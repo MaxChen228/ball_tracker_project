@@ -503,3 +503,14 @@ def test_malformed_payload_returns_422():
     client = TestClient(app)
     r = client.post("/pitch", data={"payload": '{"bogus": true}'})
     assert r.status_code == 422
+
+
+def test_path_traversing_camera_id_is_rejected():
+    """`camera_id` ends up in server-side file paths (pitch JSON + clip MOV).
+    Pydantic must reject non-identifier values so the upload can't escape
+    `data/` via `../` or embedded separators."""
+    body = _minimal_pitch_body(600, "A")
+    body["camera_id"] = "../etc"
+    client = TestClient(app)
+    r = _post_pitch(client, body, video_bytes=b"x")
+    assert r.status_code == 422

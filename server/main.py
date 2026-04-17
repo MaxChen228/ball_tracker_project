@@ -26,7 +26,7 @@ from typing import Any
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from triangulate import (
     angle_ray_cam,
@@ -65,7 +65,10 @@ class FramePayload(BaseModel):
 
 
 class PitchPayload(BaseModel):
-    camera_id: str
+    # Constrained so we can safely interpolate into filenames (clips,
+    # pitch json). Matches the iOS-side values ("A" / "B") with slack for
+    # future role additions but blocks path-traversal attempts.
+    camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
     # Shared time anchor for A/B pairing, recovered from an audio-chirp
     # matched-filter hit on the 時間校正 step. Server uses
     # `sync_anchor_timestamp_s` as the per-cycle clock origin and pairs
