@@ -4,7 +4,11 @@ import Foundation
 ///
 /// Wire format:
 ///   POST http://{server_ip}:{port}/pitch
-///   application/json body, encoded from `PitchPayload`.
+///   multipart/form-data with two parts:
+///     - `payload`: JSON-encoded `PitchPayload` (required)
+///     - `video`:   H.264/MOV clip of the cycle (optional; Phase 1 raw-video
+///                  experiment — server stores the file but still relies on
+///                  the JSON payload for triangulation)
 final class ServerUploader {
     struct FramePayload: Codable {
         let frame_index: Int
@@ -75,8 +79,20 @@ final class ServerUploader {
         self.config = config
     }
 
+    /// Legacy sugar: upload a payload with no video attachment.
     func uploadPitch(
         _ pitch: PitchPayload,
+        completion: ((Result<PitchUploadResponse, Error>) -> Void)? = nil
+    ) {
+        uploadPitch(pitch, videoURL: nil, completion: completion)
+    }
+
+    /// Upload one cycle as multipart/form-data. `videoURL` is optional — when
+    /// nil (legacy / failed clip writer / Phase-0 payload cache) the request
+    /// still succeeds and the server stores only the JSON side.
+    func uploadPitch(
+        _ pitch: PitchPayload,
+        videoURL: URL?,
         completion: ((Result<PitchUploadResponse, Error>) -> Void)? = nil
     ) {
         guard let base = config.baseURL() else {
@@ -89,15 +105,34 @@ final class ServerUploader {
         }
         let url = base.appendingPathComponent("pitch")
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let payloadData: Data
         do {
-            request.httpBody = try JSONEncoder().encode(pitch)
+            payloadData = try JSONEncoder().encode(pitch)
         } catch {
             completion?(.failure(error))
             return
         }
+
+        let videoData: Data?
+        if let videoURL {
+            videoData = try? Data(contentsOf: videoURL)
+        } else {
+            videoData = nil
+        }
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(
+            "multipart/form-data; boundary=\(boundary)",
+            forHTTPHeaderField: "Content-Type"
+        )
+        request.httpBody = Self.makeMultipartBody(
+            boundary: boundary,
+            payloadJSON: payloadData,
+            videoFilename: videoURL?.lastPathComponent ?? "clip.mov",
+            videoData: videoData
+        )
 
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
@@ -128,6 +163,39 @@ final class ServerUploader {
             }
         }
         task.resume()
+    }
+
+    private static func makeMultipartBody(
+        boundary: String,
+        payloadJSON: Data,
+        videoFilename: String,
+        videoData: Data?
+    ) -> Data {
+        var body = Data()
+        func appendString(_ s: String) {
+            if let d = s.data(using: .utf8) { body.append(d) }
+        }
+
+        // JSON part.
+        appendString("--\(boundary)\r\n")
+        appendString("Content-Disposition: form-data; name=\"payload\"\r\n")
+        appendString("Content-Type: application/json\r\n\r\n")
+        body.append(payloadJSON)
+        appendString("\r\n")
+
+        // Optional video part.
+        if let videoData {
+            appendString("--\(boundary)\r\n")
+            appendString(
+                "Content-Disposition: form-data; name=\"video\"; filename=\"\(videoFilename)\"\r\n"
+            )
+            appendString("Content-Type: video/quicktime\r\n\r\n")
+            body.append(videoData)
+            appendString("\r\n")
+        }
+
+        appendString("--\(boundary)--\r\n")
+        return body
     }
 
     func fetchStatus(completion: @escaping (Result<[String: Any], Error>) -> Void) {

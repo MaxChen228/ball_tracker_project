@@ -2,7 +2,9 @@
 
 Endpoints:
   GET  /status          — health + received-cycle summary
-  POST /pitch           — ingest one iPhone pitch payload (JSON)
+  POST /pitch           — ingest one iPhone pitch payload (multipart/form-data
+                          with required `payload` JSON part and optional
+                          `video` MOV/MP4 clip)
   GET  /chirp.wav       — reference sync chirp for the 時間校正 step
   GET  /results/latest  — latest fully-triangulated cycle
   GET  /results/{cycle} — specific cycle result
@@ -22,9 +24,9 @@ from threading import Lock
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from triangulate import (
     angle_ray_cam,
@@ -196,9 +198,30 @@ class State:
         self._data_dir = data_dir
         self._pitch_dir = data_dir / "pitches"
         self._result_dir = data_dir / "results"
+        self._video_dir = data_dir / "videos"
         self._pitch_dir.mkdir(parents=True, exist_ok=True)
         self._result_dir.mkdir(parents=True, exist_ok=True)
+        self._video_dir.mkdir(parents=True, exist_ok=True)
         self._load_from_disk()
+
+    @property
+    def video_dir(self) -> Path:
+        return self._video_dir
+
+    def save_clip(
+        self, camera_id: str, cycle: int, data: bytes, ext: str = "mov"
+    ) -> Path:
+        """Persist a cycle's H.264 clip to disk. Writes atomically so a
+        partial transfer cannot leave a corrupt file visible to downstream
+        tools. Overwrites any existing clip for (camera_id, cycle)."""
+        safe_ext = (ext or "mov").lstrip(".").lower()
+        if not safe_ext or "/" in safe_ext or "\\" in safe_ext:
+            safe_ext = "mov"
+        path = self._video_dir / f"cycle_{cycle:06d}_{camera_id}.{safe_ext}"
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+        return path
 
     def _pitch_path(self, camera_id: str, cycle: int) -> Path:
         return self._pitch_dir / f"cycle_{cycle:06d}_{camera_id}.json"
@@ -304,6 +327,8 @@ class State:
                     path.unlink(missing_ok=True)
                 for path in self._result_dir.glob("cycle_*.json*"):
                     path.unlink(missing_ok=True)
+                for path in self._video_dir.glob("cycle_*"):
+                    path.unlink(missing_ok=True)
 
 
 def _lan_ip() -> str:
@@ -357,16 +382,47 @@ def _summarize_result(result: CycleResult) -> dict[str, Any]:
 
 
 @app.post("/pitch")
-def pitch(payload: PitchPayload) -> dict[str, Any]:
-    result = state.record(payload)
-    ball_frames = sum(1 for f in payload.frames if f.ball_detected)
+async def pitch(
+    payload: str = Form(...),
+    video: UploadFile | None = File(None),
+) -> dict[str, Any]:
+    """Ingest one cycle as multipart/form-data.
+
+    Required form field `payload`: JSON-encoded `PitchPayload`.
+    Optional form field `video`:   MOV/MP4 clip of the cycle. Stored under
+                                    `data/videos/cycle_XXXXXX_{cam}.{ext}` and
+                                    not yet consumed by triangulation — Phase
+                                    1 raw-video experiment.
+    """
+    try:
+        payload_obj = PitchPayload.model_validate_json(payload)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors())
+
+    clip_info: dict[str, Any] | None = None
+    if video is not None:
+        data = await video.read()
+        if data:
+            ext = "mov"
+            if video.filename:
+                suffix = Path(video.filename).suffix.lstrip(".").lower()
+                if suffix:
+                    ext = suffix
+            clip_path = state.save_clip(
+                payload_obj.camera_id, payload_obj.cycle_number, data, ext
+            )
+            clip_info = {"filename": clip_path.name, "bytes": len(data)}
+
+    result = state.record(payload_obj)
+    ball_frames = sum(1 for f in payload_obj.frames if f.ball_detected)
     logger.info(
-        "pitch camera=%s cycle=%d frames=%d ball=%d triangulated=%d%s",
-        payload.camera_id,
-        payload.cycle_number,
-        len(payload.frames),
+        "pitch camera=%s cycle=%d frames=%d ball=%d triangulated=%d%s%s",
+        payload_obj.camera_id,
+        payload_obj.cycle_number,
+        len(payload_obj.frames),
         ball_frames,
         len(result.points),
+        f" clip={clip_info['bytes']}B" if clip_info else "",
         f" err={result.error}" if result.error else "",
     )
     if result.points:
@@ -378,7 +434,10 @@ def pitch(payload: PitchPayload) -> dict[str, Any]:
             result.points[-1].t_rel_s - result.points[0].t_rel_s,
             max(zs),
         )
-    return {"ok": True, **_summarize_result(result)}
+    response: dict[str, Any] = {"ok": True, **_summarize_result(result)}
+    if clip_info is not None:
+        response["clip"] = clip_info
+    return response
 
 
 @app.get("/chirp.wav")

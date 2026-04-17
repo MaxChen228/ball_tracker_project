@@ -1,6 +1,8 @@
 """End-to-end triangulation test + FastAPI ingest smoke test."""
 from __future__ import annotations
 
+import json as _json
+
 import cv2
 import numpy as np
 import pytest
@@ -18,9 +20,13 @@ from triangulate import (
 )
 
 
-def _post_pitch(client, body: dict):
-    """POST /pitch as application/json."""
-    return client.post("/pitch", json=body)
+def _post_pitch(client, body: dict, video_bytes: bytes | None = None):
+    """POST /pitch as multipart/form-data; optionally attach a video clip."""
+    data = {"payload": _json.dumps(body)}
+    if video_bytes is None:
+        return client.post("/pitch", data=data)
+    files = {"video": ("clip.mov", video_bytes, "video/quicktime")}
+    return client.post("/pitch", data=data, files=files)
 
 
 def _look_at(pos: np.ndarray, target: np.ndarray, up: np.ndarray = np.array([0.0, 0.0, 1.0])):
@@ -401,3 +407,99 @@ def test_undistorted_ray_cam_zero_dist_matches_angle_ray():
     d_angle = angle_ray_cam(theta_x, theta_z)
     d_pix = undistorted_ray_cam(u, v, K, np.zeros(5))
     np.testing.assert_allclose(d_pix, d_angle, atol=1e-12)
+
+
+# --------------------------- Multipart + video clip --------------------------
+
+
+def _minimal_pitch_body(cycle: int, cam_id: str = "A") -> dict:
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    P_true = np.array([0.1, 0.3, 1.0])
+    tx, tz = _project(
+        K, R_a if cam_id == "A" else R_b, t_a if cam_id == "A" else t_b, P_true
+    )
+    H = H_a if cam_id == "A" else H_b
+    return {
+        "camera_id": cam_id,
+        "sync_anchor_frame_index": 0,
+        "sync_anchor_timestamp_s": 0.0,
+        "cycle_number": cycle,
+        "frames": [
+            {"frame_index": 0, "timestamp_s": 0.0,
+             "theta_x_rad": tx, "theta_z_rad": tz, "ball_detected": True},
+        ],
+        "intrinsics": {"fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2]},
+        "homography": H.flatten().tolist(),
+    }
+
+
+def test_pitch_without_video_round_trips_like_before():
+    """Regression guard: existing clients that send only the JSON payload still
+    triangulate correctly under the new multipart endpoint."""
+    client = TestClient(app)
+    r1 = _post_pitch(client, _minimal_pitch_body(501, "A"))
+    assert r1.status_code == 200
+    assert "clip" not in r1.json()
+    r2 = _post_pitch(client, _minimal_pitch_body(501, "B"))
+    assert r2.status_code == 200
+    assert "clip" not in r2.json()
+    assert r2.json()["triangulated_points"] == 1
+
+
+def test_pitch_with_video_persists_clip_and_still_triangulates():
+    """Attach a byte-string posing as a MOV clip and verify: (a) triangulation
+    runs unchanged, (b) the clip is written under the state's video dir with
+    the expected (cycle, camera_id) basename."""
+    client = TestClient(app)
+    fake_video = b"fake mov bytes \x00\x01\x02" * 128  # small but non-empty
+    r1 = _post_pitch(client, _minimal_pitch_body(502, "A"), video_bytes=fake_video)
+    assert r1.status_code == 200
+    body = r1.json()
+    assert body["clip"]["filename"] == "cycle_000502_A.mov"
+    assert body["clip"]["bytes"] == len(fake_video)
+
+    clip_path = main.state.video_dir / "cycle_000502_A.mov"
+    assert clip_path.exists()
+    assert clip_path.read_bytes() == fake_video
+
+    # Pair with B (no video) — triangulation still works.
+    r2 = _post_pitch(client, _minimal_pitch_body(502, "B"))
+    assert r2.status_code == 200
+    assert r2.json()["triangulated_points"] == 1
+
+
+def test_save_clip_writes_atomically_and_overwrites(tmp_path):
+    """Unit-level: State.save_clip targets data/videos/ with a safe filename
+    and overwrites on repeat uploads for the same (camera, cycle)."""
+    s = main.State(data_dir=tmp_path)
+    first = s.save_clip("A", 900, b"alpha", "mov")
+    assert first == tmp_path / "videos" / "cycle_000900_A.mov"
+    assert first.read_bytes() == b"alpha"
+
+    # Overwriting preserves filename and swaps contents.
+    second = s.save_clip("A", 900, b"beta beta", "mov")
+    assert second == first
+    assert second.read_bytes() == b"beta beta"
+
+    # No ".tmp" litter left over from atomic writes.
+    assert not any(p.suffix == ".tmp" for p in (tmp_path / "videos").iterdir())
+
+
+def test_save_clip_rejects_path_traversal_extensions(tmp_path):
+    """Malformed `ext` (path separators, empty) falls back to .mov so the
+    filename stays inside data/videos/."""
+    s = main.State(data_dir=tmp_path)
+    path_bad = s.save_clip("B", 7, b"x", "../etc/passwd")
+    assert path_bad.parent == tmp_path / "videos"
+    assert path_bad.suffix == ".mov"
+
+    path_empty = s.save_clip("B", 8, b"y", "")
+    assert path_empty.suffix == ".mov"
+
+
+def test_malformed_payload_returns_422():
+    """A JSON form field that does not match PitchPayload shape yields 422,
+    not 500, so iOS can surface a precise error."""
+    client = TestClient(app)
+    r = client.post("/pitch", data={"payload": '{"bogus": true}'})
+    assert r.status_code == 422
