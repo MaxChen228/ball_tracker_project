@@ -3,69 +3,84 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 
-/// Main camera view:
-/// - STANDBY: live preview, flash detection OFF, no frame buffering
-/// - SYNC_WAITING: flash detection ON, circular pre-roll buffering ON
-/// - RECORDING: realtime per-frame detection and pitch buffering
-/// - UPLOADING: upload cached pitch payloads
+/// Main camera view. State machine:
+/// - STANDBY: live preview, chirp detector off, no frame buffering
+/// - TIME_SYNC_WAITING: listens on the mic for the reference chirp, saves
+///   session-clock PTS of the peak as the anchor
+/// - SYNC_WAITING: tracking armed, waiting for ball to enter frame
+/// - RECORDING: cycle in progress
+/// - UPLOADING: cycle persisted, handed to the upload queue
 final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
     enum AppState {
         case standby
-        case timeSyncWaiting   // dedicated mode: flash-only detection for clock alignment
-        case syncWaiting       // tracking armed, waiting for ball to enter frame
-        case recording         // cycle in progress
+        case timeSyncWaiting
+        case syncWaiting
+        case recording
         case uploading
     }
 
+    // Session + outputs.
     private let session = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private let videoOutput = AVCaptureVideoDataOutput()
     private let processingQueue = DispatchQueue(label: "camera.frame.queue")
 
-    // Audio capture — installed only while syncMode == "audio". When inactive
-    // these stay nil and the microphone is never engaged.
+    // Audio chirp sync. Mic input is always installed once granted so the
+    // chirp detector can run as soon as the user taps 時間校正.
     private var audioInput: AVCaptureDeviceInput?
     private var audioOutput: AVCaptureAudioDataOutput?
-    private var audioRecorder: AudioRecorder?
+    private var chirpDetector: AudioChirpDetector?
 
+    // State + frame index.
     private var state: AppState = .standby
     private var frameIndex: Int = 0
     private var horizontalFovRadians: Double = 1.0
 
+    // Collaborators.
     private var settings: SettingsViewController.Settings!
-
     private var ballDetector: BallDetector!
-    private var flashDetector: FlashDetector!
     private var recorder: PitchRecorder!
     private var uploader: ServerUploader!
-
     private var serverConfig: ServerUploader.ServerConfig!
+
+    // UI state.
     private var lastUploadStatusText: String = "Idle"
     private var lastResultText: String = "(尚無結果)"
     private var lastFrameTimestampForFps: CFTimeInterval = CACurrentMediaTime()
     private var framesSinceLastFpsTick: Int = 0
     private var fpsEstimate: Double = 0
     private var displayLink: CADisplayLink?
-    // Latest detection snapshot — written by capture queue, read by display link on main.
-    // Detection still runs at full capture rate; only the visual is drawn at display refresh.
+
+    // Detection snapshot for the CADisplayLink pump — written on capture
+    // queue, read on main. Per-frame main-thread dispatch is never used.
     private var latestCentroidX: Double?
     private var latestCentroidY: Double?
     private var latestImageWidth: Int = 0
     private var latestImageHeight: Int = 0
+
+    // Chirp detector snapshot for the HUD — written on audio queue.
+    private var latestChirpSnapshot: AudioChirpDetector.Snapshot?
+
     private var serverStatusTextValue: String = "unknown"
     private var isServerReachable: Bool = false
     private var statusPollTimer: Timer?
     private let ballOverlayLayer = CAShapeLayer()
 
+    // Payload persistence + upload queue.
     private let payloadStore = PitchPayloadStore()
     private var pendingPayloadFiles: [URL] = []
     private var isUploadingPayload: Bool = false
-    private var lastSyncFlashFrameIndex: Int?
-    private var lastSyncFlashTimestampS: Double?
 
-    // Mac sync — nil when sync_mode != "mac"
-    private var macSyncClient: MacSyncClient?
+    // Most recently recovered chirp anchor. Used as the `sync_anchor_*`
+    // fields on outgoing pitch payloads. Nil until the user completes a
+    // 時間校正.
+    private var lastSyncAnchorFrameIndex: Int?
+    private var lastSyncAnchorTimestampS: Double?
 
+    // Time-sync timeout task so we can cancel if the user aborts early.
+    private var timeSyncTimeoutWork: DispatchWorkItem?
+
+    // UI containers.
     private let statusContainer = UIStackView()
     private let topStatusLabel = UILabel()
     private let serverStatusDot = UIView()
@@ -74,30 +89,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let uploadStatusLabel = UILabel()
     private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
-    private let flashDebugLabel = UILabel()
-    private let macSyncDebugLabel = UILabel()
+    private let chirpDebugLabel = UILabel()
     private let trackingButton = UIButton(type: .system)
 
-    // Exposure/WB state captured before entering .timeSyncWaiting so we can
-    // restore on exit. Without locking, AE neutralizes the torch within 1–2
-    // frames and luminance barely rises above baseline.
-    private var savedExposureMode: AVCaptureDevice.ExposureMode?
-    private var savedExposureDuration: CMTime?
-    private var savedISO: Float?
-    private var savedWhiteBalanceMode: AVCaptureDevice.WhiteBalanceMode?
-    private var isExposureLockedForFlash: Bool = false
-
-    // Latest FlashDetector snapshot — written on capture queue, read by display
-    // link on main. Same pattern as latestCentroidX/Y.
-    private var latestFlashSnapshot: FlashDetector.Snapshot?
-
-    // Diagnostic string shown in the debug HUD: which exposure strategy we
-    // committed to (.custom / bias / .locked) + the actual duration/ISO the
-    // device accepted. Lets us see at a glance whether the underexpose
-    // actually took effect on this device/format.
-    private var latestExposureInfo: String?
-
-    // Calibration prerequisites (so CalibrationViewController can compute intrinsics).
+    // UserDefaults keys for calibration-derived intrinsics.
     private static let keyHorizontalFovRad = "horizontal_fov_rad"
     private static let keyImageWidthPx = "image_width_px"
     private static let keyImageHeightPx = "image_height_px"
@@ -105,6 +100,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private static let keyIntrinsicCy = "intrinsic_cy"
     private static let keyIntrinsicFx = "intrinsic_fx"
     private static let keyIntrinsicFz = "intrinsic_fz"
+    private static let keyIntrinsicDistortion = "intrinsic_distortion"
+
+    // MARK: - Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -137,7 +135,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             ),
             intrinsics: intrinsics
         )
-        flashDetector = FlashDetector(thresholdMultiplier: settings.flashThresholdMultiplier)
 
         recorder = PitchRecorder()
         recorder.setCameraId(settings.cameraRole)
@@ -148,28 +145,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         recorder.onCycleComplete = { [weak self] payload in
             guard let self else { return }
-
-            if self.settings.syncMode == "audio", let audio = self.audioRecorder {
-                // Finalize this cycle's WAV on the recorder's queue, then
-                // persist payload + sidecar atomically and re-arm for next.
-                audio.stopRecording { result in
-                    let audioURL: URL?
-                    let startTS: Double?
-                    switch result {
-                    case .success(let finished):
-                        audioURL = finished.fileURL
-                        startTS = finished.startTimestampS
-                    case .failure:
-                        audioURL = nil
-                        startTS = nil
-                    }
-                    let enriched = self.enrichedPayload(from: payload, audioStartTS: startTS)
-                    self.persistCompletedCycle(enriched, audioFileURL: audioURL)
-                }
-            } else {
-                let enriched = self.enrichedPayload(from: payload)
-                self.persistCompletedCycle(enriched, audioFileURL: nil)
-            }
+            let enriched = self.enrichedPayload(from: payload)
+            self.persistCompletedCycle(enriched)
         }
 
         do {
@@ -185,9 +162,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         setupUI()
         setupPreviewAndCapture()
-        if settings.syncMode == "audio" {
-            setupAudioCapture()
-        }
+        setupAudioCapture()
         setupBallOverlay()
         setupDisplayLink()
         startStatusPolling()
@@ -211,7 +186,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         reloadSettingsFromUserDefaults()
-        // If calibration was performed, intrinsics may have been updated in UserDefaults.
         reloadBallDetectorWithLatestIntrinsics()
         updateUIForState()
     }
@@ -230,46 +204,24 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         statusPollTimer?.invalidate()
         statusPollTimer = nil
         displayLink?.isPaused = true
-        // If the user backgrounds this VC mid-calibration, don't leave the
-        // camera stuck in custom exposure — AE must re-engage on return.
-        if isExposureLockedForFlash {
-            restoreExposure()
-            if state == .timeSyncWaiting {
-                state = .standby
-                latestFlashSnapshot = nil
-            }
+        if state == .timeSyncWaiting {
+            cancelTimeSync()
         }
-        audioRecorder?.cancelRecording()
-        // Stop mac sync on disappear; it will restart in viewDidAppear/enterSyncMode.
-        macSyncClient?.stopSyncing()
     }
 
-    // MARK: - Controls (spec has buttons; skeleton provides methods)
+    // MARK: - Tracking controls
 
     func enterSyncMode() {
         guard state == .standby else { return }
         recorder.reset()
-        // Preserve lastSyncFlash{Frame,Timestamp} from a prior 時間校正 so tracking
-        // can align A/B frames. If user skipped 時間校正 they remain nil and the
-        // recorder falls back to the first-ball-frame as the anchor (degraded mode).
-        // Ensure intrinsics are up-to-date when starting a new session.
         reloadBallDetectorWithLatestIntrinsics()
         pendingPayloadFiles.removeAll(keepingCapacity: true)
         if let files = try? payloadStore.listPayloadFiles() {
             pendingPayloadFiles.append(contentsOf: files)
         }
         isUploadingPayload = false
-
-        // Start mac-sync NTP client when sync_mode == "mac".
-        if settings.syncMode == "mac", let base = serverConfig.baseURL() {
-            let client = MacSyncClient(serverBaseURL: base)
-            macSyncClient = client
-            client.startSyncing()
-        }
-
         state = .syncWaiting
         warningLabel.isHidden = true
-        startAudioCycleRecordingIfNeeded()
         updateUIForState()
         processNextPayloadIfNeeded()
     }
@@ -277,29 +229,19 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     func exitSyncMode() {
         state = .standby
         recorder.reset()
-        audioRecorder?.cancelRecording()
         pendingPayloadFiles.removeAll(keepingCapacity: true)
         isUploadingPayload = false
         warningLabel.isHidden = true
-        macSyncClient?.stopSyncing()
-        macSyncClient = nil
         updateUIForState()
     }
 
-    /// Save a completed cycle's payload (and its audio sidecar, if any),
-    /// enqueue for upload, and re-arm audio for the next cycle. Called from
-    /// the recorder's onCycleComplete callback.
-    private func persistCompletedCycle(
-        _ payload: ServerUploader.PitchPayload,
-        audioFileURL: URL?
-    ) {
+    private func persistCompletedCycle(_ payload: ServerUploader.PitchPayload) {
         do {
-            let fileURL = try payloadStore.save(payload, audioFileURL: audioFileURL)
+            let fileURL = try payloadStore.save(payload)
             DispatchQueue.main.async {
                 self.state = .syncWaiting
                 self.lastUploadStatusText = "Cached pitch \(payload.cycle_number)"
                 self.enqueuePayloadForUpload(fileURL)
-                self.startAudioCycleRecordingIfNeeded()
                 self.updateUIForState()
             }
         } catch {
@@ -310,31 +252,67 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
+    // MARK: - Time calibration (chirp anchor)
+
     @objc private func onTapTimeCalibration() {
         if state == .timeSyncWaiting {
-            restoreExposure()
-            latestFlashSnapshot = nil
-            state = .standby
-            warningLabel.isHidden = true
-            lastUploadStatusText = "Time sync cancelled"
+            cancelTimeSync()
         } else if state == .standby {
-            flashDetector.reset()
-            latestFlashSnapshot = nil
-            lockExposureForFlashDetection()
-            state = .timeSyncWaiting
-            warningLabel.text = "等待閃光觸發中..."
+            startTimeSync()
+        }
+        updateUIForState()
+    }
+
+    private func startTimeSync() {
+        guard let detector = chirpDetector else {
+            // Mic permission still pending or denied — try once more.
+            setupAudioCapture()
+            warningLabel.text = "正在啟動麥克風…"
             warningLabel.isHidden = false
-            lastUploadStatusText = "Time sync: waiting for flash"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
-                guard let self, self.state == .timeSyncWaiting else { return }
-                self.restoreExposure()
-                self.latestFlashSnapshot = nil
-                self.state = .standby
-                self.warningLabel.isHidden = true
-                self.lastUploadStatusText = "Time sync timeout"
-                self.updateUIForState()
+            return
+        }
+        detector.reset()
+        detector.onChirpDetected = { [weak self] event in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.completeTimeSync(event)
             }
         }
+        state = .timeSyncWaiting
+        warningLabel.text = "等待同步音頻觸發中… (把兩機並排，第三裝置播 chirp)"
+        warningLabel.isHidden = false
+        lastUploadStatusText = "Time sync: waiting for chirp"
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.state == .timeSyncWaiting else { return }
+            self.cancelTimeSync(reason: "timeout")
+        }
+        timeSyncTimeoutWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
+    }
+
+    private func cancelTimeSync(reason: String = "cancelled") {
+        timeSyncTimeoutWork?.cancel()
+        timeSyncTimeoutWork = nil
+        chirpDetector?.onChirpDetected = nil
+        latestChirpSnapshot = nil
+        state = .standby
+        warningLabel.isHidden = true
+        lastUploadStatusText = "Time sync \(reason)"
+        updateUIForState()
+    }
+
+    private func completeTimeSync(_ event: AudioChirpDetector.ChirpEvent) {
+        guard state == .timeSyncWaiting else { return }
+        timeSyncTimeoutWork?.cancel()
+        timeSyncTimeoutWork = nil
+        chirpDetector?.onChirpDetected = nil
+        lastSyncAnchorFrameIndex = event.anchorFrameIndex
+        lastSyncAnchorTimestampS = event.anchorTimestampS
+        latestChirpSnapshot = nil
+        state = .standby
+        warningLabel.isHidden = true
+        lastUploadStatusText = String(format: "Time sync OK @ %.3fs", event.anchorTimestampS)
         updateUIForState()
     }
 
@@ -343,7 +321,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private func setupPreviewAndCapture() {
         session.beginConfiguration()
 
-        // Choose back camera.
         if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
             do {
                 try configureCaptureFormat(
@@ -352,8 +329,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     targetHeight: settings.captureHeight,
                     targetFps: Double(settings.captureFps)
                 )
-
-                // Persist horizontal FOV used by intrinsics approximation.
                 UserDefaults.standard.set(horizontalFovRadians, forKey: Self.keyHorizontalFovRad)
 
                 let input = try AVCaptureDeviceInput(device: device)
@@ -361,15 +336,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     session.addInput(input)
                 }
             } catch {
-                // TODO: handle error UI
+                // TODO: surface error to UI
             }
         }
 
         videoOutput.setSampleBufferDelegate(self, queue: processingQueue)
         videoOutput.alwaysDiscardsLateVideoFrames = true
-        // Use BGRA for more predictable pixel buffer layout.
         videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-
         if session.canAddOutput(videoOutput) {
             session.addOutput(videoOutput)
         }
@@ -431,94 +404,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private var currentCaptureDevice: AVCaptureDevice? {
-        (session.inputs.compactMap { $0 as? AVCaptureDeviceInput }.first)?.device
+        (session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
+            .first(where: { $0.device.hasMediaType(.video) }))?.device
     }
 
-    /// Underexpose the sensor by ~3 stops during flash detection so the torch
-    /// has real headroom above baseline.
-    ///
-    /// Rationale: merely freezing AE isn't enough in bright ambient. If the
-    /// room already puts scene luminance at ~180/255, the torch can only push
-    /// a tile toward 255 — ratio tops out around 1.4× and never crosses the
-    /// trigger. By pushing ISO to sensor-min and cutting exposureDuration by
-    /// 4×, ambient collapses to ~15–30 and the torch can still saturate the
-    /// target tile, restoring a 7–10× ratio.
-    ///
-    /// The preview will visibly dim while in .timeSyncWaiting — this is
-    /// cosmetic. Tracking (.syncWaiting / .recording) uses continuous AE and
-    /// is unaffected.
-    private func lockExposureForFlashDetection() {
-        guard let device = currentCaptureDevice, !isExposureLockedForFlash else { return }
-        do {
-            try device.lockForConfiguration()
-            defer { device.unlockForConfiguration() }
-
-            savedExposureMode = device.exposureMode
-            savedExposureDuration = device.exposureDuration
-            savedISO = device.iso
-            savedWhiteBalanceMode = device.whiteBalanceMode
-
-            if device.isExposureModeSupported(.custom) {
-                let fmt = device.activeFormat
-                // Aggressive: 1/8 of the AE-settled duration (was 1/4 — still
-                // not dark enough on some high-fps formats). Clamped to the
-                // format's minExposureDuration (typically ~1/8000s).
-                let darkerDuration = CMTimeMaximum(
-                    CMTimeMultiplyByRatio(device.exposureDuration, multiplier: 1, divisor: 8),
-                    fmt.minExposureDuration
-                )
-                let targetISO = fmt.minISO
-                let targetSeconds = CMTimeGetSeconds(darkerDuration)
-                latestExposureInfo = String(
-                    format: "custom→ ISO %.0f dur 1/%.0fs (settling…)",
-                    targetISO,
-                    targetSeconds > 0 ? 1.0 / targetSeconds : 0
-                )
-                device.setExposureModeCustom(duration: darkerDuration, iso: targetISO) { [weak self] actualTime in
-                    guard let self else { return }
-                    let s = CMTimeGetSeconds(actualTime)
-                    DispatchQueue.main.async {
-                        self.latestExposureInfo = String(
-                            format: "custom ISO %.0f dur 1/%.0fs",
-                            targetISO,
-                            s > 0 ? 1.0 / s : 0
-                        )
-                    }
-                }
-            } else if device.minExposureTargetBias <= -4 {
-                // Fallback A: device doesn't accept custom exposure on this
-                // format. Use AE bias to shift target luminance down by as
-                // much as the device allows (typically -8…+8 EV).
-                let bias = max(device.minExposureTargetBias, -6.0)
-                latestExposureInfo = String(format: "bias %.1f EV (custom unsupported)", bias)
-                device.setExposureTargetBias(bias) { _ in }
-            } else if device.isExposureModeSupported(.locked) {
-                // Fallback B: neither custom nor usable bias. Freeze AE
-                // where it landed — bright-ambient performance degrades.
-                device.exposureMode = .locked
-                latestExposureInfo = "locked at AE (degraded)"
-            } else {
-                latestExposureInfo = "no exposure control available"
-            }
-
-            if device.isWhiteBalanceModeSupported(.locked) {
-                device.whiteBalanceMode = .locked
-            }
-            isExposureLockedForFlash = true
-        } catch {
-            // Lock failure is non-fatal: detector will still run, just with
-            // AE fighting it. Leave UI to surface the degraded state via HUD.
-        }
-    }
-
-    // MARK: - Audio capture (syncMode == "audio")
-
-    /// Temporary path where the in-progress cycle's audio is written. On cycle
-    /// completion the WAV is moved into PitchPayloadStore as a sidecar of the
-    /// JSON payload.
-    private var activeAudioTempURL: URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("active_cycle.wav")
-    }
+    // MARK: - Audio (chirp) capture
 
     private func setupAudioCapture() {
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
@@ -527,7 +417,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 if granted {
                     self.configureAudioCapture()
                 } else {
-                    self.lastUploadStatusText = "Microphone denied — audio sync unavailable"
+                    self.lastUploadStatusText = "Microphone denied — time sync unavailable"
                     self.updateUIForState()
                 }
             }
@@ -535,9 +425,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func configureAudioCapture() {
-        guard audioRecorder == nil else { return }
+        guard chirpDetector == nil else { return }
         guard let mic = AVCaptureDevice.default(for: .audio) else { return }
-
         let input: AVCaptureDeviceInput
         do {
             input = try AVCaptureDeviceInput(device: mic)
@@ -545,7 +434,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             lastUploadStatusText = "Mic input failed: \(error.localizedDescription)"
             return
         }
-
         session.beginConfiguration()
         guard session.canAddInput(input) else {
             session.commitConfiguration()
@@ -561,64 +449,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             return
         }
         session.addOutput(output)
-        let recorder = AudioRecorder()
-        output.setSampleBufferDelegate(recorder, queue: recorder.deliveryQueue)
+
+        let detector = AudioChirpDetector()
+        output.setSampleBufferDelegate(detector, queue: detector.deliveryQueue)
         session.commitConfiguration()
 
         audioInput = input
         audioOutput = output
-        audioRecorder = recorder
+        chirpDetector = detector
     }
 
-    private func teardownAudioCapture() {
-        audioRecorder?.cancelRecording()
-        if audioInput != nil || audioOutput != nil {
-            session.beginConfiguration()
-            if let input = audioInput { session.removeInput(input) }
-            if let output = audioOutput { session.removeOutput(output) }
-            session.commitConfiguration()
-        }
-        audioInput = nil
-        audioOutput = nil
-        audioRecorder = nil
-    }
-
-    /// Start an audio recording covering the upcoming cycle. No-op unless
-    /// syncMode == "audio" and microphone permission was granted.
-    private func startAudioCycleRecordingIfNeeded() {
-        guard settings.syncMode == "audio", let recorder = audioRecorder else { return }
-        recorder.startRecording(to: activeAudioTempURL)
-    }
-
-    private func restoreExposure() {
-        guard let device = currentCaptureDevice, isExposureLockedForFlash else { return }
-        do {
-            try device.lockForConfiguration()
-            defer { device.unlockForConfiguration() }
-
-            let targetExposure = savedExposureMode ?? .continuousAutoExposure
-            if device.isExposureModeSupported(targetExposure) {
-                device.exposureMode = targetExposure
-            } else if device.isExposureModeSupported(.continuousAutoExposure) {
-                device.exposureMode = .continuousAutoExposure
-            }
-
-            let targetWB = savedWhiteBalanceMode ?? .continuousAutoWhiteBalance
-            if device.isWhiteBalanceModeSupported(targetWB) {
-                device.whiteBalanceMode = targetWB
-            } else if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
-                device.whiteBalanceMode = .continuousAutoWhiteBalance
-            }
-        } catch {
-            // Non-fatal; AE will re-engage on next camera session restart.
-        }
-        isExposureLockedForFlash = false
-        savedExposureMode = nil
-        savedExposureDuration = nil
-        savedISO = nil
-        savedWhiteBalanceMode = nil
-        latestExposureInfo = nil
-    }
+    // MARK: - Layout + overlays
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -646,67 +487,37 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             imageWidth: latestImageWidth,
             imageHeight: latestImageHeight
         )
-        updateFlashDebugOverlay()
-        updateMacSyncDebugOverlay()
+        updateChirpDebugOverlay()
     }
 
-    private func updateFlashDebugOverlay() {
-        guard state == .timeSyncWaiting, let snap = latestFlashSnapshot else {
+    private func updateChirpDebugOverlay() {
+        guard state == .timeSyncWaiting, let detector = chirpDetector else {
             return
         }
+        // Read-only access to the last snapshot; audio-queue writes may race
+        // but the HUD only needs a near-instant view.
+        latestChirpSnapshot = detector.lastSnapshot
+        guard let snap = latestChirpSnapshot else { return }
         let statusText: String
         let color: UIColor
         if !snap.armed {
             statusText = "warming up"
             color = .systemGray
-        } else if snap.ratio >= snap.requiredRatio && snap.rise >= snap.requiredRise {
+        } else if snap.triggered {
             statusText = "TRIGGER"
             color = .systemGreen
-        } else if snap.ratio >= snap.requiredRatio * 0.8 {
+        } else if snap.lastPeak >= snap.threshold * 0.8 {
             statusText = "close"
             color = .systemOrange
         } else {
-            statusText = "armed"
+            statusText = "listening"
             color = .systemYellow
         }
-        var text = String(
-            format: "lum %.0f  med %.0f  ratio %.2f×/%.2f×  Δ %+.0f/%.0f  %@",
-            snap.currentLuminance,
-            snap.baselineMedian,
-            snap.ratio,
-            snap.requiredRatio,
-            snap.rise,
-            snap.requiredRise,
-            statusText
+        chirpDebugLabel.text = String(
+            format: "peak %.2f / %.2f  buf %d  %@",
+            snap.lastPeak, snap.threshold, snap.bufferFillSamples, statusText
         )
-        if let exposure = latestExposureInfo {
-            text += "\n" + exposure
-        }
-        flashDebugLabel.text = text
-        flashDebugLabel.textColor = color
-    }
-
-    private func updateMacSyncDebugOverlay() {
-        guard state == .syncWaiting || state == .recording,
-              let client = macSyncClient else {
-            macSyncDebugLabel.isHidden = true
-            return
-        }
-        macSyncDebugLabel.isHidden = false
-        let snap = client.debugSnapshot
-        let offsetStr: String
-        if let off = snap.currentOffset {
-            offsetStr = String(format: "%+.3fms", off * 1000.0)
-        } else {
-            offsetStr = "pending"
-        }
-        let rttStr: String
-        if let rtt = snap.lastRTT {
-            rttStr = String(format: "%.1fms", rtt * 1000.0)
-        } else {
-            rttStr = "—"
-        }
-        macSyncDebugLabel.text = "mac-sync offset=\(offsetStr) rtt=\(rttStr) samples=\(snap.sampleCount)"
+        chirpDebugLabel.textColor = color
     }
 
     private func startStatusPolling() {
@@ -719,14 +530,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func pollServerStatus() {
-        // Hot-reload settings so Settings changes take effect without waiting for viewWillAppear
-        // (which doesn't fire after .formSheet modal dismiss).
         let latest = SettingsViewController.loadFromUserDefaults()
         let serverChanged = latest.serverIP != settings.serverIP || latest.serverPort != settings.serverPort
         let formatChanged = latest.captureWidth != settings.captureWidth
             || latest.captureHeight != settings.captureHeight
             || latest.captureFps != settings.captureFps
-        let previousSyncMode = settings.syncMode
         settings = latest
         if serverChanged {
             serverConfig = ServerUploader.ServerConfig(serverIP: latest.serverIP, serverPort: latest.serverPort)
@@ -734,13 +542,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         if formatChanged {
             reconfigureCapture()
-        }
-        if latest.syncMode != previousSyncMode {
-            if latest.syncMode == "audio" && audioRecorder == nil {
-                setupAudioCapture()
-            } else if previousSyncMode == "audio" && latest.syncMode != "audio" {
-                teardownAudioCapture()
-            }
         }
         uploader.fetchStatus { [weak self] result in
             DispatchQueue.main.async {
@@ -781,17 +582,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         warningLabel.textAlignment = .center
         warningLabel.isHidden = true
 
-        flashDebugLabel.font = .monospacedDigitSystemFont(ofSize: 14, weight: .medium)
-        flashDebugLabel.textColor = .systemGray
-        flashDebugLabel.numberOfLines = 0
-        flashDebugLabel.textAlignment = .center
-        flashDebugLabel.isHidden = true
-
-        macSyncDebugLabel.font = .monospacedDigitSystemFont(ofSize: 14, weight: .medium)
-        macSyncDebugLabel.textColor = .systemCyan
-        macSyncDebugLabel.numberOfLines = 0
-        macSyncDebugLabel.textAlignment = .center
-        macSyncDebugLabel.isHidden = true
+        chirpDebugLabel.font = .monospacedDigitSystemFont(ofSize: 14, weight: .medium)
+        chirpDebugLabel.textColor = .systemGray
+        chirpDebugLabel.numberOfLines = 0
+        chirpDebugLabel.textAlignment = .center
+        chirpDebugLabel.isHidden = true
 
         serverStatusDot.backgroundColor = .systemRed
         serverStatusDot.layer.cornerRadius = 8
@@ -831,8 +626,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         statusContainer.addArrangedSubview(row3)
         statusContainer.addArrangedSubview(row4)
         statusContainer.addArrangedSubview(warningLabel)
-        statusContainer.addArrangedSubview(flashDebugLabel)
-        statusContainer.addArrangedSubview(macSyncDebugLabel)
+        statusContainer.addArrangedSubview(chirpDebugLabel)
         view.addSubview(statusContainer)
 
         func styleButton(_ button: UIButton, title: String, background: UIColor) {
@@ -876,11 +670,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         uploadStatusLabel.text = "Upload: \(lastUploadStatusText)"
         lastResultLabel.text = "Last: \(lastResultText)"
 
-        flashDebugLabel.isHidden = (state != .timeSyncWaiting)
-        // macSyncDebugLabel visibility is driven by updateMacSyncDebugOverlay via display link.
-        if macSyncClient == nil {
-            macSyncDebugLabel.isHidden = true
-        }
+        chirpDebugLabel.isHidden = (state != .timeSyncWaiting)
 
         switch state {
         case .standby:
@@ -919,80 +709,46 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         return isServerReachable ? .systemGreen : .systemRed
     }
 
-    // MARK: - Frame processing (AVCaptureVideoDataOutputSampleBufferDelegate)
+    // MARK: - Video frame processing
 
-    nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+    nonisolated func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        // Only the video data output reaches here; audio samples go through
+        // the chirp detector's own delegate on its own queue.
+        guard connection.output is AVCaptureVideoDataOutput else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         let ts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let timestampS = CMTimeGetSeconds(ts)
-        if timestampS.isNaN || timestampS.isInfinite {
-            return
-        }
+        if timestampS.isNaN || timestampS.isInfinite { return }
 
         updateFpsEstimate()
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-
-        // Only write UserDefaults when dimensions actually change (rare).
         if latestImageWidth != width || latestImageHeight != height {
             UserDefaults.standard.set(width, forKey: Self.keyImageWidthPx)
             UserDefaults.standard.set(height, forKey: Self.keyImageHeightPx)
         }
 
-        // Advance frameIndex every frame so cross-mode timestamps stay coherent.
         let currentIndex = frameIndex
         frameIndex += 1
 
-        // Flash detection ONLY in 時間校正 mode. Once captured, save the anchor
-        // and auto-return to STANDBY.
-        if state == .timeSyncWaiting {
-            // Tile-max (not full-frame mean) so a localized torch —
-            // e.g. another phone occupying <1/16 of the frame — still
-            // produces a sharp per-tile step instead of being smeared out.
-            let lumStats = FrameProcessingUtils.luminanceStats(pixelBuffer: pixelBuffer)
-            let event = flashDetector.process(
-                sampleLuminance: lumStats.maxTile,
-                frameIndex: currentIndex,
-                timestampS: timestampS
-            )
-            latestFlashSnapshot = flashDetector.lastSnapshot
-            if let flashEvent = event {
-                lastSyncFlashFrameIndex = flashEvent.flashFrameIndex
-                lastSyncFlashTimestampS = flashEvent.flashTimestampS
-                state = .standby
-                let ts = flashEvent.flashTimestampS
-                DispatchQueue.main.async {
-                    self.restoreExposure()
-                    self.latestFlashSnapshot = nil
-                    self.warningLabel.isHidden = true
-                    self.lastUploadStatusText = String(format: "Time sync OK @ %.3fs", ts)
-                    self.updateUIForState()
-                }
-            }
+        // No ball detection during time sync — just advance frameIndex so
+        // cycle start indexes line up across modes.
+        if state == .timeSyncWaiting || state == .standby || state == .uploading {
             return
         }
 
-        // Ball detection only in tracking modes.
-        let needsDetection = state == .syncWaiting || state == .recording
-        let detection: BallDetector.DetectionResult
-        if needsDetection {
-            detection = ballDetector.detect(
-                pixelBuffer: pixelBuffer,
-                imageWidth: width,
-                imageHeight: height,
-                horizontalFovRadians: horizontalFovRadians
-            )
-        } else {
-            detection = BallDetector.DetectionResult(
-                ballDetected: false,
-                thetaXRad: nil,
-                thetaZRad: nil,
-                centroidX: nil,
-                centroidY: nil
-            )
-        }
+        let detection = ballDetector.detect(
+            pixelBuffer: pixelBuffer,
+            imageWidth: width,
+            imageHeight: height,
+            horizontalFovRadians: horizontalFovRadians
+        )
         let frame = ServerUploader.FramePayload(
             frame_index: currentIndex,
             timestamp_s: timestampS,
@@ -1003,32 +759,23 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             ball_detected: detection.ballDetected
         )
 
-        // Stash latest detection for the CADisplayLink UI pump on main.
-        // Detection itself stays at full capture rate; the overlay is drawn
-        // at display refresh rate (60/120Hz) — the max useful for visual tracking.
-        // No per-frame DispatchQueue.main.async, so 240fps never floods main.
         latestCentroidX = detection.centroidX
         latestCentroidY = detection.centroidY
         latestImageWidth = width
         latestImageHeight = height
 
         switch state {
-        case .standby, .timeSyncWaiting:
-            return
-
         case .syncWaiting:
             recorder.handleFrame(frame)
             if detection.ballDetected {
-                let anchorFrameIndex = lastSyncFlashFrameIndex ?? currentIndex
-                let anchorTimestampS = lastSyncFlashTimestampS ?? timestampS
+                let anchorFrameIndex = lastSyncAnchorFrameIndex ?? currentIndex
+                let anchorTimestampS = lastSyncAnchorTimestampS ?? timestampS
                 recorder.startRecording(
                     anchorFrameIndex: anchorFrameIndex,
                     anchorTimestampS: anchorTimestampS,
                     startFrameIndex: currentIndex
                 )
                 state = .recording
-                // One-shot dispatch on actual state transition; everything else
-                // goes through the display link.
                 DispatchQueue.main.async {
                     self.updateUIForState()
                 }
@@ -1037,7 +784,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case .recording:
             recorder.handleFrame(frame)
 
-        case .uploading:
+        default:
             return
         }
     }
@@ -1070,8 +817,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             return
         }
 
-        let audioURL = payloadStore.audioURL(for: fileURL)
-        uploader.uploadPitch(payload, audioFileURL: audioURL) { [weak self] result in
+        uploader.uploadPitch(payload) { [weak self] result in
             guard let self else { return }
             DispatchQueue.main.async {
                 var retryAfterFailure = false
@@ -1136,24 +882,20 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             ballOverlayLayer.isHidden = true
             return
         }
-
-        // Convert image pixel -> normalized capture coordinates.
         let normalized = CGPoint(
             x: CGFloat(cy / Double(imageHeight)),
             y: CGFloat(cx / Double(imageWidth))
         )
         let layerPoint = previewLayer.layerPointConverted(fromCaptureDevicePoint: normalized)
-
         let radius: CGFloat = 18
         let path = UIBezierPath(ovalIn: CGRect(x: layerPoint.x - radius, y: layerPoint.y - radius, width: radius * 2, height: radius * 2))
         ballOverlayLayer.path = path.cgPath
         ballOverlayLayer.isHidden = false
     }
 
-    private func enrichedPayload(
-        from payload: ServerUploader.PitchPayload,
-        audioStartTS: Double? = nil
-    ) -> ServerUploader.PitchPayload {
+    // MARK: - Payload enrichment
+
+    private func enrichedPayload(from payload: ServerUploader.PitchPayload) -> ServerUploader.PitchPayload {
         let d = UserDefaults.standard
         var intrinsics: ServerUploader.IntrinsicsPayload? = nil
         if
@@ -1162,10 +904,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             d.object(forKey: Self.keyIntrinsicCx) != nil,
             d.object(forKey: Self.keyIntrinsicCy) != nil
         {
-            // Distortion is only attached when 5 valid doubles are stored;
-            // otherwise server will fall back to the angle path per-frame.
             var distortion: [Double]? = nil
-            if let arr = d.array(forKey: "intrinsic_distortion") as? [Double], arr.count == 5 {
+            if let arr = d.array(forKey: Self.keyIntrinsicDistortion) as? [Double], arr.count == 5 {
                 distortion = arr
             }
             intrinsics = ServerUploader.IntrinsicsPayload(
@@ -1179,31 +919,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let homography = d.array(forKey: "homography_3x3") as? [Double]
         let w = d.integer(forKey: Self.keyImageWidthPx)
         let h = d.integer(forKey: Self.keyImageHeightPx)
-        // Mac-sync: inject offset if available. The offset sign convention is:
-        //   mac_clock_offset_s = phone_monotonic_clock - server_monotonic_clock
-        // So server applies: aligned_ts = frame.timestamp_s - mac_clock_offset_s
-        // to convert phone timestamps into server clock.
-        // MacSyncClient computes: offset = server_t1 - (t0+t3)/2
-        //   => offset > 0 means server is ahead.
-        // We want phone - server, so we negate before shipping.
-        let macOffset: Double?
-        if let client = macSyncClient, let est = client.currentOffset {
-            macOffset = -est  // flip: phone_clock - server_clock
-        } else {
-            macOffset = nil
-        }
         return ServerUploader.PitchPayload(
             camera_id: payload.camera_id,
-            flash_frame_index: payload.flash_frame_index,
-            flash_timestamp_s: payload.flash_timestamp_s,
+            sync_anchor_frame_index: payload.sync_anchor_frame_index,
+            sync_anchor_timestamp_s: payload.sync_anchor_timestamp_s,
             cycle_number: payload.cycle_number,
             frames: payload.frames,
             intrinsics: intrinsics,
             homography: homography,
             image_width_px: w > 0 ? w : nil,
-            image_height_px: h > 0 ? h : nil,
-            audio_start_ts_s: audioStartTS,
-            mac_clock_offset_s: macOffset
+            image_height_px: h > 0 ? h : nil
         )
     }
 
@@ -1215,13 +940,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             d.object(forKey: Self.keyIntrinsicCx) != nil &&
             d.object(forKey: Self.keyIntrinsicCy) != nil
         guard hasAll else { return nil }
-
         let fx = d.double(forKey: Self.keyIntrinsicFx)
         let fz = d.double(forKey: Self.keyIntrinsicFz)
         let cx = d.double(forKey: Self.keyIntrinsicCx)
         let cy = d.double(forKey: Self.keyIntrinsicCy)
-
-        // Basic sanity check.
         if fx == 0 || fz == 0 { return nil }
         return BallDetector.Intrinsics(cx: cx, cy: cy, fx: fx, fz: fz)
     }
@@ -1246,13 +968,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         settings = SettingsViewController.loadFromUserDefaults()
         serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: settings.serverPort)
         uploader = ServerUploader(config: serverConfig)
-
-        if recorder == nil {
-            return
-        }
-
+        if recorder == nil { return }
         recorder.setCameraId(settings.cameraRole)
-        flashDetector = FlashDetector(thresholdMultiplier: settings.flashThresholdMultiplier)
     }
 }
-
