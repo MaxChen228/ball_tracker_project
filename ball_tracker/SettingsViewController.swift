@@ -18,10 +18,14 @@ final class SettingsViewController: UIViewController {
         /// if it false-triggers on ambient noise. Range roughly 0.05–0.50.
         var chirpThreshold: Double
 
-        /// Base cadence (seconds) for the /status health probe when the
-        /// server is reachable. On failure the probe backs off exponentially
-        /// up to a hard cap; success resets to this base. Clamped to
-        /// [2, 300] on save.
+        /// Base cadence (seconds) for the `/heartbeat` loop when the
+        /// server is reachable. Each heartbeat also carries the current
+        /// dashboard `commands[self]` back to the phone, so this is both
+        /// the "am I online?" cadence and the worst-case arm-latency
+        /// bound. On failure the loop backs off exponentially up to a
+        /// 60 s cap; success resets to this base. Clamped to [1, 60]
+        /// on save — 1 Hz is plenty for a LAN tool, anything faster
+        /// wastes battery without perceptible UX gain.
         var pollInterval: Double
 
         var captureWidth: Int           // 1280 or 1920
@@ -133,7 +137,7 @@ final class SettingsViewController: UIViewController {
 
         let chirpThreshold = doubleOrDefault(keyChirpThreshold, defaultValue: 0.18)
 
-        let pollInterval = doubleOrDefault(keyPollInterval, defaultValue: 10.0)
+        let pollInterval = doubleOrDefault(keyPollInterval, defaultValue: 1.0)
 
         let captureWidth = intOrDefault(keyCaptureWidth, defaultValue: 1920)
         let captureHeight = intOrDefault(keyCaptureHeight, defaultValue: 1080)
@@ -228,7 +232,7 @@ final class SettingsViewController: UIViewController {
             vMin: intValue(vMinField.text, fallback: current.vMin),
             vMax: intValue(vMaxField.text, fallback: current.vMax),
             chirpThreshold: doubleValue(chirpThresholdField.text, fallback: current.chirpThreshold),
-            pollInterval: min(300.0, max(2.0, doubleValue(pollIntervalField.text, fallback: current.pollInterval))),
+            pollInterval: min(60.0, max(1.0, doubleValue(pollIntervalField.text, fallback: current.pollInterval))),
             captureWidth: resolution.0,
             captureHeight: resolution.1,
             captureFps: fps,
@@ -277,7 +281,7 @@ final class SettingsViewController: UIViewController {
         configureTextField(vMinField, placeholder: "40", keyboard: .numberPad)
         configureTextField(vMaxField, placeholder: "255", keyboard: .numberPad)
         configureTextField(chirpThresholdField, placeholder: "0.18", keyboard: .decimalPad)
-        configureTextField(pollIntervalField, placeholder: "10", keyboard: .decimalPad)
+        configureTextField(pollIntervalField, placeholder: "1", keyboard: .decimalPad)
         configureTextField(manualFxField, placeholder: "fx (e.g. 1600)", keyboard: .decimalPad)
         configureTextField(manualFyField, placeholder: "fy (e.g. 1600)", keyboard: .decimalPad)
         configureTextField(manualCxField, placeholder: "cx (e.g. 960)", keyboard: .decimalPad)
@@ -287,7 +291,7 @@ final class SettingsViewController: UIViewController {
         contentStack.addArrangedSubview(sectionTitle("Server"))
         contentStack.addArrangedSubview(fieldRow(label: "Server IP", field: serverIPField))
         contentStack.addArrangedSubview(fieldRow(label: "Server Port", field: serverPortField))
-        contentStack.addArrangedSubview(fieldRow(label: "Poll Interval (s)", field: pollIntervalField))
+        contentStack.addArrangedSubview(fieldRow(label: "Heartbeat Interval (s)", field: pollIntervalField))
 
         contentStack.addArrangedSubview(sectionTitle("Camera"))
         contentStack.addArrangedSubview(controlRow(label: "Camera Role", control: cameraRoleControl))

@@ -39,10 +39,22 @@ Open `ball_tracker.xcodeproj` in Xcode. The app needs a **physical device** (cam
 ### iOS state machine — `CameraViewController`
 `.standby → .timeSyncWaiting → .standby → .syncWaiting → .recording → .uploading → .syncWaiting …`
 
+Driven by a **1 Hz `POST /heartbeat` loop** that runs from app launch and carries the server's per-device `commands[self.camera_id]` in every reply. The local "啟動追蹤" button still works as a debug escape hatch, but the intended flow is dashboard-driven:
+
+- `commands[self] == "arm"` + state `.standby` → `enterSyncMode()` (equivalent to pressing the local button)
+- `commands[self] == "disarm"` + state `.syncWaiting`/`.uploading` → `exitSyncMode()`
+- `commands[self] == "disarm"` + state `.recording` → `recorder.forceFinishIfRecording()` flushes whatever frames are buffered; the cycle-complete handler routes back to `.standby` (not the usual `.syncWaiting`) via `returnToStandbyAfterCycle`
+- `commands[self] == "disarm"` + state `.timeSyncWaiting` → `cancelTimeSync(reason: "disarmed")`
+- `lastAppliedCommand` guards against re-triggering on repeated replies during an armed session
+
+The worst-case arm latency is therefore one heartbeat interval (default 1 s, clamped [1, 60]).
+
+State per mode:
+
 - `.timeSyncWaiting` (時間校正): **chirp detector ON, ball detection OFF**. On trigger, saves `lastSyncAnchorFrameIndex/TimestampS` and returns to `.standby`. 15 s timeout.
 - `.syncWaiting`: ball detection ON, pre-roll circular buffer (120 frames) filling. First ball-detected frame transitions to `.recording` using the saved chirp anchor for the cycle.
-- `.recording`: buffers frames AND writes an H.264 clip via `ClipRecorder`. Stops when the ball has been absent for 24 consecutive frames AND cycle length ≥ 24 frames. Emits `PitchPayload` via `onCycleComplete`; the clip finishes async before the payload is persisted. **Pre-roll frames are in the JSON payload only** — the clip starts at the first ball-detected frame (Phase-1 scope limit).
-- `.uploading`: transient state while the cycle is persisted + enqueued; transitions back to `.syncWaiting` once handed off.
+- `.recording`: buffers frames AND writes an H.264 clip via `ClipRecorder`. Stops when: (a) the ball has been absent for 24 consecutive frames AND cycle length ≥ 24 frames, (b) the cycle duration hits `maxCycleDurationS = 5 s` (hard cap — covers "ball stopped in frame"), or (c) `forceFinishIfRecording()` is called by a dashboard disarm. Emits `PitchPayload` via `onCycleComplete`; the clip finishes async before the payload is persisted. **Pre-roll frames are in the JSON payload only** — the clip starts at the first ball-detected frame (Phase-1 scope limit).
+- `.uploading`: transient state while the cycle is persisted + enqueued; transitions back to `.syncWaiting` (or `.standby` if a disarm is pending) once handed off.
 - Cycles are saved to disk in `Documents/pitch_payloads/` (`PitchPayloadStore`) **before** upload, as paired `<basename>.json` + optional `<basename>.mov`. Upload failures re-insert at queue front with 2 s backoff; `payloadStore.delete` removes the pair atomically on success.
 
 ### Frame pipeline (`CameraViewController.captureOutput`)

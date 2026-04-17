@@ -68,7 +68,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// failure. 0 means "next probe uses the base interval" (the post-success
     /// state). Capped at `maxBackoff`.
     private var currentBackoff: TimeInterval = 0
-    /// Monotonic token used to ignore stale `/status` responses when a
+    /// Monotonic token used to ignore stale `/heartbeat` responses when a
     /// manual retry or settings change kicks off a new probe before the
     /// in-flight one returns.
     private var probeGeneration: Int = 0
@@ -76,6 +76,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var tickTimer: Timer?
     private static let maxBackoff: TimeInterval = 60
     private let ballOverlayLayer = CAShapeLayer()
+
+    // Remote-control state (driven by the heartbeat response).
+    /// Last command key we acted on for this device (`"arm"` / `"disarm"` /
+    /// nil). Only state *transitions* cause local actions so repeated arm
+    /// replies during an armed session don't re-trigger enterSyncMode.
+    private var lastAppliedCommand: String?
+    /// Set by a dashboard `disarm` arriving mid-recording so the cycle-
+    /// complete path routes us back to `.standby` instead of the usual
+    /// `.syncWaiting` hand-off.
+    private var returnToStandbyAfterCycle: Bool = false
 
     // Payload persistence + upload queue.
     private let payloadStore = PitchPayloadStore()
@@ -276,11 +286,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         do {
             let fileURL = try payloadStore.save(payload, videoURL: videoURL)
             DispatchQueue.main.async {
-                self.state = .syncWaiting
                 let suffix = videoURL != nil ? " (+video)" : ""
                 self.lastUploadStatusText = "Cached pitch \(payload.cycle_number)\(suffix)"
                 self.enqueuePayloadForUpload(fileURL)
-                self.updateUIForState()
+                if self.returnToStandbyAfterCycle {
+                    // A dashboard disarm arrived mid-recording; force-finish
+                    // just flushed the cycle. Clean up instead of re-arming.
+                    self.returnToStandbyAfterCycle = false
+                    self.exitSyncMode()
+                } else {
+                    self.state = .syncWaiting
+                    self.updateUIForState()
+                }
             }
         } catch {
             // Even if the JSON save failed, drop any orphan tmp video.
@@ -289,6 +306,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             }
             DispatchQueue.main.async {
                 self.lastUploadStatusText = "Cache failed: \(error.localizedDescription)"
+                self.returnToStandbyAfterCycle = false
                 self.updateUIForState()
             }
         }
@@ -593,16 +611,21 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let gen = probeGeneration
         serverStatusTextValue = "checking…"
         updateUIForState()
-        uploader.fetchStatus { [weak self] result in
+        let cam = settings.cameraRole
+        uploader.sendHeartbeat(cameraId: cam) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self, gen == self.probeGeneration else { return }
                 switch result {
-                case .success(let dict):
+                case .success(let response):
                     self.isServerReachable = true
-                    self.serverStatusTextValue = (dict["state"] as? String) ?? "reachable"
+                    self.serverStatusTextValue = self.heartbeatDisplayText(response)
                     self.lastContactAt = Date()
                     self.currentBackoff = 0
                     self.scheduleNextProbe(after: self.settings.pollInterval)
+                    self.handleDashboardCommand(
+                        response.commands?[cam],
+                        sessionArmed: response.session?.armed ?? false
+                    )
                 case .failure:
                     self.isServerReachable = false
                     self.serverStatusTextValue = "offline"
@@ -613,6 +636,71 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 }
                 self.updateLastContactLabel()
                 self.updateUIForState()
+            }
+        }
+    }
+
+    /// Summarise the heartbeat reply for the `Server` HUD label. Prefer the
+    /// session state when available — operators care about ARMED vs IDLE,
+    /// not the generic "receiving"/"idle" string the old /status gave.
+    private func heartbeatDisplayText(_ r: ServerUploader.HeartbeatResponse) -> String {
+        if let s = r.session {
+            if s.armed {
+                return "ARMED (\(s.id))"
+            }
+            let reason = s.end_reason ?? "ended"
+            return "IDLE · last: \(reason)"
+        }
+        return r.state ?? "reachable"
+    }
+
+    /// Dispatch the server's per-device command. Only reacts to state
+    /// *transitions* (tracked via `lastAppliedCommand`) so a long-running
+    /// armed session doesn't re-enter syncWaiting on every heartbeat.
+    private func handleDashboardCommand(_ command: String?, sessionArmed: Bool) {
+        defer { lastAppliedCommand = command }
+        guard command != lastAppliedCommand else { return }
+        switch command {
+        case "arm":
+            applyRemoteArm()
+        case "disarm":
+            applyRemoteDisarm()
+        default:
+            // No pending command. If the server considers us idle but we're
+            // still mid-cycle, leave the local recording alone — it will
+            // finish naturally via ball-absent or the hard max-duration cap.
+            break
+        }
+        _ = sessionArmed  // reserved for future "did the session id change?" logic
+    }
+
+    private func applyRemoteArm() {
+        switch state {
+        case .standby:
+            enterSyncMode()
+        case .timeSyncWaiting, .syncWaiting, .recording, .uploading:
+            // Already in an active state — nothing to do. `recording`
+            // continues, `syncWaiting` is already waiting for a ball,
+            // `uploading` will transition back to syncWaiting on its own.
+            break
+        }
+    }
+
+    private func applyRemoteDisarm() {
+        switch state {
+        case .standby:
+            break
+        case .timeSyncWaiting:
+            cancelTimeSync(reason: "disarmed")
+        case .syncWaiting, .uploading:
+            exitSyncMode()
+        case .recording:
+            // Flush whatever we have so the pitch isn't lost. The
+            // cycle-complete handler will route us to standby thanks to
+            // the flag below instead of bouncing back to syncWaiting.
+            returnToStandbyAfterCycle = true
+            processingQueue.async { [weak self] in
+                self?.recorder.forceFinishIfRecording()
             }
         }
     }
@@ -915,7 +1003,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 recorder.startRecording(
                     anchorFrameIndex: anchorFrameIndex,
                     anchorTimestampS: anchorTimestampS,
-                    startFrameIndex: currentIndex
+                    startFrameIndex: currentIndex,
+                    startTimestampS: timestampS
                 )
                 startClipRecorder(width: width, height: height)
                 clipRecorder?.append(sampleBuffer: sampleBuffer)
