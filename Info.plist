@@ -25,7 +25,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Used to capture baseball pitches for tracking.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Used to record ambient audio for clock-offset alignment between the two cameras via cross-correlation.</string>
+	<string>Used to detect the sync chirp so both cameras share a common time anchor for 3D ball-path triangulation.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Needed to upload pitch data to the local tracking server.</string>
 	<key>NSAppTransportSecurity</key>
