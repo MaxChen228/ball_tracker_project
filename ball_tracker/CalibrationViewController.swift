@@ -66,6 +66,28 @@ final class CalibrationViewController: UIViewController {
     private let residualLabel = UILabel()
     private let reprojectedPolyLayer = CAShapeLayer()
 
+    // ArUco auto-calibration
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let videoQueue = DispatchQueue(label: "calibration.aruco.queue")
+    private let markerOverlayLayer = CAShapeLayer()
+    private let arucoStatusLabel = UILabel()
+    private var detectionDisplayLink: CADisplayLink?
+    // Written from videoQueue, read from main — protected by arucoLock.
+    private let arucoLock = NSLock()
+    private var latestMarkers: [(id: Int, corners: [CGPoint])] = []
+    private var latestPixelSize: CGSize = .zero
+
+    /// 4 ArUco markers (DICT_4X4_50, IDs 0-3) centered on the four plate
+    /// pentagon corners FL / FR / RS / LS (back tip skipped). User prints
+    /// small ~3-5 cm squares and tapes them so each marker's centre is on
+    /// the corresponding plate vertex.
+    private static let markerWorldPoints: [Int: (Double, Double)] = [
+        0: (-plateWidthM / 2.0, 0.0),                 // FL
+        1: ( plateWidthM / 2.0, 0.0),                 // FR
+        2: ( plateWidthM / 2.0, plateShoulderYM),     // RS
+        3: (-plateWidthM / 2.0, plateShoulderYM),     // LS
+    ]
+
     // Real home-plate pentagon vertices in meters. Axes: X = left/right,
     // Y = depth from front edge (pitcher side) toward back tip (catcher side).
     private static let plateWidthM = 0.432       // 17" front edge
@@ -83,6 +105,7 @@ final class CalibrationViewController: UIViewController {
     }
 
     deinit {
+        detectionDisplayLink?.invalidate()
         session.stopRunning()
     }
 
@@ -110,18 +133,18 @@ final class CalibrationViewController: UIViewController {
             action: #selector(exitCalibration)
         )
 
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
-            title: "Save",
-            style: .done,
-            target: self,
-            action: #selector(saveCalibration)
-        )
+        navigationItem.rightBarButtonItems = [
+            UIBarButtonItem(title: "Save", style: .done, target: self, action: #selector(saveCalibration)),
+            UIBarButtonItem(title: "Auto (ArUco)", style: .plain, target: self, action: #selector(saveArucoCalibration)),
+        ]
 
         view.layoutIfNeeded()
         setupPreview()
         setupCornerHandles()
         setupResidualOverlay()
+        setupArucoOverlay()
         refreshResidualAndPolygon()
+        startDetectionDisplayLink()
     }
 
     private func setupResidualOverlay() {
@@ -162,6 +185,14 @@ final class CalibrationViewController: UIViewController {
             } catch {
                 // TODO: handle error UI
             }
+        }
+
+        // BGRA output so the Obj-C++ bridge can wrap it as a cv::Mat directly.
+        videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        if session.canAddOutput(videoOutput) {
+            session.addOutput(videoOutput)
         }
 
         session.commitConfiguration()
@@ -496,6 +527,139 @@ final class CalibrationViewController: UIViewController {
         }
 
         return rhs
+    }
+
+    // MARK: - ArUco auto-calibration
+
+    private func setupArucoOverlay() {
+        markerOverlayLayer.strokeColor = UIColor.systemCyan.cgColor
+        markerOverlayLayer.fillColor = UIColor.systemCyan.withAlphaComponent(0.18).cgColor
+        markerOverlayLayer.lineWidth = 2
+        view.layer.addSublayer(markerOverlayLayer)
+
+        arucoStatusLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        arucoStatusLabel.textColor = .white
+        arucoStatusLabel.textAlignment = .center
+        arucoStatusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        arucoStatusLabel.layer.cornerRadius = 8
+        arucoStatusLabel.clipsToBounds = true
+        arucoStatusLabel.numberOfLines = 2
+        arucoStatusLabel.text = "ArUco: 等待偵測…"
+        arucoStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(arucoStatusLabel)
+        NSLayoutConstraint.activate([
+            arucoStatusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            arucoStatusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            arucoStatusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            arucoStatusLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 40),
+        ])
+    }
+
+    private func startDetectionDisplayLink() {
+        let link = CADisplayLink(target: self, selector: #selector(refreshArucoOverlay))
+        link.preferredFramesPerSecond = 15
+        link.add(to: .main, forMode: .common)
+        detectionDisplayLink = link
+    }
+
+    @objc private func refreshArucoOverlay() {
+        arucoLock.lock()
+        let markers = latestMarkers
+        let pixelSize = latestPixelSize
+        arucoLock.unlock()
+
+        guard pixelSize.width > 0, pixelSize.height > 0 else {
+            arucoStatusLabel.text = "ArUco: 等待相機畫面…"
+            markerOverlayLayer.path = nil
+            return
+        }
+
+        let required = Array(Self.markerWorldPoints.keys).sorted()
+        let detectedIds = Set(markers.map { $0.id })
+        let hits = required.filter { detectedIds.contains($0) }
+        arucoStatusLabel.text = "ArUco: 偵測到 \(markers.count) 個 markers，匹配 \(hits.count)/\(required.count) (IDs \(hits.sorted()))"
+
+        // Draw each marker's 4 corners as a polygon in view space.
+        let path = UIBezierPath()
+        for m in markers {
+            let viewPts = m.corners.map {
+                imagePixelToViewPoint($0, imageWidth: Int(pixelSize.width), imageHeight: Int(pixelSize.height))
+            }
+            guard viewPts.count == 4 else { continue }
+            path.move(to: viewPts[0])
+            for pt in viewPts.dropFirst() { path.addLine(to: pt) }
+            path.close()
+        }
+        markerOverlayLayer.path = path.cgPath
+    }
+
+    @objc private func saveArucoCalibration() {
+        arucoLock.lock()
+        let markers = latestMarkers
+        let pixelSize = latestPixelSize
+        arucoLock.unlock()
+
+        let required = Array(Self.markerWorldPoints.keys).sorted()
+        let byId = Dictionary(uniqueKeysWithValues: markers.map { ($0.id, $0) })
+        let missing = required.filter { byId[$0] == nil }
+        if !missing.isEmpty {
+            showAlert(title: "無法自動校正", message: "缺少 marker IDs: \(missing)。請確認 4 張 ArUco 都清晰可見。")
+            return
+        }
+        guard pixelSize.width > 0, pixelSize.height > 0 else {
+            showAlert(title: "無法自動校正", message: "尚未取得相機畫面尺寸。")
+            return
+        }
+
+        // Use each marker's centre as the correspondence to its plate vertex.
+        let worldValues: [NSValue] = required.map {
+            let (x, y) = Self.markerWorldPoints[$0]!
+            return NSValue(cgPoint: CGPoint(x: x, y: y))
+        }
+        let imageValues: [NSValue] = required.map {
+            let m = byId[$0]!
+            let cx = (m.corners[0].x + m.corners[1].x + m.corners[2].x + m.corners[3].x) * 0.25
+            let cy = (m.corners[0].y + m.corners[1].y + m.corners[2].y + m.corners[3].y) * 0.25
+            return NSValue(cgPoint: CGPoint(x: cx, y: cy))
+        }
+
+        guard let hNumbers = BTArucoDetector.findHomography(fromWorldPoints: worldValues, imagePoints: imageValues) else {
+            showAlert(title: "無法自動校正", message: "RANSAC 解不出 homography (marker 可能被遮擋)。")
+            return
+        }
+        let H = hNumbers.map { $0.doubleValue }
+        UserDefaults.standard.set(H, forKey: Self.keyHomography)
+        UserDefaults.standard.set(Int(pixelSize.width), forKey: Self.keyImageWidthPx)
+        UserDefaults.standard.set(Int(pixelSize.height), forKey: Self.keyImageHeightPx)
+
+        // Intrinsics follow the same rule as manual Save: respect the
+        // Settings → "Use ChArUco values" override.
+        persistIntrinsicsIfPossible()
+        dismiss(animated: true)
+    }
+
+    private func showAlert(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+}
+
+// Delegate conformance must be an unrestricted extension so the frame callback
+// can be `nonisolated` under strict concurrency.
+extension CalibrationViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
+    nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let detected = BTArucoDetector.detectMarkers(in: pixelBuffer)
+        let markers: [(id: Int, corners: [CGPoint])] = detected.map { m in
+            (Int(m.markerId), [m.corner0, m.corner1, m.corner2, m.corner3])
+        }
+        arucoLock.lock()
+        latestMarkers = markers
+        latestPixelSize = CGSize(width: width, height: height)
+        arucoLock.unlock()
     }
 }
 
