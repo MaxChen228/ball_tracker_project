@@ -9,9 +9,12 @@ Endpoints:
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import socket
 from contextlib import asynccontextmanager
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -132,15 +135,74 @@ def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoin
     return results
 
 
+_DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
+
+
 class State:
-    def __init__(self) -> None:
+    def __init__(self, data_dir: Path = _DEFAULT_DATA_DIR) -> None:
         self._lock = Lock()
         self.pitches: dict[tuple[str, int], PitchPayload] = {}
         self.results: dict[int, CycleResult] = {}
+        self._data_dir = data_dir
+        self._pitch_dir = data_dir / "pitches"
+        self._result_dir = data_dir / "results"
+        self._pitch_dir.mkdir(parents=True, exist_ok=True)
+        self._result_dir.mkdir(parents=True, exist_ok=True)
+        self._load_from_disk()
+
+    def _pitch_path(self, camera_id: str, cycle: int) -> Path:
+        return self._pitch_dir / f"cycle_{cycle:06d}_{camera_id}.json"
+
+    def _result_path(self, cycle: int) -> Path:
+        return self._result_dir / f"cycle_{cycle:06d}.json"
+
+    def _load_from_disk(self) -> None:
+        for path in sorted(self._pitch_dir.glob("cycle_*.json")):
+            try:
+                obj = json.loads(path.read_text())
+                pitch = PitchPayload.model_validate(obj)
+            except Exception as e:
+                logger.warning("skip corrupt pitch file %s: %s", path.name, e)
+                continue
+            self.pitches[(pitch.camera_id, pitch.cycle_number)] = pitch
+
+        seen_cycles = {cyc for _, cyc in self.pitches.keys()}
+        for cycle in sorted(seen_cycles):
+            a = self.pitches.get(("A", cycle))
+            b = self.pitches.get(("B", cycle))
+            result = CycleResult(
+                cycle_number=cycle,
+                camera_a_received=a is not None,
+                camera_b_received=b is not None,
+            )
+            if a is not None and b is not None:
+                try:
+                    result.points = triangulate_cycle(a, b)
+                except Exception as e:
+                    result.error = f"{type(e).__name__}: {e}"
+            self.results[cycle] = result
+
+        if self.pitches:
+            logger.info(
+                "restored %d pitch payloads across %d cycles from %s",
+                len(self.pitches),
+                len(seen_cycles),
+                self._data_dir,
+            )
+
+    def _atomic_write(self, path: Path, payload: str) -> None:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(payload)
+        tmp.replace(path)
 
     def record(self, pitch: PitchPayload) -> CycleResult:
         with self._lock:
             self.pitches[(pitch.camera_id, pitch.cycle_number)] = pitch
+            self._atomic_write(
+                self._pitch_path(pitch.camera_id, pitch.cycle_number),
+                pitch.model_dump_json(),
+            )
+
             a = self.pitches.get(("A", pitch.cycle_number))
             b = self.pitches.get(("B", pitch.cycle_number))
             result = CycleResult(
@@ -154,6 +216,10 @@ class State:
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
             self.results[pitch.cycle_number] = result
+            self._atomic_write(
+                self._result_path(pitch.cycle_number),
+                result.model_dump_json(),
+            )
             return result
 
     def summary(self) -> dict[str, Any]:
@@ -179,10 +245,15 @@ class State:
         with self._lock:
             return self.results.get(cycle)
 
-    def reset(self) -> None:
+    def reset(self, purge_disk: bool = False) -> None:
         with self._lock:
             self.pitches.clear()
             self.results.clear()
+            if purge_disk:
+                for path in self._pitch_dir.glob("cycle_*.json*"):
+                    path.unlink(missing_ok=True)
+                for path in self._result_dir.glob("cycle_*.json*"):
+                    path.unlink(missing_ok=True)
 
 
 def _lan_ip() -> str:
@@ -216,6 +287,25 @@ def status() -> dict[str, Any]:
     return state.summary()
 
 
+def _summarize_result(result: CycleResult) -> dict[str, Any]:
+    paired = result.camera_a_received and result.camera_b_received
+    summary: dict[str, Any] = {
+        "cycle": result.cycle_number,
+        "paired": paired,
+        "triangulated_points": len(result.points),
+        "error": result.error,
+    }
+    if result.points:
+        residuals = [p.residual_m for p in result.points]
+        zs = [p.z_m for p in result.points]
+        ts = [p.t_rel_s for p in result.points]
+        summary["mean_residual_m"] = float(np.mean(residuals))
+        summary["max_residual_m"] = float(np.max(residuals))
+        summary["peak_z_m"] = float(max(zs))
+        summary["duration_s"] = float(ts[-1] - ts[0])
+    return summary
+
+
 @app.post("/pitch")
 def pitch(payload: PitchPayload) -> dict[str, Any]:
     result = state.record(payload)
@@ -238,7 +328,7 @@ def pitch(payload: PitchPayload) -> dict[str, Any]:
             result.points[-1].t_rel_s - result.points[0].t_rel_s,
             max(zs),
         )
-    return {"ok": True, "cycle": result.cycle_number, "triangulated_points": len(result.points)}
+    return {"ok": True, **_summarize_result(result)}
 
 
 @app.get("/results/latest")
@@ -258,6 +348,6 @@ def results_cycle(cycle: int) -> CycleResult:
 
 
 @app.post("/reset")
-def reset() -> dict[str, bool]:
-    state.reset()
-    return {"ok": True}
+def reset(purge: bool = False) -> dict[str, bool]:
+    state.reset(purge_disk=purge)
+    return {"ok": True, "purged": purge}

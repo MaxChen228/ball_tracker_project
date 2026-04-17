@@ -144,10 +144,9 @@ def test_triangulate_sweeps_ball_path():
 
 
 @pytest.fixture(autouse=True)
-def _reset_state():
-    main.state.reset()
+def _reset_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     yield
-    main.state.reset()
 
 
 def test_status_initially_idle():
@@ -194,3 +193,52 @@ def test_post_pitch_single_camera_then_both_triangulates():
     assert abs(pt["x_m"] - P_true[0]) < 1e-6
     assert abs(pt["y_m"] - P_true[1]) < 1e-6
     assert abs(pt["z_m"] - P_true[2]) < 1e-6
+
+    # /pitch response summary surfaces mean residual + peak z for iOS feedback.
+    body2 = r2.json()
+    assert body2["paired"] is True
+    assert body2["cycle"] == 7
+    assert body2["error"] is None
+    assert body2["mean_residual_m"] < 1e-6
+    assert abs(body2["peak_z_m"] - P_true[2]) < 1e-6
+
+
+def test_persistence_reloads_state_across_process_restart(tmp_path):
+    """A fresh State pointed at an existing data dir re-triangulates stored pitches."""
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    P_true = np.array([0.2, 0.5, 1.1])
+    tx_a, tz_a = _project(K, R_a, t_a, P_true)
+    tx_b, tz_b = _project(K, R_b, t_b, P_true)
+
+    def make_body(cam_id, tx, tz, H):
+        return main.PitchPayload(
+            camera_id=cam_id,
+            flash_frame_index=0,
+            flash_timestamp_s=0.0,
+            cycle_number=42,
+            frames=[
+                main.FramePayload(
+                    frame_index=0, timestamp_s=0.0,
+                    theta_x_rad=tx, theta_z_rad=tz, ball_detected=True,
+                )
+            ],
+            intrinsics=main.IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
+            homography=H.flatten().tolist(),
+        )
+
+    s1 = main.State(data_dir=tmp_path)
+    s1.record(make_body("A", tx_a, tz_a, H_a))
+    s1.record(make_body("B", tx_b, tz_b, H_b))
+    del s1
+
+    # Fresh State simulating server restart: same data dir, no in-memory carry-over.
+    s2 = main.State(data_dir=tmp_path)
+    latest = s2.latest()
+    assert latest is not None
+    assert latest.cycle_number == 42
+    assert latest.camera_a_received and latest.camera_b_received
+    assert len(latest.points) == 1
+    pt = latest.points[0]
+    assert abs(pt.x_m - P_true[0]) < 1e-6
+    assert abs(pt.y_m - P_true[1]) < 1e-6
+    assert abs(pt.z_m - P_true[2]) < 1e-6
