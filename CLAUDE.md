@@ -41,15 +41,17 @@ Runs on `audio.chirp.queue`. `AVCaptureAudioDataOutput` delivers mic samples dir
 
 The reference chirp is a linear sweep 2 → 8 kHz, 100 ms, Hann-windowed, unit-energy normalized. The server's `/chirp.wav` endpoint emits the same waveform as a playable WAV surrounded by 0.5 s silence — users download it on any third device and play it near the two iPhones during 時間校正.
 
+Threshold (default 0.18, tunable from Settings → Sync → Chirp Threshold) is the normalized matched-filter peak above which a detection fires. Peaks are in roughly 0–1 with 1.0 meaning a perfect reference match on a clean recording; typical field values are 0.2–0.4 on a nearby speaker, <0.05 on stationary ambient. Lower the threshold if the HUD flashes orange ("close") but never triggers; raise it if false-triggers on ambient noise. Hot-reload via `setThreshold(_:)` — no capture-session rebuild.
+
 ### Key modules
 - `BallDetector.swift` — HSV threshold on a downsampled grid → 8-neighborhood connected components → largest component passing area filter (20–5000 px²) → centroid → `θx = atan2(px - cx, fx)`, `θz = atan2(py - cy, fz)`. Uses calibrated intrinsics if present, else FOV approximation.
-- `AudioChirpDetector.swift` — matched-filter chirp detection via `vDSP_dotpr`. Owns the audio ring buffer, reference chirp, threshold, cooldown, and emits `ChirpEvent(anchorFrameIndex, anchorTimestampS)` callbacks on its own queue. Self-contained — no dependencies on other sync helpers.
+- `AudioChirpDetector.swift` — matched-filter chirp detection via `vDSP_dotpr`. Owns the audio ring buffer, reference chirp, cooldown, and emits `ChirpEvent(anchorFrameIndex, anchorTimestampS)` callbacks on its own queue. Threshold is mutable (`setThreshold(_:)`) so Settings changes propagate without session rebuild. Self-contained — no dependencies on other sync helpers.
 - `PitchRecorder.swift` — pre-roll buffer + cycle assembly. The chirp anchor is passed in at `startRecording` time, not discovered by the recorder.
 - `CalibrationViewController.swift` — two paths to the same `homography_3x3` (row-major, 9 doubles, h33=1):
   - **Manual**: 5 draggable handles on home-plate pentagon → DLT via 8×8 normal equations with Gaussian elimination.
   - **Auto (ArUco)**: `BTArucoDetector` (OpenCV `cv::aruco`, Obj-C++ wrapper in `ArucoDetector.{h,mm}`) detects DICT_4X4_50 markers IDs 0–5 taped to plate landmarks (FL/FR/RS/LS/BT/MF), then `findHomographyFromWorldPoints:imagePoints:` solves via RANSAC least-squares.
   Also derives `fx/fz/cx/cy` from capture FOV. A Settings toggle can override intrinsics with externally computed ChArUco values including 5-coefficient distortion.
-- `SettingsViewController.swift` — persists server IP/port, role A/B, HSV range, capture resolution/fps, and optional manual intrinsics (including OpenCV 5-coefficient distortion `[k1, k2, p1, p2, k3]`) to `UserDefaults`. `normalizeServerIP` strips scheme/port/path from pasted URLs.
+- `SettingsViewController.swift` — persists server IP/port, role A/B, HSV range, chirp detection threshold (`chirp_threshold`, default 0.18), capture resolution/fps, and optional manual intrinsics (including OpenCV 5-coefficient distortion `[k1, k2, p1, p2, k3]`) to `UserDefaults`. `normalizeServerIP` strips scheme/port/path from pasted URLs. `CameraViewController.pollServerStatus` diffs settings every 2 s and calls `chirpDetector.setThreshold(_:)` / `reconfigureCapture()` without rebuilding the session.
 
 ### Server
 - `main.py` — `State` dict keyed by `(camera_id, cycle_number)`. When both A and B for a cycle arrive, `triangulate_cycle` runs immediately under the state lock. `/status` reports received + completed cycles. `/chirp.wav` returns the reference sync chirp.
@@ -87,7 +89,7 @@ Triangulation requires **both** cameras to have `intrinsics` and `homography` pr
 
 ## Hot-reload behavior
 
-`CameraViewController.pollServerStatus` runs every 2 s and also diffs `UserDefaults` settings, reconfiguring capture format and rebuilding `ServerUploader` when changed. This exists because `.formSheet` Settings dismiss does **not** trigger `viewWillAppear`.
+`CameraViewController.pollServerStatus` runs every 2 s and also diffs `UserDefaults` settings. On change it reconfigures capture format, rebuilds `ServerUploader`, or pushes a new `chirpThreshold` into the live detector — none of which require rebuilding the `AVCaptureSession`. This exists because `.formSheet` Settings dismiss does **not** trigger `viewWillAppear`.
 
 ## Info.plist
 
