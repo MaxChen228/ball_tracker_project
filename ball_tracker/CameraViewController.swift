@@ -65,7 +65,21 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let uploadStatusLabel = UILabel()
     private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
+    private let flashDebugLabel = UILabel()
     private let trackingButton = UIButton(type: .system)
+
+    // Exposure/WB state captured before entering .timeSyncWaiting so we can
+    // restore on exit. Without locking, AE neutralizes the torch within 1–2
+    // frames and luminance barely rises above baseline.
+    private var savedExposureMode: AVCaptureDevice.ExposureMode?
+    private var savedExposureDuration: CMTime?
+    private var savedISO: Float?
+    private var savedWhiteBalanceMode: AVCaptureDevice.WhiteBalanceMode?
+    private var isExposureLockedForFlash: Bool = false
+
+    // Latest FlashDetector snapshot — written on capture queue, read by display
+    // link on main. Same pattern as latestCentroidX/Y.
+    private var latestFlashSnapshot: FlashDetector.Snapshot?
 
     // Calibration prerequisites (so CalibrationViewController can compute intrinsics).
     private static let keyHorizontalFovRad = "horizontal_fov_rad"
@@ -190,6 +204,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         statusPollTimer?.invalidate()
         statusPollTimer = nil
         displayLink?.isPaused = true
+        // If the user backgrounds this VC mid-calibration, don't leave the
+        // camera stuck in custom exposure — AE must re-engage on return.
+        if isExposureLockedForFlash {
+            restoreExposure()
+            if state == .timeSyncWaiting {
+                state = .standby
+                latestFlashSnapshot = nil
+            }
+        }
     }
 
     // MARK: - Controls (spec has buttons; skeleton provides methods)
@@ -224,17 +247,23 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     @objc private func onTapTimeCalibration() {
         if state == .timeSyncWaiting {
+            restoreExposure()
+            latestFlashSnapshot = nil
             state = .standby
             warningLabel.isHidden = true
             lastUploadStatusText = "Time sync cancelled"
         } else if state == .standby {
             flashDetector.reset()
+            latestFlashSnapshot = nil
+            lockExposureForFlashDetection()
             state = .timeSyncWaiting
             warningLabel.text = "等待閃光觸發中..."
             warningLabel.isHidden = false
             lastUploadStatusText = "Time sync: waiting for flash"
             DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
                 guard let self, self.state == .timeSyncWaiting else { return }
+                self.restoreExposure()
+                self.latestFlashSnapshot = nil
                 self.state = .standby
                 self.warningLabel.isHidden = true
                 self.lastUploadStatusText = "Time sync timeout"
@@ -323,10 +352,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func reconfigureCapture() {
-        guard let input = session.inputs
-            .compactMap({ $0 as? AVCaptureDeviceInput })
-            .first else { return }
-        let device = input.device
+        guard let device = currentCaptureDevice else { return }
         let wasRunning = session.isRunning
         if wasRunning { session.stopRunning() }
         try? configureCaptureFormat(
@@ -337,6 +363,74 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         )
         UserDefaults.standard.set(horizontalFovRadians, forKey: Self.keyHorizontalFovRad)
         if wasRunning { session.startRunning() }
+    }
+
+    private var currentCaptureDevice: AVCaptureDevice? {
+        (session.inputs.compactMap { $0 as? AVCaptureDeviceInput }.first)?.device
+    }
+
+    /// Freeze exposure + white balance at the currently converged AE values
+    /// before flash detection. AE otherwise reacts within 1–2 frames and
+    /// collapses the luminance step we're trying to detect.
+    private func lockExposureForFlashDetection() {
+        guard let device = currentCaptureDevice, !isExposureLockedForFlash else { return }
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+
+            savedExposureMode = device.exposureMode
+            savedExposureDuration = device.exposureDuration
+            savedISO = device.iso
+            savedWhiteBalanceMode = device.whiteBalanceMode
+
+            // Prefer .custom (pins the exact ISO + duration AE just settled on).
+            // Fall back to .locked if the device doesn't support custom.
+            if device.isExposureModeSupported(.custom) {
+                let duration = device.exposureDuration
+                let iso = max(device.activeFormat.minISO,
+                              min(device.activeFormat.maxISO, device.iso))
+                device.setExposureModeCustom(duration: duration, iso: iso) { _ in }
+            } else if device.isExposureModeSupported(.locked) {
+                device.exposureMode = .locked
+            }
+
+            if device.isWhiteBalanceModeSupported(.locked) {
+                device.whiteBalanceMode = .locked
+            }
+            isExposureLockedForFlash = true
+        } catch {
+            // Lock failure is non-fatal: detector will still run, just with
+            // AE fighting it. Leave UI to surface the degraded state via HUD.
+        }
+    }
+
+    private func restoreExposure() {
+        guard let device = currentCaptureDevice, isExposureLockedForFlash else { return }
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+
+            let targetExposure = savedExposureMode ?? .continuousAutoExposure
+            if device.isExposureModeSupported(targetExposure) {
+                device.exposureMode = targetExposure
+            } else if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+
+            let targetWB = savedWhiteBalanceMode ?? .continuousAutoWhiteBalance
+            if device.isWhiteBalanceModeSupported(targetWB) {
+                device.whiteBalanceMode = targetWB
+            } else if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                device.whiteBalanceMode = .continuousAutoWhiteBalance
+            }
+        } catch {
+            // Non-fatal; AE will re-engage on next camera session restart.
+        }
+        isExposureLockedForFlash = false
+        savedExposureMode = nil
+        savedExposureDuration = nil
+        savedISO = nil
+        savedWhiteBalanceMode = nil
     }
 
     override func viewDidLayoutSubviews() {
@@ -365,6 +459,39 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             imageWidth: latestImageWidth,
             imageHeight: latestImageHeight
         )
+        updateFlashDebugOverlay()
+    }
+
+    private func updateFlashDebugOverlay() {
+        guard state == .timeSyncWaiting, let snap = latestFlashSnapshot else {
+            return
+        }
+        let statusText: String
+        let color: UIColor
+        if !snap.armed {
+            statusText = "warming up"
+            color = .systemGray
+        } else if snap.ratio >= snap.requiredRatio && snap.rise >= snap.requiredRise {
+            statusText = "TRIGGER"
+            color = .systemGreen
+        } else if snap.ratio >= snap.requiredRatio * 0.8 {
+            statusText = "close"
+            color = .systemOrange
+        } else {
+            statusText = "armed"
+            color = .systemYellow
+        }
+        flashDebugLabel.text = String(
+            format: "lum %.0f  med %.0f  ratio %.2f×/%.2f×  Δ %+.0f/%.0f  %@",
+            snap.currentLuminance,
+            snap.baselineMedian,
+            snap.ratio,
+            snap.requiredRatio,
+            snap.rise,
+            snap.requiredRise,
+            statusText
+        )
+        flashDebugLabel.textColor = color
     }
 
     private func startStatusPolling() {
@@ -431,6 +558,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         warningLabel.textAlignment = .center
         warningLabel.isHidden = true
 
+        flashDebugLabel.font = .monospacedDigitSystemFont(ofSize: 14, weight: .medium)
+        flashDebugLabel.textColor = .systemGray
+        flashDebugLabel.numberOfLines = 0
+        flashDebugLabel.textAlignment = .center
+        flashDebugLabel.isHidden = true
+
         serverStatusDot.backgroundColor = .systemRed
         serverStatusDot.layer.cornerRadius = 8
         serverStatusDot.translatesAutoresizingMaskIntoConstraints = false
@@ -469,6 +602,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         statusContainer.addArrangedSubview(row3)
         statusContainer.addArrangedSubview(row4)
         statusContainer.addArrangedSubview(warningLabel)
+        statusContainer.addArrangedSubview(flashDebugLabel)
         view.addSubview(statusContainer)
 
         func styleButton(_ button: UIButton, title: String, background: UIColor) {
@@ -511,6 +645,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         fpsLabel.text = String(format: "FPS %.1f", fpsEstimate)
         uploadStatusLabel.text = "Upload: \(lastUploadStatusText)"
         lastResultLabel.text = "Last: \(lastResultText)"
+
+        flashDebugLabel.isHidden = (state != .timeSyncWaiting)
 
         switch state {
         case .standby:
@@ -578,13 +714,24 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // Flash detection ONLY in 時間校正 mode. Once captured, save the anchor
         // and auto-return to STANDBY.
         if state == .timeSyncWaiting {
-            let meanLuminance = computeMeanLuminance(pixelBuffer: pixelBuffer)
-            if let flashEvent = flashDetector.process(meanLuminance: meanLuminance, frameIndex: currentIndex, timestampS: timestampS) {
+            // Tile-max (not full-frame mean) so a localized torch —
+            // e.g. another phone occupying <1/16 of the frame — still
+            // produces a sharp per-tile step instead of being smeared out.
+            let lumStats = FrameProcessingUtils.luminanceStats(pixelBuffer: pixelBuffer)
+            let event = flashDetector.process(
+                sampleLuminance: lumStats.maxTile,
+                frameIndex: currentIndex,
+                timestampS: timestampS
+            )
+            latestFlashSnapshot = flashDetector.lastSnapshot
+            if let flashEvent = event {
                 lastSyncFlashFrameIndex = flashEvent.flashFrameIndex
                 lastSyncFlashTimestampS = flashEvent.flashTimestampS
                 state = .standby
                 let ts = flashEvent.flashTimestampS
                 DispatchQueue.main.async {
+                    self.restoreExposure()
+                    self.latestFlashSnapshot = nil
                     self.warningLabel.isHidden = true
                     self.lastUploadStatusText = String(format: "Time sync OK @ %.3fs", ts)
                     self.updateUIForState()
@@ -764,63 +911,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let path = UIBezierPath(ovalIn: CGRect(x: layerPoint.x - radius, y: layerPoint.y - radius, width: radius * 2, height: radius * 2))
         ballOverlayLayer.path = path.cgPath
         ballOverlayLayer.isHidden = false
-    }
-
-    private func computeMeanLuminance(pixelBuffer: CVPixelBuffer) -> Double {
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-
-        // Spec: optionally use a fixed ROI in the upper portion of the frame.
-        let roiEndY = max(1, Int(Double(height) * 0.25))
-
-        // Sparse sampling for performance.
-        let xStep = max(1, width / 200)
-        let yStep = max(1, roiEndY / 200)
-
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-
-        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
-
-        var sumLum = 0.0
-        var count = 0.0
-
-        if pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
-            pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
-            guard let yBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return 0.0 }
-            let yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
-            let yPtr = yBase.assumingMemoryBound(to: UInt8.self)
-
-            for y in stride(from: 0, to: roiEndY, by: yStep) {
-                let rowPtr = yPtr.advanced(by: y * yStride)
-                for x in stride(from: 0, to: width, by: xStep) {
-                    sumLum += Double(rowPtr[x])
-                    count += 1.0
-                }
-            }
-        } else if pixelFormat == kCVPixelFormatType_32BGRA {
-            guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return 0.0 }
-            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-            let ptr = base.assumingMemoryBound(to: UInt8.self)
-
-            for y in stride(from: 0, to: roiEndY, by: yStep) {
-                let rowPtr = ptr.advanced(by: y * bytesPerRow)
-                for x in stride(from: 0, to: width, by: xStep) {
-                    let b = Double(rowPtr[x * 4])
-                    let g = Double(rowPtr[x * 4 + 1])
-                    let r = Double(rowPtr[x * 4 + 2])
-                    // ITU-R BT.601 luma
-                    let lum = 0.299 * r + 0.587 * g + 0.114 * b
-                    sumLum += lum
-                    count += 1.0
-                }
-            }
-        } else {
-            return 0.0
-        }
-
-        guard count > 0 else { return 0.0 }
-        return sumLum / count
     }
 
     private func enrichedPayload(from payload: ServerUploader.PitchPayload) -> ServerUploader.PitchPayload {
