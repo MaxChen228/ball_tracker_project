@@ -20,9 +20,10 @@ from threading import Lock
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from audio_sync import compute_audio_offset
 from triangulate import (
     angle_ray_cam,
     build_K,
@@ -63,6 +64,10 @@ class PitchPayload(BaseModel):
     # Server applies: aligned_ts = frame.timestamp_s - mac_clock_offset_s
     # to convert phone timestamps into server clock for cross-camera pairing.
     mac_clock_offset_s: float | None = None
+    # Audio-sync anchor: session-clock PTS of the first sample in the sidecar
+    # WAV. Combined with the correlation peak lag this recovers the A↔B clock
+    # offset. Populated only when syncMode == "audio".
+    audio_start_ts_s: float | None = None
 
 
 class TriangulatedPoint(BaseModel):
@@ -79,7 +84,10 @@ class CycleResult(BaseModel):
     camera_b_received: bool
     points: list[TriangulatedPoint] = []
     error: str | None = None
-    sync_method: str = "flash"  # "flash" | "mac"
+    sync_method: str = "flash"  # "flash" | "mac" | "audio"
+    # Measured A↔B clock offset when sync_method == "audio" (B − A, seconds
+    # — add to B frame timestamps to express them in A's clock).
+    audio_offset_s: float | None = None
 
 
 def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):
@@ -112,6 +120,19 @@ def _frame_items_mac(p: PitchPayload):
         if f.ball_detected and f.theta_x_rad is not None and f.theta_z_rad is not None:
             aligned = f.timestamp_s - offset
             out.append((aligned, f.theta_x_rad, f.theta_z_rad))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _frame_items_shifted(p: PitchPayload, ts_shift: float = 0.0):
+    """Ball-bearing frame items with their raw session-clock timestamps
+    optionally shifted. `ts_shift` > 0 moves the frames forward in time.
+    Used for audio-sync alignment (shift B's frames by delta_s = clockA −
+    clockB to express them in A's time base)."""
+    out = []
+    for f in p.frames:
+        if f.ball_detected and f.theta_x_rad is not None and f.theta_z_rad is not None:
+            out.append((f.timestamp_s + ts_shift, f.theta_x_rad, f.theta_z_rad))
     out.sort(key=lambda x: x[0])
     return out
 
@@ -153,11 +174,18 @@ def _do_triangulate(
     return results
 
 
-def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> tuple[list[TriangulatedPoint], str]:
-    """Returns (points, sync_method) where sync_method is 'mac' or 'flash'.
+def triangulate_cycle(
+    a: PitchPayload,
+    b: PitchPayload,
+    audio_offset_s: float | None = None,
+) -> tuple[list[TriangulatedPoint], str]:
+    """Returns (points, sync_method) where sync_method is 'mac' | 'audio' |
+    'flash'. Priority order: mac > audio > flash.
 
-    Uses mac-aligned timestamps when BOTH payloads carry mac_clock_offset_s;
-    falls back to flash-relative timestamps otherwise (backwards-compatible).
+    - `mac`: both payloads carry `mac_clock_offset_s` from NTP-style sync.
+    - `audio`: caller pre-computed A↔B cross-correlation offset; pass it in
+      as `audio_offset_s` (= clockA − clockB).
+    - `flash`: degraded fallback — pair on per-camera time-since-flash.
     """
     if a.intrinsics is None or a.homography is None:
         raise ValueError("camera A missing calibration (run Calibrate in iPhone app)")
@@ -168,11 +196,18 @@ def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> tuple[list[Triangulat
     _, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
 
     use_mac = (a.mac_clock_offset_s is not None) and (b.mac_clock_offset_s is not None)
+    use_audio = (not use_mac) and (audio_offset_s is not None)
 
     if use_mac:
         items_a = _frame_items_mac(a)
         items_b = _frame_items_mac(b)
         sync_method = "mac"
+    elif use_audio:
+        # Shift B's frames by audio_offset_s (= clockA − clockB), putting
+        # A and B on the same time base. A itself is unshifted.
+        items_a = _frame_items_shifted(a, ts_shift=0.0)
+        items_b = _frame_items_shifted(b, ts_shift=audio_offset_s or 0.0)
+        sync_method = "audio"
     else:
         items_a = _frame_items_flash(a)
         items_b = _frame_items_flash(b)
@@ -199,8 +234,33 @@ class State:
     def _pitch_path(self, camera_id: str, cycle: int) -> Path:
         return self._pitch_dir / f"cycle_{cycle:06d}_{camera_id}.json"
 
+    def _audio_path(self, camera_id: str, cycle: int) -> Path:
+        return self._pitch_dir / f"cycle_{cycle:06d}_{camera_id}.wav"
+
     def _result_path(self, cycle: int) -> Path:
         return self._result_dir / f"cycle_{cycle:06d}.json"
+
+    def _maybe_audio_offset(self, a: PitchPayload, b: PitchPayload) -> float | None:
+        """Cross-correlate A and B WAVs if both are present with anchors.
+        Returns delta_s = clockA − clockB (add to B frame ts to align to A)."""
+        if a.audio_start_ts_s is None or b.audio_start_ts_s is None:
+            return None
+        a_wav = self._audio_path(a.camera_id, a.cycle_number)
+        b_wav = self._audio_path(b.camera_id, b.cycle_number)
+        if not (a_wav.exists() and b_wav.exists()):
+            return None
+        try:
+            delta, _peak = compute_audio_offset(
+                a_wav, a.audio_start_ts_s,
+                b_wav, b.audio_start_ts_s,
+            )
+            return delta
+        except Exception as e:
+            logger.warning(
+                "audio offset compute failed for cycle %d: %s",
+                a.cycle_number, e
+            )
+            return None
 
     def _load_from_disk(self) -> None:
         for path in sorted(self._pitch_dir.glob("cycle_*.json")):
@@ -223,7 +283,12 @@ class State:
             )
             if a is not None and b is not None:
                 try:
-                    result.points, result.sync_method = triangulate_cycle(a, b)
+                    audio_offset = self._maybe_audio_offset(a, b)
+                    result.points, result.sync_method = triangulate_cycle(
+                        a, b, audio_offset_s=audio_offset
+                    )
+                    if result.sync_method == "audio":
+                        result.audio_offset_s = audio_offset
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
             self.results[cycle] = result
@@ -241,13 +306,19 @@ class State:
         tmp.write_text(payload)
         tmp.replace(path)
 
-    def record(self, pitch: PitchPayload) -> CycleResult:
+    def record(
+        self,
+        pitch: PitchPayload,
+        audio_bytes: bytes | None = None,
+    ) -> CycleResult:
         with self._lock:
             self.pitches[(pitch.camera_id, pitch.cycle_number)] = pitch
             self._atomic_write(
                 self._pitch_path(pitch.camera_id, pitch.cycle_number),
                 pitch.model_dump_json(),
             )
+            if audio_bytes is not None:
+                self._audio_path(pitch.camera_id, pitch.cycle_number).write_bytes(audio_bytes)
 
             a = self.pitches.get(("A", pitch.cycle_number))
             b = self.pitches.get(("B", pitch.cycle_number))
@@ -258,7 +329,12 @@ class State:
             )
             if a is not None and b is not None:
                 try:
-                    result.points, result.sync_method = triangulate_cycle(a, b)
+                    audio_offset = self._maybe_audio_offset(a, b)
+                    result.points, result.sync_method = triangulate_cycle(
+                        a, b, audio_offset_s=audio_offset
+                    )
+                    if result.sync_method == "audio":
+                        result.audio_offset_s = audio_offset
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
             self.results[pitch.cycle_number] = result
@@ -297,6 +373,8 @@ class State:
             self.results.clear()
             if purge_disk:
                 for path in self._pitch_dir.glob("cycle_*.json*"):
+                    path.unlink(missing_ok=True)
+                for path in self._pitch_dir.glob("cycle_*.wav"):
                     path.unlink(missing_ok=True)
                 for path in self._result_dir.glob("cycle_*.json*"):
                     path.unlink(missing_ok=True)
@@ -351,6 +429,7 @@ def _summarize_result(result: CycleResult) -> dict[str, Any]:
         "triangulated_points": len(result.points),
         "error": result.error,
         "sync_method": result.sync_method,
+        "audio_offset_s": result.audio_offset_s,
     }
     if result.points:
         residuals = [p.residual_m for p in result.points]
@@ -364,15 +443,28 @@ def _summarize_result(result: CycleResult) -> dict[str, Any]:
 
 
 @app.post("/pitch")
-def pitch(payload: PitchPayload) -> dict[str, Any]:
-    result = state.record(payload)
-    ball_frames = sum(1 for f in payload.frames if f.ball_detected)
+async def pitch(
+    payload: str = Form(...),
+    audio: UploadFile | None = File(None),
+) -> dict[str, Any]:
+    try:
+        pitch_obj = PitchPayload.model_validate_json(payload)
+    except Exception as e:
+        raise HTTPException(400, f"invalid payload JSON: {e}")
+    audio_bytes: bytes | None = None
+    if audio is not None:
+        audio_bytes = await audio.read()
+        if not audio_bytes:
+            audio_bytes = None
+    result = state.record(pitch_obj, audio_bytes=audio_bytes)
+    ball_frames = sum(1 for f in pitch_obj.frames if f.ball_detected)
     logger.info(
-        "pitch camera=%s cycle=%d frames=%d ball=%d triangulated=%d%s",
-        payload.camera_id,
-        payload.cycle_number,
-        len(payload.frames),
+        "pitch camera=%s cycle=%d frames=%d ball=%d sync=%s triangulated=%d%s",
+        pitch_obj.camera_id,
+        pitch_obj.cycle_number,
+        len(pitch_obj.frames),
         ball_frames,
+        result.sync_method,
         len(result.points),
         f" err={result.error}" if result.error else "",
     )

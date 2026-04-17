@@ -1,12 +1,26 @@
 """End-to-end triangulation test + FastAPI ingest smoke test."""
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 import main
 from main import app
+
+
+def _post_pitch(client, body: dict, audio_bytes: bytes | None = None):
+    """POST /pitch as multipart/form-data. `body` is the JSON payload."""
+    data = {"payload": json.dumps(body)}
+    if audio_bytes is not None:
+        return client.post(
+            "/pitch",
+            data=data,
+            files={"audio": ("clap.wav", audio_bytes, "audio/wav")},
+        )
+    return client.post("/pitch", data=data)
 from triangulate import (
     angle_ray_cam,
     build_K,
@@ -179,11 +193,11 @@ def test_post_pitch_single_camera_then_both_triangulates():
 
     client = TestClient(app)
 
-    r1 = client.post("/pitch", json=make_body("A", tx_a, tz_a, R_a, t_a, H_a))
+    r1 = _post_pitch(client, make_body("A", tx_a, tz_a, R_a, t_a, H_a))
     assert r1.status_code == 200
     assert r1.json()["triangulated_points"] == 0  # B not yet received
 
-    r2 = client.post("/pitch", json=make_body("B", tx_b, tz_b, R_b, t_b, H_b))
+    r2 = _post_pitch(client, make_body("B", tx_b, tz_b, R_b, t_b, H_b))
     assert r2.status_code == 200
     assert r2.json()["triangulated_points"] == 1
 
