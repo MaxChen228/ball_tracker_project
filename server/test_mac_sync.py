@@ -244,9 +244,10 @@ def test_mac_sync_via_api_records_sync_method(tmp_path, monkeypatch):
             "mac_clock_offset_s": offset,
         }
 
+    import json as _json
     client = TestClient(app)
-    client.post("/pitch", json=make_body("A", tx_a, tz_a, H_a, ts_phone_a, offset_a))
-    r = client.post("/pitch", json=make_body("B", tx_b, tz_b, H_b, ts_phone_b, offset_b))
+    client.post("/pitch", data={"payload": _json.dumps(make_body("A", tx_a, tz_a, H_a, ts_phone_a, offset_a))})
+    r = client.post("/pitch", data={"payload": _json.dumps(make_body("B", tx_b, tz_b, H_b, ts_phone_b, offset_b))})
     body = r.json()
     assert body["triangulated_points"] == 1
     assert body["sync_method"] == "mac"
