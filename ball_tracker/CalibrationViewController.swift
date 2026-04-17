@@ -360,6 +360,14 @@ final class CalibrationViewController: UIViewController {
 
     private func persistIntrinsicsIfPossible() {
         let d = UserDefaults.standard
+
+        // Respect Settings → "Use ChArUco values" override: if the user has
+        // pasted precise intrinsics from calibrate_intrinsics.py, do NOT stomp
+        // them with the FOV approximation.
+        if d.string(forKey: SettingsViewController.keyIntrinsicsSource) == "manual" {
+            return
+        }
+
         let imageW = d.integer(forKey: Self.keyImageWidthPx)
         let imageH = d.integer(forKey: Self.keyImageHeightPx)
         let hFovRad = d.double(forKey: Self.keyHorizontalFovRad)
