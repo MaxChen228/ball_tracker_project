@@ -25,11 +25,12 @@ Open `ball_tracker.xcodeproj` in Xcode. The app needs a **physical device** (cam
 ## Architecture
 
 ### iOS state machine — `CameraViewController`
-`.standby → .timeSyncWaiting → .standby → .syncWaiting → .recording → (save+upload) → .syncWaiting …`
+`.standby → .timeSyncWaiting → .standby → .syncWaiting → .recording → .uploading → .syncWaiting …`
 
 - `.timeSyncWaiting` (時間校正): **flash detection ON, ball detection OFF**. On trigger, saves `lastSyncFlashFrameIndex/TimestampS` and returns to `.standby`. 15s timeout.
 - `.syncWaiting`: ball detection ON, pre-roll circular buffer (120 frames) filling. First ball-detected frame transitions to `.recording` using the saved flash as the cycle anchor.
 - `.recording`: buffers frames until ball has been absent for 24 consecutive frames AND cycle length ≥ 24 frames. Emits `PitchPayload` via `onCycleComplete`.
+- `.uploading`: transient state shown while the cycle is persisted and enqueued for upload; transitions back to `.syncWaiting` once handed off.
 - Cycles are saved to disk in `Documents/pitch_payloads/` (`PitchPayloadStore`) **before** upload. Upload failures re-insert at queue front with 2s backoff.
 
 ### Frame pipeline (`CameraViewController.captureOutput`)
@@ -37,10 +38,14 @@ Runs at 240 fps on `camera.frame.queue`. Advances `frameIndex` every frame (cros
 
 ### Key modules
 - `BallDetector.swift` — HSV threshold on a downsampled grid → 8-neighborhood connected components → largest component passing area filter (20–5000 px²) → centroid → `θx = atan2(px - cx, fx)`, `θz = atan2(py - cy, fz)`. Uses calibrated intrinsics if present, else FOV approximation.
-- `FlashDetector.swift` — 30-frame luminance baseline; triggers when `current > baseline * multiplier` (default 2.5); 1s dead time after trigger.
+- `FlashDetector.swift` — 30-frame rolling **median** luminance baseline (robust to 2–6 flash frames inside the window); triggers only when both gates pass: `current / median > thresholdMultiplier` (default 1.8) **and** `current - previous > minRiseAbsolute` (default 8.0, filters slow ambient drift). 1s dead time after trigger. Upstream locks `AVCaptureDevice.exposureMode` during detection so AE doesn't neutralize the step.
+- `FrameProcessingUtils.swift` — sparse luminance sampler shared by the flash path. Tiles the frame into 4×4 cells and returns both full-frame `mean` and the brightest-tile mean (`maxTile` catches localized torches occupying <1/16 of the frame). ~40k samples regardless of resolution so 240 fps cost is constant. Handles YUV biplanar + BGRA.
 - `PitchRecorder.swift` — pre-roll buffer + cycle assembly. The flash anchor is passed in at `startRecording` time, not discovered by the recorder.
-- `CalibrationViewController.swift` — 5 draggable handles on home-plate pentagon → homography (direct-linear-transform via 8×8 normal equations with Gaussian elimination) → persisted as `homography_3x3` (row-major, 9 doubles). Also derives `fx/fz/cx/cy` from capture FOV.
-- `SettingsViewController.swift` — persists server IP/port, role A/B, HSV range, flash multiplier, capture resolution/fps to `UserDefaults`. `normalizeServerIP` strips scheme/port/path from pasted URLs.
+- `CalibrationViewController.swift` — two paths to the same `homography_3x3` (row-major, 9 doubles, h33=1):
+  - **Manual**: 5 draggable handles on home-plate pentagon → DLT via 8×8 normal equations with Gaussian elimination.
+  - **Auto (ArUco)**: `BTArucoDetector` (OpenCV `cv::aruco`, Obj-C++ wrapper in `ArucoDetector.{h,mm}`) detects DICT_4X4_50 markers IDs 0–5 taped to plate landmarks (FL/FR/RS/LS/BT/MF), then `findHomographyFromWorldPoints:imagePoints:` solves via RANSAC least-squares.
+  Also derives `fx/fz/cx/cy` from capture FOV. A Settings toggle can override intrinsics with externally computed ChArUco values including 5-coefficient distortion.
+- `SettingsViewController.swift` — persists server IP/port, role A/B, HSV range, flash multiplier, capture resolution/fps to `UserDefaults`. `normalizeServerIP` strips scheme/port/path from pasted URLs. Also supports optional OpenCV 5-coefficient distortion `[k1, k2, p1, p2, k3]` under `intrinsic_distortion` (omitted from payload when empty; cleared on FOV-calibrated runs to avoid stale values).
 
 ### Server
 - `main.py` — `State` dict keyed by `(camera_id, cycle_number)`. When both A and B for a cycle arrive, `triangulate_cycle` runs immediately under the state lock. `/status` reports received + completed cycles.
