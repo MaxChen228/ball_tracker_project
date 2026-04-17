@@ -369,9 +369,19 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         (session.inputs.compactMap { $0 as? AVCaptureDeviceInput }.first)?.device
     }
 
-    /// Freeze exposure + white balance at the currently converged AE values
-    /// before flash detection. AE otherwise reacts within 1–2 frames and
-    /// collapses the luminance step we're trying to detect.
+    /// Underexpose the sensor by ~3 stops during flash detection so the torch
+    /// has real headroom above baseline.
+    ///
+    /// Rationale: merely freezing AE isn't enough in bright ambient. If the
+    /// room already puts scene luminance at ~180/255, the torch can only push
+    /// a tile toward 255 — ratio tops out around 1.4× and never crosses the
+    /// trigger. By pushing ISO to sensor-min and cutting exposureDuration by
+    /// 4×, ambient collapses to ~15–30 and the torch can still saturate the
+    /// target tile, restoring a 7–10× ratio.
+    ///
+    /// The preview will visibly dim while in .timeSyncWaiting — this is
+    /// cosmetic. Tracking (.syncWaiting / .recording) uses continuous AE and
+    /// is unaffected.
     private func lockExposureForFlashDetection() {
         guard let device = currentCaptureDevice, !isExposureLockedForFlash else { return }
         do {
@@ -383,14 +393,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             savedISO = device.iso
             savedWhiteBalanceMode = device.whiteBalanceMode
 
-            // Prefer .custom (pins the exact ISO + duration AE just settled on).
-            // Fall back to .locked if the device doesn't support custom.
             if device.isExposureModeSupported(.custom) {
-                let duration = device.exposureDuration
-                let iso = max(device.activeFormat.minISO,
-                              min(device.activeFormat.maxISO, device.iso))
-                device.setExposureModeCustom(duration: duration, iso: iso) { _ in }
+                let fmt = device.activeFormat
+                let darkerDuration = CMTimeMaximum(
+                    CMTimeMultiplyByRatio(device.exposureDuration, multiplier: 1, divisor: 4),
+                    fmt.minExposureDuration
+                )
+                device.setExposureModeCustom(duration: darkerDuration, iso: fmt.minISO) { _ in }
             } else if device.isExposureModeSupported(.locked) {
+                // Fallback: device doesn't support .custom. Freeze AE where it
+                // landed — bright-ambient performance will be degraded.
                 device.exposureMode = .locked
             }
 
