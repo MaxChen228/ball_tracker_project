@@ -71,7 +71,11 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         chirpF0: Double = 2000.0,
         chirpF1: Double = 8000.0,
         chirpDurationS: Double = 0.1,
-        threshold: Float = 0.30,
+        // Field-tuned on an external speaker at ~1 m: clean-SNR peaks land
+        // around 0.4–0.7, typical living-room playback 0.20–0.35. Threshold
+        // 0.18 gives consistent trigger while still being well above
+        // stationary noise (<0.05) and ambient speech (~0.08).
+        threshold: Float = 0.18,
         cooldownS: Double = 1.0
     ) {
         self.sampleRate = sampleRate
