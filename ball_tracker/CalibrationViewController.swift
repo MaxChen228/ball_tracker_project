@@ -11,8 +11,9 @@ final class CalibrationViewController: UIViewController {
         let rawValue: Int
         static let frontLeft = CornerKey(rawValue: 0)
         static let frontRight = CornerKey(rawValue: 1)
-        static let backRight = CornerKey(rawValue: 2)
-        static let backLeft = CornerKey(rawValue: 3)
+        static let rightShoulder = CornerKey(rawValue: 2)
+        static let backTip = CornerKey(rawValue: 3)
+        static let leftShoulder = CornerKey(rawValue: 4)
     }
 
     private final class DraggablePointView: UIView {
@@ -131,8 +132,14 @@ final class CalibrationViewController: UIViewController {
     }
 
     private func setupCornerHandles() {
-        // Initial placement: inset rectangle in the center region.
-        // User will drag each point to the corresponding corner.
+        // Initial placement: pentagon in lower-center of frame. User drags each
+        // point to its corresponding home-plate vertex.
+        //   FL ── FR         ← front (17" edge facing pitcher)
+        //   │      │
+        //   LS    RS         ← shoulders (8.5" back)
+        //    \    /
+        //     \  /
+        //      BT            ← back tip (17" back, facing catcher)
         let w = view.bounds.width
         let h = view.bounds.height
 
@@ -142,27 +149,29 @@ final class CalibrationViewController: UIViewController {
             return v
         }
 
-        // Colors: FL/FR/BR/BL
         let fl = makeHandle(color: .systemBlue, text: "FL")
         let fr = makeHandle(color: .systemGreen, text: "FR")
-        let br = makeHandle(color: .systemOrange, text: "BR")
-        let bl = makeHandle(color: .systemPurple, text: "BL")
+        let rs = makeHandle(color: .systemOrange, text: "RS")
+        let bt = makeHandle(color: .systemRed, text: "BT")
+        let ls = makeHandle(color: .systemPurple, text: "LS")
 
-        // Rough defaults (front edge usually closer to bottom of image, but user can adjust).
         let leftX = w * 0.35
         let rightX = w * 0.65
-        let topY = h * 0.35
-        let bottomY = h * 0.65
+        let frontY = h * 0.40
+        let shoulderY = h * 0.55
+        let tipY = h * 0.70
 
-        fl.center = CGPoint(x: leftX, y: topY)
-        fr.center = CGPoint(x: rightX, y: topY)
-        br.center = CGPoint(x: rightX, y: bottomY)
-        bl.center = CGPoint(x: leftX, y: bottomY)
+        fl.center = CGPoint(x: leftX, y: frontY)
+        fr.center = CGPoint(x: rightX, y: frontY)
+        rs.center = CGPoint(x: rightX, y: shoulderY)
+        ls.center = CGPoint(x: leftX, y: shoulderY)
+        bt.center = CGPoint(x: w / 2, y: tipY)
 
         handles[.frontLeft] = fl
         handles[.frontRight] = fr
-        handles[.backRight] = br
-        handles[.backLeft] = bl
+        handles[.rightShoulder] = rs
+        handles[.leftShoulder] = ls
+        handles[.backTip] = bt
     }
 
     @objc private func exitCalibration() {
@@ -184,18 +193,18 @@ final class CalibrationViewController: UIViewController {
         let d = UserDefaults.standard
 
         // --- 1) Compute homography (world plane -> image plane) ---
-        // Home plate is a pentagon; BL/BR calibration points are the "shoulders"
-        // where the parallel sides meet the sloped sides, 8.5" back from the front edge.
-        let widthM = 0.432  // 17" front edge (facing pitcher)
-        let depthM = 0.216  // 8.5" from front edge to shoulder (BL/BR)
+        // Real home-plate pentagon vertices in meters. Axes: X = left/right,
+        // Y = depth from front edge (pitcher side) toward back tip (catcher side).
+        let widthM = 0.432       // 17" front edge
+        let shoulderY = 0.216    // 8.5" back to shoulder
+        let tipY = 0.432         // 17" back to back tip
 
-        // World points in meters on the home-plate plane (2D).
-        // X: left/right, Y: depth (front edge at 0, back edge at depth_m)
         let world: [(Double, Double)] = [
-            (-widthM / 2.0, 0.0),          // front-left
-            (widthM / 2.0, 0.0),           // front-right
-            (widthM / 2.0, depthM),        // back-right
-            (-widthM / 2.0, depthM)         // back-left
+            (-widthM / 2.0, 0.0),         // FL
+            (widthM / 2.0, 0.0),          // FR
+            (widthM / 2.0, shoulderY),    // RS (right shoulder)
+            (0.0, tipY),                  // BT (back tip, on centerline)
+            (-widthM / 2.0, shoulderY),   // LS (left shoulder)
         ]
 
         // Convert taps in view coordinates into approximate image pixel coordinates.
@@ -210,10 +219,11 @@ final class CalibrationViewController: UIViewController {
         }
 
         let imgPtsViewOrder: [CGPoint] = [
-            handles[.frontLeft]?.center ?? CGPoint(x: 0, y: 0),
-            handles[.frontRight]?.center ?? CGPoint(x: 0, y: 0),
-            handles[.backRight]?.center ?? CGPoint(x: 0, y: 0),
-            handles[.backLeft]?.center ?? CGPoint(x: 0, y: 0),
+            handles[.frontLeft]?.center ?? .zero,
+            handles[.frontRight]?.center ?? .zero,
+            handles[.rightShoulder]?.center ?? .zero,
+            handles[.backTip]?.center ?? .zero,
+            handles[.leftShoulder]?.center ?? .zero,
         ]
 
         let imgPts: [CGPoint] = imgPtsViewOrder.map { viewPointToImagePixel($0, imageWidth: imageW, imageHeight: imageH) }
@@ -270,60 +280,44 @@ final class CalibrationViewController: UIViewController {
     }
 
     /// Compute homography H (3x3) mapping world plane (X,Y) -> image pixels (u,v).
+    /// Accepts N ≥ 4 correspondences; N > 4 solves as least-squares via normal equations.
     /// Returns row-major length-9 array if solvable.
     private func computeHomography(worldPoints: [(Double, Double)], imagePoints: [CGPoint]) -> [Double]? {
-        guard worldPoints.count == 4, imagePoints.count == 4 else { return nil }
+        guard worldPoints.count == imagePoints.count, worldPoints.count >= 4 else { return nil }
+        let n = worldPoints.count
+        let rows = 2 * n
 
-        // Solve for 8 unknowns with h33 fixed to 1:
-        // H = [h11 h12 h13
-        //      h21 h22 h23
-        //      h31 h32  1 ]
-        //
-        // For each correspondence:
-        // x*(h31*X + h32*Y + 1) = h11*X + h12*Y + h13
-        // y*(h31*X + h32*Y + 1) = h21*X + h22*Y + h23
-        var A = Array(repeating: Array(repeating: 0.0, count: 8), count: 8)
-        var b = Array(repeating: 0.0, count: 8)
+        // Build A (rows × 8) and b (rows) for the linearized system.
+        var A = Array(repeating: Array(repeating: 0.0, count: 8), count: rows)
+        var b = Array(repeating: 0.0, count: rows)
 
-        for i in 0..<4 {
+        for i in 0..<n {
             let (X, Y) = worldPoints[i]
             let x = Double(imagePoints[i].x)
             let y = Double(imagePoints[i].y)
 
-            // Equation for x:
-            // h11*X + h12*Y + h13 - x*h31*X - x*h32*Y = x
-            let rowX = 2 * i
-            A[rowX][0] = X
-            A[rowX][1] = Y
-            A[rowX][2] = 1.0
-            A[rowX][3] = 0.0
-            A[rowX][4] = 0.0
-            A[rowX][5] = 0.0
-            A[rowX][6] = -x * X
-            A[rowX][7] = -x * Y
-            b[rowX] = x
-
-            // Equation for y:
-            // h21*X + h22*Y + h23 - y*h31*X - y*h32*Y = y
-            let rowY = 2 * i + 1
-            A[rowY][0] = 0.0
-            A[rowY][1] = 0.0
-            A[rowY][2] = 0.0
-            A[rowY][3] = X
-            A[rowY][4] = Y
-            A[rowY][5] = 1.0
-            A[rowY][6] = -y * X
-            A[rowY][7] = -y * Y
-            b[rowY] = y
+            A[2 * i]     = [X, Y, 1, 0, 0, 0, -x * X, -x * Y]
+            b[2 * i]     = x
+            A[2 * i + 1] = [0, 0, 0, X, Y, 1, -y * X, -y * Y]
+            b[2 * i + 1] = y
         }
 
-        if let x = solveLinearSystem8x8(A: A, b: b) {
-            // x = [h11,h12,h13,h21,h22,h23,h31,h32]
-            return [
-                x[0], x[1], x[2],
-                x[3], x[4], x[5],
-                x[6], x[7], 1.0
-            ]
+        // Normal equations: (Aᵀ A) h = Aᵀ b → 8x8 system.
+        var AtA = Array(repeating: Array(repeating: 0.0, count: 8), count: 8)
+        var Atb = Array(repeating: 0.0, count: 8)
+        for i in 0..<8 {
+            for j in 0..<8 {
+                var s = 0.0
+                for k in 0..<rows { s += A[k][i] * A[k][j] }
+                AtA[i][j] = s
+            }
+            var s = 0.0
+            for k in 0..<rows { s += A[k][i] * b[k] }
+            Atb[i] = s
+        }
+
+        if let h = solveLinearSystem8x8(A: AtA, b: Atb) {
+            return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1.0]
         }
         return nil
     }

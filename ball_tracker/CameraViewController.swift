@@ -584,7 +584,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
 
         // Ball detection only in tracking modes.
-        let needsDetection = settings.ballDetectionEnabled && (state == .syncWaiting || state == .recording)
+        let needsDetection = state == .syncWaiting || state == .recording
         let detection: BallDetector.DetectionResult
         if needsDetection {
             detection = ballDetector.detect(

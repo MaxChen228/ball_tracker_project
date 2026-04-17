@@ -96,8 +96,7 @@ final class SettingsViewController: UIViewController {
             flashThresholdMultiplier: flashThresholdMultiplier,
             captureWidth: captureWidth,
             captureHeight: captureHeight,
-            captureFps: captureFps,
-            ballDetectionEnabled: ballDetectionEnabled
+            captureFps: captureFps
         )
     }
 
@@ -154,8 +153,7 @@ final class SettingsViewController: UIViewController {
             flashThresholdMultiplier: doubleValue(flashMultiplierField.text, fallback: current.flashThresholdMultiplier),
             captureWidth: resolution.0,
             captureHeight: resolution.1,
-            captureFps: fps,
-            ballDetectionEnabled: ballDetectionSwitch.isOn
+            captureFps: fps
         )
 
         Self.saveToUserDefaults(settings)
@@ -217,9 +215,6 @@ final class SettingsViewController: UIViewController {
         contentStack.addArrangedSubview(sectionTitle("Capture"))
         contentStack.addArrangedSubview(controlRow(label: "Resolution", control: captureResolutionControl))
         contentStack.addArrangedSubview(controlRow(label: "FPS", control: captureFpsControl))
-
-        contentStack.addArrangedSubview(sectionTitle("Detection"))
-        contentStack.addArrangedSubview(controlRow(label: "Ball Detection", control: ballDetectionSwitch))
     }
 
     private func populateFields(from settings: Settings) {
@@ -235,7 +230,6 @@ final class SettingsViewController: UIViewController {
         flashMultiplierField.text = String(settings.flashThresholdMultiplier)
         captureResolutionControl.selectedSegmentIndex = settings.captureHeight >= 1080 ? 1 : 0
         captureFpsControl.selectedSegmentIndex = [60, 120, 240].firstIndex(of: settings.captureFps) ?? 2
-        ballDetectionSwitch.isOn = settings.ballDetectionEnabled
     }
 
     private func configureTextField(_ field: UITextField, placeholder: String, keyboard: UIKeyboardType) {
@@ -328,7 +322,6 @@ final class SettingsViewController: UIViewController {
         d.set(settings.captureWidth, forKey: keyCaptureWidth)
         d.set(settings.captureHeight, forKey: keyCaptureHeight)
         d.set(settings.captureFps, forKey: keyCaptureFps)
-        d.set(settings.ballDetectionEnabled, forKey: keyBallDetectionEnabled)
     }
 }
 
