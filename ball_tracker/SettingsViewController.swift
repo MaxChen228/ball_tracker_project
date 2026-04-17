@@ -13,6 +13,11 @@ final class SettingsViewController: UIViewController {
         var vMin: Int
         var vMax: Int
 
+        /// Matched-filter peak threshold for the AudioChirpDetector. Tune
+        /// down if the chirp only flashes orange ("close") in HUD; tune up
+        /// if it false-triggers on ambient noise. Range roughly 0.05–0.50.
+        var chirpThreshold: Double
+
         var captureWidth: Int           // 1280 or 1920
         var captureHeight: Int          // 720 or 1080
         var captureFps: Int             // 60, 120, 240
@@ -42,6 +47,8 @@ final class SettingsViewController: UIViewController {
     private static let keyVMin = "v_min"
     private static let keyVMax = "v_max"
 
+    private static let keyChirpThreshold = "chirp_threshold"
+
     private static let keyCaptureWidth = "capture_width"
     private static let keyCaptureHeight = "capture_height"
     private static let keyCaptureFps = "capture_fps"
@@ -70,6 +77,8 @@ final class SettingsViewController: UIViewController {
     private let sMaxField = UITextField()
     private let vMinField = UITextField()
     private let vMaxField = UITextField()
+
+    private let chirpThresholdField = UITextField()
 
     private let captureResolutionControl = UISegmentedControl(items: ["720p", "1080p"])
     private let captureFpsControl = UISegmentedControl(items: ["60", "120", "240"])
@@ -105,6 +114,8 @@ final class SettingsViewController: UIViewController {
         let vMin = intOrDefault(keyVMin, defaultValue: 40)
         let vMax = intOrDefault(keyVMax, defaultValue: 255)
 
+        let chirpThreshold = doubleOrDefault(keyChirpThreshold, defaultValue: 0.18)
+
         let captureWidth = intOrDefault(keyCaptureWidth, defaultValue: 1920)
         let captureHeight = intOrDefault(keyCaptureHeight, defaultValue: 1080)
         let captureFps = intOrDefault(keyCaptureFps, defaultValue: 240)
@@ -128,6 +139,7 @@ final class SettingsViewController: UIViewController {
             hMin: hMin, hMax: hMax,
             sMin: sMin, sMax: sMax,
             vMin: vMin, vMax: vMax,
+            chirpThreshold: chirpThreshold,
             captureWidth: captureWidth,
             captureHeight: captureHeight,
             captureFps: captureFps,
@@ -190,6 +202,7 @@ final class SettingsViewController: UIViewController {
             sMax: intValue(sMaxField.text, fallback: current.sMax),
             vMin: intValue(vMinField.text, fallback: current.vMin),
             vMax: intValue(vMaxField.text, fallback: current.vMax),
+            chirpThreshold: doubleValue(chirpThresholdField.text, fallback: current.chirpThreshold),
             captureWidth: resolution.0,
             captureHeight: resolution.1,
             captureFps: fps,
@@ -237,6 +250,7 @@ final class SettingsViewController: UIViewController {
         configureTextField(sMaxField, placeholder: "255", keyboard: .numberPad)
         configureTextField(vMinField, placeholder: "40", keyboard: .numberPad)
         configureTextField(vMaxField, placeholder: "255", keyboard: .numberPad)
+        configureTextField(chirpThresholdField, placeholder: "0.18", keyboard: .decimalPad)
         configureTextField(manualFxField, placeholder: "fx (e.g. 1600)", keyboard: .decimalPad)
         configureTextField(manualFyField, placeholder: "fy (e.g. 1600)", keyboard: .decimalPad)
         configureTextField(manualCxField, placeholder: "cx (e.g. 960)", keyboard: .decimalPad)
@@ -257,6 +271,9 @@ final class SettingsViewController: UIViewController {
         contentStack.addArrangedSubview(fieldRow(label: "S Max", field: sMaxField))
         contentStack.addArrangedSubview(fieldRow(label: "V Min", field: vMinField))
         contentStack.addArrangedSubview(fieldRow(label: "V Max", field: vMaxField))
+
+        contentStack.addArrangedSubview(sectionTitle("Sync"))
+        contentStack.addArrangedSubview(fieldRow(label: "Chirp Threshold", field: chirpThresholdField))
 
         contentStack.addArrangedSubview(sectionTitle("Capture"))
         contentStack.addArrangedSubview(controlRow(label: "Resolution", control: captureResolutionControl))
@@ -281,6 +298,7 @@ final class SettingsViewController: UIViewController {
         sMaxField.text = String(settings.sMax)
         vMinField.text = String(settings.vMin)
         vMaxField.text = String(settings.vMax)
+        chirpThresholdField.text = String(settings.chirpThreshold)
         captureResolutionControl.selectedSegmentIndex = settings.captureHeight >= 1080 ? 1 : 0
         captureFpsControl.selectedSegmentIndex = [60, 120, 240].firstIndex(of: settings.captureFps) ?? 2
 
@@ -387,6 +405,7 @@ final class SettingsViewController: UIViewController {
         d.set(settings.sMax, forKey: keySMax)
         d.set(settings.vMin, forKey: keyVMin)
         d.set(settings.vMax, forKey: keyVMax)
+        d.set(settings.chirpThreshold, forKey: keyChirpThreshold)
         d.set(settings.captureWidth, forKey: keyCaptureWidth)
         d.set(settings.captureHeight, forKey: keyCaptureHeight)
         d.set(settings.captureFps, forKey: keyCaptureFps)

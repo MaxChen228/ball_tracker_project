@@ -450,7 +450,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         session.addOutput(output)
 
-        let detector = AudioChirpDetector()
+        let detector = AudioChirpDetector(threshold: Float(settings.chirpThreshold))
         output.setSampleBufferDelegate(detector, queue: detector.deliveryQueue)
         session.commitConfiguration()
 
@@ -535,6 +535,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let formatChanged = latest.captureWidth != settings.captureWidth
             || latest.captureHeight != settings.captureHeight
             || latest.captureFps != settings.captureFps
+        let chirpThresholdChanged = latest.chirpThreshold != settings.chirpThreshold
         settings = latest
         if serverChanged {
             serverConfig = ServerUploader.ServerConfig(serverIP: latest.serverIP, serverPort: latest.serverPort)
@@ -542,6 +543,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         if formatChanged {
             reconfigureCapture()
+        }
+        if chirpThresholdChanged {
+            chirpDetector?.setThreshold(Float(latest.chirpThreshold))
         }
         uploader.fetchStatus { [weak self] result in
             DispatchQueue.main.async {

@@ -48,9 +48,12 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     /// Fired on `deliveryQueue` when a chirp is detected.
     var onChirpDetected: ((ChirpEvent) -> Void)?
 
-    // Config (immutable after init).
+    // Config.
     private let sampleRate: Double
-    private let threshold: Float
+    /// Mutable so the user can tune from Settings without rebuilding the
+    /// capture session. Reads on deliveryQueue, writes bounced through
+    /// `setThreshold(_:)`.
+    private var threshold: Float
     private let cooldownS: Double
     private let reference: [Float]
     private let refLen: Int
@@ -127,6 +130,15 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
             vDSP_vsmul(out, 1, &scale, &out, 1, vDSP_Length(n))
         }
         return out
+    }
+
+    /// Update the matched-filter trigger threshold. Safe to call from any
+    /// thread; the new value is applied on the next `runMatchedFilter` pass.
+    func setThreshold(_ value: Float) {
+        deliveryQueue.async { [weak self] in
+            guard let self else { return }
+            self.threshold = value
+        }
     }
 
     /// Discard all buffered audio and timing state. Safe to call from any
