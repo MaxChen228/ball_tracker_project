@@ -15,6 +15,14 @@ final class SettingsViewController: UIViewController {
 
         var flashThresholdMultiplier: Double
 
+        /// Time-sync strategy.
+        /// - "flash": legacy torch-based anchor, recovered on-device.
+        /// - "audio": full-cycle audio recorded with each pitch, server-side
+        ///   cross-correlation for sub-ms offset.
+        /// - "mac":  NTP-style round-trip to the shared Mac server for
+        ///   per-phone clock-offset, applied server-side before pairing.
+        var syncMode: String            // "flash" | "audio" | "mac"
+
         var captureWidth: Int           // 1280 or 1920
         var captureHeight: Int          // 720 or 1080
         var captureFps: Int             // 60, 120, 240
@@ -42,6 +50,7 @@ final class SettingsViewController: UIViewController {
     private static let keyVMax = "v_max"
 
     private static let keyFlashMultiplier = "flash_threshold_multiplier"
+    private static let keySyncMode = "sync_mode"
 
     private static let keyCaptureWidth = "capture_width"
     private static let keyCaptureHeight = "capture_height"
@@ -72,6 +81,7 @@ final class SettingsViewController: UIViewController {
     private let vMaxField = UITextField()
 
     private let flashMultiplierField = UITextField()
+    private let syncModeControl = UISegmentedControl(items: ["Flash", "Audio", "Mac"])
 
     private let captureResolutionControl = UISegmentedControl(items: ["720p", "1080p"])
     private let captureFpsControl = UISegmentedControl(items: ["60", "120", "240"])
@@ -108,6 +118,14 @@ final class SettingsViewController: UIViewController {
 
         let flashThresholdMultiplier = doubleOrDefault(keyFlashMultiplier, defaultValue: 1.8)
 
+        let rawSyncMode = d.string(forKey: keySyncMode) ?? "flash"
+        let syncMode: String
+        switch rawSyncMode {
+        case "audio": syncMode = "audio"
+        case "mac":   syncMode = "mac"
+        default:      syncMode = "flash"
+        }
+
         let captureWidth = intOrDefault(keyCaptureWidth, defaultValue: 1920)
         let captureHeight = intOrDefault(keyCaptureHeight, defaultValue: 1080)
         let captureFps = intOrDefault(keyCaptureFps, defaultValue: 240)
@@ -128,6 +146,7 @@ final class SettingsViewController: UIViewController {
             sMin: sMin, sMax: sMax,
             vMin: vMin, vMax: vMax,
             flashThresholdMultiplier: flashThresholdMultiplier,
+            syncMode: syncMode,
             captureWidth: captureWidth,
             captureHeight: captureHeight,
             captureFps: captureFps,
@@ -190,6 +209,13 @@ final class SettingsViewController: UIViewController {
             vMin: intValue(vMinField.text, fallback: current.vMin),
             vMax: intValue(vMaxField.text, fallback: current.vMax),
             flashThresholdMultiplier: doubleValue(flashMultiplierField.text, fallback: current.flashThresholdMultiplier),
+            syncMode: {
+                switch syncModeControl.selectedSegmentIndex {
+                case 1: return "audio"
+                case 2: return "mac"
+                default: return "flash"
+                }
+            }(),
             captureWidth: resolution.0,
             captureHeight: resolution.1,
             captureFps: fps,
@@ -258,6 +284,7 @@ final class SettingsViewController: UIViewController {
         contentStack.addArrangedSubview(fieldRow(label: "V Max", field: vMaxField))
 
         contentStack.addArrangedSubview(sectionTitle("Timing"))
+        contentStack.addArrangedSubview(controlRow(label: "Sync Method", control: syncModeControl))
         contentStack.addArrangedSubview(fieldRow(label: "Flash Threshold", field: flashMultiplierField))
 
         contentStack.addArrangedSubview(sectionTitle("Capture"))
@@ -283,6 +310,11 @@ final class SettingsViewController: UIViewController {
         vMinField.text = String(settings.vMin)
         vMaxField.text = String(settings.vMax)
         flashMultiplierField.text = String(settings.flashThresholdMultiplier)
+        switch settings.syncMode {
+        case "audio": syncModeControl.selectedSegmentIndex = 1
+        case "mac":   syncModeControl.selectedSegmentIndex = 2
+        default:      syncModeControl.selectedSegmentIndex = 0
+        }
         captureResolutionControl.selectedSegmentIndex = settings.captureHeight >= 1080 ? 1 : 0
         captureFpsControl.selectedSegmentIndex = [60, 120, 240].firstIndex(of: settings.captureFps) ?? 2
 
@@ -380,6 +412,7 @@ final class SettingsViewController: UIViewController {
         d.set(settings.vMin, forKey: keyVMin)
         d.set(settings.vMax, forKey: keyVMax)
         d.set(settings.flashThresholdMultiplier, forKey: keyFlashMultiplier)
+        d.set(settings.syncMode, forKey: keySyncMode)
         d.set(settings.captureWidth, forKey: keyCaptureWidth)
         d.set(settings.captureHeight, forKey: keyCaptureHeight)
         d.set(settings.captureFps, forKey: keyCaptureFps)
