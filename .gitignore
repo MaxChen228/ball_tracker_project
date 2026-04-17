@@ -19,6 +19,8 @@ xcuserdata/
 Packages/
 Package.pins
 Package.resolved
+# …but keep the app's resolved pin so SPM installs are reproducible.
+!ball_tracker.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 .build/
 
 # CocoaPods
