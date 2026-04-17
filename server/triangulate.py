@@ -10,6 +10,7 @@ Pixel projection: u = fx * X/Z + cx, v = fy * Y/Z + cy.
 """
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 
@@ -62,6 +63,26 @@ def angle_ray_cam(theta_x: float, theta_z: float) -> np.ndarray:
     So the direction in camera coords is (tan θx, tan θz, 1) normalized.
     """
     d = np.array([np.tan(theta_x), np.tan(theta_z), 1.0])
+    return d / np.linalg.norm(d)
+
+
+def undistorted_ray_cam(
+    px: float, py: float, K: np.ndarray, dist_coeffs: np.ndarray
+) -> np.ndarray:
+    """Unit ray in camera coords from a raw (distorted) pixel.
+
+    Uses cv2.undistortPoints to invert the lens distortion model and obtain
+    the normalized camera-coord direction (x_n, y_n, 1). Returns the ray
+    normalized to unit length.
+
+    dist_coeffs: OpenCV-format 5-element array [k1, k2, p1, p2, k3].
+    """
+    pts = np.array([[[float(px), float(py)]]], dtype=np.float64)
+    dist = np.asarray(dist_coeffs, dtype=np.float64).reshape(-1)
+    undist = cv2.undistortPoints(pts, K.astype(np.float64), dist)
+    x_n = float(undist[0, 0, 0])
+    y_n = float(undist[0, 0, 1])
+    d = np.array([x_n, y_n, 1.0])
     return d / np.linalg.norm(d)
 
 

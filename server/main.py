@@ -30,6 +30,7 @@ from triangulate import (
     camera_center_world,
     recover_extrinsics,
     triangulate_rays,
+    undistorted_ray_cam,
 )
 
 logger = logging.getLogger("ball_tracker")
@@ -40,6 +41,9 @@ class IntrinsicsPayload(BaseModel):
     fz: float
     cx: float
     cy: float
+    # OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Optional so old
+    # payloads without distortion still validate.
+    distortion: list[float] | None = None
 
 
 class FramePayload(BaseModel):
@@ -47,6 +51,11 @@ class FramePayload(BaseModel):
     timestamp_s: float
     theta_x_rad: float | None = None
     theta_z_rad: float | None = None
+    # Raw (distorted) ball pixel coords. When present AND the camera's
+    # intrinsics.distortion is present, the server undistorts these instead
+    # of using the angles. Nil when no ball was detected.
+    px: float | None = None
+    py: float | None = None
     ball_detected: bool
 
 
@@ -98,51 +107,69 @@ def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):
     return K, R, t, C
 
 
+def _ray_for_frame(
+    theta_x: float | None,
+    theta_z: float | None,
+    px: float | None,
+    py: float | None,
+    K: np.ndarray,
+    dist_coeffs: list[float] | None,
+) -> np.ndarray:
+    """Per-frame per-camera decision: if intrinsics.distortion and px/py are
+    both present, undistort the pixel. Otherwise fall back to the angle ray."""
+    if dist_coeffs is not None and px is not None and py is not None:
+        return undistorted_ray_cam(px, py, K, np.asarray(dist_coeffs, dtype=float))
+    if theta_x is None or theta_z is None:
+        raise ValueError("frame has neither usable angles nor pixels")
+    return angle_ray_cam(theta_x, theta_z)
+
+
+def _valid_frame_tuple(f: FramePayload) -> bool:
+    has_angles = f.theta_x_rad is not None and f.theta_z_rad is not None
+    has_pixels = f.px is not None and f.py is not None
+    return f.ball_detected and (has_angles or has_pixels)
+
+
 def _frame_items_flash(p: PitchPayload):
-    """Frame items using flash-relative time (existing behavior)."""
-    out = []
-    for f in p.frames:
-        if f.ball_detected and f.theta_x_rad is not None and f.theta_z_rad is not None:
-            out.append((f.timestamp_s - p.flash_timestamp_s, f.theta_x_rad, f.theta_z_rad))
+    """5-tuple `(t_rel, θx, θz, px, py)` using flash-relative time."""
+    out = [
+        (f.timestamp_s - p.flash_timestamp_s, f.theta_x_rad, f.theta_z_rad, f.px, f.py)
+        for f in p.frames if _valid_frame_tuple(f)
+    ]
     out.sort(key=lambda x: x[0])
     return out
 
 
 def _frame_items_mac(p: PitchPayload):
-    """Frame items aligned to server clock via mac_clock_offset_s.
-
-    mac_clock_offset_s = phone_clock - server_clock
-    aligned_ts = phone_ts - mac_clock_offset_s  =>  server clock
-    """
+    """5-tuple aligned to server clock via `mac_clock_offset_s`
+    (= phone_clock − server_clock, so aligned = phone_ts − offset)."""
     offset = p.mac_clock_offset_s or 0.0
-    out = []
-    for f in p.frames:
-        if f.ball_detected and f.theta_x_rad is not None and f.theta_z_rad is not None:
-            aligned = f.timestamp_s - offset
-            out.append((aligned, f.theta_x_rad, f.theta_z_rad))
+    out = [
+        (f.timestamp_s - offset, f.theta_x_rad, f.theta_z_rad, f.px, f.py)
+        for f in p.frames if _valid_frame_tuple(f)
+    ]
     out.sort(key=lambda x: x[0])
     return out
 
 
 def _frame_items_shifted(p: PitchPayload, ts_shift: float = 0.0):
-    """Ball-bearing frame items with their raw session-clock timestamps
-    optionally shifted. `ts_shift` > 0 moves the frames forward in time.
-    Used for audio-sync alignment (shift B's frames by delta_s = clockA −
-    clockB to express them in A's time base)."""
-    out = []
-    for f in p.frames:
-        if f.ball_detected and f.theta_x_rad is not None and f.theta_z_rad is not None:
-            out.append((f.timestamp_s + ts_shift, f.theta_x_rad, f.theta_z_rad))
+    """5-tuple with raw session-clock timestamps shifted by `ts_shift`
+    (used for audio-sync: shift B's frames by delta = clockA − clockB)."""
+    out = [
+        (f.timestamp_s + ts_shift, f.theta_x_rad, f.theta_z_rad, f.px, f.py)
+        for f in p.frames if _valid_frame_tuple(f)
+    ]
     out.sort(key=lambda x: x[0])
     return out
 
 
 def _do_triangulate(
     items_a: list, items_b: list,
-    R_a: "np.ndarray", C_a: "np.ndarray",
-    R_b: "np.ndarray", C_b: "np.ndarray",
+    K_a: "np.ndarray", R_a: "np.ndarray", C_a: "np.ndarray", dist_a: list[float] | None,
+    K_b: "np.ndarray", R_b: "np.ndarray", C_b: "np.ndarray", dist_b: list[float] | None,
 ) -> list[TriangulatedPoint]:
-    """Core pairing + ray triangulation, shared by both sync flows."""
+    """Pairing + ray triangulation. Each camera independently picks the
+    undistortion or angle ray path via `_ray_for_frame`."""
     if not items_a or not items_b:
         return []
 
@@ -150,14 +177,14 @@ def _do_triangulate(
     max_dt = 1.0 / 120.0  # 8 ms tolerance at 240 fps
 
     results: list[TriangulatedPoint] = []
-    for t_ref, tx_a, tz_a in items_a:
+    for t_ref, tx_a, tz_a, px_a, py_a in items_a:
         idx = int(np.argmin(np.abs(b_times - t_ref)))
         if abs(b_times[idx] - t_ref) > max_dt:
             continue
-        _, tx_b, tz_b = items_b[idx]
+        _, tx_b, tz_b, px_b, py_b = items_b[idx]
 
-        d_a_cam = angle_ray_cam(tx_a, tz_a)
-        d_b_cam = angle_ray_cam(tx_b, tz_b)
+        d_a_cam = _ray_for_frame(tx_a, tz_a, px_a, py_a, K_a, dist_a)
+        d_b_cam = _ray_for_frame(tx_b, tz_b, px_b, py_b, K_b, dist_b)
         d_a_world = R_a.T @ d_a_cam
         d_b_world = R_b.T @ d_b_cam
 
@@ -192,8 +219,10 @@ def triangulate_cycle(
     if b.intrinsics is None or b.homography is None:
         raise ValueError("camera B missing calibration (run Calibrate in iPhone app)")
 
-    _, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
-    _, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
+    K_a, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
+    K_b, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
+    dist_a = a.intrinsics.distortion
+    dist_b = b.intrinsics.distortion
 
     use_mac = (a.mac_clock_offset_s is not None) and (b.mac_clock_offset_s is not None)
     use_audio = (not use_mac) and (audio_offset_s is not None)
@@ -213,7 +242,12 @@ def triangulate_cycle(
         items_b = _frame_items_flash(b)
         sync_method = "flash"
 
-    return _do_triangulate(items_a, items_b, R_a, C_a, R_b, C_b), sync_method
+    points = _do_triangulate(
+        items_a, items_b,
+        K_a, R_a, C_a, dist_a,
+        K_b, R_b, C_b, dist_b,
+    )
+    return points, sync_method
 
 
 _DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))

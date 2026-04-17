@@ -1,9 +1,17 @@
-"""Render ArUco markers (DICT_4X4_50, IDs 0-3) as a single printable PNG.
+"""Render ArUco markers (DICT_4X4_50, IDs 0-5) as a single printable PNG.
 
 Layout matches `CalibrationViewController.markerWorldPoints` in the iOS app:
-four markers centered on the four home-plate corners FL / FR / RS / LS at
-(±21.6 cm, 0 or 21.6 cm) — print on A4, cut out, tape each marker so its
-**center** sits exactly on the labelled plate vertex.
+six markers centered on home-plate landmarks:
+  - FL (front left)       at (-21.6 cm,  0 cm)
+  - FR (front right)      at (+21.6 cm,  0 cm)
+  - RS (right shoulder)   at (+21.6 cm, 21.6 cm)
+  - LS (left shoulder)    at (-21.6 cm, 21.6 cm)
+  - BT (back tip)         at (  0  cm, 43.2 cm)
+  - MF (mid-front edge)   at (  0  cm,  0 cm)
+
+Print on A4 (3 rows x 2 cols), cut out, tape each marker so its **center**
+sits exactly on the labelled plate landmark. Having 6 points (instead of the
+minimum 4) lets RANSAC tolerate one occluded or misread marker.
 
 Usage:
     uv run python print_aruco_markers.py \
@@ -18,7 +26,7 @@ import cv2
 import numpy as np
 
 
-LABELS = {0: "FL", 1: "FR", 2: "RS", 3: "LS"}
+LABELS = {0: "FL", 1: "FR", 2: "RS", 3: "LS", 4: "BT", 5: "MF"}
 
 
 def render_marker_sheet(marker_size_m: float, pixels_per_m: int, out: Path) -> None:
@@ -29,13 +37,14 @@ def render_marker_sheet(marker_size_m: float, pixels_per_m: int, out: Path) -> N
     margin_px = max(40, size_px // 4)
     label_px = 60  # extra space below each marker for the "FL"/"FR"/... text
 
-    # 2x2 grid to fit A4 portrait.
-    rows, cols = 2, 2
+    # 3x2 grid (3 rows, 2 cols) to fit 6 markers on A4 portrait.
+    rows, cols = 3, 2
+    n_markers = len(LABELS)
     w = cols * size_px + (cols + 1) * margin_px
     h = rows * (size_px + label_px) + (rows + 1) * margin_px
     sheet = np.full((h, w), 255, dtype=np.uint8)
 
-    for i in range(4):
+    for i in range(n_markers):
         r, c = i // cols, i % cols
         x = margin_px + c * (size_px + margin_px)
         y = margin_px + r * (size_px + label_px + margin_px)

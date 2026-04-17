@@ -11,6 +11,11 @@ final class ServerUploader {
         let timestamp_s: Double
         let theta_x_rad: Double?
         let theta_z_rad: Double?
+        // Raw (distorted) ball pixel coords. When present and paired with
+        // intrinsics.distortion, the server undistorts these directly for
+        // triangulation. Nil when no ball detected.
+        let px: Double?
+        let py: Double?
         let ball_detected: Bool
     }
 
@@ -19,6 +24,9 @@ final class ServerUploader {
         let fz: Double
         let cx: Double
         let cy: Double
+        // OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Nil when
+        // no ChArUco calibration was imported for this camera.
+        let distortion: [Double]?
     }
 
     struct PitchPayload: Codable {
