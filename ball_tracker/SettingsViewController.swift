@@ -28,6 +28,9 @@ final class SettingsViewController: UIViewController {
         var manualFy: Double            // stored as intrinsic_fz (Swift naming collision, see CLAUDE.md)
         var manualCx: Double
         var manualCy: Double
+
+        /// Time-sync method: "flash" (default) | "mac" | "audio"
+        var syncMode: String
     }
 
     private static let keyServerIP = "server_ip"
@@ -56,6 +59,7 @@ final class SettingsViewController: UIViewController {
     private static let keyIntrinsicFz = "intrinsic_fz"
     private static let keyIntrinsicCx = "intrinsic_cx"
     private static let keyIntrinsicCy = "intrinsic_cy"
+    private static let keySyncMode = "sync_mode"  // "flash" | "mac" | "audio"
 
     private let scrollView = UIScrollView()
     private let contentStack = UIStackView()
@@ -81,6 +85,7 @@ final class SettingsViewController: UIViewController {
     private let manualFyField = UITextField()
     private let manualCxField = UITextField()
     private let manualCyField = UITextField()
+    private let syncModeControl = UISegmentedControl(items: ["flash", "mac", "audio"])
 
     static func loadFromUserDefaults() -> Settings {
         let d = UserDefaults.standard
@@ -120,6 +125,8 @@ final class SettingsViewController: UIViewController {
         let manualCx = manualEnabled ? doubleOrDefault(keyIntrinsicCx, defaultValue: 0) : 0
         let manualCy = manualEnabled ? doubleOrDefault(keyIntrinsicCy, defaultValue: 0) : 0
 
+        let syncMode = d.string(forKey: keySyncMode) ?? "flash"
+
         return Settings(
             serverIP: serverIP,
             serverPort: serverPort,
@@ -135,7 +142,8 @@ final class SettingsViewController: UIViewController {
             manualFx: manualFx,
             manualFy: manualFy,
             manualCx: manualCx,
-            manualCy: manualCy
+            manualCy: manualCy,
+            syncMode: syncMode
         )
     }
 
@@ -179,6 +187,9 @@ final class SettingsViewController: UIViewController {
         let fpsOptions = [60, 120, 240]
         let fps = fpsOptions[min(max(0, captureFpsControl.selectedSegmentIndex), fpsOptions.count - 1)]
 
+        let syncModeOptions = ["flash", "mac", "audio"]
+        let syncMode = syncModeOptions[min(max(0, syncModeControl.selectedSegmentIndex), syncModeOptions.count - 1)]
+
         let settings = Settings(
             serverIP: normalizeServerIP(serverIPField.text, fallback: current.serverIP),
             serverPort: intValue(serverPortField.text, fallback: current.serverPort),
@@ -197,7 +208,8 @@ final class SettingsViewController: UIViewController {
             manualFx: doubleValue(manualFxField.text, fallback: current.manualFx),
             manualFy: doubleValue(manualFyField.text, fallback: current.manualFy),
             manualCx: doubleValue(manualCxField.text, fallback: current.manualCx),
-            manualCy: doubleValue(manualCyField.text, fallback: current.manualCy)
+            manualCy: doubleValue(manualCyField.text, fallback: current.manualCy),
+            syncMode: syncMode
         )
 
         Self.saveToUserDefaults(settings)
@@ -264,6 +276,9 @@ final class SettingsViewController: UIViewController {
         contentStack.addArrangedSubview(controlRow(label: "Resolution", control: captureResolutionControl))
         contentStack.addArrangedSubview(controlRow(label: "FPS", control: captureFpsControl))
 
+        contentStack.addArrangedSubview(sectionTitle("Sync Mode"))
+        contentStack.addArrangedSubview(controlRow(label: "Sync Method", control: syncModeControl))
+
         contentStack.addArrangedSubview(sectionTitle("Intrinsics (override)"))
         contentStack.addArrangedSubview(controlRow(label: "Use ChArUco values", control: manualIntrinsicsSwitch))
         contentStack.addArrangedSubview(fieldRow(label: "fx", field: manualFxField))
@@ -291,6 +306,14 @@ final class SettingsViewController: UIViewController {
         manualFyField.text = settings.manualFy > 0 ? String(settings.manualFy) : ""
         manualCxField.text = settings.manualCx > 0 ? String(settings.manualCx) : ""
         manualCyField.text = settings.manualCy > 0 ? String(settings.manualCy) : ""
+
+        let syncIdx: Int
+        switch settings.syncMode {
+        case "mac": syncIdx = 1
+        case "audio": syncIdx = 2
+        default: syncIdx = 0  // "flash"
+        }
+        syncModeControl.selectedSegmentIndex = syncIdx
     }
 
     private func configureTextField(_ field: UITextField, placeholder: String, keyboard: UIKeyboardType) {
@@ -399,6 +422,8 @@ final class SettingsViewController: UIViewController {
             // Revert to letting Calibration view refresh from FOV on next Save.
             d.set("fov", forKey: keyIntrinsicsSource)
         }
+
+        d.set(settings.syncMode, forKey: keySyncMode)
     }
 }
 

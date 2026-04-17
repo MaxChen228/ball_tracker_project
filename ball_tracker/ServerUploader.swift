@@ -31,6 +31,11 @@ final class ServerUploader {
         let homography: [Double]?
         let image_width_px: Int?
         let image_height_px: Int?
+        /// Mac-sync clock offset: phone_monotonic_clock - server_monotonic_clock (seconds).
+        /// Server applies: aligned_ts = frame.timestamp_s + mac_clock_offset_s
+        /// to convert frame timestamps from phone clock to server clock.
+        /// Populated only when sync_mode == "mac" and MacSyncClient has a valid estimate.
+        let mac_clock_offset_s: Double?
     }
 
     /// Server /pitch response summary. All triangulation fields are optional because

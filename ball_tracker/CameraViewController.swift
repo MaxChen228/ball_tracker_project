@@ -57,6 +57,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var lastSyncFlashFrameIndex: Int?
     private var lastSyncFlashTimestampS: Double?
 
+    // Mac sync — nil when sync_mode != "mac"
+    private var macSyncClient: MacSyncClient?
+
     private let statusContainer = UIStackView()
     private let topStatusLabel = UILabel()
     private let serverStatusDot = UIView()
@@ -66,6 +69,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
     private let flashDebugLabel = UILabel()
+    private let macSyncDebugLabel = UILabel()
     private let trackingButton = UIButton(type: .system)
 
     // Exposure/WB state captured before entering .timeSyncWaiting so we can
@@ -213,6 +217,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 latestFlashSnapshot = nil
             }
         }
+        // Stop mac sync on disappear; it will restart in viewDidAppear/enterSyncMode.
+        macSyncClient?.stopSyncing()
     }
 
     // MARK: - Controls (spec has buttons; skeleton provides methods)
@@ -230,6 +236,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             pendingPayloadFiles.append(contentsOf: files)
         }
         isUploadingPayload = false
+
+        // Start mac-sync NTP client when sync_mode == "mac".
+        if settings.syncMode == "mac", let base = serverConfig.baseURL() {
+            let client = MacSyncClient(serverBaseURL: base)
+            macSyncClient = client
+            client.startSyncing()
+        }
+
         state = .syncWaiting
         warningLabel.isHidden = true
         updateUIForState()
@@ -242,6 +256,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         pendingPayloadFiles.removeAll(keepingCapacity: true)
         isUploadingPayload = false
         warningLabel.isHidden = true
+        macSyncClient?.stopSyncing()
+        macSyncClient = nil
         updateUIForState()
     }
 
@@ -460,6 +476,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             imageHeight: latestImageHeight
         )
         updateFlashDebugOverlay()
+        updateMacSyncDebugOverlay()
     }
 
     private func updateFlashDebugOverlay() {
@@ -492,6 +509,29 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             statusText
         )
         flashDebugLabel.textColor = color
+    }
+
+    private func updateMacSyncDebugOverlay() {
+        guard state == .syncWaiting || state == .recording,
+              let client = macSyncClient else {
+            macSyncDebugLabel.isHidden = true
+            return
+        }
+        macSyncDebugLabel.isHidden = false
+        let snap = client.debugSnapshot
+        let offsetStr: String
+        if let off = snap.currentOffset {
+            offsetStr = String(format: "%+.3fms", off * 1000.0)
+        } else {
+            offsetStr = "pending"
+        }
+        let rttStr: String
+        if let rtt = snap.lastRTT {
+            rttStr = String(format: "%.1fms", rtt * 1000.0)
+        } else {
+            rttStr = "—"
+        }
+        macSyncDebugLabel.text = "mac-sync offset=\(offsetStr) rtt=\(rttStr) samples=\(snap.sampleCount)"
     }
 
     private func startStatusPolling() {
@@ -564,6 +604,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         flashDebugLabel.textAlignment = .center
         flashDebugLabel.isHidden = true
 
+        macSyncDebugLabel.font = .monospacedDigitSystemFont(ofSize: 14, weight: .medium)
+        macSyncDebugLabel.textColor = .systemCyan
+        macSyncDebugLabel.numberOfLines = 0
+        macSyncDebugLabel.textAlignment = .center
+        macSyncDebugLabel.isHidden = true
+
         serverStatusDot.backgroundColor = .systemRed
         serverStatusDot.layer.cornerRadius = 8
         serverStatusDot.translatesAutoresizingMaskIntoConstraints = false
@@ -603,6 +649,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         statusContainer.addArrangedSubview(row4)
         statusContainer.addArrangedSubview(warningLabel)
         statusContainer.addArrangedSubview(flashDebugLabel)
+        statusContainer.addArrangedSubview(macSyncDebugLabel)
         view.addSubview(statusContainer)
 
         func styleButton(_ button: UIButton, title: String, background: UIColor) {
@@ -647,6 +694,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         lastResultLabel.text = "Last: \(lastResultText)"
 
         flashDebugLabel.isHidden = (state != .timeSyncWaiting)
+        // macSyncDebugLabel visibility is driven by updateMacSyncDebugOverlay via display link.
+        if macSyncClient == nil {
+            macSyncDebugLabel.isHidden = true
+        }
 
         switch state {
         case .standby:
@@ -932,6 +983,19 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let homography = d.array(forKey: "homography_3x3") as? [Double]
         let w = d.integer(forKey: Self.keyImageWidthPx)
         let h = d.integer(forKey: Self.keyImageHeightPx)
+        // Mac-sync: inject offset if available. The offset sign convention is:
+        //   mac_clock_offset_s = phone_monotonic_clock - server_monotonic_clock
+        // So server applies: aligned_ts = frame.timestamp_s - mac_clock_offset_s
+        // to convert phone timestamps into server clock.
+        // MacSyncClient computes: offset = server_t1 - (t0+t3)/2
+        //   => offset > 0 means server is ahead.
+        // We want phone - server, so we negate before shipping.
+        let macOffset: Double?
+        if let client = macSyncClient, let est = client.currentOffset {
+            macOffset = -est  // flip: phone_clock - server_clock
+        } else {
+            macOffset = nil
+        }
         return ServerUploader.PitchPayload(
             camera_id: payload.camera_id,
             flash_frame_index: payload.flash_frame_index,
@@ -941,7 +1005,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             intrinsics: intrinsics,
             homography: homography,
             image_width_px: w > 0 ? w : nil,
-            image_height_px: h > 0 ? h : nil
+            image_height_px: h > 0 ? h : nil,
+            mac_clock_offset_s: macOffset
         )
     }
 

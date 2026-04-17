@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import socket
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
@@ -58,6 +59,10 @@ class PitchPayload(BaseModel):
     homography: list[float] | None = None
     image_width_px: int | None = None
     image_height_px: int | None = None
+    # Mac-sync clock offset: phone_monotonic_clock - server_monotonic_clock (seconds).
+    # Server applies: aligned_ts = frame.timestamp_s - mac_clock_offset_s
+    # to convert phone timestamps into server clock for cross-camera pairing.
+    mac_clock_offset_s: float | None = None
 
 
 class TriangulatedPoint(BaseModel):
@@ -74,6 +79,7 @@ class CycleResult(BaseModel):
     camera_b_received: bool
     points: list[TriangulatedPoint] = []
     error: str | None = None
+    sync_method: str = "flash"  # "flash" | "mac"
 
 
 def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):
@@ -84,7 +90,8 @@ def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):
     return K, R, t, C
 
 
-def _frame_items(p: PitchPayload):
+def _frame_items_flash(p: PitchPayload):
+    """Frame items using flash-relative time (existing behavior)."""
     out = []
     for f in p.frames:
         if f.ball_detected and f.theta_x_rad is not None and f.theta_z_rad is not None:
@@ -93,27 +100,38 @@ def _frame_items(p: PitchPayload):
     return out
 
 
-def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoint]:
-    if a.intrinsics is None or a.homography is None:
-        raise ValueError("camera A missing calibration (run Calibrate in iPhone app)")
-    if b.intrinsics is None or b.homography is None:
-        raise ValueError("camera B missing calibration (run Calibrate in iPhone app)")
+def _frame_items_mac(p: PitchPayload):
+    """Frame items aligned to server clock via mac_clock_offset_s.
 
-    _, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
-    _, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
+    mac_clock_offset_s = phone_clock - server_clock
+    aligned_ts = phone_ts - mac_clock_offset_s  =>  server clock
+    """
+    offset = p.mac_clock_offset_s or 0.0
+    out = []
+    for f in p.frames:
+        if f.ball_detected and f.theta_x_rad is not None and f.theta_z_rad is not None:
+            aligned = f.timestamp_s - offset
+            out.append((aligned, f.theta_x_rad, f.theta_z_rad))
+    out.sort(key=lambda x: x[0])
+    return out
 
-    items_a = _frame_items(a)
-    items_b = _frame_items(b)
+
+def _do_triangulate(
+    items_a: list, items_b: list,
+    R_a: "np.ndarray", C_a: "np.ndarray",
+    R_b: "np.ndarray", C_b: "np.ndarray",
+) -> list[TriangulatedPoint]:
+    """Core pairing + ray triangulation, shared by both sync flows."""
     if not items_a or not items_b:
         return []
 
     b_times = np.array([x[0] for x in items_b])
-    max_dt = 1.0 / 120.0  # 8ms tolerance at 240fps
+    max_dt = 1.0 / 120.0  # 8 ms tolerance at 240 fps
 
     results: list[TriangulatedPoint] = []
-    for t_rel, tx_a, tz_a in items_a:
-        idx = int(np.argmin(np.abs(b_times - t_rel)))
-        if abs(b_times[idx] - t_rel) > max_dt:
+    for t_ref, tx_a, tz_a in items_a:
+        idx = int(np.argmin(np.abs(b_times - t_ref)))
+        if abs(b_times[idx] - t_ref) > max_dt:
             continue
         _, tx_b, tz_b = items_b[idx]
 
@@ -125,7 +143,7 @@ def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoin
         P, gap = triangulate_rays(C_a, d_a_world, C_b, d_b_world)
         results.append(
             TriangulatedPoint(
-                t_rel_s=t_rel,
+                t_rel_s=t_ref,
                 x_m=float(P[0]),
                 y_m=float(P[1]),
                 z_m=float(P[2]),
@@ -133,6 +151,34 @@ def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoin
             )
         )
     return results
+
+
+def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> tuple[list[TriangulatedPoint], str]:
+    """Returns (points, sync_method) where sync_method is 'mac' or 'flash'.
+
+    Uses mac-aligned timestamps when BOTH payloads carry mac_clock_offset_s;
+    falls back to flash-relative timestamps otherwise (backwards-compatible).
+    """
+    if a.intrinsics is None or a.homography is None:
+        raise ValueError("camera A missing calibration (run Calibrate in iPhone app)")
+    if b.intrinsics is None or b.homography is None:
+        raise ValueError("camera B missing calibration (run Calibrate in iPhone app)")
+
+    _, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
+    _, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
+
+    use_mac = (a.mac_clock_offset_s is not None) and (b.mac_clock_offset_s is not None)
+
+    if use_mac:
+        items_a = _frame_items_mac(a)
+        items_b = _frame_items_mac(b)
+        sync_method = "mac"
+    else:
+        items_a = _frame_items_flash(a)
+        items_b = _frame_items_flash(b)
+        sync_method = "flash"
+
+    return _do_triangulate(items_a, items_b, R_a, C_a, R_b, C_b), sync_method
 
 
 _DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
@@ -177,7 +223,7 @@ class State:
             )
             if a is not None and b is not None:
                 try:
-                    result.points = triangulate_cycle(a, b)
+                    result.points, result.sync_method = triangulate_cycle(a, b)
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
             self.results[cycle] = result
@@ -212,7 +258,7 @@ class State:
             )
             if a is not None and b is not None:
                 try:
-                    result.points = triangulate_cycle(a, b)
+                    result.points, result.sync_method = triangulate_cycle(a, b)
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
             self.results[pitch.cycle_number] = result
@@ -282,6 +328,16 @@ app = FastAPI(title="ball_tracker server", lifespan=lifespan)
 state = State()
 
 
+@app.post("/sync/time")
+def sync_time() -> dict[str, float]:
+    """Ultra-low-latency time probe for NTP-style clock-offset estimation.
+
+    Returns the server monotonic clock (time.monotonic()) the instant this
+    request is handled.  No logging, no locking — straight clock read.
+    """
+    return {"server_time_s": time.monotonic()}
+
+
 @app.get("/status")
 def status() -> dict[str, Any]:
     return state.summary()
@@ -294,6 +350,7 @@ def _summarize_result(result: CycleResult) -> dict[str, Any]:
         "paired": paired,
         "triangulated_points": len(result.points),
         "error": result.error,
+        "sync_method": result.sync_method,
     }
     if result.points:
         residuals = [p.residual_m for p in result.points]
