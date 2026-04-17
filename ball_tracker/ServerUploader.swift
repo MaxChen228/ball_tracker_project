@@ -35,6 +35,10 @@ final class ServerUploader {
 
     struct PitchPayload: Codable {
         let camera_id: String
+        /// Server-minted pairing key from `POST /sessions/arm`. A/B pairs
+        /// by this alone — iPhones no longer mint any pairing identifier.
+        /// Pattern: `s_` + 4–16 hex chars (matches the server regex).
+        let session_id: String
         /// Shared time anchor for A/B pairing, recovered from an audio-chirp
         /// matched-filter hit during the 時間校正 step. `frame_index` has no
         /// meaningful value for an audio anchor (set to 0); the server pairs
@@ -42,7 +46,9 @@ final class ServerUploader {
         /// potential future anchors (e.g. visual markers).
         let sync_anchor_frame_index: Int
         let sync_anchor_timestamp_s: Double
-        let cycle_number: Int
+        /// Device-local recording counter, for operator debugging only —
+        /// server doesn't pair on it. Optional so a phone can omit it.
+        let local_recording_index: Int?
         let frames: [FramePayload]
         let intrinsics: IntrinsicsPayload?
         let homography: [Double]?
@@ -51,10 +57,10 @@ final class ServerUploader {
     }
 
     /// Server `/pitch` response summary. Triangulation fields are optional
-    /// because they're only populated once both A and B for a cycle arrive.
+    /// because they're only populated once both A and B for a session arrive.
     struct PitchUploadResponse: Codable {
         let ok: Bool
-        let cycle: Int
+        let session_id: String
         let paired: Bool
         let triangulated_points: Int
         let error: String?
@@ -222,6 +228,60 @@ final class ServerUploader {
 
         appendString("--\(boundary)--\r\n")
         return body
+    }
+
+    /// POST `/sessions/arm` and decode the returned session id. Used by
+    /// the iPhone's local "啟動追蹤" escape-hatch button: normally the
+    /// dashboard does the arming and the id flows in via the next
+    /// heartbeat, but a phone tapping the local button needs the id
+    /// synchronously so its first detected-ball frame lands with the
+    /// correct `session_id` stamped on it.
+    func armSession(
+        completion: @escaping (Result<HeartbeatSession, Error>) -> Void
+    ) {
+        guard let base = config.baseURL() else {
+            completion(.failure(NSError(
+                domain: "ServerUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
+            )))
+            return
+        }
+        let url = base.appendingPathComponent("sessions/arm")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                completion(.failure(error))
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                completion(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
+                )))
+                return
+            }
+            guard let data else {
+                completion(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "Empty response"]
+                )))
+                return
+            }
+            do {
+                struct Wrapper: Codable { let ok: Bool; let session: HeartbeatSession }
+                let wrapper = try JSONDecoder().decode(Wrapper.self, from: data)
+                completion(.success(wrapper.session))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+        task.resume()
     }
 
     /// POST a 1 Hz liveness ping and read back the full status payload —

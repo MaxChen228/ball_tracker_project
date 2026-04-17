@@ -26,9 +26,12 @@ final class PitchPayloadStore {
         videoURL: URL? = nil
     ) throws -> URL {
         try ensureDirectory()
+        // Filename combines the server-minted session_id with a millisecond
+        // timestamp so retried uploads for the same session don't clobber
+        // each other on disk (the latest attempt wins on upload).
         let basename = String(
-            format: "pitch_%06d_%lld",
-            payload.cycle_number,
+            format: "session_%@_%lld",
+            payload.session_id,
             Int64(Date().timeIntervalSince1970 * 1000.0)
         )
         let jsonURL = directoryURL.appendingPathComponent("\(basename).json")

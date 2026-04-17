@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+from conftest import sid
 from main import app
 from triangulate import (
     angle_ray_cam,
@@ -143,9 +144,9 @@ def test_triangulate_sweeps_ball_path():
             )
         return PitchPayload(
             camera_id=cam_id,
+            session_id=sid(1),
             sync_anchor_frame_index=0,
             sync_anchor_timestamp_s=0.0,
-            cycle_number=1,
             frames=frames,
             intrinsics=IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
             homography=H.flatten().tolist(),
@@ -180,12 +181,14 @@ def test_post_pitch_single_camera_then_both_triangulates():
     tx_a, tz_a = _project(K, R_a, t_a, P_true)
     tx_b, tz_b = _project(K, R_b, t_b, P_true)
 
+    session_id = sid(7)
+
     def make_body(cam_id, tx, tz, R, t, H):
         return {
             "camera_id": cam_id,
+            "session_id": session_id,
             "sync_anchor_frame_index": 0,
             "sync_anchor_timestamp_s": 0.0,
-            "cycle_number": 7,
             "frames": [
                 {"frame_index": 0, "timestamp_s": 0.0,
                  "theta_x_rad": tx, "theta_z_rad": tz, "ball_detected": True},
@@ -206,7 +209,7 @@ def test_post_pitch_single_camera_then_both_triangulates():
 
     r3 = client.get("/results/latest")
     body = r3.json()
-    assert body["cycle_number"] == 7
+    assert body["session_id"] == session_id
     pt = body["points"][0]
     assert abs(pt["x_m"] - P_true[0]) < 1e-6
     assert abs(pt["y_m"] - P_true[1]) < 1e-6
@@ -215,7 +218,7 @@ def test_post_pitch_single_camera_then_both_triangulates():
     # /pitch response summary surfaces mean residual + peak z for iOS feedback.
     body2 = r2.json()
     assert body2["paired"] is True
-    assert body2["cycle"] == 7
+    assert body2["session_id"] == session_id
     assert body2["error"] is None
     assert body2["mean_residual_m"] < 1e-6
     assert abs(body2["peak_z_m"] - P_true[2]) < 1e-6
@@ -228,12 +231,14 @@ def test_persistence_reloads_state_across_process_restart(tmp_path):
     tx_a, tz_a = _project(K, R_a, t_a, P_true)
     tx_b, tz_b = _project(K, R_b, t_b, P_true)
 
+    session_id = sid(42)
+
     def make_body(cam_id, tx, tz, H):
         return main.PitchPayload(
             camera_id=cam_id,
+            session_id=session_id,
             sync_anchor_frame_index=0,
             sync_anchor_timestamp_s=0.0,
-            cycle_number=42,
             frames=[
                 main.FramePayload(
                     frame_index=0, timestamp_s=0.0,
@@ -253,7 +258,7 @@ def test_persistence_reloads_state_across_process_restart(tmp_path):
     s2 = main.State(data_dir=tmp_path)
     latest = s2.latest()
     assert latest is not None
-    assert latest.cycle_number == 42
+    assert latest.session_id == session_id
     assert latest.camera_a_received and latest.camera_b_received
     assert len(latest.points) == 1
     pt = latest.points[0]
@@ -272,14 +277,14 @@ def test_zero_distortion_with_pixels_matches_angle_path():
     path = np.array([[0.1, 0.3, 1.0], [-0.2, 0.8, 1.4]])
     zero_dist = [0.0, 0.0, 0.0, 0.0, 0.0]
 
-    def make_body(cam_id, P_true, R, t, H, cycle, *, with_pixels: bool):
+    def make_body(cam_id, P_true, R, t, H, session_id_: str, *, with_pixels: bool):
         tx, tz = _project(K, R, t, P_true)
         u, v = _project_pixels(K, R, t, P_true)
         body = {
             "camera_id": cam_id,
+            "session_id": session_id_,
             "sync_anchor_frame_index": 0,
             "sync_anchor_timestamp_s": 0.0,
-            "cycle_number": cycle,
             "frames": [
                 {
                     "frame_index": 0,
@@ -302,18 +307,19 @@ def test_zero_distortion_with_pixels_matches_angle_path():
         return body
 
     client = TestClient(app)
+    s1, s2, s3 = sid(1), sid(2), sid(3)
 
-    # Cycle 1: angles only.
-    _post_pitch(client, make_body("A", path[0], R_a, t_a, H_a, 1, with_pixels=False))
-    _post_pitch(client, make_body("B", path[0], R_b, t_b, H_b, 1, with_pixels=False))
-    pt_angles = client.get("/results/1").json()["points"][0]
+    # Session 1: angles only.
+    _post_pitch(client, make_body("A", path[0], R_a, t_a, H_a, s1, with_pixels=False))
+    _post_pitch(client, make_body("B", path[0], R_b, t_b, H_b, s1, with_pixels=False))
+    pt_angles = client.get(f"/results/{s1}").json()["points"][0]
 
-    # Cycle 2: pixels + zero distortion.
-    _post_pitch(client, make_body("A", path[1], R_a, t_a, H_a, 2, with_pixels=True))
-    _post_pitch(client, make_body("B", path[1], R_b, t_b, H_b, 2, with_pixels=True))
-    pt_pixels = client.get("/results/2").json()["points"][0]
+    # Session 2: pixels + zero distortion.
+    _post_pitch(client, make_body("A", path[1], R_a, t_a, H_a, s2, with_pixels=True))
+    _post_pitch(client, make_body("B", path[1], R_b, t_b, H_b, s2, with_pixels=True))
+    pt_pixels = client.get(f"/results/{s2}").json()["points"][0]
 
-    # Each cycle should recover its own true point.
+    # Each session should recover its own true point.
     assert abs(pt_angles["x_m"] - path[0][0]) < 1e-6
     assert abs(pt_angles["y_m"] - path[0][1]) < 1e-6
     assert abs(pt_angles["z_m"] - path[0][2]) < 1e-6
@@ -323,9 +329,9 @@ def test_zero_distortion_with_pixels_matches_angle_path():
 
     # And for the SAME point, both paths must agree bit-for-bit (numerically):
     # reproject path[0] through pixel path and compare.
-    _post_pitch(client, make_body("A", path[0], R_a, t_a, H_a, 3, with_pixels=True))
-    _post_pitch(client, make_body("B", path[0], R_b, t_b, H_b, 3, with_pixels=True))
-    pt_pixels_same = client.get("/results/3").json()["points"][0]
+    _post_pitch(client, make_body("A", path[0], R_a, t_a, H_a, s3, with_pixels=True))
+    _post_pitch(client, make_body("B", path[0], R_b, t_b, H_b, s3, with_pixels=True))
+    pt_pixels_same = client.get(f"/results/{s3}").json()["points"][0]
     assert abs(pt_pixels_same["x_m"] - pt_angles["x_m"]) < 1e-9
     assert abs(pt_pixels_same["y_m"] - pt_angles["y_m"]) < 1e-9
     assert abs(pt_pixels_same["z_m"] - pt_angles["z_m"]) < 1e-9
@@ -356,12 +362,14 @@ def test_nonzero_distortion_recovers_true_point():
     u_a_pin, v_a_pin = _project_pixels(K, R_a, t_a, P_true)
     assert abs(u_a - u_a_pin) > 1e-3 or abs(v_a - v_a_pin) > 1e-3
 
+    session_id = sid(99)
+
     def make_body(cam_id, u, v, H):
         return {
             "camera_id": cam_id,
+            "session_id": session_id,
             "sync_anchor_frame_index": 0,
             "sync_anchor_timestamp_s": 0.0,
-            "cycle_number": 99,
             "frames": [
                 {
                     "frame_index": 0,
@@ -388,7 +396,7 @@ def test_nonzero_distortion_recovers_true_point():
     assert r2.status_code == 200
     assert r2.json()["triangulated_points"] == 1
 
-    body = client.get("/results/99").json()
+    body = client.get(f"/results/{session_id}").json()
     pt = body["points"][0]
     assert abs(pt["x_m"] - P_true[0]) < 1e-4
     assert abs(pt["y_m"] - P_true[1]) < 1e-4
@@ -409,7 +417,7 @@ def test_undistorted_ray_cam_zero_dist_matches_angle_ray():
 # --------------------------- Multipart + video clip --------------------------
 
 
-def _minimal_pitch_body(cycle: int, cam_id: str = "A") -> dict:
+def _minimal_pitch_body(session_id: str, cam_id: str = "A") -> dict:
     K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
     P_true = np.array([0.1, 0.3, 1.0])
     tx, tz = _project(
@@ -418,9 +426,9 @@ def _minimal_pitch_body(cycle: int, cam_id: str = "A") -> dict:
     H = H_a if cam_id == "A" else H_b
     return {
         "camera_id": cam_id,
+        "session_id": session_id,
         "sync_anchor_frame_index": 0,
         "sync_anchor_timestamp_s": 0.0,
-        "cycle_number": cycle,
         "frames": [
             {"frame_index": 0, "timestamp_s": 0.0,
              "theta_x_rad": tx, "theta_z_rad": tz, "ball_detected": True},
@@ -434,10 +442,11 @@ def test_pitch_without_video_round_trips_like_before():
     """Regression guard: existing clients that send only the JSON payload still
     triangulate correctly under the new multipart endpoint."""
     client = TestClient(app)
-    r1 = _post_pitch(client, _minimal_pitch_body(501, "A"))
+    session_id = sid(501)
+    r1 = _post_pitch(client, _minimal_pitch_body(session_id, "A"))
     assert r1.status_code == 200
     assert "clip" not in r1.json()
-    r2 = _post_pitch(client, _minimal_pitch_body(501, "B"))
+    r2 = _post_pitch(client, _minimal_pitch_body(session_id, "B"))
     assert r2.status_code == 200
     assert "clip" not in r2.json()
     assert r2.json()["triangulated_points"] == 1
@@ -446,35 +455,39 @@ def test_pitch_without_video_round_trips_like_before():
 def test_pitch_with_video_persists_clip_and_still_triangulates():
     """Attach a byte-string posing as a MOV clip and verify: (a) triangulation
     runs unchanged, (b) the clip is written under the state's video dir with
-    the expected (cycle, camera_id) basename."""
+    the expected (session_id, camera_id) basename."""
     client = TestClient(app)
+    session_id = sid(502)
     fake_video = b"fake mov bytes \x00\x01\x02" * 128  # small but non-empty
-    r1 = _post_pitch(client, _minimal_pitch_body(502, "A"), video_bytes=fake_video)
+    r1 = _post_pitch(
+        client, _minimal_pitch_body(session_id, "A"), video_bytes=fake_video
+    )
     assert r1.status_code == 200
     body = r1.json()
-    assert body["clip"]["filename"] == "cycle_000502_A.mov"
+    assert body["clip"]["filename"] == f"session_{session_id}_A.mov"
     assert body["clip"]["bytes"] == len(fake_video)
 
-    clip_path = main.state.video_dir / "cycle_000502_A.mov"
+    clip_path = main.state.video_dir / f"session_{session_id}_A.mov"
     assert clip_path.exists()
     assert clip_path.read_bytes() == fake_video
 
     # Pair with B (no video) — triangulation still works.
-    r2 = _post_pitch(client, _minimal_pitch_body(502, "B"))
+    r2 = _post_pitch(client, _minimal_pitch_body(session_id, "B"))
     assert r2.status_code == 200
     assert r2.json()["triangulated_points"] == 1
 
 
 def test_save_clip_writes_atomically_and_overwrites(tmp_path):
     """Unit-level: State.save_clip targets data/videos/ with a safe filename
-    and overwrites on repeat uploads for the same (camera, cycle)."""
+    and overwrites on repeat uploads for the same (camera, session)."""
     s = main.State(data_dir=tmp_path)
-    first = s.save_clip("A", 900, b"alpha", "mov")
-    assert first == tmp_path / "videos" / "cycle_000900_A.mov"
+    session_id = sid(900)
+    first = s.save_clip("A", session_id, b"alpha", "mov")
+    assert first == tmp_path / "videos" / f"session_{session_id}_A.mov"
     assert first.read_bytes() == b"alpha"
 
     # Overwriting preserves filename and swaps contents.
-    second = s.save_clip("A", 900, b"beta beta", "mov")
+    second = s.save_clip("A", session_id, b"beta beta", "mov")
     assert second == first
     assert second.read_bytes() == b"beta beta"
 
@@ -486,11 +499,11 @@ def test_save_clip_rejects_path_traversal_extensions(tmp_path):
     """Malformed `ext` (path separators, empty) falls back to .mov so the
     filename stays inside data/videos/."""
     s = main.State(data_dir=tmp_path)
-    path_bad = s.save_clip("B", 7, b"x", "../etc/passwd")
+    path_bad = s.save_clip("B", sid(7), b"x", "../etc/passwd")
     assert path_bad.parent == tmp_path / "videos"
     assert path_bad.suffix == ".mov"
 
-    path_empty = s.save_clip("B", 8, b"y", "")
+    path_empty = s.save_clip("B", sid(8), b"y", "")
     assert path_empty.suffix == ".mov"
 
 
@@ -506,8 +519,17 @@ def test_path_traversing_camera_id_is_rejected():
     """`camera_id` ends up in server-side file paths (pitch JSON + clip MOV).
     Pydantic must reject non-identifier values so the upload can't escape
     `data/` via `../` or embedded separators."""
-    body = _minimal_pitch_body(600, "A")
+    body = _minimal_pitch_body(sid(600), "A")
     body["camera_id"] = "../etc"
     client = TestClient(app)
     r = _post_pitch(client, body, video_bytes=b"x")
+    assert r.status_code == 422
+
+
+def test_malformed_session_id_is_rejected():
+    """`session_id` also ends up in paths. Same Pydantic constraint applies
+    — path-traversal or wrong-shape ids return 422."""
+    body = _minimal_pitch_body("../etc", "A")
+    client = TestClient(app)
+    r = _post_pitch(client, body)
     assert r.status_code == 422

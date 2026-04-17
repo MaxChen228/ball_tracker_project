@@ -1,32 +1,41 @@
 """FastAPI ingest + triangulation server for ball_tracker iPhone app.
 
 Endpoints:
-  GET  /                       — dashboard (devices panel, session state,
-                                  Arm / Cancel controls, events table)
-  GET  /status                 — health + received cycles + online devices +
-                                  current session + per-camera commands
-  POST /pitch                  — ingest one iPhone pitch payload (multipart/form-data
-                                  with required `payload` JSON part and optional
-                                  `video` MOV/MP4 clip)
-  POST /heartbeat              — iPhone 1 Hz liveness ping; body: {"camera_id"}.
-                                  Returns the same shape as /status so the phone
-                                  can piggy-back on the response for commands.
-  POST /sessions/arm           — dashboard: begin an armed session. /status
-                                  starts dispatching {cam: "arm"} for online
-                                  devices.
-  POST /sessions/cancel        — dashboard: disarm manually. Triggers a short
-                                  "disarm" broadcast window so phones can exit
-                                  recording cleanly.
-  GET  /chirp.wav              — reference sync chirp for the 時間校正 step
-  GET  /events                 — one row per cycle: cameras, status, counts,
-                                  received_at, triangulation stats
-  GET  /results/latest         — latest fully-triangulated cycle
-  GET  /results/{cycle}        — specific cycle result
-  GET  /reconstruction/{cycle} — 3D scene (cameras + rays + optional
-                                  triangulated trajectory) as JSON
-  GET  /viewer/{cycle}         — same scene rendered as a self-contained
-                                  Plotly HTML page
-  POST /reset                  — clear all cached state
+  GET  /                            — dashboard (devices, session state,
+                                       Arm / Cancel controls, events table)
+  GET  /status                      — health + online devices + session +
+                                       per-camera commands
+  POST /pitch                       — ingest one session upload (multipart:
+                                       required `payload` JSON carrying
+                                       `session_id`, optional `video`
+                                       MOV/MP4 clip)
+  POST /heartbeat                   — iPhone 1 Hz liveness ping;
+                                       body: {"camera_id"}. Reply mirrors
+                                       /status so the phone can drive
+                                       arm/disarm from one round-trip.
+  POST /sessions/arm                — dashboard: begin an armed session.
+                                       Server returns the new session id
+                                       (idempotent on re-arm). /status
+                                       starts dispatching {cam: "arm"}.
+  POST /sessions/cancel             — dashboard: force-disarm. Triggers the
+                                       "disarm" echo window so phones can
+                                       exit recording cleanly.
+  GET  /chirp.wav                   — reference sync chirp for 時間校正
+  GET  /events                      — one row per session: cameras, status,
+                                       counts, received_at, triangulation
+                                       stats
+  GET  /results/latest              — most recently recorded session
+  GET  /results/{session_id}        — specific session's SessionResult
+  GET  /reconstruction/{session_id} — 3D scene (cameras + rays + optional
+                                       triangulated trajectory) as JSON
+  GET  /viewer/{session_id}         — same scene as a self-contained Plotly
+                                       HTML page
+  POST /reset                       — clear all cached state
+
+Pairing key: every PitchPayload carries `session_id` (server-minted via
+`POST /sessions/arm`). A/B pairs by `session_id`, NOT by any device-local
+counter. iPhones are dumb capture clients — they do not allocate pairing
+identifiers.
 """
 from __future__ import annotations
 
@@ -90,13 +99,21 @@ class PitchPayload(BaseModel):
     # pitch json). Matches the iOS-side values ("A" / "B") with slack for
     # future role additions but blocks path-traversal attempts.
     camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
+    # Server-assigned session identifier (from `POST /sessions/arm`). This
+    # is the sole pairing key for A/B uploads — iPhones no longer generate
+    # their own counters. Pattern matches `_new_session_id()`; also safe to
+    # interpolate into filenames.
+    session_id: str = Field(..., pattern=r"^s_[0-9a-f]{4,32}$")
     # Shared time anchor for A/B pairing, recovered from an audio-chirp
     # matched-filter hit on the 時間校正 step. Server uses
     # `sync_anchor_timestamp_s` as the per-cycle clock origin and pairs
     # frames within an 8 ms window of the relative time.
     sync_anchor_frame_index: int
     sync_anchor_timestamp_s: float
-    cycle_number: int
+    # Optional device-local recording counter. Not used for pairing; kept
+    # purely for operator debugging (e.g. "this was my 5th attempt this
+    # app launch"). iPhones may omit it entirely.
+    local_recording_index: int | None = None
     frames: list[FramePayload]
     intrinsics: IntrinsicsPayload | None = None
     homography: list[float] | None = None
@@ -112,8 +129,11 @@ class TriangulatedPoint(BaseModel):
     residual_m: float
 
 
-class CycleResult(BaseModel):
-    cycle_number: int
+class SessionResult(BaseModel):
+    """One armed-session's triangulation result. Replaces the old
+    `CycleResult` now that "cycle" is a per-device recording-window concept
+    and the pitch unit is server-level "session"."""
+    session_id: str
     camera_a_received: bool
     camera_b_received: bool
     points: list[TriangulatedPoint] = []
@@ -242,16 +262,19 @@ class Device:
 @dataclass
 class Session:
     """One dashboard "Arm" action → at most one session at a time. The
-    server does NOT assign cycle numbers — iPhones still pick their own —
-    but it records which (camera_id, cycle_number) uploads arrived during
-    this session so the dashboard can render "session s_abc → A=cycle 12,
-    B=cycle 8"."""
+    session id is the server-minted pairing key for A/B uploads — iPhones
+    stamp this id onto every PitchPayload they send during the armed
+    window, so reconstruction is always keyed by session, never by
+    device-local counters."""
     id: str
     started_at: float
     max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S
     ended_at: float | None = None
     end_reason: str | None = None   # "cycle_uploaded" | "cancelled" | "timeout"
-    cycles_received: list[dict[str, Any]] = field(default_factory=list)
+    # Camera ids that have successfully uploaded while this session was
+    # the current one. Dashboard reads this to render "session s_abc →
+    # A, B".
+    uploads_received: list[str] = field(default_factory=list)
 
     @property
     def armed(self) -> bool:
@@ -265,7 +288,7 @@ class Session:
             "ended_at": self.ended_at,
             "end_reason": self.end_reason,
             "max_duration_s": self.max_duration_s,
-            "cycles_received": list(self.cycles_received),
+            "uploads_received": list(self.uploads_received),
         }
 
 
@@ -282,8 +305,11 @@ class State:
         time_fn: Callable[[], float] = time.time,
     ) -> None:
         self._lock = Lock()
-        self.pitches: dict[tuple[str, int], PitchPayload] = {}
-        self.results: dict[int, CycleResult] = {}
+        # Pitch uploads keyed by (camera_id, session_id). One session → at
+        # most two entries (A, B). Cross-device pairing is by session_id —
+        # iPhones don't mint identifiers any more.
+        self.pitches: dict[tuple[str, str], PitchPayload] = {}
+        self.results: dict[str, SessionResult] = {}
         self._data_dir = data_dir
         self._pitch_dir = data_dir / "pitches"
         self._result_dir = data_dir / "results"
@@ -305,42 +331,42 @@ class State:
         return self._video_dir
 
     def save_clip(
-        self, camera_id: str, cycle: int, data: bytes, ext: str = "mov"
+        self, camera_id: str, session_id: str, data: bytes, ext: str = "mov"
     ) -> Path:
-        """Persist a cycle's H.264 clip to disk. Writes atomically so a
+        """Persist a session's H.264 clip to disk. Writes atomically so a
         partial transfer cannot leave a corrupt file visible to downstream
-        tools. Overwrites any existing clip for (camera_id, cycle)."""
+        tools. Overwrites any existing clip for (camera_id, session_id)."""
         safe_ext = (ext or "mov").lstrip(".").lower()
         if not safe_ext or "/" in safe_ext or "\\" in safe_ext:
             safe_ext = "mov"
-        path = self._video_dir / f"cycle_{cycle:06d}_{camera_id}.{safe_ext}"
+        path = self._video_dir / f"session_{session_id}_{camera_id}.{safe_ext}"
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_bytes(data)
         tmp.replace(path)
         return path
 
-    def _pitch_path(self, camera_id: str, cycle: int) -> Path:
-        return self._pitch_dir / f"cycle_{cycle:06d}_{camera_id}.json"
+    def _pitch_path(self, camera_id: str, session_id: str) -> Path:
+        return self._pitch_dir / f"session_{session_id}_{camera_id}.json"
 
-    def _result_path(self, cycle: int) -> Path:
-        return self._result_dir / f"cycle_{cycle:06d}.json"
+    def _result_path(self, session_id: str) -> Path:
+        return self._result_dir / f"session_{session_id}.json"
 
     def _load_from_disk(self) -> None:
-        for path in sorted(self._pitch_dir.glob("cycle_*.json")):
+        for path in sorted(self._pitch_dir.glob("session_*.json")):
             try:
                 obj = json.loads(path.read_text())
                 pitch = PitchPayload.model_validate(obj)
             except Exception as e:
                 logger.warning("skip corrupt pitch file %s: %s", path.name, e)
                 continue
-            self.pitches[(pitch.camera_id, pitch.cycle_number)] = pitch
+            self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
 
-        seen_cycles = {cyc for _, cyc in self.pitches.keys()}
-        for cycle in sorted(seen_cycles):
-            a = self.pitches.get(("A", cycle))
-            b = self.pitches.get(("B", cycle))
-            result = CycleResult(
-                cycle_number=cycle,
+        seen_sessions = {sid for _, sid in self.pitches.keys()}
+        for sid in sorted(seen_sessions):
+            a = self.pitches.get(("A", sid))
+            b = self.pitches.get(("B", sid))
+            result = SessionResult(
+                session_id=sid,
                 camera_a_received=a is not None,
                 camera_b_received=b is not None,
             )
@@ -349,13 +375,13 @@ class State:
                     result.points = triangulate_cycle(a, b)
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
-            self.results[cycle] = result
+            self.results[sid] = result
 
         if self.pitches:
             logger.info(
-                "restored %d pitch payloads across %d cycles from %s",
+                "restored %d pitch payloads across %d sessions from %s",
                 len(self.pitches),
-                len(seen_cycles),
+                len(seen_sessions),
                 self._data_dir,
             )
 
@@ -364,24 +390,24 @@ class State:
         tmp.write_text(payload)
         tmp.replace(path)
 
-    def record(self, pitch: PitchPayload) -> CycleResult:
+    def record(self, pitch: PitchPayload) -> SessionResult:
         with self._lock:
-            self.pitches[(pitch.camera_id, pitch.cycle_number)] = pitch
+            self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
             self._atomic_write(
-                self._pitch_path(pitch.camera_id, pitch.cycle_number),
+                self._pitch_path(pitch.camera_id, pitch.session_id),
                 pitch.model_dump_json(),
             )
 
-            # Drive the session state machine forward — any cycle arriving
+            # Drive the session state machine forward — any upload arriving
             # while armed disarms the session (one-shot pattern). The other
             # camera, if it was also recording, gets "disarm" on its next
             # /status poll and cleans up.
-            self._register_cycle_in_session_locked(pitch)
+            self._register_upload_in_session_locked(pitch)
 
-            a = self.pitches.get(("A", pitch.cycle_number))
-            b = self.pitches.get(("B", pitch.cycle_number))
-            result = CycleResult(
-                cycle_number=pitch.cycle_number,
+            a = self.pitches.get(("A", pitch.session_id))
+            b = self.pitches.get(("B", pitch.session_id))
+            result = SessionResult(
+                session_id=pitch.session_id,
                 camera_a_received=a is not None,
                 camera_b_received=b is not None,
             )
@@ -390,44 +416,49 @@ class State:
                     result.points = triangulate_cycle(a, b)
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
-            self.results[pitch.cycle_number] = result
+            self.results[pitch.session_id] = result
             self._atomic_write(
-                self._result_path(pitch.cycle_number),
+                self._result_path(pitch.session_id),
                 result.model_dump_json(),
             )
             return result
 
     def summary(self) -> dict[str, Any]:
         with self._lock:
-            cycles = sorted({c for _, c in self.pitches.keys()})
+            sessions = sorted({sid for _, sid in self.pitches.keys()})
             completed = [
                 k for k, r in self.results.items()
                 if r.camera_a_received and r.camera_b_received and not r.error
             ]
             return {
                 "state": "receiving" if self.pitches else "idle",
-                "received_cycles": cycles,
-                "completed_cycles": sorted(completed),
+                "received_sessions": sessions,
+                "completed_sessions": sorted(completed),
             }
 
-    def latest(self) -> CycleResult | None:
+    def latest(self) -> SessionResult | None:
+        """Most recently written result. File mtime on disk would be more
+        correct, but the in-memory ordering is good enough for the /latest
+        endpoint's "last thing uploaded" semantic — sessions sort
+        lexicographically by id which is time-of-generation-adjacent."""
         with self._lock:
             if not self.results:
                 return None
             return self.results[max(self.results.keys())]
 
-    def get(self, cycle: int) -> CycleResult | None:
+    def get(self, session_id: str) -> SessionResult | None:
         with self._lock:
-            return self.results.get(cycle)
+            return self.results.get(session_id)
 
-    def pitches_for_cycle(self, cycle: int) -> dict[str, PitchPayload]:
-        """Snapshot of all pitches currently stored for `cycle`, keyed by
-        camera_id. Returns an empty dict if the cycle has not been seen."""
+    def pitches_for_session(self, session_id: str) -> dict[str, PitchPayload]:
+        """Snapshot of all pitches currently stored for `session_id`, keyed
+        by camera_id. Returns an empty dict if the session has not been
+        seen."""
         with self._lock:
             return {
                 cam_id: p
-                for (cam_id, c), p in self.pitches.items()
-                if c == cycle
+                for (cam_id, sid), p in self.pitches.items()
+                if sid == session_id
             }
 
     # ------------------------------------------------------------------
@@ -511,18 +542,22 @@ class State:
             self._current_session = None
             return s
 
-    def _register_cycle_in_session_locked(self, pitch: PitchPayload) -> None:
-        """Called from `record()` while the state lock is held. If a session
-        is armed, attach the (cam, cycle) tuple and auto-end it (one-shot
-        arm → first cycle disarms). The other camera, if any, receives
-        `disarm` via commands_for_devices during the echo window."""
+    def _register_upload_in_session_locked(self, pitch: PitchPayload) -> None:
+        """Called from `record()` while the state lock is held. If the pitch
+        carries the current armed session's id, record the upload and
+        auto-end the session (one-shot arm → first upload disarms). The
+        other camera, if any, receives `disarm` via commands_for_devices
+        during the echo window."""
         s = self._current_session
         if s is None or s.ended_at is not None:
             return
-        s.cycles_received.append(
-            {"camera_id": pitch.camera_id, "cycle_number": pitch.cycle_number}
-        )
-        # One-shot: any cycle arrival ends the session.
+        if pitch.session_id != s.id:
+            # Upload belongs to a different session (previous armed window
+            # the phone is only now flushing). Don't touch the current one.
+            return
+        if pitch.camera_id not in s.uploads_received:
+            s.uploads_received.append(pitch.camera_id)
+        # One-shot: any upload for the current session ends it.
         s.ended_at = self._time_fn()
         s.end_reason = "cycle_uploaded"
         self._last_ended_session = s
@@ -561,27 +596,27 @@ class State:
         return cmds
 
     def events(self) -> list[dict[str, Any]]:
-        """Summary row per cycle for the events panel — one entry per
-        cycle_number, collapsing A/B uploads into a single event.
+        """Summary row per session for the events panel — one entry per
+        session_id, collapsing A/B uploads into a single event.
 
-        `received_at` is derived from the pitch file's mtime so we don't have
-        to extend the Pydantic payload with server-side timestamps.
+        `received_at` is derived from the pitch file's mtime so we don't
+        have to extend the Pydantic payload with server-side timestamps.
         """
         with self._lock:
-            cycles = sorted({c for _, c in self.pitches.keys()})
+            sessions = sorted({sid for _, sid in self.pitches.keys()})
             events: list[dict[str, Any]] = []
-            for cyc in cycles:
+            for sid in sessions:
                 cams_present = sorted(
-                    cam for (cam, c) in self.pitches.keys() if c == cyc
+                    cam for (cam, s) in self.pitches.keys() if s == sid
                 )
                 cam_frame_counts: dict[str, int] = {}
                 latest_mtime: float | None = None
                 for cam in cams_present:
-                    pitch = self.pitches[(cam, cyc)]
+                    pitch = self.pitches[(cam, sid)]
                     cam_frame_counts[cam] = sum(
                         1 for f in pitch.frames if f.ball_detected
                     )
-                    path = self._pitch_path(cam, cyc)
+                    path = self._pitch_path(cam, sid)
                     try:
                         mtime = path.stat().st_mtime
                     except FileNotFoundError:
@@ -591,7 +626,7 @@ class State:
                     ):
                         latest_mtime = mtime
 
-                result = self.results.get(cyc)
+                result = self.results.get(sid)
                 n_triangulated = len(result.points) if result is not None else 0
                 error = result.error if result is not None else None
 
@@ -619,7 +654,7 @@ class State:
 
                 events.append(
                     {
-                        "cycle_number": cyc,
+                        "session_id": sid,
                         "cameras": cams_present,
                         "status": status,
                         "received_at": latest_mtime,
@@ -631,8 +666,13 @@ class State:
                         "error": error,
                     }
                 )
-            # Latest events first — matches the UI expectation.
-            events.sort(key=lambda e: e["cycle_number"], reverse=True)
+            # Latest events first — session ids carry 4 bytes of random hex
+            # so we sort by `received_at` (fallback to id) to surface the
+            # most recently uploaded session at the top.
+            events.sort(
+                key=lambda e: (e["received_at"] or 0, e["session_id"]),
+                reverse=True,
+            )
             return events
 
     def reset(self, purge_disk: bool = False) -> None:
@@ -643,6 +683,15 @@ class State:
             self._current_session = None
             self._last_ended_session = None
             if purge_disk:
+                for path in self._pitch_dir.glob("session_*.json*"):
+                    path.unlink(missing_ok=True)
+                for path in self._result_dir.glob("session_*.json*"):
+                    path.unlink(missing_ok=True)
+                for path in self._video_dir.glob("session_*"):
+                    path.unlink(missing_ok=True)
+                # Legacy cycle-keyed files from before the session_id rename.
+                # Drop them on purge so a fresh State doesn't try to load
+                # payloads that would now fail Pydantic validation.
                 for path in self._pitch_dir.glob("cycle_*.json*"):
                     path.unlink(missing_ok=True)
                 for path in self._result_dir.glob("cycle_*.json*"):
@@ -744,10 +793,10 @@ async def sessions_cancel(request: Request):
     return {"ok": True, "session": ended.to_dict()}
 
 
-def _summarize_result(result: CycleResult) -> dict[str, Any]:
+def _summarize_result(result: SessionResult) -> dict[str, Any]:
     paired = result.camera_a_received and result.camera_b_received
     summary: dict[str, Any] = {
-        "cycle": result.cycle_number,
+        "session_id": result.session_id,
         "paired": paired,
         "triangulated_points": len(result.points),
         "error": result.error,
@@ -768,13 +817,14 @@ async def pitch(
     payload: str = Form(...),
     video: UploadFile | None = File(None),
 ) -> dict[str, Any]:
-    """Ingest one cycle as multipart/form-data.
+    """Ingest one armed-session upload as multipart/form-data.
 
-    Required form field `payload`: JSON-encoded `PitchPayload`.
-    Optional form field `video`:   MOV/MP4 clip of the cycle. Stored under
-                                    `data/videos/cycle_XXXXXX_{cam}.{ext}` and
-                                    not yet consumed by triangulation — Phase
-                                    1 raw-video experiment.
+    Required form field `payload`: JSON-encoded `PitchPayload` (carries the
+    server-minted `session_id` — the sole pairing key for A/B).
+    Optional form field `video`:   MOV/MP4 clip of the recording. Stored
+                                    under `data/videos/session_{id}_{cam}.{ext}`
+                                    and not yet consumed by triangulation —
+                                    Phase-1 raw-video staging.
     """
     try:
         payload_obj = PitchPayload.model_validate_json(payload)
@@ -791,16 +841,16 @@ async def pitch(
                 if suffix:
                     ext = suffix
             clip_path = state.save_clip(
-                payload_obj.camera_id, payload_obj.cycle_number, data, ext
+                payload_obj.camera_id, payload_obj.session_id, data, ext
             )
             clip_info = {"filename": clip_path.name, "bytes": len(data)}
 
     result = state.record(payload_obj)
     ball_frames = sum(1 for f in payload_obj.frames if f.ball_detected)
     logger.info(
-        "pitch camera=%s cycle=%d frames=%d ball=%d triangulated=%d%s%s",
+        "pitch camera=%s session=%s frames=%d ball=%d triangulated=%d%s%s",
         payload_obj.camera_id,
-        payload_obj.cycle_number,
+        payload_obj.session_id,
         len(payload_obj.frames),
         ball_frames,
         len(result.points),
@@ -810,8 +860,8 @@ async def pitch(
     if result.points:
         zs = [p.z_m for p in result.points]
         logger.info(
-            "  cycle %d → %d pts, duration %.2fs, peak z = %.2fm",
-            result.cycle_number,
+            "  session %s → %d pts, duration %.2fs, peak z = %.2fm",
+            result.session_id,
             len(result.points),
             result.points[-1].t_rel_s - result.points[0].t_rel_s,
             max(zs),
@@ -862,47 +912,47 @@ def chirp_wav() -> Response:
 
 
 @app.get("/results/latest")
-def results_latest() -> CycleResult:
+def results_latest() -> SessionResult:
     r = state.latest()
     if r is None:
         raise HTTPException(404, "no results yet")
     return r
 
 
-@app.get("/results/{cycle}")
-def results_cycle(cycle: int) -> CycleResult:
-    r = state.get(cycle)
+@app.get("/results/{session_id}")
+def results_for_session(session_id: str) -> SessionResult:
+    r = state.get(session_id)
     if r is None:
-        raise HTTPException(404, f"cycle {cycle} not found")
+        raise HTTPException(404, f"session {session_id} not found")
     return r
 
 
-def _scene_for_cycle(cycle: int):
+def _scene_for_session(session_id: str):
     """Shared fetch+build for the two scene endpoints. Raises 404 when no
-    pitches have been received for this cycle yet."""
+    pitches have been received for this session yet."""
     # Local imports so the FastAPI app still boots when plotly is missing
     # (the JSON endpoint doesn't need it; the HTML one will surface a 500).
     from reconstruct import build_scene
 
-    pitches = state.pitches_for_cycle(cycle)
+    pitches = state.pitches_for_session(session_id)
     if not pitches:
-        raise HTTPException(404, f"cycle {cycle} has no pitches")
-    result = state.get(cycle)
+        raise HTTPException(404, f"session {session_id} has no pitches")
+    result = state.get(session_id)
     triangulated = result.points if result is not None else []
-    return build_scene(cycle, pitches, triangulated)
+    return build_scene(session_id, pitches, triangulated)
 
 
-@app.get("/reconstruction/{cycle}")
-def reconstruction(cycle: int) -> dict[str, Any]:
-    scene = _scene_for_cycle(cycle)
+@app.get("/reconstruction/{session_id}")
+def reconstruction(session_id: str) -> dict[str, Any]:
+    scene = _scene_for_session(session_id)
     return scene.to_dict()
 
 
-@app.get("/viewer/{cycle}", response_class=HTMLResponse)
-def viewer(cycle: int) -> HTMLResponse:
+@app.get("/viewer/{session_id}", response_class=HTMLResponse)
+def viewer(session_id: str) -> HTMLResponse:
     from viewer import render_scene_html
 
-    scene = _scene_for_cycle(cycle)
+    scene = _scene_for_session(session_id)
     return HTMLResponse(render_scene_html(scene))
 
 

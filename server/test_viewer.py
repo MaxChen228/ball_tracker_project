@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+from conftest import sid
 from main import app
 from reconstruct import Scene, build_scene
 
@@ -69,9 +70,9 @@ def _pitch(cam_id, cycle, K, R, t, H, P_trajectory, with_pixels=False):
         )
     return main.PitchPayload(
         camera_id=cam_id,
+        session_id=sid(cycle),
         sync_anchor_frame_index=0,
         sync_anchor_timestamp_s=0.0,
-        cycle_number=cycle,
         frames=frames,
         intrinsics=main.IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
         homography=H.flatten().tolist(),
@@ -85,10 +86,11 @@ def test_build_scene_camera_center_matches_rig():
     K, (R_a, t_a, C_a, H_a), _ = _make_rig()
     P = np.array([[0.1, 0.3, 1.0]])
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, P)
+    session_id = sid(1)
 
-    scene = build_scene(1, {"A": pitch}, triangulated=None)
+    scene = build_scene(session_id, {"A": pitch}, triangulated=None)
 
-    assert scene.cycle_number == 1
+    assert scene.session_id == session_id
     assert len(scene.cameras) == 1
     cam = scene.cameras[0]
     assert cam.camera_id == "A"
@@ -102,7 +104,7 @@ def test_build_scene_ray_origin_is_camera_center_and_points_toward_ball():
     P = np.array([0.5, 0.3, 1.0])  # slightly right, in front, up
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([P]))
 
-    scene = build_scene(1, {"A": pitch}, triangulated=None)
+    scene = build_scene(sid(1), {"A": pitch}, triangulated=None)
 
     assert len(scene.rays) == 1
     r = scene.rays[0]
@@ -127,7 +129,7 @@ def test_build_scene_ray_endpoint_hits_ground_when_direction_is_downward():
     P = np.array([0.0, 0.2, 0.4])
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([P]))
 
-    scene = build_scene(1, {"A": pitch}, triangulated=None)
+    scene = build_scene(sid(1), {"A": pitch}, triangulated=None)
 
     r = scene.rays[0]
     assert r.endpoint[2] == pytest.approx(0.0, abs=1e-6)
@@ -140,7 +142,7 @@ def test_build_scene_skips_pitch_missing_calibration():
     pitch = _pitch("A", 1, K, R_a, t_a, np.eye(3), P)
     pitch_no_calib = pitch.model_copy(update={"intrinsics": None, "homography": None})
 
-    scene = build_scene(1, {"A": pitch_no_calib}, triangulated=None)
+    scene = build_scene(sid(1), {"A": pitch_no_calib}, triangulated=None)
 
     assert scene.cameras == []
     assert scene.rays == []
@@ -161,7 +163,7 @@ def test_build_scene_two_cameras_attaches_triangulated_points():
         for i, P in enumerate(P_path)
     ]
 
-    scene = build_scene(5, {"A": pa, "B": pb}, triangulated=tri)
+    scene = build_scene(sid(5), {"A": pa, "B": pb}, triangulated=tri)
 
     assert len(scene.cameras) == 2
     assert {c.camera_id for c in scene.cameras} == {"A", "B"}
@@ -176,10 +178,10 @@ def test_build_scene_two_cameras_attaches_triangulated_points():
 def test_scene_to_dict_is_json_serialisable():
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
-    scene = build_scene(1, {"A": pitch}, triangulated=None)
+    scene = build_scene(sid(1), {"A": pitch}, triangulated=None)
     # Round-trip via JSON to catch any non-serialisable dataclass fields.
     out = _json.loads(_json.dumps(scene.to_dict()))
-    assert out["cycle_number"] == 1
+    assert out["session_id"] == sid(1)
     assert "cameras" in out and "rays" in out and "triangulated" in out
 
 
@@ -192,49 +194,51 @@ def _post_pitch(client, pitch: main.PitchPayload):
 
 def test_reconstruction_endpoint_returns_scene_shape():
     K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(701)
     pitch = _pitch("A", 701, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
     client = TestClient(app)
 
     assert _post_pitch(client, pitch).status_code == 200
 
-    r = client.get("/reconstruction/701")
+    r = client.get(f"/reconstruction/{session_id}")
     assert r.status_code == 200
     body = r.json()
-    assert body["cycle_number"] == 701
+    assert body["session_id"] == session_id
     assert len(body["cameras"]) == 1
     assert body["cameras"][0]["camera_id"] == "A"
     assert len(body["rays"]) == 1
     assert body["triangulated"] == []
 
 
-def test_reconstruction_endpoint_unknown_cycle_returns_404():
+def test_reconstruction_endpoint_unknown_session_returns_404():
     client = TestClient(app)
-    r = client.get("/reconstruction/99999")
+    r = client.get(f"/reconstruction/{sid('deadbeef')}")
     assert r.status_code == 404
 
 
 def test_viewer_endpoint_returns_plotly_html():
     K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(702)
     pitch = _pitch("A", 702, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
     client = TestClient(app)
     assert _post_pitch(client, pitch).status_code == 200
 
-    r = client.get("/viewer/702")
+    r = client.get(f"/viewer/{session_id}")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     # Plotly's CDN script tag or a clear Plotly signature must be present.
     body = r.text.lower()
     assert "plotly" in body
-    assert "cycle 702" in body
+    assert session_id in body
 
 
-def test_viewer_endpoint_unknown_cycle_returns_404():
+def test_viewer_endpoint_unknown_session_returns_404():
     client = TestClient(app)
-    r = client.get("/viewer/99999")
+    r = client.get(f"/viewer/{sid('deadbeef')}")
     assert r.status_code == 404
 
 
-def test_events_endpoint_lists_cycles_latest_first():
+def test_events_endpoint_lists_sessions_latest_first():
     K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
     P = np.array([[0.1, 0.3, 1.0]])
     client = TestClient(app)
@@ -244,17 +248,18 @@ def test_events_endpoint_lists_cycles_latest_first():
     assert _post_pitch(client, _pitch("B", 810, K, R_b, t_b, H_b, P)).status_code == 200
 
     events = client.get("/events").json()
-    # At least the two cycles we posted, in descending cycle order.
-    cycles = [e["cycle_number"] for e in events]
-    assert cycles.index(810) < cycles.index(800)
+    # Two sessions posted — the second (sid(810)) arrived after sid(800) so
+    # its pitch-file mtime is strictly later → sorted first.
+    session_ids = [e["session_id"] for e in events]
+    assert session_ids.index(sid(810)) < session_ids.index(sid(800))
 
-    evt_810 = next(e for e in events if e["cycle_number"] == 810)
+    evt_810 = next(e for e in events if e["session_id"] == sid(810))
     assert evt_810["cameras"] == ["A", "B"]
     assert evt_810["status"] in ("paired", "paired_no_points")
     assert evt_810["n_ball_frames"] == {"A": 1, "B": 1}
     assert evt_810["n_triangulated"] == 1
 
-    evt_800 = next(e for e in events if e["cycle_number"] == 800)
+    evt_800 = next(e for e in events if e["session_id"] == sid(800))
     assert evt_800["cameras"] == ["A"]
     assert evt_800["status"] == "partial"
 
@@ -270,7 +275,7 @@ def test_index_endpoint_lists_events_with_viewer_links():
     assert r.headers["content-type"].startswith("text/html")
     body = r.text
     assert "ball_tracker dashboard" in body
-    assert 'href="/viewer/901"' in body
+    assert f'href="/viewer/{sid(901)}"' in body
 
 
 def test_index_endpoint_empty_state_is_rendered():
