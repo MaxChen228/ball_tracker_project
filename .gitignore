@@ -49,3 +49,6 @@ env/
 # Env
 .env
 .env.local
+
+# Server runtime state (pitch/results cache, written per-request).
+server/data/
