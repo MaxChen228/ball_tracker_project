@@ -25,9 +25,11 @@ Nominal rig used by the operator — actual per-session pose still comes from th
 ```bash
 cd server
 uv run uvicorn main:app --host 0.0.0.0 --port 8765   # run (prints LAN IP → paste into iPhone Settings)
-uv run pytest                                        # all tests
+uv run pytest                                        # all tests (server + viewer)
 uv run pytest test_server.py::test_triangulate_sweeps_ball_path   # single test
 ```
+
+The root URL `http://<server>:8765/` is the **events index** — a table of every received cycle linking into `/viewer/{cycle}` for the 3D scene (plate plane, camera pose, ray bundle, triangulated trajectory). Purely server-rendered HTML; Plotly.js is loaded from CDN so there's no build step.
 
 ### iOS
 Open `ball_tracker.xcodeproj` in Xcode. The app needs a **physical device** (camera + 240 fps capture + microphone). Unit tests in `ball_trackerTests/`, UI tests in `ball_trackerUITests/` via Xcode's Test action (`⌘U`).
@@ -67,8 +69,10 @@ Threshold (default 0.18, tunable from Settings → Sync → Chirp Threshold) is 
 - `SettingsViewController.swift` — persists server IP/port, role A/B, HSV range, chirp detection threshold (`chirp_threshold`, default 0.18), `/status` poll interval (`poll_interval_s`, default 10, clamped [2, 300]), capture resolution/fps, and optional manual intrinsics (including OpenCV 5-coefficient distortion `[k1, k2, p1, p2, k3]`) to `UserDefaults`. `normalizeServerIP` strips scheme/port/path from pasted URLs. `onDismiss` fires in `viewDidDisappear` (covers Save, Close, and interactive-swipe dismiss) — the presenter re-diffs settings there instead of relying on a polling tick.
 
 ### Server
-- `main.py` — `State` dict keyed by `(camera_id, cycle_number)`. When both A and B for a cycle arrive, `triangulate_cycle` runs immediately under the state lock. `/pitch` accepts multipart (`payload: str` Form + optional `video: UploadFile`); `camera_id` is Pydantic-constrained to `^[A-Za-z0-9_-]{1,16}$` so it can't escape the data dir when interpolated into file paths. Clip bytes are written atomically via tmp-rename to `data/videos/cycle_{cycle:06d}_{camera_id}.{ext}`. `/status` reports received + completed cycles. `/chirp.wav` returns the reference sync chirp.
+- `main.py` — `State` dict keyed by `(camera_id, cycle_number)`. When both A and B for a cycle arrive, `triangulate_cycle` runs immediately under the state lock. `/pitch` accepts multipart (`payload: str` Form + optional `video: UploadFile`); `camera_id` is Pydantic-constrained to `^[A-Za-z0-9_-]{1,16}$` so it can't escape the data dir when interpolated into file paths. Clip bytes are written atomically via tmp-rename to `data/videos/cycle_{cycle:06d}_{camera_id}.{ext}`. `/status` reports received + completed cycles. `/chirp.wav` returns the reference sync chirp. `State.events()` collapses each cycle into one summary row (cameras present, status, received-at mtime, ball-frame counts, triangulation stats) for the `/events` JSON endpoint and the `/` HTML index.
 - `triangulate.py` — `recover_extrinsics` decomposes `H = K [r1 r2 t]` (Zhang's planar method), orthonormalizes via SVD, flips sign if `t[2] < 0` (camera must be in front of plate). `triangulate_rays` solves the 2×2 system for the shortest segment between two 3D rays and returns its midpoint + gap. `undistorted_ray_cam` applies OpenCV-compatible 5-coefficient undistortion when raw pixels + distortion are both supplied.
+- `reconstruct.py` — pure-geometry scene builder used by the viewer endpoints. `build_scene(cycle, pitches, triangulated)` returns a `Scene` dataclass with `cameras` (position + local RGB-triad axes in world frame), `rays` (one per ball-detected frame: origin = camera center, endpoint = ground-plane intersection or `_RAY_MAX_LEN_M` fallback), and `triangulated` points when both A+B are paired. `Scene.to_dict()` is the stable JSON hand-off for `/reconstruction/{cycle}`.
+- `viewer.py` — two HTML renderers. `render_scene_html(scene)` produces the Plotly 3D figure (ground plane, world axes, camera markers + forward arrows, ray bundle per camera, triangulated trajectory coloured by time; loads Plotly.js from CDN). `render_events_index_html(events)` produces the `/` HTML table with links into each cycle's `/viewer/{cycle}`. No JS framework, no build step.
 
 ## Coordinate conventions (critical)
 
