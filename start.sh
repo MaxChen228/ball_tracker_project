@@ -7,6 +7,7 @@ set -euo pipefail
 PORT="${1:-8765}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$ROOT/server"
+DATA_DIR="${BALL_TRACKER_DATA_DIR:-$SERVER_DIR/data}"
 
 # Kill anything already bound to the port (previous uvicorn instance).
 if lsof -ti tcp:"$PORT" >/dev/null 2>&1; then
@@ -15,10 +16,25 @@ if lsof -ti tcp:"$PORT" >/dev/null 2>&1; then
   sleep 0.5
 fi
 
-# Print LAN IP so you can paste it into the iPhone Settings screen.
 LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo '<unknown>')"
-echo "[start.sh] LAN IP: $LAN_IP   port: $PORT"
-echo "[start.sh] iPhone Settings -> Server IP: $LAN_IP   Port: $PORT"
+
+cat <<EOF
+
+  ball_tracker server
+  ───────────────────
+  LAN IP         $LAN_IP
+  Port           $PORT
+  Data dir       $DATA_DIR
+
+  Events index   http://$LAN_IP:$PORT/
+  Localhost      http://localhost:$PORT/
+  Status         http://$LAN_IP:$PORT/status
+  Chirp .wav     http://$LAN_IP:$PORT/chirp.wav
+
+  iPhone → Settings → Server IP: $LAN_IP   Port: $PORT
+  Stop: Ctrl+C
+
+EOF
 
 cd "$SERVER_DIR"
 exec uv run uvicorn main:app --host 0.0.0.0 --port "$PORT"
