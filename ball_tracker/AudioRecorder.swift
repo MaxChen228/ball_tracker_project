@@ -10,6 +10,16 @@ import Foundation
 /// delegate with `deliveryQueue` as the queue. All internal state is accessed
 /// on that serial queue, so no locks are required.
 final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+    /// Finalized recording metadata returned via `stopRecording`'s completion.
+    /// `startTimestampS` is the capture-session PTS (same time base as
+    /// video frame timestamps) of the first audio sample written. Server-side
+    /// cross-correlation combines this with the measured sample-lag to recover
+    /// the A↔B clock offset.
+    struct FinishedRecording {
+        let fileURL: URL
+        let startTimestampS: Double
+    }
+
     /// Pass this to `AVCaptureAudioDataOutput.setSampleBufferDelegate(_:queue:)`.
     let deliveryQueue = DispatchQueue(label: "audio.recorder.queue")
 
@@ -17,6 +27,7 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
     private var sessionStarted = false
+    private var sessionStartTimestampS: Double = 0
 
     /// Begin writing a new WAV file. Any existing file at the URL is replaced.
     /// First delivered sample buffer's PTS becomes the session start; audio is
@@ -51,7 +62,7 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
 
     /// Finalize the WAV file. `completion` fires on an internal AVFoundation
     /// queue — the caller is responsible for bouncing to main if needed.
-    func stopRecording(completion: @escaping (Result<URL, Error>) -> Void) {
+    func stopRecording(completion: @escaping (Result<FinishedRecording, Error>) -> Void) {
         deliveryQueue.async { [weak self] in
             guard let self, let w = self.writer, let i = self.input else {
                 completion(.failure(NSError(
@@ -61,9 +72,11 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
                 )))
                 return
             }
+            let startTS = self.sessionStartTimestampS
             self.writer = nil
             self.input = nil
             self.sessionStarted = false
+            self.sessionStartTimestampS = 0
 
             // If session never started (no sample buffers received), finishWriting
             // will produce an empty file or error — handle both as failure.
@@ -81,7 +94,10 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
                 if let err = w.error {
                     completion(.failure(err))
                 } else {
-                    completion(.success(w.outputURL))
+                    completion(.success(FinishedRecording(
+                        fileURL: w.outputURL,
+                        startTimestampS: startTS
+                    )))
                 }
             }
         }
@@ -95,6 +111,7 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
             self.writer = nil
             self.input = nil
             self.sessionStarted = false
+            self.sessionStartTimestampS = 0
         }
     }
 
@@ -113,6 +130,7 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
             guard w.startWriting() else { return }
             w.startSession(atSourceTime: pts)
             sessionStarted = true
+            sessionStartTimestampS = CMTimeGetSeconds(pts)
         }
 
         guard w.status == .writing, i.isReadyForMoreMediaData else { return }

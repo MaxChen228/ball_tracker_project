@@ -93,7 +93,8 @@ final class PitchRecorder {
             intrinsics: nil,
             homography: nil,
             image_width_px: nil,
-            image_height_px: nil
+            image_height_px: nil,
+            audio_start_ts_s: nil
         )
 
         onCycleComplete?(payload)

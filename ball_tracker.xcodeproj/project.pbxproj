@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		E9A1C0010001000000000001 /* opencv2 in Frameworks */ = {isa = PBXBuildFile; productRef = E9A1C0000001000000000001 /* opencv2 */; };
+		E9A1C0010001000000000001 /* OpenCV in Frameworks */ = {isa = PBXBuildFile; productRef = E9A1C0000001000000000001 /* OpenCV */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -56,7 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E9A1C0010001000000000001 /* opencv2 in Frameworks */,
+				E9A1C0010001000000000001 /* OpenCV in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -117,7 +117,7 @@
 			);
 			name = ball_tracker;
 			packageProductDependencies = (
-				E9A1C0000001000000000001 /* opencv2 */,
+				E9A1C0000001000000000001 /* OpenCV */,
 			);
 			productName = ball_tracker;
 			productReference = E9DEFF032F91EA0C00BE8704 /* ball_tracker.app */;
@@ -592,7 +592,7 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		E9A1C0000001000000000001 /* opencv2 */ = {
+		E9A1C0000001000000000001 /* OpenCV */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = E9A1C0020001000000000001 /* XCRemoteSwiftPackageReference "opencv-spm" */;
 			productName = OpenCV;
