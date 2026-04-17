@@ -22,6 +22,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let videoOutput = AVCaptureVideoDataOutput()
     private let processingQueue = DispatchQueue(label: "camera.frame.queue")
 
+    // Audio capture — installed only while syncMode == "audio". When inactive
+    // these stay nil and the microphone is never engaged.
+    private var audioInput: AVCaptureDeviceInput?
+    private var audioOutput: AVCaptureAudioDataOutput?
+    private var audioRecorder: AudioRecorder?
+
     private var state: AppState = .standby
     private var frameIndex: Int = 0
     private var horizontalFovRadians: Double = 1.0
@@ -138,20 +144,27 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         recorder.onCycleComplete = { [weak self] payload in
             guard let self else { return }
-            let enriched = self.enrichedPayload(from: payload)
-            do {
-                let fileURL = try self.payloadStore.save(enriched)
-                DispatchQueue.main.async {
-                    self.state = .syncWaiting
-                    self.lastUploadStatusText = "Cached pitch \(enriched.cycle_number)"
-                    self.enqueuePayloadForUpload(fileURL)
-                    self.updateUIForState()
+
+            if self.settings.syncMode == "audio", let audio = self.audioRecorder {
+                // Finalize this cycle's WAV on the recorder's queue, then
+                // persist payload + sidecar atomically and re-arm for next.
+                audio.stopRecording { result in
+                    let audioURL: URL?
+                    let startTS: Double?
+                    switch result {
+                    case .success(let finished):
+                        audioURL = finished.fileURL
+                        startTS = finished.startTimestampS
+                    case .failure:
+                        audioURL = nil
+                        startTS = nil
+                    }
+                    let enriched = self.enrichedPayload(from: payload, audioStartTS: startTS)
+                    self.persistCompletedCycle(enriched, audioFileURL: audioURL)
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    self.lastUploadStatusText = "Cache failed: \(error.localizedDescription)"
-                    self.updateUIForState()
-                }
+            } else {
+                let enriched = self.enrichedPayload(from: payload)
+                self.persistCompletedCycle(enriched, audioFileURL: nil)
             }
         }
 
@@ -168,6 +181,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         setupUI()
         setupPreviewAndCapture()
+        if settings.syncMode == "audio" {
+            setupAudioCapture()
+        }
         setupBallOverlay()
         setupDisplayLink()
         startStatusPolling()
@@ -219,6 +235,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 latestFlashSnapshot = nil
             }
         }
+        audioRecorder?.cancelRecording()
     }
 
     // MARK: - Controls (spec has buttons; skeleton provides methods)
@@ -238,6 +255,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         isUploadingPayload = false
         state = .syncWaiting
         warningLabel.isHidden = true
+        startAudioCycleRecordingIfNeeded()
         updateUIForState()
         processNextPayloadIfNeeded()
     }
@@ -245,10 +263,35 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     func exitSyncMode() {
         state = .standby
         recorder.reset()
+        audioRecorder?.cancelRecording()
         pendingPayloadFiles.removeAll(keepingCapacity: true)
         isUploadingPayload = false
         warningLabel.isHidden = true
         updateUIForState()
+    }
+
+    /// Save a completed cycle's payload (and its audio sidecar, if any),
+    /// enqueue for upload, and re-arm audio for the next cycle. Called from
+    /// the recorder's onCycleComplete callback.
+    private func persistCompletedCycle(
+        _ payload: ServerUploader.PitchPayload,
+        audioFileURL: URL?
+    ) {
+        do {
+            let fileURL = try payloadStore.save(payload, audioFileURL: audioFileURL)
+            DispatchQueue.main.async {
+                self.state = .syncWaiting
+                self.lastUploadStatusText = "Cached pitch \(payload.cycle_number)"
+                self.enqueuePayloadForUpload(fileURL)
+                self.startAudioCycleRecordingIfNeeded()
+                self.updateUIForState()
+            }
+        } catch {
+            DispatchQueue.main.async {
+                self.lastUploadStatusText = "Cache failed: \(error.localizedDescription)"
+                self.updateUIForState()
+            }
+        }
     }
 
     @objc private func onTapTimeCalibration() {
@@ -452,6 +495,85 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
+    // MARK: - Audio capture (syncMode == "audio")
+
+    /// Temporary path where the in-progress cycle's audio is written. On cycle
+    /// completion the WAV is moved into PitchPayloadStore as a sidecar of the
+    /// JSON payload.
+    private var activeAudioTempURL: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("active_cycle.wav")
+    }
+
+    private func setupAudioCapture() {
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                if granted {
+                    self.configureAudioCapture()
+                } else {
+                    self.lastUploadStatusText = "Microphone denied — audio sync unavailable"
+                    self.updateUIForState()
+                }
+            }
+        }
+    }
+
+    private func configureAudioCapture() {
+        guard audioRecorder == nil else { return }
+        guard let mic = AVCaptureDevice.default(for: .audio) else { return }
+
+        let input: AVCaptureDeviceInput
+        do {
+            input = try AVCaptureDeviceInput(device: mic)
+        } catch {
+            lastUploadStatusText = "Mic input failed: \(error.localizedDescription)"
+            return
+        }
+
+        session.beginConfiguration()
+        guard session.canAddInput(input) else {
+            session.commitConfiguration()
+            lastUploadStatusText = "Session rejected audio input"
+            return
+        }
+        session.addInput(input)
+
+        let output = AVCaptureAudioDataOutput()
+        guard session.canAddOutput(output) else {
+            session.removeInput(input)
+            session.commitConfiguration()
+            return
+        }
+        session.addOutput(output)
+        let recorder = AudioRecorder()
+        output.setSampleBufferDelegate(recorder, queue: recorder.deliveryQueue)
+        session.commitConfiguration()
+
+        audioInput = input
+        audioOutput = output
+        audioRecorder = recorder
+    }
+
+    private func teardownAudioCapture() {
+        audioRecorder?.cancelRecording()
+        if audioInput != nil || audioOutput != nil {
+            session.beginConfiguration()
+            if let input = audioInput { session.removeInput(input) }
+            if let output = audioOutput { session.removeOutput(output) }
+            session.commitConfiguration()
+        }
+        audioInput = nil
+        audioOutput = nil
+        audioRecorder = nil
+    }
+
+    /// Start an audio recording covering the upcoming cycle. No-op unless
+    /// syncMode == "audio" and microphone permission was granted.
+    private func startAudioCycleRecordingIfNeeded() {
+        guard settings.syncMode == "audio", let recorder = audioRecorder else { return }
+        recorder.startRecording(to: activeAudioTempURL)
+    }
+
     private func restoreExposure() {
         guard let device = currentCaptureDevice, isExposureLockedForFlash else { return }
         do {
@@ -564,6 +686,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let formatChanged = latest.captureWidth != settings.captureWidth
             || latest.captureHeight != settings.captureHeight
             || latest.captureFps != settings.captureFps
+        let previousSyncMode = settings.syncMode
         settings = latest
         if serverChanged {
             serverConfig = ServerUploader.ServerConfig(serverIP: latest.serverIP, serverPort: latest.serverPort)
@@ -571,6 +694,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         if formatChanged {
             reconfigureCapture()
+        }
+        if latest.syncMode != previousSyncMode {
+            if latest.syncMode == "audio" && audioRecorder == nil {
+                setupAudioCapture()
+            } else if previousSyncMode == "audio" && latest.syncMode != "audio" {
+                teardownAudioCapture()
+            }
         }
         uploader.fetchStatus { [weak self] result in
             DispatchQueue.main.async {
@@ -887,7 +1017,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             return
         }
 
-        uploader.uploadPitch(payload) { [weak self] result in
+        let audioURL = payloadStore.audioURL(for: fileURL)
+        uploader.uploadPitch(payload, audioFileURL: audioURL) { [weak self] result in
             guard let self else { return }
             DispatchQueue.main.async {
                 var retryAfterFailure = false
@@ -966,7 +1097,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         ballOverlayLayer.isHidden = false
     }
 
-    private func enrichedPayload(from payload: ServerUploader.PitchPayload) -> ServerUploader.PitchPayload {
+    private func enrichedPayload(
+        from payload: ServerUploader.PitchPayload,
+        audioStartTS: Double? = nil
+    ) -> ServerUploader.PitchPayload {
         let d = UserDefaults.standard
         var intrinsics: ServerUploader.IntrinsicsPayload? = nil
         if
@@ -994,7 +1128,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             intrinsics: intrinsics,
             homography: homography,
             image_width_px: w > 0 ? w : nil,
-            image_height_px: h > 0 ? h : nil
+            image_height_px: h > 0 ? h : nil,
+            audio_start_ts_s: audioStartTS
         )
     }
 

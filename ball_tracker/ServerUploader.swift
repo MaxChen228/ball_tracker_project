@@ -31,6 +31,10 @@ final class ServerUploader {
         let homography: [Double]?
         let image_width_px: Int?
         let image_height_px: Int?
+        /// Session-clock timestamp of the first audio sample in the sidecar
+        /// WAV, when syncMode == "audio". Server combines this with the
+        /// measured sample-lag from cross-correlation to recover A↔B offset.
+        let audio_start_ts_s: Double?
     }
 
     /// Server /pitch response summary. All triangulation fields are optional because
@@ -45,6 +49,8 @@ final class ServerUploader {
         let max_residual_m: Double?
         let peak_z_m: Double?
         let duration_s: Double?
+        let sync_method: String?      // "flash" | "audio" | "mac" (server-reported)
+        let audio_offset_s: Double?   // audio-sync measured B-clock offset in seconds
     }
 
     struct ServerConfig {
@@ -62,38 +68,67 @@ final class ServerUploader {
         self.config = config
     }
 
-    func uploadPitch(_ pitch: PitchPayload, completion: ((Result<PitchUploadResponse, Error>) -> Void)? = nil) {
+    /// Upload one pitch payload to the server.
+    ///
+    /// When `audioFileURL` is non-nil, POSTs `multipart/form-data` with a
+    /// `payload` part (JSON) and an `audio` part (WAV bytes). Otherwise still
+    /// sends multipart with just the `payload` part — the server accepts both.
+    func uploadPitch(
+        _ pitch: PitchPayload,
+        audioFileURL: URL? = nil,
+        completion: ((Result<PitchUploadResponse, Error>) -> Void)? = nil
+    ) {
         guard let base = config.baseURL() else {
-            completion?(.failure(NSError(domain: "ServerUploader", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"])))
+            completion?(.failure(NSError(
+                domain: "ServerUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
+            )))
             return
         }
         let url = base.appendingPathComponent("pitch")
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
+        let payloadData: Data
         do {
-            let body = try JSONEncoder().encode(pitch)
-            request.httpBody = body
+            payloadData = try JSONEncoder().encode(pitch)
         } catch {
             completion?(.failure(error))
             return
         }
 
-        // Spec: do not use background upload; use foreground upload for low latency.
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(
+            "multipart/form-data; boundary=\(boundary)",
+            forHTTPHeaderField: "Content-Type"
+        )
+        request.httpBody = Self.buildMultipartBody(
+            boundary: boundary,
+            payloadJSON: payloadData,
+            audioFileURL: audioFileURL
+        )
+
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 completion?(.failure(error))
                 return
             }
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                let e = NSError(domain: "ServerUploader", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"])
+                let e = NSError(
+                    domain: "ServerUploader",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
+                )
                 completion?(.failure(e))
                 return
             }
             guard let data else {
-                completion?(.failure(NSError(domain: "ServerUploader", code: -2, userInfo: [NSLocalizedDescriptionKey: "Empty response"])))
+                completion?(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "Empty response"]
+                )))
                 return
             }
             do {
@@ -104,6 +139,36 @@ final class ServerUploader {
             }
         }
         task.resume()
+    }
+
+    private static func buildMultipartBody(
+        boundary: String,
+        payloadJSON: Data,
+        audioFileURL: URL?
+    ) -> Data {
+        var body = Data()
+        let boundaryLine = "--\(boundary)\r\n".data(using: .utf8)!
+        let terminator = "\r\n".data(using: .utf8)!
+
+        body.append(boundaryLine)
+        body.append("Content-Disposition: form-data; name=\"payload\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: application/json\r\n\r\n".data(using: .utf8)!)
+        body.append(payloadJSON)
+        body.append(terminator)
+
+        if let audioFileURL,
+           FileManager.default.fileExists(atPath: audioFileURL.path),
+           let audioData = try? Data(contentsOf: audioFileURL) {
+            let filename = audioFileURL.lastPathComponent
+            body.append(boundaryLine)
+            body.append("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+            body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
+            body.append(audioData)
+            body.append(terminator)
+        }
+
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        return body
     }
 
     func fetchStatus(completion: @escaping (Result<[String: Any], Error>) -> Void) {
