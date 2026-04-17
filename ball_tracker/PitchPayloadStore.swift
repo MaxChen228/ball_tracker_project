@@ -1,6 +1,8 @@
 import Foundation
 
-/// Persists pitch payload JSON files locally until upload succeeds.
+/// Persists pitch payload JSON files locally until upload succeeds. A
+/// completed cycle optionally has a companion H.264 .mov clip stored with
+/// the same basename so both travel together through the upload queue.
 final class PitchPayloadStore {
     private let directoryURL: URL
     private let encoder = JSONEncoder()
@@ -14,18 +16,42 @@ final class PitchPayloadStore {
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
     }
 
+    /// Write the payload JSON to disk. If a video clip is supplied, move it
+    /// (preserving the fileURL's extension) alongside with the same basename.
+    /// Callers pass the writer's tmp URL; on success we take ownership and
+    /// any earlier copy at the destination is overwritten.
     @discardableResult
-    func save(_ payload: ServerUploader.PitchPayload) throws -> URL {
+    func save(
+        _ payload: ServerUploader.PitchPayload,
+        videoURL: URL? = nil
+    ) throws -> URL {
         try ensureDirectory()
-        let filename = String(
-            format: "pitch_%06d_%lld.json",
+        let basename = String(
+            format: "pitch_%06d_%lld",
             payload.cycle_number,
             Int64(Date().timeIntervalSince1970 * 1000.0)
         )
-        let url = directoryURL.appendingPathComponent(filename)
+        let jsonURL = directoryURL.appendingPathComponent("\(basename).json")
         let data = try encoder.encode(payload)
-        try data.write(to: url, options: .atomic)
-        return url
+        try data.write(to: jsonURL, options: .atomic)
+
+        if let videoURL {
+            let ext = videoURL.pathExtension.isEmpty ? "mov" : videoURL.pathExtension
+            let destVideoURL = directoryURL.appendingPathComponent("\(basename).\(ext)")
+            try? FileManager.default.removeItem(at: destVideoURL)
+            do {
+                try FileManager.default.moveItem(at: videoURL, to: destVideoURL)
+            } catch {
+                // Best-effort: if move failed (e.g. cross-volume), try copy +
+                // delete source. Keep the JSON — the video is optional in the
+                // upload path, so losing it is degraded but not fatal.
+                if (try? FileManager.default.copyItem(at: videoURL, to: destVideoURL)) != nil {
+                    try? FileManager.default.removeItem(at: videoURL)
+                }
+            }
+        }
+
+        return jsonURL
     }
 
     func listPayloadFiles() throws -> [URL] {
@@ -45,7 +71,34 @@ final class PitchPayloadStore {
         return try JSONDecoder().decode(ServerUploader.PitchPayload.self, from: data)
     }
 
+    /// Return the companion video URL for a JSON payload file if one exists
+    /// on disk. Matches any extension (`.mov`, `.mp4`) against the shared
+    /// basename; returns the first hit.
+    func videoURL(forPayload jsonURL: URL) -> URL? {
+        let basename = jsonURL.deletingPathExtension().lastPathComponent
+        let candidates = ["mov", "mp4", "m4v"]
+        for ext in candidates {
+            let candidate = directoryURL.appendingPathComponent("\(basename).\(ext)")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    /// Remove the JSON payload and any companion video clip in one shot.
     func delete(_ fileURL: URL) {
+        if let video = videoURL(forPayload: fileURL) {
+            try? FileManager.default.removeItem(at: video)
+        }
         try? FileManager.default.removeItem(at: fileURL)
+    }
+
+    /// A fresh temp URL suitable for handing to `ClipRecorder`. Lives under
+    /// the app's tmp dir so AVAssetWriter can drop failed writes without
+    /// polluting Documents; successful clips are moved by `save`.
+    func makeTempVideoURL() -> URL {
+        let name = "clip_\(UUID().uuidString).mov"
+        return FileManager.default.temporaryDirectory.appendingPathComponent(name)
     }
 }

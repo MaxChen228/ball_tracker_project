@@ -71,6 +71,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var pendingPayloadFiles: [URL] = []
     private var isUploadingPayload: Bool = false
 
+    // Per-cycle H.264 clip writer, created on entry to .recording and
+    // finalised when the cycle ends. Phase-1 raw-video experiment: the clip
+    // travels alongside the JSON payload so server-side detection can be
+    // iterated against a canonical source of truth.
+    private var clipRecorder: ClipRecorder?
+
     // Most recently recovered chirp anchor. Used as the `sync_anchor_*`
     // fields on outgoing pitch payloads. Nil until the user completes a
     // 時間校正.
@@ -146,7 +152,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         recorder.onCycleComplete = { [weak self] payload in
             guard let self else { return }
             let enriched = self.enrichedPayload(from: payload)
-            self.persistCompletedCycle(enriched)
+            let finishingClip = self.clipRecorder
+            self.clipRecorder = nil
+            if let finishingClip {
+                finishingClip.finish { [weak self] videoURL in
+                    self?.persistCompletedCycle(enriched, videoURL: videoURL)
+                }
+            } else {
+                self.persistCompletedCycle(enriched, videoURL: nil)
+            }
         }
 
         do {
@@ -229,22 +243,36 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     func exitSyncMode() {
         state = .standby
         recorder.reset()
+        // Tear down the clip writer on the capture queue so we can't race
+        // with an in-flight `append` from captureOutput.
+        processingQueue.async { [weak self] in
+            self?.clipRecorder?.cancel()
+            self?.clipRecorder = nil
+        }
         pendingPayloadFiles.removeAll(keepingCapacity: true)
         isUploadingPayload = false
         warningLabel.isHidden = true
         updateUIForState()
     }
 
-    private func persistCompletedCycle(_ payload: ServerUploader.PitchPayload) {
+    private func persistCompletedCycle(
+        _ payload: ServerUploader.PitchPayload,
+        videoURL: URL?
+    ) {
         do {
-            let fileURL = try payloadStore.save(payload)
+            let fileURL = try payloadStore.save(payload, videoURL: videoURL)
             DispatchQueue.main.async {
                 self.state = .syncWaiting
-                self.lastUploadStatusText = "Cached pitch \(payload.cycle_number)"
+                let suffix = videoURL != nil ? " (+video)" : ""
+                self.lastUploadStatusText = "Cached pitch \(payload.cycle_number)\(suffix)"
                 self.enqueuePayloadForUpload(fileURL)
                 self.updateUIForState()
             }
         } catch {
+            // Even if the JSON save failed, drop any orphan tmp video.
+            if let videoURL {
+                try? FileManager.default.removeItem(at: videoURL)
+            }
             DispatchQueue.main.async {
                 self.lastUploadStatusText = "Cache failed: \(error.localizedDescription)"
                 self.updateUIForState()
@@ -779,6 +807,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     anchorTimestampS: anchorTimestampS,
                     startFrameIndex: currentIndex
                 )
+                startClipRecorder(width: width, height: height)
+                clipRecorder?.append(sampleBuffer: sampleBuffer)
                 state = .recording
                 DispatchQueue.main.async {
                     self.updateUIForState()
@@ -786,10 +816,24 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             }
 
         case .recording:
+            clipRecorder?.append(sampleBuffer: sampleBuffer)
             recorder.handleFrame(frame)
 
         default:
             return
+        }
+    }
+
+    private func startClipRecorder(width: Int, height: Int) {
+        let tmpURL = payloadStore.makeTempVideoURL()
+        let cr = ClipRecorder(outputURL: tmpURL)
+        do {
+            try cr.prepare(width: width, height: height)
+            clipRecorder = cr
+        } catch {
+            // Clip writing is a Phase-1 experiment — if AVAssetWriter rejects
+            // the configuration we degrade to JSON-only and keep recording.
+            clipRecorder = nil
         }
     }
 
@@ -821,7 +865,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             return
         }
 
-        uploader.uploadPitch(payload) { [weak self] result in
+        let videoURL = payloadStore.videoURL(forPayload: fileURL)
+
+        uploader.uploadPitch(payload, videoURL: videoURL) { [weak self] result in
             guard let self else { return }
             DispatchQueue.main.async {
                 var retryAfterFailure = false
