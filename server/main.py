@@ -28,6 +28,7 @@ from triangulate import (
     camera_center_world,
     recover_extrinsics,
     triangulate_rays,
+    undistorted_ray_cam,
 )
 
 logger = logging.getLogger("ball_tracker")
@@ -38,6 +39,9 @@ class IntrinsicsPayload(BaseModel):
     fz: float
     cx: float
     cy: float
+    # OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Optional so old
+    # payloads without distortion still validate.
+    distortion: list[float] | None = None
 
 
 class FramePayload(BaseModel):
@@ -45,6 +49,11 @@ class FramePayload(BaseModel):
     timestamp_s: float
     theta_x_rad: float | None = None
     theta_z_rad: float | None = None
+    # Raw (distorted) ball pixel coords. When present AND the camera's
+    # intrinsics.distortion is present, the server undistorts these instead
+    # of using the angles. Nil when no ball was detected.
+    px: float | None = None
+    py: float | None = None
     ball_detected: bool
 
 
@@ -85,12 +94,54 @@ def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):
 
 
 def _frame_items(p: PitchPayload):
+    """Emit (t_rel_s, theta_x, theta_z, px, py) per valid ball-detected frame.
+
+    A frame is "valid" if either:
+      - theta_x_rad and theta_z_rad are both present, or
+      - px and py are both present.
+    px/py may be None (angles-only fallback) and theta_*_rad may be None
+    (pixels-only). Both must not be None simultaneously.
+    """
     out = []
     for f in p.frames:
-        if f.ball_detected and f.theta_x_rad is not None and f.theta_z_rad is not None:
-            out.append((f.timestamp_s - p.flash_timestamp_s, f.theta_x_rad, f.theta_z_rad))
+        if not f.ball_detected:
+            continue
+        has_angles = f.theta_x_rad is not None and f.theta_z_rad is not None
+        has_pixels = f.px is not None and f.py is not None
+        if not (has_angles or has_pixels):
+            continue
+        out.append(
+            (
+                f.timestamp_s - p.flash_timestamp_s,
+                f.theta_x_rad,
+                f.theta_z_rad,
+                f.px,
+                f.py,
+            )
+        )
     out.sort(key=lambda x: x[0])
     return out
+
+
+def _ray_for_frame(
+    theta_x: float | None,
+    theta_z: float | None,
+    px: float | None,
+    py: float | None,
+    K: np.ndarray,
+    dist_coeffs: list[float] | None,
+) -> np.ndarray:
+    """Choose undistortion path when possible, else fall back to angle path.
+
+    Per-frame per-camera decision: if intrinsics.distortion is present for
+    this camera AND this frame has px/py, undistort. Otherwise use angles.
+    """
+    if dist_coeffs is not None and px is not None and py is not None:
+        return undistorted_ray_cam(px, py, K, np.asarray(dist_coeffs, dtype=float))
+    # Angle fallback requires both angles.
+    if theta_x is None or theta_z is None:
+        raise ValueError("frame has neither usable angles nor pixels")
+    return angle_ray_cam(theta_x, theta_z)
 
 
 def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoint]:
@@ -99,8 +150,10 @@ def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoin
     if b.intrinsics is None or b.homography is None:
         raise ValueError("camera B missing calibration (run Calibrate in iPhone app)")
 
-    _, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
-    _, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
+    K_a, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
+    K_b, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
+    dist_a = a.intrinsics.distortion
+    dist_b = b.intrinsics.distortion
 
     items_a = _frame_items(a)
     items_b = _frame_items(b)
@@ -111,14 +164,14 @@ def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoin
     max_dt = 1.0 / 120.0  # 8ms tolerance at 240fps
 
     results: list[TriangulatedPoint] = []
-    for t_rel, tx_a, tz_a in items_a:
+    for t_rel, tx_a, tz_a, px_a, py_a in items_a:
         idx = int(np.argmin(np.abs(b_times - t_rel)))
         if abs(b_times[idx] - t_rel) > max_dt:
             continue
-        _, tx_b, tz_b = items_b[idx]
+        _, tx_b, tz_b, px_b, py_b = items_b[idx]
 
-        d_a_cam = angle_ray_cam(tx_a, tz_a)
-        d_b_cam = angle_ray_cam(tx_b, tz_b)
+        d_a_cam = _ray_for_frame(tx_a, tz_a, px_a, py_a, K_a, dist_a)
+        d_b_cam = _ray_for_frame(tx_b, tz_b, px_b, py_b, K_b, dist_b)
         d_a_world = R_a.T @ d_a_cam
         d_b_world = R_b.T @ d_b_cam
 
