@@ -18,6 +18,16 @@ final class SettingsViewController: UIViewController {
         var captureWidth: Int           // 1280 or 1920
         var captureHeight: Int          // 720 or 1080
         var captureFps: Int             // 60, 120, 240
+
+        // Manual intrinsics override (e.g. from a ChArUco calibration run).
+        // When enabled, these values are written to the shared fx/fz/cx/cy
+        // UserDefaults keys and Calibration view will NOT overwrite them from
+        // the AVCapture FOV approximation.
+        var manualIntrinsicsEnabled: Bool
+        var manualFx: Double
+        var manualFy: Double            // stored as intrinsic_fz (Swift naming collision, see CLAUDE.md)
+        var manualCx: Double
+        var manualCy: Double
     }
 
     private static let keyServerIP = "server_ip"
@@ -37,6 +47,16 @@ final class SettingsViewController: UIViewController {
     private static let keyCaptureHeight = "capture_height"
     private static let keyCaptureFps = "capture_fps"
 
+    // Manual intrinsics override. If enabled, these values get written to the
+    // shared keys (`intrinsic_fx`, `intrinsic_fz`, `intrinsic_cx`, `intrinsic_cy`)
+    // that BallDetector / ServerUploader already read.
+    private static let keyManualIntrinsicsEnabled = "manual_intrinsics_enabled"
+    static let keyIntrinsicsSource = "intrinsics_source"  // "manual" | "fov"
+    private static let keyIntrinsicFx = "intrinsic_fx"
+    private static let keyIntrinsicFz = "intrinsic_fz"
+    private static let keyIntrinsicCx = "intrinsic_cx"
+    private static let keyIntrinsicCy = "intrinsic_cy"
+
     private let scrollView = UIScrollView()
     private let contentStack = UIStackView()
 
@@ -55,6 +75,12 @@ final class SettingsViewController: UIViewController {
 
     private let captureResolutionControl = UISegmentedControl(items: ["720p", "1080p"])
     private let captureFpsControl = UISegmentedControl(items: ["60", "120", "240"])
+
+    private let manualIntrinsicsSwitch = UISwitch()
+    private let manualFxField = UITextField()
+    private let manualFyField = UITextField()
+    private let manualCxField = UITextField()
+    private let manualCyField = UITextField()
 
     static func loadFromUserDefaults() -> Settings {
         let d = UserDefaults.standard
@@ -86,6 +112,14 @@ final class SettingsViewController: UIViewController {
         let captureHeight = intOrDefault(keyCaptureHeight, defaultValue: 1080)
         let captureFps = intOrDefault(keyCaptureFps, defaultValue: 240)
 
+        let manualEnabled = d.bool(forKey: keyManualIntrinsicsEnabled)
+        // Only surface the 4 intrinsic values when manual mode is on; otherwise
+        // the fields stay blank (the live FOV-derived values still drive BallDetector).
+        let manualFx = manualEnabled ? doubleOrDefault(keyIntrinsicFx, defaultValue: 0) : 0
+        let manualFy = manualEnabled ? doubleOrDefault(keyIntrinsicFz, defaultValue: 0) : 0
+        let manualCx = manualEnabled ? doubleOrDefault(keyIntrinsicCx, defaultValue: 0) : 0
+        let manualCy = manualEnabled ? doubleOrDefault(keyIntrinsicCy, defaultValue: 0) : 0
+
         return Settings(
             serverIP: serverIP,
             serverPort: serverPort,
@@ -96,7 +130,12 @@ final class SettingsViewController: UIViewController {
             flashThresholdMultiplier: flashThresholdMultiplier,
             captureWidth: captureWidth,
             captureHeight: captureHeight,
-            captureFps: captureFps
+            captureFps: captureFps,
+            manualIntrinsicsEnabled: manualEnabled,
+            manualFx: manualFx,
+            manualFy: manualFy,
+            manualCx: manualCx,
+            manualCy: manualCy
         )
     }
 
@@ -153,7 +192,12 @@ final class SettingsViewController: UIViewController {
             flashThresholdMultiplier: doubleValue(flashMultiplierField.text, fallback: current.flashThresholdMultiplier),
             captureWidth: resolution.0,
             captureHeight: resolution.1,
-            captureFps: fps
+            captureFps: fps,
+            manualIntrinsicsEnabled: manualIntrinsicsSwitch.isOn,
+            manualFx: doubleValue(manualFxField.text, fallback: current.manualFx),
+            manualFy: doubleValue(manualFyField.text, fallback: current.manualFy),
+            manualCx: doubleValue(manualCxField.text, fallback: current.manualCx),
+            manualCy: doubleValue(manualCyField.text, fallback: current.manualCy)
         )
 
         Self.saveToUserDefaults(settings)
@@ -193,6 +237,10 @@ final class SettingsViewController: UIViewController {
         configureTextField(vMinField, placeholder: "40", keyboard: .numberPad)
         configureTextField(vMaxField, placeholder: "255", keyboard: .numberPad)
         configureTextField(flashMultiplierField, placeholder: "2.5", keyboard: .decimalPad)
+        configureTextField(manualFxField, placeholder: "fx (e.g. 1600)", keyboard: .decimalPad)
+        configureTextField(manualFyField, placeholder: "fy (e.g. 1600)", keyboard: .decimalPad)
+        configureTextField(manualCxField, placeholder: "cx (e.g. 960)", keyboard: .decimalPad)
+        configureTextField(manualCyField, placeholder: "cy (e.g. 540)", keyboard: .decimalPad)
 
         contentStack.addArrangedSubview(sectionTitle("Server"))
         contentStack.addArrangedSubview(fieldRow(label: "Server IP", field: serverIPField))
@@ -215,6 +263,13 @@ final class SettingsViewController: UIViewController {
         contentStack.addArrangedSubview(sectionTitle("Capture"))
         contentStack.addArrangedSubview(controlRow(label: "Resolution", control: captureResolutionControl))
         contentStack.addArrangedSubview(controlRow(label: "FPS", control: captureFpsControl))
+
+        contentStack.addArrangedSubview(sectionTitle("Intrinsics (override)"))
+        contentStack.addArrangedSubview(controlRow(label: "Use ChArUco values", control: manualIntrinsicsSwitch))
+        contentStack.addArrangedSubview(fieldRow(label: "fx", field: manualFxField))
+        contentStack.addArrangedSubview(fieldRow(label: "fy", field: manualFyField))
+        contentStack.addArrangedSubview(fieldRow(label: "cx", field: manualCxField))
+        contentStack.addArrangedSubview(fieldRow(label: "cy", field: manualCyField))
     }
 
     private func populateFields(from settings: Settings) {
@@ -230,6 +285,12 @@ final class SettingsViewController: UIViewController {
         flashMultiplierField.text = String(settings.flashThresholdMultiplier)
         captureResolutionControl.selectedSegmentIndex = settings.captureHeight >= 1080 ? 1 : 0
         captureFpsControl.selectedSegmentIndex = [60, 120, 240].firstIndex(of: settings.captureFps) ?? 2
+
+        manualIntrinsicsSwitch.isOn = settings.manualIntrinsicsEnabled
+        manualFxField.text = settings.manualFx > 0 ? String(settings.manualFx) : ""
+        manualFyField.text = settings.manualFy > 0 ? String(settings.manualFy) : ""
+        manualCxField.text = settings.manualCx > 0 ? String(settings.manualCx) : ""
+        manualCyField.text = settings.manualCy > 0 ? String(settings.manualCy) : ""
     }
 
     private func configureTextField(_ field: UITextField, placeholder: String, keyboard: UIKeyboardType) {
@@ -322,6 +383,22 @@ final class SettingsViewController: UIViewController {
         d.set(settings.captureWidth, forKey: keyCaptureWidth)
         d.set(settings.captureHeight, forKey: keyCaptureHeight)
         d.set(settings.captureFps, forKey: keyCaptureFps)
+
+        d.set(settings.manualIntrinsicsEnabled, forKey: keyManualIntrinsicsEnabled)
+        if settings.manualIntrinsicsEnabled
+            && settings.manualFx > 0 && settings.manualFy > 0
+            && settings.manualCx > 0 && settings.manualCy > 0 {
+            // Push manual values into the shared intrinsic keys and flag the
+            // source so Calibration view skips the FOV-based overwrite.
+            d.set(settings.manualFx, forKey: keyIntrinsicFx)
+            d.set(settings.manualFy, forKey: keyIntrinsicFz)  // fz ≡ fy (CLAUDE.md)
+            d.set(settings.manualCx, forKey: keyIntrinsicCx)
+            d.set(settings.manualCy, forKey: keyIntrinsicCy)
+            d.set("manual", forKey: keyIntrinsicsSource)
+        } else {
+            // Revert to letting Calibration view refresh from FOV on next Save.
+            d.set("fov", forKey: keyIntrinsicsSource)
+        }
     }
 }
 
