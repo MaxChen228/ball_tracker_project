@@ -64,6 +64,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var serverStatusTextValue: String = "unknown"
     private var isServerReachable: Bool = false
     private var statusPollTimer: Timer?
+    /// Current delay (seconds) used to schedule the next probe after a
+    /// failure. 0 means "next probe uses the base interval" (the post-success
+    /// state). Capped at `maxBackoff`.
+    private var currentBackoff: TimeInterval = 0
+    /// Monotonic token used to ignore stale `/status` responses when a
+    /// manual retry or settings change kicks off a new probe before the
+    /// in-flight one returns.
+    private var probeGeneration: Int = 0
+    private var lastContactAt: Date?
+    private var tickTimer: Timer?
+    private static let maxBackoff: TimeInterval = 60
     private let ballOverlayLayer = CAShapeLayer()
 
     // Payload persistence + upload queue.
@@ -97,6 +108,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let warningLabel = UILabel()
     private let chirpDebugLabel = UILabel()
     private let trackingButton = UIButton(type: .system)
+    private let lastContactLabel = UILabel()
+    private let testConnectionButton = UIButton(type: .system)
 
     // UserDefaults keys for calibration-derived intrinsics.
     private static let keyHorizontalFovRad = "horizontal_fov_rad"
@@ -192,6 +205,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     @objc private func openSettings() {
         let vc = SettingsViewController()
+        vc.onDismiss = { [weak self] in
+            self?.applyUpdatedSettings()
+        }
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .formSheet
         present(nav, animated: true)
@@ -199,8 +215,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        reloadSettingsFromUserDefaults()
-        reloadBallDetectorWithLatestIntrinsics()
+        applyUpdatedSettings()
         updateUIForState()
     }
 
@@ -215,8 +230,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        statusPollTimer?.invalidate()
-        statusPollTimer = nil
+        stopStatusPolling()
         displayLink?.isPaused = true
         if state == .timeSyncWaiting {
             cancelTimeSync()
@@ -548,23 +562,80 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         chirpDebugLabel.textColor = color
     }
 
+    /// Kicks off health-probe cadence: resets backoff and probes immediately.
+    /// Settings diffing lives in `applyUpdatedSettings`, not here — polling
+    /// is now pure connection health.
     private func startStatusPolling() {
         statusPollTimer?.invalidate()
-        statusPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.pollServerStatus()
-        }
-        statusPollTimer?.tolerance = 0.5
-        pollServerStatus()
+        statusPollTimer = nil
+        currentBackoff = 0
+        probeServerNow()
+        startTickTimer()
     }
 
-    private func pollServerStatus() {
+    private func stopStatusPolling() {
+        statusPollTimer?.invalidate()
+        statusPollTimer = nil
+        stopTickTimer()
+    }
+
+    private func scheduleNextProbe(after delay: TimeInterval) {
+        statusPollTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            self?.probeServerNow()
+        }
+        timer.tolerance = max(0.5, delay * 0.1)
+        statusPollTimer = timer
+    }
+
+    private func probeServerNow() {
+        probeGeneration += 1
+        let gen = probeGeneration
+        serverStatusTextValue = "checking…"
+        updateUIForState()
+        uploader.fetchStatus { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, gen == self.probeGeneration else { return }
+                switch result {
+                case .success(let dict):
+                    self.isServerReachable = true
+                    self.serverStatusTextValue = (dict["state"] as? String) ?? "reachable"
+                    self.lastContactAt = Date()
+                    self.currentBackoff = 0
+                    self.scheduleNextProbe(after: self.settings.pollInterval)
+                case .failure:
+                    self.isServerReachable = false
+                    self.serverStatusTextValue = "offline"
+                    let base = self.settings.pollInterval
+                    let next = self.currentBackoff == 0 ? base : min(Self.maxBackoff, self.currentBackoff * 2)
+                    self.currentBackoff = next
+                    self.scheduleNextProbe(after: next)
+                }
+                self.updateLastContactLabel()
+                self.updateUIForState()
+            }
+        }
+    }
+
+    @objc private func onTapTestConnection() {
+        currentBackoff = 0
+        probeServerNow()
+    }
+
+    /// Settings-dismiss callback. Re-diffs UserDefaults and reconfigures
+    /// anything settings-driven. Replaces the old per-poll diffing.
+    private func applyUpdatedSettings() {
         let latest = SettingsViewController.loadFromUserDefaults()
-        let serverChanged = latest.serverIP != settings.serverIP || latest.serverPort != settings.serverPort
+        let serverChanged = latest.serverIP != settings.serverIP
+            || latest.serverPort != settings.serverPort
         let formatChanged = latest.captureWidth != settings.captureWidth
             || latest.captureHeight != settings.captureHeight
             || latest.captureFps != settings.captureFps
         let chirpThresholdChanged = latest.chirpThreshold != settings.chirpThreshold
+        let pollIntervalChanged = latest.pollInterval != settings.pollInterval
+
         settings = latest
+
         if serverChanged {
             serverConfig = ServerUploader.ServerConfig(serverIP: latest.serverIP, serverPort: latest.serverPort)
             uploader = ServerUploader(config: serverConfig)
@@ -575,24 +646,47 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         if chirpThresholdChanged {
             chirpDetector?.setThreshold(Float(latest.chirpThreshold))
         }
-        uploader.fetchStatus { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                switch result {
-                case .success(let dict):
-                    self.isServerReachable = true
-                    if let state = dict["state"] as? String {
-                        self.serverStatusTextValue = state
-                    } else {
-                        self.serverStatusTextValue = "reachable"
-                    }
-                case .failure:
-                    self.isServerReachable = false
-                    self.serverStatusTextValue = "offline"
-                }
-                self.updateUIForState()
-            }
+        recorder?.setCameraId(latest.cameraRole)
+        reloadBallDetectorWithLatestIntrinsics()
+
+        if serverChanged || pollIntervalChanged {
+            // New endpoint or new cadence — invalidate in-flight probe, reset
+            // backoff, and re-probe immediately so the HUD reflects reality.
+            currentBackoff = 0
+            probeServerNow()
         }
+    }
+
+    private func startTickTimer() {
+        tickTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateLastContactLabel()
+        }
+        timer.tolerance = 0.5
+        tickTimer = timer
+        updateLastContactLabel()
+    }
+
+    private func stopTickTimer() {
+        tickTimer?.invalidate()
+        tickTimer = nil
+    }
+
+    private func updateLastContactLabel() {
+        guard let ts = lastContactAt else {
+            lastContactLabel.text = "Last contact: —"
+            return
+        }
+        let s = Int(Date().timeIntervalSince(ts))
+        let text: String
+        if s < 60 {
+            text = "\(s)s ago"
+        } else if s < 3600 {
+            text = "\(s / 60)m \(s % 60)s ago"
+        } else {
+            text = "\(s / 3600)h ago"
+        }
+        lastContactLabel.text = "Last contact: \(text)"
     }
 
     private func setupUI() {
@@ -608,6 +702,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         styleLabel(fpsLabel, size: 18, weight: .medium)
         styleLabel(uploadStatusLabel, size: 18, weight: .medium)
         styleLabel(lastResultLabel, size: 17, weight: .medium)
+        styleLabel(lastContactLabel, size: 15, weight: .regular)
+        lastContactLabel.textColor = .lightGray
+        lastContactLabel.text = "Last contact: —"
         lastResultLabel.textColor = .systemGreen
         styleLabel(warningLabel, size: 22, weight: .bold)
         warningLabel.textColor = .systemYellow
@@ -632,10 +729,22 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         row1.axis = .horizontal
         row1.alignment = .center
 
-        let row2 = UIStackView(arrangedSubviews: [serverStatusDot, serverStatusLabel, fpsLabel])
+        testConnectionButton.setTitle("Test", for: .normal)
+        testConnectionButton.setTitleColor(.white, for: .normal)
+        testConnectionButton.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.85)
+        testConnectionButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
+        testConnectionButton.layer.cornerRadius = 8
+        testConnectionButton.contentEdgeInsets = UIEdgeInsets(top: 4, left: 10, bottom: 4, right: 10)
+        testConnectionButton.addTarget(self, action: #selector(onTapTestConnection), for: .touchUpInside)
+
+        let row2 = UIStackView(arrangedSubviews: [serverStatusDot, serverStatusLabel, fpsLabel, testConnectionButton])
         row2.axis = .horizontal
         row2.spacing = 8
         row2.alignment = .center
+
+        let row2b = UIStackView(arrangedSubviews: [lastContactLabel])
+        row2b.axis = .horizontal
+        row2b.alignment = .center
 
         let row3 = UIStackView(arrangedSubviews: [uploadStatusLabel])
         row3.axis = .horizontal
@@ -655,6 +764,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         statusContainer.layer.cornerRadius = 12
         statusContainer.addArrangedSubview(row1)
         statusContainer.addArrangedSubview(row2)
+        statusContainer.addArrangedSubview(row2b)
         statusContainer.addArrangedSubview(row3)
         statusContainer.addArrangedSubview(row4)
         statusContainer.addArrangedSubview(warningLabel)
@@ -1014,11 +1124,4 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         )
     }
 
-    private func reloadSettingsFromUserDefaults() {
-        settings = SettingsViewController.loadFromUserDefaults()
-        serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: settings.serverPort)
-        uploader = ServerUploader(config: serverConfig)
-        if recorder == nil { return }
-        recorder.setCameraId(settings.cameraRole)
-    }
 }
