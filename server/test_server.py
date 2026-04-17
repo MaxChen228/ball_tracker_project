@@ -132,7 +132,8 @@ def test_triangulate_sweeps_ball_path():
 
     payload_a = build_payload("A", R_a, t_a, H_a)
     payload_b = build_payload("B", R_b, t_b, H_b)
-    points = triangulate_cycle(payload_a, payload_b)
+    points, sync_method = triangulate_cycle(payload_a, payload_b)
+    assert sync_method == "flash"  # no mac_clock_offset_s in payloads
     assert len(points) == len(path)
     recovered = np.array([[p.x_m, p.y_m, p.z_m] for p in points])
     np.testing.assert_allclose(recovered, path, atol=1e-6)
