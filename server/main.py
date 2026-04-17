@@ -1,14 +1,21 @@
 """FastAPI ingest + triangulation server for ball_tracker iPhone app.
 
 Endpoints:
-  GET  /status          — health + received-cycle summary
-  POST /pitch           — ingest one iPhone pitch payload (multipart/form-data
-                          with required `payload` JSON part and optional
-                          `video` MOV/MP4 clip)
-  GET  /chirp.wav       — reference sync chirp for the 時間校正 step
-  GET  /results/latest  — latest fully-triangulated cycle
-  GET  /results/{cycle} — specific cycle result
-  POST /reset           — clear all cached state
+  GET  /                       — events index (HTML table → /viewer/{cycle})
+  GET  /status                 — health + received-cycle summary
+  POST /pitch                  — ingest one iPhone pitch payload (multipart/form-data
+                                  with required `payload` JSON part and optional
+                                  `video` MOV/MP4 clip)
+  GET  /chirp.wav              — reference sync chirp for the 時間校正 step
+  GET  /events                 — one row per cycle: cameras, status, counts,
+                                  received_at, triangulation stats
+  GET  /results/latest         — latest fully-triangulated cycle
+  GET  /results/{cycle}        — specific cycle result
+  GET  /reconstruction/{cycle} — 3D scene (cameras + rays + optional
+                                  triangulated trajectory) as JSON
+  GET  /viewer/{cycle}         — same scene rendered as a self-contained
+                                  Plotly HTML page
+  POST /reset                  — clear all cached state
 """
 from __future__ import annotations
 
@@ -25,7 +32,7 @@ from typing import Any
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field, ValidationError
 
 from triangulate import (
@@ -321,6 +328,91 @@ class State:
         with self._lock:
             return self.results.get(cycle)
 
+    def pitches_for_cycle(self, cycle: int) -> dict[str, PitchPayload]:
+        """Snapshot of all pitches currently stored for `cycle`, keyed by
+        camera_id. Returns an empty dict if the cycle has not been seen."""
+        with self._lock:
+            return {
+                cam_id: p
+                for (cam_id, c), p in self.pitches.items()
+                if c == cycle
+            }
+
+    def events(self) -> list[dict[str, Any]]:
+        """Summary row per cycle for the events panel — one entry per
+        cycle_number, collapsing A/B uploads into a single event.
+
+        `received_at` is derived from the pitch file's mtime so we don't have
+        to extend the Pydantic payload with server-side timestamps.
+        """
+        with self._lock:
+            cycles = sorted({c for _, c in self.pitches.keys()})
+            events: list[dict[str, Any]] = []
+            for cyc in cycles:
+                cams_present = sorted(
+                    cam for (cam, c) in self.pitches.keys() if c == cyc
+                )
+                cam_frame_counts: dict[str, int] = {}
+                latest_mtime: float | None = None
+                for cam in cams_present:
+                    pitch = self.pitches[(cam, cyc)]
+                    cam_frame_counts[cam] = sum(
+                        1 for f in pitch.frames if f.ball_detected
+                    )
+                    path = self._pitch_path(cam, cyc)
+                    try:
+                        mtime = path.stat().st_mtime
+                    except FileNotFoundError:
+                        mtime = None
+                    if mtime is not None and (
+                        latest_mtime is None or mtime > latest_mtime
+                    ):
+                        latest_mtime = mtime
+
+                result = self.results.get(cyc)
+                n_triangulated = len(result.points) if result is not None else 0
+                error = result.error if result is not None else None
+
+                if error:
+                    status = "error"
+                elif len(cams_present) >= 2 and n_triangulated > 0:
+                    status = "paired"
+                elif len(cams_present) >= 2:
+                    status = "paired_no_points"
+                else:
+                    status = "partial"
+
+                peak_z: float | None = None
+                mean_res: float | None = None
+                duration: float | None = None
+                if result is not None and result.points:
+                    zs = [p.z_m for p in result.points]
+                    peak_z = float(max(zs))
+                    mean_res = float(
+                        sum(p.residual_m for p in result.points)
+                        / len(result.points)
+                    )
+                    ts = [p.t_rel_s for p in result.points]
+                    duration = float(ts[-1] - ts[0])
+
+                events.append(
+                    {
+                        "cycle_number": cyc,
+                        "cameras": cams_present,
+                        "status": status,
+                        "received_at": latest_mtime,
+                        "n_ball_frames": cam_frame_counts,
+                        "n_triangulated": n_triangulated,
+                        "peak_z_m": peak_z,
+                        "mean_residual_m": mean_res,
+                        "duration_s": duration,
+                        "error": error,
+                    }
+                )
+            # Latest events first — matches the UI expectation.
+            events.sort(key=lambda e: e["cycle_number"], reverse=True)
+            return events
+
     def reset(self, purge_disk: bool = False) -> None:
         with self._lock:
             self.pitches.clear()
@@ -496,6 +588,47 @@ def results_cycle(cycle: int) -> CycleResult:
     if r is None:
         raise HTTPException(404, f"cycle {cycle} not found")
     return r
+
+
+def _scene_for_cycle(cycle: int):
+    """Shared fetch+build for the two scene endpoints. Raises 404 when no
+    pitches have been received for this cycle yet."""
+    # Local imports so the FastAPI app still boots when plotly is missing
+    # (the JSON endpoint doesn't need it; the HTML one will surface a 500).
+    from reconstruct import build_scene
+
+    pitches = state.pitches_for_cycle(cycle)
+    if not pitches:
+        raise HTTPException(404, f"cycle {cycle} has no pitches")
+    result = state.get(cycle)
+    triangulated = result.points if result is not None else []
+    return build_scene(cycle, pitches, triangulated)
+
+
+@app.get("/reconstruction/{cycle}")
+def reconstruction(cycle: int) -> dict[str, Any]:
+    scene = _scene_for_cycle(cycle)
+    return scene.to_dict()
+
+
+@app.get("/viewer/{cycle}", response_class=HTMLResponse)
+def viewer(cycle: int) -> HTMLResponse:
+    from viewer import render_scene_html
+
+    scene = _scene_for_cycle(cycle)
+    return HTMLResponse(render_scene_html(scene))
+
+
+@app.get("/events")
+def events() -> list[dict[str, Any]]:
+    return state.events()
+
+
+@app.get("/", response_class=HTMLResponse)
+def events_index() -> HTMLResponse:
+    from viewer import render_events_index_html
+
+    return HTMLResponse(render_events_index_html(state.events()))
 
 
 @app.post("/reset")

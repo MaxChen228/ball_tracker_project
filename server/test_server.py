@@ -162,12 +162,9 @@ def test_triangulate_sweeps_ball_path():
 
 
 # --------------------------- API smoke tests ---------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _reset_state(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
-    yield
+# Note: the autouse `_reset_main_state` fixture in conftest.py replaces
+# `main.state` with a tmp_path-backed State before each test so these
+# cases can hit the global app without leaking files across runs.
 
 
 def test_status_initially_idle():
