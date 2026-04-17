@@ -998,6 +998,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             timestamp_s: timestampS,
             theta_x_rad: detection.thetaXRad,
             theta_z_rad: detection.thetaZRad,
+            px: detection.centroidX,
+            py: detection.centroidY,
             ball_detected: detection.ballDetected
         )
 
@@ -1160,11 +1162,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             d.object(forKey: Self.keyIntrinsicCx) != nil,
             d.object(forKey: Self.keyIntrinsicCy) != nil
         {
+            // Distortion is only attached when 5 valid doubles are stored;
+            // otherwise server will fall back to the angle path per-frame.
+            var distortion: [Double]? = nil
+            if let arr = d.array(forKey: "intrinsic_distortion") as? [Double], arr.count == 5 {
+                distortion = arr
+            }
             intrinsics = ServerUploader.IntrinsicsPayload(
                 fx: d.double(forKey: Self.keyIntrinsicFx),
                 fz: d.double(forKey: Self.keyIntrinsicFz),
                 cx: d.double(forKey: Self.keyIntrinsicCx),
-                cy: d.double(forKey: Self.keyIntrinsicCy)
+                cy: d.double(forKey: Self.keyIntrinsicCy),
+                distortion: distortion
             )
         }
         let homography = d.array(forKey: "homography_3x3") as? [Double]
