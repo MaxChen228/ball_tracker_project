@@ -1,6 +1,7 @@
 """End-to-end triangulation test + FastAPI ingest smoke test."""
 from __future__ import annotations
 
+import cv2
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -13,6 +14,7 @@ from triangulate import (
     camera_center_world,
     recover_extrinsics,
     triangulate_rays,
+    undistorted_ray_cam,
 )
 
 
@@ -242,3 +244,155 @@ def test_persistence_reloads_state_across_process_restart(tmp_path):
     assert abs(pt.x_m - P_true[0]) < 1e-6
     assert abs(pt.y_m - P_true[1]) < 1e-6
     assert abs(pt.z_m - P_true[2]) < 1e-6
+
+
+# --------------------------- Distortion plumbing -----------------------------
+
+
+def _project_pixels(K: np.ndarray, R: np.ndarray, t: np.ndarray, P_world: np.ndarray):
+    """Project a world point to (undistorted) pixel coords (u, v)."""
+    P_cam = R @ P_world + t
+    u = K[0, 0] * P_cam[0] / P_cam[2] + K[0, 2]
+    v = K[1, 1] * P_cam[1] / P_cam[2] + K[1, 2]
+    return float(u), float(v)
+
+
+def test_zero_distortion_with_pixels_matches_angle_path():
+    """Posting px/py + distortion=[0]*5 must give identical triangulation to angles-only."""
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    # Two different path points across two cycles to exercise the plumbing.
+    path = np.array([[0.1, 0.3, 1.0], [-0.2, 0.8, 1.4]])
+    zero_dist = [0.0, 0.0, 0.0, 0.0, 0.0]
+
+    def make_body(cam_id, P_true, R, t, H, cycle, *, with_pixels: bool):
+        tx, tz = _project(K, R, t, P_true)
+        u, v = _project_pixels(K, R, t, P_true)
+        body = {
+            "camera_id": cam_id,
+            "flash_frame_index": 0,
+            "flash_timestamp_s": 0.0,
+            "cycle_number": cycle,
+            "frames": [
+                {
+                    "frame_index": 0,
+                    "timestamp_s": 0.0,
+                    "theta_x_rad": tx,
+                    "theta_z_rad": tz,
+                    "ball_detected": True,
+                    **({"px": u, "py": v} if with_pixels else {}),
+                },
+            ],
+            "intrinsics": {
+                "fx": K[0, 0],
+                "fz": K[1, 1],
+                "cx": K[0, 2],
+                "cy": K[1, 2],
+                **({"distortion": zero_dist} if with_pixels else {}),
+            },
+            "homography": H.flatten().tolist(),
+        }
+        return body
+
+    client = TestClient(app)
+
+    # Cycle 1: angles only.
+    client.post("/pitch", json=make_body("A", path[0], R_a, t_a, H_a, 1, with_pixels=False))
+    client.post("/pitch", json=make_body("B", path[0], R_b, t_b, H_b, 1, with_pixels=False))
+    pt_angles = client.get("/results/1").json()["points"][0]
+
+    # Cycle 2: pixels + zero distortion.
+    client.post("/pitch", json=make_body("A", path[1], R_a, t_a, H_a, 2, with_pixels=True))
+    client.post("/pitch", json=make_body("B", path[1], R_b, t_b, H_b, 2, with_pixels=True))
+    pt_pixels = client.get("/results/2").json()["points"][0]
+
+    # Each cycle should recover its own true point.
+    assert abs(pt_angles["x_m"] - path[0][0]) < 1e-6
+    assert abs(pt_angles["y_m"] - path[0][1]) < 1e-6
+    assert abs(pt_angles["z_m"] - path[0][2]) < 1e-6
+    assert abs(pt_pixels["x_m"] - path[1][0]) < 1e-6
+    assert abs(pt_pixels["y_m"] - path[1][1]) < 1e-6
+    assert abs(pt_pixels["z_m"] - path[1][2]) < 1e-6
+
+    # And for the SAME point, both paths must agree bit-for-bit (numerically):
+    # reproject path[0] through pixel path and compare.
+    client.post("/pitch", json=make_body("A", path[0], R_a, t_a, H_a, 3, with_pixels=True))
+    client.post("/pitch", json=make_body("B", path[0], R_b, t_b, H_b, 3, with_pixels=True))
+    pt_pixels_same = client.get("/results/3").json()["points"][0]
+    assert abs(pt_pixels_same["x_m"] - pt_angles["x_m"]) < 1e-9
+    assert abs(pt_pixels_same["y_m"] - pt_angles["y_m"]) < 1e-9
+    assert abs(pt_pixels_same["z_m"] - pt_angles["z_m"]) < 1e-9
+
+
+def test_nonzero_distortion_recovers_true_point():
+    """Pre-distort pixels via cv2.projectPoints, send them + coeffs back, verify recovery."""
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    P_true = np.array([0.15, 0.55, 1.3])
+
+    # Realistic smartphone-lens distortion magnitude.
+    dist = np.array([0.12, -0.25, 0.001, -0.0015, 0.08], dtype=np.float64)
+
+    def project_distorted(R: np.ndarray, t: np.ndarray) -> tuple[float, float]:
+        # cv2.projectPoints expects rvec+tvec (object→camera extrinsic).
+        rvec, _ = cv2.Rodrigues(R)
+        tvec = t.reshape(3, 1)
+        pts_obj = P_true.reshape(1, 1, 3).astype(np.float64)
+        proj, _ = cv2.projectPoints(pts_obj, rvec, tvec, K.astype(np.float64), dist)
+        u, v = float(proj[0, 0, 0]), float(proj[0, 0, 1])
+        return u, v
+
+    u_a, v_a = project_distorted(R_a, t_a)
+    u_b, v_b = project_distorted(R_b, t_b)
+
+    # Sanity: with non-zero distortion the distorted pixels differ from the
+    # pinhole projection, so angle-only triangulation would be wrong.
+    u_a_pin, v_a_pin = _project_pixels(K, R_a, t_a, P_true)
+    assert abs(u_a - u_a_pin) > 1e-3 or abs(v_a - v_a_pin) > 1e-3
+
+    def make_body(cam_id, u, v, H):
+        return {
+            "camera_id": cam_id,
+            "flash_frame_index": 0,
+            "flash_timestamp_s": 0.0,
+            "cycle_number": 99,
+            "frames": [
+                {
+                    "frame_index": 0,
+                    "timestamp_s": 0.0,
+                    "px": u,
+                    "py": v,
+                    "ball_detected": True,
+                },
+            ],
+            "intrinsics": {
+                "fx": K[0, 0],
+                "fz": K[1, 1],
+                "cx": K[0, 2],
+                "cy": K[1, 2],
+                "distortion": dist.tolist(),
+            },
+            "homography": H.flatten().tolist(),
+        }
+
+    client = TestClient(app)
+    r1 = client.post("/pitch", json=make_body("A", u_a, v_a, H_a))
+    assert r1.status_code == 200
+    r2 = client.post("/pitch", json=make_body("B", u_b, v_b, H_b))
+    assert r2.status_code == 200
+    assert r2.json()["triangulated_points"] == 1
+
+    body = client.get("/results/99").json()
+    pt = body["points"][0]
+    assert abs(pt["x_m"] - P_true[0]) < 1e-4
+    assert abs(pt["y_m"] - P_true[1]) < 1e-4
+    assert abs(pt["z_m"] - P_true[2]) < 1e-4
+
+
+def test_undistorted_ray_cam_zero_dist_matches_angle_ray():
+    """Unit: undistorted_ray_cam with zero coeffs equals angle_ray_cam derived from the pixel."""
+    K = build_K(1600.0, 1600.0, 960.0, 540.0)
+    u, v = 1234.5, 678.9
+    theta_x = np.arctan2(u - K[0, 2], K[0, 0])
+    theta_z = np.arctan2(v - K[1, 2], K[1, 1])
+    d_angle = angle_ray_cam(theta_x, theta_z)
+    d_pix = undistorted_ray_cam(u, v, K, np.zeros(5))
+    np.testing.assert_allclose(d_pix, d_angle, atol=1e-12)

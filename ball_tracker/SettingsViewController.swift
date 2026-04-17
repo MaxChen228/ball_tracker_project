@@ -28,6 +28,9 @@ final class SettingsViewController: UIViewController {
         var manualFy: Double            // stored as intrinsic_fz (Swift naming collision, see CLAUDE.md)
         var manualCx: Double
         var manualCy: Double
+        // OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Empty means
+        // no distortion is persisted and the payload omits the field.
+        var manualDistortion: [Double]
     }
 
     private static let keyServerIP = "server_ip"
@@ -56,6 +59,7 @@ final class SettingsViewController: UIViewController {
     private static let keyIntrinsicFz = "intrinsic_fz"
     private static let keyIntrinsicCx = "intrinsic_cx"
     private static let keyIntrinsicCy = "intrinsic_cy"
+    private static let keyIntrinsicDistortion = "intrinsic_distortion"
 
     private let scrollView = UIScrollView()
     private let contentStack = UIStackView()
@@ -81,6 +85,7 @@ final class SettingsViewController: UIViewController {
     private let manualFyField = UITextField()
     private let manualCxField = UITextField()
     private let manualCyField = UITextField()
+    private let manualDistortionField = UITextField()
 
     static func loadFromUserDefaults() -> Settings {
         let d = UserDefaults.standard
@@ -119,6 +124,12 @@ final class SettingsViewController: UIViewController {
         let manualFy = manualEnabled ? doubleOrDefault(keyIntrinsicFz, defaultValue: 0) : 0
         let manualCx = manualEnabled ? doubleOrDefault(keyIntrinsicCx, defaultValue: 0) : 0
         let manualCy = manualEnabled ? doubleOrDefault(keyIntrinsicCy, defaultValue: 0) : 0
+        let manualDistortion: [Double]
+        if manualEnabled, let arr = d.array(forKey: keyIntrinsicDistortion) as? [Double], arr.count == 5 {
+            manualDistortion = arr
+        } else {
+            manualDistortion = []
+        }
 
         return Settings(
             serverIP: serverIP,
@@ -135,7 +146,8 @@ final class SettingsViewController: UIViewController {
             manualFx: manualFx,
             manualFy: manualFy,
             manualCx: manualCx,
-            manualCy: manualCy
+            manualCy: manualCy,
+            manualDistortion: manualDistortion
         )
     }
 
@@ -197,11 +209,31 @@ final class SettingsViewController: UIViewController {
             manualFx: doubleValue(manualFxField.text, fallback: current.manualFx),
             manualFy: doubleValue(manualFyField.text, fallback: current.manualFy),
             manualCx: doubleValue(manualCxField.text, fallback: current.manualCx),
-            manualCy: doubleValue(manualCyField.text, fallback: current.manualCy)
+            manualCy: doubleValue(manualCyField.text, fallback: current.manualCy),
+            manualDistortion: Self.parseDistortion(manualDistortionField.text)
         )
 
         Self.saveToUserDefaults(settings)
         dismiss(animated: true)
+    }
+
+    /// Parse a comma-separated string of 5 doubles (e.g. "0.12, -0.34, 0.001, -0.002, 0.05").
+    /// Returns [] on any parse failure or non-5-count.
+    static func parseDistortion(_ text: String?) -> [Double] {
+        guard let text else { return [] }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return [] }
+        let parts = trimmed.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard parts.count == 5 else { return [] }
+        var out: [Double] = []
+        out.reserveCapacity(5)
+        for p in parts {
+            guard let v = Double(p) else { return [] }
+            out.append(v)
+        }
+        return out
     }
 
     private func setupUI() {
@@ -241,6 +273,11 @@ final class SettingsViewController: UIViewController {
         configureTextField(manualFyField, placeholder: "fy (e.g. 1600)", keyboard: .decimalPad)
         configureTextField(manualCxField, placeholder: "cx (e.g. 960)", keyboard: .decimalPad)
         configureTextField(manualCyField, placeholder: "cy (e.g. 540)", keyboard: .decimalPad)
+        configureTextField(
+            manualDistortionField,
+            placeholder: "k1, k2, p1, p2, k3",
+            keyboard: .numbersAndPunctuation
+        )
 
         contentStack.addArrangedSubview(sectionTitle("Server"))
         contentStack.addArrangedSubview(fieldRow(label: "Server IP", field: serverIPField))
@@ -270,6 +307,7 @@ final class SettingsViewController: UIViewController {
         contentStack.addArrangedSubview(fieldRow(label: "fy", field: manualFyField))
         contentStack.addArrangedSubview(fieldRow(label: "cx", field: manualCxField))
         contentStack.addArrangedSubview(fieldRow(label: "cy", field: manualCyField))
+        contentStack.addArrangedSubview(fieldRow(label: "Distortion (5 coeffs)", field: manualDistortionField))
     }
 
     private func populateFields(from settings: Settings) {
@@ -291,6 +329,13 @@ final class SettingsViewController: UIViewController {
         manualFyField.text = settings.manualFy > 0 ? String(settings.manualFy) : ""
         manualCxField.text = settings.manualCx > 0 ? String(settings.manualCx) : ""
         manualCyField.text = settings.manualCy > 0 ? String(settings.manualCy) : ""
+        if settings.manualDistortion.count == 5 {
+            manualDistortionField.text = settings.manualDistortion
+                .map { String(format: "%.6g", $0) }
+                .joined(separator: ", ")
+        } else {
+            manualDistortionField.text = ""
+        }
     }
 
     private func configureTextField(_ field: UITextField, placeholder: String, keyboard: UIKeyboardType) {
@@ -398,6 +443,15 @@ final class SettingsViewController: UIViewController {
         } else {
             // Revert to letting Calibration view refresh from FOV on next Save.
             d.set("fov", forKey: keyIntrinsicsSource)
+        }
+
+        // Distortion: persist only when manual intrinsics are on AND exactly
+        // 5 coeffs parsed. Otherwise clear the key so payloads omit the field
+        // (FOV-calibrated runs must not carry stale distortion).
+        if settings.manualIntrinsicsEnabled && settings.manualDistortion.count == 5 {
+            d.set(settings.manualDistortion, forKey: keyIntrinsicDistortion)
+        } else {
+            d.removeObject(forKey: keyIntrinsicDistortion)
         }
     }
 }

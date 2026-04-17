@@ -77,15 +77,19 @@ final class CalibrationViewController: UIViewController {
     private var latestMarkers: [(id: Int, corners: [CGPoint])] = []
     private var latestPixelSize: CGSize = .zero
 
-    /// 4 ArUco markers (DICT_4X4_50, IDs 0-3) centered on the four plate
-    /// pentagon corners FL / FR / RS / LS (back tip skipped). User prints
-    /// small ~3-5 cm squares and tapes them so each marker's centre is on
-    /// the corresponding plate vertex.
+    /// 6 ArUco markers (DICT_4X4_50, IDs 0-5) centered on home-plate
+    /// landmarks: FL / FR / RS / LS / BT / MF. Extra points (BT = back tip,
+    /// MF = mid-front edge) give better front-back spread and a centreline
+    /// anchor so RANSAC in `findHomography` can tolerate 1-2 misreads.
+    /// User prints small ~3-5 cm squares and tapes them so each marker's
+    /// centre is on the corresponding plate vertex.
     private static let markerWorldPoints: [Int: (Double, Double)] = [
         0: (-plateWidthM / 2.0, 0.0),                 // FL
         1: ( plateWidthM / 2.0, 0.0),                 // FR
         2: ( plateWidthM / 2.0, plateShoulderYM),     // RS
         3: (-plateWidthM / 2.0, plateShoulderYM),     // LS
+        4: ( 0.0,                plateTipYM),         // BT (back tip)
+        5: ( 0.0,                0.0),                // MF (mid-front edge)
     ]
 
     // Real home-plate pentagon vertices in meters. Axes: X = left/right,
@@ -601,9 +605,16 @@ final class CalibrationViewController: UIViewController {
 
         let required = Array(Self.markerWorldPoints.keys).sorted()
         let byId = Dictionary(uniqueKeysWithValues: markers.map { ($0.id, $0) })
+        let detected = required.filter { byId[$0] != nil }
         let missing = required.filter { byId[$0] == nil }
-        if !missing.isEmpty {
-            showAlert(title: "無法自動校正", message: "缺少 marker IDs: \(missing)。請確認 4 張 ArUco 都清晰可見。")
+        // Allow up to 1 missing marker out of 6 — RANSAC in findHomography
+        // still has >=5 correspondences to solve with outlier rejection.
+        let minRequired = max(4, required.count - 1)
+        if detected.count < minRequired {
+            showAlert(
+                title: "無法自動校正",
+                message: "只偵測到 \(detected.count)/\(required.count) 個 marker（至少需 \(minRequired)）。缺少 IDs: \(missing)。"
+            )
             return
         }
         guard pixelSize.width > 0, pixelSize.height > 0 else {
@@ -611,12 +622,12 @@ final class CalibrationViewController: UIViewController {
             return
         }
 
-        // Use each marker's centre as the correspondence to its plate vertex.
-        let worldValues: [NSValue] = required.map {
+        // Use each detected marker's centre as the correspondence to its plate vertex.
+        let worldValues: [NSValue] = detected.map {
             let (x, y) = Self.markerWorldPoints[$0]!
             return NSValue(cgPoint: CGPoint(x: x, y: y))
         }
-        let imageValues: [NSValue] = required.map {
+        let imageValues: [NSValue] = detected.map {
             let m = byId[$0]!
             let cx = (m.corners[0].x + m.corners[1].x + m.corners[2].x + m.corners[3].x) * 0.25
             let cy = (m.corners[0].y + m.corners[1].y + m.corners[2].y + m.corners[3].y) * 0.25
