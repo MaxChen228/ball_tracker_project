@@ -1,8 +1,6 @@
 """End-to-end triangulation test + FastAPI ingest smoke test."""
 from __future__ import annotations
 
-import json
-
 import cv2
 import numpy as np
 import pytest
@@ -20,16 +18,9 @@ from triangulate import (
 )
 
 
-def _post_pitch(client, body: dict, audio_bytes: bytes | None = None):
-    """POST /pitch as multipart/form-data. `body` is the JSON payload."""
-    data = {"payload": json.dumps(body)}
-    if audio_bytes is not None:
-        return client.post(
-            "/pitch",
-            data=data,
-            files={"audio": ("clap.wav", audio_bytes, "audio/wav")},
-        )
-    return client.post("/pitch", data=data)
+def _post_pitch(client, body: dict):
+    """POST /pitch as application/json."""
+    return client.post("/pitch", json=body)
 
 
 def _look_at(pos: np.ndarray, target: np.ndarray, up: np.ndarray = np.array([0.0, 0.0, 1.0])):
@@ -146,8 +137,8 @@ def test_triangulate_sweeps_ball_path():
             )
         return PitchPayload(
             camera_id=cam_id,
-            flash_frame_index=0,
-            flash_timestamp_s=0.0,
+            sync_anchor_frame_index=0,
+            sync_anchor_timestamp_s=0.0,
             cycle_number=1,
             frames=frames,
             intrinsics=IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
@@ -156,8 +147,7 @@ def test_triangulate_sweeps_ball_path():
 
     payload_a = build_payload("A", R_a, t_a, H_a)
     payload_b = build_payload("B", R_b, t_b, H_b)
-    points, sync_method = triangulate_cycle(payload_a, payload_b)
-    assert sync_method == "flash"  # no mac_clock_offset_s in payloads
+    points = triangulate_cycle(payload_a, payload_b)
     assert len(points) == len(path)
     recovered = np.array([[p.x_m, p.y_m, p.z_m] for p in points])
     np.testing.assert_allclose(recovered, path, atol=1e-6)
@@ -190,8 +180,8 @@ def test_post_pitch_single_camera_then_both_triangulates():
     def make_body(cam_id, tx, tz, R, t, H):
         return {
             "camera_id": cam_id,
-            "flash_frame_index": 0,
-            "flash_timestamp_s": 0.0,
+            "sync_anchor_frame_index": 0,
+            "sync_anchor_timestamp_s": 0.0,
             "cycle_number": 7,
             "frames": [
                 {"frame_index": 0, "timestamp_s": 0.0,
@@ -238,8 +228,8 @@ def test_persistence_reloads_state_across_process_restart(tmp_path):
     def make_body(cam_id, tx, tz, H):
         return main.PitchPayload(
             camera_id=cam_id,
-            flash_frame_index=0,
-            flash_timestamp_s=0.0,
+            sync_anchor_frame_index=0,
+            sync_anchor_timestamp_s=0.0,
             cycle_number=42,
             frames=[
                 main.FramePayload(
@@ -284,8 +274,8 @@ def test_zero_distortion_with_pixels_matches_angle_path():
         u, v = _project_pixels(K, R, t, P_true)
         body = {
             "camera_id": cam_id,
-            "flash_frame_index": 0,
-            "flash_timestamp_s": 0.0,
+            "sync_anchor_frame_index": 0,
+            "sync_anchor_timestamp_s": 0.0,
             "cycle_number": cycle,
             "frames": [
                 {
@@ -366,8 +356,8 @@ def test_nonzero_distortion_recovers_true_point():
     def make_body(cam_id, u, v, H):
         return {
             "camera_id": cam_id,
-            "flash_frame_index": 0,
-            "flash_timestamp_s": 0.0,
+            "sync_anchor_frame_index": 0,
+            "sync_anchor_timestamp_s": 0.0,
             "cycle_number": 99,
             "frames": [
                 {

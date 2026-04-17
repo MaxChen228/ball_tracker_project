@@ -13,16 +13,6 @@ final class SettingsViewController: UIViewController {
         var vMin: Int
         var vMax: Int
 
-        var flashThresholdMultiplier: Double
-
-        /// Time-sync strategy.
-        /// - "flash": legacy torch-based anchor, recovered on-device.
-        /// - "audio": full-cycle audio recorded with each pitch, server-side
-        ///   cross-correlation for sub-ms offset.
-        /// - "mac":  NTP-style round-trip to the shared Mac server for
-        ///   per-phone clock-offset, applied server-side before pairing.
-        var syncMode: String            // "flash" | "audio" | "mac"
-
         var captureWidth: Int           // 1280 or 1920
         var captureHeight: Int          // 720 or 1080
         var captureFps: Int             // 60, 120, 240
@@ -52,9 +42,6 @@ final class SettingsViewController: UIViewController {
     private static let keyVMin = "v_min"
     private static let keyVMax = "v_max"
 
-    private static let keyFlashMultiplier = "flash_threshold_multiplier"
-    private static let keySyncMode = "sync_mode"
-
     private static let keyCaptureWidth = "capture_width"
     private static let keyCaptureHeight = "capture_height"
     private static let keyCaptureFps = "capture_fps"
@@ -83,9 +70,6 @@ final class SettingsViewController: UIViewController {
     private let sMaxField = UITextField()
     private let vMinField = UITextField()
     private let vMaxField = UITextField()
-
-    private let flashMultiplierField = UITextField()
-    private let syncModeControl = UISegmentedControl(items: ["Flash", "Audio", "Mac"])
 
     private let captureResolutionControl = UISegmentedControl(items: ["720p", "1080p"])
     private let captureFpsControl = UISegmentedControl(items: ["60", "120", "240"])
@@ -121,23 +105,11 @@ final class SettingsViewController: UIViewController {
         let vMin = intOrDefault(keyVMin, defaultValue: 40)
         let vMax = intOrDefault(keyVMax, defaultValue: 255)
 
-        let flashThresholdMultiplier = doubleOrDefault(keyFlashMultiplier, defaultValue: 1.8)
-
-        let rawSyncMode = d.string(forKey: keySyncMode) ?? "flash"
-        let syncMode: String
-        switch rawSyncMode {
-        case "audio": syncMode = "audio"
-        case "mac":   syncMode = "mac"
-        default:      syncMode = "flash"
-        }
-
         let captureWidth = intOrDefault(keyCaptureWidth, defaultValue: 1920)
         let captureHeight = intOrDefault(keyCaptureHeight, defaultValue: 1080)
         let captureFps = intOrDefault(keyCaptureFps, defaultValue: 240)
 
         let manualEnabled = d.bool(forKey: keyManualIntrinsicsEnabled)
-        // Only surface the 4 intrinsic values when manual mode is on; otherwise
-        // the fields stay blank (the live FOV-derived values still drive BallDetector).
         let manualFx = manualEnabled ? doubleOrDefault(keyIntrinsicFx, defaultValue: 0) : 0
         let manualFy = manualEnabled ? doubleOrDefault(keyIntrinsicFz, defaultValue: 0) : 0
         let manualCx = manualEnabled ? doubleOrDefault(keyIntrinsicCx, defaultValue: 0) : 0
@@ -156,8 +128,6 @@ final class SettingsViewController: UIViewController {
             hMin: hMin, hMax: hMax,
             sMin: sMin, sMax: sMax,
             vMin: vMin, vMax: vMax,
-            flashThresholdMultiplier: flashThresholdMultiplier,
-            syncMode: syncMode,
             captureWidth: captureWidth,
             captureHeight: captureHeight,
             captureFps: captureFps,
@@ -220,14 +190,6 @@ final class SettingsViewController: UIViewController {
             sMax: intValue(sMaxField.text, fallback: current.sMax),
             vMin: intValue(vMinField.text, fallback: current.vMin),
             vMax: intValue(vMaxField.text, fallback: current.vMax),
-            flashThresholdMultiplier: doubleValue(flashMultiplierField.text, fallback: current.flashThresholdMultiplier),
-            syncMode: {
-                switch syncModeControl.selectedSegmentIndex {
-                case 1: return "audio"
-                case 2: return "mac"
-                default: return "flash"
-                }
-            }(),
             captureWidth: resolution.0,
             captureHeight: resolution.1,
             captureFps: fps,
@@ -236,30 +198,11 @@ final class SettingsViewController: UIViewController {
             manualFy: doubleValue(manualFyField.text, fallback: current.manualFy),
             manualCx: doubleValue(manualCxField.text, fallback: current.manualCx),
             manualCy: doubleValue(manualCyField.text, fallback: current.manualCy),
-            manualDistortion: Self.parseDistortion(manualDistortionField.text)
+            manualDistortion: parseDistortion(manualDistortionField.text) ?? current.manualDistortion
         )
 
         Self.saveToUserDefaults(settings)
         dismiss(animated: true)
-    }
-
-    /// Parse a comma-separated string of 5 doubles (e.g. "0.12, -0.34, 0.001, -0.002, 0.05").
-    /// Returns [] on any parse failure or non-5-count.
-    static func parseDistortion(_ text: String?) -> [Double] {
-        guard let text else { return [] }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return [] }
-        let parts = trimmed.split(separator: ",").map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        guard parts.count == 5 else { return [] }
-        var out: [Double] = []
-        out.reserveCapacity(5)
-        for p in parts {
-            guard let v = Double(p) else { return [] }
-            out.append(v)
-        }
-        return out
     }
 
     private func setupUI() {
@@ -294,16 +237,11 @@ final class SettingsViewController: UIViewController {
         configureTextField(sMaxField, placeholder: "255", keyboard: .numberPad)
         configureTextField(vMinField, placeholder: "40", keyboard: .numberPad)
         configureTextField(vMaxField, placeholder: "255", keyboard: .numberPad)
-        configureTextField(flashMultiplierField, placeholder: "1.8", keyboard: .decimalPad)
         configureTextField(manualFxField, placeholder: "fx (e.g. 1600)", keyboard: .decimalPad)
         configureTextField(manualFyField, placeholder: "fy (e.g. 1600)", keyboard: .decimalPad)
         configureTextField(manualCxField, placeholder: "cx (e.g. 960)", keyboard: .decimalPad)
         configureTextField(manualCyField, placeholder: "cy (e.g. 540)", keyboard: .decimalPad)
-        configureTextField(
-            manualDistortionField,
-            placeholder: "k1, k2, p1, p2, k3",
-            keyboard: .numbersAndPunctuation
-        )
+        configureTextField(manualDistortionField, placeholder: "k1,k2,p1,p2,k3", keyboard: .numbersAndPunctuation)
 
         contentStack.addArrangedSubview(sectionTitle("Server"))
         contentStack.addArrangedSubview(fieldRow(label: "Server IP", field: serverIPField))
@@ -320,10 +258,6 @@ final class SettingsViewController: UIViewController {
         contentStack.addArrangedSubview(fieldRow(label: "V Min", field: vMinField))
         contentStack.addArrangedSubview(fieldRow(label: "V Max", field: vMaxField))
 
-        contentStack.addArrangedSubview(sectionTitle("Timing"))
-        contentStack.addArrangedSubview(controlRow(label: "Sync Method", control: syncModeControl))
-        contentStack.addArrangedSubview(fieldRow(label: "Flash Threshold", field: flashMultiplierField))
-
         contentStack.addArrangedSubview(sectionTitle("Capture"))
         contentStack.addArrangedSubview(controlRow(label: "Resolution", control: captureResolutionControl))
         contentStack.addArrangedSubview(controlRow(label: "FPS", control: captureFpsControl))
@@ -334,7 +268,7 @@ final class SettingsViewController: UIViewController {
         contentStack.addArrangedSubview(fieldRow(label: "fy", field: manualFyField))
         contentStack.addArrangedSubview(fieldRow(label: "cx", field: manualCxField))
         contentStack.addArrangedSubview(fieldRow(label: "cy", field: manualCyField))
-        contentStack.addArrangedSubview(fieldRow(label: "Distortion (5 coeffs)", field: manualDistortionField))
+        contentStack.addArrangedSubview(fieldRow(label: "distortion", field: manualDistortionField))
     }
 
     private func populateFields(from settings: Settings) {
@@ -347,12 +281,6 @@ final class SettingsViewController: UIViewController {
         sMaxField.text = String(settings.sMax)
         vMinField.text = String(settings.vMin)
         vMaxField.text = String(settings.vMax)
-        flashMultiplierField.text = String(settings.flashThresholdMultiplier)
-        switch settings.syncMode {
-        case "audio": syncModeControl.selectedSegmentIndex = 1
-        case "mac":   syncModeControl.selectedSegmentIndex = 2
-        default:      syncModeControl.selectedSegmentIndex = 0
-        }
         captureResolutionControl.selectedSegmentIndex = settings.captureHeight >= 1080 ? 1 : 0
         captureFpsControl.selectedSegmentIndex = [60, 120, 240].firstIndex(of: settings.captureFps) ?? 2
 
@@ -361,13 +289,9 @@ final class SettingsViewController: UIViewController {
         manualFyField.text = settings.manualFy > 0 ? String(settings.manualFy) : ""
         manualCxField.text = settings.manualCx > 0 ? String(settings.manualCx) : ""
         manualCyField.text = settings.manualCy > 0 ? String(settings.manualCy) : ""
-        if settings.manualDistortion.count == 5 {
-            manualDistortionField.text = settings.manualDistortion
-                .map { String(format: "%.6g", $0) }
-                .joined(separator: ", ")
-        } else {
-            manualDistortionField.text = ""
-        }
+        manualDistortionField.text = settings.manualDistortion.isEmpty
+            ? ""
+            : settings.manualDistortion.map { String($0) }.joined(separator: ",")
     }
 
     private func configureTextField(_ field: UITextField, placeholder: String, keyboard: UIKeyboardType) {
@@ -422,9 +346,16 @@ final class SettingsViewController: UIViewController {
         return value
     }
 
-    private func nonEmpty(_ text: String?, fallback: String) -> String {
-        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return fallback }
-        return text
+    /// Parses a comma-separated 5-tuple of doubles. Returns nil for empty or
+    /// malformed input; callers fall back to the existing persisted value.
+    private func parseDistortion(_ text: String?) -> [Double]? {
+        guard let raw = text?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return []  // explicit empty → clear
+        }
+        let parts = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 5 else { return nil }
+        let values = parts.compactMap { Double($0) }
+        return values.count == 5 ? values : nil
     }
 
     /// Accept pasted URLs like `http://10.2.248.10:8765/status` and keep only the host.
@@ -456,8 +387,6 @@ final class SettingsViewController: UIViewController {
         d.set(settings.sMax, forKey: keySMax)
         d.set(settings.vMin, forKey: keyVMin)
         d.set(settings.vMax, forKey: keyVMax)
-        d.set(settings.flashThresholdMultiplier, forKey: keyFlashMultiplier)
-        d.set(settings.syncMode, forKey: keySyncMode)
         d.set(settings.captureWidth, forKey: keyCaptureWidth)
         d.set(settings.captureHeight, forKey: keyCaptureHeight)
         d.set(settings.captureFps, forKey: keyCaptureFps)
@@ -466,26 +395,19 @@ final class SettingsViewController: UIViewController {
         if settings.manualIntrinsicsEnabled
             && settings.manualFx > 0 && settings.manualFy > 0
             && settings.manualCx > 0 && settings.manualCy > 0 {
-            // Push manual values into the shared intrinsic keys and flag the
-            // source so Calibration view skips the FOV-based overwrite.
             d.set(settings.manualFx, forKey: keyIntrinsicFx)
             d.set(settings.manualFy, forKey: keyIntrinsicFz)  // fz ≡ fy (CLAUDE.md)
             d.set(settings.manualCx, forKey: keyIntrinsicCx)
             d.set(settings.manualCy, forKey: keyIntrinsicCy)
             d.set("manual", forKey: keyIntrinsicsSource)
+            if settings.manualDistortion.count == 5 {
+                d.set(settings.manualDistortion, forKey: keyIntrinsicDistortion)
+            } else {
+                d.removeObject(forKey: keyIntrinsicDistortion)
+            }
         } else {
-            // Revert to letting Calibration view refresh from FOV on next Save.
             d.set("fov", forKey: keyIntrinsicsSource)
-        }
-
-        // Distortion: persist only when manual intrinsics are on AND exactly
-        // 5 coeffs parsed. Otherwise clear the key so payloads omit the field
-        // (FOV-calibrated runs must not carry stale distortion).
-        if settings.manualIntrinsicsEnabled && settings.manualDistortion.count == 5 {
-            d.set(settings.manualDistortion, forKey: keyIntrinsicDistortion)
-        } else {
             d.removeObject(forKey: keyIntrinsicDistortion)
         }
     }
 }
-

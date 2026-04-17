@@ -1,19 +1,19 @@
 import Foundation
 
 /// iOS uploader responsible for sending one iPhone pitch payload to the server.
-/// Spec:
+///
+/// Wire format:
 ///   POST http://{server_ip}:{port}/pitch
-///   body is JSON:
-///     { camera_id, flash_frame_index, flash_timestamp_s, cycle_number, frames[] }
+///   application/json body, encoded from `PitchPayload`.
 final class ServerUploader {
     struct FramePayload: Codable {
         let frame_index: Int
         let timestamp_s: Double
         let theta_x_rad: Double?
         let theta_z_rad: Double?
-        // Raw (distorted) ball pixel coords. When present and paired with
-        // intrinsics.distortion, the server undistorts these directly for
-        // triangulation. Nil when no ball detected.
+        /// Raw (distorted) ball pixel coords. When present and paired with
+        /// `intrinsics.distortion`, the server undistorts these for
+        /// triangulation. Nil when no ball was detected.
         let px: Double?
         let py: Double?
         let ball_detected: Bool
@@ -24,34 +24,30 @@ final class ServerUploader {
         let fz: Double
         let cx: Double
         let cy: Double
-        // OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Nil when
-        // no ChArUco calibration was imported for this camera.
+        /// OpenCV 5-coefficient distortion `[k1, k2, p1, p2, k3]`. Nil when
+        /// no ChArUco calibration has been imported for this camera.
         let distortion: [Double]?
     }
 
     struct PitchPayload: Codable {
         let camera_id: String
-        let flash_frame_index: Int
-        let flash_timestamp_s: Double
+        /// Shared time anchor for A/B pairing, recovered from an audio-chirp
+        /// matched-filter hit during the 時間校正 step. `frame_index` has no
+        /// meaningful value for an audio anchor (set to 0); the server pairs
+        /// by `timestamp_s` alone. Kept separate for legibility and for
+        /// potential future anchors (e.g. visual markers).
+        let sync_anchor_frame_index: Int
+        let sync_anchor_timestamp_s: Double
         let cycle_number: Int
         let frames: [FramePayload]
         let intrinsics: IntrinsicsPayload?
         let homography: [Double]?
         let image_width_px: Int?
         let image_height_px: Int?
-        /// Session-clock timestamp of the first audio sample in the sidecar
-        /// WAV, when syncMode == "audio". Server combines this with the
-        /// measured sample-lag from cross-correlation to recover A↔B offset.
-        let audio_start_ts_s: Double?
-        /// Mac-sync clock offset: phone_monotonic_clock - server_monotonic_clock (seconds).
-        /// Server applies: aligned_ts = frame.timestamp_s + mac_clock_offset_s
-        /// to convert frame timestamps from phone clock to server clock.
-        /// Populated only when sync_mode == "mac" and MacSyncClient has a valid estimate.
-        let mac_clock_offset_s: Double?
     }
 
-    /// Server /pitch response summary. All triangulation fields are optional because
-    /// they're only populated when both A and B have been received for the cycle.
+    /// Server `/pitch` response summary. Triangulation fields are optional
+    /// because they're only populated once both A and B for a cycle arrive.
     struct PitchUploadResponse: Codable {
         let ok: Bool
         let cycle: Int
@@ -62,8 +58,6 @@ final class ServerUploader {
         let max_residual_m: Double?
         let peak_z_m: Double?
         let duration_s: Double?
-        let sync_method: String?      // "flash" | "audio" | "mac" (server-reported)
-        let audio_offset_s: Double?   // audio-sync measured B-clock offset in seconds
     }
 
     struct ServerConfig {
@@ -81,14 +75,8 @@ final class ServerUploader {
         self.config = config
     }
 
-    /// Upload one pitch payload to the server.
-    ///
-    /// When `audioFileURL` is non-nil, POSTs `multipart/form-data` with a
-    /// `payload` part (JSON) and an `audio` part (WAV bytes). Otherwise still
-    /// sends multipart with just the `payload` part — the server accepts both.
     func uploadPitch(
         _ pitch: PitchPayload,
-        audioFileURL: URL? = nil,
         completion: ((Result<PitchUploadResponse, Error>) -> Void)? = nil
     ) {
         guard let base = config.baseURL() else {
@@ -101,26 +89,15 @@ final class ServerUploader {
         }
         let url = base.appendingPathComponent("pitch")
 
-        let payloadData: Data
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         do {
-            payloadData = try JSONEncoder().encode(pitch)
+            request.httpBody = try JSONEncoder().encode(pitch)
         } catch {
             completion?(.failure(error))
             return
         }
-
-        let boundary = "Boundary-\(UUID().uuidString)"
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue(
-            "multipart/form-data; boundary=\(boundary)",
-            forHTTPHeaderField: "Content-Type"
-        )
-        request.httpBody = Self.buildMultipartBody(
-            boundary: boundary,
-            payloadJSON: payloadData,
-            audioFileURL: audioFileURL
-        )
 
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
@@ -128,12 +105,11 @@ final class ServerUploader {
                 return
             }
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                let e = NSError(
+                completion?(.failure(NSError(
                     domain: "ServerUploader",
                     code: http.statusCode,
                     userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
-                )
-                completion?(.failure(e))
+                )))
                 return
             }
             guard let data else {
@@ -154,39 +130,13 @@ final class ServerUploader {
         task.resume()
     }
 
-    private static func buildMultipartBody(
-        boundary: String,
-        payloadJSON: Data,
-        audioFileURL: URL?
-    ) -> Data {
-        var body = Data()
-        let boundaryLine = "--\(boundary)\r\n".data(using: .utf8)!
-        let terminator = "\r\n".data(using: .utf8)!
-
-        body.append(boundaryLine)
-        body.append("Content-Disposition: form-data; name=\"payload\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: application/json\r\n\r\n".data(using: .utf8)!)
-        body.append(payloadJSON)
-        body.append(terminator)
-
-        if let audioFileURL,
-           FileManager.default.fileExists(atPath: audioFileURL.path),
-           let audioData = try? Data(contentsOf: audioFileURL) {
-            let filename = audioFileURL.lastPathComponent
-            body.append(boundaryLine)
-            body.append("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
-            body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
-            body.append(audioData)
-            body.append(terminator)
-        }
-
-        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
-        return body
-    }
-
     func fetchStatus(completion: @escaping (Result<[String: Any], Error>) -> Void) {
         guard let base = config.baseURL() else {
-            completion(.failure(NSError(domain: "ServerUploader", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"])))
+            completion(.failure(NSError(
+                domain: "ServerUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
+            )))
             return
         }
         let url = base.appendingPathComponent("status")
@@ -197,12 +147,19 @@ final class ServerUploader {
                 return
             }
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                let e = NSError(domain: "ServerUploader", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"])
-                completion(.failure(e))
+                completion(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
+                )))
                 return
             }
             guard let data else {
-                completion(.failure(NSError(domain: "ServerUploader", code: -2, userInfo: [NSLocalizedDescriptionKey: "Empty response"])))
+                completion(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "Empty response"]
+                )))
                 return
             }
             do {
@@ -210,7 +167,11 @@ final class ServerUploader {
                 if let dict = obj as? [String: Any] {
                     completion(.success(dict))
                 } else {
-                    completion(.failure(NSError(domain: "ServerUploader", code: -3, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON shape"])))
+                    completion(.failure(NSError(
+                        domain: "ServerUploader",
+                        code: -3,
+                        userInfo: [NSLocalizedDescriptionKey: "Invalid JSON shape"]
+                    )))
                 }
             } catch {
                 completion(.failure(error))
@@ -219,4 +180,3 @@ final class ServerUploader {
         task.resume()
     }
 }
-

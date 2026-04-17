@@ -2,28 +2,30 @@
 
 Endpoints:
   GET  /status          — health + received-cycle summary
-  POST /pitch           — ingest one iPhone pitch payload
+  POST /pitch           — ingest one iPhone pitch payload (JSON)
+  GET  /chirp.wav       — reference sync chirp for the 時間校正 step
   GET  /results/latest  — latest fully-triangulated cycle
   GET  /results/{cycle} — specific cycle result
   POST /reset           — clear all cached state
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 import socket
-import time
+import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 
-from audio_sync import compute_audio_offset
 from triangulate import (
     angle_ray_cam,
     build_K,
@@ -41,8 +43,9 @@ class IntrinsicsPayload(BaseModel):
     fz: float
     cx: float
     cy: float
-    # OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Optional so old
-    # payloads without distortion still validate.
+    # OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Optional so
+    # payloads without distortion still validate and fall back to the angle
+    # path.
     distortion: list[float] | None = None
 
 
@@ -61,22 +64,18 @@ class FramePayload(BaseModel):
 
 class PitchPayload(BaseModel):
     camera_id: str
-    flash_frame_index: int
-    flash_timestamp_s: float
+    # Shared time anchor for A/B pairing, recovered from an audio-chirp
+    # matched-filter hit on the 時間校正 step. Server uses
+    # `sync_anchor_timestamp_s` as the per-cycle clock origin and pairs
+    # frames within an 8 ms window of the relative time.
+    sync_anchor_frame_index: int
+    sync_anchor_timestamp_s: float
     cycle_number: int
     frames: list[FramePayload]
     intrinsics: IntrinsicsPayload | None = None
     homography: list[float] | None = None
     image_width_px: int | None = None
     image_height_px: int | None = None
-    # Mac-sync clock offset: phone_monotonic_clock - server_monotonic_clock (seconds).
-    # Server applies: aligned_ts = frame.timestamp_s - mac_clock_offset_s
-    # to convert phone timestamps into server clock for cross-camera pairing.
-    mac_clock_offset_s: float | None = None
-    # Audio-sync anchor: session-clock PTS of the first sample in the sidecar
-    # WAV. Combined with the correlation peak lag this recovers the A↔B clock
-    # offset. Populated only when syncMode == "audio".
-    audio_start_ts_s: float | None = None
 
 
 class TriangulatedPoint(BaseModel):
@@ -93,10 +92,6 @@ class CycleResult(BaseModel):
     camera_b_received: bool
     points: list[TriangulatedPoint] = []
     error: str | None = None
-    sync_method: str = "flash"  # "flash" | "mac" | "audio"
-    # Measured A↔B clock offset when sync_method == "audio" (B − A, seconds
-    # — add to B frame timestamps to express them in A's clock).
-    audio_offset_s: float | None = None
 
 
 def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):
@@ -115,8 +110,8 @@ def _ray_for_frame(
     K: np.ndarray,
     dist_coeffs: list[float] | None,
 ) -> np.ndarray:
-    """Per-frame per-camera decision: if intrinsics.distortion and px/py are
-    both present, undistort the pixel. Otherwise fall back to the angle ray."""
+    """Per-frame ray choice. Prefer undistorting raw pixels if available,
+    otherwise fall back to the angle ray computed on-device."""
     if dist_coeffs is not None and px is not None and py is not None:
         return undistorted_ray_cam(px, py, K, np.asarray(dist_coeffs, dtype=float))
     if theta_x is None or theta_z is None:
@@ -124,62 +119,51 @@ def _ray_for_frame(
     return angle_ray_cam(theta_x, theta_z)
 
 
-def _valid_frame_tuple(f: FramePayload) -> bool:
+def _valid_frame(f: FramePayload) -> bool:
     has_angles = f.theta_x_rad is not None and f.theta_z_rad is not None
     has_pixels = f.px is not None and f.py is not None
     return f.ball_detected and (has_angles or has_pixels)
 
 
-def _frame_items_flash(p: PitchPayload):
-    """5-tuple `(t_rel, θx, θz, px, py)` using flash-relative time."""
+def _frame_items(p: PitchPayload):
+    """Ball-bearing frames as `(t_rel, θx, θz, px, py)`, sorted by
+    anchor-relative time. `t_rel = timestamp_s − sync_anchor_timestamp_s`."""
+    anchor = p.sync_anchor_timestamp_s
     out = [
-        (f.timestamp_s - p.flash_timestamp_s, f.theta_x_rad, f.theta_z_rad, f.px, f.py)
-        for f in p.frames if _valid_frame_tuple(f)
+        (f.timestamp_s - anchor, f.theta_x_rad, f.theta_z_rad, f.px, f.py)
+        for f in p.frames if _valid_frame(f)
     ]
     out.sort(key=lambda x: x[0])
     return out
 
 
-def _frame_items_mac(p: PitchPayload):
-    """5-tuple aligned to server clock via `mac_clock_offset_s`
-    (= phone_clock − server_clock, so aligned = phone_ts − offset)."""
-    offset = p.mac_clock_offset_s or 0.0
-    out = [
-        (f.timestamp_s - offset, f.theta_x_rad, f.theta_z_rad, f.px, f.py)
-        for f in p.frames if _valid_frame_tuple(f)
-    ]
-    out.sort(key=lambda x: x[0])
-    return out
+def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoint]:
+    """Pair A and B frames within an 8 ms window of anchor-relative time and
+    run ray-midpoint triangulation. Requires intrinsics + homography on both
+    cameras."""
+    if a.intrinsics is None or a.homography is None:
+        raise ValueError("camera A missing calibration (run Calibrate in iPhone app)")
+    if b.intrinsics is None or b.homography is None:
+        raise ValueError("camera B missing calibration (run Calibrate in iPhone app)")
 
+    K_a, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
+    K_b, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
 
-def _frame_items_shifted(p: PitchPayload, ts_shift: float = 0.0):
-    """5-tuple with raw session-clock timestamps shifted by `ts_shift`
-    (used for audio-sync: shift B's frames by delta = clockA − clockB)."""
-    out = [
-        (f.timestamp_s + ts_shift, f.theta_x_rad, f.theta_z_rad, f.px, f.py)
-        for f in p.frames if _valid_frame_tuple(f)
-    ]
-    out.sort(key=lambda x: x[0])
-    return out
-
-
-def _do_triangulate(
-    items_a: list, items_b: list,
-    K_a: "np.ndarray", R_a: "np.ndarray", C_a: "np.ndarray", dist_a: list[float] | None,
-    K_b: "np.ndarray", R_b: "np.ndarray", C_b: "np.ndarray", dist_b: list[float] | None,
-) -> list[TriangulatedPoint]:
-    """Pairing + ray triangulation. Each camera independently picks the
-    undistortion or angle ray path via `_ray_for_frame`."""
+    items_a = _frame_items(a)
+    items_b = _frame_items(b)
     if not items_a or not items_b:
         return []
 
     b_times = np.array([x[0] for x in items_b])
     max_dt = 1.0 / 120.0  # 8 ms tolerance at 240 fps
 
+    dist_a = a.intrinsics.distortion
+    dist_b = b.intrinsics.distortion
+
     results: list[TriangulatedPoint] = []
-    for t_ref, tx_a, tz_a, px_a, py_a in items_a:
-        idx = int(np.argmin(np.abs(b_times - t_ref)))
-        if abs(b_times[idx] - t_ref) > max_dt:
+    for t_rel, tx_a, tz_a, px_a, py_a in items_a:
+        idx = int(np.argmin(np.abs(b_times - t_rel)))
+        if abs(b_times[idx] - t_rel) > max_dt:
             continue
         _, tx_b, tz_b, px_b, py_b = items_b[idx]
 
@@ -191,7 +175,7 @@ def _do_triangulate(
         P, gap = triangulate_rays(C_a, d_a_world, C_b, d_b_world)
         results.append(
             TriangulatedPoint(
-                t_rel_s=t_ref,
+                t_rel_s=t_rel,
                 x_m=float(P[0]),
                 y_m=float(P[1]),
                 z_m=float(P[2]),
@@ -199,55 +183,6 @@ def _do_triangulate(
             )
         )
     return results
-
-
-def triangulate_cycle(
-    a: PitchPayload,
-    b: PitchPayload,
-    audio_offset_s: float | None = None,
-) -> tuple[list[TriangulatedPoint], str]:
-    """Returns (points, sync_method) where sync_method is 'mac' | 'audio' |
-    'flash'. Priority order: mac > audio > flash.
-
-    - `mac`: both payloads carry `mac_clock_offset_s` from NTP-style sync.
-    - `audio`: caller pre-computed A↔B cross-correlation offset; pass it in
-      as `audio_offset_s` (= clockA − clockB).
-    - `flash`: degraded fallback — pair on per-camera time-since-flash.
-    """
-    if a.intrinsics is None or a.homography is None:
-        raise ValueError("camera A missing calibration (run Calibrate in iPhone app)")
-    if b.intrinsics is None or b.homography is None:
-        raise ValueError("camera B missing calibration (run Calibrate in iPhone app)")
-
-    K_a, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
-    K_b, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
-    dist_a = a.intrinsics.distortion
-    dist_b = b.intrinsics.distortion
-
-    use_mac = (a.mac_clock_offset_s is not None) and (b.mac_clock_offset_s is not None)
-    use_audio = (not use_mac) and (audio_offset_s is not None)
-
-    if use_mac:
-        items_a = _frame_items_mac(a)
-        items_b = _frame_items_mac(b)
-        sync_method = "mac"
-    elif use_audio:
-        # Shift B's frames by audio_offset_s (= clockA − clockB), putting
-        # A and B on the same time base. A itself is unshifted.
-        items_a = _frame_items_shifted(a, ts_shift=0.0)
-        items_b = _frame_items_shifted(b, ts_shift=audio_offset_s or 0.0)
-        sync_method = "audio"
-    else:
-        items_a = _frame_items_flash(a)
-        items_b = _frame_items_flash(b)
-        sync_method = "flash"
-
-    points = _do_triangulate(
-        items_a, items_b,
-        K_a, R_a, C_a, dist_a,
-        K_b, R_b, C_b, dist_b,
-    )
-    return points, sync_method
 
 
 _DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
@@ -268,33 +203,8 @@ class State:
     def _pitch_path(self, camera_id: str, cycle: int) -> Path:
         return self._pitch_dir / f"cycle_{cycle:06d}_{camera_id}.json"
 
-    def _audio_path(self, camera_id: str, cycle: int) -> Path:
-        return self._pitch_dir / f"cycle_{cycle:06d}_{camera_id}.wav"
-
     def _result_path(self, cycle: int) -> Path:
         return self._result_dir / f"cycle_{cycle:06d}.json"
-
-    def _maybe_audio_offset(self, a: PitchPayload, b: PitchPayload) -> float | None:
-        """Cross-correlate A and B WAVs if both are present with anchors.
-        Returns delta_s = clockA − clockB (add to B frame ts to align to A)."""
-        if a.audio_start_ts_s is None or b.audio_start_ts_s is None:
-            return None
-        a_wav = self._audio_path(a.camera_id, a.cycle_number)
-        b_wav = self._audio_path(b.camera_id, b.cycle_number)
-        if not (a_wav.exists() and b_wav.exists()):
-            return None
-        try:
-            delta, _peak = compute_audio_offset(
-                a_wav, a.audio_start_ts_s,
-                b_wav, b.audio_start_ts_s,
-            )
-            return delta
-        except Exception as e:
-            logger.warning(
-                "audio offset compute failed for cycle %d: %s",
-                a.cycle_number, e
-            )
-            return None
 
     def _load_from_disk(self) -> None:
         for path in sorted(self._pitch_dir.glob("cycle_*.json")):
@@ -317,12 +227,7 @@ class State:
             )
             if a is not None and b is not None:
                 try:
-                    audio_offset = self._maybe_audio_offset(a, b)
-                    result.points, result.sync_method = triangulate_cycle(
-                        a, b, audio_offset_s=audio_offset
-                    )
-                    if result.sync_method == "audio":
-                        result.audio_offset_s = audio_offset
+                    result.points = triangulate_cycle(a, b)
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
             self.results[cycle] = result
@@ -340,19 +245,13 @@ class State:
         tmp.write_text(payload)
         tmp.replace(path)
 
-    def record(
-        self,
-        pitch: PitchPayload,
-        audio_bytes: bytes | None = None,
-    ) -> CycleResult:
+    def record(self, pitch: PitchPayload) -> CycleResult:
         with self._lock:
             self.pitches[(pitch.camera_id, pitch.cycle_number)] = pitch
             self._atomic_write(
                 self._pitch_path(pitch.camera_id, pitch.cycle_number),
                 pitch.model_dump_json(),
             )
-            if audio_bytes is not None:
-                self._audio_path(pitch.camera_id, pitch.cycle_number).write_bytes(audio_bytes)
 
             a = self.pitches.get(("A", pitch.cycle_number))
             b = self.pitches.get(("B", pitch.cycle_number))
@@ -363,12 +262,7 @@ class State:
             )
             if a is not None and b is not None:
                 try:
-                    audio_offset = self._maybe_audio_offset(a, b)
-                    result.points, result.sync_method = triangulate_cycle(
-                        a, b, audio_offset_s=audio_offset
-                    )
-                    if result.sync_method == "audio":
-                        result.audio_offset_s = audio_offset
+                    result.points = triangulate_cycle(a, b)
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
             self.results[pitch.cycle_number] = result
@@ -408,8 +302,6 @@ class State:
             if purge_disk:
                 for path in self._pitch_dir.glob("cycle_*.json*"):
                     path.unlink(missing_ok=True)
-                for path in self._pitch_dir.glob("cycle_*.wav"):
-                    path.unlink(missing_ok=True)
                 for path in self._result_dir.glob("cycle_*.json*"):
                     path.unlink(missing_ok=True)
 
@@ -440,16 +332,6 @@ app = FastAPI(title="ball_tracker server", lifespan=lifespan)
 state = State()
 
 
-@app.post("/sync/time")
-def sync_time() -> dict[str, float]:
-    """Ultra-low-latency time probe for NTP-style clock-offset estimation.
-
-    Returns the server monotonic clock (time.monotonic()) the instant this
-    request is handled.  No logging, no locking — straight clock read.
-    """
-    return {"server_time_s": time.monotonic()}
-
-
 @app.get("/status")
 def status() -> dict[str, Any]:
     return state.summary()
@@ -462,8 +344,6 @@ def _summarize_result(result: CycleResult) -> dict[str, Any]:
         "paired": paired,
         "triangulated_points": len(result.points),
         "error": result.error,
-        "sync_method": result.sync_method,
-        "audio_offset_s": result.audio_offset_s,
     }
     if result.points:
         residuals = [p.residual_m for p in result.points]
@@ -477,28 +357,15 @@ def _summarize_result(result: CycleResult) -> dict[str, Any]:
 
 
 @app.post("/pitch")
-async def pitch(
-    payload: str = Form(...),
-    audio: UploadFile | None = File(None),
-) -> dict[str, Any]:
-    try:
-        pitch_obj = PitchPayload.model_validate_json(payload)
-    except Exception as e:
-        raise HTTPException(400, f"invalid payload JSON: {e}")
-    audio_bytes: bytes | None = None
-    if audio is not None:
-        audio_bytes = await audio.read()
-        if not audio_bytes:
-            audio_bytes = None
-    result = state.record(pitch_obj, audio_bytes=audio_bytes)
-    ball_frames = sum(1 for f in pitch_obj.frames if f.ball_detected)
+def pitch(payload: PitchPayload) -> dict[str, Any]:
+    result = state.record(payload)
+    ball_frames = sum(1 for f in payload.frames if f.ball_detected)
     logger.info(
-        "pitch camera=%s cycle=%d frames=%d ball=%d sync=%s triangulated=%d%s",
-        pitch_obj.camera_id,
-        pitch_obj.cycle_number,
-        len(pitch_obj.frames),
+        "pitch camera=%s cycle=%d frames=%d ball=%d triangulated=%d%s",
+        payload.camera_id,
+        payload.cycle_number,
+        len(payload.frames),
         ball_frames,
-        result.sync_method,
         len(result.points),
         f" err={result.error}" if result.error else "",
     )
@@ -512,6 +379,45 @@ async def pitch(
             max(zs),
         )
     return {"ok": True, **_summarize_result(result)}
+
+
+@app.get("/chirp.wav")
+def chirp_wav() -> Response:
+    """Reference sync chirp for the 時間校正 step.
+
+    Users download this on any device (browser) and play it near the two
+    iPhones. Each phone's AudioChirpDetector runs matched filtering and
+    pins the session-clock PTS of the peak as the per-cycle anchor.
+
+    Signal: linear sweep 2 → 8 kHz, 100 ms, Hann-windowed, surrounded by
+    0.5 s of silence either side so the phones can catch it mid-stream.
+    """
+    sr = 44100
+    f0 = 2000.0
+    f1 = 8000.0
+    duration = 0.1
+    n = int(sr * duration)
+    t = np.arange(n) / sr
+    phase = 2.0 * np.pi * (f0 * t + (f1 - f0) * t ** 2 / (2.0 * duration))
+    window = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(n) / (n - 1)))
+    chirp = np.sin(phase) * window
+
+    silence = np.zeros(int(sr * 0.5), dtype=np.float64)
+    full = np.concatenate([silence, chirp, silence])
+    pcm = np.clip(full * 0.8, -1.0, 1.0)
+    pcm_int = (pcm * 32767.0).astype(np.int16)
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm_int.tobytes())
+    return Response(
+        content=buf.getvalue(),
+        media_type="audio/wav",
+        headers={"Content-Disposition": 'inline; filename="chirp.wav"'},
+    )
 
 
 @app.get("/results/latest")
