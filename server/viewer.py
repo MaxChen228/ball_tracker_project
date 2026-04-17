@@ -1,12 +1,12 @@
 """Plotly-based 3D viewer for reconstructed scenes, plus a matching
-index page that lists every cycle as a clickable event row.
+index page that lists every session as a clickable event row.
 
-Both renderers return self-contained HTML strings — the `/viewer/{cycle}`
-and `/` endpoints return these directly. The 3D page loads Plotly.js from
-CDN so the file stays tiny and opens in any modern browser without a
-build step. Future replacements (Three.js, deck.gl, etc.) only need to
-re-implement these two functions; `reconstruct.Scene` and the events
-dict shape are the stable hand-offs.
+Both renderers return self-contained HTML strings — the
+`/viewer/{session_id}` and `/` endpoints return these directly. The 3D
+page loads Plotly.js from CDN so the file stays tiny and opens in any
+modern browser without a build step. Future replacements (Three.js,
+deck.gl, etc.) only need to re-implement these two functions;
+`reconstruct.Scene` and the events dict shape are the stable hand-offs.
 """
 from __future__ import annotations
 
@@ -171,7 +171,7 @@ def render_scene_html(scene: Scene) -> str:
 
     fig = go.Figure(data=traces)
     fig.update_layout(
-        title=f"Cycle {scene.cycle_number}  —  {subtitle}",
+        title=f"Session {scene.session_id}  —  {subtitle}",
         scene=dict(
             xaxis=dict(title="X (left/right, m)"),
             yaxis=dict(title="Y (depth, m)"),
@@ -367,7 +367,7 @@ def render_events_index_html(
     session: dict[str, Any] | None = None,
 ) -> str:
     """Render the dashboard: devices panel + session panel + Arm/Cancel
-    controls + events table with links into each cycle's 3D viewer.
+    controls + events table with links into each session's 3D viewer.
 
     All inputs match the shape of their /status and /events counterparts,
     so the JSON and HTML sides of the server describe the same data."""
@@ -375,7 +375,7 @@ def render_events_index_html(
 
     if not events:
         events_body = (
-            '<div class="empty">No cycles received yet. Arm a session from the panel above, '
+            '<div class="empty">No sessions received yet. Arm a session from the panel above, '
             "then throw a ball within the camera&rsquo;s view.</div>"
         )
     else:
@@ -390,9 +390,10 @@ def render_events_index_html(
             err = e.get("error") or ""
             err_html = f' <span title="{html.escape(err)}">⚠</span>' if err else ""
             mode = "dual" if len(e["cameras"]) >= 2 else "single"
+            sid = html.escape(e["session_id"])
             rows.append(
                 "<tr>"
-                f'<td><a href="/viewer/{e["cycle_number"]}">#{e["cycle_number"]}</a></td>'
+                f'<td><a href="/viewer/{sid}"><span class="session-id">{sid}</span></a></td>'
                 f'<td>{cams} <span class="badge {"online" if mode == "dual" else "offline"}">{mode}</span></td>'
                 f'<td><span class="status {status}">{status}</span>{err_html}</td>'
                 f'<td>{_fmt_received_at(e["received_at"])}</td>'
@@ -406,7 +407,7 @@ def render_events_index_html(
         events_body = (
             "<table>"
             "<thead><tr>"
-            "<th>Cycle</th><th>Cams / mode</th><th>Status</th><th>Received</th>"
+            "<th>Session</th><th>Cams / mode</th><th>Status</th><th>Received</th>"
             "<th>Ball frames</th><th>3D pts</th><th>Mean resid (m)</th>"
             "<th>Peak Z (m)</th><th>Duration (s)</th>"
             "</tr></thead>"
@@ -420,7 +421,7 @@ def render_events_index_html(
         f"<style>{_INDEX_CSS}</style>"
         "</head><body>"
         "<h1>ball_tracker dashboard</h1>"
-        f'<div class="subtitle">{len(events)} cycle(s) · click a row to open the 3D viewer</div>'
+        f'<div class="subtitle">{len(events)} session(s) · click a row to open the 3D viewer</div>'
         f"{_render_control_panel(devices, session)}"
         f"{events_body}"
         f"<script>{_INDEX_JS}</script>"

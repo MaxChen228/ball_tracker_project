@@ -54,14 +54,14 @@ class Ray:
 
 @dataclass
 class Scene:
-    cycle_number: int
+    session_id: str
     cameras: list[CameraView] = field(default_factory=list)
     rays: list[Ray] = field(default_factory=list)
     triangulated: list[dict[str, float]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "cycle_number": self.cycle_number,
+            "session_id": self.session_id,
             "cameras": [vars(c) for c in self.cameras],
             "rays": [vars(r) for r in self.rays],
             "triangulated": list(self.triangulated),
@@ -104,19 +104,19 @@ def _world_ray(
 
 
 def build_scene(
-    cycle_number: int,
+    session_id: str,
     pitches: dict[str, "PitchPayload"],
     triangulated: list["TriangulatedPoint"] | None = None,
 ) -> Scene:
-    """Construct a renderable `Scene` for one cycle.
+    """Construct a renderable `Scene` for one session.
 
     `pitches`: camera_id → PitchPayload (subset of State.pitches filtered
-               to this cycle). Cameras missing intrinsics or homography
+               to this session). Cameras missing intrinsics or homography
                are silently skipped — they show up as no camera + no rays
                in the viewer, which is itself the diagnostic signal.
-    `triangulated`: CycleResult.points if both cameras were paired.
+    `triangulated`: SessionResult.points if both cameras were paired.
     """
-    scene = Scene(cycle_number=cycle_number)
+    scene = Scene(session_id=session_id)
 
     for cam_id in sorted(pitches.keys()):
         pitch = pitches[cam_id]

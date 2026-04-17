@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+from conftest import sid
 from main import app
 
 
@@ -128,24 +129,44 @@ def test_commands_emit_disarm_after_session_ends(tmp_path):
     assert s.commands_for_devices() == {}
 
 
-def test_cycle_upload_ends_armed_session(tmp_path):
-    """The key one-shot behaviour: first cycle arrival during an armed
-    session ends it with reason=cycle_uploaded. Subsequent arrivals leave
-    the state alone (no new session created)."""
+def test_upload_ends_armed_session(tmp_path):
+    """The key one-shot behaviour: first upload for the current session
+    ends it with reason=cycle_uploaded. Uploads tagged with a different
+    session_id (e.g. a phone flushing a prior armed window) don't disturb
+    the currently armed session."""
     s = main.State(data_dir=tmp_path)
     s.heartbeat("A")
     s.heartbeat("B")
     session = s.arm_session()
 
-    pitch_a = _minimal_pitch("A", cycle=200)
+    pitch_a = _minimal_pitch("A", session_id=session.id)
     s.record(pitch_a)
 
-    # Session ended; `_last_ended_session` carries the cycle record.
+    # Session ended; `_last_ended_session` carries the upload record.
     assert s.current_session() is None
     assert s._last_ended_session is not None
     assert s._last_ended_session.id == session.id
     assert s._last_ended_session.end_reason == "cycle_uploaded"
-    assert {c["camera_id"] for c in s._last_ended_session.cycles_received} == {"A"}
+    assert set(s._last_ended_session.uploads_received) == {"A"}
+
+
+def test_upload_from_stale_session_does_not_disarm_current(tmp_path):
+    """An upload arriving while a newer session is armed, but tagged with
+    the previous session's id, must not end the newer session."""
+    s = main.State(data_dir=tmp_path)
+    s.heartbeat("A")
+    first = s.arm_session()
+    s.cancel_session()
+    second = s.arm_session()
+
+    # A phone flushing a recording tied to the already-cancelled session.
+    stale = _minimal_pitch("A", session_id=first.id)
+    s.record(stale)
+
+    current = s.current_session()
+    assert current is not None
+    assert current.id == second.id
+    assert current.armed is True
 
 
 # --- HTTP endpoints --------------------------------------------------------
@@ -231,10 +252,13 @@ def test_pitch_upload_ends_armed_session_end_to_end():
     client = TestClient(app)
     client.post("/heartbeat", json={"camera_id": "A"})
     client.post("/heartbeat", json={"camera_id": "B"})
-    client.post("/sessions/arm", headers={"Accept": "application/json"})
+    arm_reply = client.post(
+        "/sessions/arm", headers={"Accept": "application/json"}
+    ).json()
+    session_id = arm_reply["session"]["id"]
 
-    # Simulate A's phone uploading a pitch.
-    body = _minimal_pitch_body("A", cycle=300)
+    # Simulate A's phone uploading a pitch tagged with the armed session.
+    body = _minimal_pitch_body("A", session_id=session_id)
     r = client.post("/pitch", data={"payload": _json.dumps(body)})
     assert r.status_code == 200
 
@@ -272,14 +296,14 @@ def test_dashboard_marks_expected_cameras_offline_when_absent():
 # --- Helpers ---------------------------------------------------------------
 
 
-def _minimal_pitch(camera_id: str, cycle: int) -> main.PitchPayload:
+def _minimal_pitch(camera_id: str, session_id: str) -> main.PitchPayload:
     """A minimal server-internal PitchPayload with no calibration — enough
     for `State.record` to run, not enough for triangulation."""
     return main.PitchPayload(
         camera_id=camera_id,
+        session_id=session_id,
         sync_anchor_frame_index=0,
         sync_anchor_timestamp_s=0.0,
-        cycle_number=cycle,
         frames=[
             main.FramePayload(
                 frame_index=0,
@@ -292,6 +316,6 @@ def _minimal_pitch(camera_id: str, cycle: int) -> main.PitchPayload:
     )
 
 
-def _minimal_pitch_body(camera_id: str, cycle: int) -> dict:
+def _minimal_pitch_body(camera_id: str, session_id: str) -> dict:
     """Dict version for /pitch multipart form."""
-    return _minimal_pitch(camera_id, cycle).model_dump()
+    return _minimal_pitch(camera_id, session_id).model_dump()

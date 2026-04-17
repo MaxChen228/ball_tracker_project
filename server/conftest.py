@@ -20,3 +20,12 @@ def _reset_main_state(tmp_path, monkeypatch):
     tests, and no interference with the developer's real `server/data/`."""
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     yield
+
+
+def sid(n: int | str) -> str:
+    """Session-id helper for tests — returns a value that matches the
+    server's `s_[0-9a-f]{4,32}` regex. Use a stable int or a readable
+    suffix so assertions on session identity stay legible."""
+    if isinstance(n, int):
+        return f"s_{n:08x}"
+    return f"s_{n}"

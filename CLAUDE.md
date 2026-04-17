@@ -39,13 +39,15 @@ Open `ball_tracker.xcodeproj` in Xcode. The app needs a **physical device** (cam
 ### iOS state machine — `CameraViewController`
 `.standby → .timeSyncWaiting → .standby → .syncWaiting → .recording → .uploading → .syncWaiting …`
 
-Driven by a **1 Hz `POST /heartbeat` loop** that runs from app launch and carries the server's per-device `commands[self.camera_id]` in every reply. The local "啟動追蹤" button still works as a debug escape hatch, but the intended flow is dashboard-driven:
+Driven by a **1 Hz `POST /heartbeat` loop** that runs from app launch and carries the server's per-device `commands[self.camera_id]` **plus the current `session_id`** in every reply. The local "啟動追蹤" button still works as a debug escape hatch (it calls `POST /sessions/arm` to get an id synchronously, then enters sync mode), but the intended flow is dashboard-driven:
 
-- `commands[self] == "arm"` + state `.standby` → `enterSyncMode()` (equivalent to pressing the local button)
+- `commands[self] == "arm"` + state `.standby` → cache `response.session.id` as `currentSessionId`, `enterSyncMode()`
 - `commands[self] == "disarm"` + state `.syncWaiting`/`.uploading` → `exitSyncMode()`
 - `commands[self] == "disarm"` + state `.recording` → `recorder.forceFinishIfRecording()` flushes whatever frames are buffered; the cycle-complete handler routes back to `.standby` (not the usual `.syncWaiting`) via `returnToStandbyAfterCycle`
 - `commands[self] == "disarm"` + state `.timeSyncWaiting` → `cancelTimeSync(reason: "disarmed")`
 - `lastAppliedCommand` guards against re-triggering on repeated replies during an armed session
+
+iPhones never mint pairing identifiers — every `startRecording` reads `currentSessionId` (set from the heartbeat reply) and stamps it onto the outgoing `PitchPayload.session_id`. Uploads tagged with a superseded session are ignored by `_register_upload_in_session_locked` on the server, so a late flush can't disarm a new session.
 
 The worst-case arm latency is therefore one heartbeat interval (default 1 s, clamped [1, 60]).
 
@@ -70,15 +72,15 @@ Threshold (default 0.18, tunable from Settings → Sync → Chirp Threshold) is 
 ### Key modules
 - `BallDetector.swift` — HSV threshold on a downsampled grid → 8-neighborhood connected components → largest component passing area filter (20–5000 px²) → centroid → `θx = atan2(px - cx, fx)`, `θz = atan2(py - cy, fz)`. Uses calibrated intrinsics if present, else FOV approximation.
 - `AudioChirpDetector.swift` — matched-filter chirp detection via `vDSP_dotpr`. Owns the audio ring buffer, reference chirp, cooldown, and emits `ChirpEvent(anchorFrameIndex, anchorTimestampS)` callbacks on its own queue. Threshold is mutable (`setThreshold(_:)`) so Settings changes propagate without session rebuild. Self-contained — no dependencies on other sync helpers.
-- `PitchRecorder.swift` — pre-roll buffer + cycle assembly. The chirp anchor is passed in at `startRecording` time, not discovered by the recorder.
+- `PitchRecorder.swift` — pre-roll buffer + recording assembly. `session_id` and the chirp anchor are both passed in at `startRecording` time — the recorder doesn't mint any pairing identifier. `localRecordingIndex` is a run-of-app debug counter (not reset on state changes) that ships on the payload as `local_recording_index` purely for operator logs.
 - `ClipRecorder.swift` — `AVAssetWriter` wrapper that consumes the same `CMSampleBuffer`s the capture queue dispatches, writes H.264 MOV to a tmp URL, and finalises async on cycle-complete. `prepare → append (first append starts the writer session at that PTS) → finish/cancel`. Caller (`CameraViewController`) serialises all calls onto `processingQueue`; `exitSyncMode` tears down via an async dispatch onto the same queue so it can't race with an in-flight append. Failed `prepare` degrades silently — the cycle still uploads, just without a clip.
 - `PitchPayloadStore.swift` — local cache for completed cycles. `save(payload, videoURL:)` writes `<basename>.json` atomically and moves any tmp clip to `<basename>.<ext>`. `videoURL(forPayload:)` resolves the companion clip for the uploader; `delete(jsonURL)` removes both. `makeTempVideoURL()` provides fresh `Documents/tmp/clip_<uuid>.mov` URLs for `ClipRecorder`.
-- `ServerUploader.swift` — `POST /pitch` as `multipart/form-data` (required `payload` JSON field + optional `video` file part). `uploadPitch(_, videoURL:, completion:)` is the primary API; a legacy overload without `videoURL` remains for tests and early-migration callers. Multipart body is hand-built — no third-party HTTP lib. `fetchStatus(completion:)` hits `/status` and is what the connection-health HUD polls.
+- `ServerUploader.swift` — `POST /pitch` as `multipart/form-data` (required `payload` JSON field + optional `video` file part). `uploadPitch(_, videoURL:, completion:)` is the primary API; a legacy overload without `videoURL` remains for tests and early-migration callers. Multipart body is hand-built — no third-party HTTP lib. `sendHeartbeat(cameraId:)` is the 1 Hz liveness + command channel. `armSession(completion:)` is used by the local tracking button as a synchronous shortcut to get a session id before entering sync mode.
 - `CalibrationViewController.swift` — two paths to the same `homography_3x3` (row-major, 9 doubles, h33=1):
   - **Manual**: 5 draggable handles on home-plate pentagon → DLT via 8×8 normal equations with Gaussian elimination.
   - **Auto (ArUco)**: `BTArucoDetector` (OpenCV `cv::aruco`, Obj-C++ wrapper in `ArucoDetector.{h,mm}`) detects DICT_4X4_50 markers IDs 0–5 taped to plate landmarks (FL/FR/RS/LS/BT/MF), then `findHomographyFromWorldPoints:imagePoints:` solves via RANSAC least-squares.
   Also derives `fx/fz/cx/cy` from capture FOV. A Settings toggle can override intrinsics with externally computed ChArUco values including 5-coefficient distortion.
-- `SettingsViewController.swift` — persists server IP/port, role A/B, HSV range, chirp detection threshold (`chirp_threshold`, default 0.18), `/status` poll interval (`poll_interval_s`, default 10, clamped [2, 300]), capture resolution/fps, and optional manual intrinsics (including OpenCV 5-coefficient distortion `[k1, k2, p1, p2, k3]`) to `UserDefaults`. `normalizeServerIP` strips scheme/port/path from pasted URLs. `onDismiss` fires in `viewDidDisappear` (covers Save, Close, and interactive-swipe dismiss) — the presenter re-diffs settings there instead of relying on a polling tick.
+- `SettingsViewController.swift` — persists server IP/port, role A/B, HSV range, chirp detection threshold (`chirp_threshold`, default 0.18), heartbeat interval (`poll_interval_s`, default 1, clamped [1, 60]), capture resolution/fps, and optional manual intrinsics (including OpenCV 5-coefficient distortion `[k1, k2, p1, p2, k3]`) to `UserDefaults`. `normalizeServerIP` strips scheme/port/path from pasted URLs. `onDismiss` fires in `viewDidDisappear` (covers Save, Close, and interactive-swipe dismiss) — the presenter re-diffs settings there instead of relying on a polling tick.
 
 ### Server
 - `main.py` — `State` dict keyed by `(camera_id, cycle_number)`, plus an in-memory device registry and a single-slot session machine (both cleared on restart). When both A and B for a cycle arrive, `triangulate_cycle` runs immediately under the state lock. `/pitch` accepts multipart (`payload: str` Form + optional `video: UploadFile`); `camera_id` is Pydantic-constrained to `^[A-Za-z0-9_-]{1,16}$` so it can't escape the data dir when interpolated into file paths. Clip bytes are written atomically via tmp-rename to `data/videos/cycle_{cycle:06d}_{camera_id}.{ext}`. `/chirp.wav` returns the reference sync chirp. `State.events()` collapses each cycle into one summary row (cameras present, status, received-at mtime, ball-frame counts, triangulation stats) for the `/events` JSON endpoint and the `/` HTML dashboard. A cycle arriving during an armed session auto-ends the session (one-shot arm) and flips commands to `disarm` for the echo window.
@@ -108,18 +110,21 @@ Threshold (default 0.18, tunable from Settings → Sync → Chirp Threshold) is 
 
   ```
   camera_id: str matching ^[A-Za-z0-9_-]{1,16}$   # "A"/"B" in practice; server rejects anything else with 422
+  session_id: str matching ^s_[0-9a-f]{4,32}$     # server-minted; sole pairing key for A/B
   sync_anchor_frame_index: int            # placeholder; server ignores and pairs by timestamp
   sync_anchor_timestamp_s: float          # chirp-detected session-clock PTS
-  cycle_number: int                       # monotonic per device; server pairs A+B by this
+  local_recording_index: int?             # device-local debug counter, not used for pairing
   frames: [{frame_index, timestamp_s, theta_x_rad?, theta_z_rad?, px?, py?, ball_detected}]
   intrinsics: {fx, fz, cx, cy, distortion?}?   # fz == OpenCV fy; distortion is [k1,k2,p1,p2,k3]
   homography: [h11..h33]?                 # row-major, h33 normalized to 1
   image_width_px?, image_height_px?
   ```
 
-- **`video`** (optional, typically `video/quicktime`) — H.264 MOV of the cycle. When present the server stores it under `data/videos/cycle_{cycle:06d}_{camera_id}.<ext>` and surfaces `{"clip": {"filename", "bytes"}}` in the response, but triangulation does **not** yet read it.
+- **`video`** (optional, typically `video/quicktime`) — H.264 MOV of the recording. When present the server stores it under `data/videos/session_{session_id}_{camera_id}.<ext>` and surfaces `{"clip": {"filename", "bytes"}}` in the response, but triangulation does **not** yet read it.
 
-Triangulation requires **both** cameras to have `intrinsics` and `homography` present — if a phone's calibration was never saved, the server returns `error` on the cycle but still stores the raw payload (and clip, if any).
+Pairing is by **`session_id` alone** (server-minted via `POST /sessions/arm`). iPhones never generate pairing identifiers. `local_recording_index` is a device-local debug counter; the server ignores it for pairing.
+
+Triangulation requires **both** cameras to have `intrinsics` and `homography` present — if a phone's calibration was never saved, the server returns `error` on the session but still stores the raw payload (and clip, if any).
 
 ## Degraded / fallback modes
 
@@ -129,9 +134,9 @@ Triangulation requires **both** cameras to have `intrinsics` and `homography` pr
 
 ## Connection health + hot-reload
 
-`CameraViewController` runs a scheduled `/status` probe (base cadence from Settings → Poll Interval, default 10 s). On failure the interval doubles until a 60 s cap (`10 → 20 → 40 → 60`); a success resets to the base. A manual **Test** button on the HUD cancels any in-flight probe and re-probes immediately. The HUD also shows `Last contact: N s ago` updated by a 1 Hz tick timer (paused with the view). A generation token on each probe ensures stale responses from an outdated host/port can't overwrite current state.
+`CameraViewController` runs a 1 Hz `POST /heartbeat` loop (base cadence from Settings → Heartbeat Interval, default 1 s). On failure the interval doubles until a 60 s cap; a success resets to the base. A manual **Test** button on the HUD cancels any in-flight probe and re-probes immediately. The HUD also shows `Last contact: N s ago` updated by a 1 Hz tick timer (paused with the view). A generation token on each probe ensures stale responses from an outdated host/port can't overwrite current state. The HUD's `Server` line shows `ARMED (s_xxx)` / `IDLE · last: cycle_uploaded` derived from the heartbeat's `session` payload.
 
-Settings hot-reload is **not** tied to the probe cadence. `SettingsViewController.onDismiss` fires in `viewDidDisappear` (covers Save, Close, and interactive-swipe dismiss), and the presenter re-diffs `UserDefaults` there. On change: capture format is reconfigured, `ServerUploader` rebuilt, a new `chirpThreshold` is pushed into the live detector, or the probe cadence is updated with backoff reset — none of which require rebuilding the `AVCaptureSession`.
+Settings hot-reload is **not** tied to the heartbeat cadence. `SettingsViewController.onDismiss` fires in `viewDidDisappear` (covers Save, Close, and interactive-swipe dismiss), and the presenter re-diffs `UserDefaults` there. On change: capture format is reconfigured, `ServerUploader` rebuilt, a new `chirpThreshold` is pushed into the live detector, or the heartbeat cadence is updated with backoff reset — none of which require rebuilding the `AVCaptureSession`.
 
 ## Info.plist
 

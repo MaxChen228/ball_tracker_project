@@ -86,6 +86,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// complete path routes us back to `.standby` instead of the usual
     /// `.syncWaiting` hand-off.
     private var returnToStandbyAfterCycle: Bool = false
+    /// Server-minted pairing key for the currently armed session. Read
+    /// off each heartbeat reply; tagged onto every recording that starts
+    /// while the session is armed. Nil when the server has no active
+    /// session. iPhones never mint this themselves.
+    private var currentSessionId: String?
 
     // Payload persistence + upload queue.
     private let payloadStore = PitchPayloadStore()
@@ -287,7 +292,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             let fileURL = try payloadStore.save(payload, videoURL: videoURL)
             DispatchQueue.main.async {
                 let suffix = videoURL != nil ? " (+video)" : ""
-                self.lastUploadStatusText = "Cached pitch \(payload.cycle_number)\(suffix)"
+                self.lastUploadStatusText = "Cached \(payload.session_id)\(suffix)"
                 self.enqueuePayloadForUpload(fileURL)
                 if self.returnToStandbyAfterCycle {
                     // A dashboard disarm arrived mid-recording; force-finish
@@ -621,6 +626,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     self.serverStatusTextValue = self.heartbeatDisplayText(response)
                     self.lastContactAt = Date()
                     self.currentBackoff = 0
+                    // Cache the server's session id so `startRecording` can
+                    // stamp it onto uploads without another round-trip.
+                    // Nil when the server is idle.
+                    self.currentSessionId = (response.session?.armed == true)
+                        ? response.session?.id
+                        : nil
                     self.scheduleNextProbe(after: self.settings.pollInterval)
                     self.handleDashboardCommand(
                         response.commands?[cam],
@@ -886,7 +897,35 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     @objc private func onTapTracking() {
         if state == .standby {
-            enterSyncMode()
+            // Local escape-hatch: make sure a server session exists before
+            // we enter syncWaiting, otherwise the first recording would
+            // have no session_id to stamp onto its upload.
+            if currentSessionId != nil {
+                enterSyncMode()
+            } else {
+                trackingButton.isEnabled = false
+                lastUploadStatusText = "Arming session…"
+                updateUIForState()
+                uploader.armSession { [weak self] result in
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        self.trackingButton.isEnabled = true
+                        switch result {
+                        case .success(let session):
+                            self.currentSessionId = session.armed ? session.id : nil
+                            if self.currentSessionId != nil {
+                                self.enterSyncMode()
+                            } else {
+                                self.lastUploadStatusText = "Arm returned an ended session (\(session.end_reason ?? "?")). Try again."
+                                self.updateUIForState()
+                            }
+                        case .failure(let error):
+                            self.lastUploadStatusText = "Arm failed: \(error.localizedDescription)"
+                            self.updateUIForState()
+                        }
+                    }
+                }
+            }
         } else {
             exitSyncMode()
         }
@@ -998,9 +1037,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case .syncWaiting:
             recorder.handleFrame(frame)
             if detection.ballDetected {
+                guard let sid = currentSessionId else {
+                    // No armed session on the server — drop the ball
+                    // sighting. This can happen in the short window between
+                    // a dashboard disarm and the state transition to
+                    // .standby; the next heartbeat will tidy up.
+                    break
+                }
                 let anchorFrameIndex = lastSyncAnchorFrameIndex ?? currentIndex
                 let anchorTimestampS = lastSyncAnchorTimestampS ?? timestampS
                 recorder.startRecording(
+                    sessionId: sid,
                     anchorFrameIndex: anchorFrameIndex,
                     anchorTimestampS: anchorTimestampS,
                     startFrameIndex: currentIndex,
@@ -1073,7 +1120,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 switch result {
                 case .success(let response):
                     self.payloadStore.delete(fileURL)
-                    self.lastUploadStatusText = "Uploaded pitch \(payload.cycle_number)"
+                    self.lastUploadStatusText = "Uploaded \(payload.session_id)"
                     self.lastResultText = self.formatResultSummary(response)
                 case .failure(let error):
                     self.lastUploadStatusText = "Upload failed: \(error.localizedDescription)"
@@ -1094,20 +1141,21 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func formatResultSummary(_ r: ServerUploader.PitchUploadResponse) -> String {
+        let sid = r.session_id
         if let err = r.error, !err.isEmpty {
-            return "#\(r.cycle) ✗ \(err)"
+            return "\(sid) ✗ \(err)"
         }
         if !r.paired {
-            return "#\(r.cycle) 已收 (等待另一相機)"
+            return "\(sid) 已收 (等待另一相機)"
         }
         if r.triangulated_points == 0 {
-            return "#\(r.cycle) ✗ 0 pts (時間窗口未對齊?)"
+            return "\(sid) ✗ 0 pts (時間窗口未對齊?)"
         }
         let gapMm = (r.mean_residual_m ?? 0) * 1000.0
         let peakZ = r.peak_z_m ?? 0
         let dur = r.duration_s ?? 0
-        return String(format: "#%d ✓ %d pts gap=%.0fmm peak=%.2fm dur=%.2fs",
-                      r.cycle, r.triangulated_points, gapMm, peakZ, dur)
+        return String(format: "%@ ✓ %d pts gap=%.0fmm peak=%.2fm dur=%.2fs",
+                      sid, r.triangulated_points, gapMm, peakZ, dur)
     }
 
     private func updateFpsEstimate() {
@@ -1170,9 +1218,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let h = d.integer(forKey: Self.keyImageHeightPx)
         return ServerUploader.PitchPayload(
             camera_id: payload.camera_id,
+            session_id: payload.session_id,
             sync_anchor_frame_index: payload.sync_anchor_frame_index,
             sync_anchor_timestamp_s: payload.sync_anchor_timestamp_s,
-            cycle_number: payload.cycle_number,
+            local_recording_index: payload.local_recording_index,
             frames: payload.frames,
             intrinsics: intrinsics,
             homography: homography,
