@@ -64,6 +64,32 @@ final class ServerUploader {
         let duration_s: Double?
     }
 
+    /// One device entry as reported by `/heartbeat` / `/status`.
+    struct HeartbeatDevice: Codable {
+        let camera_id: String
+        let last_seen_at: Double
+    }
+
+    /// Current armed/ended session, or nil when the server has never
+    /// armed one this process lifetime.
+    struct HeartbeatSession: Codable {
+        let id: String
+        let armed: Bool
+        let started_at: Double
+        let ended_at: Double?
+        let end_reason: String?
+    }
+
+    /// Response body shared by `POST /heartbeat` and `GET /status`.
+    /// `commands[self.camera_id]` drives the dashboard-remote arm/disarm
+    /// flow on iPhone.
+    struct HeartbeatResponse: Codable {
+        let state: String?
+        let devices: [HeartbeatDevice]?
+        let session: HeartbeatSession?
+        let commands: [String: String]?
+    }
+
     struct ServerConfig {
         var serverIP: String = "192.168.1.100"
         var serverPort: Int = 8765
@@ -196,6 +222,65 @@ final class ServerUploader {
 
         appendString("--\(boundary)--\r\n")
         return body
+    }
+
+    /// POST a 1 Hz liveness ping and read back the full status payload —
+    /// the server piggy-backs `devices`, `session`, and per-camera
+    /// `commands` on every reply, so one round-trip drives both online
+    /// presence and remote arm/disarm dispatch.
+    func sendHeartbeat(
+        cameraId: String,
+        completion: @escaping (Result<HeartbeatResponse, Error>) -> Void
+    ) {
+        guard let base = config.baseURL() else {
+            completion(.failure(NSError(
+                domain: "ServerUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
+            )))
+            return
+        }
+        let url = base.appendingPathComponent("heartbeat")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            request.httpBody = try JSONEncoder().encode(["camera_id": cameraId])
+        } catch {
+            completion(.failure(error))
+            return
+        }
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                completion(.failure(error))
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                completion(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
+                )))
+                return
+            }
+            guard let data else {
+                completion(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "Empty response"]
+                )))
+                return
+            }
+            do {
+                let decoded = try JSONDecoder().decode(HeartbeatResponse.self, from: data)
+                completion(.success(decoded))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+        task.resume()
     }
 
     func fetchStatus(completion: @escaping (Result<[String: Any], Error>) -> Void) {
