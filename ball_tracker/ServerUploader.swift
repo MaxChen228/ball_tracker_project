@@ -33,6 +33,20 @@ final class ServerUploader {
         let image_height_px: Int?
     }
 
+    /// Server /pitch response summary. All triangulation fields are optional because
+    /// they're only populated when both A and B have been received for the cycle.
+    struct PitchUploadResponse: Codable {
+        let ok: Bool
+        let cycle: Int
+        let paired: Bool
+        let triangulated_points: Int
+        let error: String?
+        let mean_residual_m: Double?
+        let max_residual_m: Double?
+        let peak_z_m: Double?
+        let duration_s: Double?
+    }
+
     struct ServerConfig {
         var serverIP: String = "192.168.1.100"
         var serverPort: Int = 8765
@@ -48,7 +62,7 @@ final class ServerUploader {
         self.config = config
     }
 
-    func uploadPitch(_ pitch: PitchPayload, completion: ((Result<Void, Error>) -> Void)? = nil) {
+    func uploadPitch(_ pitch: PitchPayload, completion: ((Result<PitchUploadResponse, Error>) -> Void)? = nil) {
         guard let base = config.baseURL() else {
             completion?(.failure(NSError(domain: "ServerUploader", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"])))
             return
@@ -68,7 +82,7 @@ final class ServerUploader {
         }
 
         // Spec: do not use background upload; use foreground upload for low latency.
-        let task = URLSession.shared.dataTask(with: request) { _, response, error in
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 completion?(.failure(error))
                 return
@@ -78,7 +92,16 @@ final class ServerUploader {
                 completion?(.failure(e))
                 return
             }
-            completion?(.success(()))
+            guard let data else {
+                completion?(.failure(NSError(domain: "ServerUploader", code: -2, userInfo: [NSLocalizedDescriptionKey: "Empty response"])))
+                return
+            }
+            do {
+                let decoded = try JSONDecoder().decode(PitchUploadResponse.self, from: data)
+                completion?(.success(decoded))
+            } catch {
+                completion?(.failure(error))
+            }
         }
         task.resume()
     }

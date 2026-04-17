@@ -35,6 +35,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private var serverConfig: ServerUploader.ServerConfig!
     private var lastUploadStatusText: String = "Idle"
+    private var lastResultText: String = "(尚無結果)"
     private var lastFrameTimestampForFps: CFTimeInterval = CACurrentMediaTime()
     private var framesSinceLastFpsTick: Int = 0
     private var fpsEstimate: Double = 0
@@ -62,6 +63,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let serverStatusLabel = UILabel()
     private let fpsLabel = UILabel()
     private let uploadStatusLabel = UILabel()
+    private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
     private let trackingButton = UIButton(type: .system)
 
@@ -422,6 +424,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         styleLabel(serverStatusLabel, size: 18, weight: .medium)
         styleLabel(fpsLabel, size: 18, weight: .medium)
         styleLabel(uploadStatusLabel, size: 18, weight: .medium)
+        styleLabel(lastResultLabel, size: 17, weight: .medium)
+        lastResultLabel.textColor = .systemGreen
         styleLabel(warningLabel, size: 22, weight: .bold)
         warningLabel.textColor = .systemYellow
         warningLabel.textAlignment = .center
@@ -449,6 +453,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         row3.spacing = 12
         row3.alignment = .center
 
+        let row4 = UIStackView(arrangedSubviews: [lastResultLabel])
+        row4.axis = .horizontal
+        row4.alignment = .center
+
         statusContainer.axis = .vertical
         statusContainer.spacing = 8
         statusContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -459,6 +467,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         statusContainer.addArrangedSubview(row1)
         statusContainer.addArrangedSubview(row2)
         statusContainer.addArrangedSubview(row3)
+        statusContainer.addArrangedSubview(row4)
         statusContainer.addArrangedSubview(warningLabel)
         view.addSubview(statusContainer)
 
@@ -501,6 +510,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         serverStatusDot.backgroundColor = serverReachableColor()
         fpsLabel.text = String(format: "FPS %.1f", fpsEstimate)
         uploadStatusLabel.text = "Upload: \(lastUploadStatusText)"
+        lastResultLabel.text = "Last: \(lastResultText)"
 
         switch state {
         case .standby:
@@ -682,9 +692,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             DispatchQueue.main.async {
                 var retryAfterFailure = false
                 switch result {
-                case .success:
+                case .success(let response):
                     self.payloadStore.delete(fileURL)
                     self.lastUploadStatusText = "Uploaded pitch \(payload.cycle_number)"
+                    self.lastResultText = self.formatResultSummary(response)
                 case .failure(let error):
                     self.lastUploadStatusText = "Upload failed: \(error.localizedDescription)"
                     self.pendingPayloadFiles.insert(fileURL, at: 0)
@@ -701,6 +712,23 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 }
             }
         }
+    }
+
+    private func formatResultSummary(_ r: ServerUploader.PitchUploadResponse) -> String {
+        if let err = r.error, !err.isEmpty {
+            return "#\(r.cycle) ✗ \(err)"
+        }
+        if !r.paired {
+            return "#\(r.cycle) 已收 (等待另一相機)"
+        }
+        if r.triangulated_points == 0 {
+            return "#\(r.cycle) ✗ 0 pts (時間窗口未對齊?)"
+        }
+        let gapMm = (r.mean_residual_m ?? 0) * 1000.0
+        let peakZ = r.peak_z_m ?? 0
+        let dur = r.duration_s ?? 0
+        return String(format: "#%d ✓ %d pts gap=%.0fmm peak=%.2fm dur=%.2fs",
+                      r.cycle, r.triangulated_points, gapMm, peakZ, dur)
     }
 
     private func updateFpsEstimate() {
