@@ -106,7 +106,7 @@ final class SettingsViewController: UIViewController {
         let vMin = intOrDefault(keyVMin, defaultValue: 40)
         let vMax = intOrDefault(keyVMax, defaultValue: 255)
 
-        let flashThresholdMultiplier = doubleOrDefault(keyFlashMultiplier, defaultValue: 2.5)
+        let flashThresholdMultiplier = doubleOrDefault(keyFlashMultiplier, defaultValue: 1.8)
 
         let captureWidth = intOrDefault(keyCaptureWidth, defaultValue: 1920)
         let captureHeight = intOrDefault(keyCaptureHeight, defaultValue: 1080)
@@ -236,7 +236,7 @@ final class SettingsViewController: UIViewController {
         configureTextField(sMaxField, placeholder: "255", keyboard: .numberPad)
         configureTextField(vMinField, placeholder: "40", keyboard: .numberPad)
         configureTextField(vMaxField, placeholder: "255", keyboard: .numberPad)
-        configureTextField(flashMultiplierField, placeholder: "2.5", keyboard: .decimalPad)
+        configureTextField(flashMultiplierField, placeholder: "1.8", keyboard: .decimalPad)
         configureTextField(manualFxField, placeholder: "fx (e.g. 1600)", keyboard: .decimalPad)
         configureTextField(manualFyField, placeholder: "fy (e.g. 1600)", keyboard: .decimalPad)
         configureTextField(manualCxField, placeholder: "cx (e.g. 960)", keyboard: .decimalPad)
