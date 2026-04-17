@@ -18,6 +18,12 @@ final class SettingsViewController: UIViewController {
         /// if it false-triggers on ambient noise. Range roughly 0.05–0.50.
         var chirpThreshold: Double
 
+        /// Base cadence (seconds) for the /status health probe when the
+        /// server is reachable. On failure the probe backs off exponentially
+        /// up to a hard cap; success resets to this base. Clamped to
+        /// [2, 300] on save.
+        var pollInterval: Double
+
         var captureWidth: Int           // 1280 or 1920
         var captureHeight: Int          // 720 or 1080
         var captureFps: Int             // 60, 120, 240
@@ -48,6 +54,8 @@ final class SettingsViewController: UIViewController {
     private static let keyVMax = "v_max"
 
     private static let keyChirpThreshold = "chirp_threshold"
+
+    private static let keyPollInterval = "poll_interval_s"
 
     private static let keyCaptureWidth = "capture_width"
     private static let keyCaptureHeight = "capture_height"
@@ -80,6 +88,8 @@ final class SettingsViewController: UIViewController {
 
     private let chirpThresholdField = UITextField()
 
+    private let pollIntervalField = UITextField()
+
     private let captureResolutionControl = UISegmentedControl(items: ["720p", "1080p"])
     private let captureFpsControl = UISegmentedControl(items: ["60", "120", "240"])
 
@@ -89,6 +99,13 @@ final class SettingsViewController: UIViewController {
     private let manualCxField = UITextField()
     private let manualCyField = UITextField()
     private let manualDistortionField = UITextField()
+
+    /// Invoked once in `viewDidDisappear`, regardless of whether the user
+    /// dismissed via Close, Save, or an interactive swipe. The presenting
+    /// camera view uses this to re-diff UserDefaults and reconfigure
+    /// anything settings-driven (server URL, capture format, chirp
+    /// threshold, poll cadence) without needing viewWillAppear.
+    var onDismiss: (() -> Void)?
 
     static func loadFromUserDefaults() -> Settings {
         let d = UserDefaults.standard
@@ -116,6 +133,8 @@ final class SettingsViewController: UIViewController {
 
         let chirpThreshold = doubleOrDefault(keyChirpThreshold, defaultValue: 0.18)
 
+        let pollInterval = doubleOrDefault(keyPollInterval, defaultValue: 10.0)
+
         let captureWidth = intOrDefault(keyCaptureWidth, defaultValue: 1920)
         let captureHeight = intOrDefault(keyCaptureHeight, defaultValue: 1080)
         let captureFps = intOrDefault(keyCaptureFps, defaultValue: 240)
@@ -140,6 +159,7 @@ final class SettingsViewController: UIViewController {
             sMin: sMin, sMax: sMax,
             vMin: vMin, vMax: vMax,
             chirpThreshold: chirpThreshold,
+            pollInterval: pollInterval,
             captureWidth: captureWidth,
             captureHeight: captureHeight,
             captureFps: captureFps,
@@ -178,6 +198,11 @@ final class SettingsViewController: UIViewController {
         view.addGestureRecognizer(tap)
     }
 
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        onDismiss?()
+    }
+
     @objc private func closeTapped() {
         dismiss(animated: true)
     }
@@ -203,6 +228,7 @@ final class SettingsViewController: UIViewController {
             vMin: intValue(vMinField.text, fallback: current.vMin),
             vMax: intValue(vMaxField.text, fallback: current.vMax),
             chirpThreshold: doubleValue(chirpThresholdField.text, fallback: current.chirpThreshold),
+            pollInterval: min(300.0, max(2.0, doubleValue(pollIntervalField.text, fallback: current.pollInterval))),
             captureWidth: resolution.0,
             captureHeight: resolution.1,
             captureFps: fps,
@@ -251,6 +277,7 @@ final class SettingsViewController: UIViewController {
         configureTextField(vMinField, placeholder: "40", keyboard: .numberPad)
         configureTextField(vMaxField, placeholder: "255", keyboard: .numberPad)
         configureTextField(chirpThresholdField, placeholder: "0.18", keyboard: .decimalPad)
+        configureTextField(pollIntervalField, placeholder: "10", keyboard: .decimalPad)
         configureTextField(manualFxField, placeholder: "fx (e.g. 1600)", keyboard: .decimalPad)
         configureTextField(manualFyField, placeholder: "fy (e.g. 1600)", keyboard: .decimalPad)
         configureTextField(manualCxField, placeholder: "cx (e.g. 960)", keyboard: .decimalPad)
@@ -260,6 +287,7 @@ final class SettingsViewController: UIViewController {
         contentStack.addArrangedSubview(sectionTitle("Server"))
         contentStack.addArrangedSubview(fieldRow(label: "Server IP", field: serverIPField))
         contentStack.addArrangedSubview(fieldRow(label: "Server Port", field: serverPortField))
+        contentStack.addArrangedSubview(fieldRow(label: "Poll Interval (s)", field: pollIntervalField))
 
         contentStack.addArrangedSubview(sectionTitle("Camera"))
         contentStack.addArrangedSubview(controlRow(label: "Camera Role", control: cameraRoleControl))
@@ -299,6 +327,7 @@ final class SettingsViewController: UIViewController {
         vMinField.text = String(settings.vMin)
         vMaxField.text = String(settings.vMax)
         chirpThresholdField.text = String(settings.chirpThreshold)
+        pollIntervalField.text = String(settings.pollInterval)
         captureResolutionControl.selectedSegmentIndex = settings.captureHeight >= 1080 ? 1 : 0
         captureFpsControl.selectedSegmentIndex = [60, 120, 240].firstIndex(of: settings.captureFps) ?? 2
 
@@ -406,6 +435,7 @@ final class SettingsViewController: UIViewController {
         d.set(settings.vMin, forKey: keyVMin)
         d.set(settings.vMax, forKey: keyVMax)
         d.set(settings.chirpThreshold, forKey: keyChirpThreshold)
+        d.set(settings.pollInterval, forKey: keyPollInterval)
         d.set(settings.captureWidth, forKey: keyCaptureWidth)
         d.set(settings.captureHeight, forKey: keyCaptureHeight)
         d.set(settings.captureFps, forKey: keyCaptureFps)
