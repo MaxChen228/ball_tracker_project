@@ -94,7 +94,10 @@ final class PitchRecorder {
             homography: nil,
             image_width_px: nil,
             image_height_px: nil,
-            audio_start_ts_s: nil
+            audio_start_ts_s: nil,
+            // mac_clock_offset_s filled in by CameraViewController.enrichedPayload
+            // when syncMode == "mac"
+            mac_clock_offset_s: nil
         )
 
         onCycleComplete?(payload)
