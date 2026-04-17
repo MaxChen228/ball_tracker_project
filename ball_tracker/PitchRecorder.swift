@@ -93,7 +93,8 @@ final class PitchRecorder {
             intrinsics: nil,
             homography: nil,
             image_width_px: nil,
-            image_height_px: nil
+            image_height_px: nil,
+            mac_clock_offset_s: nil  // enriched later by CameraViewController.enrichedPayload
         )
 
         onCycleComplete?(payload)
