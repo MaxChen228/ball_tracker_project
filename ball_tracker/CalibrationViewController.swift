@@ -63,6 +63,25 @@ final class CalibrationViewController: UIViewController {
 
     private var handles: [CornerKey: DraggablePointView] = [:]
 
+    private let residualLabel = UILabel()
+    private let reprojectedPolyLayer = CAShapeLayer()
+
+    // Real home-plate pentagon vertices in meters. Axes: X = left/right,
+    // Y = depth from front edge (pitcher side) toward back tip (catcher side).
+    private static let plateWidthM = 0.432       // 17" front edge
+    private static let plateShoulderYM = 0.216   // 8.5" back to shoulder
+    private static let plateTipYM = 0.432        // 17" back to back tip
+
+    private static func plateWorldPoints() -> [(Double, Double)] {
+        return [
+            (-plateWidthM / 2.0, 0.0),          // FL
+            (plateWidthM / 2.0, 0.0),           // FR
+            (plateWidthM / 2.0, plateShoulderYM),  // RS
+            (0.0, plateTipYM),                  // BT
+            (-plateWidthM / 2.0, plateShoulderYM), // LS
+        ]
+    }
+
     deinit {
         session.stopRunning()
     }
@@ -101,6 +120,33 @@ final class CalibrationViewController: UIViewController {
         view.layoutIfNeeded()
         setupPreview()
         setupCornerHandles()
+        setupResidualOverlay()
+        refreshResidualAndPolygon()
+    }
+
+    private func setupResidualOverlay() {
+        reprojectedPolyLayer.strokeColor = UIColor.systemGreen.cgColor
+        reprojectedPolyLayer.fillColor = UIColor.clear.cgColor
+        reprojectedPolyLayer.lineWidth = 2
+        reprojectedPolyLayer.lineDashPattern = [6, 4]
+        view.layer.addSublayer(reprojectedPolyLayer)
+
+        residualLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        residualLabel.textColor = .white
+        residualLabel.textAlignment = .center
+        residualLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        residualLabel.layer.cornerRadius = 10
+        residualLabel.clipsToBounds = true
+        residualLabel.numberOfLines = 2
+        residualLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(residualLabel)
+
+        NSLayoutConstraint.activate([
+            residualLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            residualLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            residualLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
+            residualLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 56),
+        ])
     }
 
     private func setupPreview() {
@@ -145,6 +191,9 @@ final class CalibrationViewController: UIViewController {
 
         func makeHandle(color: UIColor, text: String) -> DraggablePointView {
             let v = DraggablePointView(color: color, text: text)
+            v.onMoved = { [weak self] _ in
+                self?.refreshResidualAndPolygon()
+            }
             view.addSubview(v)
             return v
         }
@@ -187,25 +236,98 @@ final class CalibrationViewController: UIViewController {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         previewLayer?.frame = view.bounds
+        reprojectedPolyLayer.frame = view.bounds
+    }
+
+    private func refreshResidualAndPolygon() {
+        let d = UserDefaults.standard
+        let imageW = d.integer(forKey: Self.keyImageWidthPx)
+        let imageH = d.integer(forKey: Self.keyImageHeightPx)
+        guard imageW > 0, imageH > 0, handles.count == 5 else {
+            residualLabel.text = "等待相機尺寸…"
+            reprojectedPolyLayer.path = nil
+            return
+        }
+
+        let viewOrder: [CGPoint] = [
+            handles[.frontLeft]?.center ?? .zero,
+            handles[.frontRight]?.center ?? .zero,
+            handles[.rightShoulder]?.center ?? .zero,
+            handles[.backTip]?.center ?? .zero,
+            handles[.leftShoulder]?.center ?? .zero,
+        ]
+        let imgPts = viewOrder.map {
+            viewPointToImagePixel($0, imageWidth: imageW, imageHeight: imageH)
+        }
+        let world = Self.plateWorldPoints()
+
+        guard let H = computeHomography(worldPoints: world, imagePoints: imgPts) else {
+            residualLabel.text = "無法解算單應矩陣 (點位退化?)"
+            reprojectedPolyLayer.path = nil
+            return
+        }
+
+        var residualSum = 0.0
+        var residualMax = 0.0
+        var reprojectedView: [CGPoint] = []
+        for i in 0..<5 {
+            let (X, Y) = world[i]
+            let u = H[0] * X + H[1] * Y + H[2]
+            let v = H[3] * X + H[4] * Y + H[5]
+            let w = H[6] * X + H[7] * Y + H[8]
+            guard abs(w) > 1e-9 else { continue }
+            let px = u / w
+            let py = v / w
+            let dx = px - Double(imgPts[i].x)
+            let dy = py - Double(imgPts[i].y)
+            let err = (dx * dx + dy * dy).squareRoot()
+            residualSum += err
+            residualMax = max(residualMax, err)
+            reprojectedView.append(imagePixelToViewPoint(
+                CGPoint(x: px, y: py), imageWidth: imageW, imageHeight: imageH
+            ))
+        }
+        let residualMean = residualSum / 5.0
+
+        let quality: String
+        let color: UIColor
+        if residualMax < 3 {
+            quality = "極佳"
+            color = .systemGreen
+        } else if residualMax < 8 {
+            quality = "可接受"
+            color = .systemYellow
+        } else {
+            quality = "偏差過大，重新拖曳"
+            color = .systemRed
+        }
+        residualLabel.text = String(format: "殘差 mean=%.1fpx max=%.1fpx  —  %@",
+                                    residualMean, residualMax, quality)
+        residualLabel.backgroundColor = color.withAlphaComponent(0.55)
+
+        if reprojectedView.count == 5 {
+            let path = UIBezierPath()
+            path.move(to: reprojectedView[0])
+            for pt in reprojectedView.dropFirst() { path.addLine(to: pt) }
+            path.close()
+            reprojectedPolyLayer.path = path.cgPath
+            reprojectedPolyLayer.strokeColor = color.cgColor
+        }
+    }
+
+    private func imagePixelToViewPoint(_ p: CGPoint, imageWidth: Int, imageHeight: Int) -> CGPoint {
+        guard let previewLayer else { return .zero }
+        // Inverse of viewPointToImagePixel: image-pixel (px, py) → normalized capture coords → layer point.
+        let devX = CGFloat(p.y) / CGFloat(imageHeight)  // capture-x = image-y fraction
+        let devY = CGFloat(p.x) / CGFloat(imageWidth)   // capture-y = image-x fraction
+        return previewLayer.layerPointConverted(fromCaptureDevicePoint: CGPoint(x: devX, y: devY))
     }
 
     private func persistCalibrationFromDraggedPoints() {
         let d = UserDefaults.standard
 
         // --- 1) Compute homography (world plane -> image plane) ---
-        // Real home-plate pentagon vertices in meters. Axes: X = left/right,
-        // Y = depth from front edge (pitcher side) toward back tip (catcher side).
-        let widthM = 0.432       // 17" front edge
-        let shoulderY = 0.216    // 8.5" back to shoulder
-        let tipY = 0.432         // 17" back to back tip
-
-        let world: [(Double, Double)] = [
-            (-widthM / 2.0, 0.0),         // FL
-            (widthM / 2.0, 0.0),          // FR
-            (widthM / 2.0, shoulderY),    // RS (right shoulder)
-            (0.0, tipY),                  // BT (back tip, on centerline)
-            (-widthM / 2.0, shoulderY),   // LS (left shoulder)
-        ]
+        let world = Self.plateWorldPoints()
 
         // Convert taps in view coordinates into approximate image pixel coordinates.
         // (This is approximate until we wire previewLayer->pixel coordinate mapping.)
