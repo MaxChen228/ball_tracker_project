@@ -81,6 +81,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // link on main. Same pattern as latestCentroidX/Y.
     private var latestFlashSnapshot: FlashDetector.Snapshot?
 
+    // Diagnostic string shown in the debug HUD: which exposure strategy we
+    // committed to (.custom / bias / .locked) + the actual duration/ISO the
+    // device accepted. Lets us see at a glance whether the underexpose
+    // actually took effect on this device/format.
+    private var latestExposureInfo: String?
+
     // Calibration prerequisites (so CalibrationViewController can compute intrinsics).
     private static let keyHorizontalFovRad = "horizontal_fov_rad"
     private static let keyImageWidthPx = "image_width_px"
@@ -395,15 +401,45 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
             if device.isExposureModeSupported(.custom) {
                 let fmt = device.activeFormat
+                // Aggressive: 1/8 of the AE-settled duration (was 1/4 — still
+                // not dark enough on some high-fps formats). Clamped to the
+                // format's minExposureDuration (typically ~1/8000s).
                 let darkerDuration = CMTimeMaximum(
-                    CMTimeMultiplyByRatio(device.exposureDuration, multiplier: 1, divisor: 4),
+                    CMTimeMultiplyByRatio(device.exposureDuration, multiplier: 1, divisor: 8),
                     fmt.minExposureDuration
                 )
-                device.setExposureModeCustom(duration: darkerDuration, iso: fmt.minISO) { _ in }
+                let targetISO = fmt.minISO
+                let targetSeconds = CMTimeGetSeconds(darkerDuration)
+                latestExposureInfo = String(
+                    format: "custom→ ISO %.0f dur 1/%.0fs (settling…)",
+                    targetISO,
+                    targetSeconds > 0 ? 1.0 / targetSeconds : 0
+                )
+                device.setExposureModeCustom(duration: darkerDuration, iso: targetISO) { [weak self] actualTime in
+                    guard let self else { return }
+                    let s = CMTimeGetSeconds(actualTime)
+                    DispatchQueue.main.async {
+                        self.latestExposureInfo = String(
+                            format: "custom ISO %.0f dur 1/%.0fs",
+                            targetISO,
+                            s > 0 ? 1.0 / s : 0
+                        )
+                    }
+                }
+            } else if device.minExposureTargetBias <= -4 {
+                // Fallback A: device doesn't accept custom exposure on this
+                // format. Use AE bias to shift target luminance down by as
+                // much as the device allows (typically -8…+8 EV).
+                let bias = max(device.minExposureTargetBias, -6.0)
+                latestExposureInfo = String(format: "bias %.1f EV (custom unsupported)", bias)
+                device.setExposureTargetBias(bias) { _ in }
             } else if device.isExposureModeSupported(.locked) {
-                // Fallback: device doesn't support .custom. Freeze AE where it
-                // landed — bright-ambient performance will be degraded.
+                // Fallback B: neither custom nor usable bias. Freeze AE
+                // where it landed — bright-ambient performance degrades.
                 device.exposureMode = .locked
+                latestExposureInfo = "locked at AE (degraded)"
+            } else {
+                latestExposureInfo = "no exposure control available"
             }
 
             if device.isWhiteBalanceModeSupported(.locked) {
@@ -443,6 +479,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         savedExposureDuration = nil
         savedISO = nil
         savedWhiteBalanceMode = nil
+        latestExposureInfo = nil
     }
 
     override func viewDidLayoutSubviews() {
@@ -493,7 +530,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             statusText = "armed"
             color = .systemYellow
         }
-        flashDebugLabel.text = String(
+        var text = String(
             format: "lum %.0f  med %.0f  ratio %.2f×/%.2f×  Δ %+.0f/%.0f  %@",
             snap.currentLuminance,
             snap.baselineMedian,
@@ -503,6 +540,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             snap.requiredRise,
             statusText
         )
+        if let exposure = latestExposureInfo {
+            text += "\n" + exposure
+        }
+        flashDebugLabel.text = text
         flashDebugLabel.textColor = color
     }
 
