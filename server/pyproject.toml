@@ -9,6 +9,7 @@ dependencies = [
     "pydantic>=2.13",
     "numpy>=2.0",
     "opencv-contrib-python>=4.10",
+    "python-multipart>=0.0.12",
 ]
 
 [dependency-groups]
