@@ -1,11 +1,22 @@
 """FastAPI ingest + triangulation server for ball_tracker iPhone app.
 
 Endpoints:
-  GET  /                       — events index (HTML table → /viewer/{cycle})
-  GET  /status                 — health + received-cycle summary
+  GET  /                       — dashboard (devices panel, session state,
+                                  Arm / Cancel controls, events table)
+  GET  /status                 — health + received cycles + online devices +
+                                  current session + per-camera commands
   POST /pitch                  — ingest one iPhone pitch payload (multipart/form-data
                                   with required `payload` JSON part and optional
                                   `video` MOV/MP4 clip)
+  POST /heartbeat              — iPhone 1 Hz liveness ping; body: {"camera_id"}.
+                                  Returns the same shape as /status so the phone
+                                  can piggy-back on the response for commands.
+  POST /sessions/arm           — dashboard: begin an armed session. /status
+                                  starts dispatching {cam: "arm"} for online
+                                  devices.
+  POST /sessions/cancel        — dashboard: disarm manually. Triggers a short
+                                  "disarm" broadcast window so phones can exit
+                                  recording cleanly.
   GET  /chirp.wav              — reference sync chirp for the 時間校正 step
   GET  /events                 — one row per cycle: cameras, status, counts,
                                   received_at, triangulation stats
@@ -23,16 +34,19 @@ import io
 import json
 import logging
 import os
+import secrets
 import socket
+import time
 import wave
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, Response
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field, ValidationError
 
 from triangulate import (
@@ -199,9 +213,74 @@ def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoin
 
 _DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
 
+# Seconds a heartbeat remains fresh. A phone beating at 1 Hz drops off the
+# "online" list after missing ~3 beats — conservative enough to tolerate a
+# stalled wifi roam without flapping.
+_DEVICE_STALE_S = 3.0
+
+# When a session ends, server keeps advertising `disarm` on /status for a
+# brief window so the phone that didn't fire the cycle still gets the signal
+# on its next poll. Long enough to cover any sensible poll cadence.
+_DISARM_ECHO_S = 5.0
+
+# Session auto-timeout if no cycle arrives. Covers "dashboard armed but
+# nobody threw anything" — otherwise /status would keep dispatching arm
+# forever.
+_DEFAULT_SESSION_TIMEOUT_S = 60.0
+
+
+@dataclass
+class Device:
+    """Most recent heartbeat from a single iPhone. `last_seen_at` is a wall
+    clock unix timestamp so `now - last_seen_at` compares cleanly even
+    across server restarts (the dict is memory-only, so restart implies no
+    device is online yet)."""
+    camera_id: str
+    last_seen_at: float
+
+
+@dataclass
+class Session:
+    """One dashboard "Arm" action → at most one session at a time. The
+    server does NOT assign cycle numbers — iPhones still pick their own —
+    but it records which (camera_id, cycle_number) uploads arrived during
+    this session so the dashboard can render "session s_abc → A=cycle 12,
+    B=cycle 8"."""
+    id: str
+    started_at: float
+    max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S
+    ended_at: float | None = None
+    end_reason: str | None = None   # "cycle_uploaded" | "cancelled" | "timeout"
+    cycles_received: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def armed(self) -> bool:
+        return self.ended_at is None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "armed": self.armed,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "end_reason": self.end_reason,
+            "max_duration_s": self.max_duration_s,
+            "cycles_received": list(self.cycles_received),
+        }
+
+
+def _new_session_id() -> str:
+    # 8 hex chars ≈ 4 bytes of entropy — plenty for a personal-LAN tool
+    # where sessions are seconds apart, not microseconds.
+    return "s_" + secrets.token_hex(4)
+
 
 class State:
-    def __init__(self, data_dir: Path = _DEFAULT_DATA_DIR) -> None:
+    def __init__(
+        self,
+        data_dir: Path = _DEFAULT_DATA_DIR,
+        time_fn: Callable[[], float] = time.time,
+    ) -> None:
         self._lock = Lock()
         self.pitches: dict[tuple[str, int], PitchPayload] = {}
         self.results: dict[int, CycleResult] = {}
@@ -212,6 +291,13 @@ class State:
         self._pitch_dir.mkdir(parents=True, exist_ok=True)
         self._result_dir.mkdir(parents=True, exist_ok=True)
         self._video_dir.mkdir(parents=True, exist_ok=True)
+        # Dashboard-control state. All in-memory — devices re-heartbeat on
+        # connection, sessions don't survive restart.
+        self._devices: dict[str, Device] = {}
+        self._current_session: Session | None = None
+        self._last_ended_session: Session | None = None
+        # Injectable clock so timeout and staleness tests don't need sleeps.
+        self._time_fn = time_fn
         self._load_from_disk()
 
     @property
@@ -286,6 +372,12 @@ class State:
                 pitch.model_dump_json(),
             )
 
+            # Drive the session state machine forward — any cycle arriving
+            # while armed disarms the session (one-shot pattern). The other
+            # camera, if it was also recording, gets "disarm" on its next
+            # /status poll and cleans up.
+            self._register_cycle_in_session_locked(pitch)
+
             a = self.pitches.get(("A", pitch.cycle_number))
             b = self.pitches.get(("B", pitch.cycle_number))
             result = CycleResult(
@@ -337,6 +429,136 @@ class State:
                 for (cam_id, c), p in self.pitches.items()
                 if c == cycle
             }
+
+    # ------------------------------------------------------------------
+    # Dashboard-control plumbing: heartbeat registry + session state
+    # ------------------------------------------------------------------
+
+    def heartbeat(self, camera_id: str) -> None:
+        """Record one liveness ping. Overwrites the previous entry for this
+        camera so `last_seen_at` always reflects the latest beat."""
+        now = self._time_fn()
+        with self._lock:
+            self._devices[camera_id] = Device(
+                camera_id=camera_id, last_seen_at=now
+            )
+
+    def online_devices(
+        self, stale_after_s: float = _DEVICE_STALE_S
+    ) -> list[Device]:
+        """Snapshot of devices whose last heartbeat is within
+        `stale_after_s` of now. Returned sorted by camera_id for
+        deterministic rendering."""
+        now = self._time_fn()
+        with self._lock:
+            fresh = [
+                d for d in self._devices.values()
+                if now - d.last_seen_at <= stale_after_s
+            ]
+        fresh.sort(key=lambda d: d.camera_id)
+        return fresh
+
+    def _check_session_timeout_locked(self, now: float) -> None:
+        """If the current session has exceeded its max_duration_s, transition
+        it to ended(reason=timeout). Assumes the caller holds `self._lock`."""
+        s = self._current_session
+        if s is None or s.ended_at is not None:
+            return
+        if now - s.started_at > s.max_duration_s:
+            s.ended_at = now
+            s.end_reason = "timeout"
+            self._last_ended_session = s
+            self._current_session = None
+
+    def current_session(self) -> Session | None:
+        """Current armed session (None if idle). Side-effect: lazily applies
+        the timeout so polling callers (status, commands) drive the state
+        machine forward without a background task."""
+        now = self._time_fn()
+        with self._lock:
+            self._check_session_timeout_locked(now)
+            return self._current_session
+
+    def arm_session(
+        self, max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S
+    ) -> Session:
+        """Begin a new armed session. If one is already armed, return it
+        unchanged (idempotent so dashboard double-clicks don't double-arm)."""
+        now = self._time_fn()
+        with self._lock:
+            self._check_session_timeout_locked(now)
+            if self._current_session is not None:
+                return self._current_session
+            session = Session(
+                id=_new_session_id(),
+                started_at=now,
+                max_duration_s=max_duration_s,
+            )
+            self._current_session = session
+            return session
+
+    def cancel_session(self, reason: str = "cancelled") -> Session | None:
+        """Force-end the current armed session. Returns the ended session,
+        or None if nothing was armed."""
+        now = self._time_fn()
+        with self._lock:
+            s = self._current_session
+            if s is None or s.ended_at is not None:
+                return None
+            s.ended_at = now
+            s.end_reason = reason
+            self._last_ended_session = s
+            self._current_session = None
+            return s
+
+    def _register_cycle_in_session_locked(self, pitch: PitchPayload) -> None:
+        """Called from `record()` while the state lock is held. If a session
+        is armed, attach the (cam, cycle) tuple and auto-end it (one-shot
+        arm → first cycle disarms). The other camera, if any, receives
+        `disarm` via commands_for_devices during the echo window."""
+        s = self._current_session
+        if s is None or s.ended_at is not None:
+            return
+        s.cycles_received.append(
+            {"camera_id": pitch.camera_id, "cycle_number": pitch.cycle_number}
+        )
+        # One-shot: any cycle arrival ends the session.
+        s.ended_at = self._time_fn()
+        s.end_reason = "cycle_uploaded"
+        self._last_ended_session = s
+        self._current_session = None
+
+    def session_snapshot(self) -> Session | None:
+        """Return the session most relevant to a status caller: the current
+        armed session if any, otherwise the most recently ended one (so the
+        dashboard can display "IDLE (last: cycle_uploaded)" and the iPhone
+        sees session.armed == False during the disarm echo window)."""
+        current = self.current_session()
+        if current is not None:
+            return current
+        with self._lock:
+            return self._last_ended_session
+
+    def commands_for_devices(self) -> dict[str, str]:
+        """Derive per-device commands from the current session state. The
+        iPhone reads `commands[self.camera_id]` on each /status poll:
+          - "arm"    if a session is currently armed
+          - "disarm" if a session ended within _DISARM_ECHO_S ago
+          - absent   otherwise (steady state, no action required)"""
+        now = self._time_fn()
+        current = self.current_session()  # applies timeout
+        online_ids = [d.camera_id for d in self.online_devices()]
+        with self._lock:
+            last_ended = self._last_ended_session
+        cmds: dict[str, str] = {}
+        if current is not None:
+            for cam in online_ids:
+                cmds[cam] = "arm"
+        elif last_ended is not None and last_ended.ended_at is not None:
+            if now - last_ended.ended_at <= _DISARM_ECHO_S:
+                for cam in online_ids:
+                    cmds[cam] = "disarm"
+        return cmds
 
     def events(self) -> list[dict[str, Any]]:
         """Summary row per cycle for the events panel — one entry per
@@ -417,6 +639,9 @@ class State:
         with self._lock:
             self.pitches.clear()
             self.results.clear()
+            self._devices.clear()
+            self._current_session = None
+            self._last_ended_session = None
             if purge_disk:
                 for path in self._pitch_dir.glob("cycle_*.json*"):
                     path.unlink(missing_ok=True)
@@ -452,9 +677,71 @@ app = FastAPI(title="ball_tracker server", lifespan=lifespan)
 state = State()
 
 
+def _build_status_response() -> dict[str, Any]:
+    """Shared shape for GET /status and POST /heartbeat responses. Anything
+    an iPhone needs to decide whether to arm / disarm is in here — the
+    phone just polls this and reacts to `commands[self.camera_id]`."""
+    summary = state.summary()
+    session = state.session_snapshot()
+    return {
+        **summary,
+        "devices": [
+            {"camera_id": d.camera_id, "last_seen_at": d.last_seen_at}
+            for d in state.online_devices()
+        ],
+        "session": session.to_dict() if session is not None else None,
+        "commands": state.commands_for_devices(),
+    }
+
+
 @app.get("/status")
 def status() -> dict[str, Any]:
-    return state.summary()
+    return _build_status_response()
+
+
+class HeartbeatBody(BaseModel):
+    camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
+
+
+@app.post("/heartbeat")
+def heartbeat(body: HeartbeatBody) -> dict[str, Any]:
+    """iPhone liveness ping. Responds with the same payload as /status so
+    the phone can decide arm/disarm from the reply without a second call."""
+    state.heartbeat(body.camera_id)
+    return _build_status_response()
+
+
+def _wants_html(request: Request) -> bool:
+    """Returns True when the request looks like a browser form submission
+    (Accept: text/html). Lets one endpoint serve both dashboard buttons
+    and JSON API callers without a second URL."""
+    return "text/html" in request.headers.get("accept", "").lower()
+
+
+@app.post("/sessions/arm")
+async def sessions_arm(
+    request: Request,
+    max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S,
+):
+    """Begin an armed session. HTML-form callers (dashboard buttons) get a
+    303 redirect back to /. Machine callers get the session JSON."""
+    session = state.arm_session(max_duration_s=max_duration_s)
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "session": session.to_dict()}
+
+
+@app.post("/sessions/cancel")
+async def sessions_cancel(request: Request):
+    """Force-disarm. Returns 409 to API callers when nothing was armed;
+    HTML callers always get a 303 redirect back to the dashboard so the
+    button never looks broken."""
+    ended = state.cancel_session(reason="cancelled")
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    if ended is None:
+        raise HTTPException(status_code=409, detail="no armed session")
+    return {"ok": True, "session": ended.to_dict()}
 
 
 def _summarize_result(result: CycleResult) -> dict[str, Any]:
@@ -628,7 +915,17 @@ def events() -> list[dict[str, Any]]:
 def events_index() -> HTMLResponse:
     from viewer import render_events_index_html
 
-    return HTMLResponse(render_events_index_html(state.events()))
+    session = state.session_snapshot()
+    return HTMLResponse(
+        render_events_index_html(
+            events=state.events(),
+            devices=[
+                {"camera_id": d.camera_id, "last_seen_at": d.last_seen_at}
+                for d in state.online_devices()
+            ],
+            session=session.to_dict() if session is not None else None,
+        )
+    )
 
 
 @app.post("/reset")

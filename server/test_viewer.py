@@ -269,7 +269,7 @@ def test_index_endpoint_lists_events_with_viewer_links():
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     body = r.text
-    assert "ball_tracker events" in body
+    assert "ball_tracker dashboard" in body
     assert 'href="/viewer/901"' in body
 
 
@@ -279,4 +279,4 @@ def test_index_endpoint_empty_state_is_rendered():
     assert r.status_code == 200
     # Either the empty message or a table — the fixture may have left rows
     # behind. Assert it's renderable HTML with the page title.
-    assert "ball_tracker events" in r.text
+    assert "ball_tracker dashboard" in r.text
