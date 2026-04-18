@@ -1,5 +1,6 @@
 import UIKit
 import AVFoundation
+import AudioToolbox
 import CoreMedia
 import CoreVideo
 import os
@@ -117,7 +118,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // UI containers.
     private let statusContainer = UIStackView()
-    private let topStatusLabel = UILabel()
+    private let topStatusLabel = PaddedLabel()
     private let serverStatusDot = UIView()
     private let serverStatusLabel = UILabel()
     private let fpsLabel = UILabel()
@@ -127,6 +128,30 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let chirpDebugLabel = UILabel()
     private let lastContactLabel = UILabel()
     private let testConnectionButton = UIButton(type: .system)
+
+    // Full-screen colored border that reflects AppState. Stroke width +
+    // tint change per state; pulses opacity in WAITING states so the
+    // operator can see the mode change from across the field.
+    private let stateBorderLayer = CAShapeLayer()
+
+    // Top-right "● REC 2.3s" indicator, shown only during .recording.
+    private let recIndicator = UIView()
+    private let recDotView = UIView()
+    private let recTimerLabel = UILabel()
+    private var recTimer: Timer?
+    private var recStartTime: CFTimeInterval = 0
+
+    // Haptic feedback generators. Kept as properties so prepare() is
+    // honored (trigger latency drops from ~100 ms to <20 ms).
+    private let armHaptic = UIImpactFeedbackGenerator(style: .light)
+    private let startRecHaptic = UIImpactFeedbackGenerator(style: .medium)
+    private let endRecHaptic = UINotificationFeedbackGenerator()
+
+    // System-sound IDs used at recording start/end. 1113 / 1114 are short
+    // iOS system tones with audibly different pitches, so the operator
+    // can distinguish start vs end without looking at the screen.
+    private let startRecSoundID: SystemSoundID = 1113
+    private let endRecSoundID: SystemSoundID = 1114
 
     // MARK: - Lifecycle
 
@@ -172,6 +197,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             let finishingClip = self.clipRecorder
             self.clipRecorder = nil
             log.info("camera cycle complete session=\(payload.session_id, privacy: .public) cam=\(payload.camera_id, privacy: .public) frames=\(payload.frames.count) has_clip=\(finishingClip != nil)")
+            // End-of-recording feedback — haptic + system sound so the
+            // operator knows the cycle finished without looking down.
+            DispatchQueue.main.async {
+                AudioServicesPlaySystemSound(self.endRecSoundID)
+                self.endRecHaptic.notificationOccurred(.success)
+            }
             let enriched = self.enrichedPayload(from: payload)
             if let finishingClip {
                 finishingClip.finish { [weak self] videoURL in
@@ -277,6 +308,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         state = .syncWaiting
         updateUIForState()
         uploadQueue.processNextIfNeeded()
+        // Acknowledge arm with a light tap; pre-warm the next two haptics
+        // so their first fire isn't lazy-initialised.
+        armHaptic.impactOccurred()
+        startRecHaptic.prepare()
+        endRecHaptic.prepare()
     }
 
     func exitSyncMode() {
@@ -615,6 +651,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         previewLayer?.frame = view.bounds
+        // Border path follows the root view bounds; regenerated on every
+        // layout pass so rotation / safe-area changes stay in sync.
+        stateBorderLayer.frame = view.bounds
+        stateBorderLayer.path = UIBezierPath(rect: view.bounds).cgPath
     }
 
     private func setupBallOverlay() {
@@ -839,7 +879,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             label.lineBreakMode = .byWordWrapping
         }
 
-        styleLabel(topStatusLabel, size: 24, weight: .bold)
+        topStatusLabel.font = .systemFont(ofSize: 30, weight: .heavy)
+        topStatusLabel.textColor = .black
+        topStatusLabel.numberOfLines = 1
+        topStatusLabel.textAlignment = .center
+        topStatusLabel.layer.cornerRadius = 14
+        topStatusLabel.layer.masksToBounds = true
+        topStatusLabel.adjustsFontSizeToFitWidth = true
+        topStatusLabel.minimumScaleFactor = 0.65
         styleLabel(serverStatusLabel, size: 18, weight: .medium)
         styleLabel(fpsLabel, size: 18, weight: .medium)
         styleLabel(uploadStatusLabel, size: 18, weight: .medium)
@@ -867,7 +914,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             serverStatusDot.heightAnchor.constraint(equalToConstant: 16),
         ])
 
-        let row1 = UIStackView(arrangedSubviews: [topStatusLabel])
+        let row1 = UIStackView(arrangedSubviews: [topStatusLabel, UIView()])
         row1.axis = .horizontal
         row1.alignment = .center
 
@@ -918,10 +965,59 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             statusContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             statusContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
         ])
+
+        setupStateBorder()
+        setupRecIndicator()
+    }
+
+    private func setupStateBorder() {
+        stateBorderLayer.fillColor = UIColor.clear.cgColor
+        stateBorderLayer.strokeColor = UIColor.clear.cgColor
+        stateBorderLayer.lineWidth = 0
+        // Sit above the preview layer (index 0) but below the HUD views.
+        // Border is decorative — never intercept touches (CAShapeLayer
+        // doesn't by default, belt and braces).
+        view.layer.addSublayer(stateBorderLayer)
+    }
+
+    private func setupRecIndicator() {
+        recIndicator.translatesAutoresizingMaskIntoConstraints = false
+        recIndicator.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        recIndicator.layer.cornerRadius = 14
+        recIndicator.layer.borderColor = UIColor.systemRed.cgColor
+        recIndicator.layer.borderWidth = 1
+        recIndicator.isHidden = true
+
+        recDotView.backgroundColor = .systemRed
+        recDotView.layer.cornerRadius = 7
+        recDotView.translatesAutoresizingMaskIntoConstraints = false
+
+        recTimerLabel.text = "REC 0.0s"
+        recTimerLabel.textColor = .white
+        recTimerLabel.font = .monospacedDigitSystemFont(ofSize: 16, weight: .bold)
+        recTimerLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        recIndicator.addSubview(recDotView)
+        recIndicator.addSubview(recTimerLabel)
+        view.addSubview(recIndicator)
+
+        NSLayoutConstraint.activate([
+            recIndicator.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            recIndicator.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            recIndicator.heightAnchor.constraint(equalToConstant: 32),
+
+            recDotView.leadingAnchor.constraint(equalTo: recIndicator.leadingAnchor, constant: 10),
+            recDotView.centerYAnchor.constraint(equalTo: recIndicator.centerYAnchor),
+            recDotView.widthAnchor.constraint(equalToConstant: 14),
+            recDotView.heightAnchor.constraint(equalToConstant: 14),
+
+            recTimerLabel.leadingAnchor.constraint(equalTo: recDotView.trailingAnchor, constant: 8),
+            recTimerLabel.trailingAnchor.constraint(equalTo: recIndicator.trailingAnchor, constant: -12),
+            recTimerLabel.centerYAnchor.constraint(equalTo: recIndicator.centerYAnchor),
+        ])
     }
 
     private func updateUIForState() {
-        topStatusLabel.text = "State: \(stateText(state))"
         serverStatusLabel.text = "Server \(healthMonitor?.statusText ?? "unknown")"
         serverStatusDot.backgroundColor = serverReachableColor()
         fpsLabel.text = String(format: "FPS %.1f", fpsEstimate)
@@ -929,6 +1025,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         lastResultLabel.text = "Last: \(lastResultText)"
 
         chirpDebugLabel.isHidden = (state != .timeSyncWaiting)
+        applyStateVisuals()
     }
 
     private func stateText(_ state: AppState) -> String {
@@ -939,6 +1036,106 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case .recording: return "RECORDING"
         case .uploading: return "UPLOADING"
         }
+    }
+
+    // MARK: - State visuals
+
+    private func applyStateVisuals() {
+        let cfg = stateVisualConfig(for: state)
+
+        // Border
+        stateBorderLayer.strokeColor = cfg.borderColor.cgColor
+        stateBorderLayer.lineWidth = cfg.borderWidth
+        stateBorderLayer.removeAnimation(forKey: "pulse")
+        if cfg.pulse {
+            let anim = CABasicAnimation(keyPath: "opacity")
+            anim.fromValue = 0.35
+            anim.toValue = 1.0
+            anim.duration = 0.85
+            anim.autoreverses = true
+            anim.repeatCount = .infinity
+            stateBorderLayer.add(anim, forKey: "pulse")
+        } else {
+            stateBorderLayer.opacity = 1.0
+        }
+
+        // Chip
+        topStatusLabel.text = cfg.chipText
+        topStatusLabel.backgroundColor = cfg.chipBg
+        topStatusLabel.textColor = cfg.chipFg
+
+        // REC indicator
+        if state == .recording {
+            recIndicator.isHidden = false
+            startRecTimer()
+        } else {
+            recIndicator.isHidden = true
+            stopRecTimer()
+        }
+    }
+
+    private struct StateVisualConfig {
+        let borderColor: UIColor
+        let borderWidth: CGFloat
+        let pulse: Bool
+        let chipText: String
+        let chipBg: UIColor
+        let chipFg: UIColor
+    }
+
+    private func stateVisualConfig(for s: AppState) -> StateVisualConfig {
+        switch s {
+        case .standby:
+            return .init(
+                borderColor: UIColor.white.withAlphaComponent(0.15), borderWidth: 2, pulse: false,
+                chipText: "STANDBY",
+                chipBg: UIColor(white: 0.25, alpha: 0.9), chipFg: .white
+            )
+        case .timeSyncWaiting:
+            return .init(
+                borderColor: .systemBlue, borderWidth: 8, pulse: true,
+                chipText: "TIME SYNC",
+                chipBg: UIColor.systemBlue.withAlphaComponent(0.95), chipFg: .white
+            )
+        case .syncWaiting:
+            return .init(
+                borderColor: .systemYellow, borderWidth: 10, pulse: true,
+                chipText: "WAITING FOR BALL",
+                chipBg: UIColor.systemYellow.withAlphaComponent(0.95), chipFg: .black
+            )
+        case .recording:
+            return .init(
+                borderColor: .systemRed, borderWidth: 14, pulse: false,
+                chipText: "● RECORDING",
+                chipBg: UIColor.systemRed.withAlphaComponent(0.95), chipFg: .white
+            )
+        case .uploading:
+            return .init(
+                borderColor: .systemOrange, borderWidth: 6, pulse: false,
+                chipText: "UPLOADING",
+                chipBg: UIColor.systemOrange.withAlphaComponent(0.95), chipFg: .black
+            )
+        }
+    }
+
+    private func startRecTimer() {
+        recStartTime = CACurrentMediaTime()
+        recTimerLabel.text = "REC 0.0s"
+        recDotView.alpha = 1.0
+        recTimer?.invalidate()
+        recTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let elapsed = CACurrentMediaTime() - self.recStartTime
+            self.recTimerLabel.text = String(format: "REC %.1fs", elapsed)
+            // 2 Hz blink so the operator can read the dot from distance.
+            self.recDotView.alpha = (Int(elapsed * 2) % 2 == 0) ? 1.0 : 0.25
+        }
+    }
+
+    private func stopRecTimer() {
+        recTimer?.invalidate()
+        recTimer = nil
+        recDotView.alpha = 1.0
     }
 
     private func serverReachableColor() -> UIColor {
@@ -1027,6 +1224,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 state = .recording
                 DispatchQueue.main.async {
                     self.updateUIForState()
+                    // Start-of-recording feedback: short system tone +
+                    // a medium impact so the operator registers the
+                    // transition even if looking away from the screen.
+                    AudioServicesPlaySystemSound(self.startRecSoundID)
+                    self.startRecHaptic.impactOccurred()
                 }
             }
 
@@ -1118,4 +1320,22 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         )
     }
 
+}
+
+/// UILabel with per-edge inset — gives a colored background chip real
+/// left/right padding without resorting to NSAttributedString hacks.
+final class PaddedLabel: UILabel {
+    var contentInsets = UIEdgeInsets(top: 6, left: 14, bottom: 6, right: 14)
+
+    override func drawText(in rect: CGRect) {
+        super.drawText(in: rect.inset(by: contentInsets))
+    }
+
+    override var intrinsicContentSize: CGSize {
+        let s = super.intrinsicContentSize
+        return CGSize(
+            width: s.width + contentInsets.left + contentInsets.right,
+            height: s.height + contentInsets.top + contentInsets.bottom
+        )
+    }
 }
