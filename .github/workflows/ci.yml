@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  server:
+    name: Server tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: server/uv.lock
+
+      - name: Install deps
+        run: uv sync --locked
+
+      - name: pytest
+        run: uv run pytest
+
+  ios:
+    name: iOS build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Cache SwiftPM packages
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('ball_tracker.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Resolve SwiftPM deps
+        run: |
+          xcodebuild \
+            -project ball_tracker.xcodeproj \
+            -scheme ball_tracker \
+            -resolvePackageDependencies
+
+      - name: Build (device target, no codesign)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ball_tracker.xcodeproj \
+            -scheme ball_tracker \
+            -destination "generic/platform=iOS" \
+            -configuration Debug \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build-for-testing
