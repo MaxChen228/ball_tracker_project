@@ -70,6 +70,13 @@ final class ManualCalibrationViewController: UIViewController {
         session.stopRunning()
     }
 
+    // Handle layout + homography solve assume the view is wider than tall
+    // (front-edge L/R on top, back tip at bottom). Portrait flips the
+    // aspect ratio and the initial handle placement would overlap.
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        [.landscapeLeft, .landscapeRight]
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
