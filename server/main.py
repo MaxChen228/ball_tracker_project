@@ -39,6 +39,7 @@ identifiers.
 """
 from __future__ import annotations
 
+import functools
 import io
 import json
 import logging
@@ -237,6 +238,18 @@ _DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
 # "online" list after missing ~3 beats — conservative enough to tolerate a
 # stalled wifi roam without flapping.
 _DEVICE_STALE_S = 3.0
+
+# Entries in `_devices` older than this get pruned on every heartbeat write.
+# Legitimate phones beat at 1 Hz so anything beyond 60 s is not coming back;
+# pruning on write is what keeps a malformed/spoofed client from ballooning
+# the registry forever without needing a background task.
+_DEVICE_GC_AFTER_S = 60.0
+
+# Hard cap on `_devices` size. Even with GC-on-write, a burst of distinct
+# camera_ids within the GC window could push memory up. Cap at 64 — more
+# than enough for any plausible rig (we run 2-phone stereo) while still
+# bounding adversarial input.
+_DEVICE_REGISTRY_CAP = 64
 
 # When a session ends, server keeps advertising `disarm` on /status for a
 # brief window so the phone that didn't fire the cycle still gets the signal
@@ -467,12 +480,29 @@ class State:
 
     def heartbeat(self, camera_id: str) -> None:
         """Record one liveness ping. Overwrites the previous entry for this
-        camera so `last_seen_at` always reflects the latest beat."""
+        camera so `last_seen_at` always reflects the latest beat. Prunes any
+        entry older than `_DEVICE_GC_AFTER_S` and enforces a hard size cap
+        (evicts the oldest by `last_seen_at`) so a misbehaving client can't
+        grow the registry without bound."""
         now = self._time_fn()
         with self._lock:
             self._devices[camera_id] = Device(
                 camera_id=camera_id, last_seen_at=now
             )
+            # GC stale entries first — cheap and keeps the cap hit rare.
+            stale = [
+                cam for cam, dev in self._devices.items()
+                if now - dev.last_seen_at > _DEVICE_GC_AFTER_S
+            ]
+            for cam in stale:
+                del self._devices[cam]
+            # Hard cap: if GC didn't bring us under, drop oldest.
+            while len(self._devices) > _DEVICE_REGISTRY_CAP:
+                oldest = min(
+                    self._devices.items(),
+                    key=lambda kv: kv[1].last_seen_at,
+                )[0]
+                del self._devices[oldest]
 
     def online_devices(
         self, stale_after_s: float = _DEVICE_STALE_S
@@ -872,17 +902,11 @@ async def pitch(
     return response
 
 
-@app.get("/chirp.wav")
-def chirp_wav() -> Response:
-    """Reference sync chirp for the 時間校正 step.
-
-    Users download this on any device (browser) and play it near the two
-    iPhones. Each phone's AudioChirpDetector runs matched filtering and
-    pins the session-clock PTS of the peak as the per-cycle anchor.
-
-    Signal: linear sweep 2 → 8 kHz, 100 ms, Hann-windowed, surrounded by
-    0.5 s of silence either side so the phones can catch it mid-stream.
-    """
+@functools.lru_cache(maxsize=1)
+def _chirp_wav_bytes() -> bytes:
+    """Build the reference sync chirp WAV once and cache. The signal is
+    deterministic (constants only) so any subsequent request can reuse the
+    exact same bytes without re-running the FFT-style synthesis."""
     sr = 44100
     f0 = 2000.0
     f1 = 8000.0
@@ -904,8 +928,22 @@ def chirp_wav() -> Response:
         w.setsampwidth(2)
         w.setframerate(sr)
         w.writeframes(pcm_int.tobytes())
+    return buf.getvalue()
+
+
+@app.get("/chirp.wav")
+def chirp_wav() -> Response:
+    """Reference sync chirp for the 時間校正 step.
+
+    Users download this on any device (browser) and play it near the two
+    iPhones. Each phone's AudioChirpDetector runs matched filtering and
+    pins the session-clock PTS of the peak as the per-cycle anchor.
+
+    Signal: linear sweep 2 → 8 kHz, 100 ms, Hann-windowed, surrounded by
+    0.5 s of silence either side so the phones can catch it mid-stream.
+    """
     return Response(
-        content=buf.getvalue(),
+        content=_chirp_wav_bytes(),
         media_type="audio/wav",
         headers={"Content-Disposition": 'inline; filename="chirp.wav"'},
     )
