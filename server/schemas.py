@@ -153,7 +153,7 @@ class Session:
     started_at: float
     max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S
     ended_at: float | None = None
-    end_reason: str | None = None   # "cycle_uploaded" | "cancelled" | "timeout"
+    end_reason: str | None = None   # "cancelled" | "timeout"
     # Camera ids that have successfully uploaded while this session was
     # the current one. Dashboard reads this to render "session s_abc →
     # A, B".
