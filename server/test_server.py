@@ -406,6 +406,28 @@ def test_post_pitch_anchorless_sets_error(tmp_path):
     assert r.json()["error"] == "no time sync"
 
 
+def test_pitch_writes_annotated_clip_alongside_raw(tmp_path):
+    """After /pitch, server has BOTH the raw MOV and a `_annotated` sibling
+    that re-encodes the clip with a circle drawn on every detected frame."""
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    P_true = np.array([0.1, 0.3, 1.0])
+    session_id = sid(540)
+    mov = _encode_single_ball_mov(
+        tmp_path, K, R_a, t_a, P_true, filename="src.mov"
+    )
+    client = TestClient(app)
+    r = _post_pitch(client, _base_payload("A", session_id, K, H_a), mov)
+    assert r.status_code == 200, r.text
+
+    raw = main.state.video_dir / f"session_{session_id}_A.mov"
+    annotated = main.state.video_dir / f"session_{session_id}_A_annotated.mov"
+    assert raw.exists()
+    assert annotated.exists()
+    # The annotated MOV must be a valid H.264 file that PyAV can decode.
+    from video import count_frames
+    assert count_frames(annotated) > 0
+
+
 def test_pitch_clip_persisted_with_canonical_filename(tmp_path):
     """Uploaded MOV is saved under data/videos/session_{sid}_{cam}.{ext}."""
     K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
