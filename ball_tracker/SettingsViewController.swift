@@ -101,7 +101,6 @@ final class SettingsViewController: UIViewController {
     private let serverIPField = UITextField()
     private let serverPortField = UITextField()
     private let cameraRoleControl = UISegmentedControl(items: ["A · 1B 側", "B · 3B 側"])
-    private let parkCameraSwitch = UISwitch()
 
     private let chirpThresholdField = UITextField()
     private let pollIntervalField = UITextField()
@@ -282,7 +281,11 @@ final class SettingsViewController: UIViewController {
             pollInterval: min(60.0, max(1.0, doubleValue(pollIntervalField.text, fallback: current.pollInterval))),
             captureWidth: Self.captureWidthFixed,
             captureHeight: Self.captureHeightFixed,
-            parkCameraInStandby: parkCameraSwitch.isOn,
+            // Park toggle is owned by the HUD button now; Save just
+            // forwards whatever the live UserDefaults value is so we don't
+            // clobber a change made in the main screen while Settings
+            // was open.
+            parkCameraInStandby: current.parkCameraInStandby,
             manualIntrinsicsEnabled: manualIntrinsicsSwitch.isOn,
             manualFx: doubleValue(manualFxField.text, fallback: current.manualFx),
             manualFy: doubleValue(manualFyField.text, fallback: current.manualFy),
@@ -394,9 +397,8 @@ final class SettingsViewController: UIViewController {
             title: "Camera",
             rows: [
                 controlRow(label: "Role", control: cameraRoleControl),
-                controlRow(label: "Park in STANDBY", control: parkCameraSwitch),
             ],
-            footer: "解析度系統固定 1080p。FPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。\nPark 開啟（預設）時 STANDBY 會停住 capture session 避免過熱；關閉則保留即時預覽，方便設置取景但會持續耗電發熱。"
+            footer: "解析度系統固定 1080p。FPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。\nSTANDBY 的即時預覽用主畫面右上「預覽」按鈕切換。"
         ))
 
         contentStack.addArrangedSubview(sectionBlock(
@@ -473,7 +475,6 @@ final class SettingsViewController: UIViewController {
         serverIPField.text = settings.serverIP
         serverPortField.text = String(settings.serverPort)
         cameraRoleControl.selectedSegmentIndex = settings.cameraRole == "B" ? 1 : 0
-        parkCameraSwitch.isOn = settings.parkCameraInStandby
         chirpThresholdField.text = String(settings.chirpThreshold)
         pollIntervalField.text = String(settings.pollInterval)
 
@@ -751,6 +752,14 @@ final class SettingsViewController: UIViewController {
     }
 
     // MARK: - Persistence
+
+    /// One-shot setter used by the main HUD's preview toggle button so it
+    /// doesn't need to know the UserDefaults key. Caller is expected to
+    /// trigger a settings hot-reload afterwards (e.g. via `onDismiss`
+    /// dispatcher or `applyUpdatedSettings`) to pick up the change.
+    static func setParkCameraInStandby(_ value: Bool) {
+        UserDefaults.standard.set(value, forKey: keyParkCameraInStandby)
+    }
 
     static func saveToUserDefaults(_ settings: Settings) {
         let d = UserDefaults.standard
