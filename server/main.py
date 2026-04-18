@@ -1100,8 +1100,8 @@ _VIDEO_FILENAME_RE = re.compile(
 )
 
 
-def _videos_for_session(session_id: str) -> list[tuple[str, str, float]]:
-    """Return `[(camera_id, "/videos/<filename>", t_rel_offset_s), ...]`
+def _videos_for_session(session_id: str) -> list[tuple[str, str, float, float]]:
+    """Return `[(camera_id, "/videos/<filename>", t_rel_offset_s, video_fps), ...]`
     sorted by camera_id. Prefers the `_annotated` clip when present (the
     one with detection circles drawn) and falls back to the raw MOV.
 
@@ -1110,7 +1110,11 @@ def _videos_for_session(session_id: str) -> list[tuple[str, str, float]]:
     clip's first frame was captured. The viewer seeks each camera's
     video by `currentTime = t_rel − offset`, which keeps A and B locked
     to the shared chirp anchor regardless of how different their arm-to-
-    first-frame latency was."""
+    first-frame latency was.
+
+    `video_fps` is the per-camera nominal capture rate (240.0 in the
+    default rig). The viewer uses the larger of A/B as the master
+    frame-stepping rate for its frame-by-frame controls."""
     prefix = f"session_{session_id}_"
     pitches = state.pitches_for_session(session_id)
 
@@ -1129,7 +1133,7 @@ def _videos_for_session(session_id: str) -> list[tuple[str, str, float]]:
         if cam not in best or (is_annotated and "_annotated" not in best[cam]):
             best[cam] = name
 
-    out: list[tuple[str, str, float]] = []
+    out: list[tuple[str, str, float, float]] = []
     for cam in sorted(best):
         name = best[cam]
         pitch = pitches.get(cam)
@@ -1142,7 +1146,8 @@ def _videos_for_session(session_id: str) -> list[tuple[str, str, float]]:
             offset = float(
                 pitch.video_start_pts_s - pitch.sync_anchor_timestamp_s
             )
-        out.append((cam, f"/videos/{name}", offset))
+        fps = float(pitch.video_fps) if pitch is not None else 240.0
+        out.append((cam, f"/videos/{name}", offset, fps))
     return out
 
 

@@ -79,7 +79,7 @@ def render_scene_div(scene: Scene, div_id: str = "canvas-scene") -> str:
 
 def render_viewer_html(
     scene: Scene,
-    videos: list[tuple[str, str, float]],
+    videos: list[tuple[str, str, float, float]],
     health: dict,
 ) -> str:
     """Full /viewer/{sid} post-mortem page.
@@ -99,14 +99,17 @@ def render_viewer_html(
          room (since that's the payoff visual); a session without one
          shrinks the scene so the videos — the only surviving evidence —
          dominate.
-      4. Shared timeline footer — ALL/PLAYBACK toggle, play/pause, single
-         scrubber that drives both videos and 3D playback together.
+      4. Shared timeline footer — two rows: scrubber + frame counter on
+         top, transport (prev/next frame, play/pause) + speed buttons +
+         ALL/PLAYBACK toggle on the bottom. Frame-granular scrubbing and
+         `.` / `,` keyboard stepping make this a proper analysis tool.
 
-    `videos` is `[(camera_id, url, t_rel_offset_s), ...]` where
+    `videos` is `[(camera_id, url, t_rel_offset_s, video_fps), ...]` where
     `t_rel_offset_s = video_start_pts_s − sync_anchor_timestamp_s` for
     that camera. Each video's `currentTime = t_rel − t_rel_offset_s`, so
     A and B stay locked to the chirp anchor even when their phones
-    started recording at different wall-clock moments.
+    started recording at different wall-clock moments. `video_fps` drives
+    the frame-by-frame controls (prev/next frame, frame counter).
     """
     import json as _json
 
@@ -124,8 +127,8 @@ def render_viewer_html(
     fallback_color_json = _json.dumps(_FALLBACK_CAMERA_COLOR)
     accent_color_json = _json.dumps(_ACCENT)
     videos_json = _json.dumps(
-        [{"camera_id": cam, "url": url, "t_rel_offset_s": off}
-         for (cam, url, off) in videos]
+        [{"camera_id": cam, "url": url, "t_rel_offset_s": off, "fps": fps}
+         for (cam, url, off, fps) in videos]
     )
     has_triangulated = bool(scene.triangulated)
 
@@ -135,7 +138,7 @@ def render_viewer_html(
     scene_flex = "3 1 0" if has_triangulated else "2 1 0"
     videos_flex = "2 1 0" if has_triangulated else "3 1 0"
 
-    videos_by_cam = {cam: (url, off) for cam, url, off in videos}
+    videos_by_cam = {cam: (url, off) for cam, url, off, _fps in videos}
     video_cells = "".join(
         _video_cell_html(cam, videos_by_cam.get(cam))
         for cam in ("A", "B")
@@ -258,22 +261,45 @@ def render_viewer_html(
     color:var(--sub); font-family:var(--mono); font-size:11px;
     letter-spacing:0.12em; text-transform:uppercase; }}
 
-  /* --- Timeline footer --- */
-  .timeline {{ flex:0 0 56px; background:var(--surface);
-    display:flex; align-items:center; gap:14px; padding:0 24px;
-    font-family:var(--mono); font-size:12px; color:var(--sub); }}
-  .timeline button {{ padding:5px 14px; font:inherit; font-size:11px;
-    letter-spacing:0.12em; text-transform:uppercase;
+  /* --- Timeline footer (two rows) --- */
+  .timeline {{ flex:0 0 auto; background:var(--surface);
+    display:flex; flex-direction:column; gap:8px;
+    padding:10px 24px 12px; font-family:var(--mono); font-size:12px;
+    color:var(--sub); }}
+  .tl-row {{ display:flex; align-items:center; gap:12px; }}
+  .tl-row input[type=range] {{ flex:1 1 auto; accent-color:var(--ink);
+    height:20px; }}
+  .tl-row .frame-label {{ min-width:220px; text-align:right;
+    color:var(--ink); font-weight:500; font-size:12px;
+    letter-spacing:0.02em; }}
+  .tl-row .frame-label .t {{ color:var(--sub); font-weight:400;
+    margin-left:10px; }}
+  .timeline button {{ padding:5px 12px; font:inherit; font-size:11px;
+    letter-spacing:0.1em; text-transform:uppercase;
     border:1px solid var(--border-base); background:var(--bg);
-    color:var(--ink); border-radius:2px; cursor:pointer; min-width:60px; }}
-  .timeline input[type=range] {{ flex:1 1 auto; accent-color:var(--ink); }}
-  .timeline .tlabel {{ min-width:140px; text-align:right; color:var(--ink);
-    font-weight:500; }}
-  .mode-toggle {{ display:inline-flex; border:1px solid var(--border-base);
+    color:var(--ink); border-radius:2px; cursor:pointer;
+    min-width:42px; }}
+  .timeline button:hover {{ border-color:var(--ink); }}
+  .timeline button:disabled {{ opacity:0.4; cursor:not-allowed; }}
+  .timeline .transport {{ display:inline-flex; gap:4px; }}
+  .timeline .transport button {{ min-width:36px; padding:5px 8px;
+    font-size:13px; letter-spacing:0; }}
+  .timeline .play-btn {{ min-width:70px; font-weight:500; }}
+  .speed-group {{ display:inline-flex; border:1px solid var(--border-base);
     border-radius:2px; overflow:hidden; }}
+  .speed-group button {{ border:none; background:transparent;
+    color:var(--sub); padding:5px 10px; min-width:auto; border-radius:0;
+    border-right:1px solid var(--border-base); }}
+  .speed-group button:last-child {{ border-right:none; }}
+  .speed-group button.active {{ background:var(--ink); color:var(--surface); }}
+  .speed-group button:hover:not(.active) {{ color:var(--ink); }}
+  .mode-toggle {{ display:inline-flex; border:1px solid var(--border-base);
+    border-radius:2px; overflow:hidden; margin-left:auto; }}
   .mode-toggle button {{ padding:5px 12px; border:none; background:transparent;
     color:var(--sub); cursor:pointer; min-width:auto; border-radius:0; }}
   .mode-toggle button.active {{ background:var(--ink); color:var(--surface); }}
+  .tl-hint {{ font-size:10px; color:var(--sub); letter-spacing:0.06em;
+    text-transform:uppercase; opacity:0.7; }}
 </style>
 </head><body>
 <div class="viewer">
@@ -288,12 +314,30 @@ def render_viewer_html(
     <div class="videos-col">{video_cells}</div>
   </div>
   <div class="timeline">
-    <button id="play-btn" type="button">Play</button>
-    <input id="scrubber" type="range" min="0" max="1000" value="0" step="1" />
-    <span id="time-label" class="tlabel">t=0.000s</span>
-    <div class="mode-toggle" role="tablist">
-      <button id="mode-all" class="active" type="button">All</button>
-      <button id="mode-playback" type="button">Playback</button>
+    <div class="tl-row">
+      <input id="scrubber" type="range" min="0" max="1" value="0" step="1" />
+      <span id="frame-label" class="frame-label">frame 0 / 0<span class="t">t=0.000s</span></span>
+    </div>
+    <div class="tl-row">
+      <div class="transport" role="group" aria-label="transport">
+        <button id="step-first" type="button" title="First frame (Home)">&#x23ee;</button>
+        <button id="step-back" type="button" title="Prev frame (,)">&#x23ea;</button>
+        <button id="play-btn" class="play-btn" type="button" title="Play/pause (Space)">Play</button>
+        <button id="step-fwd" type="button" title="Next frame (.)">&#x23e9;</button>
+        <button id="step-last" type="button" title="Last frame (End)">&#x23ed;</button>
+      </div>
+      <div class="speed-group" id="speed-group" role="group" aria-label="playback speed">
+        <button data-rate="0.1" type="button">0.1&times;</button>
+        <button data-rate="0.25" type="button">0.25&times;</button>
+        <button data-rate="0.5" type="button">0.5&times;</button>
+        <button data-rate="1" class="active" type="button">1&times;</button>
+        <button data-rate="2" type="button">2&times;</button>
+      </div>
+      <span class="tl-hint">space &middot; , . &middot; &larr; &rarr;</span>
+      <div class="mode-toggle" role="tablist">
+        <button id="mode-all" class="active" type="button">All</button>
+        <button id="mode-playback" type="button">Playback</button>
+      </div>
     </div>
   </div>
 </div>
@@ -322,12 +366,18 @@ def render_viewer_html(
   const sceneDiv = document.getElementById("scene");
   const playBtn = document.getElementById("play-btn");
   const scrubber = document.getElementById("scrubber");
-  const tLabel = document.getElementById("time-label");
+  const frameLabel = document.getElementById("frame-label");
   const modeAll = document.getElementById("mode-all");
   const modePlayback = document.getElementById("mode-playback");
+  const stepFirstBtn = document.getElementById("step-first");
+  const stepBackBtn = document.getElementById("step-back");
+  const stepFwdBtn = document.getElementById("step-fwd");
+  const stepLastBtn = document.getElementById("step-last");
+  const speedGroup = document.getElementById("speed-group");
 
   const vids = Array.from(document.querySelectorAll("video[data-cam]"));
   const offsetByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.t_rel_offset_s]));
+  const fpsByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.fps]));
 
   // Master timeline is anchor-relative (t_rel_s). Span it from the
   // earliest observed data point to the latest; fall back to a trivial
@@ -342,9 +392,22 @@ def render_viewer_html(
   let tMax = allTs.length ? Math.max(...allTs) : 1.0;
   if (tMax - tMin < 0.05) tMax = tMin + 0.05;
 
+  // Frame is the primary state; t is derived. Using the max of A/B as
+  // the master fps means stepping one frame never under-samples either
+  // video. In the nominal rig both cameras are 240 fps so masterFps = 240.
+  const MASTER_FPS = Math.max(...Object.values(fpsByCam), 1);
+  const FRAME_DT = 1 / MASTER_FPS;
+  const TOTAL_FRAMES = Math.max(1, Math.round((tMax - tMin) * MASTER_FPS));
+
   let mode = "all";
-  let currentT = tMin;
+  let currentFrame = 0;          // in [0, TOTAL_FRAMES - 1]
+  let currentT = tMin;           // derived = tMin + currentFrame * FRAME_DT
   let rafPending = false;
+  let rvfcEnabled = false;       // set to true once we register rVFC
+
+  // Scrubber is now frame-granular, not normalized 0..1000.
+  scrubber.max = String(TOTAL_FRAMES - 1);
+  scrubber.step = "1";
 
   // --- Dynamic trace builders. Each takes the master time cutoff and
   //     returns Scatter3d-shaped objects (plain JS objects; Plotly
@@ -453,21 +516,39 @@ def render_viewer_html(
     return currentT;
   }}
 
-  function setT(t, {{ seekVideos = true }} = {{}}) {{
-    currentT = Math.max(tMin, Math.min(tMax, t));
-    scrubber.value = String(((currentT - tMin) / (tMax - tMin)) * 1000 | 0);
-    tLabel.textContent = `t=${{currentT.toFixed(3)}}s`;
+  function renderFrameLabel() {{
+    frameLabel.innerHTML =
+      `frame ${{currentFrame}} / ${{TOTAL_FRAMES - 1}}` +
+      `<span class="t">t=${{currentT.toFixed(3)}}s</span>`;
+  }}
+
+  function setFrame(f, {{ seekVideos = true }} = {{}}) {{
+    currentFrame = Math.max(0, Math.min(TOTAL_FRAMES - 1, f | 0));
+    currentT = tMin + currentFrame * FRAME_DT;
+    scrubber.value = String(currentFrame);
+    renderFrameLabel();
     if (seekVideos) syncVideosToT(currentT);
     if (mode === "playback") drawScene();
   }}
 
+  function setT(t, opts) {{
+    // Backwards-compat shim: snap t to nearest frame index.
+    setFrame(Math.round((t - tMin) / FRAME_DT), opts);
+  }}
+
+  function stepFrames(delta) {{
+    vids.forEach(v => v.pause());
+    setFrame(currentFrame + delta);
+  }}
+
   function onVideoTimeUpdate() {{
-    if (rafPending) return;
+    // Fallback path when requestVideoFrameCallback isn't available.
+    if (rvfcEnabled || rafPending) return;
     rafPending = true;
     requestAnimationFrame(() => {{
       rafPending = false;
       const t = readMasterTFromVideo();
-      setT(t, {{ seekVideos: false }});
+      setFrame(Math.round((t - tMin) / FRAME_DT), {{ seekVideos: false }});
     }});
   }}
 
@@ -482,7 +563,29 @@ def render_viewer_html(
   }});
 
   function updatePlayBtnLabel() {{
-    playBtn.textContent = vids.every(v => v.paused) ? "PLAY" : "PAUSE";
+    playBtn.textContent = vids.every(v => v.paused) ? "Play" : "Pause";
+  }}
+
+  // Precise per-presented-frame callback. Drives the 3D scene + frame
+  // counter at real display rate (much smoother than `timeupdate`'s
+  // ~4 Hz). Only the first video is used as the master; A and B are
+  // kept aligned via their offset. Firefox < 131 / Safari < 16.4 fall
+  // back to the timeupdate path.
+  const hasRVFC = typeof HTMLVideoElement !== 'undefined'
+    && 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+  function driveWithRVFC() {{
+    if (!vids.length) return;
+    rvfcEnabled = true;
+    const master = vids[0];
+    const off = offsetByCam[master.dataset.cam] ?? 0;
+    const onFrame = (_now, metadata) => {{
+      const mediaT = (metadata && typeof metadata.mediaTime === 'number')
+        ? metadata.mediaTime : master.currentTime;
+      const t = mediaT + off;
+      setFrame(Math.round((t - tMin) / FRAME_DT), {{ seekVideos: false }});
+      master.requestVideoFrameCallback(onFrame);
+    }};
+    master.requestVideoFrameCallback(onFrame);
   }}
 
   vids.forEach(v => {{
@@ -496,10 +599,73 @@ def render_viewer_html(
       for (const other of vids) {{ if (other !== v && other.playbackRate !== r) other.playbackRate = r; }}
     }});
   }});
+  if (hasRVFC) driveWithRVFC();
 
   scrubber.addEventListener("input", () => {{
-    const frac = Number(scrubber.value) / 1000;
-    setT(tMin + frac * (tMax - tMin));
+    setFrame(Number(scrubber.value));
+  }});
+
+  stepFirstBtn.addEventListener("click", () => stepFrames(-TOTAL_FRAMES));
+  stepLastBtn.addEventListener("click",  () => stepFrames(+TOTAL_FRAMES));
+  stepBackBtn.addEventListener("click",  () => stepFrames(-1));
+  stepFwdBtn.addEventListener("click",   () => stepFrames(+1));
+
+  // Speed group — single active toggle. `ratechange` on one video
+  // propagates to the others via the listener above.
+  let currentRate = 1.0;
+  speedGroup.addEventListener("click", (ev) => {{
+    const btn = ev.target.closest("button[data-rate]");
+    if (!btn) return;
+    const r = parseFloat(btn.dataset.rate);
+    if (!isFinite(r) || r <= 0) return;
+    currentRate = r;
+    vids.forEach(v => {{ v.playbackRate = r; }});
+    for (const b of speedGroup.querySelectorAll("button")) {{
+      b.classList.toggle("active", b === btn);
+    }}
+  }});
+
+  // Keyboard — ignore when the focus is inside an input/scrubber so
+  // arrow-keys still scroll ranges natively when focused.
+  window.addEventListener("keydown", (ev) => {{
+    const tag = (ev.target && ev.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea") return;
+    switch (ev.key) {{
+      case " ":
+        ev.preventDefault();
+        playBtn.click();
+        break;
+      case ",":
+        ev.preventDefault();
+        stepFrames(ev.shiftKey ? -10 : -1);
+        break;
+      case ".":
+        ev.preventDefault();
+        stepFrames(ev.shiftKey ? +10 : +1);
+        break;
+      case "ArrowLeft":
+        ev.preventDefault();
+        stepFrames(-Math.round(0.5 * MASTER_FPS));
+        break;
+      case "ArrowRight":
+        ev.preventDefault();
+        stepFrames(+Math.round(0.5 * MASTER_FPS));
+        break;
+      case "Home":
+        ev.preventDefault();
+        stepFrames(-TOTAL_FRAMES);
+        break;
+      case "End":
+        ev.preventDefault();
+        stepFrames(+TOTAL_FRAMES);
+        break;
+      case "1": case "2": case "3": case "4": case "5": {{
+        const idx = Number(ev.key) - 1;
+        const buttons = speedGroup.querySelectorAll("button[data-rate]");
+        if (buttons[idx]) {{ ev.preventDefault(); buttons[idx].click(); }}
+        break;
+      }}
+    }}
   }});
 
   function setMode(next) {{
@@ -512,7 +678,7 @@ def render_viewer_html(
   modePlayback.addEventListener("click", () => setMode("playback"));
 
   // Initial render.
-  setT(tMin, {{ seekVideos: true }});
+  setFrame(0, {{ seekVideos: true }});
   drawScene();
   updatePlayBtnLabel();
 }})();
