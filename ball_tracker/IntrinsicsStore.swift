@@ -50,6 +50,12 @@ enum IntrinsicsStore {
         return h
     }
 
+    /// Non-logging existence probe — cheap to call from UI ticks without
+    /// spamming the log with "missing / loaded" lines.
+    static func hasHomography() -> Bool {
+        UserDefaults.standard.array(forKey: keyHomography) != nil
+    }
+
     /// Return the captured image dimensions, or nil when they have not
     /// been written yet (the capture callback writes them lazily).
     static func loadImageDimensions() -> (width: Int, height: Int)? {
