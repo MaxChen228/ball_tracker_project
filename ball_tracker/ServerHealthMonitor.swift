@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "network")
 
 /// 1 Hz `/heartbeat` poller with exponential backoff on failure. Owns
 /// the liveness-probe timer, the stale-response generation token, and
@@ -25,6 +28,16 @@ final class ServerHealthMonitor {
     /// a manual retry or settings change kicks off a new probe before
     /// the in-flight one returns.
     private var probeGeneration: Int = 0
+
+    /// Last armed/idle state we logged, so the state-change log only
+    /// fires on transitions rather than every successful heartbeat.
+    /// `nil` = no heartbeat yet observed this process lifetime.
+    private var lastArmedState: Bool?
+
+    /// Ticks every successful heartbeat to throttle `.debug` "still ok"
+    /// logs to roughly one per 10 replies. Avoids 1 Hz spam while still
+    /// leaving a breadcrumb when debug-level collection is on.
+    private var successTickCounter: Int = 0
 
     private(set) var lastContactAt: Date?
     private(set) var isReachable: Bool = false
@@ -95,11 +108,26 @@ final class ServerHealthMonitor {
                 switch result {
                 case .success(let response):
                     self.lastContactAt = Date()
+                    if self.currentBackoffS != 0 {
+                        log.info("heartbeat recovered interval_s=\(self.baseIntervalS)")
+                    }
                     self.currentBackoffS = 0
                     self.updateStatus(
                         text: Self.heartbeatDisplayText(response),
                         reachable: true
                     )
+                    let armed = response.session?.armed ?? false
+                    if self.lastArmedState != armed {
+                        let newState = armed ? "ARMED" : "IDLE"
+                        let sid = response.session?.id ?? "-"
+                        log.info("heartbeat state=\(newState, privacy: .public) session=\(sid, privacy: .public)")
+                        self.lastArmedState = armed
+                    } else {
+                        self.successTickCounter &+= 1
+                        if self.successTickCounter % 10 == 0 {
+                            log.debug("heartbeat ok tick=\(self.successTickCounter)")
+                        }
+                    }
                     self.onHeartbeatSuccess?(response)
                     self.scheduleNext(after: self.baseIntervalS)
                 case .failure:
@@ -108,6 +136,10 @@ final class ServerHealthMonitor {
                     let next = self.currentBackoffS == 0
                         ? base
                         : min(Self.maxBackoffS, self.currentBackoffS * 2)
+                    // First failure stays quiet; only warn once backoff starts escalating.
+                    if self.currentBackoffS != 0 {
+                        log.warning("heartbeat backoff interval_s=\(next)")
+                    }
                     self.currentBackoffS = next
                     self.scheduleNext(after: next)
                 }

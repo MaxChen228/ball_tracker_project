@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "network")
 
 /// iOS uploader responsible for sending one iPhone pitch payload to the server.
 ///
@@ -204,22 +207,30 @@ final class ServerUploader {
             videoData: videoData
         )
 
+        let sid = pitch.session_id
+        let cam = pitch.camera_id
+        let bytes = payloadData.count + (videoData?.count ?? 0)
+
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 let urlError = (error as? URLError) ?? URLError(.unknown)
+                log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=\(urlError.localizedDescription, privacy: .public) code=\(urlError.code.rawValue)")
                 completion(.failure(.network(urlError)))
                 return
             }
             guard let http = response as? HTTPURLResponse else {
+                log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=invalid_response")
                 completion(.failure(.invalidResponse))
                 return
             }
             if !(200...299).contains(http.statusCode) {
                 if (500...599).contains(http.statusCode) {
+                    log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=http_\(http.statusCode) category=server")
                     completion(.failure(.server(statusCode: http.statusCode, body: data)))
                 } else {
                     // 4xx (and any other non-2xx/non-5xx) is non-retryable
                     // from the client's perspective.
+                    log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=http_\(http.statusCode) category=client")
                     completion(.failure(.client(statusCode: http.statusCode, body: data)))
                 }
                 return
@@ -227,13 +238,16 @@ final class ServerUploader {
             guard let data else {
                 // 2xx with an empty body — treat as decoding failure so the
                 // caller sees it as non-transient (retrying won't add bytes).
+                log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=empty_body")
                 completion(.failure(.decoding(URLError(.cannotDecodeContentData))))
                 return
             }
             do {
                 let decoded = try JSONDecoder().decode(PitchUploadResponse.self, from: data)
+                log.info("upload ok session=\(sid, privacy: .public) cam=\(cam, privacy: .public) bytes=\(bytes) paired=\(decoded.paired) points=\(decoded.triangulated_points)")
                 completion(.success(decoded))
             } catch {
+                log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=\(error.localizedDescription, privacy: .public) category=decoding")
                 completion(.failure(.decoding(error)))
             }
         }
@@ -321,10 +335,12 @@ final class ServerUploader {
 
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
+                log.error("arm failed err=\(error.localizedDescription, privacy: .public)")
                 completion(.failure(error))
                 return
             }
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                log.error("arm failed err=http_\(http.statusCode)")
                 completion(.failure(NSError(
                     domain: "ServerUploader",
                     code: http.statusCode,
@@ -333,6 +349,7 @@ final class ServerUploader {
                 return
             }
             guard let data else {
+                log.error("arm failed err=empty_body")
                 completion(.failure(NSError(
                     domain: "ServerUploader",
                     code: -2,
@@ -343,8 +360,10 @@ final class ServerUploader {
             do {
                 struct Wrapper: Codable { let ok: Bool; let session: HeartbeatSession }
                 let wrapper = try JSONDecoder().decode(Wrapper.self, from: data)
+                log.info("arm ok session=\(wrapper.session.id, privacy: .public)")
                 completion(.success(wrapper.session))
             } catch {
+                log.error("arm failed err=\(error.localizedDescription, privacy: .public) category=decoding")
                 completion(.failure(error))
             }
         }
