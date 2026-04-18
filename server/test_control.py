@@ -52,6 +52,56 @@ def test_online_devices_custom_threshold(tmp_path):
     assert s.online_devices(stale_after_s=0.1) == []
 
 
+def test_heartbeat_prunes_stale_entries_on_write(tmp_path):
+    """A malformed client hammering /heartbeat with random camera_ids must
+    not grow `_devices` without bound — entries older than the GC window
+    get dropped on the next heartbeat write."""
+    clock = {"now": 1000.0}
+    s = main.State(data_dir=tmp_path, time_fn=lambda: clock["now"])
+    for i in range(10):
+        s.heartbeat(f"ghost_{i}")
+    # Advance well past the GC window (main._DEVICE_GC_AFTER_S = 60 s).
+    clock["now"] = 1000.0 + main._DEVICE_GC_AFTER_S + 1.0
+    # One fresh heartbeat should sweep the 10 stale entries.
+    s.heartbeat("A")
+    assert set(s._devices.keys()) == {"A"}
+
+
+def test_heartbeat_enforces_registry_cap(tmp_path):
+    """If a client spams N > _DEVICE_REGISTRY_CAP distinct camera_ids within
+    the GC window, the cap evicts the oldest so the dict never exceeds the
+    cap size."""
+    clock = {"now": 1000.0}
+    s = main.State(data_dir=tmp_path, time_fn=lambda: clock["now"])
+    cap = main._DEVICE_REGISTRY_CAP
+    # Fire cap+5 unique ids, staggering timestamps so "oldest" is well-defined.
+    for i in range(cap + 5):
+        clock["now"] = 1000.0 + i * 0.01
+        s.heartbeat(f"dev_{i:03d}")
+    assert len(s._devices) == cap
+    # The 5 oldest (dev_000..dev_004) should have been evicted, newest kept.
+    assert "dev_000" not in s._devices
+    assert f"dev_{cap + 4:03d}" in s._devices
+
+
+# --- /chirp.wav caching ----------------------------------------------------
+
+
+def test_chirp_wav_is_cached_across_calls(tmp_path):
+    """Chirp synthesis is deterministic; the endpoint must return the same
+    bytes from a cache instead of re-running the PCM generation each time."""
+    # Reset the lru_cache so the first call below is guaranteed to populate.
+    main._chirp_wav_bytes.cache_clear()
+    client = TestClient(app)
+    r1 = client.get("/chirp.wav")
+    r2 = client.get("/chirp.wav")
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r1.content == r2.content
+    info = main._chirp_wav_bytes.cache_info()
+    assert info.hits >= 1  # second call was a cache hit, not a recompute
+
+
 # --- Session state machine -------------------------------------------------
 
 
