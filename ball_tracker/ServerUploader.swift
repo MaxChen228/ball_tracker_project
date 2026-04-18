@@ -159,6 +159,15 @@ final class ServerUploader {
     /// Typed variant of `uploadPitch(_:videoURL:completion:)`. Distinguishes
     /// network / 4xx / 5xx / decoding failures so the caller can branch its
     /// retry strategy on `UploadError.isTransient`.
+    ///
+    /// Body construction is **streaming**: the multipart envelope (header +
+    /// video bytes + footer) is assembled into a tmp file by copying the
+    /// MOV in 64 KB chunks, then uploaded via
+    /// `URLSession.uploadTask(with:fromFile:)`. This avoids loading the
+    /// 150-300 MB clip into RAM (previously caused OOM on the device) and
+    /// surfaces an explicit `.network(URLError(.fileDoesNotExist))` failure
+    /// when the source video is unreadable — instead of the old `try?` path
+    /// that silently dropped the video part and hit the server's 422.
     func uploadPitchTyped(
         _ pitch: PitchPayload,
         videoURL: URL?,
@@ -178,73 +187,96 @@ final class ServerUploader {
             return
         }
 
-        let videoData: Data?
-        if let videoURL {
-            videoData = try? Data(contentsOf: videoURL)
-        } else {
-            videoData = nil
-        }
-
         let boundary = "Boundary-\(UUID().uuidString)"
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue(
-            "multipart/form-data; boundary=\(boundary)",
-            forHTTPHeaderField: "Content-Type"
-        )
-        request.httpBody = Self.makeMultipartBody(
-            boundary: boundary,
-            payloadJSON: payloadData,
-            videoFilename: videoURL?.lastPathComponent ?? "clip.mov",
-            videoData: videoData
-        )
-
         let sid = pitch.session_id
         let cam = pitch.camera_id
-        let bytes = payloadData.count + (videoData?.count ?? 0)
 
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                let urlError = (error as? URLError) ?? URLError(.unknown)
-                log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=\(urlError.localizedDescription, privacy: .public) code=\(urlError.code.rawValue)")
-                completion(.failure(.network(urlError)))
-                return
-            }
-            guard let http = response as? HTTPURLResponse else {
-                log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=invalid_response")
-                completion(.failure(.invalidResponse))
-                return
-            }
-            if !(200...299).contains(http.statusCode) {
-                if (500...599).contains(http.statusCode) {
-                    log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=http_\(http.statusCode) category=server")
-                    completion(.failure(.server(statusCode: http.statusCode, body: data)))
-                } else {
-                    // 4xx (and any other non-2xx/non-5xx) is non-retryable
-                    // from the client's perspective.
-                    log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=http_\(http.statusCode) category=client")
-                    completion(.failure(.client(statusCode: http.statusCode, body: data)))
-                }
-                return
-            }
-            guard let data else {
-                // 2xx with an empty body — treat as decoding failure so the
-                // caller sees it as non-transient (retrying won't add bytes).
-                log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=empty_body")
-                completion(.failure(.decoding(URLError(.cannotDecodeContentData))))
-                return
-            }
+        // Stream the multipart body (potentially 150-300 MB of MOV bytes)
+        // to a tmp file on a background queue so callers on the main queue
+        // — `PayloadUploadQueue.processNextIfNeeded` is one — don't stall
+        // their run loop on disk I/O.
+        Self.bodyAssemblyQueue.async {
+            let bodyFileURL: URL
+            let bodyByteCount: Int
             do {
-                let decoded = try JSONDecoder().decode(PitchUploadResponse.self, from: data)
-                log.info("upload ok session=\(sid, privacy: .public) cam=\(cam, privacy: .public) bytes=\(bytes) paired=\(decoded.paired) points=\(decoded.triangulated_points)")
-                completion(.success(decoded))
+                let written = try Self.writeMultipartBodyToTempFile(
+                    boundary: boundary,
+                    payloadJSON: payloadData,
+                    videoURL: videoURL
+                )
+                bodyFileURL = written.url
+                bodyByteCount = written.byteCount
+            } catch let err as UploadError {
+                completion(.failure(err))
+                return
             } catch {
-                log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=\(error.localizedDescription, privacy: .public) category=decoding")
-                completion(.failure(.decoding(error)))
+                completion(.failure(.network(URLError(.cannotCreateFile))))
+                return
             }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue(
+                "multipart/form-data; boundary=\(boundary)",
+                forHTTPHeaderField: "Content-Type"
+            )
+
+            let task = URLSession.shared.uploadTask(
+                with: request,
+                fromFile: bodyFileURL
+            ) { data, response, error in
+                try? FileManager.default.removeItem(at: bodyFileURL)
+                if let error = error {
+                    let urlError = (error as? URLError) ?? URLError(.unknown)
+                    log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=\(urlError.localizedDescription, privacy: .public) code=\(urlError.code.rawValue)")
+                    completion(.failure(.network(urlError)))
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else {
+                    log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=invalid_response")
+                    completion(.failure(.invalidResponse))
+                    return
+                }
+                if !(200...299).contains(http.statusCode) {
+                    if (500...599).contains(http.statusCode) {
+                        log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=http_\(http.statusCode) category=server")
+                        completion(.failure(.server(statusCode: http.statusCode, body: data)))
+                    } else {
+                        // 4xx (and any other non-2xx/non-5xx) is non-retryable
+                        // from the client's perspective.
+                        log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=http_\(http.statusCode) category=client")
+                        completion(.failure(.client(statusCode: http.statusCode, body: data)))
+                    }
+                    return
+                }
+                guard let data else {
+                    // 2xx with an empty body — treat as decoding failure so the
+                    // caller sees it as non-transient (retrying won't add bytes).
+                    log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=empty_body")
+                    completion(.failure(.decoding(URLError(.cannotDecodeContentData))))
+                    return
+                }
+                do {
+                    let decoded = try JSONDecoder().decode(PitchUploadResponse.self, from: data)
+                    log.info("upload ok session=\(sid, privacy: .public) cam=\(cam, privacy: .public) bytes=\(bodyByteCount) paired=\(decoded.paired) points=\(decoded.triangulated_points)")
+                    completion(.success(decoded))
+                } catch {
+                    log.error("upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=\(error.localizedDescription, privacy: .public) category=decoding")
+                    completion(.failure(.decoding(error)))
+                }
+            }
+            task.resume()
         }
-        task.resume()
     }
+
+    /// Serial background queue for streaming-multipart-body assembly so a
+    /// 150-300 MB MOV copy never blocks the main run loop. Serial because
+    /// writes go to disjoint UUID-named tmp files anyway and one-at-a-time
+    /// is friendlier on the disk and on flash wear than parallel writes.
+    private static let bodyAssemblyQueue = DispatchQueue(
+        label: "com.Max0228.ball-tracker.uploader.body",
+        qos: .utility
+    )
 
     /// Map a typed `UploadError` back into the `NSError` shape emitted by
     /// the pre-typed implementation. Kept private so the legacy overload
@@ -270,37 +302,117 @@ final class ServerUploader {
         }
     }
 
-    private static func makeMultipartBody(
+    /// Build the multipart/form-data envelope into a tmp file by streaming
+    /// (a) the JSON header bytes, (b) — when `videoURL` is non-nil — the
+    /// MOV in 64 KB chunks via `InputStream`, then (c) the closing
+    /// boundary footer. Used so a 150-300 MB clip never has to live in RAM
+    /// alongside the rest of the multipart body.
+    ///
+    /// Throws `UploadError.network(URLError(.fileDoesNotExist))` when
+    /// `videoURL` was supplied but cannot be opened — this is the explicit
+    /// failure the legacy `try? Data(contentsOf:)` swallowed. Every other
+    /// I/O error is rethrown as the underlying `Error` so the caller can
+    /// translate it to `.network(URLError(.cannotCreateFile))`.
+    private static func writeMultipartBodyToTempFile(
         boundary: String,
         payloadJSON: Data,
-        videoFilename: String,
-        videoData: Data?
-    ) -> Data {
-        var body = Data()
-        func appendString(_ s: String) {
-            if let d = s.data(using: .utf8) { body.append(d) }
+        videoURL: URL?
+    ) throws -> (url: URL, byteCount: Int) {
+        let tmpURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("upload-\(UUID().uuidString).multipart")
+
+        guard let out = OutputStream(url: tmpURL, append: false) else {
+            throw UploadError.network(URLError(.cannotCreateFile))
+        }
+        out.open()
+        defer { out.close() }
+
+        var totalWritten = 0
+
+        func writeData(_ data: Data) throws {
+            try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                    return
+                }
+                var remaining = raw.count
+                var offset = 0
+                while remaining > 0 {
+                    let n = out.write(base.advanced(by: offset), maxLength: remaining)
+                    if n <= 0 {
+                        let underlying = out.streamError ?? URLError(.cannotWriteToFile)
+                        throw underlying
+                    }
+                    offset += n
+                    remaining -= n
+                    totalWritten += n
+                }
+            }
+        }
+
+        func writeString(_ s: String) throws {
+            if let d = s.data(using: .utf8) { try writeData(d) }
         }
 
         // JSON part.
-        appendString("--\(boundary)\r\n")
-        appendString("Content-Disposition: form-data; name=\"payload\"\r\n")
-        appendString("Content-Type: application/json\r\n\r\n")
-        body.append(payloadJSON)
-        appendString("\r\n")
+        try writeString("--\(boundary)\r\n")
+        try writeString("Content-Disposition: form-data; name=\"payload\"\r\n")
+        try writeString("Content-Type: application/json\r\n\r\n")
+        try writeData(payloadJSON)
+        try writeString("\r\n")
 
-        // Optional video part.
-        if let videoData {
-            appendString("--\(boundary)\r\n")
-            appendString(
-                "Content-Disposition: form-data; name=\"video\"; filename=\"\(videoFilename)\"\r\n"
+        // Optional video part — streamed in 64 KB chunks.
+        if let videoURL {
+            guard let input = InputStream(url: videoURL) else {
+                // Surfaced from the throwing call site as the explicit
+                // file-unreadable signal. Avoids the legacy `try?` that
+                // silently sent a video-less request.
+                throw UploadError.network(URLError(.fileDoesNotExist))
+            }
+            input.open()
+            defer { input.close() }
+
+            // Open() can fail post-construction (e.g. permission revoked
+            // between init and open) — treat the same as missing.
+            if input.streamError != nil {
+                throw UploadError.network(URLError(.fileDoesNotExist))
+            }
+
+            try writeString("--\(boundary)\r\n")
+            try writeString(
+                "Content-Disposition: form-data; name=\"video\"; filename=\"\(videoURL.lastPathComponent)\"\r\n"
             )
-            appendString("Content-Type: video/quicktime\r\n\r\n")
-            body.append(videoData)
-            appendString("\r\n")
+            try writeString("Content-Type: video/quicktime\r\n\r\n")
+
+            let bufferSize = 64 * 1024
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+            defer { buffer.deallocate() }
+
+            while input.hasBytesAvailable {
+                let read = input.read(buffer, maxLength: bufferSize)
+                if read < 0 {
+                    let underlying = input.streamError ?? URLError(.cannotOpenFile)
+                    throw underlying
+                }
+                if read == 0 { break }
+                var remaining = read
+                var offset = 0
+                while remaining > 0 {
+                    let n = out.write(buffer.advanced(by: offset), maxLength: remaining)
+                    if n <= 0 {
+                        let underlying = out.streamError ?? URLError(.cannotWriteToFile)
+                        throw underlying
+                    }
+                    offset += n
+                    remaining -= n
+                    totalWritten += n
+                }
+            }
+
+            try writeString("\r\n")
         }
 
-        appendString("--\(boundary)--\r\n")
-        return body
+        try writeString("--\(boundary)--\r\n")
+        return (tmpURL, totalWritten)
     }
 
     /// POST a 1 Hz liveness ping and read back the full status payload —
