@@ -81,6 +81,7 @@ from schemas import (
     _DEFAULT_SESSION_TIMEOUT_S,
 )
 from pairing import triangulate_cycle
+from pipeline import detect_pitch
 from chirp import chirp_wav_bytes
 from cleanup_old_sessions import cleanup_expired_sessions
 
@@ -761,20 +762,30 @@ def _summarize_result(result: SessionResult) -> dict[str, Any]:
 async def pitch(
     request: Request,
     payload: str = Form(...),
-    video: UploadFile | None = File(None),
+    video: UploadFile = File(...),
 ) -> dict[str, Any]:
     """Ingest one armed-session upload as multipart/form-data.
 
-    Required form field `payload`: JSON-encoded `PitchPayload` (carries the
-    server-minted `session_id` — the sole pairing key for A/B).
-    Optional form field `video`:   MOV/MP4 clip of the recording. Stored
-                                    under `data/videos/session_{id}_{cam}.{ext}`
-                                    and not yet consumed by triangulation —
-                                    Phase-1 raw-video staging.
+    Required form fields:
+      - `payload` — JSON-encoded `PitchPayload` (camera_id, session_id,
+        sync_anchor_timestamp_s, video_start_pts_s, video_fps, intrinsics,
+        homography, image_{width,height}_px). No per-frame data.
+      - `video`   — H.264 MOV/MP4 of the cycle. Server decodes it, runs
+        HSV ball detection per frame, then triangulates with the partner
+        upload for this session.
 
-    Rejects uploads whose total body exceeds `_MAX_PITCH_UPLOAD_BYTES` —
-    FastAPI buffers the full body before this handler runs, so without a
-    cap an attacker could OOM the process with a single request.
+    Flow:
+      1. 413 guard on declared Content-Length
+      2. Validate JSON payload
+      3. Persist the clip bytes atomically
+      4. Decode the clip and synthesise per-frame detection results
+      5. `state.record()` stores the enriched payload + triangulates if B
+         (or A) is already on file
+      6. Return the session summary — triangulation stats for the dashboard.
+
+    Uploads without a time-sync anchor (`sync_anchor_timestamp_s is None`)
+    skip detection + triangulation and surface `error="no time sync"` on
+    the session. Operator's cue to re-run 時間校正.
     """
     # Fail fast on oversize bodies when the client advertises Content-Length
     # (Starlette has already buffered by the time we get here, but returning
@@ -793,34 +804,53 @@ async def pitch(
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors())
 
-    clip_info: dict[str, Any] | None = None
-    if video is not None:
-        data = await video.read()
-        # Defence in depth: re-check the actual read size in case the
-        # declared Content-Length was missing or spoofed.
-        if len(data) > _MAX_PITCH_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="video too large")
-        if data:
-            ext = "mov"
-            if video.filename:
-                suffix = Path(video.filename).suffix.lstrip(".").lower()
-                if suffix:
-                    ext = suffix
-            clip_path = state.save_clip(
-                payload_obj.camera_id, payload_obj.session_id, data, ext
-            )
-            clip_info = {"filename": clip_path.name, "bytes": len(data)}
+    data = await video.read()
+    # Defence in depth: re-check the actual read size in case the declared
+    # Content-Length was missing or spoofed.
+    if len(data) > _MAX_PITCH_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="video too large")
+    if not data:
+        raise HTTPException(status_code=422, detail="video attachment is empty")
+    ext = "mov"
+    if video.filename:
+        suffix = Path(video.filename).suffix.lstrip(".").lower()
+        if suffix:
+            ext = suffix
+    clip_path = state.save_clip(
+        payload_obj.camera_id, payload_obj.session_id, data, ext
+    )
+    clip_info = {"filename": clip_path.name, "bytes": len(data)}
+
+    # Run ball detection against the persisted MOV OUTSIDE any state lock
+    # (detection is the single heavy step per upload, up to a few seconds
+    # for a multi-second clip — state.record() grabs the lock for
+    # millisecond-scale work only).
+    if payload_obj.sync_anchor_timestamp_s is None:
+        # No time anchor → pairing is impossible; skip detection so we
+        # don't waste CPU on data that will never triangulate.
+        payload_obj.frames = []
+        detection_ran = False
+    else:
+        payload_obj.frames = detect_pitch(
+            clip_path, payload_obj.video_start_pts_s
+        )
+        detection_ran = True
 
     result = state.record(payload_obj)
+    if payload_obj.sync_anchor_timestamp_s is None and result.error is None:
+        # Persist the "no time sync" diagnostic so the session reads
+        # consistently from /events / /results without re-running record().
+        result.error = "no time sync"
     ball_frames = sum(1 for f in payload_obj.frames if f.ball_detected)
     logger.info(
-        "pitch camera=%s session=%s frames=%d ball=%d triangulated=%d%s%s",
+        "pitch camera=%s session=%s clip=%dB frames=%d ball=%d detected=%s triangulated=%d%s",
         payload_obj.camera_id,
         payload_obj.session_id,
+        clip_info["bytes"],
         len(payload_obj.frames),
         ball_frames,
+        detection_ran,
         len(result.points),
-        f" clip={clip_info['bytes']}B" if clip_info else "",
         f" err={result.error}" if result.error else "",
     )
     if result.points:
@@ -833,8 +863,7 @@ async def pitch(
             max(zs),
         )
     response: dict[str, Any] = {"ok": True, **_summarize_result(result)}
-    if clip_info is not None:
-        response["clip"] = clip_info
+    response["clip"] = clip_info
     return response
 
 

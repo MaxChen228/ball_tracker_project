@@ -308,13 +308,13 @@ def test_pitch_upload_ends_armed_session_end_to_end():
     ).json()
     session_id = arm_reply["session"]["id"]
 
-    # Simulate A's phone uploading a pitch tagged with the armed session.
-    body = _minimal_pitch_body("A", session_id=session_id)
-    r = client.post("/pitch", data={"payload": _json.dumps(body)})
-    assert r.status_code == 200
+    # The /pitch endpoint now requires a real MOV and decode/detect/
+    # triangulate on the server. This test is scoped to the session
+    # state machine, not ingestion — call `state.record` directly with
+    # a manually-built PitchPayload (`frames` already populated), which
+    # is the same path the ingestion handler uses post-detection.
+    main.state.record(_minimal_pitch("A", session_id=session_id))
 
-    # Session should be ended now; commands should carry disarm for B
-    # (and for A too — the server broadcasts to every online device).
     status = client.get("/status").json()
     assert status["session"] is not None
     assert status["session"]["armed"] is False
@@ -355,24 +355,21 @@ def test_dashboard_marks_expected_cameras_offline_when_absent():
 
 def _minimal_pitch(camera_id: str, session_id: str) -> main.PitchPayload:
     """A minimal server-internal PitchPayload with no calibration — enough
-    for `State.record` to run, not enough for triangulation."""
+    for `State.record` to run, not enough for triangulation. Frames are
+    populated to keep `events()` counts meaningful without going through
+    the /pitch detection path."""
     return main.PitchPayload(
         camera_id=camera_id,
         session_id=session_id,
-        sync_anchor_frame_index=0,
         sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
         frames=[
             main.FramePayload(
                 frame_index=0,
                 timestamp_s=0.0,
-                theta_x_rad=0.0,
-                theta_z_rad=0.0,
+                px=100.0, py=100.0,
                 ball_detected=True,
             ),
         ],
     )
-
-
-def _minimal_pitch_body(camera_id: str, session_id: str) -> dict:
-    """Dict version for /pitch multipart form."""
-    return _minimal_pitch(camera_id, session_id).model_dump()

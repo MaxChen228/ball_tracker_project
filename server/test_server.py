@@ -1,4 +1,18 @@
-"""End-to-end triangulation test + FastAPI ingest smoke test."""
+"""End-to-end triangulation test + FastAPI ingest smoke test.
+
+The server no longer accepts per-frame ball data on the wire. The iPhone
+uploads only the H.264 MOV + minimal metadata, and the server decodes +
+detects + triangulates. Tests here either:
+
+  (a) Pure math — exercise `triangulate_*` / `recover_extrinsics` directly.
+  (b) Direct-State tests — construct a `PitchPayload` with pre-populated
+      `frames` (bypassing the /pitch path) to verify state management,
+      lock discipline, pairing edge cases.
+  (c) /pitch E2E — encode a synthetic MOV with a blue circle whose pixel
+      coords are ground-truthed projections of a known 3D point; POST
+      the MOV + JSON and verify server-side detection recovers the 3D
+      point within numerical tolerance.
+"""
 from __future__ import annotations
 
 import io
@@ -7,7 +21,10 @@ import logging
 import os
 import threading
 import time
+from fractions import Fraction
+from pathlib import Path
 
+import av  # type: ignore[import]
 import cv2
 import numpy as np
 import pytest
@@ -28,13 +45,7 @@ from triangulate import (
 )
 
 
-def _post_pitch(client, body: dict, video_bytes: bytes | None = None):
-    """POST /pitch as multipart/form-data; optionally attach a video clip."""
-    data = {"payload": _json.dumps(body)}
-    if video_bytes is None:
-        return client.post("/pitch", data=data)
-    files = {"video": ("clip.mov", video_bytes, "video/quicktime")}
-    return client.post("/pitch", data=data, files=files)
+# ---------------------------- Scene helpers ----------------------------------
 
 
 def _look_at(pos: np.ndarray, target: np.ndarray, up: np.ndarray = np.array([0.0, 0.0, 1.0])):
@@ -44,7 +55,6 @@ def _look_at(pos: np.ndarray, target: np.ndarray, up: np.ndarray = np.array([0.0
     """
     z_cam = target - pos
     z_cam /= np.linalg.norm(z_cam)
-    # Image down direction in world: project -up onto plane perpendicular to z_cam.
     y_cam = -up - np.dot(-up, z_cam) * z_cam
     y_cam /= np.linalg.norm(y_cam)
     x_cam = np.cross(y_cam, z_cam)
@@ -74,21 +84,104 @@ def _make_scene():
     cx, cy = 960.0, 540.0
     K = build_K(fx, fy, cx, cy)
 
-    # Cameras placed as a stereo pair looking at plate.
-    # World: X right, Y forward (depth from plate front), Z up.
+    # Stereo pair looking at the plate.
     C_a = np.array([1.8, -2.5, 1.2])
     C_b = np.array([-1.8, -2.5, 1.2])
     target = np.array([0.0, 0.15, 0.0])
     R_a, t_a = _look_at(C_a, target)
     R_b, t_b = _look_at(C_b, target)
 
-    # Homography each camera would measure for plate plane (Z=0).
-    # H = K [r1 r2 t] (up to scale; normalize h33=1 to match iPhone's convention).
+    # Homography each camera measures for plate plane (Z=0).
     H_a = K @ np.column_stack([R_a[:, 0], R_a[:, 1], t_a])
     H_b = K @ np.column_stack([R_b[:, 0], R_b[:, 1], t_b])
     H_a /= H_a[2, 2]
     H_b /= H_b[2, 2]
     return K, fx, fy, cx, cy, (R_a, t_a, C_a, H_a), (R_b, t_b, C_b, H_b)
+
+
+# ---------------------------- MOV / frame synthesis --------------------------
+
+
+def _make_frame_with_ball(
+    width: int,
+    height: int,
+    center_px: tuple[float, float] | None,
+    radius: int = 15,
+) -> np.ndarray:
+    """Paint a deep-blue circle on a black BGR frame. `center_px=None`
+    means "no ball" (pure black → HSV detection returns None)."""
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    if center_px is not None:
+        cx_i = int(round(center_px[0]))
+        cy_i = int(round(center_px[1]))
+        # BGR (240, 60, 60) → HSV ≈ (120, 191, 240): blue hue, saturated,
+        # bright enough to pass the default HSV range (100-130, 140-255,
+        # 40-255).
+        cv2.circle(frame, (cx_i, cy_i), radius, (240, 60, 60), -1)
+    return frame
+
+
+def _encode_mov(frames: list[np.ndarray], fps: float, path: Path) -> None:
+    """Encode a list of BGR uint8 frames as H.264 MOV. First frame's
+    container PTS is 0 by convention (PyAV starts from 0 for freshly
+    opened streams) — the server reconstructs the absolute iOS session
+    clock via `video_start_pts_s` on the upload payload."""
+    if not frames:
+        raise ValueError("need at least one frame")
+    height, width = frames[0].shape[:2]
+    container = av.open(str(path), mode="w")
+    try:
+        rate = Fraction(int(round(fps * 1000)), 1000)
+        stream = container.add_stream("h264", rate=rate)
+        stream.width = width
+        stream.height = height
+        stream.pix_fmt = "yuv420p"
+        for bgr in frames:
+            frame = av.VideoFrame.from_ndarray(bgr, format="bgr24")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    finally:
+        container.close()
+
+
+def _post_pitch(client, payload_body: dict, video_path: Path | None):
+    data = {"payload": _json.dumps(payload_body)}
+    if video_path is None:
+        return client.post("/pitch", data=data)
+    with open(video_path, "rb") as f:
+        files = {"video": (video_path.name, f.read(), "video/quicktime")}
+    return client.post("/pitch", data=data, files=files)
+
+
+def _base_payload(
+    cam_id: str,
+    session_id: str,
+    K: np.ndarray,
+    H: np.ndarray,
+    *,
+    anchor_ts: float | None = 0.0,
+    video_start_pts: float = 0.0,
+    video_fps: float = 30.0,
+    width: int = 1920,
+    height: int = 1080,
+    distortion: list[float] | None = None,
+) -> dict:
+    intr: dict = {"fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2]}
+    if distortion is not None:
+        intr["distortion"] = distortion
+    return {
+        "camera_id": cam_id,
+        "session_id": session_id,
+        "sync_anchor_timestamp_s": anchor_ts,
+        "video_start_pts_s": video_start_pts,
+        "video_fps": video_fps,
+        "intrinsics": intr,
+        "homography": H.flatten().tolist(),
+        "image_width_px": width,
+        "image_height_px": height,
+    }
 
 
 # --------------------------- Unit tests --------------------------------------
@@ -103,12 +196,11 @@ def test_recover_extrinsics_matches_ground_truth():
 
 def test_triangulate_perfect_rays_recovers_point():
     K, *_, (R_a, t_a, C_a, H_a), (R_b, t_b, C_b, H_b) = _make_scene()
-    P_true = np.array([0.25, 0.6, 1.55])  # 25cm right, 60cm deep, 1.55m up
+    P_true = np.array([0.25, 0.6, 1.55])
 
     theta_x_a, theta_z_a = _project(K, R_a, t_a, P_true)
     theta_x_b, theta_z_b = _project(K, R_b, t_b, P_true)
 
-    # Follow the server pipeline: K+H → recovered pose → world-space rays → triangulate.
     R_a_r, t_a_r = recover_extrinsics(K, H_a)
     R_b_r, t_b_r = recover_extrinsics(K, H_b)
     C_a_r = camera_center_world(R_a_r, t_a_r)
@@ -122,46 +214,69 @@ def test_triangulate_perfect_rays_recovers_point():
     assert gap < 1e-6
 
 
+def test_undistorted_ray_cam_zero_dist_matches_angle_ray():
+    K = build_K(1600.0, 1600.0, 960.0, 540.0)
+    u, v = 1234.5, 678.9
+    theta_x = np.arctan2(u - K[0, 2], K[0, 0])
+    theta_z = np.arctan2(v - K[1, 2], K[1, 1])
+    d_angle = angle_ray_cam(theta_x, theta_z)
+    d_pix = undistorted_ray_cam(u, v, K, np.zeros(5))
+    np.testing.assert_allclose(d_pix, d_angle, atol=1e-12)
+
+
+# --------------------------- triangulate_cycle unit (direct, no /pitch) ------
+
+
+def _direct_payload_with_frames(
+    cam_id: str,
+    session_id: str,
+    path: np.ndarray,
+    ts: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    H: np.ndarray,
+    K: np.ndarray,
+) -> "main.PitchPayload":
+    frames = []
+    for i, (Pi, ti) in enumerate(zip(path, ts)):
+        u, v = _project_pixels(K, R, t, Pi)
+        frames.append(
+            main.FramePayload(
+                frame_index=i, timestamp_s=float(ti),
+                px=u, py=v, ball_detected=True,
+            )
+        )
+    return main.PitchPayload(
+        camera_id=cam_id,
+        session_id=session_id,
+        sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        frames=frames,
+        intrinsics=main.IntrinsicsPayload(
+            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+        ),
+        homography=H.flatten().tolist(),
+    )
+
+
 def test_triangulate_sweeps_ball_path():
-    """Simulate a short pitch: ball starts high-back, ends low-front over plate."""
+    """Simulate a short pitch and verify the pixel-only triangulation path
+    recovers every point on the trajectory."""
     K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
-    # 20 points along a parabolic path.
     ts = np.linspace(0.0, 0.4, 20)
-    # Start (0, 18m, 2m), end (0, 0, 0.5m), slight lateral curve, gravity drop.
     path = np.stack(
         [
             0.1 * np.sin(ts * 10),
             18.0 - 45.0 * ts,
-            2.0 - 4.9 * ts**2 + 2.0 * ts - 2.0 * ts,  # simple drop
+            2.0 - 4.9 * ts**2 + 2.0 * ts - 2.0 * ts,
         ],
         axis=1,
     )
 
-    from main import PitchPayload, FramePayload, IntrinsicsPayload, triangulate_cycle
-
-    def build_payload(cam_id: str, R, t, H):
-        frames = []
-        for i, (Pi, ti) in enumerate(zip(path, ts)):
-            tx, tz = _project(K, R, t, Pi)
-            frames.append(
-                FramePayload(
-                    frame_index=i, timestamp_s=float(ti),
-                    theta_x_rad=tx, theta_z_rad=tz, ball_detected=True,
-                )
-            )
-        return PitchPayload(
-            camera_id=cam_id,
-            session_id=sid(1),
-            sync_anchor_frame_index=0,
-            sync_anchor_timestamp_s=0.0,
-            frames=frames,
-            intrinsics=IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
-            homography=H.flatten().tolist(),
-        )
-
-    payload_a = build_payload("A", R_a, t_a, H_a)
-    payload_b = build_payload("B", R_b, t_b, H_b)
-    points = triangulate_cycle(payload_a, payload_b)
+    payload_a = _direct_payload_with_frames("A", sid(1), path, ts, R_a, t_a, H_a, K)
+    payload_b = _direct_payload_with_frames("B", sid(1), path, ts, R_b, t_b, H_b, K)
+    points = pairing.triangulate_cycle(payload_a, payload_b)
     assert len(points) == len(path)
     recovered = np.array([[p.x_m, p.y_m, p.z_m] for p in points])
     np.testing.assert_allclose(recovered, path, atol=1e-6)
@@ -169,99 +284,22 @@ def test_triangulate_sweeps_ball_path():
     assert max(residuals) < 1e-6
 
 
-# --------------------------- API smoke tests ---------------------------------
-# Note: the autouse `_reset_main_state` fixture in conftest.py replaces
-# `main.state` with a tmp_path-backed State before each test so these
-# cases can hit the global app without leaking files across runs.
-
-
-def test_status_initially_idle():
-    client = TestClient(app)
-    r = client.get("/status")
-    assert r.status_code == 200
-    assert r.json()["state"] == "idle"
-
-
-def test_post_pitch_single_camera_then_both_triangulates():
-    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
-    P_true = np.array([0.1, 0.3, 1.0])
-    tx_a, tz_a = _project(K, R_a, t_a, P_true)
-    tx_b, tz_b = _project(K, R_b, t_b, P_true)
-
-    session_id = sid(7)
-
-    def make_body(cam_id, tx, tz, R, t, H):
-        return {
-            "camera_id": cam_id,
-            "session_id": session_id,
-            "sync_anchor_frame_index": 0,
-            "sync_anchor_timestamp_s": 0.0,
-            "frames": [
-                {"frame_index": 0, "timestamp_s": 0.0,
-                 "theta_x_rad": tx, "theta_z_rad": tz, "ball_detected": True},
-            ],
-            "intrinsics": {"fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2]},
-            "homography": H.flatten().tolist(),
-        }
-
-    client = TestClient(app)
-
-    r1 = _post_pitch(client, make_body("A", tx_a, tz_a, R_a, t_a, H_a))
-    assert r1.status_code == 200
-    assert r1.json()["triangulated_points"] == 0  # B not yet received
-
-    r2 = _post_pitch(client, make_body("B", tx_b, tz_b, R_b, t_b, H_b))
-    assert r2.status_code == 200
-    assert r2.json()["triangulated_points"] == 1
-
-    r3 = client.get("/results/latest")
-    body = r3.json()
-    assert body["session_id"] == session_id
-    pt = body["points"][0]
-    assert abs(pt["x_m"] - P_true[0]) < 1e-6
-    assert abs(pt["y_m"] - P_true[1]) < 1e-6
-    assert abs(pt["z_m"] - P_true[2]) < 1e-6
-
-    # /pitch response summary surfaces mean residual + peak z for iOS feedback.
-    body2 = r2.json()
-    assert body2["paired"] is True
-    assert body2["session_id"] == session_id
-    assert body2["error"] is None
-    assert body2["mean_residual_m"] < 1e-6
-    assert abs(body2["peak_z_m"] - P_true[2]) < 1e-6
-
-
 def test_persistence_reloads_state_across_process_restart(tmp_path):
-    """A fresh State pointed at an existing data dir re-triangulates stored pitches."""
+    """State pointed at an existing data dir re-triangulates stored pitches."""
     K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
     P_true = np.array([0.2, 0.5, 1.1])
-    tx_a, tz_a = _project(K, R_a, t_a, P_true)
-    tx_b, tz_b = _project(K, R_b, t_b, P_true)
-
+    ts = np.array([0.0])
+    path = P_true.reshape(1, 3)
     session_id = sid(42)
 
-    def make_body(cam_id, tx, tz, H):
-        return main.PitchPayload(
-            camera_id=cam_id,
-            session_id=session_id,
-            sync_anchor_frame_index=0,
-            sync_anchor_timestamp_s=0.0,
-            frames=[
-                main.FramePayload(
-                    frame_index=0, timestamp_s=0.0,
-                    theta_x_rad=tx, theta_z_rad=tz, ball_detected=True,
-                )
-            ],
-            intrinsics=main.IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
-            homography=H.flatten().tolist(),
-        )
+    payload_a = _direct_payload_with_frames("A", session_id, path, ts, R_a, t_a, H_a, K)
+    payload_b = _direct_payload_with_frames("B", session_id, path, ts, R_b, t_b, H_b, K)
 
     s1 = main.State(data_dir=tmp_path)
-    s1.record(make_body("A", tx_a, tz_a, H_a))
-    s1.record(make_body("B", tx_b, tz_b, H_b))
+    s1.record(payload_a)
+    s1.record(payload_b)
     del s1
 
-    # Fresh State simulating server restart: same data dir, no in-memory carry-over.
     s2 = main.State(data_dir=tmp_path)
     latest = s2.latest()
     assert latest is not None
@@ -274,86 +312,137 @@ def test_persistence_reloads_state_across_process_restart(tmp_path):
     assert abs(pt.z_m - P_true[2]) < 1e-6
 
 
+# --------------------------- API smoke + detection E2E -----------------------
+
+
+def test_status_initially_idle():
+    client = TestClient(app)
+    r = client.get("/status")
+    assert r.status_code == 200
+    assert r.json()["state"] == "idle"
+
+
+def _encode_single_ball_mov(
+    tmp_path: Path,
+    K: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    P_true: np.ndarray,
+    *,
+    width: int = 1920,
+    height: int = 1080,
+    fps: float = 30.0,
+    n_frames: int = 3,
+    filename: str,
+) -> Path:
+    u, v = _project_pixels(K, R, t, P_true)
+    frames = [
+        _make_frame_with_ball(width, height, (u, v)) for _ in range(n_frames)
+    ]
+    out = tmp_path / filename
+    _encode_mov(frames, fps=fps, path=out)
+    return out
+
+
+def test_post_pitch_with_video_triangulates_server_side(tmp_path):
+    """End-to-end: paint a blue circle at the projected pixel of a known
+    3D point on both cameras' MOVs, POST them, verify the server-detected
+    centroid triangulates to ≤ 1 px of the true 3D location."""
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    P_true = np.array([0.1, 0.3, 1.0])
+    session_id = sid(7)
+
+    client = TestClient(app)
+
+    mov_a = _encode_single_ball_mov(
+        tmp_path, K, R_a, t_a, P_true, filename="a.mov"
+    )
+    mov_b = _encode_single_ball_mov(
+        tmp_path, K, R_b, t_b, P_true, filename="b.mov"
+    )
+
+    r1 = _post_pitch(client, _base_payload("A", session_id, K, H_a), mov_a)
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["triangulated_points"] == 0  # B not yet received
+
+    r2 = _post_pitch(client, _base_payload("B", session_id, K, H_b), mov_b)
+    assert r2.status_code == 200, r2.text
+    body2 = r2.json()
+    assert body2["paired"] is True
+    assert body2["triangulated_points"] >= 1
+
+    # The server detected pixel can be sub-pixel off from ground truth
+    # due to connected-components centroid quantisation, so allow a small
+    # triangulation tolerance.
+    r3 = client.get(f"/results/{session_id}").json()
+    pt = r3["points"][0]
+    assert abs(pt["x_m"] - P_true[0]) < 2e-3
+    assert abs(pt["y_m"] - P_true[1]) < 2e-3
+    assert abs(pt["z_m"] - P_true[2]) < 2e-3
+
+
+def test_post_pitch_missing_video_returns_422(tmp_path):
+    """Video is now mandatory — iPhone always produces one. Missing video
+    must fail validation, not silently succeed."""
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    client = TestClient(app)
+    r = _post_pitch(client, _base_payload("A", sid(501), K, H_a), None)
+    assert r.status_code == 422, r.text
+
+
+def test_post_pitch_anchorless_sets_error(tmp_path):
+    """Upload with `sync_anchor_timestamp_s=null` is accepted (so the clip
+    still lands on disk for forensics) but the session is flagged
+    `error="no time sync"` and triangulation is skipped."""
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    P_true = np.array([0.1, 0.3, 1.0])
+    mov = _encode_single_ball_mov(
+        tmp_path, K, R_a, t_a, P_true, filename="anchorless.mov"
+    )
+    client = TestClient(app)
+    body = _base_payload("A", sid(502), K, H_a, anchor_ts=None)
+    r = _post_pitch(client, body, mov)
+    assert r.status_code == 200, r.text
+    assert r.json()["error"] == "no time sync"
+
+
+def test_pitch_clip_persisted_with_canonical_filename(tmp_path):
+    """Uploaded MOV is saved under data/videos/session_{sid}_{cam}.{ext}."""
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    P_true = np.array([0.1, 0.3, 1.0])
+    session_id = sid(503)
+    mov = _encode_single_ball_mov(
+        tmp_path, K, R_a, t_a, P_true, filename="src.mov"
+    )
+    client = TestClient(app)
+    r = _post_pitch(client, _base_payload("A", session_id, K, H_a), mov)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["clip"]["filename"] == f"session_{session_id}_A.mov"
+    assert body["clip"]["bytes"] > 0
+
+    saved = main.state.video_dir / f"session_{session_id}_A.mov"
+    assert saved.exists()
+    assert saved.stat().st_size > 0
+
+
 # --------------------------- Distortion plumbing -----------------------------
 
 
-def test_zero_distortion_with_pixels_matches_angle_path():
-    """Posting px/py + distortion=[0]*5 must give identical triangulation to angles-only."""
+def test_nonzero_distortion_recovers_true_point_via_mov(tmp_path):
+    """Pre-distort projected pixels via cv2.projectPoints, render them as
+    MOV frames, and verify triangulation with server-side detection +
+    5-coef undistortion recovers the original 3D point."""
     K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
-    # Two different path points across two cycles to exercise the plumbing.
-    path = np.array([[0.1, 0.3, 1.0], [-0.2, 0.8, 1.4]])
-    zero_dist = [0.0, 0.0, 0.0, 0.0, 0.0]
-
-    def make_body(cam_id, P_true, R, t, H, session_id_: str, *, with_pixels: bool):
-        tx, tz = _project(K, R, t, P_true)
-        u, v = _project_pixels(K, R, t, P_true)
-        body = {
-            "camera_id": cam_id,
-            "session_id": session_id_,
-            "sync_anchor_frame_index": 0,
-            "sync_anchor_timestamp_s": 0.0,
-            "frames": [
-                {
-                    "frame_index": 0,
-                    "timestamp_s": 0.0,
-                    "theta_x_rad": tx,
-                    "theta_z_rad": tz,
-                    "ball_detected": True,
-                    **({"px": u, "py": v} if with_pixels else {}),
-                },
-            ],
-            "intrinsics": {
-                "fx": K[0, 0],
-                "fz": K[1, 1],
-                "cx": K[0, 2],
-                "cy": K[1, 2],
-                **({"distortion": zero_dist} if with_pixels else {}),
-            },
-            "homography": H.flatten().tolist(),
-        }
-        return body
-
-    client = TestClient(app)
-    s1, s2, s3 = sid(1), sid(2), sid(3)
-
-    # Session 1: angles only.
-    _post_pitch(client, make_body("A", path[0], R_a, t_a, H_a, s1, with_pixels=False))
-    _post_pitch(client, make_body("B", path[0], R_b, t_b, H_b, s1, with_pixels=False))
-    pt_angles = client.get(f"/results/{s1}").json()["points"][0]
-
-    # Session 2: pixels + zero distortion.
-    _post_pitch(client, make_body("A", path[1], R_a, t_a, H_a, s2, with_pixels=True))
-    _post_pitch(client, make_body("B", path[1], R_b, t_b, H_b, s2, with_pixels=True))
-    pt_pixels = client.get(f"/results/{s2}").json()["points"][0]
-
-    # Each session should recover its own true point.
-    assert abs(pt_angles["x_m"] - path[0][0]) < 1e-6
-    assert abs(pt_angles["y_m"] - path[0][1]) < 1e-6
-    assert abs(pt_angles["z_m"] - path[0][2]) < 1e-6
-    assert abs(pt_pixels["x_m"] - path[1][0]) < 1e-6
-    assert abs(pt_pixels["y_m"] - path[1][1]) < 1e-6
-    assert abs(pt_pixels["z_m"] - path[1][2]) < 1e-6
-
-    # And for the SAME point, both paths must agree bit-for-bit (numerically):
-    # reproject path[0] through pixel path and compare.
-    _post_pitch(client, make_body("A", path[0], R_a, t_a, H_a, s3, with_pixels=True))
-    _post_pitch(client, make_body("B", path[0], R_b, t_b, H_b, s3, with_pixels=True))
-    pt_pixels_same = client.get(f"/results/{s3}").json()["points"][0]
-    assert abs(pt_pixels_same["x_m"] - pt_angles["x_m"]) < 1e-9
-    assert abs(pt_pixels_same["y_m"] - pt_angles["y_m"]) < 1e-9
-    assert abs(pt_pixels_same["z_m"] - pt_angles["z_m"]) < 1e-9
-
-
-def test_nonzero_distortion_recovers_true_point():
-    """Pre-distort pixels via cv2.projectPoints, send them + coeffs back, verify recovery."""
-    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
-    P_true = np.array([0.15, 0.55, 1.3])
-
-    # Realistic smartphone-lens distortion magnitude.
-    dist = np.array([0.12, -0.25, 0.001, -0.0015, 0.08], dtype=np.float64)
+    # Point chosen to keep the distorted projection inside frame — the
+    # high-distortion case at (0.15, 0.55, 1.3) pushes camera A's pixel
+    # above the image top, which the centroid detector cannot see.
+    P_true = np.array([0.1, 0.3, 1.0])
+    # Modest smartphone-lens distortion. Bigger k1 starts shoving
+    # peripheral pixels off-screen in the synthesised scene.
+    dist = np.array([0.04, -0.12, 0.001, -0.0015, 0.02], dtype=np.float64)
 
     def project_distorted(R: np.ndarray, t: np.ndarray) -> tuple[float, float]:
-        # cv2.projectPoints expects rvec+tvec (object→camera extrinsic).
         rvec, _ = cv2.Rodrigues(R)
         tvec = t.reshape(3, 1)
         pts_obj = P_true.reshape(1, 1, 3).astype(np.float64)
@@ -364,147 +453,53 @@ def test_nonzero_distortion_recovers_true_point():
     u_a, v_a = project_distorted(R_a, t_a)
     u_b, v_b = project_distorted(R_b, t_b)
 
-    # Sanity: with non-zero distortion the distorted pixels differ from the
-    # pinhole projection, so angle-only triangulation would be wrong.
-    u_a_pin, v_a_pin = _project_pixels(K, R_a, t_a, P_true)
-    assert abs(u_a - u_a_pin) > 1e-3 or abs(v_a - v_a_pin) > 1e-3
+    # Paint the distorted pixels into the MOVs.
+    frames_a = [_make_frame_with_ball(1920, 1080, (u_a, v_a)) for _ in range(3)]
+    frames_b = [_make_frame_with_ball(1920, 1080, (u_b, v_b)) for _ in range(3)]
+    mov_a = tmp_path / "dist_a.mov"
+    mov_b = tmp_path / "dist_b.mov"
+    _encode_mov(frames_a, fps=30.0, path=mov_a)
+    _encode_mov(frames_b, fps=30.0, path=mov_b)
 
     session_id = sid(99)
-
-    def make_body(cam_id, u, v, H):
-        return {
-            "camera_id": cam_id,
-            "session_id": session_id,
-            "sync_anchor_frame_index": 0,
-            "sync_anchor_timestamp_s": 0.0,
-            "frames": [
-                {
-                    "frame_index": 0,
-                    "timestamp_s": 0.0,
-                    "px": u,
-                    "py": v,
-                    "ball_detected": True,
-                },
-            ],
-            "intrinsics": {
-                "fx": K[0, 0],
-                "fz": K[1, 1],
-                "cx": K[0, 2],
-                "cy": K[1, 2],
-                "distortion": dist.tolist(),
-            },
-            "homography": H.flatten().tolist(),
-        }
-
     client = TestClient(app)
-    r1 = _post_pitch(client, make_body("A", u_a, v_a, H_a))
-    assert r1.status_code == 200
-    r2 = _post_pitch(client, make_body("B", u_b, v_b, H_b))
-    assert r2.status_code == 200
-    assert r2.json()["triangulated_points"] == 1
 
-    body = client.get(f"/results/{session_id}").json()
-    pt = body["points"][0]
-    assert abs(pt["x_m"] - P_true[0]) < 1e-4
-    assert abs(pt["y_m"] - P_true[1]) < 1e-4
-    assert abs(pt["z_m"] - P_true[2]) < 1e-4
+    dist_list = dist.tolist()
+    body_a = _base_payload("A", session_id, K, H_a, distortion=dist_list)
+    body_b = _base_payload("B", session_id, K, H_b, distortion=dist_list)
 
+    r1 = _post_pitch(client, body_a, mov_a)
+    assert r1.status_code == 200, r1.text
+    r2 = _post_pitch(client, body_b, mov_b)
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["triangulated_points"] >= 1
 
-def test_undistorted_ray_cam_zero_dist_matches_angle_ray():
-    """Unit: undistorted_ray_cam with zero coeffs equals angle_ray_cam derived from the pixel."""
-    K = build_K(1600.0, 1600.0, 960.0, 540.0)
-    u, v = 1234.5, 678.9
-    theta_x = np.arctan2(u - K[0, 2], K[0, 0])
-    theta_z = np.arctan2(v - K[1, 2], K[1, 1])
-    d_angle = angle_ray_cam(theta_x, theta_z)
-    d_pix = undistorted_ray_cam(u, v, K, np.zeros(5))
-    np.testing.assert_allclose(d_pix, d_angle, atol=1e-12)
+    pt = client.get(f"/results/{session_id}").json()["points"][0]
+    # Detection + undistortion + triangulation: a couple mm of slack is
+    # plenty for a ~1 m-distant ball encoded via lossy H.264.
+    assert abs(pt["x_m"] - P_true[0]) < 5e-3
+    assert abs(pt["y_m"] - P_true[1]) < 5e-3
+    assert abs(pt["z_m"] - P_true[2]) < 5e-3
 
 
-# --------------------------- Multipart + video clip --------------------------
-
-
-def _minimal_pitch_body(session_id: str, cam_id: str = "A") -> dict:
-    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
-    P_true = np.array([0.1, 0.3, 1.0])
-    tx, tz = _project(
-        K, R_a if cam_id == "A" else R_b, t_a if cam_id == "A" else t_b, P_true
-    )
-    H = H_a if cam_id == "A" else H_b
-    return {
-        "camera_id": cam_id,
-        "session_id": session_id,
-        "sync_anchor_frame_index": 0,
-        "sync_anchor_timestamp_s": 0.0,
-        "frames": [
-            {"frame_index": 0, "timestamp_s": 0.0,
-             "theta_x_rad": tx, "theta_z_rad": tz, "ball_detected": True},
-        ],
-        "intrinsics": {"fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2]},
-        "homography": H.flatten().tolist(),
-    }
-
-
-def test_pitch_without_video_round_trips_like_before():
-    """Regression guard: existing clients that send only the JSON payload still
-    triangulate correctly under the new multipart endpoint."""
-    client = TestClient(app)
-    session_id = sid(501)
-    r1 = _post_pitch(client, _minimal_pitch_body(session_id, "A"))
-    assert r1.status_code == 200
-    assert "clip" not in r1.json()
-    r2 = _post_pitch(client, _minimal_pitch_body(session_id, "B"))
-    assert r2.status_code == 200
-    assert "clip" not in r2.json()
-    assert r2.json()["triangulated_points"] == 1
-
-
-def test_pitch_with_video_persists_clip_and_still_triangulates():
-    """Attach a byte-string posing as a MOV clip and verify: (a) triangulation
-    runs unchanged, (b) the clip is written under the state's video dir with
-    the expected (session_id, camera_id) basename."""
-    client = TestClient(app)
-    session_id = sid(502)
-    fake_video = b"fake mov bytes \x00\x01\x02" * 128  # small but non-empty
-    r1 = _post_pitch(
-        client, _minimal_pitch_body(session_id, "A"), video_bytes=fake_video
-    )
-    assert r1.status_code == 200
-    body = r1.json()
-    assert body["clip"]["filename"] == f"session_{session_id}_A.mov"
-    assert body["clip"]["bytes"] == len(fake_video)
-
-    clip_path = main.state.video_dir / f"session_{session_id}_A.mov"
-    assert clip_path.exists()
-    assert clip_path.read_bytes() == fake_video
-
-    # Pair with B (no video) — triangulation still works.
-    r2 = _post_pitch(client, _minimal_pitch_body(session_id, "B"))
-    assert r2.status_code == 200
-    assert r2.json()["triangulated_points"] == 1
+# --------------------------- save_clip ---------------------------------------
 
 
 def test_save_clip_writes_atomically_and_overwrites(tmp_path):
-    """Unit-level: State.save_clip targets data/videos/ with a safe filename
-    and overwrites on repeat uploads for the same (camera, session)."""
     s = main.State(data_dir=tmp_path)
     session_id = sid(900)
     first = s.save_clip("A", session_id, b"alpha", "mov")
     assert first == tmp_path / "videos" / f"session_{session_id}_A.mov"
     assert first.read_bytes() == b"alpha"
 
-    # Overwriting preserves filename and swaps contents.
     second = s.save_clip("A", session_id, b"beta beta", "mov")
     assert second == first
     assert second.read_bytes() == b"beta beta"
 
-    # No ".tmp" litter left over from atomic writes.
     assert not any(p.suffix == ".tmp" for p in (tmp_path / "videos").iterdir())
 
 
 def test_save_clip_rejects_path_traversal_extensions(tmp_path):
-    """Malformed `ext` (path separators, empty) falls back to .mov so the
-    filename stays inside data/videos/."""
     s = main.State(data_dir=tmp_path)
     path_bad = s.save_clip("B", sid(7), b"x", "../etc/passwd")
     assert path_bad.parent == tmp_path / "videos"
@@ -514,31 +509,45 @@ def test_save_clip_rejects_path_traversal_extensions(tmp_path):
     assert path_empty.suffix == ".mov"
 
 
-def test_malformed_payload_returns_422():
-    """A JSON form field that does not match PitchPayload shape yields 422,
-    not 500, so iOS can surface a precise error."""
+# --------------------------- Payload validation ------------------------------
+
+
+def test_malformed_payload_returns_422(tmp_path):
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    mov = _encode_single_ball_mov(
+        tmp_path, K, R_a, t_a, np.array([0.1, 0.3, 1.0]), filename="ok.mov"
+    )
     client = TestClient(app)
-    r = client.post("/pitch", data={"payload": '{"bogus": true}'})
+    with open(mov, "rb") as f:
+        files = {"video": (mov.name, f.read(), "video/quicktime")}
+    r = client.post(
+        "/pitch",
+        data={"payload": '{"bogus": true}'},
+        files=files,
+    )
     assert r.status_code == 422
 
 
-def test_path_traversing_camera_id_is_rejected():
-    """`camera_id` ends up in server-side file paths (pitch JSON + clip MOV).
-    Pydantic must reject non-identifier values so the upload can't escape
-    `data/` via `../` or embedded separators."""
-    body = _minimal_pitch_body(sid(600), "A")
+def test_path_traversing_camera_id_is_rejected(tmp_path):
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    mov = _encode_single_ball_mov(
+        tmp_path, K, R_a, t_a, np.array([0.1, 0.3, 1.0]), filename="ok.mov"
+    )
+    body = _base_payload("A", sid(600), K, H_a)
     body["camera_id"] = "../etc"
     client = TestClient(app)
-    r = _post_pitch(client, body, video_bytes=b"x")
+    r = _post_pitch(client, body, mov)
     assert r.status_code == 422
 
 
-def test_malformed_session_id_is_rejected():
-    """`session_id` also ends up in paths. Same Pydantic constraint applies
-    — path-traversal or wrong-shape ids return 422."""
-    body = _minimal_pitch_body("../etc", "A")
+def test_malformed_session_id_is_rejected(tmp_path):
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    mov = _encode_single_ball_mov(
+        tmp_path, K, R_a, t_a, np.array([0.1, 0.3, 1.0]), filename="ok.mov"
+    )
+    body = _base_payload("A", "../etc", K, H_a)
     client = TestClient(app)
-    r = _post_pitch(client, body)
+    r = _post_pitch(client, body, mov)
     assert r.status_code == 422
 
 
@@ -546,15 +555,9 @@ def test_malformed_session_id_is_rejected():
 
 
 def test_save_clip_is_lock_protected(tmp_path):
-    """P1-A regression: four threads overwrite the same (camera, session)
-    clip simultaneously. Without the lock, concurrent tmp-writes clobber each
-    other mid-stream so the final `.mov` is a mix of different thread
-    payloads. The final file must equal exactly one of the inputs."""
     s = main.State(data_dir=tmp_path)
     session_id = sid(910)
 
-    # Distinct byte patterns large enough that a mid-write clobber would be
-    # detectable — each thread writes ~640 KB of its own repeating pattern.
     payloads = [bytes([i]) * (640 * 1024) for i in (0x11, 0x22, 0x33, 0x44)]
     barrier = threading.Barrier(len(payloads))
     errors: list[BaseException] = []
@@ -577,24 +580,18 @@ def test_save_clip_is_lock_protected(tmp_path):
     final_path = tmp_path / "videos" / f"session_{session_id}_A.mov"
     assert final_path.exists()
     final_bytes = final_path.read_bytes()
-    # Must equal one input exactly — not a concatenation or interleave.
     assert final_bytes in payloads, (
         f"clip is a torn mix of writes (len={len(final_bytes)})"
     )
-    # No tmp leftovers (lock released + rename completed on every worker).
     assert not any(
         p.suffix == ".tmp" for p in (tmp_path / "videos").iterdir()
     )
 
 
 def test_record_does_not_hold_lock_during_io(tmp_path, monkeypatch):
-    """P1-B regression: `State.record` must release `self._lock` before its
-    disk writes. Monkey-patch `_atomic_write` to block on a threading.Event,
-    run `record` in a worker, and prove `state.heartbeat` still returns
-    quickly from the main thread while record is parked mid-I/O."""
+    """`State.record` must release `self._lock` before its disk writes."""
     K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
     P_true = np.array([0.1, 0.3, 1.0])
-    tx, tz = _project(K, R_a, t_a, P_true)
     session_id = sid(920)
 
     s = main.State(data_dir=tmp_path)
@@ -605,22 +602,22 @@ def test_record_does_not_hold_lock_during_io(tmp_path, monkeypatch):
 
     def blocking_atomic_write(path, payload):
         entered_io.set()
-        # Park the "disk write" until the test releases us. If this runs
-        # while the lock is still held, `heartbeat` below will block too.
         assert release.wait(timeout=5.0), "release event never fired"
         return original_atomic_write(path, payload)
 
     monkeypatch.setattr(s, "_atomic_write", blocking_atomic_write)
 
+    u, v = _project_pixels(K, R_a, t_a, P_true)
     pitch = main.PitchPayload(
         camera_id="A",
         session_id=session_id,
-        sync_anchor_frame_index=0,
         sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
         frames=[
             main.FramePayload(
                 frame_index=0, timestamp_s=0.0,
-                theta_x_rad=tx, theta_z_rad=tz, ball_detected=True,
+                px=u, py=v, ball_detected=True,
             )
         ],
         intrinsics=main.IntrinsicsPayload(
@@ -631,13 +628,8 @@ def test_record_does_not_hold_lock_during_io(tmp_path, monkeypatch):
 
     recorder = threading.Thread(target=s.record, args=(pitch,))
     recorder.start()
-    # Wait until record() is parked inside _atomic_write (i.e. past the
-    # first critical section and into the unlocked I/O phase).
     assert entered_io.wait(timeout=5.0), "record never reached _atomic_write"
 
-    # Heartbeat must be fast — it only briefly touches `_devices` under
-    # the lock, and the lock is currently idle because record() released
-    # it before entering disk I/O.
     t0 = time.perf_counter()
     s.heartbeat("A")
     elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -651,19 +643,15 @@ def test_record_does_not_hold_lock_during_io(tmp_path, monkeypatch):
 
 
 def test_pitch_upload_rejects_oversize_video():
-    """P1-C regression: a /pitch POST whose body exceeds
-    `_MAX_PITCH_UPLOAD_BYTES` must be rejected with 413 and never reach
-    triangulation. Uses a declared Content-Length slightly over the cap so
-    the pre-check path fires without actually buffering 500 MB."""
-    session_id = sid(930)
-    body = _minimal_pitch_body(session_id, "A")
-
-    # Simulate an oversize request by forging Content-Length. TestClient
-    # otherwise computes Content-Length from the real body, so we just
-    # override the header — the handler's pre-check reads the header
-    # before touching the stream.
+    """413 guard fires on declared Content-Length before the handler
+    touches the multipart parts."""
+    body = _base_payload(
+        "A", sid(930),
+        K=build_K(1600, 1600, 960, 540),
+        H=np.eye(3),
+    )
     client = TestClient(app)
-    fake_video = b"\x00" * 1024  # tiny actual body; header lies about size
+    fake_video = b"\x00" * 1024
     files = {"video": ("clip.mov", fake_video, "video/quicktime")}
     data = {"payload": _json.dumps(body)}
     oversize = main._MAX_PITCH_UPLOAD_BYTES + 1
@@ -677,19 +665,16 @@ def test_pitch_upload_rejects_oversize_video():
 
 
 def test_pitch_upload_rejects_oversize_body_after_read():
-    """P1-C defence-in-depth: even when the attacker omits Content-Length,
-    the post-read size check catches an oversize video. We temporarily
-    shrink `_MAX_PITCH_UPLOAD_BYTES` so the test can generate a body
-    exceeding the cap without allocating 500 MB."""
-    session_id = sid(931)
-    body = _minimal_pitch_body(session_id, "A")
+    body = _base_payload(
+        "A", sid(931),
+        K=build_K(1600, 1600, 960, 540),
+        H=np.eye(3),
+    )
     client = TestClient(app)
 
     original_cap = main._MAX_PITCH_UPLOAD_BYTES
     try:
-        main._MAX_PITCH_UPLOAD_BYTES = 4 * 1024  # 4 KB for the test
-        # 8 KB payload — well over the shrunken cap but tiny in absolute
-        # terms so the test stays cheap.
+        main._MAX_PITCH_UPLOAD_BYTES = 4 * 1024
         fake_video = b"A" * (8 * 1024)
         files = {"video": ("clip.mov", fake_video, "video/quicktime")}
         data = {"payload": _json.dumps(body)}
@@ -707,18 +692,15 @@ def _build_pairing_payloads(
     timestamps_b: list[float],
     session_id: str,
 ):
-    """Build A/B PitchPayloads with one frame per timestamp, all aimed at a
-    fixed ground-truth point so ray geometry is valid. `timestamps_a/b` are
-    anchor-relative (sync_anchor_timestamp_s = 0)."""
     K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
     P_true = np.array([0.1, 0.3, 1.0])
 
     def frames(ts_list: list[float], R, t):
-        tx, tz = _project(K, R, t, P_true)
+        u, v = _project_pixels(K, R, t, P_true)
         return [
             main.FramePayload(
                 frame_index=i, timestamp_s=float(ti),
-                theta_x_rad=tx, theta_z_rad=tz, ball_detected=True,
+                px=u, py=v, ball_detected=True,
             )
             for i, ti in enumerate(ts_list)
         ]
@@ -726,30 +708,32 @@ def _build_pairing_payloads(
     payload_a = main.PitchPayload(
         camera_id="A",
         session_id=session_id,
-        sync_anchor_frame_index=0,
         sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
         frames=frames(timestamps_a, R_a, t_a),
-        intrinsics=main.IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
+        intrinsics=main.IntrinsicsPayload(
+            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+        ),
         homography=H_a.flatten().tolist(),
     )
     payload_b = main.PitchPayload(
         camera_id="B",
         session_id=session_id,
-        sync_anchor_frame_index=0,
         sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
         frames=frames(timestamps_b, R_b, t_b),
-        intrinsics=main.IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
+        intrinsics=main.IntrinsicsPayload(
+            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+        ),
         homography=H_b.flatten().tolist(),
     )
     return payload_a, payload_b
 
 
 def test_pairing_drop_diagnostics(caplog):
-    """Debug log fires for each out-of-window drop and the summary log
-    reports the correct counts."""
     session_id = sid(700)
-    # Second B frame is 100 ms away from its A counterpart → outside the
-    # 8.33 ms window; first pair is coincident and must triangulate.
     ts_a = [0.000, 0.100]
     ts_b = [0.000, 0.200]
     payload_a, payload_b = _build_pairing_payloads(ts_a, ts_b, session_id)
@@ -776,12 +760,7 @@ def test_pairing_drop_diagnostics(caplog):
 
 
 def test_max_dt_env_override(monkeypatch):
-    """Widening `BALL_TRACKER_MAX_DT_S` via env var lets previously-dropped
-    frames pair. Patches `_MAX_DT_S` directly, which is equivalent to
-    re-importing `pairing` under the env var but deterministic."""
     session_id = sid(701)
-    # Second B frame is 20 ms past A's counterpart — outside default 8.33 ms
-    # but inside a relaxed 30 ms window.
     ts_a = [0.000, 0.100]
     ts_b = [0.000, 0.120]
     payload_a, payload_b = _build_pairing_payloads(ts_a, ts_b, session_id)
@@ -798,7 +777,6 @@ def test_max_dt_env_override(monkeypatch):
 
 
 def _make_session_json(dir_path, session_id: str, age_seconds: float) -> None:
-    """Create `pitches/session_<sid>.json` and age its mtime by `age_seconds`."""
     dir_path.mkdir(parents=True, exist_ok=True)
     p = dir_path / f"session_{session_id}.json"
     p.write_text("{}")
@@ -807,8 +785,6 @@ def _make_session_json(dir_path, session_id: str, age_seconds: float) -> None:
 
 
 def test_cleanup_expired_sessions_removes_old(tmp_path):
-    """90-day-old session gets deleted; fresh one stays. Verifies the primary
-    lifespan-cleanup path."""
     pitches = tmp_path / "pitches"
     _make_session_json(pitches, "s_deadbeef", age_seconds=90 * 86400.0)
     _make_session_json(pitches, "s_cafef00d", age_seconds=0.0)
@@ -825,8 +801,6 @@ def test_cleanup_expired_sessions_removes_old(tmp_path):
 
 
 def test_cleanup_expired_sessions_disabled_days_zero(tmp_path):
-    """days=0 is the documented "disabled" sentinel — no scan, no delete,
-    (0, 0, 0) counts. This is what BALL_TRACKER_CLEANUP_DAYS=0 opts into."""
     pitches = tmp_path / "pitches"
     _make_session_json(pitches, "s_deadbeef", age_seconds=90 * 86400.0)
 
@@ -837,7 +811,6 @@ def test_cleanup_expired_sessions_disabled_days_zero(tmp_path):
 
 
 def test_cleanup_expired_sessions_dry_run(tmp_path):
-    """dry_run reports the counts it *would* delete but leaves disk alone."""
     pitches = tmp_path / "pitches"
     _make_session_json(pitches, "s_deadbeef", age_seconds=90 * 86400.0)
 
@@ -849,3 +822,41 @@ def test_cleanup_expired_sessions_dry_run(tmp_path):
     assert files == 1
     assert bytes_removed > 0
     assert (pitches / "session_s_deadbeef.json").exists()
+
+
+# ----- detection.py / video.py unit -----------------------------------------
+
+
+def test_detect_ball_finds_blue_circle_centroid():
+    from detection import HSVRange, detect_ball
+    frame = _make_frame_with_ball(320, 240, (160.0, 120.0), radius=15)
+    result = detect_ball(frame, HSVRange.default())
+    assert result is not None
+    px, py = result
+    # Sub-pixel centroid from connected-components stats should be very
+    # close to the drawn center.
+    assert abs(px - 160.0) < 1.0
+    assert abs(py - 120.0) < 1.0
+
+
+def test_detect_ball_returns_none_on_empty_frame():
+    from detection import HSVRange, detect_ball
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    assert detect_ball(frame, HSVRange.default()) is None
+
+
+def test_iter_frames_reconstructs_absolute_pts(tmp_path):
+    from video import iter_frames
+    frames = [_make_frame_with_ball(320, 240, (10.0 + i, 10.0 + i)) for i in range(5)]
+    mov = tmp_path / "seq.mov"
+    _encode_mov(frames, fps=30.0, path=mov)
+    start = 100.5
+    yielded = list(iter_frames(mov, video_start_pts_s=start))
+    assert len(yielded) == 5
+    # PTS must be monotonic and start at `video_start_pts_s`.
+    ptses = [t for t, _ in yielded]
+    assert ptses[0] == pytest.approx(start, abs=1e-6)
+    for a, b in zip(ptses, ptses[1:]):
+        assert b > a
+    # Frame 4 is 4/30 s after the start.
+    assert ptses[-1] == pytest.approx(start + 4.0 / 30.0, abs=1.0 / 30.0)

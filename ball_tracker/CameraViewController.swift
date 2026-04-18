@@ -8,12 +8,16 @@ import os
 private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "camera")
 
 /// Main camera view. State machine:
-/// - STANDBY: live preview, chirp detector off, no frame buffering
+/// - STANDBY: live preview, chirp detector off, no recording
 /// - TIME_SYNC_WAITING: listens on the mic for the reference chirp, saves
-///   session-clock PTS of the peak as the anchor
-/// - SYNC_WAITING: tracking armed, waiting for ball to enter frame
-/// - RECORDING: cycle in progress
+///   session-clock PTS of the peak as the anchor (manual 時間校正 only)
+/// - RECORDING: dashboard-armed; H.264 clip being written to disk
 /// - UPLOADING: cycle persisted, handed to the upload queue
+///
+/// The phone is a pure capture client — no ball detection runs on-device.
+/// Dashboard arm goes straight to `.recording`; dashboard cancel (or server
+/// session timeout) is the sole exit back to standby. Server ingests the
+/// MOV and does HSV detection + triangulation.
 ///
 /// Heavy side concerns live in dedicated helpers:
 /// - `ServerHealthMonitor` owns the 1 Hz heartbeat, backoff, and
@@ -24,16 +28,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     enum AppState {
         case standby
         case timeSyncWaiting
-        case syncWaiting
         case recording
         case uploading
     }
 
-    // Adaptive capture rate. Idle/time-sync runs at 60 fps to keep the
-    // sensor + ISP cool and preserve battery; tracking (`.syncWaiting` +
-    // `.recording`) switches to 240 fps so the 8 ms A/B pair window gets
-    // sub-frame resolution. Transitions live in `enterSyncMode` /
-    // `exitSyncMode` via `switchCaptureFps(_:)`.
+    // Adaptive capture rate. Idle / time-sync runs at 60 fps to keep the
+    // sensor + ISP cool and save battery; `.recording` switches to 240 fps
+    // so the 8 ms A/B pair window gets sub-frame resolution server-side.
+    // The format swap costs ~300-500 ms (stopRunning → activeFormat →
+    // startRunning) so we only do it at state boundaries.
     private let standbyFps: Double = 60
     private let trackingFps: Double = 240
 
@@ -60,7 +63,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // Collaborators.
     private var settings: SettingsViewController.Settings!
-    private var ballDetector: BallDetector!
     private var recorder: PitchRecorder!
     private var uploader: ServerUploader!
     private var serverConfig: ServerUploader.ServerConfig!
@@ -75,26 +77,28 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var fpsEstimate: Double = 0
     private var displayLink: CADisplayLink?
 
-    // Detection snapshot for the CADisplayLink pump — written on capture
-    // queue, read on main. Per-frame main-thread dispatch is never used.
-    private var latestCentroidX: Double?
-    private var latestCentroidY: Double?
+    // Last observed capture dimensions; mirrored into IntrinsicsStore so
+    // the payload enrichment path and the server-side detection pipeline
+    // agree on what resolution the MOV was recorded at.
     private var latestImageWidth: Int = 0
     private var latestImageHeight: Int = 0
 
     // Chirp detector snapshot for the HUD — written on audio queue.
     private var latestChirpSnapshot: AudioChirpDetector.Snapshot?
 
-    private let ballOverlayLayer = CAShapeLayer()
+    // `.recording` was just entered but the ClipRecorder hasn't been
+    // prepared yet — the very next captured sample will configure the
+    // writer at the observed pixel dimensions.
+    private var pendingRecordingBootstrap: Bool = false
 
     // Remote-control state (driven by the heartbeat response).
     /// Last command key we acted on for this device (`"arm"` / `"disarm"` /
     /// nil). Only state *transitions* cause local actions so repeated arm
     /// replies during an armed session don't re-trigger enterSyncMode.
     private var lastAppliedCommand: String?
-    /// Set by a dashboard `disarm` arriving mid-recording so the cycle-
-    /// complete path routes us back to `.standby` instead of the usual
-    /// `.syncWaiting` hand-off.
+    /// Reserved for future branching in the cycle-complete path (e.g. a
+    /// re-arm that wants to skip the standby flash). Always true today
+    /// because `.recording` always returns to `.standby` now.
     private var returnToStandbyAfterCycle: Bool = false
     /// Server-minted pairing key for the currently armed session. Read
     /// off each heartbeat reply; tagged onto every recording that starts
@@ -111,10 +115,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // iterated against a canonical source of truth.
     private var clipRecorder: ClipRecorder?
 
-    // Most recently recovered chirp anchor. Used as the `sync_anchor_*`
-    // fields on outgoing pitch payloads. Nil until the user completes a
-    // 時間校正.
-    private var lastSyncAnchorFrameIndex: Int?
+    // Most recently recovered chirp anchor — session-clock PTS of the
+    // chirp peak from the mic matched filter. Stamped onto outgoing
+    // payloads as `sync_anchor_timestamp_s`. Nil until the user completes
+    // a 時間校正; server rejects unpaired sessions whose anchor is nil.
     private var lastSyncAnchorTimestampS: Double?
 
     // Time-sync timeout task so we can cancel if the user aborts early.
@@ -177,30 +181,23 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         settings = SettingsViewController.loadFromUserDefaults()
         serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: settings.serverPort)
 
-        ballDetector = BallDetector(
-            hsvRange: BallDetector.HSVRange(
-                hMin: settings.hMin,
-                hMax: settings.hMax,
-                sMin: settings.sMin,
-                sMax: settings.sMax,
-                vMin: settings.vMin,
-                vMax: settings.vMax
-            ),
-            intrinsics: IntrinsicsStore.loadBallDetectorIntrinsics()
-        )
-
         recorder = PitchRecorder()
         recorder.setCameraId(settings.cameraRole)
         recorder.onRecordingStarted = { [weak self] _ in
             DispatchQueue.main.async {
                 self?.warningLabel.isHidden = true
+                // Start-of-recording feedback: short tone + a medium
+                // haptic so the operator registers the transition even
+                // if looking away from the screen.
+                AudioServicesPlaySystemSound(self?.startRecSoundID ?? 0)
+                self?.startRecHaptic.impactOccurred()
             }
         }
         recorder.onCycleComplete = { [weak self] payload in
             guard let self else { return }
             let finishingClip = self.clipRecorder
             self.clipRecorder = nil
-            log.info("camera cycle complete session=\(payload.session_id, privacy: .public) cam=\(payload.camera_id, privacy: .public) frames=\(payload.frames.count) has_clip=\(finishingClip != nil)")
+            log.info("camera cycle complete session=\(payload.session_id, privacy: .public) cam=\(payload.camera_id, privacy: .public) has_clip=\(finishingClip != nil)")
             // End-of-recording feedback — haptic + system sound so the
             // operator knows the cycle finished without looking down.
             DispatchQueue.main.async {
@@ -237,7 +234,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         setupUI()
         setupPreviewAndCapture()
         setupAudioCapture()
-        setupBallOverlay()
         setupDisplayLink()
         healthMonitor.start()
         updateUIForState()
@@ -297,19 +293,23 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         healthMonitor?.stop()
     }
 
-    // MARK: - Tracking controls
+    // MARK: - Recording controls
 
-    func enterSyncMode() {
+    /// Dashboard arm landed — bump the capture rate to 240 fps and move to
+    /// `.recording`. ClipRecorder is *not* created here; we defer that to
+    /// the first captureOutput so we can use the real pixel-buffer
+    /// dimensions instead of the Settings-declared 1920×1080. The
+    /// PitchRecorder is also started from captureOutput, once the first
+    /// appended sample's session-clock PTS is known.
+    func enterRecordingMode() {
         guard state == .standby else { return }
-        log.info("camera entering sync mode session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
-        // Clear any stale time-sync / mic warning first so switchCaptureFps
-        // can raise a new one if the 240 fps format is unavailable.
+        log.info("camera entering recording session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         warningLabel.isHidden = true
         switchCaptureFps(trackingFps)
         recorder.reset()
-        reloadBallDetectorWithLatestIntrinsics()
         try? uploadQueue.reloadPending()
-        state = .syncWaiting
+        pendingRecordingBootstrap = true
+        state = .recording
         updateUIForState()
         uploadQueue.processNextIfNeeded()
         // Acknowledge arm with a light tap; pre-warm the next two haptics
@@ -319,12 +319,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         endRecHaptic.prepare()
     }
 
-    func exitSyncMode() {
-        log.info("camera exiting sync mode session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public) state=\(self.stateText(self.state), privacy: .public)")
+    /// Return to `.standby` after a cycle was flushed (or the recording
+    /// never produced a frame between arm and disarm). Clears any live
+    /// clip writer on the processing queue so we can't race with an
+    /// in-flight `append` from captureOutput.
+    func exitRecordingToStandby() {
+        log.info("camera exit recording → standby session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public) state=\(self.stateText(self.state), privacy: .public)")
         state = .standby
+        pendingRecordingBootstrap = false
         recorder.reset()
-        // Tear down the clip writer on the capture queue so we can't race
-        // with an in-flight `append` from captureOutput.
         processingQueue.async { [weak self] in
             self?.clipRecorder?.cancel()
             self?.clipRecorder = nil
@@ -345,15 +348,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 let suffix = videoURL != nil ? " (+video)" : ""
                 self.lastUploadStatusText = "Cached \(payload.session_id)\(suffix)"
                 self.uploadQueue.enqueue(fileURL)
-                if self.returnToStandbyAfterCycle {
-                    // A dashboard disarm arrived mid-recording; force-finish
-                    // just flushed the cycle. Clean up instead of re-arming.
-                    self.returnToStandbyAfterCycle = false
-                    self.exitSyncMode()
-                } else {
-                    self.state = .syncWaiting
-                    self.updateUIForState()
-                }
+                // Every cycle-complete returns to standby. Dashboard re-arm
+                // happens via the next heartbeat.
+                self.returnToStandbyAfterCycle = false
+                self.exitRecordingToStandby()
             }
         } catch {
             log.error("camera cycle persist failed session=\(payload.session_id, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
@@ -364,7 +362,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             DispatchQueue.main.async {
                 self.lastUploadStatusText = "Cache failed: \(error.localizedDescription)"
                 self.returnToStandbyAfterCycle = false
-                self.updateUIForState()
+                self.exitRecordingToStandby()
             }
         }
     }
@@ -447,7 +445,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         timeSyncTimeoutWork?.cancel()
         timeSyncTimeoutWork = nil
         chirpDetector?.onChirpDetected = nil
-        lastSyncAnchorFrameIndex = event.anchorFrameIndex
         lastSyncAnchorTimestampS = event.anchorTimestampS
         // Surface the freshly-acquired anchor to the dashboard via the
         // next heartbeat so the sidebar's "time sync" dot flips green.
@@ -498,7 +495,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         preview.frame = view.bounds
         // App is locked to landscape (Info.plist). Pin the preview connection
         // to sensor-native angle 0 so the on-screen image matches the raw
-        // CVPixelBuffer orientation BallDetector / ArUco consume; a stale
+        // CVPixelBuffer orientation ArUco calibration consumes; a stale
         // 90° rotation here was why "holding phone landscape" still rendered
         // a portrait-oriented preview.
         if let connection = preview.connection, connection.isVideoRotationAngleSupported(0) {
@@ -550,6 +547,25 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let frameDuration = CMTime(value: 1, timescale: Int32(targetFps))
         device.activeVideoMinFrameDuration = frameDuration
         device.activeVideoMaxFrameDuration = frameDuration
+
+        // Cap the AE exposure time to the target frame duration. Without this,
+        // iOS lengthens individual exposures in low light to brighten the
+        // image, which drags the effective capture rate down (a room that
+        // wants 70 ms exposures drops a "240 fps" session to ~14 fps). Capped
+        // AE keeps the sensor locked to the target rate and compensates with
+        // ISO — noisier in dim rooms, but frame rate holds.
+        let lo = selected.minExposureDuration
+        let hi = selected.maxExposureDuration
+        let capped: CMTime
+        if CMTimeCompare(frameDuration, lo) < 0 {
+            capped = lo
+        } else if CMTimeCompare(frameDuration, hi) > 0 {
+            capped = hi
+        } else {
+            capped = frameDuration
+        }
+        device.activeMaxExposureDuration = capped
+        device.exposureMode = .continuousAutoExposure
 
         horizontalFovRadians = Double(device.activeFormat.videoFieldOfView) * Double.pi / 180.0
     }
@@ -661,14 +677,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         stateBorderLayer.path = UIBezierPath(rect: view.bounds).cgPath
     }
 
-    private func setupBallOverlay() {
-        ballOverlayLayer.strokeColor = UIColor.systemGreen.cgColor
-        ballOverlayLayer.fillColor = UIColor.clear.cgColor
-        ballOverlayLayer.lineWidth = 3
-        ballOverlayLayer.isHidden = true
-        view.layer.addSublayer(ballOverlayLayer)
-    }
-
     private func setupDisplayLink() {
         let link = CADisplayLink(target: self, selector: #selector(handleDisplayTick))
         link.add(to: .main, forMode: .common)
@@ -676,12 +684,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     @objc private func handleDisplayTick() {
-        updateBallOverlay(
-            centroidX: latestCentroidX,
-            centroidY: latestCentroidY,
-            imageWidth: latestImageWidth,
-            imageHeight: latestImageHeight
-        )
         updateChirpDebugOverlay()
     }
 
@@ -754,8 +756,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     /// Dispatch the server's per-device command. Only reacts to state
-    /// *transitions* (tracked via `lastAppliedCommand`) so a long-running
-    /// armed session doesn't re-enter syncWaiting on every heartbeat.
+    /// *transitions* (tracked via `lastAppliedCommand`) so repeated arm
+    /// replies during an armed session don't re-trigger enter.
     private func handleDashboardCommand(_ command: String?, sessionArmed: Bool) {
         defer { lastAppliedCommand = command }
         guard command != lastAppliedCommand else { return }
@@ -765,9 +767,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case "disarm":
             applyRemoteDisarm()
         default:
-            // No pending command. If the server considers us idle but we're
-            // still mid-cycle, leave the local recording alone — it will
-            // finish naturally via ball-absent or the hard max-duration cap.
+            // No pending command. Recording only ends via an explicit
+            // disarm — never a silent fallthrough.
             break
         }
         _ = sessionArmed  // reserved for future "did the session id change?" logic
@@ -777,11 +778,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         log.info("camera received arm command state=\(self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         switch state {
         case .standby:
-            enterSyncMode()
-        case .timeSyncWaiting, .syncWaiting, .recording, .uploading:
-            // Already in an active state — nothing to do. `recording`
-            // continues, `syncWaiting` is already waiting for a ball,
-            // `uploading` will transition back to syncWaiting on its own.
+            enterRecordingMode()
+        case .timeSyncWaiting, .recording, .uploading:
+            // Active state — arm is a no-op. `.timeSyncWaiting` finishes
+            // on its own and returns to standby; next heartbeat re-sends
+            // the arm command and this branch flips us into recording.
             break
         }
     }
@@ -793,15 +794,29 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             break
         case .timeSyncWaiting:
             cancelTimeSync(reason: "disarmed")
-        case .syncWaiting, .uploading:
-            exitSyncMode()
+        case .uploading:
+            // Upload flow runs its own course; state transitions back to
+            // standby via persistCompletedCycle once the queue accepts.
+            break
         case .recording:
-            // Flush whatever we have so the pitch isn't lost. The
-            // cycle-complete handler will route us to standby thanks to
-            // the flag below instead of bouncing back to syncWaiting.
             returnToStandbyAfterCycle = true
             processingQueue.async { [weak self] in
-                self?.recorder.forceFinishIfRecording()
+                guard let self else { return }
+                if self.recorder.isActive {
+                    // Normal path: flush whatever frames the clip contains;
+                    // onCycleComplete drives persist + standby transition.
+                    self.recorder.forceFinishIfRecording()
+                } else {
+                    // Disarm arrived before the first frame reached us
+                    // (happens if cancel is pressed in the ~300 ms fps
+                    // switch window). Tear down cleanly on main.
+                    self.clipRecorder?.cancel()
+                    self.clipRecorder = nil
+                    DispatchQueue.main.async {
+                        self.returnToStandbyAfterCycle = false
+                        self.exitRecordingToStandby()
+                    }
+                }
             }
         }
     }
@@ -848,7 +863,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             healthMonitor.updateBaseInterval(latest.pollInterval)
         }
         recorder?.setCameraId(latest.cameraRole)
-        reloadBallDetectorWithLatestIntrinsics()
 
         if serverChanged || pollIntervalChanged {
             // New endpoint or new cadence — invalidate in-flight probe, reset
@@ -1036,7 +1050,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         switch state {
         case .standby: return "STANDBY"
         case .timeSyncWaiting: return "TIME_SYNC"
-        case .syncWaiting: return "SYNC_WAITING"
         case .recording: return "RECORDING"
         case .uploading: return "UPLOADING"
         }
@@ -1100,12 +1113,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 borderColor: .systemBlue, borderWidth: 8, pulse: true,
                 chipText: "TIME SYNC",
                 chipBg: UIColor.systemBlue.withAlphaComponent(0.95), chipFg: .white
-            )
-        case .syncWaiting:
-            return .init(
-                borderColor: .systemYellow, borderWidth: 10, pulse: true,
-                chipText: "WAITING FOR BALL",
-                chipBg: UIColor.systemYellow.withAlphaComponent(0.95), chipFg: .black
             )
         case .recording:
             return .init(
@@ -1172,76 +1179,53 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         if latestImageWidth != width || latestImageHeight != height {
             IntrinsicsStore.setImageDimensions(width: width, height: height)
         }
-
-        let currentIndex = frameIndex
-        frameIndex += 1
-
-        // No ball detection during time sync — just advance frameIndex so
-        // cycle start indexes line up across modes.
-        if state == .timeSyncWaiting || state == .standby || state == .uploading {
-            return
-        }
-
-        let detection = ballDetector.detect(
-            pixelBuffer: pixelBuffer,
-            imageWidth: width,
-            imageHeight: height,
-            horizontalFovRadians: horizontalFovRadians
-        )
-        let frame = ServerUploader.FramePayload(
-            frame_index: currentIndex,
-            timestamp_s: timestampS,
-            theta_x_rad: detection.thetaXRad,
-            theta_z_rad: detection.thetaZRad,
-            px: detection.centroidX,
-            py: detection.centroidY,
-            ball_detected: detection.ballDetected
-        )
-
-        latestCentroidX = detection.centroidX
-        latestCentroidY = detection.centroidY
         latestImageWidth = width
         latestImageHeight = height
 
-        switch state {
-        case .syncWaiting:
-            recorder.handleFrame(frame)
-            if detection.ballDetected {
-                guard let sid = currentSessionId else {
-                    // No armed session on the server — drop the ball
-                    // sighting. This can happen in the short window between
-                    // a dashboard disarm and the state transition to
-                    // .standby; the next heartbeat will tidy up.
-                    break
-                }
-                let anchorFrameIndex = lastSyncAnchorFrameIndex ?? currentIndex
-                let anchorTimestampS = lastSyncAnchorTimestampS ?? timestampS
-                recorder.startRecording(
-                    sessionId: sid,
-                    anchorFrameIndex: anchorFrameIndex,
-                    anchorTimestampS: anchorTimestampS,
-                    startFrameIndex: currentIndex,
-                    startTimestampS: timestampS
-                )
-                startClipRecorder(width: width, height: height)
-                clipRecorder?.append(sampleBuffer: sampleBuffer)
-                state = .recording
+        frameIndex += 1
+
+        // Only the `.recording` state cares about samples. Phone is a pure
+        // capture client — no ball detection, no overlay, no per-frame
+        // payload work. Idle / time-sync / uploading all just drop through.
+        guard state == .recording else { return }
+
+        // Lazy-bootstrap the ClipRecorder from the first real sample's
+        // dimensions (deferred from enterRecordingMode so we can key off
+        // whatever the sensor is actually delivering post-fps-switch).
+        if pendingRecordingBootstrap {
+            pendingRecordingBootstrap = false
+            startClipRecorder(width: width, height: height)
+            if clipRecorder == nil {
+                // Prepare failed. Fall back to standby on main.
+                log.error("camera clip bootstrap failed session=\(self.currentSessionId ?? "nil", privacy: .public)")
                 DispatchQueue.main.async {
-                    self.updateUIForState()
-                    // Start-of-recording feedback: short system tone +
-                    // a medium impact so the operator registers the
-                    // transition even if looking away from the screen.
-                    AudioServicesPlaySystemSound(self.startRecSoundID)
-                    self.startRecHaptic.impactOccurred()
+                    self.returnToStandbyAfterCycle = false
+                    self.exitRecordingToStandby()
                 }
+                return
             }
+        }
 
-        case .recording:
-            clipRecorder?.append(sampleBuffer: sampleBuffer)
-            recorder.handleFrame(frame)
+        guard let clip = clipRecorder else { return }
+        clip.append(sampleBuffer: sampleBuffer)
 
-        default:
-            return
+        // First successful append kicks off the PitchRecorder so its
+        // payload carries the session-clock PTS of the MOV's first frame.
+        if !recorder.isActive, let firstPTS = clip.firstSamplePTS {
+            let sid = currentSessionId ?? ""
+            if sid.isEmpty {
+                // Armed locally without a server session id — shouldn't
+                // happen (heartbeat sets it before arm fires), but bail
+                // rather than uploading a payload the server will 422.
+                log.error("camera recording started without session_id cam=\(self.settings.cameraRole, privacy: .public)")
+                return
+            }
+            recorder.startRecording(
+                sessionId: sid,
+                anchorTimestampS: lastSyncAnchorTimestampS,
+                videoStartPtsS: CMTimeGetSeconds(firstPTS),
+                videoFps: trackingFps
+            )
         }
     }
 
@@ -1269,28 +1253,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         lastFrameTimestampForFps = now
     }
 
-    private func updateBallOverlay(centroidX: Double?, centroidY: Double?, imageWidth: Int, imageHeight: Int) {
-        guard
-            let previewLayer,
-            let cx = centroidX,
-            let cy = centroidY,
-            imageWidth > 0,
-            imageHeight > 0
-        else {
-            ballOverlayLayer.isHidden = true
-            return
-        }
-        let normalized = CGPoint(
-            x: CGFloat(cy / Double(imageHeight)),
-            y: CGFloat(cx / Double(imageWidth))
-        )
-        let layerPoint = previewLayer.layerPointConverted(fromCaptureDevicePoint: normalized)
-        let radius: CGFloat = 18
-        let path = UIBezierPath(ovalIn: CGRect(x: layerPoint.x - radius, y: layerPoint.y - radius, width: radius * 2, height: radius * 2))
-        ballOverlayLayer.path = path.cgPath
-        ballOverlayLayer.isHidden = false
-    }
-
     // MARK: - Payload enrichment
 
     private func enrichedPayload(from payload: ServerUploader.PitchPayload) -> ServerUploader.PitchPayload {
@@ -1298,32 +1260,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         return ServerUploader.PitchPayload(
             camera_id: payload.camera_id,
             session_id: payload.session_id,
-            sync_anchor_frame_index: payload.sync_anchor_frame_index,
             sync_anchor_timestamp_s: payload.sync_anchor_timestamp_s,
+            video_start_pts_s: payload.video_start_pts_s,
+            video_fps: payload.video_fps,
             local_recording_index: payload.local_recording_index,
-            frames: payload.frames,
             intrinsics: IntrinsicsStore.loadIntrinsicsPayload(),
             homography: IntrinsicsStore.loadHomography(),
             image_width_px: dims?.width,
             image_height_px: dims?.height
         )
     }
-
-    private func reloadBallDetectorWithLatestIntrinsics() {
-        guard settings != nil else { return }
-        ballDetector = BallDetector(
-            hsvRange: BallDetector.HSVRange(
-                hMin: settings.hMin,
-                hMax: settings.hMax,
-                sMin: settings.sMin,
-                sMax: settings.sMax,
-                vMin: settings.vMin,
-                vMax: settings.vMax
-            ),
-            intrinsics: IntrinsicsStore.loadBallDetectorIntrinsics()
-        )
-    }
-
 }
 
 /// UILabel with per-edge inset — gives a colored background chip real

@@ -127,7 +127,8 @@ final class CalibrationViewController: UIViewController {
     private static let keyIntrinsicFx = "intrinsic_fx"
     private static let keyIntrinsicFz = "intrinsic_fz"
 
-    // NOTE: We persist intrinsics as fx/fz/cx/cy (used by BallDetector).
+    // NOTE: We persist intrinsics as fx/fz/cx/cy — the pitch payload ships
+    // these to the server, which uses them for ray-midpoint triangulation.
 
     override func viewDidLoad() {
         super.viewDidLoad()

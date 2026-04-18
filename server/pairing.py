@@ -47,10 +47,19 @@ def _ray_for_frame(
     K: np.ndarray,
     dist_coeffs: list[float] | None,
 ) -> np.ndarray:
-    """Per-frame ray choice. Prefer undistorting raw pixels if available,
-    otherwise fall back to the angle ray computed on-device."""
-    if dist_coeffs is not None and px is not None and py is not None:
-        return undistorted_ray_cam(px, py, K, np.asarray(dist_coeffs, dtype=float))
+    """Per-frame ray choice. Prefer the undistorted-pixel path whenever
+    `px`/`py` are present (server detection always produces them); fall
+    back to the on-device angle path only when pixels are missing.
+    Zero-distortion is the default when `dist_coeffs` is absent — equivalent
+    to the pinhole projection the angle path computes, so both yield the
+    same ray for zero-distortion input."""
+    if px is not None and py is not None:
+        coeffs = (
+            np.asarray(dist_coeffs, dtype=float)
+            if dist_coeffs is not None
+            else np.zeros(5, dtype=float)
+        )
+        return undistorted_ray_cam(px, py, K, coeffs)
     if theta_x is None or theta_z is None:
         raise ValueError("frame has neither usable angles nor pixels")
     return angle_ray_cam(theta_x, theta_z)
