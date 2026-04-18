@@ -276,20 +276,34 @@ def render_viewer_html(
     color:var(--sub); }}
   .tl-row {{ display:flex; align-items:center; gap:12px; }}
   .scrubber-wrap {{ flex:1 1 auto; display:flex; flex-direction:column;
-    gap:2px; min-width:0; }}
+    gap:3px; min-width:0; }}
   .scrubber-wrap input[type=range] {{ width:100%; accent-color:var(--ink);
     height:18px; margin:0; }}
   .scrubber-wrap canvas {{ display:block; width:100%; height:18px;
     border:1px solid var(--border-base); border-radius:2px;
     background:var(--bg); image-rendering:pixelated; }}
-  .tl-row .frame-label {{ min-width:320px; text-align:right;
+  .strip-legend {{ font-size:10px; color:var(--sub); letter-spacing:0.06em;
+    display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    text-transform:uppercase; }}
+  .strip-legend .sw {{ display:inline-block; width:10px; height:10px;
+    vertical-align:middle; margin-right:4px;
+    border:1px solid var(--border-base); }}
+  .tl-row .frame-label {{ min-width:340px; text-align:right;
     color:var(--ink); font-weight:500; font-size:11px;
     letter-spacing:0.02em; white-space:nowrap;
-    font-variant-numeric:tabular-nums; }}
-  .tl-row .frame-label .sub {{ color:var(--sub); font-weight:400;
-    margin-left:8px; }}
+    font-variant-numeric:tabular-nums;
+    display:inline-flex; align-items:center; justify-content:flex-end;
+    gap:6px; }}
+  .tl-row .frame-label .sub {{ color:var(--sub); font-weight:400; }}
   .tl-row .frame-label .det {{ color:var(--contra); font-weight:500; }}
   .tl-row .frame-label .det.no {{ color:var(--sub); }}
+  #frame-input {{ width:60px; font:inherit; font-size:11px;
+    background:var(--bg); border:1px solid var(--border-base);
+    color:var(--ink); padding:1px 4px; text-align:center;
+    font-variant-numeric:tabular-nums; border-radius:2px; }}
+  #frame-input:focus {{ outline:none; border-color:var(--ink); }}
+  #frame-input::-webkit-inner-spin-button,
+  #frame-input::-webkit-outer-spin-button {{ opacity:0.4; }}
   .timeline button {{ padding:5px 12px; font:inherit; font-size:11px;
     letter-spacing:0.1em; text-transform:uppercase;
     border:1px solid var(--border-base); background:var(--bg);
@@ -318,11 +332,38 @@ def render_viewer_html(
   .scene-col .mode-toggle button {{ padding:5px 12px; border:none;
     background:transparent; color:var(--sub); cursor:pointer;
     min-width:auto; border-radius:0; font:inherit; font-size:11px;
-    letter-spacing:0.1em; text-transform:uppercase; }}
+    letter-spacing:0.1em; text-transform:uppercase; font-weight:400; }}
+  .scene-col .mode-toggle button:hover:not(.active) {{ color:var(--ink); }}
   .scene-col .mode-toggle button.active {{ background:var(--ink);
-    color:var(--surface); }}
-  .tl-hint {{ font-size:10px; color:var(--sub); letter-spacing:0.06em;
-    text-transform:uppercase; opacity:0.7; margin-left:auto; }}
+    color:var(--surface); font-weight:500; }}
+  .scene-col .scene-reset {{ position:absolute; top:10px; right:140px;
+    z-index:5; padding:4px 10px; border:1px solid var(--border-base);
+    background:var(--surface); color:var(--sub); cursor:pointer;
+    border-radius:2px; font:inherit; font-size:13px; line-height:1;
+    min-width:auto; }}
+  .scene-col .scene-reset:hover {{ color:var(--ink);
+    border-color:var(--ink); }}
+  .hint-btn {{ font:inherit; font-size:11px; padding:3px 9px;
+    border:1px solid var(--border-base); background:var(--bg);
+    color:var(--sub); border-radius:2px; cursor:pointer;
+    margin-left:auto; min-width:auto; font-weight:600;
+    letter-spacing:0.04em; }}
+  .hint-btn:hover, .hint-btn.open {{ color:var(--ink);
+    border-color:var(--ink); }}
+  .hint-overlay {{ position:absolute; bottom:60px; right:24px;
+    background:var(--surface); border:1px solid var(--border-base);
+    padding:14px 18px; font:inherit; font-size:11px;
+    color:var(--ink); display:none; z-index:10; border-radius:2px;
+    min-width:240px; }}
+  .hint-overlay.open {{ display:block; }}
+  .hint-overlay h4 {{ margin:0 0 8px; font-family:var(--mono);
+    font-size:10px; letter-spacing:0.18em; text-transform:uppercase;
+    color:var(--sub); font-weight:600; }}
+  .hint-overlay table {{ border-collapse:collapse; width:100%; }}
+  .hint-overlay td {{ padding:2px 8px; vertical-align:top; }}
+  .hint-overlay td:first-child {{ color:var(--sub);
+    font-family:var(--mono); white-space:nowrap; }}
+  .timeline {{ position:relative; }}
 </style>
 </head><body>
 <div class="viewer">
@@ -335,6 +376,7 @@ def render_viewer_html(
   <div class="work">
     <div class="scene-col">
       <div id="scene"></div>
+      <button id="scene-reset" class="scene-reset" type="button" title="Reset 3D view">&#x21BA;</button>
       <div class="mode-toggle" role="tablist" title="Trace cutoff mode">
         <button id="mode-all" class="active" type="button">All</button>
         <button id="mode-playback" type="button">Playback</button>
@@ -345,10 +387,21 @@ def render_viewer_html(
   <div class="timeline">
     <div class="tl-row">
       <div class="scrubber-wrap">
+        <div class="strip-legend" aria-hidden="true">
+          <span>detection density:</span>
+          <span><span class="sw" style="background:var(--contra);border-color:var(--contra);"></span>A detected</span>
+          <span><span class="sw" style="background:var(--dual);border-color:var(--dual);"></span>B detected</span>
+          <span><span class="sw" style="background:rgba(122,117,108,0.35);"></span>missed</span>
+          <span><span class="sw" style="background:rgba(232,228,219,0.6);"></span>no frame</span>
+          <span><span class="sw" style="background:var(--accent);border-color:var(--accent);"></span>chirp anchor</span>
+        </div>
         <input id="scrubber" type="range" min="0" max="1" value="0" step="1" />
         <canvas id="detection-canvas" height="18" aria-hidden="true"></canvas>
       </div>
-      <span id="frame-label" class="frame-label">frame 0 / 0<span class="sub">t=0.000s</span></span>
+      <span id="frame-label" class="frame-label">
+        frame <input id="frame-input" type="number" min="0" max="0" value="0" step="1" title="Type a frame index to jump" /> / <span id="frame-total">0</span>
+        <span class="sub" id="frame-sub">t=0.000s</span>
+      </span>
     </div>
     <div class="tl-row">
       <div class="transport" role="group" aria-label="transport">
@@ -365,7 +418,21 @@ def render_viewer_html(
         <button data-rate="1" class="active" type="button">1&times;</button>
         <button data-rate="2" type="button">2&times;</button>
       </div>
-      <span class="tl-hint">space &middot; , . &middot; &larr; &rarr; &middot; d f (jump)</span>
+      <button id="hint-btn" class="hint-btn" type="button" title="Keyboard shortcuts (?)" aria-haspopup="dialog">?</button>
+    </div>
+    <div id="hint-overlay" class="hint-overlay" role="dialog" aria-label="Keyboard shortcuts">
+      <h4>Keyboard shortcuts</h4>
+      <table><tbody>
+        <tr><td>Space</td><td>Play / pause</td></tr>
+        <tr><td>, &nbsp;.</td><td>Prev / next frame</td></tr>
+        <tr><td>Shift+, &nbsp;.</td><td>&plusmn;10 frames</td></tr>
+        <tr><td>&larr; &nbsp;&rarr;</td><td>&plusmn;0.5 second</td></tr>
+        <tr><td>Home / End</td><td>First / last frame</td></tr>
+        <tr><td>D &nbsp;F</td><td>Prev / next ball-detected frame</td></tr>
+        <tr><td>1 &ndash; 5</td><td>Speed presets</td></tr>
+        <tr><td>?</td><td>Toggle this help</td></tr>
+        <tr><td>Esc</td><td>Close</td></tr>
+      </tbody></table>
     </div>
   </div>
 </div>
@@ -394,7 +461,9 @@ def render_viewer_html(
   const sceneDiv = document.getElementById("scene");
   const playBtn = document.getElementById("play-btn");
   const scrubber = document.getElementById("scrubber");
-  const frameLabel = document.getElementById("frame-label");
+  const frameInput = document.getElementById("frame-input");
+  const frameTotal = document.getElementById("frame-total");
+  const frameSub = document.getElementById("frame-sub");
   const modeAll = document.getElementById("mode-all");
   const modePlayback = document.getElementById("mode-playback");
   const stepFirstBtn = document.getElementById("step-first");
@@ -402,6 +471,17 @@ def render_viewer_html(
   const stepFwdBtn = document.getElementById("step-fwd");
   const stepLastBtn = document.getElementById("step-last");
   const speedGroup = document.getElementById("speed-group");
+  const sceneResetBtn = document.getElementById("scene-reset");
+  const hintBtn = document.getElementById("hint-btn");
+  const hintOverlay = document.getElementById("hint-overlay");
+
+  // Snapshot the default 3D camera so the reset button can restore it
+  // even after the user orbits. _build_figure ships scene.camera now;
+  // fallback covers the case where layout pre-dates that change.
+  const DEFAULT_CAMERA = (LAYOUT && LAYOUT.scene && LAYOUT.scene.camera)
+    ? JSON.parse(JSON.stringify(LAYOUT.scene.camera))
+    : {{eye: {{x: 1.5, y: 1.5, z: 1.0}}, up: {{x: 0, y: 0, z: 1}},
+       center: {{x: 0, y: 0.2, z: 0.3}}}};
 
   const vids = Array.from(document.querySelectorAll("video[data-cam]"));
   const offsetByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.t_rel_offset_s]));
@@ -411,6 +491,9 @@ def render_viewer_html(
     framesByCam[v.camera_id] = v.frames || {{ t_rel_s: [], detected: [] }};
   }}
   const camsWithFrames = Object.keys(framesByCam).filter(c => (framesByCam[c].t_rel_s || []).length);
+  // Master FPS for arrow-key half-second jumps. Pick the max reported
+  // capture rate so a 240 Hz cam doesn't get under-stepped by a fallback.
+  const MASTER_FPS = Math.max(60, ...Object.values(fpsByCam).filter(f => isFinite(f) && f > 0));
 
   // --- Build the UNION timeline from every cam's actual decoded-frame
   // PTS. This is the single source of truth: the scrubber walks real MOV
@@ -468,6 +551,8 @@ def render_viewer_html(
   // Scrubber indexes the union timeline directly.
   scrubber.max = String(TOTAL_FRAMES - 1);
   scrubber.step = "1";
+  frameInput.max = String(TOTAL_FRAMES - 1);
+  frameTotal.textContent = String(TOTAL_FRAMES - 1);
 
   // --- Dynamic trace builders. Each takes the master time cutoff and
   //     returns Scatter3d-shaped objects (plain JS objects; Plotly
@@ -599,7 +684,15 @@ def render_viewer_html(
   }}
 
   function renderFrameLabel() {{
-    const parts = [`frame ${{currentFrame}} / ${{TOTAL_FRAMES - 1}}`];
+    // Don't clobber the input while the user is typing into it.
+    const v = String(currentFrame);
+    if (document.activeElement !== frameInput && frameInput.value !== v) {{
+      frameInput.value = v;
+    }}
+    // tRel — offset from timeline start, so the operator sees a 0-based
+    // window (e.g. 0.000 → 3.100s) instead of absolute mach time.
+    const tRel = currentT - tMin;
+    const parts = [];
     for (const cam of camsWithFrames) {{
       const entry = camAtFrame[cam][currentFrame];
       if (entry === null) {{
@@ -610,8 +703,8 @@ def render_viewer_html(
         parts.push(`<span class="sub">${{cam}}:${{entry.idx}}</span><span class="${{cls}}">${{mark}}</span>`);
       }}
     }}
-    parts.push(`<span class="sub">t=${{currentT.toFixed(3)}}s</span>`);
-    frameLabel.innerHTML = parts.join(" ");
+    parts.push(`<span class="sub">t=${{tRel.toFixed(3)}}s</span>`);
+    frameSub.innerHTML = parts.join(" ");
   }}
 
   function setFrame(f, {{ seekVideos = true }} = {{}}) {{
@@ -721,6 +814,19 @@ def render_viewer_html(
     setFrame(Number(scrubber.value));
   }});
 
+  // Frame input — type a frame index, hit Enter or blur to jump.
+  // `change` covers both. Pause first because typing a destination
+  // implies the operator wants to land there, not be overrun by playback.
+  frameInput.addEventListener("change", () => {{
+    const f = Number(frameInput.value);
+    if (!isFinite(f)) {{ frameInput.value = String(currentFrame); return; }}
+    vids.forEach(v => v.pause());
+    setFrame(f);
+  }});
+  frameInput.addEventListener("keydown", (ev) => {{
+    if (ev.key === "Enter") {{ ev.preventDefault(); frameInput.blur(); }}
+  }});
+
   stepFirstBtn.addEventListener("click", () => stepFrames(-TOTAL_FRAMES));
   stepLastBtn.addEventListener("click",  () => stepFrames(+TOTAL_FRAMES));
   stepBackBtn.addEventListener("click",  () => stepFrames(-1));
@@ -742,8 +848,17 @@ def render_viewer_html(
   }});
 
   // Keyboard — ignore when the focus is inside an input/scrubber so
-  // arrow-keys still scroll ranges natively when focused.
+  // arrow-keys still scroll ranges natively when focused. Esc is the
+  // one exception: it always closes the hint overlay regardless of
+  // focus, since that's the primary "get out" gesture.
   window.addEventListener("keydown", (ev) => {{
+    if (ev.key === "Escape") {{
+      if (hintOverlay.classList.contains("open")) {{
+        ev.preventDefault();
+        setHintOpen(false);
+      }}
+      return;
+    }}
     const tag = (ev.target && ev.target.tagName || "").toLowerCase();
     if (tag === "input" || tag === "textarea") return;
     switch (ev.key) {{
@@ -783,6 +898,10 @@ def render_viewer_html(
         ev.preventDefault();
         jumpDetection(+1);
         break;
+      case "?":
+        ev.preventDefault();
+        setHintOpen(!hintOverlay.classList.contains("open"));
+        break;
       case "1": case "2": case "3": case "4": case "5": {{
         const idx = Number(ev.key) - 1;
         const buttons = speedGroup.querySelectorAll("button[data-rate]");
@@ -801,6 +920,23 @@ def render_viewer_html(
   modeAll.addEventListener("click", () => setMode("all"));
   modePlayback.addEventListener("click", () => setMode("playback"));
 
+  // Reset 3D view — restore the camera Plotly was given at first paint.
+  // Plotly's relayout treats `scene.camera` as a full replacement so the
+  // user can orbit freely and always come back here with one click.
+  sceneResetBtn.addEventListener("click", () => {{
+    Plotly.relayout(sceneDiv, {{ "scene.camera": DEFAULT_CAMERA }});
+  }});
+
+  // Keyboard cheat-sheet overlay — `?` toggles, Esc closes.
+  function setHintOpen(open) {{
+    hintOverlay.classList.toggle("open", open);
+    hintBtn.classList.toggle("open", open);
+    hintBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  }}
+  hintBtn.addEventListener("click", () => {{
+    setHintOpen(!hintOverlay.classList.contains("open"));
+  }});
+
   // --- Detection strip overlay. One horizontal row per cam directly
   // below the scrubber, each column = one union-timeline slot. Pixels
   // coloured so the operator sees at a glance: where the ball was
@@ -812,6 +948,7 @@ def render_viewer_html(
   const STRIP_MUTED = "rgba(122, 117, 108, 0.35)";
   const STRIP_EMPTY = "rgba(232, 228, 219, 0.6)";
   const STRIP_HEAD = "#2A2520";
+  const STRIP_CHIRP = "rgba(230, 179, 0, 0.65)";  // _ACCENT, half-alpha
 
   function resizeDetectionCanvas() {{
     const cssW = detectionCanvas.clientWidth;
@@ -850,6 +987,15 @@ def render_viewer_html(
         ctx.fillStyle = e.detected ? color : STRIP_MUTED;
         ctx.fillRect(x, y, 1, rowH);
       }}
+    }}
+    // Chirp anchor marker — union time = 0 by construction, since each
+    // cam's t_rel_s is already anchor-relative. Drawn under the playhead
+    // so the operator's current scrub position always wins visually when
+    // they overlap (which happens at t=0).
+    if (tMin <= 0 && tMax >= 0 && tMax > tMin) {{
+      const xChirp = Math.round((-tMin) * (W - 1) / (tMax - tMin));
+      ctx.fillStyle = STRIP_CHIRP;
+      ctx.fillRect(Math.max(0, xChirp - 1), 0, 2, H);
     }}
     // Playhead.
     const xHead = TOTAL_FRAMES <= 1 ? 0
@@ -1318,6 +1464,14 @@ def _build_figure(scene: Scene):
             zaxis=axis("Z (up, m)"),
             bgcolor=_BG,
             aspectmode="data",
+            # Pin a default camera so the viewer's "reset 3D view" button
+            # always lands here regardless of how the user has orbited.
+            # The reset button reads this back via LAYOUT.scene.camera.
+            camera=dict(
+                eye=dict(x=1.5, y=1.5, z=1.0),
+                up=dict(x=0, y=0, z=1),
+                center=dict(x=0, y=0.2, z=0.3),
+            ),
         ),
         margin=dict(l=0, r=0, t=36, b=0),
         legend=dict(
