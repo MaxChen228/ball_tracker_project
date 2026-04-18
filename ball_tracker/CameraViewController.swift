@@ -78,8 +78,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var uploadQueue: PayloadUploadQueue!
 
     // UI state.
-    private var lastUploadStatusText: String = "Idle"
-    private var lastResultText: String = "(尚無結果)"
+    private var lastUploadStatusText: String = ""
+    private var lastResultText: String = CameraViewController.initialLastResultText
     private var lastFrameTimestampForFps: CFTimeInterval = CACurrentMediaTime()
     private var framesSinceLastFpsTick: Int = 0
     private var fpsEstimate: Double = 0
@@ -132,18 +132,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // Time-sync timeout task so we can cancel if the user aborts early.
     private var timeSyncTimeoutWork: DispatchWorkItem?
 
-    // UI containers.
-    private let statusContainer = UIStackView()
-    private let topStatusLabel = PaddedLabel()
-    private let serverStatusDot = UIView()
-    private let serverStatusLabel = UILabel()
-    private let fpsLabel = UILabel()
-    private let uploadStatusLabel = UILabel()
+    // UI containers. Layout is a Ready card (left-centered, standby only)
+    // plus the existing state chip (top-left) + REC indicator (top-right).
+    // FPS / last-contact / Test are Settings → Diagnostics now.
+    private let topStatusChip = StatusChip()
+    private let readyCard = ReadyCard()
     private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
     private let chirpDebugLabel = UILabel()
-    private let lastContactLabel = UILabel()
-    private let testConnectionButton = UIButton(type: .system)
+    /// Last upload status, short label: "暫存完成", "時間校正完成" etc.
+    private let uploadStatusLabel = UILabel()
 
     // Full-screen colored border that reflects AppState. Stroke width +
     // tint change per state; pulses opacity in WAITING states so the
@@ -218,9 +216,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         recorder = PitchRecorder()
         recorder.setCameraId(settings.cameraRole)
-        recorder.onRecordingStarted = { [weak self] _ in
+        recorder.onRecordingStarted = { [weak self] idx in
             DispatchQueue.main.async {
                 guard let self else { return }
+                DiagnosticsData.shared.update(localRecordingIndex: .some(idx))
                 // Keep the "尚未時間校正" warning up while recording — the
                 // upload will still go but the server will skip triangulation,
                 // and the operator needs to keep seeing why.
@@ -258,7 +257,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         do {
             try payloadStore.ensureDirectory()
         } catch {
-            lastUploadStatusText = "Store init failed: \(error.localizedDescription)"
+            lastUploadStatusText = "暫存初始化失敗 · \(error.localizedDescription)"
         }
 
         uploader = ServerUploader(config: serverConfig)
@@ -290,7 +289,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     @objc private func openCalibration() {
-        let vc = CalibrationViewController()
+        let vc = CalibrationChooserViewController()
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .fullScreen
         present(nav, animated: true)
@@ -315,6 +314,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     @objc private func openSettings() {
         let vc = SettingsViewController()
+        vc.cameraVC = self
         vc.onDismiss = { [weak self] in
             self?.applyUpdatedSettings()
         }
@@ -385,8 +385,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let snapshotSessionId = currentSessionId
         log.info("camera entering recording session=\(snapshotSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         if lastSyncAnchorTimestampS == nil {
-            warningLabel.text = "⚠️ 尚未時間校正，將無法三角化"
-            warningLabel.textColor = .systemOrange
+            warningLabel.text = "尚未時間校正，將無法三角化"
+            warningLabel.textColor = DesignTokens.Colors.pending
             warningLabel.isHidden = false
             log.warning("arm without time sync anchor — server will skip triangulation")
         } else {
@@ -439,8 +439,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         do {
             let fileURL = try payloadStore.save(payload, videoURL: videoURL)
             DispatchQueue.main.async {
-                let suffix = videoURL != nil ? " (+video)" : ""
-                self.lastUploadStatusText = "Cached \(payload.session_id)\(suffix)"
+                self.lastUploadStatusText = "暫存完成 · 等待上傳"
                 self.uploadQueue.enqueue(fileURL)
                 // Every cycle-complete returns to standby. Dashboard re-arm
                 // happens via the next heartbeat.
@@ -454,7 +453,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 try? FileManager.default.removeItem(at: videoURL)
             }
             DispatchQueue.main.async {
-                self.lastUploadStatusText = "Cache failed: \(error.localizedDescription)"
+                self.lastUploadStatusText = "暫存失敗 · \(error.localizedDescription)"
                 self.returnToStandbyAfterCycle = false
                 self.exitRecordingToStandby()
             }
@@ -496,7 +495,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         frameStateBox.update(state: .timeSyncWaiting, pendingBootstrap: false, sessionId: nil)
         warningLabel.text = "等待同步音頻觸發中… (把兩機並排，第三裝置播 chirp)"
         warningLabel.isHidden = false
-        lastUploadStatusText = "Time sync: waiting for chirp"
+        lastUploadStatusText = "時間校正中 · 等待聲波"
 
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.state == .timeSyncWaiting else { return }
@@ -519,7 +518,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         if settings.parkCameraInStandby {
             stopCapture()
         }
-        lastUploadStatusText = "Time sync \(reason)"
+        lastUploadStatusText = "時間校正 · \(Self.localizedCancelReason(reason))"
 
         if reason == "timeout" {
             log.warning("camera time-sync timeout cam=\(self.settings.cameraRole, privacy: .public)")
@@ -529,7 +528,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             // miss that the chirp never arrived.
             let originalBg = warningLabel.backgroundColor
             let originalFg = warningLabel.textColor
-            warningLabel.backgroundColor = .systemRed
+            warningLabel.backgroundColor = DesignTokens.Colors.fail
             warningLabel.textColor = .white
             warningLabel.text = "時間校正逾時：確認 chirp 音訊與麥克風"
             warningLabel.isHidden = false
@@ -562,7 +561,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             stopCapture()
         }
         warningLabel.isHidden = true
-        lastUploadStatusText = String(format: "Time sync OK @ %.3fs", event.anchorTimestampS)
+        lastUploadStatusText = "時間校正完成"
         updateUIForState()
     }
 
@@ -773,7 +772,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     self.configureAudioCapture()
                 } else {
                     log.error("camera mic permission denied cam=\(self.settings.cameraRole, privacy: .public)")
-                    self.lastUploadStatusText = "Microphone denied — time sync unavailable"
+                    self.lastUploadStatusText = "麥克風未授權 · 無法時間校正"
                     self.updateUIForState()
                 }
             }
@@ -788,14 +787,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             input = try AVCaptureDeviceInput(device: mic)
         } catch {
             log.error("camera mic input init failed error=\(error.localizedDescription, privacy: .public)")
-            lastUploadStatusText = "Mic input failed: \(error.localizedDescription)"
+            lastUploadStatusText = "麥克風啟動失敗 · \(error.localizedDescription)"
             return
         }
         session.beginConfiguration()
         guard session.canAddInput(input) else {
             session.commitConfiguration()
             log.error("camera session rejected audio input cam=\(self.settings.cameraRole, privacy: .public)")
-            lastUploadStatusText = "Session rejected audio input"
+            lastUploadStatusText = "擷取階段拒絕麥克風"
             return
         }
         session.addInput(input)
@@ -871,16 +870,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // MARK: - Server health + upload queue wiring
 
     private func wireHealthMonitorCallbacks() {
-        healthMonitor.onStatusChanged = { [weak self] _, _ in
+        healthMonitor.onStatusChanged = { [weak self] text, _ in
+            DiagnosticsData.shared.update(serverStatusText: text)
             self?.updateUIForState()
         }
         healthMonitor.onHeartbeatSuccess = { [weak self] response in
             guard let self else { return }
             // Cache the server's session id so `startRecording` can stamp
             // it onto uploads without another round-trip. Nil when idle.
-            self.currentSessionId = (response.session?.armed == true)
-                ? response.session?.id
-                : nil
+            let sid = (response.session?.armed == true) ? response.session?.id : nil
+            self.currentSessionId = sid
+            DiagnosticsData.shared.update(sessionId: .some(sid))
             let cam = self.settings.cameraRole
             self.handleDashboardCommand(
                 response.commands?[cam],
@@ -902,7 +902,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self.lastResultText = text
             // A successful upload arrived — clear any sticky red from a
             // previous dropped-payload banner so the green default returns.
-            self.lastResultLabel.textColor = .systemGreen
+            self.lastResultLabel.textColor = DesignTokens.Colors.ok
             self.updateUIForState()
         }
         uploadQueue.onUploadingChanged = { [weak self] _ in
@@ -916,8 +916,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             // Surface a sticky red banner on the "Last:" row — the green
             // success line gets overwritten by the next paired pitch, but
             // a dropped payload is data loss the operator must notice.
-            self.lastResultText = "⛔ 上傳失敗已丟棄: \(basename) — \(detail)"
-            self.lastResultLabel.textColor = .systemRed
+            self.lastResultText = "上傳失敗已丟棄: \(basename) — \(detail)"
+            self.lastResultLabel.textColor = DesignTokens.Colors.fail
             self.updateUIForState()
         }
     }
@@ -1007,7 +1007,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    @objc private func onTapTestConnection() {
+    /// Force an immediate heartbeat probe, resetting backoff. Exposed for
+    /// the Settings → Diagnostics "Test connection" action (formerly a
+    /// HUD button on the main screen).
+    func testServerConnection() {
         healthMonitor.resetBackoff()
         healthMonitor.probeNow()
     }
@@ -1073,120 +1076,136 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
+    /// Forward the heartbeat monitor's tick to the shared Diagnostics
+    /// singleton so Settings → Diagnostics can render it. The main HUD
+    /// itself no longer shows "last contact" — Ready card's server row
+    /// answers the operator's "am I online?" question on its own.
     private func updateLastContactLabel(from date: Date?) {
-        guard let date else {
-            lastContactLabel.text = "Last contact: —"
-            return
-        }
-        let s = Int(Date().timeIntervalSince(date))
-        let text: String
-        if s < 60 {
-            text = "\(s)s ago"
-        } else if s < 3600 {
-            text = "\(s / 60)m \(s % 60)s ago"
-        } else {
-            text = "\(s / 3600)h ago"
-        }
-        lastContactLabel.text = "Last contact: \(text)"
+        DiagnosticsData.shared.update(lastContactAt: date)
     }
 
     private func setupUI() {
-        func styleLabel(_ label: UILabel, size: CGFloat = 18, weight: UIFont.Weight = .semibold) {
-            label.font = .systemFont(ofSize: size, weight: weight)
-            label.textColor = .white
-            label.numberOfLines = 0
-            label.lineBreakMode = .byWordWrapping
-        }
+        // Top-left state chip.
+        topStatusChip.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(topStatusChip)
 
-        topStatusLabel.font = .systemFont(ofSize: 30, weight: .heavy)
-        topStatusLabel.textColor = .black
-        topStatusLabel.numberOfLines = 1
-        topStatusLabel.textAlignment = .center
-        topStatusLabel.layer.cornerRadius = 14
-        topStatusLabel.layer.masksToBounds = true
-        topStatusLabel.adjustsFontSizeToFitWidth = true
-        topStatusLabel.minimumScaleFactor = 0.65
-        styleLabel(serverStatusLabel, size: 18, weight: .medium)
-        styleLabel(fpsLabel, size: 18, weight: .medium)
-        styleLabel(uploadStatusLabel, size: 18, weight: .medium)
-        styleLabel(lastResultLabel, size: 17, weight: .medium)
-        styleLabel(lastContactLabel, size: 15, weight: .regular)
-        lastContactLabel.textColor = .lightGray
-        lastContactLabel.text = "Last contact: —"
-        lastResultLabel.textColor = .systemGreen
-        styleLabel(warningLabel, size: 22, weight: .bold)
-        warningLabel.textColor = .systemYellow
+        // Transient banner for error / progress text. Hidden by default;
+        // state-change paths set text + reveal, and a timer usually hides it.
+        warningLabel.font = DesignTokens.Fonts.sans(size: 18, weight: .bold)
+        warningLabel.textColor = DesignTokens.Colors.pending
         warningLabel.textAlignment = .center
+        warningLabel.numberOfLines = 0
+        warningLabel.translatesAutoresizingMaskIntoConstraints = false
         warningLabel.isHidden = true
+        view.addSubview(warningLabel)
 
-        chirpDebugLabel.font = .monospacedDigitSystemFont(ofSize: 14, weight: .medium)
-        chirpDebugLabel.textColor = .systemGray
+        // Chirp peak / buffer debug — only visible during time-sync. This
+        // is the one on-screen debug overlay we keep because the operator
+        // needs it to tune chirp threshold in real time.
+        chirpDebugLabel.font = DesignTokens.Fonts.mono(size: 13, weight: .medium)
+        chirpDebugLabel.textColor = DesignTokens.Colors.sub
         chirpDebugLabel.numberOfLines = 0
         chirpDebugLabel.textAlignment = .center
+        chirpDebugLabel.translatesAutoresizingMaskIntoConstraints = false
         chirpDebugLabel.isHidden = true
+        view.addSubview(chirpDebugLabel)
 
-        serverStatusDot.backgroundColor = .systemRed
-        serverStatusDot.layer.cornerRadius = 8
-        serverStatusDot.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            serverStatusDot.widthAnchor.constraint(equalToConstant: 16),
-            serverStatusDot.heightAnchor.constraint(equalToConstant: 16),
-        ])
+        // Last successful result — hidden until the first result arrives so
+        // an empty "(尚無結果)" doesn't linger as noise on cold launch.
+        lastResultLabel.font = DesignTokens.Fonts.sans(size: 14, weight: .medium)
+        lastResultLabel.textColor = DesignTokens.Colors.ok
+        lastResultLabel.numberOfLines = 2
+        lastResultLabel.translatesAutoresizingMaskIntoConstraints = false
+        lastResultLabel.isHidden = true
+        view.addSubview(lastResultLabel)
 
-        let row1 = UIStackView(arrangedSubviews: [topStatusLabel, UIView()])
-        row1.axis = .horizontal
-        row1.alignment = .center
+        // Upload status — one-liner under the Ready card. Hidden when the
+        // text is "Idle" so only meaningful phases show up.
+        uploadStatusLabel.font = DesignTokens.Fonts.sans(size: 13, weight: .medium)
+        uploadStatusLabel.textColor = DesignTokens.Colors.sub
+        uploadStatusLabel.numberOfLines = 1
+        uploadStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        uploadStatusLabel.isHidden = true
+        view.addSubview(uploadStatusLabel)
 
-        testConnectionButton.setTitle("Test", for: .normal)
-        testConnectionButton.setTitleColor(.white, for: .normal)
-        testConnectionButton.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.85)
-        testConnectionButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
-        testConnectionButton.layer.cornerRadius = 8
-        testConnectionButton.contentEdgeInsets = UIEdgeInsets(top: 4, left: 10, bottom: 4, right: 10)
-        testConnectionButton.addTarget(self, action: #selector(onTapTestConnection), for: .touchUpInside)
-
-        let row2 = UIStackView(arrangedSubviews: [serverStatusDot, serverStatusLabel, fpsLabel, testConnectionButton])
-        row2.axis = .horizontal
-        row2.spacing = 8
-        row2.alignment = .center
-
-        let row2b = UIStackView(arrangedSubviews: [lastContactLabel])
-        row2b.axis = .horizontal
-        row2b.alignment = .center
-
-        let row3 = UIStackView(arrangedSubviews: [uploadStatusLabel])
-        row3.axis = .horizontal
-        row3.spacing = 12
-        row3.alignment = .center
-
-        let row4 = UIStackView(arrangedSubviews: [lastResultLabel])
-        row4.axis = .horizontal
-        row4.alignment = .center
-
-        statusContainer.axis = .vertical
-        statusContainer.spacing = 8
-        statusContainer.translatesAutoresizingMaskIntoConstraints = false
-        statusContainer.layoutMargins = UIEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
-        statusContainer.isLayoutMarginsRelativeArrangement = true
-        statusContainer.backgroundColor = UIColor.black.withAlphaComponent(0.45)
-        statusContainer.layer.cornerRadius = 12
-        statusContainer.addArrangedSubview(row1)
-        statusContainer.addArrangedSubview(row2)
-        statusContainer.addArrangedSubview(row2b)
-        statusContainer.addArrangedSubview(row3)
-        statusContainer.addArrangedSubview(row4)
-        statusContainer.addArrangedSubview(warningLabel)
-        statusContainer.addArrangedSubview(chirpDebugLabel)
-        view.addSubview(statusContainer)
+        // The Ready card. Centered horizontally, sitting above the bottom
+        // safe area so it doesn't fight the camera preview mid-frame.
+        view.addSubview(readyCard)
 
         NSLayoutConstraint.activate([
-            statusContainer.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            statusContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            statusContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            topStatusChip.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: DesignTokens.Spacing.m),
+            topStatusChip.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.m),
+
+            warningLabel.topAnchor.constraint(equalTo: topStatusChip.bottomAnchor, constant: DesignTokens.Spacing.s),
+            warningLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),
+            warningLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DesignTokens.Spacing.l),
+
+            readyCard.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            readyCard.widthAnchor.constraint(lessThanOrEqualToConstant: 480),
+            readyCard.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),
+            readyCard.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -DesignTokens.Spacing.l),
+            readyCard.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -DesignTokens.Spacing.xl),
+
+            uploadStatusLabel.topAnchor.constraint(equalTo: readyCard.bottomAnchor, constant: DesignTokens.Spacing.s),
+            uploadStatusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+
+            lastResultLabel.topAnchor.constraint(equalTo: uploadStatusLabel.bottomAnchor, constant: DesignTokens.Spacing.xs),
+            lastResultLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),
+            lastResultLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DesignTokens.Spacing.l),
+
+            chirpDebugLabel.bottomAnchor.constraint(equalTo: readyCard.topAnchor, constant: -DesignTokens.Spacing.s),
+            chirpDebugLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),
+            chirpDebugLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DesignTokens.Spacing.l),
         ])
 
         setupStateBorder()
         setupRecIndicator()
+    }
+
+    /// Recompute ready-card gate states + hint, then repaint. Called every
+    /// time `updateUIForState` fires.
+    private func updateReadyCard() {
+        let calibrationOK = IntrinsicsStore.hasHomography()
+        let timeSyncOK = lastSyncAnchorTimestampS != nil
+        let serverOK = healthMonitor?.isReachable ?? false
+
+        let hint: String
+        if !serverOK {
+            hint = "無法接收開始指令：檢查 Wi-Fi 或 Settings 中的伺服器 IP"
+        } else if !calibrationOK {
+            hint = "本機還沒校正鏡頭位置，無法三角化"
+        } else if !timeSyncOK {
+            hint = "尚未時間校正，錄影將無法與另一台配對"
+        } else {
+            hint = "等待開始指令…（由 Dashboard 控制）"
+        }
+
+        let calibrationGate = ReadyCard.Gate(
+            state: calibrationOK ? .pass : .fail,
+            label: "位置校正",
+            action: calibrationOK ? nil : "按這裡開始",
+            onTap: calibrationOK ? nil : { [weak self] in self?.openCalibration() }
+        )
+        let timeSyncGate = ReadyCard.Gate(
+            state: timeSyncOK ? .pass : (state == .timeSyncWaiting ? .pending : .fail),
+            label: "時間校正",
+            action: (timeSyncOK || state == .timeSyncWaiting) ? nil : "按這裡開始",
+            onTap: (timeSyncOK || state == .timeSyncWaiting) ? nil : { [weak self] in self?.onTapTimeCalibration() }
+        )
+        let serverGate = ReadyCard.Gate(
+            state: serverOK ? .pass : .fail,
+            label: serverOK ? "伺服器已連線" : "伺服器離線",
+            action: serverOK ? nil : "檢查 Wi-Fi / Settings IP",
+            onTap: nil
+        )
+        readyCard.update(.init(
+            cameraRole: settings.cameraRole,
+            calibration: calibrationGate,
+            timeSync: timeSyncGate,
+            server: serverGate,
+            hint: hint
+        ))
+        readyCard.isHidden = (state != .standby)
     }
 
     private func setupStateBorder() {
@@ -1237,13 +1256,27 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func updateUIForState() {
-        serverStatusLabel.text = "Server \(healthMonitor?.statusText ?? "unknown")"
-        serverStatusDot.backgroundColor = serverReachableColor()
-        fpsLabel.text = String(format: "FPS %.1f", fpsEstimate)
-        uploadStatusLabel.text = "Upload: \(lastUploadStatusText)"
-        lastResultLabel.text = "Last: \(lastResultText)"
+        // Upload status — hide the uninformative "Idle" default so the HUD
+        // only surfaces meaningful phases ("暫存完成", "時間校正完成", etc).
+        if lastUploadStatusText.isEmpty || lastUploadStatusText == "Idle" {
+            uploadStatusLabel.isHidden = true
+            uploadStatusLabel.text = nil
+        } else {
+            uploadStatusLabel.isHidden = false
+            uploadStatusLabel.text = lastUploadStatusText
+        }
+
+        // Last result line — reveal only once a real result has landed.
+        if !hasReceivedFirstResult {
+            lastResultLabel.isHidden = true
+        } else {
+            lastResultLabel.isHidden = false
+            lastResultLabel.text = lastResultText
+        }
 
         chirpDebugLabel.isHidden = (state != .timeSyncWaiting)
+        updateReadyCard()
+
         // State-transition-only side effects: re-running applyStateVisuals
         // on every tick resets the REC timer and rebuilds the pulse
         // animation, so edge-trigger it here. Label / colour refresh above
@@ -1254,12 +1287,30 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
+    /// True once at least one upload result (success or fail) has been
+    /// observed, so we can start showing the `lastResultLabel`. Before then
+    /// the placeholder text would just be noise on first launch.
+    private var hasReceivedFirstResult: Bool {
+        lastResultText != Self.initialLastResultText
+    }
+    private static let initialLastResultText = "(尚無結果)"
+
     private func stateText(_ state: AppState) -> String {
         switch state {
         case .standby: return "STANDBY"
         case .timeSyncWaiting: return "TIME_SYNC"
         case .recording: return "RECORDING"
         case .uploading: return "UPLOADING"
+        }
+    }
+
+    /// Translate the internal `cancelTimeSync(reason:)` tag into user copy.
+    private static func localizedCancelReason(_ reason: String) -> String {
+        switch reason {
+        case "timeout": return "逾時"
+        case "cancelled": return "已取消"
+        case "disarmed": return "已取消（dashboard 停止）"
+        default: return reason
         }
     }
 
@@ -1284,12 +1335,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             stateBorderLayer.opacity = 1.0
         }
 
-        // Chip
-        topStatusLabel.text = cfg.chipText
-        topStatusLabel.backgroundColor = cfg.chipBg
-        topStatusLabel.textColor = cfg.chipFg
+        topStatusChip.text = cfg.chipText
+        topStatusChip.setStyle(cfg.chipStyle)
 
-        // REC indicator
         if state == .recording {
             recIndicator.isHidden = false
             startRecTimer()
@@ -1304,8 +1352,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let borderWidth: CGFloat
         let pulse: Bool
         let chipText: String
-        let chipBg: UIColor
-        let chipFg: UIColor
+        let chipStyle: StatusChip.Style
     }
 
     private func stateVisualConfig(for s: AppState) -> StateVisualConfig {
@@ -1313,26 +1360,22 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case .standby:
             return .init(
                 borderColor: UIColor.white.withAlphaComponent(0.15), borderWidth: 2, pulse: false,
-                chipText: "STANDBY",
-                chipBg: UIColor(white: 0.25, alpha: 0.9), chipFg: .white
+                chipText: "待機", chipStyle: .neutral
             )
         case .timeSyncWaiting:
             return .init(
                 borderColor: .systemBlue, borderWidth: 8, pulse: true,
-                chipText: "TIME SYNC",
-                chipBg: UIColor.systemBlue.withAlphaComponent(0.95), chipFg: .white
+                chipText: "時間校正中", chipStyle: .pending
             )
         case .recording:
             return .init(
-                borderColor: .systemRed, borderWidth: 14, pulse: false,
-                chipText: "● RECORDING",
-                chipBg: UIColor.systemRed.withAlphaComponent(0.95), chipFg: .white
+                borderColor: DesignTokens.Colors.fail, borderWidth: 14, pulse: false,
+                chipText: "● 錄影中", chipStyle: .fail
             )
         case .uploading:
             return .init(
-                borderColor: .systemOrange, borderWidth: 6, pulse: false,
-                chipText: "UPLOADING",
-                chipBg: UIColor.systemOrange.withAlphaComponent(0.95), chipFg: .black
+                borderColor: DesignTokens.Colors.pending, borderWidth: 6, pulse: false,
+                chipText: "上傳中", chipStyle: .pending
             )
         }
     }
@@ -1357,12 +1400,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         recDotView.alpha = 1.0
     }
 
-    private func serverReachableColor() -> UIColor {
-        if uploadQueue?.isUploading ?? false {
-            return .systemOrange
-        }
-        return (healthMonitor?.isReachable ?? false) ? .systemGreen : .systemRed
-    }
 
     // MARK: - Video frame processing
 
@@ -1467,6 +1504,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         fpsEstimate = Double(framesSinceLastFpsTick) / elapsed
         framesSinceLastFpsTick = 0
         lastFrameTimestampForFps = now
+        // Fan-out to the Diagnostics screen (Settings → Diagnostics).
+        DiagnosticsData.shared.update(fpsEstimate: fpsEstimate)
     }
 
     // MARK: - Payload enrichment
@@ -1536,20 +1575,3 @@ final class FrameStateBox {
     }
 }
 
-/// UILabel with per-edge inset — gives a colored background chip real
-/// left/right padding without resorting to NSAttributedString hacks.
-final class PaddedLabel: UILabel {
-    var contentInsets = UIEdgeInsets(top: 6, left: 14, bottom: 6, right: 14)
-
-    override func drawText(in rect: CGRect) {
-        super.drawText(in: rect.inset(by: contentInsets))
-    }
-
-    override var intrinsicContentSize: CGSize {
-        let s = super.intrinsicContentSize
-        return CGSize(
-            width: s.width + contentInsets.left + contentInsets.right,
-            height: s.height + contentInsets.top + contentInsets.bottom
-        )
-    }
-}
