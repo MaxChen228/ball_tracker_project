@@ -56,24 +56,31 @@ def _make_rig():
     return K, (R_a, t_a, C_a, H_a), (R_b, t_b, C_b, H_b)
 
 
-def _pitch(cam_id, cycle, K, R, t, H, P_trajectory, with_pixels=False):
+def _project_pixels(K, R, t, P_world):
+    P_cam = R @ P_world + t
+    u = K[0, 0] * P_cam[0] / P_cam[2] + K[0, 2]
+    v = K[1, 1] * P_cam[1] / P_cam[2] + K[1, 2]
+    return float(u), float(v)
+
+
+def _pitch(cam_id, cycle, K, R, t, H, P_trajectory):
     frames = []
     for i, P in enumerate(P_trajectory):
-        tx, tz = _project(K, R, t, P)
+        u, v = _project_pixels(K, R, t, P)
         frames.append(
             schemas.FramePayload(
                 frame_index=i,
                 timestamp_s=float(i) / 240.0,
-                theta_x_rad=tx,
-                theta_z_rad=tz,
+                px=u, py=v,
                 ball_detected=True,
             )
         )
     return schemas.PitchPayload(
         camera_id=cam_id,
         session_id=sid(cycle),
-        sync_anchor_frame_index=0,
         sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
         frames=frames,
         intrinsics=schemas.IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
         homography=H.flatten().tolist(),
@@ -233,8 +240,13 @@ def test_scene_to_dict_is_json_serialisable():
 # ---- HTTP endpoints -------------------------------------------------------
 
 
-def _post_pitch(client, pitch: main.PitchPayload):
-    return client.post("/pitch", data={"payload": pitch.model_dump_json()})
+def _record_pitch(pitch: main.PitchPayload) -> None:
+    """Directly persist a manually-built PitchPayload (frames already
+    populated). The /pitch ingestion handler now requires a real MOV for
+    server-side detection; these tests are scoped to viewer/event
+    rendering, so we bypass ingestion and go straight to state.record,
+    which is the same path the handler calls after detection."""
+    main.state.record(pitch)
 
 
 def test_reconstruction_endpoint_returns_scene_shape():
@@ -243,7 +255,7 @@ def test_reconstruction_endpoint_returns_scene_shape():
     pitch = _pitch("A", 701, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
     client = TestClient(app)
 
-    assert _post_pitch(client, pitch).status_code == 200
+    _record_pitch(pitch)
 
     r = client.get(f"/reconstruction/{session_id}")
     assert r.status_code == 200
@@ -266,12 +278,11 @@ def test_viewer_endpoint_returns_plotly_html():
     session_id = sid(702)
     pitch = _pitch("A", 702, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
     client = TestClient(app)
-    assert _post_pitch(client, pitch).status_code == 200
+    _record_pitch(pitch)
 
     r = client.get(f"/viewer/{session_id}")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
-    # Plotly's CDN script tag or a clear Plotly signature must be present.
     body = r.text.lower()
     assert "plotly" in body
     assert session_id in body
@@ -288,13 +299,11 @@ def test_events_endpoint_lists_sessions_latest_first():
     P = np.array([[0.1, 0.3, 1.0]])
     client = TestClient(app)
 
-    assert _post_pitch(client, _pitch("A", 800, K, R_a, t_a, H_a, P)).status_code == 200
-    assert _post_pitch(client, _pitch("A", 810, K, R_a, t_a, H_a, P)).status_code == 200
-    assert _post_pitch(client, _pitch("B", 810, K, R_b, t_b, H_b, P)).status_code == 200
+    _record_pitch(_pitch("A", 800, K, R_a, t_a, H_a, P))
+    _record_pitch(_pitch("A", 810, K, R_a, t_a, H_a, P))
+    _record_pitch(_pitch("B", 810, K, R_b, t_b, H_b, P))
 
     events = client.get("/events").json()
-    # Two sessions posted — the second (sid(810)) arrived after sid(800) so
-    # its pitch-file mtime is strictly later → sorted first.
     session_ids = [e["session_id"] for e in events]
     assert session_ids.index(sid(810)) < session_ids.index(sid(800))
 
@@ -313,7 +322,7 @@ def test_index_endpoint_lists_events_with_viewer_links():
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     pitch = _pitch("A", 901, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
     client = TestClient(app)
-    assert _post_pitch(client, pitch).status_code == 200
+    _record_pitch(pitch)
 
     r = client.get("/")
     assert r.status_code == 200
