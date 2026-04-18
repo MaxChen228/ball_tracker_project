@@ -28,7 +28,6 @@ final class SettingsViewController: UIViewController {
         // parameterised, but Settings always writes/loads 1920/1080.
         var captureWidth: Int
         var captureHeight: Int
-        var captureFps: Int             // 60, 120, 240
 
         // Manual intrinsics override (e.g. from a ChArUco calibration run).
         // When enabled, these values are written to the shared fx/fz/cx/cy
@@ -80,7 +79,6 @@ final class SettingsViewController: UIViewController {
 
     private static let keyCaptureWidth = "capture_width"
     private static let keyCaptureHeight = "capture_height"
-    private static let keyCaptureFps = "capture_fps"
 
     private static let keyManualIntrinsicsEnabled = "manual_intrinsics_enabled"
     static let keyIntrinsicsSource = "intrinsics_source"  // "manual" | "fov"
@@ -120,7 +118,6 @@ final class SettingsViewController: UIViewController {
     private let chirpThresholdField = UITextField()
     private let pollIntervalField = UITextField()
 
-    private let captureFpsControl = UISegmentedControl(items: ["60", "120", "240"])
 
     // Capture resolution is hard-wired to 1920×1080 (16:9) across the whole
     // system — see `captureWidthFixed` / `captureHeightFixed`. Added after
@@ -173,10 +170,11 @@ final class SettingsViewController: UIViewController {
 
         // Capture resolution is system-wide fixed at 1920×1080 (see
         // `captureWidthFixed` / `captureHeightFixed`). Any stale UserDefaults
-        // values from prior 720p runs are ignored on load.
+        // values from prior 720p runs are ignored on load. Capture FPS is
+        // adaptive (60 idle / 240 tracking) and owned by CameraViewController —
+        // it is no longer a user-visible setting.
         let captureWidth = captureWidthFixed
         let captureHeight = captureHeightFixed
-        let captureFps = intOrDefault(keyCaptureFps, defaultValue: 240)
 
         let manualEnabled = d.bool(forKey: keyManualIntrinsicsEnabled)
         let manualFx = manualEnabled ? doubleOrDefault(keyIntrinsicFx, defaultValue: 0) : 0
@@ -207,7 +205,6 @@ final class SettingsViewController: UIViewController {
             pollInterval: pollInterval,
             captureWidth: captureWidth,
             captureHeight: captureHeight,
-            captureFps: captureFps,
             manualIntrinsicsEnabled: manualEnabled,
             manualFx: manualFx,
             manualFy: manualFy,
@@ -275,8 +272,6 @@ final class SettingsViewController: UIViewController {
         }
 
         let current = Self.loadFromUserDefaults()
-        let fpsOptions = [60, 120, 240]
-        let fps = fpsOptions[min(max(0, captureFpsControl.selectedSegmentIndex), fpsOptions.count - 1)]
 
         // Resolve intrinsics metadata: import overrides, else keep existing,
         // else default to current resolution (manual typing at this resolution).
@@ -310,7 +305,6 @@ final class SettingsViewController: UIViewController {
             pollInterval: min(60.0, max(1.0, doubleValue(pollIntervalField.text, fallback: current.pollInterval))),
             captureWidth: Self.captureWidthFixed,
             captureHeight: Self.captureHeightFixed,
-            captureFps: fps,
             manualIntrinsicsEnabled: manualIntrinsicsSwitch.isOn,
             manualFx: doubleValue(manualFxField.text, fallback: current.manualFx),
             manualFy: doubleValue(manualFyField.text, fallback: current.manualFy),
@@ -438,9 +432,8 @@ final class SettingsViewController: UIViewController {
             title: "Camera",
             rows: [
                 controlRow(label: "Role", control: cameraRoleControl),
-                controlRow(label: "FPS", control: captureFpsControl),
             ],
-            footer: "解析度系統固定 1080p。240 fps 僅部分機型支援；不支援時會回退到最近的可用格式。"
+            footer: "解析度系統固定 1080p。FPS 自動切換：待機 60、追蹤 240。"
         ))
 
         contentStack.addArrangedSubview(sectionBlock(
@@ -538,7 +531,6 @@ final class SettingsViewController: UIViewController {
         vMaxField.text = String(settings.vMax)
         chirpThresholdField.text = String(settings.chirpThreshold)
         pollIntervalField.text = String(settings.pollInterval)
-        captureFpsControl.selectedSegmentIndex = [60, 120, 240].firstIndex(of: settings.captureFps) ?? 2
 
         manualIntrinsicsSwitch.isOn = settings.manualIntrinsicsEnabled
         manualFxField.text = settings.manualFx > 0 ? String(settings.manualFx) : ""
@@ -830,7 +822,6 @@ final class SettingsViewController: UIViewController {
         d.set(settings.pollInterval, forKey: keyPollInterval)
         d.set(settings.captureWidth, forKey: keyCaptureWidth)
         d.set(settings.captureHeight, forKey: keyCaptureHeight)
-        d.set(settings.captureFps, forKey: keyCaptureFps)
 
         d.set(settings.manualIntrinsicsEnabled, forKey: keyManualIntrinsicsEnabled)
         if settings.manualIntrinsicsEnabled

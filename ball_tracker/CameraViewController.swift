@@ -28,6 +28,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case uploading
     }
 
+    // Adaptive capture rate. Idle/time-sync runs at 60 fps to keep the
+    // sensor + ISP cool and preserve battery; tracking (`.syncWaiting` +
+    // `.recording`) switches to 240 fps so the 8 ms A/B pair window gets
+    // sub-frame resolution. Transitions live in `enterSyncMode` /
+    // `exitSyncMode` via `switchCaptureFps(_:)`.
+    private let standbyFps: Double = 60
+    private let trackingFps: Double = 240
+
     // Session + outputs.
     private let session = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
@@ -260,6 +268,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     func enterSyncMode() {
         guard state == .standby else { return }
         log.info("camera entering sync mode session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
+        switchCaptureFps(trackingFps)
         recorder.reset()
         reloadBallDetectorWithLatestIntrinsics()
         try? uploadQueue.reloadPending()
@@ -280,6 +289,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.clipRecorder = nil
         }
         uploadQueue.clearPending()
+        switchCaptureFps(standbyFps)
         warningLabel.isHidden = true
         updateUIForState()
     }
@@ -416,7 +426,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     device,
                     targetWidth: settings.captureWidth,
                     targetHeight: settings.captureHeight,
-                    targetFps: Double(settings.captureFps)
+                    targetFps: standbyFps
                 )
                 IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
 
@@ -487,7 +497,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         horizontalFovRadians = Double(device.activeFormat.videoFieldOfView) * Double.pi / 180.0
     }
 
-    private func reconfigureCapture() {
+    /// Swap the active capture format to a new frame rate at the current
+    /// fixed resolution. Used for the idle↔tracking FPS transition
+    /// (`standbyFps` ↔ `trackingFps`) triggered by enter/exit of sync mode,
+    /// and by the resolution-change path in `applyUpdatedSettings`. The
+    /// format swap requires `stopRunning → activeFormat = X → startRunning`,
+    /// which blocks the session for ~300-500 ms — deliberately called only
+    /// at moments with no time-critical frame work in flight (entering
+    /// sync while the user is placing the ball, or exiting back to idle).
+    private func switchCaptureFps(_ targetFps: Double) {
         guard let device = currentCaptureDevice else { return }
         let wasRunning = session.isRunning
         if wasRunning { session.stopRunning() }
@@ -495,7 +513,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             device,
             targetWidth: settings.captureWidth,
             targetHeight: settings.captureHeight,
-            targetFps: Double(settings.captureFps)
+            targetFps: targetFps
         )
         IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
         if wasRunning { session.startRunning() }
@@ -725,7 +743,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             || latest.serverPort != settings.serverPort
         let formatChanged = latest.captureWidth != settings.captureWidth
             || latest.captureHeight != settings.captureHeight
-            || latest.captureFps != settings.captureFps
         let chirpThresholdChanged = latest.chirpThreshold != settings.chirpThreshold
         let pollIntervalChanged = latest.pollInterval != settings.pollInterval
         let cameraRoleChanged = latest.cameraRole != settings.cameraRole
@@ -739,7 +756,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             uploadQueue.updateUploader(uploader)
         }
         if formatChanged {
-            reconfigureCapture()
+            // Resolution is currently fixed (captureWidthFixed/HeightFixed) so
+            // this branch only fires on a stale-prefs migration. Re-pick a
+            // format at whichever FPS is appropriate for the current state.
+            let fps = (state == .standby || state == .timeSyncWaiting) ? standbyFps : trackingFps
+            switchCaptureFps(fps)
         }
         if chirpThresholdChanged {
             chirpDetector?.setThreshold(Float(latest.chirpThreshold))
