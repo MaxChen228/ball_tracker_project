@@ -128,6 +128,11 @@ final class SettingsViewController: UIViewController {
 
     var onDismiss: (() -> Void)?
 
+    /// Camera VC reference forwarded to the Diagnostics subpage so its
+    /// Test-connection button can actually probe. Nil-safe — settings still
+    /// opens without it; the Test button just no-ops.
+    weak var cameraVC: CameraViewController?
+
     static func loadFromUserDefaults() -> Settings {
         let d = UserDefaults.standard
 
@@ -422,6 +427,25 @@ final class SettingsViewController: UIViewController {
             ],
             footer: "匯入 calibrate_intrinsics.py 輸出的 JSON，自動縮放到 1080p。關閉開關時改用 FOV 近似。"
         ))
+
+        // Diagnostics entry — absorbs the FPS / last-contact / Test button
+        // that used to clutter the main HUD.
+        let diagButton = UIButton(type: .system)
+        diagButton.setTitle("Diagnostics  →", for: .normal)
+        diagButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
+        diagButton.contentHorizontalAlignment = .leading
+        diagButton.addTarget(self, action: #selector(openDiagnostics), for: .touchUpInside)
+        contentStack.addArrangedSubview(sectionBlock(
+            title: "診斷",
+            rows: [singleView(diagButton)],
+            footer: "FPS、last contact、session id、Test 連線。"
+        ))
+    }
+
+    @objc private func openDiagnostics() {
+        let vc = SettingsDiagnosticsViewController()
+        vc.cameraVC = cameraVC
+        navigationController?.pushViewController(vc, animated: true)
     }
 
     private func buildStatusCard() {
