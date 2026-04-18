@@ -442,6 +442,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let preview = AVCaptureVideoPreviewLayer(session: session)
         preview.videoGravity = .resizeAspectFill
         preview.frame = view.bounds
+        // App is locked to landscape (Info.plist). Pin the preview connection
+        // to sensor-native angle 0 so the on-screen image matches the raw
+        // CVPixelBuffer orientation BallDetector / ArUco consume; a stale
+        // 90° rotation here was why "holding phone landscape" still rendered
+        // a portrait-oriented preview.
+        if let connection = preview.connection, connection.isVideoRotationAngleSupported(0) {
+            connection.videoRotationAngle = 0
+        }
         view.layer.insertSublayer(preview, at: 0)
         previewLayer = preview
     }

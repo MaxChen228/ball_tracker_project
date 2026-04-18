@@ -1,4 +1,5 @@
 import UIKit
+import UniformTypeIdentifiers
 
 final class SettingsViewController: UIViewController {
     struct Settings {
@@ -19,31 +20,47 @@ final class SettingsViewController: UIViewController {
         var chirpThreshold: Double
 
         /// Base cadence (seconds) for the `/heartbeat` loop when the
-        /// server is reachable. Each heartbeat also carries the current
-        /// dashboard `commands[self]` back to the phone, so this is both
-        /// the "am I online?" cadence and the worst-case arm-latency
-        /// bound. On failure the loop backs off exponentially up to a
-        /// 60 s cap; success resets to this base. Clamped to [1, 60]
-        /// on save — 1 Hz is plenty for a LAN tool, anything faster
-        /// wastes battery without perceptible UX gain.
+        /// server is reachable. Clamped to [1, 60] on save.
         var pollInterval: Double
 
-        var captureWidth: Int           // 1280 or 1920
-        var captureHeight: Int          // 720 or 1080
+        // Resolution is system-wide fixed at 1920×1080; fields are kept so
+        // downstream callers (CameraViewController.selectFormat) can stay
+        // parameterised, but Settings always writes/loads 1920/1080.
+        var captureWidth: Int
+        var captureHeight: Int
         var captureFps: Int             // 60, 120, 240
 
         // Manual intrinsics override (e.g. from a ChArUco calibration run).
         // When enabled, these values are written to the shared fx/fz/cx/cy
-        // UserDefaults keys and Calibration view will NOT overwrite them from
-        // the AVCapture FOV approximation.
+        // UserDefaults keys and Calibration view will NOT overwrite them.
         var manualIntrinsicsEnabled: Bool
         var manualFx: Double
-        var manualFy: Double            // stored as intrinsic_fz (Swift naming collision, see CLAUDE.md)
+        var manualFy: Double            // stored as intrinsic_fz
         var manualCx: Double
         var manualCy: Double
         // OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Empty means
         // no distortion is persisted and the payload omits the field.
         var manualDistortion: [Double]
+
+        // Display-only metadata recorded at import/save time so the summary
+        // card can show "ChArUco · 1080p · RMS 1.07 px · 3 min ago" without
+        // hitting the filesystem. 0 / nil means "unknown" (e.g. manually typed).
+        var intrinsicsCalibratedWidth: Int
+        var intrinsicsCalibratedHeight: Int
+        var intrinsicsRms: Double
+        var intrinsicsCalibratedAt: Date?
+    }
+
+    /// Decoded from `calibrate_intrinsics.py --out *.json`.
+    private struct CharucoIntrinsicsJSON: Decodable {
+        let fx: Double
+        let fy: Double
+        let cx: Double
+        let cy: Double
+        let image_width: Int
+        let image_height: Int
+        let rms_reprojection_error_px: Double?
+        let distortion_coeffs: [Double]
     }
 
     private static let keyServerIP = "server_ip"
@@ -65,9 +82,6 @@ final class SettingsViewController: UIViewController {
     private static let keyCaptureHeight = "capture_height"
     private static let keyCaptureFps = "capture_fps"
 
-    // Manual intrinsics override. If enabled, these values get written to the
-    // shared keys (`intrinsic_fx`, `intrinsic_fz`, `intrinsic_cx`, `intrinsic_cy`)
-    // that BallDetector / ServerUploader already read.
     private static let keyManualIntrinsicsEnabled = "manual_intrinsics_enabled"
     static let keyIntrinsicsSource = "intrinsics_source"  // "manual" | "fov"
     private static let keyIntrinsicFx = "intrinsic_fx"
@@ -76,12 +90,25 @@ final class SettingsViewController: UIViewController {
     private static let keyIntrinsicCy = "intrinsic_cy"
     private static let keyIntrinsicDistortion = "intrinsic_distortion"
 
+    // New metadata keys (display-only; triangulation doesn't read them).
+    private static let keyIntrinsicsCalibratedW = "intrinsic_calibrated_w"
+    private static let keyIntrinsicsCalibratedH = "intrinsic_calibrated_h"
+    private static let keyIntrinsicsRms = "intrinsic_rms"
+    private static let keyIntrinsicsCalibratedAt = "intrinsic_calibrated_at"
+
     private let scrollView = UIScrollView()
     private let contentStack = UIStackView()
 
+    // Status summary
+    private let statusCard = UIView()
+    private let statusServerLabel = UILabel()
+    private let statusRoleLabel = UILabel()
+    private let statusIntrinsicsLabel = UILabel()
+
+    // Fields
     private let serverIPField = UITextField()
     private let serverPortField = UITextField()
-    private let cameraRoleControl = UISegmentedControl(items: ["A", "B"])
+    private let cameraRoleControl = UISegmentedControl(items: ["A · 1B 側", "B · 3B 側"])
 
     private let hMinField = UITextField()
     private let hMaxField = UITextField()
@@ -91,24 +118,30 @@ final class SettingsViewController: UIViewController {
     private let vMaxField = UITextField()
 
     private let chirpThresholdField = UITextField()
-
     private let pollIntervalField = UITextField()
 
-    private let captureResolutionControl = UISegmentedControl(items: ["720p", "1080p"])
     private let captureFpsControl = UISegmentedControl(items: ["60", "120", "240"])
 
+    // Capture resolution is hard-wired to 1920×1080 (16:9) across the whole
+    // system — see `captureWidthFixed` / `captureHeightFixed`. Added after
+    // repeatedly hitting "intrinsics baked at 720p, pipeline running 1080p"
+    // drift. If a future pipeline ever needs 720p again, reintroduce a
+    // segmented control and the `resolutionChanged` logic the prior revision
+    // had (git blame this file for the full prompt-driven flow).
+    private static let captureWidthFixed = 1920
+    private static let captureHeightFixed = 1080
+
     private let manualIntrinsicsSwitch = UISwitch()
+    private let importIntrinsicsButton = UIButton(type: .system)
     private let manualFxField = UITextField()
     private let manualFyField = UITextField()
     private let manualCxField = UITextField()
     private let manualCyField = UITextField()
     private let manualDistortionField = UITextField()
 
-    /// Invoked once in `viewDidDisappear`, regardless of whether the user
-    /// dismissed via Close, Save, or an interactive swipe. The presenting
-    /// camera view uses this to re-diff UserDefaults and reconfigure
-    /// anything settings-driven (server URL, capture format, chirp
-    /// threshold, poll cadence) without needing viewWillAppear.
+    // Pending import metadata; written to UserDefaults only on Save.
+    private var pendingImportMeta: (w: Int, h: Int, rms: Double)?
+
     var onDismiss: (() -> Void)?
 
     static func loadFromUserDefaults() -> Settings {
@@ -136,11 +169,13 @@ final class SettingsViewController: UIViewController {
         let vMax = intOrDefault(keyVMax, defaultValue: 255)
 
         let chirpThreshold = doubleOrDefault(keyChirpThreshold, defaultValue: 0.18)
-
         let pollInterval = doubleOrDefault(keyPollInterval, defaultValue: 1.0)
 
-        let captureWidth = intOrDefault(keyCaptureWidth, defaultValue: 1920)
-        let captureHeight = intOrDefault(keyCaptureHeight, defaultValue: 1080)
+        // Capture resolution is system-wide fixed at 1920×1080 (see
+        // `captureWidthFixed` / `captureHeightFixed`). Any stale UserDefaults
+        // values from prior 720p runs are ignored on load.
+        let captureWidth = captureWidthFixed
+        let captureHeight = captureHeightFixed
         let captureFps = intOrDefault(keyCaptureFps, defaultValue: 240)
 
         let manualEnabled = d.bool(forKey: keyManualIntrinsicsEnabled)
@@ -154,6 +189,12 @@ final class SettingsViewController: UIViewController {
         } else {
             manualDistortion = []
         }
+
+        let calW = intOrDefault(keyIntrinsicsCalibratedW, defaultValue: 0)
+        let calH = intOrDefault(keyIntrinsicsCalibratedH, defaultValue: 0)
+        let rms = doubleOrDefault(keyIntrinsicsRms, defaultValue: 0)
+        let calAtTs = doubleOrDefault(keyIntrinsicsCalibratedAt, defaultValue: 0)
+        let calAt: Date? = calAtTs > 0 ? Date(timeIntervalSince1970: calAtTs) : nil
 
         return Settings(
             serverIP: serverIP,
@@ -172,20 +213,24 @@ final class SettingsViewController: UIViewController {
             manualFy: manualFy,
             manualCx: manualCx,
             manualCy: manualCy,
-            manualDistortion: manualDistortion
+            manualDistortion: manualDistortion,
+            intrinsicsCalibratedWidth: calW,
+            intrinsicsCalibratedHeight: calH,
+            intrinsicsRms: rms,
+            intrinsicsCalibratedAt: calAt
         )
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .systemGroupedBackground
         title = "Settings"
 
         navigationItem.leftBarButtonItem = UIBarButtonItem(
-            title: "Close",
+            title: "Cancel",
             style: .plain,
             target: self,
-            action: #selector(closeTapped)
+            action: #selector(cancelTapped)
         )
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             title: "Save",
@@ -193,9 +238,14 @@ final class SettingsViewController: UIViewController {
             target: self,
             action: #selector(saveTapped)
         )
+        // Block interactive swipe-dismiss so changes can't silently drop.
+        isModalInPresentation = true
 
         setupUI()
-        populateFields(from: Self.loadFromUserDefaults())
+        let current = Self.loadFromUserDefaults()
+        populateFields(from: current)
+        updateStatusSummary(from: current)
+        updateManualFieldsEnabled(animated: false)
 
         let tap = UITapGestureRecognizer(target: self, action: #selector(dismissKeyboard))
         tap.cancelsTouchesInView = false
@@ -207,7 +257,7 @@ final class SettingsViewController: UIViewController {
         onDismiss?()
     }
 
-    @objc private func closeTapped() {
+    @objc private func cancelTapped() {
         dismiss(animated: true)
     }
 
@@ -216,10 +266,35 @@ final class SettingsViewController: UIViewController {
     }
 
     @objc private func saveTapped() {
+        dismissKeyboard()
+        if let problem = validate() {
+            let alert = UIAlertController(title: "無法儲存", message: problem, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            present(alert, animated: true)
+            return
+        }
+
         let current = Self.loadFromUserDefaults()
-        let resolution = captureResolutionControl.selectedSegmentIndex == 1 ? (1920, 1080) : (1280, 720)
         let fpsOptions = [60, 120, 240]
         let fps = fpsOptions[min(max(0, captureFpsControl.selectedSegmentIndex), fpsOptions.count - 1)]
+
+        // Resolve intrinsics metadata: import overrides, else keep existing,
+        // else default to current resolution (manual typing at this resolution).
+        let meta: (w: Int, h: Int, rms: Double, at: Date?)
+        if let p = pendingImportMeta {
+            meta = (p.w, p.h, p.rms, Date())
+        } else if manualIntrinsicsSwitch.isOn {
+            if current.intrinsicsCalibratedWidth > 0 {
+                meta = (current.intrinsicsCalibratedWidth,
+                        current.intrinsicsCalibratedHeight,
+                        current.intrinsicsRms,
+                        current.intrinsicsCalibratedAt)
+            } else {
+                meta = (Self.captureWidthFixed, Self.captureHeightFixed, 0, Date())
+            }
+        } else {
+            meta = (0, 0, 0, nil)
+        }
 
         let settings = Settings(
             serverIP: normalizeServerIP(serverIPField.text, fallback: current.serverIP),
@@ -233,27 +308,77 @@ final class SettingsViewController: UIViewController {
             vMax: intValue(vMaxField.text, fallback: current.vMax),
             chirpThreshold: doubleValue(chirpThresholdField.text, fallback: current.chirpThreshold),
             pollInterval: min(60.0, max(1.0, doubleValue(pollIntervalField.text, fallback: current.pollInterval))),
-            captureWidth: resolution.0,
-            captureHeight: resolution.1,
+            captureWidth: Self.captureWidthFixed,
+            captureHeight: Self.captureHeightFixed,
             captureFps: fps,
             manualIntrinsicsEnabled: manualIntrinsicsSwitch.isOn,
             manualFx: doubleValue(manualFxField.text, fallback: current.manualFx),
             manualFy: doubleValue(manualFyField.text, fallback: current.manualFy),
             manualCx: doubleValue(manualCxField.text, fallback: current.manualCx),
             manualCy: doubleValue(manualCyField.text, fallback: current.manualCy),
-            manualDistortion: parseDistortion(manualDistortionField.text) ?? current.manualDistortion
+            manualDistortion: parseDistortion(manualDistortionField.text) ?? current.manualDistortion,
+            intrinsicsCalibratedWidth: meta.w,
+            intrinsicsCalibratedHeight: meta.h,
+            intrinsicsRms: meta.rms,
+            intrinsicsCalibratedAt: meta.at
         )
 
         Self.saveToUserDefaults(settings)
         dismiss(animated: true)
     }
 
+    // MARK: - Validation
+
+    private func validate() -> String? {
+        let port = intValue(serverPortField.text, fallback: -1)
+        if port < 1 || port > 65535 { return "Server port 需介於 1–65535" }
+
+        let poll = doubleValue(pollIntervalField.text, fallback: 1.0)
+        if poll < 1 || poll > 60 { return "Heartbeat interval 需介於 1–60 秒" }
+
+        let ct = doubleValue(chirpThresholdField.text, fallback: 0)
+        if ct <= 0 || ct > 1 { return "Chirp threshold 需介於 0–1（典型 0.15–0.35）" }
+
+        if intValue(hMinField.text, fallback: 0) >= intValue(hMaxField.text, fallback: 180) {
+            return "H Min 必須小於 H Max"
+        }
+        if intValue(sMinField.text, fallback: 0) >= intValue(sMaxField.text, fallback: 255) {
+            return "S Min 必須小於 S Max"
+        }
+        if intValue(vMinField.text, fallback: 0) >= intValue(vMaxField.text, fallback: 255) {
+            return "V Min 必須小於 V Max"
+        }
+
+        if manualIntrinsicsSwitch.isOn {
+            let fx = doubleValue(manualFxField.text, fallback: -1)
+            let fy = doubleValue(manualFyField.text, fallback: -1)
+            let cx = doubleValue(manualCxField.text, fallback: -1)
+            let cy = doubleValue(manualCyField.text, fallback: -1)
+            if fx < 100 { return "fx 不合理（應 > 100 px）" }
+            if fy < 100 { return "fy 不合理（應 > 100 px）" }
+            if cx <= 0 { return "cx 不合理（需 > 0）" }
+            if cy <= 0 { return "cy 不合理（需 > 0）" }
+
+            if let raw = manualDistortionField.text?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !raw.isEmpty {
+                let parts = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                if parts.count != 5 { return "distortion 需 5 個以逗號分隔的數字（k1,k2,p1,p2,k3）" }
+                if parts.contains(where: { Double($0) == nil }) {
+                    return "distortion 含非數字元素"
+                }
+            }
+        }
+        return nil
+    }
+
+    // MARK: - UI
+
     private func setupUI() {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         contentStack.axis = .vertical
-        contentStack.spacing = 16
-        contentStack.layoutMargins = UIEdgeInsets(top: 20, left: 16, bottom: 24, right: 16)
+        contentStack.spacing = 20
+        contentStack.layoutMargins = UIEdgeInsets(top: 16, left: 16, bottom: 32, right: 16)
         contentStack.isLayoutMarginsRelativeArrangement = true
 
         view.addSubview(scrollView)
@@ -282,42 +407,123 @@ final class SettingsViewController: UIViewController {
         configureTextField(vMaxField, placeholder: "255", keyboard: .numberPad)
         configureTextField(chirpThresholdField, placeholder: "0.18", keyboard: .decimalPad)
         configureTextField(pollIntervalField, placeholder: "1", keyboard: .decimalPad)
-        configureTextField(manualFxField, placeholder: "fx (e.g. 1600)", keyboard: .decimalPad)
-        configureTextField(manualFyField, placeholder: "fy (e.g. 1600)", keyboard: .decimalPad)
-        configureTextField(manualCxField, placeholder: "cx (e.g. 960)", keyboard: .decimalPad)
-        configureTextField(manualCyField, placeholder: "cy (e.g. 540)", keyboard: .decimalPad)
+        configureTextField(manualFxField, placeholder: "e.g. 1371.5", keyboard: .decimalPad)
+        configureTextField(manualFyField, placeholder: "e.g. 1378.0", keyboard: .decimalPad)
+        configureTextField(manualCxField, placeholder: "e.g. 961.9", keyboard: .decimalPad)
+        configureTextField(manualCyField, placeholder: "e.g. 536.9", keyboard: .decimalPad)
         configureTextField(manualDistortionField, placeholder: "k1,k2,p1,p2,k3", keyboard: .numbersAndPunctuation)
 
-        contentStack.addArrangedSubview(sectionTitle("Server"))
-        contentStack.addArrangedSubview(fieldRow(label: "Server IP", field: serverIPField))
-        contentStack.addArrangedSubview(fieldRow(label: "Server Port", field: serverPortField))
-        contentStack.addArrangedSubview(fieldRow(label: "Heartbeat Interval (s)", field: pollIntervalField))
+        manualIntrinsicsSwitch.addTarget(self, action: #selector(manualToggleChanged), for: .valueChanged)
 
-        contentStack.addArrangedSubview(sectionTitle("Camera"))
-        contentStack.addArrangedSubview(controlRow(label: "Camera Role", control: cameraRoleControl))
+        importIntrinsicsButton.setTitle("Import ChArUco JSON…", for: .normal)
+        importIntrinsicsButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
+        importIntrinsicsButton.contentHorizontalAlignment = .leading
+        importIntrinsicsButton.addTarget(self, action: #selector(importIntrinsicsTapped), for: .touchUpInside)
 
-        contentStack.addArrangedSubview(sectionTitle("HSV"))
-        contentStack.addArrangedSubview(fieldRow(label: "H Min", field: hMinField))
-        contentStack.addArrangedSubview(fieldRow(label: "H Max", field: hMaxField))
-        contentStack.addArrangedSubview(fieldRow(label: "S Min", field: sMinField))
-        contentStack.addArrangedSubview(fieldRow(label: "S Max", field: sMaxField))
-        contentStack.addArrangedSubview(fieldRow(label: "V Min", field: vMinField))
-        contentStack.addArrangedSubview(fieldRow(label: "V Max", field: vMaxField))
+        // Status summary card
+        buildStatusCard()
+        contentStack.addArrangedSubview(statusCard)
 
-        contentStack.addArrangedSubview(sectionTitle("Sync"))
-        contentStack.addArrangedSubview(fieldRow(label: "Chirp Threshold", field: chirpThresholdField))
+        contentStack.addArrangedSubview(sectionBlock(
+            title: "Server",
+            rows: [
+                fieldRow(label: "IP", field: serverIPField),
+                fieldRow(label: "Port", field: serverPortField),
+                fieldRow(label: "Heartbeat (s)", field: pollIntervalField),
+            ],
+            footer: "IP 支援貼整串 URL（如 http://x.x.x.x:8765/status），會自動抽出主機。"
+        ))
 
-        contentStack.addArrangedSubview(sectionTitle("Capture"))
-        contentStack.addArrangedSubview(controlRow(label: "Resolution", control: captureResolutionControl))
-        contentStack.addArrangedSubview(controlRow(label: "FPS", control: captureFpsControl))
+        contentStack.addArrangedSubview(sectionBlock(
+            title: "Camera",
+            rows: [
+                controlRow(label: "Role", control: cameraRoleControl),
+                controlRow(label: "FPS", control: captureFpsControl),
+            ],
+            footer: "解析度系統固定 1080p。240 fps 僅部分機型支援；不支援時會回退到最近的可用格式。"
+        ))
 
-        contentStack.addArrangedSubview(sectionTitle("Intrinsics (override)"))
-        contentStack.addArrangedSubview(controlRow(label: "Use ChArUco values", control: manualIntrinsicsSwitch))
-        contentStack.addArrangedSubview(fieldRow(label: "fx", field: manualFxField))
-        contentStack.addArrangedSubview(fieldRow(label: "fy", field: manualFyField))
-        contentStack.addArrangedSubview(fieldRow(label: "cx", field: manualCxField))
-        contentStack.addArrangedSubview(fieldRow(label: "cy", field: manualCyField))
-        contentStack.addArrangedSubview(fieldRow(label: "distortion", field: manualDistortionField))
+        contentStack.addArrangedSubview(sectionBlock(
+            title: "Ball Detection (HSV)",
+            rows: [
+                fieldRow(label: "H Min", field: hMinField),
+                fieldRow(label: "H Max", field: hMaxField),
+                fieldRow(label: "S Min", field: sMinField),
+                fieldRow(label: "S Max", field: sMaxField),
+                fieldRow(label: "V Min", field: vMinField),
+                fieldRow(label: "V Max", field: vMaxField),
+            ],
+            footer: "H 0-180 / S 0-255 / V 0-255。深藍棒球預設 100–130, 140–255, 40–255。"
+        ))
+
+        contentStack.addArrangedSubview(sectionBlock(
+            title: "Audio Sync",
+            rows: [
+                fieldRow(label: "Chirp Threshold", field: chirpThresholdField),
+            ],
+            footer: "HUD 閃橘色（接近）但不觸發 → 降低；環境噪音誤觸 → 提高。預設 0.18。"
+        ))
+
+        contentStack.addArrangedSubview(sectionBlock(
+            title: "Camera Intrinsics",
+            rows: [
+                controlRow(label: "Use ChArUco values", control: manualIntrinsicsSwitch),
+                singleView(importIntrinsicsButton),
+                fieldRow(label: "fx", field: manualFxField),
+                fieldRow(label: "fy", field: manualFyField),
+                fieldRow(label: "cx", field: manualCxField),
+                fieldRow(label: "cy", field: manualCyField),
+                fieldRow(label: "distortion", field: manualDistortionField),
+            ],
+            footer: "匯入 calibrate_intrinsics.py 輸出的 JSON，自動縮放到 1080p。關閉開關時改用 FOV 近似。"
+        ))
+    }
+
+    private func buildStatusCard() {
+        statusCard.backgroundColor = .secondarySystemGroupedBackground
+        statusCard.layer.cornerRadius = 12
+        statusCard.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = UILabel()
+        title.text = "Status"
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = .secondaryLabel
+
+        statusServerLabel.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+        statusRoleLabel.font = .systemFont(ofSize: 14)
+        statusIntrinsicsLabel.font = .systemFont(ofSize: 14)
+
+        let rows = UIStackView(arrangedSubviews: [
+            statusRow(key: "Server", value: statusServerLabel),
+            statusRow(key: "Role", value: statusRoleLabel),
+            statusRow(key: "Intrinsics", value: statusIntrinsicsLabel),
+        ])
+        rows.axis = .vertical
+        rows.spacing = 6
+
+        let container = UIStackView(arrangedSubviews: [title, rows])
+        container.axis = .vertical
+        container.spacing = 8
+        container.translatesAutoresizingMaskIntoConstraints = false
+        statusCard.addSubview(container)
+        NSLayoutConstraint.activate([
+            container.topAnchor.constraint(equalTo: statusCard.topAnchor, constant: 12),
+            container.leadingAnchor.constraint(equalTo: statusCard.leadingAnchor, constant: 14),
+            container.trailingAnchor.constraint(equalTo: statusCard.trailingAnchor, constant: -14),
+            container.bottomAnchor.constraint(equalTo: statusCard.bottomAnchor, constant: -12),
+        ])
+    }
+
+    private func statusRow(key: String, value: UILabel) -> UIStackView {
+        let k = UILabel()
+        k.text = key
+        k.font = .systemFont(ofSize: 13, weight: .medium)
+        k.textColor = .secondaryLabel
+        k.widthAnchor.constraint(equalToConstant: 88).isActive = true
+        let stack = UIStackView(arrangedSubviews: [k, value])
+        stack.axis = .horizontal
+        stack.spacing = 8
+        return stack
     }
 
     private func populateFields(from settings: Settings) {
@@ -332,7 +538,6 @@ final class SettingsViewController: UIViewController {
         vMaxField.text = String(settings.vMax)
         chirpThresholdField.text = String(settings.chirpThreshold)
         pollIntervalField.text = String(settings.pollInterval)
-        captureResolutionControl.selectedSegmentIndex = settings.captureHeight >= 1080 ? 1 : 0
         captureFpsControl.selectedSegmentIndex = [60, 120, 240].firstIndex(of: settings.captureFps) ?? 2
 
         manualIntrinsicsSwitch.isOn = settings.manualIntrinsicsEnabled
@@ -345,6 +550,123 @@ final class SettingsViewController: UIViewController {
             : settings.manualDistortion.map { String($0) }.joined(separator: ",")
     }
 
+    // MARK: - Status summary
+
+    private func updateStatusSummary(from s: Settings) {
+        statusServerLabel.text = "\(s.serverIP):\(s.serverPort)"
+        statusRoleLabel.text = s.cameraRole == "A" ? "A · 1B 側" : "B · 3B 側"
+        statusIntrinsicsLabel.text = intrinsicsSummary(s)
+    }
+
+    private func intrinsicsSummary(_ s: Settings) -> String {
+        guard s.manualIntrinsicsEnabled && s.manualFx > 0 else {
+            return "FOV approximation（未校正）"
+        }
+        var parts = ["Manual"]
+        if s.intrinsicsCalibratedHeight > 0 {
+            parts.append("\(s.intrinsicsCalibratedHeight)p")
+        }
+        if s.intrinsicsRms > 0 {
+            parts.append(String(format: "RMS %.2f px", s.intrinsicsRms))
+        }
+        if let at = s.intrinsicsCalibratedAt {
+            let fmt = RelativeDateTimeFormatter()
+            fmt.unitsStyle = .abbreviated
+            parts.append(fmt.localizedString(for: at, relativeTo: Date()))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    // MARK: - Live interactions
+
+    @objc private func manualToggleChanged() {
+        updateManualFieldsEnabled(animated: true)
+        updateLiveStatusPreview()
+    }
+
+    @objc private func importIntrinsicsTapped() {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.json])
+        picker.delegate = self
+        picker.allowsMultipleSelection = false
+        picker.shouldShowFileExtensions = true
+        present(picker, animated: true)
+    }
+
+    private func updateManualFieldsEnabled(animated: Bool) {
+        let on = manualIntrinsicsSwitch.isOn
+        let alpha: CGFloat = on ? 1.0 : 0.35
+        let fields: [UITextField] = [manualFxField, manualFyField, manualCxField, manualCyField, manualDistortionField]
+        let change = {
+            fields.forEach { $0.isEnabled = on; $0.alpha = alpha }
+            self.importIntrinsicsButton.isEnabled = on
+            self.importIntrinsicsButton.alpha = alpha
+        }
+        if animated { UIView.animate(withDuration: 0.2, animations: change) } else { change() }
+    }
+
+    /// Rebuilds the Intrinsics status line from live field values (no persistence).
+    /// Called after toggle / import / resolution change so the card stays truthful.
+    private func updateLiveStatusPreview() {
+        let fx = Double(manualFxField.text ?? "") ?? 0
+        guard manualIntrinsicsSwitch.isOn, fx > 0 else {
+            statusIntrinsicsLabel.text = "FOV approximation（未校正）"
+            return
+        }
+        var parts = [pendingImportMeta != nil ? "ChArUco" : "Manual"]
+        parts.append("\(Self.captureHeightFixed)p")
+        if let rms = pendingImportMeta?.rms, rms > 0 {
+            parts.append(String(format: "RMS %.2f px", rms))
+        }
+        statusIntrinsicsLabel.text = parts.joined(separator: " · ")
+    }
+
+    // MARK: - Intrinsics math
+
+    private func clearManualIntrinsics() {
+        manualFxField.text = ""
+        manualFyField.text = ""
+        manualCxField.text = ""
+        manualCyField.text = ""
+        manualDistortionField.text = ""
+    }
+
+    /// Converts intrinsics from (fromW×fromH) to (toW×toH). Handles pure scale when
+    /// aspect ratios match, and a 4:3 → 16:9 center-crop-then-scale (the ChArUco
+    /// calibration JSON is typically 4032×3024 while the live pipeline is 16:9).
+    /// Returns nil if the aspect transform is unsupported (e.g. 16:9 → 4:3).
+    private func scaleIntrinsics(
+        fx: Double, fy: Double, cx: Double, cy: Double,
+        fromW: Int, fromH: Int, toW: Int, toH: Int
+    ) -> (fx: Double, fy: Double, cx: Double, cy: Double)? {
+        let fromAspect = Double(fromW) / Double(fromH)
+        let toAspect = Double(toW) / Double(toH)
+        let eps = 0.01
+
+        let effW = fromW
+        var effH = fromH
+        let adjCx = cx
+        var adjCy = cy
+
+        if abs(fromAspect - toAspect) > eps {
+            if fromAspect < toAspect {
+                // Source is taller (e.g. 4:3). Crop top/bottom to match target aspect.
+                let newH = Int((Double(fromW) / toAspect).rounded())
+                let crop = (fromH - newH) / 2
+                effH = newH
+                adjCy = cy - Double(crop)
+            } else {
+                // Source is wider than target (rare for this app). Not supported.
+                return nil
+            }
+        }
+
+        let sx = Double(toW) / Double(effW)
+        let sy = Double(toH) / Double(effH)
+        return (fx * sx, fy * sy, adjCx * sx, adjCy * sy)
+    }
+
+    // MARK: - UI helpers
+
     private func configureTextField(_ field: UITextField, placeholder: String, keyboard: UIKeyboardType) {
         field.borderStyle = .roundedRect
         field.placeholder = placeholder
@@ -353,17 +675,72 @@ final class SettingsViewController: UIViewController {
         field.autocapitalizationType = .none
     }
 
-    private func sectionTitle(_ text: String) -> UILabel {
-        let label = UILabel()
-        label.text = text
-        label.font = .systemFont(ofSize: 18, weight: .bold)
-        return label
+    private func sectionBlock(title: String, rows: [UIView], footer: String?) -> UIView {
+        let container = UIView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let card = UIView()
+        card.backgroundColor = .secondarySystemGroupedBackground
+        card.layer.cornerRadius = 12
+        card.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleLabel = UILabel()
+        titleLabel.text = title
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.textColor = .secondaryLabel
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let rowStack = UIStackView(arrangedSubviews: rows)
+        rowStack.axis = .vertical
+        rowStack.spacing = 10
+        rowStack.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(rowStack)
+        NSLayoutConstraint.activate([
+            rowStack.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
+            rowStack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+            rowStack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+            rowStack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
+        ])
+
+        container.addSubview(titleLabel)
+        container.addSubview(card)
+
+        var constraints: [NSLayoutConstraint] = [
+            titleLabel.topAnchor.constraint(equalTo: container.topAnchor),
+            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
+            titleLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
+            card.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
+            card.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            card.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        ]
+
+        if let footer {
+            let footerLabel = UILabel()
+            footerLabel.text = footer
+            footerLabel.font = .systemFont(ofSize: 12)
+            footerLabel.textColor = .secondaryLabel
+            footerLabel.numberOfLines = 0
+            footerLabel.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(footerLabel)
+            constraints += [
+                footerLabel.topAnchor.constraint(equalTo: card.bottomAnchor, constant: 6),
+                footerLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
+                footerLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
+                footerLabel.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            ]
+        } else {
+            constraints.append(card.bottomAnchor.constraint(equalTo: container.bottomAnchor))
+        }
+
+        NSLayoutConstraint.activate(constraints)
+        return container
     }
 
     private func fieldRow(label text: String, field: UITextField) -> UIView {
         let label = UILabel()
         label.text = text
         label.font = .systemFont(ofSize: 15, weight: .medium)
+        label.widthAnchor.constraint(equalToConstant: 110).isActive = true
         label.setContentHuggingPriority(.required, for: .horizontal)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -378,6 +755,7 @@ final class SettingsViewController: UIViewController {
         let label = UILabel()
         label.text = text
         label.font = .systemFont(ofSize: 15, weight: .medium)
+        label.widthAnchor.constraint(equalToConstant: 110).isActive = true
         label.setContentHuggingPriority(.required, for: .horizontal)
 
         let stack = UIStackView(arrangedSubviews: [label, control])
@@ -386,6 +764,14 @@ final class SettingsViewController: UIViewController {
         stack.alignment = .center
         return stack
     }
+
+    private func singleView(_ view: UIView) -> UIView {
+        let wrap = UIStackView(arrangedSubviews: [view])
+        wrap.axis = .horizontal
+        return wrap
+    }
+
+    // MARK: - Parsing
 
     private func intValue(_ text: String?, fallback: Int) -> Int {
         guard let text, let value = Int(text) else { return fallback }
@@ -427,6 +813,8 @@ final class SettingsViewController: UIViewController {
         return s.isEmpty ? fallback : s
     }
 
+    // MARK: - Persistence
+
     static func saveToUserDefaults(_ settings: Settings) {
         let d = UserDefaults.standard
         d.set(settings.serverIP, forKey: keyServerIP)
@@ -458,9 +846,77 @@ final class SettingsViewController: UIViewController {
             } else {
                 d.removeObject(forKey: keyIntrinsicDistortion)
             }
+            d.set(settings.intrinsicsCalibratedWidth, forKey: keyIntrinsicsCalibratedW)
+            d.set(settings.intrinsicsCalibratedHeight, forKey: keyIntrinsicsCalibratedH)
+            d.set(settings.intrinsicsRms, forKey: keyIntrinsicsRms)
+            d.set(settings.intrinsicsCalibratedAt?.timeIntervalSince1970 ?? 0, forKey: keyIntrinsicsCalibratedAt)
         } else {
             d.set("fov", forKey: keyIntrinsicsSource)
             d.removeObject(forKey: keyIntrinsicDistortion)
+            d.removeObject(forKey: keyIntrinsicsCalibratedW)
+            d.removeObject(forKey: keyIntrinsicsCalibratedH)
+            d.removeObject(forKey: keyIntrinsicsRms)
+            d.removeObject(forKey: keyIntrinsicsCalibratedAt)
         }
+    }
+}
+
+// MARK: - Document picker (ChArUco JSON import)
+
+extension SettingsViewController: UIDocumentPickerDelegate {
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard let url = urls.first else { return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+
+        do {
+            let data = try Data(contentsOf: url)
+            let payload = try JSONDecoder().decode(CharucoIntrinsicsJSON.self, from: data)
+            applyImportedIntrinsics(payload)
+        } catch {
+            let alert = UIAlertController(
+                title: "匯入失敗",
+                message: "無法解析 JSON：\(error.localizedDescription)",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            present(alert, animated: true)
+        }
+    }
+
+    private func applyImportedIntrinsics(_ p: CharucoIntrinsicsJSON) {
+        let targetW = Self.captureWidthFixed
+        let targetH = Self.captureHeightFixed
+
+        guard let baked = scaleIntrinsics(
+            fx: p.fx, fy: p.fy, cx: p.cx, cy: p.cy,
+            fromW: p.image_width, fromH: p.image_height,
+            toW: targetW, toH: targetH
+        ) else {
+            let alert = UIAlertController(
+                title: "不支援的 aspect",
+                message: "JSON 為 \(p.image_width)×\(p.image_height)，無法轉換到 \(targetW)×\(targetH)。",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            present(alert, animated: true)
+            return
+        }
+
+        manualIntrinsicsSwitch.setOn(true, animated: true)
+        updateManualFieldsEnabled(animated: true)
+
+        manualFxField.text = String(format: "%.2f", baked.fx)
+        manualFyField.text = String(format: "%.2f", baked.fy)
+        manualCxField.text = String(format: "%.2f", baked.cx)
+        manualCyField.text = String(format: "%.2f", baked.cy)
+        if p.distortion_coeffs.count == 5 {
+            manualDistortionField.text = p.distortion_coeffs
+                .map { String(format: "%.6f", $0) }
+                .joined(separator: ",")
+        }
+
+        pendingImportMeta = (targetW, targetH, p.rms_reprojection_error_px ?? 0)
+        updateLiveStatusPreview()
     }
 }
