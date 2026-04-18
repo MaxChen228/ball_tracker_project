@@ -288,6 +288,68 @@ def test_viewer_endpoint_returns_plotly_html():
     assert session_id in body
 
 
+def test_viewer_endpoint_embeds_video_tags_for_available_clips():
+    """Viewer page ships a <video> per on-disk clip, with src pointing at
+    /videos/session_{sid}_{cam}.{ext}."""
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    session_id = sid(704)
+    _record_pitch(_pitch("A", 704, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    _record_pitch(_pitch("B", 704, K, R_b, t_b, H_b, np.array([[0.1, 0.3, 1.0]])))
+    # Drop dummy clip bytes at the expected locations (no need for real
+    # H.264 — the viewer just embeds the URL).
+    main.state.save_clip("A", session_id, b"ok-a", "mov")
+    main.state.save_clip("B", session_id, b"ok-b", "mov")
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert f'src="/videos/session_{session_id}_A.mov"' in body
+    assert f'src="/videos/session_{session_id}_B.mov"' in body
+    assert 'data-cam="A"' in body
+    assert 'data-cam="B"' in body
+
+
+def test_viewer_endpoint_without_clips_still_renders():
+    """No MOVs on disk → viewer renders a placeholder instead of 500."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(705)
+    _record_pitch(_pitch("A", 705, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert "no clips on disk" in body
+    assert "<video" not in body
+
+
+def test_video_endpoint_serves_clip_bytes():
+    session_id = sid(706)
+    main.state.save_clip("A", session_id, b"\x00\x01\x02byte-soup", "mov")
+    client = TestClient(app)
+    r = client.get(f"/videos/session_{session_id}_A.mov")
+    assert r.status_code == 200
+    assert r.content == b"\x00\x01\x02byte-soup"
+
+
+def test_video_endpoint_rejects_path_traversal():
+    """Only filenames matching the canonical `session_<sid>_<cam>.<ext>`
+    shape pass through. Anything else → 404 (not 200, not 500)."""
+    client = TestClient(app)
+    for bad in [
+        "..%2Fetc%2Fpasswd",
+        "etc/passwd",
+        "session_bad.mov",
+        "session_s_nope_A.exe",
+    ]:
+        r = client.get(f"/videos/{bad}")
+        assert r.status_code == 404, bad
+
+
+def test_video_endpoint_404_when_file_missing():
+    session_id = sid(707)
+    client = TestClient(app)
+    # No save_clip call — the on-disk file does not exist.
+    r = client.get(f"/videos/session_{session_id}_A.mov")
+    assert r.status_code == 404
+
+
 def test_viewer_endpoint_unknown_session_returns_404():
     client = TestClient(app)
     r = client.get(f"/viewer/{sid('deadbeef')}")

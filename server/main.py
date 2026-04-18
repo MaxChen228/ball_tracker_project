@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import time
@@ -62,7 +63,7 @@ from typing import Any, Callable
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
 # Re-exports so `from main import PitchPayload, ...` keeps working for the
@@ -924,10 +925,50 @@ def reconstruction(session_id: str) -> dict[str, Any]:
 
 @app.get("/viewer/{session_id}", response_class=HTMLResponse)
 def viewer(session_id: str) -> HTMLResponse:
-    from render_scene import render_scene_html
+    from render_scene import render_viewer_html
 
     scene = _scene_for_session(session_id)
-    return HTMLResponse(render_scene_html(scene))
+    videos = _videos_for_session(session_id)
+    return HTMLResponse(render_viewer_html(scene, videos))
+
+
+# Only the exact filename shape `/pitch` writes is allowed through the
+# /videos route, to keep the handler from serving arbitrary files out of
+# `data/videos/` if something unexpected ever lands there.
+_VIDEO_FILENAME_RE = re.compile(
+    r"^session_s_[0-9a-f]{4,32}_[A-Za-z0-9_-]{1,16}\.(mov|mp4|m4v)$"
+)
+
+
+def _videos_for_session(session_id: str) -> list[tuple[str, str]]:
+    """Return `[(camera_id, "/videos/<filename>"), ...]` sorted by camera_id
+    for every MOV/MP4 clip that landed on disk for this session. Empty
+    list when no clips exist (e.g. a session the server saved frames for
+    but no video — shouldn't happen post-pivot, but keep the helper
+    permissive so the viewer just hides the video area)."""
+    prefix = f"session_{session_id}_"
+    out: list[tuple[str, str]] = []
+    for path in sorted(state.video_dir.glob(f"{prefix}*")):
+        name = path.name
+        if not _VIDEO_FILENAME_RE.match(name):
+            continue
+        # Extract camera_id: strip "session_{sid}_" prefix and extension.
+        cam = name[len(prefix):].rsplit(".", 1)[0]
+        out.append((cam, f"/videos/{name}"))
+    return out
+
+
+@app.get("/videos/{filename}")
+def serve_video(filename: str) -> FileResponse:
+    """Stream the on-disk MOV/MP4 clip for the viewer page. FastAPI's
+    FileResponse honours Range requests so browsers can seek without
+    downloading the entire file upfront."""
+    if not _VIDEO_FILENAME_RE.match(filename):
+        raise HTTPException(status_code=404, detail="not found")
+    path = state.video_dir / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(path)
 
 
 @app.get("/events")
