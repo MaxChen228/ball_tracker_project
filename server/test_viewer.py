@@ -354,9 +354,9 @@ def test_viewer_endpoint_without_clips_still_renders():
 
 def test_viewer_health_banner_shows_partial_session_failure():
     """A-only session → health banner must surface (a) A's uploaded chip,
-    (b) B's 'not uploaded' state, and (c) an explicit failure strip
-    explaining triangulation was skipped. This is the whole reason the
-    banner exists — a glance should answer 'why is the 3D empty?'."""
+    (b) B's collapsed 'never uploaded' row, and (c) an explicit failure
+    strip explaining triangulation was skipped. This is the whole reason
+    the banner exists — a glance should answer 'why is the 3D empty?'."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(720)
     _record_pitch(_pitch("A", 720, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -365,16 +365,24 @@ def test_viewer_health_banner_shows_partial_session_failure():
     body = client.get(f"/viewer/{session_id}").text
     assert "CAM A" in body and "CAM B" in body
     assert "uploaded" in body
-    assert "not uploaded" in body
-    assert "never uploaded" in body  # failure strip reason
+    # Missing cam now collapses to a one-row 'never uploaded' notice +
+    # the failure strip surfaces the same wording so the operator can't
+    # miss it.
+    assert "never uploaded" in body
     assert "triangulation skipped" in body
-    # Triangulation card falls to the zero state.
+    # Hero triangulation card falls to the zero state.
     assert "no triangulation" in body
+    # Layout mode is `single-cam` so the videos column collapses and
+    # the 3D scene gets ~70% width via the data-mode CSS rule.
+    assert 'data-mode="single-cam"' in body
+    # Missing cam-card is rendered with the `missing` class — present in
+    # the SSR HTML even though it's a single collapsed row visually.
+    assert "cam-card missing" in body
 
 
 def test_viewer_health_banner_shows_paired_triangulation_count():
-    """Both A and B present + triangulated points → banner shows the
-    count and no failure strip."""
+    """Both A and B present + triangulated points → hero shows the
+    count, the per-cam rate bars render, and no failure strip exists."""
     K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
     session_id = sid(721)
     P = np.array([[0.1, 0.3, 1.0], [0.2, 0.5, 1.2]])
@@ -384,8 +392,58 @@ def test_viewer_health_banner_shows_paired_triangulation_count():
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
     assert "points triangulated" in body
+    # Hero card must render the big triangulation digit, not a chip.
+    assert 'class="hero-tri"' in body
+    # Detection-rate progress bar must render for each received cam.
+    assert 'class="rate-bar"' in body
+    assert 'rate-fill ok' in body  # both cams hit 100% detection
+    # Layout mode is `paired` since both cameras uploaded.
+    assert 'data-mode="paired"' in body
+    # Hero sub-line carries the metadata that used to live in the nav.
+    assert "session " + session_id in body
+    assert "duration " in body
     # No failure strip should render when every check passes.
     assert 'class="fail-strip"' not in body
+    # Nav bar must NOT carry the old `.meta` strip — metadata moved
+    # into the hero so it doesn't appear twice on the page.
+    assert 'class="meta"' not in body
+
+
+def test_viewer_health_banner_rate_bar_colour_tiers():
+    """Detection-rate progress bar must tint by ratio: <5% fail (red),
+    <30% pending (amber), else ok (green). The tier is what the operator
+    actually scans for — the colour answers 'is this signal usable?'."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(723)
+    # 20 frames, only 1 detection → 5% (just at the pending threshold).
+    frames = []
+    for i in range(20):
+        frames.append(schemas.FramePayload(
+            frame_index=i,
+            timestamp_s=float(i) / 240.0,
+            px=960.0 if i == 0 else None,
+            py=540.0 if i == 0 else None,
+            ball_detected=(i == 0),
+        ))
+    pitch = schemas.PitchPayload(
+        camera_id="A",
+        session_id=session_id,
+        sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        frames=frames,
+        intrinsics=schemas.IntrinsicsPayload(
+            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+        ),
+        homography=H_a.flatten().tolist(),
+    )
+    main.state.record(pitch)
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    # 1/20 = 5% → pending tier (amber). Boundary is `< 0.30`.
+    assert "rate-fill pending" in body
+    assert "1</span>" in body and "20 frames" in body
 
 
 def test_viewer_health_banner_flags_missing_time_sync():

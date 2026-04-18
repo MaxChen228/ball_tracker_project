@@ -27,8 +27,10 @@ _BORDER_BASE = "#DBD6CD"
 _BORDER_L = "#E8E4DB"
 _CONTRA = "#4A6B8C"   # Cam A — semantic blue
 _DUAL = "#D35400"     # Cam B — semantic warm
-_DEV = "#C0392B"      # semantic red (axis X / error)
+_DEV = "#C0392B"      # semantic red (axis X / fail / error)
 _ACCENT = "#E6B300"   # interactive / triangulated trajectory highlight
+_OK = "#3D7B5F"       # success green — uploaded chip, passing checks
+_PENDING = "#D49A1F"  # warm amber — degraded but not failed (low detection rate)
 
 _CAMERA_COLORS = {
     "A": _CONTRA,
@@ -140,20 +142,48 @@ def render_viewer_html(
     )
     has_triangulated = bool(scene.triangulated)
 
-    # Adaptive split: triangulation succeeded → 3D gets more (it's the
-    # whole point of the two-phone rig); no triangulation → videos get
-    # more (they're the only evidence left).
+    # Adaptive split between the 3D scene and the video column. Default
+    # ratio is set here as a fallback; CSS `data-mode` rules below
+    # override it at the layout layer for `single-cam` (70/30 — extra
+    # 3D room since one video collapses) and `paired` (3/2 — scene
+    # still leads but video cells stay readable).
     scene_flex = "3 1 0" if has_triangulated else "2 1 0"
     videos_flex = "2 1 0" if has_triangulated else "3 1 0"
 
     videos_by_cam = {cam: (url, off) for cam, url, off, _fps, _fr in videos}
+    # `never_coming` collapses the slot to a one-row notice — only when
+    # the cam never uploaded AND its sibling did, so the survivor has
+    # full vertical room. When neither uploaded we keep the dashed
+    # 'no clips on disk' placeholder for both, since there's nothing to
+    # gain from collapsing a column that already has no content.
+    other_cam = {"A": "B", "B": "A"}
     video_cells = "".join(
-        _video_cell_html(cam, videos_by_cam.get(cam))
+        _video_cell_html(
+            cam,
+            videos_by_cam.get(cam),
+            never_coming=(
+                cam not in videos_by_cam
+                and other_cam[cam] in videos_by_cam
+                and not health["cameras"][cam]["received"]
+            ),
+        )
         for cam in ("A", "B")
     )
 
+    # `data-mode` toggles layout rules in CSS — `single-cam` widens the
+    # 3D scene at the expense of the videos column when only one phone
+    # ever uploaded (B's vid-cell collapses), so the surviving evidence
+    # gets the room it deserves.
+    cam_a_received = health["cameras"]["A"]["received"]
+    cam_b_received = health["cameras"]["B"]["received"]
+    if cam_a_received and cam_b_received:
+        layout_mode = "paired"
+    elif cam_a_received or cam_b_received:
+        layout_mode = "single-cam"
+    else:
+        layout_mode = "empty"
+
     health_html = _health_banner_html(health)
-    header_meta = _header_meta_text(health)
 
     return f"""<!doctype html>
 <html lang="en"><head>
@@ -164,6 +194,7 @@ def render_viewer_html(
     --bg: {_BG}; --surface: {_SURFACE}; --ink: {_INK}; --sub: {_SUB};
     --border-base: {_BORDER_BASE}; --border-l: {_BORDER_L};
     --contra: {_CONTRA}; --dual: {_DUAL}; --dev: {_DEV}; --accent: {_ACCENT};
+    --ok: {_OK}; --pending: {_PENDING};
     --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     --sans: "Noto Sans TC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }}
@@ -181,27 +212,48 @@ def render_viewer_html(
     letter-spacing:0.16em; color:var(--ink); }}
   .nav .brand .dot {{ display:inline-block; width:7px; height:7px;
     background:var(--ink); margin-right:10px; vertical-align:middle; }}
-  .nav .meta {{ font-family:var(--mono); font-size:11px;
-    letter-spacing:0.08em; text-transform:uppercase; color:var(--sub);
-    display:flex; gap:16px; }}
-  .nav .meta .v {{ color:var(--ink); font-weight:500; }}
   .nav .back {{ margin-left:auto; font-family:var(--mono); font-size:11px;
     letter-spacing:0.12em; text-transform:uppercase; color:var(--sub);
     text-decoration:none; }}
   .nav .back:hover {{ color:var(--ink); }}
 
-  /* --- Health banner --- */
+  /* --- Health banner: hero (50%) + cam stack (50%) ---
+     Hero is the page's headline number. Cam rows live in a stack on
+     the right so two compact rows take vertical space proportional to
+     the hero's bigness without ever cropping the digit. */
   .health {{ flex:0 0 auto; background:var(--surface);
     border-bottom:1px solid var(--border-base); padding:18px 24px;
     display:flex; flex-direction:column; gap:12px; }}
-  .health-row {{ display:grid; grid-template-columns:1fr 1fr 220px;
+  .health-row {{ display:grid; grid-template-columns:1fr 1fr;
     gap:16px; align-items:stretch; }}
+  .cam-stack {{ display:flex; flex-direction:column; gap:8px; }}
+
+  /* Hero card — the single biggest piece of information on the page. */
+  .hero-card {{ border:1px solid var(--border-base); border-radius:4px;
+    padding:16px 20px; background:var(--bg); display:flex;
+    flex-direction:column; justify-content:center; gap:6px; }}
+  .hero-card.ok {{ background:var(--surface); border-color:var(--accent); }}
+  .hero-title {{ font-family:var(--mono); font-size:10px;
+    letter-spacing:0.18em; text-transform:uppercase; color:var(--sub); }}
+  .hero-tri {{ font-family:var(--mono); font-size:56px; font-weight:500;
+    line-height:1; color:var(--accent); letter-spacing:0.01em; }}
+  .hero-tri.zero {{ color:var(--sub); }}
+  .hero-note {{ font-family:var(--mono); font-size:11px;
+    letter-spacing:0.04em; color:var(--sub); }}
+  .hero-sub {{ font-family:var(--mono); font-size:11px;
+    letter-spacing:0.04em; color:var(--sub); margin-top:6px;
+    border-top:1px solid var(--border-l); padding-top:8px; }}
+
+  /* Compact per-camera row. `received` and `missing` share the
+     `.cam-card` wrapper but missing is a single-line collapsed row. */
   .cam-card {{ border:1px solid var(--border-base); border-radius:4px;
-    padding:12px 16px; background:var(--bg);
-    display:flex; flex-direction:column; gap:8px; }}
+    padding:10px 14px; background:var(--bg);
+    display:flex; flex-direction:column; gap:6px; }}
   .cam-card.received {{ background:var(--surface); }}
-  .cam-card.missing {{ opacity:0.75; }}
-  .cam-head {{ display:flex; align-items:center; gap:10px; }}
+  .cam-card.missing {{ opacity:0.85; flex-direction:row;
+    align-items:center; gap:10px; }}
+  .cam-head {{ display:flex; align-items:center; gap:10px;
+    flex-wrap:wrap; }}
   .cam-badge {{ font-family:var(--mono); font-weight:600; font-size:11px;
     letter-spacing:0.18em; padding:3px 10px; border:1px solid;
     border-radius:2px; }}
@@ -209,33 +261,38 @@ def render_viewer_html(
   .cam-badge.B {{ color:var(--dual); border-color:var(--dual); }}
   .cam-state {{ font-family:var(--mono); font-size:11px;
     letter-spacing:0.08em; text-transform:uppercase; }}
-  .cam-state.ok {{ color:var(--ink); }}
-  .cam-state.bad {{ color:var(--dev); }}
-  .cam-checks {{ display:flex; flex-wrap:wrap; gap:6px 14px; }}
+  .cam-state.ok {{ color:var(--ok); }}
+  .cam-state.fail {{ color:var(--dev); }}
+  .cam-note {{ font-family:var(--mono); font-size:11px; color:var(--sub);
+    letter-spacing:0.02em; }}
+  .cam-checks {{ display:inline-flex; flex-wrap:wrap; gap:4px 12px;
+    margin-left:auto; }}
   .check {{ font-family:var(--mono); font-size:11px;
     letter-spacing:0.04em; color:var(--sub);
     display:inline-flex; align-items:center; gap:6px; }}
   .check .mark {{ font-weight:700; width:12px; display:inline-block;
     text-align:center; }}
   .check.pass {{ color:var(--ink); }}
-  .check.pass .mark {{ color:var(--contra); }}
+  .check.pass .mark {{ color:var(--ok); }}
   .check.fail .mark {{ color:var(--dev); }}
+  .cam-rate {{ display:flex; align-items:center; gap:10px; }}
   .cam-stats {{ font-family:var(--mono); font-size:12px; color:var(--ink);
-    letter-spacing:0.02em; }}
+    letter-spacing:0.02em; white-space:nowrap; }}
   .cam-stats .n {{ font-weight:500; }}
   .cam-stats .of {{ color:var(--sub); }}
 
-  .tri-card {{ border:1px solid var(--border-base); border-radius:4px;
-    padding:12px 16px; background:var(--bg); display:flex;
-    flex-direction:column; justify-content:center; gap:4px; }}
-  .tri-card.ok {{ background:var(--surface); border-color:var(--accent); }}
-  .tri-title {{ font-family:var(--mono); font-size:10px;
-    letter-spacing:0.18em; text-transform:uppercase; color:var(--sub); }}
-  .tri-count {{ font-family:var(--mono); font-size:28px; font-weight:500;
-    color:var(--ink); line-height:1; letter-spacing:0.02em; }}
-  .tri-count.zero {{ color:var(--sub); }}
-  .tri-note {{ font-family:var(--mono); font-size:10px;
-    letter-spacing:0.04em; color:var(--sub); }}
+  /* Detection-rate progress bar — purely decorative, the number to the
+     right is still the source of truth, but the bar gives a 1-glance
+     answer to "how much of the recording had a ball?". */
+  .rate-bar {{ flex:1 1 auto; min-width:60px; height:3px;
+    background:var(--border-l); border-radius:2px; overflow:hidden;
+    display:inline-block; }}
+  .rate-fill {{ display:block; height:100%; transition:width .3s; }}
+  .rate-fill.ok {{ background:var(--ok); }}
+  .rate-fill.pending {{ background:var(--pending); }}
+  .rate-fill.fail {{ background:var(--dev); }}
+  .rate-empty {{ font-family:var(--mono); font-size:12px;
+    color:var(--sub); flex:1; }}
 
   .fail-strip {{ font-family:var(--mono); font-size:12px;
     letter-spacing:0.02em; padding:8px 12px; border-radius:2px;
@@ -244,7 +301,11 @@ def render_viewer_html(
     align-items:center; gap:10px; }}
   .fail-strip .icon {{ font-weight:700; }}
 
-  /* --- Main work area --- */
+  /* --- Main work area ---
+     `data-mode` lets the layout adapt without re-rendering: paired
+     keeps the default 3:2 split (both video cells equal); single-cam
+     widens the scene to ~70% since the missing video collapses; empty
+     falls through to the default flex values. */
   .work {{ flex:1 1 auto; display:flex; min-height:460px;
     border-bottom:1px solid var(--border-base); }}
   .scene-col {{ flex:{scene_flex}; min-width:420px; position:relative;
@@ -252,8 +313,13 @@ def render_viewer_html(
   #scene {{ position:absolute; inset:0; }}
   .videos-col {{ flex:{videos_flex}; min-width:320px; display:flex;
     flex-direction:column; gap:1px; background:var(--border-base); }}
+  .work[data-mode="single-cam"] .scene-col {{ flex:7 1 0; }}
+  .work[data-mode="single-cam"] .videos-col {{ flex:3 1 0;
+    min-width:240px; }}
   .vid-cell {{ flex:1 1 0; background:var(--surface); padding:10px 14px;
     display:flex; flex-direction:column; gap:6px; min-height:0; }}
+  .vid-cell.collapsed {{ flex:0 0 auto; padding:8px 14px;
+    flex-direction:row; align-items:center; gap:10px; }}
   .vid-head {{ display:flex; align-items:center; gap:10px; }}
   .vid-label {{ font-family:var(--mono); font-size:10px; font-weight:600;
     letter-spacing:0.18em; border:1px solid; padding:2px 8px;
@@ -369,11 +435,10 @@ def render_viewer_html(
 <div class="viewer">
   <div class="nav">
     <span class="brand"><span class="dot"></span>BALL_TRACKER</span>
-    <span class="meta">{header_meta}</span>
     <a class="back" href="/">&larr; dashboard</a>
   </div>
   {health_html}
-  <div class="work">
+  <div class="work" data-mode="{layout_mode}">
     <div class="scene-col">
       <div id="scene"></div>
       <button id="scene-reset" class="scene-reset" type="button" title="Reset 3D view">&#x21BA;</button>
@@ -1021,15 +1086,27 @@ def _camera_color(camera_id: str) -> str:
     return _CAMERA_COLORS.get(camera_id, _FALLBACK_CAMERA_COLOR)
 
 
-def _video_cell_html(cam: str, entry: tuple[str, float] | None) -> str:
-    """One vid-cell per camera slot. `entry` is None when the slot has no
-    clip on disk — rendered as an explicit placeholder so the operator
-    sees "no clip" rather than a silent gap."""
+def _video_cell_html(
+    cam: str, entry: tuple[str, float] | None, *, never_coming: bool = False
+) -> str:
+    """One vid-cell per camera slot. Three states:
+      * clip present → embed `<video>` synced to the chirp anchor.
+      * `entry is None`, `never_coming=False` → dashed placeholder
+        keeping the slot height so a late paired upload doesn't reflow
+        the page.
+      * `never_coming=True` → collapse to a one-row notice; the missing
+        cam isn't coming and the survivor deserves the vertical room.
+    """
     color = _camera_color(cam)
     if entry is None:
-        # Keep the 'no clips on disk' literal when BOTH cameras are missing
-        # (test_viewer_endpoint_without_clips_still_renders checks for it);
-        # a per-slot placeholder is fine and still contains the phrase.
+        if never_coming:
+            return (
+                f'<div class="vid-cell collapsed">'
+                f'<span class="vid-label" '
+                f'style="color:{color};border-color:{color};">CAM {cam}</span>'
+                f'<span class="vid-hint">never uploaded</span>'
+                f'</div>'
+            )
         body = '<div class="vid-frame empty">no clips on disk</div>'
         hint = "awaiting upload"
     else:
@@ -1052,77 +1129,82 @@ def _video_cell_html(cam: str, entry: tuple[str, float] | None) -> str:
     )
 
 
-def _header_meta_text(health: dict) -> str:
-    """Monospaced status strip for the nav bar: session id, duration,
-    upload time. Each value is tagged `.v` so the design-system CSS
-    colours it as 'ink' while the labels stay 'sub'."""
+def _hero_meta_subline(health: dict) -> str:
+    """Sub line under the big triangulation count — session id, duration,
+    received-at — replacing the old nav-bar `.meta` strip so the metadata
+    lives next to the headline number it qualifies."""
     import datetime as _dt
 
-    parts: list[str] = []
-    parts.append(
-        f'<span>SESSION <span class="v">{health["session_id"]}</span></span>'
-    )
+    parts: list[str] = [f'session {health["session_id"]}']
     dur = health.get("duration_s")
     if dur is not None:
-        parts.append(f'<span>DURATION <span class="v">{dur:.2f}s</span></span>')
+        parts.append(f"duration {dur:.2f}s")
     rx = health.get("received_at")
     if rx is not None:
         ts = _dt.datetime.fromtimestamp(rx).strftime("%m-%d %H:%M")
-        parts.append(f'<span>RECEIVED <span class="v">{ts}</span></span>')
-    return "".join(parts)
+        parts.append(f"received {ts}")
+    return " · ".join(parts)
 
 
 def _health_banner_html(health: dict) -> str:
-    """Per-camera diagnostic cards + triangulation summary + explicit
-    failure strip. The banner is the page's answer to "what actually
-    happened during this session?" — every failure mode the pipeline can
-    hit (B never uploaded, no time sync, missing calibration, triangulation
-    skipped) has a visible surface here, so the operator never has to
-    infer from an empty 3D scene."""
-    cards: list[str] = []
-    for cam_id in ("A", "B"):
-        cam = health["cameras"][cam_id]
-        cards.append(_cam_card_html(cam_id, cam))
-
+    """Hero-first banner: 3D TRAJECTORY count is the page's headline
+    (left half, big number + session metadata sub-line). CAM A / CAM B
+    rows live in the right half — compact, one row per camera, with a
+    detection-rate progress bar so 'how much of the recording actually
+    contained a ball?' reads at a glance. Failure strip stays at the
+    bottom so blocking issues are surfaced explicitly even when the
+    upper rows look healthy."""
     tri_n = health.get("triangulated_count", 0)
+    sub = _hero_meta_subline(health)
     if tri_n > 0:
-        tri_block = (
-            f'<div class="tri-card ok">'
-            f'<div class="tri-title">3D Trajectory</div>'
-            f'<div class="tri-count">{tri_n}</div>'
-            f'<div class="tri-note">points triangulated</div>'
+        hero_block = (
+            f'<div class="hero-card ok">'
+            f'<div class="hero-title">3D Trajectory</div>'
+            f'<div class="hero-tri">{tri_n}</div>'
+            f'<div class="hero-note">points triangulated</div>'
+            f'<div class="hero-sub">{sub}</div>'
             f'</div>'
         )
     else:
-        tri_block = (
-            f'<div class="tri-card">'
-            f'<div class="tri-title">3D Trajectory</div>'
-            f'<div class="tri-count zero">—</div>'
-            f'<div class="tri-note">no triangulation</div>'
+        hero_block = (
+            f'<div class="hero-card">'
+            f'<div class="hero-title">3D Trajectory</div>'
+            f'<div class="hero-tri zero">—</div>'
+            f'<div class="hero-note">no triangulation</div>'
+            f'<div class="hero-sub">{sub}</div>'
             f'</div>'
         )
+
+    cam_rows = "".join(
+        _cam_card_html(cam_id, health["cameras"][cam_id])
+        for cam_id in ("A", "B")
+    )
 
     fail_strip = _failure_strip_html(health)
 
     return (
         f'<div class="health">'
-        f'<div class="health-row">{cards[0]}{cards[1]}{tri_block}</div>'
+        f'<div class="health-row">'
+        f'{hero_block}'
+        f'<div class="cam-stack">{cam_rows}</div>'
+        f'</div>'
         f'{fail_strip}'
         f'</div>'
     )
 
 
 def _cam_card_html(cam_id: str, cam: dict) -> str:
+    """One compact row per camera. Chip colour, check marks, and the
+    rate-bar tint map to ok/pending/fail so the operator can scan A and
+    B at a glance. Missing cams collapse to a one-line notice — viewer
+    is a post-mortem, an absent upload won't show up later."""
     if not cam["received"]:
         return (
             f'<div class="cam-card missing">'
-            f'<div class="cam-head">'
             f'<span class="cam-badge {cam_id}">CAM {cam_id}</span>'
-            f'<span class="cam-state bad">not uploaded</span>'
-            f'</div>'
-            f'<div class="cam-stats" style="color:var(--sub);">'
-            f'this phone never reached the server for this session'
-            f'</div>'
+            f'<span class="cam-state fail">never uploaded</span>'
+            f'<span class="cam-note">single-camera session, '
+            f'triangulation skipped</span>'
             f'</div>'
         )
 
@@ -1139,19 +1221,40 @@ def _cam_card_html(cam_id: str, cam: dict) -> str:
 
     n_det = cam["n_detected"]
     n_frames = cam["n_frames"]
+
     stats_html = (
         f'<span class="n">{n_det}</span>'
         f'<span class="of"> detected / {n_frames} frames</span>'
     )
+    if n_frames == 0:
+        # Zero decodable frames — a 0/0 bar would be misleading.
+        rate_html = '<span class="rate-empty">—</span>'
+    else:
+        ratio = n_det / n_frames
+        # Tier thresholds match the operator's mental model — "almost
+        # nothing" vs "weak signal" vs "we have a track".
+        if ratio < 0.05:
+            rate_class = "fail"
+        elif ratio < 0.30:
+            rate_class = "pending"
+        else:
+            rate_class = "ok"
+        # Min 2% width so a non-zero detection still shows a sliver.
+        pct = max(2, round(ratio * 100)) if n_det > 0 else 0
+        rate_html = (
+            f'<span class="rate-bar"><span class="rate-fill {rate_class}" '
+            f'style="width:{pct}%"></span></span>'
+        )
 
     return (
         f'<div class="cam-card received">'
         f'<div class="cam-head">'
         f'<span class="cam-badge {cam_id}">CAM {cam_id}</span>'
         f'<span class="cam-state ok">uploaded</span>'
+        f'<span class="cam-checks">{checks_html}</span>'
         f'</div>'
-        f'<div class="cam-checks">{checks_html}</div>'
-        f'<div class="cam-stats">{stats_html}</div>'
+        f'<div class="cam-rate">{rate_html}<span class="cam-stats">'
+        f'{stats_html}</span></div>'
         f'</div>'
     )
 
