@@ -252,6 +252,20 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
+    deinit {
+        // CADisplayLink holds a strong reference to its target — without an
+        // explicit invalidate the controller can't deallocate, and the
+        // selector keeps firing on main. Pausing in viewWillDisappear is
+        // not enough; the link must be invalidated for the retain cycle to
+        // break. Timers are belt-and-braces — stopStatusPolling already
+        // kills them, but cover the "deinit without viewWillDisappear"
+        // edge case too.
+        displayLink?.invalidate()
+        displayLink = nil
+        statusPollTimer?.invalidate()
+        tickTimer?.invalidate()
+    }
+
     // MARK: - Tracking controls
 
     func enterSyncMode() {
