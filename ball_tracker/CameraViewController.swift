@@ -56,10 +56,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var audioOutput: AVCaptureAudioDataOutput?
     private var chirpDetector: AudioChirpDetector?
 
-    // State + frame index.
+    // State + frame index. `state` is read/written on main; `captureOutput`
+    // (frame queue, up to 240 Hz) reads it via `frameStateBox.snapshot()` so
+    // it never observes a partially-updated AppState while `applyRemoteDisarm`
+    // mutates it on main. `frameIndex` is touched only on the frame queue.
     private var state: AppState = .standby
     private var frameIndex: Int = 0
     private var horizontalFovRadians: Double = 1.0
+
+    // Lock-protected mirror of the three fields `captureOutput` reads
+    // across queues. Main thread is the sole writer; the frame queue
+    // takes a single locked snapshot per delivered sample.
+    private let frameStateBox = FrameStateBox()
 
     // Collaborators.
     private var settings: SettingsViewController.Settings!
@@ -86,22 +94,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // Chirp detector snapshot for the HUD — written on audio queue.
     private var latestChirpSnapshot: AudioChirpDetector.Snapshot?
 
-    // `.recording` was just entered but the ClipRecorder hasn't been
-    // prepared yet — the very next captured sample will configure the
-    // writer at the observed pixel dimensions.
-    private var pendingRecordingBootstrap: Bool = false
-
-    // Disarm arrived while `.recording` was still waiting for its first
-    // captured sample (fps switch blocks main ~500 ms, and the first
-    // frame after `startRunning` takes another beat). Rather than
-    // aborting the clip with zero frames, we park the disarm here; the
-    // next captureOutput that successfully starts the recorder will see
-    // this flag and immediately force-finish, so at least one frame
-    // reaches the server. `pendingDisarmTimeoutWork` is the main-thread
-    // 2 s bail-out that fires when no frame ever arrives (camera broken
-    // or session torn down mid-flight).
-    private var pendingDisarm: Bool = false
-    private var pendingDisarmTimeoutWork: DispatchWorkItem?
+    // The `.recording`-was-just-entered bootstrap flag and the snapshot of
+    // `currentSessionId` taken at arm time both live in `frameStateBox`;
+    // the camera VC itself never reads them after the push, so duplicating
+    // them as instance vars would just be two stores out of sync.
 
     // Remote-control state (driven by the heartbeat response).
     /// Last command key we acted on for this device (`"arm"` / `"disarm"` /
@@ -224,12 +220,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         recorder.setCameraId(settings.cameraRole)
         recorder.onRecordingStarted = { [weak self] _ in
             DispatchQueue.main.async {
-                self?.warningLabel.isHidden = true
+                guard let self else { return }
+                // Keep the "尚未時間校正" warning up while recording — the
+                // upload will still go but the server will skip triangulation,
+                // and the operator needs to keep seeing why.
+                if self.lastSyncAnchorTimestampS != nil {
+                    self.warningLabel.isHidden = true
+                }
                 // Start-of-recording feedback: short tone + a medium
                 // haptic so the operator registers the transition even
                 // if looking away from the screen.
-                AudioServicesPlaySystemSound(self?.startRecSoundID ?? 0)
-                self?.startRecHaptic.impactOccurred()
+                AudioServicesPlaySystemSound(self.startRecSoundID)
+                self.startRecHaptic.impactOccurred()
             }
         }
         recorder.onCycleComplete = { [weak self] payload in
@@ -376,12 +378,24 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// known.
     func enterRecordingMode() {
         guard state == .standby else { return }
-        log.info("camera entering recording session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
-        warningLabel.isHidden = true
+        // Snapshot the server-minted session id at arm time and freeze it
+        // into the frame-state box. `self.currentSessionId` may flip during
+        // the ~300-500 ms fps-switch window, so the captureOutput path
+        // reads this snapshot rather than the live property.
+        let snapshotSessionId = currentSessionId
+        log.info("camera entering recording session=\(snapshotSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
+        if lastSyncAnchorTimestampS == nil {
+            warningLabel.text = "⚠️ 尚未時間校正，將無法三角化"
+            warningLabel.textColor = .systemOrange
+            warningLabel.isHidden = false
+            log.warning("arm without time sync anchor — server will skip triangulation")
+        } else {
+            warningLabel.isHidden = true
+        }
         startCapture(at: trackingFps)
         recorder.reset()
-        pendingRecordingBootstrap = true
         state = .recording
+        frameStateBox.update(state: .recording, pendingBootstrap: true, sessionId: snapshotSessionId)
         updateUIForState()
         // Acknowledge arm with a light tap; pre-warm the next two haptics
         // so their first fire isn't lazy-initialised.
@@ -401,7 +415,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     func exitRecordingToStandby() {
         log.info("camera exit recording → standby session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public) state=\(self.stateText(self.state), privacy: .public)")
         state = .standby
-        pendingRecordingBootstrap = false
+        frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
         recorder.reset()
         processingQueue.async { [weak self] in
             self?.clipRecorder?.cancel()
@@ -479,6 +493,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             }
         }
         state = .timeSyncWaiting
+        frameStateBox.update(state: .timeSyncWaiting, pendingBootstrap: false, sessionId: nil)
         warningLabel.text = "等待同步音頻觸發中… (把兩機並排，第三裝置播 chirp)"
         warningLabel.isHidden = false
         lastUploadStatusText = "Time sync: waiting for chirp"
@@ -498,6 +513,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         chirpDetector?.onChirpDetected = nil
         latestChirpSnapshot = nil
         state = .standby
+        frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
         // Already at standbyFps — if the operator asked to keep the preview,
         // just leave the session running; otherwise park it.
         if settings.parkCameraInStandby {
@@ -541,6 +557,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         healthMonitor?.updateTimeSynced(true)
         latestChirpSnapshot = nil
         state = .standby
+        frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
         if settings.parkCameraInStandby {
             stopCapture()
         }
@@ -881,11 +898,46 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.updateUIForState()
         }
         uploadQueue.onLastResultChanged = { [weak self] text in
-            self?.lastResultText = text
-            self?.updateUIForState()
+            guard let self else { return }
+            self.lastResultText = text
+            // A successful upload arrived — clear any sticky red from a
+            // previous dropped-payload banner so the green default returns.
+            self.lastResultLabel.textColor = .systemGreen
+            self.updateUIForState()
         }
         uploadQueue.onUploadingChanged = { [weak self] _ in
             self?.updateUIForState()
+        }
+        uploadQueue.onPayloadDropped = { [weak self] fileURL, error in
+            guard let self else { return }
+            let basename = fileURL.deletingPathExtension().lastPathComponent
+            let detail = Self.describeUploadError(error)
+            log.error("camera payload dropped file=\(basename, privacy: .public) reason=\(detail, privacy: .public)")
+            // Surface a sticky red banner on the "Last:" row — the green
+            // success line gets overwritten by the next paired pitch, but
+            // a dropped payload is data loss the operator must notice.
+            self.lastResultText = "⛔ 上傳失敗已丟棄: \(basename) — \(detail)"
+            self.lastResultLabel.textColor = .systemRed
+            self.updateUIForState()
+        }
+    }
+
+    /// Short human-readable detail for `UploadError`. `PayloadUploadQueue`
+    /// has its own one-word categoriser for the small "Upload:" line; this
+    /// one is for the more prominent "Last:" alert and includes status
+    /// codes so the operator can grep server logs.
+    private static func describeUploadError(_ error: ServerUploader.UploadError) -> String {
+        switch error {
+        case .network(let urlError):
+            return "network (\(urlError.code.rawValue))"
+        case .client(let code, _):
+            return "HTTP \(code) (client)"
+        case .server(let code, _):
+            return "HTTP \(code) (server)"
+        case .decoding:
+            return "decode error"
+        case .invalidResponse:
+            return "no response"
         }
     }
 
@@ -1340,20 +1392,29 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         frameIndex += 1
 
+        // Locked snapshot of state, pending-bootstrap, and the
+        // session id frozen at arm time. Read once per sample; the
+        // rest of this method only touches `snap`, never `self.state`
+        // / `self.currentSessionId` directly, so a 240 Hz sample can't
+        // race a main-thread mutation mid-method.
+        let snap = frameStateBox.snapshot()
+
         // Only the `.recording` state cares about samples. Phone is a pure
         // capture client — no ball detection, no overlay, no per-frame
         // payload work. Idle / time-sync / uploading all just drop through.
-        guard state == .recording else { return }
+        guard snap.state == .recording else { return }
 
         // Lazy-bootstrap the ClipRecorder from the first real sample's
         // dimensions (deferred from enterRecordingMode so we can key off
         // whatever the sensor is actually delivering post-fps-switch).
-        if pendingRecordingBootstrap {
-            pendingRecordingBootstrap = false
+        // `consumePendingBootstrap` clears the flag atomically so a
+        // simultaneous main-thread push can't race us into starting the
+        // writer twice.
+        if frameStateBox.consumePendingBootstrap() {
             startClipRecorder(width: width, height: height)
             if clipRecorder == nil {
                 // Prepare failed. Fall back to standby on main.
-                log.error("camera clip bootstrap failed session=\(self.currentSessionId ?? "nil", privacy: .public)")
+                log.error("camera clip bootstrap failed session=\(snap.sessionId ?? "nil", privacy: .public)")
                 DispatchQueue.main.async {
                     self.returnToStandbyAfterCycle = false
                     self.exitRecordingToStandby()
@@ -1368,8 +1429,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // First successful append kicks off the PitchRecorder so its
         // payload carries the session-clock PTS of the MOV's first frame.
         if !recorder.isActive, let firstPTS = clip.firstSamplePTS {
-            let sid = currentSessionId ?? ""
-            if sid.isEmpty {
+            guard let sid = snap.sessionId, !sid.isEmpty else {
                 // Armed locally without a server session id — shouldn't
                 // happen (heartbeat sets it before arm fires), but bail
                 // rather than uploading a payload the server will 422.
@@ -1425,6 +1485,54 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             image_width_px: dims?.width,
             image_height_px: dims?.height
         )
+    }
+}
+
+/// Lock-protected mirror of the three fields `captureOutput` reads across
+/// queues (`state`, `pendingRecordingBootstrap`, `pendingSessionId`). Main
+/// thread is the sole writer — `applyRemoteArm` / `applyRemoteDisarm` /
+/// `enterRecordingMode` / `exitRecordingToStandby` push every transition;
+/// the frame queue takes one locked snapshot per delivered sample so a
+/// 240 Hz read can never observe a partially-mutated state struct.
+final class FrameStateBox {
+    struct Snapshot {
+        let state: CameraViewController.AppState
+        let pendingBootstrap: Bool
+        let sessionId: String?
+    }
+
+    private var lock = os_unfair_lock_s()
+    private var _state: CameraViewController.AppState = .standby
+    private var _pendingBootstrap: Bool = false
+    private var _sessionId: String?
+
+    func snapshot() -> Snapshot {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return Snapshot(
+            state: _state,
+            pendingBootstrap: _pendingBootstrap,
+            sessionId: _sessionId
+        )
+    }
+
+    func update(state: CameraViewController.AppState, pendingBootstrap: Bool, sessionId: String?) {
+        os_unfair_lock_lock(&lock)
+        _state = state
+        _pendingBootstrap = pendingBootstrap
+        _sessionId = sessionId
+        os_unfair_lock_unlock(&lock)
+    }
+
+    /// Edge-trigger helper for the frame queue: clears the bootstrap flag
+    /// once the writer is up. Returns the previous value so the caller can
+    /// branch on whether *this* sample owned the bootstrap.
+    func consumePendingBootstrap() -> Bool {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        let prev = _pendingBootstrap
+        _pendingBootstrap = false
+        return prev
     }
 }
 
