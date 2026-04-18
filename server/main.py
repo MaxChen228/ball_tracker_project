@@ -55,6 +55,7 @@ identifiers.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -553,79 +554,87 @@ class State:
 
         `received_at` is derived from the pitch file's mtime so we don't
         have to extend the Pydantic payload with server-side timestamps.
+        Disk `stat()` happens AFTER releasing `self._lock` so the
+        dashboard's 5 s tick can't block heartbeats / /pitch handlers
+        that need to mutate the state map.
         """
+        # --- Critical section: snapshot only the in-memory data we need.
         with self._lock:
             sessions = sorted({sid for _, sid in self.pitches.keys()})
-            events: list[dict[str, Any]] = []
+            snapshots: list[tuple[str, list[str], dict[str, int], SessionResult | None]] = []
             for sid in sessions:
                 cams_present = sorted(
                     cam for (cam, s) in self.pitches.keys() if s == sid
                 )
-                cam_frame_counts: dict[str, int] = {}
-                latest_mtime: float | None = None
-                for cam in cams_present:
-                    pitch = self.pitches[(cam, sid)]
-                    cam_frame_counts[cam] = sum(
-                        1 for f in pitch.frames if f.ball_detected
+                cam_frame_counts = {
+                    cam: sum(
+                        1 for f in self.pitches[(cam, sid)].frames if f.ball_detected
                     )
-                    path = self._pitch_path(cam, sid)
-                    try:
-                        mtime = path.stat().st_mtime
-                    except FileNotFoundError:
-                        mtime = None
-                    if mtime is not None and (
-                        latest_mtime is None or mtime > latest_mtime
-                    ):
-                        latest_mtime = mtime
-
-                result = self.results.get(sid)
-                n_triangulated = len(result.points) if result is not None else 0
-                error = result.error if result is not None else None
-
-                if error:
-                    status = "error"
-                elif len(cams_present) >= 2 and n_triangulated > 0:
-                    status = "paired"
-                elif len(cams_present) >= 2:
-                    status = "paired_no_points"
-                else:
-                    status = "partial"
-
-                peak_z: float | None = None
-                mean_res: float | None = None
-                duration: float | None = None
-                if result is not None and result.points:
-                    zs = [p.z_m for p in result.points]
-                    peak_z = float(max(zs))
-                    mean_res = float(
-                        sum(p.residual_m for p in result.points)
-                        / len(result.points)
-                    )
-                    ts = [p.t_rel_s for p in result.points]
-                    duration = float(ts[-1] - ts[0])
-
-                events.append(
-                    {
-                        "session_id": sid,
-                        "cameras": cams_present,
-                        "status": status,
-                        "received_at": latest_mtime,
-                        "n_ball_frames": cam_frame_counts,
-                        "n_triangulated": n_triangulated,
-                        "peak_z_m": peak_z,
-                        "mean_residual_m": mean_res,
-                        "duration_s": duration,
-                        "error": error,
-                    }
+                    for cam in cams_present
+                }
+                snapshots.append(
+                    (sid, cams_present, cam_frame_counts, self.results.get(sid))
                 )
-            # Latest events first — session ids carry 4 bytes of random hex
-            # so we sort by `received_at` (fallback to id) to surface the
-            # most recently uploaded session at the top.
-            events.sort(
-                key=lambda e: (e["received_at"] or 0, e["session_id"]),
-                reverse=True,
+
+        # --- Outside the lock: file stats + summary derivation.
+        events: list[dict[str, Any]] = []
+        for sid, cams_present, cam_frame_counts, result in snapshots:
+            latest_mtime: float | None = None
+            for cam in cams_present:
+                try:
+                    mtime = self._pitch_path(cam, sid).stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                if latest_mtime is None or mtime > latest_mtime:
+                    latest_mtime = mtime
+
+            n_triangulated = len(result.points) if result is not None else 0
+            error = result.error if result is not None else None
+
+            if error:
+                status = "error"
+            elif len(cams_present) >= 2 and n_triangulated > 0:
+                status = "paired"
+            elif len(cams_present) >= 2:
+                status = "paired_no_points"
+            else:
+                status = "partial"
+
+            peak_z: float | None = None
+            mean_res: float | None = None
+            duration: float | None = None
+            if result is not None and result.points:
+                zs = [p.z_m for p in result.points]
+                peak_z = float(max(zs))
+                mean_res = float(
+                    sum(p.residual_m for p in result.points)
+                    / len(result.points)
+                )
+                ts = [p.t_rel_s for p in result.points]
+                duration = float(ts[-1] - ts[0])
+
+            events.append(
+                {
+                    "session_id": sid,
+                    "cameras": cams_present,
+                    "status": status,
+                    "received_at": latest_mtime,
+                    "n_ball_frames": cam_frame_counts,
+                    "n_triangulated": n_triangulated,
+                    "peak_z_m": peak_z,
+                    "mean_residual_m": mean_res,
+                    "duration_s": duration,
+                    "error": error,
+                }
             )
-            return events
+        # Latest events first — session ids carry 4 bytes of random hex
+        # so we sort by `received_at` (fallback to id) to surface the
+        # most recently uploaded session at the top.
+        events.sort(
+            key=lambda e: (e["received_at"] or 0, e["session_id"]),
+            reverse=True,
+        )
+        return events
 
     def delete_session(self, session_id: str) -> bool:
         """Remove a single session's in-memory + on-disk artefacts.
@@ -933,23 +942,26 @@ async def pitch(
         suffix = Path(video.filename).suffix.lstrip(".").lower()
         if suffix:
             ext = suffix
-    clip_path = state.save_clip(
-        payload_obj.camera_id, payload_obj.session_id, data, ext
+    # Hand the heavy steps (disk write, PyAV decode + cv2 detection, PyAV
+    # re-encode, atomic JSON writes + triangulation) to the default thread
+    # executor. A 240 fps × 1080p clip's `detect_pitch` + `annotate_video`
+    # pair can hold the CPU for seconds — running it on the event loop
+    # would stall every other request (heartbeats, /status, dashboard
+    # ticks) for the same duration.
+    clip_path = await asyncio.to_thread(
+        state.save_clip,
+        payload_obj.camera_id, payload_obj.session_id, data, ext,
     )
     clip_info = {"filename": clip_path.name, "bytes": len(data)}
 
-    # Run ball detection against the persisted MOV OUTSIDE any state lock
-    # (detection is the single heavy step per upload, up to a few seconds
-    # for a multi-second clip — state.record() grabs the lock for
-    # millisecond-scale work only).
     if payload_obj.sync_anchor_timestamp_s is None:
         # No time anchor → pairing is impossible; skip detection so we
         # don't waste CPU on data that will never triangulate.
         payload_obj.frames = []
         detection_ran = False
     else:
-        payload_obj.frames = detect_pitch(
-            clip_path, payload_obj.video_start_pts_s
+        payload_obj.frames = await asyncio.to_thread(
+            detect_pitch, clip_path, payload_obj.video_start_pts_s,
         )
         detection_ran = True
         # Re-encode the clip with a green circle on every detected frame
@@ -958,7 +970,9 @@ async def pitch(
         # viewer just falls back to it.
         annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
         try:
-            annotate_video(clip_path, annotated_path, payload_obj.frames)
+            await asyncio.to_thread(
+                annotate_video, clip_path, annotated_path, payload_obj.frames,
+            )
         except Exception as exc:
             logger.warning(
                 "annotate_video failed session=%s cam=%s err=%s",
@@ -970,7 +984,7 @@ async def pitch(
                 except OSError:
                     pass
 
-    result = state.record(payload_obj)
+    result = await asyncio.to_thread(state.record, payload_obj)
     if payload_obj.sync_anchor_timestamp_s is None and result.error is None:
         # Persist the "no time sync" diagnostic so the session reads
         # consistently from /events / /results without re-running record().
