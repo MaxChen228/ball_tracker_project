@@ -1,18 +1,22 @@
 """Purge old ball_tracker session data from the server's data directory.
 
 Long-running servers accumulate per-session pitch JSONs, triangulation results,
-and H.264 clips under data/. This standalone script groups every file under
+and H.264 clips under data/. This script groups every file under
 `<data-dir>/{pitches,results,videos}` by session id, and deletes sessions whose
-youngest file mtime is older than `--days` days ago.
+youngest file mtime is older than `days` days ago.
 
-Usage:
+CLI usage:
     uv run python cleanup_old_sessions.py --days 7
     uv run python cleanup_old_sessions.py --days 30 --data-dir /srv/ball_tracker/data
     uv run python cleanup_old_sessions.py --days 7 --dry-run
 
 Data-dir precedence: CLI flag > $BALL_TRACKER_DATA_DIR > "data" (cwd-relative).
 
-This script is intentionally dependency-free (stdlib only). It never imports
+Library usage: `cleanup_expired_sessions(data_dir, days, dry_run)` is imported
+by `main.py`'s lifespan so the server self-cleans on startup. The CLI entry
+point `main()` wraps the same function for manual / cron invocations.
+
+This module is intentionally dependency-free (stdlib only). It never imports
 the FastAPI server, so it is safe to run against a stopped server, or via cron
 on a schedule independent of the main process.
 """
@@ -152,6 +156,47 @@ def _delete_group(group: SessionGroup) -> tuple[int, int]:
     return files_removed, bytes_removed
 
 
+def _process_expired(
+    expired: list[SessionGroup], dry_run: bool
+) -> tuple[int, int, int]:
+    """Delete each expired group (or tally sizes if dry_run) and aggregate."""
+    sessions_deleted = 0
+    files_deleted = 0
+    bytes_deleted = 0
+    for group in expired:
+        if dry_run:
+            files_deleted += len(group.files)
+            bytes_deleted += group.total_bytes()
+        else:
+            removed_files, removed_bytes = _delete_group(group)
+            files_deleted += removed_files
+            bytes_deleted += removed_bytes
+        sessions_deleted += 1
+    return (sessions_deleted, files_deleted, bytes_deleted)
+
+
+def cleanup_expired_sessions(
+    data_dir: Path,
+    days: float,
+    dry_run: bool = False,
+) -> tuple[int, int, int]:
+    """Scan `data_dir`, delete sessions whose youngest file is older than `days`.
+
+    Returns `(sessions_deleted, files_deleted, bytes_deleted)`. `days <= 0` is
+    a no-op and returns `(0, 0, 0)` — callers use that to disable cleanup
+    without branching. A missing `data_dir` is also a no-op (nothing to clean).
+
+    This is the library entry point used by `main.py`'s lifespan hook and by
+    the CLI `main()`. It never prints — callers log their own summaries.
+    """
+    if days <= 0 or not data_dir.is_dir():
+        return (0, 0, 0)
+    cutoff_epoch = time.time() - days * 86400.0
+    groups = _scan_data_dir(data_dir)
+    expired = _find_expired(groups.values(), cutoff_epoch)
+    return _process_expired(expired, dry_run)
+
+
 def _resolve_data_dir(cli_value: str | None) -> Path:
     """Precedence: --data-dir > $BALL_TRACKER_DATA_DIR > 'data'."""
     if cli_value:
@@ -221,38 +266,22 @@ def main(argv: list[str] | None = None) -> int:
         f"(cutoff = {cutoff_human})"
     )
 
+    # Scan once, print per-session audit lines, then delete via the shared
+    # `_process_expired` helper so the CLI and library stay in lock-step.
     groups = _scan_data_dir(data_dir)
     expired = _find_expired(groups.values(), cutoff_epoch)
-
-    total_files = 0
-    total_bytes = 0
+    verb = "would delete" if args.dry_run else "deleting"
     for group in expired:
-        file_count = len(group.files)
-        byte_count = group.total_bytes()
-        if args.dry_run:
-            print(
-                f"[dry-run] would delete session_{group.session_id}: "
-                f"{file_count} files, {_format_bytes(byte_count)}"
-            )
-            total_files += file_count
-            total_bytes += byte_count
-        else:
-            removed_files, removed_bytes = _delete_group(group)
-            print(
-                f"deleted session_{group.session_id}: "
-                f"{removed_files} files, {_format_bytes(removed_bytes)}"
-            )
-            total_files += removed_files
-            total_bytes += removed_bytes
+        print(
+            f"{prefix}{verb} session_{group.session_id}: "
+            f"{len(group.files)} files, {_format_bytes(group.total_bytes())}"
+        )
 
-    session_count = len(expired)
-    if args.dry_run:
-        suffix = " (not deleted — remove --dry-run to apply)"
-    else:
-        suffix = ""
+    sessions, files, bytes_removed = _process_expired(expired, args.dry_run)
+    suffix = " (not deleted — remove --dry-run to apply)" if args.dry_run else ""
     print(
-        f"{prefix}total: {session_count} sessions, {total_files} files, "
-        f"{_format_bytes(total_bytes)}{suffix}"
+        f"{prefix}total: {sessions} sessions, {files} files, "
+        f"{_format_bytes(bytes_removed)}{suffix}"
     )
     return 0
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json as _json
 import logging
+import os
 import threading
 import time
 
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 import main
 import pairing
+from cleanup_old_sessions import cleanup_expired_sessions
 from conftest import sid
 from main import app
 from triangulate import (
@@ -790,3 +792,60 @@ def test_max_dt_env_override(monkeypatch):
     monkeypatch.setattr(pairing, "_MAX_DT_S", 0.030)
     points_wide = pairing.triangulate_cycle(payload_a, payload_b)
     assert len(points_wide) == 2
+
+
+# ----- cleanup_expired_sessions --------------------------------------------
+
+
+def _make_session_json(dir_path, session_id: str, age_seconds: float) -> None:
+    """Create `pitches/session_<sid>.json` and age its mtime by `age_seconds`."""
+    dir_path.mkdir(parents=True, exist_ok=True)
+    p = dir_path / f"session_{session_id}.json"
+    p.write_text("{}")
+    mtime = time.time() - age_seconds
+    os.utime(p, (mtime, mtime))
+
+
+def test_cleanup_expired_sessions_removes_old(tmp_path):
+    """90-day-old session gets deleted; fresh one stays. Verifies the primary
+    lifespan-cleanup path."""
+    pitches = tmp_path / "pitches"
+    _make_session_json(pitches, "s_deadbeef", age_seconds=90 * 86400.0)
+    _make_session_json(pitches, "s_cafef00d", age_seconds=0.0)
+
+    sessions, files, bytes_removed = cleanup_expired_sessions(
+        tmp_path, days=30, dry_run=False
+    )
+
+    assert sessions == 1
+    assert files == 1
+    assert bytes_removed > 0
+    assert not (pitches / "session_s_deadbeef.json").exists()
+    assert (pitches / "session_s_cafef00d.json").exists()
+
+
+def test_cleanup_expired_sessions_disabled_days_zero(tmp_path):
+    """days=0 is the documented "disabled" sentinel — no scan, no delete,
+    (0, 0, 0) counts. This is what BALL_TRACKER_CLEANUP_DAYS=0 opts into."""
+    pitches = tmp_path / "pitches"
+    _make_session_json(pitches, "s_deadbeef", age_seconds=90 * 86400.0)
+
+    result = cleanup_expired_sessions(tmp_path, days=0, dry_run=False)
+
+    assert result == (0, 0, 0)
+    assert (pitches / "session_s_deadbeef.json").exists()
+
+
+def test_cleanup_expired_sessions_dry_run(tmp_path):
+    """dry_run reports the counts it *would* delete but leaves disk alone."""
+    pitches = tmp_path / "pitches"
+    _make_session_json(pitches, "s_deadbeef", age_seconds=90 * 86400.0)
+
+    sessions, files, bytes_removed = cleanup_expired_sessions(
+        tmp_path, days=30, dry_run=True
+    )
+
+    assert sessions == 1
+    assert files == 1
+    assert bytes_removed > 0
+    assert (pitches / "session_s_deadbeef.json").exists()
