@@ -2,6 +2,9 @@ import UIKit
 import AVFoundation
 import CoreMedia
 import CoreVideo
+import os
+
+private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "camera")
 
 /// Main camera view. State machine:
 /// - STANDBY: live preview, chirp detector off, no frame buffering
@@ -159,9 +162,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         recorder.onCycleComplete = { [weak self] payload in
             guard let self else { return }
-            let enriched = self.enrichedPayload(from: payload)
             let finishingClip = self.clipRecorder
             self.clipRecorder = nil
+            log.info("camera cycle complete session=\(payload.session_id, privacy: .public) cam=\(payload.camera_id, privacy: .public) frames=\(payload.frames.count) has_clip=\(finishingClip != nil)")
+            let enriched = self.enrichedPayload(from: payload)
             if let finishingClip {
                 finishingClip.finish { [weak self] videoURL in
                     self?.persistCompletedCycle(enriched, videoURL: videoURL)
@@ -255,6 +259,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     func enterSyncMode() {
         guard state == .standby else { return }
+        log.info("camera entering sync mode session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         recorder.reset()
         reloadBallDetectorWithLatestIntrinsics()
         try? uploadQueue.reloadPending()
@@ -265,6 +270,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     func exitSyncMode() {
+        log.info("camera exiting sync mode session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public) state=\(self.stateText(self.state), privacy: .public)")
         state = .standby
         recorder.reset()
         // Tear down the clip writer on the capture queue so we can't race
@@ -299,6 +305,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 }
             }
         } catch {
+            log.error("camera cycle persist failed session=\(payload.session_id, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             // Even if the JSON save failed, drop any orphan tmp video.
             if let videoURL {
                 try? FileManager.default.removeItem(at: videoURL)
@@ -351,18 +358,41 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func cancelTimeSync(reason: String = "cancelled") {
+        log.info("camera cancel time-sync reason=\(reason, privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         timeSyncTimeoutWork?.cancel()
         timeSyncTimeoutWork = nil
         chirpDetector?.onChirpDetected = nil
         latestChirpSnapshot = nil
         state = .standby
-        warningLabel.isHidden = true
         lastUploadStatusText = "Time sync \(reason)"
+
+        if reason == "timeout" {
+            log.warning("camera time-sync timeout cam=\(self.settings.cameraRole, privacy: .public)")
+            // Flash a red banner for 3 s so the operator notices the miss;
+            // the HUD's warning label is otherwise yellow for the "waiting"
+            // state and hiding it immediately on timeout made it easy to
+            // miss that the chirp never arrived.
+            let originalBg = warningLabel.backgroundColor
+            let originalFg = warningLabel.textColor
+            warningLabel.backgroundColor = .systemRed
+            warningLabel.textColor = .white
+            warningLabel.text = "時間校正逾時：確認 chirp 音訊與麥克風"
+            warningLabel.isHidden = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                guard let self else { return }
+                self.warningLabel.isHidden = true
+                self.warningLabel.backgroundColor = originalBg
+                self.warningLabel.textColor = originalFg
+            }
+        } else {
+            warningLabel.isHidden = true
+        }
         updateUIForState()
     }
 
     private func completeTimeSync(_ event: AudioChirpDetector.ChirpEvent) {
         guard state == .timeSyncWaiting else { return }
+        log.info("camera complete time-sync anchor_frame=\(event.anchorFrameIndex) anchor_ts=\(event.anchorTimestampS) cam=\(self.settings.cameraRole, privacy: .public)")
         timeSyncTimeoutWork?.cancel()
         timeSyncTimeoutWork = nil
         chirpDetector?.onChirpDetected = nil
@@ -395,6 +425,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     session.addInput(input)
                 }
             } catch {
+                log.error("camera capture format configuration failed error=\(error.localizedDescription, privacy: .public)")
                 // TODO: surface error to UI
             }
         }
@@ -476,6 +507,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 if granted {
                     self.configureAudioCapture()
                 } else {
+                    log.error("camera mic permission denied cam=\(self.settings.cameraRole, privacy: .public)")
                     self.lastUploadStatusText = "Microphone denied — time sync unavailable"
                     self.updateUIForState()
                 }
@@ -490,12 +522,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         do {
             input = try AVCaptureDeviceInput(device: mic)
         } catch {
+            log.error("camera mic input init failed error=\(error.localizedDescription, privacy: .public)")
             lastUploadStatusText = "Mic input failed: \(error.localizedDescription)"
             return
         }
         session.beginConfiguration()
         guard session.canAddInput(input) else {
             session.commitConfiguration()
+            log.error("camera session rejected audio input cam=\(self.settings.cameraRole, privacy: .public)")
             lastUploadStatusText = "Session rejected audio input"
             return
         }
@@ -638,6 +672,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func applyRemoteArm() {
+        log.info("camera received arm command state=\(self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         switch state {
         case .standby:
             enterSyncMode()
@@ -650,6 +685,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func applyRemoteDisarm() {
+        log.info("camera received disarm command state=\(self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         switch state {
         case .standby:
             break
@@ -1020,6 +1056,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         } catch {
             // Clip writing is a Phase-1 experiment — if AVAssetWriter rejects
             // the configuration we degrade to JSON-only and keep recording.
+            log.error("camera clip recorder prepare failed error=\(error.localizedDescription, privacy: .public)")
             clipRecorder = nil
         }
     }
