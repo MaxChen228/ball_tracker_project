@@ -77,6 +77,91 @@ def render_scene_div(scene: Scene, div_id: str = "canvas-scene") -> str:
     )
 
 
+def render_viewer_html(scene: Scene, videos: list[tuple[str, str]]) -> str:
+    """Full /viewer/{sid} page: 3D scene on top, A/B MOV playback below.
+
+    `videos` is a sorted list of `(camera_id, url)` pairs — typically
+    `[("A", "/videos/session_..._A.mov"), ("B", "/videos/session_..._B.mov")]`.
+    Videos are rendered side-by-side with a shared play/pause control so
+    the operator can scrub A and B in lock-step when reviewing a cycle.
+    """
+    scene_fragment = _build_figure(scene).to_html(
+        include_plotlyjs="cdn", full_html=False, div_id="scene"
+    )
+    video_cells = "".join(
+        f"""
+        <div class="vid-cell">
+          <div class="vid-label" style="border-color:{_camera_color(cam)};color:{_camera_color(cam)};">CAM {cam}</div>
+          <video data-cam="{cam}" controls preload="metadata" playsinline src="{url}"></video>
+        </div>
+        """
+        for cam, url in videos
+    )
+    if not video_cells:
+        video_cells = (
+            '<div class="vid-empty">no clips on disk for this session</div>'
+        )
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><title>Session {scene.session_id}</title>
+<style>
+  html, body {{ margin:0; padding:0; background:{_BG}; color:{_INK};
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+  .viewer {{ display:flex; flex-direction:column; min-height:100vh; }}
+  header {{ padding:16px 24px; border-bottom:1px solid {_BORDER_BASE};
+    background:{_SURFACE}; display:flex; align-items:baseline; gap:16px; }}
+  header h1 {{ margin:0; font-size:18px; font-weight:600; letter-spacing:0.02em; }}
+  header .sid {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color:{_SUB}; font-size:14px; }}
+  header a {{ margin-left:auto; color:{_SUB}; font-size:13px; text-decoration:none; }}
+  header a:hover {{ color:{_INK}; }}
+  .scene-wrap {{ flex:1 1 auto; min-height:420px; }}
+  .scene-wrap > div {{ height:100%; }}
+  .videos {{ display:grid; grid-template-columns:1fr 1fr; gap:1px;
+    background:{_BORDER_BASE}; border-top:1px solid {_BORDER_BASE}; }}
+  .vid-cell {{ background:{_SURFACE}; padding:12px; display:flex;
+    flex-direction:column; gap:8px; }}
+  .vid-label {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size:11px; font-weight:600; letter-spacing:0.1em;
+    border:1px solid; padding:2px 8px; align-self:flex-start; border-radius:2px; }}
+  .vid-cell video {{ width:100%; max-height:50vh; background:#000; }}
+  .vid-empty {{ grid-column:1 / -1; padding:32px; text-align:center;
+    color:{_SUB}; font-size:14px; background:{_SURFACE}; }}
+  .sync-note {{ padding:8px 24px; font-size:12px; color:{_SUB};
+    background:{_SURFACE}; border-top:1px solid {_BORDER_BASE}; }}
+</style>
+</head><body>
+<div class="viewer">
+  <header>
+    <h1>Session Viewer</h1>
+    <span class="sid">{scene.session_id}</span>
+    <a href="/">&larr; dashboard</a>
+  </header>
+  <div class="scene-wrap">{scene_fragment}</div>
+  <div class="videos">{video_cells}</div>
+  <div class="sync-note">Playback: press play on either video — both A and B start together and scrub-sync on seek.</div>
+</div>
+<script>
+(() => {{
+  const vids = Array.from(document.querySelectorAll("video[data-cam]"));
+  if (vids.length < 2) return;
+  let syncing = false;
+  const run = (fn) => {{ if (syncing) return; syncing = true; fn(); syncing = false; }};
+  vids.forEach((src) => {{
+    src.addEventListener("play",  () => run(() => vids.forEach((v) => v !== src && v.paused && v.play())));
+    src.addEventListener("pause", () => run(() => vids.forEach((v) => v !== src && !v.paused && v.pause())));
+    src.addEventListener("seeked", () => run(() => vids.forEach((v) => {{ if (v !== src && Math.abs(v.currentTime - src.currentTime) > 0.05) v.currentTime = src.currentTime; }})));
+    src.addEventListener("ratechange", () => run(() => vids.forEach((v) => v !== src && (v.playbackRate = src.playbackRate))));
+  }});
+}})();
+</script>
+</body></html>"""
+
+
+def _camera_color(camera_id: str) -> str:
+    return _CAMERA_COLORS.get(camera_id, _FALLBACK_CAMERA_COLOR)
+
+
 def _build_figure(scene: Scene):
     import plotly.graph_objects as go
 
