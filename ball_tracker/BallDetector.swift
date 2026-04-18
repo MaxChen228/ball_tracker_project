@@ -1,6 +1,9 @@
 import Foundation
 import CoreVideo
 import CoreImage
+import os
+
+private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "sensing")
 
 /// Deep-blue ball detector (HSV masking) - skeleton implementation.
 /// The spec requires per-frame HSV thresholding + contour filtering + centroid -> angle calculation.
@@ -47,6 +50,8 @@ final class BallDetector {
     init(hsvRange: HSVRange, intrinsics: Intrinsics? = nil) {
         self.hsvRange = hsvRange
         self.intrinsics = intrinsics
+        let source = intrinsics != nil ? "calibrated" : "fov_approx"
+        log.info("detector initialized intrinsics=\(source, privacy: .public)")
     }
 
     deinit {
@@ -233,6 +238,7 @@ final class BallDetector {
             }
             scratchBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: needed)
             scratchBufferCapacity = needed
+            log.debug("detector buffer resized bytes=\(needed, privacy: .public)")
         }
 
         guard let baseAddress = scratchBuffer else { return nil }

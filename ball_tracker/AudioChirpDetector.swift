@@ -2,6 +2,9 @@ import AVFoundation
 import Accelerate
 import CoreMedia
 import Foundation
+import os
+
+private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "sensing")
 
 /// Single sync mechanism for the tracker: each phone listens for a known
 /// linear-chirp signal (2 → 8 kHz Hann-windowed, 100 ms) played from a third
@@ -135,6 +138,7 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     /// Update the matched-filter trigger threshold. Safe to call from any
     /// thread; the new value is applied on the next `runMatchedFilter` pass.
     func setThreshold(_ value: Float) {
+        log.info("chirp threshold updated value=\(value, privacy: .public)")
         deliveryQueue.async { [weak self] in
             guard let self else { return }
             self.threshold = value
@@ -283,6 +287,7 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
                 let pts = CMTimeGetSeconds(first) + chirpCenterGlobal / sampleRate
                 lastTriggerPTS = pts
                 triggered = true
+                log.info("chirp detected peak=\(peakNorm, privacy: .public) threshold=\(self.threshold, privacy: .public) anchor_s=\(pts, privacy: .public)")
                 onChirpDetected?(
                     ChirpEvent(anchorFrameIndex: 0, anchorTimestampS: pts)
                 )
