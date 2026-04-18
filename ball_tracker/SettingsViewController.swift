@@ -22,6 +22,13 @@ final class SettingsViewController: UIViewController {
         var captureWidth: Int
         var captureHeight: Int
 
+        /// Park the AVCaptureSession (stopRunning) while the phone is in
+        /// `.standby`. Default true — saves power and prevents the sensor
+        /// from heating up during long idle waits. Turn off for setup /
+        /// framing where the operator wants a continuous live preview and
+        /// is willing to trade battery + heat for it.
+        var parkCameraInStandby: Bool
+
         // Manual intrinsics override (e.g. from a ChArUco calibration run).
         // When enabled, these values are written to the shared fx/fz/cx/cy
         // UserDefaults keys and Calibration view will NOT overwrite them.
@@ -65,6 +72,7 @@ final class SettingsViewController: UIViewController {
 
     private static let keyCaptureWidth = "capture_width"
     private static let keyCaptureHeight = "capture_height"
+    private static let keyParkCameraInStandby = "park_camera_in_standby"
 
     private static let keyManualIntrinsicsEnabled = "manual_intrinsics_enabled"
     static let keyIntrinsicsSource = "intrinsics_source"  // "manual" | "fov"
@@ -93,6 +101,7 @@ final class SettingsViewController: UIViewController {
     private let serverIPField = UITextField()
     private let serverPortField = UITextField()
     private let cameraRoleControl = UISegmentedControl(items: ["A · 1B 側", "B · 3B 側"])
+    private let parkCameraSwitch = UISwitch()
 
     private let chirpThresholdField = UITextField()
     private let pollIntervalField = UITextField()
@@ -139,6 +148,10 @@ final class SettingsViewController: UIViewController {
 
         let chirpThreshold = doubleOrDefault(keyChirpThreshold, defaultValue: 0.18)
         let pollInterval = doubleOrDefault(keyPollInterval, defaultValue: 1.0)
+        // Default true (park) — matches the energy-saving behaviour that
+        // shipped before this toggle existed. Legacy installs without the
+        // key land on the same behaviour they had yesterday.
+        let parkCameraInStandby = d.object(forKey: keyParkCameraInStandby) as? Bool ?? true
 
         // Capture resolution is system-wide fixed at 1920×1080 (see
         // `captureWidthFixed` / `captureHeightFixed`). Any stale UserDefaults
@@ -174,6 +187,7 @@ final class SettingsViewController: UIViewController {
             pollInterval: pollInterval,
             captureWidth: captureWidth,
             captureHeight: captureHeight,
+            parkCameraInStandby: parkCameraInStandby,
             manualIntrinsicsEnabled: manualEnabled,
             manualFx: manualFx,
             manualFy: manualFy,
@@ -268,6 +282,7 @@ final class SettingsViewController: UIViewController {
             pollInterval: min(60.0, max(1.0, doubleValue(pollIntervalField.text, fallback: current.pollInterval))),
             captureWidth: Self.captureWidthFixed,
             captureHeight: Self.captureHeightFixed,
+            parkCameraInStandby: parkCameraSwitch.isOn,
             manualIntrinsicsEnabled: manualIntrinsicsSwitch.isOn,
             manualFx: doubleValue(manualFxField.text, fallback: current.manualFx),
             manualFy: doubleValue(manualFyField.text, fallback: current.manualFy),
@@ -379,8 +394,9 @@ final class SettingsViewController: UIViewController {
             title: "Camera",
             rows: [
                 controlRow(label: "Role", control: cameraRoleControl),
+                controlRow(label: "Park in STANDBY", control: parkCameraSwitch),
             ],
-            footer: "解析度系統固定 1080p。FPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。"
+            footer: "解析度系統固定 1080p。FPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。\nPark 開啟（預設）時 STANDBY 會停住 capture session 避免過熱；關閉則保留即時預覽，方便設置取景但會持續耗電發熱。"
         ))
 
         contentStack.addArrangedSubview(sectionBlock(
@@ -457,6 +473,7 @@ final class SettingsViewController: UIViewController {
         serverIPField.text = settings.serverIP
         serverPortField.text = String(settings.serverPort)
         cameraRoleControl.selectedSegmentIndex = settings.cameraRole == "B" ? 1 : 0
+        parkCameraSwitch.isOn = settings.parkCameraInStandby
         chirpThresholdField.text = String(settings.chirpThreshold)
         pollIntervalField.text = String(settings.pollInterval)
 
@@ -744,6 +761,7 @@ final class SettingsViewController: UIViewController {
         d.set(settings.pollInterval, forKey: keyPollInterval)
         d.set(settings.captureWidth, forKey: keyCaptureWidth)
         d.set(settings.captureHeight, forKey: keyCaptureHeight)
+        d.set(settings.parkCameraInStandby, forKey: keyParkCameraInStandby)
 
         d.set(settings.manualIntrinsicsEnabled, forKey: keyManualIntrinsicsEnabled)
         if settings.manualIntrinsicsEnabled
