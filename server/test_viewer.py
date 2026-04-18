@@ -421,6 +421,34 @@ def test_viewer_embeds_scene_data_and_mode_toggle():
     assert 'id="mode-playback"' in body
 
 
+def test_viewer_ships_interactive_diagnostic_widgets():
+    """The viewer's interactive surface — frame-input for jump-to,
+    scene-reset for the 3D camera, strip-legend for the detection canvas,
+    and hint-overlay for the keyboard cheat sheet — must all render. These
+    widgets are what makes the viewer a diagnostic tool rather than a
+    passive playback page; their presence is a contract the JS depends on."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(711)
+    _record_pitch(_pitch("A", 711, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert 'id="frame-input"' in body
+    assert 'id="scene-reset"' in body
+    assert 'class="strip-legend"' in body
+    assert 'id="hint-overlay"' in body
+    assert 'id="hint-btn"' in body
+    # Default 3D camera baked into the figure layout so the reset button
+    # has a known target. _build_figure ships scene.camera; assert one of
+    # its keys lands in the inline JSON blob.
+    assert '"camera"' in body
+    # The cheat sheet calls out the actual shortcuts so the operator
+    # learns them on first hover.
+    assert "Play / pause" in body
+    assert "ball-detected" in body
+
+
 def test_viewer_exposes_camera_t_rel_offsets(tmp_path):
     """Video metadata passed to JS must carry per-camera
     `t_rel_offset_s = video_start_pts_s − sync_anchor_timestamp_s` so
