@@ -479,11 +479,12 @@ class State:
             return s
 
     def _register_upload_in_session_locked(self, pitch: PitchPayload) -> None:
-        """Called from `record()` while the state lock is held. If the pitch
-        carries the current armed session's id, record the upload and
-        auto-end the session (one-shot arm → first upload disarms). The
-        other camera, if any, receives `disarm` via commands_for_devices
-        during the echo window."""
+        """Called from `record()` while the state lock is held. Appends
+        the camera to the session's uploads_received list so the events
+        panel can show which phones have flushed. Does NOT end the
+        session — in the current pivot, the iPhone only flushes a
+        recording after receiving `disarm`, so the session is already
+        ended (reason = cancelled or timeout) by the time this fires."""
         s = self._current_session
         if s is None or s.ended_at is not None:
             return
@@ -493,16 +494,11 @@ class State:
             return
         if pitch.camera_id not in s.uploads_received:
             s.uploads_received.append(pitch.camera_id)
-        # One-shot: any upload for the current session ends it.
-        s.ended_at = self._time_fn()
-        s.end_reason = "cycle_uploaded"
-        self._last_ended_session = s
-        self._current_session = None
 
     def session_snapshot(self) -> Session | None:
         """Return the session most relevant to a status caller: the current
         armed session if any, otherwise the most recently ended one (so the
-        dashboard can display "IDLE (last: cycle_uploaded)" and the iPhone
+        dashboard can display "IDLE · last: cancelled" and the iPhone
         sees session.armed == False during the disarm echo window)."""
         current = self.current_session()
         if current is not None:
