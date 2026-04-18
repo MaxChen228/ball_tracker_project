@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "camera")
 
 /// Realtime per-recording buffering:
 /// - Maintain a pre-roll circular buffer (120 frames @ 240 fps ≈ 0.5 s)
@@ -86,6 +89,7 @@ final class PitchRecorder {
         // Include pre-trigger data in payload.
         cycleFrames = preRollBuffer
         localRecordingIndex += 1
+        log.info("recorder start session=\(sessionId, privacy: .public) cam=\(self.cameraId, privacy: .public) idx=\(self.localRecordingIndex) pre_roll=\(self.preRollBuffer.count) anchor_ts=\(anchorTimestampS)")
         onRecordingStarted?(localRecordingIndex)
     }
 
@@ -125,11 +129,13 @@ final class PitchRecorder {
     /// natural end, so the upload queue sees no special case.
     func forceFinishIfRecording() {
         guard isRecording else { return }
+        log.info("recorder force finish session=\(self.sessionId, privacy: .public) cam=\(self.cameraId, privacy: .public) frames=\(self.cycleFrames.count)")
         finishCycle()
     }
 
     private func finishCycle() {
         isRecording = false
+        log.info("recorder finish cycle session=\(self.sessionId, privacy: .public) cam=\(self.cameraId, privacy: .public) idx=\(self.localRecordingIndex) frames=\(self.cycleFrames.count)")
 
         let payload = ServerUploader.PitchPayload(
             camera_id: cameraId,

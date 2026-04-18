@@ -1,6 +1,9 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import os
+
+private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "camera")
 
 /// Per-cycle H.264 clip writer that consumes the same `CMSampleBuffer`s the
 /// capture queue already dispatches to `CameraViewController.captureOutput`.
@@ -37,7 +40,13 @@ final class ClipRecorder {
     /// server side (OpenCV / FFmpeg) can decode without special builds.
     func prepare(width: Int, height: Int) throws {
         try? FileManager.default.removeItem(at: outputURL)
-        let w = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        let w: AVAssetWriter
+        do {
+            w = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        } catch {
+            log.error("clip writer init failed error=\(error.localizedDescription, privacy: .public)")
+            throw error
+        }
         let input = AVAssetWriterInput(
             mediaType: .video,
             outputSettings: [
@@ -48,6 +57,7 @@ final class ClipRecorder {
         )
         input.expectsMediaDataInRealTime = true
         guard w.canAdd(input) else {
+            log.error("clip writer cannot add video input width=\(width) height=\(height)")
             throw ClipRecorderError.cannotAddVideoInput
         }
         w.add(input)
@@ -55,6 +65,7 @@ final class ClipRecorder {
         videoInput = input
         sessionStarted = false
         droppedFrameCount = 0
+        log.info("clip writer prepared width=\(width) height=\(height)")
     }
 
     /// Append one frame. The first appended sample's PTS becomes the writer
@@ -64,7 +75,10 @@ final class ClipRecorder {
         guard let writer, let videoInput else { return }
 
         if !sessionStarted {
-            guard writer.startWriting() else { return }
+            guard writer.startWriting() else {
+                log.error("clip writer startWriting failed status=\(writer.status.rawValue) error=\(writer.error?.localizedDescription ?? "nil", privacy: .public)")
+                return
+            }
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             writer.startSession(atSourceTime: pts)
             sessionStarted = true
@@ -74,6 +88,12 @@ final class ClipRecorder {
             _ = videoInput.append(sampleBuffer)
         } else {
             droppedFrameCount += 1
+            // Log dropped frames at cadence boundaries only — per-frame
+            // would flood the subsystem at 240 fps. `.debug` stays off in
+            // release builds by default.
+            if droppedFrameCount == 1 || droppedFrameCount % 60 == 0 {
+                log.debug("clip writer dropped frames count=\(self.droppedFrameCount)")
+            }
         }
     }
 
@@ -88,6 +108,7 @@ final class ClipRecorder {
         }
         guard sessionStarted else {
             // Nothing was appended; tear down without producing a file.
+            log.info("clip writer finish no-op (session never started)")
             videoInput.markAsFinished()
             writer.cancelWriting()
             self.writer = nil
@@ -98,14 +119,17 @@ final class ClipRecorder {
         }
         videoInput.markAsFinished()
         let capturedURL = outputURL
+        let dropped = droppedFrameCount
         writer.finishWriting { [weak self] in
             let status = writer.status
             self?.writer = nil
             self?.videoInput = nil
             self?.sessionStarted = false
             if status == .completed {
+                log.info("clip writer finished url=\(capturedURL.lastPathComponent, privacy: .public) dropped=\(dropped)")
                 completion(capturedURL)
             } else {
+                log.error("clip writer finish failed status=\(status.rawValue) error=\(writer.error?.localizedDescription ?? "nil", privacy: .public)")
                 try? FileManager.default.removeItem(at: capturedURL)
                 completion(nil)
             }
@@ -114,6 +138,9 @@ final class ClipRecorder {
 
     /// Abort the clip without producing a file. Safe to call from any state.
     func cancel() {
+        if writer != nil {
+            log.info("clip writer cancel session_started=\(self.sessionStarted) dropped=\(self.droppedFrameCount)")
+        }
         if let writer, sessionStarted {
             videoInput?.markAsFinished()
             writer.cancelWriting()
