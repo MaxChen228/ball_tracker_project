@@ -20,6 +20,13 @@ final class PitchPayloadStore {
     /// (preserving the fileURL's extension) alongside with the same basename.
     /// Callers pass the writer's tmp URL; on success we take ownership and
     /// any earlier copy at the destination is overwritten.
+    ///
+    /// Atomicity: the video is placed FIRST, JSON last. JSON existing on disk
+    /// is the "commit" signal the upload path keys off, so if JSON write
+    /// throws we roll back the video placement. If video placement fails but
+    /// JSON succeeds we continue (video is optional in the upload path) —
+    /// and any partial destination file from a torn cross-volume move is
+    /// cleaned up before we decide there's no video.
     @discardableResult
     func save(
         _ payload: ServerUploader.PitchPayload,
@@ -36,22 +43,37 @@ final class PitchPayloadStore {
         )
         let jsonURL = directoryURL.appendingPathComponent("\(basename).json")
         let data = try encoder.encode(payload)
-        try data.write(to: jsonURL, options: .atomic)
 
+        var placedVideoURL: URL? = nil
         if let videoURL {
             let ext = videoURL.pathExtension.isEmpty ? "mov" : videoURL.pathExtension
             let destVideoURL = directoryURL.appendingPathComponent("\(basename).\(ext)")
             try? FileManager.default.removeItem(at: destVideoURL)
             do {
                 try FileManager.default.moveItem(at: videoURL, to: destVideoURL)
+                placedVideoURL = destVideoURL
             } catch {
-                // Best-effort: if move failed (e.g. cross-volume), try copy +
-                // delete source. Keep the JSON — the video is optional in the
-                // upload path, so losing it is degraded but not fatal.
+                // moveItem can leave a partial file at the destination on a
+                // cross-volume failure. Clean it up before falling back so
+                // the retry starts from a known-clean state.
+                try? FileManager.default.removeItem(at: destVideoURL)
                 if (try? FileManager.default.copyItem(at: videoURL, to: destVideoURL)) != nil {
                     try? FileManager.default.removeItem(at: videoURL)
+                    placedVideoURL = destVideoURL
                 }
+                // If both failed: no video, but JSON upload still works.
             }
+        }
+
+        do {
+            try data.write(to: jsonURL, options: .atomic)
+        } catch {
+            // JSON is the commit signal; without it the video would be an
+            // undiscoverable orphan. Roll back so the save is all-or-nothing.
+            if let placedVideoURL {
+                try? FileManager.default.removeItem(at: placedVideoURL)
+            }
+            throw error
         }
 
         return jsonURL
