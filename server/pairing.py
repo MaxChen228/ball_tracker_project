@@ -7,6 +7,9 @@ anchor-relative time and run ray-midpoint triangulation to recover the
 """
 from __future__ import annotations
 
+import logging
+import os
+
 import numpy as np
 
 from schemas import IntrinsicsPayload, FramePayload, PitchPayload, TriangulatedPoint
@@ -18,6 +21,14 @@ from triangulate import (
     triangulate_rays,
     undistorted_ray_cam,
 )
+
+logger = logging.getLogger(__name__)
+
+# Pairing window between A/B anchor-relative timestamps. 8.33 ms ≈ one frame at
+# 240 fps; override via `BALL_TRACKER_MAX_DT_S` env var (in seconds) to widen
+# the window for field diagnostics without recompiling.
+_DEFAULT_MAX_DT_S = 1.0 / 120.0
+_MAX_DT_S = float(os.environ.get("BALL_TRACKER_MAX_DT_S", _DEFAULT_MAX_DT_S))
 
 
 def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):
@@ -77,38 +88,56 @@ def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoin
 
     items_a = _frame_items(a)
     items_b = _frame_items(b)
-    if not items_a or not items_b:
-        return []
 
-    b_times = np.array([x[0] for x in items_b])
-    max_dt = 1.0 / 120.0  # 8 ms tolerance at 240 fps
-
-    dist_a = a.intrinsics.distortion
-    dist_b = b.intrinsics.distortion
-
+    drop_outside_window = 0
+    drop_near_parallel = 0
     results: list[TriangulatedPoint] = []
-    for t_rel, tx_a, tz_a, px_a, py_a in items_a:
-        idx = int(np.argmin(np.abs(b_times - t_rel)))
-        if abs(b_times[idx] - t_rel) > max_dt:
-            continue
-        _, tx_b, tz_b, px_b, py_b = items_b[idx]
 
-        d_a_cam = _ray_for_frame(tx_a, tz_a, px_a, py_a, K_a, dist_a)
-        d_b_cam = _ray_for_frame(tx_b, tz_b, px_b, py_b, K_b, dist_b)
-        d_a_world = R_a.T @ d_a_cam
-        d_b_world = R_b.T @ d_b_cam
+    if items_a and items_b:
+        b_times = np.array([x[0] for x in items_b])
+        dist_a = a.intrinsics.distortion
+        dist_b = b.intrinsics.distortion
 
-        P, gap = triangulate_rays(C_a, d_a_world, C_b, d_b_world)
-        if P is None:
-            # Near-parallel rays for this frame pair — no meaningful 3D point.
-            continue
-        results.append(
-            TriangulatedPoint(
-                t_rel_s=t_rel,
-                x_m=float(P[0]),
-                y_m=float(P[1]),
-                z_m=float(P[2]),
-                residual_m=gap,
+        for t_rel, tx_a, tz_a, px_a, py_a in items_a:
+            idx = int(np.argmin(np.abs(b_times - t_rel)))
+            dt = float(b_times[idx] - t_rel)
+            if abs(dt) > _MAX_DT_S:
+                drop_outside_window += 1
+                logger.debug(
+                    "pairing drop reason=outside_window t_rel=%.6f dt=%.6f max_dt=%.6f",
+                    t_rel, dt, _MAX_DT_S,
+                )
+                continue
+            _, tx_b, tz_b, px_b, py_b = items_b[idx]
+
+            d_a_cam = _ray_for_frame(tx_a, tz_a, px_a, py_a, K_a, dist_a)
+            d_b_cam = _ray_for_frame(tx_b, tz_b, px_b, py_b, K_b, dist_b)
+            d_a_world = R_a.T @ d_a_cam
+            d_b_world = R_b.T @ d_b_cam
+
+            P, gap = triangulate_rays(C_a, d_a_world, C_b, d_b_world)
+            if P is None:
+                # Near-parallel rays for this frame pair — no meaningful 3D point.
+                drop_near_parallel += 1
+                logger.debug(
+                    "pairing drop reason=near_parallel t_rel=%.6f",
+                    t_rel,
+                )
+                continue
+            results.append(
+                TriangulatedPoint(
+                    t_rel_s=t_rel,
+                    x_m=float(P[0]),
+                    y_m=float(P[1]),
+                    z_m=float(P[2]),
+                    residual_m=gap,
+                )
             )
-        )
+
+    logger.info(
+        "pairing cycle complete session_id=%s pairs_in_a=%d pairs_in_b=%d "
+        "pairs_out=%d drop_outside_window=%d drop_near_parallel=%d max_dt=%.6f",
+        a.session_id, len(items_a), len(items_b), len(results),
+        drop_outside_window, drop_near_parallel, _MAX_DT_S,
+    )
     return results
