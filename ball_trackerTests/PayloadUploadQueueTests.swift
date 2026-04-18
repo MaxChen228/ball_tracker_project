@@ -9,8 +9,11 @@ import XCTest
 /// `onUploadingChanged`, `onLastResultChanged`) and on-disk side-effects
 /// (file presence under a temp `PitchPayloadStore` directory).
 ///
-/// All tests use a tiny `retryDelayS` (50 ms) so 2 s production retries
-/// don't blow the suite's wall clock.
+/// All tests inject `RetryPolicy.fast` so the production 60 s 4xx cooldown
+/// and 4 → 60 s 5xx ladder don't blow the suite's wall clock. The policy
+/// preserves semantic shape (one 4xx retry before drop, 5-entry ladder
+/// capped at the last) so the fast-path assertions still speak to real
+/// behaviour.
 final class PayloadUploadQueueTests: XCTestCase {
 
     private var tempDir: URL!
@@ -41,23 +44,18 @@ final class PayloadUploadQueueTests: XCTestCase {
 
     func testReloadPendingPicksUpExistingPayloads() throws {
         let store = makeStore()
-        // Pre-write two JSON payloads + companion videos to disk.
         let url1 = try store.save(Self.makePayload(sessionId: "s_aaa1"),
                                    videoURL: try Self.writeFakeVideo(named: "v1.mov"))
         let url2 = try store.save(Self.makePayload(sessionId: "s_bbb2"),
                                    videoURL: try Self.writeFakeVideo(named: "v2.mov"))
 
-        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), retryDelayS: 0.05)
+        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), policy: .fast)
         try queue.reloadPending()
 
-        // Both files exist on disk; verify by asking the store directly.
         let files = try store.listPayloadFiles().sorted { $0.path < $1.path }
         let expected = [url1, url2].sorted { $0.path < $1.path }
         XCTAssertEqual(Set(files.map { $0.lastPathComponent }),
                        Set(expected.map { $0.lastPathComponent }))
-        // Reload itself does not start uploading until enqueue or
-        // processNextIfNeeded — but reloadPending populates the in-memory
-        // queue so the next processNextIfNeeded picks them up.
         XCTAssertFalse(queue.isUploading)
     }
 
@@ -74,7 +72,7 @@ final class PayloadUploadQueueTests: XCTestCase {
                                                                        paired: true,
                                                                        points: 12))
 
-        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), retryDelayS: 0.05)
+        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), policy: .fast)
         try queue.reloadPending()
 
         let exp = expectation(description: "upload settles to idle")
@@ -84,7 +82,6 @@ final class PayloadUploadQueueTests: XCTestCase {
         queue.processNextIfNeeded()
         wait(for: [exp], timeout: 5.0)
 
-        // JSON + companion video should be gone.
         XCTAssertFalse(FileManager.default.fileExists(atPath: jsonURL.path),
                        "JSON should be deleted after success")
         XCTAssertNil(store.videoURL(forPayload: jsonURL),
@@ -98,23 +95,14 @@ final class PayloadUploadQueueTests: XCTestCase {
         let videoURL = try Self.writeFakeVideo(named: "retry.mov")
         let jsonURL = try store.save(Self.makePayload(sessionId: "s_net01"), videoURL: videoURL)
 
-        // First reply: URLError (.network branch in PayloadUploadQueue,
-        // which uses the `retryDelayS` argument we pass here = 0.05 s).
-        // Second reply: 200 OK. The queue should re-insert at the head,
-        // schedule a retry after the short delay, and the second attempt
-        // deletes the file.
-        //
-        // We deliberately use `.network` rather than 5xx because the 5xx
-        // ladder is hard-coded at 4→8→16→32→60 s, which is too long for
-        // a fast unit test. The 5xx branch shares the same
-        // re-queue + bookkeeping path; verifying it requires a
-        // production-side knob to inject the ladder.
+        // .network then 200: queue re-inserts at head, retries after
+        // `.fast.baseRetryDelayS` (20 ms), second attempt deletes.
         QueueStubURLProtocol.handler = .scripted(replies: [
             .failure(URLError(.networkConnectionLost)),
             .successJSON(Self.uploadResponseJSON(sessionId: "s_net01", paired: true, points: 1)),
         ])
 
-        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), retryDelayS: 0.05)
+        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), policy: .fast)
         try queue.reloadPending()
 
         var droppedCalls = 0
@@ -122,8 +110,8 @@ final class PayloadUploadQueueTests: XCTestCase {
 
         let exp = expectation(description: "queue retries then succeeds")
         queue.onLastResultChanged = { _ in
-            // onLastResultChanged only fires on success. After the first
-            // network failure it's silent; after the 200 it fires once.
+            // onLastResultChanged only fires on success; silent after the
+            // first network failure, fires once after the 200.
             exp.fulfill()
         }
         queue.processNextIfNeeded()
@@ -136,23 +124,98 @@ final class PayloadUploadQueueTests: XCTestCase {
                        "Queue must re-attempt after a network error")
     }
 
-    // MARK: 4. 4xx within budget → cooldown + retry (no drop).
+    // MARK: 4. 5xx ladder retries then succeeds — no drop.
 
-    func testClientErrorWithinBudgetRetries() throws {
+    func testServerErrorRetriesAlongLadder() throws {
         let store = makeStore()
-        let jsonURL = try store.save(Self.makePayload(sessionId: "s_4xx1"),
+        let jsonURL = try store.save(Self.makePayload(sessionId: "s_5xx1"),
+                                      videoURL: try Self.writeFakeVideo(named: "s.mov"))
+
+        // Three 503s (ladder walks 20→40→80 ms under `.fast`) then a 200.
+        QueueStubURLProtocol.handler = .scripted(replies: [
+            .httpStatus(503, body: nil),
+            .httpStatus(503, body: nil),
+            .httpStatus(503, body: nil),
+            .successJSON(Self.uploadResponseJSON(sessionId: "s_5xx1", paired: true, points: 2)),
+        ])
+
+        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), policy: .fast)
+        try queue.reloadPending()
+
+        var droppedCalls = 0
+        queue.onPayloadDropped = { _, _ in droppedCalls += 1 }
+
+        let exp = expectation(description: "5xx ladder settles on success")
+        queue.onLastResultChanged = { _ in exp.fulfill() }
+        queue.processNextIfNeeded()
+        wait(for: [exp], timeout: 5.0)
+
+        XCTAssertEqual(droppedCalls, 0, "5xx retries must NOT drop")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: jsonURL.path),
+                       "Final 2xx should delete the JSON")
+        XCTAssertEqual(QueueStubURLProtocol.requestCount, 4,
+                       "Queue must walk the ladder through all three 503s")
+    }
+
+    // MARK: 5. 4xx with budget exhausted → drop + delete.
+
+    func testClientErrorBudgetExhaustedDropsAndDeletes() throws {
+        let store = makeStore()
+        let jsonURL = try store.save(Self.makePayload(sessionId: "s_drop1"),
+                                      videoURL: try Self.writeFakeVideo(named: "d.mov"))
+
+        // Budget = 1: first 4xx bumps count to 1 (no drop yet, one
+        // cooldown retry scheduled — 50 ms under `.fast`). Second 4xx
+        // sees count ≥ budget → drop.
+        QueueStubURLProtocol.handler = .scripted(replies: [
+            .httpStatus(422, body: Data("bad shape".utf8)),
+            .httpStatus(400, body: Data("still bad".utf8)),
+        ])
+
+        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), policy: .fast)
+        try queue.reloadPending()
+
+        let dropExp = expectation(description: "drop fires")
+        var dropped: (URL, ServerUploader.UploadError)?
+        queue.onPayloadDropped = { url, err in
+            dropped = (url, err)
+            dropExp.fulfill()
+        }
+
+        queue.processNextIfNeeded()
+        wait(for: [dropExp], timeout: 5.0)
+
+        XCTAssertNotNil(dropped, "Second 4xx must hit the drop path")
+        XCTAssertEqual(dropped?.0.lastPathComponent, jsonURL.lastPathComponent,
+                       "Drop callback must carry the dropped file URL")
+        if case let .client(code, _)? = dropped?.1 {
+            XCTAssertTrue(code == 400 || code == 422,
+                          "Drop should carry a 4xx status (got \(code))")
+        } else {
+            XCTFail("Dropped error should be .client(_); got \(String(describing: dropped?.1))")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: jsonURL.path),
+                       "JSON should be deleted on drop")
+        XCTAssertNil(store.videoURL(forPayload: jsonURL),
+                     "Companion video should be deleted on drop")
+        XCTAssertEqual(QueueStubURLProtocol.requestCount, 2,
+                       "Queue must attempt twice before dropping")
+    }
+
+    // MARK: 6. First 4xx alone does NOT drop (budget not yet exhausted).
+
+    func testFirstClientErrorWithinBudgetDoesNotDrop() throws {
+        let store = makeStore()
+        let jsonURL = try store.save(Self.makePayload(sessionId: "s_4xx0"),
                                       videoURL: try Self.writeFakeVideo(named: "c.mov"))
 
-        // First 422, second 200. The queue's 4xx budget is 1, so the first
-        // 4xx schedules the cooldown retry; we override the cooldown via
-        // the test's tight loop indirectly — the production cooldown is
-        // 60 s, but the queue calls processNextIfNeeded() via
-        // DispatchQueue.main.asyncAfter(deadline: .now() + 60). For the
-        // unit test we cannot wait 60 s, so this case verifies only that
-        // the FIRST 4xx does NOT trigger drop and does NOT delete the file.
+        // Only one 4xx is queued; the scripted stub falls back to a 500
+        // for the cooldown-retry attempt, so we observe state AFTER the
+        // first settle (before the retry). Using a one-shot handler that
+        // never completes would leave the test hanging.
         QueueStubURLProtocol.handler = .httpStatus(422, body: Data("bad shape".utf8))
 
-        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), retryDelayS: 0.05)
+        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), policy: .fast)
         try queue.reloadPending()
 
         var dropped: (URL, ServerUploader.UploadError)?
@@ -169,83 +232,19 @@ final class PayloadUploadQueueTests: XCTestCase {
         queue.processNextIfNeeded()
         wait(for: [firstSettleExp], timeout: 5.0)
 
-        // Within budget — no drop, file still on disk awaiting the cooldown
-        // retry that we won't wait for.
         XCTAssertNil(dropped, "First 4xx is within budget; no drop yet")
         XCTAssertTrue(FileManager.default.fileExists(atPath: jsonURL.path),
-                      "JSON must remain on disk while retry is pending")
+                      "JSON must remain on disk while the cooldown retry is pending")
     }
 
-    // MARK: 5. 4xx with budget exhausted → drop + delete.
-
-    func testClientErrorBudgetExhaustedDropsAndDeletes() throws {
-        let store = makeStore()
-        let jsonURL = try store.save(Self.makePayload(sessionId: "s_drop1"),
-                                      videoURL: try Self.writeFakeVideo(named: "d.mov"))
-
-        // The queue's 4xx budget is 1 — meaning ONE retry is allowed before
-        // drop. The drop fires when `clientErrorRetryCount >= 1`. So we
-        // need to reach the second 4xx attempt for the drop to trigger.
-        // Since the cooldown between retries is 60 s of wall-clock time
-        // we cannot drive that path in a fast test. Instead, we
-        // pre-bookkeep by feeding TWO 4xx responses back-to-back via
-        // direct enqueue cycles: first attempt sets count=1, second attempt
-        // (same fileURL) sees count >= budget and drops.
-        //
-        // To simulate the second attempt without the cooldown wait, we
-        // re-enqueue the file URL via a fresh processNextIfNeeded after
-        // forcing the queue's internal state to consider the file
-        // already-counted. Since we can't reach private state, we use the
-        // longer path: fire two real probes by re-saving + re-enqueuing
-        // the same payload twice — but that creates a NEW file each time
-        // (different basename), defeating the per-URL budget.
-        //
-        // The honest verifiable path: after the first 4xx, the queue
-        // re-inserts the URL and schedules a 60 s cooldown. That cooldown
-        // is what gates the drop; we trust the production logic's
-        // unit-tested branch by asserting the **first** 4xx is NOT a drop
-        // (covered above) and observing that the file is still on disk
-        // pending the cooldown retry. The drop branch itself is exercised
-        // by the queue's existing call sites in CameraViewController; a
-        // future refactor exposing `clientErrorCooldownS` as injectable
-        // would let us verify drop end-to-end here.
-        QueueStubURLProtocol.handler = .httpStatus(400, body: nil)
-
-        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), retryDelayS: 0.05)
-        try queue.reloadPending()
-
-        var dropped: (URL, ServerUploader.UploadError)?
-        queue.onPayloadDropped = { url, err in dropped = (url, err) }
-
-        let exp = expectation(description: "first 4xx settles")
-        var settleCount = 0
-        queue.onUploadingChanged = { uploading in
-            if !uploading {
-                settleCount += 1
-                if settleCount == 1 { exp.fulfill() }
-            }
-        }
-        queue.processNextIfNeeded()
-        wait(for: [exp], timeout: 5.0)
-
-        // First 4xx: budget not yet exhausted → no drop, file preserved
-        // for the cooldown retry. The drop branch is reached after the
-        // second attempt which we can't trigger inside the fast test
-        // window — but we verify the no-drop side here as the
-        // observable contract.
-        XCTAssertNil(dropped, "Single 4xx within budget should not drop yet")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: jsonURL.path),
-                      "File preserved during 4xx cooldown")
-    }
-
-    // MARK: 6. clearPending() empties the in-memory queue but keeps disk files.
+    // MARK: 7. clearPending() empties the in-memory queue but keeps disk files.
 
     func testClearPendingPreservesDiskFiles() throws {
         let store = makeStore()
         let jsonURL = try store.save(Self.makePayload(sessionId: "s_keep0"),
                                       videoURL: try Self.writeFakeVideo(named: "k.mov"))
 
-        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), retryDelayS: 0.05)
+        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), policy: .fast)
         try queue.reloadPending()
         queue.clearPending()
 
@@ -257,12 +256,8 @@ final class PayloadUploadQueueTests: XCTestCase {
     // MARK: - Helpers
 
     private func makeStore() -> PitchPayloadStore {
-        // Use a unique subdir under tempDir per test instance.
         let dirName = "store_\(UUID().uuidString)"
         let store = PitchPayloadStore(directoryName: dirName)
-        // PitchPayloadStore writes under Documents/<dirName>; the deletion
-        // in tearDown only cleans tempDir, not Documents. To keep tests
-        // hermetic, also clean the store's directory at end of test.
         addTeardownBlock {
             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
             try? FileManager.default.removeItem(at: docs.appendingPathComponent(dirName))
@@ -272,9 +267,8 @@ final class PayloadUploadQueueTests: XCTestCase {
     }
 
     private func makeUploader() -> ServerUploader {
-        // The host doesn't matter — QueueStubURLProtocol intercepts every
-        // request before DNS — but we still use a localhost URL for
-        // realism.
+        // Host doesn't matter — QueueStubURLProtocol intercepts every
+        // request before DNS.
         let cfg = ServerUploader.ServerConfig(serverIP: "127.0.0.1", serverPort: 65535)
         return ServerUploader(config: cfg)
     }
@@ -319,10 +313,8 @@ final class PayloadUploadQueueTests: XCTestCase {
 // MARK: - URLProtocol stub for the queue tests
 
 /// Intercepts every HTTP request through `URLSession.shared`'s default
-/// config. Unlike the monitor's stub this one supports a scripted reply
-/// list so we can simulate "first 503, then 200" without needing a real
-/// server. Independent class so both test suites can register their
-/// stubs without colliding handler state.
+/// config. Supports a scripted reply list so we can simulate "first 503,
+/// then 200" without needing a real server.
 final class QueueStubURLProtocol: URLProtocol {
     enum Reply {
         case successJSON(Data)
@@ -361,8 +353,6 @@ final class QueueStubURLProtocol: URLProtocol {
         QueueStubURLProtocol.lock.lock()
         QueueStubURLProtocol.requestCount += 1
         let handler = QueueStubURLProtocol.handler
-        // Pop scripted replies under the lock so concurrent retries don't
-        // duplicate-step the script.
         var resolved: Handler? = handler
         if case .scripted(let replies) = handler {
             let idx = QueueStubURLProtocol.scriptedIndex
@@ -394,7 +384,6 @@ final class QueueStubURLProtocol: URLProtocol {
         case .failure(let err):
             client?.urlProtocol(self, didFailWithError: err)
         case .scripted:
-            // Unreachable — already resolved above.
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
         }
     }
