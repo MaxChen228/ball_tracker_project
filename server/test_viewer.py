@@ -131,7 +131,8 @@ def test_build_scene_ray_origin_is_camera_center_and_points_toward_ball():
 
 def test_build_scene_ray_endpoint_hits_ground_when_direction_is_downward():
     """Any ray whose direction has negative Z component in world frame should
-    have its endpoint clamped to the Z=0 plane (positive t)."""
+    have its endpoint clamped to the Z=0 plane (positive t), and contribute
+    one point to the camera's ground trace."""
     K, (R_a, t_a, C_a, H_a), _ = _make_rig()
     # Point below camera height, above plate plane.
     P = np.array([0.0, 0.2, 0.4])
@@ -141,40 +142,55 @@ def test_build_scene_ray_endpoint_hits_ground_when_direction_is_downward():
 
     r = scene.rays[0]
     assert r.endpoint[2] == pytest.approx(0.0, abs=1e-6)
+    # Ground trace gets the same ground-plane intersection.
+    assert len(scene.ground_traces["A"]) == 1
+    assert scene.ground_traces["A"][0]["z"] == pytest.approx(0.0, abs=1e-6)
 
 
-def test_build_scene_skips_rays_that_dont_intersect_ground():
-    """Rays whose world-frame direction has Z >= 0 (pointing up, or parallel
-    to the plate) would extend to infinity / never hit Z=0 with positive t.
-    `build_scene` must drop them rather than emit 10 m sky-poles that swamp
-    the viewer with false-positive ball detections."""
+def test_build_scene_keeps_upward_rays_without_ground_trace():
+    """Rays with world-frame direction Z >= 0 (pointing up or parallel to
+    the plate) are geometrically valid — a ball mid-flight above camera
+    height must still appear as a ray. The endpoint can't be clamped to
+    Z=0, so it's extended along the ray direction by a scene-scale length.
+    Ground trace only collects frames whose ray actually hits the plate."""
     K, (R_a, t_a, C_a, H_a), _ = _make_rig()
-    # C_a sits at Z=1.2. Any ball point at Z >= C_a.z produces a ray that
-    # either points upward (dz > 0) or is parallel (dz ~= 0) when the point
-    # is at the same height. Ball point above the camera → upward ray.
+    # C_a sits at Z=1.2. Ball point above camera → ray points up (dz > 0).
     P_up = np.array([0.0, 0.2, 3.0])
-    # Ball point at exactly camera height but offset in Y → horizontal ray
-    # (dz ~= 0), which also fails to cross Z=0 with positive t.
+    # Ball at camera height, offset in Y → ray ~horizontal (dz ~= 0).
     P_level = np.array([0.5, 0.2, 1.2])
-    # Valid, downward-pointing ray to prove the others were filtered rather
-    # than all rays being dropped by some other bug.
+    # Downward-pointing ray (hits ground), to show both paths coexist.
     P_ok = np.array([0.0, 0.2, 0.4])
     trajectory = np.array([P_up, P_level, P_ok])
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, trajectory)
 
     scene = build_scene(sid(1), {"A": pitch}, triangulated=None)
 
-    # Only the P_ok frame should have produced a ray.
-    assert len(scene.rays) == 1
-    assert scene.rays[0].frame_index == 2
-    assert scene.rays[0].endpoint[2] == pytest.approx(0.0, abs=1e-6)
+    # All three frames keep a ray — none are dropped.
+    assert len(scene.rays) == 3
+    # But only the downward ray contributes to the ground trace.
+    assert len(scene.ground_traces["A"]) == 1
+    assert scene.ground_traces["A"][0]["z"] == pytest.approx(0.0, abs=1e-6)
+    # The ray for P_ok matches P_ok's ground projection.
+    r_ok = next(r for r in scene.rays if r.frame_index == 2)
+    assert r_ok.endpoint[2] == pytest.approx(0.0, abs=1e-6)
+    # Upward / horizontal rays have endpoints extended along direction —
+    # not clamped to the plate.
+    for r in scene.rays:
+        if r.frame_index in (0, 1):
+            # Endpoint lies further from camera center than the camera
+            # itself and is NOT at Z=0 (no ground intersection exists).
+            end = np.array(r.endpoint)
+            origin = np.array(r.origin)
+            assert np.linalg.norm(end - origin) > 1e-3
 
 
-def test_build_scene_skipped_rays_do_not_affect_camera_or_triangulated():
-    """Filtering rays must not interfere with camera pose or triangulated
-    point attachment — only `scene.rays` shrinks."""
+def test_build_scene_all_upward_rays_still_render():
+    """Even when every detection yields an upward ray (ball consistently
+    above camera height), the viewer must still show those rays — the
+    only thing missing is the ground trace. Camera and triangulated
+    points are untouched."""
     K, (R_a, t_a, C_a, H_a), _ = _make_rig()
-    P_up = np.array([0.0, 0.2, 3.0])  # all frames point upward → 0 rays
+    P_up = np.array([0.0, 0.2, 3.0])  # all frames point upward
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([P_up]))
     tri = [
         main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6)
@@ -183,7 +199,9 @@ def test_build_scene_skipped_rays_do_not_affect_camera_or_triangulated():
     scene = build_scene(sid(1), {"A": pitch}, triangulated=tri)
 
     assert len(scene.cameras) == 1
-    assert scene.rays == []
+    assert len(scene.rays) == 1
+    # No ground trace because the single ray doesn't cross Z=0.
+    assert scene.ground_traces == {}
     assert len(scene.triangulated) == 1
 
 

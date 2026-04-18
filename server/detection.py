@@ -62,7 +62,7 @@ class HSVRange:
 # Minimum / maximum area (in pixels) a candidate blob must have to be
 # considered a ball. Same bounds as the Swift implementation used.
 _MIN_AREA_PX = 20
-_MAX_AREA_PX = 5000
+_MAX_AREA_PX = 150_000
 
 
 def detect_ball(

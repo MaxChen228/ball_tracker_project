@@ -1,12 +1,18 @@
 """Per-cycle 3D scene builder for the viewer.
 
 Single-phone scope: each phone's homography → camera pose; every
-ball-detected frame whose ray actually crosses the plate plane (Z=0 at
-positive parameter t) becomes a ray (origin = camera center, direction =
-normalized ray in world frame, endpoint = ground-plane intersection).
-Rays that point upward or parallel to the plate are dropped — they
-almost always come from false-positive ball detections (sky, ceiling,
-reflections) and drawing them as long poles swamps the viewer.
+ball-detected frame becomes a ray (origin = camera center, direction =
+normalized ray in world frame). Upward-pointing rays are kept — a ball
+mid-flight above camera height is geometrically valid, and monocular
+outlier rejection is deferred to the dual-camera trajectory-fit step.
+The ray's visual endpoint is clamped to the plate plane (Z=0) when the
+direction crosses it at positive t, otherwise extended along the ray a
+scene-scale length so upward rays still render.
+
+Ground trace (`scene.ground_traces[cam]`) is a separate projection of
+the ray∩Z=0 intersection, ordered by anchor-relative time — the
+"assume-ball-is-on-ground" single-camera proxy. Only frames whose ray
+actually hits the plate contribute here.
 
 Two-phone scope: the CycleResult's triangulated points are attached as
 a 3D polyline — same `Scene` shape so the viewer renders either mode
@@ -82,12 +88,12 @@ class Scene:
         }
 
 
-def _ray_endpoint(origin: np.ndarray, direction: np.ndarray) -> np.ndarray | None:
-    """Intersect a ray with the ground plane (Z=0) at positive parameter t.
-
-    Returns the intersection point, or `None` if the ray points upward /
-    parallel to the plate — such rays are caller-dropped so the viewer
-    never renders "pole-into-the-sky" artifacts from false positives.
+def _ray_ground_intersection(
+    origin: np.ndarray, direction: np.ndarray
+) -> np.ndarray | None:
+    """Ray ∩ plate plane (Z=0) at positive parameter t. Returns the
+    intersection point, or `None` if the ray points upward / parallel to
+    the plate (no physical ground-projection exists in that case).
     Visualisation-only; never used for geometry math."""
     dz = float(direction[2])
     if abs(dz) <= 1e-9:
@@ -96,6 +102,16 @@ def _ray_endpoint(origin: np.ndarray, direction: np.ndarray) -> np.ndarray | Non
     if t <= 0:
         return None
     return origin + t * direction
+
+
+def _ray_viz_endpoint(
+    origin: np.ndarray, direction: np.ndarray, length: float
+) -> np.ndarray:
+    """Fixed-length projection along ray direction — used as the Ray's
+    visual endpoint when no ground intersection exists. Keeps upward rays
+    on screen instead of dropping them; direction carries the information
+    the viewer needs."""
+    return origin + length * direction
 
 
 def _world_ray(
@@ -164,6 +180,12 @@ def build_scene(
 
         dist = intr.distortion
         anchor = pitch.sync_anchor_timestamp_s or 0.0
+        # Scene-scale fallback length for rays that don't cross the plate —
+        # scales with the camera's distance from the world origin so the
+        # line stays visually comparable to ground-hit rays drawn by the
+        # same camera. Floor at 5 m keeps it readable when the camera is
+        # very close to the plate.
+        viz_length = max(5.0, 2.0 * float(np.linalg.norm(C)))
         trace: list[dict[str, float]] = []
         for f in pitch.frames:
             if not f.ball_detected:
@@ -178,9 +200,8 @@ def build_scene(
                 )
             except Exception:
                 continue
-            endpoint = _ray_endpoint(C, d_world)
-            if endpoint is None:
-                continue
+            ground = _ray_ground_intersection(C, d_world)
+            endpoint = ground if ground is not None else _ray_viz_endpoint(C, d_world, viz_length)
             t_rel = float(f.timestamp_s - anchor)
             scene.rays.append(
                 Ray(
@@ -191,14 +212,15 @@ def build_scene(
                     endpoint=endpoint.tolist(),
                 )
             )
-            trace.append(
-                {
-                    "t_rel_s": t_rel,
-                    "x": float(endpoint[0]),
-                    "y": float(endpoint[1]),
-                    "z": float(endpoint[2]),
-                }
-            )
+            if ground is not None:
+                trace.append(
+                    {
+                        "t_rel_s": t_rel,
+                        "x": float(ground[0]),
+                        "y": float(ground[1]),
+                        "z": float(ground[2]),
+                    }
+                )
         if trace:
             trace.sort(key=lambda p: p["t_rel_s"])
             scene.ground_traces[cam_id] = trace
