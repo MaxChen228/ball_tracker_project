@@ -1,6 +1,9 @@
 import UIKit
 import AVFoundation
 import CoreMedia
+import os
+
+private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "sensing")
 
 /// Home plate calibration screen (spec):
 /// - Show live preview
@@ -187,7 +190,10 @@ final class CalibrationViewController: UIViewController {
                     session.addInput(input)
                 }
             } catch {
-                // TODO: handle error UI
+                log.error("calibration camera input failed error=\(error.localizedDescription, privacy: .public)")
+                DispatchQueue.main.async { [weak self] in
+                    self?.showAlert(title: "相機無法開啟", message: "無法存取後置相機：\(error.localizedDescription)")
+                }
             }
         }
 
@@ -265,6 +271,7 @@ final class CalibrationViewController: UIViewController {
 
     @objc private func saveCalibration() {
         persistCalibrationFromDraggedPoints()
+        log.info("calibration saved source=manual")
         dismiss(animated: true)
     }
 
@@ -611,6 +618,7 @@ final class CalibrationViewController: UIViewController {
         // still has >=5 correspondences to solve with outlier rejection.
         let minRequired = max(4, required.count - 1)
         if detected.count < minRequired {
+            log.warning("aruco detection failed reason=insufficient_markers detected=\(detected.count, privacy: .public) required=\(minRequired, privacy: .public) missing=\(missing, privacy: .public)")
             showAlert(
                 title: "無法自動校正",
                 message: "只偵測到 \(detected.count)/\(required.count) 個 marker（至少需 \(minRequired)）。缺少 IDs: \(missing)。"
@@ -618,6 +626,7 @@ final class CalibrationViewController: UIViewController {
             return
         }
         guard pixelSize.width > 0, pixelSize.height > 0 else {
+            log.warning("aruco detection failed reason=no_pixel_size")
             showAlert(title: "無法自動校正", message: "尚未取得相機畫面尺寸。")
             return
         }
@@ -635,6 +644,7 @@ final class CalibrationViewController: UIViewController {
         }
 
         guard let hNumbers = BTArucoDetector.findHomography(fromWorldPoints: worldValues, imagePoints: imageValues) else {
+            log.warning("aruco detection failed reason=ransac_no_solution detected=\(detected.count, privacy: .public)")
             showAlert(title: "無法自動校正", message: "RANSAC 解不出 homography (marker 可能被遮擋)。")
             return
         }
@@ -646,6 +656,7 @@ final class CalibrationViewController: UIViewController {
         // Intrinsics follow the same rule as manual Save: respect the
         // Settings → "Use ChArUco values" override.
         persistIntrinsicsIfPossible()
+        log.info("calibration saved source=aruco markers=\(detected.count, privacy: .public)")
         dismiss(animated: true)
     }
 

@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "sensing")
 
 /// Centralised UserDefaults access for calibration-derived intrinsics,
 /// homography, and captured image dimensions. Keeps the keys and the
@@ -19,17 +22,20 @@ enum IntrinsicsStore {
     /// ball detector, or nil when any field is missing / zero.
     static func loadBallDetectorIntrinsics() -> BallDetector.Intrinsics? {
         let d = UserDefaults.standard
-        guard
-            d.object(forKey: keyIntrinsicFx) != nil,
-            d.object(forKey: keyIntrinsicFz) != nil,
-            d.object(forKey: keyIntrinsicCx) != nil,
-            d.object(forKey: keyIntrinsicCy) != nil
-        else { return nil }
         let fx = d.double(forKey: keyIntrinsicFx)
         let fz = d.double(forKey: keyIntrinsicFz)
+        let hasAll = d.object(forKey: keyIntrinsicFx) != nil
+            && d.object(forKey: keyIntrinsicFz) != nil
+            && d.object(forKey: keyIntrinsicCx) != nil
+            && d.object(forKey: keyIntrinsicCy) != nil
+            && fx != 0 && fz != 0
+        guard hasAll else {
+            log.warning("intrinsics missing — falling back to FOV approximation")
+            return nil
+        }
         let cx = d.double(forKey: keyIntrinsicCx)
         let cy = d.double(forKey: keyIntrinsicCy)
-        if fx == 0 || fz == 0 { return nil }
+        log.debug("intrinsics loaded fx=\(fx, privacy: .public) fz=\(fz, privacy: .public) cx=\(cx, privacy: .public) cy=\(cy, privacy: .public)")
         return BallDetector.Intrinsics(cx: cx, cy: cy, fx: fx, fz: fz)
     }
 
@@ -57,7 +63,12 @@ enum IntrinsicsStore {
     }
 
     static func loadHomography() -> [Double]? {
-        UserDefaults.standard.array(forKey: keyHomography) as? [Double]
+        guard let h = UserDefaults.standard.array(forKey: keyHomography) as? [Double] else {
+            log.warning("homography missing — triangulation will fail server-side")
+            return nil
+        }
+        log.debug("homography loaded")
+        return h
     }
 
     /// Return the captured image dimensions, or nil when they have not
