@@ -1,0 +1,182 @@
+"""Unit tests for geometry primitives in `triangulate.py`.
+
+Covers the two bugs flagged in the audit:
+
+* `triangulate_rays` near-parallel fallback — must return (None, inf)
+  so the caller can drop the frame instead of placing the ball at the
+  arbitrary midpoint of the two camera centers.
+* `recover_extrinsics` sign-flip robustness — near-degenerate
+  homographies (camera near plate plane) must raise ValueError rather
+  than silently flipping via an unreliable `sign(t[2])` check.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from triangulate import (
+    build_K,
+    camera_center_world,
+    recover_extrinsics,
+    triangulate_rays,
+)
+
+
+# --------------------------- helpers -----------------------------------------
+
+
+def _look_at(pos: np.ndarray, target: np.ndarray, up: np.ndarray = np.array([0.0, 0.0, 1.0])):
+    """Build (R_wc, t_wc) for a camera at `pos` looking at `target`.
+
+    Camera frame (OpenCV): X right, Y down, Z forward.
+    Duplicated from test_server._look_at to keep this module standalone.
+    """
+    z_cam = target - pos
+    z_cam /= np.linalg.norm(z_cam)
+    y_cam = -up - np.dot(-up, z_cam) * z_cam
+    y_cam /= np.linalg.norm(y_cam)
+    x_cam = np.cross(y_cam, z_cam)
+    R_cw = np.column_stack([x_cam, y_cam, z_cam])  # cam → world
+    R_wc = R_cw.T
+    t_wc = -R_wc @ pos
+    return R_wc, t_wc
+
+
+def _homography_from_pose(K: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Compose world-plate → pixel homography from a calibrated pose.
+
+    H = K [r1 r2 t], then normalise h33 = 1 to match the iPhone-side
+    convention `PitchPayload.homography`.
+    """
+    H = K @ np.column_stack([R[:, 0], R[:, 1], t])
+    return H / H[2, 2]
+
+
+# --------------------------- triangulate_rays --------------------------------
+
+
+def test_triangulate_rays_converging_returns_exact_point():
+    """Two rays that provably cross at P_true → midpoint == P_true, gap ≈ 0."""
+    P_true = np.array([0.5, 1.2, 1.8])
+    C1 = np.array([2.0, -3.0, 1.0])
+    C2 = np.array([-2.0, -3.0, 1.0])
+    d1 = (P_true - C1) / np.linalg.norm(P_true - C1)
+    d2 = (P_true - C2) / np.linalg.norm(P_true - C2)
+
+    P_rec, gap = triangulate_rays(C1, d1, C2, d2)
+
+    assert P_rec is not None
+    np.testing.assert_allclose(P_rec, P_true, atol=1e-9)
+    assert gap < 1e-9
+
+
+def test_triangulate_rays_parallel_returns_none_inf():
+    """Identical direction from distinct origins → no intersection geometry,
+    must refuse to fabricate a midpoint."""
+    C1 = np.array([1.5, 0.0, 1.2])
+    C2 = np.array([-1.5, 0.0, 1.2])
+    d = np.array([0.0, 1.0, 0.0])  # both rays shoot straight forward (Y)
+
+    P_rec, gap = triangulate_rays(C1, d, C2, d)
+
+    assert P_rec is None
+    assert gap == float("inf")
+
+
+def test_triangulate_rays_anti_parallel_returns_none_inf():
+    """Opposing directions also drive det(A) ≈ 0; same contract holds."""
+    C1 = np.array([0.0, -1.0, 1.0])
+    C2 = np.array([0.0, 1.0, 1.0])
+    d1 = np.array([0.0, 1.0, 0.0])
+    d2 = np.array([0.0, -1.0, 0.0])
+
+    P_rec, gap = triangulate_rays(C1, d1, C2, d2)
+
+    assert P_rec is None
+    assert gap == float("inf")
+
+
+# --------------------------- recover_extrinsics ------------------------------
+
+
+def test_recover_extrinsics_happy_path_round_trip():
+    """Sanity: a well-posed homography round-trips through the decomposition."""
+    fx = fy = 1600.0
+    cx, cy = 960.0, 540.0
+    K = build_K(fx, fy, cx, cy)
+    C = np.array([1.8, -2.5, 1.2])
+    target = np.array([0.0, 0.15, 0.0])
+    R, t = _look_at(C, target)
+    H = _homography_from_pose(K, R, t)
+
+    R_rec, t_rec = recover_extrinsics(K, H)
+
+    np.testing.assert_allclose(R_rec, R, atol=1e-8)
+    np.testing.assert_allclose(t_rec, t, atol=1e-8)
+    # Recovered camera center matches the rig.
+    np.testing.assert_allclose(camera_center_world(R_rec, t_rec), C, atol=1e-8)
+
+
+def test_recover_extrinsics_sign_flip_restores_positive_tz():
+    """An H whose raw Zhang decomposition yields t[2] < 0 must trigger the
+    sign-flip branch and emerge with t[2] > 0 (camera in front of plate).
+
+    Negating the entire homography leaves the induced point correspondence
+    unchanged (H and -H map world → image identically up to a scale of -1),
+    but flips the sign of the recovered (R, t). That lets us test the flip
+    branch without manufacturing an impossible pose.
+    """
+    fx = fy = 1600.0
+    cx, cy = 960.0, 540.0
+    K = build_K(fx, fy, cx, cy)
+    C = np.array([1.8, -2.5, 1.2])
+    target = np.array([0.0, 0.15, 0.0])
+    R, t = _look_at(C, target)
+    H = _homography_from_pose(K, R, t)
+    # Sanity: the un-flipped version already decomposes to t[2] > 0, so we
+    # need to negate H to force the raw decomposition through the < 0 branch.
+    H_negated = -H
+
+    R_rec, t_rec = recover_extrinsics(K, H_negated)
+
+    assert t_rec[2] > 0, "sign-flip branch should restore camera in front of plate"
+    # Recovered pose equals the original (sign-flip undid the negation).
+    np.testing.assert_allclose(R_rec, R, atol=1e-8)
+    np.testing.assert_allclose(t_rec, t, atol=1e-8)
+
+
+def test_recover_extrinsics_degenerate_small_tz_raises():
+    """A homography whose decomposition yields |t[2]| < 1e-6 is geometrically
+    a camera (nearly) on the plate plane — the sign of t[2] is numerically
+    unreliable, so the function must raise ValueError instead of flipping."""
+    fx = fy = 1600.0
+    cx, cy = 960.0, 540.0
+    K = build_K(fx, fy, cx, cy)
+    # Camera with optical axis (z_cam = +Y) orthogonal to its own position
+    # vector (0, 1, 0) · (1, 1e-7, 2) ≈ 1e-7 → t[2] ≈ -1e-7, well under 1e-6.
+    C = np.array([1.0, 1e-7, 2.0])
+    target = np.array([1.0, 1.0 + 1e-7, 2.0])
+    R, t = _look_at(C, target)
+    assert abs(t[2]) < 1e-6, "precondition: pose must decompose to |t[2]| < 1e-6"
+    H = _homography_from_pose(K, R, t)
+
+    with pytest.raises(ValueError, match="degenerate homography"):
+        recover_extrinsics(K, H)
+
+
+def test_recover_extrinsics_threshold_boundary_passes():
+    """Just above the 1e-6 threshold must still decompose successfully —
+    guard against the check being too aggressive for legitimate poses."""
+    fx = fy = 1600.0
+    cx, cy = 960.0, 540.0
+    K = build_K(fx, fy, cx, cy)
+    # |t[2]| ≈ 1e-4, comfortably above the threshold.
+    C = np.array([1.0, 1e-4, 2.0])
+    target = np.array([1.0, 1.0 + 1e-4, 2.0])
+    R, t = _look_at(C, target)
+    assert abs(t[2]) > 1e-6
+    H = _homography_from_pose(K, R, t)
+
+    # Should not raise.
+    R_rec, t_rec = recover_extrinsics(K, H)
+    assert t_rec[2] > 0
