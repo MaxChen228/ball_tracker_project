@@ -99,6 +99,9 @@ def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoin
         d_b_world = R_b.T @ d_b_cam
 
         P, gap = triangulate_rays(C_a, d_a_world, C_b, d_b_world)
+        if P is None:
+            # Near-parallel rays for this frame pair — no meaningful 3D point.
+            continue
         results.append(
             TriangulatedPoint(
                 t_rel_s=t_rel,

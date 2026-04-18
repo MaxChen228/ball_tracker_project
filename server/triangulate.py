@@ -39,6 +39,12 @@ def recover_extrinsics(K: np.ndarray, H: np.ndarray) -> tuple[np.ndarray, np.nda
 
     # Camera must be in front of plate plane → world-point-in-cam Z > 0 for any
     # point on the plate. Test with world origin: z_cam = (R @ 0 + t)[2] = t[2] > 0.
+    # If |t[2]| is numerically near zero the camera is (approximately) on the
+    # plate plane itself — the sign of t[2] is unreliable, so refuse to
+    # disambiguate and let the caller handle a bad calibration instead of
+    # silently producing a flipped pose.
+    if abs(t[2]) < 1e-6:
+        raise ValueError("degenerate homography")
     if t[2] < 0:
         R = -R
         t = -t
@@ -88,12 +94,17 @@ def undistorted_ray_cam(
 
 def triangulate_rays(
     C1: np.ndarray, d1: np.ndarray, C2: np.ndarray, d2: np.ndarray
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray | None, float]:
     """Midpoint of the shortest segment connecting two 3D rays.
 
     Ray i : p(s) = C_i + s * d_i
     Returns (midpoint, gap) where gap is the distance between the two closest
     points (ideally 0 for perfect rays).
+
+    When the rays are (near-)parallel the 2×2 system is singular and no
+    meaningful midpoint exists — returns (None, inf) so the caller can
+    drop that frame pair instead of placing the ball at the arbitrary
+    midpoint of the two camera centers.
     """
     v = C1 - C2
     a11 = float(np.dot(d1, d1))
@@ -105,9 +116,8 @@ def triangulate_rays(
     rhs = np.array([b1, b2])
     det = np.linalg.det(A)
     if abs(det) < 1e-12:
-        # Parallel rays: return midpoint of the two origins as a fallback.
-        mid = 0.5 * (C1 + C2)
-        return mid, float(np.linalg.norm(v))
+        # Parallel / near-parallel rays: no intersection geometry to midpoint.
+        return None, float("inf")
     s, t = np.linalg.solve(A, rhs)
     P1 = C1 + s * d1
     P2 = C2 + t * d2

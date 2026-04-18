@@ -1,9 +1,12 @@
 """Per-cycle 3D scene builder for the viewer.
 
 Single-phone scope: each phone's homography → camera pose; every
-ball-detected frame becomes a ray (origin = camera center, direction =
-normalized ray in world frame, endpoint = ground-plane intersection or
-capped at `_RAY_MAX_LEN_M`).
+ball-detected frame whose ray actually crosses the plate plane (Z=0 at
+positive parameter t) becomes a ray (origin = camera center, direction =
+normalized ray in world frame, endpoint = ground-plane intersection).
+Rays that point upward or parallel to the plate are dropped — they
+almost always come from false-positive ball detections (sky, ceiling,
+reflections) and drawing them as long poles swamps the viewer.
 
 Two-phone scope: the CycleResult's triangulated points are attached as
 a 3D polyline — same `Scene` shape so the viewer renders either mode
@@ -68,20 +71,20 @@ class Scene:
         }
 
 
-# Arbitrary "big enough" length for rays that never cross Z=0 with positive
-# parameter t (e.g. pointing upward or parallel to the plate plane).
-_RAY_MAX_LEN_M = 10.0
+def _ray_endpoint(origin: np.ndarray, direction: np.ndarray) -> np.ndarray | None:
+    """Intersect a ray with the ground plane (Z=0) at positive parameter t.
 
-
-def _ray_endpoint(origin: np.ndarray, direction: np.ndarray) -> np.ndarray:
-    """Extend a ray to either the ground plane (Z=0) along positive t, or a
-    fixed max length. Visualisation-only; never used for geometry math."""
+    Returns the intersection point, or `None` if the ray points upward /
+    parallel to the plate — such rays are caller-dropped so the viewer
+    never renders "pole-into-the-sky" artifacts from false positives.
+    Visualisation-only; never used for geometry math."""
     dz = float(direction[2])
-    if abs(dz) > 1e-9:
-        t = -float(origin[2]) / dz
-        if t > 0:
-            return origin + t * direction
-    return origin + _RAY_MAX_LEN_M * direction
+    if abs(dz) <= 1e-9:
+        return None
+    t = -float(origin[2]) / dz
+    if t <= 0:
+        return None
+    return origin + t * direction
 
 
 def _world_ray(
@@ -159,6 +162,8 @@ def build_scene(
             except Exception:
                 continue
             endpoint = _ray_endpoint(C, d_world)
+            if endpoint is None:
+                continue
             scene.rays.append(
                 Ray(
                     camera_id=cam_id,
