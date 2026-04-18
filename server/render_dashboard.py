@@ -142,8 +142,6 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .session-head {{ display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }}
 .session-id {{ font-family: var(--mono); font-size: 14px; color: var(--ink);
                letter-spacing: 0.04em; }}
-.session-meta {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
-                 text-transform: uppercase; color: var(--sub); }}
 .session-actions {{ display: flex; gap: 8px; margin-top: 14px; }}
 
 /* --- Buttons --- */
@@ -255,9 +253,13 @@ _JS_TEMPLATE = r"""
     const armed = !!(s && s.armed);
     const chip = armed ? `<span class="chip armed">armed</span>` : `<span class="chip idle">idle</span>`;
     const sid = s && s.id ? `<span class="session-id">${esc(s.id)}</span>` : '';
-    const reason = (!armed && s && s.end_reason) ? `<span class="session-meta">last: ${esc(s.end_reason)}</span>` : '';
+    const clearBtn = (!armed && s && s.id)
+      ? `<form class="inline" method="POST" action="/sessions/clear">
+           <button class="btn" type="submit">Clear</button>
+         </form>`
+      : '';
     sessionBox.innerHTML = `
-      <div class="session-head">${chip}${sid}${reason}</div>
+      <div class="session-head">${chip}${sid}</div>
       <div class="session-actions">
         <form class="inline" method="POST" action="/sessions/arm">
           <button class="btn" type="submit" ${armed ? 'disabled' : ''}>Arm session</button>
@@ -265,6 +267,7 @@ _JS_TEMPLATE = r"""
         <form class="inline" method="POST" action="/sessions/stop">
           <button class="btn danger" type="submit" ${armed ? '' : 'disabled'}>Stop</button>
         </form>
+        ${clearBtn}
       </div>`;
 
     // Mirror into the nav's tiny status strip.
@@ -446,10 +449,6 @@ def _render_session_body(session: dict[str, Any] | None) -> str:
         if session and session.get("id")
         else ""
     )
-    reason_html = ""
-    if not armed and session and session.get("end_reason"):
-        reason_html = f'<span class="session-meta">last: {html.escape(session["end_reason"])}</span>'
-
     arm_btn = (
         '<form class="inline" method="POST" action="/sessions/arm">'
         f'<button class="btn" type="submit"{" disabled" if armed else ""}>Arm session</button>'
@@ -460,9 +459,16 @@ def _render_session_body(session: dict[str, Any] | None) -> str:
         f'<button class="btn danger" type="submit"{"" if armed else " disabled"}>Stop</button>'
         "</form>"
     )
+    clear_btn = ""
+    if not armed and session and session.get("id"):
+        clear_btn = (
+            '<form class="inline" method="POST" action="/sessions/clear">'
+            '<button class="btn" type="submit">Clear</button>'
+            "</form>"
+        )
     return (
-        f'<div class="session-head">{chip_html}{sid_html}{reason_html}</div>'
-        f'<div class="session-actions">{arm_btn}{stop_btn}</div>'
+        f'<div class="session-head">{chip_html}{sid_html}</div>'
+        f'<div class="session-actions">{arm_btn}{stop_btn}{clear_btn}</div>'
     )
 
 

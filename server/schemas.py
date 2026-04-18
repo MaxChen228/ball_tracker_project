@@ -153,7 +153,6 @@ class Session:
     started_at: float
     max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S
     ended_at: float | None = None
-    end_reason: str | None = None   # "stopped" | "timeout"
     # Camera ids that have successfully uploaded while this session was
     # the current one. Dashboard reads this to render "session s_abc →
     # A, B".
@@ -169,7 +168,6 @@ class Session:
             "armed": self.armed,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
-            "end_reason": self.end_reason,
             "max_duration_s": self.max_duration_s,
             "uploads_received": list(self.uploads_received),
         }
