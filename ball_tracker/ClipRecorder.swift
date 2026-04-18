@@ -182,10 +182,12 @@ final class ClipRecorder {
         switch decision {
         case .noOpReturnNil:
             completion(nil)
-        case .tearDownEmpty(let w, let input):
+        case .tearDownEmpty(_, _):
+            // .idle path: startWriting was never called, so writer.status
+            // is still .unknown — markAsFinished / cancelWriting would
+            // raise an uncatchable Objective-C NSException. Drop refs and
+            // clean the file directly without touching the writer state.
             log.info("clip writer finish no-op (session never started)")
-            input.markAsFinished()
-            w.cancelWriting()
             withLock {
                 writer = nil
                 videoInput = nil
