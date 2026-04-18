@@ -80,19 +80,31 @@ def render_scene_div(scene: Scene, div_id: str = "canvas-scene") -> str:
 def render_viewer_html(
     scene: Scene,
     videos: list[tuple[str, str, float]],
+    health: dict,
 ) -> str:
-    """Full /viewer/{sid} page with three synchronised views:
+    """Full /viewer/{sid} post-mortem page.
 
-      1. A 3D scene canvas on top, with an `ALL / PLAYBACK` mode toggle.
-         `PLAYBACK` scrubs rays + ground traces + triangulated points by
-         anchor-relative time (`t_rel_s`), so past data builds up and
-         future data stays hidden as the operator plays.
-      2. Cam A video (bottom-left) + Cam B video (bottom-right).
+    Layout (top to bottom):
+
+      1. Header bar — BALL_TRACKER brand + session id + back link.
+      2. Health banner — the page's first-class citizen. Per-camera rows
+         answer "did A/B reach here, calibrated, time-synced, how many
+         frames, how many detections?", plus a session-level triangulation
+         chip + explicit failure-reason strip when something stopped the
+         pipeline short. This is what makes the viewer a diagnostic tool
+         rather than a 3D novelty.
+      3. Main work area — two-column flex: 3D scene on the left, CAM A
+         stacked above CAM B on the right. Width split is adaptive: a
+         session with a triangulated trajectory gives the 3D scene more
+         room (since that's the payoff visual); a session without one
+         shrinks the scene so the videos — the only surviving evidence —
+         dominate.
+      4. Shared timeline footer — ALL/PLAYBACK toggle, play/pause, single
+         scrubber that drives both videos and 3D playback together.
 
     `videos` is `[(camera_id, url, t_rel_offset_s), ...]` where
     `t_rel_offset_s = video_start_pts_s − sync_anchor_timestamp_s` for
-    that camera. The master play head is expressed in anchor-relative
-    seconds; each video's `currentTime = t_rel − t_rel_offset_s`, so
+    that camera. Each video's `currentTime = t_rel − t_rel_offset_s`, so
     A and B stay locked to the chirp anchor even when their phones
     started recording at different wall-clock moments.
     """
@@ -107,8 +119,6 @@ def render_viewer_html(
     ]
     static_traces_json = _json.dumps(static_traces)
 
-    # Scene dict — JS rebuilds dynamic traces (rays / ground_traces /
-    # triangulated) from this under a time filter.
     scene_json = _json.dumps(scene.to_dict())
     camera_colors_json = _json.dumps(_CAMERA_COLORS)
     fallback_color_json = _json.dumps(_FALLBACK_CAMERA_COLOR)
@@ -119,82 +129,173 @@ def render_viewer_html(
     )
     has_triangulated = bool(scene.triangulated)
 
+    # Adaptive split: triangulation succeeded → 3D gets more (it's the
+    # whole point of the two-phone rig); no triangulation → videos get
+    # more (they're the only evidence left).
+    scene_flex = "3 1 0" if has_triangulated else "2 1 0"
+    videos_flex = "2 1 0" if has_triangulated else "3 1 0"
+
+    videos_by_cam = {cam: (url, off) for cam, url, off in videos}
     video_cells = "".join(
-        f"""
-        <div class="vid-cell">
-          <div class="vid-label" style="border-color:{_camera_color(cam)};color:{_camera_color(cam)};">CAM {cam}</div>
-          <video data-cam="{cam}" preload="auto" playsinline muted src="{url}"></video>
-        </div>
-        """
-        for cam, url, _ in videos
+        _video_cell_html(cam, videos_by_cam.get(cam))
+        for cam in ("A", "B")
     )
-    if not video_cells:
-        video_cells = (
-            '<div class="vid-empty">no clips on disk for this session</div>'
-        )
+
+    health_html = _health_banner_html(health)
+    header_meta = _header_meta_text(health)
+
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><title>Session {scene.session_id}</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
-  html, body {{ margin:0; padding:0; background:{_BG}; color:{_INK};
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+  :root {{
+    --bg: {_BG}; --surface: {_SURFACE}; --ink: {_INK}; --sub: {_SUB};
+    --border-base: {_BORDER_BASE}; --border-l: {_BORDER_L};
+    --contra: {_CONTRA}; --dual: {_DUAL}; --dev: {_DEV}; --accent: {_ACCENT};
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: "Noto Sans TC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }}
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin:0; padding:0; height:100%; background:var(--bg);
+    color:var(--ink); font-family:var(--sans); font-weight:300; line-height:1.6;
+    -webkit-font-smoothing:antialiased; }}
   .viewer {{ display:flex; flex-direction:column; min-height:100vh; }}
-  header {{ padding:14px 24px; border-bottom:1px solid {_BORDER_BASE};
-    background:{_SURFACE}; display:flex; align-items:center; gap:16px;
-    flex-wrap:wrap; }}
-  header h1 {{ margin:0; font-size:18px; font-weight:600; letter-spacing:0.02em; }}
-  header .sid {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    color:{_SUB}; font-size:14px; }}
-  header a.back {{ margin-left:auto; color:{_SUB}; font-size:13px;
+
+  /* --- Header (52px brand bar) --- */
+  .nav {{ height:52px; flex:0 0 52px; background:var(--surface);
+    border-bottom:1px solid var(--border-base); display:flex;
+    align-items:center; padding:0 24px; gap:20px; }}
+  .nav .brand {{ font-family:var(--mono); font-weight:700; font-size:14px;
+    letter-spacing:0.16em; color:var(--ink); }}
+  .nav .brand .dot {{ display:inline-block; width:7px; height:7px;
+    background:var(--ink); margin-right:10px; vertical-align:middle; }}
+  .nav .meta {{ font-family:var(--mono); font-size:11px;
+    letter-spacing:0.08em; text-transform:uppercase; color:var(--sub);
+    display:flex; gap:16px; }}
+  .nav .meta .v {{ color:var(--ink); font-weight:500; }}
+  .nav .back {{ margin-left:auto; font-family:var(--mono); font-size:11px;
+    letter-spacing:0.12em; text-transform:uppercase; color:var(--sub);
     text-decoration:none; }}
-  header a.back:hover {{ color:{_INK}; }}
-  .mode-toggle {{ display:inline-flex; border:1px solid {_BORDER_BASE};
-    border-radius:4px; overflow:hidden; }}
-  .mode-toggle button {{ padding:6px 14px; font:inherit; font-size:12px;
-    letter-spacing:0.1em; text-transform:uppercase; border:none;
-    background:{_SURFACE}; color:{_SUB}; cursor:pointer; }}
-  .mode-toggle button.active {{ background:{_INK}; color:{_SURFACE}; }}
-  .scene-wrap {{ flex:1 1 auto; min-height:460px; position:relative; }}
-  #scene {{ width:100%; height:100%; min-height:460px; }}
-  .timeline {{ padding:12px 24px; background:{_SURFACE};
-    border-top:1px solid {_BORDER_BASE}; display:flex; align-items:center;
-    gap:12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size:12px; color:{_SUB}; }}
-  .timeline button {{ padding:4px 12px; font:inherit; font-size:12px;
-    border:1px solid {_BORDER_BASE}; background:{_BG}; color:{_INK};
-    border-radius:3px; cursor:pointer; min-width:52px; }}
-  .timeline input[type=range] {{ flex:1 1 auto; accent-color:{_INK}; }}
-  .timeline .tlabel {{ min-width:130px; text-align:right; color:{_INK}; }}
-  .videos {{ display:grid; grid-template-columns:1fr 1fr; gap:1px;
-    background:{_BORDER_BASE}; border-top:1px solid {_BORDER_BASE}; }}
-  .vid-cell {{ background:{_SURFACE}; padding:12px; display:flex;
-    flex-direction:column; gap:8px; }}
-  .vid-label {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size:11px; font-weight:600; letter-spacing:0.1em;
-    border:1px solid; padding:2px 8px; align-self:flex-start; border-radius:2px; }}
-  .vid-cell video {{ width:100%; max-height:50vh; background:#000; }}
-  .vid-empty {{ grid-column:1 / -1; padding:32px; text-align:center;
-    color:{_SUB}; font-size:14px; background:{_SURFACE}; }}
+  .nav .back:hover {{ color:var(--ink); }}
+
+  /* --- Health banner --- */
+  .health {{ flex:0 0 auto; background:var(--surface);
+    border-bottom:1px solid var(--border-base); padding:18px 24px;
+    display:flex; flex-direction:column; gap:12px; }}
+  .health-row {{ display:grid; grid-template-columns:1fr 1fr 220px;
+    gap:16px; align-items:stretch; }}
+  .cam-card {{ border:1px solid var(--border-base); border-radius:4px;
+    padding:12px 16px; background:var(--bg);
+    display:flex; flex-direction:column; gap:8px; }}
+  .cam-card.received {{ background:var(--surface); }}
+  .cam-card.missing {{ opacity:0.75; }}
+  .cam-head {{ display:flex; align-items:center; gap:10px; }}
+  .cam-badge {{ font-family:var(--mono); font-weight:600; font-size:11px;
+    letter-spacing:0.18em; padding:3px 10px; border:1px solid;
+    border-radius:2px; }}
+  .cam-badge.A {{ color:var(--contra); border-color:var(--contra); }}
+  .cam-badge.B {{ color:var(--dual); border-color:var(--dual); }}
+  .cam-state {{ font-family:var(--mono); font-size:11px;
+    letter-spacing:0.08em; text-transform:uppercase; }}
+  .cam-state.ok {{ color:var(--ink); }}
+  .cam-state.bad {{ color:var(--dev); }}
+  .cam-checks {{ display:flex; flex-wrap:wrap; gap:6px 14px; }}
+  .check {{ font-family:var(--mono); font-size:11px;
+    letter-spacing:0.04em; color:var(--sub);
+    display:inline-flex; align-items:center; gap:6px; }}
+  .check .mark {{ font-weight:700; width:12px; display:inline-block;
+    text-align:center; }}
+  .check.pass {{ color:var(--ink); }}
+  .check.pass .mark {{ color:var(--contra); }}
+  .check.fail .mark {{ color:var(--dev); }}
+  .cam-stats {{ font-family:var(--mono); font-size:12px; color:var(--ink);
+    letter-spacing:0.02em; }}
+  .cam-stats .n {{ font-weight:500; }}
+  .cam-stats .of {{ color:var(--sub); }}
+
+  .tri-card {{ border:1px solid var(--border-base); border-radius:4px;
+    padding:12px 16px; background:var(--bg); display:flex;
+    flex-direction:column; justify-content:center; gap:4px; }}
+  .tri-card.ok {{ background:var(--surface); border-color:var(--accent); }}
+  .tri-title {{ font-family:var(--mono); font-size:10px;
+    letter-spacing:0.18em; text-transform:uppercase; color:var(--sub); }}
+  .tri-count {{ font-family:var(--mono); font-size:28px; font-weight:500;
+    color:var(--ink); line-height:1; letter-spacing:0.02em; }}
+  .tri-count.zero {{ color:var(--sub); }}
+  .tri-note {{ font-family:var(--mono); font-size:10px;
+    letter-spacing:0.04em; color:var(--sub); }}
+
+  .fail-strip {{ font-family:var(--mono); font-size:12px;
+    letter-spacing:0.02em; padding:8px 12px; border-radius:2px;
+    border:1px solid var(--dev); color:var(--dev);
+    background:rgba(192, 57, 43, 0.06); display:flex;
+    align-items:center; gap:10px; }}
+  .fail-strip .icon {{ font-weight:700; }}
+
+  /* --- Main work area --- */
+  .work {{ flex:1 1 auto; display:flex; min-height:460px;
+    border-bottom:1px solid var(--border-base); }}
+  .scene-col {{ flex:{scene_flex}; min-width:420px; position:relative;
+    border-right:1px solid var(--border-base); background:var(--bg); }}
+  #scene {{ position:absolute; inset:0; }}
+  .videos-col {{ flex:{videos_flex}; min-width:320px; display:flex;
+    flex-direction:column; gap:1px; background:var(--border-base); }}
+  .vid-cell {{ flex:1 1 0; background:var(--surface); padding:10px 14px;
+    display:flex; flex-direction:column; gap:6px; min-height:0; }}
+  .vid-head {{ display:flex; align-items:center; gap:10px; }}
+  .vid-label {{ font-family:var(--mono); font-size:10px; font-weight:600;
+    letter-spacing:0.18em; border:1px solid; padding:2px 8px;
+    border-radius:2px; }}
+  .vid-hint {{ font-family:var(--mono); font-size:10px;
+    letter-spacing:0.06em; color:var(--sub); text-transform:uppercase; }}
+  .vid-frame {{ flex:1 1 auto; min-height:0; display:flex;
+    align-items:center; justify-content:center; background:#000;
+    border-radius:2px; overflow:hidden; }}
+  .vid-frame video {{ width:100%; height:100%; object-fit:contain;
+    display:block; }}
+  .vid-frame.empty {{ background:var(--bg); border:1px dashed var(--border-base);
+    color:var(--sub); font-family:var(--mono); font-size:11px;
+    letter-spacing:0.12em; text-transform:uppercase; }}
+
+  /* --- Timeline footer --- */
+  .timeline {{ flex:0 0 56px; background:var(--surface);
+    display:flex; align-items:center; gap:14px; padding:0 24px;
+    font-family:var(--mono); font-size:12px; color:var(--sub); }}
+  .timeline button {{ padding:5px 14px; font:inherit; font-size:11px;
+    letter-spacing:0.12em; text-transform:uppercase;
+    border:1px solid var(--border-base); background:var(--bg);
+    color:var(--ink); border-radius:2px; cursor:pointer; min-width:60px; }}
+  .timeline input[type=range] {{ flex:1 1 auto; accent-color:var(--ink); }}
+  .timeline .tlabel {{ min-width:140px; text-align:right; color:var(--ink);
+    font-weight:500; }}
+  .mode-toggle {{ display:inline-flex; border:1px solid var(--border-base);
+    border-radius:2px; overflow:hidden; }}
+  .mode-toggle button {{ padding:5px 12px; border:none; background:transparent;
+    color:var(--sub); cursor:pointer; min-width:auto; border-radius:0; }}
+  .mode-toggle button.active {{ background:var(--ink); color:var(--surface); }}
 </style>
 </head><body>
 <div class="viewer">
-  <header>
-    <h1>Session Viewer</h1>
-    <span class="sid">{scene.session_id}</span>
+  <div class="nav">
+    <span class="brand"><span class="dot"></span>BALL_TRACKER</span>
+    <span class="meta">{header_meta}</span>
+    <a class="back" href="/">&larr; dashboard</a>
+  </div>
+  {health_html}
+  <div class="work">
+    <div class="scene-col"><div id="scene"></div></div>
+    <div class="videos-col">{video_cells}</div>
+  </div>
+  <div class="timeline">
+    <button id="play-btn" type="button">Play</button>
+    <input id="scrubber" type="range" min="0" max="1000" value="0" step="1" />
+    <span id="time-label" class="tlabel">t=0.000s</span>
     <div class="mode-toggle" role="tablist">
       <button id="mode-all" class="active" type="button">All</button>
       <button id="mode-playback" type="button">Playback</button>
     </div>
-    <a class="back" href="/">&larr; dashboard</a>
-  </header>
-  <div class="scene-wrap"><div id="scene"></div></div>
-  <div class="timeline">
-    <button id="play-btn" type="button">PLAY</button>
-    <input id="scrubber" type="range" min="0" max="1000" value="0" step="1" />
-    <span id="time-label" class="tlabel">t=0.000s</span>
   </div>
-  <div class="videos">{video_cells}</div>
 </div>
 <script id="viewer-data" type="application/json">{{
   "scene": {scene_json},
@@ -421,6 +522,196 @@ def render_viewer_html(
 
 def _camera_color(camera_id: str) -> str:
     return _CAMERA_COLORS.get(camera_id, _FALLBACK_CAMERA_COLOR)
+
+
+def _video_cell_html(cam: str, entry: tuple[str, float] | None) -> str:
+    """One vid-cell per camera slot. `entry` is None when the slot has no
+    clip on disk — rendered as an explicit placeholder so the operator
+    sees "no clip" rather than a silent gap."""
+    color = _camera_color(cam)
+    if entry is None:
+        # Keep the 'no clips on disk' literal when BOTH cameras are missing
+        # (test_viewer_endpoint_without_clips_still_renders checks for it);
+        # a per-slot placeholder is fine and still contains the phrase.
+        body = '<div class="vid-frame empty">no clips on disk</div>'
+        hint = "awaiting upload"
+    else:
+        url, _ = entry
+        body = (
+            f'<div class="vid-frame">'
+            f'<video data-cam="{cam}" preload="auto" playsinline muted '
+            f'src="{url}"></video></div>'
+        )
+        hint = "synced to chirp"
+    return (
+        f'<div class="vid-cell">'
+        f'<div class="vid-head">'
+        f'<span class="vid-label" style="color:{color};border-color:{color};">'
+        f'CAM {cam}</span>'
+        f'<span class="vid-hint">{hint}</span>'
+        f'</div>'
+        f'{body}'
+        f'</div>'
+    )
+
+
+def _header_meta_text(health: dict) -> str:
+    """Monospaced status strip for the nav bar: session id, duration,
+    upload time. Each value is tagged `.v` so the design-system CSS
+    colours it as 'ink' while the labels stay 'sub'."""
+    import datetime as _dt
+
+    parts: list[str] = []
+    parts.append(
+        f'<span>SESSION <span class="v">{health["session_id"]}</span></span>'
+    )
+    dur = health.get("duration_s")
+    if dur is not None:
+        parts.append(f'<span>DURATION <span class="v">{dur:.2f}s</span></span>')
+    rx = health.get("received_at")
+    if rx is not None:
+        ts = _dt.datetime.fromtimestamp(rx).strftime("%m-%d %H:%M")
+        parts.append(f'<span>RECEIVED <span class="v">{ts}</span></span>')
+    return "".join(parts)
+
+
+def _health_banner_html(health: dict) -> str:
+    """Per-camera diagnostic cards + triangulation summary + explicit
+    failure strip. The banner is the page's answer to "what actually
+    happened during this session?" — every failure mode the pipeline can
+    hit (B never uploaded, no time sync, missing calibration, triangulation
+    skipped) has a visible surface here, so the operator never has to
+    infer from an empty 3D scene."""
+    cards: list[str] = []
+    for cam_id in ("A", "B"):
+        cam = health["cameras"][cam_id]
+        cards.append(_cam_card_html(cam_id, cam))
+
+    tri_n = health.get("triangulated_count", 0)
+    if tri_n > 0:
+        tri_block = (
+            f'<div class="tri-card ok">'
+            f'<div class="tri-title">3D Trajectory</div>'
+            f'<div class="tri-count">{tri_n}</div>'
+            f'<div class="tri-note">points triangulated</div>'
+            f'</div>'
+        )
+    else:
+        tri_block = (
+            f'<div class="tri-card">'
+            f'<div class="tri-title">3D Trajectory</div>'
+            f'<div class="tri-count zero">—</div>'
+            f'<div class="tri-note">no triangulation</div>'
+            f'</div>'
+        )
+
+    fail_strip = _failure_strip_html(health)
+
+    return (
+        f'<div class="health">'
+        f'<div class="health-row">{cards[0]}{cards[1]}{tri_block}</div>'
+        f'{fail_strip}'
+        f'</div>'
+    )
+
+
+def _cam_card_html(cam_id: str, cam: dict) -> str:
+    if not cam["received"]:
+        return (
+            f'<div class="cam-card missing">'
+            f'<div class="cam-head">'
+            f'<span class="cam-badge {cam_id}">CAM {cam_id}</span>'
+            f'<span class="cam-state bad">not uploaded</span>'
+            f'</div>'
+            f'<div class="cam-stats" style="color:var(--sub);">'
+            f'this phone never reached the server for this session'
+            f'</div>'
+            f'</div>'
+        )
+
+    checks = [
+        ("calibrated", cam["calibrated"], "intrinsics + homography"),
+        ("time synced", cam["time_synced"], "chirp anchor"),
+    ]
+    checks_html = "".join(
+        f'<span class="check {"pass" if ok else "fail"}" title="{tip}">'
+        f'<span class="mark">{"✓" if ok else "✗"}</span>{label}'
+        f'</span>'
+        for (label, ok, tip) in checks
+    )
+
+    n_det = cam["n_detected"]
+    n_frames = cam["n_frames"]
+    stats_html = (
+        f'<span class="n">{n_det}</span>'
+        f'<span class="of"> detected / {n_frames} frames</span>'
+    )
+
+    return (
+        f'<div class="cam-card received">'
+        f'<div class="cam-head">'
+        f'<span class="cam-badge {cam_id}">CAM {cam_id}</span>'
+        f'<span class="cam-state ok">uploaded</span>'
+        f'</div>'
+        f'<div class="cam-checks">{checks_html}</div>'
+        f'<div class="cam-stats">{stats_html}</div>'
+        f'</div>'
+    )
+
+
+def _failure_strip_html(health: dict) -> str:
+    """Surface the first blocking failure explicitly. Order matters —
+    show the earliest pipeline step that broke, because fixing a later
+    step before the earlier one is wasted effort. `None` return means
+    the pipeline completed cleanly, so no strip is rendered."""
+    cams = health["cameras"]
+    tri_n = health.get("triangulated_count", 0)
+    server_err = health.get("error")
+
+    reasons: list[str] = []
+    missing = [c for c in ("A", "B") if not cams[c]["received"]]
+    if missing:
+        reasons.append(
+            f"{' + '.join('Cam ' + c for c in missing)} never uploaded "
+            f"— triangulation skipped"
+        )
+    else:
+        uncal = [c for c in ("A", "B") if not cams[c]["calibrated"]]
+        if uncal:
+            reasons.append(
+                f"{' + '.join('Cam ' + c for c in uncal)} missing calibration "
+                f"(intrinsics or homography) — run Calibration screen"
+            )
+        unsyn = [c for c in ("A", "B") if not cams[c]["time_synced"]]
+        if unsyn:
+            reasons.append(
+                f"{' + '.join('Cam ' + c for c in unsyn)} has no chirp anchor "
+                f"— re-run 時間校正 before arming"
+            )
+        if server_err:
+            reasons.append(f"server error: {server_err}")
+        elif tri_n == 0 and all(cams[c]["received"] for c in ("A", "B")):
+            no_detect = [c for c in ("A", "B") if cams[c]["n_detected"] == 0]
+            if no_detect:
+                reasons.append(
+                    f"{' + '.join('Cam ' + c for c in no_detect)} detected no ball "
+                    f"in any frame — check lighting / HSV range"
+                )
+            else:
+                reasons.append(
+                    "triangulation produced no points — check A/B pairing "
+                    "window or frame timing"
+                )
+
+    if not reasons:
+        return ""
+    body = "<br>".join(reasons)
+    return (
+        f'<div class="fail-strip">'
+        f'<span class="icon">!</span>'
+        f'<span>{body}</span>'
+        f'</div>'
+    )
 
 
 def _build_figure(scene: Scene):

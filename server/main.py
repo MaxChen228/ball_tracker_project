@@ -1032,7 +1032,65 @@ def viewer(session_id: str) -> HTMLResponse:
 
     scene = _scene_for_session(session_id)
     videos_with_offsets = _videos_for_session(session_id)
-    return HTMLResponse(render_viewer_html(scene, videos_with_offsets))
+    health = _build_viewer_health(session_id)
+    return HTMLResponse(render_viewer_html(scene, videos_with_offsets, health))
+
+
+def _build_viewer_health(session_id: str) -> dict[str, Any]:
+    """Per-camera diagnostic snapshot shown at the top of /viewer/{sid}.
+
+    The viewer is a post-mortem tool — the operator wants to know at a
+    glance what actually happened during this session. `render_viewer_html`
+    turns each field into a chip/row so a failure mode ("B never uploaded",
+    "no time sync", "triangulation skipped") reads immediately, without the
+    user having to infer it from an empty 3D scene."""
+    pitches = state.pitches_for_session(session_id)
+    result = state.get(session_id)
+
+    cams: dict[str, dict[str, Any]] = {}
+    for cam_id in ("A", "B"):
+        p = pitches.get(cam_id)
+        if p is None:
+            cams[cam_id] = {
+                "received": False,
+                "calibrated": False,
+                "time_synced": False,
+                "n_frames": 0,
+                "n_detected": 0,
+            }
+        else:
+            cams[cam_id] = {
+                "received": True,
+                "calibrated": p.intrinsics is not None and p.homography is not None,
+                "time_synced": p.sync_anchor_timestamp_s is not None,
+                "n_frames": len(p.frames),
+                "n_detected": sum(1 for f in p.frames if f.ball_detected),
+            }
+
+    duration_s: float | None = None
+    timestamps = [
+        f.timestamp_s for p in pitches.values() for f in p.frames
+    ]
+    if timestamps:
+        duration_s = float(max(timestamps) - min(timestamps))
+
+    latest_mtime: float | None = None
+    for cam_id in pitches:
+        try:
+            mtime = state._pitch_path(cam_id, session_id).stat().st_mtime
+        except (FileNotFoundError, OSError):
+            continue
+        if latest_mtime is None or mtime > latest_mtime:
+            latest_mtime = mtime
+
+    return {
+        "session_id": session_id,
+        "cameras": cams,
+        "triangulated_count": len(result.points) if result is not None else 0,
+        "error": result.error if result is not None else None,
+        "duration_s": duration_s,
+        "received_at": latest_mtime,
+    }
 
 
 # Allowed filenames under /videos. Either the raw clip (`session_<sid>_<cam>.<ext>`)
