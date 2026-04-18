@@ -264,9 +264,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        if !session.isRunning {
-            session.startRunning()
-        }
+        // Capture session stays OFF in standby — the phone was heating up from
+        // an idle 60 fps preview. Session is spun up on-demand only by
+        // `enterRecordingMode` (arm) or `startTimeSync` (manual 時間校正).
         healthMonitor.start()
         displayLink?.isPaused = false
     }
@@ -295,17 +295,19 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // MARK: - Recording controls
 
-    /// Dashboard arm landed — bump the capture rate to 240 fps and move to
-    /// `.recording`. ClipRecorder is *not* created here; we defer that to
-    /// the first captureOutput so we can use the real pixel-buffer
-    /// dimensions instead of the Settings-declared 1920×1080. The
-    /// PitchRecorder is also started from captureOutput, once the first
-    /// appended sample's session-clock PTS is known.
+    /// Dashboard arm landed — spin up the capture session at 240 fps and
+    /// move to `.recording`. Session was parked (stopped) in standby to keep
+    /// the phone cool, so this is both a start *and* an fps swap. ClipRecorder
+    /// is *not* created here; we defer that to the first captureOutput so we
+    /// can use the real pixel-buffer dimensions instead of the
+    /// Settings-declared 1920×1080. The PitchRecorder is also started from
+    /// captureOutput, once the first appended sample's session-clock PTS is
+    /// known.
     func enterRecordingMode() {
         guard state == .standby else { return }
         log.info("camera entering recording session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         warningLabel.isHidden = true
-        switchCaptureFps(trackingFps)
+        startCapture(at: trackingFps)
         recorder.reset()
         try? uploadQueue.reloadPending()
         pendingRecordingBootstrap = true
@@ -334,7 +336,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         uploadQueue.clearPending()
         warningLabel.isHidden = true
-        switchCaptureFps(standbyFps)
+        stopCapture()
         updateUIForState()
     }
 
@@ -386,6 +388,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             warningLabel.isHidden = false
             return
         }
+        // Session is parked while in standby. Spin it up at the idle fps so
+        // the mic starts delivering samples to the chirp detector. 60 fps of
+        // video is a free byproduct — cheaper than carving the audio input
+        // out to its own session, and the time-sync window is bounded at 15 s.
+        startCapture(at: standbyFps)
         detector.reset()
         detector.onChirpDetected = { [weak self] event in
             guard let self else { return }
@@ -413,6 +420,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         chirpDetector?.onChirpDetected = nil
         latestChirpSnapshot = nil
         state = .standby
+        stopCapture()
         lastUploadStatusText = "Time sync \(reason)"
 
         if reason == "timeout" {
@@ -451,6 +459,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         healthMonitor?.updateTimeSynced(true)
         latestChirpSnapshot = nil
         state = .standby
+        stopCapture()
         warningLabel.isHidden = true
         lastUploadStatusText = String(format: "Time sync OK @ %.3fs", event.anchorTimestampS)
         updateUIForState()
@@ -605,6 +614,47 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             warningLabel.text = "FPS 切換失敗 (\(Int(targetFps))fps 不支援)"
             warningLabel.isHidden = false
         }
+    }
+
+    /// Spin the capture session up at `targetFps`. Used when leaving the
+    /// parked standby state — either for an armed recording (`trackingFps`)
+    /// or a manual 時間校正 window (`standbyFps`). If the session is already
+    /// running, delegates to `switchCaptureFps` so the fps swap still
+    /// happens. Safe to call from any state; no-op if no capture device.
+    private func startCapture(at targetFps: Double) {
+        guard let device = currentCaptureDevice else { return }
+        if session.isRunning {
+            switchCaptureFps(targetFps)
+            return
+        }
+        do {
+            try configureCaptureFormat(
+                device,
+                targetWidth: settings.captureWidth,
+                targetHeight: settings.captureHeight,
+                targetFps: targetFps
+            )
+            IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
+            session.startRunning()
+            log.info("camera capture started fps=\(targetFps)")
+        } catch {
+            log.error("camera capture start failed error=\(error.localizedDescription, privacy: .public)")
+            warningLabel.text = "相機啟動失敗 (\(Int(targetFps))fps)"
+            warningLabel.isHidden = false
+        }
+    }
+
+    /// Park the capture session. Camera + mic hardware go idle so the phone
+    /// doesn't heat up under a long idle preview — only heartbeat keeps
+    /// running in standby. Safe to call when already stopped. Also zeroes
+    /// the HUD fps reading so the frozen "FPS 59.5" doesn't linger.
+    private func stopCapture() {
+        guard session.isRunning else { return }
+        session.stopRunning()
+        fpsEstimate = 0
+        framesSinceLastFpsTick = 0
+        lastFrameTimestampForFps = CACurrentMediaTime()
+        log.info("camera capture stopped")
     }
 
     private var currentCaptureDevice: AVCaptureDevice? {

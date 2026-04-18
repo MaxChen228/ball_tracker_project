@@ -58,18 +58,18 @@ Driven by a **1 Hz `POST /heartbeat` loop** that runs from app launch and carrie
 
 iPhones never mint pairing identifiers — every `startRecording` reads `currentSessionId` (set from the heartbeat reply) and stamps it onto the outgoing `PitchPayload.session_id`. Uploads tagged with a superseded session are ignored by `_register_upload_in_session_locked` on the server, so a late flush can't disarm a new session.
 
-The worst-case arm latency is therefore one heartbeat interval (default 1 s, clamped [1, 60]).
+The worst-case arm latency is therefore one heartbeat interval (default 1 s, clamped [1, 60]) **plus ~500 ms** for the cold-start of `AVCaptureSession` — standby parks the camera so a `startCapture(at:)` call is needed to bring it up.
 
 State per mode:
 
-- `.standby`: idle preview at 60 fps, chirp detector idle (unless time-sync was just triggered manually), no recording.
-- `.timeSyncWaiting` (時間校正): **chirp detector ON**. On trigger, saves `lastSyncAnchorTimestampS` and returns to `.standby`. 15 s timeout. Can only be entered from `.standby` via the manual 時間校正 button — not from an arm command.
-- `.recording`: captures H.264 MOV via `ClipRecorder`. **Only exit path is `forceFinishIfRecording()`**, triggered when the dashboard sends `disarm` (operator pressed Cancel) or the server-side session times out. No on-device detection, no auto-end. Emits `PitchPayload` via `onCycleComplete`; the clip finishes async before the payload is persisted.
+- `.standby`: **capture session stopped** — camera + mic hardware idle so the phone doesn't heat up under a long preview. Preview layer goes dark; only the heartbeat keeps running. No recording, no chirp detection.
+- `.timeSyncWaiting` (時間校正): session spun up at `standbyFps` so the mic can deliver samples; **chirp detector ON**. On trigger, saves `lastSyncAnchorTimestampS`, stops the session, and returns to `.standby`. 15 s timeout. Can only be entered from `.standby` via the manual 時間校正 button — not from an arm command.
+- `.recording`: session spun up at `trackingFps` (240). Captures H.264 MOV via `ClipRecorder`. **Only exit path is `forceFinishIfRecording()`**, triggered when the dashboard sends `disarm` (operator pressed Cancel) or the server-side session times out. No on-device detection, no auto-end. Emits `PitchPayload` via `onCycleComplete`; the clip finishes async before the payload is persisted. Session is stopped on the way back to standby.
 - `.uploading`: transient state while the cycle is persisted + enqueued; transitions back to `.standby` once handed off.
 - Cycles are saved to disk in `Documents/pitch_payloads/` (`PitchPayloadStore`) **before** upload, as paired `<basename>.json` + `<basename>.mov`. Upload failures re-insert at queue front with 2 s backoff; `payloadStore.delete` removes the pair atomically on success.
 
 ### Frame pipeline (`CameraViewController.captureOutput`)
-Runs on `camera.frame.queue` at **60 fps while idle (`.standby` / `.timeSyncWaiting` / `.uploading`) and 240 fps while recording (`.recording`)**. The switch is driven by `switchCaptureFps(_:)` called from `enterRecordingMode` / `exitRecordingToStandby`; each transition costs a `stopRunning → activeFormat = X → startRunning` cycle (~300-500 ms), deliberately spent in the non-time-critical windows (right after the arm command arrives, and after the cycle ends).
+Runs on `camera.frame.queue` **only while the session is live** — 60 fps during `.timeSyncWaiting` / `.uploading` and 240 fps during `.recording`. `.standby` keeps the session stopped so the camera doesn't burn power / heat. Transitions are driven by two helpers: `startCapture(at:)` (configure format + `startRunning`, used to leave standby) and `stopCapture()` (`stopRunning`, used to return to standby). `switchCaptureFps(_:)` still exists for the mid-session fps swap (stop → reconfigure → start ~300-500 ms), but in the current state machine nothing calls it on a running session — the session is only live at one fps at a time.
 
 FPS is hard-capped by an exposure ceiling: `configureCaptureFormat` sets `activeMaxExposureDuration = frameDuration`, so iOS's auto-exposure can't stretch individual samples past 1/60 s (idle) or 1/240 s (recording). AE compensates with ISO — noisier in low light, but frame rate holds. Without this cap a dim room silently dropped the effective capture rate to ~14 fps.
 
