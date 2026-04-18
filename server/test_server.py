@@ -1,7 +1,10 @@
 """End-to-end triangulation test + FastAPI ingest smoke test."""
 from __future__ import annotations
 
+import io
 import json as _json
+import threading
+import time
 
 import cv2
 import numpy as np
@@ -533,3 +536,160 @@ def test_malformed_session_id_is_rejected():
     client = TestClient(app)
     r = _post_pitch(client, body)
     assert r.status_code == 422
+
+
+# --------------------------- Concurrency + DoS guards ------------------------
+
+
+def test_save_clip_is_lock_protected(tmp_path):
+    """P1-A regression: four threads overwrite the same (camera, session)
+    clip simultaneously. Without the lock, concurrent tmp-writes clobber each
+    other mid-stream so the final `.mov` is a mix of different thread
+    payloads. The final file must equal exactly one of the inputs."""
+    s = main.State(data_dir=tmp_path)
+    session_id = sid(910)
+
+    # Distinct byte patterns large enough that a mid-write clobber would be
+    # detectable — each thread writes ~640 KB of its own repeating pattern.
+    payloads = [bytes([i]) * (640 * 1024) for i in (0x11, 0x22, 0x33, 0x44)]
+    barrier = threading.Barrier(len(payloads))
+    errors: list[BaseException] = []
+
+    def worker(data: bytes):
+        try:
+            barrier.wait(timeout=5.0)
+            s.save_clip("A", session_id, data, "mov")
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(p,)) for p in payloads]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+        assert not t.is_alive(), "worker hung"
+    assert not errors, errors
+
+    final_path = tmp_path / "videos" / f"session_{session_id}_A.mov"
+    assert final_path.exists()
+    final_bytes = final_path.read_bytes()
+    # Must equal one input exactly — not a concatenation or interleave.
+    assert final_bytes in payloads, (
+        f"clip is a torn mix of writes (len={len(final_bytes)})"
+    )
+    # No tmp leftovers (lock released + rename completed on every worker).
+    assert not any(
+        p.suffix == ".tmp" for p in (tmp_path / "videos").iterdir()
+    )
+
+
+def test_record_does_not_hold_lock_during_io(tmp_path, monkeypatch):
+    """P1-B regression: `State.record` must release `self._lock` before its
+    disk writes. Monkey-patch `_atomic_write` to block on a threading.Event,
+    run `record` in a worker, and prove `state.heartbeat` still returns
+    quickly from the main thread while record is parked mid-I/O."""
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    P_true = np.array([0.1, 0.3, 1.0])
+    tx, tz = _project(K, R_a, t_a, P_true)
+    session_id = sid(920)
+
+    s = main.State(data_dir=tmp_path)
+
+    release = threading.Event()
+    entered_io = threading.Event()
+    original_atomic_write = s._atomic_write
+
+    def blocking_atomic_write(path, payload):
+        entered_io.set()
+        # Park the "disk write" until the test releases us. If this runs
+        # while the lock is still held, `heartbeat` below will block too.
+        assert release.wait(timeout=5.0), "release event never fired"
+        return original_atomic_write(path, payload)
+
+    monkeypatch.setattr(s, "_atomic_write", blocking_atomic_write)
+
+    pitch = main.PitchPayload(
+        camera_id="A",
+        session_id=session_id,
+        sync_anchor_frame_index=0,
+        sync_anchor_timestamp_s=0.0,
+        frames=[
+            main.FramePayload(
+                frame_index=0, timestamp_s=0.0,
+                theta_x_rad=tx, theta_z_rad=tz, ball_detected=True,
+            )
+        ],
+        intrinsics=main.IntrinsicsPayload(
+            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+        ),
+        homography=H_a.flatten().tolist(),
+    )
+
+    recorder = threading.Thread(target=s.record, args=(pitch,))
+    recorder.start()
+    # Wait until record() is parked inside _atomic_write (i.e. past the
+    # first critical section and into the unlocked I/O phase).
+    assert entered_io.wait(timeout=5.0), "record never reached _atomic_write"
+
+    # Heartbeat must be fast — it only briefly touches `_devices` under
+    # the lock, and the lock is currently idle because record() released
+    # it before entering disk I/O.
+    t0 = time.perf_counter()
+    s.heartbeat("A")
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    assert elapsed_ms < 50, (
+        f"heartbeat took {elapsed_ms:.1f} ms — record is still holding the lock"
+    )
+
+    release.set()
+    recorder.join(timeout=5.0)
+    assert not recorder.is_alive()
+
+
+def test_pitch_upload_rejects_oversize_video():
+    """P1-C regression: a /pitch POST whose body exceeds
+    `_MAX_PITCH_UPLOAD_BYTES` must be rejected with 413 and never reach
+    triangulation. Uses a declared Content-Length slightly over the cap so
+    the pre-check path fires without actually buffering 500 MB."""
+    session_id = sid(930)
+    body = _minimal_pitch_body(session_id, "A")
+
+    # Simulate an oversize request by forging Content-Length. TestClient
+    # otherwise computes Content-Length from the real body, so we just
+    # override the header — the handler's pre-check reads the header
+    # before touching the stream.
+    client = TestClient(app)
+    fake_video = b"\x00" * 1024  # tiny actual body; header lies about size
+    files = {"video": ("clip.mov", fake_video, "video/quicktime")}
+    data = {"payload": _json.dumps(body)}
+    oversize = main._MAX_PITCH_UPLOAD_BYTES + 1
+    r = client.post(
+        "/pitch",
+        data=data,
+        files=files,
+        headers={"Content-Length": str(oversize)},
+    )
+    assert r.status_code == 413, r.text
+
+
+def test_pitch_upload_rejects_oversize_body_after_read():
+    """P1-C defence-in-depth: even when the attacker omits Content-Length,
+    the post-read size check catches an oversize video. We temporarily
+    shrink `_MAX_PITCH_UPLOAD_BYTES` so the test can generate a body
+    exceeding the cap without allocating 500 MB."""
+    session_id = sid(931)
+    body = _minimal_pitch_body(session_id, "A")
+    client = TestClient(app)
+
+    original_cap = main._MAX_PITCH_UPLOAD_BYTES
+    try:
+        main._MAX_PITCH_UPLOAD_BYTES = 4 * 1024  # 4 KB for the test
+        # 8 KB payload — well over the shrunken cap but tiny in absolute
+        # terms so the test stays cheap.
+        fake_video = b"A" * (8 * 1024)
+        files = {"video": ("clip.mov", fake_video, "video/quicktime")}
+        data = {"payload": _json.dumps(body)}
+        r = client.post("/pitch", data=data, files=files)
+        assert r.status_code == 413, r.text
+    finally:
+        main._MAX_PITCH_UPLOAD_BYTES = original_cap

@@ -99,6 +99,13 @@ _DEVICE_REGISTRY_CAP = 64
 # on its next poll. Long enough to cover any sensible poll cadence.
 _DISARM_ECHO_S = 5.0
 
+# Hard cap on `/pitch` video upload size. A 5 s cycle at 4K / 240 fps sits
+# comfortably under this; anything beyond is almost certainly a misbehaving
+# client or a denial-of-service attempt. FastAPI buffers the full multipart
+# body in memory before the handler runs, so without this cap a single
+# oversized request can OOM the process.
+_MAX_PITCH_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
+
 # Session auto-timeout (`_DEFAULT_SESSION_TIMEOUT_S`), Device, and Session
 # now live in schemas.py — imported above for back-compat re-export.
 
@@ -146,14 +153,22 @@ class State:
     ) -> Path:
         """Persist a session's H.264 clip to disk. Writes atomically so a
         partial transfer cannot leave a corrupt file visible to downstream
-        tools. Overwrites any existing clip for (camera_id, session_id)."""
+        tools. Overwrites any existing clip for (camera_id, session_id).
+
+        The tmp-write + rename must happen under `self._lock` — two
+        simultaneous POSTs for the same (camera, session) would otherwise
+        race on the shared `<path>.tmp` filename. `os.replace` is atomic,
+        but `tmp.write_bytes(data)` is not; a concurrent second write would
+        clobber the first's tmp mid-stream and the first's `replace` would
+        then publish a corrupt clip."""
         safe_ext = (ext or "mov").lstrip(".").lower()
         if not safe_ext or "/" in safe_ext or "\\" in safe_ext:
             safe_ext = "mov"
         path = self._video_dir / f"session_{session_id}_{camera_id}.{safe_ext}"
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_bytes(data)
-        tmp.replace(path)
+        with self._lock:
+            tmp.write_bytes(data)
+            tmp.replace(path)
         return path
 
     def _pitch_path(self, camera_id: str, session_id: str) -> Path:
@@ -197,42 +212,72 @@ class State:
             )
 
     def _atomic_write(self, path: Path, payload: str) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        # Unique tmp filename per call so concurrent writers targeting the
+        # same `path` (e.g. two simultaneous /pitch POSTs producing the same
+        # result file) can't clobber each other's in-flight tmp before the
+        # rename. Each caller writes its own tmp then atomically replaces
+        # `path`; last writer wins on `path` (deterministic content).
+        tmp = path.with_suffix(path.suffix + f".{secrets.token_hex(4)}.tmp")
         tmp.write_text(payload)
         tmp.replace(path)
 
     def record(self, pitch: PitchPayload) -> SessionResult:
+        """Persist a pitch upload and, if its pair is already present,
+        triangulate the session.
+
+        Lock discipline: the critical section is kept tight. Disk I/O and
+        NumPy triangulation happen OUTSIDE `self._lock` so heartbeats and
+        status polls don't block on a slow disk or a millisecond-scale
+        triangulation run.
+
+        Race note: two simultaneous A+B uploads for the same session can
+        each observe the other inside their own critical section and both
+        trigger triangulation. That's redundant CPU but not incorrect —
+        both computations take the same (a, b) snapshot and deterministically
+        yield the same points; last-writer-wins on `self.results[sid]`
+        and on the result JSON file (both atomic)."""
+        pitch_path = self._pitch_path(pitch.camera_id, pitch.session_id)
+
+        # --- Critical section 1: mutate pitches + drive session FSM. ---
+        # Grab the pair snapshot here so triangulation below runs against a
+        # consistent view without re-entering the lock.
         with self._lock:
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
-            self._atomic_write(
-                self._pitch_path(pitch.camera_id, pitch.session_id),
-                pitch.model_dump_json(),
-            )
-
             # Drive the session state machine forward — any upload arriving
             # while armed disarms the session (one-shot pattern). The other
             # camera, if it was also recording, gets "disarm" on its next
             # /status poll and cleans up.
             self._register_upload_in_session_locked(pitch)
-
             a = self.pitches.get(("A", pitch.session_id))
             b = self.pitches.get(("B", pitch.session_id))
-            result = SessionResult(
-                session_id=pitch.session_id,
-                camera_a_received=a is not None,
-                camera_b_received=b is not None,
-            )
-            if a is not None and b is not None:
-                try:
-                    result.points = triangulate_cycle(a, b)
-                except Exception as e:
-                    result.error = f"{type(e).__name__}: {e}"
+
+        # --- Outside the lock: write pitch JSON. Filename is unique per
+        # (camera, session) and each pitch uses its own tmp file, so two
+        # concurrent calls here cannot collide. ---
+        self._atomic_write(pitch_path, pitch.model_dump_json())
+
+        # --- Outside the lock: build the result + triangulate if paired. ---
+        result = SessionResult(
+            session_id=pitch.session_id,
+            camera_a_received=a is not None,
+            camera_b_received=b is not None,
+        )
+        if a is not None and b is not None:
+            try:
+                result.points = triangulate_cycle(a, b)
+            except Exception as e:
+                result.error = f"{type(e).__name__}: {e}"
+
+        # --- Outside the lock: persist the result JSON. ---
+        self._atomic_write(
+            self._result_path(pitch.session_id),
+            result.model_dump_json(),
+        )
+
+        # --- Critical section 2: publish the result into the in-memory map. ---
+        with self._lock:
             self.results[pitch.session_id] = result
-            self._atomic_write(
-                self._result_path(pitch.session_id),
-                result.model_dump_json(),
-            )
-            return result
+        return result
 
     def summary(self) -> dict[str, Any]:
         with self._lock:
@@ -638,6 +683,7 @@ def _summarize_result(result: SessionResult) -> dict[str, Any]:
 
 @app.post("/pitch")
 async def pitch(
+    request: Request,
     payload: str = Form(...),
     video: UploadFile | None = File(None),
 ) -> dict[str, Any]:
@@ -649,7 +695,23 @@ async def pitch(
                                     under `data/videos/session_{id}_{cam}.{ext}`
                                     and not yet consumed by triangulation —
                                     Phase-1 raw-video staging.
+
+    Rejects uploads whose total body exceeds `_MAX_PITCH_UPLOAD_BYTES` —
+    FastAPI buffers the full body before this handler runs, so without a
+    cap an attacker could OOM the process with a single request.
     """
+    # Fail fast on oversize bodies when the client advertises Content-Length
+    # (Starlette has already buffered by the time we get here, but returning
+    # 413 early is still cheaper than processing the multipart parts).
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared = int(content_length)
+        except ValueError:
+            declared = -1
+        if declared > _MAX_PITCH_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="video too large")
+
     try:
         payload_obj = PitchPayload.model_validate_json(payload)
     except ValidationError as e:
@@ -658,6 +720,10 @@ async def pitch(
     clip_info: dict[str, Any] | None = None
     if video is not None:
         data = await video.read()
+        # Defence in depth: re-check the actual read size in case the
+        # declared Content-Length was missing or spoofed.
+        if len(data) > _MAX_PITCH_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="video too large")
         if data:
             ext = "mov"
             if video.filename:

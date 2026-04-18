@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+import schemas
 from conftest import sid
 from main import app
 from reconstruct import Scene, build_scene
@@ -60,7 +61,7 @@ def _pitch(cam_id, cycle, K, R, t, H, P_trajectory, with_pixels=False):
     for i, P in enumerate(P_trajectory):
         tx, tz = _project(K, R, t, P)
         frames.append(
-            main.FramePayload(
+            schemas.FramePayload(
                 frame_index=i,
                 timestamp_s=float(i) / 240.0,
                 theta_x_rad=tx,
@@ -68,13 +69,13 @@ def _pitch(cam_id, cycle, K, R, t, H, P_trajectory, with_pixels=False):
                 ball_detected=True,
             )
         )
-    return main.PitchPayload(
+    return schemas.PitchPayload(
         camera_id=cam_id,
         session_id=sid(cycle),
         sync_anchor_frame_index=0,
         sync_anchor_timestamp_s=0.0,
         frames=frames,
-        intrinsics=main.IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
+        intrinsics=schemas.IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
         homography=H.flatten().tolist(),
     )
 
@@ -133,6 +134,50 @@ def test_build_scene_ray_endpoint_hits_ground_when_direction_is_downward():
 
     r = scene.rays[0]
     assert r.endpoint[2] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_build_scene_skips_rays_that_dont_intersect_ground():
+    """Rays whose world-frame direction has Z >= 0 (pointing up, or parallel
+    to the plate) would extend to infinity / never hit Z=0 with positive t.
+    `build_scene` must drop them rather than emit 10 m sky-poles that swamp
+    the viewer with false-positive ball detections."""
+    K, (R_a, t_a, C_a, H_a), _ = _make_rig()
+    # C_a sits at Z=1.2. Any ball point at Z >= C_a.z produces a ray that
+    # either points upward (dz > 0) or is parallel (dz ~= 0) when the point
+    # is at the same height. Ball point above the camera → upward ray.
+    P_up = np.array([0.0, 0.2, 3.0])
+    # Ball point at exactly camera height but offset in Y → horizontal ray
+    # (dz ~= 0), which also fails to cross Z=0 with positive t.
+    P_level = np.array([0.5, 0.2, 1.2])
+    # Valid, downward-pointing ray to prove the others were filtered rather
+    # than all rays being dropped by some other bug.
+    P_ok = np.array([0.0, 0.2, 0.4])
+    trajectory = np.array([P_up, P_level, P_ok])
+    pitch = _pitch("A", 1, K, R_a, t_a, H_a, trajectory)
+
+    scene = build_scene(sid(1), {"A": pitch}, triangulated=None)
+
+    # Only the P_ok frame should have produced a ray.
+    assert len(scene.rays) == 1
+    assert scene.rays[0].frame_index == 2
+    assert scene.rays[0].endpoint[2] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_build_scene_skipped_rays_do_not_affect_camera_or_triangulated():
+    """Filtering rays must not interfere with camera pose or triangulated
+    point attachment — only `scene.rays` shrinks."""
+    K, (R_a, t_a, C_a, H_a), _ = _make_rig()
+    P_up = np.array([0.0, 0.2, 3.0])  # all frames point upward → 0 rays
+    pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([P_up]))
+    tri = [
+        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6)
+    ]
+
+    scene = build_scene(sid(1), {"A": pitch}, triangulated=tri)
+
+    assert len(scene.cameras) == 1
+    assert scene.rays == []
+    assert len(scene.triangulated) == 1
 
 
 def test_build_scene_skips_pitch_missing_calibration():
