@@ -62,6 +62,13 @@ class Scene:
     cameras: list[CameraView] = field(default_factory=list)
     rays: list[Ray] = field(default_factory=list)
     triangulated: list[dict[str, float]] = field(default_factory=list)
+    # Per-camera ground-plane trace: the (x, y, 0) intersection of every
+    # ball-detected ray with the plate plane, ordered by anchor-relative
+    # time. This is the single-camera proxy for a trajectory — it's what
+    # a monocular view can recover without B pairing (equivalent to
+    # "assume the ball is on the ground"). Keyed by camera_id so multi-
+    # camera scenes still draw one trace per phone.
+    ground_traces: dict[str, list[dict[str, float]]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +76,9 @@ class Scene:
             "cameras": [vars(c) for c in self.cameras],
             "rays": [vars(r) for r in self.rays],
             "triangulated": list(self.triangulated),
+            "ground_traces": {
+                cam: list(trace) for cam, trace in self.ground_traces.items()
+            },
         }
 
 
@@ -153,7 +163,8 @@ def build_scene(
         )
 
         dist = intr.distortion
-        anchor = pitch.sync_anchor_timestamp_s
+        anchor = pitch.sync_anchor_timestamp_s or 0.0
+        trace: list[dict[str, float]] = []
         for f in pitch.frames:
             if not f.ball_detected:
                 continue
@@ -170,15 +181,27 @@ def build_scene(
             endpoint = _ray_endpoint(C, d_world)
             if endpoint is None:
                 continue
+            t_rel = float(f.timestamp_s - anchor)
             scene.rays.append(
                 Ray(
                     camera_id=cam_id,
-                    t_rel_s=float(f.timestamp_s - anchor),
+                    t_rel_s=t_rel,
                     frame_index=f.frame_index,
                     origin=C.tolist(),
                     endpoint=endpoint.tolist(),
                 )
             )
+            trace.append(
+                {
+                    "t_rel_s": t_rel,
+                    "x": float(endpoint[0]),
+                    "y": float(endpoint[1]),
+                    "z": float(endpoint[2]),
+                }
+            )
+        if trace:
+            trace.sort(key=lambda p: p["t_rel_s"])
+            scene.ground_traces[cam_id] = trace
 
     if triangulated:
         scene.triangulated = [

@@ -82,7 +82,7 @@ from schemas import (
     _DEFAULT_SESSION_TIMEOUT_S,
 )
 from pairing import triangulate_cycle
-from pipeline import detect_pitch
+from pipeline import annotate_video, detect_pitch
 from chirp import chirp_wav_bytes
 from cleanup_old_sessions import cleanup_expired_sessions
 
@@ -836,6 +836,23 @@ async def pitch(
             clip_path, payload_obj.video_start_pts_s
         )
         detection_ran = True
+        # Re-encode the clip with a green circle on every detected frame
+        # so the viewer shows "processed" footage by default. Failures
+        # here are logged-and-swallowed: raw clip is still on disk, the
+        # viewer just falls back to it.
+        annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
+        try:
+            annotate_video(clip_path, annotated_path, payload_obj.frames)
+        except Exception as exc:
+            logger.warning(
+                "annotate_video failed session=%s cam=%s err=%s",
+                payload_obj.session_id, payload_obj.camera_id, exc,
+            )
+            if annotated_path.exists():
+                try:
+                    annotated_path.unlink()
+                except OSError:
+                    pass
 
     result = state.record(payload_obj)
     if payload_obj.sync_anchor_timestamp_s is None and result.error is None:
@@ -928,33 +945,60 @@ def viewer(session_id: str) -> HTMLResponse:
     from render_scene import render_viewer_html
 
     scene = _scene_for_session(session_id)
-    videos = _videos_for_session(session_id)
-    return HTMLResponse(render_viewer_html(scene, videos))
+    videos_with_offsets = _videos_for_session(session_id)
+    return HTMLResponse(render_viewer_html(scene, videos_with_offsets))
 
 
-# Only the exact filename shape `/pitch` writes is allowed through the
-# /videos route, to keep the handler from serving arbitrary files out of
-# `data/videos/` if something unexpected ever lands there.
+# Allowed filenames under /videos. Either the raw clip (`session_<sid>_<cam>.<ext>`)
+# or its annotated sibling with a `_annotated` suffix — both produced by /pitch.
 _VIDEO_FILENAME_RE = re.compile(
-    r"^session_s_[0-9a-f]{4,32}_[A-Za-z0-9_-]{1,16}\.(mov|mp4|m4v)$"
+    r"^session_s_[0-9a-f]{4,32}_[A-Za-z0-9_-]{1,16}(_annotated)?\.(mov|mp4|m4v)$"
 )
 
 
-def _videos_for_session(session_id: str) -> list[tuple[str, str]]:
-    """Return `[(camera_id, "/videos/<filename>"), ...]` sorted by camera_id
-    for every MOV/MP4 clip that landed on disk for this session. Empty
-    list when no clips exist (e.g. a session the server saved frames for
-    but no video — shouldn't happen post-pivot, but keep the helper
-    permissive so the viewer just hides the video area)."""
+def _videos_for_session(session_id: str) -> list[tuple[str, str, float]]:
+    """Return `[(camera_id, "/videos/<filename>", t_rel_offset_s), ...]`
+    sorted by camera_id. Prefers the `_annotated` clip when present (the
+    one with detection circles drawn) and falls back to the raw MOV.
+
+    `t_rel_offset_s = video_start_pts_s − sync_anchor_timestamp_s` is the
+    amount of anchor-relative time that had already elapsed when the
+    clip's first frame was captured. The viewer seeks each camera's
+    video by `currentTime = t_rel − offset`, which keeps A and B locked
+    to the shared chirp anchor regardless of how different their arm-to-
+    first-frame latency was."""
     prefix = f"session_{session_id}_"
-    out: list[tuple[str, str]] = []
+    pitches = state.pitches_for_session(session_id)
+
+    # Pick one filename per camera — prefer the annotated version.
+    best: dict[str, str] = {}
     for path in sorted(state.video_dir.glob(f"{prefix}*")):
         name = path.name
         if not _VIDEO_FILENAME_RE.match(name):
             continue
-        # Extract camera_id: strip "session_{sid}_" prefix and extension.
-        cam = name[len(prefix):].rsplit(".", 1)[0]
-        out.append((cam, f"/videos/{name}"))
+        stem = name.rsplit(".", 1)[0]  # "session_<sid>_<cam>" or "..._annotated"
+        is_annotated = stem.endswith("_annotated")
+        cam = stem[len(prefix):]
+        if is_annotated:
+            cam = cam[: -len("_annotated")]
+        # Annotated beats raw for the same camera.
+        if cam not in best or (is_annotated and "_annotated" not in best[cam]):
+            best[cam] = name
+
+    out: list[tuple[str, str, float]] = []
+    for cam in sorted(best):
+        name = best[cam]
+        pitch = pitches.get(cam)
+        if pitch is None or pitch.sync_anchor_timestamp_s is None:
+            # Missing anchor → can't align to the master clock; fall back
+            # to a zero offset so the video at least plays from its own
+            # start. The viewer will just show drift between A and B.
+            offset = 0.0
+        else:
+            offset = float(
+                pitch.video_start_pts_s - pitch.sync_anchor_timestamp_s
+            )
+        out.append((cam, f"/videos/{name}", offset))
     return out
 
 

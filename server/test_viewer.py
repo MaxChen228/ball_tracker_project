@@ -308,6 +308,21 @@ def test_viewer_endpoint_embeds_video_tags_for_available_clips():
     assert 'data-cam="B"' in body
 
 
+def test_viewer_endpoint_prefers_annotated_clip_when_available():
+    """Raw + annotated both on disk → viewer picks the annotated one."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(708)
+    _record_pitch(_pitch("A", 708, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"raw", "mov")
+    # Annotated counterpart — server-side normal path writes this too.
+    annotated = main.state.video_dir / f"session_{session_id}_A_annotated.mov"
+    annotated.write_bytes(b"annotated")
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert f'src="/videos/session_{session_id}_A_annotated.mov"' in body
+    assert f'src="/videos/session_{session_id}_A.mov"' not in body
+
+
 def test_viewer_endpoint_without_clips_still_renders():
     """No MOVs on disk → viewer renders a placeholder instead of 500."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
@@ -317,6 +332,53 @@ def test_viewer_endpoint_without_clips_still_renders():
     body = client.get(f"/viewer/{session_id}").text
     assert "no clips on disk" in body
     assert "<video" not in body
+
+
+def test_viewer_embeds_scene_data_and_mode_toggle():
+    """Viewer serialises the scene (ground_traces + rays) inline so JS
+    can rebuild the Plotly traces under a time filter, and exposes the
+    [ALL] / [PLAYBACK] toggle."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(709)
+    _record_pitch(_pitch("A", 709, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    # Inline scene blob + the mode toggle buttons.
+    assert 'id="viewer-data"' in body
+    assert '"ground_traces"' in body
+    assert 'id="mode-all"' in body
+    assert 'id="mode-playback"' in body
+
+
+def test_viewer_exposes_camera_t_rel_offsets(tmp_path):
+    """Video metadata passed to JS must carry per-camera
+    `t_rel_offset_s = video_start_pts_s − sync_anchor_timestamp_s` so
+    the JS can align A and B by their shared chirp anchor."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(710)
+    pitch = schemas.PitchPayload(
+        camera_id="A",
+        session_id=session_id,
+        sync_anchor_timestamp_s=100.0,  # chirp hit at session-clock 100 s
+        video_start_pts_s=101.5,        # first MOV frame at 101.5 s
+        video_fps=240.0,
+        frames=[schemas.FramePayload(
+            frame_index=0, timestamp_s=101.5, px=960.0, py=540.0,
+            ball_detected=True,
+        )],
+        intrinsics=schemas.IntrinsicsPayload(
+            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+        ),
+        homography=H_a.flatten().tolist(),
+    )
+    main.state.record(pitch)
+    main.state.save_clip("A", session_id, b"clip", "mov")
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    # t_rel_offset = 101.5 − 100.0 = 1.5 s (serialised as JSON number).
+    assert '"t_rel_offset_s": 1.5' in body
 
 
 def test_video_endpoint_serves_clip_bytes():
