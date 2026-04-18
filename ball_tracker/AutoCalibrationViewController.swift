@@ -28,6 +28,13 @@ final class AutoCalibrationViewController: UIViewController {
         session.stopRunning()
     }
 
+    // ArUco detector reads the CVPixelBuffer at sensor-native rotation (0°)
+    // and the overlay uses landscape view coordinates — portrait would
+    // misplace the polygon and break the RANSAC fit on tilted markers.
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        [.landscapeLeft, .landscapeRight]
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
