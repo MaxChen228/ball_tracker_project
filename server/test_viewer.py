@@ -334,6 +334,57 @@ def test_viewer_endpoint_without_clips_still_renders():
     assert "<video" not in body
 
 
+def test_viewer_health_banner_shows_partial_session_failure():
+    """A-only session → health banner must surface (a) A's uploaded chip,
+    (b) B's 'not uploaded' state, and (c) an explicit failure strip
+    explaining triangulation was skipped. This is the whole reason the
+    banner exists — a glance should answer 'why is the 3D empty?'."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(720)
+    _record_pitch(_pitch("A", 720, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert "CAM A" in body and "CAM B" in body
+    assert "uploaded" in body
+    assert "not uploaded" in body
+    assert "never uploaded" in body  # failure strip reason
+    assert "triangulation skipped" in body
+    # Triangulation card falls to the zero state.
+    assert "no triangulation" in body
+
+
+def test_viewer_health_banner_shows_paired_triangulation_count():
+    """Both A and B present + triangulated points → banner shows the
+    count and no failure strip."""
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    session_id = sid(721)
+    P = np.array([[0.1, 0.3, 1.0], [0.2, 0.5, 1.2]])
+    _record_pitch(_pitch("A", 721, K, R_a, t_a, H_a, P))
+    _record_pitch(_pitch("B", 721, K, R_b, t_b, H_b, P))
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert "points triangulated" in body
+    # No failure strip should render when every check passes.
+    assert 'class="fail-strip"' not in body
+
+
+def test_viewer_health_banner_flags_missing_time_sync():
+    """Both cameras uploaded, but neither has a chirp anchor → banner
+    must call out the sync failure by name rather than just showing an
+    empty 3D scene."""
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    session_id = sid(722)
+    for cam, R, t, H in (("A", R_a, t_a, H_a), ("B", R_b, t_b, H_b)):
+        p = _pitch(cam, 722, K, R, t, H, np.array([[0.1, 0.3, 1.0]]))
+        main.state.record(p.model_copy(update={"sync_anchor_timestamp_s": None}))
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert "no chirp anchor" in body
+
+
 def test_viewer_embeds_scene_data_and_mode_toggle():
     """Viewer serialises the scene (ground_traces + rays) inline so JS
     can rebuild the Plotly traces under a time filter, and exposes the
