@@ -28,6 +28,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case uploading
     }
 
+    // Adaptive capture rate. Idle/time-sync runs at 60 fps to keep the
+    // sensor + ISP cool and preserve battery; tracking (`.syncWaiting` +
+    // `.recording`) switches to 240 fps so the 8 ms A/B pair window gets
+    // sub-frame resolution. Transitions live in `enterSyncMode` /
+    // `exitSyncMode` via `switchCaptureFps(_:)`.
+    private let standbyFps: Double = 60
+    private let trackingFps: Double = 240
+
     // Session + outputs.
     private let session = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
@@ -260,11 +268,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     func enterSyncMode() {
         guard state == .standby else { return }
         log.info("camera entering sync mode session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
+        // Clear any stale time-sync / mic warning first so switchCaptureFps
+        // can raise a new one if the 240 fps format is unavailable.
+        warningLabel.isHidden = true
+        switchCaptureFps(trackingFps)
         recorder.reset()
         reloadBallDetectorWithLatestIntrinsics()
         try? uploadQueue.reloadPending()
         state = .syncWaiting
-        warningLabel.isHidden = true
         updateUIForState()
         uploadQueue.processNextIfNeeded()
     }
@@ -281,6 +292,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         uploadQueue.clearPending()
         warningLabel.isHidden = true
+        switchCaptureFps(standbyFps)
         updateUIForState()
     }
 
@@ -416,7 +428,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     device,
                     targetWidth: settings.captureWidth,
                     targetHeight: settings.captureHeight,
-                    targetFps: Double(settings.captureFps)
+                    targetFps: standbyFps
                 )
                 IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
 
@@ -442,8 +454,27 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let preview = AVCaptureVideoPreviewLayer(session: session)
         preview.videoGravity = .resizeAspectFill
         preview.frame = view.bounds
+        // App is locked to landscape (Info.plist). Pin the preview connection
+        // to sensor-native angle 0 so the on-screen image matches the raw
+        // CVPixelBuffer orientation BallDetector / ArUco consume; a stale
+        // 90° rotation here was why "holding phone landscape" still rendered
+        // a portrait-oriented preview.
+        if let connection = preview.connection, connection.isVideoRotationAngleSupported(0) {
+            connection.videoRotationAngle = 0
+        }
         view.layer.insertSublayer(preview, at: 0)
         previewLayer = preview
+    }
+
+    enum CaptureFormatError: LocalizedError {
+        case noMatchingFormat(width: Int, height: Int, fps: Double)
+
+        var errorDescription: String? {
+            switch self {
+            case .noMatchingFormat(let w, let h, let fps):
+                return "No AVCaptureDevice.Format matches \(w)×\(h) @ \(Int(fps)) fps"
+            }
+        }
     }
 
     private func configureCaptureFormat(
@@ -466,7 +497,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 break
             }
         }
-        guard let selected else { return }
+        guard let selected else {
+            throw CaptureFormatError.noMatchingFormat(width: targetWidth, height: targetHeight, fps: targetFps)
+        }
 
         try device.lockForConfiguration()
         defer { device.unlockForConfiguration() }
@@ -479,18 +512,41 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         horizontalFovRadians = Double(device.activeFormat.videoFieldOfView) * Double.pi / 180.0
     }
 
-    private func reconfigureCapture() {
+    /// Swap the active capture format to a new frame rate at the current
+    /// fixed resolution. Used for the idle↔tracking FPS transition
+    /// (`standbyFps` ↔ `trackingFps`) triggered by enter/exit of sync mode,
+    /// and by the resolution-change path in `applyUpdatedSettings`. The
+    /// format swap requires `stopRunning → activeFormat = X → startRunning`,
+    /// which blocks the session for ~300-500 ms — deliberately called only
+    /// at moments with no time-critical frame work in flight (entering
+    /// sync while the user is placing the ball, or exiting back to idle).
+    private func switchCaptureFps(_ targetFps: Double) {
         guard let device = currentCaptureDevice else { return }
         let wasRunning = session.isRunning
         if wasRunning { session.stopRunning() }
-        try? configureCaptureFormat(
-            device,
-            targetWidth: settings.captureWidth,
-            targetHeight: settings.captureHeight,
-            targetFps: Double(settings.captureFps)
-        )
-        IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
-        if wasRunning { session.startRunning() }
+        defer { if wasRunning { session.startRunning() } }
+
+        do {
+            try configureCaptureFormat(
+                device,
+                targetWidth: settings.captureWidth,
+                targetHeight: settings.captureHeight,
+                targetFps: targetFps
+            )
+            IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
+            // Read back the actually-applied rate so an operator can tell
+            // from logs whether the sensor is honouring our request. 240 fps
+            // formats typically crop the sensor ROI, so `videoFieldOfView`
+            // may differ between 60 and 240 fps — log it per switch so any
+            // FOV-approximation intrinsics drift is visible.
+            let applied = device.activeVideoMinFrameDuration
+            let appliedFps = applied.value > 0 ? Double(applied.timescale) / Double(applied.value) : 0
+            log.info("camera fps switched target=\(targetFps) applied=\(appliedFps) fov_rad=\(self.horizontalFovRadians)")
+        } catch {
+            log.error("camera fps switch failed target=\(targetFps) error=\(error.localizedDescription, privacy: .public)")
+            warningLabel.text = "FPS 切換失敗 (\(Int(targetFps))fps 不支援)"
+            warningLabel.isHidden = false
+        }
     }
 
     private var currentCaptureDevice: AVCaptureDevice? {
@@ -717,7 +773,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             || latest.serverPort != settings.serverPort
         let formatChanged = latest.captureWidth != settings.captureWidth
             || latest.captureHeight != settings.captureHeight
-            || latest.captureFps != settings.captureFps
         let chirpThresholdChanged = latest.chirpThreshold != settings.chirpThreshold
         let pollIntervalChanged = latest.pollInterval != settings.pollInterval
         let cameraRoleChanged = latest.cameraRole != settings.cameraRole
@@ -731,7 +786,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             uploadQueue.updateUploader(uploader)
         }
         if formatChanged {
-            reconfigureCapture()
+            // Resolution is currently fixed (captureWidthFixed/HeightFixed) so
+            // this branch only fires on a stale-prefs migration. Re-pick a
+            // format at whichever FPS is appropriate for the current state.
+            let fps = (state == .standby || state == .timeSyncWaiting) ? standbyFps : trackingFps
+            switchCaptureFps(fps)
         }
         if chirpThresholdChanged {
             chirpDetector?.setThreshold(Float(latest.chirpThreshold))
