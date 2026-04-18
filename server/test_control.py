@@ -325,6 +325,141 @@ def test_pitch_upload_keeps_session_armed_until_stop():
     assert set(status["session"]["uploads_received"]) == {"A"}
 
 
+def test_delete_session_removes_memory_and_disk_artefacts(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    pitch_a = _minimal_pitch("A", session_id=sid(1))
+    pitch_b = _minimal_pitch("B", session_id=sid(1))
+    s.record(pitch_a)
+    s.record(pitch_b)
+    # Drop a fake video clip into the expected location so the cleanup
+    # also exercises the video glob.
+    video_path = tmp_path / "videos" / f"session_{sid(1)}_A.mov"
+    video_path.write_bytes(b"fake mov")
+
+    assert (tmp_path / "pitches" / f"session_{sid(1)}_A.json").exists()
+    assert (tmp_path / "results" / f"session_{sid(1)}.json").exists()
+
+    assert s.delete_session(sid(1)) is True
+
+    assert ("A", sid(1)) not in s.pitches
+    assert ("B", sid(1)) not in s.pitches
+    assert sid(1) not in s.results
+    assert not (tmp_path / "pitches" / f"session_{sid(1)}_A.json").exists()
+    assert not (tmp_path / "pitches" / f"session_{sid(1)}_B.json").exists()
+    assert not (tmp_path / "results" / f"session_{sid(1)}.json").exists()
+    assert not video_path.exists()
+
+
+def test_delete_unknown_session_returns_false(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    assert s.delete_session(sid(99)) is False
+
+
+def test_delete_clears_last_ended_session_pointer(tmp_path):
+    """`session_snapshot` surfaces the last-ended session even after it's
+    been deleted; clearing the pointer ensures the dashboard doesn't show
+    a ghost "last: stopped" chip for a session whose files are gone."""
+    clock = {"now": 1000.0}
+    s = main.State(data_dir=tmp_path, time_fn=lambda: clock["now"])
+    s.heartbeat("A")
+    armed = s.arm_session()
+    s.stop_session()
+
+    pitch = _minimal_pitch("A", session_id=armed.id)
+    s.record(pitch)
+
+    assert s.delete_session(armed.id) is True
+    assert s.session_snapshot() is None
+
+
+def test_delete_refuses_armed_session(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    s.heartbeat("A")
+    armed = s.arm_session()
+    with pytest.raises(RuntimeError, match="armed"):
+        s.delete_session(armed.id)
+
+
+def test_sessions_delete_html_form_redirects():
+    client = TestClient(app)
+    main.state.record(_minimal_pitch("A", session_id=sid(2)))
+    assert sid(2) in main.state.results
+
+    r = client.post(
+        f"/sessions/{sid(2)}/delete",
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+    assert sid(2) not in main.state.results
+
+
+def test_sessions_delete_json_api():
+    client = TestClient(app)
+    main.state.record(_minimal_pitch("A", session_id=sid(3)))
+
+    r = client.post(
+        f"/sessions/{sid(3)}/delete",
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "session_id": sid(3)}
+    assert sid(3) not in main.state.results
+
+
+def test_sessions_delete_json_returns_404_for_unknown():
+    client = TestClient(app)
+    r = client.post(
+        f"/sessions/{sid(4)}/delete",
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 404
+
+
+def test_sessions_delete_json_returns_409_when_armed():
+    client = TestClient(app)
+    client.post("/heartbeat", json={"camera_id": "A"})
+    armed = client.post(
+        "/sessions/arm", headers={"Accept": "application/json"}
+    ).json()["session"]
+
+    r = client.post(
+        f"/sessions/{armed['id']}/delete",
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 409
+
+
+def test_sessions_delete_rejects_malformed_id_json():
+    client = TestClient(app)
+    r = client.post(
+        "/sessions/bad..id/delete",
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 422
+
+
+def test_sessions_delete_malformed_html_redirects():
+    """Dashboard never sends a malformed id, but if a hand-edited URL
+    lands one, redirect instead of surfacing a 422 page."""
+    client = TestClient(app)
+    r = client.post(
+        "/sessions/bad..id/delete",
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+
+def test_dashboard_events_list_renders_delete_form():
+    client = TestClient(app)
+    main.state.record(_minimal_pitch("A", session_id=sid(5)))
+    body = client.get("/").text
+    assert f'action="/sessions/{sid(5)}/delete"' in body
+    assert 'class="event-delete"' in body
+
+
 def test_dashboard_renders_control_panel():
     client = TestClient(app)
     r = client.get("/")
