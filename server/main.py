@@ -71,6 +71,7 @@ from schemas import (
 )
 from pairing import triangulate_cycle
 from chirp import chirp_wav_bytes
+from cleanup_old_sessions import cleanup_expired_sessions
 
 logger = logging.getLogger("ball_tracker")
 
@@ -143,6 +144,10 @@ class State:
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
         self._load_from_disk()
+
+    @property
+    def data_dir(self) -> Path:
+        return self._data_dir
 
     @property
     def video_dir(self) -> Path:
@@ -592,6 +597,17 @@ async def lifespan(app: FastAPI):
     )
     ip = _lan_ip()
     logger.info("LAN IP: %s  →  set iPhone Settings → Server IP = %s, Port = 8765", ip, ip)
+    # $BALL_TRACKER_CLEANUP_DAYS=0 disables startup cleanup; otherwise sessions
+    # whose youngest file is older than N days are purged here.
+    cleanup_days = int(os.environ.get("BALL_TRACKER_CLEANUP_DAYS", "30"))
+    if cleanup_days > 0:
+        sessions, files, bytes_removed = cleanup_expired_sessions(
+            state.data_dir, days=cleanup_days, dry_run=False
+        )
+        logger.info(
+            "cleanup: removed %d sessions / %d files / %d bytes older than %d days from %s",
+            sessions, files, bytes_removed, cleanup_days, state.data_dir,
+        )
     yield
 
 
