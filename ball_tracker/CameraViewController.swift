@@ -161,6 +161,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var recTimer: Timer?
     private var recStartTime: CFTimeInterval = 0
 
+    // Last state whose visuals (border stroke, pulse animation, REC timer)
+    // were applied. `updateUIForState` fires on every heartbeat tick and
+    // upload-queue callback — if we re-ran `applyStateVisuals` each time
+    // the REC timer would reset to 0.0 s and the pulse animation would be
+    // torn down and re-added every beat. Gating on this sentinel means
+    // transition-side-effects run exactly once per state change, while
+    // pure label/colour updates (Server / FPS / Upload / Last) still
+    // refresh every call.
+    private var lastRenderedState: AppState?
+
     // Haptic feedback generators. Kept as properties so prepare() is
     // honored (trigger latency drops from ~100 ms to <20 ms).
     private let armHaptic = UIImpactFeedbackGenerator(style: .light)
@@ -1114,7 +1124,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         lastResultLabel.text = "Last: \(lastResultText)"
 
         chirpDebugLabel.isHidden = (state != .timeSyncWaiting)
-        applyStateVisuals()
+        // State-transition-only side effects: re-running applyStateVisuals
+        // on every tick resets the REC timer and rebuilds the pulse
+        // animation, so edge-trigger it here. Label / colour refresh above
+        // stays level-triggered.
+        if lastRenderedState != state {
+            applyStateVisuals()
+            lastRenderedState = state
+        }
     }
 
     private func stateText(_ state: AppState) -> String {

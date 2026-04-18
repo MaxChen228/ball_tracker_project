@@ -610,6 +610,65 @@ class State:
             )
             return events
 
+    def delete_session(self, session_id: str) -> bool:
+        """Remove a single session's in-memory + on-disk artefacts.
+
+        Returns True if anything was removed, False if the session was
+        unknown. Raises RuntimeError if `session_id` is the currently
+        armed session — stop it first, or the phones may flush uploads
+        into a half-deleted slot.
+
+        Wipes the pitches / results / videos files for `session_id` (both
+        the live and any `.tmp` siblings) plus the annotated clip, and
+        clears the entry from `_pitches`, `_results`, and the
+        `_last_ended_session` pointer if it matches."""
+        with self._lock:
+            current = self._current_session
+            if (
+                current is not None
+                and current.ended_at is None
+                and current.id == session_id
+            ):
+                raise RuntimeError(
+                    f"cannot delete armed session {session_id}; stop it first"
+                )
+
+            keys_to_drop = [
+                (cam, sid)
+                for (cam, sid) in self.pitches
+                if sid == session_id
+            ]
+            removed_any = bool(keys_to_drop) or session_id in self.results
+            for key in keys_to_drop:
+                self.pitches.pop(key, None)
+            self.results.pop(session_id, None)
+            if (
+                self._last_ended_session is not None
+                and self._last_ended_session.id == session_id
+            ):
+                self._last_ended_session = None
+
+        # Disk cleanup outside the lock — same pattern record() uses.
+        for pattern in (
+            f"session_{session_id}_*.json",
+            f"session_{session_id}_*.json.*.tmp",
+        ):
+            for path in self._pitch_dir.glob(pattern):
+                path.unlink(missing_ok=True)
+                removed_any = True
+        for pattern in (
+            f"session_{session_id}.json",
+            f"session_{session_id}.json.*.tmp",
+        ):
+            for path in self._result_dir.glob(pattern):
+                path.unlink(missing_ok=True)
+                removed_any = True
+        for path in self._video_dir.glob(f"session_{session_id}_*"):
+            # Includes raw + `_annotated` + any in-flight `.tmp` sibling.
+            path.unlink(missing_ok=True)
+            removed_any = True
+        return removed_any
+
     def reset(self, purge_disk: bool = False) -> None:
         with self._lock:
             self.pitches.clear()
@@ -737,6 +796,34 @@ async def sessions_stop(request: Request):
     if ended is None:
         raise HTTPException(status_code=409, detail="no armed session")
     return {"ok": True, "session": ended.to_dict()}
+
+
+# Matches the `Session.id` schema regex — keeps the path parameter from
+# accepting anything that could traverse out of the data dir via glob().
+_SESSION_ID_RE = re.compile(r"^s_[0-9a-f]{4,32}$")
+
+
+@app.post("/sessions/{session_id}/delete")
+async def sessions_delete(request: Request, session_id: str):
+    """Remove a past session's pitches, results, and videos from memory
+    and disk. HTML callers (dashboard ✕ button) always get a 303 back to
+    the dashboard so the list visibly shrinks. JSON callers get 404 for
+    unknown sessions and 409 when the session is still armed."""
+    if not _SESSION_ID_RE.match(session_id):
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=422, detail="invalid session_id")
+    try:
+        removed = state.delete_session(session_id)
+    except RuntimeError as e:
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=409, detail=str(e))
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+    return {"ok": True, "session_id": session_id}
 
 
 def _summarize_result(result: SessionResult) -> dict[str, Any]:

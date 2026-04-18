@@ -164,11 +164,13 @@ form.inline {{ display: inline-block; margin: 0; }}
 
 /* --- Events list --- */
 .events-empty {{ color: var(--sub); font-size: 13px; padding: 12px 0; font-style: italic; }}
+.event-item {{ position: relative; border-top: 1px solid var(--border-l); }}
+.event-item:first-child {{ border-top: 0; }}
+.event-item:hover {{ background: var(--bg); margin: 0 -8px; padding: 0 8px; }}
 .event-row {{ display: block; text-decoration: none; color: inherit;
-              padding: 12px 0; border-top: 1px solid var(--border-l); }}
-.event-row:first-child {{ border-top: 0; }}
-.event-row:hover {{ background: var(--bg); margin: 0 -8px; padding: 12px 8px; }}
-.event-top {{ display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }}
+              padding: 12px 0; }}
+.event-top {{ display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+              padding-right: 32px; }}
 .event-top .sid {{ font-family: var(--mono); font-size: 13px; color: var(--ink);
                    letter-spacing: 0.04em; }}
 .event-stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 14px;
@@ -176,6 +178,14 @@ form.inline {{ display: inline-block; margin: 0; }}
 .event-stats .k {{ color: var(--sub); letter-spacing: 0.08em; text-transform: uppercase;
                    font-size: 9px; display: block; }}
 .event-stats .v {{ font-variant-numeric: tabular-nums; color: var(--ink); }}
+.event-delete-form {{ position: absolute; top: 10px; right: 4px; margin: 0; }}
+.event-item:hover .event-delete-form {{ right: 12px; }}
+.event-delete {{ background: transparent; border: 1px solid var(--border-base);
+                 color: var(--sub); font-family: var(--mono); font-size: 13px;
+                 line-height: 1; padding: 2px 8px 3px; border-radius: 2px;
+                 cursor: pointer; transition: all 0.15s ease; }}
+.event-delete:hover {{ border-color: var(--dev); color: var(--dev);
+                       background: var(--surface); }}
 
 /* --- Canvas overlay hint --- */
 .canvas-hint {{ position: absolute; left: 20px; top: 20px; z-index: 5;
@@ -289,21 +299,34 @@ _JS_TEMPLATE = r"""
       const peakZ = fmtNum(e.peak_z_m, 2);
       const duration = fmtNum(e.duration_s, 2);
       const mean = fmtNum(e.mean_residual_m, 4);
+      const sid = esc(e.session_id);
+      // Delete form is a sibling of the event-row link so submitting it
+      // does not navigate via the wrapping anchor. Confirm dialog guards
+      // against accidental clicks — once removed, disk files are gone.
+      const confirmMsg = `刪除 session ${e.session_id}？此動作無法復原。`;
       return `
-        <a class="event-row" href="/viewer/${esc(e.session_id)}">
-          <div class="event-top">
-            <span class="sid">${esc(e.session_id)}</span>
-            <span class="chip ${esc(mode)}">${mode}</span>
-            <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
-          </div>
-          <div class="event-stats">
-            <span><span class="k">Cams</span><span class="v">${esc(cams)}</span></span>
-            <span><span class="k">3D pts</span><span class="v">${e.n_triangulated || 0}</span></span>
-            <span><span class="k">Mean resid (m)</span><span class="v">${mean}</span></span>
-            <span><span class="k">Peak Z (m)</span><span class="v">${peakZ}</span></span>
-            <span><span class="k">Duration (s)</span><span class="v">${duration}</span></span>
-          </div>
-        </a>`;
+        <div class="event-item">
+          <a class="event-row" href="/viewer/${sid}">
+            <div class="event-top">
+              <span class="sid">${sid}</span>
+              <span class="chip ${esc(mode)}">${mode}</span>
+              <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
+            </div>
+            <div class="event-stats">
+              <span><span class="k">Cams</span><span class="v">${esc(cams)}</span></span>
+              <span><span class="k">3D pts</span><span class="v">${e.n_triangulated || 0}</span></span>
+              <span><span class="k">Mean resid (m)</span><span class="v">${mean}</span></span>
+              <span><span class="k">Peak Z (m)</span><span class="v">${peakZ}</span></span>
+              <span><span class="k">Duration (s)</span><span class="v">${duration}</span></span>
+            </div>
+          </a>
+          <form class="event-delete-form" method="POST"
+                action="/sessions/${sid}/delete"
+                onsubmit="return confirm(${JSON.stringify(confirmMsg)});">
+            <button class="event-delete" type="submit"
+                    aria-label="Delete session ${sid}">&times;</button>
+          </form>
+        </div>`;
     }).join('');
   }
 
@@ -457,6 +480,10 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
         peak_z = "—" if e.get("peak_z_m") is None else format(e["peak_z_m"], ".2f")
         duration = "—" if e.get("duration_s") is None else format(e["duration_s"], ".2f")
         parts.append(
+            # event-row is a link into the viewer; the delete form is a
+            # sibling (not a descendant) so the button submit doesn't
+            # navigate via the wrapping anchor.
+            f'<div class="event-item">'
             f'<a class="event-row" href="/viewer/{sid}">'
             f'<div class="event-top">'
             f'<span class="sid">{sid}</span>'
@@ -471,6 +498,13 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f'<span><span class="k">Duration (s)</span><span class="v">{duration}</span></span>'
             f"</div>"
             f"</a>"
+            f'<form class="event-delete-form" method="POST" '
+            f'action="/sessions/{sid}/delete" '
+            f'onsubmit="return confirm(\'刪除 session {sid}？此動作無法復原。\');">'
+            f'<button class="event-delete" type="submit" '
+            f'aria-label="Delete session {sid}">&times;</button>'
+            f"</form>"
+            f"</div>"
         )
     return "".join(parts)
 
