@@ -268,12 +268,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     func enterSyncMode() {
         guard state == .standby else { return }
         log.info("camera entering sync mode session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
+        // Clear any stale time-sync / mic warning first so switchCaptureFps
+        // can raise a new one if the 240 fps format is unavailable.
+        warningLabel.isHidden = true
         switchCaptureFps(trackingFps)
         recorder.reset()
         reloadBallDetectorWithLatestIntrinsics()
         try? uploadQueue.reloadPending()
         state = .syncWaiting
-        warningLabel.isHidden = true
         updateUIForState()
         uploadQueue.processNextIfNeeded()
     }
@@ -289,8 +291,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.clipRecorder = nil
         }
         uploadQueue.clearPending()
-        switchCaptureFps(standbyFps)
         warningLabel.isHidden = true
+        switchCaptureFps(standbyFps)
         updateUIForState()
     }
 
@@ -464,6 +466,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         previewLayer = preview
     }
 
+    enum CaptureFormatError: LocalizedError {
+        case noMatchingFormat(width: Int, height: Int, fps: Double)
+
+        var errorDescription: String? {
+            switch self {
+            case .noMatchingFormat(let w, let h, let fps):
+                return "No AVCaptureDevice.Format matches \(w)×\(h) @ \(Int(fps)) fps"
+            }
+        }
+    }
+
     private func configureCaptureFormat(
         _ device: AVCaptureDevice,
         targetWidth: Int,
@@ -484,7 +497,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 break
             }
         }
-        guard let selected else { return }
+        guard let selected else {
+            throw CaptureFormatError.noMatchingFormat(width: targetWidth, height: targetHeight, fps: targetFps)
+        }
 
         try device.lockForConfiguration()
         defer { device.unlockForConfiguration() }
@@ -509,14 +524,29 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         guard let device = currentCaptureDevice else { return }
         let wasRunning = session.isRunning
         if wasRunning { session.stopRunning() }
-        try? configureCaptureFormat(
-            device,
-            targetWidth: settings.captureWidth,
-            targetHeight: settings.captureHeight,
-            targetFps: targetFps
-        )
-        IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
-        if wasRunning { session.startRunning() }
+        defer { if wasRunning { session.startRunning() } }
+
+        do {
+            try configureCaptureFormat(
+                device,
+                targetWidth: settings.captureWidth,
+                targetHeight: settings.captureHeight,
+                targetFps: targetFps
+            )
+            IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
+            // Read back the actually-applied rate so an operator can tell
+            // from logs whether the sensor is honouring our request. 240 fps
+            // formats typically crop the sensor ROI, so `videoFieldOfView`
+            // may differ between 60 and 240 fps — log it per switch so any
+            // FOV-approximation intrinsics drift is visible.
+            let applied = device.activeVideoMinFrameDuration
+            let appliedFps = applied.value > 0 ? Double(applied.timescale) / Double(applied.value) : 0
+            log.info("camera fps switched target=\(targetFps) applied=\(appliedFps) fov_rad=\(self.horizontalFovRadians)")
+        } catch {
+            log.error("camera fps switch failed target=\(targetFps) error=\(error.localizedDescription, privacy: .public)")
+            warningLabel.text = "FPS 切換失敗 (\(Int(targetFps))fps 不支援)"
+            warningLabel.isHidden = false
+        }
     }
 
     private var currentCaptureDevice: AVCaptureDevice? {
