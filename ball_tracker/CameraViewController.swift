@@ -15,7 +15,7 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "camer
 /// - UPLOADING: cycle persisted, handed to the upload queue
 ///
 /// The phone is a pure capture client — no ball detection runs on-device.
-/// Dashboard arm goes straight to `.recording`; dashboard cancel (or server
+/// Dashboard arm goes straight to `.recording`; dashboard stop (or server
 /// session timeout) is the sole exit back to standby. Server ingests the
 /// MOV and does HSV detection + triangulation.
 ///
@@ -90,6 +90,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // prepared yet — the very next captured sample will configure the
     // writer at the observed pixel dimensions.
     private var pendingRecordingBootstrap: Bool = false
+
+    // Disarm arrived while `.recording` was still waiting for its first
+    // captured sample (fps switch blocks main ~500 ms, and the first
+    // frame after `startRunning` takes another beat). Rather than
+    // aborting the clip with zero frames, we park the disarm here; the
+    // next captureOutput that successfully starts the recorder will see
+    // this flag and immediately force-finish, so at least one frame
+    // reaches the server. `pendingDisarmTimeoutWork` is the main-thread
+    // 2 s bail-out that fires when no frame ever arrives (camera broken
+    // or session torn down mid-flight).
+    private var pendingDisarm: Bool = false
+    private var pendingDisarmTimeoutWork: DispatchWorkItem?
 
     // Remote-control state (driven by the heartbeat response).
     /// Last command key we acted on for this device (`"arm"` / `"disarm"` /
@@ -223,6 +235,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         uploader = ServerUploader(config: serverConfig)
         uploadQueue = PayloadUploadQueue(store: payloadStore, uploader: uploader)
         wireUploadQueueCallbacks()
+        // Rehydrate whatever payloads are sitting in Documents from a
+        // previous run (or a prior cycle that hit a transient network
+        // error) and kick the worker. Done at viewDidLoad so the queue
+        // lifecycle is decoupled from session arm/disarm — cached pitches
+        // upload as soon as the server is reachable, not "next time the
+        // operator arms a session".
+        try? uploadQueue.reloadPending()
+        uploadQueue.processNextIfNeeded()
 
         healthMonitor = ServerHealthMonitor(
             uploader: uploader,
@@ -309,11 +329,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         warningLabel.isHidden = true
         startCapture(at: trackingFps)
         recorder.reset()
-        try? uploadQueue.reloadPending()
         pendingRecordingBootstrap = true
         state = .recording
         updateUIForState()
-        uploadQueue.processNextIfNeeded()
         // Acknowledge arm with a light tap; pre-warm the next two haptics
         // so their first fire isn't lazy-initialised.
         armHaptic.impactOccurred()
@@ -324,7 +342,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// Return to `.standby` after a cycle was flushed (or the recording
     /// never produced a frame between arm and disarm). Clears any live
     /// clip writer on the processing queue so we can't race with an
-    /// in-flight `append` from captureOutput.
+    /// in-flight `append` from captureOutput. The upload queue is NOT
+    /// touched here — a pitch just enqueued by `persistCompletedCycle`
+    /// needs to keep marching even after we've flipped back to standby,
+    /// and the queue lifecycle is now owned by `viewDidLoad` instead of
+    /// the sync-mode enter/exit boundaries.
     func exitRecordingToStandby() {
         log.info("camera exit recording → standby session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public) state=\(self.stateText(self.state), privacy: .public)")
         state = .standby
@@ -334,7 +356,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.clipRecorder?.cancel()
             self?.clipRecorder = nil
         }
-        uploadQueue.clearPending()
         warningLabel.isHidden = true
         stopCapture()
         updateUIForState()
@@ -858,7 +879,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     self.recorder.forceFinishIfRecording()
                 } else {
                     // Disarm arrived before the first frame reached us
-                    // (happens if cancel is pressed in the ~300 ms fps
+                    // (happens if stop is pressed in the ~300 ms fps
                     // switch window). Tear down cleanly on main.
                     self.clipRecorder?.cancel()
                     self.clipRecorder = nil

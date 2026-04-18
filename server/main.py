@@ -27,9 +27,10 @@ Endpoints:
                                        Server returns the new session id
                                        (idempotent on re-arm). /status
                                        starts dispatching {cam: "arm"}.
-  POST /sessions/cancel             — dashboard: force-disarm. Triggers the
-                                       "disarm" echo window so phones can
-                                       exit recording cleanly.
+  POST /sessions/stop               — dashboard: end the armed session.
+                                       Triggers the "disarm" echo window so
+                                       phones flush the in-progress recording
+                                       and upload the cycle.
   GET  /chirp.wav                   — reference sync chirp for 時間校正
   GET  /events                      — one row per session: cameras, status,
                                        counts, received_at, triangulation
@@ -464,9 +465,11 @@ class State:
             self._current_session = session
             return session
 
-    def cancel_session(self, reason: str = "cancelled") -> Session | None:
-        """Force-end the current armed session. Returns the ended session,
-        or None if nothing was armed."""
+    def stop_session(self, reason: str = "stopped") -> Session | None:
+        """End the current armed session (operator pressed Stop on the
+        dashboard). Returns the ended session, or None if nothing was
+        armed. Data captured during the session is preserved; `Stop` is a
+        normal lifecycle event, not an abort."""
         now = self._time_fn()
         with self._lock:
             s = self._current_session
@@ -484,7 +487,7 @@ class State:
         panel can show which phones have flushed. Does NOT end the
         session — in the current pivot, the iPhone only flushes a
         recording after receiving `disarm`, so the session is already
-        ended (reason = cancelled or timeout) by the time this fires."""
+        ended (reason = stopped or timeout) by the time this fires."""
         s = self._current_session
         if s is None or s.ended_at is not None:
             return
@@ -498,7 +501,7 @@ class State:
     def session_snapshot(self) -> Session | None:
         """Return the session most relevant to a status caller: the current
         armed session if any, otherwise the most recently ended one (so the
-        dashboard can display "IDLE · last: cancelled" and the iPhone
+        dashboard can display "IDLE · last: stopped" and the iPhone
         sees session.armed == False during the disarm echo window)."""
         current = self.current_session()
         if current is not None:
@@ -723,12 +726,12 @@ async def sessions_arm(
     return {"ok": True, "session": session.to_dict()}
 
 
-@app.post("/sessions/cancel")
-async def sessions_cancel(request: Request):
-    """Force-disarm. Returns 409 to API callers when nothing was armed;
-    HTML callers always get a 303 redirect back to the dashboard so the
-    button never looks broken."""
-    ended = state.cancel_session(reason="cancelled")
+@app.post("/sessions/stop")
+async def sessions_stop(request: Request):
+    """End the armed session (operator Stop). Returns 409 to API callers
+    when nothing was armed; HTML callers always get a 303 redirect back
+    to the dashboard so the button never looks broken."""
+    ended = state.stop_session(reason="stopped")
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     if ended is None:

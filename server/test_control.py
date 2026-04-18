@@ -116,20 +116,20 @@ def test_arm_session_creates_session_and_is_idempotent(tmp_path):
     assert session_b.id == session_a.id
 
 
-def test_cancel_session_transitions_to_ended(tmp_path):
+def test_stop_session_transitions_to_ended(tmp_path):
     s = main.State(data_dir=tmp_path)
     session = s.arm_session()
-    ended = s.cancel_session()
+    ended = s.stop_session()
     assert ended is not None
     assert ended.id == session.id
     assert ended.armed is False
-    assert ended.end_reason == "cancelled"
+    assert ended.end_reason == "stopped"
     assert s.current_session() is None
 
 
-def test_cancel_without_armed_session_returns_none(tmp_path):
+def test_stop_without_armed_session_returns_none(tmp_path):
     s = main.State(data_dir=tmp_path)
-    assert s.cancel_session() is None
+    assert s.stop_session() is None
 
 
 def test_session_times_out_automatically(tmp_path):
@@ -170,7 +170,7 @@ def test_commands_emit_disarm_after_session_ends(tmp_path):
     s.heartbeat("A")
     s.heartbeat("B")
     s.arm_session()
-    s.cancel_session()
+    s.stop_session()
 
     # Immediately after cancel: both phones should see disarm.
     assert s.commands_for_devices() == {"A": "disarm", "B": "disarm"}
@@ -209,7 +209,7 @@ def test_upload_from_stale_session_does_not_disarm_current(tmp_path):
     s = main.State(data_dir=tmp_path)
     s.heartbeat("A")
     first = s.arm_session()
-    s.cancel_session()
+    s.stop_session()
     second = s.arm_session()
 
     # A phone flushing a recording tied to the already-cancelled session.
@@ -255,7 +255,7 @@ def test_status_surfaces_session_and_commands_during_arm():
     assert status["commands"] == {"A": "arm", "B": "arm"}
 
 
-def test_sessions_arm_cancel_json_api():
+def test_sessions_arm_stop_json_api():
     client = TestClient(app)
     r = client.post(
         "/sessions/arm",
@@ -265,15 +265,15 @@ def test_sessions_arm_cancel_json_api():
     assert r.status_code == 200
     session_id = r.json()["session"]["id"]
 
-    r2 = client.post("/sessions/cancel", headers={"Accept": "application/json"})
+    r2 = client.post("/sessions/stop", headers={"Accept": "application/json"})
     assert r2.status_code == 200
     assert r2.json()["session"]["id"] == session_id
-    assert r2.json()["session"]["end_reason"] == "cancelled"
+    assert r2.json()["session"]["end_reason"] == "stopped"
 
 
-def test_sessions_cancel_returns_409_when_nothing_armed():
+def test_sessions_stop_returns_409_when_nothing_armed():
     client = TestClient(app)
-    r = client.post("/sessions/cancel", headers={"Accept": "application/json"})
+    r = client.post("/sessions/stop", headers={"Accept": "application/json"})
     assert r.status_code == 409
 
 
@@ -289,12 +289,12 @@ def test_sessions_arm_html_form_redirects_to_dashboard():
     assert r.headers["location"] == "/"
 
 
-def test_sessions_cancel_html_form_redirects_even_if_not_armed():
-    """The dashboard cancel button should never look broken, even when
+def test_sessions_stop_html_form_redirects_even_if_not_armed():
+    """The dashboard Stop button should never look broken, even when
     pressed on an idle session — 303 redirect, not 409."""
     client = TestClient(app)
     r = client.post(
-        "/sessions/cancel",
+        "/sessions/stop",
         headers={"Accept": "text/html"},
         follow_redirects=False,
     )
@@ -333,7 +333,7 @@ def test_dashboard_renders_control_panel():
     # Nav brand + the three SSR-hydrated panel containers the JS polls into.
     assert "BALL_TRACKER" in body
     assert 'action="/sessions/arm"' in body
-    assert 'action="/sessions/cancel"' in body
+    assert 'action="/sessions/stop"' in body
     assert 'id="devices-body"' in body
     assert 'id="session-body"' in body
     assert 'id="events-body"' in body

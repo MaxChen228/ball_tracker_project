@@ -10,7 +10,7 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "camer
 /// No per-frame work lives here any more: the phone is a pure camera, so
 /// ball detection runs on the server against the MOV and neither iOS nor
 /// this recorder inspects pixel content. `forceFinishIfRecording()` is the
-/// sole exit path (dashboard cancel or server-side session timeout).
+/// sole exit path (dashboard stop or server-side session timeout).
 final class PitchRecorder {
     private var isRecording: Bool = false
     /// Device-local debug counter. Not a pairing key. Survives across
@@ -69,7 +69,7 @@ final class PitchRecorder {
     }
 
     /// Finish the current cycle. Sole exit path — fired by the dashboard
-    /// cancel (disarm command) or a server-side session timeout. Emits the
+    /// stop (disarm command) or a server-side session timeout. Emits the
     /// payload to `onCycleComplete` and returns to idle.
     func forceFinishIfRecording() {
         guard isRecording else { return }
