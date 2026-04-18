@@ -52,3 +52,12 @@ env/
 
 # Server runtime state (pitch/results cache, written per-request).
 server/data/
+
+# Per-device calibration artefacts (large image sets + device-specific JSON).
+server/calib_A/
+server/calib_B/
+server/intrinsics_*.json
+server/charuco_board.png
+
+# Claude Code session scratch
+.claude/

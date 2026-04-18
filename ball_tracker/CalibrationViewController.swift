@@ -210,6 +210,14 @@ final class CalibrationViewController: UIViewController {
         let preview = AVCaptureVideoPreviewLayer(session: session)
         preview.videoGravity = .resizeAspectFill
         preview.frame = view.bounds
+        // App UI is locked landscape (see Info.plist). Force the preview
+        // connection to sensor-native angle 0 so the preview frame aligns
+        // with the CVPixelBuffer orientation the ArUco detector sees —
+        // otherwise `captureDevicePointConverted` would apply an implicit
+        // rotation and the overlay would land in the wrong place.
+        if let connection = preview.connection, connection.isVideoRotationAngleSupported(0) {
+            connection.videoRotationAngle = 0
+        }
         view.layer.addSublayer(preview)
         previewLayer = preview
 
@@ -359,9 +367,16 @@ final class CalibrationViewController: UIViewController {
 
     private func imagePixelToViewPoint(_ p: CGPoint, imageWidth: Int, imageHeight: Int) -> CGPoint {
         guard let previewLayer else { return .zero }
-        // Inverse of viewPointToImagePixel: image-pixel (px, py) → normalized capture coords → layer point.
-        let devX = CGFloat(p.y) / CGFloat(imageHeight)  // capture-x = image-y fraction
-        let devY = CGFloat(p.x) / CGFloat(imageWidth)   // capture-y = image-x fraction
+        // Apple's normalized capture device coords: (0,0) = top-left,
+        // (1,1) = bottom-right in landscape-home-right — i.e. device.x is
+        // the horizontal fraction along the long edge, device.y is the
+        // vertical fraction along the short edge. The CVPixelBuffer is in
+        // the same landscape frame, so image.x / imageWidth → device.x
+        // (no axis swap). Earlier revisions swapped these, which visually
+        // manifested as the ArUco marker overlay rendering rotated 90° and
+        // stretched (cyan boxes never landed on the actual markers).
+        let devX = CGFloat(p.x) / CGFloat(imageWidth)
+        let devY = CGFloat(p.y) / CGFloat(imageHeight)
         return previewLayer.layerPointConverted(fromCaptureDevicePoint: CGPoint(x: devX, y: devY))
     }
 
@@ -440,11 +455,17 @@ final class CalibrationViewController: UIViewController {
         // This respects `videoGravity = .resizeAspectFill`, so cropped preview areas map correctly.
         let devicePoint = previewLayer.captureDevicePointConverted(fromLayerPoint: p)
 
-        // AVCapture normalized coordinates are in landscape camera space:
-        // x -> vertical fraction, y -> horizontal fraction.
-        // For the current portrait-style UI, map into image pixels by image axes.
-        let px = CGFloat(imageWidth) * devicePoint.y
-        let py = CGFloat(imageHeight) * devicePoint.x
+        // Apple's capture-device normalized coords are in landscape-home-right:
+        // device.x = horizontal fraction (along imageWidth = 1920 long edge),
+        // device.y = vertical fraction (along imageHeight = 1080 short edge).
+        // The CVPixelBuffer the ball detector reads uses the same landscape
+        // (x, y) axes, so there's no axis swap between the two. An earlier
+        // revision's comment claimed device.x was vertical — that was wrong,
+        // and also meant any manual-handle homography it persisted was
+        // rotated 90° relative to the ball detector's pixel coords (only the
+        // overlay bug was visible, but the stored H was numerically off too).
+        let px = CGFloat(imageWidth) * devicePoint.x
+        let py = CGFloat(imageHeight) * devicePoint.y
 
         let clampedX = min(max(0, px), CGFloat(imageWidth - 1))
         let clampedY = min(max(0, py), CGFloat(imageHeight - 1))
