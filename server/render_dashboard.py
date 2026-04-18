@@ -253,7 +253,7 @@ _JS_TEMPLATE = r"""
           <button class="btn" type="submit" ${armed ? 'disabled' : ''}>Arm session</button>
         </form>
         <form class="inline" method="POST" action="/sessions/cancel">
-          <button class="btn danger" type="submit" ${armed ? '' : 'disabled'}>Cancel</button>
+          <button class="btn danger" type="submit" ${armed ? '' : 'disabled'}>Stop</button>
         </form>
       </div>`;
 
@@ -432,14 +432,14 @@ def _render_session_body(session: dict[str, Any] | None) -> str:
         f'<button class="btn" type="submit"{" disabled" if armed else ""}>Arm session</button>'
         "</form>"
     )
-    cancel_btn = (
+    stop_btn = (
         '<form class="inline" method="POST" action="/sessions/cancel">'
-        f'<button class="btn danger" type="submit"{"" if armed else " disabled"}>Cancel</button>'
+        f'<button class="btn danger" type="submit"{"" if armed else " disabled"}>Stop</button>'
         "</form>"
     )
     return (
         f'<div class="session-head">{chip_html}{sid_html}{reason_html}</div>'
-        f'<div class="session-actions">{arm_btn}{cancel_btn}</div>'
+        f'<div class="session-actions">{arm_btn}{stop_btn}</div>'
     )
 
 
