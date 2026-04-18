@@ -161,6 +161,20 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var recTimer: Timer?
     private var recStartTime: CFTimeInterval = 0
 
+    // Nav-bar toggle that flips `settings.parkCameraInStandby`. Title
+    // reflects the **current** state so a tap is read as "flip this".
+    // Lives next to Settings so the operator can jump between "live
+    // framing" and "parked / cool" in one tap without entering a modal.
+    private lazy var previewToggleItem: UIBarButtonItem = {
+        let item = UIBarButtonItem(
+            title: "",
+            style: .plain,
+            target: self,
+            action: #selector(togglePreviewPark)
+        )
+        return item
+    }()
+
     // Last state whose visuals (border stroke, pulse animation, REC timer)
     // were applied. `updateUIForState` fires on every heartbeat tick and
     // upload-queue callback — if we re-ran `applyStateVisuals` each time
@@ -189,12 +203,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         super.viewDidLoad()
         view.backgroundColor = .black
 
-        navigationItem.leftBarButtonItem = UIBarButtonItem(
-            title: "Settings",
-            style: .plain,
-            target: self,
-            action: #selector(openSettings)
-        )
+        navigationItem.leftBarButtonItems = [
+            UIBarButtonItem(
+                title: "Settings",
+                style: .plain,
+                target: self,
+                action: #selector(openSettings)
+            ),
+            previewToggleItem,
+        ]
         navigationItem.rightBarButtonItems = [
             UIBarButtonItem(title: "時間校正", style: .plain, target: self, action: #selector(onTapTimeCalibration)),
             UIBarButtonItem(title: "位置校正", style: .plain, target: self, action: #selector(openCalibration)),
@@ -266,6 +283,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         setupAudioCapture()
         setupDisplayLink()
         healthMonitor.start()
+        updatePreviewToggleTitle()
         updateUIForState()
     }
 
@@ -274,6 +292,23 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .fullScreen
         present(nav, animated: true)
+    }
+
+    @objc private func togglePreviewPark() {
+        let newValue = !settings.parkCameraInStandby
+        SettingsViewController.setParkCameraInStandby(newValue)
+        // Re-diff with the rest of settings-driven wiring untouched. The
+        // park branch inside applyUpdatedSettings handles start/stop when
+        // state == .standby; other states are no-ops.
+        applyUpdatedSettings()
+    }
+
+    /// Sync the nav-bar button title to `settings.parkCameraInStandby`.
+    /// Title shows the **current** mode so a tap reads as "flip this".
+    private func updatePreviewToggleTitle() {
+        previewToggleItem.title = settings.parkCameraInStandby
+            ? "預覽：關"
+            : "預覽：開"
     }
 
     @objc private func openSettings() {
@@ -980,6 +1015,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             } else {
                 startCapture(at: standbyFps)
             }
+        }
+        if parkChanged {
+            updatePreviewToggleTitle()
         }
     }
 
