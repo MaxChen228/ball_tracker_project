@@ -420,7 +420,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// and the queue lifecycle is now owned by `viewDidLoad` instead of
     /// the sync-mode enter/exit boundaries.
     func exitRecordingToStandby() {
-        log.info("camera exit recording → standby session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public) state=\(self.stateText(self.state), privacy: .public)")
+        log.info("camera exit recording → standby session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public) state=\(Self.stateText(self.state), privacy: .public)")
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
         recorder.reset()
@@ -889,8 +889,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self.currentSessionId = sid
             DiagnosticsData.shared.update(sessionId: .some(sid))
             let cam = self.settings.cameraRole
+            let cmd = response.commands?[cam]
+            // Log every transition so Xcode console shows the server's
+            // intent reaching iOS. A steady-state "arm"/"disarm" echoing
+            // every second is logged only when the value changed — see
+            // handleDashboardCommand's guard.
+            if cmd != self.lastAppliedCommand {
+                log.info("heartbeat reply session_armed=\(response.session?.armed ?? false) session_id=\(sid ?? "nil", privacy: .public) command=\(cmd ?? "nil", privacy: .public) cam=\(cam, privacy: .public)")
+            }
             self.handleDashboardCommand(
-                response.commands?[cam],
+                cmd,
                 sessionArmed: response.session?.armed ?? false
             )
         }
@@ -968,7 +976,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func applyRemoteArm() {
-        log.info("camera received arm command state=\(self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
+        log.info("camera received arm command state=\(Self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         switch state {
         case .standby:
             enterRecordingMode()
@@ -981,7 +989,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func applyRemoteDisarm() {
-        log.info("camera received disarm command state=\(self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
+        log.info("camera received disarm command state=\(Self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         switch state {
         case .standby:
             break
@@ -995,7 +1003,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             returnToStandbyAfterCycle = true
             processingQueue.async { [weak self] in
                 guard let self else { return }
-                if self.recorder.isActive {
+                let active = self.recorder.isActive
+                log.info("camera disarm while recording: recorder_active=\(active) clip_exists=\(self.clipRecorder != nil)")
+                if active {
                     // Normal path: flush whatever frames the clip contains;
                     // onCycleComplete drives persist + standby transition.
                     self.recorder.forceFinishIfRecording()
@@ -1003,6 +1013,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     // Disarm arrived before the first frame reached us
                     // (happens if stop is pressed in the ~300 ms fps
                     // switch window). Tear down cleanly on main.
+                    log.warning("camera disarm before first frame: no payload produced — frames never reached captureOutput or clip.append failed")
                     self.clipRecorder?.cancel()
                     self.clipRecorder = nil
                     DispatchQueue.main.async {
@@ -1302,7 +1313,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
     private static let initialLastResultText = "(尚無結果)"
 
-    private func stateText(_ state: AppState) -> String {
+    static func stateText(_ state: AppState) -> String {
         switch state {
         case .standby: return "STANDBY"
         case .timeSyncWaiting: return "TIME_SYNC"
@@ -1443,6 +1454,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // race a main-thread mutation mid-method.
         let snap = frameStateBox.snapshot()
 
+        // Rate-limited debug heartbeat so Xcode console can confirm frames
+        // are actually flowing and which state the capture thread sees.
+        // Log the first 3 frames (catches "session started but zero frames"
+        // bugs) then once every 240 frames (~1 s at tracking fps, ~4 s at
+        // idle) for steady monitoring.
+        if frameIndex <= 3 || frameIndex % 240 == 0 {
+            log.info("camera frame idx=\(self.frameIndex) state=\(Self.stateText(snap.state), privacy: .public) pendingBootstrap=\(snap.pendingBootstrap) sid=\(snap.sessionId ?? "nil", privacy: .public)")
+        }
+
         // Only the `.recording` state cares about samples. Phone is a pure
         // capture client — no ball detection, no overlay, no per-frame
         // payload work. Idle / time-sync / uploading all just drop through.
@@ -1455,6 +1475,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // simultaneous main-thread push can't race us into starting the
         // writer twice.
         if frameStateBox.consumePendingBootstrap() {
+            log.info("camera clip bootstrap start width=\(width) height=\(height) sid=\(snap.sessionId ?? "nil", privacy: .public)")
             startClipRecorder(width: width, height: height)
             if clipRecorder == nil {
                 // Prepare failed. Fall back to standby on main.
@@ -1465,6 +1486,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 }
                 return
             }
+            log.info("camera clip bootstrap ok session=\(snap.sessionId ?? "nil", privacy: .public)")
         }
 
         guard let clip = clipRecorder else { return }
@@ -1480,6 +1502,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 log.error("camera recording started without session_id cam=\(self.settings.cameraRole, privacy: .public)")
                 return
             }
+            log.info("camera first frame appended, starting recorder session=\(sid, privacy: .public) video_start_pts=\(CMTimeGetSeconds(firstPTS)) anchor=\(self.lastSyncAnchorTimestampS ?? .nan)")
             recorder.startRecording(
                 sessionId: sid,
                 anchorTimestampS: lastSyncAnchorTimestampS,
