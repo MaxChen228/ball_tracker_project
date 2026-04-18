@@ -33,7 +33,7 @@ uv run pytest test_server.py::test_triangulate_sweeps_ball_path   # single test
 The root URL `http://<server>:8765/` is the **dashboard** — a three-zone layout styled after the `PHYSICS_LAB` design system (warm-neutral palette, JetBrains Mono + Noto Sans TC, 1 px borders replacing shadows):
 
 - 52 px top nav: `BALL_TRACKER` brand + live status strip (`Devices n/2 · Calibrated n/2 · Session …`)
-- 440 px left sidebar: three cards — **Devices** (per-camera row with `offline` / `online` / `calibrated` chip), **Session** (`armed`/`idle` chip + `Arm` / `Cancel` buttons), **Events** (stacked event rows linking to `/viewer/{session_id}`)
+- 440 px left sidebar: three cards — **Devices** (per-camera row with `offline` / `online` / `calibrated` chip), **Session** (`armed`/`idle` chip + `Arm` / `Stop` buttons), **Events** (stacked event rows linking to `/viewer/{session_id}`)
 - full-bleed right canvas: live Plotly 3D scene showing the plate mesh and whichever cameras have a calibration persisted — even before any pitch is uploaded. Drag to orbit.
 
 Hydration: initial SSR paints every panel + canvas, then three JS ticks keep everything fresh — `/status` every 1 s (devices/session/nav strip), `/calibration/state` every 5 s (canvas repaint via `Plotly.react`), `/events` every 5 s (sidebar event list). Plotly.js is loaded once from CDN at the top of the document and shared across the canvas and `/viewer/{session_id}`; there is no build step. Arm flips the server into an armed session and starts dispatching `{cam: "arm"}` to online devices via `/status`; the first uploaded pitch auto-ends it (one-shot).
@@ -64,7 +64,7 @@ State per mode:
 
 - `.standby`: **capture session stopped** — camera + mic hardware idle so the phone doesn't heat up under a long preview. Preview layer goes dark; only the heartbeat keeps running. No recording, no chirp detection.
 - `.timeSyncWaiting` (時間校正): session spun up at `standbyFps` so the mic can deliver samples; **chirp detector ON**. On trigger, saves `lastSyncAnchorTimestampS`, stops the session, and returns to `.standby`. 15 s timeout. Can only be entered from `.standby` via the manual 時間校正 button — not from an arm command.
-- `.recording`: session spun up at `trackingFps` (240). Captures H.264 MOV via `ClipRecorder`. **Only exit path is `forceFinishIfRecording()`**, triggered when the dashboard sends `disarm` (operator pressed Cancel) or the server-side session times out. No on-device detection, no auto-end. Emits `PitchPayload` via `onCycleComplete`; the clip finishes async before the payload is persisted. Session is stopped on the way back to standby.
+- `.recording`: session spun up at `trackingFps` (240). Captures H.264 MOV via `ClipRecorder`. **Only exit path is `forceFinishIfRecording()`**, triggered when the dashboard sends `disarm` (operator pressed Stop) or the server-side session times out. No on-device detection, no auto-end. Emits `PitchPayload` via `onCycleComplete`; the clip finishes async before the payload is persisted. Session is stopped on the way back to standby.
 - `.uploading`: transient state while the cycle is persisted + enqueued; transitions back to `.standby` once handed off.
 - Cycles are saved to disk in `Documents/pitch_payloads/` (`PitchPayloadStore`) **before** upload, as paired `<basename>.json` + `<basename>.mov`. Upload failures re-insert at queue front with 2 s backoff; `payloadStore.delete` removes the pair atomically on success.
 
