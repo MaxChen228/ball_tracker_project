@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json as _json
+import logging
 import threading
 import time
 
@@ -12,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+import pairing
 from conftest import sid
 from main import app
 from triangulate import (
@@ -693,3 +695,98 @@ def test_pitch_upload_rejects_oversize_body_after_read():
         assert r.status_code == 413, r.text
     finally:
         main._MAX_PITCH_UPLOAD_BYTES = original_cap
+
+
+# --------------------------- Pairing drop diagnostics ------------------------
+
+
+def _build_pairing_payloads(
+    timestamps_a: list[float],
+    timestamps_b: list[float],
+    session_id: str,
+):
+    """Build A/B PitchPayloads with one frame per timestamp, all aimed at a
+    fixed ground-truth point so ray geometry is valid. `timestamps_a/b` are
+    anchor-relative (sync_anchor_timestamp_s = 0)."""
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    P_true = np.array([0.1, 0.3, 1.0])
+
+    def frames(ts_list: list[float], R, t):
+        tx, tz = _project(K, R, t, P_true)
+        return [
+            main.FramePayload(
+                frame_index=i, timestamp_s=float(ti),
+                theta_x_rad=tx, theta_z_rad=tz, ball_detected=True,
+            )
+            for i, ti in enumerate(ts_list)
+        ]
+
+    payload_a = main.PitchPayload(
+        camera_id="A",
+        session_id=session_id,
+        sync_anchor_frame_index=0,
+        sync_anchor_timestamp_s=0.0,
+        frames=frames(timestamps_a, R_a, t_a),
+        intrinsics=main.IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
+        homography=H_a.flatten().tolist(),
+    )
+    payload_b = main.PitchPayload(
+        camera_id="B",
+        session_id=session_id,
+        sync_anchor_frame_index=0,
+        sync_anchor_timestamp_s=0.0,
+        frames=frames(timestamps_b, R_b, t_b),
+        intrinsics=main.IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
+        homography=H_b.flatten().tolist(),
+    )
+    return payload_a, payload_b
+
+
+def test_pairing_drop_diagnostics(caplog):
+    """Debug log fires for each out-of-window drop and the summary log
+    reports the correct counts."""
+    session_id = sid(700)
+    # Second B frame is 100 ms away from its A counterpart → outside the
+    # 8.33 ms window; first pair is coincident and must triangulate.
+    ts_a = [0.000, 0.100]
+    ts_b = [0.000, 0.200]
+    payload_a, payload_b = _build_pairing_payloads(ts_a, ts_b, session_id)
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="pairing"):
+        points = pairing.triangulate_cycle(payload_a, payload_b)
+
+    assert len(points) == 1
+
+    debug_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("outside_window" in m for m in debug_msgs), debug_msgs
+
+    info_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    summaries = [m for m in info_msgs if "pairing cycle complete" in m]
+    assert len(summaries) == 1, info_msgs
+    summary = summaries[0]
+    assert "pairs_in_a=2" in summary
+    assert "pairs_in_b=2" in summary
+    assert "pairs_out=1" in summary
+    assert "drop_outside_window=1" in summary
+    assert "drop_near_parallel=0" in summary
+    assert session_id in summary
+
+
+def test_max_dt_env_override(monkeypatch):
+    """Widening `BALL_TRACKER_MAX_DT_S` via env var lets previously-dropped
+    frames pair. Patches `_MAX_DT_S` directly, which is equivalent to
+    re-importing `pairing` under the env var but deterministic."""
+    session_id = sid(701)
+    # Second B frame is 20 ms past A's counterpart — outside default 8.33 ms
+    # but inside a relaxed 30 ms window.
+    ts_a = [0.000, 0.100]
+    ts_b = [0.000, 0.120]
+    payload_a, payload_b = _build_pairing_payloads(ts_a, ts_b, session_id)
+
+    points_default = pairing.triangulate_cycle(payload_a, payload_b)
+    assert len(points_default) == 1
+
+    monkeypatch.setattr(pairing, "_MAX_DT_S", 0.030)
+    points_wide = pairing.triangulate_cycle(payload_a, payload_b)
+    assert len(points_wide) == 2
