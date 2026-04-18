@@ -180,11 +180,14 @@ def test_commands_emit_disarm_after_session_ends(tmp_path):
     assert s.commands_for_devices() == {}
 
 
-def test_upload_ends_armed_session(tmp_path):
-    """The key one-shot behaviour: first upload for the current session
-    ends it with reason=cycle_uploaded. Uploads tagged with a different
-    session_id (e.g. a phone flushing a prior armed window) don't disturb
-    the currently armed session."""
+def test_upload_records_camera_in_armed_session(tmp_path):
+    """An upload tagged with the current session adds that camera to
+    `uploads_received`. It does NOT end the session — in the server-side
+    detection pivot the phone only flushes after receiving disarm, so
+    the session is always already ended by Stop / timeout before an
+    upload arrives. This test exercises the rare case where the upload
+    lands while the session is still nominally armed (e.g. a background
+    race) and confirms the session stays armed."""
     s = main.State(data_dir=tmp_path)
     s.heartbeat("A")
     s.heartbeat("B")
@@ -193,12 +196,11 @@ def test_upload_ends_armed_session(tmp_path):
     pitch_a = _minimal_pitch("A", session_id=session.id)
     s.record(pitch_a)
 
-    # Session ended; `_last_ended_session` carries the upload record.
-    assert s.current_session() is None
-    assert s._last_ended_session is not None
-    assert s._last_ended_session.id == session.id
-    assert s._last_ended_session.end_reason == "cycle_uploaded"
-    assert set(s._last_ended_session.uploads_received) == {"A"}
+    current = s.current_session()
+    assert current is not None
+    assert current.id == session.id
+    assert current.armed is True
+    assert set(current.uploads_received) == {"A"}
 
 
 def test_upload_from_stale_session_does_not_disarm_current(tmp_path):
@@ -299,7 +301,12 @@ def test_sessions_cancel_html_form_redirects_even_if_not_armed():
     assert r.status_code == 303
 
 
-def test_pitch_upload_ends_armed_session_end_to_end():
+def test_pitch_upload_keeps_session_armed_until_stop():
+    """Post-pivot, an upload does NOT end the session — only an
+    explicit Stop (or the server-side timeout) does. The phone only
+    flushes after receiving disarm, so in practice uploads always land
+    on already-ended sessions; this test covers the rare in-flight
+    case and asserts the session stays armed."""
     client = TestClient(app)
     client.post("/heartbeat", json={"camera_id": "A"})
     client.post("/heartbeat", json={"camera_id": "B"})
@@ -308,18 +315,14 @@ def test_pitch_upload_ends_armed_session_end_to_end():
     ).json()
     session_id = arm_reply["session"]["id"]
 
-    # The /pitch endpoint now requires a real MOV and decode/detect/
-    # triangulate on the server. This test is scoped to the session
-    # state machine, not ingestion — call `state.record` directly with
-    # a manually-built PitchPayload (`frames` already populated), which
-    # is the same path the ingestion handler uses post-detection.
     main.state.record(_minimal_pitch("A", session_id=session_id))
 
     status = client.get("/status").json()
     assert status["session"] is not None
-    assert status["session"]["armed"] is False
-    assert status["session"]["end_reason"] == "cycle_uploaded"
-    assert status["commands"] == {"A": "disarm", "B": "disarm"}
+    assert status["session"]["armed"] is True
+    assert status["session"]["end_reason"] is None
+    assert status["commands"] == {"A": "arm", "B": "arm"}
+    assert set(status["session"]["uploads_received"]) == {"A"}
 
 
 def test_dashboard_renders_control_panel():
