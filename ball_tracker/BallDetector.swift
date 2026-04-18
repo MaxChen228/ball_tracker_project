@@ -32,9 +32,27 @@ final class BallDetector {
     private let hsvRange: HSVRange
     private let intrinsics: Intrinsics?
 
+    // Reusable RGBA scratch buffer for pixelBufferToRGBA. The capture queue calls
+    // detect() serially (see CameraViewController.captureOutput on camera.frame.queue),
+    // so no locking is required. Reallocated only when frame dimensions change.
+    // Safety assumption: the owning VC pauses capture on viewWillDisappear before
+    // releasing this detector, so no in-flight frame can race with deinit.
+    private var scratchBuffer: UnsafeMutablePointer<UInt8>?
+    private var scratchBufferCapacity: Int = 0
+
+    // Reusable CIContext. Creating one per frame is itself an allocation hot spot.
+    private let ciContext: CIContext = CIContext(options: nil)
+    private let rgbColorSpace: CGColorSpace = CGColorSpaceCreateDeviceRGB()
+
     init(hsvRange: HSVRange, intrinsics: Intrinsics? = nil) {
         self.hsvRange = hsvRange
         self.intrinsics = intrinsics
+    }
+
+    deinit {
+        if let ptr = scratchBuffer {
+            ptr.deallocate()
+        }
     }
 
     /// Returns whether a deep-blue ball is detected and (if so) its angular offsets.
@@ -47,7 +65,9 @@ final class BallDetector {
         imageHeight: Int,
         horizontalFovRadians: Double
     ) -> DetectionResult {
-        // 1) Convert pixelBuffer to RGBA for HSV conversion (prototype; not optimized for 240fps yet).
+        // 1) Convert pixelBuffer to RGBA for HSV conversion. Writes into the pooled
+        // scratch buffer (allocated once / on dimension change) to avoid ~1 GB/s of
+        // heap churn at 240 fps × 1920×1080 × 4 B.
         guard let rgba = pixelBufferToRGBA(pixelBuffer: pixelBuffer, width: imageWidth, height: imageHeight) else {
             return DetectionResult(ballDetected: false, thetaXRad: nil, thetaZRad: nil, centroidX: nil, centroidY: nil)
         }
@@ -197,29 +217,39 @@ final class BallDetector {
         return (hDegrees: h, s: s, v: v)
     }
 
-    /// Render pixelBuffer into an RGBA byte array (prototype).
-    private func pixelBufferToRGBA(pixelBuffer: CVPixelBuffer, width: Int, height: Int) -> [UInt8]? {
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = CIContext(options: nil)
-
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+    /// Render pixelBuffer into the pooled RGBA scratch buffer.
+    /// Returns an UnsafeMutablePointer valid until the next call to this method
+    /// (or until deinit). CIContext.render writes every byte unconditionally, so
+    /// we skip any zero-fill even when the buffer is freshly allocated.
+    private func pixelBufferToRGBA(pixelBuffer: CVPixelBuffer, width: Int, height: Int) -> UnsafeMutablePointer<UInt8>? {
         let bytesPerRow = width * 4
-        var rgba = [UInt8](repeating: 0, count: height * bytesPerRow)
-        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        let needed = height * bytesPerRow
+        if needed <= 0 { return nil }
 
-        rgba.withUnsafeMutableBytes { rawPtr in
-            guard let baseAddress = rawPtr.baseAddress else { return }
-            context.render(
-                ciImage,
-                toBitmap: baseAddress,
-                rowBytes: bytesPerRow,
-                bounds: rect,
-                format: .RGBA8,
-                colorSpace: colorSpace
-            )
+        // Grow (or initially allocate) the scratch buffer only when it can't fit.
+        if scratchBufferCapacity < needed {
+            if let old = scratchBuffer {
+                old.deallocate()
+            }
+            scratchBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: needed)
+            scratchBufferCapacity = needed
         }
 
-        return rgba
+        guard let baseAddress = scratchBuffer else { return nil }
+
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+
+        ciContext.render(
+            ciImage,
+            toBitmap: baseAddress,
+            rowBytes: bytesPerRow,
+            bounds: rect,
+            format: .RGBA8,
+            colorSpace: rgbColorSpace
+        )
+
+        return baseAddress
     }
 }
 

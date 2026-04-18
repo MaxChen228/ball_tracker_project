@@ -111,6 +111,25 @@ final class ServerUploader {
         self.config = config
     }
 
+    /// Typed upload error. Introduced alongside the legacy
+    /// `Result<_, Error>` API so callers can apply differentiated retry
+    /// policy (e.g. backoff on `.network`/`.server`, give up on `.client`).
+    /// The legacy API maps these back into `NSError` for source
+    /// compatibility — a separate migration will move call sites across.
+    enum UploadError: Error {
+        /// URLSession-level failure: timeout, no network, TLS, DNS, etc.
+        case network(URLError)
+        /// HTTP 4xx — request is malformed or rejected; retry won't help.
+        case client(statusCode: Int, body: Data?)
+        /// HTTP 5xx — server-side fault; transient, retry makes sense.
+        case server(statusCode: Int, body: Data?)
+        /// Body parse failure (JSON shape drift, truncated response, etc.).
+        case decoding(Error)
+        /// No `HTTPURLResponse` came back — defensive; shouldn't happen
+        /// under `URLSession.shared.dataTask(with: URLRequest)`.
+        case invalidResponse
+    }
+
     /// Legacy sugar: upload a payload with no video attachment.
     func uploadPitch(
         _ pitch: PitchPayload,
@@ -122,17 +141,36 @@ final class ServerUploader {
     /// Upload one cycle as multipart/form-data. `videoURL` is optional — when
     /// nil (legacy / failed clip writer / Phase-0 payload cache) the request
     /// still succeeds and the server stores only the JSON side.
+    ///
+    /// Legacy `Error`-typed completion overload. Internally delegates to
+    /// `uploadPitchTyped(_:videoURL:completion:)` and maps `UploadError`
+    /// back to the `NSError` shape the previous implementation surfaced,
+    /// so existing call sites (e.g. `PayloadUploadQueue`) behave identically.
     func uploadPitch(
         _ pitch: PitchPayload,
         videoURL: URL?,
         completion: ((Result<PitchUploadResponse, Error>) -> Void)? = nil
     ) {
+        uploadPitchTyped(pitch, videoURL: videoURL) { result in
+            switch result {
+            case .success(let response):
+                completion?(.success(response))
+            case .failure(let uploadError):
+                completion?(.failure(Self.legacyNSError(for: uploadError)))
+            }
+        }
+    }
+
+    /// Typed variant of `uploadPitch(_:videoURL:completion:)`. Distinguishes
+    /// network / 4xx / 5xx / decoding failures so the caller can branch its
+    /// retry strategy on `UploadError.isTransient`.
+    func uploadPitchTyped(
+        _ pitch: PitchPayload,
+        videoURL: URL?,
+        completion: @escaping (Result<PitchUploadResponse, UploadError>) -> Void
+    ) {
         guard let base = config.baseURL() else {
-            completion?(.failure(NSError(
-                domain: "ServerUploader",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
-            )))
+            completion(.failure(.network(URLError(.badURL))))
             return
         }
         let url = base.appendingPathComponent("pitch")
@@ -141,7 +179,7 @@ final class ServerUploader {
         do {
             payloadData = try JSONEncoder().encode(pitch)
         } catch {
-            completion?(.failure(error))
+            completion(.failure(.decoding(error)))
             return
         }
 
@@ -168,33 +206,62 @@ final class ServerUploader {
 
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
-                completion?(.failure(error))
+                let urlError = (error as? URLError) ?? URLError(.unknown)
+                completion(.failure(.network(urlError)))
                 return
             }
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                completion?(.failure(NSError(
-                    domain: "ServerUploader",
-                    code: http.statusCode,
-                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
-                )))
+            guard let http = response as? HTTPURLResponse else {
+                completion(.failure(.invalidResponse))
+                return
+            }
+            if !(200...299).contains(http.statusCode) {
+                if (500...599).contains(http.statusCode) {
+                    completion(.failure(.server(statusCode: http.statusCode, body: data)))
+                } else {
+                    // 4xx (and any other non-2xx/non-5xx) is non-retryable
+                    // from the client's perspective.
+                    completion(.failure(.client(statusCode: http.statusCode, body: data)))
+                }
                 return
             }
             guard let data else {
-                completion?(.failure(NSError(
-                    domain: "ServerUploader",
-                    code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: "Empty response"]
-                )))
+                // 2xx with an empty body — treat as decoding failure so the
+                // caller sees it as non-transient (retrying won't add bytes).
+                completion(.failure(.decoding(URLError(.cannotDecodeContentData))))
                 return
             }
             do {
                 let decoded = try JSONDecoder().decode(PitchUploadResponse.self, from: data)
-                completion?(.success(decoded))
+                completion(.success(decoded))
             } catch {
-                completion?(.failure(error))
+                completion(.failure(.decoding(error)))
             }
         }
         task.resume()
+    }
+
+    /// Map a typed `UploadError` back into the `NSError` shape emitted by
+    /// the pre-typed implementation. Kept private so the legacy overload
+    /// can preserve wire-compatible error surfaces for unmigrated callers.
+    private static func legacyNSError(for error: UploadError) -> NSError {
+        switch error {
+        case .network(let urlError):
+            return urlError as NSError
+        case .client(let code, _), .server(let code, _):
+            return NSError(
+                domain: "ServerUploader",
+                code: code,
+                userInfo: [NSLocalizedDescriptionKey: "HTTP status \(code)"]
+            )
+        case .decoding(let underlying):
+            return underlying as NSError
+        case .invalidResponse:
+            return NSError(
+                domain: "ServerUploader",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "Empty response"]
+            )
+        }
     }
 
     private static func makeMultipartBody(
@@ -343,6 +410,13 @@ final class ServerUploader {
         task.resume()
     }
 
+    /// Convenience: does this failure warrant a retry with backoff?
+    /// `true` for network glitches and 5xx; `false` for 4xx, decoding,
+    /// and the defensive `invalidResponse` case.
+    static func isTransient(_ error: UploadError) -> Bool {
+        return error.isTransient
+    }
+
     func fetchStatus(completion: @escaping (Result<[String: Any], Error>) -> Void) {
         guard let base = config.baseURL() else {
             completion(.failure(NSError(
@@ -391,5 +465,19 @@ final class ServerUploader {
             }
         }
         task.resume()
+    }
+}
+
+extension ServerUploader.UploadError {
+    /// `true` for failures that a caller should retry with backoff:
+    /// transient network issues and 5xx responses. `false` for 4xx
+    /// (request is the problem), decoding (body shape is the problem),
+    /// and `invalidResponse` (no HTTPURLResponse came back at all).
+    var isTransient: Bool {
+        switch self {
+        case .network: return true
+        case .server: return true
+        case .client, .decoding, .invalidResponse: return false
+        }
     }
 }
