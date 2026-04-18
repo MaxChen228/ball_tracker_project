@@ -193,6 +193,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // MARK: - Lifecycle
 
+    // Camera preview assumes sensor long-edge → horizontal pitcher-to-plate
+    // direction; switching to portrait would flip the axes and invalidate
+    // the ChArUco intrinsic calibration captured in landscape.
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        [.landscapeLeft, .landscapeRight]
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black

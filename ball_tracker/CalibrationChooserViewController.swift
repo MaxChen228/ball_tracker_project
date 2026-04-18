@@ -5,6 +5,10 @@ import UIKit
 /// nav button into the same view and the operator couldn't tell which
 /// was actually driving the save. Now the user picks up front.
 final class CalibrationChooserViewController: UIViewController {
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        [.landscapeLeft, .landscapeRight]
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
