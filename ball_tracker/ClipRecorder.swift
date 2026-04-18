@@ -15,29 +15,53 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "camer
 /// only in the JSON payload; covering them in video would cost ~1GB of
 /// buffered BGRA, which is not worth it for Phase 1.
 ///
-/// Threading: the caller serialises `prepare`/`append`/`finish`/`cancel`. In
-/// `CameraViewController` all calls happen on the capture processing queue.
-/// `finish` hands its completion to an arbitrary queue (AVAssetWriter's
-/// internal queue) — consumers that need main-thread work dispatch from
-/// there.
+/// Threading: the caller serialises `prepare`/`append`/`finish`/`cancel` onto
+/// `CameraViewController.processingQueue`. However, `finish` hands its
+/// completion to AVAssetWriter's internal queue, so a `cancel` arriving on
+/// the processing queue can race with an in-flight `finishWriting`. The
+/// explicit `lifecycle` state machine below guards that crossing — once
+/// `finish` flips us to `.finishing`, any subsequent `cancel` is a no-op
+/// and absolutely will not delete the just-finalised file.
 final class ClipRecorder {
     enum ClipRecorderError: Error {
         case cannotAddVideoInput
         case notStarted
     }
 
+    /// Lifecycle phases tracked under `stateLock`.
+    /// - `idle`: `prepare` succeeded but no frame appended yet.
+    /// - `writing`: at least one sample has started the writer session.
+    /// - `finishing`: `finish` is in flight; `finishWriting` callback pending.
+    /// - `finished`: terminal success path; file may exist at `outputURL`.
+    /// - `cancelled`: terminal cancel path; file deleted.
+    private enum State {
+        case idle
+        case writing
+        case finishing
+        case finished
+        case cancelled
+    }
+
     private let outputURL: URL
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
-    private var sessionStarted: Bool = false
     private(set) var droppedFrameCount: Int = 0
     /// Session-clock PTS of the first sample appended. Uploader pairs this
     /// with the JSON payload so the server can reconstruct absolute PTS for
     /// each decoded frame.
     private(set) var firstSamplePTS: CMTime?
 
+    private var lifecycle: State = .idle
+    private let stateLock = NSLock()
+
     init(outputURL: URL) {
         self.outputURL = outputURL
+    }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body()
     }
 
     /// Open the writer. Must be called before any `append`. Uses H.264 so the
@@ -65,11 +89,15 @@ final class ClipRecorder {
             throw ClipRecorderError.cannotAddVideoInput
         }
         w.add(input)
-        writer = w
-        videoInput = input
-        sessionStarted = false
-        droppedFrameCount = 0
-        firstSamplePTS = nil
+        // Lock so a racing cancel/finish on AVAssetWriter's queue sees the
+        // fresh lifecycle immediately.
+        withLock {
+            writer = w
+            videoInput = input
+            droppedFrameCount = 0
+            firstSamplePTS = nil
+            lifecycle = .idle
+        }
         log.info("clip writer prepared width=\(width) height=\(height)")
     }
 
@@ -77,7 +105,20 @@ final class ClipRecorder {
     /// session's `atSourceTime`, so downstream decoders see timestamps on the
     /// same session clock as the JSON payload's `timestamp_s`.
     func append(sampleBuffer: CMSampleBuffer) {
-        guard let writer, let videoInput else { return }
+        // Snapshot under lock; we only proceed if we still hold a writer and
+        // are in a state that accepts samples.
+        let snapshot: (writer: AVAssetWriter, input: AVAssetWriterInput, started: Bool)? = withLock {
+            guard let writer, let videoInput else { return nil }
+            switch lifecycle {
+            case .idle:
+                return (writer, videoInput, false)
+            case .writing:
+                return (writer, videoInput, true)
+            case .finishing, .finished, .cancelled:
+                return nil
+            }
+        }
+        guard let (writer, videoInput, sessionStarted) = snapshot else { return }
 
         if !sessionStarted {
             guard writer.startWriting() else {
@@ -86,74 +127,135 @@ final class ClipRecorder {
             }
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             writer.startSession(atSourceTime: pts)
-            firstSamplePTS = pts
-            sessionStarted = true
+            withLock {
+                firstSamplePTS = pts
+                lifecycle = .writing
+            }
         }
 
         if videoInput.isReadyForMoreMediaData {
             _ = videoInput.append(sampleBuffer)
         } else {
-            droppedFrameCount += 1
+            let dropped: Int = withLock {
+                droppedFrameCount += 1
+                return droppedFrameCount
+            }
             // Log dropped frames at cadence boundaries only — per-frame
             // would flood the subsystem at 240 fps. `.debug` stays off in
             // release builds by default.
-            if droppedFrameCount == 1 || droppedFrameCount % 60 == 0 {
-                log.debug("clip writer dropped frames count=\(self.droppedFrameCount)")
+            if dropped == 1 || dropped % 60 == 0 {
+                log.debug("clip writer dropped frames count=\(dropped)")
             }
         }
     }
 
     /// Finalise and flush. `completion` fires on AVAssetWriter's internal
     /// queue with the clip URL on success, nil on failure (no session, writer
-    /// error). The recorder resets its state so a fresh `prepare` is needed
-    /// for the next cycle.
+    /// error). The recorder transitions to `.finishing` (then `.finished`)
+    /// so any racing `cancel()` becomes a no-op and cannot delete the
+    /// produced file.
     func finish(completion: @escaping (URL?) -> Void) {
-        guard let writer, let videoInput else {
-            completion(nil)
-            return
+        // Decide the next move atomically. We may be:
+        //  - .idle: prepared but no frames; tear down and return nil (no
+        //    file produced). Mark .finished so a racing cancel is a no-op.
+        //  - .writing: real flush via finishWriting.
+        //  - .finishing/.finished/.cancelled: already terminal — nil.
+        enum Decision {
+            case noOpReturnNil                                       // already terminal
+            case tearDownEmpty(AVAssetWriter, AVAssetWriterInput)    // .idle path
+            case finalize(AVAssetWriter, AVAssetWriterInput, Int)    // .writing path
         }
-        guard sessionStarted else {
-            // Nothing was appended; tear down without producing a file.
+        let decision: Decision = withLock {
+            guard let w = writer, let input = videoInput else { return .noOpReturnNil }
+            switch lifecycle {
+            case .idle:
+                lifecycle = .finishing
+                return .tearDownEmpty(w, input)
+            case .writing:
+                lifecycle = .finishing
+                return .finalize(w, input, droppedFrameCount)
+            case .finishing, .finished, .cancelled:
+                return .noOpReturnNil
+            }
+        }
+
+        switch decision {
+        case .noOpReturnNil:
+            completion(nil)
+        case .tearDownEmpty(let w, let input):
             log.info("clip writer finish no-op (session never started)")
-            videoInput.markAsFinished()
-            writer.cancelWriting()
-            self.writer = nil
-            self.videoInput = nil
+            input.markAsFinished()
+            w.cancelWriting()
+            withLock {
+                writer = nil
+                videoInput = nil
+                lifecycle = .finished
+            }
             try? FileManager.default.removeItem(at: outputURL)
             completion(nil)
-            return
-        }
-        videoInput.markAsFinished()
-        let capturedURL = outputURL
-        let dropped = droppedFrameCount
-        writer.finishWriting { [weak self] in
-            let status = writer.status
-            self?.writer = nil
-            self?.videoInput = nil
-            self?.sessionStarted = false
-            if status == .completed {
-                log.info("clip writer finished url=\(capturedURL.lastPathComponent, privacy: .public) dropped=\(dropped)")
-                completion(capturedURL)
-            } else {
-                log.error("clip writer finish failed status=\(status.rawValue) error=\(writer.error?.localizedDescription ?? "nil", privacy: .public)")
-                try? FileManager.default.removeItem(at: capturedURL)
-                completion(nil)
+        case .finalize(let w, let input, let dropped):
+            input.markAsFinished()
+            let capturedURL = outputURL
+            w.finishWriting { [weak self] in
+                let status = w.status
+                if let self {
+                    self.withLock {
+                        self.writer = nil
+                        self.videoInput = nil
+                        self.lifecycle = .finished
+                    }
+                }
+                if status == .completed {
+                    log.info("clip writer finished url=\(capturedURL.lastPathComponent, privacy: .public) dropped=\(dropped)")
+                    completion(capturedURL)
+                } else {
+                    log.error("clip writer finish failed status=\(status.rawValue) error=\(w.error?.localizedDescription ?? "nil", privacy: .public)")
+                    try? FileManager.default.removeItem(at: capturedURL)
+                    completion(nil)
+                }
             }
         }
     }
 
-    /// Abort the clip without producing a file. Safe to call from any state.
+    /// Abort the clip without producing a file. Safe to call from any state,
+    /// but if `finish` is already in flight (or has completed) this is a
+    /// no-op — we will NEVER delete a file `finish` is trying to produce or
+    /// has just produced.
     func cancel() {
-        if writer != nil {
-            log.info("clip writer cancel session_started=\(self.sessionStarted) dropped=\(self.droppedFrameCount)")
+        enum Action {
+            case noOp(State)                                              // already terminal/finishing
+            case abort(AVAssetWriter?, AVAssetWriterInput?, Bool, Int)    // .idle / .writing
         }
-        if let writer, sessionStarted {
-            videoInput?.markAsFinished()
-            writer.cancelWriting()
+        let action: Action = withLock {
+            switch lifecycle {
+            case .finishing, .finished:
+                return .noOp(lifecycle)
+            case .cancelled:
+                return .noOp(.cancelled)
+            case .idle, .writing:
+                let started = (lifecycle == .writing)
+                let w = writer
+                let input = videoInput
+                lifecycle = .cancelled
+                writer = nil
+                videoInput = nil
+                return .abort(w, input, started, droppedFrameCount)
+            }
         }
-        writer = nil
-        videoInput = nil
-        sessionStarted = false
-        try? FileManager.default.removeItem(at: outputURL)
+
+        switch action {
+        case .noOp(let state):
+            // Important: don't touch the output file — finish() owns it.
+            log.warning("clip writer cancel ignored (lifecycle=\(String(describing: state), privacy: .public))")
+        case .abort(let w, let input, let started, let dropped):
+            if w != nil {
+                log.info("clip writer cancel session_started=\(started) dropped=\(dropped)")
+            }
+            if let w, started {
+                input?.markAsFinished()
+                w.cancelWriting()
+            }
+            try? FileManager.default.removeItem(at: outputURL)
+        }
     }
 }
