@@ -294,9 +294,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Capture session stays OFF in standby — the phone was heating up from
-        // an idle 60 fps preview. Session is spun up on-demand only by
-        // `enterRecordingMode` (arm) or `startTimeSync` (manual 時間校正).
+        // Default: capture session stays OFF in standby — the phone was
+        // heating up from an idle 60 fps preview. Session is spun up on-
+        // demand only by `enterRecordingMode` (arm) or `startTimeSync`
+        // (manual 時間校正). Settings → Camera → "Park in STANDBY" can flip
+        // this off; in that case we keep the preview running at the idle
+        // fps so the operator gets a continuous framing aid.
+        if !settings.parkCameraInStandby && state == .standby {
+            startCapture(at: standbyFps)
+        }
         healthMonitor.start()
         displayLink?.isPaused = false
     }
@@ -367,7 +373,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.clipRecorder = nil
         }
         warningLabel.isHidden = true
-        stopCapture()
+        if settings.parkCameraInStandby {
+            stopCapture()
+        } else {
+            // Keep the preview live — drop fps back to idle so the sensor
+            // stops running at 240.
+            switchCaptureFps(standbyFps)
+        }
         updateUIForState()
     }
 
@@ -451,7 +463,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         chirpDetector?.onChirpDetected = nil
         latestChirpSnapshot = nil
         state = .standby
-        stopCapture()
+        // Already at standbyFps — if the operator asked to keep the preview,
+        // just leave the session running; otherwise park it.
+        if settings.parkCameraInStandby {
+            stopCapture()
+        }
         lastUploadStatusText = "Time sync \(reason)"
 
         if reason == "timeout" {
@@ -490,7 +506,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         healthMonitor?.updateTimeSynced(true)
         latestChirpSnapshot = nil
         state = .standby
-        stopCapture()
+        if settings.parkCameraInStandby {
+            stopCapture()
+        }
         warningLabel.isHidden = true
         lastUploadStatusText = String(format: "Time sync OK @ %.3fs", event.anchorTimestampS)
         updateUIForState()
@@ -918,6 +936,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let chirpThresholdChanged = latest.chirpThreshold != settings.chirpThreshold
         let pollIntervalChanged = latest.pollInterval != settings.pollInterval
         let cameraRoleChanged = latest.cameraRole != settings.cameraRole
+        let parkChanged = latest.parkCameraInStandby != settings.parkCameraInStandby
 
         settings = latest
 
@@ -950,6 +969,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             // backoff, and re-probe immediately so the HUD reflects reality.
             healthMonitor.resetBackoff()
             healthMonitor.probeNow()
+        }
+
+        // Park-mode only takes effect in standby — the active states own
+        // their own capture lifecycle and we'd rather not yank the session
+        // out from under a live recording or a time-sync listener.
+        if parkChanged && state == .standby {
+            if latest.parkCameraInStandby {
+                stopCapture()
+            } else {
+                startCapture(at: standbyFps)
+            }
         }
     }
 
