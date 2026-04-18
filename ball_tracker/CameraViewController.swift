@@ -41,7 +41,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let session = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private let videoOutput = AVCaptureVideoDataOutput()
-    private let processingQueue = DispatchQueue(label: "camera.frame.queue")
+    // `.userInitiated` QoS is required for 240 fps frame delivery. With default
+    // QoS the queue can be throttled by the scheduler which amplifies any
+    // detection stalls into dropped-frame cascades (AVCaptureVideoDataOutput
+    // has `alwaysDiscardsLateVideoFrames = true`).
+    private let processingQueue = DispatchQueue(label: "camera.frame.queue", qos: .userInitiated)
 
     // Audio chirp sync. Mic input is always installed once granted so the
     // chirp detector can run as soon as the user taps 時間校正.

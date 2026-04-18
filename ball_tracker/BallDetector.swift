@@ -1,6 +1,5 @@
 import Foundation
 import CoreVideo
-import CoreImage
 import os
 
 private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "sensing")
@@ -35,29 +34,11 @@ final class BallDetector {
     private let hsvRange: HSVRange
     private let intrinsics: Intrinsics?
 
-    // Reusable RGBA scratch buffer for pixelBufferToRGBA. The capture queue calls
-    // detect() serially (see CameraViewController.captureOutput on camera.frame.queue),
-    // so no locking is required. Reallocated only when frame dimensions change.
-    // Safety assumption: the owning VC pauses capture on viewWillDisappear before
-    // releasing this detector, so no in-flight frame can race with deinit.
-    private var scratchBuffer: UnsafeMutablePointer<UInt8>?
-    private var scratchBufferCapacity: Int = 0
-
-    // Reusable CIContext. Creating one per frame is itself an allocation hot spot.
-    private let ciContext: CIContext = CIContext(options: nil)
-    private let rgbColorSpace: CGColorSpace = CGColorSpaceCreateDeviceRGB()
-
     init(hsvRange: HSVRange, intrinsics: Intrinsics? = nil) {
         self.hsvRange = hsvRange
         self.intrinsics = intrinsics
         let source = intrinsics != nil ? "calibrated" : "fov_approx"
         log.info("detector initialized intrinsics=\(source, privacy: .public)")
-    }
-
-    deinit {
-        if let ptr = scratchBuffer {
-            ptr.deallocate()
-        }
     }
 
     /// Returns whether a deep-blue ball is detected and (if so) its angular offsets.
@@ -70,14 +51,24 @@ final class BallDetector {
         imageHeight: Int,
         horizontalFovRadians: Double
     ) -> DetectionResult {
-        // 1) Convert pixelBuffer to RGBA for HSV conversion. Writes into the pooled
-        // scratch buffer (allocated once / on dimension change) to avoid ~1 GB/s of
-        // heap churn at 240 fps × 1920×1080 × 4 B.
-        guard let rgba = pixelBufferToRGBA(pixelBuffer: pixelBuffer, width: imageWidth, height: imageHeight) else {
+        // Direct BGRA plane access. CameraViewController pins videoSettings to
+        // kCVPixelFormatType_32BGRA so the sample buffer we receive already
+        // has the layout we want — no CIContext.render round-trip needed.
+        // The previous implementation rasterized the full 1920×1080 frame to
+        // an RGBA scratch bitmap every call (~50–80 ms) which capped effective
+        // tracking throughput at ~14 fps regardless of the 240 fps capture
+        // format. Reading the base address + skipping by `step` keeps the
+        // per-frame cost proportional to the sampled grid (~230k reads) not
+        // the full buffer (~2M pixels + GPU→CPU copy).
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
             return DetectionResult(ballDetected: false, thetaXRad: nil, thetaZRad: nil, centroidX: nil, centroidY: nil)
         }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let bgra = baseAddress.assumingMemoryBound(to: UInt8.self)
 
-        // 2) HSV threshold + centroid estimation using sampled pixels.
         let step = max(2, min(imageWidth, imageHeight) / 300) // reduce compute load
         let defaultCx = Double(imageWidth) / 2.0
         let defaultCy = Double(imageHeight) / 2.0
@@ -94,12 +85,14 @@ final class BallDetector {
         // - S/V: 0..255
         for gy in 0..<gridH {
             let y = min(imageHeight - 1, gy * step)
+            let rowBase = y * bytesPerRow
             for gx in 0..<gridW {
                 let x = min(imageWidth - 1, gx * step)
-                let idx = (y * imageWidth + x) * 4
-                let r = Double(rgba[idx]) / 255.0
-                let g = Double(rgba[idx + 1]) / 255.0
-                let b = Double(rgba[idx + 2]) / 255.0
+                let idx = rowBase + x * 4
+                // 32BGRA byte order on Apple platforms: B G R A.
+                let b = Double(bgra[idx]) / 255.0
+                let g = Double(bgra[idx + 1]) / 255.0
+                let r = Double(bgra[idx + 2]) / 255.0
 
                 let hsv = rgbToHSV(r: r, g: g, b: b)
                 let hOpenCV = Int(round(hsv.hDegrees / 2.0)) // 0..179
@@ -222,40 +215,5 @@ final class BallDetector {
         return (hDegrees: h, s: s, v: v)
     }
 
-    /// Render pixelBuffer into the pooled RGBA scratch buffer.
-    /// Returns an UnsafeMutablePointer valid until the next call to this method
-    /// (or until deinit). CIContext.render writes every byte unconditionally, so
-    /// we skip any zero-fill even when the buffer is freshly allocated.
-    private func pixelBufferToRGBA(pixelBuffer: CVPixelBuffer, width: Int, height: Int) -> UnsafeMutablePointer<UInt8>? {
-        let bytesPerRow = width * 4
-        let needed = height * bytesPerRow
-        if needed <= 0 { return nil }
-
-        // Grow (or initially allocate) the scratch buffer only when it can't fit.
-        if scratchBufferCapacity < needed {
-            if let old = scratchBuffer {
-                old.deallocate()
-            }
-            scratchBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: needed)
-            scratchBufferCapacity = needed
-            log.debug("detector buffer resized bytes=\(needed, privacy: .public)")
-        }
-
-        guard let baseAddress = scratchBuffer else { return nil }
-
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let rect = CGRect(x: 0, y: 0, width: width, height: height)
-
-        ciContext.render(
-            ciImage,
-            toBitmap: baseAddress,
-            rowBytes: bytesPerRow,
-            bounds: rect,
-            format: .RGBA8,
-            colorSpace: rgbColorSpace
-        )
-
-        return baseAddress
-    }
 }
 
