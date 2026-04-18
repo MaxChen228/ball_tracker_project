@@ -79,7 +79,7 @@ def render_scene_div(scene: Scene, div_id: str = "canvas-scene") -> str:
 
 def render_viewer_html(
     scene: Scene,
-    videos: list[tuple[str, str, float, float]],
+    videos: list[tuple[str, str, float, float, dict[str, list]]],
     health: dict,
 ) -> str:
     """Full /viewer/{sid} post-mortem page.
@@ -99,17 +99,22 @@ def render_viewer_html(
          room (since that's the payoff visual); a session without one
          shrinks the scene so the videos — the only surviving evidence —
          dominate.
-      4. Shared timeline footer — two rows: scrubber + frame counter on
-         top, transport (prev/next frame, play/pause) + speed buttons +
-         ALL/PLAYBACK toggle on the bottom. Frame-granular scrubbing and
-         `.` / `,` keyboard stepping make this a proper analysis tool.
+      4. Shared timeline footer — scrubber with an inline detection strip
+         (one row per camera showing which frames the ball was found in),
+         frame counter + per-cam PTS, transport (prev/next frame,
+         play/pause), speed buttons, ALL/PLAYBACK toggle. The scrubber
+         walks the real union-of-MOV-PTS timeline — so non-detected
+         frames, frame drops, and the full capture window are all
+         scrubbable, not a synthesised 240 Hz grid.
 
-    `videos` is `[(camera_id, url, t_rel_offset_s, video_fps), ...]` where
-    `t_rel_offset_s = video_start_pts_s − sync_anchor_timestamp_s` for
-    that camera. Each video's `currentTime = t_rel − t_rel_offset_s`, so
-    A and B stay locked to the chirp anchor even when their phones
-    started recording at different wall-clock moments. `video_fps` drives
-    the frame-by-frame controls (prev/next frame, frame counter).
+    `videos` is
+    `[(camera_id, url, t_rel_offset_s, video_fps, frames_info), ...]`
+    where `t_rel_offset_s = video_start_pts_s − sync_anchor_timestamp_s`
+    for that camera and `frames_info = {"t_rel_s": [...], "detected":
+    [...]}` carries the actual post-detection per-frame timestamps + ball
+    flags. Each video's `currentTime = t_rel − t_rel_offset_s`, so A and
+    B stay locked to the chirp anchor even when their phones started
+    recording at different wall-clock moments.
     """
     import json as _json
 
@@ -127,8 +132,9 @@ def render_viewer_html(
     fallback_color_json = _json.dumps(_FALLBACK_CAMERA_COLOR)
     accent_color_json = _json.dumps(_ACCENT)
     videos_json = _json.dumps(
-        [{"camera_id": cam, "url": url, "t_rel_offset_s": off, "fps": fps}
-         for (cam, url, off, fps) in videos]
+        [{"camera_id": cam, "url": url, "t_rel_offset_s": off, "fps": fps,
+          "frames": frames}
+         for (cam, url, off, fps, frames) in videos]
     )
     has_triangulated = bool(scene.triangulated)
 
@@ -138,7 +144,7 @@ def render_viewer_html(
     scene_flex = "3 1 0" if has_triangulated else "2 1 0"
     videos_flex = "2 1 0" if has_triangulated else "3 1 0"
 
-    videos_by_cam = {cam: (url, off) for cam, url, off, _fps in videos}
+    videos_by_cam = {cam: (url, off) for cam, url, off, _fps, _fr in videos}
     video_cells = "".join(
         _video_cell_html(cam, videos_by_cam.get(cam))
         for cam in ("A", "B")
@@ -267,13 +273,21 @@ def render_viewer_html(
     padding:10px 24px 12px; font-family:var(--mono); font-size:12px;
     color:var(--sub); }}
   .tl-row {{ display:flex; align-items:center; gap:12px; }}
-  .tl-row input[type=range] {{ flex:1 1 auto; accent-color:var(--ink);
-    height:20px; }}
-  .tl-row .frame-label {{ min-width:220px; text-align:right;
-    color:var(--ink); font-weight:500; font-size:12px;
-    letter-spacing:0.02em; }}
-  .tl-row .frame-label .t {{ color:var(--sub); font-weight:400;
-    margin-left:10px; }}
+  .scrubber-wrap {{ flex:1 1 auto; display:flex; flex-direction:column;
+    gap:2px; min-width:0; }}
+  .scrubber-wrap input[type=range] {{ width:100%; accent-color:var(--ink);
+    height:18px; margin:0; }}
+  .scrubber-wrap canvas {{ display:block; width:100%; height:18px;
+    border:1px solid var(--border-base); border-radius:2px;
+    background:var(--bg); image-rendering:pixelated; }}
+  .tl-row .frame-label {{ min-width:320px; text-align:right;
+    color:var(--ink); font-weight:500; font-size:11px;
+    letter-spacing:0.02em; white-space:nowrap;
+    font-variant-numeric:tabular-nums; }}
+  .tl-row .frame-label .sub {{ color:var(--sub); font-weight:400;
+    margin-left:8px; }}
+  .tl-row .frame-label .det {{ color:var(--contra); font-weight:500; }}
+  .tl-row .frame-label .det.no {{ color:var(--sub); }}
   .timeline button {{ padding:5px 12px; font:inherit; font-size:11px;
     letter-spacing:0.1em; text-transform:uppercase;
     border:1px solid var(--border-base); background:var(--bg);
@@ -315,8 +329,11 @@ def render_viewer_html(
   </div>
   <div class="timeline">
     <div class="tl-row">
-      <input id="scrubber" type="range" min="0" max="1" value="0" step="1" />
-      <span id="frame-label" class="frame-label">frame 0 / 0<span class="t">t=0.000s</span></span>
+      <div class="scrubber-wrap">
+        <input id="scrubber" type="range" min="0" max="1" value="0" step="1" />
+        <canvas id="detection-canvas" height="18" aria-hidden="true"></canvas>
+      </div>
+      <span id="frame-label" class="frame-label">frame 0 / 0<span class="sub">t=0.000s</span></span>
     </div>
     <div class="tl-row">
       <div class="transport" role="group" aria-label="transport">
@@ -333,7 +350,7 @@ def render_viewer_html(
         <button data-rate="1" class="active" type="button">1&times;</button>
         <button data-rate="2" type="button">2&times;</button>
       </div>
-      <span class="tl-hint">space &middot; , . &middot; &larr; &rarr;</span>
+      <span class="tl-hint">space &middot; , . &middot; &larr; &rarr; &middot; d f (jump)</span>
       <div class="mode-toggle" role="tablist">
         <button id="mode-all" class="active" type="button">All</button>
         <button id="mode-playback" type="button">Playback</button>
@@ -378,34 +395,66 @@ def render_viewer_html(
   const vids = Array.from(document.querySelectorAll("video[data-cam]"));
   const offsetByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.t_rel_offset_s]));
   const fpsByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.fps]));
-
-  // Master timeline is anchor-relative (t_rel_s). Span it from the
-  // earliest observed data point to the latest; fall back to a trivial
-  // 1 s window if the scene is empty.
-  const allTs = [];
-  for (const arr of Object.values(SCENE.ground_traces || {{}})) {{
-    for (const p of arr) allTs.push(p.t_rel_s);
+  const framesByCam = {{}};  // cam -> {{ t_rel_s: [...], detected: [...] }}
+  for (const v of VIDEO_META) {{
+    framesByCam[v.camera_id] = v.frames || {{ t_rel_s: [], detected: [] }};
   }}
-  for (const r of SCENE.rays || []) allTs.push(r.t_rel_s);
-  for (const p of SCENE.triangulated || []) allTs.push(p.t_rel_s);
-  let tMin = allTs.length ? Math.min(...allTs) : 0.0;
-  let tMax = allTs.length ? Math.max(...allTs) : 1.0;
-  if (tMax - tMin < 0.05) tMax = tMin + 0.05;
+  const camsWithFrames = Object.keys(framesByCam).filter(c => (framesByCam[c].t_rel_s || []).length);
 
-  // Frame is the primary state; t is derived. Using the max of A/B as
-  // the master fps means stepping one frame never under-samples either
-  // video. In the nominal rig both cameras are 240 fps so masterFps = 240.
-  const MASTER_FPS = Math.max(...Object.values(fpsByCam), 1);
-  const FRAME_DT = 1 / MASTER_FPS;
-  const TOTAL_FRAMES = Math.max(1, Math.round((tMax - tMin) * MASTER_FPS));
+  // --- Build the UNION timeline from every cam's actual decoded-frame
+  // PTS. This is the single source of truth: the scrubber walks real MOV
+  // frames (including drops + non-detected frames), not a synthesised
+  // 240 Hz grid. Dedupe collisions at 0.1 ms to avoid fake steps when
+  // A and B happened to decode on the same PTS.
+  const QUANT = 10000;  // 0.1 ms granularity
+  const timeMap = new Map();
+  for (const cam of camsWithFrames) {{
+    for (const t of framesByCam[cam].t_rel_s) {{
+      const q = Math.round(t * QUANT);
+      if (!timeMap.has(q)) timeMap.set(q, t);
+    }}
+  }}
+  // Fallback when the session has zero decoded frames (no video on disk):
+  // use whatever scene points exist so the viewer still renders a usable
+  // scrubber rather than collapsing to a 1-slot timeline.
+  if (timeMap.size === 0) {{
+    for (const r of SCENE.rays || []) timeMap.set(Math.round(r.t_rel_s * QUANT), r.t_rel_s);
+    for (const p of SCENE.triangulated || []) timeMap.set(Math.round(p.t_rel_s * QUANT), p.t_rel_s);
+  }}
+  const unionTimes = Array.from(timeMap.values()).sort((a, b) => a - b);
+  if (unionTimes.length === 0) {{ unionTimes.push(0); unionTimes.push(0.05); }}
+  const TOTAL_FRAMES = unionTimes.length;
+  let tMin = unionTimes[0];
+  let tMax = unionTimes[TOTAL_FRAMES - 1];
+
+  // --- For each cam, precompute the nearest-cam-frame index per union
+  // slot so the detection strip + frame-info panel read in O(1). `null`
+  // means this union time falls outside the cam's capture window.
+  function buildCamIndex(cam) {{
+    const f = framesByCam[cam];
+    const ts = f.t_rel_s, det = f.detected;
+    const out = new Array(TOTAL_FRAMES).fill(null);
+    if (!ts.length) return out;
+    const tol = 0.010;  // 10 ms — looser than one frame at 240 fps
+    let j = 0;
+    for (let i = 0; i < TOTAL_FRAMES; ++i) {{
+      const t = unionTimes[i];
+      if (t < ts[0] - tol || t > ts[ts.length - 1] + tol) continue;
+      while (j + 1 < ts.length && Math.abs(ts[j + 1] - t) <= Math.abs(ts[j] - t)) j++;
+      out[i] = {{ idx: j, t: ts[j], detected: !!det[j] }};
+    }}
+    return out;
+  }}
+  const camAtFrame = {{}};  // cam -> [{{idx,t,detected}}|null, ...]
+  for (const cam of camsWithFrames) camAtFrame[cam] = buildCamIndex(cam);
 
   let mode = "all";
   let currentFrame = 0;          // in [0, TOTAL_FRAMES - 1]
-  let currentT = tMin;           // derived = tMin + currentFrame * FRAME_DT
-  let rafPending = false;
+  let currentT = tMin;           // derived = unionTimes[currentFrame]
   let rvfcEnabled = false;       // set to true once we register rVFC
+  let seekRafPending = false;    // coalesces rapid seeks onto one rAF tick
 
-  // Scrubber is now frame-granular, not normalized 0..1000.
+  // Scrubber indexes the union timeline directly.
   scrubber.max = String(TOTAL_FRAMES - 1);
   scrubber.step = "1";
 
@@ -493,17 +542,27 @@ def render_viewer_html(
 
   // --- Video sync via anchor-relative time ---
 
+  // Coalesced seeks: scrubber drags + arrow-key holds used to fire one
+  // `video.currentTime =` per input event, which the browser queues as
+  // independent seek operations and visibly stutters. Collapse them to
+  // one write per animation frame. No threshold — the scrubber is
+  // frame-granular now and sub-frame gaps (~5 ms) must actually land.
   function syncVideosToT(t) {{
-    for (const v of vids) {{
-      const off = offsetByCam[v.dataset.cam] ?? 0;
-      const want = t - off;
-      // Only seek if the gap is > 50 ms — avoids feedback loops when
-      // the browser fires its own timeupdate after our seek.
-      if (isFinite(want) && Math.abs(v.currentTime - want) > 0.05) {{
-        try {{ v.currentTime = Math.max(0, want); }} catch (e) {{}}
+    if (!isFinite(t)) return;
+    seekTargetT = t;
+    if (seekRafPending) return;
+    seekRafPending = true;
+    requestAnimationFrame(() => {{
+      seekRafPending = false;
+      const tt = seekTargetT;
+      for (const v of vids) {{
+        const off = offsetByCam[v.dataset.cam] ?? 0;
+        const want = Math.max(0, tt - off);
+        try {{ v.currentTime = want; }} catch (e) {{}}
       }}
-    }}
+    }});
   }}
+  let seekTargetT = tMin;
 
   function readMasterTFromVideo() {{
     // Pick the first ready video; else fall back to current scrubber.
@@ -516,24 +575,47 @@ def render_viewer_html(
     return currentT;
   }}
 
+  // Binary-search the nearest union-timeline index for a given t.
+  function frameIndexForT(t) {{
+    let lo = 0, hi = TOTAL_FRAMES - 1;
+    if (t <= unionTimes[lo]) return lo;
+    if (t >= unionTimes[hi]) return hi;
+    while (lo + 1 < hi) {{
+      const mid = (lo + hi) >> 1;
+      if (unionTimes[mid] <= t) lo = mid; else hi = mid;
+    }}
+    return (t - unionTimes[lo]) <= (unionTimes[hi] - t) ? lo : hi;
+  }}
+
   function renderFrameLabel() {{
-    frameLabel.innerHTML =
-      `frame ${{currentFrame}} / ${{TOTAL_FRAMES - 1}}` +
-      `<span class="t">t=${{currentT.toFixed(3)}}s</span>`;
+    const parts = [`frame ${{currentFrame}} / ${{TOTAL_FRAMES - 1}}`];
+    for (const cam of camsWithFrames) {{
+      const entry = camAtFrame[cam][currentFrame];
+      if (entry === null) {{
+        parts.push(`<span class="sub">${{cam}}:—</span>`);
+      }} else {{
+        const cls = entry.detected ? "det" : "det no";
+        const mark = entry.detected ? "✓" : "·";
+        parts.push(`<span class="sub">${{cam}}:${{entry.idx}}</span><span class="${{cls}}">${{mark}}</span>`);
+      }}
+    }}
+    parts.push(`<span class="sub">t=${{currentT.toFixed(3)}}s</span>`);
+    frameLabel.innerHTML = parts.join(" ");
   }}
 
   function setFrame(f, {{ seekVideos = true }} = {{}}) {{
     currentFrame = Math.max(0, Math.min(TOTAL_FRAMES - 1, f | 0));
-    currentT = tMin + currentFrame * FRAME_DT;
+    currentT = unionTimes[currentFrame];
     scrubber.value = String(currentFrame);
     renderFrameLabel();
+    renderDetectionStrip();
     if (seekVideos) syncVideosToT(currentT);
     if (mode === "playback") drawScene();
   }}
 
   function setT(t, opts) {{
-    // Backwards-compat shim: snap t to nearest frame index.
-    setFrame(Math.round((t - tMin) / FRAME_DT), opts);
+    // Backwards-compat shim: snap t to nearest union-timeline frame.
+    setFrame(frameIndexForT(t), opts);
   }}
 
   function stepFrames(delta) {{
@@ -541,14 +623,28 @@ def render_viewer_html(
     setFrame(currentFrame + delta);
   }}
 
+  // Jump to the previous/next union slot where *any* cam detected the
+  // ball. `dir` is -1 (prev) or +1 (next). Falls back to a plain step
+  // when there are no detected frames on that side.
+  function jumpDetection(dir) {{
+    let i = currentFrame + dir;
+    while (i >= 0 && i < TOTAL_FRAMES) {{
+      for (const cam of camsWithFrames) {{
+        const e = camAtFrame[cam][i];
+        if (e && e.detected) {{ vids.forEach(v => v.pause()); setFrame(i); return; }}
+      }}
+      i += dir;
+    }}
+  }}
+
   function onVideoTimeUpdate() {{
     // Fallback path when requestVideoFrameCallback isn't available.
-    if (rvfcEnabled || rafPending) return;
-    rafPending = true;
+    // rAF-coalesce the read so high-frequency timeupdate bursts don't
+    // fight our own scrubber-driven seeks.
+    if (rvfcEnabled || seekRafPending) return;
     requestAnimationFrame(() => {{
-      rafPending = false;
       const t = readMasterTFromVideo();
-      setFrame(Math.round((t - tMin) / FRAME_DT), {{ seekVideos: false }});
+      setFrame(frameIndexForT(t), {{ seekVideos: false }});
     }});
   }}
 
@@ -576,13 +672,22 @@ def render_viewer_html(
   function driveWithRVFC() {{
     if (!vids.length) return;
     rvfcEnabled = true;
-    const master = vids[0];
+    // Pick the cam with the most decoded frames as master — it carries
+    // the richest timeline, so its PTS stream drives the scrubber at
+    // highest resolution. Falls back to vids[0] when frame info is
+    // missing (e.g. non-detection-skipped session).
+    let master = vids[0];
+    let masterCount = -1;
+    for (const v of vids) {{
+      const n = (framesByCam[v.dataset.cam]?.t_rel_s || []).length;
+      if (n > masterCount) {{ master = v; masterCount = n; }}
+    }}
     const off = offsetByCam[master.dataset.cam] ?? 0;
     const onFrame = (_now, metadata) => {{
       const mediaT = (metadata && typeof metadata.mediaTime === 'number')
         ? metadata.mediaTime : master.currentTime;
       const t = mediaT + off;
-      setFrame(Math.round((t - tMin) / FRAME_DT), {{ seekVideos: false }});
+      setFrame(frameIndexForT(t), {{ seekVideos: false }});
       master.requestVideoFrameCallback(onFrame);
     }};
     master.requestVideoFrameCallback(onFrame);
@@ -659,6 +764,14 @@ def render_viewer_html(
         ev.preventDefault();
         stepFrames(+TOTAL_FRAMES);
         break;
+      case "d": case "D":
+        ev.preventDefault();
+        jumpDetection(-1);
+        break;
+      case "f": case "F":
+        ev.preventDefault();
+        jumpDetection(+1);
+        break;
       case "1": case "2": case "3": case "4": case "5": {{
         const idx = Number(ev.key) - 1;
         const buttons = speedGroup.querySelectorAll("button[data-rate]");
@@ -677,10 +790,71 @@ def render_viewer_html(
   modeAll.addEventListener("click", () => setMode("all"));
   modePlayback.addEventListener("click", () => setMode("playback"));
 
-  // Initial render.
+  // --- Detection strip overlay. One horizontal row per cam directly
+  // below the scrubber, each column = one union-timeline slot. Pixels
+  // coloured so the operator sees at a glance: where the ball was
+  // detected (cam-tinted), where the cam decoded a frame but detection
+  // missed (muted grey), and where the cam had no frame at all (empty).
+  // The playhead mirrors the scrubber thumb as a dark vertical line so
+  // the strip doubles as a quick "where am I" indicator.
+  const detectionCanvas = document.getElementById("detection-canvas");
+  const STRIP_MUTED = "rgba(122, 117, 108, 0.35)";
+  const STRIP_EMPTY = "rgba(232, 228, 219, 0.6)";
+  const STRIP_HEAD = "#2A2520";
+
+  function resizeDetectionCanvas() {{
+    const cssW = detectionCanvas.clientWidth;
+    const cssH = detectionCanvas.clientHeight || 18;
+    const dpr = window.devicePixelRatio || 1;
+    const pxW = Math.max(1, Math.floor(cssW * dpr));
+    const pxH = Math.max(1, Math.floor(cssH * dpr));
+    if (detectionCanvas.width !== pxW || detectionCanvas.height !== pxH) {{
+      detectionCanvas.width = pxW;
+      detectionCanvas.height = pxH;
+    }}
+    renderDetectionStrip();
+  }}
+
+  function renderDetectionStrip() {{
+    const W = detectionCanvas.width, H = detectionCanvas.height;
+    if (!W || !H) return;
+    const ctx = detectionCanvas.getContext("2d");
+    ctx.clearRect(0, 0, W, H);
+    const cams = camsWithFrames;
+    const rows = Math.max(1, cams.length);
+    const rowH = Math.floor(H / rows);
+    for (let ci = 0; ci < cams.length; ++ci) {{
+      const cam = cams[ci];
+      const strip = camAtFrame[cam];
+      const color = CAM_COLOR[cam] || FALLBACK;
+      const y = ci * rowH;
+      ctx.fillStyle = STRIP_EMPTY;
+      ctx.fillRect(0, y, W, rowH);
+      for (let x = 0; x < W; ++x) {{
+        // Map canvas pixel x → union-timeline slot.
+        const i = TOTAL_FRAMES <= 1 ? 0
+          : Math.min(TOTAL_FRAMES - 1, Math.round(x * (TOTAL_FRAMES - 1) / (W - 1)));
+        const e = strip[i];
+        if (e === null) continue;
+        ctx.fillStyle = e.detected ? color : STRIP_MUTED;
+        ctx.fillRect(x, y, 1, rowH);
+      }}
+    }}
+    // Playhead.
+    const xHead = TOTAL_FRAMES <= 1 ? 0
+      : Math.round(currentFrame * (W - 1) / (TOTAL_FRAMES - 1));
+    ctx.fillStyle = STRIP_HEAD;
+    ctx.fillRect(Math.max(0, xHead - 1), 0, 2, H);
+  }}
+
+  window.addEventListener("resize", resizeDetectionCanvas);
+
+  // Initial render. Canvas sizing must happen after layout, so defer the
+  // first strip paint one frame so clientWidth is non-zero.
   setFrame(0, {{ seekVideos: true }});
   drawScene();
   updatePlayBtnLabel();
+  requestAnimationFrame(resizeDetectionCanvas);
 }})();
 </script>
 </body></html>"""
