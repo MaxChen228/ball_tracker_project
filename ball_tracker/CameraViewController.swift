@@ -10,6 +10,12 @@ import CoreVideo
 /// - SYNC_WAITING: tracking armed, waiting for ball to enter frame
 /// - RECORDING: cycle in progress
 /// - UPLOADING: cycle persisted, handed to the upload queue
+///
+/// Heavy side concerns live in dedicated helpers:
+/// - `ServerHealthMonitor` owns the 1 Hz heartbeat, backoff, and
+///   "last contact" tick timer.
+/// - `PayloadUploadQueue` owns the cached-pitch upload worker.
+/// - `IntrinsicsStore` owns UserDefaults keys for calibration artefacts.
 final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
     enum AppState {
         case standby
@@ -42,6 +48,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var recorder: PitchRecorder!
     private var uploader: ServerUploader!
     private var serverConfig: ServerUploader.ServerConfig!
+    private var healthMonitor: ServerHealthMonitor!
+    private var uploadQueue: PayloadUploadQueue!
 
     // UI state.
     private var lastUploadStatusText: String = "Idle"
@@ -61,20 +69,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // Chirp detector snapshot for the HUD — written on audio queue.
     private var latestChirpSnapshot: AudioChirpDetector.Snapshot?
 
-    private var serverStatusTextValue: String = "unknown"
-    private var isServerReachable: Bool = false
-    private var statusPollTimer: Timer?
-    /// Current delay (seconds) used to schedule the next probe after a
-    /// failure. 0 means "next probe uses the base interval" (the post-success
-    /// state). Capped at `maxBackoff`.
-    private var currentBackoff: TimeInterval = 0
-    /// Monotonic token used to ignore stale `/heartbeat` responses when a
-    /// manual retry or settings change kicks off a new probe before the
-    /// in-flight one returns.
-    private var probeGeneration: Int = 0
-    private var lastContactAt: Date?
-    private var tickTimer: Timer?
-    private static let maxBackoff: TimeInterval = 60
     private let ballOverlayLayer = CAShapeLayer()
 
     // Remote-control state (driven by the heartbeat response).
@@ -92,10 +86,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// session. iPhones never mint this themselves.
     private var currentSessionId: String?
 
-    // Payload persistence + upload queue.
+    // Payload persistence.
     private let payloadStore = PitchPayloadStore()
-    private var pendingPayloadFiles: [URL] = []
-    private var isUploadingPayload: Bool = false
 
     // Per-cycle H.264 clip writer, created on entry to .recording and
     // finalised when the cycle ends. Phase-1 raw-video experiment: the clip
@@ -126,16 +118,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let lastContactLabel = UILabel()
     private let testConnectionButton = UIButton(type: .system)
 
-    // UserDefaults keys for calibration-derived intrinsics.
-    private static let keyHorizontalFovRad = "horizontal_fov_rad"
-    private static let keyImageWidthPx = "image_width_px"
-    private static let keyImageHeightPx = "image_height_px"
-    private static let keyIntrinsicCx = "intrinsic_cx"
-    private static let keyIntrinsicCy = "intrinsic_cy"
-    private static let keyIntrinsicFx = "intrinsic_fx"
-    private static let keyIntrinsicFz = "intrinsic_fz"
-    private static let keyIntrinsicDistortion = "intrinsic_distortion"
-
     // MARK: - Lifecycle
 
     override func viewDidLoad() {
@@ -156,8 +138,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         settings = SettingsViewController.loadFromUserDefaults()
         serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: settings.serverPort)
 
-        let intrinsics = loadIntrinsicsFromUserDefaults()
-
         ballDetector = BallDetector(
             hsvRange: BallDetector.HSVRange(
                 hMin: settings.hMin,
@@ -167,7 +147,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 vMin: settings.vMin,
                 vMax: settings.vMax
             ),
-            intrinsics: intrinsics
+            intrinsics: IntrinsicsStore.loadBallDetectorIntrinsics()
         )
 
         recorder = PitchRecorder()
@@ -193,21 +173,27 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         do {
             try payloadStore.ensureDirectory()
-            pendingPayloadFiles = try payloadStore.listPayloadFiles()
         } catch {
-            DispatchQueue.main.async {
-                self.lastUploadStatusText = "Store init failed: \(error.localizedDescription)"
-            }
+            lastUploadStatusText = "Store init failed: \(error.localizedDescription)"
         }
 
         uploader = ServerUploader(config: serverConfig)
+        uploadQueue = PayloadUploadQueue(store: payloadStore, uploader: uploader)
+        wireUploadQueueCallbacks()
+
+        healthMonitor = ServerHealthMonitor(
+            uploader: uploader,
+            cameraId: settings.cameraRole,
+            baseIntervalS: settings.pollInterval
+        )
+        wireHealthMonitorCallbacks()
 
         setupUI()
         setupPreviewAndCapture()
         setupAudioCapture()
         setupBallOverlay()
         setupDisplayLink()
-        startStatusPolling()
+        healthMonitor.start()
         updateUIForState()
     }
 
@@ -239,13 +225,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         if !session.isRunning {
             session.startRunning()
         }
-        startStatusPolling()
+        healthMonitor.start()
         displayLink?.isPaused = false
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        stopStatusPolling()
+        healthMonitor.stop()
         displayLink?.isPaused = true
         if state == .timeSyncWaiting {
             cancelTimeSync()
@@ -257,13 +243,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // explicit invalidate the controller can't deallocate, and the
         // selector keeps firing on main. Pausing in viewWillDisappear is
         // not enough; the link must be invalidated for the retain cycle to
-        // break. Timers are belt-and-braces — stopStatusPolling already
-        // kills them, but cover the "deinit without viewWillDisappear"
-        // edge case too.
+        // break. ServerHealthMonitor.stop() is belt-and-braces —
+        // viewWillDisappear already calls it, but cover the "deinit without
+        // viewWillDisappear" edge case too.
         displayLink?.invalidate()
         displayLink = nil
-        statusPollTimer?.invalidate()
-        tickTimer?.invalidate()
+        healthMonitor?.stop()
     }
 
     // MARK: - Tracking controls
@@ -272,15 +257,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         guard state == .standby else { return }
         recorder.reset()
         reloadBallDetectorWithLatestIntrinsics()
-        pendingPayloadFiles.removeAll(keepingCapacity: true)
-        if let files = try? payloadStore.listPayloadFiles() {
-            pendingPayloadFiles.append(contentsOf: files)
-        }
-        isUploadingPayload = false
+        try? uploadQueue.reloadPending()
         state = .syncWaiting
         warningLabel.isHidden = true
         updateUIForState()
-        processNextPayloadIfNeeded()
+        uploadQueue.processNextIfNeeded()
     }
 
     func exitSyncMode() {
@@ -292,8 +273,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.clipRecorder?.cancel()
             self?.clipRecorder = nil
         }
-        pendingPayloadFiles.removeAll(keepingCapacity: true)
-        isUploadingPayload = false
+        uploadQueue.clearPending()
         warningLabel.isHidden = true
         updateUIForState()
     }
@@ -307,7 +287,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             DispatchQueue.main.async {
                 let suffix = videoURL != nil ? " (+video)" : ""
                 self.lastUploadStatusText = "Cached \(payload.session_id)\(suffix)"
-                self.enqueuePayloadForUpload(fileURL)
+                self.uploadQueue.enqueue(fileURL)
                 if self.returnToStandbyAfterCycle {
                     // A dashboard disarm arrived mid-recording; force-finish
                     // just flushed the cycle. Clean up instead of re-arming.
@@ -408,7 +388,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     targetHeight: settings.captureHeight,
                     targetFps: Double(settings.captureFps)
                 )
-                UserDefaults.standard.set(horizontalFovRadians, forKey: Self.keyHorizontalFovRad)
+                IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
 
                 let input = try AVCaptureDeviceInput(device: device)
                 if session.canAddInput(input) {
@@ -478,7 +458,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             targetHeight: settings.captureHeight,
             targetFps: Double(settings.captureFps)
         )
-        UserDefaults.standard.set(horizontalFovRadians, forKey: Self.keyHorizontalFovRad)
+        IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
         if wasRunning { session.startRunning() }
     }
 
@@ -599,84 +579,42 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         chirpDebugLabel.textColor = color
     }
 
-    /// Kicks off health-probe cadence: resets backoff and probes immediately.
-    /// Settings diffing lives in `applyUpdatedSettings`, not here — polling
-    /// is now pure connection health.
-    private func startStatusPolling() {
-        statusPollTimer?.invalidate()
-        statusPollTimer = nil
-        currentBackoff = 0
-        probeServerNow()
-        startTickTimer()
-    }
+    // MARK: - Server health + upload queue wiring
 
-    private func stopStatusPolling() {
-        statusPollTimer?.invalidate()
-        statusPollTimer = nil
-        stopTickTimer()
-    }
-
-    private func scheduleNextProbe(after delay: TimeInterval) {
-        statusPollTimer?.invalidate()
-        let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            self?.probeServerNow()
+    private func wireHealthMonitorCallbacks() {
+        healthMonitor.onStatusChanged = { [weak self] _, _ in
+            self?.updateUIForState()
         }
-        timer.tolerance = max(0.5, delay * 0.1)
-        statusPollTimer = timer
-    }
-
-    private func probeServerNow() {
-        probeGeneration += 1
-        let gen = probeGeneration
-        serverStatusTextValue = "checking…"
-        updateUIForState()
-        let cam = settings.cameraRole
-        uploader.sendHeartbeat(cameraId: cam) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self, gen == self.probeGeneration else { return }
-                switch result {
-                case .success(let response):
-                    self.isServerReachable = true
-                    self.serverStatusTextValue = self.heartbeatDisplayText(response)
-                    self.lastContactAt = Date()
-                    self.currentBackoff = 0
-                    // Cache the server's session id so `startRecording` can
-                    // stamp it onto uploads without another round-trip.
-                    // Nil when the server is idle.
-                    self.currentSessionId = (response.session?.armed == true)
-                        ? response.session?.id
-                        : nil
-                    self.scheduleNextProbe(after: self.settings.pollInterval)
-                    self.handleDashboardCommand(
-                        response.commands?[cam],
-                        sessionArmed: response.session?.armed ?? false
-                    )
-                case .failure:
-                    self.isServerReachable = false
-                    self.serverStatusTextValue = "offline"
-                    let base = self.settings.pollInterval
-                    let next = self.currentBackoff == 0 ? base : min(Self.maxBackoff, self.currentBackoff * 2)
-                    self.currentBackoff = next
-                    self.scheduleNextProbe(after: next)
-                }
-                self.updateLastContactLabel()
-                self.updateUIForState()
-            }
+        healthMonitor.onHeartbeatSuccess = { [weak self] response in
+            guard let self else { return }
+            // Cache the server's session id so `startRecording` can stamp
+            // it onto uploads without another round-trip. Nil when idle.
+            self.currentSessionId = (response.session?.armed == true)
+                ? response.session?.id
+                : nil
+            let cam = self.settings.cameraRole
+            self.handleDashboardCommand(
+                response.commands?[cam],
+                sessionArmed: response.session?.armed ?? false
+            )
+        }
+        healthMonitor.onLastContactTick = { [weak self] date in
+            self?.updateLastContactLabel(from: date)
         }
     }
 
-    /// Summarise the heartbeat reply for the `Server` HUD label. Prefer the
-    /// session state when available — operators care about ARMED vs IDLE,
-    /// not the generic "receiving"/"idle" string the old /status gave.
-    private func heartbeatDisplayText(_ r: ServerUploader.HeartbeatResponse) -> String {
-        if let s = r.session {
-            if s.armed {
-                return "ARMED (\(s.id))"
-            }
-            let reason = s.end_reason ?? "ended"
-            return "IDLE · last: \(reason)"
+    private func wireUploadQueueCallbacks() {
+        uploadQueue.onStatusTextChanged = { [weak self] text in
+            self?.lastUploadStatusText = text
+            self?.updateUIForState()
         }
-        return r.state ?? "reachable"
+        uploadQueue.onLastResultChanged = { [weak self] text in
+            self?.lastResultText = text
+            self?.updateUIForState()
+        }
+        uploadQueue.onUploadingChanged = { [weak self] _ in
+            self?.updateUIForState()
+        }
     }
 
     /// Dispatch the server's per-device command. Only reacts to state
@@ -731,8 +669,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     @objc private func onTapTestConnection() {
-        currentBackoff = 0
-        probeServerNow()
+        healthMonitor.resetBackoff()
+        healthMonitor.probeNow()
     }
 
     /// Settings-dismiss callback. Re-diffs UserDefaults and reconfigures
@@ -746,12 +684,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             || latest.captureFps != settings.captureFps
         let chirpThresholdChanged = latest.chirpThreshold != settings.chirpThreshold
         let pollIntervalChanged = latest.pollInterval != settings.pollInterval
+        let cameraRoleChanged = latest.cameraRole != settings.cameraRole
 
         settings = latest
 
         if serverChanged {
             serverConfig = ServerUploader.ServerConfig(serverIP: latest.serverIP, serverPort: latest.serverPort)
             uploader = ServerUploader(config: serverConfig)
+            healthMonitor.updateUploader(uploader)
+            uploadQueue.updateUploader(uploader)
         }
         if formatChanged {
             reconfigureCapture()
@@ -759,38 +700,29 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         if chirpThresholdChanged {
             chirpDetector?.setThreshold(Float(latest.chirpThreshold))
         }
+        if cameraRoleChanged {
+            healthMonitor.updateCameraId(latest.cameraRole)
+        }
+        if pollIntervalChanged {
+            healthMonitor.updateBaseInterval(latest.pollInterval)
+        }
         recorder?.setCameraId(latest.cameraRole)
         reloadBallDetectorWithLatestIntrinsics()
 
         if serverChanged || pollIntervalChanged {
             // New endpoint or new cadence — invalidate in-flight probe, reset
             // backoff, and re-probe immediately so the HUD reflects reality.
-            currentBackoff = 0
-            probeServerNow()
+            healthMonitor.resetBackoff()
+            healthMonitor.probeNow()
         }
     }
 
-    private func startTickTimer() {
-        tickTimer?.invalidate()
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.updateLastContactLabel()
-        }
-        timer.tolerance = 0.5
-        tickTimer = timer
-        updateLastContactLabel()
-    }
-
-    private func stopTickTimer() {
-        tickTimer?.invalidate()
-        tickTimer = nil
-    }
-
-    private func updateLastContactLabel() {
-        guard let ts = lastContactAt else {
+    private func updateLastContactLabel(from date: Date?) {
+        guard let date else {
             lastContactLabel.text = "Last contact: —"
             return
         }
-        let s = Int(Date().timeIntervalSince(ts))
+        let s = Int(Date().timeIntervalSince(date))
         let text: String
         if s < 60 {
             text = "\(s)s ago"
@@ -947,7 +879,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func updateUIForState() {
         topStatusLabel.text = "State: \(stateText(state))"
-        serverStatusLabel.text = "Server \(serverReachableText())"
+        serverStatusLabel.text = "Server \(healthMonitor?.statusText ?? "unknown")"
         serverStatusDot.backgroundColor = serverReachableColor()
         fpsLabel.text = String(format: "FPS %.1f", fpsEstimate)
         uploadStatusLabel.text = "Upload: \(lastUploadStatusText)"
@@ -981,15 +913,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    private func serverReachableText() -> String {
-        return serverStatusTextValue
-    }
-
     private func serverReachableColor() -> UIColor {
-        if isUploadingPayload {
+        if uploadQueue?.isUploading ?? false {
             return .systemOrange
         }
-        return isServerReachable ? .systemGreen : .systemRed
+        return (healthMonitor?.isReachable ?? false) ? .systemGreen : .systemRed
     }
 
     // MARK: - Video frame processing
@@ -1013,8 +941,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         if latestImageWidth != width || latestImageHeight != height {
-            UserDefaults.standard.set(width, forKey: Self.keyImageWidthPx)
-            UserDefaults.standard.set(height, forKey: Self.keyImageHeightPx)
+            IntrinsicsStore.setImageDimensions(width: width, height: height)
         }
 
         let currentIndex = frameIndex
@@ -1097,81 +1024,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    private func enqueuePayloadForUpload(_ fileURL: URL) {
-        pendingPayloadFiles.append(fileURL)
-        processNextPayloadIfNeeded()
-    }
-
-    private func processNextPayloadIfNeeded() {
-        guard !isUploadingPayload else { return }
-        guard !pendingPayloadFiles.isEmpty else { return }
-
-        isUploadingPayload = true
-        let fileURL = pendingPayloadFiles.removeFirst()
-
-        DispatchQueue.main.async {
-            self.lastUploadStatusText = "Uploading cached pitch..."
-            self.updateUIForState()
-        }
-
-        let payload: ServerUploader.PitchPayload
-        do {
-            payload = try payloadStore.load(fileURL)
-        } catch {
-            isUploadingPayload = false
-            lastUploadStatusText = "Cache read failed: \(error.localizedDescription)"
-            updateUIForState()
-            processNextPayloadIfNeeded()
-            return
-        }
-
-        let videoURL = payloadStore.videoURL(forPayload: fileURL)
-
-        uploader.uploadPitch(payload, videoURL: videoURL) { [weak self] result in
-            guard let self else { return }
-            DispatchQueue.main.async {
-                var retryAfterFailure = false
-                switch result {
-                case .success(let response):
-                    self.payloadStore.delete(fileURL)
-                    self.lastUploadStatusText = "Uploaded \(payload.session_id)"
-                    self.lastResultText = self.formatResultSummary(response)
-                case .failure(let error):
-                    self.lastUploadStatusText = "Upload failed: \(error.localizedDescription)"
-                    self.pendingPayloadFiles.insert(fileURL, at: 0)
-                    retryAfterFailure = true
-                }
-                self.isUploadingPayload = false
-                self.updateUIForState()
-                if retryAfterFailure {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                        self.processNextPayloadIfNeeded()
-                    }
-                } else {
-                    self.processNextPayloadIfNeeded()
-                }
-            }
-        }
-    }
-
-    private func formatResultSummary(_ r: ServerUploader.PitchUploadResponse) -> String {
-        let sid = r.session_id
-        if let err = r.error, !err.isEmpty {
-            return "\(sid) ✗ \(err)"
-        }
-        if !r.paired {
-            return "\(sid) 已收 (等待另一相機)"
-        }
-        if r.triangulated_points == 0 {
-            return "\(sid) ✗ 0 pts (時間窗口未對齊?)"
-        }
-        let gapMm = (r.mean_residual_m ?? 0) * 1000.0
-        let peakZ = r.peak_z_m ?? 0
-        let dur = r.duration_s ?? 0
-        return String(format: "%@ ✓ %d pts gap=%.0fmm peak=%.2fm dur=%.2fs",
-                      sid, r.triangulated_points, gapMm, peakZ, dur)
-    }
-
     private func updateFpsEstimate() {
         framesSinceLastFpsTick += 1
         let now = CACurrentMediaTime()
@@ -1207,29 +1059,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // MARK: - Payload enrichment
 
     private func enrichedPayload(from payload: ServerUploader.PitchPayload) -> ServerUploader.PitchPayload {
-        let d = UserDefaults.standard
-        var intrinsics: ServerUploader.IntrinsicsPayload? = nil
-        if
-            d.object(forKey: Self.keyIntrinsicFx) != nil,
-            d.object(forKey: Self.keyIntrinsicFz) != nil,
-            d.object(forKey: Self.keyIntrinsicCx) != nil,
-            d.object(forKey: Self.keyIntrinsicCy) != nil
-        {
-            var distortion: [Double]? = nil
-            if let arr = d.array(forKey: Self.keyIntrinsicDistortion) as? [Double], arr.count == 5 {
-                distortion = arr
-            }
-            intrinsics = ServerUploader.IntrinsicsPayload(
-                fx: d.double(forKey: Self.keyIntrinsicFx),
-                fz: d.double(forKey: Self.keyIntrinsicFz),
-                cx: d.double(forKey: Self.keyIntrinsicCx),
-                cy: d.double(forKey: Self.keyIntrinsicCy),
-                distortion: distortion
-            )
-        }
-        let homography = d.array(forKey: "homography_3x3") as? [Double]
-        let w = d.integer(forKey: Self.keyImageWidthPx)
-        let h = d.integer(forKey: Self.keyImageHeightPx)
+        let dims = IntrinsicsStore.loadImageDimensions()
         return ServerUploader.PitchPayload(
             camera_id: payload.camera_id,
             session_id: payload.session_id,
@@ -1237,32 +1067,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             sync_anchor_timestamp_s: payload.sync_anchor_timestamp_s,
             local_recording_index: payload.local_recording_index,
             frames: payload.frames,
-            intrinsics: intrinsics,
-            homography: homography,
-            image_width_px: w > 0 ? w : nil,
-            image_height_px: h > 0 ? h : nil
+            intrinsics: IntrinsicsStore.loadIntrinsicsPayload(),
+            homography: IntrinsicsStore.loadHomography(),
+            image_width_px: dims?.width,
+            image_height_px: dims?.height
         )
-    }
-
-    private func loadIntrinsicsFromUserDefaults() -> BallDetector.Intrinsics? {
-        let d = UserDefaults.standard
-        let hasAll =
-            d.object(forKey: Self.keyIntrinsicFx) != nil &&
-            d.object(forKey: Self.keyIntrinsicFz) != nil &&
-            d.object(forKey: Self.keyIntrinsicCx) != nil &&
-            d.object(forKey: Self.keyIntrinsicCy) != nil
-        guard hasAll else { return nil }
-        let fx = d.double(forKey: Self.keyIntrinsicFx)
-        let fz = d.double(forKey: Self.keyIntrinsicFz)
-        let cx = d.double(forKey: Self.keyIntrinsicCx)
-        let cy = d.double(forKey: Self.keyIntrinsicCy)
-        if fx == 0 || fz == 0 { return nil }
-        return BallDetector.Intrinsics(cx: cx, cy: cy, fx: fx, fz: fz)
     }
 
     private func reloadBallDetectorWithLatestIntrinsics() {
         guard settings != nil else { return }
-        let intrinsics = loadIntrinsicsFromUserDefaults()
         ballDetector = BallDetector(
             hsvRange: BallDetector.HSVRange(
                 hMin: settings.hMin,
@@ -1272,7 +1085,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 vMin: settings.vMin,
                 vMax: settings.vMax
             ),
-            intrinsics: intrinsics
+            intrinsics: IntrinsicsStore.loadBallDetectorIntrinsics()
         )
     }
 
