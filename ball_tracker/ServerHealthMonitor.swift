@@ -15,6 +15,10 @@ final class ServerHealthMonitor {
     private var uploader: ServerUploader
     private var cameraId: String
     private var baseIntervalS: TimeInterval
+    /// Mirrored from the camera VC whenever a chirp anchor is set or
+    /// cleared. Stamped onto every outgoing heartbeat so the dashboard
+    /// can show per-device time-sync status without peeking at payloads.
+    private var timeSynced: Bool = false
 
     private var pollTimer: Timer?
     private var tickTimer: Timer?
@@ -75,6 +79,12 @@ final class ServerHealthMonitor {
         cameraId = id
     }
 
+    /// Set by the camera VC when a chirp anchor is recorded or cleared.
+    /// Cheap: only the next heartbeat picks this up, no immediate probe.
+    func updateTimeSynced(_ synced: Bool) {
+        timeSynced = synced
+    }
+
     /// Replace the post-success poll cadence. Does not reschedule any
     /// in-flight probe — pair with `probeNow()` if you want it to take
     /// effect immediately.
@@ -102,7 +112,7 @@ final class ServerHealthMonitor {
         let gen = probeGeneration
         updateStatus(text: "checking…", reachable: isReachable)
         let cam = cameraId
-        uploader.sendHeartbeat(cameraId: cam) { [weak self] result in
+        uploader.sendHeartbeat(cameraId: cam, timeSynced: timeSynced) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self, gen == self.probeGeneration else { return }
                 switch result {

@@ -327,21 +327,27 @@ def test_dashboard_renders_control_panel():
     r = client.get("/")
     assert r.status_code == 200
     body = r.text
-    assert "ball_tracker dashboard" in body
+    # Nav brand + the three SSR-hydrated panel containers the JS polls into.
+    assert "BALL_TRACKER" in body
     assert 'action="/sessions/arm"' in body
     assert 'action="/sessions/cancel"' in body
-    assert 'id="devices-badges"' in body
-    assert 'id="session-state"' in body
+    assert 'id="devices-body"' in body
+    assert 'id="session-body"' in body
+    assert 'id="events-body"' in body
+    assert 'id="scene-root"' in body
 
 
 def test_dashboard_marks_expected_cameras_offline_when_absent():
     client = TestClient(app)
     r = client.get("/")
-    # Neither A nor B have heartbeated → both rendered offline in the
-    # initial server-rendered badge row.
+    # Neither A nor B have heartbeated → both rendered with the "Not seen"
+    # caption and the idle/offline chip in the initial server-rendered
+    # device list. `in` (not `count`) so incidental matches inside the
+    # inline JS template don't throw off the assertion.
     body = r.text
-    assert 'class="badge offline">A' in body
-    assert 'class="badge offline">B' in body
+    assert '<div class="id">A</div>' in body
+    assert '<div class="id">B</div>' in body
+    assert body.count('<div class="meta">Not seen</div>') >= 2
 
 
 # --- Helpers ---------------------------------------------------------------

@@ -1,8 +1,18 @@
 """FastAPI ingest + triangulation server for ball_tracker iPhone app.
 
 Endpoints:
-  GET  /                            — dashboard (devices, session state,
-                                       Arm / Cancel controls, events table)
+  GET  /                            — dashboard (nav + 440 px sidebar with
+                                       devices / session / events + full-bleed
+                                       3D canvas showing the calibration scene)
+  POST /calibration                 — iPhone uploads a freshly-saved
+                                       `{camera_id, intrinsics, homography,
+                                       image_{width,height}_px}` so the
+                                       dashboard can render the camera pose
+                                       immediately (before any pitch arrives).
+                                       Idempotent overwrite per camera_id.
+  GET  /calibration/state           — dashboard polls this every 5 s; returns
+                                       the current per-camera snapshots +
+                                       a ready-to-`Plotly.react` figure spec.
   GET  /status                      — health + online devices + session +
                                        per-camera commands
   POST /pitch                       — ingest one session upload (multipart:
@@ -59,6 +69,7 @@ from pydantic import ValidationError
 # existing test suite and any downstream tooling. New callers should import
 # from the split modules directly (schemas / pairing / chirp / render_*).
 from schemas import (
+    CalibrationSnapshot,
     Device,
     FramePayload,
     HeartbeatBody,
@@ -133,17 +144,26 @@ class State:
         self._pitch_dir = data_dir / "pitches"
         self._result_dir = data_dir / "results"
         self._video_dir = data_dir / "videos"
+        self._calibration_dir = data_dir / "calibrations"
         self._pitch_dir.mkdir(parents=True, exist_ok=True)
         self._result_dir.mkdir(parents=True, exist_ok=True)
         self._video_dir.mkdir(parents=True, exist_ok=True)
+        self._calibration_dir.mkdir(parents=True, exist_ok=True)
         # Dashboard-control state. All in-memory — devices re-heartbeat on
         # connection, sessions don't survive restart.
         self._devices: dict[str, Device] = {}
         self._current_session: Session | None = None
         self._last_ended_session: Session | None = None
+        # Per-camera calibration snapshots. Written by POST /calibration,
+        # read by the dashboard canvas so the 3D preview shows where each
+        # phone "thinks it is" relative to the plate, independent of any
+        # session. Persisted as one JSON per camera so a server restart
+        # keeps whatever calibrations were live.
+        self._calibrations: dict[str, CalibrationSnapshot] = {}
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
         self._load_from_disk()
+        self._load_calibrations_from_disk()
 
     @property
     def data_dir(self) -> Path:
@@ -215,6 +235,39 @@ class State:
                 len(seen_sessions),
                 self._data_dir,
             )
+
+    def _calibration_path(self, camera_id: str) -> Path:
+        return self._calibration_dir / f"{camera_id}.json"
+
+    def _load_calibrations_from_disk(self) -> None:
+        for path in sorted(self._calibration_dir.glob("*.json")):
+            try:
+                obj = json.loads(path.read_text())
+                snap = CalibrationSnapshot.model_validate(obj)
+            except Exception as e:
+                logger.warning("skip corrupt calibration file %s: %s", path.name, e)
+                continue
+            self._calibrations[snap.camera_id] = snap
+        if self._calibrations:
+            logger.info(
+                "restored %d camera calibration(s) from %s",
+                len(self._calibrations),
+                self._calibration_dir,
+            )
+
+    def set_calibration(self, snapshot: CalibrationSnapshot) -> None:
+        """Record (or overwrite) one camera's calibration and persist it
+        atomically so the dashboard survives a restart. Last write wins —
+        the phone re-POSTs every time the user completes a Calibration
+        screen save, so there's no attempt to version older snapshots."""
+        payload = snapshot.model_dump_json(indent=2)
+        with self._lock:
+            self._calibrations[snapshot.camera_id] = snapshot
+            self._atomic_write(self._calibration_path(snapshot.camera_id), payload)
+
+    def calibrations(self) -> dict[str, CalibrationSnapshot]:
+        with self._lock:
+            return dict(self._calibrations)
 
     def _atomic_write(self, path: Path, payload: str) -> None:
         # Unique tmp filename per call so concurrent writers targeting the
@@ -326,16 +379,19 @@ class State:
     # Dashboard-control plumbing: heartbeat registry + session state
     # ------------------------------------------------------------------
 
-    def heartbeat(self, camera_id: str) -> None:
+    def heartbeat(self, camera_id: str, time_synced: bool = False) -> None:
         """Record one liveness ping. Overwrites the previous entry for this
-        camera so `last_seen_at` always reflects the latest beat. Prunes any
+        camera so `last_seen_at` and `time_synced` always reflect the latest
+        beat — the phone is the authoritative source for both. Prunes any
         entry older than `_DEVICE_GC_AFTER_S` and enforces a hard size cap
         (evicts the oldest by `last_seen_at`) so a misbehaving client can't
         grow the registry without bound."""
         now = self._time_fn()
         with self._lock:
             self._devices[camera_id] = Device(
-                camera_id=camera_id, last_seen_at=now
+                camera_id=camera_id,
+                last_seen_at=now,
+                time_synced=time_synced,
             )
             # GC stale entries first — cheap and keeps the cap hit rare.
             stale = [
@@ -624,7 +680,11 @@ def _build_status_response() -> dict[str, Any]:
     return {
         **summary,
         "devices": [
-            {"camera_id": d.camera_id, "last_seen_at": d.last_seen_at}
+            {
+                "camera_id": d.camera_id,
+                "last_seen_at": d.last_seen_at,
+                "time_synced": d.time_synced,
+            }
             for d in state.online_devices()
         ],
         "session": session.to_dict() if session is not None else None,
@@ -641,7 +701,7 @@ def status() -> dict[str, Any]:
 def heartbeat(body: HeartbeatBody) -> dict[str, Any]:
     """iPhone liveness ping. Responds with the same payload as /status so
     the phone can decide arm/disarm from the reply without a second call."""
-    state.heartbeat(body.camera_id)
+    state.heartbeat(body.camera_id, time_synced=body.time_synced)
     return _build_status_response()
 
 
@@ -846,6 +906,55 @@ def events() -> list[dict[str, Any]]:
     return state.events()
 
 
+@app.post("/calibration")
+def post_calibration(snapshot: CalibrationSnapshot) -> dict[str, Any]:
+    """iPhone pushes its freshly-solved calibration (intrinsics + homography)
+    so the dashboard canvas can show where the camera is positioned in world
+    space, even before the first pitch is ever recorded. Idempotent overwrite:
+    each camera only keeps its latest snapshot."""
+    state.set_calibration(snapshot)
+    return {
+        "ok": True,
+        "camera_id": snapshot.camera_id,
+        "image_width_px": snapshot.image_width_px,
+        "image_height_px": snapshot.image_height_px,
+    }
+
+
+@app.get("/calibration/state")
+def calibration_state() -> dict[str, Any]:
+    """Dashboard polls this to repaint the canvas whenever a new calibration
+    lands. Returns both the raw scene (so callers can rebuild custom views)
+    and a ready-to-`Plotly.react` figure spec — the dashboard uses the
+    latter so the trace/layout construction stays centralised server-side
+    and the browser only speaks figure JSON."""
+    from reconstruct import build_calibration_scene
+    from render_scene import _build_figure
+
+    cals = state.calibrations()
+    scene = build_calibration_scene(cals)
+    # `fig.to_plotly_json()` can leak numpy arrays into the payload; the
+    # JSON round-trip guarantees everything is native-Python and FastAPI
+    # can serialise it without reaching for a custom encoder.
+    fig = _build_figure(scene)
+    fig_json = json.loads(fig.to_json())
+    return {
+        "calibrations": [
+            {
+                "camera_id": cam_id,
+                "image_width_px": snap.image_width_px,
+                "image_height_px": snap.image_height_px,
+            }
+            for cam_id, snap in sorted(cals.items())
+        ],
+        "scene": scene.to_dict(),
+        "plot": {
+            "data": fig_json.get("data", []),
+            "layout": fig_json.get("layout", {}),
+        },
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def events_index() -> HTMLResponse:
     from render_dashboard import render_events_index_html
@@ -855,10 +964,15 @@ def events_index() -> HTMLResponse:
         render_events_index_html(
             events=state.events(),
             devices=[
-                {"camera_id": d.camera_id, "last_seen_at": d.last_seen_at}
+                {
+                    "camera_id": d.camera_id,
+                    "last_seen_at": d.last_seen_at,
+                    "time_synced": d.time_synced,
+                }
                 for d in state.online_devices()
             ],
             session=session.to_dict() if session is not None else None,
+            calibrations=sorted(state.calibrations().keys()),
         )
     )
 

@@ -125,7 +125,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
     private let chirpDebugLabel = UILabel()
-    private let trackingButton = UIButton(type: .system)
     private let lastContactLabel = UILabel()
     private let testConnectionButton = UIButton(type: .system)
 
@@ -410,6 +409,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         chirpDetector?.onChirpDetected = nil
         lastSyncAnchorFrameIndex = event.anchorFrameIndex
         lastSyncAnchorTimestampS = event.anchorTimestampS
+        // Surface the freshly-acquired anchor to the dashboard via the
+        // next heartbeat so the sidebar's "time sync" dot flips green.
+        healthMonitor?.updateTimeSynced(true)
         latestChirpSnapshot = nil
         state = .standby
         warningLabel.isHidden = true
@@ -911,65 +913,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         statusContainer.addArrangedSubview(chirpDebugLabel)
         view.addSubview(statusContainer)
 
-        func styleButton(_ button: UIButton, title: String, background: UIColor) {
-            button.setTitle(title, for: .normal)
-            button.setTitleColor(.white, for: .normal)
-            button.backgroundColor = background.withAlphaComponent(0.92)
-            button.titleLabel?.font = .systemFont(ofSize: 16, weight: .bold)
-            button.layer.cornerRadius = 12
-            button.contentEdgeInsets = UIEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
-            button.translatesAutoresizingMaskIntoConstraints = false
-        }
-
-        styleButton(trackingButton, title: "啟動追蹤", background: .systemBlue)
-        trackingButton.addTarget(self, action: #selector(onTapTracking), for: .touchUpInside)
-        view.addSubview(trackingButton)
-
         NSLayoutConstraint.activate([
             statusContainer.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             statusContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             statusContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-
-            trackingButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            trackingButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            trackingButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
         ])
-    }
-
-    @objc private func onTapTracking() {
-        if state == .standby {
-            // Local escape-hatch: make sure a server session exists before
-            // we enter syncWaiting, otherwise the first recording would
-            // have no session_id to stamp onto its upload.
-            if currentSessionId != nil {
-                enterSyncMode()
-            } else {
-                trackingButton.isEnabled = false
-                lastUploadStatusText = "Arming session…"
-                updateUIForState()
-                uploader.armSession { [weak self] result in
-                    DispatchQueue.main.async {
-                        guard let self else { return }
-                        self.trackingButton.isEnabled = true
-                        switch result {
-                        case .success(let session):
-                            self.currentSessionId = session.armed ? session.id : nil
-                            if self.currentSessionId != nil {
-                                self.enterSyncMode()
-                            } else {
-                                self.lastUploadStatusText = "Arm returned an ended session (\(session.end_reason ?? "?")). Try again."
-                                self.updateUIForState()
-                            }
-                        case .failure(let error):
-                            self.lastUploadStatusText = "Arm failed: \(error.localizedDescription)"
-                            self.updateUIForState()
-                        }
-                    }
-                }
-            }
-        } else {
-            exitSyncMode()
-        }
     }
 
     private func updateUIForState() {
@@ -981,21 +929,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         lastResultLabel.text = "Last: \(lastResultText)"
 
         chirpDebugLabel.isHidden = (state != .timeSyncWaiting)
-
-        switch state {
-        case .standby:
-            trackingButton.setTitle("啟動追蹤", for: .normal)
-            trackingButton.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.92)
-            trackingButton.isEnabled = true
-        case .timeSyncWaiting:
-            trackingButton.setTitle("時間校正中…", for: .normal)
-            trackingButton.backgroundColor = UIColor.systemGray.withAlphaComponent(0.85)
-            trackingButton.isEnabled = false
-        case .syncWaiting, .recording, .uploading:
-            trackingButton.setTitle("停止追蹤", for: .normal)
-            trackingButton.backgroundColor = UIColor.systemRed.withAlphaComponent(0.92)
-            trackingButton.isEnabled = true
-        }
     }
 
     private func stateText(_ state: AppState) -> String {

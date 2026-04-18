@@ -87,6 +87,26 @@ class SessionResult(BaseModel):
 
 class HeartbeatBody(BaseModel):
     camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
+    # Whether this phone currently has a valid audio-chirp sync anchor
+    # cached locally. Surfaced on `/status` so the dashboard can show a
+    # per-device "time sync ✓/✗" badge without waiting for a pitch
+    # upload. Optional + defaults False so older iOS builds that don't
+    # send the field still validate.
+    time_synced: bool = False
+
+
+class CalibrationSnapshot(BaseModel):
+    """Standalone calibration upload. Sent by the phone whenever the user
+    finishes Auto (ArUco) or Manual 5-handle Save, so the dashboard can draw
+    the camera's pose in the 3D canvas without waiting for a pitch. Same
+    `intrinsics + homography + image_{width,height}_px` shape PitchPayload
+    already carries — the server can reuse `reconstruct`'s extrinsics math
+    on it verbatim."""
+    camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
+    intrinsics: IntrinsicsPayload
+    homography: list[float] = Field(..., min_length=9, max_length=9)
+    image_width_px: int
+    image_height_px: int
 
 
 # nobody threw anything" — otherwise /status would keep dispatching arm
@@ -99,9 +119,13 @@ class Device:
     """Most recent heartbeat from a single iPhone. `last_seen_at` is a wall
     clock unix timestamp so `now - last_seen_at` compares cleanly even
     across server restarts (the dict is memory-only, so restart implies no
-    device is online yet)."""
+    device is online yet). `time_synced` is the latest value the phone
+    asserted on its heartbeat — the phone is authoritative because only
+    it owns the chirp-detector state, so every heartbeat simply overwrites
+    the cached flag."""
     camera_id: str
     last_seen_at: float
+    time_synced: bool = False
 
 
 @dataclass

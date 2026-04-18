@@ -1,32 +1,89 @@
-"""Plotly 3D scene renderer for /viewer/{session_id} — extracted from viewer.py.
+"""Plotly 3D scene renderer for /viewer/{session_id} and the dashboard
+canvas — extracted from viewer.py.
 
 Returns a self-contained HTML string with the ground plane, world axes,
 per-camera marker + local RGB triad + forward arrow, ray bundles, and
 the triangulated trajectory coloured by time. Loads Plotly.js from CDN
 so the file stays tiny and opens in any modern browser without a build
 step. `reconstruct.Scene` is the stable input hand-off.
+
+Colour palette mirrors the `PHYSICS_LAB` design system (warm neutrals +
+semantic roles) — `contra` for camera A, `dual` for camera B, `accent`
+for the triangulated trajectory, `borderL` for the plate mesh, `ink`
+at 40% for world axes.
 """
 from __future__ import annotations
 
 from reconstruct import Scene
 
+# Design-system tokens reused across the dashboard and this scene so the
+# 3D canvas visually belongs to the same page as the sidebar.
+_BG = "#F8F7F4"
+_SURFACE = "#FCFBFA"
+_INK = "#2A2520"
+_INK_40 = "rgba(42, 37, 32, 0.4)"
+_SUB = "#7A756C"
+_BORDER_BASE = "#DBD6CD"
+_BORDER_L = "#E8E4DB"
+_CONTRA = "#4A6B8C"   # Cam A — semantic blue
+_DUAL = "#D35400"     # Cam B — semantic warm
+_DEV = "#C0392B"      # semantic red (axis X / error)
+_ACCENT = "#E6B300"   # interactive / triangulated trajectory highlight
+
 _CAMERA_COLORS = {
-    "A": "royalblue",
-    "B": "darkorange",
+    "A": _CONTRA,
+    "B": _DUAL,
 }
-_FALLBACK_CAMERA_COLOR = "gray"
+_FALLBACK_CAMERA_COLOR = _SUB
 _GROUND_HALF_EXTENT_M = 1.5   # ground mesh drawn from (-1.5, -1.5) to (+1.5, +1.5)
 _WORLD_AXIS_LEN_M = 0.3
 _CAMERA_AXIS_LEN_M = 0.25
 _CAMERA_FORWARD_ARROW_M = 0.5
 
+# Home-plate pentagon (world frame, Z=0). Vertices match the iOS
+# CalibrationViewController's `markerWorldPoints`: front edge is at Y=0
+# facing the pitcher, back tip is toward the catcher at Y=+0.432 m.
+# Drawn with a filled mesh + outlined pentagon so it's clearly readable
+# on top of the dim ground plane.
+_PLATE_WIDTH_M = 0.432
+_PLATE_SHOULDER_Y_M = 0.216
+_PLATE_TIP_Y_M = 0.432
+_PLATE_X = [
+    -_PLATE_WIDTH_M / 2,   # FL
+    +_PLATE_WIDTH_M / 2,   # FR
+    +_PLATE_WIDTH_M / 2,   # RS
+    0.0,                   # BT
+    -_PLATE_WIDTH_M / 2,   # LS
+]
+_PLATE_Y = [
+    0.0,
+    0.0,
+    _PLATE_SHOULDER_Y_M,
+    _PLATE_TIP_Y_M,
+    _PLATE_SHOULDER_Y_M,
+]
+
 
 def render_scene_html(scene: Scene) -> str:
+    return _build_figure(scene).to_html(include_plotlyjs="cdn", full_html=True)
+
+
+def render_scene_div(scene: Scene, div_id: str = "canvas-scene") -> str:
+    """HTML fragment (no <html> wrapper) for embedding the 3D scene inside
+    the dashboard shell. Plotly.js is assumed to be loaded once at the top
+    of the host document — each fragment only ships its trace data."""
+    return _build_figure(scene).to_html(
+        include_plotlyjs=False, full_html=False, div_id=div_id
+    )
+
+
+def _build_figure(scene: Scene):
     import plotly.graph_objects as go
 
     traces: list = []
 
-    # --- Ground plane (Z=0) ---
+    # --- Ground plane (Z=0). Very dim so the pentagon reads cleanly on
+    #     top of it; the ground is purely a reference surface, not content.
     g = _GROUND_HALF_EXTENT_M
     traces.append(
         go.Mesh3d(
@@ -34,19 +91,55 @@ def render_scene_html(scene: Scene) -> str:
             y=[-g, -g, g, g],
             z=[0.0, 0.0, 0.0, 0.0],
             i=[0, 0], j=[1, 2], k=[2, 3],
-            color="lightgray",
-            opacity=0.25,
+            color=_BORDER_L,
+            opacity=0.18,
             name="ground (Z=0)",
             hoverinfo="skip",
             showlegend=False,
         )
     )
 
-    # --- World axes at origin (RGB) ---
+    # --- Home plate (Z=0). Filled pentagon in `surface` with an ink
+    #     outline — high enough contrast against the ground that the
+    #     canvas always reads as "the plate is the anchor" even before
+    #     any camera exists.
+    traces.append(
+        go.Mesh3d(
+            x=_PLATE_X,
+            y=_PLATE_Y,
+            z=[0.0] * 5,
+            # Fan triangulation from vertex 0 (FL): (0,1,2), (0,2,3), (0,3,4).
+            i=[0, 0, 0],
+            j=[1, 2, 3],
+            k=[2, 3, 4],
+            color=_SURFACE,
+            opacity=0.95,
+            flatshading=True,
+            name="home plate",
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    traces.append(
+        go.Scatter3d(
+            x=_PLATE_X + [_PLATE_X[0]],
+            y=_PLATE_Y + [_PLATE_Y[0]],
+            z=[0.0] * 6,
+            mode="lines",
+            line=dict(color=_INK, width=3),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+
+    # --- World axes at origin. Ink-tinted instead of full-saturation RGB
+    #     so the axes recede behind the semantic camera colours — matches
+    #     the design-system rule that semantic colour is meaning, not
+    #     decoration.
     for direction, color, label in (
-        ((1.0, 0.0, 0.0), "crimson", "X"),
-        ((0.0, 1.0, 0.0), "seagreen", "Y"),
-        ((0.0, 0.0, 1.0), "royalblue", "Z_world"),
+        ((1.0, 0.0, 0.0), _DEV, "X"),
+        ((0.0, 1.0, 0.0), _CONTRA, "Y"),
+        ((0.0, 0.0, 1.0), _INK_40, "Z"),
     ):
         dx, dy, dz = direction
         traces.append(
@@ -57,7 +150,8 @@ def render_scene_html(scene: Scene) -> str:
                 mode="lines+text",
                 text=["", label],
                 textposition="top center",
-                line=dict(color=color, width=5),
+                textfont=dict(family="JetBrains Mono, monospace", size=11, color=_INK),
+                line=dict(color=color, width=4),
                 hoverinfo="skip",
                 showlegend=False,
             )
@@ -85,12 +179,14 @@ def render_scene_html(scene: Scene) -> str:
             )
         )
 
-        # Local axes: forward (cam+Z) long blue arrow, right (+X) short red,
-        # up (-image_down) short green. Helps see orientation at a glance.
+        # Local axes: forward (cam+Z) in the camera's own tinted colour
+        # (so A/B stay visually distinct at a glance), right (+X) and
+        # up (-image_down) in muted ink so they don't compete with the
+        # forward vector for the eye.
         for axis, axis_color, length in (
             (cam.axis_forward_world, color, _CAMERA_FORWARD_ARROW_M),
-            (cam.axis_right_world, "crimson", _CAMERA_AXIS_LEN_M),
-            (cam.axis_up_world, "seagreen", _CAMERA_AXIS_LEN_M),
+            (cam.axis_right_world, _DEV, _CAMERA_AXIS_LEN_M),
+            (cam.axis_up_world, _INK_40, _CAMERA_AXIS_LEN_M),
         ):
             traces.append(
                 go.Scatter3d(
@@ -139,13 +235,18 @@ def render_scene_html(scene: Scene) -> str:
             go.Scatter3d(
                 x=xs, y=ys, z=zs,
                 mode="lines+markers",
-                line=dict(color="limegreen", width=4),
+                line=dict(color=_ACCENT, width=4),
                 marker=dict(
                     size=4,
                     color=ts,
-                    colorscale="Plasma",
+                    colorscale="Cividis",
                     showscale=True,
-                    colorbar=dict(title="t (s)"),
+                    colorbar=dict(
+                        title=dict(text="t (s)", font=dict(color=_INK, size=11)),
+                        tickfont=dict(color=_INK, size=10),
+                        outlinecolor=_BORDER_BASE,
+                        outlinewidth=1,
+                    ),
                 ),
                 name=f"3D trajectory ({len(ts)} pts)",
                 hovertemplate=(
@@ -163,16 +264,42 @@ def render_scene_html(scene: Scene) -> str:
     if scene.triangulated:
         subtitle += f" · {len(scene.triangulated)} 3D pts"
 
+    axis_font = dict(family="JetBrains Mono, monospace", size=11, color=_INK)
+    axis_style = dict(
+        backgroundcolor=_BG,
+        gridcolor=_BORDER_L,
+        zerolinecolor=_BORDER_BASE,
+        linecolor=_BORDER_BASE,
+        tickfont=dict(family="JetBrains Mono, monospace", size=10, color=_SUB),
+    )
+
+    def axis(title_text: str) -> dict:
+        return dict(title=dict(text=title_text, font=axis_font), **axis_style)
+
     fig = go.Figure(data=traces)
     fig.update_layout(
-        title=f"Session {scene.session_id}  —  {subtitle}",
+        title=dict(
+            text=f"Session {scene.session_id}  —  {subtitle}",
+            font=dict(family="JetBrains Mono, monospace", size=13, color=_INK),
+            x=0.02,
+        ),
+        paper_bgcolor=_BG,
+        plot_bgcolor=_BG,
         scene=dict(
-            xaxis=dict(title="X (left/right, m)"),
-            yaxis=dict(title="Y (depth, m)"),
-            zaxis=dict(title="Z (up, m)"),
+            xaxis=axis("X (left/right, m)"),
+            yaxis=axis("Y (depth, m)"),
+            zaxis=axis("Z (up, m)"),
+            bgcolor=_BG,
             aspectmode="data",
         ),
-        margin=dict(l=0, r=0, t=40, b=0),
-        legend=dict(itemsizing="constant"),
+        margin=dict(l=0, r=0, t=36, b=0),
+        legend=dict(
+            itemsizing="constant",
+            bgcolor=_SURFACE,
+            bordercolor=_BORDER_BASE,
+            borderwidth=1,
+            font=dict(family="JetBrains Mono, monospace", size=11, color=_INK),
+        ),
+        font=dict(family="Noto Sans TC, sans-serif", color=_INK),
     )
-    return fig.to_html(include_plotlyjs="cdn", full_html=True)
+    return fig
