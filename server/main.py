@@ -1100,8 +1100,10 @@ _VIDEO_FILENAME_RE = re.compile(
 )
 
 
-def _videos_for_session(session_id: str) -> list[tuple[str, str, float, float]]:
-    """Return `[(camera_id, "/videos/<filename>", t_rel_offset_s, video_fps), ...]`
+def _videos_for_session(
+    session_id: str,
+) -> list[tuple[str, str, float, float, dict[str, list]]]:
+    """Return `[(camera_id, "/videos/<filename>", t_rel_offset_s, video_fps, frames), ...]`
     sorted by camera_id. Prefers the `_annotated` clip when present (the
     one with detection circles drawn) and falls back to the raw MOV.
 
@@ -1113,8 +1115,14 @@ def _videos_for_session(session_id: str) -> list[tuple[str, str, float, float]]:
     first-frame latency was.
 
     `video_fps` is the per-camera nominal capture rate (240.0 in the
-    default rig). The viewer uses the larger of A/B as the master
-    frame-stepping rate for its frame-by-frame controls."""
+    default rig) — kept for display, but the viewer's timeline uses real
+    per-frame PTS, not the nominal grid.
+
+    `frames = {"t_rel_s": [...], "detected": [...]}` ships the actual
+    post-detection frame timeline to the browser so the viewer's scrubber
+    can step real MOV frames (including drops + non-detected frames)
+    instead of synthesising a virtual 240 Hz grid that doesn't match the
+    decoded video. Both arrays have one entry per decoded frame."""
     prefix = f"session_{session_id}_"
     pitches = state.pitches_for_session(session_id)
 
@@ -1133,7 +1141,7 @@ def _videos_for_session(session_id: str) -> list[tuple[str, str, float, float]]:
         if cam not in best or (is_annotated and "_annotated" not in best[cam]):
             best[cam] = name
 
-    out: list[tuple[str, str, float, float]] = []
+    out: list[tuple[str, str, float, float, dict[str, list]]] = []
     for cam in sorted(best):
         name = best[cam]
         pitch = pitches.get(cam)
@@ -1147,7 +1155,15 @@ def _videos_for_session(session_id: str) -> list[tuple[str, str, float, float]]:
                 pitch.video_start_pts_s - pitch.sync_anchor_timestamp_s
             )
         fps = float(pitch.video_fps) if pitch is not None else 240.0
-        out.append((cam, f"/videos/{name}", offset, fps))
+        anchor = pitch.sync_anchor_timestamp_s if pitch is not None else None
+        if pitch is not None and anchor is not None:
+            t_rel = [float(f.timestamp_s - anchor) for f in pitch.frames]
+            detected = [bool(f.ball_detected) for f in pitch.frames]
+        else:
+            t_rel = []
+            detected = []
+        frames_info = {"t_rel_s": t_rel, "detected": detected}
+        out.append((cam, f"/videos/{name}", offset, fps, frames_info))
     return out
 
 
