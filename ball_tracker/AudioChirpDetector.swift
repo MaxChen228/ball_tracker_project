@@ -52,19 +52,27 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     var onChirpDetected: ((ChirpEvent) -> Void)?
 
     // Config.
-    private let sampleRate: Double
+    /// Current sample rate the reference + ring are built against. Starts at
+    /// the init default (44.1 kHz for tests) and is overwritten on the first
+    /// `captureOutput` buffer via `rebuildForSampleRate(_:)` when the real
+    /// mic ASBD reports a different rate (iPhone delivers 48 kHz natively).
+    private var sampleRate: Double
     /// Mutable so the user can tune from Settings without rebuilding the
     /// capture session. Reads on deliveryQueue, writes bounced through
     /// `setThreshold(_:)`.
     private var threshold: Float
     private let cooldownS: Double
-    private let reference: [Float]
-    private let refLen: Int
-    private let checkIntervalSamples: Int
+    /// Chirp parameters kept around for lazy rebuild on rate change.
+    private let chirpF0: Double
+    private let chirpF1: Double
+    private let chirpDurationS: Double
+    private var reference: [Float]
+    private var refLen: Int
+    private var checkIntervalSamples: Int
 
     // Mutable state — accessed only on deliveryQueue.
     private var ring: [Float]
-    private let ringLen: Int
+    private var ringLen: Int
     private var writeIndex: Int = 0
     private var totalWritten: Int = 0
     private var firstPTS: CMTime?
@@ -84,18 +92,50 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         threshold: Float = 0.18,
         cooldownS: Double = 1.0
     ) {
-        self.sampleRate = sampleRate
+        self.sampleRate = 0
         self.threshold = threshold
         self.cooldownS = cooldownS
-        self.refLen = Int(sampleRate * chirpDurationS)
+        self.chirpF0 = chirpF0
+        self.chirpF1 = chirpF1
+        self.chirpDurationS = chirpDurationS
+        self.reference = []
+        self.refLen = 0
+        self.checkIntervalSamples = 0
+        self.ring = []
+        self.ringLen = 0
+        self.lastSnapshot = Snapshot(
+            bufferFillSamples: 0,
+            lastPeak: 0,
+            threshold: threshold,
+            armed: false,
+            triggered: false
+        )
+        super.init()
+        rebuildForSampleRate(sampleRate)
+    }
+
+    /// Regenerate the reference chirp + ring buffer for a new sample rate and
+    /// reset all timing state. Called once from `init` with the default rate
+    /// (keeps the test path working) and again from `captureOutput` when the
+    /// real mic ASBD reports a different rate (iPhones deliver 48 kHz).
+    /// Must run on `deliveryQueue` — `captureOutput` already is; `init`
+    /// predates anyone seeing the instance so it's safe there too.
+    private func rebuildForSampleRate(_ rate: Double) {
+        self.sampleRate = rate
+        self.refLen = Int(rate * chirpDurationS)
         self.ringLen = 2 * refLen
-        self.ring = [Float](repeating: 0, count: 2 * refLen)
         self.reference = Self.makeChirp(
-            sampleRate: sampleRate, f0: chirpF0, f1: chirpF1, duration: chirpDurationS
+            sampleRate: rate, f0: chirpF0, f1: chirpF1, duration: chirpDurationS
         )
         // ~10 Hz matched-filter pass. Balances latency with CPU on the
         // capture queue (O(N²) in refLen, dominated by vDSP_dotpr).
-        self.checkIntervalSamples = Int(sampleRate / 10.0)
+        self.checkIntervalSamples = Int(rate / 10.0)
+        self.ring = [Float](repeating: 0, count: ringLen)
+        self.writeIndex = 0
+        self.totalWritten = 0
+        self.firstPTS = nil
+        self.lastTriggerPTS = nil
+        self.samplesSinceCheck = 0
         self.lastSnapshot = Snapshot(
             bufferFillSamples: 0,
             lastPeak: 0,
@@ -174,6 +214,11 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         from connection: AVCaptureConnection
     ) {
         // Runs on deliveryQueue.
+        if let rate = Self.firstSampleRate(sampleBuffer),
+           abs(rate - sampleRate) > 0.5 {
+            log.info("chirp detector rebuilding for sample_rate_hz=\(rate, privacy: .public) (was \(self.sampleRate, privacy: .public))")
+            rebuildForSampleRate(rate)
+        }
         if firstPTS == nil {
             firstPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         }
@@ -309,6 +354,18 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     }
 
     // MARK: - PCM extraction
+
+    /// Read the sample buffer's native sample rate from its ASBD. Returns nil
+    /// when the buffer lacks a format description (shouldn't happen on
+    /// `AVCaptureAudioDataOutput`, but stay defensive).
+    private static func firstSampleRate(_ sampleBuffer: CMSampleBuffer) -> Double? {
+        guard let fmt = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(fmt) else {
+            return nil
+        }
+        let rate = asbdPtr.pointee.mSampleRate
+        return rate > 0 ? rate : nil
+    }
 
     /// Pulls a mono Float32 view of the sample buffer. Handles the common
     /// iOS capture formats: Float32 mono/stereo (interleaved or planar) and
