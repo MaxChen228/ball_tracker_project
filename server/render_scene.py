@@ -102,10 +102,12 @@ def render_viewer_html(
       4. Shared timeline footer — scrubber with an inline detection strip
          (one row per camera showing which frames the ball was found in),
          frame counter + per-cam PTS, transport (prev/next frame,
-         play/pause), speed buttons, ALL/PLAYBACK toggle. The scrubber
-         walks the real union-of-MOV-PTS timeline — so non-detected
-         frames, frame drops, and the full capture window are all
-         scrubbable, not a synthesised 240 Hz grid.
+         play/pause), speed buttons. The scrubber walks the real
+         union-of-MOV-PTS timeline — so non-detected frames, frame drops,
+         and the full capture window are all scrubbable, not a
+         synthesised 240 Hz grid. The `All / Playback` toggle floats over
+         the 3D scene itself because it only gates trace cutoff on the
+         scene; videos and transport aren't affected by it.
 
     `videos` is
     `[(camera_id, url, t_rel_offset_s, video_fps, frames_info), ...]`
@@ -307,13 +309,20 @@ def render_viewer_html(
   .speed-group button:last-child {{ border-right:none; }}
   .speed-group button.active {{ background:var(--ink); color:var(--surface); }}
   .speed-group button:hover:not(.active) {{ color:var(--ink); }}
-  .mode-toggle {{ display:inline-flex; border:1px solid var(--border-base);
-    border-radius:2px; overflow:hidden; margin-left:auto; }}
-  .mode-toggle button {{ padding:5px 12px; border:none; background:transparent;
-    color:var(--sub); cursor:pointer; min-width:auto; border-radius:0; }}
-  .mode-toggle button.active {{ background:var(--ink); color:var(--surface); }}
+  /* Mode toggle floats over the 3D scene — it only affects what the
+     scene draws (trace cutoff), so it belongs with the scene, not with
+     the shared timeline transport. */
+  .scene-col .mode-toggle {{ position:absolute; top:10px; right:10px;
+    z-index:5; display:inline-flex; border:1px solid var(--border-base);
+    border-radius:2px; overflow:hidden; background:var(--surface); }}
+  .scene-col .mode-toggle button {{ padding:5px 12px; border:none;
+    background:transparent; color:var(--sub); cursor:pointer;
+    min-width:auto; border-radius:0; font:inherit; font-size:11px;
+    letter-spacing:0.1em; text-transform:uppercase; }}
+  .scene-col .mode-toggle button.active {{ background:var(--ink);
+    color:var(--surface); }}
   .tl-hint {{ font-size:10px; color:var(--sub); letter-spacing:0.06em;
-    text-transform:uppercase; opacity:0.7; }}
+    text-transform:uppercase; opacity:0.7; margin-left:auto; }}
 </style>
 </head><body>
 <div class="viewer">
@@ -324,7 +333,13 @@ def render_viewer_html(
   </div>
   {health_html}
   <div class="work">
-    <div class="scene-col"><div id="scene"></div></div>
+    <div class="scene-col">
+      <div id="scene"></div>
+      <div class="mode-toggle" role="tablist" title="Trace cutoff mode">
+        <button id="mode-all" class="active" type="button">All</button>
+        <button id="mode-playback" type="button">Playback</button>
+      </div>
+    </div>
     <div class="videos-col">{video_cells}</div>
   </div>
   <div class="timeline">
@@ -351,10 +366,6 @@ def render_viewer_html(
         <button data-rate="2" type="button">2&times;</button>
       </div>
       <span class="tl-hint">space &middot; , . &middot; &larr; &rarr; &middot; d f (jump)</span>
-      <div class="mode-toggle" role="tablist">
-        <button id="mode-all" class="active" type="button">All</button>
-        <button id="mode-playback" type="button">Playback</button>
-      </div>
     </div>
   </div>
 </div>
