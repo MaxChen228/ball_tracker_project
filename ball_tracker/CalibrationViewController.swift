@@ -280,7 +280,42 @@ final class CalibrationViewController: UIViewController {
     @objc private func saveCalibration() {
         persistCalibrationFromDraggedPoints()
         log.info("calibration saved source=manual")
+        postCalibrationToServer(source: "manual")
         dismiss(animated: true)
+    }
+
+    /// Fire-and-forget POST of the just-persisted calibration so the
+    /// dashboard canvas can draw this camera's pose without waiting for
+    /// a first pitch upload. Failures are logged only — the UserDefaults
+    /// write already happened, so the phone itself is still calibrated
+    /// even if the server copy never lands.
+    private func postCalibrationToServer(source: String) {
+        guard let intrinsics = IntrinsicsStore.loadIntrinsicsPayload(),
+              let homography = IntrinsicsStore.loadHomography(),
+              let dims = IntrinsicsStore.loadImageDimensions() else {
+            log.info("calibration upload skipped reason=incomplete_local_state source=\(source, privacy: .public)")
+            return
+        }
+        let settings = SettingsViewController.loadFromUserDefaults()
+        let uploader = ServerUploader(config: ServerUploader.ServerConfig(
+            serverIP: settings.serverIP,
+            serverPort: settings.serverPort
+        ))
+        let payload = ServerUploader.CalibrationPayload(
+            camera_id: settings.cameraRole,
+            intrinsics: intrinsics,
+            homography: homography,
+            image_width_px: dims.width,
+            image_height_px: dims.height
+        )
+        uploader.postCalibration(payload) { result in
+            switch result {
+            case .success:
+                log.info("calibration upload ok cam=\(settings.cameraRole, privacy: .public) source=\(source, privacy: .public)")
+            case .failure(let error):
+                log.error("calibration upload failed cam=\(settings.cameraRole, privacy: .public) source=\(source, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     override func viewDidLayoutSubviews() {
@@ -678,6 +713,7 @@ final class CalibrationViewController: UIViewController {
         // Settings → "Use ChArUco values" override.
         persistIntrinsicsIfPossible()
         log.info("calibration saved source=aruco markers=\(detected.count, privacy: .public)")
+        postCalibrationToServer(source: "aruco")
         dismiss(animated: true)
     }
 

@@ -33,6 +33,7 @@ from triangulate import (
 
 if TYPE_CHECKING:
     from main import PitchPayload, TriangulatedPoint
+    from schemas import CalibrationSnapshot
 
 
 @dataclass
@@ -186,4 +187,63 @@ def build_scene(
             for p in triangulated
         ]
 
+    return scene
+
+
+def _camera_view_from_intrinsics_and_homography(
+    camera_id: str,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    homography: list[float],
+) -> CameraView:
+    """Shared pose-recovery path. Same math `build_scene` does for each
+    pitch — centralised here so the calibration-preview scene renders the
+    camera in the exact same world-frame pose a triangulation would."""
+    K = build_K(fx, fy, cx, cy)
+    H = np.array(homography, dtype=float).reshape(3, 3)
+    R_wc, t_wc = recover_extrinsics(K, H)
+    C = camera_center_world(R_wc, t_wc)
+    R_inv = R_wc.T
+    forward = R_inv @ np.array([0.0, 0.0, 1.0])
+    right = R_inv @ np.array([1.0, 0.0, 0.0])
+    up = R_inv @ np.array([0.0, -1.0, 0.0])
+    return CameraView(
+        camera_id=camera_id,
+        center_world=C.tolist(),
+        axis_forward_world=(forward / np.linalg.norm(forward)).tolist(),
+        axis_right_world=(right / np.linalg.norm(right)).tolist(),
+        axis_up_world=(up / np.linalg.norm(up)).tolist(),
+    )
+
+
+def build_calibration_scene(
+    calibrations: dict[str, "CalibrationSnapshot"],
+) -> Scene:
+    """Build a scene that only carries camera poses — no rays, no triangulated
+    trajectory. Used by the dashboard canvas to preview whatever calibrations
+    are currently persisted, independent of any session state. An empty
+    `calibrations` dict yields an empty scene (canvas shows just the plate).
+    """
+    scene = Scene(session_id="_calibration")
+    for cam_id in sorted(calibrations.keys()):
+        cal = calibrations[cam_id]
+        try:
+            scene.cameras.append(
+                _camera_view_from_intrinsics_and_homography(
+                    camera_id=cam_id,
+                    fx=cal.intrinsics.fx,
+                    fy=cal.intrinsics.fz,
+                    cx=cal.intrinsics.cx,
+                    cy=cal.intrinsics.cy,
+                    homography=cal.homography,
+                )
+            )
+        except Exception:
+            # Pose recovery can fail on a pathological homography (e.g. a
+            # malformed save from the phone). Skip silently — the dashboard
+            # shows "uncalibrated" for that slot rather than 500-ing the
+            # whole page.
+            continue
     return scene

@@ -311,71 +311,18 @@ final class ServerUploader {
         return body
     }
 
-    /// POST `/sessions/arm` and decode the returned session id. Used by
-    /// the iPhone's local "啟動追蹤" escape-hatch button: normally the
-    /// dashboard does the arming and the id flows in via the next
-    /// heartbeat, but a phone tapping the local button needs the id
-    /// synchronously so its first detected-ball frame lands with the
-    /// correct `session_id` stamped on it.
-    func armSession(
-        completion: @escaping (Result<HeartbeatSession, Error>) -> Void
-    ) {
-        guard let base = config.baseURL() else {
-            completion(.failure(NSError(
-                domain: "ServerUploader",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
-            )))
-            return
-        }
-        let url = base.appendingPathComponent("sessions/arm")
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                log.error("arm failed err=\(error.localizedDescription, privacy: .public)")
-                completion(.failure(error))
-                return
-            }
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                log.error("arm failed err=http_\(http.statusCode)")
-                completion(.failure(NSError(
-                    domain: "ServerUploader",
-                    code: http.statusCode,
-                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
-                )))
-                return
-            }
-            guard let data else {
-                log.error("arm failed err=empty_body")
-                completion(.failure(NSError(
-                    domain: "ServerUploader",
-                    code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: "Empty response"]
-                )))
-                return
-            }
-            do {
-                struct Wrapper: Codable { let ok: Bool; let session: HeartbeatSession }
-                let wrapper = try JSONDecoder().decode(Wrapper.self, from: data)
-                log.info("arm ok session=\(wrapper.session.id, privacy: .public)")
-                completion(.success(wrapper.session))
-            } catch {
-                log.error("arm failed err=\(error.localizedDescription, privacy: .public) category=decoding")
-                completion(.failure(error))
-            }
-        }
-        task.resume()
-    }
-
     /// POST a 1 Hz liveness ping and read back the full status payload —
     /// the server piggy-backs `devices`, `session`, and per-camera
     /// `commands` on every reply, so one round-trip drives both online
     /// presence and remote arm/disarm dispatch.
+    ///
+    /// `timeSynced` mirrors whether the phone currently holds a valid
+    /// audio-chirp anchor (`lastSyncAnchorTimestampS != nil`). The server
+    /// surfaces it on `/status` → dashboard so each device row shows a
+    /// "time sync ✓ / ✗" dot without waiting for a pitch upload.
     func sendHeartbeat(
         cameraId: String,
+        timeSynced: Bool = false,
         completion: @escaping (Result<HeartbeatResponse, Error>) -> Void
     ) {
         guard let base = config.baseURL() else {
@@ -391,8 +338,14 @@ final class ServerUploader {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        struct HeartbeatRequestBody: Codable {
+            let camera_id: String
+            let time_synced: Bool
+        }
         do {
-            request.httpBody = try JSONEncoder().encode(["camera_id": cameraId])
+            request.httpBody = try JSONEncoder().encode(
+                HeartbeatRequestBody(camera_id: cameraId, time_synced: timeSynced)
+            )
         } catch {
             completion(.failure(error))
             return
@@ -434,6 +387,71 @@ final class ServerUploader {
     /// and the defensive `invalidResponse` case.
     static func isTransient(_ error: UploadError) -> Bool {
         return error.isTransient
+    }
+
+    /// Standalone calibration snapshot — sent after the user saves a fresh
+    /// ArUco or manual-handle calibration so the dashboard can draw the
+    /// camera's pose in its 3D canvas immediately, without waiting for a
+    /// first pitch upload. `image_width_px` / `image_height_px` come from
+    /// the live capture frame dimensions (matches what the ball-detection
+    /// pipeline already writes to `IntrinsicsStore`).
+    struct CalibrationPayload: Codable {
+        let camera_id: String
+        let intrinsics: IntrinsicsPayload
+        let homography: [Double]
+        let image_width_px: Int
+        let image_height_px: Int
+    }
+
+    /// POST the freshly-solved calibration to the server. Fire-and-forget
+    /// from the caller's perspective: failures are logged but don't block
+    /// the local UserDefaults write — the phone has already persisted the
+    /// values locally, the server-side copy is a convenience for the
+    /// dashboard canvas only.
+    func postCalibration(
+        _ payload: CalibrationPayload,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        guard let base = config.baseURL() else {
+            completion?(.failure(NSError(
+                domain: "ServerUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
+            )))
+            return
+        }
+        let url = base.appendingPathComponent("calibration")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            request.httpBody = try JSONEncoder().encode(payload)
+        } catch {
+            completion?(.failure(error))
+            return
+        }
+
+        let cam = payload.camera_id
+        let task = URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error = error {
+                log.error("calibration post failed cam=\(cam, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+                completion?(.failure(error))
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                log.error("calibration post failed cam=\(cam, privacy: .public) http=\(http.statusCode)")
+                completion?(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
+                )))
+                return
+            }
+            log.info("calibration post ok cam=\(cam, privacy: .public)")
+            completion?(.success(()))
+        }
+        task.resume()
     }
 
     func fetchStatus(completion: @escaping (Result<[String: Any], Error>) -> Void) {

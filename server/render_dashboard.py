@@ -1,105 +1,363 @@
-"""Dashboard renderer for `/` — A/B badges, session state, Arm/Cancel controls, events table. Extracted from viewer.py."""
+"""Dashboard renderer for `/` — three-zone layout (top nav + 440px
+sidebar + full-bleed 3D canvas) styled after the PHYSICS_LAB design
+system. The canvas shows a live 3D scene of the plate plus whichever
+cameras have a calibration persisted; the sidebar carries devices,
+session controls, and the events list. All three columns tick from
+JSON endpoints (`/status`, `/calibration/state`, `/events`) so the page
+never has to reload to reflect a new calibration or a new pitch."""
 from __future__ import annotations
 
 import datetime as _dt
 import html
 from typing import Any
 
+from reconstruct import build_calibration_scene
+from render_scene import _build_figure
 from schemas import Device, Session
 
 
-_INDEX_CSS = """
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-           margin: 24px; color: #222; background: #fafafa; }
-    h1 { font-size: 22px; margin: 0 0 4px 0; }
-    .subtitle { color: #666; margin-bottom: 20px; font-size: 14px; }
-    .control { background: white; box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-               border-radius: 8px; padding: 16px 18px; max-width: 980px;
-               margin-bottom: 20px; }
-    .control .row { display: flex; flex-wrap: wrap; gap: 20px 28px;
-                    align-items: center; }
-    .control .label { font-size: 12px; color: #888; text-transform: uppercase;
-                      letter-spacing: 0.05em; margin-bottom: 4px; }
-    .control .block { min-width: 130px; }
-    .badge { display: inline-block; padding: 3px 9px; border-radius: 10px;
-             font-size: 12px; font-weight: 600; margin-right: 6px;
-             font-variant-numeric: tabular-nums; }
-    .badge.online  { background: #e0f7ea; color: #1e7d45; }
-    .badge.offline { background: #eef1f5; color: #555; }
-    .session-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                  font-size: 13px; color: #333; }
-    .session-state { font-weight: 600; }
-    .session-state.armed   { color: #1e7d45; }
-    .session-state.idle    { color: #666; }
-    form.inline { display: inline-block; margin: 0; }
-    button { border: none; border-radius: 6px; padding: 8px 16px;
-             font-size: 14px; font-weight: 600; cursor: pointer; }
-    button.arm    { background: #0b6bcb; color: white; }
-    button.arm:hover    { background: #0958a8; }
-    button.cancel { background: #fdecec; color: #b3261e; }
-    button.cancel:hover { background: #f9d6d6; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    table { border-collapse: collapse; width: 100%; max-width: 980px;
-            background: white; box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-            border-radius: 6px; overflow: hidden; }
-    th, td { padding: 10px 14px; text-align: left; font-size: 14px;
-             border-bottom: 1px solid #eee; }
-    th { background: #f2f4f7; font-weight: 600; color: #333; }
-    tr:hover td { background: #f7faff; }
-    td.num { font-variant-numeric: tabular-nums; text-align: right; }
-    a { color: #0b6bcb; text-decoration: none; font-weight: 500; }
-    a:hover { text-decoration: underline; }
-    .status { display: inline-block; padding: 2px 8px; border-radius: 10px;
-              font-size: 12px; font-weight: 600; }
-    .status.paired { background: #e0f7ea; color: #1e7d45; }
-    .status.paired_no_points { background: #fff3cd; color: #8a6d00; }
-    .status.partial { background: #eef1f5; color: #555; }
-    .status.error { background: #fdecec; color: #b3261e; }
-    .empty { color: #888; font-style: italic; padding: 24px; text-align: center; }
+# --- Design-system tokens (mirrored in render_scene.py) ----------------------
+_BG = "#F8F7F4"
+_SURFACE = "#FCFBFA"
+_BORDER_BASE = "#DBD6CD"
+_BORDER_L = "#E8E4DB"
+_INK = "#2A2520"
+_SUB = "#7A756C"
+_INK_LIGHT = "#5A5550"
+_DEV = "#C0392B"
+_CONTRA = "#4A6B8C"
+_DUAL = "#D35400"
+_ACCENT = "#E6B300"
+
+
+_CSS = f"""
+:root {{
+  --bg: {_BG};
+  --surface: {_SURFACE};
+  --border-base: {_BORDER_BASE};
+  --border-l: {_BORDER_L};
+  --ink: {_INK};
+  --sub: {_SUB};
+  --ink-light: {_INK_LIGHT};
+  --dev: {_DEV};
+  --contra: {_CONTRA};
+  --dual: {_DUAL};
+  --accent: {_ACCENT};
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: "Noto Sans TC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --nav-h: 52px;
+  --sidebar-w: 440px;
+}}
+
+* {{ box-sizing: border-box; }}
+html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--ink);
+              font-family: var(--sans); font-weight: 300; line-height: 1.8;
+              -webkit-font-smoothing: antialiased; }}
+
+/* --- Top nav --- */
+.nav {{ position: fixed; top: 0; left: 0; right: 0; height: var(--nav-h);
+        background: var(--surface); border-bottom: 1px solid var(--border-base);
+        display: flex; align-items: center; padding: 0 24px;
+        z-index: 20; gap: 24px; }}
+.nav .brand {{ font-family: var(--mono); font-weight: 700; font-size: 14px;
+               letter-spacing: 0.16em; color: var(--ink); }}
+.nav .brand .dot {{ display: inline-block; width: 7px; height: 7px; background: var(--ink);
+                    margin-right: 10px; vertical-align: middle; border-radius: 0; }}
+.nav .status-line {{ margin-left: auto; font-family: var(--mono); font-size: 11px;
+                     letter-spacing: 0.08em; text-transform: uppercase; color: var(--sub);
+                     display: flex; gap: 20px; align-items: center; }}
+.nav .status-line .pair {{ display: flex; gap: 6px; align-items: center; }}
+.nav .status-line .label {{ color: var(--sub); }}
+.nav .status-line .val {{ color: var(--ink); font-weight: 500; }}
+.nav .status-line .val.armed {{ color: var(--contra); }}
+.nav .status-line .val.idle {{ color: var(--sub); }}
+
+/* --- Main layout: sidebar + canvas --- */
+.layout {{ display: flex; height: 100vh; padding-top: var(--nav-h); }}
+.sidebar {{ width: var(--sidebar-w); flex-shrink: 0; overflow-y: auto;
+            background: var(--surface); border-right: 1px solid var(--border-base);
+            box-shadow: 4px 0 24px rgba(0,0,0,0.03);
+            padding: 32px 24px; z-index: 10;
+            display: flex; flex-direction: column; gap: 24px; }}
+.canvas {{ flex: 1; position: relative; overflow: hidden;
+           background: var(--bg); }}
+#scene-root {{ position: absolute; inset: 0; }}
+
+/* --- Scrollbar --- */
+.sidebar::-webkit-scrollbar {{ width: 4px; }}
+.sidebar::-webkit-scrollbar-track {{ background: transparent; }}
+.sidebar::-webkit-scrollbar-thumb {{ background: var(--border-base); }}
+.sidebar::-webkit-scrollbar-thumb:hover {{ background: var(--sub); }}
+
+/* --- Card --- */
+.card {{ background: var(--surface); border: 1px solid var(--border-base);
+         border-radius: 4px; padding: 20px; }}
+.card + .card {{ margin-top: 0; }}
+.card-title {{ font-family: var(--mono); font-weight: 500; font-size: 12px;
+               letter-spacing: 0.08em; text-transform: uppercase; color: var(--sub);
+               margin: 0 0 14px 0; padding: 0; }}
+.card-subtitle {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+                  text-transform: uppercase; color: var(--sub);
+                  margin-top: 14px; margin-bottom: 6px; }}
+.card section + section {{ border-top: 1px solid var(--border-l); margin-top: 14px;
+                           padding-top: 14px; }}
+
+/* --- Device rows --- */
+.device {{ display: grid; grid-template-columns: 36px 1fr auto; align-items: center;
+           gap: 12px; padding: 10px 0; }}
+.device + .device {{ border-top: 1px solid var(--border-l); }}
+.device .id {{ font-family: var(--mono); font-size: 16px; font-weight: 500; color: var(--ink);
+               letter-spacing: 0.04em; }}
+.device .meta {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+                 text-transform: uppercase; color: var(--sub); }}
+.device .meta em {{ font-style: normal; color: var(--ink-light); }}
+.device .sub {{ display: flex; gap: 14px; margin-top: 4px; }}
+.device .sub .item {{ font-family: var(--mono); font-size: 9px; letter-spacing: 0.16em;
+                      text-transform: uppercase; color: var(--sub);
+                      display: flex; align-items: center; gap: 5px; }}
+.device .sub .dot {{ width: 6px; height: 6px; border-radius: 50%;
+                     background: var(--border-base); display: inline-block; }}
+.device .sub .dot.ok {{ background: var(--contra); }}
+.device .sub .dot.warn {{ background: var(--dual); }}
+.device .sub .dot.bad {{ background: var(--dev); }}
+
+/* --- Chip (pill) --- */
+.chip {{ display: inline-block; padding: 4px 12px; border-radius: 12px;
+         font-family: var(--mono); font-size: 10px; font-weight: 500;
+         letter-spacing: 0.16em; text-transform: uppercase;
+         border: 1px solid var(--border-base); color: var(--sub); background: transparent;
+         transition: all 0.2s ease; }}
+.chip.online {{ border-color: var(--contra); color: var(--contra); }}
+.chip.calibrated {{ background: var(--contra); border-color: var(--contra); color: var(--surface); }}
+.chip.armed {{ background: var(--contra); border-color: var(--contra); color: var(--surface); }}
+.chip.idle {{ color: var(--sub); border-color: var(--border-base); }}
+.chip.paired {{ background: var(--contra); border-color: var(--contra); color: var(--surface); }}
+.chip.partial {{ color: var(--sub); border-color: var(--border-base); }}
+.chip.paired_no_points {{ background: var(--dual); border-color: var(--dual); color: var(--surface); }}
+.chip.error {{ background: var(--dev); border-color: var(--dev); color: var(--surface); }}
+.chip.dual {{ color: var(--dual); border-color: var(--dual); }}
+.chip.single {{ color: var(--sub); border-color: var(--border-base); }}
+
+/* --- Session block --- */
+.session-head {{ display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }}
+.session-id {{ font-family: var(--mono); font-size: 14px; color: var(--ink);
+               letter-spacing: 0.04em; }}
+.session-meta {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+                 text-transform: uppercase; color: var(--sub); }}
+.session-actions {{ display: flex; gap: 8px; margin-top: 14px; }}
+
+/* --- Buttons --- */
+button.btn {{ font-family: var(--mono); font-size: 11px; font-weight: 500;
+              letter-spacing: 0.08em; text-transform: uppercase;
+              padding: 10px 16px; border-radius: 2px; cursor: pointer;
+              background: var(--ink); color: var(--surface);
+              border: 1px solid var(--ink); transition: all 0.2s ease; }}
+button.btn:hover:not(:disabled) {{ background: var(--ink-light); }}
+button.btn.secondary {{ background: transparent; color: var(--ink);
+                        border-color: var(--border-base); }}
+button.btn.secondary:hover:not(:disabled) {{ border-color: var(--ink); }}
+button.btn.danger {{ background: transparent; color: var(--dev);
+                     border-color: var(--dev); }}
+button.btn.danger:hover:not(:disabled) {{ background: var(--dev); color: var(--surface); }}
+button.btn:disabled {{ opacity: 0.35; cursor: not-allowed; }}
+form.inline {{ display: inline-block; margin: 0; }}
+
+/* --- Events list --- */
+.events-empty {{ color: var(--sub); font-size: 13px; padding: 12px 0; font-style: italic; }}
+.event-row {{ display: block; text-decoration: none; color: inherit;
+              padding: 12px 0; border-top: 1px solid var(--border-l); }}
+.event-row:first-child {{ border-top: 0; }}
+.event-row:hover {{ background: var(--bg); margin: 0 -8px; padding: 12px 8px; }}
+.event-top {{ display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }}
+.event-top .sid {{ font-family: var(--mono); font-size: 13px; color: var(--ink);
+                   letter-spacing: 0.04em; }}
+.event-stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 14px;
+                font-family: var(--mono); font-size: 11px; color: var(--ink-light); }}
+.event-stats .k {{ color: var(--sub); letter-spacing: 0.08em; text-transform: uppercase;
+                   font-size: 9px; display: block; }}
+.event-stats .v {{ font-variant-numeric: tabular-nums; color: var(--ink); }}
+
+/* --- Canvas overlay hint --- */
+.canvas-hint {{ position: absolute; left: 20px; top: 20px; z-index: 5;
+                font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+                text-transform: uppercase; color: var(--sub);
+                background: var(--surface); border: 1px solid var(--border-l);
+                padding: 6px 10px; pointer-events: none; }}
 """
 
 
-# Live-refresh poll: pulls /status every second to keep the devices badge
-# and session panel current. Events table stays static — it mutates via
-# /pitch arrivals and a full page reload is cheap enough.
-_INDEX_JS = """
+_JS_TEMPLATE = r"""
 (function () {
-  const fmtMono = (v) => '<span class="session-id">' + v + '</span>';
-  async function refresh() {
+  const EXPECTED = ['A', 'B'];
+
+  const sceneRoot = document.getElementById('scene-root');
+  const devicesBox = document.getElementById('devices-body');
+  const sessionBox = document.getElementById('session-body');
+  const eventsBox = document.getElementById('events-body');
+  const navStatus = document.getElementById('nav-status');
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+  function statusChip(cam, online, calibrated) {
+    if (calibrated) return `<span class="chip calibrated">calibrated</span>`;
+    if (online)     return `<span class="chip online">online</span>`;
+    return `<span class="chip idle">offline</span>`;
+  }
+
+  function renderDevices(state) {
+    const devByCam = new Map((state.devices || []).map(d => [d.camera_id, d]));
+    const calibrated = new Set(state.calibrations || []);
+
+    function row(cam, deviceRecord) {
+      const online = !!deviceRecord;
+      const timeSynced = !!(deviceRecord && deviceRecord.time_synced);
+      const isCal = calibrated.has(cam);
+      const meta = !online ? 'Not seen'
+                   : isCal ? 'Ready · pose known'
+                           : 'Awaiting calibration';
+      const calDot = isCal ? 'ok' : (online ? 'warn' : 'bad');
+      const syncDot = !online ? 'bad' : (timeSynced ? 'ok' : 'warn');
+      const syncLabel = !online ? 'offline' : (timeSynced ? 'synced' : 'not synced');
+      const calLabel = !online ? 'offline' : (isCal ? 'calibrated' : 'pending');
+      return `
+        <div class="device">
+          <div class="id">${esc(cam)}</div>
+          <div>
+            <div class="meta">${esc(meta)}</div>
+            <div class="sub">
+              <span class="item"><span class="dot ${syncDot}"></span>time sync · ${esc(syncLabel)}</span>
+              <span class="item"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>
+            </div>
+          </div>
+          <div>${statusChip(cam, online, isCal)}</div>
+        </div>`;
+    }
+
+    const rows = EXPECTED.map(cam => row(cam, devByCam.get(cam))).join('');
+    const extras = (state.devices || [])
+      .filter(d => !EXPECTED.includes(d.camera_id))
+      .map(d => row(d.camera_id, d)).join('');
+    devicesBox.innerHTML = rows + extras;
+  }
+
+  function renderSession(state) {
+    const s = state.session;
+    const armed = !!(s && s.armed);
+    const chip = armed ? `<span class="chip armed">armed</span>` : `<span class="chip idle">idle</span>`;
+    const sid = s && s.id ? `<span class="session-id">${esc(s.id)}</span>` : '';
+    const reason = (!armed && s && s.end_reason) ? `<span class="session-meta">last: ${esc(s.end_reason)}</span>` : '';
+    sessionBox.innerHTML = `
+      <div class="session-head">${chip}${sid}${reason}</div>
+      <div class="session-actions">
+        <form class="inline" method="POST" action="/sessions/arm">
+          <button class="btn" type="submit" ${armed ? 'disabled' : ''}>Arm session</button>
+        </form>
+        <form class="inline" method="POST" action="/sessions/cancel">
+          <button class="btn danger" type="submit" ${armed ? '' : 'disabled'}>Cancel</button>
+        </form>
+      </div>`;
+
+    // Mirror into the nav's tiny status strip.
+    if (navStatus) {
+      const online = (state.devices || []).length;
+      const cal = (state.calibrations || []).length;
+      navStatus.innerHTML = `
+        <span class="pair"><span class="label">Devices</span><span class="val">${online}/2</span></span>
+        <span class="pair"><span class="label">Calibrated</span><span class="val">${cal}/2</span></span>
+        <span class="pair"><span class="label">Session</span>` +
+        (armed
+          ? `<span class="val armed">${esc(s.id || '—')}</span>`
+          : `<span class="val idle">idle</span>`) +
+        `</span>`;
+    }
+  }
+
+  function fmtNum(v, digits) {
+    if (v === null || v === undefined) return '—';
+    return Number(v).toFixed(digits);
+  }
+
+  function renderEvents(events) {
+    if (!events || events.length === 0) {
+      eventsBox.innerHTML = `<div class="events-empty">No sessions received yet.</div>`;
+      return;
+    }
+    eventsBox.innerHTML = events.map(e => {
+      const cams = (e.cameras || []).join(' · ') || '—';
+      const mode = (e.cameras || []).length >= 2 ? 'dual' : 'single';
+      const stat = (e.status || '').replace(/_/g, ' ');
+      const peakZ = fmtNum(e.peak_z_m, 2);
+      const duration = fmtNum(e.duration_s, 2);
+      const mean = fmtNum(e.mean_residual_m, 4);
+      return `
+        <a class="event-row" href="/viewer/${esc(e.session_id)}">
+          <div class="event-top">
+            <span class="sid">${esc(e.session_id)}</span>
+            <span class="chip ${esc(mode)}">${mode}</span>
+            <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
+          </div>
+          <div class="event-stats">
+            <span><span class="k">Cams</span><span class="v">${esc(cams)}</span></span>
+            <span><span class="k">3D pts</span><span class="v">${e.n_triangulated || 0}</span></span>
+            <span><span class="k">Mean resid (m)</span><span class="v">${mean}</span></span>
+            <span><span class="k">Peak Z (m)</span><span class="v">${peakZ}</span></span>
+            <span><span class="k">Duration (s)</span><span class="v">${duration}</span></span>
+          </div>
+        </a>`;
+    }).join('');
+  }
+
+  let currentDevices = null;
+  let currentSession = null;
+  let currentCalibrations = null;
+
+  async function tickStatus() {
     try {
       const r = await fetch('/status', { cache: 'no-store' });
       if (!r.ok) return;
       const s = await r.json();
-
-      const devNode = document.getElementById('devices-badges');
-      if (devNode) {
-        const seen = new Set((s.devices || []).map(d => d.camera_id));
-        const expected = ['A', 'B'];
-        devNode.innerHTML = expected.map(id =>
-          `<span class="badge ${seen.has(id) ? 'online' : 'offline'}">${id}</span>`
-        ).join('') + (s.devices || []).filter(d => !expected.includes(d.camera_id))
-          .map(d => `<span class="badge online">${d.camera_id}</span>`).join('');
-      }
-
-      const sessNode = document.getElementById('session-state');
-      const armBtn = document.getElementById('arm-btn');
-      const cancelBtn = document.getElementById('cancel-btn');
-      if (sessNode) {
-        if (s.session && s.session.armed) {
-          sessNode.innerHTML = '<span class="session-state armed">ARMED</span> ' + fmtMono(s.session.id);
-          if (armBtn) armBtn.disabled = true;
-          if (cancelBtn) cancelBtn.disabled = false;
-        } else {
-          const tail = s.session ? ` (last: ${s.session.end_reason || 'ended'})` : '';
-          sessNode.innerHTML = '<span class="session-state idle">IDLE</span>' + tail;
-          if (armBtn) armBtn.disabled = false;
-          if (cancelBtn) cancelBtn.disabled = true;
-        }
-      }
-    } catch (e) { /* silent — next tick will retry */ }
+      // /status does not include calibrations; merge the last-known set so
+      // the devices card shows "calibrated" chips between calibration ticks.
+      s.calibrations = currentCalibrations || [];
+      currentDevices = s.devices || [];
+      currentSession = s.session || null;
+      renderDevices(s);
+      renderSession(s);
+    } catch (e) { /* silent retry next tick */ }
   }
-  refresh();
-  setInterval(refresh, 1000);
+
+  async function tickCalibration() {
+    try {
+      const r = await fetch('/calibration/state', { cache: 'no-store' });
+      if (!r.ok) return;
+      const payload = await r.json();
+      currentCalibrations = (payload.calibrations || []).map(c => c.camera_id);
+      renderDevices({ devices: currentDevices || [], calibrations: currentCalibrations });
+      renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations });
+      if (payload.plot && sceneRoot && window.Plotly) {
+        Plotly.react(sceneRoot, payload.plot.data || [], payload.plot.layout || {}, { responsive: true });
+      }
+    } catch (e) { /* silent */ }
+  }
+
+  async function tickEvents() {
+    try {
+      const r = await fetch('/events', { cache: 'no-store' });
+      if (!r.ok) return;
+      const events = await r.json();
+      renderEvents(events);
+    } catch (e) { /* silent */ }
+  }
+
+  // Prime all three immediately, then stagger polling so the UI stays
+  // current without hammering the server. Status carries arming state
+  // (1 s) and is the only high-frequency tick.
+  tickStatus();
+  tickCalibration();
+  tickEvents();
+  setInterval(tickStatus, 1000);
+  setInterval(tickCalibration, 5000);
+  setInterval(tickEvents, 5000);
 })();
 """
 
@@ -110,73 +368,128 @@ def _fmt_received_at(ts: float | None) -> str:
     return _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _fmt_opt_float(v: float | None, fmt: str) -> str:
-    return "—" if v is None else format(v, fmt)
-
-
-def _render_devices_badges(devices: list[dict[str, Any]]) -> str:
-    """Initial server-rendered state of the devices panel. The JS tick will
-    override this within 1 s, but rendering it correctly on first paint
-    avoids an "offline" flash."""
-    seen = {d["camera_id"] for d in devices}
-    expected = ["A", "B"]
-    parts = []
-    for cam in expected:
-        cls = "online" if cam in seen else "offline"
-        parts.append(f'<span class="badge {cls}">{html.escape(cam)}</span>')
-    for d in devices:
-        if d["camera_id"] not in expected:
-            parts.append(
-                f'<span class="badge online">{html.escape(d["camera_id"])}</span>'
-            )
-    return "".join(parts)
-
-
-def _render_session_state(session: dict[str, Any] | None) -> str:
-    if session is not None and session.get("armed"):
-        return (
-            f'<span class="session-state armed">ARMED</span> '
-            f'<span class="session-id">{html.escape(session["id"])}</span>'
-        )
-    if session is not None:
-        reason = html.escape(session.get("end_reason") or "ended")
-        return f'<span class="session-state idle">IDLE</span> (last: {reason})'
-    return '<span class="session-state idle">IDLE</span>'
-
-
-def _render_control_panel(
+def _render_device_rows(
     devices: list[dict[str, Any]],
-    session: dict[str, Any] | None,
+    calibrations: list[str],
 ) -> str:
+    """Server-rendered initial paint. JS will replace this within 1 s but we
+    avoid a flash of empty content on first load."""
+    device_by_id = {d["camera_id"]: d for d in devices}
+    calibrated = set(calibrations)
+
+    def render_row(cam_id: str) -> str:
+        dev = device_by_id.get(cam_id)
+        online = dev is not None
+        time_synced = bool(dev.get("time_synced")) if dev else False
+        is_cal = cam_id in calibrated
+        if not online:
+            meta, chip_cls, chip_label = "Not seen", "idle", "offline"
+        elif is_cal:
+            meta, chip_cls, chip_label = "Ready · pose known", "calibrated", "calibrated"
+        else:
+            meta, chip_cls, chip_label = "Awaiting calibration", "online", "online"
+        cal_dot = "ok" if is_cal else ("warn" if online else "bad")
+        sync_dot = "ok" if time_synced else ("warn" if online else "bad")
+        sync_label = "synced" if time_synced else ("not synced" if online else "offline")
+        cal_label = "calibrated" if is_cal else ("pending" if online else "offline")
+        return (
+            f'<div class="device">'
+            f'<div class="id">{html.escape(cam_id)}</div>'
+            f'<div>'
+            f'<div class="meta">{html.escape(meta)}</div>'
+            f'<div class="sub">'
+            f'<span class="item"><span class="dot {sync_dot}"></span>time sync · {sync_label}</span>'
+            f'<span class="item"><span class="dot {cal_dot}"></span>pose · {cal_label}</span>'
+            f'</div>'
+            f'</div>'
+            f'<div><span class="chip {chip_cls}">{chip_label}</span></div>'
+            f'</div>'
+        )
+
+    rows = [render_row(cam) for cam in ("A", "B")]
+    rows.extend(render_row(d["camera_id"]) for d in devices if d["camera_id"] not in ("A", "B"))
+    return "".join(rows)
+
+
+def _render_session_body(session: dict[str, Any] | None) -> str:
     armed = session is not None and session.get("armed")
+    chip_html = (
+        '<span class="chip armed">armed</span>'
+        if armed
+        else '<span class="chip idle">idle</span>'
+    )
+    sid_html = (
+        f'<span class="session-id">{html.escape(session["id"])}</span>'
+        if session and session.get("id")
+        else ""
+    )
+    reason_html = ""
+    if not armed and session and session.get("end_reason"):
+        reason_html = f'<span class="session-meta">last: {html.escape(session["end_reason"])}</span>'
+
     arm_btn = (
         '<form class="inline" method="POST" action="/sessions/arm">'
-        f'<button id="arm-btn" class="arm" type="submit"'
-        f'{" disabled" if armed else ""}>準備完成 · Arm</button>'
+        f'<button class="btn" type="submit"{" disabled" if armed else ""}>Arm session</button>'
         "</form>"
     )
     cancel_btn = (
         '<form class="inline" method="POST" action="/sessions/cancel">'
-        f'<button id="cancel-btn" class="cancel" type="submit"'
-        f'{"" if armed else " disabled"}>取消 · Cancel</button>'
+        f'<button class="btn danger" type="submit"{"" if armed else " disabled"}>Cancel</button>'
         "</form>"
     )
     return (
-        '<div class="control">'
-        '<div class="row">'
-        '<div class="block">'
-        '<div class="label">Devices</div>'
-        f'<div id="devices-badges">{_render_devices_badges(devices)}</div>'
-        "</div>"
-        '<div class="block" style="min-width:240px">'
-        '<div class="label">Session</div>'
-        f'<div id="session-state">{_render_session_state(session)}</div>'
-        "</div>"
-        '<div class="block" style="margin-left:auto">'
-        f'{arm_btn} {cancel_btn}'
-        "</div>"
-        "</div>"
-        "</div>"
+        f'<div class="session-head">{chip_html}{sid_html}{reason_html}</div>'
+        f'<div class="session-actions">{arm_btn}{cancel_btn}</div>'
+    )
+
+
+def _render_events_body(events: list[dict[str, Any]]) -> str:
+    if not events:
+        return '<div class="events-empty">No sessions received yet.</div>'
+    parts: list[str] = []
+    for e in events:
+        sid = html.escape(e["session_id"])
+        cams = " · ".join(html.escape(c) for c in e.get("cameras", [])) or "—"
+        mode = "dual" if len(e.get("cameras", [])) >= 2 else "single"
+        status = html.escape(e.get("status", ""))
+        stat_label = status.replace("_", " ")
+        mean = "—" if e.get("mean_residual_m") is None else format(e["mean_residual_m"], ".4f")
+        peak_z = "—" if e.get("peak_z_m") is None else format(e["peak_z_m"], ".2f")
+        duration = "—" if e.get("duration_s") is None else format(e["duration_s"], ".2f")
+        parts.append(
+            f'<a class="event-row" href="/viewer/{sid}">'
+            f'<div class="event-top">'
+            f'<span class="sid">{sid}</span>'
+            f'<span class="chip {mode}">{mode}</span>'
+            f'<span class="chip {status}">{stat_label}</span>'
+            f"</div>"
+            f'<div class="event-stats">'
+            f'<span><span class="k">Cams</span><span class="v">{cams}</span></span>'
+            f'<span><span class="k">3D pts</span><span class="v">{e.get("n_triangulated", 0)}</span></span>'
+            f'<span><span class="k">Mean resid (m)</span><span class="v">{mean}</span></span>'
+            f'<span><span class="k">Peak Z (m)</span><span class="v">{peak_z}</span></span>'
+            f'<span><span class="k">Duration (s)</span><span class="v">{duration}</span></span>'
+            f"</div>"
+            f"</a>"
+        )
+    return "".join(parts)
+
+
+def _render_nav_status(
+    devices: list[dict[str, Any]],
+    session: dict[str, Any] | None,
+    calibrations: list[str],
+) -> str:
+    armed = session is not None and session.get("armed")
+    session_html = (
+        f'<span class="val armed">{html.escape(session.get("id", "—"))}</span>'
+        if armed
+        else '<span class="val idle">idle</span>'
+    )
+    return (
+        f'<span class="pair"><span class="label">Devices</span><span class="val">{len(devices)}/2</span></span>'
+        f'<span class="pair"><span class="label">Calibrated</span><span class="val">{len(calibrations)}/2</span></span>'
+        f'<span class="pair"><span class="label">Session</span>{session_html}</span>'
     )
 
 
@@ -184,65 +497,57 @@ def render_events_index_html(
     events: list[dict[str, Any]],
     devices: list[dict[str, Any]] | None = None,
     session: dict[str, Any] | None = None,
+    calibrations: list[str] | None = None,
 ) -> str:
-    """Render the dashboard: devices panel + session panel + Arm/Cancel
-    controls + events table with links into each session's 3D viewer.
-
-    All inputs match the shape of their /status and /events counterparts,
-    so the JSON and HTML sides of the server describe the same data."""
+    """Render the dashboard: top nav + sidebar (devices / session / events)
+    + a canvas showing the current calibration scene. All three panels
+    hydrate from JSON ticks after first paint — the initial SSR avoids a
+    flash of empty content while the first fetch is in flight."""
     devices = devices or []
+    calibrations = calibrations or []
 
-    if not events:
-        events_body = (
-            '<div class="empty">No sessions received yet. Arm a session from the panel above, '
-            "then throw a ball within the camera&rsquo;s view.</div>"
-        )
-    else:
-        rows: list[str] = []
-        for e in events:
-            cams = ", ".join(html.escape(c) for c in e["cameras"]) or "—"
-            counts = e.get("n_ball_frames", {}) or {}
-            counts_str = ", ".join(
-                f"{html.escape(c)}:{n}" for c, n in sorted(counts.items())
-            ) or "—"
-            status = html.escape(e["status"])
-            err = e.get("error") or ""
-            err_html = f' <span title="{html.escape(err)}">⚠</span>' if err else ""
-            mode = "dual" if len(e["cameras"]) >= 2 else "single"
-            sid = html.escape(e["session_id"])
-            rows.append(
-                "<tr>"
-                f'<td><a href="/viewer/{sid}"><span class="session-id">{sid}</span></a></td>'
-                f'<td>{cams} <span class="badge {"online" if mode == "dual" else "offline"}">{mode}</span></td>'
-                f'<td><span class="status {status}">{status}</span>{err_html}</td>'
-                f'<td>{_fmt_received_at(e["received_at"])}</td>'
-                f'<td>{counts_str}</td>'
-                f'<td class="num">{e["n_triangulated"]}</td>'
-                f'<td class="num">{_fmt_opt_float(e["mean_residual_m"], ".4f")}</td>'
-                f'<td class="num">{_fmt_opt_float(e["peak_z_m"], ".2f")}</td>'
-                f'<td class="num">{_fmt_opt_float(e["duration_s"], ".2f")}</td>'
-                "</tr>"
-            )
-        events_body = (
-            "<table>"
-            "<thead><tr>"
-            "<th>Session</th><th>Cams / mode</th><th>Status</th><th>Received</th>"
-            "<th>Ball frames</th><th>3D pts</th><th>Mean resid (m)</th>"
-            "<th>Peak Z (m)</th><th>Duration (s)</th>"
-            "</tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody>"
-            "</table>"
-        )
+    from main import state  # local import: avoid circular at module load time
+
+    scene = build_calibration_scene(state.calibrations())
+    fig = _build_figure(scene)
+    scene_div = fig.to_html(include_plotlyjs=False, full_html=False, div_id="scene-root")
 
     return (
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        "<title>ball_tracker dashboard</title>"
-        f"<style>{_INDEX_CSS}</style>"
+        "<!DOCTYPE html>"
+        "<html lang=\"en\"><head>"
+        "<meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>ball_tracker</title>"
+        "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">"
+        "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
+        "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
+        "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
+        f"<style>{_CSS}</style>"
         "</head><body>"
-        "<h1>ball_tracker dashboard</h1>"
-        f'<div class="subtitle">{len(events)} session(s) · click a row to open the 3D viewer</div>'
-        f"{_render_control_panel(devices, session)}"
-        f"{events_body}"
-        f"<script>{_INDEX_JS}</script>"
+        '<nav class="nav">'
+        '<span class="brand"><span class="dot"></span>BALL_TRACKER</span>'
+        f'<div class="status-line" id="nav-status">{_render_nav_status(devices, session, calibrations)}</div>'
+        "</nav>"
+        '<div class="layout">'
+        '<aside class="sidebar">'
+        '<div class="card">'
+        '<h2 class="card-title">Devices</h2>'
+        f'<div id="devices-body">{_render_device_rows(devices, calibrations)}</div>'
+        "</div>"
+        '<div class="card">'
+        '<h2 class="card-title">Session</h2>'
+        f'<div id="session-body">{_render_session_body(session)}</div>'
+        "</div>"
+        '<div class="card">'
+        '<h2 class="card-title">Events</h2>'
+        f'<div id="events-body">{_render_events_body(events)}</div>'
+        "</div>"
+        "</aside>"
+        '<section class="canvas">'
+        '<div class="canvas-hint">Live calibration preview · drag to rotate</div>'
+        f"{scene_div}"
+        "</section>"
+        "</div>"
+        f"<script>{_JS_TEMPLATE}</script>"
         "</body></html>"
     )

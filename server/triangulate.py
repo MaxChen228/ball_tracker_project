@@ -24,6 +24,16 @@ def recover_extrinsics(K: np.ndarray, H: np.ndarray) -> tuple[np.ndarray, np.nda
     H maps world (X, Y, 1) → pixel (u, v, 1) up to scale, with h33 = 1.
     H = K [r1 r2 t] (Zhang's planar calibration).
     R_wc transforms a world vector into the camera frame.
+
+    Only handles the overall-sign `H ↔ -H` ambiguity (flip when `t[2] < 0`).
+    The "plate normal direction" ambiguity (two Zhang twins) is determined
+    entirely by the sign of `r1 × r2`, which Zhang derives directly from
+    the decomposition; there is no second branch to pick here. If the
+    resulting camera center `C = -R^T t` lands below the plate (Z < 0),
+    the root cause is on the caller's side — typically ArUco markers taped
+    in a mirrored layout or with IDs swapped — not an ambiguity this
+    routine can resolve. A warning is logged so the dashboard operator
+    can tell at a glance that the calibration needs to be redone.
     """
     M = np.linalg.inv(K) @ H
     lam = 1.0 / np.linalg.norm(M[:, 0])
@@ -32,23 +42,15 @@ def recover_extrinsics(K: np.ndarray, H: np.ndarray) -> tuple[np.ndarray, np.nda
     t = lam * M[:, 2]
     r3 = np.cross(r1, r2)
     R_approx = np.column_stack([r1, r2, r3])
-    # Orthonormalize (closest rotation in Frobenius norm).
     U, _, Vt = np.linalg.svd(R_approx)
     D = np.diag([1.0, 1.0, float(np.sign(np.linalg.det(U @ Vt)))])
     R = U @ D @ Vt
 
-    # Camera must be in front of plate plane → world-point-in-cam Z > 0 for any
-    # point on the plate. Test with world origin: z_cam = (R @ 0 + t)[2] = t[2] > 0.
-    # If |t[2]| is numerically near zero the camera is (approximately) on the
-    # plate plane itself — the sign of t[2] is unreliable, so refuse to
-    # disambiguate and let the caller handle a bad calibration instead of
-    # silently producing a flipped pose.
     if abs(t[2]) < 1e-6:
         raise ValueError("degenerate homography")
     if t[2] < 0:
         R = -R
         t = -t
-        # Re-fix determinant if sign flip broke it.
         if np.linalg.det(R) < 0:
             R[:, 2] *= -1
 

@@ -319,7 +319,7 @@ def test_index_endpoint_lists_events_with_viewer_links():
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     body = r.text
-    assert "ball_tracker dashboard" in body
+    assert "BALL_TRACKER" in body
     assert f'href="/viewer/{sid(901)}"' in body
 
 
@@ -327,6 +327,6 @@ def test_index_endpoint_empty_state_is_rendered():
     client = TestClient(app)
     r = client.get("/")
     assert r.status_code == 200
-    # Either the empty message or a table — the fixture may have left rows
-    # behind. Assert it's renderable HTML with the page title.
-    assert "ball_tracker dashboard" in r.text
+    # Either the empty message or a session event list — the fixture may
+    # have left rows behind. Assert the nav brand is in the HTML either way.
+    assert "BALL_TRACKER" in r.text
