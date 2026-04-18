@@ -31,6 +31,11 @@ Endpoints:
                                        Triggers the "disarm" echo window so
                                        phones flush the in-progress recording
                                        and upload the cycle.
+  POST /sessions/clear              — dashboard: drop the last-ended
+                                       session pointer so the session
+                                       card on / goes blank. No-op (409
+                                       for JSON callers) when already
+                                       idle with no prior session.
   GET  /chirp.wav                   — reference sync chirp for 時間校正
   GET  /events                      — one row per session: cameras, status,
                                        counts, received_at, triangulation
@@ -428,13 +433,12 @@ class State:
 
     def _check_session_timeout_locked(self, now: float) -> None:
         """If the current session has exceeded its max_duration_s, transition
-        it to ended(reason=timeout). Assumes the caller holds `self._lock`."""
+        it to ended. Assumes the caller holds `self._lock`."""
         s = self._current_session
         if s is None or s.ended_at is not None:
             return
         if now - s.started_at > s.max_duration_s:
             s.ended_at = now
-            s.end_reason = "timeout"
             self._last_ended_session = s
             self._current_session = None
 
@@ -465,7 +469,7 @@ class State:
             self._current_session = session
             return session
 
-    def stop_session(self, reason: str = "stopped") -> Session | None:
+    def stop_session(self) -> Session | None:
         """End the current armed session (operator pressed Stop on the
         dashboard). Returns the ended session, or None if nothing was
         armed. Data captured during the session is preserved; `Stop` is a
@@ -476,10 +480,22 @@ class State:
             if s is None or s.ended_at is not None:
                 return None
             s.ended_at = now
-            s.end_reason = reason
             self._last_ended_session = s
             self._current_session = None
             return s
+
+    def clear_last_ended_session(self) -> bool:
+        """Drop the `_last_ended_session` pointer so the dashboard's
+        session card goes blank again. No-op (returns False) when a
+        session is currently armed or there's nothing to clear — the
+        pointer is strictly a dashboard-idle-state concern."""
+        with self._lock:
+            if self._current_session is not None and self._current_session.ended_at is None:
+                return False
+            if self._last_ended_session is None:
+                return False
+            self._last_ended_session = None
+            return True
 
     def _register_upload_in_session_locked(self, pitch: PitchPayload) -> None:
         """Called from `record()` while the state lock is held. Appends
@@ -487,7 +503,7 @@ class State:
         panel can show which phones have flushed. Does NOT end the
         session — in the current pivot, the iPhone only flushes a
         recording after receiving `disarm`, so the session is already
-        ended (reason = stopped or timeout) by the time this fires."""
+        ended by the time this fires."""
         s = self._current_session
         if s is None or s.ended_at is not None:
             return
@@ -500,9 +516,10 @@ class State:
 
     def session_snapshot(self) -> Session | None:
         """Return the session most relevant to a status caller: the current
-        armed session if any, otherwise the most recently ended one (so the
-        dashboard can display "IDLE · last: stopped" and the iPhone
-        sees session.armed == False during the disarm echo window)."""
+        armed session if any, otherwise the most recently ended one (so
+        the iPhone sees session.armed == False during the disarm echo
+        window, and the dashboard can keep the session id visible until
+        the operator hits Clear)."""
         current = self.current_session()
         if current is not None:
             return current
@@ -790,12 +807,25 @@ async def sessions_stop(request: Request):
     """End the armed session (operator Stop). Returns 409 to API callers
     when nothing was armed; HTML callers always get a 303 redirect back
     to the dashboard so the button never looks broken."""
-    ended = state.stop_session(reason="stopped")
+    ended = state.stop_session()
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     if ended is None:
         raise HTTPException(status_code=409, detail="no armed session")
     return {"ok": True, "session": ended.to_dict()}
+
+
+@app.post("/sessions/clear")
+async def sessions_clear(request: Request):
+    """Drop the last-ended session pointer so the dashboard card returns
+    to blank. HTML callers get a 303 back to /; JSON callers get 409 when
+    nothing was there to clear (idle with no previous session)."""
+    cleared = state.clear_last_ended_session()
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    if not cleared:
+        raise HTTPException(status_code=409, detail="nothing to clear")
+    return {"ok": True}
 
 
 # Matches the `Session.id` schema regex — keeps the path parameter from

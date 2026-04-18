@@ -123,7 +123,6 @@ def test_stop_session_transitions_to_ended(tmp_path):
     assert ended is not None
     assert ended.id == session.id
     assert ended.armed is False
-    assert ended.end_reason == "stopped"
     assert s.current_session() is None
 
 
@@ -144,10 +143,10 @@ def test_session_times_out_automatically(tmp_path):
     clock["now"] = 1006.0   # past max_duration
     assert s.current_session() is None
 
-    # `_last_ended_session` should reflect the timeout reason so
-    # commands_for_devices can emit disarm.
+    # `_last_ended_session` should be set so commands_for_devices can
+    # emit disarm during the echo window.
     assert s._last_ended_session is not None
-    assert s._last_ended_session.end_reason == "timeout"
+    assert s._last_ended_session.ended_at is not None
 
 
 # --- Cross-camera command dispatch ----------------------------------------
@@ -268,7 +267,7 @@ def test_sessions_arm_stop_json_api():
     r2 = client.post("/sessions/stop", headers={"Accept": "application/json"})
     assert r2.status_code == 200
     assert r2.json()["session"]["id"] == session_id
-    assert r2.json()["session"]["end_reason"] == "stopped"
+    assert r2.json()["session"]["armed"] is False
 
 
 def test_sessions_stop_returns_409_when_nothing_armed():
@@ -320,7 +319,7 @@ def test_pitch_upload_keeps_session_armed_until_stop():
     status = client.get("/status").json()
     assert status["session"] is not None
     assert status["session"]["armed"] is True
-    assert status["session"]["end_reason"] is None
+    assert status["session"]["ended_at"] is None
     assert status["commands"] == {"A": "arm", "B": "arm"}
     assert set(status["session"]["uploads_received"]) == {"A"}
 
@@ -358,7 +357,7 @@ def test_delete_unknown_session_returns_false(tmp_path):
 def test_delete_clears_last_ended_session_pointer(tmp_path):
     """`session_snapshot` surfaces the last-ended session even after it's
     been deleted; clearing the pointer ensures the dashboard doesn't show
-    a ghost "last: stopped" chip for a session whose files are gone."""
+    a ghost session chip for a session whose files are gone."""
     clock = {"now": 1000.0}
     s = main.State(data_dir=tmp_path, time_fn=lambda: clock["now"])
     s.heartbeat("A")
@@ -370,6 +369,51 @@ def test_delete_clears_last_ended_session_pointer(tmp_path):
 
     assert s.delete_session(armed.id) is True
     assert s.session_snapshot() is None
+
+
+def test_clear_last_ended_session(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    s.arm_session()
+    s.stop_session()
+    assert s.session_snapshot() is not None
+
+    assert s.clear_last_ended_session() is True
+    assert s.session_snapshot() is None
+    # Second call is a no-op.
+    assert s.clear_last_ended_session() is False
+
+
+def test_clear_refuses_while_armed(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    s.arm_session()
+    assert s.clear_last_ended_session() is False
+    assert s.session_snapshot() is not None
+
+
+def test_sessions_clear_html_redirect():
+    main.state.reset()
+    main.state.arm_session()
+    main.state.stop_session()
+
+    client = TestClient(app)
+    r = client.post(
+        "/sessions/clear",
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+    assert main.state.session_snapshot() is None
+
+
+def test_sessions_clear_json_409_when_nothing_to_clear():
+    main.state.reset()
+    client = TestClient(app)
+    r = client.post(
+        "/sessions/clear",
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 409
 
 
 def test_delete_refuses_armed_session(tmp_path):

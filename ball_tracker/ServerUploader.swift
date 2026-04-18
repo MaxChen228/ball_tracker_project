@@ -79,7 +79,6 @@ final class ServerUploader {
         let armed: Bool
         let started_at: Double
         let ended_at: Double?
-        let end_reason: String?
     }
 
     /// Response body shared by `POST /heartbeat` and `GET /status`.

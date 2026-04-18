@@ -209,11 +209,7 @@ final class ServerHealthMonitor {
     /// gave.
     private static func heartbeatDisplayText(_ r: ServerUploader.HeartbeatResponse) -> String {
         if let s = r.session {
-            if s.armed {
-                return "ARMED (\(s.id))"
-            }
-            let reason = s.end_reason ?? "ended"
-            return "IDLE · last: \(reason)"
+            return s.armed ? "ARMED (\(s.id))" : "IDLE"
         }
         return r.state ?? "reachable"
     }
