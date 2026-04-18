@@ -31,6 +31,10 @@ final class ClipRecorder {
     private var videoInput: AVAssetWriterInput?
     private var sessionStarted: Bool = false
     private(set) var droppedFrameCount: Int = 0
+    /// Session-clock PTS of the first sample appended. Uploader pairs this
+    /// with the JSON payload so the server can reconstruct absolute PTS for
+    /// each decoded frame.
+    private(set) var firstSamplePTS: CMTime?
 
     init(outputURL: URL) {
         self.outputURL = outputURL
@@ -65,6 +69,7 @@ final class ClipRecorder {
         videoInput = input
         sessionStarted = false
         droppedFrameCount = 0
+        firstSamplePTS = nil
         log.info("clip writer prepared width=\(width) height=\(height)")
     }
 
@@ -81,6 +86,7 @@ final class ClipRecorder {
             }
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             writer.startSession(atSourceTime: pts)
+            firstSamplePTS = pts
             sessionStarted = true
         }
 

@@ -97,8 +97,13 @@ def _world_ray(
     dist_coeffs: list[float] | None,
     R_wc: np.ndarray,
 ) -> np.ndarray:
-    if dist_coeffs is not None and px is not None and py is not None:
-        d_cam = undistorted_ray_cam(px, py, K, np.asarray(dist_coeffs, dtype=float))
+    if px is not None and py is not None:
+        coeffs = (
+            np.asarray(dist_coeffs, dtype=float)
+            if dist_coeffs is not None
+            else np.zeros(5, dtype=float)
+        )
+        d_cam = undistorted_ray_cam(px, py, K, coeffs)
     elif theta_x is not None and theta_z is not None:
         d_cam = angle_ray_cam(theta_x, theta_z)
     else:

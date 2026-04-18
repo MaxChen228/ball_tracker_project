@@ -9,23 +9,10 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "netwo
 ///   POST http://{server_ip}:{port}/pitch
 ///   multipart/form-data with two parts:
 ///     - `payload`: JSON-encoded `PitchPayload` (required)
-///     - `video`:   H.264/MOV clip of the cycle (optional; Phase 1 raw-video
-///                  experiment — server stores the file but still relies on
-///                  the JSON payload for triangulation)
+///     - `video`:   H.264/MOV clip of the cycle (required — server-side ball
+///                  detection is the sole data path; no detection runs on
+///                  the phone any more)
 final class ServerUploader {
-    struct FramePayload: Codable {
-        let frame_index: Int
-        let timestamp_s: Double
-        let theta_x_rad: Double?
-        let theta_z_rad: Double?
-        /// Raw (distorted) ball pixel coords. When present and paired with
-        /// `intrinsics.distortion`, the server undistorts these for
-        /// triangulation. Nil when no ball was detected.
-        let px: Double?
-        let py: Double?
-        let ball_detected: Bool
-    }
-
     struct IntrinsicsPayload: Codable {
         let fx: Double
         let fz: Double
@@ -36,23 +23,29 @@ final class ServerUploader {
         let distortion: [Double]?
     }
 
+    /// Metadata accompanying the required H.264 MOV. The server decodes the
+    /// video, runs HSV ball detection per frame, and triangulates.
     struct PitchPayload: Codable {
         let camera_id: String
         /// Server-minted pairing key from `POST /sessions/arm`. A/B pairs
         /// by this alone — iPhones no longer mint any pairing identifier.
         /// Pattern: `s_` + 4–16 hex chars (matches the server regex).
         let session_id: String
-        /// Shared time anchor for A/B pairing, recovered from an audio-chirp
-        /// matched-filter hit during the 時間校正 step. `frame_index` has no
-        /// meaningful value for an audio anchor (set to 0); the server pairs
-        /// by `timestamp_s` alone. Kept separate for legibility and for
-        /// potential future anchors (e.g. visual markers).
-        let sync_anchor_frame_index: Int
-        let sync_anchor_timestamp_s: Double
+        /// Session-clock PTS of the audio-chirp peak (from 時間校正). Nil
+        /// when the operator armed without running a fresh time sync; the
+        /// server flags this session as unpaireable.
+        let sync_anchor_timestamp_s: Double?
+        /// Absolute session-clock PTS (seconds) of the first video sample
+        /// written to the MOV. The server adds this to each container-
+        /// relative frame PTS to reconstruct the iOS master clock — which
+        /// is the space `sync_anchor_timestamp_s` lives in.
+        let video_start_pts_s: Double
+        /// Nominal capture rate of the MOV. Server uses this as a sanity
+        /// check against the decoded frame count.
+        let video_fps: Double
         /// Device-local recording counter, for operator debugging only —
         /// server doesn't pair on it. Optional so a phone can omit it.
         let local_recording_index: Int?
-        let frames: [FramePayload]
         let intrinsics: IntrinsicsPayload?
         let homography: [Double]?
         let image_width_px: Int?

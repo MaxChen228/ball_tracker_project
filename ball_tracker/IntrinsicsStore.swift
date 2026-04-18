@@ -18,27 +18,6 @@ enum IntrinsicsStore {
     static let keyIntrinsicDistortion = "intrinsic_distortion"
     static let keyHomography = "homography_3x3"
 
-    /// Return the four-parameter intrinsics used by the on-device
-    /// ball detector, or nil when any field is missing / zero.
-    static func loadBallDetectorIntrinsics() -> BallDetector.Intrinsics? {
-        let d = UserDefaults.standard
-        let fx = d.double(forKey: keyIntrinsicFx)
-        let fz = d.double(forKey: keyIntrinsicFz)
-        let hasAll = d.object(forKey: keyIntrinsicFx) != nil
-            && d.object(forKey: keyIntrinsicFz) != nil
-            && d.object(forKey: keyIntrinsicCx) != nil
-            && d.object(forKey: keyIntrinsicCy) != nil
-            && fx != 0 && fz != 0
-        guard hasAll else {
-            log.warning("intrinsics missing — falling back to FOV approximation")
-            return nil
-        }
-        let cx = d.double(forKey: keyIntrinsicCx)
-        let cy = d.double(forKey: keyIntrinsicCy)
-        log.debug("intrinsics loaded fx=\(fx, privacy: .public) fz=\(fz, privacy: .public) cx=\(cx, privacy: .public) cy=\(cy, privacy: .public)")
-        return BallDetector.Intrinsics(cx: cx, cy: cy, fx: fx, fz: fz)
-    }
-
     /// Return the payload-shaped intrinsics (including optional OpenCV
     /// 5-coefficient distortion), or nil when the core four are missing.
     static func loadIntrinsicsPayload() -> ServerUploader.IntrinsicsPayload? {

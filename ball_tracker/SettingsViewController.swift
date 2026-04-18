@@ -7,13 +7,6 @@ final class SettingsViewController: UIViewController {
         var serverPort: Int
         var cameraRole: String          // "A" or "B"
 
-        var hMin: Int
-        var hMax: Int
-        var sMin: Int
-        var sMax: Int
-        var vMin: Int
-        var vMax: Int
-
         /// Matched-filter peak threshold for the AudioChirpDetector. Tune
         /// down if the chirp only flashes orange ("close") in HUD; tune up
         /// if it false-triggers on ambient noise. Range roughly 0.05–0.50.
@@ -66,13 +59,6 @@ final class SettingsViewController: UIViewController {
     private static let keyServerPort = "server_port"
     private static let keyCameraRole = "camera_role"
 
-    private static let keyHMin = "h_min"
-    private static let keyHMax = "h_max"
-    private static let keySMin = "s_min"
-    private static let keySMax = "s_max"
-    private static let keyVMin = "v_min"
-    private static let keyVMax = "v_max"
-
     private static let keyChirpThreshold = "chirp_threshold"
 
     private static let keyPollInterval = "poll_interval_s"
@@ -107,13 +93,6 @@ final class SettingsViewController: UIViewController {
     private let serverIPField = UITextField()
     private let serverPortField = UITextField()
     private let cameraRoleControl = UISegmentedControl(items: ["A · 1B 側", "B · 3B 側"])
-
-    private let hMinField = UITextField()
-    private let hMaxField = UITextField()
-    private let sMinField = UITextField()
-    private let sMaxField = UITextField()
-    private let vMinField = UITextField()
-    private let vMaxField = UITextField()
 
     private let chirpThresholdField = UITextField()
     private let pollIntervalField = UITextField()
@@ -158,13 +137,6 @@ final class SettingsViewController: UIViewController {
         let serverPort = intOrDefault(keyServerPort, defaultValue: 8765)
         let cameraRole = d.string(forKey: keyCameraRole) ?? "A"
 
-        let hMin = intOrDefault(keyHMin, defaultValue: 100)
-        let hMax = intOrDefault(keyHMax, defaultValue: 130)
-        let sMin = intOrDefault(keySMin, defaultValue: 140)
-        let sMax = intOrDefault(keySMax, defaultValue: 255)
-        let vMin = intOrDefault(keyVMin, defaultValue: 40)
-        let vMax = intOrDefault(keyVMax, defaultValue: 255)
-
         let chirpThreshold = doubleOrDefault(keyChirpThreshold, defaultValue: 0.18)
         let pollInterval = doubleOrDefault(keyPollInterval, defaultValue: 1.0)
 
@@ -198,9 +170,6 @@ final class SettingsViewController: UIViewController {
             serverIP: serverIP,
             serverPort: serverPort,
             cameraRole: cameraRole,
-            hMin: hMin, hMax: hMax,
-            sMin: sMin, sMax: sMax,
-            vMin: vMin, vMax: vMax,
             chirpThreshold: chirpThreshold,
             pollInterval: pollInterval,
             captureWidth: captureWidth,
@@ -295,12 +264,6 @@ final class SettingsViewController: UIViewController {
             serverIP: normalizeServerIP(serverIPField.text, fallback: current.serverIP),
             serverPort: intValue(serverPortField.text, fallback: current.serverPort),
             cameraRole: cameraRoleControl.selectedSegmentIndex == 1 ? "B" : "A",
-            hMin: intValue(hMinField.text, fallback: current.hMin),
-            hMax: intValue(hMaxField.text, fallback: current.hMax),
-            sMin: intValue(sMinField.text, fallback: current.sMin),
-            sMax: intValue(sMaxField.text, fallback: current.sMax),
-            vMin: intValue(vMinField.text, fallback: current.vMin),
-            vMax: intValue(vMaxField.text, fallback: current.vMax),
             chirpThreshold: doubleValue(chirpThresholdField.text, fallback: current.chirpThreshold),
             pollInterval: min(60.0, max(1.0, doubleValue(pollIntervalField.text, fallback: current.pollInterval))),
             captureWidth: Self.captureWidthFixed,
@@ -332,16 +295,6 @@ final class SettingsViewController: UIViewController {
 
         let ct = doubleValue(chirpThresholdField.text, fallback: 0)
         if ct <= 0 || ct > 1 { return "Chirp threshold 需介於 0–1（典型 0.15–0.35）" }
-
-        if intValue(hMinField.text, fallback: 0) >= intValue(hMaxField.text, fallback: 180) {
-            return "H Min 必須小於 H Max"
-        }
-        if intValue(sMinField.text, fallback: 0) >= intValue(sMaxField.text, fallback: 255) {
-            return "S Min 必須小於 S Max"
-        }
-        if intValue(vMinField.text, fallback: 0) >= intValue(vMaxField.text, fallback: 255) {
-            return "V Min 必須小於 V Max"
-        }
 
         if manualIntrinsicsSwitch.isOn {
             let fx = doubleValue(manualFxField.text, fallback: -1)
@@ -393,12 +346,6 @@ final class SettingsViewController: UIViewController {
 
         configureTextField(serverIPField, placeholder: "192.168.1.100", keyboard: .numbersAndPunctuation)
         configureTextField(serverPortField, placeholder: "8765", keyboard: .numberPad)
-        configureTextField(hMinField, placeholder: "100", keyboard: .numberPad)
-        configureTextField(hMaxField, placeholder: "130", keyboard: .numberPad)
-        configureTextField(sMinField, placeholder: "140", keyboard: .numberPad)
-        configureTextField(sMaxField, placeholder: "255", keyboard: .numberPad)
-        configureTextField(vMinField, placeholder: "40", keyboard: .numberPad)
-        configureTextField(vMaxField, placeholder: "255", keyboard: .numberPad)
         configureTextField(chirpThresholdField, placeholder: "0.18", keyboard: .decimalPad)
         configureTextField(pollIntervalField, placeholder: "1", keyboard: .decimalPad)
         configureTextField(manualFxField, placeholder: "e.g. 1371.5", keyboard: .decimalPad)
@@ -433,20 +380,7 @@ final class SettingsViewController: UIViewController {
             rows: [
                 controlRow(label: "Role", control: cameraRoleControl),
             ],
-            footer: "解析度系統固定 1080p。FPS 自動切換：待機 60、追蹤 240。"
-        ))
-
-        contentStack.addArrangedSubview(sectionBlock(
-            title: "Ball Detection (HSV)",
-            rows: [
-                fieldRow(label: "H Min", field: hMinField),
-                fieldRow(label: "H Max", field: hMaxField),
-                fieldRow(label: "S Min", field: sMinField),
-                fieldRow(label: "S Max", field: sMaxField),
-                fieldRow(label: "V Min", field: vMinField),
-                fieldRow(label: "V Max", field: vMaxField),
-            ],
-            footer: "H 0-180 / S 0-255 / V 0-255。深藍棒球預設 100–130, 140–255, 40–255。"
+            footer: "解析度系統固定 1080p。FPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。"
         ))
 
         contentStack.addArrangedSubview(sectionBlock(
@@ -523,12 +457,6 @@ final class SettingsViewController: UIViewController {
         serverIPField.text = settings.serverIP
         serverPortField.text = String(settings.serverPort)
         cameraRoleControl.selectedSegmentIndex = settings.cameraRole == "B" ? 1 : 0
-        hMinField.text = String(settings.hMin)
-        hMaxField.text = String(settings.hMax)
-        sMinField.text = String(settings.sMin)
-        sMaxField.text = String(settings.sMax)
-        vMinField.text = String(settings.vMin)
-        vMaxField.text = String(settings.vMax)
         chirpThresholdField.text = String(settings.chirpThreshold)
         pollIntervalField.text = String(settings.pollInterval)
 
@@ -812,12 +740,6 @@ final class SettingsViewController: UIViewController {
         d.set(settings.serverIP, forKey: keyServerIP)
         d.set(settings.serverPort, forKey: keyServerPort)
         d.set(settings.cameraRole, forKey: keyCameraRole)
-        d.set(settings.hMin, forKey: keyHMin)
-        d.set(settings.hMax, forKey: keyHMax)
-        d.set(settings.sMin, forKey: keySMin)
-        d.set(settings.sMax, forKey: keySMax)
-        d.set(settings.vMin, forKey: keyVMin)
-        d.set(settings.vMax, forKey: keyVMax)
         d.set(settings.chirpThreshold, forKey: keyChirpThreshold)
         d.set(settings.pollInterval, forKey: keyPollInterval)
         d.set(settings.captureWidth, forKey: keyCaptureWidth)

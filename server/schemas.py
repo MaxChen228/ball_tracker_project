@@ -21,25 +21,32 @@ class IntrinsicsPayload(BaseModel):
     cx: float
     cy: float
     # OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Optional so
-    # payloads without distortion still validate and fall back to the angle
-    # path.
+    # payloads without distortion still validate; server detection still
+    # runs, just without lens distortion correction in triangulation.
     distortion: list[float] | None = None
 
 
 class FramePayload(BaseModel):
+    """Internal shape produced by server-side detection. NOT part of the wire
+    contract any more — the iPhone uploads only the MOV + metadata; server
+    synthesises one `FramePayload` per decoded video frame. `theta_x_rad`
+    / `theta_z_rad` are always None now (the phone doesn't do angle
+    projection); px/py come from server detection, and triangulation
+    always uses the pixel+distortion path."""
     frame_index: int
     timestamp_s: float
     theta_x_rad: float | None = None
     theta_z_rad: float | None = None
-    # Raw (distorted) ball pixel coords. When present AND the camera's
-    # intrinsics.distortion is present, the server undistorts these instead
-    # of using the angles. Nil when no ball was detected.
     px: float | None = None
     py: float | None = None
     ball_detected: bool
 
 
 class PitchPayload(BaseModel):
+    """Wire + in-memory shape. The iPhone posts the wire subset (no `frames`);
+    server detection populates `frames` before triangulation and re-saves
+    the enriched record to disk, so reloads across restarts skip re-
+    detection."""
     # Constrained so we can safely interpolate into filenames (clips,
     # pitch json). Matches the iOS-side values ("A" / "B") with slack for
     # future role additions but blocks path-traversal attempts.
@@ -50,16 +57,23 @@ class PitchPayload(BaseModel):
     # interpolate into filenames.
     session_id: str = Field(..., pattern=r"^s_[0-9a-f]{4,32}$")
     # Shared time anchor for A/B pairing, recovered from an audio-chirp
-    # matched-filter hit on the 時間校正 step. Server uses
-    # `sync_anchor_timestamp_s` as the per-cycle clock origin and pairs
-    # frames within an 8 ms window of the relative time.
-    sync_anchor_frame_index: int
-    sync_anchor_timestamp_s: float
+    # matched-filter hit on the 時間校正 step. Nil when the operator armed
+    # without running a fresh time sync → server marks the session as
+    # `error="no time sync"` and skips triangulation.
+    sync_anchor_timestamp_s: float | None = None
+    # Absolute session-clock PTS (seconds) of the first video sample. Server
+    # adds this to each container-relative frame PTS so `FramePayload.timestamp_s`
+    # lives on the same iOS master clock as `sync_anchor_timestamp_s`.
+    video_start_pts_s: float
+    # Nominal capture rate of the MOV. Sanity-check + detection log.
+    video_fps: float
     # Optional device-local recording counter. Not used for pairing; kept
-    # purely for operator debugging (e.g. "this was my 5th attempt this
-    # app launch"). iPhones may omit it entirely.
+    # purely for operator debugging.
     local_recording_index: int | None = None
-    frames: list[FramePayload]
+    # Server-side synthesised per-frame data (populated after detection).
+    # Optional on the wire: the iPhone always omits it; server writes it
+    # back to disk before triangulation.
+    frames: list[FramePayload] = Field(default_factory=list)
     intrinsics: IntrinsicsPayload | None = None
     homography: list[float] | None = None
     image_width_px: int | None = None
