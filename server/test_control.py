@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+import chirp
 import main
 from conftest import sid
 from main import app
@@ -91,14 +92,14 @@ def test_chirp_wav_is_cached_across_calls(tmp_path):
     """Chirp synthesis is deterministic; the endpoint must return the same
     bytes from a cache instead of re-running the PCM generation each time."""
     # Reset the lru_cache so the first call below is guaranteed to populate.
-    main._chirp_wav_bytes.cache_clear()
+    chirp.chirp_wav_bytes.cache_clear()
     client = TestClient(app)
     r1 = client.get("/chirp.wav")
     r2 = client.get("/chirp.wav")
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert r1.content == r2.content
-    info = main._chirp_wav_bytes.cache_info()
+    info = chirp.chirp_wav_bytes.cache_info()
     assert info.hits >= 1  # second call was a cache hit, not a recompute
 
 

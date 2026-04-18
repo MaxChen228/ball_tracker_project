@@ -39,17 +39,13 @@ identifiers.
 """
 from __future__ import annotations
 
-import functools
-import io
 import json
 import logging
 import os
 import secrets
 import socket
 import time
-import wave
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
@@ -57,179 +53,26 @@ from typing import Any, Callable
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 
-from triangulate import (
-    angle_ray_cam,
-    build_K,
-    camera_center_world,
-    recover_extrinsics,
-    triangulate_rays,
-    undistorted_ray_cam,
+# Re-exports so `from main import PitchPayload, ...` keeps working for the
+# existing test suite and any downstream tooling. New callers should import
+# from the split modules directly (schemas / pairing / chirp / render_*).
+from schemas import (
+    Device,
+    FramePayload,
+    HeartbeatBody,
+    IntrinsicsPayload,
+    PitchPayload,
+    Session,
+    SessionResult,
+    TriangulatedPoint,
+    _DEFAULT_SESSION_TIMEOUT_S,
 )
+from pairing import triangulate_cycle
+from chirp import chirp_wav_bytes
 
 logger = logging.getLogger("ball_tracker")
-
-
-class IntrinsicsPayload(BaseModel):
-    fx: float
-    fz: float
-    cx: float
-    cy: float
-    # OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Optional so
-    # payloads without distortion still validate and fall back to the angle
-    # path.
-    distortion: list[float] | None = None
-
-
-class FramePayload(BaseModel):
-    frame_index: int
-    timestamp_s: float
-    theta_x_rad: float | None = None
-    theta_z_rad: float | None = None
-    # Raw (distorted) ball pixel coords. When present AND the camera's
-    # intrinsics.distortion is present, the server undistorts these instead
-    # of using the angles. Nil when no ball was detected.
-    px: float | None = None
-    py: float | None = None
-    ball_detected: bool
-
-
-class PitchPayload(BaseModel):
-    # Constrained so we can safely interpolate into filenames (clips,
-    # pitch json). Matches the iOS-side values ("A" / "B") with slack for
-    # future role additions but blocks path-traversal attempts.
-    camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
-    # Server-assigned session identifier (from `POST /sessions/arm`). This
-    # is the sole pairing key for A/B uploads — iPhones no longer generate
-    # their own counters. Pattern matches `_new_session_id()`; also safe to
-    # interpolate into filenames.
-    session_id: str = Field(..., pattern=r"^s_[0-9a-f]{4,32}$")
-    # Shared time anchor for A/B pairing, recovered from an audio-chirp
-    # matched-filter hit on the 時間校正 step. Server uses
-    # `sync_anchor_timestamp_s` as the per-cycle clock origin and pairs
-    # frames within an 8 ms window of the relative time.
-    sync_anchor_frame_index: int
-    sync_anchor_timestamp_s: float
-    # Optional device-local recording counter. Not used for pairing; kept
-    # purely for operator debugging (e.g. "this was my 5th attempt this
-    # app launch"). iPhones may omit it entirely.
-    local_recording_index: int | None = None
-    frames: list[FramePayload]
-    intrinsics: IntrinsicsPayload | None = None
-    homography: list[float] | None = None
-    image_width_px: int | None = None
-    image_height_px: int | None = None
-
-
-class TriangulatedPoint(BaseModel):
-    t_rel_s: float
-    x_m: float
-    y_m: float
-    z_m: float
-    residual_m: float
-
-
-class SessionResult(BaseModel):
-    """One armed-session's triangulation result. Replaces the old
-    `CycleResult` now that "cycle" is a per-device recording-window concept
-    and the pitch unit is server-level "session"."""
-    session_id: str
-    camera_a_received: bool
-    camera_b_received: bool
-    points: list[TriangulatedPoint] = []
-    error: str | None = None
-
-
-def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):
-    K = build_K(intr.fx, intr.fz, intr.cx, intr.cy)
-    H = np.array(H_list, dtype=float).reshape(3, 3)
-    R, t = recover_extrinsics(K, H)
-    C = camera_center_world(R, t)
-    return K, R, t, C
-
-
-def _ray_for_frame(
-    theta_x: float | None,
-    theta_z: float | None,
-    px: float | None,
-    py: float | None,
-    K: np.ndarray,
-    dist_coeffs: list[float] | None,
-) -> np.ndarray:
-    """Per-frame ray choice. Prefer undistorting raw pixels if available,
-    otherwise fall back to the angle ray computed on-device."""
-    if dist_coeffs is not None and px is not None and py is not None:
-        return undistorted_ray_cam(px, py, K, np.asarray(dist_coeffs, dtype=float))
-    if theta_x is None or theta_z is None:
-        raise ValueError("frame has neither usable angles nor pixels")
-    return angle_ray_cam(theta_x, theta_z)
-
-
-def _valid_frame(f: FramePayload) -> bool:
-    has_angles = f.theta_x_rad is not None and f.theta_z_rad is not None
-    has_pixels = f.px is not None and f.py is not None
-    return f.ball_detected and (has_angles or has_pixels)
-
-
-def _frame_items(p: PitchPayload):
-    """Ball-bearing frames as `(t_rel, θx, θz, px, py)`, sorted by
-    anchor-relative time. `t_rel = timestamp_s − sync_anchor_timestamp_s`."""
-    anchor = p.sync_anchor_timestamp_s
-    out = [
-        (f.timestamp_s - anchor, f.theta_x_rad, f.theta_z_rad, f.px, f.py)
-        for f in p.frames if _valid_frame(f)
-    ]
-    out.sort(key=lambda x: x[0])
-    return out
-
-
-def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoint]:
-    """Pair A and B frames within an 8 ms window of anchor-relative time and
-    run ray-midpoint triangulation. Requires intrinsics + homography on both
-    cameras."""
-    if a.intrinsics is None or a.homography is None:
-        raise ValueError("camera A missing calibration (run Calibrate in iPhone app)")
-    if b.intrinsics is None or b.homography is None:
-        raise ValueError("camera B missing calibration (run Calibrate in iPhone app)")
-
-    K_a, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
-    K_b, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
-
-    items_a = _frame_items(a)
-    items_b = _frame_items(b)
-    if not items_a or not items_b:
-        return []
-
-    b_times = np.array([x[0] for x in items_b])
-    max_dt = 1.0 / 120.0  # 8 ms tolerance at 240 fps
-
-    dist_a = a.intrinsics.distortion
-    dist_b = b.intrinsics.distortion
-
-    results: list[TriangulatedPoint] = []
-    for t_rel, tx_a, tz_a, px_a, py_a in items_a:
-        idx = int(np.argmin(np.abs(b_times - t_rel)))
-        if abs(b_times[idx] - t_rel) > max_dt:
-            continue
-        _, tx_b, tz_b, px_b, py_b = items_b[idx]
-
-        d_a_cam = _ray_for_frame(tx_a, tz_a, px_a, py_a, K_a, dist_a)
-        d_b_cam = _ray_for_frame(tx_b, tz_b, px_b, py_b, K_b, dist_b)
-        d_a_world = R_a.T @ d_a_cam
-        d_b_world = R_b.T @ d_b_cam
-
-        P, gap = triangulate_rays(C_a, d_a_world, C_b, d_b_world)
-        results.append(
-            TriangulatedPoint(
-                t_rel_s=t_rel,
-                x_m=float(P[0]),
-                y_m=float(P[1]),
-                z_m=float(P[2]),
-                residual_m=gap,
-            )
-        )
-    return results
 
 
 _DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
@@ -256,53 +99,8 @@ _DEVICE_REGISTRY_CAP = 64
 # on its next poll. Long enough to cover any sensible poll cadence.
 _DISARM_ECHO_S = 5.0
 
-# Session auto-timeout if no cycle arrives. Covers "dashboard armed but
-# nobody threw anything" — otherwise /status would keep dispatching arm
-# forever.
-_DEFAULT_SESSION_TIMEOUT_S = 60.0
-
-
-@dataclass
-class Device:
-    """Most recent heartbeat from a single iPhone. `last_seen_at` is a wall
-    clock unix timestamp so `now - last_seen_at` compares cleanly even
-    across server restarts (the dict is memory-only, so restart implies no
-    device is online yet)."""
-    camera_id: str
-    last_seen_at: float
-
-
-@dataclass
-class Session:
-    """One dashboard "Arm" action → at most one session at a time. The
-    session id is the server-minted pairing key for A/B uploads — iPhones
-    stamp this id onto every PitchPayload they send during the armed
-    window, so reconstruction is always keyed by session, never by
-    device-local counters."""
-    id: str
-    started_at: float
-    max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S
-    ended_at: float | None = None
-    end_reason: str | None = None   # "cycle_uploaded" | "cancelled" | "timeout"
-    # Camera ids that have successfully uploaded while this session was
-    # the current one. Dashboard reads this to render "session s_abc →
-    # A, B".
-    uploads_received: list[str] = field(default_factory=list)
-
-    @property
-    def armed(self) -> bool:
-        return self.ended_at is None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "armed": self.armed,
-            "started_at": self.started_at,
-            "ended_at": self.ended_at,
-            "end_reason": self.end_reason,
-            "max_duration_s": self.max_duration_s,
-            "uploads_received": list(self.uploads_received),
-        }
+# Session auto-timeout (`_DEFAULT_SESSION_TIMEOUT_S`), Device, and Session
+# now live in schemas.py — imported above for back-compat re-export.
 
 
 def _new_session_id() -> str:
@@ -778,10 +576,6 @@ def status() -> dict[str, Any]:
     return _build_status_response()
 
 
-class HeartbeatBody(BaseModel):
-    camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
-
-
 @app.post("/heartbeat")
 def heartbeat(body: HeartbeatBody) -> dict[str, Any]:
     """iPhone liveness ping. Responds with the same payload as /status so
@@ -902,35 +696,6 @@ async def pitch(
     return response
 
 
-@functools.lru_cache(maxsize=1)
-def _chirp_wav_bytes() -> bytes:
-    """Build the reference sync chirp WAV once and cache. The signal is
-    deterministic (constants only) so any subsequent request can reuse the
-    exact same bytes without re-running the FFT-style synthesis."""
-    sr = 44100
-    f0 = 2000.0
-    f1 = 8000.0
-    duration = 0.1
-    n = int(sr * duration)
-    t = np.arange(n) / sr
-    phase = 2.0 * np.pi * (f0 * t + (f1 - f0) * t ** 2 / (2.0 * duration))
-    window = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(n) / (n - 1)))
-    chirp = np.sin(phase) * window
-
-    silence = np.zeros(int(sr * 0.5), dtype=np.float64)
-    full = np.concatenate([silence, chirp, silence])
-    pcm = np.clip(full * 0.8, -1.0, 1.0)
-    pcm_int = (pcm * 32767.0).astype(np.int16)
-
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(sr)
-        w.writeframes(pcm_int.tobytes())
-    return buf.getvalue()
-
-
 @app.get("/chirp.wav")
 def chirp_wav() -> Response:
     """Reference sync chirp for the 時間校正 step.
@@ -943,7 +708,7 @@ def chirp_wav() -> Response:
     0.5 s of silence either side so the phones can catch it mid-stream.
     """
     return Response(
-        content=_chirp_wav_bytes(),
+        content=chirp_wav_bytes(),
         media_type="audio/wav",
         headers={"Content-Disposition": 'inline; filename="chirp.wav"'},
     )
@@ -988,7 +753,7 @@ def reconstruction(session_id: str) -> dict[str, Any]:
 
 @app.get("/viewer/{session_id}", response_class=HTMLResponse)
 def viewer(session_id: str) -> HTMLResponse:
-    from viewer import render_scene_html
+    from render_scene import render_scene_html
 
     scene = _scene_for_session(session_id)
     return HTMLResponse(render_scene_html(scene))
@@ -1001,7 +766,7 @@ def events() -> list[dict[str, Any]]:
 
 @app.get("/", response_class=HTMLResponse)
 def events_index() -> HTMLResponse:
-    from viewer import render_events_index_html
+    from render_dashboard import render_events_index_html
 
     session = state.session_snapshot()
     return HTMLResponse(
