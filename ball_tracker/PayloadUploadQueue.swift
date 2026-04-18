@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "network")
 
 /// Serialises cached pitch payloads up to the server, one at a time. Owns
 /// the in-memory queue of `PitchPayloadStore` JSON URLs; on success the
@@ -89,6 +92,7 @@ final class PayloadUploadQueue {
         let files = try store.listPayloadFiles()
         pendingFiles.append(contentsOf: files)
         setUploading(false)
+        log.info("queue reloaded pending=\(self.pendingFiles.count)")
     }
 
     /// Drop the in-memory queue only — on-disk files are preserved so a
@@ -102,6 +106,7 @@ final class PayloadUploadQueue {
     /// the worker slot is idle.
     func enqueue(_ fileURL: URL) {
         pendingFiles.append(fileURL)
+        log.info("queue enqueue url=\(fileURL.lastPathComponent, privacy: .public) depth=\(self.pendingFiles.count)")
         processNextIfNeeded()
     }
 
@@ -114,6 +119,7 @@ final class PayloadUploadQueue {
         let fileURL = pendingFiles.removeFirst()
         setUploading(true)
         onStatusTextChanged?("Uploading cached pitch...")
+        log.debug("queue dequeue url=\(fileURL.lastPathComponent, privacy: .public) depth=\(self.pendingFiles.count)")
 
         let payload: ServerUploader.PitchPayload
         do {
@@ -135,6 +141,7 @@ final class PayloadUploadQueue {
                     self.store.delete(fileURL)
                     self.clientErrorRetryCount.removeValue(forKey: fileURL)
                     self.serverBackoffTier = 0
+                    log.info("queue delete-on-success url=\(fileURL.lastPathComponent, privacy: .public) session=\(response.session_id, privacy: .public)")
                     self.onStatusTextChanged?("Uploaded \(payload.session_id)")
                     self.onLastResultChanged?(Self.formatResultSummary(response))
                     self.setUploading(false)
@@ -145,6 +152,7 @@ final class PayloadUploadQueue {
                     if self.shouldDrop(for: error, fileURL: fileURL) {
                         self.store.delete(fileURL)
                         self.clientErrorRetryCount.removeValue(forKey: fileURL)
+                        log.warning("queue drop url=\(fileURL.lastPathComponent, privacy: .public) reason=\(Self.describe(error), privacy: .public)")
                         self.onStatusTextChanged?(
                             "Dropped \(payload.session_id): \(Self.describe(error))"
                         )
@@ -157,6 +165,7 @@ final class PayloadUploadQueue {
                     // Otherwise re-queue and schedule a category-appropriate retry.
                     self.bookkeepRetry(for: error, fileURL: fileURL)
                     let delay = self.delay(for: error)
+                    log.warning("queue retry url=\(fileURL.lastPathComponent, privacy: .public) reason=\(Self.describe(error), privacy: .public) delay_s=\(Int(delay.rounded()))")
                     self.onStatusTextChanged?(
                         "Upload failed (\(Self.describe(error))); retry in \(Int(delay.rounded()))s"
                     )
