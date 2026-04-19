@@ -825,6 +825,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             }
         }
         guard let selected else {
+            // Dump every (w×h @ fps_range) the device offers so Console.app
+            // shows exactly why the search missed — usually either the target
+            // resolution is not supported at all on this device, or it is
+            // supported but not at the requested fps.
+            for (i, format) in device.formats.enumerated() {
+                let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                let ranges = format.videoSupportedFrameRateRanges
+                    .map { "\($0.minFrameRate)-\($0.maxFrameRate)" }
+                    .joined(separator: ",")
+                log.error("camera format[\(i)] \(dims.width)x\(dims.height) fps_ranges=[\(ranges, privacy: .public)]")
+            }
+            log.error("camera no matching format target=\(targetWidth)x\(targetHeight)@\(targetFps)fps device=\(device.localizedName, privacy: .public) uniqueID=\(device.uniqueID, privacy: .public)")
             throw CaptureFormatError.noMatchingFormat(width: targetWidth, height: targetHeight, fps: targetFps)
         }
 
