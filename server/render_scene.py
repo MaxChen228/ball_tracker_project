@@ -373,6 +373,15 @@ def render_viewer_html(
     text-align:right; flex:0 0 52px; }}
   .strip-row .strip-canvas {{ flex:1 1 auto; min-width:0; }}
   .strip-row[hidden] {{ display:none; }}
+  /* Dual-mode: server stream is post-encode (lossy) reference; on-device
+     is pre-encode ground truth. Mute the server row visually so the eye
+     reads on-device as authoritative. */
+  .strip-row.is-reference {{ opacity:0.6; }}
+  .strip-row.is-reference .strip-label::after {{ content:" · REF";
+    color:var(--sub); font-weight:400; }}
+  .strip-note {{ font-size:9px; color:var(--sub); letter-spacing:0.04em;
+    text-transform:none; font-style:italic;
+    padding:2px 0 0 58px; line-height:1.4; }}
   .strip-legend {{ font-size:10px; color:var(--sub); letter-spacing:0.06em;
     display:flex; gap:10px; align-items:center; flex-wrap:wrap;
     text-transform:uppercase; }}
@@ -500,13 +509,18 @@ def render_viewer_html(
           <span class="strip-label" aria-hidden="true"></span>
           <input id="scrubber" class="strip-canvas" type="range" min="0" max="1" value="0" step="1" />
         </div>
-        <div class="strip-row" id="strip-row-server">
+        <div class="strip-row" id="strip-row-server"
+             title="Server detection runs on H.264-decoded BGR (post-encode). Quantization erases small/distant balls — expect a narrower detection window than ON-DEV.">
           <span class="strip-label">SERVER</span>
           <canvas id="detection-canvas" class="strip-canvas" height="18" aria-hidden="true"></canvas>
         </div>
-        <div class="strip-row" id="strip-row-on-device" hidden>
+        <div class="strip-row" id="strip-row-on-device" hidden
+             title="On-device detection runs on raw BGRA (pre-encode). Closer to ground truth — wider detection window than SERVER in dual mode.">
           <span class="strip-label">ON-DEV</span>
           <canvas id="detection-canvas-on-device" class="strip-canvas" height="18" aria-hidden="true"></canvas>
+        </div>
+        <div class="strip-note" id="strip-note-dual" hidden>
+          兩條 stream 共享同一 chirp anchor — 色塊起止差異反映 H.264 壓縮損失（SERVER 解碼後丟失小球訊號），不是時間錯位。
         </div>
       </div>
       <span id="frame-label" class="frame-label">
@@ -1220,10 +1234,14 @@ def render_viewer_html(
   const STRIP_EMPTY = "rgba(232, 228, 219, 0.6)";
   const STRIP_HEAD = "#2A2520";
   const STRIP_CHIRP = "rgba(230, 179, 0, 0.65)";  // _ACCENT, half-alpha
-  // Reveal the second strip + toggle when on-device data exists.
+  // Reveal the second strip + toggle when on-device data exists. Also
+  // mark SERVER as "reference" (post-encode) and surface the explanatory
+  // note so users don't read the strip-start offset as a time-sync bug.
   if (HAS_ON_DEVICE) {{
     stripRowOnDevice.hidden = false;
     toggleOnDeviceWrap.hidden = false;
+    document.getElementById("strip-row-server").classList.add("is-reference");
+    document.getElementById("strip-note-dual").hidden = false;
   }}
 
   function resizeOneCanvas(canvas) {{
@@ -1666,7 +1684,12 @@ def _build_figure(scene: Scene):
                 marker=dict(size=8, color=color, symbol="diamond"),
                 text=[f"Cam {cam.camera_id}"],
                 textposition="top center",
-                name=f"Camera {cam.camera_id}",
+                # In-scene text label is anchored to the marker, so the
+                # separate legend entry just adds clutter (and overlaps
+                # the canvas hint pill on the dashboard preview). Hover
+                # tooltip still works; Rays/Ground traces keep their
+                # legend rows so per-cam colour mapping stays discoverable.
+                showlegend=False,
                 hovertemplate=(
                     f"Camera {cam.camera_id}"
                     "<br>x=%{x:.2f} m"

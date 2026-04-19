@@ -1444,6 +1444,18 @@ def calibration_state() -> dict[str, Any]:
     # JSON round-trip guarantees everything is native-Python and FastAPI
     # can serialise it without reaching for a custom encoder.
     fig = _build_figure(scene)
+    # Mirror render_events_index_html's dashboard-specific layout overrides
+    # so the 5 s tick can't undo them: drop the duplicate title, fill the
+    # panel, and pin a fixed rig-scale bbox so a single 3m-distant camera
+    # can't shrink the 0.5 m plate via aspectmode="data" autoscaling.
+    fig.update_layout(
+        title=None, margin=dict(l=0, r=0, t=8, b=0),
+        scene_xaxis_range=[-3.5, 3.5],
+        scene_yaxis_range=[-3.5, 3.5],
+        scene_zaxis_range=[-0.2, 2.0],
+        scene_aspectmode="manual",
+        scene_aspectratio=dict(x=1.0, y=1.0, z=0.45),
+    )
     fig_json = json.loads(fig.to_json())
     return {
         "calibrations": [

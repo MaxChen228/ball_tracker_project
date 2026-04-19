@@ -82,6 +82,10 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .nav .status-line .val {{ color: var(--ink); font-weight: 500; }}
 .nav .status-line .val.armed {{ color: var(--passed); }}
 .nav .status-line .val.idle {{ color: var(--sub); }}
+/* Warn-tinted count when < 2 cams report — makes "0/2 devices" jump out
+   as actionable instead of reading as a flat label next to "1/2 cal". */
+.nav .status-line .val.partial {{ color: var(--warn); }}
+.nav .status-line .val.full    {{ color: var(--passed); }}
 
 /* --- Main layout: sidebar + canvas --- */
 .layout {{ display: flex; height: 100vh; padding-top: var(--nav-h); }}
@@ -114,7 +118,11 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
                            padding-top: var(--s-3); }}
 
 /* --- Device rows --- */
-.device {{ display: grid; grid-template-columns: 28px 1fr auto; align-items: center;
+/* Middle column uses minmax so a wider chip (CALIBRATED vs OFFLINE) can't
+   squeeze the sub-row into a second line and make A / B rows different
+   heights. `auto` → min-content keeps the chip column tight. */
+.device {{ display: grid; grid-template-columns: 28px minmax(0, 1fr) min-content;
+           align-items: center;
            gap: var(--s-3); padding: var(--s-2) 0; }}
 .device + .device {{ border-top: 1px solid var(--border-l); }}
 .device .id {{ font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--ink);
@@ -122,10 +130,14 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .device .meta {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
                  text-transform: uppercase; color: var(--sub); }}
 .device .meta em {{ font-style: normal; color: var(--ink-light); }}
-.device .sub {{ display: flex; gap: var(--s-3); margin-top: var(--s-1); }}
+/* Two-column grid forces both items onto the same line and guarantees
+   identical row height regardless of per-device label length. */
+.device .sub {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                gap: var(--s-2); margin-top: var(--s-1); }}
 .device .sub .item {{ font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em;
                       text-transform: uppercase; color: var(--sub);
-                      display: flex; align-items: center; gap: var(--s-1); }}
+                      display: flex; align-items: center; gap: var(--s-1);
+                      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
 .device .sub .dot {{ width: 6px; height: 6px; border-radius: 50%;
                      background: var(--border-base); display: inline-block; }}
 .device .sub .dot.ok {{ background: var(--passed); }}
@@ -166,6 +178,22 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
                 text-transform: uppercase; color: var(--sub); min-width: 44px; }}
 .mode-locked {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
                  color: var(--sub); padding-left: var(--s-1); }}
+/* Segmented control: the three mode buttons share one outer border and
+   collapse their individual borders/radius so the eye reads them as a
+   single exclusive choice, not three separate CTAs. */
+.mode-segmented {{ display: inline-flex; border: 1px solid var(--border-base);
+                    border-radius: var(--r); overflow: hidden; }}
+.mode-segmented form.inline {{ display: inline-flex; margin: 0; }}
+.mode-segmented form.inline + form.inline button.btn {{
+  border-left: 1px solid var(--border-base); }}
+.mode-segmented button.btn,
+.mode-segmented button.btn.secondary {{
+  border: 0; border-radius: 0; padding: 6px 12px; font-size: 10px;
+  letter-spacing: 0.10em; }}
+.mode-segmented button.btn.secondary {{
+  background: transparent; color: var(--sub); }}
+.mode-segmented button.btn.secondary:hover:not(:disabled) {{
+  background: var(--surface-hover); color: var(--ink); border: 0; }}
 
 /* --- Buttons — unified geometry, single border-radius. Standard is
    36px tall, mini variant (used in event delete) is 24px. --- */
@@ -308,7 +336,9 @@ _JS_TEMPLATE = r"""
       };
       modeRow = `<div class="mode-row">
           <span class="mode-label">Mode</span>
-          ${btn('camera_only')}${btn('on_device')}${btn('dual')}
+          <div class="mode-segmented" role="radiogroup" aria-label="Capture mode">
+            ${btn('camera_only')}${btn('on_device')}${btn('dual')}
+          </div>
         </div>`;
     }
     const sessHtml = `
@@ -329,9 +359,10 @@ _JS_TEMPLATE = r"""
     if (navStatus) {
       const online = (state.devices || []).length;
       const cal = (state.calibrations || []).length;
+      const countCls = n => (n >= 2 ? 'full' : 'partial');
       const navHtml = `
-        <span class="pair"><span class="label">Devices</span><span class="val">${online}/2</span></span>
-        <span class="pair"><span class="label">Calibrated</span><span class="val">${cal}/2</span></span>
+        <span class="pair"><span class="label">Devices</span><span class="val ${countCls(online)}">${online}/2</span></span>
+        <span class="pair"><span class="label">Calibrated</span><span class="val ${countCls(cal)}">${cal}/2</span></span>
         <span class="pair"><span class="label">Session</span>` +
         (armed
           ? `<span class="val armed">${esc(s.id || '—')}</span>`
@@ -360,6 +391,11 @@ _JS_TEMPLATE = r"""
       const duration = fmtNum(e.duration_s, 2);
       const mean = fmtNum(e.mean_residual_m, 4);
       const sid = esc(e.session_id);
+      // Sessions with no triangulated output (error / no sync / single cam)
+      // carry all-null metrics; skip the stats row entirely so the events
+      // list stays dense and the meaningful rows don't drown in "—" cells.
+      const hasMetrics = (e.n_triangulated || 0) > 0
+        || peakZ !== '—' || duration !== '—' || mean !== '—';
       // Delete form is a sibling of the event-row link so submitting it
       // does not navigate via the wrapping anchor. Confirm dialog guards
       // against accidental clicks — once removed, disk files are gone.
@@ -377,13 +413,13 @@ _JS_TEMPLATE = r"""
               <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
               <span class="chip ${esc(captureMode)}">${esc(captureModeLabel)}</span>
             </div>
-            <div class="event-stats">
+            ${hasMetrics ? `<div class="event-stats">
               <span><span class="k">Cams</span><span class="v">${esc(cams)}</span></span>
               <span><span class="k">3D pts</span><span class="v">${e.n_triangulated || 0}</span></span>
               <span><span class="k">Mean resid (m)</span><span class="v">${mean}</span></span>
               <span><span class="k">Peak Z (m)</span><span class="v">${peakZ}</span></span>
               <span><span class="k">Duration (s)</span><span class="v">${duration}</span></span>
-            </div>
+            </div>` : ''}
           </a>
           <form class="event-delete-form" method="POST"
                 action="/sessions/${sid}/delete"
@@ -632,8 +668,9 @@ def _render_session_body(
         mode_row = (
             '<div class="mode-row">'
             '<span class="mode-label">Mode</span>'
+            '<div class="mode-segmented" role="radiogroup" aria-label="Capture mode">'
             f'{_mode_button("camera_only")}{_mode_button("on_device")}{_mode_button("dual")}'
-            "</div>"
+            "</div></div>"
         )
 
     return (
@@ -662,6 +699,22 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
         mean = "—" if e.get("mean_residual_m") is None else format(e["mean_residual_m"], ".4f")
         peak_z = "—" if e.get("peak_z_m") is None else format(e["peak_z_m"], ".2f")
         duration = "—" if e.get("duration_s") is None else format(e["duration_s"], ".2f")
+        # Collapse the stats row when the session produced no usable
+        # metrics — saves two rows of "—" clutter for error / single-cam
+        # sessions. Mirror of the JS-tick guard in renderEvents().
+        has_metrics = (
+            (e.get("n_triangulated") or 0) > 0
+            or mean != "—" or peak_z != "—" or duration != "—"
+        )
+        stats_html = (
+            f'<div class="event-stats">'
+            f'<span><span class="k">Cams</span><span class="v">{cams}</span></span>'
+            f'<span><span class="k">3D pts</span><span class="v">{e.get("n_triangulated", 0)}</span></span>'
+            f'<span><span class="k">Mean resid (m)</span><span class="v">{mean}</span></span>'
+            f'<span><span class="k">Peak Z (m)</span><span class="v">{peak_z}</span></span>'
+            f'<span><span class="k">Duration (s)</span><span class="v">{duration}</span></span>'
+            f"</div>"
+        ) if has_metrics else ""
         parts.append(
             # event-row is a link into the viewer; the delete form is a
             # sibling (not a descendant) so the button submit doesn't
@@ -674,13 +727,7 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f'<span class="chip {status}">{stat_label}</span>'
             f'<span class="chip {capture_mode}">{capture_mode}</span>'
             f"</div>"
-            f'<div class="event-stats">'
-            f'<span><span class="k">Cams</span><span class="v">{cams}</span></span>'
-            f'<span><span class="k">3D pts</span><span class="v">{e.get("n_triangulated", 0)}</span></span>'
-            f'<span><span class="k">Mean resid (m)</span><span class="v">{mean}</span></span>'
-            f'<span><span class="k">Peak Z (m)</span><span class="v">{peak_z}</span></span>'
-            f'<span><span class="k">Duration (s)</span><span class="v">{duration}</span></span>'
-            f"</div>"
+            f"{stats_html}"
             f"</a>"
             f'<form class="event-delete-form" method="POST" '
             f'action="/sessions/{sid}/delete" '
@@ -704,9 +751,13 @@ def _render_nav_status(
         if armed
         else '<span class="val idle">idle</span>'
     )
+    def _count_cls(n: int) -> str:
+        return "full" if n >= 2 else ("partial" if n >= 1 else "partial")
+    dev_cls = _count_cls(len(devices))
+    cal_cls = _count_cls(len(calibrations))
     return (
-        f'<span class="pair"><span class="label">Devices</span><span class="val">{len(devices)}/2</span></span>'
-        f'<span class="pair"><span class="label">Calibrated</span><span class="val">{len(calibrations)}/2</span></span>'
+        f'<span class="pair"><span class="label">Devices</span><span class="val {dev_cls}">{len(devices)}/2</span></span>'
+        f'<span class="pair"><span class="label">Calibrated</span><span class="val {cal_cls}">{len(calibrations)}/2</span></span>'
         f'<span class="pair"><span class="label">Session</span>{session_html}</span>'
     )
 
@@ -729,6 +780,22 @@ def render_events_index_html(
 
     scene = build_calibration_scene(state.calibrations())
     fig = _build_figure(scene)
+    # Dashboard tweaks vs viewer defaults:
+    #  - title=None: corner pill + nav already say what this is
+    #  - fixed bbox + manual aspect ratio: with aspectmode="data" a single
+    #    3m-distant camera blows up the bounding box and shrinks the
+    #    50 cm plate to a dot. Pinning ±3.5 m XY / 2 m Z to the rig
+    #    geometry keeps the plate readable whether 0, 1, or 2 cams are
+    #    calibrated. Viewer leaves "data" so the ball trajectory still
+    #    fits naturally.
+    fig.update_layout(
+        title=None, margin=dict(l=0, r=0, t=8, b=0),
+        scene_xaxis_range=[-3.5, 3.5],
+        scene_yaxis_range=[-3.5, 3.5],
+        scene_zaxis_range=[-0.2, 2.0],
+        scene_aspectmode="manual",
+        scene_aspectratio=dict(x=1.0, y=1.0, z=0.45),
+    )
     scene_div = fig.to_html(include_plotlyjs=False, full_html=False, div_id="scene-root")
 
     return (
