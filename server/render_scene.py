@@ -169,6 +169,7 @@ def render_viewer_html(
     # 'no clips on disk' placeholder for both, since there's nothing to
     # gain from collapsing a column that already has no content.
     other_cam = {"A": "B", "B": "A"}
+    cams_by_id = {c.camera_id: c for c in scene.cameras}
     video_cells = "".join(
         _video_cell_html(
             cam,
@@ -178,13 +179,16 @@ def render_viewer_html(
                 and other_cam[cam] in videos_by_cam
                 and not health["cameras"][cam]["received"]
             ),
+            image_width_px=(cams_by_id[cam].image_width_px if cam in cams_by_id else None),
+            image_height_px=(cams_by_id[cam].image_height_px if cam in cams_by_id else None),
+            cx=(cams_by_id[cam].cx if cam in cams_by_id else None),
+            cy=(cams_by_id[cam].cy if cam in cams_by_id else None),
         )
         for cam in ("A", "B")
     )
     # Bottom row of the 2×2 grid: one 2D reprojection canvas per camera,
     # rendered from that camera's full K + [R|t] + distortion model.
     # JS hydrates the canvas after page load.
-    cams_by_id = {c.camera_id: c for c in scene.cameras}
     virt_cells = "".join(
         _virtual_cell_html(
             cam,
@@ -390,9 +394,24 @@ def render_viewer_html(
     letter-spacing:0.06em; color:var(--sub); text-transform:uppercase; }}
   .vid-frame {{ flex:1 1 auto; min-height:0; display:flex;
     align-items:center; justify-content:center; background:#000;
-    border-radius:var(--r); overflow:hidden; }}
+    border-radius:var(--r); overflow:hidden; position:relative;
+    width:100%; max-width:100%; align-self:center; }}
   .vid-frame video {{ width:100%; height:100%; object-fit:contain;
     display:block; }}
+  /* Principal-point cross: same (cx, cy) reference mark the virtual
+     canvas draws. Overlaying it on the real MOV lets the operator check
+     whether the camera's optical centre actually falls where ChArUco
+     said it does — a lens-alignment sanity cue. Drawn with a dark halo
+     so it reads on light floors and dark corners alike. */
+  .pp-cross {{ position:absolute; width:14px; height:14px;
+    transform:translate(-50%, -50%); pointer-events:none; z-index:2; }}
+  .pp-cross::before, .pp-cross::after {{ content:""; position:absolute;
+    background:rgba(255,255,255,0.7);
+    box-shadow:0 0 2px rgba(0,0,0,0.85); }}
+  .pp-cross::before {{ left:0; right:0; top:50%; height:1px;
+    transform:translateY(-0.5px); }}
+  .pp-cross::after  {{ top:0; bottom:0; left:50%; width:1px;
+    transform:translateX(-0.5px); }}
   .vid-frame.empty {{ background:var(--bg); border:1px dashed var(--border-base);
     color:var(--sub); font-family:var(--mono); font-size:11px;
     letter-spacing:0.12em; text-transform:uppercase; border-radius:var(--r); }}
@@ -1134,53 +1153,104 @@ def render_viewer_html(
       ctx.setLineDash([]);
     }}
 
+    // Cividis colormap — same scale the main Plotly scene's colorbar
+    // uses, so the eye learns the convention once: dark blue = trajectory
+    // start, bright yellow = end. Hand-picked stops from the Plotly
+    // cividis definition; interpolated linearly between them.
+    function cividis(t) {{
+      const stops = [
+        [0.00,   0,  32,  76],
+        [0.25,   0,  79, 107],
+        [0.50,  87, 118, 124],
+        [0.75, 167, 156, 119],
+        [1.00, 253, 231,  55],
+      ];
+      t = Math.max(0, Math.min(1, t));
+      for (let i = 1; i < stops.length; i++) {{
+        if (t <= stops[i][0]) {{
+          const [t0, r0, g0, b0] = stops[i - 1];
+          const [t1, r1, g1, b1] = stops[i];
+          const a = (t - t0) / (t1 - t0);
+          return `rgb(${{Math.round(r0 + a * (r1 - r0))}}, ` +
+                 `${{Math.round(g0 + a * (g1 - g0))}}, ` +
+                 `${{Math.round(b0 + a * (b1 - b0))}})`;
+        }}
+      }}
+      return "rgb(253, 231, 55)";
+    }}
+
     // Trajectory — server then on-device, both reprojected into this
-    // camera's frame, both truncated by playback cutoff. Same accent
-    // hue as the main Plotly scene's trajectory so the eye ties "this
-    // point in the 3D canvas" to "this point in the virtual frame".
+    // camera's frame, both truncated by playback cutoff. Visual grammar
+    // mirrors the main 3D scene: server uses ACCENT line + cividis dots
+    // (so time direction is visible at a glance); on-device uses a
+    // contrasting dashed line so the two streams can't be confused.
     function drawTraj(pts, opts) {{
       if (!pts || !pts.length) return;
-      const px = [];
+      const visible = [];
       for (const p of pts) {{
         if (p.t_rel_s > cutoff) break;
         const proj = projectWorldToPixel([p.x, p.y, p.z], meta);
         if (proj === null) continue;
-        px.push({{x: proj.u * sx, y: proj.v * sy}});
+        visible.push({{x: proj.u * sx, y: proj.v * sy, t: p.t_rel_s}});
       }}
-      if (px.length < 1) return;
-      if (px.length >= 2) {{
-        ctx.strokeStyle = opts.color;
+      if (!visible.length) return;
+      // Connecting line first so the dots sit on top.
+      if (visible.length >= 2) {{
+        ctx.strokeStyle = opts.lineColor;
         ctx.lineWidth = opts.width;
-        if (opts.dashed) ctx.setLineDash([3, 3]); else ctx.setLineDash([]);
+        if (opts.dashed) ctx.setLineDash([4, 3]); else ctx.setLineDash([]);
         ctx.beginPath();
-        ctx.moveTo(px[0].x, px[0].y);
-        for (let i = 1; i < px.length; i++) ctx.lineTo(px[i].x, px[i].y);
+        ctx.moveTo(visible[0].x, visible[0].y);
+        for (let i = 1; i < visible.length; i++) ctx.lineTo(visible[i].x, visible[i].y);
         ctx.stroke();
         ctx.setLineDash([]);
       }}
-      // Per-point dots (light) + emphasise the last one (current frame
-      // position) so playback has a clear "you are here" marker.
-      ctx.fillStyle = opts.color;
-      for (const p of px) {{
+      // Per-point markers. Server → cividis (time colour-coded); on-
+      // device → flat light colour so it reads as the "other" stream.
+      const t0 = pts[0].t_rel_s;
+      const tRange = Math.max((pts[pts.length - 1].t_rel_s) - t0, 1e-6);
+      for (const p of visible) {{
+        ctx.fillStyle = opts.cividisDots
+          ? cividis((p.t - t0) / tRange)
+          : opts.lineColor;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 1.5, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
         ctx.fill();
       }}
-      const last = px[px.length - 1];
+      // Start marker — hollow ring at the trajectory's first point so
+      // the direction (start → current) is unambiguous when the ball
+      // loops back in frame.
+      const start = visible[0];
+      ctx.strokeStyle = opts.lineColor;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
       ctx.beginPath();
-      ctx.arc(last.x, last.y, 4, 0, Math.PI * 2);
+      ctx.arc(start.x, start.y, 5, 0, Math.PI * 2);
+      ctx.stroke();
+      // Current-frame marker — filled + white halo so it pops above the
+      // trail regardless of the cividis colour behind it.
+      const last = visible[visible.length - 1];
+      ctx.fillStyle = opts.lineColor;
+      ctx.beginPath();
+      ctx.arc(last.x, last.y, 5.5, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = "#F8F7F4";
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 2;
       ctx.stroke();
     }}
 
     if (isLayerVisible("traj", "server")) {{
-      drawTraj(SCENE.triangulated, {{color: ACCENT, width: 2, dashed: false}});
+      drawTraj(SCENE.triangulated, {{
+        lineColor: ACCENT, width: 2.5, dashed: false, cividisDots: true,
+      }});
     }}
     if (isLayerVisible("traj", "on_device")) {{
-      drawTraj(SCENE.triangulated_on_device,
-               {{color: ACCENT, width: 1.5, dashed: true}});
+      drawTraj(SCENE.triangulated_on_device, {{
+        // Neutral bright blue contrasts with server's warm yellow so
+        // overlapping reprojections stay readable.
+        lineColor: "rgb(175, 210, 255)", width: 1.8, dashed: true,
+        cividisDots: false,
+      }});
     }}
 
     ctx.restore();
@@ -1753,7 +1823,14 @@ def _camera_color(camera_id: str) -> str:
 
 
 def _video_cell_html(
-    cam: str, entry: tuple[str, float] | None, *, never_coming: bool = False
+    cam: str,
+    entry: tuple[str, float] | None,
+    *,
+    never_coming: bool = False,
+    image_width_px: int | None = None,
+    image_height_px: int | None = None,
+    cx: float | None = None,
+    cy: float | None = None,
 ) -> str:
     """One vid-cell per camera slot. Three states:
       * clip present → embed `<video>` synced to the chirp anchor.
@@ -1762,6 +1839,11 @@ def _video_cell_html(
         the page.
       * `never_coming=True` → collapse to a one-row notice; the missing
         cam isn't coming and the survivor deserves the vertical room.
+
+    `image_width_px` / `image_height_px` fix the vid-frame aspect to
+    the MOV's actual aspect so `object-fit:contain` never letterboxes —
+    makes the principal-point overlay land at the same pixel as the
+    virtual canvas below without any JS letterbox math.
     """
     color = _camera_color(cam)
     if entry is None:
@@ -1777,10 +1859,27 @@ def _video_cell_html(
         hint = "awaiting upload"
     else:
         url, _ = entry
+        if image_width_px and image_height_px:
+            frame_style = f' style="aspect-ratio:{image_width_px}/{image_height_px}"'
+        else:
+            frame_style = ""
+        pp_html = ""
+        if (
+            cx is not None and cy is not None
+            and image_width_px and image_height_px
+        ):
+            pct_x = cx / image_width_px * 100.0
+            pct_y = cy / image_height_px * 100.0
+            pp_html = (
+                f'<div class="pp-cross" '
+                f'style="left:{pct_x:.3f}%;top:{pct_y:.3f}%"></div>'
+            )
         body = (
-            f'<div class="vid-frame">'
+            f'<div class="vid-frame"{frame_style}>'
             f'<video data-cam="{cam}" preload="auto" playsinline muted '
-            f'src="{url}"></video></div>'
+            f'src="{url}"></video>'
+            f'{pp_html}'
+            f'</div>'
         )
         hint = "synced to chirp"
     return (
