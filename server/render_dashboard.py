@@ -256,7 +256,8 @@ _JS_TEMPLATE = r"""
     const extras = (state.devices || [])
       .filter(d => !EXPECTED.includes(d.camera_id))
       .map(d => row(d.camera_id, d)).join('');
-    devicesBox.innerHTML = rows + extras;
+    const devHtml = rows + extras;
+    if (devicesBox.innerHTML !== devHtml) devicesBox.innerHTML = devHtml;
   }
 
   const MODE_LABELS = { camera_only: 'Camera-only', on_device: 'On-device' };
@@ -294,7 +295,7 @@ _JS_TEMPLATE = r"""
           ${btn('camera_only')}${btn('on_device')}
         </div>`;
     }
-    sessionBox.innerHTML = `
+    const sessHtml = `
       <div class="session-head">${chip}${sid}</div>
       <div class="session-actions">
         <form class="inline" method="POST" action="/sessions/arm">
@@ -306,12 +307,13 @@ _JS_TEMPLATE = r"""
         ${clearBtn}
       </div>
       ${modeRow}`;
+    if (sessionBox.innerHTML !== sessHtml) sessionBox.innerHTML = sessHtml;
 
     // Mirror into the nav's tiny status strip.
     if (navStatus) {
       const online = (state.devices || []).length;
       const cal = (state.calibrations || []).length;
-      navStatus.innerHTML = `
+      const navHtml = `
         <span class="pair"><span class="label">Devices</span><span class="val">${online}/2</span></span>
         <span class="pair"><span class="label">Calibrated</span><span class="val">${cal}/2</span></span>
         <span class="pair"><span class="label">Session</span>` +
@@ -319,6 +321,7 @@ _JS_TEMPLATE = r"""
           ? `<span class="val armed">${esc(s.id || '—')}</span>`
           : `<span class="val idle">idle</span>`) +
         `</span>`;
+      if (navStatus.innerHTML !== navHtml) navStatus.innerHTML = navHtml;
     }
   }
 
@@ -328,11 +331,13 @@ _JS_TEMPLATE = r"""
   }
 
   function renderEvents(events) {
+    let evHtml;
     if (!events || events.length === 0) {
-      eventsBox.innerHTML = `<div class="events-empty">No sessions received yet.</div>`;
+      evHtml = `<div class="events-empty">No sessions received yet.</div>`;
+      if (eventsBox.innerHTML !== evHtml) eventsBox.innerHTML = evHtml;
       return;
     }
-    eventsBox.innerHTML = events.map(e => {
+    evHtml = events.map(e => {
       const cams = (e.cameras || []).join(' · ') || '—';
       const mode = (e.cameras || []).length >= 2 ? 'dual' : 'single';
       const stat = (e.status || '').replace(/_/g, ' ');
@@ -371,6 +376,7 @@ _JS_TEMPLATE = r"""
           </form>
         </div>`;
     }).join('');
+    if (eventsBox.innerHTML !== evHtml) eventsBox.innerHTML = evHtml;
   }
 
   let currentDevices = null;
