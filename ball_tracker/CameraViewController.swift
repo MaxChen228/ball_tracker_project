@@ -130,6 +130,24 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // iterated against a canonical source of truth.
     private var clipRecorder: ClipRecorder?
 
+    // Offloaded on-device ball detection. Runs on `detectionQueue` at
+    // ≤60 Hz while the state is `.recording`, so 240 fps sample delivery on
+    // `processingQueue` never stalls. The timestamps accumulated here drive
+    // the post-recording MOV-trim decision (keep only [first-seen, last-seen]
+    // + a margin, capped at 1.5 s). Results are NOT uploaded — the server
+    // still runs its own detection on the uploaded MOV; this side is purely
+    // a trim oracle. Buffer is reset on every `enterRecordingMode` /
+    // `exitRecordingToStandby` transition.
+    private let detectionQueue = DispatchQueue(label: "camera.detection.queue", qos: .utility)
+    private let detectionStateLock = NSLock()
+    private var detectionInFlight = false
+    private var lastDetectionDispatchTimeS: TimeInterval = 0
+    private static let detectionIntervalS: TimeInterval = 1.0 / 60.0
+    private var ballDetectionPtsBuffer: [TimeInterval] = []
+    /// Bumped on every cycle boundary so a detection closure dispatched for
+    /// cycle N can discard its result if cycle N+1 has already started.
+    private var detectionGeneration: Int = 0
+
     // Most recently recovered chirp anchor — session-clock PTS of the
     // chirp peak from the mic matched filter. Stamped onto outgoing
     // payloads as `sync_anchor_timestamp_s`. Nil until the user completes
@@ -408,6 +426,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         startCapture(at: trackingFps)
         recorder.reset()
+        resetBallDetectionState()
         state = .recording
         frameStateBox.update(state: .recording, pendingBootstrap: true, sessionId: snapshotSessionId)
         updateUIForState()
@@ -431,6 +450,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
         recorder.reset()
+        // Bump the detection generation so any closure still running on
+        // detectionQueue discards its result; also clears the buffer of
+        // anything that landed before this point.
+        resetBallDetectionState()
         processingQueue.async { [weak self] in
             self?.clipRecorder?.cancel()
             self?.clipRecorder = nil
@@ -1554,6 +1577,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         guard let clip = clipRecorder else { return }
         clip.append(sampleBuffer: sampleBuffer)
 
+        // Offload ball detection, throttled to 60 Hz + one-in-flight so the
+        // ~12-18 ms HSV+CC can't pile up against 240 fps capture. Dropped
+        // frames are fine — we only need a coarse "ball-present" envelope to
+        // decide the trim window at end-of-recording, not a per-frame trace.
+        dispatchDetectionIfDue(pixelBuffer: pixelBuffer, timestampS: timestampS)
+
         // First successful append kicks off the PitchRecorder so its
         // payload carries the session-clock PTS of the MOV's first frame.
         if !recorder.isActive, let firstPTS = clip.firstSamplePTS {
@@ -1572,6 +1601,65 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 videoFps: trackingFps
             )
         }
+    }
+
+    /// Fire off one BallDetector call on `detectionQueue` if (a) the throttle
+    /// window has elapsed (≥60 Hz cap) and (b) no previous detection is still
+    /// running. Called from `captureOutput` — must not block.
+    ///
+    /// A `detectionGeneration` check inside the async closure guards against
+    /// a late detection landing in the wrong cycle's buffer (enter/exit of
+    /// recording bumps the generation). This replaces a `.sync` barrier so
+    /// main-thread transitions don't pay a full detection interval.
+    private func dispatchDetectionIfDue(pixelBuffer: CVPixelBuffer, timestampS: TimeInterval) {
+        detectionStateLock.lock()
+        let elapsed = timestampS - lastDetectionDispatchTimeS
+        let shouldDispatch = !detectionInFlight && elapsed >= Self.detectionIntervalS
+        let gen = detectionGeneration
+        if shouldDispatch {
+            detectionInFlight = true
+            lastDetectionDispatchTimeS = timestampS
+        }
+        detectionStateLock.unlock()
+        guard shouldDispatch else { return }
+
+        detectionQueue.async { [weak self] in
+            guard let self else { return }
+            let detection = BTBallDetector.detect(in: pixelBuffer)
+            self.detectionStateLock.lock()
+            defer { self.detectionStateLock.unlock() }
+            // Generation mismatch means the recording cycle we were dispatched
+            // for has already ended — drop this result on the floor instead
+            // of contaminating the fresh cycle's buffer.
+            guard gen == self.detectionGeneration else { return }
+            self.detectionInFlight = false
+            if detection != nil {
+                self.ballDetectionPtsBuffer.append(timestampS)
+            }
+        }
+    }
+
+    /// Bump the detection generation, clear the buffer, and reset the
+    /// throttle. Called at both ends of a recording cycle so no stale
+    /// state bleeds across arms.
+    private func resetBallDetectionState() {
+        detectionStateLock.lock()
+        detectionGeneration &+= 1
+        ballDetectionPtsBuffer.removeAll()
+        detectionInFlight = false
+        lastDetectionDispatchTimeS = 0
+        detectionStateLock.unlock()
+    }
+
+    /// Take ownership of the accumulated ball-detection timestamps for this
+    /// recording cycle. Used by the trim pipeline (Step 4c) and then the
+    /// buffer is cleared so the next cycle starts fresh.
+    func drainBallDetections() -> [TimeInterval] {
+        detectionStateLock.lock()
+        defer { detectionStateLock.unlock() }
+        let out = ballDetectionPtsBuffer
+        ballDetectionPtsBuffer.removeAll()
+        return out
     }
 
     private func startClipRecorder(width: Int, height: Int) {
