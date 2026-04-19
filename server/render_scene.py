@@ -1329,6 +1329,28 @@ def render_viewer_html(
     Plotly.relayout(sceneDiv, {{ "scene.camera": DEFAULT_CAMERA }});
   }});
 
+  // Plotly's built-in wheel-zoom on 3D scenes is tuned for mouse wheels
+  // and feels sluggish on macOS trackpads (pinch arrives as ctrl+wheel
+  // with tiny deltas). Replace with a direct camera.eye scale so each
+  // event = ~10 % distance change. Magnitude is sqrt-shaped so trackpad's
+  // many-tiny-events feels continuous instead of jittery and mouse
+  // wheel's chunky events stay bounded per click.
+  sceneDiv.addEventListener("wheel", (e) => {{
+    if (!sceneDiv._fullLayout || !sceneDiv._fullLayout.scene) return;
+    const cam = sceneDiv._fullLayout.scene.camera;
+    if (!cam || !cam.eye) return;
+    e.preventDefault();
+    const mag = Math.min(0.5, Math.sqrt(Math.abs(e.deltaY)) * 0.04);
+    const factor = e.deltaY > 0 ? (1 + mag) : (1 - mag);
+    Plotly.relayout(sceneDiv, {{
+      "scene.camera.eye": {{
+        x: cam.eye.x * factor,
+        y: cam.eye.y * factor,
+        z: cam.eye.z * factor,
+      }},
+    }});
+  }}, {{ passive: false }});
+
   // Keyboard cheat-sheet overlay — `?` toggles, Esc closes.
   function setHintOpen(open) {{
     hintOverlay.classList.toggle("open", open);
