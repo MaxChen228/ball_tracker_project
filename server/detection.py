@@ -51,7 +51,7 @@ class HSVRange:
             return cls(*parts)
         except Exception as e:
             logger.warning(
-                "BALL_TRACKER_HSV_RANGE=%r parse failed (%s) — using default deep-blue",
+                "BALL_TRACKER_HSV_RANGE=%r parse failed (%s) — using default yellow-green",
                 raw, e,
             )
             return cls.default()
@@ -68,25 +68,45 @@ class HSVRange:
 _MIN_AREA_PX = 20
 _MAX_AREA_PX = 150_000
 
+# Shape gates against yellow-green clutter (cardboard, clothes, pale floor
+# tiles) that slip through HSV. A real ball — even one in flight — stays
+# very close to a filled circle on our rig; operator confirmed motion blur
+# at 240 fps causes only mild ellipsing. Tuned loose enough to keep those
+# through, tight enough to drop clothing folds and elongated reflections.
+_MIN_ASPECT = 0.75  # min(w,h)/max(w,h); 1.0 = square bbox, 0.75 ≈ 4:3
+# Theoretical circle fill = π/4 ≈ 0.785 but empirical `combined = hsv AND
+# fg_mask` fill for real balls on our rig sits at 0.63-0.70 (median 0.68
+# across s_fcf73afa/s_03d533c4) because ball-side shadows, the seam, and
+# HSV edge bleed each carve ~10-15% out of the bbox. 0.60 is calibrated
+# to that measured distribution with a small safety margin below the
+# lowest observed ball.
+_MIN_FILL = 0.60
+
 
 def detect_ball(
     frame_bgr: np.ndarray,
     hsv_range: HSVRange,
+    *,
+    fg_mask: np.ndarray | None = None,
 ) -> tuple[float, float] | None:
     """Find the largest HSV-masked blob whose area is within
-    `[MIN_AREA_PX, MAX_AREA_PX]` and return its centroid as
-    `(px, py)` in **pixel** coordinates (column, row). Returns `None` if no
-    blob satisfies the filter.
+    `[MIN_AREA_PX, MAX_AREA_PX]` AND whose bbox aspect ratio and fill
+    ratio clear the ball-shape gates. Returns `(px, py)` centroid in
+    pixel coordinates, else `None`.
+
+    `fg_mask` (uint8 0/255) is optionally AND-ed with the HSV mask — used
+    by the pipeline to restrict detection to moving pixels from a
+    background subtractor. Pass `None` for HSV-only behaviour.
 
     Simple-minded on purpose: no morphological ops, no temporal smoothing.
-    The triangulator already tolerates a handful of false positives via the
-    per-frame drop log; anything more aggressive belongs in a follow-up
-    ML-based detector.
+    Anything more aggressive belongs in a follow-up ML-based detector.
     """
     if frame_bgr is None or frame_bgr.size == 0:
         return None
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, hsv_range.lo(), hsv_range.hi())
+    if fg_mask is not None:
+        mask = cv2.bitwise_and(mask, fg_mask)
 
     # Connected components with stats (label 0 is the background).
     num_labels, _labels, stats, centroids = cv2.connectedComponentsWithStats(
@@ -100,6 +120,16 @@ def detect_ball(
     for idx in range(1, num_labels):
         area = int(stats[idx, cv2.CC_STAT_AREA])
         if area < _MIN_AREA_PX or area > _MAX_AREA_PX:
+            continue
+        w = int(stats[idx, cv2.CC_STAT_WIDTH])
+        h = int(stats[idx, cv2.CC_STAT_HEIGHT])
+        if w <= 0 or h <= 0:
+            continue
+        aspect = min(w, h) / max(w, h)
+        if aspect < _MIN_ASPECT:
+            continue
+        fill = area / (w * h)
+        if fill < _MIN_FILL:
             continue
         if area > best_area:
             best_area = area
