@@ -78,7 +78,7 @@ final class SettingsViewController: UIViewController {
     // Calibration always bakes intrinsics at 1080p — every downstream math
     // (HSV detection, intrinsics scaling, ChArUco import target) treats
     // these as the reference resolution. The capture format itself can
-    // drop to 720p / 540p via the Settings picker, and the server rescales
+    // drop to 720p via the Settings picker, and the server rescales
     // intrinsics + homography per-pitch through
     // `pairing.scale_pitch_to_video_dims`.
     static let captureWidthFixed = 1920
@@ -86,9 +86,9 @@ final class SettingsViewController: UIViewController {
 
     /// Recording-resolution options shown in the SwiftUI Settings picker.
     /// All 16:9. `CameraViewController.configureCaptureFormat` searches for
-    /// an AVCaptureDevice format matching (width, height) at 240 fps; 540p
-    /// isn't supported on every iPhone — the picker still offers it but
-    /// the format selection will fail loudly if the rig can't honour it.
+    /// an AVCaptureDevice format matching (width, height) at 240 fps.
+    /// Only 1080p and 720p are standard Apple slow-mo presets — 540p is
+    /// not a 240 fps format on any shipping iPhone, so it's not offered.
     struct CaptureResolution: Hashable {
         let label: String
         let width: Int
@@ -97,7 +97,6 @@ final class SettingsViewController: UIViewController {
     static let captureResolutions: [CaptureResolution] = [
         CaptureResolution(label: "1080p", width: 1920, height: 1080),
         CaptureResolution(label: "720p", width: 1280, height: 720),
-        CaptureResolution(label: "540p", width: 960, height: 540),
     ]
 
     // MARK: - Container state
