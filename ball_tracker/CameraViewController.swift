@@ -130,6 +130,40 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // iterated against a canonical source of truth.
     private var clipRecorder: ClipRecorder?
 
+    // Offloaded on-device ball detection. Runs on `detectionQueue` at
+    // ≤60 Hz while the state is `.recording`, so 240 fps sample delivery on
+    // `processingQueue` never stalls. Serves two roles depending on
+    // currentCaptureMode:
+    //   - mode-one (camera_only): output is the trim-window oracle. Results
+    //     not uploaded — server re-runs its own authoritative detection on
+    //     the received MOV.
+    //   - mode-two (on_device): output IS the ground truth. Shipped to the
+    //     server as `PitchPayload.frames` with no MOV; server pairs +
+    //     triangulates directly.
+    // The same BTDetectionSession (shape gate + MOG2) drives both so the
+    // algorithm stays identical between modes and aligned with the server.
+    private let detectionQueue = DispatchQueue(label: "camera.detection.queue", qos: .utility)
+    private let detectionStateLock = NSLock()
+    private var detectionInFlight = false
+    private var lastDetectionDispatchTimeS: TimeInterval = 0
+    private static let detectionIntervalS: TimeInterval = 1.0 / 60.0
+    /// BTDetectionSession (MOG2 + shape-gated detection). One per recording
+    /// cycle — rebuilt on entry so the background model starts fresh.
+    /// Access serialised through `detectionStateLock` (or confined to
+    /// `detectionQueue`).
+    private var detectionSession: BTDetectionSession?
+    /// Accumulated per-frame detection results for the current cycle.
+    /// Drained at cycle-complete and either discarded (mode-one) or
+    /// attached to the upload payload (mode-two).
+    private var detectionFramesBuffer: [ServerUploader.FramePayload] = []
+    /// Monotonic counter used as `FramePayload.frame_index`. Bumped on
+    /// every dispatched detection call so the index mirrors the order
+    /// detections were run — not the capture-queue frame order.
+    private var detectionCallIndex: Int = 0
+    /// Bumped on every cycle boundary so a detection closure dispatched for
+    /// cycle N can discard its result if cycle N+1 has already started.
+    private var detectionGeneration: Int = 0
+
     // Most recently recovered chirp anchor — session-clock PTS of the
     // chirp peak from the mic matched filter. Stamped onto outgoing
     // payloads as `sync_anchor_timestamp_s`. Nil until the user completes
@@ -143,6 +177,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // plus the existing state chip (top-left) + REC indicator (top-right).
     // FPS / last-contact / Test are Settings → Diagnostics now.
     private let topStatusChip = StatusChip()
+    /// Small HUD chip showing the currently-effective capture mode
+    /// (session snapshot if armed, otherwise the dashboard's global
+    /// toggle). Driven by `/heartbeat` replies.
+    private let modeLabel = UILabel()
+    /// Last-known capture mode from the server. Starts at cameraOnly so a
+    /// network-unreachable launch degrades to the pre-split behaviour. Step 2
+    /// reads this at cycle-complete to decide whether to upload the MOV or
+    /// just the detection JSON.
+    private var currentCaptureMode: ServerUploader.CaptureMode = .cameraOnly
     private let readyCard = ReadyCard()
     private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
@@ -261,10 +304,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             let enriched = self.enrichedPayload(from: payload)
             if let finishingClip {
                 finishingClip.finish { [weak self] videoURL in
-                    self?.persistCompletedCycle(enriched, videoURL: videoURL)
+                    self?.handleFinishedClip(enriched: enriched, videoURL: videoURL)
                 }
             } else {
-                self.persistCompletedCycle(enriched, videoURL: nil)
+                // Mode-two (no clip recorder built) or mode-one with a
+                // failed bootstrap — either way handleFinishedClip owns the
+                // drain-frames-and-persist dance. In mode-two it reads the
+                // detection buffer and routes through handleOnDeviceCycle;
+                // in the degenerate mode-one case with no MOV it falls
+                // through to a JSON-only upload.
+                self.handleFinishedClip(enriched: enriched, videoURL: nil)
             }
         }
 
@@ -408,6 +457,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         startCapture(at: trackingFps)
         recorder.reset()
+        resetBallDetectionState()
         state = .recording
         frameStateBox.update(state: .recording, pendingBootstrap: true, sessionId: snapshotSessionId)
         updateUIForState()
@@ -431,6 +481,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
         recorder.reset()
+        // Bump the detection generation so any closure still running on
+        // detectionQueue discards its result; also clears the buffer of
+        // anything that landed before this point.
+        resetBallDetectionState()
         processingQueue.async { [weak self] in
             self?.clipRecorder?.cancel()
             self?.clipRecorder = nil
@@ -444,6 +498,117 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             switchCaptureFps(standbyFps)
         }
         updateUIForState()
+    }
+
+    // Pre/post-roll margins around the detected ball window. Two-camera
+    // trim ranges rarely align to the same frame (parallax + occlusion
+    // differences), so we pad the window on both ends — 300 ms absorbs up
+    // to ~250 ms of A/B disagreement while still shrinking the upload to
+    // under 2 s in the common case.
+    private static let trimPreRollS: Double = 0.3
+    private static let trimPostRollS: Double = 0.3
+    /// Hard ceiling on the trimmed clip duration, measured from the first
+    /// detection (minus pre-roll). Covers a realistic pitch + follow-through
+    /// without blowing the upload budget.
+    private static let trimMaxDurationS: Double = 1.5
+
+    /// Cycle-complete router. Branches on the effective capture mode:
+    ///   - `onDevice` → attach the drained frames to the payload, delete
+    ///     the (unused) MOV, and upload frames-only.
+    ///   - `cameraOnly` → use detection timestamps as trim oracle and ship
+    ///     the trimmed MOV the existing Step 4 path.
+    ///
+    /// `currentCaptureMode` is read once at cycle-complete — if the
+    /// dashboard flips the toggle mid-recording the session still
+    /// finishes in the mode it armed with (that's what Session.mode
+    /// guarantees on the server side).
+    private func handleFinishedClip(
+        enriched: ServerUploader.PitchPayload,
+        videoURL: URL?
+    ) {
+        let frames = drainDetectedFrames()
+        let mode = currentCaptureMode
+        log.info("cycle complete session=\(enriched.session_id, privacy: .public) mode=\(mode.rawValue, privacy: .public) frames=\(frames.count) ball_frames=\(frames.filter { $0.ball_detected }.count) has_video=\(videoURL != nil)")
+
+        if mode == .onDevice {
+            handleOnDeviceCycle(enriched: enriched, videoURL: videoURL, frames: frames)
+            return
+        }
+        handleCameraOnlyCycle(enriched: enriched, videoURL: videoURL, frames: frames)
+    }
+
+    /// Mode-two: attach the frame list to the payload, delete any MOV
+    /// still sitting in tmp, and ship a frames-only payload (no video
+    /// part, bandwidth is a few KB).
+    private func handleOnDeviceCycle(
+        enriched: ServerUploader.PitchPayload,
+        videoURL: URL?,
+        frames: [ServerUploader.FramePayload]
+    ) {
+        if let videoURL {
+            try? FileManager.default.removeItem(at: videoURL)
+        }
+        let updated = enriched.withFrames(frames)
+        persistCompletedCycle(updated, videoURL: nil)
+    }
+
+    /// Mode-one: detection results are a trim oracle only; server re-runs
+    /// authoritative detection on the received MOV. Uses the timestamps of
+    /// `ball_detected == true` frames to pick the trim window, falling
+    /// back to uploading the full MOV when no ball was seen or trim fails.
+    private func handleCameraOnlyCycle(
+        enriched: ServerUploader.PitchPayload,
+        videoURL: URL?,
+        frames: [ServerUploader.FramePayload]
+    ) {
+        guard let videoURL else {
+            persistCompletedCycle(enriched, videoURL: nil)
+            return
+        }
+
+        let ballTimestamps = frames.compactMap { $0.ball_detected ? $0.timestamp_s : nil }
+        let originalStart = enriched.video_start_pts_s
+
+        guard !ballTimestamps.isEmpty else {
+            log.info("cycle trim skip reason=no_ball_detected session=\(enriched.session_id, privacy: .public)")
+            persistCompletedCycle(enriched, videoURL: videoURL)
+            return
+        }
+
+        let first = ballTimestamps.min() ?? originalStart
+        let last = ballTimestamps.max() ?? first
+        let desiredStartAbs = max(first - Self.trimPreRollS, originalStart)
+        let desiredEndAbs = min(last + Self.trimPostRollS, desiredStartAbs + Self.trimMaxDurationS)
+        let startOffsetInMovS = desiredStartAbs - originalStart
+        let durationS = max(desiredEndAbs - desiredStartAbs, 0)
+
+        guard durationS > 0 else {
+            log.warning("cycle trim degenerate range — uploading full clip session=\(enriched.session_id, privacy: .public)")
+            persistCompletedCycle(enriched, videoURL: videoURL)
+            return
+        }
+
+        log.info("cycle trim plan session=\(enriched.session_id, privacy: .public) ball_frames=\(ballTimestamps.count) window=[\(desiredStartAbs),\(desiredEndAbs)] offset_in_mov=\(startOffsetInMovS) dur=\(durationS)")
+
+        let destination = payloadStore.makeTempVideoURL()
+        ClipTrimmer.trim(
+            source: videoURL,
+            startOffsetFromMovStartS: startOffsetInMovS,
+            durationS: durationS,
+            destination: destination,
+            originalVideoStartPtsS: originalStart
+        ) { [weak self] output in
+            guard let self else { return }
+            guard let output else {
+                log.warning("cycle trim failed — uploading full clip session=\(enriched.session_id, privacy: .public)")
+                self.persistCompletedCycle(enriched, videoURL: videoURL)
+                return
+            }
+            try? FileManager.default.removeItem(at: videoURL)
+            let updated = enriched.withVideoStartPts(output.absoluteStartPtsS)
+            log.info("cycle trimmed session=\(enriched.session_id, privacy: .public) abs_start=\(output.absoluteStartPtsS) dur=\(output.durationS)")
+            self.persistCompletedCycle(updated, videoURL: output.url)
+        }
     }
 
     private func persistCompletedCycle(
@@ -949,6 +1114,20 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             let sid = (response.session?.armed == true) ? response.session?.id : nil
             self.currentSessionId = sid
             DiagnosticsData.shared.update(sessionId: .some(sid))
+            // Effective mode: snapshot from the armed session if present,
+            // otherwise the dashboard's global toggle. Unknown / missing
+            // fields fall back to cameraOnly for backwards compat with
+            // pre-mode-split server builds.
+            let modeStr = response.session?.mode ?? response.capture_mode
+                ?? ServerUploader.CaptureMode.cameraOnly.rawValue
+            let mode = ServerUploader.CaptureMode(rawValue: modeStr) ?? .cameraOnly
+            if self.currentCaptureMode != mode {
+                log.info("capture mode changed to \(mode.rawValue, privacy: .public)")
+            }
+            self.currentCaptureMode = mode
+            DispatchQueue.main.async {
+                self.modeLabel.text = "MODE · \(mode.displayLabel.uppercased())"
+            }
             let cam = self.settings.cameraRole
             let cmd = response.commands?[cam]
             // Log every transition so Xcode console shows the server's
@@ -1116,9 +1295,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             uploadQueue.updateUploader(uploader)
         }
         if formatChanged {
-            // Resolution is currently fixed (captureWidthFixed/HeightFixed) so
-            // this branch only fires on a stale-prefs migration. Re-pick a
-            // format at whichever FPS is appropriate for the current state.
+            // User picked a different capture resolution in Settings.
+            // `settings` has already been updated to `latest` above, so
+            // switchCaptureFps → configureCaptureFormat will look up the
+            // new target dims via self.settings.
             let fps = (state == .standby || state == .timeSyncWaiting) ? standbyFps : trackingFps
             switchCaptureFps(fps)
         }
@@ -1167,6 +1347,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // Top-left state chip.
         topStatusChip.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(topStatusChip)
+
+        // Top-right mode indicator. Populated from heartbeat replies; shows
+        // the effective capture mode so the operator always knows whether
+        // an arm will record+upload MOV (camera-only) or run detection on
+        // device (on-device).
+        modeLabel.font = DesignTokens.Fonts.mono(size: 11, weight: .medium)
+        modeLabel.textColor = DesignTokens.Colors.sub
+        modeLabel.textAlignment = .right
+        modeLabel.translatesAutoresizingMaskIntoConstraints = false
+        modeLabel.text = "MODE · CAMERA-ONLY"
+        view.addSubview(modeLabel)
 
         // Transient banner for error / progress text. Hidden by default;
         // state-change paths set text + reveal, and a timer usually hides it.
@@ -1217,6 +1408,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         NSLayoutConstraint.activate([
             topStatusChip.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: DesignTokens.Spacing.m),
             topStatusChip.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.m),
+
+            modeLabel.centerYAnchor.constraint(equalTo: topStatusChip.centerYAnchor),
+            modeLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DesignTokens.Spacing.m),
 
             warningLabel.topAnchor.constraint(equalTo: topStatusChip.bottomAnchor, constant: DesignTokens.Spacing.s),
             warningLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),
@@ -1527,53 +1721,138 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             log.info("camera frame idx=\(self.frameIndex) state=\(Self.stateText(snap.state), privacy: .public) pendingBootstrap=\(snap.pendingBootstrap) sid=\(snap.sessionId ?? "nil", privacy: .public)")
         }
 
-        // Only the `.recording` state cares about samples. Phone is a pure
-        // capture client — no ball detection, no overlay, no per-frame
-        // payload work. Idle / time-sync / uploading all just drop through.
+        // Only the `.recording` state cares about samples.
         guard snap.state == .recording else { return }
 
-        // Lazy-bootstrap the ClipRecorder from the first real sample's
-        // dimensions (deferred from enterRecordingMode so we can key off
-        // whatever the sensor is actually delivering post-fps-switch).
-        // `consumePendingBootstrap` clears the flag atomically so a
-        // simultaneous main-thread push can't race us into starting the
-        // writer twice.
-        if frameStateBox.consumePendingBootstrap() {
-            log.info("camera clip bootstrap start width=\(width) height=\(height) sid=\(snap.sessionId ?? "nil", privacy: .public)")
-            startClipRecorder(width: width, height: height)
-            if clipRecorder == nil {
-                // Prepare failed. Fall back to standby on main.
-                log.error("camera clip bootstrap failed session=\(snap.sessionId ?? "nil", privacy: .public)")
-                DispatchQueue.main.async {
-                    self.returnToStandbyAfterCycle = false
-                    self.exitRecordingToStandby()
+        let isModeOne = currentCaptureMode == .cameraOnly
+
+        if isModeOne {
+            // Lazy-bootstrap the ClipRecorder from the first real sample's
+            // dimensions (deferred from enterRecordingMode so we can key
+            // off whatever the sensor is actually delivering post-fps-
+            // switch). `consumePendingBootstrap` clears the flag atomically
+            // so a simultaneous main-thread push can't race us into
+            // starting the writer twice.
+            if frameStateBox.consumePendingBootstrap() {
+                log.info("camera clip bootstrap start width=\(width) height=\(height) sid=\(snap.sessionId ?? "nil", privacy: .public)")
+                startClipRecorder(width: width, height: height)
+                if clipRecorder == nil {
+                    log.error("camera clip bootstrap failed session=\(snap.sessionId ?? "nil", privacy: .public)")
+                    DispatchQueue.main.async {
+                        self.returnToStandbyAfterCycle = false
+                        self.exitRecordingToStandby()
+                    }
+                    return
                 }
-                return
+                log.info("camera clip bootstrap ok session=\(snap.sessionId ?? "nil", privacy: .public)")
             }
-            log.info("camera clip bootstrap ok session=\(snap.sessionId ?? "nil", privacy: .public)")
+            clipRecorder?.append(sampleBuffer: sampleBuffer)
+        } else {
+            // Mode-two: no MOV is being written. Drain the pendingBootstrap
+            // flag so a later arm that flips back to camera_only doesn't
+            // inherit a stale "please prepare" request (Session.mode is
+            // frozen per-arm on the server, but belt+braces here).
+            _ = frameStateBox.consumePendingBootstrap()
         }
 
-        guard let clip = clipRecorder else { return }
-        clip.append(sampleBuffer: sampleBuffer)
+        // Detection runs in both modes — same BTDetectionSession algorithm,
+        // just different fates for its output (trim oracle vs. uploaded
+        // payload).
+        dispatchDetectionIfDue(pixelBuffer: pixelBuffer, timestampS: timestampS)
 
-        // First successful append kicks off the PitchRecorder so its
-        // payload carries the session-clock PTS of the MOV's first frame.
-        if !recorder.isActive, let firstPTS = clip.firstSamplePTS {
+        // Bootstrap the PitchRecorder on the first sample regardless of
+        // mode. In mode-one this fires on the same sample clipRecorder
+        // just consumed, so the payload's `video_start_pts_s` still
+        // matches `clip.firstSamplePTS` (both are this sample's PTS).
+        // In mode-two there's no clip — we lean on the captured sample's
+        // session-clock PTS directly.
+        if !recorder.isActive {
             guard let sid = snap.sessionId, !sid.isEmpty else {
-                // Armed locally without a server session id — shouldn't
-                // happen (heartbeat sets it before arm fires), but bail
-                // rather than uploading a payload the server will 422.
                 log.error("camera recording started without session_id cam=\(self.settings.cameraRole, privacy: .public)")
                 return
             }
-            log.info("camera first frame appended, starting recorder session=\(sid, privacy: .public) video_start_pts=\(CMTimeGetSeconds(firstPTS)) anchor=\(self.lastSyncAnchorTimestampS ?? .nan)")
+            log.info("camera first frame, starting recorder session=\(sid, privacy: .public) mode=\(self.currentCaptureMode.rawValue, privacy: .public) video_start_pts=\(timestampS) anchor=\(self.lastSyncAnchorTimestampS ?? .nan)")
             recorder.startRecording(
                 sessionId: sid,
                 anchorTimestampS: lastSyncAnchorTimestampS,
-                videoStartPtsS: CMTimeGetSeconds(firstPTS),
+                videoStartPtsS: timestampS,
                 videoFps: trackingFps
             )
         }
+    }
+
+    /// Fire off one BTDetectionSession step on `detectionQueue` if (a) the
+    /// throttle window has elapsed (≥60 Hz cap) and (b) no previous
+    /// detection is still running. Called from `captureOutput` — must not
+    /// block.
+    ///
+    /// A `detectionGeneration` check inside the async closure guards against
+    /// a late detection landing in the wrong cycle's buffer (enter/exit of
+    /// recording bumps the generation).
+    ///
+    /// Every dispatched detection produces a FramePayload entry: the server's
+    /// pipeline also records one entry per decoded frame (with null px/py
+    /// when no ball), so we mirror that shape to keep the two sides
+    /// substitutable.
+    private func dispatchDetectionIfDue(pixelBuffer: CVPixelBuffer, timestampS: TimeInterval) {
+        detectionStateLock.lock()
+        let elapsed = timestampS - lastDetectionDispatchTimeS
+        let shouldDispatch = !detectionInFlight && elapsed >= Self.detectionIntervalS
+        let gen = detectionGeneration
+        guard let session = detectionSession, shouldDispatch else {
+            detectionStateLock.unlock()
+            return
+        }
+        detectionInFlight = true
+        lastDetectionDispatchTimeS = timestampS
+        let callIndex = detectionCallIndex
+        detectionCallIndex += 1
+        detectionStateLock.unlock()
+
+        detectionQueue.async { [weak self] in
+            guard let self else { return }
+            let detection = session.apply(pixelBuffer)
+            self.detectionStateLock.lock()
+            defer { self.detectionStateLock.unlock() }
+            // Generation mismatch means the recording cycle we were dispatched
+            // for has already ended — drop this result on the floor instead
+            // of contaminating the fresh cycle's buffer.
+            guard gen == self.detectionGeneration else { return }
+            self.detectionInFlight = false
+            let frame = ServerUploader.FramePayload(
+                frame_index: callIndex,
+                timestamp_s: timestampS,
+                px: detection.map { Double($0.px) },
+                py: detection.map { Double($0.py) },
+                ball_detected: detection != nil
+            )
+            self.detectionFramesBuffer.append(frame)
+        }
+    }
+
+    /// Bump the detection generation, rebuild the session, clear the
+    /// buffer, reset the throttle. Called at both ends of a recording
+    /// cycle so no stale MOG2 state or detections bleed across arms.
+    private func resetBallDetectionState() {
+        detectionStateLock.lock()
+        detectionGeneration &+= 1
+        detectionFramesBuffer.removeAll()
+        detectionInFlight = false
+        lastDetectionDispatchTimeS = 0
+        detectionCallIndex = 0
+        detectionSession = BTDetectionSession()
+        detectionStateLock.unlock()
+    }
+
+    /// Take ownership of the accumulated per-frame detection results for
+    /// this recording cycle. Used by the cycle-complete path (mode-one
+    /// uses it as a trim oracle; mode-two ships it to the server).
+    func drainDetectedFrames() -> [ServerUploader.FramePayload] {
+        detectionStateLock.lock()
+        defer { detectionStateLock.unlock() }
+        let out = detectionFramesBuffer
+        detectionFramesBuffer.removeAll()
+        return out
     }
 
     private func startClipRecorder(width: Int, height: Int) {
@@ -1616,7 +1895,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             intrinsics: IntrinsicsStore.loadIntrinsicsPayload(),
             homography: IntrinsicsStore.loadHomography(),
             image_width_px: dims?.width,
-            image_height_px: dims?.height
+            image_height_px: dims?.height,
+            frames: payload.frames
         )
     }
 }

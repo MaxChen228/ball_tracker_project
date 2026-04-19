@@ -78,6 +78,7 @@ from pydantic import ValidationError
 # from the split modules directly (schemas / pairing / chirp / render_*).
 from schemas import (
     CalibrationSnapshot,
+    CaptureMode,
     Device,
     FramePayload,
     HeartbeatBody,
@@ -88,7 +89,7 @@ from schemas import (
     TriangulatedPoint,
     _DEFAULT_SESSION_TIMEOUT_S,
 )
-from pairing import triangulate_cycle
+from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pipeline import annotate_video, detect_pitch
 from chirp import chirp_wav_bytes
 from cleanup_old_sessions import cleanup_expired_sessions
@@ -163,6 +164,11 @@ class State:
         self._devices: dict[str, Device] = {}
         self._current_session: Session | None = None
         self._last_ended_session: Session | None = None
+        # Global capture-mode toggle. Dashboard flips this; every subsequent
+        # arm_session() snapshots the current value into the session. Default
+        # `camera_only` preserves the pre-mode-split behaviour for anyone
+        # upgrading a running server without touching the dashboard.
+        self._current_mode: CaptureMode = CaptureMode.camera_only
         # Per-camera calibration snapshots. Written by POST /calibration,
         # read by the dashboard canvas so the 3D preview shows where each
         # phone "thinks it is" relative to the plate, independent of any
@@ -171,8 +177,11 @@ class State:
         self._calibrations: dict[str, CalibrationSnapshot] = {}
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
-        self._load_from_disk()
+        # Calibrations first — _load_from_disk re-triangulates every cached
+        # pitch, and triangulation needs the calibration snapshot to decide
+        # the intrinsic-scale factor (MOV dims vs. calibration dims).
         self._load_calibrations_from_disk()
+        self._load_from_disk()
 
     @property
     def data_dir(self) -> Path:
@@ -232,7 +241,7 @@ class State:
             )
             if a is not None and b is not None:
                 try:
-                    result.points = triangulate_cycle(a, b)
+                    result.points = self._triangulate_pair(a, b)
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
             self.results[sid] = result
@@ -277,6 +286,28 @@ class State:
     def calibrations(self) -> dict[str, CalibrationSnapshot]:
         with self._lock:
             return dict(self._calibrations)
+
+    def _triangulate_pair(
+        self, a: PitchPayload, b: PitchPayload
+    ) -> list[TriangulatedPoint]:
+        """Scale each pitch's intrinsics + homography to its MOV's actual
+        pixel grid (using the cached calibration snapshot as the reference
+        resolution) and then triangulate. When no snapshot is cached for a
+        camera the scale factor falls back to 1.0 and the pitch is passed
+        through unchanged — the legacy behaviour for pre-resolution-picker
+        builds that always recorded at the calibration resolution."""
+        with self._lock:
+            cal_a = self._calibrations.get(a.camera_id)
+            cal_b = self._calibrations.get(b.camera_id)
+        a_scaled = scale_pitch_to_video_dims(
+            a,
+            (cal_a.image_width_px, cal_a.image_height_px) if cal_a else None,
+        )
+        b_scaled = scale_pitch_to_video_dims(
+            b,
+            (cal_b.image_width_px, cal_b.image_height_px) if cal_b else None,
+        )
+        return triangulate_cycle(a_scaled, b_scaled)
 
     def _atomic_write(self, path: Path, payload: str) -> None:
         # Unique tmp filename per call so concurrent writers targeting the
@@ -331,7 +362,7 @@ class State:
         )
         if a is not None and b is not None:
             try:
-                result.points = triangulate_cycle(a, b)
+                result.points = self._triangulate_pair(a, b)
             except Exception as e:
                 result.error = f"{type(e).__name__}: {e}"
 
@@ -456,7 +487,9 @@ class State:
         self, max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S
     ) -> Session:
         """Begin a new armed session. If one is already armed, return it
-        unchanged (idempotent so dashboard double-clicks don't double-arm)."""
+        unchanged (idempotent so dashboard double-clicks don't double-arm).
+        Snapshots the current global `capture_mode` so a late dashboard
+        toggle can't disturb the in-flight recording."""
         now = self._time_fn()
         with self._lock:
             self._check_session_timeout_locked(now)
@@ -466,9 +499,24 @@ class State:
                 id=_new_session_id(),
                 started_at=now,
                 max_duration_s=max_duration_s,
+                mode=self._current_mode,
             )
             self._current_session = session
             return session
+
+    def current_mode(self) -> CaptureMode:
+        """Dashboard-selected capture mode (global, not session-scoped).
+        iPhones read this from status/heartbeat to render the HUD mode chip
+        even while idle."""
+        with self._lock:
+            return self._current_mode
+
+    def set_mode(self, mode: CaptureMode) -> CaptureMode:
+        """Record the dashboard's mode choice. Only affects sessions armed
+        after this call — in-flight sessions keep their snapshot mode."""
+        with self._lock:
+            self._current_mode = mode
+            return mode
 
     def stop_session(self) -> Session | None:
         """End the current armed session (operator pressed Stop on the
@@ -613,11 +661,22 @@ class State:
                 ts = [p.t_rel_s for p in result.points]
                 duration = float(ts[-1] - ts[0])
 
+            # Infer the session's capture mode from whether any MOV file
+            # landed on disk. Mode-two uploads frames-only so no video ever
+            # gets saved; mode-one always produces at least one MOV. If a
+            # single session mixes both (e.g. one phone mis-set), the
+            # presence of any MOV wins — operator-visible cue is enough.
+            has_any_video = any(
+                self._video_dir.glob(f"session_{sid}_*")
+            )
+            mode = "camera_only" if has_any_video else "on_device"
+
             events.append(
                 {
                     "session_id": sid,
                     "cameras": cams_present,
                     "status": status,
+                    "mode": mode,
                     "received_at": latest_mtime,
                     "n_ball_frames": cam_frame_counts,
                     "n_triangulated": n_triangulated,
@@ -775,6 +834,11 @@ def _build_status_response() -> dict[str, Any]:
         ],
         "session": session.to_dict() if session is not None else None,
         "commands": state.commands_for_devices(),
+        # Global dashboard mode choice. iPhones show this on the HUD in idle
+        # and fall back to it when there's no armed session; during an armed
+        # session they read session.mode instead (it's the snapshot that
+        # can't drift from under them).
+        "capture_mode": state.current_mode().value,
     }
 
 
@@ -822,6 +886,28 @@ async def sessions_stop(request: Request):
     if ended is None:
         raise HTTPException(status_code=409, detail="no armed session")
     return {"ok": True, "session": ended.to_dict()}
+
+
+@app.post("/sessions/set_mode")
+async def sessions_set_mode(
+    request: Request,
+    mode: str = Form(...),
+):
+    """Dashboard mode picker target. Records the global capture mode which
+    the next `arm_session()` will snapshot. HTML form callers (dashboard
+    radio buttons) get a 303 back to /; JSON API callers get the applied
+    mode echoed so they can confirm the write."""
+    try:
+        applied = CaptureMode(mode)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid mode {mode!r}; expected one of: {[m.value for m in CaptureMode]}",
+        )
+    state.set_mode(applied)
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "capture_mode": applied.value}
 
 
 @app.post("/sessions/clear")
@@ -888,34 +974,26 @@ def _summarize_result(result: SessionResult) -> dict[str, Any]:
 async def pitch(
     request: Request,
     payload: str = Form(...),
-    video: UploadFile = File(...),
+    video: UploadFile | None = File(None),
 ) -> dict[str, Any]:
     """Ingest one armed-session upload as multipart/form-data.
 
     Required form fields:
-      - `payload` — JSON-encoded `PitchPayload` (camera_id, session_id,
-        sync_anchor_timestamp_s, video_start_pts_s, video_fps, intrinsics,
-        homography, image_{width,height}_px). No per-frame data.
-      - `video`   — H.264 MOV/MP4 of the cycle. Server decodes it, runs
-        HSV ball detection per frame, then triangulates with the partner
-        upload for this session.
+      - `payload` — JSON-encoded `PitchPayload`. In mode-one (`camera_only`)
+        carries only session-level metadata; in mode-two (`on_device`) also
+        carries the per-frame `frames: [FramePayload]` list produced by the
+        iPhone's own HSV+MOG2 detector.
 
-    Flow:
-      1. 413 guard on declared Content-Length
-      2. Validate JSON payload
-      3. Persist the clip bytes atomically
-      4. Decode the clip and synthesise per-frame detection results
-      5. `state.record()` stores the enriched payload + triangulates if B
-         (or A) is already on file
-      6. Return the session summary — triangulation stats for the dashboard.
+    Optional:
+      - `video` — H.264 MOV/MP4 of the cycle. Required in mode-one (server
+        decodes it and runs HSV detection). Omitted in mode-two — server
+        trusts the iPhone's detection output and only pairs + triangulates.
 
-    Uploads without a time-sync anchor (`sync_anchor_timestamp_s is None`)
-    skip detection + triangulation and surface `error="no time sync"` on
-    the session. Operator's cue to re-run 時間校正.
+    Requests with neither a video nor a non-empty `frames` list return 422:
+    there's no way to triangulate off nothing. Requests without a time-sync
+    anchor skip detection+triangulation and surface `error="no time sync"`.
     """
-    # Fail fast on oversize bodies when the client advertises Content-Length
-    # (Starlette has already buffered by the time we get here, but returning
-    # 413 early is still cheaper than processing the multipart parts).
+    # Fail fast on oversize bodies when the client advertises Content-Length.
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
@@ -930,74 +1008,87 @@ async def pitch(
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors())
 
-    data = await video.read()
-    # Defence in depth: re-check the actual read size in case the declared
-    # Content-Length was missing or spoofed.
-    if len(data) > _MAX_PITCH_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="video too large")
-    if not data:
-        raise HTTPException(status_code=422, detail="video attachment is empty")
-    ext = "mov"
-    if video.filename:
-        suffix = Path(video.filename).suffix.lstrip(".").lower()
-        if suffix:
-            ext = suffix
-    # Hand the heavy steps (disk write, PyAV decode + cv2 detection, PyAV
-    # re-encode, atomic JSON writes + triangulation) to the default thread
-    # executor. A 240 fps × 1080p clip's `detect_pitch` + `annotate_video`
-    # pair can hold the CPU for seconds — running it on the event loop
-    # would stall every other request (heartbeats, /status, dashboard
-    # ticks) for the same duration.
-    clip_path = await asyncio.to_thread(
-        state.save_clip,
-        payload_obj.camera_id, payload_obj.session_id, data, ext,
-    )
-    clip_info = {"filename": clip_path.name, "bytes": len(data)}
-
-    if payload_obj.sync_anchor_timestamp_s is None:
-        # No time anchor → pairing is impossible; skip detection so we
-        # don't waste CPU on data that will never triangulate.
-        payload_obj.frames = []
-        detection_ran = False
-    else:
-        payload_obj.frames = await asyncio.to_thread(
-            detect_pitch, clip_path, payload_obj.video_start_pts_s,
+    has_video = video is not None and (video.filename or video.size)
+    has_frames = bool(payload_obj.frames)
+    if not has_video and not has_frames:
+        raise HTTPException(
+            status_code=422,
+            detail="must supply either `video` (mode-one) or a non-empty "
+                   "`frames` list in payload (mode-two)",
         )
-        detection_ran = True
-        # Re-encode the clip with a green circle on every detected frame
-        # so the viewer shows "processed" footage by default. Failures
-        # here are logged-and-swallowed: raw clip is still on disk, the
-        # viewer just falls back to it.
-        annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
-        try:
-            await asyncio.to_thread(
-                annotate_video, clip_path, annotated_path, payload_obj.frames,
+
+    clip_info: dict[str, Any] | None = None
+    detection_ran = False
+
+    if has_video:
+        data = await video.read()
+        if len(data) > _MAX_PITCH_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="video too large")
+        if not data:
+            raise HTTPException(status_code=422, detail="video attachment is empty")
+        ext = "mov"
+        if video.filename:
+            suffix = Path(video.filename).suffix.lstrip(".").lower()
+            if suffix:
+                ext = suffix
+        # Hand the heavy steps (disk write, PyAV decode + cv2 detection,
+        # annotate_video re-encode, atomic JSON writes + triangulation)
+        # to the default thread executor.
+        clip_path = await asyncio.to_thread(
+            state.save_clip,
+            payload_obj.camera_id, payload_obj.session_id, data, ext,
+        )
+        clip_info = {"filename": clip_path.name, "bytes": len(data)}
+
+        if payload_obj.sync_anchor_timestamp_s is None:
+            payload_obj.frames = []
+        else:
+            # Mode-one: server-side detection is authoritative. We
+            # overwrite any `frames` the iPhone may have speculatively
+            # included alongside the MOV.
+            payload_obj.frames = await asyncio.to_thread(
+                detect_pitch, clip_path, payload_obj.video_start_pts_s,
             )
-        except Exception as exc:
-            logger.warning(
-                "annotate_video failed session=%s cam=%s err=%s",
-                payload_obj.session_id, payload_obj.camera_id, exc,
-            )
-            if annotated_path.exists():
-                try:
-                    annotated_path.unlink()
-                except OSError:
-                    pass
+            detection_ran = True
+            annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
+            try:
+                await asyncio.to_thread(
+                    annotate_video, clip_path, annotated_path, payload_obj.frames,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "annotate_video failed session=%s cam=%s err=%s",
+                    payload_obj.session_id, payload_obj.camera_id, exc,
+                )
+                if annotated_path.exists():
+                    try:
+                        annotated_path.unlink()
+                    except OSError:
+                        pass
+    else:
+        # Mode-two: iPhone already detected; we trust the frames list and
+        # only run pairing + triangulation. No disk write, no annotated
+        # clip — the viewer for this session will fall back to the
+        # per-frame trace from the payload JSON.
+        if payload_obj.sync_anchor_timestamp_s is None:
+            # Anchor missing ⇒ the session can't pair no matter what the
+            # frames say; drop them so downstream counts stay honest.
+            payload_obj.frames = []
+        else:
+            detection_ran = True  # "detection" already ran on the device
 
     result = await asyncio.to_thread(state.record, payload_obj)
     if payload_obj.sync_anchor_timestamp_s is None and result.error is None:
-        # Persist the "no time sync" diagnostic so the session reads
-        # consistently from /events / /results without re-running record().
         result.error = "no time sync"
     ball_frames = sum(1 for f in payload_obj.frames if f.ball_detected)
     logger.info(
-        "pitch camera=%s session=%s clip=%dB frames=%d ball=%d detected=%s triangulated=%d%s",
+        "pitch camera=%s session=%s clip=%s frames=%d ball=%d detected_on=%s triangulated=%d%s",
         payload_obj.camera_id,
         payload_obj.session_id,
-        clip_info["bytes"],
+        f"{clip_info['bytes']}B" if clip_info else "none",
         len(payload_obj.frames),
         ball_frames,
-        detection_ran,
+        "server" if has_video else ("device" if detection_ran else "skipped"),
         len(result.points),
         f" err={result.error}" if result.error else "",
     )
@@ -1127,6 +1218,10 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         if latest_mtime is None or mtime > latest_mtime:
             latest_mtime = mtime
 
+    # Infer capture mode from presence of MOV files — same rule as events().
+    has_any_video = any(state.video_dir.glob(f"session_{session_id}_*"))
+    mode = "camera_only" if has_any_video else "on_device"
+
     return {
         "session_id": session_id,
         "cameras": cams,
@@ -1134,6 +1229,7 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         "error": result.error if result is not None else None,
         "duration_s": duration_s,
         "received_at": latest_mtime,
+        "mode": mode,
     }
 
 
@@ -1296,6 +1392,7 @@ def events_index() -> HTMLResponse:
             ],
             session=session.to_dict() if session is not None else None,
             calibrations=sorted(state.calibrations().keys()),
+            capture_mode=state.current_mode().value,
         )
     )
 
