@@ -90,6 +90,7 @@ from schemas import (
     _DEFAULT_SESSION_TIMEOUT_S,
 )
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
+from fitting import fit_trajectory
 from pipeline import annotate_video, detect_pitch
 from video import probe_dims
 from chirp import chirp_wav_bytes
@@ -244,11 +245,13 @@ class State:
                 if self._has_server_frames(a) and self._has_server_frames(b):
                     try:
                         result.points = self._triangulate_pair(a, b, source="server")
+                        result.fit = fit_trajectory(result.points)
                     except Exception as e:
                         result.error = f"{type(e).__name__}: {e}"
                 if self._has_on_device_frames(a) and self._has_on_device_frames(b):
                     try:
                         result.points_on_device = self._triangulate_pair(a, b, source="on_device")
+                        result.fit_on_device = fit_trajectory(result.points_on_device)
                     except Exception as e:
                         result.error_on_device = f"{type(e).__name__}: {e}"
             self.results[sid] = result
@@ -393,11 +396,13 @@ class State:
             if self._has_server_frames(a) and self._has_server_frames(b):
                 try:
                     result.points = self._triangulate_pair(a, b, source="server")
+                    result.fit = fit_trajectory(result.points)
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
             if self._has_on_device_frames(a) and self._has_on_device_frames(b):
                 try:
                     result.points_on_device = self._triangulate_pair(a, b, source="on_device")
+                    result.fit_on_device = fit_trajectory(result.points_on_device)
                 except Exception as e:
                     result.error_on_device = f"{type(e).__name__}: {e}"
 
@@ -714,6 +719,26 @@ class State:
                 ts = [p.t_rel_s for p in result.points]
                 duration = float(ts[-1] - ts[0])
 
+            # Dashboard-LIVE view summary: derived exclusively from the
+            # on-device fit (mode-two is authoritative for the LIVE panel;
+            # mode-one is forensic). Release-point velocity is the
+            # derivative of the quadratic evaluated at release_t_s.
+            speed_mps: float | None = None
+            plate_xz_m: list[float] | None = None
+            rms_m: float | None = None
+            fit_duration_s: float | None = None
+            fod = result.fit_on_device if result is not None else None
+            if fod is not None:
+                rms_m = float(fod.rms_m)
+                fit_duration_s = float(fod.t_max_s - fod.t_min_s)
+                t_rel = fod.release_t_s
+                vx = 2.0 * fod.coeffs_x[0] * t_rel + fod.coeffs_x[1]
+                vy = 2.0 * fod.coeffs_y[0] * t_rel + fod.coeffs_y[1]
+                vz = 2.0 * fod.coeffs_z[0] * t_rel + fod.coeffs_z[1]
+                speed_mps = float((vx * vx + vy * vy + vz * vz) ** 0.5)
+                if fod.plate_xyz_m is not None:
+                    plate_xz_m = [float(fod.plate_xyz_m[0]), float(fod.plate_xyz_m[2])]
+
             # Infer the session's capture mode from payload shape:
             # - any pitch carries frames_on_device → dual OR on_device
             # - any MOV exists on disk → camera_only OR dual
@@ -745,6 +770,14 @@ class State:
                     "duration_s": duration,
                     "error": error,
                     "error_on_device": error_on_device,
+                    # Fit-derived summary (LIVE dashboard). All None when
+                    # fit_on_device is missing — frontend hides the row in
+                    # that case.
+                    "rms_m": rms_m,
+                    "speed_mps": speed_mps,
+                    "plate_xz_m": plate_xz_m,
+                    "fit_duration_s": fit_duration_s,
+                    "has_fit": fod is not None,
                 }
             )
         # Latest events first — session ids carry 4 bytes of random hex
@@ -1597,6 +1630,9 @@ def calibration_state() -> dict[str, Any]:
         scene_zaxis_range=[-0.2, 2.0],
         scene_aspectmode="manual",
         scene_aspectratio=dict(x=1.0, y=1.0, z=0.45),
+        # Match the value used by render_events_index_html SSR so the tick
+        # never flips uirevision and Plotly keeps the user's camera/orbit.
+        scene_uirevision="dashboard-canvas",
     )
     fig_json = json.loads(fig.to_json())
     return {
