@@ -14,6 +14,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from pairing import scale_pitch_to_video_dims
+from schemas import IntrinsicsPayload, PitchPayload
 from triangulate import (
     build_K,
     camera_center_world,
@@ -180,3 +182,125 @@ def test_recover_extrinsics_threshold_boundary_passes():
     # Should not raise.
     R_rec, t_rec = recover_extrinsics(K, H)
     assert t_rec[2] > 0
+
+
+# --------------------------- scale_pitch_to_video_dims -----------------------
+
+
+def _pitch_at(
+    width: int,
+    height: int,
+    intrinsics: IntrinsicsPayload | None,
+    homography: list[float] | None,
+) -> PitchPayload:
+    return PitchPayload(
+        camera_id="A",
+        session_id="s_cafebabe",
+        sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        intrinsics=intrinsics,
+        homography=homography,
+        image_width_px=width,
+        image_height_px=height,
+    )
+
+
+def test_scale_pitch_noop_when_dims_match():
+    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=540.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1920, 1080, intr, H)
+
+    out = scale_pitch_to_video_dims(pitch, (1920, 1080))
+
+    assert out is pitch  # identity returned without copy
+
+
+def test_scale_pitch_noop_when_calibration_missing():
+    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=540.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, intr, H)
+
+    out = scale_pitch_to_video_dims(pitch, None)
+
+    assert out is pitch
+
+
+def test_scale_pitch_noop_when_intrinsics_missing():
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, None, H)
+
+    out = scale_pitch_to_video_dims(pitch, (1920, 1080))
+
+    assert out is pitch
+
+
+def test_scale_pitch_1080_to_720_scales_intrinsics_proportionally():
+    intr = IntrinsicsPayload(
+        fx=1600.0, fz=1600.0, cx=960.0, cy=540.0,
+        distortion=[0.1, -0.05, 0.001, -0.002, 0.02],
+    )
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, intr, H)
+
+    out = scale_pitch_to_video_dims(pitch, (1920, 1080))
+
+    sx = 1280 / 1920  # 0.6667
+    sy = 720 / 1080  # 0.6667
+    assert out.intrinsics is not None
+    assert out.intrinsics.fx == pytest.approx(1600.0 * sx)
+    assert out.intrinsics.fz == pytest.approx(1600.0 * sy)
+    assert out.intrinsics.cx == pytest.approx(960.0 * sx)
+    assert out.intrinsics.cy == pytest.approx(540.0 * sy)
+    # Distortion is dimensionless; must be unchanged.
+    assert out.intrinsics.distortion == [0.1, -0.05, 0.001, -0.002, 0.02]
+
+
+def test_scale_pitch_scales_homography_first_two_rows_and_renormalises():
+    """Scaling by S = diag(sx, sy, 1) must leave the last row (normalised to 1)
+    intact after the h33 renormalisation."""
+    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=540.0)
+    H_in = [2.0, 0.1, 30.0, 0.2, 3.0, 40.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, intr, H_in)
+
+    out = scale_pitch_to_video_dims(pitch, (1920, 1080))
+
+    assert out.homography is not None
+    H_out = np.array(out.homography).reshape(3, 3)
+    # h33 convention preserved (inputs normalised, scale preserves it).
+    assert H_out[2, 2] == pytest.approx(1.0)
+    # First row × sx, second × sy.
+    sx = sy = 1280 / 1920
+    np.testing.assert_allclose(H_out[0, :], np.array(H_in[0:3]) * sx, atol=1e-12)
+    np.testing.assert_allclose(H_out[1, :], np.array(H_in[3:6]) * sy, atol=1e-12)
+    np.testing.assert_allclose(H_out[2, :], np.array(H_in[6:9]), atol=1e-12)
+
+
+def test_scale_pitch_roundtrip_preserves_projected_pixel():
+    """End-to-end invariant: if we project a world point through the original
+    (K, H) to get a 1080p pixel, and scale (K, H) to 720p, projecting the same
+    world point must yield a pixel at the same fractional position (scaled
+    down by the same ratio)."""
+    fx = fy = 1600.0
+    cx, cy = 960.0, 540.0
+    intr = IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy)
+    K = build_K(fx, fy, cx, cy)
+    C = np.array([1.8, -2.5, 1.2])
+    R, t = _look_at(C, np.array([0.0, 0.15, 0.0]))
+    H_true = _homography_from_pose(K, R, t)
+    pitch = _pitch_at(1280, 720, intr, H_true.flatten().tolist())
+
+    # Arbitrary plate-plane point.
+    world = np.array([0.2, 0.3, 1.0])
+    pix_1080 = H_true @ world
+    pix_1080 = pix_1080[:2] / pix_1080[2]
+
+    out = scale_pitch_to_video_dims(pitch, (1920, 1080))
+    assert out.homography is not None
+    H_720 = np.array(out.homography).reshape(3, 3)
+    pix_720 = H_720 @ world
+    pix_720 = pix_720[:2] / pix_720[2]
+
+    sx = 1280 / 1920
+    sy = 720 / 1080
+    np.testing.assert_allclose(pix_720, pix_1080 * np.array([sx, sy]), atol=1e-9)
