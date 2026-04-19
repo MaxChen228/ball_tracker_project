@@ -449,7 +449,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         log.info("camera entering recording session=\(snapshotSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         if lastSyncAnchorTimestampS == nil {
             warningLabel.text = "尚未時間校正，將無法三角化"
-            warningLabel.textColor = DesignTokens.Colors.pending
+            warningLabel.textColor = DesignTokens.Colors.ink
             warningLabel.isHidden = false
             log.warning("arm without time sync anchor — server will skip triangulation")
         } else {
@@ -707,8 +707,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             // miss that the chirp never arrived.
             let originalBg = warningLabel.backgroundColor
             let originalFg = warningLabel.textColor
-            warningLabel.backgroundColor = DesignTokens.Colors.fail
-            warningLabel.textColor = .white
+            warningLabel.backgroundColor = DesignTokens.Colors.destructive
+            warningLabel.textColor = DesignTokens.Colors.cardBackground
             warningLabel.text = "時間校正逾時：確認 chirp 音訊與麥克風"
             warningLabel.isHidden = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
@@ -1082,16 +1082,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let color: UIColor
         if !snap.armed {
             statusText = "warming up"
-            color = .systemGray
+            color = DesignTokens.Colors.sub
         } else if snap.triggered {
             statusText = "TRIGGER"
-            color = .systemGreen
+            color = DesignTokens.Colors.success
         } else if snap.lastPeak >= snap.threshold * 0.8 {
             statusText = "close"
-            color = .systemOrange
+            color = DesignTokens.Colors.warning
         } else {
             statusText = "listening"
-            color = .systemYellow
+            color = DesignTokens.Colors.sub
         }
         chirpDebugLabel.text = String(
             format: "peak %.2f / %.2f  buf %d  %@",
@@ -1362,7 +1362,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // Transient banner for error / progress text. Hidden by default;
         // state-change paths set text + reveal, and a timer usually hides it.
         warningLabel.font = DesignTokens.Fonts.sans(size: 18, weight: .bold)
-        warningLabel.textColor = DesignTokens.Colors.pending
+        warningLabel.textColor = DesignTokens.Colors.ink
+        warningLabel.backgroundColor = DesignTokens.Colors.warning.withAlphaComponent(0.85)
+        warningLabel.layer.cornerRadius = DesignTokens.CornerRadius.chip
+        warningLabel.layer.masksToBounds = true
         warningLabel.textAlignment = .center
         warningLabel.numberOfLines = 0
         warningLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -1493,19 +1496,19 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func setupRecIndicator() {
         recIndicator.translatesAutoresizingMaskIntoConstraints = false
-        recIndicator.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        recIndicator.backgroundColor = DesignTokens.Colors.hudSurface
         recIndicator.layer.cornerRadius = 14
-        recIndicator.layer.borderColor = UIColor.systemRed.cgColor
+        recIndicator.layer.borderColor = DesignTokens.Colors.destructive.cgColor
         recIndicator.layer.borderWidth = 1
         recIndicator.isHidden = true
 
-        recDotView.backgroundColor = .systemRed
+        recDotView.backgroundColor = DesignTokens.Colors.destructive
         recDotView.layer.cornerRadius = 7
         recDotView.translatesAutoresizingMaskIntoConstraints = false
 
         recTimerLabel.text = "REC 0.0s"
-        recTimerLabel.textColor = .white
-        recTimerLabel.font = .monospacedDigitSystemFont(ofSize: 16, weight: .bold)
+        recTimerLabel.textColor = DesignTokens.Colors.ink
+        recTimerLabel.font = DesignTokens.Fonts.mono(size: 16, weight: .bold)
         recTimerLabel.translatesAutoresizingMaskIntoConstraints = false
 
         recIndicator.addSubview(recDotView)
@@ -1632,22 +1635,22 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         switch s {
         case .standby:
             return .init(
-                borderColor: UIColor.white.withAlphaComponent(0.15), borderWidth: 2, pulse: false,
+                borderColor: DesignTokens.Colors.cardBorder, borderWidth: 2, pulse: false,
                 chipText: "待機", chipStyle: .neutral
             )
         case .timeSyncWaiting:
             return .init(
-                borderColor: .systemBlue, borderWidth: 8, pulse: true,
+                borderColor: DesignTokens.Colors.accent, borderWidth: 8, pulse: true,
                 chipText: "時間校正中", chipStyle: .pending
             )
         case .recording:
             return .init(
-                borderColor: DesignTokens.Colors.fail, borderWidth: 14, pulse: false,
+                borderColor: DesignTokens.Colors.destructive, borderWidth: 14, pulse: false,
                 chipText: "● 錄影中", chipStyle: .fail
             )
         case .uploading:
             return .init(
-                borderColor: DesignTokens.Colors.pending, borderWidth: 6, pulse: false,
+                borderColor: DesignTokens.Colors.warning, borderWidth: 6, pulse: false,
                 chipText: "上傳中", chipStyle: .pending
             )
         }

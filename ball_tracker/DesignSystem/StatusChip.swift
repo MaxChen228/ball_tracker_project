@@ -1,9 +1,10 @@
 import UIKit
 
-/// Colored pill label used for the top-of-HUD state indicator ("待機",
-/// "錄影中", etc). Replaces the older `PaddedLabel` — same intrinsic
-/// padding trick but with a `setStyle` API that pulls from DesignTokens
-/// so a rename / palette change flips every chip in one place.
+/// Pill label used for the top-of-HUD state indicator ("待機", "錄影中"…).
+/// Uses the hybrid language: `hudSurface` fill for every state, 1 px tone
+/// border, tone-colored uppercase label. No per-state background swap — the
+/// chip's tone is carried by the border + text so it reads well over the
+/// live camera preview without the old "color-blob on dark" feel.
 final class StatusChip: UILabel {
     enum Style {
         case ok
@@ -21,33 +22,34 @@ final class StatusChip: UILabel {
 
     init() {
         super.init(frame: .zero)
-        font = DesignTokens.Fonts.sans(size: 18, weight: .heavy)
+        font = DesignTokens.Fonts.sans(size: 16, weight: .heavy)
         textAlignment = .center
         numberOfLines = 1
         adjustsFontSizeToFitWidth = true
         minimumScaleFactor = 0.7
         layer.cornerRadius = DesignTokens.CornerRadius.chip
         layer.masksToBounds = true
+        layer.borderWidth = 1
+        backgroundColor = DesignTokens.Colors.hudSurface
         setStyle(.neutral)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func setStyle(_ style: Style) {
+        let tone: UIColor
         switch style {
         case .ok:
-            backgroundColor = DesignTokens.Colors.ok
-            textColor = .white
+            tone = DesignTokens.Colors.success
         case .pending:
-            backgroundColor = DesignTokens.Colors.pending
-            textColor = .black
+            tone = DesignTokens.Colors.warning
         case .fail:
-            backgroundColor = DesignTokens.Colors.fail
-            textColor = .white
+            tone = DesignTokens.Colors.destructive
         case .neutral:
-            backgroundColor = UIColor(white: 0.25, alpha: 0.9)
-            textColor = DesignTokens.Colors.ink
+            tone = DesignTokens.Colors.sub
         }
+        textColor = tone
+        layer.borderColor = tone.withAlphaComponent(0.45).cgColor
     }
 
     override func drawText(in rect: CGRect) {

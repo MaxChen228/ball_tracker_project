@@ -389,26 +389,24 @@ def render_viewer_html(
   .speed-group button:last-child {{ border-right:none; }}
   .speed-group button.active {{ background:var(--ink); color:var(--surface); }}
   .speed-group button:hover:not(.active) {{ color:var(--ink); }}
-  /* Mode toggle floats over the 3D scene — it only affects what the
-     scene draws (trace cutoff), so it belongs with the scene, not with
-     the shared timeline transport. */
-  .scene-col .mode-toggle {{ position:absolute; top:10px; right:10px;
-    z-index:5; display:inline-flex; border:1px solid var(--border-base);
-    border-radius:2px; overflow:hidden; background:var(--surface); }}
-  .scene-col .mode-toggle button {{ padding:5px 12px; border:none;
+  /* Scene toolbar floats over the 3D scene. Groups the reset button and
+     the trace-cutoff mode toggle in a single bordered bar so they read
+     as one control surface instead of two separate floating chips. */
+  .scene-col .scene-toolbar {{ position:absolute; top:10px; right:10px;
+    z-index:5; display:inline-flex; align-items:stretch;
+    border:1px solid var(--border-base); border-radius:2px;
+    overflow:hidden; background:var(--surface); }}
+  .scene-col .scene-toolbar button {{ padding:5px 12px; border:none;
     background:transparent; color:var(--sub); cursor:pointer;
     min-width:auto; border-radius:0; font:inherit; font-size:11px;
-    letter-spacing:0.1em; text-transform:uppercase; font-weight:400; }}
-  .scene-col .mode-toggle button:hover:not(.active) {{ color:var(--ink); }}
-  .scene-col .mode-toggle button.active {{ background:var(--ink);
+    letter-spacing:0.1em; text-transform:uppercase; font-weight:400;
+    line-height:1; }}
+  .scene-col .scene-toolbar button:hover:not(.active) {{ color:var(--ink); }}
+  .scene-col .scene-toolbar button.active {{ background:var(--ink);
     color:var(--surface); font-weight:500; }}
-  .scene-col .scene-reset {{ position:absolute; top:10px; right:140px;
-    z-index:5; padding:4px 10px; border:1px solid var(--border-base);
-    background:var(--surface); color:var(--sub); cursor:pointer;
-    border-radius:2px; font:inherit; font-size:13px; line-height:1;
-    min-width:auto; }}
-  .scene-col .scene-reset:hover {{ color:var(--ink);
-    border-color:var(--ink); }}
+  .scene-col .scene-toolbar .reset {{ font-size:14px; padding:4px 12px; }}
+  .scene-col .scene-toolbar .divider {{ width:1px;
+    background:var(--border-base); align-self:stretch; }}
   .hint-btn {{ font:inherit; font-size:11px; padding:3px 9px;
     border:1px solid var(--border-base); background:var(--bg);
     color:var(--sub); border-radius:2px; cursor:pointer;
@@ -441,10 +439,11 @@ def render_viewer_html(
   <div class="work" data-mode="{layout_mode}">
     <div class="scene-col">
       <div id="scene"></div>
-      <button id="scene-reset" class="scene-reset" type="button" title="Reset 3D view">&#x21BA;</button>
-      <div class="mode-toggle" role="tablist" title="Trace cutoff mode">
-        <button id="mode-all" class="active" type="button">All</button>
-        <button id="mode-playback" type="button">Playback</button>
+      <div class="scene-toolbar" role="toolbar" aria-label="Scene controls">
+        <button id="scene-reset" class="reset" type="button" title="Reset 3D view">&#x21BA;</button>
+        <div class="divider" aria-hidden="true"></div>
+        <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
+        <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
       </div>
     </div>
     <div class="videos-col">{video_cells}</div>
