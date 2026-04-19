@@ -223,6 +223,21 @@ form.inline {{ display: inline-block; margin: 0; }}
 .event-item:hover {{ background: var(--surface-hover); }}
 .event-row {{ flex: 1; min-width: 0; display: block; text-decoration: none;
               color: inherit; padding: var(--s-2) var(--s-2); }}
+/* Trajectory overlay toggle — only visible on sessions with 3D pts. The
+   coloured dot mirrors the trace tint Plotly uses in the canvas so the
+   operator can match checkbox → line without guessing. Clicking the
+   checkbox does NOT navigate (it's outside the <a class="event-row">). */
+.traj-toggle {{ flex: 0 0 auto; padding: var(--s-2) 0 0 var(--s-2);
+                display: flex; align-items: center; gap: 4px;
+                cursor: pointer; user-select: none; }}
+.traj-toggle input[type=checkbox] {{ accent-color: var(--ink);
+                                      width: 13px; height: 13px; margin: 0;
+                                      cursor: pointer; }}
+.traj-toggle .swatch {{ width: 10px; height: 10px; border-radius: 50%;
+                         border: 1px solid rgba(0,0,0,0.12);
+                         display: inline-block; }}
+.traj-toggle-placeholder {{ flex: 0 0 auto;
+                             width: calc(13px + 10px + var(--s-2) + 8px); }}
 .event-top {{ display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-1);
               flex-wrap: wrap; }}
 .event-top .sid {{ font-family: var(--mono); font-size: 12px; font-weight: 500;
@@ -259,6 +274,109 @@ _JS_TEMPLATE = r"""
   const sessionBox = document.getElementById('session-body');
   const eventsBox = document.getElementById('events-body');
   const navStatus = document.getElementById('nav-status');
+
+  // --- Trajectory overlay state --------------------------------------------
+  // Persisted set of session_ids whose triangulated trajectory is currently
+  // painted on top of the calibration canvas. Cached /results/{sid} payloads
+  // avoid refetching across ticks; basePlot is the last /calibration/state
+  // fig spec so checkbox toggles can repaint without waiting for the 5 s
+  // tick. Palette is deliberately disjoint from the A/B camera colours in
+  // render_scene.py so the trajectory lines don't get confused with cams.
+  const TRAJ_STORAGE_KEY = 'ball_tracker_dashboard_selected_trajectories';
+  const TRAJ_PALETTE = ['#256246', '#9B6B16', '#A7372A', '#4A6B8C', '#5A5550', '#C97A2B'];
+  const selectedTrajIds = (() => {
+    try {
+      const raw = localStorage.getItem(TRAJ_STORAGE_KEY);
+      return new Set(raw ? JSON.parse(raw) : []);
+    } catch { return new Set(); }
+  })();
+  const trajCache = new Map();       // sid -> {points, points_on_device}
+  let basePlot = null;               // last /calibration/state .plot payload
+
+  function persistTrajSelection() {
+    try { localStorage.setItem(TRAJ_STORAGE_KEY, JSON.stringify([...selectedTrajIds])); }
+    catch { /* storage full / private mode — ignore, selection stays in-memory */ }
+  }
+
+  // Stable hash → palette index so the same session always gets the same
+  // colour across reloads even though the Set iteration order is random.
+  function trajColorFor(sid) {
+    let h = 0;
+    for (let i = 0; i < sid.length; ++i) h = ((h << 5) - h + sid.charCodeAt(i)) | 0;
+    return TRAJ_PALETTE[Math.abs(h) % TRAJ_PALETTE.length];
+  }
+
+  async function ensureTrajLoaded(sid) {
+    if (trajCache.has(sid)) return trajCache.get(sid);
+    try {
+      const r = await fetch(`/results/${encodeURIComponent(sid)}`, { cache: 'no-store' });
+      if (!r.ok) return null;
+      const data = await r.json();
+      const entry = {
+        points: data.points || [],
+        points_on_device: data.points_on_device || [],
+      };
+      trajCache.set(sid, entry);
+      return entry;
+    } catch { return null; }
+  }
+
+  function trajTracesFor(sid, result, color) {
+    // Prefer on-device points when present (pre-encode, wider detection
+    // window in dual sessions); fall back to server points. Single line
+    // trace with markers so sparse trajectories (few pts) still read.
+    const src = (result.points_on_device && result.points_on_device.length)
+      ? result.points_on_device : (result.points || []);
+    if (!src.length) return [];
+    return [{
+      type: 'scatter3d',
+      mode: 'lines+markers',
+      x: src.map(p => p.x_m),
+      y: src.map(p => p.y_m),
+      z: src.map(p => p.z_m),
+      line: { color, width: 4 },
+      marker: { color, size: 3, opacity: 0.85 },
+      name: `traj ${sid}`,
+      hovertemplate: `${sid}<br>t=%{customdata:.3f}s<br>x=%{x:.2f} y=%{y:.2f} z=%{z:.2f}<extra></extra>`,
+      customdata: src.map(p => p.t_rel_s),
+      showlegend: true,
+    }];
+  }
+
+  async function repaintCanvas() {
+    if (!basePlot || !window.Plotly) return;
+    const extraTraces = [];
+    // Load any missing trajectories in parallel — checkbox clicks before
+    // the first tick should still paint immediately.
+    await Promise.all([...selectedTrajIds].map(sid => ensureTrajLoaded(sid)));
+    for (const sid of selectedTrajIds) {
+      const result = trajCache.get(sid);
+      if (!result) continue;
+      extraTraces.push(...trajTracesFor(sid, result, trajColorFor(sid)));
+    }
+    Plotly.react(
+      sceneRoot,
+      [...(basePlot.data || []), ...extraTraces],
+      basePlot.layout || {},
+      { responsive: true },
+    );
+  }
+
+  // Delegated change handler — event list re-renders on every tick, so we
+  // can't rebind per-checkbox. Capture click on the wrapping <label> to
+  // prevent the event-row <a> from swallowing the toggle.
+  eventsBox.addEventListener('click', (e) => {
+    if (e.target.closest('.traj-toggle')) e.stopPropagation();
+  });
+  eventsBox.addEventListener('change', (e) => {
+    const cb = e.target.closest('input[data-traj-sid]');
+    if (!cb) return;
+    const sid = cb.dataset.trajSid;
+    if (cb.checked) selectedTrajIds.add(sid);
+    else selectedTrajIds.delete(sid);
+    persistTrajSelection();
+    repaintCanvas();
+  });
 
   function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 
@@ -404,8 +522,21 @@ _JS_TEMPLATE = r"""
                         : e.mode === 'dual'       ? 'dual'
                         : 'camera-only';
       const captureModeLabel = captureMode;
+      // Trajectory overlay toggle: only sessions with 3D points qualify.
+      // Sibling to event-row (not inside) so the checkbox click doesn't
+      // trigger the wrapping link's navigation.
+      const hasTraj = (e.n_triangulated || 0) > 0;
+      const color = hasTraj ? trajColorFor(e.session_id) : '';
+      const checked = selectedTrajIds.has(e.session_id) ? 'checked' : '';
+      const toggle = hasTraj
+        ? `<label class="traj-toggle" title="Overlay trajectory on canvas">
+             <input type="checkbox" data-traj-sid="${sid}" ${checked}>
+             <span class="swatch" style="background:${color}"></span>
+           </label>`
+        : `<span class="traj-toggle-placeholder" aria-hidden="true"></span>`;
       return `
         <div class="event-item">
+          ${toggle}
           <a class="event-row" href="/viewer/${sid}">
             <div class="event-top">
               <span class="sid">${sid}</span>
@@ -509,7 +640,10 @@ _JS_TEMPLATE = r"""
       renderDevices({ devices: currentDevices || [], calibrations: currentCalibrations });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
       if (payload.plot && sceneRoot && window.Plotly) {
-        Plotly.react(sceneRoot, payload.plot.data || [], payload.plot.layout || {}, { responsive: true });
+        // Cache the base plot so checkbox toggles can re-overlay
+        // trajectories between /calibration/state ticks without refetching.
+        basePlot = payload.plot;
+        repaintCanvas();
       }
     } catch (e) { /* silent */ }
   }
@@ -519,6 +653,19 @@ _JS_TEMPLATE = r"""
       const r = await fetch('/events', { cache: 'no-store' });
       if (!r.ok) return;
       const events = await r.json();
+      // Prune selection for sessions the user deleted server-side so the
+      // canvas doesn't keep painting a phantom trajectory whose checkbox
+      // no longer exists.
+      const liveIds = new Set(events.map(e => e.session_id));
+      let pruned = false;
+      for (const sid of [...selectedTrajIds]) {
+        if (!liveIds.has(sid)) {
+          selectedTrajIds.delete(sid);
+          trajCache.delete(sid);
+          pruned = true;
+        }
+      }
+      if (pruned) { persistTrajSelection(); repaintCanvas(); }
       renderEvents(events);
     } catch (e) { /* silent */ }
   }
@@ -715,11 +862,26 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f'<span><span class="k">Duration (s)</span><span class="v">{duration}</span></span>'
             f"</div>"
         ) if has_metrics else ""
+        # SSR renders the checkbox placeholder unchecked (localStorage is
+        # browser-side); the first tickEvents round-trip rehydrates the
+        # persisted selection within ~one paint. Column width matches the
+        # JS-rendered variant so there's no layout shift on rehydrate.
+        has_traj = (e.get("n_triangulated") or 0) > 0
+        if has_traj:
+            toggle_html = (
+                '<label class="traj-toggle" title="Overlay trajectory on canvas">'
+                f'<input type="checkbox" data-traj-sid="{sid}">'
+                '<span class="swatch"></span>'
+                "</label>"
+            )
+        else:
+            toggle_html = '<span class="traj-toggle-placeholder" aria-hidden="true"></span>'
         parts.append(
-            # event-row is a link into the viewer; the delete form is a
-            # sibling (not a descendant) so the button submit doesn't
+            # event-row is a link into the viewer; the delete form + traj
+            # toggle are siblings (not descendants) so their clicks don't
             # navigate via the wrapping anchor.
             f'<div class="event-item">'
+            f"{toggle_html}"
             f'<a class="event-row" href="/viewer/{sid}">'
             f'<div class="event-top">'
             f'<span class="sid">{sid}</span>'
