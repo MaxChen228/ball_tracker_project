@@ -1460,21 +1460,32 @@ def _videos_for_session(
         if pitch is not None and anchor is not None:
             t_rel = [float(f.timestamp_s - anchor) for f in pitch.frames]
             detected = [bool(f.ball_detected) for f in pitch.frames]
+            px = [float(f.px) if f.px is not None else None for f in pitch.frames]
+            py = [float(f.py) if f.py is not None else None for f in pitch.frames]
             t_rel_od = [float(f.timestamp_s - anchor) for f in pitch.frames_on_device]
             detected_od = [bool(f.ball_detected) for f in pitch.frames_on_device]
+            px_od = [float(f.px) if f.px is not None else None for f in pitch.frames_on_device]
+            py_od = [float(f.py) if f.py is not None else None for f in pitch.frames_on_device]
         else:
-            t_rel = []
-            detected = []
-            t_rel_od = []
-            detected_od = []
+            t_rel = detected = px = py = []
+            t_rel_od = detected_od = px_od = py_od = []
         # Ship both detection streams so the viewer can render two
         # parallel density strips and overlay the dual-mode rays. Legacy
         # `t_rel_s`/`detected` keys preserved for backwards compatibility;
         # `on_device` sub-dict is empty for mono-mode sessions.
+        # `px`/`py` power the virtual-camera canvas: at playback time T,
+        # find the nearest detection and draw a dot at (px, py) — that
+        # IS literally what this camera saw at that moment (the
+        # camera's own ray collapses to a point on its own image plane).
         frames_info = {
             "t_rel_s": t_rel,
             "detected": detected,
-            "on_device": {"t_rel_s": t_rel_od, "detected": detected_od},
+            "px": px,
+            "py": py,
+            "on_device": {
+                "t_rel_s": t_rel_od, "detected": detected_od,
+                "px": px_od, "py": py_od,
+            },
         }
         url = f"/videos/{name}" if name else None
         out.append((cam, url, offset, fps, frames_info))
