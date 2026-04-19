@@ -106,14 +106,28 @@ final class SettingsViewController: UIViewController {
     private let pollIntervalField = UITextField()
 
 
-    // Capture resolution is hard-wired to 1920×1080 (16:9) across the whole
-    // system — see `captureWidthFixed` / `captureHeightFixed`. Added after
-    // repeatedly hitting "intrinsics baked at 720p, pipeline running 1080p"
-    // drift. If a future pipeline ever needs 720p again, reintroduce a
-    // segmented control and the `resolutionChanged` logic the prior revision
-    // had (git blame this file for the full prompt-driven flow).
-    private static let captureWidthFixed = 1920
-    private static let captureHeightFixed = 1080
+    // Capture resolution picker. Calibration is still done at 1080p and the
+    // server rescales intrinsics + homography to whichever resolution the
+    // MOV arrives at (see `pairing.scale_pitch_to_video_dims`), so lowering
+    // the recording resolution only affects upload size, not the triangulation
+    // math. 16:9 fixed across all options — AVCaptureDevice format selection
+    // in CameraViewController matches on (width, height).
+    struct CaptureResolution {
+        let label: String
+        let width: Int
+        let height: Int
+    }
+    static let captureResolutions: [CaptureResolution] = [
+        CaptureResolution(label: "1080p", width: 1920, height: 1080),
+        CaptureResolution(label: "720p", width: 1280, height: 720),
+        CaptureResolution(label: "540p", width: 960, height: 540),
+    ]
+    private static let defaultCaptureWidth = 1920
+    private static let defaultCaptureHeight = 1080
+
+    private let captureResolutionControl = UISegmentedControl(
+        items: SettingsViewController.captureResolutions.map { $0.label }
+    )
 
     private let manualIntrinsicsSwitch = UISwitch()
     private let importIntrinsicsButton = UIButton(type: .system)
@@ -157,13 +171,16 @@ final class SettingsViewController: UIViewController {
         // key land on the same behaviour they had yesterday.
         let parkCameraInStandby = d.object(forKey: keyParkCameraInStandby) as? Bool ?? true
 
-        // Capture resolution is system-wide fixed at 1920×1080 (see
-        // `captureWidthFixed` / `captureHeightFixed`). Any stale UserDefaults
-        // values from prior 720p runs are ignored on load. Capture FPS is
-        // adaptive (60 idle / 240 tracking) and owned by CameraViewController —
-        // it is no longer a user-visible setting.
-        let captureWidth = captureWidthFixed
-        let captureHeight = captureHeightFixed
+        // Capture resolution is user-picked (1080p / 720p / 540p, 16:9). The
+        // server rescales intrinsics + homography to whichever resolution
+        // the MOV arrives at, so changing this only trades upload size for
+        // detection resolution. Fallback to 1080p if the stored height isn't
+        // in the supported set (stale value from an old build, say).
+        let storedH = intOrDefault(keyCaptureHeight, defaultValue: defaultCaptureHeight)
+        let resolution = captureResolutions.first { $0.height == storedH }
+            ?? captureResolutions[0]
+        let captureWidth = resolution.width
+        let captureHeight = resolution.height
 
         let manualEnabled = d.bool(forKey: keyManualIntrinsicsEnabled)
         let manualFx = manualEnabled ? doubleOrDefault(keyIntrinsicFx, defaultValue: 0) : 0
@@ -272,11 +289,15 @@ final class SettingsViewController: UIViewController {
                         current.intrinsicsRms,
                         current.intrinsicsCalibratedAt)
             } else {
-                meta = (Self.captureWidthFixed, Self.captureHeightFixed, 0, Date())
+                meta = (Self.defaultCaptureWidth, Self.defaultCaptureHeight, 0, Date())
             }
         } else {
             meta = (0, 0, 0, nil)
         }
+
+        let resolutions = Self.captureResolutions
+        let pickedIndex = max(0, min(captureResolutionControl.selectedSegmentIndex, resolutions.count - 1))
+        let pickedResolution = resolutions[pickedIndex]
 
         let settings = Settings(
             serverIP: normalizeServerIP(serverIPField.text, fallback: current.serverIP),
@@ -284,8 +305,8 @@ final class SettingsViewController: UIViewController {
             cameraRole: cameraRoleControl.selectedSegmentIndex == 1 ? "B" : "A",
             chirpThreshold: doubleValue(chirpThresholdField.text, fallback: current.chirpThreshold),
             pollInterval: min(60.0, max(1.0, doubleValue(pollIntervalField.text, fallback: current.pollInterval))),
-            captureWidth: Self.captureWidthFixed,
-            captureHeight: Self.captureHeightFixed,
+            captureWidth: pickedResolution.width,
+            captureHeight: pickedResolution.height,
             // Park toggle is owned by the HUD button now; Save just
             // forwards whatever the live UserDefaults value is so we don't
             // clobber a change made in the main screen while Settings
@@ -402,8 +423,9 @@ final class SettingsViewController: UIViewController {
             title: "Camera",
             rows: [
                 controlRow(label: "Role", control: cameraRoleControl),
+                controlRow(label: "Resolution", control: captureResolutionControl),
             ],
-            footer: "解析度系統固定 1080p。FPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。\nSTANDBY 的即時預覽用主畫面右上「預覽」按鈕切換。"
+            footer: "校正永遠以 1080p 為基準；改錄製解析度只影響上傳大小，server 會自動縮放內參。\nFPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。\nSTANDBY 的即時預覽用主畫面右上「預覽」按鈕切換。"
         ))
 
         contentStack.addArrangedSubview(sectionBlock(
@@ -502,6 +524,9 @@ final class SettingsViewController: UIViewController {
         chirpThresholdField.text = String(settings.chirpThreshold)
         pollIntervalField.text = String(settings.pollInterval)
 
+        let resIdx = Self.captureResolutions.firstIndex(where: { $0.height == settings.captureHeight }) ?? 0
+        captureResolutionControl.selectedSegmentIndex = resIdx
+
         manualIntrinsicsSwitch.isOn = settings.manualIntrinsicsEnabled
         manualFxField.text = settings.manualFx > 0 ? String(settings.manualFx) : ""
         manualFyField.text = settings.manualFy > 0 ? String(settings.manualFy) : ""
@@ -575,7 +600,9 @@ final class SettingsViewController: UIViewController {
             return
         }
         var parts = [pendingImportMeta != nil ? "ChArUco" : "Manual"]
-        parts.append("\(Self.captureHeightFixed)p")
+        // Intrinsics are always baked at the default resolution (1080p);
+        // recording at 720p/540p relies on server-side scale, not a re-bake.
+        parts.append("\(Self.defaultCaptureHeight)p")
         if let rms = pendingImportMeta?.rms, rms > 0 {
             parts.append(String(format: "RMS %.2f px", rms))
         }
@@ -849,8 +876,13 @@ extension SettingsViewController: UIDocumentPickerDelegate {
     }
 
     private func applyImportedIntrinsics(_ p: CharucoIntrinsicsJSON) {
-        let targetW = Self.captureWidthFixed
-        let targetH = Self.captureHeightFixed
+        // Imported ChArUco is normalised to 1080p regardless of the user's
+        // current capture-resolution pick. The triangulation pipeline treats
+        // intrinsics as "baked at calibration resolution" and rescales them
+        // per-pitch; keeping the bake resolution fixed is what makes that
+        // contract well-defined.
+        let targetW = Self.defaultCaptureWidth
+        let targetH = Self.defaultCaptureHeight
 
         guard let baked = scaleIntrinsics(
             fx: p.fx, fy: p.fy, cx: p.cx, cy: p.cy,
