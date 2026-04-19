@@ -438,18 +438,51 @@ def render_viewer_html(
     min-width:42px; transition:border-color 0.15s, background 0.15s, color 0.15s; }}
   .timeline button:hover {{ border-color:var(--ink); }}
   .timeline button:disabled {{ opacity:0.4; cursor:not-allowed; }}
-  .timeline .transport {{ display:inline-flex; gap:4px; }}
-  .timeline .transport button {{ min-width:36px; padding:5px 8px;
-    font-size:13px; letter-spacing:0; }}
-  .timeline .play-btn {{ min-width:70px; font-weight:500; }}
+  /* --- Transport cluster ----------------------------------------------
+     Wrap step + play in one pill-shaped capsule. PLAY is the centre of
+     gravity (filled dark, slightly taller); step buttons are borderless
+     icons that read as PLAY's adjuncts, not equals. The whole capsule
+     sits in `--surface` so it visually separates from the timeline
+     background even on light themes. */
+  .timeline .transport {{ display:inline-flex; align-items:center;
+    gap:0; padding:3px;
+    background:var(--bg); border:1px solid var(--border-base);
+    border-radius:999px; }}
+  .timeline .transport button {{ border:none; background:transparent;
+    width:30px; height:30px; min-width:30px; padding:0; font-size:13px;
+    color:var(--ink-light); border-radius:50%;
+    display:inline-flex; align-items:center; justify-content:center;
+    letter-spacing:0; }}
+  .timeline .transport button:hover {{ background:var(--surface-hover);
+    color:var(--ink); border-color:transparent; }}
+  .timeline .transport button:disabled:hover {{ background:transparent;
+    color:var(--ink-light); }}
+  .timeline .transport .play-btn {{ min-width:64px; width:auto;
+    height:32px; padding:0 14px;
+    background:var(--ink); color:var(--surface);
+    font-weight:500; font-size:11px; letter-spacing:0.10em;
+    text-transform:uppercase; border-radius:999px;
+    margin:0 4px; }}
+  .timeline .transport .play-btn:hover {{ background:var(--ink-light);
+    color:var(--surface); }}
+  /* --- Speed segmented control ----------------------------------------
+     Same kg-admin segmented language as dashboard MODE: shared border,
+     no internal gaps, dark fill on active. Inactive segments are sub-
+     toned so the eye reads "1×" as the chosen value, not just "the
+     currently bolded one". */
   .speed-group {{ display:inline-flex; border:1px solid var(--border-base);
-    border-radius:var(--r); overflow:hidden; }}
+    border-radius:var(--r); overflow:hidden;
+    background:var(--surface); height:32px; }}
   .speed-group button {{ border:none; background:transparent;
-    color:var(--sub); padding:5px 10px; min-width:auto; border-radius:0;
-    border-right:1px solid var(--border-base); }}
+    color:var(--sub); padding:0 12px; min-width:auto; border-radius:0;
+    font-size:10px; letter-spacing:0.06em; height:100%;
+    border-right:1px solid var(--border-l);
+    font-variant-numeric:tabular-nums; }}
   .speed-group button:last-child {{ border-right:none; }}
-  .speed-group button.active {{ background:var(--ink); color:var(--surface); }}
-  .speed-group button:hover:not(.active) {{ color:var(--ink); }}
+  .speed-group button.active {{ background:var(--ink); color:var(--surface);
+    font-weight:500; }}
+  .speed-group button:hover:not(.active) {{ color:var(--ink);
+    background:var(--surface-hover); border-color:transparent; }}
   /* Scene toolbar floats over the 3D scene. Groups the reset button and
      the trace-cutoff mode toggle in a single bordered bar so they read
      as one control surface instead of two separate floating chips. */
@@ -468,13 +501,18 @@ def render_viewer_html(
   .scene-col .scene-toolbar .reset {{ font-size:14px; padding:4px 12px; }}
   .scene-col .scene-toolbar .divider {{ width:1px;
     background:var(--border-base); align-self:stretch; }}
-  .hint-btn {{ font:inherit; font-size:11px; padding:3px 9px;
-    border:1px solid var(--border-base); background:var(--bg);
-    color:var(--sub); border-radius:var(--r); cursor:pointer;
+  /* Help: small circular icon — explicitly subordinate to play /
+     speed. `margin-left:auto` keeps it pinned to the right corner so
+     the visual weight stays on the central transport cluster. */
+  .hint-btn {{ font:inherit; font-size:12px; padding:0;
+    width:28px; height:28px;
+    border:1px solid var(--border-base); background:var(--surface);
+    color:var(--sub); border-radius:50%; cursor:pointer;
     margin-left:auto; min-width:auto; font-weight:600;
-    letter-spacing:0.04em; }}
+    letter-spacing:0;
+    display:inline-flex; align-items:center; justify-content:center; }}
   .hint-btn:hover, .hint-btn.open {{ color:var(--ink);
-    border-color:var(--ink); }}
+    border-color:var(--ink); background:var(--surface-hover); }}
   .hint-overlay {{ position:absolute; bottom:60px; right:var(--s-5);
     background:var(--surface); border:1px solid var(--border-base);
     padding:var(--s-3) var(--s-4); font:inherit; font-size:11px;
