@@ -268,6 +268,45 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         }
     }
 
+    // MARK: - Test injection
+
+    /// Push synthetic samples directly into the ring on the delivery queue,
+    /// bypassing CMSampleBuffer plumbing. Mirrors the per-buffer path of
+    /// `captureOutput` — including the `samplesSinceCheck` cadence gate —
+    /// so tests can exercise the full matched-filter + pairing pipeline
+    /// end-to-end without AVFoundation. Blocks until the feed drains so a
+    /// test can assert on callback delivery synchronously.
+    func _testFeed(samples: [Float], sampleRate rate: Double, firstPTS pts: CMTime) {
+        deliveryQueue.sync {
+            if abs(rate - sampleRate) > 0.5 {
+                rebuildForSampleRate(rate)
+            }
+            if firstPTS == nil { firstPTS = pts }
+
+            var offset = 0
+            // Match the real capture cadence: iOS hands ~10 ms chunks at a
+            // time. Feeding one big array in a single pass would never cross
+            // the `samplesSinceCheck >= checkIntervalSamples` gate more than
+            // once, so split it.
+            let chunk = max(1, Int(rate * 0.01))
+            while offset < samples.count {
+                let end = min(offset + chunk, samples.count)
+                for i in offset..<end {
+                    ring[writeIndex] = samples[i]
+                    writeIndex += 1
+                    if writeIndex >= ringLen { writeIndex = 0 }
+                    totalWritten += 1
+                }
+                samplesSinceCheck += end - offset
+                if totalWritten >= ringLen && samplesSinceCheck >= checkIntervalSamples {
+                    runMatchedFilter()
+                    samplesSinceCheck = 0
+                }
+                offset = end
+            }
+        }
+    }
+
     // MARK: - AVCaptureAudioDataOutputSampleBufferDelegate
 
     func captureOutput(
@@ -387,14 +426,26 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         let now_s = currentPTSApprox()
         let armed = (lastTriggerPTS ?? -Double.infinity) + cooldownS <= now_s
 
-        // Expire stale pending up-sweep.
-        if let pu = pendingUp,
-           now_s - pu.centerS > chirpGapCenterS + chirpPairToleranceS {
+        // Expire stale pending up-sweep. `now_s` tracks the newest sample,
+        // but a down-sweep only becomes correlatable once its END sits in the
+        // ring — i.e. `now_s ≥ up_center + chirpGap + chirpDuration/2`. The
+        // expiry bound therefore has to hold the pending across that full
+        // detection latency plus the pair-gap tolerance, not just the
+        // center-to-center gap. An earlier version used just
+        // `chirpGapCenterS + chirpPairToleranceS` and cleared pending right
+        // before the legitimate down-sweep check — pairing never fired.
+        let pendingHoldS = chirpGapCenterS + chirpDurationS + chirpPairToleranceS
+        if let pu = pendingUp, now_s - pu.centerS > pendingHoldS {
             pendingUp = nil
         }
 
-        let upPSR = upResult.secondNorm > 0 ? upResult.bestNorm / upResult.secondNorm : Float.greatestFiniteMagnitude
-        let downPSR = downResult.secondNorm > 0 ? downResult.bestNorm / downResult.secondNorm : Float.greatestFiniteMagnitude
+        // PSR denominator = best normalized value outside the ±exclusion zone
+        // around the peak. On short startup scans the exclusion can blanket
+        // the whole scan → no sidelobe samples → reject (PSR = 0) rather
+        // than auto-accepting; subsequent passes with more samples will
+        // re-evaluate.
+        let upPSR = upResult.secondNorm > 0 ? upResult.bestNorm / upResult.secondNorm : 0
+        let downPSR = downResult.secondNorm > 0 ? downResult.bestNorm / downResult.secondNorm : 0
 
         let upValid = armed && upResult.bestNorm > threshold && upPSR > minPSR
         let downValid = armed && downResult.bestNorm > threshold && downPSR > minPSR

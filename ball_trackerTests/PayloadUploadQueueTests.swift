@@ -284,7 +284,9 @@ final class PayloadUploadQueueTests: XCTestCase {
             intrinsics: nil,
             homography: nil,
             image_width_px: nil,
-            image_height_px: nil
+            image_height_px: nil,
+            frames: [],
+            frames_on_device: []
         )
     }
 
