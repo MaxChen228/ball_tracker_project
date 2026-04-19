@@ -161,6 +161,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // plus the existing state chip (top-left) + REC indicator (top-right).
     // FPS / last-contact / Test are Settings → Diagnostics now.
     private let topStatusChip = StatusChip()
+    /// Small HUD chip showing the currently-effective capture mode
+    /// (session snapshot if armed, otherwise the dashboard's global
+    /// toggle). Driven by `/heartbeat` replies.
+    private let modeLabel = UILabel()
+    /// Last-known capture mode from the server. Starts at cameraOnly so a
+    /// network-unreachable launch degrades to the pre-split behaviour. Step 2
+    /// reads this at cycle-complete to decide whether to upload the MOV or
+    /// just the detection JSON.
+    private var currentCaptureMode: ServerUploader.CaptureMode = .cameraOnly
     private let readyCard = ReadyCard()
     private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
@@ -1054,6 +1063,20 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             let sid = (response.session?.armed == true) ? response.session?.id : nil
             self.currentSessionId = sid
             DiagnosticsData.shared.update(sessionId: .some(sid))
+            // Effective mode: snapshot from the armed session if present,
+            // otherwise the dashboard's global toggle. Unknown / missing
+            // fields fall back to cameraOnly for backwards compat with
+            // pre-mode-split server builds.
+            let modeStr = response.session?.mode ?? response.capture_mode
+                ?? ServerUploader.CaptureMode.cameraOnly.rawValue
+            let mode = ServerUploader.CaptureMode(rawValue: modeStr) ?? .cameraOnly
+            if self.currentCaptureMode != mode {
+                log.info("capture mode changed to \(mode.rawValue, privacy: .public)")
+            }
+            self.currentCaptureMode = mode
+            DispatchQueue.main.async {
+                self.modeLabel.text = "MODE · \(mode.displayLabel.uppercased())"
+            }
             let cam = self.settings.cameraRole
             let cmd = response.commands?[cam]
             // Log every transition so Xcode console shows the server's
@@ -1274,6 +1297,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         topStatusChip.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(topStatusChip)
 
+        // Top-right mode indicator. Populated from heartbeat replies; shows
+        // the effective capture mode so the operator always knows whether
+        // an arm will record+upload MOV (camera-only) or run detection on
+        // device (on-device).
+        modeLabel.font = DesignTokens.Fonts.mono(size: 11, weight: .medium)
+        modeLabel.textColor = DesignTokens.Colors.sub
+        modeLabel.textAlignment = .right
+        modeLabel.translatesAutoresizingMaskIntoConstraints = false
+        modeLabel.text = "MODE · CAMERA-ONLY"
+        view.addSubview(modeLabel)
+
         // Transient banner for error / progress text. Hidden by default;
         // state-change paths set text + reveal, and a timer usually hides it.
         warningLabel.font = DesignTokens.Fonts.sans(size: 18, weight: .bold)
@@ -1320,6 +1354,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         NSLayoutConstraint.activate([
             topStatusChip.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: DesignTokens.Spacing.m),
             topStatusChip.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.m),
+
+            modeLabel.centerYAnchor.constraint(equalTo: topStatusChip.centerYAnchor),
+            modeLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DesignTokens.Spacing.m),
 
             warningLabel.topAnchor.constraint(equalTo: topStatusChip.bottomAnchor, constant: DesignTokens.Spacing.s),
             warningLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),

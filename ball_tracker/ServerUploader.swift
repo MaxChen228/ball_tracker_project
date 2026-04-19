@@ -100,6 +100,10 @@ final class ServerUploader {
         let armed: Bool
         let started_at: Double
         let ended_at: Double?
+        /// Capture mode snapshotted at arm time. Once armed this is frozen
+        /// for the whole recording cycle — a dashboard toggle mid-session
+        /// doesn't mutate it. Optional to keep older server builds parseable.
+        let mode: String?
     }
 
     /// Response body shared by `POST /heartbeat` and `GET /status`.
@@ -110,6 +114,24 @@ final class ServerUploader {
         let devices: [HeartbeatDevice]?
         let session: HeartbeatSession?
         let commands: [String: String]?
+        /// Dashboard-wide capture mode toggle. iPhones read this in idle
+        /// to render the HUD mode chip; during an armed session the phone
+        /// prefers `session.mode` (the snapshot). Optional for back-compat.
+        let capture_mode: String?
+    }
+
+    /// iOS-side capture-mode enum. Kept string-valued so it round-trips
+    /// directly through HeartbeatResponse without a custom decoder.
+    enum CaptureMode: String, Codable {
+        case cameraOnly = "camera_only"
+        case onDevice = "on_device"
+
+        var displayLabel: String {
+            switch self {
+            case .cameraOnly: return "Camera-only"
+            case .onDevice:   return "On-device"
+            }
+        }
     }
 
     struct ServerConfig {
