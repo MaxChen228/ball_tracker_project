@@ -42,6 +42,14 @@ if TYPE_CHECKING:
     from schemas import CalibrationSnapshot
 
 
+# Maximum render distance from the camera (for rays / ground trace points)
+# or from the world origin (for triangulated points). Anything beyond this
+# is dropped from the scene entirely. Near-horizontal rays otherwise hit
+# the plate plane tens of metres out, which blows up the Plotly auto-fit
+# axis and makes the near-field trajectory unreadable.
+_MAX_RENDER_DIST_M = 10.0
+
+
 @dataclass
 class CameraView:
     camera_id: str
@@ -201,7 +209,25 @@ def build_scene(
             except Exception:
                 continue
             ground = _ray_ground_intersection(C, d_world)
-            endpoint = ground if ground is not None else _ray_viz_endpoint(C, d_world, viz_length)
+            # Clamp endpoint distance from camera to `_MAX_RENDER_DIST_M`.
+            # Near-horizontal rays would otherwise hit the plate tens of
+            # metres out, blowing up Plotly's auto-fit axis. Clamping
+            # (rather than skipping) preserves the ray's direction in the
+            # viewer while bounding the scene. Ground-trace points only
+            # contribute when the true intersection sits inside the
+            # radius — a trace point at the clamp boundary would lie, and
+            # mis-reads as "ball landed here".
+            ground_within_radius = (
+                ground is not None
+                and float(np.linalg.norm(ground - C)) <= _MAX_RENDER_DIST_M
+            )
+            if ground_within_radius:
+                endpoint = ground
+            else:
+                viz_len = (
+                    _MAX_RENDER_DIST_M if ground is not None else min(viz_length, _MAX_RENDER_DIST_M)
+                )
+                endpoint = C + viz_len * d_world
             t_rel = float(f.timestamp_s - anchor)
             scene.rays.append(
                 Ray(
@@ -212,7 +238,7 @@ def build_scene(
                     endpoint=endpoint.tolist(),
                 )
             )
-            if ground is not None:
+            if ground_within_radius:
                 trace.append(
                     {
                         "t_rel_s": t_rel,
@@ -235,6 +261,7 @@ def build_scene(
                 "residual_m": float(p.residual_m),
             }
             for p in triangulated
+            if (p.x_m ** 2 + p.y_m ** 2 + p.z_m ** 2) ** 0.5 <= _MAX_RENDER_DIST_M
         ]
 
     return scene
