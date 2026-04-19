@@ -1259,12 +1259,27 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
                 "n_detected": sum(1 for f in p.frames if f.ball_detected),
             }
 
+    # Duration must NOT span raw `timestamp_s` across pitches — each
+    # iPhone's session clock has its own epoch (seconds since that device
+    # booted), so `max(all) - min(all)` mixes two independent clocks and
+    # yields absurd "6-hour" durations when A and B booted hours apart.
+    # Prefer the triangulated-points `t_rel_s` range (already in the
+    # anchor-relative clock, same one `/events` uses). Fall back to the
+    # max per-pitch anchor-relative span for partial (single-cam / untri-
+    # angulated) sessions.
     duration_s: float | None = None
-    timestamps = [
-        f.timestamp_s for p in pitches.values() for f in p.frames
-    ]
-    if timestamps:
-        duration_s = float(max(timestamps) - min(timestamps))
+    if result is not None and result.points:
+        ts = [p.t_rel_s for p in result.points]
+        duration_s = float(max(ts) - min(ts))
+    else:
+        per_pitch_spans: list[float] = []
+        for p in pitches.values():
+            if p.sync_anchor_timestamp_s is None or not p.frames:
+                continue
+            rels = [f.timestamp_s - p.sync_anchor_timestamp_s for f in p.frames]
+            per_pitch_spans.append(max(rels) - min(rels))
+        if per_pitch_spans:
+            duration_s = float(max(per_pitch_spans))
 
     latest_mtime: float | None = None
     for cam_id in pitches:
@@ -1295,6 +1310,12 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         "session_id": session_id,
         "cameras": cams,
         "triangulated_count": len(result.points) if result is not None else 0,
+        # On-device count shown beside the main server count in dual mode
+        # so the operator can see the two streams' yields side by side
+        # instead of having to infer from legend counts later.
+        "triangulated_count_on_device": (
+            len(result.points_on_device) if result is not None else 0
+        ),
         "error": result.error if result is not None else None,
         "duration_s": duration_s,
         "received_at": latest_mtime,

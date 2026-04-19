@@ -755,6 +755,11 @@ def render_viewer_html(
         opacity: src === "on_device" ? 0.35 : 0.35,
         name: `Rays ${{cam}} (${{src === "on_device" ? "iOS" : "server"}}, ${{Math.floor(xs.length / 3)}})`,
         hoverinfo: "skip",
+        // Legend would balloon to 4 rows (cam × source) on dual sessions —
+        // the detection strip already shows which cam × source fired when,
+        // and the in-scene colours + dash pattern tell the story. Drop
+        // from legend to keep the scene uncluttered.
+        showlegend: false,
       }});
     }}
 
@@ -762,6 +767,9 @@ def render_viewer_html(
     // Dashed when a triangulated trajectory is also shown so the 3D
     // trajectory visually dominates; on-device uses a denser dot pattern
     // so overlap with server ground traces stays disambiguated.
+    // Ground traces also suppressed from legend — same rationale as rays.
+    // The colour + dash encoding + the triangulated trajectory above them
+    // are the signal; a 4-row "Ground trace X (src, N pts)" list is noise.
     if (showServer) {{
       for (const [cam, trace] of Object.entries(SCENE.ground_traces || {{}})) {{
         const filtered = trace.filter(p => p.t_rel_s <= cutoff);
@@ -777,6 +785,7 @@ def render_viewer_html(
           marker: {{size: 3, color: color}},
           opacity: HAS_TRIANGULATED ? 0.45 : 0.7,
           name: `Ground trace ${{cam}} (server, ${{filtered.length}} pts)`,
+          showlegend: false,
         }});
       }}
     }}
@@ -795,6 +804,7 @@ def render_viewer_html(
           marker: {{size: 3, color: color, symbol: "circle-open"}},
           opacity: 0.7,
           name: `Ground trace ${{cam}} (iOS, ${{filtered.length}} pts)`,
+          showlegend: false,
         }});
       }}
     }}
@@ -805,7 +815,14 @@ def render_viewer_html(
     if (showServer) {{
       const triPts = (SCENE.triangulated || []).filter(p => p.t_rel_s <= cutoff);
       if (triPts.length) {{
-        const ts = triPts.map(p => p.t_rel_s);
+        // Colorbar shows time RELATIVE to the trajectory's first
+        // triangulated point (0-based), not the raw `t_rel_s` (which is
+        // anchor-relative and can land at t=337s if the chirp fired
+        // minutes before the pitch). "How far into the ball flight" is
+        // what the operator actually wants; raw anchor-relative time is
+        // still available on the strip below.
+        const t0 = triPts[0].t_rel_s;
+        const ts = triPts.map(p => p.t_rel_s - t0);
         out.push({{
           type: "scatter3d",
           x: triPts.map(p => p.x),
@@ -814,7 +831,11 @@ def render_viewer_html(
           mode: "lines+markers",
           line: {{color: ACCENT, width: 4}},
           marker: {{size: 4, color: ts, colorscale: "Cividis", showscale: true,
-            colorbar: {{title: "t (s)"}}}},
+            colorbar: {{
+              title: {{text: "flight t (s)", font: {{size: 10}}}},
+              thickness: 10, len: 0.45, x: 1.02, y: 0.5,
+              tickfont: {{size: 9}},
+            }}}},
           name: `3D trajectory (server, ${{triPts.length}} pts)`,
         }});
       }}
@@ -1433,13 +1454,22 @@ def _health_banner_html(health: dict) -> str:
     bottom so blocking issues are surfaced explicitly even when the
     upper rows look healthy."""
     tri_n = health.get("triangulated_count", 0)
+    tri_od = health.get("triangulated_count_on_device", 0) or 0
     sub = _hero_meta_subline(health)
+    # Dual mode carries two independent counts (server decode vs iOS
+    # BGRA); show both so the operator sees the asymmetry without
+    # hunting in the legend.
+    note = (
+        f"points triangulated · server {tri_n} · iOS {tri_od}"
+        if tri_od and health.get("mode") == "dual"
+        else "points triangulated"
+    )
     if tri_n > 0:
         hero_block = (
             f'<div class="hero-card ok">'
             f'<div class="hero-title">3D Trajectory</div>'
             f'<div class="hero-tri">{tri_n}</div>'
-            f'<div class="hero-note">points triangulated</div>'
+            f'<div class="hero-note">{note}</div>'
             f'<div class="hero-sub">{sub}</div>'
             f'</div>'
         )
@@ -1865,7 +1895,15 @@ def _build_figure(scene: Scene):
             bgcolor=_SURFACE,
             bordercolor=_BORDER_BASE,
             borderwidth=1,
-            font=dict(family="JetBrains Mono, monospace", size=11, color=_INK),
+            font=dict(family="JetBrains Mono, monospace", size=10, color=_INK),
+            # Horizontal legend pinned to the bottom-left so it can't
+            # collide with the colorbar on the right. Rays / ground /
+            # camera traces are all `showlegend=False`, so this row only
+            # holds 3D-trajectory entries (1 or 2 items in dual mode) —
+            # fits on one line and keeps the 3D canvas unobstructed.
+            orientation="h",
+            x=0.0, xanchor="left",
+            y=-0.02, yanchor="top",
         ),
         font=dict(family="Noto Sans TC, sans-serif", color=_INK),
     )
