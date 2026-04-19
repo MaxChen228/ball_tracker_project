@@ -307,7 +307,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     self?.handleFinishedClip(enriched: enriched, videoURL: videoURL)
                 }
             } else {
-                self.persistCompletedCycle(enriched, videoURL: nil)
+                // Mode-two (no clip recorder built) or mode-one with a
+                // failed bootstrap — either way handleFinishedClip owns the
+                // drain-frames-and-persist dance. In mode-two it reads the
+                // detection buffer and routes through handleOnDeviceCycle;
+                // in the degenerate mode-one case with no MOV it falls
+                // through to a JSON-only upload.
+                self.handleFinishedClip(enriched: enriched, videoURL: nil)
             }
         }
 
@@ -1712,56 +1718,61 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             log.info("camera frame idx=\(self.frameIndex) state=\(Self.stateText(snap.state), privacy: .public) pendingBootstrap=\(snap.pendingBootstrap) sid=\(snap.sessionId ?? "nil", privacy: .public)")
         }
 
-        // Only the `.recording` state cares about samples. Phone is a pure
-        // capture client — no ball detection, no overlay, no per-frame
-        // payload work. Idle / time-sync / uploading all just drop through.
+        // Only the `.recording` state cares about samples.
         guard snap.state == .recording else { return }
 
-        // Lazy-bootstrap the ClipRecorder from the first real sample's
-        // dimensions (deferred from enterRecordingMode so we can key off
-        // whatever the sensor is actually delivering post-fps-switch).
-        // `consumePendingBootstrap` clears the flag atomically so a
-        // simultaneous main-thread push can't race us into starting the
-        // writer twice.
-        if frameStateBox.consumePendingBootstrap() {
-            log.info("camera clip bootstrap start width=\(width) height=\(height) sid=\(snap.sessionId ?? "nil", privacy: .public)")
-            startClipRecorder(width: width, height: height)
-            if clipRecorder == nil {
-                // Prepare failed. Fall back to standby on main.
-                log.error("camera clip bootstrap failed session=\(snap.sessionId ?? "nil", privacy: .public)")
-                DispatchQueue.main.async {
-                    self.returnToStandbyAfterCycle = false
-                    self.exitRecordingToStandby()
+        let isModeOne = currentCaptureMode == .cameraOnly
+
+        if isModeOne {
+            // Lazy-bootstrap the ClipRecorder from the first real sample's
+            // dimensions (deferred from enterRecordingMode so we can key
+            // off whatever the sensor is actually delivering post-fps-
+            // switch). `consumePendingBootstrap` clears the flag atomically
+            // so a simultaneous main-thread push can't race us into
+            // starting the writer twice.
+            if frameStateBox.consumePendingBootstrap() {
+                log.info("camera clip bootstrap start width=\(width) height=\(height) sid=\(snap.sessionId ?? "nil", privacy: .public)")
+                startClipRecorder(width: width, height: height)
+                if clipRecorder == nil {
+                    log.error("camera clip bootstrap failed session=\(snap.sessionId ?? "nil", privacy: .public)")
+                    DispatchQueue.main.async {
+                        self.returnToStandbyAfterCycle = false
+                        self.exitRecordingToStandby()
+                    }
+                    return
                 }
-                return
+                log.info("camera clip bootstrap ok session=\(snap.sessionId ?? "nil", privacy: .public)")
             }
-            log.info("camera clip bootstrap ok session=\(snap.sessionId ?? "nil", privacy: .public)")
+            clipRecorder?.append(sampleBuffer: sampleBuffer)
+        } else {
+            // Mode-two: no MOV is being written. Drain the pendingBootstrap
+            // flag so a later arm that flips back to camera_only doesn't
+            // inherit a stale "please prepare" request (Session.mode is
+            // frozen per-arm on the server, but belt+braces here).
+            _ = frameStateBox.consumePendingBootstrap()
         }
 
-        guard let clip = clipRecorder else { return }
-        clip.append(sampleBuffer: sampleBuffer)
-
-        // Offload ball detection, throttled to 60 Hz + one-in-flight so the
-        // ~12-18 ms HSV+CC can't pile up against 240 fps capture. Dropped
-        // frames are fine — we only need a coarse "ball-present" envelope to
-        // decide the trim window at end-of-recording, not a per-frame trace.
+        // Detection runs in both modes — same BTDetectionSession algorithm,
+        // just different fates for its output (trim oracle vs. uploaded
+        // payload).
         dispatchDetectionIfDue(pixelBuffer: pixelBuffer, timestampS: timestampS)
 
-        // First successful append kicks off the PitchRecorder so its
-        // payload carries the session-clock PTS of the MOV's first frame.
-        if !recorder.isActive, let firstPTS = clip.firstSamplePTS {
+        // Bootstrap the PitchRecorder on the first sample regardless of
+        // mode. In mode-one this fires on the same sample clipRecorder
+        // just consumed, so the payload's `video_start_pts_s` still
+        // matches `clip.firstSamplePTS` (both are this sample's PTS).
+        // In mode-two there's no clip — we lean on the captured sample's
+        // session-clock PTS directly.
+        if !recorder.isActive {
             guard let sid = snap.sessionId, !sid.isEmpty else {
-                // Armed locally without a server session id — shouldn't
-                // happen (heartbeat sets it before arm fires), but bail
-                // rather than uploading a payload the server will 422.
                 log.error("camera recording started without session_id cam=\(self.settings.cameraRole, privacy: .public)")
                 return
             }
-            log.info("camera first frame appended, starting recorder session=\(sid, privacy: .public) video_start_pts=\(CMTimeGetSeconds(firstPTS)) anchor=\(self.lastSyncAnchorTimestampS ?? .nan)")
+            log.info("camera first frame, starting recorder session=\(sid, privacy: .public) mode=\(self.currentCaptureMode.rawValue, privacy: .public) video_start_pts=\(timestampS) anchor=\(self.lastSyncAnchorTimestampS ?? .nan)")
             recorder.startRecording(
                 sessionId: sid,
                 anchorTimestampS: lastSyncAnchorTimestampS,
-                videoStartPtsS: CMTimeGetSeconds(firstPTS),
+                videoStartPtsS: timestampS,
                 videoFps: trackingFps
             )
         }
