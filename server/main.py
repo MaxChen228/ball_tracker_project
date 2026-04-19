@@ -661,11 +661,22 @@ class State:
                 ts = [p.t_rel_s for p in result.points]
                 duration = float(ts[-1] - ts[0])
 
+            # Infer the session's capture mode from whether any MOV file
+            # landed on disk. Mode-two uploads frames-only so no video ever
+            # gets saved; mode-one always produces at least one MOV. If a
+            # single session mixes both (e.g. one phone mis-set), the
+            # presence of any MOV wins — operator-visible cue is enough.
+            has_any_video = any(
+                self._video_dir.glob(f"session_{sid}_*")
+            )
+            mode = "camera_only" if has_any_video else "on_device"
+
             events.append(
                 {
                     "session_id": sid,
                     "cameras": cams_present,
                     "status": status,
+                    "mode": mode,
                     "received_at": latest_mtime,
                     "n_ball_frames": cam_frame_counts,
                     "n_triangulated": n_triangulated,

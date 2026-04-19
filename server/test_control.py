@@ -413,6 +413,37 @@ def test_session_to_dict_includes_mode(tmp_path):
     assert session.to_dict()["mode"] == "on_device"
 
 
+def test_events_tags_mode_one_when_video_on_disk(tmp_path):
+    """Mode-one session: a MOV file under data/videos/ flips the event's
+    `mode` tag to `camera_only`, so the dashboard chip reads correctly."""
+    s = main.State(data_dir=tmp_path)
+    pitch = _minimal_pitch("A", session_id=sid(700))
+    s.record(pitch)
+    # Pretend the video-write path ran (main.py normally does this during
+    # /pitch; here we just drop a dummy MOV into the right dir).
+    (tmp_path / "videos").mkdir(exist_ok=True)
+    (tmp_path / "videos" / f"session_{sid(700)}_A.mov").write_bytes(b"fake")
+
+    events = s.events()
+    match = [e for e in events if e["session_id"] == sid(700)]
+    assert match, events
+    assert match[0]["mode"] == "camera_only"
+
+
+def test_events_tags_mode_two_when_no_video_on_disk(tmp_path):
+    """Mode-two session: no MOV lands on disk, so events should report
+    `on_device` so the dashboard chip distinguishes it from mode-one."""
+    s = main.State(data_dir=tmp_path)
+    pitch = _minimal_pitch("A", session_id=sid(701))
+    s.record(pitch)
+    # No video file created — mode-two.
+
+    events = s.events()
+    match = [e for e in events if e["session_id"] == sid(701)]
+    assert match, events
+    assert match[0]["mode"] == "on_device"
+
+
 def test_delete_session_removes_memory_and_disk_artefacts(tmp_path):
     s = main.State(data_dir=tmp_path)
     pitch_a = _minimal_pitch("A", session_id=sid(1))
