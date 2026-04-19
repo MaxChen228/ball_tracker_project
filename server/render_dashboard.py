@@ -137,6 +137,11 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .chip.error {{ background: var(--dev); border-color: var(--dev); color: var(--surface); }}
 .chip.dual {{ color: var(--dual); border-color: var(--dual); }}
 .chip.single {{ color: var(--sub); border-color: var(--border-base); }}
+/* Capture-mode chips on event rows. camera-only shares the sub-palette
+   (it's the existing path); on-device stands out so operators can spot
+   mode-two sessions at a glance. */
+.chip.camera-only {{ color: var(--sub); border-color: var(--border-base); }}
+.chip.on-device {{ color: var(--contra); border-color: var(--contra); }}
 
 /* --- Session block --- */
 .session-head {{ display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }}
@@ -339,6 +344,8 @@ _JS_TEMPLATE = r"""
       // does not navigate via the wrapping anchor. Confirm dialog guards
       // against accidental clicks — once removed, disk files are gone.
       const confirmMsg = `刪除 session ${e.session_id}？此動作無法復原。`;
+      const captureMode = e.mode === 'on_device' ? 'on-device' : 'camera-only';
+      const captureModeLabel = captureMode;
       return `
         <div class="event-item">
           <a class="event-row" href="/viewer/${sid}">
@@ -346,6 +353,7 @@ _JS_TEMPLATE = r"""
               <span class="sid">${sid}</span>
               <span class="chip ${esc(mode)}">${mode}</span>
               <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
+              <span class="chip ${esc(captureMode)}">${esc(captureModeLabel)}</span>
             </div>
             <div class="event-stats">
               <span><span class="k">Cams</span><span class="v">${esc(cams)}</span></span>
@@ -550,9 +558,10 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
     for e in events:
         sid = html.escape(e["session_id"])
         cams = " · ".join(html.escape(c) for c in e.get("cameras", [])) or "—"
-        mode = "dual" if len(e.get("cameras", [])) >= 2 else "single"
+        cam_mode = "dual" if len(e.get("cameras", [])) >= 2 else "single"
         status = html.escape(e.get("status", ""))
         stat_label = status.replace("_", " ")
+        capture_mode = "on-device" if e.get("mode") == "on_device" else "camera-only"
         mean = "—" if e.get("mean_residual_m") is None else format(e["mean_residual_m"], ".4f")
         peak_z = "—" if e.get("peak_z_m") is None else format(e["peak_z_m"], ".2f")
         duration = "—" if e.get("duration_s") is None else format(e["duration_s"], ".2f")
@@ -564,8 +573,9 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f'<a class="event-row" href="/viewer/{sid}">'
             f'<div class="event-top">'
             f'<span class="sid">{sid}</span>'
-            f'<span class="chip {mode}">{mode}</span>'
+            f'<span class="chip {cam_mode}">{cam_mode}</span>'
             f'<span class="chip {status}">{stat_label}</span>'
+            f'<span class="chip {capture_mode}">{capture_mode}</span>'
             f"</div>"
             f'<div class="event-stats">'
             f'<span><span class="k">Cams</span><span class="v">{cams}</span></span>'
