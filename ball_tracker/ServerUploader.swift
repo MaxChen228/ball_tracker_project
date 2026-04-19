@@ -75,29 +75,6 @@ final class ServerUploader {
         /// encoded concretely for consistency with `frames`.
         let frames_on_device: [FramePayload]
 
-        /// Return a copy of this payload with `video_start_pts_s` replaced.
-        /// Used by the post-recording trim pipeline: the trimmer writes a
-        /// new MOV whose first frame corresponds to some time offset into
-        /// the original clip, so the payload that ships alongside it must
-        /// point at the new absolute start to keep the server's PTS
-        /// reconstruction on the right session clock.
-        func withVideoStartPts(_ newVideoStartPtsS: Double) -> PitchPayload {
-            PitchPayload(
-                camera_id: camera_id,
-                session_id: session_id,
-                sync_anchor_timestamp_s: sync_anchor_timestamp_s,
-                video_start_pts_s: newVideoStartPtsS,
-                video_fps: video_fps,
-                local_recording_index: local_recording_index,
-                intrinsics: intrinsics,
-                homography: homography,
-                image_width_px: image_width_px,
-                image_height_px: image_height_px,
-                frames: frames,
-                frames_on_device: frames_on_device
-            )
-        }
-
         /// Return a copy of this payload with `frames` replaced. Used by
         /// the mode-two cycle-complete path to attach the session's
         /// BTDetectionSession output before shipping.

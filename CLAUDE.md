@@ -15,7 +15,7 @@ The dashboard has a mode toggle that picks how detection is done; every `POST /s
 
 ### Components
 
-- **iOS app** — `ball_tracker/` (Swift + Obj-C++, UIKit). Xcode project at `ball_tracker.xcodeproj`. Bundle ID `com.Max0228.ball-tracker`, iOS 26.2 target, Swift 5.0. Reads effective mode from `/heartbeat` replies (session snapshot if armed, else dashboard global); HUD shows a `MODE · …` chip top-right. In mode-one the clip writer + detection queue both run (detection used as trim oracle); in mode-two the clip writer is skipped entirely and detection output goes directly into the upload payload's `frames` list.
+- **iOS app** — `ball_tracker/` (Swift + Obj-C++, UIKit). Xcode project at `ball_tracker.xcodeproj`. Bundle ID `com.Max0228.ball-tracker`, iOS 26.2 target, Swift 5.0. Reads effective mode from `/heartbeat` replies (session snapshot if armed, else dashboard global); HUD shows a `MODE · …` chip top-right. In mode-one the clip writer + detection queue both run (detection only drives HUD/debug; the full MOV is uploaded untrimmed); in mode-two the clip writer is skipped entirely and detection output goes directly into the upload payload's `frames` list.
 - **Server** — `server/` (FastAPI + `python-multipart` + PyAV + OpenCV). `uv`-managed venv at `server/.venv` (Python 3.13). In-memory state plus `data/` persistence (`pitches/`, `results/`, `videos/`); a restart reloads enriched pitch JSONs (frames already detected) and re-triangulates. `POST /pitch` accepts either a multipart `video` (mode-one, server runs detection) or a `frames` list in the JSON payload (mode-two, server skips decode); 422 when neither is supplied. Events + viewer tag each historical session by looking for a MOV on disk under `data/videos/session_<sid>_*`.
 
 ## Physical setup (current)
@@ -84,7 +84,7 @@ FPS is hard-capped by an exposure ceiling: `configureCaptureFormat` sets `active
 
 `captureOutput` advances `frameIndex` for debug logs, updates the HUD FPS estimate, and branches on `currentCaptureMode`:
 
-- In mode-one: lazy-bootstraps `clipRecorder` from the first sample's dims and appends every sample to it. The MOV gets trimmed post-recording by `ClipTrimmer` using the detection queue's timestamps as a trim oracle; server-side detection is still authoritative.
+- In mode-one: lazy-bootstraps `clipRecorder` from the first sample's dims and appends every sample to it. The full recorded MOV is uploaded as-is (no trim); server-side detection is authoritative.
 - In mode-two: skips `clipRecorder` entirely (no tmp MOV written), relies on `BTDetectionSession`'s accumulated `FramePayload` list, and ships it via `PitchPayload.frames` with `videoURL: nil`.
 
 Both modes run `dispatchDetectionIfDue` on every sample — throttled to 60 Hz on a utility queue so the ~12-18 ms HSV + CC + shape + MOG2 pipeline can't stall 240 fps capture. `PitchRecorder` is kicked off on the first captured sample in both modes using the sample's session-clock PTS as `videoStartPtsS`.

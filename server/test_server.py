@@ -370,12 +370,17 @@ def test_post_pitch_with_video_triangulates_server_side(tmp_path):
     assert r2.status_code == 200, r2.text
     body2 = r2.json()
     assert body2["paired"] is True
-    assert body2["triangulated_points"] >= 1
+    # Server detection runs as a BackgroundTask (post-response), so the
+    # per-request triangulated_points reflects only what was available
+    # when the response was composed. The authoritative count comes from
+    # /results/{sid}, queried below once background detection finished.
+    assert body2["detection_pending"] is True
 
     # The server detected pixel can be sub-pixel off from ground truth
     # due to connected-components centroid quantisation, so allow a small
     # triangulation tolerance.
     r3 = client.get(f"/results/{session_id}").json()
+    assert len(r3["points"]) >= 1
     pt = r3["points"][0]
     assert abs(pt["x_m"] - P_true[0]) < 2e-3
     assert abs(pt["y_m"] - P_true[1]) < 2e-3
@@ -594,7 +599,9 @@ def test_dashboard_drives_mode_one_end_to_end(tmp_path):
     r_b = _post_pitch(client, _base_payload("B", session_id, K, H_b), mov_b)
     assert r_b.status_code == 200, r_b.text
     assert r_b.json()["paired"] is True
-    assert r_b.json()["triangulated_points"] >= 1
+    # Server detection runs post-response as a BackgroundTask; query the
+    # canonical result after TestClient drains background tasks.
+    assert len(client.get(f"/results/{session_id}").json()["points"]) >= 1
 
     # 4. Events tags it as camera_only.
     events = client.get("/events").json()
@@ -702,6 +709,87 @@ def test_dashboard_drives_dual_mode_end_to_end(tmp_path):
     assert "<video" in viewer_html
 
 
+def test_dual_mode_on_device_surfaces_before_server_detection(tmp_path, monkeypatch):
+    """Early-surface guarantee: in dual mode, `result.points_on_device`
+    becomes available as soon as both cameras' payloads arrive, even if
+    server MOV detection never finishes. Implemented by monkey-patching
+    `detect_pitch` to a no-op — if the on-device triangulation were
+    coupled to server detection, stubbing detection would also zero out
+    `points_on_device`. It must not."""
+    import main as server_main
+
+    detect_calls: list[Path] = []
+
+    def _stub_detect(clip_path, video_start_pts_s):
+        detect_calls.append(Path(clip_path))
+        return []
+
+    monkeypatch.setattr(server_main, "detect_pitch", _stub_detect)
+
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    P_true = np.array([0.05, 0.2, 1.1])
+    client = TestClient(app)
+
+    client.post(
+        "/sessions/set_mode",
+        data={"mode": "dual"},
+        headers={"Accept": "application/json"},
+    )
+    arm = client.post(
+        "/sessions/arm", headers={"Accept": "application/json"}
+    ).json()
+    session_id = arm["session"]["id"]
+
+    mov_a = _encode_single_ball_mov(
+        tmp_path, K, R_a, t_a, P_true, filename="early_a.mov"
+    )
+    mov_b = _encode_single_ball_mov(
+        tmp_path, K, R_b, t_b, P_true, filename="early_b.mov"
+    )
+    ua, va = _project_pixels(K, R_a, t_a, P_true)
+    ub, vb = _project_pixels(K, R_b, t_b, P_true)
+
+    body_a = _base_payload("A", session_id, K, H_a)
+    body_a["frames_on_device"] = [{
+        "frame_index": 0, "timestamp_s": 0.0,
+        "px": ua, "py": va, "ball_detected": True,
+    }]
+    body_b = _base_payload("B", session_id, K, H_b)
+    body_b["frames_on_device"] = [{
+        "frame_index": 0, "timestamp_s": 0.0,
+        "px": ub, "py": vb, "ball_detected": True,
+    }]
+
+    r_a = _post_pitch(client, body_a, mov_a)
+    assert r_a.status_code == 200, r_a.text
+    assert r_a.json()["detection_pending"] is True
+
+    r_b = _post_pitch(client, body_b, mov_b)
+    assert r_b.status_code == 200, r_b.text
+    assert r_b.json()["detection_pending"] is True
+
+    # Canonical result: on-device path populated from the iOS frames list;
+    # server path intentionally empty because detect_pitch was stubbed.
+    result = client.get(f"/results/{session_id}").json()
+    assert result["points_on_device"], "on-device triangulation must run independently of server detect_pitch"
+    assert result["points"] == [], "stub detect_pitch → server points stays empty"
+    od = result["points_on_device"][0]
+    assert abs(od["x_m"] - P_true[0]) < 1e-6
+    assert abs(od["y_m"] - P_true[1]) < 1e-6
+    assert abs(od["z_m"] - P_true[2]) < 1e-6
+
+    # Background detection was still invoked for each MOV (just stubbed
+    # to return []) — proves the scheduling path fires, not that the
+    # handler skipped it.
+    assert len(detect_calls) == 2
+
+    # Events row immediately reports the on-device count.
+    events = client.get("/events").json()
+    matched = [e for e in events if e["session_id"] == session_id]
+    assert matched
+    assert matched[0]["n_triangulated_on_device"] == 1
+
+
 def test_pitch_writes_annotated_clip_alongside_raw(tmp_path):
     """After /pitch, server has BOTH the raw MOV and a `_annotated` sibling
     that re-encodes the clip with a circle drawn on every detected frame."""
@@ -790,9 +878,11 @@ def test_nonzero_distortion_recovers_true_point_via_mov(tmp_path):
     assert r1.status_code == 200, r1.text
     r2 = _post_pitch(client, body_b, mov_b)
     assert r2.status_code == 200, r2.text
-    assert r2.json()["triangulated_points"] >= 1
+    # Background-detect path: poll the result endpoint for the final count.
+    result_points = client.get(f"/results/{session_id}").json()["points"]
+    assert len(result_points) >= 1
 
-    pt = client.get(f"/results/{session_id}").json()["points"][0]
+    pt = result_points[0]
     # Detection + undistortion + triangulation: a couple mm of slack is
     # plenty for a ~1 m-distant ball encoded via lossy H.264.
     assert abs(pt["x_m"] - P_true[0]) < 5e-3

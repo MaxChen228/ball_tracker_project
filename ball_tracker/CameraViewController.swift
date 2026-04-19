@@ -506,28 +506,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         updateUIForState()
     }
 
-    // Pre/post-roll margins around the detected ball window. Two-camera
-    // trim ranges rarely align to the same frame (parallax + occlusion
-    // differences), so we pad the window on both ends — 300 ms absorbs up
-    // to ~250 ms of A/B disagreement while still shrinking the upload to
-    // under 2 s in the common case.
-    private static let trimPreRollS: Double = 0.3
-    private static let trimPostRollS: Double = 0.3
-    /// Hard ceiling on the trimmed clip duration, measured from the first
-    /// detection (minus pre-roll). Covers a realistic pitch + follow-through
-    /// without blowing the upload budget.
-    private static let trimMaxDurationS: Double = 3.0
-
     /// Cycle-complete router. Branches on the effective capture mode:
     ///   - `onDevice` → attach the drained frames to the payload, delete
     ///     the (unused) MOV, and upload frames-only.
-    ///   - `cameraOnly` → use detection timestamps as trim oracle and ship
-    ///     the trimmed MOV; `frames` stays empty on the wire because
-    ///     server detection is authoritative.
-    ///   - `dual` → same as `cameraOnly` (trim the MOV using on-device
-    ///     detection as oracle, upload the clip) **plus** attach the
-    ///     iOS-end frame list as `frames_on_device` so the server keeps
-    ///     both detection streams for side-by-side comparison.
+    ///   - `cameraOnly` → ship the full MOV; `frames` stays empty on the
+    ///     wire because server detection is authoritative.
+    ///   - `dual` → same as `cameraOnly` (upload the full MOV) **plus**
+    ///     attach the iOS-end frame list as `frames_on_device` so the
+    ///     server keeps both detection streams for side-by-side comparison.
     ///
     /// `currentCaptureMode` is read once at cycle-complete — if the
     /// dashboard flips the toggle mid-recording the session still
@@ -545,17 +531,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             handleOnDeviceCycle(enriched: enriched, videoURL: videoURL, frames: frames)
             return
         }
-        // Dual carries frames_on_device on top of the MOV path; camera_only
-        // leaves frames_on_device empty. Thread the decision via the
-        // enriched payload so handleCameraOnlyCycle's trim logic stays
-        // agnostic.
         let payloadForUpload: ServerUploader.PitchPayload
         if mode == .dual {
             payloadForUpload = enriched.withFramesOnDevice(frames)
         } else {
             payloadForUpload = enriched
         }
-        handleCameraOnlyCycle(enriched: payloadForUpload, videoURL: videoURL, frames: frames)
+        handleCameraOnlyCycle(enriched: payloadForUpload, videoURL: videoURL)
     }
 
     /// Mode-two: attach the frame list to the payload, delete any MOV
@@ -573,63 +555,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         persistCompletedCycle(updated, videoURL: nil)
     }
 
-    /// Mode-one: detection results are a trim oracle only; server re-runs
-    /// authoritative detection on the received MOV. Uses the timestamps of
-    /// `ball_detected == true` frames to pick the trim window, falling
-    /// back to uploading the full MOV when no ball was seen or trim fails.
+    /// Mode-one / dual: ship the full recorded MOV as-is. Server runs
+    /// authoritative detection on the received clip.
     private func handleCameraOnlyCycle(
         enriched: ServerUploader.PitchPayload,
-        videoURL: URL?,
-        frames: [ServerUploader.FramePayload]
+        videoURL: URL?
     ) {
-        guard let videoURL else {
-            persistCompletedCycle(enriched, videoURL: nil)
-            return
-        }
-
-        let ballTimestamps = frames.compactMap { $0.ball_detected ? $0.timestamp_s : nil }
-        let originalStart = enriched.video_start_pts_s
-
-        guard !ballTimestamps.isEmpty else {
-            log.info("cycle trim skip reason=no_ball_detected session=\(enriched.session_id, privacy: .public)")
-            persistCompletedCycle(enriched, videoURL: videoURL)
-            return
-        }
-
-        let first = ballTimestamps.min() ?? originalStart
-        let last = ballTimestamps.max() ?? first
-        let desiredStartAbs = max(first - Self.trimPreRollS, originalStart)
-        let desiredEndAbs = min(last + Self.trimPostRollS, desiredStartAbs + Self.trimMaxDurationS)
-        let startOffsetInMovS = desiredStartAbs - originalStart
-        let durationS = max(desiredEndAbs - desiredStartAbs, 0)
-
-        guard durationS > 0 else {
-            log.warning("cycle trim degenerate range — uploading full clip session=\(enriched.session_id, privacy: .public)")
-            persistCompletedCycle(enriched, videoURL: videoURL)
-            return
-        }
-
-        log.info("cycle trim plan session=\(enriched.session_id, privacy: .public) ball_frames=\(ballTimestamps.count) window=[\(desiredStartAbs),\(desiredEndAbs)] offset_in_mov=\(startOffsetInMovS) dur=\(durationS)")
-
-        let destination = payloadStore.makeTempVideoURL()
-        ClipTrimmer.trim(
-            source: videoURL,
-            startOffsetFromMovStartS: startOffsetInMovS,
-            durationS: durationS,
-            destination: destination,
-            originalVideoStartPtsS: originalStart
-        ) { [weak self] output in
-            guard let self else { return }
-            guard let output else {
-                log.warning("cycle trim failed — uploading full clip session=\(enriched.session_id, privacy: .public)")
-                self.persistCompletedCycle(enriched, videoURL: videoURL)
-                return
-            }
-            try? FileManager.default.removeItem(at: videoURL)
-            let updated = enriched.withVideoStartPts(output.absoluteStartPtsS)
-            log.info("cycle trimmed session=\(enriched.session_id, privacy: .public) abs_start=\(output.absoluteStartPtsS) dur=\(output.durationS)")
-            self.persistCompletedCycle(updated, videoURL: output.url)
-        }
+        persistCompletedCycle(enriched, videoURL: videoURL)
     }
 
     private func persistCompletedCycle(
