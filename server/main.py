@@ -1057,12 +1057,17 @@ async def pitch(
         raise HTTPException(status_code=422, detail=e.errors())
 
     has_video = video is not None and (video.filename or video.size)
-    has_frames = bool(payload_obj.frames)
+    # Either stream counts as "data the server can work with": `frames`
+    # from mode-two (iOS detection, authoritative for its session) or
+    # `frames_on_device` from a degraded-dual upload (dual-mode cycle
+    # where the MOV writer failed but the on-device detector still
+    # produced a frame list). Both land in the triangulation pipeline.
+    has_frames = bool(payload_obj.frames) or bool(payload_obj.frames_on_device)
     if not has_video and not has_frames:
         raise HTTPException(
             status_code=422,
-            detail="must supply either `video` (mode-one) or a non-empty "
-                   "`frames` list in payload (mode-two)",
+            detail="must supply either `video` (mode-one / dual) or a "
+                   "non-empty `frames` / `frames_on_device` list in payload",
         )
 
     clip_info: dict[str, Any] | None = None
