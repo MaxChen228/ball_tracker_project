@@ -143,6 +143,12 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .session-id {{ font-family: var(--mono); font-size: 14px; color: var(--ink);
                letter-spacing: 0.04em; }}
 .session-actions {{ display: flex; gap: 8px; margin-top: 14px; }}
+.mode-row {{ display: flex; gap: 8px; align-items: center; margin-top: 14px;
+             flex-wrap: wrap; }}
+.mode-label {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
+                text-transform: uppercase; color: var(--sub); min-width: 48px; }}
+.mode-locked {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
+                 color: var(--sub); padding-left: 4px; }}
 
 /* --- Buttons --- */
 button.btn {{ font-family: var(--mono); font-size: 11px; font-weight: 500;
@@ -248,6 +254,8 @@ _JS_TEMPLATE = r"""
     devicesBox.innerHTML = rows + extras;
   }
 
+  const MODE_LABELS = { camera_only: 'Camera-only', on_device: 'On-device' };
+
   function renderSession(state) {
     const s = state.session;
     const armed = !!(s && s.armed);
@@ -258,6 +266,29 @@ _JS_TEMPLATE = r"""
            <button class="btn" type="submit">Clear</button>
          </form>`
       : '';
+    const captureMode = state.capture_mode || 'camera_only';
+    let modeRow;
+    if (armed) {
+      const sessionMode = (s && s.mode) || captureMode;
+      const label = MODE_LABELS[sessionMode] || sessionMode;
+      modeRow = `<div class="mode-row">
+          <span class="mode-label">Mode</span>
+          <span class="mode-locked">locked · ${esc(label)}</span>
+        </div>`;
+    } else {
+      const btn = (val) => {
+        const active = val === captureMode;
+        const cls = active ? 'btn' : 'btn secondary';
+        return `<form class="inline" method="POST" action="/sessions/set_mode">
+            <input type="hidden" name="mode" value="${val}">
+            <button class="${cls}" type="submit">${MODE_LABELS[val]}</button>
+          </form>`;
+      };
+      modeRow = `<div class="mode-row">
+          <span class="mode-label">Mode</span>
+          ${btn('camera_only')}${btn('on_device')}
+        </div>`;
+    }
     sessionBox.innerHTML = `
       <div class="session-head">${chip}${sid}</div>
       <div class="session-actions">
@@ -268,7 +299,8 @@ _JS_TEMPLATE = r"""
           <button class="btn danger" type="submit" ${armed ? '' : 'disabled'}>Stop</button>
         </form>
         ${clearBtn}
-      </div>`;
+      </div>
+      ${modeRow}`;
 
     // Mirror into the nav's tiny status strip.
     if (navStatus) {
@@ -437,7 +469,16 @@ def _render_device_rows(
     return "".join(rows)
 
 
-def _render_session_body(session: dict[str, Any] | None) -> str:
+_MODE_LABELS = {
+    "camera_only": "Camera-only",
+    "on_device": "On-device",
+}
+
+
+def _render_session_body(
+    session: dict[str, Any] | None,
+    capture_mode: str = "camera_only",
+) -> str:
     armed = session is not None and session.get("armed")
     chip_html = (
         '<span class="chip armed">armed</span>'
@@ -466,9 +507,39 @@ def _render_session_body(session: dict[str, Any] | None) -> str:
             '<button class="btn" type="submit">Clear</button>'
             "</form>"
         )
+
+    # Mode picker. When armed, the armed session's snapshot mode is shown as
+    # locked — flipping only affects the next arm, so disabling the buttons
+    # avoids the mental-model drift of "I clicked but nothing changed".
+    if armed:
+        session_mode = (session or {}).get("mode", capture_mode)
+        mode_row = (
+            '<div class="mode-row">'
+            '<span class="mode-label">Mode</span>'
+            f'<span class="mode-locked">locked · {html.escape(_MODE_LABELS.get(session_mode, session_mode))}</span>'
+            "</div>"
+        )
+    else:
+        def _mode_button(value: str) -> str:
+            active = value == capture_mode
+            cls = "btn" if active else "btn secondary"
+            return (
+                '<form class="inline" method="POST" action="/sessions/set_mode">'
+                f'<input type="hidden" name="mode" value="{value}">'
+                f'<button class="{cls}" type="submit">{_MODE_LABELS[value]}</button>'
+                "</form>"
+            )
+        mode_row = (
+            '<div class="mode-row">'
+            '<span class="mode-label">Mode</span>'
+            f'{_mode_button("camera_only")}{_mode_button("on_device")}'
+            "</div>"
+        )
+
     return (
         f'<div class="session-head">{chip_html}{sid_html}</div>'
         f'<div class="session-actions">{arm_btn}{stop_btn}{clear_btn}</div>'
+        f'{mode_row}'
     )
 
 
@@ -538,6 +609,7 @@ def render_events_index_html(
     devices: list[dict[str, Any]] | None = None,
     session: dict[str, Any] | None = None,
     calibrations: list[str] | None = None,
+    capture_mode: str = "camera_only",
 ) -> str:
     """Render the dashboard: top nav + sidebar (devices / session / events)
     + a canvas showing the current calibration scene. All three panels
@@ -576,7 +648,7 @@ def render_events_index_html(
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Session</h2>'
-        f'<div id="session-body">{_render_session_body(session)}</div>'
+        f'<div id="session-body">{_render_session_body(session, capture_mode)}</div>'
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Events</h2>'

@@ -1371,6 +1371,7 @@ def events_index() -> HTMLResponse:
             ],
             session=session.to_dict() if session is not None else None,
             calibrations=sorted(state.calibrations().keys()),
+            capture_mode=state.current_mode().value,
         )
     )
 
