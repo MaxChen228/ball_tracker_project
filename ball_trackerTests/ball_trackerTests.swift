@@ -116,6 +116,64 @@ struct AudioChirpDetectorTests {
         let expected = CMTimeGetSeconds(basePTS) + expectedAnchorOffset
         #expect(abs(event.anchorTimestampS - expected) < 0.002)  // <2 ms
     }
+
+    @Test func dualChirpFiresUnderNoiseAndAttenuatedDown() {
+        // Mimics the field failure mode that the clean integration test
+        // missed: the down-sweep arrives weaker than the up-sweep (mic AGC
+        // pulled gain after the up burst) and is buried in white noise that
+        // raises sidelobes. Without the "drop PSR for down when pendingUp
+        // is set" rule, this case fails the down-side PSR gate and never
+        // pairs.
+        let sr = 44100.0
+        let chirpDur = 0.1
+        let gapSilence = 0.05
+        let leadingSilence = 0.2
+        let trailingSilence = 0.2
+
+        let up = AudioChirpDetector.makeChirp(
+            sampleRate: sr, f0: 2000.0, f1: 8000.0, duration: chirpDur
+        )
+        var down = AudioChirpDetector.makeChirp(
+            sampleRate: sr, f0: 8000.0, f1: 2000.0, duration: chirpDur
+        )
+        // Halve the down-sweep amplitude — emulates AGC suppressing the
+        // second burst. The unit-energy reference still cross-correlates,
+        // but the normalized peak is lower and sidelobes look proportionally
+        // larger relative to it.
+        for i in 0..<down.count { down[i] *= 0.5 }
+
+        let lead = [Float](repeating: 0, count: Int(sr * leadingSilence))
+        let midGap = [Float](repeating: 0, count: Int(sr * gapSilence))
+        let tail = [Float](repeating: 0, count: Int(sr * trailingSilence))
+        var signal: [Float] = []
+        signal.reserveCapacity(lead.count + up.count + midGap.count + down.count + tail.count)
+        signal.append(contentsOf: lead)
+        signal.append(contentsOf: up)
+        signal.append(contentsOf: midGap)
+        signal.append(contentsOf: down)
+        signal.append(contentsOf: tail)
+
+        // Add deterministic pseudo-random white noise across the full track
+        // so PSR-relevant sidelobes are non-zero everywhere — including the
+        // down-sweep window. Amplitude tuned to put SNR around the realistic
+        // field range (peaks 0.3-0.5).
+        var rng: UInt32 = 0x1357_9bdf
+        for i in 0..<signal.count {
+            rng = rng &* 1_103_515_245 &+ 12_345
+            let r = Float(Int32(bitPattern: rng)) / Float(Int32.max)
+            signal[i] += 0.04 * r
+        }
+
+        let detector = AudioChirpDetector(sampleRate: sr)
+        let received = Locked<[AudioChirpDetector.ChirpEvent]>([])
+        detector.onChirpDetected = { event in received.withValue { $0.append(event) } }
+        detector._testFeed(
+            samples: signal, sampleRate: sr,
+            firstPTS: CMTime(value: 44100, timescale: 44100)
+        )
+
+        #expect(received.value.count == 1, "noisy + attenuated down should still pair")
+    }
 }
 
 /// Tiny async-safe box for collecting callback values in Swift Testing tests.
