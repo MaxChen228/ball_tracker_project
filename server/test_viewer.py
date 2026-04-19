@@ -205,6 +205,47 @@ def test_build_scene_all_upward_rays_still_render():
     assert len(scene.triangulated) == 1
 
 
+def test_build_scene_clamps_rays_beyond_max_render_dist():
+    """Near-horizontal rays hit the plate plane tens of metres out; the
+    scene clamps the endpoint to `_MAX_RENDER_DIST_M` so Plotly's auto-
+    fit axis doesn't include the far intersection. Ground-trace entry is
+    suppressed because a "landing point" at the clamp boundary would lie."""
+    from reconstruct import _MAX_RENDER_DIST_M
+
+    K, (R_a, t_a, C_a, H_a), _ = _make_rig()
+    # Ball near camera height, far away in Y — produces a near-horizontal
+    # ray whose true ground intersection sits hundreds of metres out.
+    P_far = np.array([-2.0, 20.0, 1.15])
+    pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([P_far]))
+    scene = build_scene(sid(1), {"A": pitch}, triangulated=None)
+
+    assert len(scene.rays) == 1
+    r = scene.rays[0]
+    dist = float(np.linalg.norm(np.array(r.endpoint) - np.array(r.origin)))
+    assert dist <= _MAX_RENDER_DIST_M + 1e-6
+    assert scene.ground_traces == {}
+
+
+def test_build_scene_skips_triangulated_beyond_max_render_dist():
+    """Triangulated points past the render radius (measured from the world
+    origin) are dropped so the viewer's plate-relative axis stays bounded."""
+    from reconstruct import _MAX_RENDER_DIST_M
+
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    P_path = np.array([[0.1, 0.3, 1.0]])
+    pa = _pitch("A", 9, K, R_a, t_a, H_a, P_path)
+    pb = _pitch("B", 9, K, R_b, t_b, H_b, P_path)
+    tri = [
+        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6),   # in
+        main.TriangulatedPoint(t_rel_s=0.1, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6),  # out
+    ]
+    scene = build_scene(sid(9), {"A": pa, "B": pb}, triangulated=tri)
+
+    assert len(scene.triangulated) == 1
+    assert scene.triangulated[0]["x"] == pytest.approx(0.1)
+    _ = _MAX_RENDER_DIST_M  # ensure symbol is referenced (readability for future tuning)
+
+
 def test_build_scene_skips_pitch_missing_calibration():
     K, (R_a, t_a, _, _), _ = _make_rig()
     # Dummy homography to build the PitchPayload, then strip it.
