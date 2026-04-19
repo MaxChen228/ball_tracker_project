@@ -87,7 +87,8 @@ final class PitchRecorder {
             homography: nil,
             image_width_px: nil,
             image_height_px: nil,
-            frames: []
+            frames: [],
+            frames_on_device: []
         )
         onCycleComplete?(payload)
         sessionId = ""

@@ -516,7 +516,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     ///   - `onDevice` → attach the drained frames to the payload, delete
     ///     the (unused) MOV, and upload frames-only.
     ///   - `cameraOnly` → use detection timestamps as trim oracle and ship
-    ///     the trimmed MOV the existing Step 4 path.
+    ///     the trimmed MOV; `frames` stays empty on the wire because
+    ///     server detection is authoritative.
+    ///   - `dual` → same as `cameraOnly` (trim the MOV using on-device
+    ///     detection as oracle, upload the clip) **plus** attach the
+    ///     iOS-end frame list as `frames_on_device` so the server keeps
+    ///     both detection streams for side-by-side comparison.
     ///
     /// `currentCaptureMode` is read once at cycle-complete — if the
     /// dashboard flips the toggle mid-recording the session still
@@ -534,7 +539,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             handleOnDeviceCycle(enriched: enriched, videoURL: videoURL, frames: frames)
             return
         }
-        handleCameraOnlyCycle(enriched: enriched, videoURL: videoURL, frames: frames)
+        // Dual carries frames_on_device on top of the MOV path; camera_only
+        // leaves frames_on_device empty. Thread the decision via the
+        // enriched payload so handleCameraOnlyCycle's trim logic stays
+        // agnostic.
+        let payloadForUpload: ServerUploader.PitchPayload
+        if mode == .dual {
+            payloadForUpload = enriched.withFramesOnDevice(frames)
+        } else {
+            payloadForUpload = enriched
+        }
+        handleCameraOnlyCycle(enriched: payloadForUpload, videoURL: videoURL, frames: frames)
     }
 
     /// Mode-two: attach the frame list to the payload, delete any MOV
@@ -1908,7 +1923,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             homography: IntrinsicsStore.loadHomography(),
             image_width_px: dims?.width,
             image_height_px: dims?.height,
-            frames: payload.frames
+            frames: payload.frames,
+            frames_on_device: payload.frames_on_device
         )
     }
 }
