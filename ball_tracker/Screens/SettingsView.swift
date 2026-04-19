@@ -313,7 +313,7 @@ struct SettingsView: View {
     private var cameraSection: some View {
         sectionWithFooter(
             "Camera",
-            footer: "校正永遠以 1080p 為基準；改錄製解析度只影響上傳大小，server 會自動縮放內參。\n部分 iPhone 只支援 1080p / 720p @240fps；選 540p 若開啟失敗請降回 720p。\nFPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。\nSTANDBY 的即時預覽用主畫面右上「預覽」按鈕切換。"
+            footer: "校正永遠以 1080p 為基準；改錄製解析度只影響上傳大小，server 會自動縮放內參。\niPhone 的 240 fps 只有 1080p / 720p 兩檔，540p 不是標準 slow-mo preset。\nFPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。\nSTANDBY 的即時預覽用主畫面右上「預覽」按鈕切換。"
         ) {
             VStack(spacing: DesignTokens.Spacing.m) {
                 AppFieldRow("Role") {
