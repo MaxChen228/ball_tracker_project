@@ -88,7 +88,7 @@ from schemas import (
     TriangulatedPoint,
     _DEFAULT_SESSION_TIMEOUT_S,
 )
-from pairing import triangulate_cycle
+from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pipeline import annotate_video, detect_pitch
 from chirp import chirp_wav_bytes
 from cleanup_old_sessions import cleanup_expired_sessions
@@ -171,8 +171,11 @@ class State:
         self._calibrations: dict[str, CalibrationSnapshot] = {}
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
-        self._load_from_disk()
+        # Calibrations first — _load_from_disk re-triangulates every cached
+        # pitch, and triangulation needs the calibration snapshot to decide
+        # the intrinsic-scale factor (MOV dims vs. calibration dims).
         self._load_calibrations_from_disk()
+        self._load_from_disk()
 
     @property
     def data_dir(self) -> Path:
@@ -232,7 +235,7 @@ class State:
             )
             if a is not None and b is not None:
                 try:
-                    result.points = triangulate_cycle(a, b)
+                    result.points = self._triangulate_pair(a, b)
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
             self.results[sid] = result
@@ -277,6 +280,28 @@ class State:
     def calibrations(self) -> dict[str, CalibrationSnapshot]:
         with self._lock:
             return dict(self._calibrations)
+
+    def _triangulate_pair(
+        self, a: PitchPayload, b: PitchPayload
+    ) -> list[TriangulatedPoint]:
+        """Scale each pitch's intrinsics + homography to its MOV's actual
+        pixel grid (using the cached calibration snapshot as the reference
+        resolution) and then triangulate. When no snapshot is cached for a
+        camera the scale factor falls back to 1.0 and the pitch is passed
+        through unchanged — the legacy behaviour for pre-resolution-picker
+        builds that always recorded at the calibration resolution."""
+        with self._lock:
+            cal_a = self._calibrations.get(a.camera_id)
+            cal_b = self._calibrations.get(b.camera_id)
+        a_scaled = scale_pitch_to_video_dims(
+            a,
+            (cal_a.image_width_px, cal_a.image_height_px) if cal_a else None,
+        )
+        b_scaled = scale_pitch_to_video_dims(
+            b,
+            (cal_b.image_width_px, cal_b.image_height_px) if cal_b else None,
+        )
+        return triangulate_cycle(a_scaled, b_scaled)
 
     def _atomic_write(self, path: Path, payload: str) -> None:
         # Unique tmp filename per call so concurrent writers targeting the
@@ -331,7 +356,7 @@ class State:
         )
         if a is not None and b is not None:
             try:
-                result.points = triangulate_cycle(a, b)
+                result.points = self._triangulate_pair(a, b)
             except Exception as e:
                 result.error = f"{type(e).__name__}: {e}"
 
