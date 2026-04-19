@@ -92,13 +92,13 @@ final class AutoCalibrationViewController: UIViewController {
     }
 
     private func setupArucoOverlay() {
-        markerOverlayLayer.strokeColor = UIColor.systemCyan.cgColor
-        markerOverlayLayer.fillColor = UIColor.systemCyan.withAlphaComponent(0.18).cgColor
+        markerOverlayLayer.strokeColor = DesignTokens.Colors.accent.cgColor
+        markerOverlayLayer.fillColor = DesignTokens.Colors.accent.withAlphaComponent(0.18).cgColor
         markerOverlayLayer.lineWidth = 2
         view.layer.addSublayer(markerOverlayLayer)
 
         arucoStatusLabel.font = DesignTokens.Fonts.sans(size: 15, weight: .medium)
-        arucoStatusLabel.textColor = .white
+        arucoStatusLabel.textColor = DesignTokens.Colors.ink
         arucoStatusLabel.textAlignment = .center
         arucoStatusLabel.backgroundColor = DesignTokens.Colors.surface
         arucoStatusLabel.layer.cornerRadius = DesignTokens.CornerRadius.card

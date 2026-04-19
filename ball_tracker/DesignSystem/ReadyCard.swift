@@ -57,7 +57,7 @@ final class ReadyCard: UIView {
 
         let gateStack = UIStackView(arrangedSubviews: [calibrationRow, timeSyncRow, serverRow])
         gateStack.axis = .vertical
-        gateStack.spacing = DesignTokens.Spacing.s
+        gateStack.spacing = DesignTokens.Spacing.m
 
         let rootStack = UIStackView(arrangedSubviews: [headerStack, gateStack, hintLabel])
         rootStack.axis = .vertical
@@ -81,7 +81,7 @@ final class ReadyCard: UIView {
             && model.server.state == .pass
         headerLabel.text = "Cam \(model.cameraRole)"
         stateLabel.text = ready ? "READY" : "尚未就緒"
-        stateLabel.textColor = ready ? DesignTokens.Colors.ok : DesignTokens.Colors.pending
+        stateLabel.textColor = ready ? DesignTokens.Colors.success : DesignTokens.Colors.warning
         hintLabel.text = model.hint
         hintLabel.isHidden = model.hint.isEmpty
         apply(model.calibration, to: calibrationRow)

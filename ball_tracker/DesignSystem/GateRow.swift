@@ -3,10 +3,10 @@ import UIKit
 /// One "gate" row in the Ready card — a single yes/no precondition that
 /// needs to be green before the operator can shoot.
 ///
-/// - `.pass` → shows `✓` + label in the ok color
-/// - `.pending` → shows `…` + label in the pending color
-/// - `.fail` → shows `✗` + label in fail color; if `action` is provided,
-///   the row becomes tappable and the label reads `label · action`
+/// - `.pass` → shows `✓` + label in success (灰橄欖) color
+/// - `.pending` → shows `…` + label in warning (琥珀) color
+/// - `.fail` → shows `✗` + label in destructive (煙玫瑰) color; if `action`
+///   is provided, the row becomes tappable and the label reads `label · action`
 final class GateRow: UIControl {
     enum State {
         case pass
@@ -17,10 +17,12 @@ final class GateRow: UIControl {
     private let glyphLabel = UILabel()
     private let textLabel = UILabel()
     private var tapAction: (() -> Void)?
+    private var highlightColor: UIColor = .clear
 
     init() {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
+        layer.cornerRadius = DesignTokens.CornerRadius.chipSmall
 
         glyphLabel.font = DesignTokens.Fonts.mono(size: 16, weight: .bold)
         glyphLabel.textAlignment = .center
@@ -36,12 +38,12 @@ final class GateRow: UIControl {
         addSubview(textLabel)
 
         NSLayoutConstraint.activate([
-            glyphLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            glyphLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: DesignTokens.Spacing.xs),
             glyphLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             glyphLabel.widthAnchor.constraint(equalToConstant: 20),
 
             textLabel.leadingAnchor.constraint(equalTo: glyphLabel.trailingAnchor, constant: DesignTokens.Spacing.s),
-            textLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
+            textLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -DesignTokens.Spacing.xs),
             textLabel.topAnchor.constraint(equalTo: topAnchor, constant: DesignTokens.Spacing.xs),
             textLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -DesignTokens.Spacing.xs),
         ])
@@ -67,22 +69,32 @@ final class GateRow: UIControl {
         switch state {
         case .pass:
             glyph = "✓"
-            color = DesignTokens.Colors.ok
+            color = DesignTokens.Colors.success
         case .pending:
             glyph = "…"
-            color = DesignTokens.Colors.pending
+            color = DesignTokens.Colors.warning
         case .fail:
             glyph = "✗"
-            color = DesignTokens.Colors.fail
+            color = DesignTokens.Colors.destructive
         }
         glyphLabel.text = glyph
         glyphLabel.textColor = color
+        highlightColor = color.withAlphaComponent(0.08)
         if let action {
             textLabel.text = "\(label) · \(action)"
-            textLabel.textColor = DesignTokens.Colors.ok
+            textLabel.textColor = color
         } else {
             textLabel.text = label
             textLabel.textColor = state == .pass ? DesignTokens.Colors.ink : DesignTokens.Colors.sub
+        }
+    }
+
+    override var isHighlighted: Bool {
+        didSet {
+            guard oldValue != isHighlighted else { return }
+            UIView.animate(withDuration: DesignTokens.Motion.quick) {
+                self.backgroundColor = self.isHighlighted ? self.highlightColor : .clear
+            }
         }
     }
 
