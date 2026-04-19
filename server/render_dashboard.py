@@ -256,8 +256,7 @@ _JS_TEMPLATE = r"""
     const extras = (state.devices || [])
       .filter(d => !EXPECTED.includes(d.camera_id))
       .map(d => row(d.camera_id, d)).join('');
-    const devHtml = rows + extras;
-    if (devicesBox.innerHTML !== devHtml) devicesBox.innerHTML = devHtml;
+    devicesBox.innerHTML = rows + extras;
   }
 
   const MODE_LABELS = { camera_only: 'Camera-only', on_device: 'On-device' };
@@ -307,7 +306,7 @@ _JS_TEMPLATE = r"""
         ${clearBtn}
       </div>
       ${modeRow}`;
-    if (sessionBox.innerHTML !== sessHtml) sessionBox.innerHTML = sessHtml;
+    sessionBox.innerHTML = sessHtml;
 
     // Mirror into the nav's tiny status strip.
     if (navStatus) {
@@ -321,7 +320,7 @@ _JS_TEMPLATE = r"""
           ? `<span class="val armed">${esc(s.id || '—')}</span>`
           : `<span class="val idle">idle</span>`) +
         `</span>`;
-      if (navStatus.innerHTML !== navHtml) navStatus.innerHTML = navHtml;
+      navStatus.innerHTML = navHtml;
     }
   }
 
@@ -333,8 +332,7 @@ _JS_TEMPLATE = r"""
   function renderEvents(events) {
     let evHtml;
     if (!events || events.length === 0) {
-      evHtml = `<div class="events-empty">No sessions received yet.</div>`;
-      if (eventsBox.innerHTML !== evHtml) eventsBox.innerHTML = evHtml;
+      eventsBox.innerHTML = `<div class="events-empty">No sessions received yet.</div>`;
       return;
     }
     evHtml = events.map(e => {
@@ -376,12 +374,59 @@ _JS_TEMPLATE = r"""
           </form>
         </div>`;
     }).join('');
-    if (eventsBox.innerHTML !== evHtml) eventsBox.innerHTML = evHtml;
+    eventsBox.innerHTML = evHtml;
   }
 
   let currentDevices = null;
   let currentSession = null;
   let currentCalibrations = null;
+
+  // Keys used to skip re-renders when nothing changed. We compare serialised
+  // state data rather than innerHTML strings because the browser re-serialises
+  // HTML differently from the raw template literals we build.
+  let _lastDevKey = null;
+  let _lastSessKey = null;
+  let _lastNavKey = null;
+  let _lastEvKey = null;
+
+  const _origRenderDevices = renderDevices;
+  renderDevices = function(state) {
+    const key = JSON.stringify({
+      devices: (state.devices || []).map(d => ({ id: d.camera_id, ts: d.time_synced })),
+      calibrations: (state.calibrations || []).slice().sort(),
+    });
+    if (key === _lastDevKey) return;
+    _lastDevKey = key;
+    _origRenderDevices(state);
+  };
+
+  const _origRenderSession = renderSession;
+  renderSession = function(state) {
+    const s = state.session;
+    const sessKey = JSON.stringify({
+      armed: !!(s && s.armed), id: s && s.id, mode: s && s.mode,
+      capture_mode: state.capture_mode,
+    });
+    const navKey = JSON.stringify({
+      online: (state.devices || []).length,
+      cal: (state.calibrations || []).length,
+      armed: !!(s && s.armed), id: s && s.id,
+    });
+    if (sessKey === _lastSessKey && navKey === _lastNavKey) return;
+    _lastSessKey = sessKey;
+    _lastNavKey = navKey;
+    _origRenderSession(state);
+  };
+
+  const _origRenderEvents = renderEvents;
+  renderEvents = function(events) {
+    const key = JSON.stringify((events || []).map(e => ({
+      id: e.session_id, status: e.status, n: e.n_triangulated,
+    })));
+    if (key === _lastEvKey) return;
+    _lastEvKey = key;
+    _origRenderEvents(events);
+  };
 
   async function tickStatus() {
     try {
