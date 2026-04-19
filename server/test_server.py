@@ -689,10 +689,11 @@ def test_dashboard_drives_dual_mode_end_to_end(tmp_path):
     assert "on_device" in sources_seen
     assert scene["triangulated_on_device"], "scene missing on-device points"
 
-    # 7. Viewer HTML includes the dual strip + toggle.
+    # 7. Viewer HTML includes the dual strip + per-layer visibility matrix.
     viewer_html = client.get(f"/viewer/{session_id}").text
     assert "detection-canvas-on-device" in viewer_html
-    assert "toggle-on-device" in viewer_html
+    assert 'data-layer="traj"' in viewer_html
+    assert 'data-src="on_device"' in viewer_html
     # Hero banner must surface `mode dual`, not regress to camera-only —
     # previously the viewer only checked MOV presence and ignored
     # frames_on_device, so dual sessions mis-labelled as camera-only.
