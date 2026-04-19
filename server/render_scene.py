@@ -1265,6 +1265,9 @@ def render_viewer_html(
         showOnDevice = true; toggleOnDevice.checked = true;
       }}
       document.getElementById("strip-row-server").hidden = !showServer;
+      // Re-show path: canvas width resets to 0 while display:none was
+      // active, so re-resize before the next repaint draws into it.
+      requestAnimationFrame(resizeDetectionCanvas);
       drawScene();
     }});
     toggleOnDevice.addEventListener("change", () => {{
@@ -1274,6 +1277,7 @@ def render_viewer_html(
         document.getElementById("strip-row-server").hidden = false;
       }}
       stripRowOnDevice.hidden = !showOnDevice;
+      requestAnimationFrame(resizeDetectionCanvas);
       drawScene();
     }});
   }}
