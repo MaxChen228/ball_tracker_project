@@ -36,7 +36,17 @@ _CAMERA_COLORS = {
     "A": _CONTRA,
     "B": _DUAL,
 }
+# Second palette for the on-device detection stream. Rotated hues
+# (Cam A warm green, Cam B purple) so the dual-mode overlay reads as a
+# visibly different detector at a glance — same-cam-same-color would
+# require a loupe to tell the two rays apart when they nearly coincide.
+# Per-cam identity is preserved so A vs B is still distinguishable.
+_CAMERA_COLORS_ON_DEVICE = {
+    "A": "#3D7B5F",  # muted green (complementary to Cam A's blue)
+    "B": "#8B4789",  # muted purple (complementary to Cam B's orange)
+}
 _FALLBACK_CAMERA_COLOR = _SUB
+_FALLBACK_CAMERA_COLOR_ON_DEVICE = "#6D5A7A"  # neutral muted purple
 _GROUND_HALF_EXTENT_M = 1.5   # ground mesh drawn from (-1.5, -1.5) to (+1.5, +1.5)
 _WORLD_AXIS_LEN_M = 0.3
 _CAMERA_AXIS_LEN_M = 0.25
@@ -133,7 +143,9 @@ def render_viewer_html(
 
     scene_json = _json.dumps(scene.to_dict())
     camera_colors_json = _json.dumps(_CAMERA_COLORS)
+    camera_colors_on_device_json = _json.dumps(_CAMERA_COLORS_ON_DEVICE)
     fallback_color_json = _json.dumps(_FALLBACK_CAMERA_COLOR)
+    fallback_color_on_device_json = _json.dumps(_FALLBACK_CAMERA_COLOR_ON_DEVICE)
     accent_color_json = _json.dumps(_ACCENT)
     videos_json = _json.dumps(
         [{"camera_id": cam, "url": url, "t_rel_offset_s": off, "fps": fps,
@@ -477,7 +489,10 @@ def render_viewer_html(
             <label id="toggle-on-device-wrap" hidden><input type="checkbox" id="toggle-on-device" checked>On-device</label>
           </span>
         </div>
-        <input id="scrubber" type="range" min="0" max="1" value="0" step="1" />
+        <div class="strip-row strip-row-scrubber">
+          <span class="strip-label" aria-hidden="true"></span>
+          <input id="scrubber" class="strip-canvas" type="range" min="0" max="1" value="0" step="1" />
+        </div>
         <div class="strip-row" id="strip-row-server">
           <span class="strip-label">SERVER</span>
           <canvas id="detection-canvas" class="strip-canvas" height="18" aria-hidden="true"></canvas>
@@ -530,7 +545,9 @@ def render_viewer_html(
   "layout": {layout_json},
   "static_traces": {static_traces_json},
   "camera_colors": {camera_colors_json},
+  "camera_colors_on_device": {camera_colors_on_device_json},
   "fallback_color": {fallback_color_json},
+  "fallback_color_on_device": {fallback_color_on_device_json},
   "accent_color": {accent_color_json},
   "videos": {videos_json},
   "has_triangulated": {str(has_triangulated).lower()}
@@ -542,8 +559,15 @@ def render_viewer_html(
   const STATIC = DATA.static_traces || [];
   const LAYOUT = DATA.layout;
   const CAM_COLOR = DATA.camera_colors || {{}};
+  const CAM_COLOR_OD = DATA.camera_colors_on_device || {{}};
   const FALLBACK = DATA.fallback_color;
+  const FALLBACK_OD = DATA.fallback_color_on_device || FALLBACK;
   const ACCENT = DATA.accent_color;
+  function colorForCamSource(cam, source) {{
+    return source === "on_device"
+      ? (CAM_COLOR_OD[cam] || FALLBACK_OD)
+      : (CAM_COLOR[cam] || FALLBACK);
+  }}
   const VIDEO_META = DATA.videos || [];
   const HAS_TRIANGULATED = DATA.has_triangulated;
 
@@ -699,7 +723,7 @@ def render_viewer_html(
     }}
     for (const [key, rays] of Object.entries(raysByKey)) {{
       const [cam, src] = key.split("|");
-      const color = CAM_COLOR[cam] || FALLBACK;
+      const color = colorForCamSource(cam, src);
       const {{xs, ys, zs}} = ballDetectedRaysUpTo(rays, cutoff);
       if (!xs.length) continue;
       out.push({{
@@ -707,7 +731,7 @@ def render_viewer_html(
         x: xs, y: ys, z: zs,
         mode: "lines",
         line: {{color: color, width: 2, dash: src === "on_device" ? "dot" : "solid"}},
-        opacity: src === "on_device" ? 0.22 : 0.35,
+        opacity: src === "on_device" ? 0.35 : 0.35,
         name: `Rays ${{cam}} (${{src === "on_device" ? "iOS" : "server"}}, ${{Math.floor(xs.length / 3)}})`,
         hoverinfo: "skip",
       }});
@@ -721,7 +745,7 @@ def render_viewer_html(
       for (const [cam, trace] of Object.entries(SCENE.ground_traces || {{}})) {{
         const filtered = trace.filter(p => p.t_rel_s <= cutoff);
         if (!filtered.length) continue;
-        const color = CAM_COLOR[cam] || FALLBACK;
+        const color = colorForCamSource(cam, "server");
         out.push({{
           type: "scatter3d",
           x: filtered.map(p => p.x),
@@ -739,7 +763,7 @@ def render_viewer_html(
       for (const [cam, trace] of Object.entries(SCENE.ground_traces_on_device || {{}})) {{
         const filtered = trace.filter(p => p.t_rel_s <= cutoff);
         if (!filtered.length) continue;
-        const color = CAM_COLOR[cam] || FALLBACK;
+        const color = colorForCamSource(cam, "on_device");
         out.push({{
           type: "scatter3d",
           x: filtered.map(p => p.x),
@@ -748,7 +772,7 @@ def render_viewer_html(
           mode: "lines+markers",
           line: {{color: color, width: 3, dash: "dot"}},
           marker: {{size: 3, color: color, symbol: "circle-open"}},
-          opacity: 0.55,
+          opacity: 0.7,
           name: `Ground trace ${{cam}} (iOS, ${{filtered.length}} pts)`,
         }});
       }}
@@ -1213,7 +1237,7 @@ def render_viewer_html(
     renderDetectionStrip();
   }}
 
-  function drawStripInto(canvas, cams, strips) {{
+  function drawStripInto(canvas, cams, strips, source) {{
     const W = canvas.width, H = canvas.height;
     if (!W || !H) return;
     const ctx = canvas.getContext("2d");
@@ -1223,7 +1247,7 @@ def render_viewer_html(
     for (let ci = 0; ci < cams.length; ++ci) {{
       const cam = cams[ci];
       const strip = strips[cam];
-      const color = CAM_COLOR[cam] || FALLBACK;
+      const color = colorForCamSource(cam, source);
       const y = ci * rowH;
       ctx.fillStyle = STRIP_EMPTY;
       ctx.fillRect(0, y, W, rowH);
@@ -1249,9 +1273,9 @@ def render_viewer_html(
   }}
 
   function renderDetectionStrip() {{
-    drawStripInto(detectionCanvas, camsWithFrames, camAtFrame);
+    drawStripInto(detectionCanvas, camsWithFrames, camAtFrame, "server");
     if (HAS_ON_DEVICE) {{
-      drawStripInto(detectionCanvasOnDevice, camsWithFramesOnDevice, camAtFrameOnDevice);
+      drawStripInto(detectionCanvasOnDevice, camsWithFramesOnDevice, camAtFrameOnDevice, "on_device");
     }}
   }}
 
