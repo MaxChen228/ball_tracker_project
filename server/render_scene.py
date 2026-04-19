@@ -1025,18 +1025,17 @@ def render_viewer_html(
 
   // --- Virtual camera canvases (bottom row of the 2×2 videos-col grid)
   //
-  // Each iPhone with a recovered pose gets its own 2D <canvas> that
-  // draws the scene's 3D content (plate pentagon, triangulated
-  // trajectory) reprojected through this camera's full projection
-  // model: world → camera via R_wc + t_wc, pinhole divide, 5-coef
-  // Brown-Conrady distortion, K to get pixel coords.
+  // Mental model: the virtual IS what this camera sees. A camera's own
+  // ray to the ball, projected onto that camera's own image plane,
+  // collapses to one point — the detected pixel (px, py). The other
+  // camera's rays are irrelevant to where the point lands in THIS
+  // camera's frame. So we skip triangulation entirely and just draw
+  // the per-frame (px, py) detection stream at the current playback
+  // time.
   //
-  // Why not Plotly 3D: Plotly's 3D camera is a fixed-FOV ideal pinhole
-  // with no distortion model, and rendering a 3D scene from inside the
-  // camera's pose still includes the camera's own geometry in frame
-  // (you see yourself). Proper reprojection solves all three — the
-  // camera cannot appear in its own image, FOV is driven by fx/fy,
-  // and distortion is honoured.
+  // Plate pentagon IS reprojected (world 3D corners → this cam's
+  // image plane) because the plate has no per-frame detection data —
+  // it's fixed geometry the operator uses to eyeball calibration.
 
   // Home-plate pentagon in world coords. Matches reconstruct.py
   // _PLATE_X/_PLATE_Y so the dashed outline lands where the operator
@@ -1100,7 +1099,7 @@ def render_viewer_html(
     return true;
   }}
 
-  function drawVirtCanvas(entry, cutoff) {{
+  function drawVirtCanvas(entry) {{
     const {{canvas, meta}} = entry;
     if (!sizeVirtCanvas(canvas)) return;
     const ctx = canvas.getContext("2d");
@@ -1153,126 +1152,71 @@ def render_viewer_html(
       ctx.setLineDash([]);
     }}
 
-    // Cividis colormap — same scale the main Plotly scene's colorbar
-    // uses, so the eye learns the convention once: dark blue = trajectory
-    // start, bright yellow = end. Hand-picked stops from the Plotly
-    // cividis definition; interpolated linearly between them.
-    function cividis(t) {{
-      const stops = [
-        [0.00,   0,  32,  76],
-        [0.25,   0,  79, 107],
-        [0.50,  87, 118, 124],
-        [0.75, 167, 156, 119],
-        [1.00, 253, 231,  55],
-      ];
-      t = Math.max(0, Math.min(1, t));
-      for (let i = 1; i < stops.length; i++) {{
-        if (t <= stops[i][0]) {{
-          const [t0, r0, g0, b0] = stops[i - 1];
-          const [t1, r1, g1, b1] = stops[i];
-          const a = (t - t0) / (t1 - t0);
-          return `rgb(${{Math.round(r0 + a * (r1 - r0))}}, ` +
-                 `${{Math.round(g0 + a * (g1 - g0))}}, ` +
-                 `${{Math.round(b0 + a * (b1 - b0))}})`;
-        }}
+    // Nearest detection at the current playback time. The frame data
+    // comes from VIDEO_META (Python already built `frames.px/py/t_rel_s/
+    // detected` per source). Binary-search the nearest frame index; if
+    // ball_detected is true AND the nearest frame is within `tol` of
+    // currentT, draw the dot — otherwise the camera didn't see the
+    // ball at this moment, so leave the canvas clean.
+    function drawCurrentDetection(framesForThisCam, opts) {{
+      if (!framesForThisCam) return;
+      const ts = framesForThisCam.t_rel_s || [];
+      const det = framesForThisCam.detected || [];
+      const pxArr = framesForThisCam.px || [];
+      const pyArr = framesForThisCam.py || [];
+      if (!ts.length) return;
+      // Binary-search nearest t index.
+      let lo = 0, hi = ts.length - 1;
+      while (lo + 1 < hi) {{
+        const mid = (lo + hi) >> 1;
+        if (ts[mid] <= currentT) lo = mid; else hi = mid;
       }}
-      return "rgb(253, 231, 55)";
-    }}
-
-    // Trajectory — server then on-device, both reprojected into this
-    // camera's frame, both truncated by playback cutoff. Visual grammar
-    // mirrors the main 3D scene: server uses ACCENT line + cividis dots
-    // (so time direction is visible at a glance); on-device uses a
-    // contrasting dashed line so the two streams can't be confused.
-    function drawTraj(pts, opts) {{
-      if (!pts || !pts.length) return;
-      const visible = [];
-      for (const p of pts) {{
-        if (p.t_rel_s > cutoff) break;
-        const proj = projectWorldToPixel([p.x, p.y, p.z], meta);
-        if (proj === null) continue;
-        visible.push({{x: proj.u * sx, y: proj.v * sy, t: p.t_rel_s}});
-      }}
-      if (!visible.length) return;
-      // Connecting line first so the dots sit on top.
-      if (visible.length >= 2) {{
-        ctx.strokeStyle = opts.lineColor;
-        ctx.lineWidth = opts.width;
-        if (opts.dashed) ctx.setLineDash([4, 3]); else ctx.setLineDash([]);
-        ctx.beginPath();
-        ctx.moveTo(visible[0].x, visible[0].y);
-        for (let i = 1; i < visible.length; i++) ctx.lineTo(visible[i].x, visible[i].y);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }}
-      // Per-point markers. Server → cividis (time colour-coded); on-
-      // device → flat light colour so it reads as the "other" stream.
-      const t0 = pts[0].t_rel_s;
-      const tRange = Math.max((pts[pts.length - 1].t_rel_s) - t0, 1e-6);
-      for (const p of visible) {{
-        ctx.fillStyle = opts.cividisDots
-          ? cividis((p.t - t0) / tRange)
-          : opts.lineColor;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
-        ctx.fill();
-      }}
-      // Start marker — hollow ring at the trajectory's first point so
-      // the direction (start → current) is unambiguous when the ball
-      // loops back in frame.
-      const start = visible[0];
-      ctx.strokeStyle = opts.lineColor;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([]);
+      const iLo = Math.abs(ts[lo] - currentT) <= Math.abs(ts[hi] - currentT) ? lo : hi;
+      const tol = 0.020;  // 20 ms — looser than 1 frame at 60 fps
+      if (Math.abs(ts[iLo] - currentT) > tol) return;
+      if (!det[iLo]) return;
+      const px = pxArr[iLo], py = pyArr[iLo];
+      if (px == null || py == null) return;
+      const x = px * sx, y = py * sy;
+      // Outer halo (white alpha) for contrast against any background +
+      // filled core in the per-source colour. Slightly larger than the
+      // real ball-in-frame would be — the virtual is a diagnostic, not
+      // an exact replica.
+      ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
       ctx.beginPath();
-      ctx.arc(start.x, start.y, 5, 0, Math.PI * 2);
-      ctx.stroke();
-      // Current-frame marker — filled + white halo so it pops above the
-      // trail regardless of the cividis colour behind it.
-      const last = visible[visible.length - 1];
-      ctx.fillStyle = opts.lineColor;
-      ctx.beginPath();
-      ctx.arc(last.x, last.y, 5.5, 0, Math.PI * 2);
+      ctx.arc(x, y, 7, 0, Math.PI * 2);
       ctx.fill();
-      ctx.strokeStyle = "#F8F7F4";
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      ctx.fillStyle = opts.color;
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.fill();
     }}
 
+    const cam = meta.camera_id;
     if (isLayerVisible("traj", "server")) {{
-      drawTraj(SCENE.triangulated, {{
-        lineColor: ACCENT, width: 2.5, dashed: false, cividisDots: true,
-      }});
+      drawCurrentDetection(framesByCam[cam], {{color: ACCENT}});
     }}
     if (isLayerVisible("traj", "on_device")) {{
-      drawTraj(SCENE.triangulated_on_device, {{
-        // Neutral bright blue contrasts with server's warm yellow so
-        // overlapping reprojections stay readable.
-        lineColor: "rgb(175, 210, 255)", width: 1.8, dashed: true,
-        cividisDots: false,
-      }});
+      drawCurrentDetection(framesByCamOnDevice[cam],
+                           {{color: "rgb(175, 210, 255)"}});
     }}
 
     ctx.restore();
   }}
 
-  function drawVirtuals(cutoff) {{
-    for (const entry of VIRT_CANVASES) drawVirtCanvas(entry, cutoff);
+  function drawVirtuals() {{
+    for (const entry of VIRT_CANVASES) drawVirtCanvas(entry);
   }}
 
   function drawScene() {{
     const cutoff = mode === "all" ? Infinity : currentT;
     Plotly.react(sceneDiv, [...STATIC, ...buildDynamicTraces(cutoff)], LAYOUT, {{displayModeBar: false, responsive: true}});
-    drawVirtuals(cutoff);
+    drawVirtuals();
   }}
 
   // Virtual canvases need to resize with the window (DPR + layout
-  // changes). Redraw with current cutoff after resize so the geometry
-  // doesn't stretch.
-  window.addEventListener("resize", () => {{
-    const cutoff = mode === "all" ? Infinity : currentT;
-    drawVirtuals(cutoff);
-  }});
+  // changes). Redraw with current ball position after resize.
+  window.addEventListener("resize", () => drawVirtuals());
 
   // --- Video sync via anchor-relative time ---
 
@@ -1369,6 +1313,10 @@ def render_viewer_html(
     renderDetectionStrip();
     if (seekVideos) syncVideosToT(currentT);
     if (mode === "playback") drawScene();
+    // Virtual canvases always reflect the current moment (no trail),
+    // independent of the main-scene All/Playback toggle — that toggle
+    // gates the 3D trajectory cutoff, not the virtual cams.
+    drawVirtuals();
   }}
 
   function setT(t, opts) {{
