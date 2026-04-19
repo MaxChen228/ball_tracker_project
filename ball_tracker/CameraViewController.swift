@@ -1133,6 +1133,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         } else if snap.triggered {
             statusText = "TRIGGER"
             color = DesignTokens.Colors.success
+        } else if snap.pendingUp {
+            // Up latched, waiting for the down-sweep partner. Surfaces the
+            // dual-chirp middle state so a stuck pair (down rejected by
+            // PSR / threshold / gap) is visible instead of being hidden
+            // behind the same "close" yellow as a borderline up.
+            statusText = "PENDING"
+            color = DesignTokens.Colors.warning
         } else if snap.lastPeak >= snap.threshold * 0.8 {
             statusText = "close"
             color = DesignTokens.Colors.warning
@@ -1141,8 +1148,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             color = DesignTokens.Colors.sub
         }
         chirpDebugLabel.text = String(
-            format: "peak %.2f / %.2f  buf %d  %@",
-            snap.lastPeak, snap.threshold, snap.bufferFillSamples, statusText
+            format: "up %.2f dn %.2f / %.2f psr %.1f  buf %d  %@",
+            snap.lastPeak, snap.lastDownPeak, snap.threshold,
+            snap.lastPSR, snap.bufferFillSamples, statusText
         )
         chirpDebugLabel.textColor = color
     }
