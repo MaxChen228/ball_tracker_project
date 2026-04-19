@@ -18,6 +18,7 @@ import chirp
 import main
 from conftest import sid
 from main import app
+from schemas import SyncReport
 
 
 # --- Device heartbeat + staleness ------------------------------------------
@@ -690,6 +691,240 @@ def test_dashboard_marks_expected_cameras_offline_when_absent():
     assert '<div class="id">A</div>' in body
     assert '<div class="id">B</div>' in body
     assert body.count('<div class="meta">Not seen</div>') >= 2
+
+
+# --- Mutual chirp sync -----------------------------------------------------
+
+
+def _heartbeat_both(client: TestClient) -> None:
+    client.post("/heartbeat", json={"camera_id": "A"})
+    client.post("/heartbeat", json={"camera_id": "B"})
+
+
+def _build_sync_report(
+    *, role: str, sync_id: str, delta_s: float, distance_m: float,
+    e_a: float = 100.0, e_b: float = 100.0, c: float = 343.0,
+) -> dict:
+    """Produce the JSON body for POST /sync/report matching a given
+    ground-truth (Δ, D) — same construction as test_sync_solver's helper
+    but returns the wire dict so the TestClient can pass it as JSON."""
+    tof = distance_m / c
+    if role == "A":
+        return {
+            "camera_id": "A", "sync_id": sync_id, "role": "A",
+            "t_self_s": e_a, "t_from_other_s": e_b + delta_s + tof,
+            "emitted_band": "A",
+        }
+    return {
+        "camera_id": "B", "sync_id": sync_id, "role": "B",
+        "t_self_s": e_b, "t_from_other_s": e_a - delta_s + tof,
+        "emitted_band": "B",
+    }
+
+
+def test_sync_start_requires_two_devices():
+    client = TestClient(app)
+    client.post("/heartbeat", json={"camera_id": "A"})
+
+    r = client.post("/sync/start")
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "devices_missing"
+
+
+def test_sync_start_conflicts_with_armed_session():
+    client = TestClient(app)
+    _heartbeat_both(client)
+    client.post("/sessions/arm", headers={"Accept": "application/json"})
+
+    r = client.post("/sync/start")
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "session_armed"
+
+
+def test_sync_start_rejects_reentrant_run():
+    client = TestClient(app)
+    _heartbeat_both(client)
+
+    r1 = client.post("/sync/start")
+    assert r1.status_code == 200
+    r2 = client.post("/sync/start")
+    assert r2.status_code == 409
+    assert r2.json()["detail"]["error"] == "sync_in_progress"
+
+
+def test_sync_end_to_end_solves_delta_and_distance():
+    client = TestClient(app)
+    _heartbeat_both(client)
+
+    start = client.post("/sync/start").json()
+    sync_id = start["sync"]["id"]
+
+    # Heartbeat now surfaces the sync_run command for both phones + the
+    # top-level sync context carrying the id.
+    hb = client.post("/heartbeat", json={"camera_id": "A"}).json()
+    assert hb["commands"].get("A") == "sync_run"
+    assert hb["sync"]["id"] == sync_id
+    assert hb["sync"]["reports_received"] == []
+
+    delta_truth = 0.007
+    distance_truth = 2.8
+    a_report = _build_sync_report(
+        role="A", sync_id=sync_id, delta_s=delta_truth, distance_m=distance_truth,
+    )
+    r_a = client.post("/sync/report", json=a_report)
+    assert r_a.status_code == 200
+    assert r_a.json()["solved"] is False
+
+    # After A reports, commands[A] drops but commands[B] still says sync_run
+    # so B knows it must still act.
+    hb2 = client.post("/heartbeat", json={"camera_id": "A"}).json()
+    assert "A" not in hb2["commands"]
+    assert hb2["commands"].get("B") == "sync_run"
+    assert hb2["sync"]["reports_received"] == ["A"]
+
+    b_report = _build_sync_report(
+        role="B", sync_id=sync_id, delta_s=delta_truth, distance_m=distance_truth,
+    )
+    r_b = client.post("/sync/report", json=b_report)
+    assert r_b.status_code == 200
+    body = r_b.json()
+    assert body["solved"] is True
+    assert body["result"]["delta_s"] == pytest.approx(delta_truth, abs=1e-9)
+    assert body["result"]["distance_m"] == pytest.approx(distance_truth, abs=1e-5)
+
+    # Sync is cleared, last_sync populated, commands empty, cooldown counting
+    # down.
+    hb3 = client.post("/heartbeat", json={"camera_id": "A"}).json()
+    assert hb3["sync"] is None
+    assert hb3["last_sync"]["id"] == sync_id
+    assert hb3["sync_cooldown_remaining_s"] > 0.0
+    assert "A" not in hb3["commands"]
+
+
+def test_sync_stale_report_is_rejected(tmp_path):
+    """A report whose sync_id doesn't match the current run's id is a leftover
+    from a timed-out run and must be refused rather than overwriting the
+    fresh run's partial state."""
+    client = TestClient(app)
+    _heartbeat_both(client)
+    client.post("/sync/start")
+
+    report = _build_sync_report(
+        role="A", sync_id="sy_deadbeef", delta_s=0.0, distance_m=1.0,
+    )
+    r = client.post("/sync/report", json=report)
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "stale_sync_id"
+
+
+def test_sync_report_without_active_run_is_rejected():
+    client = TestClient(app)
+    _heartbeat_both(client)
+
+    r = client.post("/sync/report", json=_build_sync_report(
+        role="A", sync_id="sy_deadbeef", delta_s=0.0, distance_m=1.0,
+    ))
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "no_sync"
+
+
+def test_sync_timeout_drops_run_and_triggers_cooldown(tmp_path):
+    clock = {"now": 1000.0}
+    s = main.State(data_dir=tmp_path, time_fn=lambda: clock["now"])
+    s.heartbeat("A")
+    s.heartbeat("B")
+    run, reason = s.start_sync()
+    assert reason is None and run is not None
+
+    # Advance past timeout without either phone reporting. Re-heartbeat so
+    # devices stay online through the long wait — matches the real flow
+    # where phones beat at 1 Hz regardless of sync state.
+    clock["now"] = 1000.0 + main._SYNC_TIMEOUT_S + 0.5
+    s.heartbeat("A")
+    s.heartbeat("B")
+    assert s.current_sync() is None
+    # Fresh /sync/start must wait for cooldown.
+    _, reason2 = s.start_sync()
+    assert reason2 == "cooldown"
+
+    # After cooldown, next start succeeds.
+    clock["now"] += main._SYNC_COOLDOWN_S + 0.1
+    s.heartbeat("A")
+    s.heartbeat("B")
+    run2, reason3 = s.start_sync()
+    assert reason3 is None and run2 is not None
+
+
+def test_sync_cooldown_blocks_immediate_restart(tmp_path):
+    clock = {"now": 1000.0}
+    s = main.State(data_dir=tmp_path, time_fn=lambda: clock["now"])
+    s.heartbeat("A")
+    s.heartbeat("B")
+
+    run, _ = s.start_sync()
+    assert run is not None
+    a = SyncReport(
+        camera_id="A", sync_id=run.id, role="A",
+        t_self_s=0.0, t_from_other_s=0.01, emitted_band="A",
+    )
+    b = SyncReport(
+        camera_id="B", sync_id=run.id, role="B",
+        t_self_s=0.0, t_from_other_s=0.01, emitted_band="B",
+    )
+    s.record_sync_report(a)
+    _, result, _ = s.record_sync_report(b)
+    assert result is not None
+
+    # Still in cooldown.
+    _, reason = s.start_sync()
+    assert reason == "cooldown"
+
+    clock["now"] += main._SYNC_COOLDOWN_S + 0.1
+    s.heartbeat("A")
+    s.heartbeat("B")
+    _, reason2 = s.start_sync()
+    assert reason2 is None
+
+
+def test_sync_run_ids_are_unique_across_runs(tmp_path):
+    clock = {"now": 1000.0}
+    s = main.State(data_dir=tmp_path, time_fn=lambda: clock["now"])
+    s.heartbeat("A")
+    s.heartbeat("B")
+
+    run1, _ = s.start_sync()
+    assert run1 is not None
+    # Simulate completion to clear state and escape cooldown.
+    a1 = SyncReport(camera_id="A", sync_id=run1.id, role="A",
+                    t_self_s=0.0, t_from_other_s=0.0, emitted_band="A")
+    b1 = SyncReport(camera_id="B", sync_id=run1.id, role="B",
+                    t_self_s=0.0, t_from_other_s=0.0, emitted_band="B")
+    s.record_sync_report(a1)
+    s.record_sync_report(b1)
+    clock["now"] += main._SYNC_COOLDOWN_S + 0.1
+    s.heartbeat("A")
+    s.heartbeat("B")
+
+    run2, _ = s.start_sync()
+    assert run2 is not None
+    assert run2.id != run1.id
+    assert run2.id.startswith("sy_")
+
+
+def test_sync_state_endpoint_reflects_run_and_last():
+    client = TestClient(app)
+    _heartbeat_both(client)
+
+    assert client.get("/sync/state").json() == {
+        "sync": None, "last_sync": None,
+        "cooldown_remaining_s": 0.0, "logs": [],
+    }
+
+    start = client.post("/sync/start").json()
+    sync_id = start["sync"]["id"]
+    state_during = client.get("/sync/state").json()
+    assert state_during["sync"]["id"] == sync_id
+    assert state_during["last_sync"] is None
 
 
 # --- Helpers ---------------------------------------------------------------

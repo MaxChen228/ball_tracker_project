@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -201,6 +201,92 @@ class CalibrationSnapshot(BaseModel):
 # nobody threw anything" — otherwise /status would keep dispatching arm
 # forever.
 _DEFAULT_SESSION_TIMEOUT_S = 60.0
+
+
+# --- Mutual chirp sync -----------------------------------------------------
+# Each phone emits a distinct audio chirp (two disjoint frequency bands),
+# records its own self-hear + the peer's arrival via mic, and ships both
+# timestamps to the server. The server solves a 2-variable linear system
+# for Δ (A−B clock offset) and D (inter-phone distance). Pairing within
+# the /pitch flow then uses Δ to align B's timeline onto A's — replacing
+# the third-device chirp anchor that `sync_anchor_timestamp_s` carried.
+
+_SYNC_ID_PATTERN = r"^sy_[0-9a-f]{4,32}$"
+
+
+class SyncReport(BaseModel):
+    """Wire payload for `POST /sync/report`. Each phone submits one of
+    these once both the self-hear and cross-hear matched-filter peaks have
+    fired on its mic stream. Both timestamps MUST live on the same
+    `AVCaptureSession.masterClock` so the solver's algebra holds."""
+    camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
+    sync_id: str = Field(..., pattern=_SYNC_ID_PATTERN)
+    role: Literal["A", "B"]
+    # mic PTS when this phone heard its own chirp (own-band matched filter)
+    t_self_s: float
+    # mic PTS when this phone heard the other phone's chirp (other-band filter)
+    t_from_other_s: float
+    # Which frequency band this phone actually emitted — cross-checked
+    # against role at the server to catch role-config drift on the rig.
+    emitted_band: Literal["A", "B"]
+
+
+class SyncResult(BaseModel):
+    """Solved outcome of one mutual-sync run. `delta_s` is **A clock
+    minus B clock** (a positive value means A is ahead of B). Apply it
+    as `t_on_A = t_on_B + delta_s` when re-timing B's events into A's
+    timeline."""
+    id: str
+    delta_s: float
+    distance_m: float
+    solved_at: float
+    # Raw timestamps preserved for post-hoc debugging / viewer overlays.
+    t_a_self_s: float
+    t_a_from_b_s: float
+    t_b_self_s: float
+    t_b_from_a_s: float
+
+
+class SyncLogEntry(BaseModel):
+    """Single line in the dashboard's Time Sync diagnostic log. Both the
+    server and each phone append entries — `source` is `"server"` or the
+    originating `camera_id`. `detail` carries event-specific fields (e.g.
+    `{"band": "A", "peak": 0.42}` for an iOS `band_fired` event); kept as
+    free-form JSON so adding new events doesn't require a schema change."""
+    ts: float
+    source: str
+    event: str = Field(..., max_length=64)
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class SyncLogBody(BaseModel):
+    """Wire shape for `POST /sync/log`. Phones push one entry per major
+    sync-flow event so the dashboard's diagnostic panel can display the
+    full A/B/server timeline in one place."""
+    camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
+    event: str = Field(..., max_length=64)
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+@dataclass
+class SyncRun:
+    """Transient in-memory state for an in-progress mutual-sync run. Lives
+    on `State` alongside the armed-session slot. Keyed by role so a late
+    repeat report from the same phone overwrites rather than ambiguates."""
+    id: str
+    started_at: float
+    reports: dict[str, SyncReport] = field(default_factory=dict)
+
+    @property
+    def complete(self) -> bool:
+        return "A" in self.reports and "B" in self.reports
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "started_at": self.started_at,
+            "reports_received": sorted(self.reports.keys()),
+        }
 
 
 @dataclass
