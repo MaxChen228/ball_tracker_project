@@ -108,16 +108,17 @@ def _make_frame_with_ball(
     center_px: tuple[float, float] | None,
     radius: int = 15,
 ) -> np.ndarray:
-    """Paint a deep-blue circle on a black BGR frame. `center_px=None`
-    means "no ball" (pure black → HSV detection returns None)."""
+    """Paint a yellow-green tennis-ball-coloured circle on a black BGR
+    frame. `center_px=None` means "no ball" (pure black → HSV detection
+    returns None)."""
     frame = np.zeros((height, width, 3), dtype=np.uint8)
     if center_px is not None:
         cx_i = int(round(center_px[0]))
         cy_i = int(round(center_px[1]))
-        # BGR (240, 60, 60) → HSV ≈ (120, 191, 240): blue hue, saturated,
-        # bright enough to pass the default HSV range (100-130, 140-255,
-        # 40-255).
-        cv2.circle(frame, (cx_i, cy_i), radius, (240, 60, 60), -1)
+        # BGR (50, 220, 220) → HSV ≈ (30, 197, 220): yellow-green hue,
+        # saturated, bright enough to pass the default HSV range
+        # (25-55, 90-255, 90-255) for a fluorescent tennis ball.
+        cv2.circle(frame, (cx_i, cy_i), radius, (50, 220, 220), -1)
     return frame
 
 

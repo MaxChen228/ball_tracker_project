@@ -5,9 +5,10 @@ threshold → connected-components → largest-blob pipeline on each decoded
 frame to recover `(px, py)` in image space. The result feeds `pipeline.py`
 which synthesises `FramePayload`s for the existing `triangulate_cycle` path.
 
-HSV defaults target the deep-blue baseball the physical rig was built for.
-Override via the `BALL_TRACKER_HSV_RANGE` env var (comma-separated
-`hMin,hMax,sMin,sMax,vMin,vMax`) if you change the ball.
+HSV defaults target a yellow tennis ball (the fluorescent yellow-green
+ball currently used on the rig). Override via the `BALL_TRACKER_HSV_RANGE`
+env var (comma-separated `hMin,hMax,sMin,sMax,vMin,vMax`) if you change
+the ball — e.g. a deep-blue baseball uses `100,130,140,255,40,255`.
 """
 from __future__ import annotations
 
@@ -32,8 +33,11 @@ class HSVRange:
 
     @classmethod
     def default(cls) -> "HSVRange":
-        # Matches the historical Swift-side defaults: deep-blue baseball.
-        return cls(h_min=100, h_max=130, s_min=140, s_max=255, v_min=40, v_max=255)
+        # Fluorescent yellow-green tennis ball — the ball currently used
+        # on the physical rig. OpenCV H range is 0-179; tennis-ball hue
+        # sits ~25-55 (lime-yellow to yellow-green). High S/V filters out
+        # pale wood floor and warm wall tones.
+        return cls(h_min=25, h_max=55, s_min=90, s_max=255, v_min=90, v_max=255)
 
     @classmethod
     def from_env(cls) -> "HSVRange":
