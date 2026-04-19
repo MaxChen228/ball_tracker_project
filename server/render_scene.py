@@ -786,9 +786,44 @@ def render_viewer_html(
     setFrame(frameIndexForT(t), opts);
   }}
 
-  function stepFrames(delta) {{
+  // Virtual clock — drives playback when no playable video element
+  // is present (mode on_device: frames-only payload, no MOV on disk).
+  // When vids.length is positive the video is master and this clock
+  // stays dormant. Tick
+  // speed mirrors `currentRate` so the speed buttons keep working.
+  let virtualRAF = null;
+  let virtualLastPerfMs = 0;
+  function virtualPlaying() {{ return virtualRAF !== null; }}
+  function startVirtualClock() {{
+    if (virtualRAF !== null) return;
+    virtualLastPerfMs = performance.now();
+    const tick = (now) => {{
+      virtualRAF = requestAnimationFrame(tick);
+      const dt = (now - virtualLastPerfMs) / 1000 * currentRate;
+      virtualLastPerfMs = now;
+      const nextT = currentT + dt;
+      if (nextT >= unionTimes[TOTAL_FRAMES - 1]) {{
+        setFrame(TOTAL_FRAMES - 1);
+        stopVirtualClock();
+        updatePlayBtnLabel();
+        return;
+      }}
+      setFrame(frameIndexForT(nextT));
+    }};
+    virtualRAF = requestAnimationFrame(tick);
+  }}
+  function stopVirtualClock() {{
+    if (virtualRAF !== null) {{ cancelAnimationFrame(virtualRAF); virtualRAF = null; }}
+  }}
+  function pauseAllPlayback() {{
     vids.forEach(v => v.pause());
+    stopVirtualClock();
+  }}
+
+  function stepFrames(delta) {{
+    pauseAllPlayback();
     setFrame(currentFrame + delta);
+    updatePlayBtnLabel();
   }}
 
   // Jump to the previous/next union slot where *any* cam detected the
@@ -799,7 +834,7 @@ def render_viewer_html(
     while (i >= 0 && i < TOTAL_FRAMES) {{
       for (const cam of camsWithFrames) {{
         const e = camAtFrame[cam][i];
-        if (e && e.detected) {{ vids.forEach(v => v.pause()); setFrame(i); return; }}
+        if (e && e.detected) {{ pauseAllPlayback(); setFrame(i); updatePlayBtnLabel(); return; }}
       }}
       i += dir;
     }}
@@ -816,18 +851,30 @@ def render_viewer_html(
     }});
   }}
 
-  // Play-button toggles all videos together.
+  // Play-button toggles all videos together. When there are no playable
+  // video elements (mode on_device: frames-only payload) fall back to
+  // the virtual clock so the play/pause + speed + Space-bar UI works.
   playBtn.addEventListener("click", () => {{
-    const anyPaused = vids.some(v => v.paused);
-    if (anyPaused) {{
-      vids.forEach(v => {{ try {{ v.play(); }} catch (e) {{}} }});
-    }} else {{
-      vids.forEach(v => v.pause());
+    if (vids.length > 0) {{
+      const anyPaused = vids.some(v => v.paused);
+      if (anyPaused) {{
+        vids.forEach(v => {{ try {{ v.play(); }} catch (e) {{}} }});
+      }} else {{
+        vids.forEach(v => v.pause());
+      }}
+      return;
     }}
+    // No videos: drive playback from the virtual clock.
+    if (virtualPlaying()) {{ stopVirtualClock(); }} else {{ startVirtualClock(); }}
+    updatePlayBtnLabel();
   }});
 
   function updatePlayBtnLabel() {{
-    playBtn.textContent = vids.every(v => v.paused) ? "Play" : "Pause";
+    if (vids.length > 0) {{
+      playBtn.textContent = vids.every(v => v.paused) ? "Play" : "Pause";
+    }} else {{
+      playBtn.textContent = virtualPlaying() ? "Pause" : "Play";
+    }}
   }}
 
   // Precise per-presented-frame callback. Drives the 3D scene + frame
@@ -884,8 +931,9 @@ def render_viewer_html(
   frameInput.addEventListener("change", () => {{
     const f = Number(frameInput.value);
     if (!isFinite(f)) {{ frameInput.value = String(currentFrame); return; }}
-    vids.forEach(v => v.pause());
+    pauseAllPlayback();
     setFrame(f);
+    updatePlayBtnLabel();
   }});
   frameInput.addEventListener("keydown", (ev) => {{
     if (ev.key === "Enter") {{ ev.preventDefault(); frameInput.blur(); }}
