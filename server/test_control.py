@@ -324,6 +324,95 @@ def test_pitch_upload_keeps_session_armed_until_stop():
     assert set(status["session"]["uploads_received"]) == {"A"}
 
 
+# --- Capture mode (mode-one / mode-two dashboard toggle) -------------------
+
+
+def test_default_mode_is_camera_only(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    assert s.current_mode().value == "camera_only"
+
+
+def test_set_mode_changes_current_mode(tmp_path):
+    from schemas import CaptureMode
+    s = main.State(data_dir=tmp_path)
+    s.set_mode(CaptureMode.on_device)
+    assert s.current_mode() == CaptureMode.on_device
+
+
+def test_arm_session_snapshots_current_mode(tmp_path):
+    from schemas import CaptureMode
+    s = main.State(data_dir=tmp_path)
+    s.set_mode(CaptureMode.on_device)
+    session = s.arm_session()
+    assert session.mode == CaptureMode.on_device
+
+
+def test_mode_change_after_arm_does_not_affect_armed_session(tmp_path):
+    from schemas import CaptureMode
+    s = main.State(data_dir=tmp_path)
+    session = s.arm_session()
+    # Dashboard operator flips the toggle mid-session.
+    s.set_mode(CaptureMode.on_device)
+    assert session.mode == CaptureMode.camera_only  # snapshot frozen
+    assert s.current_mode() == CaptureMode.on_device  # global flipped for next arm
+
+
+def test_status_includes_capture_mode():
+    client = TestClient(app)
+    status = client.get("/status").json()
+    assert status["capture_mode"] == "camera_only"
+
+
+def test_heartbeat_reply_includes_capture_mode():
+    client = TestClient(app)
+    r = client.post("/heartbeat", json={"camera_id": "A"})
+    assert r.json()["capture_mode"] == "camera_only"
+
+
+def test_set_mode_endpoint_persists_on_device_choice():
+    client = TestClient(app)
+    r = client.post(
+        "/sessions/set_mode",
+        data={"mode": "on_device"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 200
+    assert r.json()["capture_mode"] == "on_device"
+    # Round-trips via status.
+    status = client.get("/status").json()
+    assert status["capture_mode"] == "on_device"
+
+
+def test_set_mode_endpoint_rejects_invalid_value():
+    client = TestClient(app)
+    r = client.post(
+        "/sessions/set_mode",
+        data={"mode": "lightning_fast"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 400
+
+
+def test_set_mode_endpoint_html_form_redirects():
+    client = TestClient(app)
+    r = client.post(
+        "/sessions/set_mode",
+        data={"mode": "on_device"},
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+
+
+def test_session_to_dict_includes_mode(tmp_path):
+    from schemas import CaptureMode
+    s = main.State(data_dir=tmp_path)
+    s.set_mode(CaptureMode.on_device)
+    session = s.arm_session()
+    assert session.to_dict()["mode"] == "on_device"
+
+
 def test_delete_session_removes_memory_and_disk_artefacts(tmp_path):
     s = main.State(data_dir=tmp_path)
     pitch_a = _minimal_pitch("A", session_id=sid(1))

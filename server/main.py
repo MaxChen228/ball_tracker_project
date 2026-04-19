@@ -78,6 +78,7 @@ from pydantic import ValidationError
 # from the split modules directly (schemas / pairing / chirp / render_*).
 from schemas import (
     CalibrationSnapshot,
+    CaptureMode,
     Device,
     FramePayload,
     HeartbeatBody,
@@ -163,6 +164,11 @@ class State:
         self._devices: dict[str, Device] = {}
         self._current_session: Session | None = None
         self._last_ended_session: Session | None = None
+        # Global capture-mode toggle. Dashboard flips this; every subsequent
+        # arm_session() snapshots the current value into the session. Default
+        # `camera_only` preserves the pre-mode-split behaviour for anyone
+        # upgrading a running server without touching the dashboard.
+        self._current_mode: CaptureMode = CaptureMode.camera_only
         # Per-camera calibration snapshots. Written by POST /calibration,
         # read by the dashboard canvas so the 3D preview shows where each
         # phone "thinks it is" relative to the plate, independent of any
@@ -481,7 +487,9 @@ class State:
         self, max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S
     ) -> Session:
         """Begin a new armed session. If one is already armed, return it
-        unchanged (idempotent so dashboard double-clicks don't double-arm)."""
+        unchanged (idempotent so dashboard double-clicks don't double-arm).
+        Snapshots the current global `capture_mode` so a late dashboard
+        toggle can't disturb the in-flight recording."""
         now = self._time_fn()
         with self._lock:
             self._check_session_timeout_locked(now)
@@ -491,9 +499,24 @@ class State:
                 id=_new_session_id(),
                 started_at=now,
                 max_duration_s=max_duration_s,
+                mode=self._current_mode,
             )
             self._current_session = session
             return session
+
+    def current_mode(self) -> CaptureMode:
+        """Dashboard-selected capture mode (global, not session-scoped).
+        iPhones read this from status/heartbeat to render the HUD mode chip
+        even while idle."""
+        with self._lock:
+            return self._current_mode
+
+    def set_mode(self, mode: CaptureMode) -> CaptureMode:
+        """Record the dashboard's mode choice. Only affects sessions armed
+        after this call — in-flight sessions keep their snapshot mode."""
+        with self._lock:
+            self._current_mode = mode
+            return mode
 
     def stop_session(self) -> Session | None:
         """End the current armed session (operator pressed Stop on the
@@ -800,6 +823,11 @@ def _build_status_response() -> dict[str, Any]:
         ],
         "session": session.to_dict() if session is not None else None,
         "commands": state.commands_for_devices(),
+        # Global dashboard mode choice. iPhones show this on the HUD in idle
+        # and fall back to it when there's no armed session; during an armed
+        # session they read session.mode instead (it's the snapshot that
+        # can't drift from under them).
+        "capture_mode": state.current_mode().value,
     }
 
 
@@ -847,6 +875,28 @@ async def sessions_stop(request: Request):
     if ended is None:
         raise HTTPException(status_code=409, detail="no armed session")
     return {"ok": True, "session": ended.to_dict()}
+
+
+@app.post("/sessions/set_mode")
+async def sessions_set_mode(
+    request: Request,
+    mode: str = Form(...),
+):
+    """Dashboard mode picker target. Records the global capture mode which
+    the next `arm_session()` will snapshot. HTML form callers (dashboard
+    radio buttons) get a 303 back to /; JSON API callers get the applied
+    mode echoed so they can confirm the write."""
+    try:
+        applied = CaptureMode(mode)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid mode {mode!r}; expected one of: {[m.value for m in CaptureMode]}",
+        )
+    state.set_mode(applied)
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "capture_mode": applied.value}
 
 
 @app.post("/sessions/clear")
