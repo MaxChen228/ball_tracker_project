@@ -908,22 +908,30 @@ def render_viewer_html(
   // speed mirrors `currentRate` so the speed buttons keep working.
   let virtualRAF = null;
   let virtualLastPerfMs = 0;
+  // Independent virtual-time cursor. Earlier revision fed the snapped
+  // currentT back into the next tick's `nextT = currentT + dt`, which
+  // let setFrame's nearest-frame snap cancel small dt increments — if
+  // dt was shorter than half the inter-frame gap the clock stalled on
+  // the same frame forever. Tracking virtualTime separately from the
+  // displayed (snapped) frame keeps the clock monotone.
+  let virtualTime = 0;
   function virtualPlaying() {{ return virtualRAF !== null; }}
   function startVirtualClock() {{
     if (virtualRAF !== null) return;
     virtualLastPerfMs = performance.now();
+    virtualTime = currentT;
     const tick = (now) => {{
       virtualRAF = requestAnimationFrame(tick);
       const dt = (now - virtualLastPerfMs) / 1000 * currentRate;
       virtualLastPerfMs = now;
-      const nextT = currentT + dt;
-      if (nextT >= unionTimes[TOTAL_FRAMES - 1]) {{
+      virtualTime += dt;
+      if (virtualTime >= unionTimes[TOTAL_FRAMES - 1]) {{
         setFrame(TOTAL_FRAMES - 1);
         stopVirtualClock();
         updatePlayBtnLabel();
         return;
       }}
-      setFrame(frameIndexForT(nextT));
+      setFrame(frameIndexForT(virtualTime));
     }};
     virtualRAF = requestAnimationFrame(tick);
   }}
