@@ -150,7 +150,7 @@ def render_viewer_html(
     scene_flex = "3 1 0" if has_triangulated else "2 1 0"
     videos_flex = "2 1 0" if has_triangulated else "3 1 0"
 
-    videos_by_cam = {cam: (url, off) for cam, url, off, _fps, _fr in videos}
+    videos_by_cam = {cam: (url, off) for cam, url, off, _fps, _fr in videos if url}
     # `never_coming` collapses the slot to a one-row notice — only when
     # the cam never uploaded AND its sibling did, so the survivor has
     # full vertical room. When neither uploaded we keep the dashed
