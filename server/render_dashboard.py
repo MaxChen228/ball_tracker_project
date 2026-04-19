@@ -343,6 +343,12 @@ _JS_TEMPLATE = r"""
     }];
   }
 
+  // Tracks whether the dashboard 3D canvas has been painted at least once,
+  // so subsequent paints can omit `scene.camera` and not stomp on the
+  // user's orbit. Declared above repaintCanvas so the function-scope
+  // closure binds without temporal-dead-zone risk.
+  let canvasFirstPaintDone = false;
+
   async function repaintCanvas() {
     if (!basePlot || !window.Plotly) return;
     const extraTraces = [];
@@ -354,12 +360,51 @@ _JS_TEMPLATE = r"""
       if (!result) continue;
       extraTraces.push(...trajTracesFor(sid, result, trajColorFor(sid)));
     }
+    // After the first paint, strip `scene.camera` from the layout we
+    // hand to Plotly.react — otherwise every 5 s tickCalibration push
+    // resets the user's orbit back to the default eye position. Plotly
+    // leaves the existing camera alone if the new layout doesn't carry
+    // one. First paint must keep the camera so the initial view is the
+    // designed default rather than wherever Plotly auto-fits.
+    let layout = basePlot.layout || {};
+    if (canvasFirstPaintDone && layout.scene && layout.scene.camera) {
+      layout = JSON.parse(JSON.stringify(layout));
+      delete layout.scene.camera;
+    }
     Plotly.react(
       sceneRoot,
       [...(basePlot.data || []), ...extraTraces],
-      basePlot.layout || {},
-      { responsive: true },
+      layout,
+      { responsive: true, scrollZoom: true },
     );
+    canvasFirstPaintDone = true;
+  }
+
+  // Plotly's built-in 3D wheel-zoom is tuned for mouse wheels and feels
+  // sluggish on trackpads (especially pinch-to-zoom which arrives as
+  // ctrl+wheel with tiny deltas). Replace it with a direct camera.eye
+  // scale so each wheel tick = ~10 % distance change and trackpad
+  // gestures get the same per-event treatment as a mouse wheel click.
+  if (sceneRoot) {
+    sceneRoot.addEventListener('wheel', (e) => {
+      if (!sceneRoot._fullLayout || !sceneRoot._fullLayout.scene) return;
+      const cam = sceneRoot._fullLayout.scene.camera;
+      if (!cam || !cam.eye) return;
+      e.preventDefault();
+      // Wheel-down (positive deltaY) = zoom out, wheel-up = zoom in.
+      // Magnitude scaled by sqrt so trackpad's many-tiny-events feels
+      // continuous instead of jittery; mouse wheel's chunky events
+      // still produce a noticeable but bounded jump per click.
+      const mag = Math.min(0.5, Math.sqrt(Math.abs(e.deltaY)) * 0.04);
+      const factor = e.deltaY > 0 ? (1 + mag) : (1 - mag);
+      Plotly.relayout(sceneRoot, {
+        'scene.camera.eye': {
+          x: cam.eye.x * factor,
+          y: cam.eye.y * factor,
+          z: cam.eye.z * factor,
+        },
+      });
+    }, { passive: false });
   }
 
   // Delegated change handler — event list re-renders on every tick, so we
