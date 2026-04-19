@@ -352,6 +352,32 @@ def test_viewer_endpoint_without_clips_still_renders():
     assert "<video" not in body
 
 
+def test_viewer_banner_tags_on_device_when_no_video_on_disk():
+    """Mode-two session has no MOV on disk — hero banner sub-line should
+    surface `mode on-device` so the operator knows the 3D came from
+    iPhone-side detection, not server re-detection."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(706)
+    _record_pitch(_pitch("A", 706, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert "mode on-device" in body
+
+
+def test_viewer_banner_tags_camera_only_when_video_on_disk(tmp_path):
+    """Mode-one session: any MOV under data/videos/ flips the banner's
+    sub-line to `mode camera-only`."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(707)
+    _record_pitch(_pitch("A", 707, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    # Drop a dummy MOV so _build_viewer_health's glob sees it.
+    main.state.video_dir.mkdir(parents=True, exist_ok=True)
+    (main.state.video_dir / f"session_{session_id}_A.mov").write_bytes(b"fake")
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert "mode camera-only" in body
+
+
 def test_viewer_health_banner_shows_partial_session_failure():
     """A-only session → health banner must surface (a) A's uploaded chip,
     (b) B's collapsed 'never uploaded' row, and (c) an explicit failure
