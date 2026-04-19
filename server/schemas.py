@@ -10,9 +10,31 @@ FastAPI app plumbing."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+
+class CaptureMode(str, Enum):
+    """Which side of the split does ball detection on the recording.
+
+    - `camera_only`: iPhone uploads the MOV, server runs detection + triangulation.
+      Bandwidth heavy, but the server sees the raw pixels so the detection
+      pipeline (HSV + shape gate + MOG2) is fully authoritative.
+    - `on_device`: iPhone runs the same detection pipeline locally and uploads
+      only the per-frame results as JSON. Bandwidth is a few KB per session.
+      Triangulation still happens on the server using the uploaded frames.
+
+    The dashboard toggles the mode; every armed session snapshots the
+    current global mode at arm time so a late dashboard toggle doesn't
+    disturb an in-flight recording.
+    """
+    camera_only = "camera_only"
+    on_device = "on_device"
+
+
+_DEFAULT_CAPTURE_MODE = CaptureMode.camera_only
 
 
 class IntrinsicsPayload(BaseModel):
@@ -157,6 +179,10 @@ class Session:
     # the current one. Dashboard reads this to render "session s_abc →
     # A, B".
     uploads_received: list[str] = field(default_factory=list)
+    # Snapshot of the dashboard's `capture_mode` at arm time. Once armed
+    # the session's mode is immutable — a late dashboard toggle only
+    # affects the next session.
+    mode: CaptureMode = _DEFAULT_CAPTURE_MODE
 
     @property
     def armed(self) -> bool:
@@ -170,4 +196,5 @@ class Session:
             "ended_at": self.ended_at,
             "max_duration_s": self.max_duration_s,
             "uploads_received": list(self.uploads_received),
+            "mode": self.mode.value,
         }
