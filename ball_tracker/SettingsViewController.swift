@@ -425,7 +425,7 @@ final class SettingsViewController: UIViewController {
                 controlRow(label: "Role", control: cameraRoleControl),
                 controlRow(label: "Resolution", control: captureResolutionControl),
             ],
-            footer: "校正永遠以 1080p 為基準；改錄製解析度只影響上傳大小，server 會自動縮放內參。\nFPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。\nSTANDBY 的即時預覽用主畫面右上「預覽」按鈕切換。"
+            footer: "校正永遠以 1080p 為基準；改錄製解析度只影響上傳大小，server 會自動縮放內參。\n部分 iPhone 只支援 1080p / 720p @240fps；選 540p 若開啟失敗請降回 720p。\nFPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。\nSTANDBY 的即時預覽用主畫面右上「預覽」按鈕切換。"
         ))
 
         contentStack.addArrangedSubview(sectionBlock(

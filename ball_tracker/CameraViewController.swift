@@ -1116,9 +1116,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             uploadQueue.updateUploader(uploader)
         }
         if formatChanged {
-            // Resolution is currently fixed (captureWidthFixed/HeightFixed) so
-            // this branch only fires on a stale-prefs migration. Re-pick a
-            // format at whichever FPS is appropriate for the current state.
+            // User picked a different capture resolution in Settings.
+            // `settings` has already been updated to `latest` above, so
+            // switchCaptureFps → configureCaptureFormat will look up the
+            // new target dims via self.settings.
             let fps = (state == .standby || state == .timeSyncWaiting) ? standbyFps : trackingFps
             switchCaptureFps(fps)
         }
