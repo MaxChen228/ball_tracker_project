@@ -91,6 +91,7 @@ from schemas import (
 )
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pipeline import annotate_video, detect_pitch
+from video import probe_dims
 from chirp import chirp_wav_bytes
 from cleanup_old_sessions import cleanup_expired_sessions
 
@@ -1104,6 +1105,27 @@ async def pitch(
         )
         clip_info = {"filename": clip_path.name, "bytes": len(data)}
 
+        # Reconcile image dims: the iPhone's IntrinsicsStore sometimes
+        # ships calibration-time dims (e.g. 1920×1080) even when the MOV
+        # encoder produced a lower resolution (720p / 540p). Server
+        # detection then returns px/py in MOV-pixel coords while the
+        # payload claims the MOV is 1080p — downstream scaling ends up
+        # 1.5× off. Probe the real MOV dims once and overwrite the
+        # payload fields so every downstream consumer (triangulation
+        # rescale, viewer virtual-cam canvas) speaks the same grid.
+        actual_dims = await asyncio.to_thread(probe_dims, clip_path)
+        if actual_dims is not None:
+            mw, mh = actual_dims
+            if payload_obj.image_width_px != mw or payload_obj.image_height_px != mh:
+                logger.info(
+                    "reconciling image dims camera=%s session=%s payload=%sx%s mov=%dx%d",
+                    payload_obj.camera_id, payload_obj.session_id,
+                    payload_obj.image_width_px, payload_obj.image_height_px,
+                    mw, mh,
+                )
+                payload_obj.image_width_px = mw
+                payload_obj.image_height_px = mh
+
         # Early-surface: do NOT block on detect_pitch (8-20 s). Record the
         # payload with frames=[] so the dashboard + viewer + on-device
         # triangulation see this cycle immediately, then schedule the
@@ -1242,6 +1264,16 @@ def results_for_session(session_id: str) -> SessionResult:
     return r
 
 
+def _find_clip_on_disk(session_id: str, camera_id: str) -> Path | None:
+    """Locate the raw MOV for a given (session, cam) pair, skipping the
+    `_annotated` sibling. Returns None if no raw clip exists."""
+    for path in state.video_dir.glob(f"session_{session_id}_{camera_id}.*"):
+        if path.stem.endswith("_annotated"):
+            continue
+        return path
+    return None
+
+
 def _scene_for_session(session_id: str):
     """Shared fetch+build for the two scene endpoints. Raises 404 when no
     pitches have been received for this session yet.
@@ -1260,14 +1292,27 @@ def _scene_for_session(session_id: str):
     if not pitches:
         raise HTTPException(404, f"session {session_id} has no pitches")
     calibrations = state.calibrations()
-    scaled_pitches = {
-        cam: scale_pitch_to_video_dims(
+    # Retrofit MOV-dim reconciliation for sessions captured before the
+    # /pitch handler started probing on ingest. The payload may claim
+    # 1920×1080 while the MOV was actually encoded at 720p; without
+    # fixing this the viewer's virtual canvas scales server-detected
+    # px/py by the wrong denominator and the ball dot lands elsewhere.
+    scaled_pitches = {}
+    for cam, pitch in pitches.items():
+        clip = _find_clip_on_disk(session_id, cam)
+        if clip is not None:
+            actual_dims = probe_dims(clip)
+            if actual_dims is not None:
+                mw, mh = actual_dims
+                if pitch.image_width_px != mw or pitch.image_height_px != mh:
+                    pitch = pitch.model_copy(
+                        update={"image_width_px": mw, "image_height_px": mh}
+                    )
+        scaled_pitches[cam] = scale_pitch_to_video_dims(
             pitch,
             (calibrations[cam].image_width_px, calibrations[cam].image_height_px)
             if cam in calibrations else None,
         )
-        for cam, pitch in pitches.items()
-    }
     result = state.get(session_id)
     triangulated = result.points if result is not None else []
     triangulated_on_device = result.points_on_device if result is not None else []

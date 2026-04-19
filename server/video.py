@@ -52,6 +52,26 @@ def iter_frames(
         container.close()
 
 
+def probe_dims(video_path: Path) -> tuple[int, int] | None:
+    """Return `(width, height)` of the MOV's decoded pixel grid, or None
+    if the container can't be opened / has no video stream. Lightweight —
+    opens the container, reads stream metadata, closes; no frame decode."""
+    try:
+        container = av.open(str(video_path))
+    except Exception as e:
+        logger.warning("probe_dims failed for %s: %s", video_path, e)
+        return None
+    try:
+        stream = container.streams.video[0]
+        w = int(getattr(stream.codec_context, "width", 0) or getattr(stream, "width", 0) or 0)
+        h = int(getattr(stream.codec_context, "height", 0) or getattr(stream, "height", 0) or 0)
+        if w <= 0 or h <= 0:
+            return None
+        return (w, h)
+    finally:
+        container.close()
+
+
 def count_frames(video_path: Path) -> int:
     """Cheap second-pass frame count (used by tests / sanity logs)."""
     container = av.open(str(video_path))
