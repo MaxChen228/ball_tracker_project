@@ -25,6 +25,18 @@ final class ServerUploader {
 
     /// Metadata accompanying the required H.264 MOV. The server decodes the
     /// video, runs HSV ball detection per frame, and triangulates.
+    /// One decoded / on-device-detected frame. Wire-identical to
+    /// `server/schemas.FramePayload`. `px` / `py` are nil on frames where
+    /// the detector didn't find a ball (mode-two still records those so
+    /// the server can see the timestamp coverage).
+    struct FramePayload: Codable {
+        let frame_index: Int
+        let timestamp_s: Double
+        let px: Double?
+        let py: Double?
+        let ball_detected: Bool
+    }
+
     struct PitchPayload: Codable {
         let camera_id: String
         /// Server-minted pairing key from `POST /sessions/arm`. A/B pairs
@@ -50,6 +62,12 @@ final class ServerUploader {
         let homography: [Double]?
         let image_width_px: Int?
         let image_height_px: Int?
+        /// Per-frame detection results. Empty in mode-one (`camera_only`):
+        /// the server runs detection on the uploaded MOV. Non-empty in
+        /// mode-two (`on_device`): iPhone ran its own BTDetectionSession
+        /// pipeline and ships the frame list alongside the metadata, no MOV.
+        /// Default [] so the field always encodes to a concrete array.
+        let frames: [FramePayload]
 
         /// Return a copy of this payload with `video_start_pts_s` replaced.
         /// Used by the post-recording trim pipeline: the trimmer writes a
@@ -68,7 +86,27 @@ final class ServerUploader {
                 intrinsics: intrinsics,
                 homography: homography,
                 image_width_px: image_width_px,
-                image_height_px: image_height_px
+                image_height_px: image_height_px,
+                frames: frames
+            )
+        }
+
+        /// Return a copy of this payload with `frames` replaced. Used by
+        /// the mode-two cycle-complete path to attach the session's
+        /// BTDetectionSession output before shipping.
+        func withFrames(_ newFrames: [FramePayload]) -> PitchPayload {
+            PitchPayload(
+                camera_id: camera_id,
+                session_id: session_id,
+                sync_anchor_timestamp_s: sync_anchor_timestamp_s,
+                video_start_pts_s: video_start_pts_s,
+                video_fps: video_fps,
+                local_recording_index: local_recording_index,
+                intrinsics: intrinsics,
+                homography: homography,
+                image_width_px: image_width_px,
+                image_height_px: image_height_px,
+                frames: newFrames
             )
         }
     }

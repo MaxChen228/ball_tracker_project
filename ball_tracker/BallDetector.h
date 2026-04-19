@@ -62,7 +62,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Feed one frame into the MOG2 model and (post-warmup) run detection
 /// on the combined HSV-AND-fg_mask blob mask. Returns the largest blob
 /// passing the area + shape gate, or nil if none / still warming up.
-- (nullable BTBallDetection *)applyPixelBuffer:(CVPixelBufferRef)pixelBuffer;
+- (nullable BTBallDetection *)applyPixelBuffer:(CVPixelBufferRef)pixelBuffer
+    NS_SWIFT_NAME(apply(_:));
 
 @end
 
