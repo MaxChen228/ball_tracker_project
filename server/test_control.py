@@ -103,6 +103,46 @@ def test_chirp_wav_is_cached_across_calls(tmp_path):
     assert info.hits >= 1  # second call was a cache hit, not a recompute
 
 
+def test_chirp_wav_has_dual_burst_shape():
+    """The reference waveform is two 100 ms sweeps separated by 50 ms of
+    silence. Detector-side Doppler cancellation depends on exactly that gap
+    geometry — if the WAV layout drifts, every phone in the field would need
+    a matching re-flash, so pin the shape here."""
+    chirp.chirp_wav_bytes.cache_clear()
+    wav = chirp.chirp_wav_bytes()
+    # Skip the 44-byte RIFF header and parse as int16 PCM.
+    pcm = np.frombuffer(wav[44:], dtype=np.int16).astype(np.float32) / 32768.0
+    sr = 44100
+
+    # Envelope: per-10-ms energy.
+    win = sr // 100
+    energy = np.array(
+        [np.sum(pcm[i : i + win] ** 2) for i in range(0, len(pcm) - win, win)]
+    )
+    active = energy > (energy.max() * 0.05)
+
+    # Find contiguous active regions.
+    regions: list[tuple[int, int]] = []
+    i = 0
+    while i < len(active):
+        if active[i]:
+            j = i
+            while j < len(active) and active[j]:
+                j += 1
+            regions.append((i, j))
+            i = j
+        else:
+            i += 1
+
+    assert len(regions) == 2, f"expected exactly 2 chirp bursts, got {len(regions)}"
+    # Each burst ≈ 100 ms = 10 windows; tolerate ±3 windows for Hann taper.
+    for start, end in regions:
+        assert 7 <= (end - start) <= 13
+    # Gap between bursts ≈ 50 ms = 5 windows; tolerate ±3.
+    gap = regions[1][0] - regions[0][1]
+    assert 2 <= gap <= 8
+
+
 # --- Session state machine -------------------------------------------------
 
 
