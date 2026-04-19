@@ -25,6 +25,12 @@ class CaptureMode(str, Enum):
     - `on_device`: iPhone runs the same detection pipeline locally and uploads
       only the per-frame results as JSON. Bandwidth is a few KB per session.
       Triangulation still happens on the server using the uploaded frames.
+    - `dual`: both of the above in one shot — MOV is uploaded AND the
+      iPhone's on-device detection result is attached as `frames_on_device`.
+      Server runs its own detection on the MOV into `frames`, then
+      triangulates each source independently. Used for ground-truth
+      comparison during HSV / shape-gate tuning — viewer overlays the two
+      point clouds so you can see where iOS and server disagree.
 
     The dashboard toggles the mode; every armed session snapshots the
     current global mode at arm time so a late dashboard toggle doesn't
@@ -32,6 +38,7 @@ class CaptureMode(str, Enum):
     """
     camera_only = "camera_only"
     on_device = "on_device"
+    dual = "dual"
 
 
 _DEFAULT_CAPTURE_MODE = CaptureMode.camera_only
@@ -93,9 +100,14 @@ class PitchPayload(BaseModel):
     # purely for operator debugging.
     local_recording_index: int | None = None
     # Server-side synthesised per-frame data (populated after detection).
-    # Optional on the wire: the iPhone always omits it; server writes it
-    # back to disk before triangulation.
+    # For `camera_only` / `dual` modes the iPhone omits this on the wire and
+    # server detection fills it before triangulation. For `on_device` mode
+    # the iPhone populates it directly and server detection is skipped.
     frames: list[FramePayload] = Field(default_factory=list)
+    # Parallel detection stream shipped by the iPhone when the session was
+    # armed in `dual` mode. Lets the server keep both iOS-end and server-end
+    # detection results for side-by-side comparison. Empty list otherwise.
+    frames_on_device: list[FramePayload] = Field(default_factory=list)
     intrinsics: IntrinsicsPayload | None = None
     homography: list[float] | None = None
     image_width_px: int | None = None
@@ -113,12 +125,20 @@ class TriangulatedPoint(BaseModel):
 class SessionResult(BaseModel):
     """One armed-session's triangulation result. Replaces the old
     `CycleResult` now that "cycle" is a per-device recording-window concept
-    and the pitch unit is server-level "session"."""
+    and the pitch unit is server-level "session".
+
+    Dual mode surfaces two parallel point clouds — `points` is the default
+    (server detection) stream that existing code keys off, `points_on_device`
+    is the iOS-end stream when the session armed in `dual` mode. Mono-mode
+    sessions (camera_only / on_device) leave `points_on_device` empty and
+    `points` is the single authoritative result."""
     session_id: str
     camera_a_received: bool
     camera_b_received: bool
     points: list[TriangulatedPoint] = []
     error: str | None = None
+    points_on_device: list[TriangulatedPoint] = []
+    error_on_device: str | None = None
 
 
 class HeartbeatBody(BaseModel):

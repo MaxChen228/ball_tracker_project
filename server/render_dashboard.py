@@ -259,7 +259,7 @@ _JS_TEMPLATE = r"""
     devicesBox.innerHTML = rows + extras;
   }
 
-  const MODE_LABELS = { camera_only: 'Camera-only', on_device: 'On-device' };
+  const MODE_LABELS = { camera_only: 'Camera-only', on_device: 'On-device', dual: 'Dual' };
 
   function renderSession(state) {
     const s = state.session;
@@ -291,7 +291,7 @@ _JS_TEMPLATE = r"""
       };
       modeRow = `<div class="mode-row">
           <span class="mode-label">Mode</span>
-          ${btn('camera_only')}${btn('on_device')}
+          ${btn('camera_only')}${btn('on_device')}${btn('dual')}
         </div>`;
     }
     const sessHtml = `
@@ -347,7 +347,9 @@ _JS_TEMPLATE = r"""
       // does not navigate via the wrapping anchor. Confirm dialog guards
       // against accidental clicks — once removed, disk files are gone.
       const confirmMsg = `刪除 session ${e.session_id}？此動作無法復原。`;
-      const captureMode = e.mode === 'on_device' ? 'on-device' : 'camera-only';
+      const captureMode = e.mode === 'on_device' ? 'on-device'
+                        : e.mode === 'dual'       ? 'dual'
+                        : 'camera-only';
       const captureModeLabel = captureMode;
       return `
         <div class="event-item">
@@ -552,6 +554,7 @@ def _render_device_rows(
 _MODE_LABELS = {
     "camera_only": "Camera-only",
     "on_device": "On-device",
+    "dual": "Dual",
 }
 
 
@@ -612,7 +615,7 @@ def _render_session_body(
         mode_row = (
             '<div class="mode-row">'
             '<span class="mode-label">Mode</span>'
-            f'{_mode_button("camera_only")}{_mode_button("on_device")}'
+            f'{_mode_button("camera_only")}{_mode_button("on_device")}{_mode_button("dual")}'
             "</div>"
         )
 
@@ -633,7 +636,12 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
         cam_mode = "dual" if len(e.get("cameras", [])) >= 2 else "single"
         status = html.escape(e.get("status", ""))
         stat_label = status.replace("_", " ")
-        capture_mode = "on-device" if e.get("mode") == "on_device" else "camera-only"
+        mode_val = e.get("mode")
+        capture_mode = (
+            "on-device" if mode_val == "on_device"
+            else "dual" if mode_val == "dual"
+            else "camera-only"
+        )
         mean = "—" if e.get("mean_residual_m") is None else format(e["mean_residual_m"], ".4f")
         peak_z = "—" if e.get("peak_z_m") is None else format(e["peak_z_m"], ".2f")
         duration = "—" if e.get("duration_s") is None else format(e["duration_s"], ".2f")

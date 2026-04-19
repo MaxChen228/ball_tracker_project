@@ -241,9 +241,14 @@ class State:
             )
             if a is not None and b is not None:
                 try:
-                    result.points = self._triangulate_pair(a, b)
+                    result.points = self._triangulate_pair(a, b, source="server")
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
+                if self._has_on_device_frames(a) and self._has_on_device_frames(b):
+                    try:
+                        result.points_on_device = self._triangulate_pair(a, b, source="on_device")
+                    except Exception as e:
+                        result.error_on_device = f"{type(e).__name__}: {e}"
             self.results[sid] = result
 
         if self.pitches:
@@ -288,14 +293,19 @@ class State:
             return dict(self._calibrations)
 
     def _triangulate_pair(
-        self, a: PitchPayload, b: PitchPayload
+        self, a: PitchPayload, b: PitchPayload, *, source: str = "server",
     ) -> list[TriangulatedPoint]:
         """Scale each pitch's intrinsics + homography to its MOV's actual
         pixel grid (using the cached calibration snapshot as the reference
         resolution) and then triangulate. When no snapshot is cached for a
         camera the scale factor falls back to 1.0 and the pitch is passed
         through unchanged — the legacy behaviour for pre-resolution-picker
-        builds that always recorded at the calibration resolution."""
+        builds that always recorded at the calibration resolution.
+
+        `source` picks the detection stream (`"server"` default reads
+        `pitch.frames`; `"on_device"` reads `pitch.frames_on_device`). Dual
+        mode calls this twice per session to keep the two point clouds
+        separate."""
         with self._lock:
             cal_a = self._calibrations.get(a.camera_id)
             cal_b = self._calibrations.get(b.camera_id)
@@ -307,7 +317,14 @@ class State:
             b,
             (cal_b.image_width_px, cal_b.image_height_px) if cal_b else None,
         )
-        return triangulate_cycle(a_scaled, b_scaled)
+        return triangulate_cycle(a_scaled, b_scaled, source=source)
+
+    @staticmethod
+    def _has_on_device_frames(pitch: PitchPayload) -> bool:
+        """Dual-mode detection: if any pitch carries `frames_on_device`,
+        the session was armed dual and we owe the caller a second
+        triangulation pass over the iOS detection stream."""
+        return bool(pitch and pitch.frames_on_device)
 
     def _atomic_write(self, path: Path, payload: str) -> None:
         # Unique tmp filename per call so concurrent writers targeting the
@@ -362,9 +379,14 @@ class State:
         )
         if a is not None and b is not None:
             try:
-                result.points = self._triangulate_pair(a, b)
+                result.points = self._triangulate_pair(a, b, source="server")
             except Exception as e:
                 result.error = f"{type(e).__name__}: {e}"
+            if self._has_on_device_frames(a) and self._has_on_device_frames(b):
+                try:
+                    result.points_on_device = self._triangulate_pair(a, b, source="on_device")
+                except Exception as e:
+                    result.error_on_device = f"{type(e).__name__}: {e}"
 
         # --- Outside the lock: persist the result JSON. ---
         self._atomic_write(
@@ -609,7 +631,7 @@ class State:
         # --- Critical section: snapshot only the in-memory data we need.
         with self._lock:
             sessions = sorted({sid for _, sid in self.pitches.keys()})
-            snapshots: list[tuple[str, list[str], dict[str, int], SessionResult | None]] = []
+            snapshots: list[tuple[str, list[str], dict[str, int], dict[str, int], SessionResult | None]] = []
             for sid in sessions:
                 cams_present = sorted(
                     cam for (cam, s) in self.pitches.keys() if s == sid
@@ -620,13 +642,29 @@ class State:
                     )
                     for cam in cams_present
                 }
+                cam_frame_counts_on_device = {
+                    cam: sum(
+                        1 for f in self.pitches[(cam, sid)].frames_on_device if f.ball_detected
+                    )
+                    for cam in cams_present
+                }
+                # Any pitch for this session carrying non-empty frames_on_device
+                # implies the session armed in dual mode (on-device uploads
+                # always omit the MOV; dual adds frames_on_device on top of
+                # the MOV). Computed inside the lock so the mode-inference
+                # step outside doesn't need to re-read self.pitches.
+                has_any_on_device_frames = any(
+                    bool(self.pitches[(cam, sid)].frames_on_device)
+                    for cam in cams_present
+                )
                 snapshots.append(
-                    (sid, cams_present, cam_frame_counts, self.results.get(sid))
+                    (sid, cams_present, cam_frame_counts, cam_frame_counts_on_device,
+                     has_any_on_device_frames, self.results.get(sid))
                 )
 
         # --- Outside the lock: file stats + summary derivation.
         events: list[dict[str, Any]] = []
-        for sid, cams_present, cam_frame_counts, result in snapshots:
+        for sid, cams_present, cam_frame_counts, cam_frame_counts_on_device, has_any_on_device_frames, result in snapshots:
             latest_mtime: float | None = None
             for cam in cams_present:
                 try:
@@ -637,7 +675,9 @@ class State:
                     latest_mtime = mtime
 
             n_triangulated = len(result.points) if result is not None else 0
+            n_triangulated_on_device = len(result.points_on_device) if result is not None else 0
             error = result.error if result is not None else None
+            error_on_device = result.error_on_device if result is not None else None
 
             if error:
                 status = "error"
@@ -661,15 +701,20 @@ class State:
                 ts = [p.t_rel_s for p in result.points]
                 duration = float(ts[-1] - ts[0])
 
-            # Infer the session's capture mode from whether any MOV file
-            # landed on disk. Mode-two uploads frames-only so no video ever
-            # gets saved; mode-one always produces at least one MOV. If a
-            # single session mixes both (e.g. one phone mis-set), the
-            # presence of any MOV wins — operator-visible cue is enough.
+            # Infer the session's capture mode from payload shape:
+            # - any pitch carries frames_on_device → dual OR on_device
+            # - any MOV exists on disk → camera_only OR dual
+            # Combine: on_device+MOV = dual; frames_on_device only = on_device;
+            # MOV only = camera_only.
             has_any_video = any(
                 self._video_dir.glob(f"session_{sid}_*")
             )
-            mode = "camera_only" if has_any_video else "on_device"
+            if has_any_video and has_any_on_device_frames:
+                mode = "dual"
+            elif has_any_video:
+                mode = "camera_only"
+            else:
+                mode = "on_device"
 
             events.append(
                 {
@@ -679,11 +724,14 @@ class State:
                     "mode": mode,
                     "received_at": latest_mtime,
                     "n_ball_frames": cam_frame_counts,
+                    "n_ball_frames_on_device": cam_frame_counts_on_device,
                     "n_triangulated": n_triangulated,
+                    "n_triangulated_on_device": n_triangulated_on_device,
                     "peak_z_m": peak_z,
                     "mean_residual_m": mean_res,
                     "duration_s": duration,
                     "error": error,
+                    "error_on_device": error_on_device,
                 }
             )
         # Latest events first — session ids carry 4 bytes of random hex
@@ -1152,7 +1200,11 @@ def _scene_for_session(session_id: str):
         raise HTTPException(404, f"session {session_id} has no pitches")
     result = state.get(session_id)
     triangulated = result.points if result is not None else []
-    return build_scene(session_id, pitches, triangulated)
+    triangulated_on_device = result.points_on_device if result is not None else []
+    return build_scene(
+        session_id, pitches, triangulated,
+        triangulated_on_device=triangulated_on_device,
+    )
 
 
 @app.get("/reconstruction/{session_id}")
@@ -1282,10 +1334,15 @@ def _videos_for_session(
             best[cam] = name
 
     out: list[tuple[str, str, float, float, dict[str, list]]] = []
-    # Include all cameras that either have a video file OR have on-device
-    # frames (mode on_device has no MOV but still needs a VIDEO_META entry
-    # so the detection strip in the viewer is populated).
-    all_cams = sorted(set(best) | {c for c in pitches if pitches[c].frames})
+    # Include all cameras that either have a video file OR have either
+    # detection stream on the payload (mode on_device has no MOV but still
+    # needs a VIDEO_META entry so the detection strip in the viewer is
+    # populated; dual mode carries both streams).
+    all_cams = sorted(
+        set(best)
+        | {c for c in pitches if pitches[c].frames}
+        | {c for c in pitches if pitches[c].frames_on_device}
+    )
     for cam in all_cams:
         name = best.get(cam)
         pitch = pitches.get(cam)
@@ -1300,10 +1357,22 @@ def _videos_for_session(
         if pitch is not None and anchor is not None:
             t_rel = [float(f.timestamp_s - anchor) for f in pitch.frames]
             detected = [bool(f.ball_detected) for f in pitch.frames]
+            t_rel_od = [float(f.timestamp_s - anchor) for f in pitch.frames_on_device]
+            detected_od = [bool(f.ball_detected) for f in pitch.frames_on_device]
         else:
             t_rel = []
             detected = []
-        frames_info = {"t_rel_s": t_rel, "detected": detected}
+            t_rel_od = []
+            detected_od = []
+        # Ship both detection streams so the viewer can render two
+        # parallel density strips and overlay the dual-mode rays. Legacy
+        # `t_rel_s`/`detected` keys preserved for backwards compatibility;
+        # `on_device` sub-dict is empty for mono-mode sessions.
+        frames_info = {
+            "t_rel_s": t_rel,
+            "detected": detected,
+            "on_device": {"t_rel_s": t_rel_od, "detected": detected_od},
+        }
         url = f"/videos/{name}" if name else None
         out.append((cam, url, offset, fps, frames_info))
     return out
