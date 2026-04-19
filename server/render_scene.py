@@ -1390,7 +1390,11 @@ def _hero_meta_subline(health: dict) -> str:
         parts.append(f"received {ts}")
     mode = health.get("mode")
     if mode:
-        label = "on-device" if mode == "on_device" else "camera-only"
+        label = (
+            "on-device" if mode == "on_device"
+            else "dual" if mode == "dual"
+            else "camera-only"
+        )
         parts.append(f"mode {label}")
     return " · ".join(parts)
 

@@ -693,6 +693,10 @@ def test_dashboard_drives_dual_mode_end_to_end(tmp_path):
     viewer_html = client.get(f"/viewer/{session_id}").text
     assert "detection-canvas-on-device" in viewer_html
     assert "toggle-on-device" in viewer_html
+    # Hero banner must surface `mode dual`, not regress to camera-only —
+    # previously the viewer only checked MOV presence and ignored
+    # frames_on_device, so dual sessions mis-labelled as camera-only.
+    assert "mode dual" in viewer_html
     # MOV must still be embedded (dual uploads the clip).
     assert "<video" in viewer_html
 
