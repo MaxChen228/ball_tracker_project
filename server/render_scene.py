@@ -388,14 +388,33 @@ def render_viewer_html(
   .strip-legend .sw {{ display:inline-block; width:10px; height:10px;
     vertical-align:middle; margin-right:4px;
     border:1px solid var(--border-base); }}
-  .source-toggles {{ margin-left:auto; display:flex; gap:10px;
-    align-items:center; }}
-  .source-toggles label {{ display:inline-flex; align-items:center;
-    gap:4px; cursor:pointer; text-transform:uppercase;
-    letter-spacing:0.08em; font-size:10px; color:var(--sub); }}
-  .source-toggles label[hidden] {{ display:none; }}
-  .source-toggles input[type=checkbox] {{ accent-color:var(--ink);
-    width:12px; height:12px; margin:0; }}
+  /* Layer matrix: 3 trace categories × 2 detection sources = up to 6
+     independent visibility toggles, replacing the old global Server /
+     On-device checkboxes. Rendered inline in the legend row when space
+     permits; wraps to its own row on narrow layouts via flex-wrap. */
+  .layer-toggles {{ margin-left:auto; display:flex; gap:8px;
+    align-items:center; flex-wrap:wrap; }}
+  .layer-toggles .layer-label {{ color:var(--sub); letter-spacing:0.08em;
+    font-size:10px; }}
+  .layer-toggles .layer-group {{ display:inline-flex; align-items:center;
+    gap:4px; padding:2px 4px 2px 6px;
+    border:1px solid var(--border-base); border-radius:var(--r); }}
+  .layer-toggles .layer-group[data-src-scope="on_device_only"] {{ display:none; }}
+  .layer-toggles .layer-name {{ font-size:10px; letter-spacing:0.08em;
+    color:var(--ink); text-transform:uppercase; padding-right:2px;
+    display:inline-flex; align-items:center; gap:4px; }}
+  .layer-toggles .layer-name .swatch {{ width:8px; height:8px;
+    display:inline-block; border:1px solid rgba(0,0,0,0.12); }}
+  .layer-toggles .layer-pill {{ font:inherit; font-size:9px;
+    letter-spacing:0.06em; padding:1px 6px; min-width:unset;
+    background:transparent; color:var(--sub);
+    border:1px solid var(--border-base); border-radius:2px;
+    cursor:pointer; text-transform:uppercase;
+    transition:background 0.12s, color 0.12s, border-color 0.12s; }}
+  .layer-toggles .layer-pill[aria-pressed="true"] {{
+    background:var(--ink); color:var(--surface); border-color:var(--ink); }}
+  .layer-toggles .layer-pill:hover {{ border-color:var(--ink); }}
+  .layer-toggles .layer-pill[hidden] {{ display:none; }}
   .tl-row .frame-label {{ min-width:340px; text-align:right;
     color:var(--ink); font-weight:500; font-size:11px;
     letter-spacing:0.02em; white-space:nowrap;
@@ -500,9 +519,23 @@ def render_viewer_html(
           <span><span class="sw" style="background:rgba(122,117,108,0.35);"></span>missed</span>
           <span><span class="sw" style="background:rgba(232,228,219,0.6);"></span>no frame</span>
           <span><span class="sw" style="background:var(--accent);border-color:var(--accent);"></span>chirp anchor</span>
-          <span class="source-toggles" id="source-toggles">
-            <label><input type="checkbox" id="toggle-server" checked>Server</label>
-            <label id="toggle-on-device-wrap" hidden><input type="checkbox" id="toggle-on-device" checked>On-device</label>
+          <span class="layer-toggles" id="layer-toggles" aria-label="Layer visibility">
+            <span class="layer-label">show:</span>
+            <span class="layer-group" data-layer="traj">
+              <span class="layer-name">Traj</span>
+              <button type="button" class="layer-pill" data-layer="traj" data-src="server"    aria-pressed="true">svr</button>
+              <button type="button" class="layer-pill" data-layer="traj" data-src="on_device" aria-pressed="true">iOS</button>
+            </span>
+            <span class="layer-group" data-layer="camA">
+              <span class="layer-name"><span class="swatch" data-cam="A"></span>Rays A</span>
+              <button type="button" class="layer-pill" data-layer="camA" data-src="server"    aria-pressed="true">svr</button>
+              <button type="button" class="layer-pill" data-layer="camA" data-src="on_device" aria-pressed="true">iOS</button>
+            </span>
+            <span class="layer-group" data-layer="camB">
+              <span class="layer-name"><span class="swatch" data-cam="B"></span>Rays B</span>
+              <button type="button" class="layer-pill" data-layer="camB" data-src="server"    aria-pressed="true">svr</button>
+              <button type="button" class="layer-pill" data-layer="camB" data-src="on_device" aria-pressed="true">iOS</button>
+            </span>
           </span>
         </div>
         <div class="strip-row strip-row-scrubber">
@@ -635,8 +668,39 @@ def render_viewer_html(
   const camsWithFrames = Object.keys(framesByCam).filter(c => (framesByCam[c].t_rel_s || []).length);
   const camsWithFramesOnDevice = Object.keys(framesByCamOnDevice).filter(c => (framesByCamOnDevice[c].t_rel_s || []).length);
   const HAS_ON_DEVICE = camsWithFramesOnDevice.length > 0;
-  let showServer = true;
-  let showOnDevice = HAS_ON_DEVICE;  // default: both on if present
+
+  // --- Layer visibility matrix ---------------------------------------------
+  // 3 trace categories × 2 detection sources = 6 independent toggles.
+  // Rays + ground trace for a camera always share one switch (they derive
+  // from the same frame stream, and separating them just adds UI without
+  // new information). Persisted across sessions in localStorage so the
+  // operator's preferred view (e.g. "hide server, trust on-device only")
+  // doesn't reset on every session load.
+  const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility";
+  const layerVisibility = {{
+    traj: {{ server: true, on_device: HAS_ON_DEVICE }},
+    camA: {{ server: true, on_device: HAS_ON_DEVICE }},
+    camB: {{ server: true, on_device: HAS_ON_DEVICE }},
+  }};
+  try {{
+    const saved = JSON.parse(localStorage.getItem(LAYER_VIS_KEY) || "null");
+    if (saved && typeof saved === "object") {{
+      for (const k of ["traj", "camA", "camB"]) {{
+        if (saved[k]) {{
+          if (typeof saved[k].server === "boolean")    layerVisibility[k].server    = saved[k].server;
+          if (typeof saved[k].on_device === "boolean") layerVisibility[k].on_device = saved[k].on_device && HAS_ON_DEVICE;
+        }}
+      }}
+    }}
+  }} catch {{ /* ignore parse / storage failures */ }}
+
+  function persistLayerVisibility() {{
+    try {{ localStorage.setItem(LAYER_VIS_KEY, JSON.stringify(layerVisibility)); }}
+    catch {{ /* storage full / private mode */ }}
+  }}
+  function isLayerVisible(layer, src) {{
+    return !!(layerVisibility[layer] && layerVisibility[layer][src]);
+  }}
   // Master FPS for arrow-key half-second jumps. Pick the max reported
   // capture rate so a 240 Hz cam doesn't get under-stepped by a fallback.
   const MASTER_FPS = Math.max(60, ...Object.values(fpsByCam).filter(f => isFinite(f) && f > 0));
@@ -737,8 +801,8 @@ def render_viewer_html(
     const raysByKey = {{}};  // `${{cam}}|${{source}}` -> [rays]
     for (const r of (SCENE.rays || [])) {{
       const src = r.source || "server";
-      if (src === "server" && !showServer) continue;
-      if (src === "on_device" && !showOnDevice) continue;
+      const camKey = `cam${{r.camera_id}}`;
+      if (!isLayerVisible(camKey, src)) continue;
       const key = `${{r.camera_id}}|${{src}}`;
       (raysByKey[key] = raysByKey[key] || []).push(r);
     }}
@@ -767,52 +831,51 @@ def render_viewer_html(
     // Dashed when a triangulated trajectory is also shown so the 3D
     // trajectory visually dominates; on-device uses a denser dot pattern
     // so overlap with server ground traces stays disambiguated.
-    // Ground traces also suppressed from legend — same rationale as rays.
-    // The colour + dash encoding + the triangulated trajectory above them
-    // are the signal; a 4-row "Ground trace X (src, N pts)" list is noise.
-    if (showServer) {{
-      for (const [cam, trace] of Object.entries(SCENE.ground_traces || {{}})) {{
-        const filtered = trace.filter(p => p.t_rel_s <= cutoff);
-        if (!filtered.length) continue;
-        const color = colorForCamSource(cam, "server");
-        out.push({{
-          type: "scatter3d",
-          x: filtered.map(p => p.x),
-          y: filtered.map(p => p.y),
-          z: filtered.map(p => p.z),
-          mode: "lines+markers",
-          line: {{color: color, width: 3, dash: HAS_TRIANGULATED ? "dash" : "solid"}},
-          marker: {{size: 3, color: color}},
-          opacity: HAS_TRIANGULATED ? 0.45 : 0.7,
-          name: `Ground trace ${{cam}} (server, ${{filtered.length}} pts)`,
-          showlegend: false,
-        }});
-      }}
+    // Ground traces follow the same per-(cam, source) visibility as rays
+    // — they're derived from the same frame stream, so one toggle
+    // controls both. Legend suppressed (strip below already conveys
+    // per-cam detection density).
+    for (const [cam, trace] of Object.entries(SCENE.ground_traces || {{}})) {{
+      if (!isLayerVisible(`cam${{cam}}`, "server")) continue;
+      const filtered = trace.filter(p => p.t_rel_s <= cutoff);
+      if (!filtered.length) continue;
+      const color = colorForCamSource(cam, "server");
+      out.push({{
+        type: "scatter3d",
+        x: filtered.map(p => p.x),
+        y: filtered.map(p => p.y),
+        z: filtered.map(p => p.z),
+        mode: "lines+markers",
+        line: {{color: color, width: 3, dash: HAS_TRIANGULATED ? "dash" : "solid"}},
+        marker: {{size: 3, color: color}},
+        opacity: HAS_TRIANGULATED ? 0.45 : 0.7,
+        name: `Ground trace ${{cam}} (server, ${{filtered.length}} pts)`,
+        showlegend: false,
+      }});
     }}
-    if (showOnDevice) {{
-      for (const [cam, trace] of Object.entries(SCENE.ground_traces_on_device || {{}})) {{
-        const filtered = trace.filter(p => p.t_rel_s <= cutoff);
-        if (!filtered.length) continue;
-        const color = colorForCamSource(cam, "on_device");
-        out.push({{
-          type: "scatter3d",
-          x: filtered.map(p => p.x),
-          y: filtered.map(p => p.y),
-          z: filtered.map(p => p.z),
-          mode: "lines+markers",
-          line: {{color: color, width: 3, dash: "dot"}},
-          marker: {{size: 3, color: color, symbol: "circle-open"}},
-          opacity: 0.7,
-          name: `Ground trace ${{cam}} (iOS, ${{filtered.length}} pts)`,
-          showlegend: false,
-        }});
-      }}
+    for (const [cam, trace] of Object.entries(SCENE.ground_traces_on_device || {{}})) {{
+      if (!isLayerVisible(`cam${{cam}}`, "on_device")) continue;
+      const filtered = trace.filter(p => p.t_rel_s <= cutoff);
+      if (!filtered.length) continue;
+      const color = colorForCamSource(cam, "on_device");
+      out.push({{
+        type: "scatter3d",
+        x: filtered.map(p => p.x),
+        y: filtered.map(p => p.y),
+        z: filtered.map(p => p.z),
+        mode: "lines+markers",
+        line: {{color: color, width: 3, dash: "dot"}},
+        marker: {{size: 3, color: color, symbol: "circle-open"}},
+        opacity: 0.7,
+        name: `Ground trace ${{cam}} (iOS, ${{filtered.length}} pts)`,
+        showlegend: false,
+      }});
     }}
 
     // Triangulated trajectories — server (solid, Cividis colorbar) and
     // on-device (dot-dash, open markers, no colorbar so the legend stays
     // readable). Both are filtered against the current playback cutoff.
-    if (showServer) {{
+    if (isLayerVisible("traj", "server")) {{
       const triPts = (SCENE.triangulated || []).filter(p => p.t_rel_s <= cutoff);
       if (triPts.length) {{
         // Colorbar shows time RELATIVE to the trajectory's first
@@ -840,7 +903,7 @@ def render_viewer_html(
         }});
       }}
     }}
-    if (showOnDevice) {{
+    if (isLayerVisible("traj", "on_device")) {{
       const triPts = (SCENE.triangulated_on_device || []).filter(p => p.t_rel_s <= cutoff);
       if (triPts.length) {{
         out.push({{
@@ -1248,22 +1311,64 @@ def render_viewer_html(
   const detectionCanvas = document.getElementById("detection-canvas");
   const detectionCanvasOnDevice = document.getElementById("detection-canvas-on-device");
   const stripRowOnDevice = document.getElementById("strip-row-on-device");
-  const toggleOnDeviceWrap = document.getElementById("toggle-on-device-wrap");
-  const toggleServer = document.getElementById("toggle-server");
-  const toggleOnDevice = document.getElementById("toggle-on-device");
+  const layerToggles = document.getElementById("layer-toggles");
   const STRIP_MUTED = "rgba(122, 117, 108, 0.35)";
   const STRIP_EMPTY = "rgba(232, 228, 219, 0.6)";
   const STRIP_HEAD = "#2A2520";
   const STRIP_CHIRP = "rgba(230, 179, 0, 0.65)";  // _ACCENT, half-alpha
-  // Reveal the second strip + toggle when on-device data exists. Also
-  // mark SERVER as "reference" (post-encode) and surface the explanatory
-  // note so users don't read the strip-start offset as a time-sync bug.
+  // Reveal the second strip when on-device data exists. Also mark SERVER
+  // as "reference" (post-encode) and surface the explanatory note so
+  // users don't read the strip-start offset as a time-sync bug.
   if (HAS_ON_DEVICE) {{
     stripRowOnDevice.hidden = false;
-    toggleOnDeviceWrap.hidden = false;
     document.getElementById("strip-row-server").classList.add("is-reference");
     document.getElementById("strip-note-dual").hidden = false;
   }}
+
+  // --- Seed the layer pill UI from persisted state ------------------------
+  // Each pill's aria-pressed reflects `layerVisibility[layer][src]`; iOS
+  // pills are disabled (visually and functionally) when the session has
+  // no on-device data — mono-mode sessions should not show toggles that
+  // can't do anything. Click handler toggles state, persists, repaints.
+  function paintLayerPills() {{
+    const pills = layerToggles.querySelectorAll(".layer-pill");
+    for (const pill of pills) {{
+      const layer = pill.dataset.layer;
+      const src = pill.dataset.src;
+      if (src === "on_device" && !HAS_ON_DEVICE) {{ pill.hidden = true; continue; }}
+      pill.setAttribute("aria-pressed", isLayerVisible(layer, src) ? "true" : "false");
+    }}
+    // Colour the cam-name swatches using the same palette buildDynamic
+    // uses for rays — so the user sees "this toggle == this colour on
+    // screen" without guessing.
+    for (const sw of layerToggles.querySelectorAll(".layer-name .swatch")) {{
+      const cam = sw.dataset.cam;
+      sw.style.background = colorForCamSource(cam, "server");
+    }}
+  }}
+  paintLayerPills();
+  layerToggles.addEventListener("click", (e) => {{
+    const pill = e.target.closest(".layer-pill");
+    if (!pill) return;
+    const layer = pill.dataset.layer;
+    const src = pill.dataset.src;
+    // Prevent the viewer from ending up with every toggle off — render
+    // would be just cameras floating in space, which looks like a bug.
+    // Require at least one pill be pressed at all times by refusing the
+    // final toggle-off.
+    const wouldBeOff = {{ ...layerVisibility[layer] }};
+    wouldBeOff[src] = !wouldBeOff[src];
+    const anyLeft = Object.values(layerVisibility).some(group =>
+      Object.entries(group).some(([k, v]) =>
+        (group === layerVisibility[layer] ? wouldBeOff[k] : v) && (k !== "on_device" || HAS_ON_DEVICE)
+      )
+    );
+    if (!anyLeft) return;  // silently reject — the final pill can't go off
+    layerVisibility[layer][src] = !layerVisibility[layer][src];
+    persistLayerVisibility();
+    paintLayerPills();
+    drawScene();
+  }});
 
   function resizeOneCanvas(canvas) {{
     const cssW = canvas.clientWidth;
@@ -1325,40 +1430,12 @@ def render_viewer_html(
     }}
   }}
 
-  // Source visibility checkboxes drive both the detection strips and
-  // the 3D scene overlays. Strip rows hide entirely when their source
-  // is toggled off so the vertical real estate collapses; 3D trace
-  // visibility is handled inside buildDynamicTraces via `showServer` /
-  // `showOnDevice`. The server strip never hides (mono-mode users would
-  // otherwise lose their only view); we just disable the checkbox.
-  if (!HAS_ON_DEVICE) {{
-    toggleServer.disabled = true;
-  }} else {{
-    toggleServer.addEventListener("change", () => {{
-      showServer = !!toggleServer.checked;
-      // Prevent both sources being off simultaneously — the viewer would
-      // render an empty scene and both strips blank, confusing rather
-      // than informative. Last checkbox toggled-off flips the other on.
-      if (!showServer && !showOnDevice) {{
-        showOnDevice = true; toggleOnDevice.checked = true;
-      }}
-      document.getElementById("strip-row-server").hidden = !showServer;
-      // Re-show path: canvas width resets to 0 while display:none was
-      // active, so re-resize before the next repaint draws into it.
-      requestAnimationFrame(resizeDetectionCanvas);
-      drawScene();
-    }});
-    toggleOnDevice.addEventListener("change", () => {{
-      showOnDevice = !!toggleOnDevice.checked;
-      if (!showServer && !showOnDevice) {{
-        showServer = true; toggleServer.checked = true;
-        document.getElementById("strip-row-server").hidden = false;
-      }}
-      stripRowOnDevice.hidden = !showOnDevice;
-      requestAnimationFrame(resizeDetectionCanvas);
-      drawScene();
-    }});
-  }}
+  // Detection strip rows are pure diagnostic overlays now — they always
+  // reflect whatever data the session carries, regardless of which
+  // scene layers the user has toggled off. If you can't see the 3D
+  // trajectory, the strip is the fastest way to re-answer "did the
+  // detector actually fire?" so hiding it on a layer toggle would be
+  // counterproductive.
 
   window.addEventListener("resize", resizeDetectionCanvas);
 

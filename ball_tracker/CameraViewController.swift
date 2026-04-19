@@ -146,7 +146,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let detectionStateLock = NSLock()
     private var detectionInFlight = false
     private var lastDetectionDispatchTimeS: TimeInterval = 0
-    private static let detectionIntervalS: TimeInterval = 1.0 / 60.0
+    // 0 = no time-based throttle; detectionInFlight serialises the pipeline,
+    // so the effective rate floats to whatever the HSV + MOG2 + shape pipeline
+    // can sustain (~55-80 Hz on A17-class hardware). Capture still runs at
+    // 240 fps so the MOV / anchor clock are unaffected.
+    private static let detectionIntervalS: TimeInterval = 0
     /// BTDetectionSession (MOG2 + shape-gated detection). One per recording
     /// cycle — rebuilt on entry so the background model starts fresh.
     /// Access serialised through `detectionStateLock` (or confined to
