@@ -1751,9 +1751,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // Only the `.recording` state cares about samples.
         guard snap.state == .recording else { return }
 
-        let isModeOne = currentCaptureMode == .cameraOnly
+        // Both camera_only and dual need the MOV recorder — dual bundles
+        // the MOV alongside its on-device frame list. Only on_device skips
+        // ClipRecorder entirely (bandwidth savings, no clip on disk).
+        let needsVideoRecorder = currentCaptureMode != .onDevice
 
-        if isModeOne {
+        if needsVideoRecorder {
             // Lazy-bootstrap the ClipRecorder from the first real sample's
             // dimensions (deferred from enterRecordingMode so we can key
             // off whatever the sensor is actually delivering post-fps-
