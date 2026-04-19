@@ -97,10 +97,11 @@ enum ClipTrimmer {
             log.error("clip trim no video track source=\(source.lastPathComponent, privacy: .public)")
             completion(nil); return
         }
-        guard let formatHint = videoTrack.formatDescriptions.first as? CMFormatDescription else {
+        guard let rawFormatHint = videoTrack.formatDescriptions.first else {
             log.error("clip trim no format description source=\(source.lastPathComponent, privacy: .public)")
             completion(nil); return
         }
+        let formatHint = rawFormatHint as! CMFormatDescription
 
         let reader: AVAssetReader
         do {
