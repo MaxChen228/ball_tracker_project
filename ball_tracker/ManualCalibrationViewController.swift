@@ -147,11 +147,11 @@ final class ManualCalibrationViewController: UIViewController {
             return v
         }
 
-        let fl = makeHandle(color: .systemBlue, text: "FL")
-        let fr = makeHandle(color: .systemGreen, text: "FR")
-        let rs = makeHandle(color: .systemOrange, text: "RS")
-        let bt = makeHandle(color: .systemRed, text: "BT")
-        let ls = makeHandle(color: .systemPurple, text: "LS")
+        let fl = makeHandle(color: DesignTokens.Colors.accent, text: "FL")
+        let fr = makeHandle(color: DesignTokens.Colors.success, text: "FR")
+        let rs = makeHandle(color: DesignTokens.Colors.warning, text: "RS")
+        let bt = makeHandle(color: DesignTokens.Colors.destructive, text: "BT")
+        let ls = makeHandle(color: DesignTokens.Colors.cameraB, text: "LS")
 
         let leftX = w * 0.35
         let rightX = w * 0.65
@@ -180,9 +180,9 @@ final class ManualCalibrationViewController: UIViewController {
         view.layer.addSublayer(reprojectedPolyLayer)
 
         residualLabel.font = DesignTokens.Fonts.sans(size: 16, weight: .semibold)
-        residualLabel.textColor = .white
+        residualLabel.textColor = DesignTokens.Colors.ink
         residualLabel.textAlignment = .center
-        residualLabel.backgroundColor = DesignTokens.Colors.surface
+        residualLabel.backgroundColor = DesignTokens.Colors.hudSurface
         residualLabel.layer.cornerRadius = DesignTokens.CornerRadius.card
         residualLabel.clipsToBounds = true
         residualLabel.numberOfLines = 2
