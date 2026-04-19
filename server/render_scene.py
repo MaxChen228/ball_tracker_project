@@ -2025,6 +2025,12 @@ def _build_figure(scene: Scene):
                 up=dict(x=0, y=0, z=1),
                 center=dict(x=0, y=0.2, z=0.3),
             ),
+            # Stable scene-level uirevision: Plotly preserves user-driven
+            # camera state (orbit/zoom/pan) across Plotly.react calls as
+            # long as this key's value doesn't change. drawScene reruns
+            # on every playback tick — without this the camera snaps back
+            # to the default eye above every frame.
+            uirevision="viewer-scene",
         ),
         margin=dict(l=0, r=0, t=36, b=0),
         legend=dict(
