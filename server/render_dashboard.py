@@ -34,6 +34,7 @@ _CSS = f"""
 :root {{
   --bg: {_BG};
   --surface: {_SURFACE};
+  --surface-hover: #F3F0EA;
   --border-base: {_BORDER_BASE};
   --border-l: {_BORDER_L};
   --ink: {_INK};
@@ -43,10 +44,20 @@ _CSS = f"""
   --contra: {_CONTRA};
   --dual: {_DUAL};
   --accent: {_ACCENT};
+  /* Semantic state washes — mirror kg admin's badge palette so chips
+     read as subdued backgrounds rather than saturated pills. */
+  --passed:      #256246; --passed-bg:  rgba(37,98,70,.08);
+  --warn:        #9B6B16; --warn-bg:    rgba(155,107,22,.08);
+  --failed:      #A7372A; --failed-bg:  rgba(167,55,42,.08);
+  --idle-bg:     rgba(105,114,125,.06);
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: "Noto Sans TC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --nav-h: 52px;
   --sidebar-w: 440px;
+  /* Unified 8px-grid spacing + single border-radius. Use var(--r)
+     everywhere; the old 4/12/2 mix collapses to one rhythm. */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px; --s-5: 24px;
+  --r: 3px;
 }}
 
 * {{ box-sizing: border-box; }}
@@ -69,16 +80,15 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .nav .status-line .pair {{ display: flex; gap: 6px; align-items: center; }}
 .nav .status-line .label {{ color: var(--sub); }}
 .nav .status-line .val {{ color: var(--ink); font-weight: 500; }}
-.nav .status-line .val.armed {{ color: var(--contra); }}
+.nav .status-line .val.armed {{ color: var(--passed); }}
 .nav .status-line .val.idle {{ color: var(--sub); }}
 
 /* --- Main layout: sidebar + canvas --- */
 .layout {{ display: flex; height: 100vh; padding-top: var(--nav-h); }}
 .sidebar {{ width: var(--sidebar-w); flex-shrink: 0; overflow-y: auto;
             background: var(--surface); border-right: 1px solid var(--border-base);
-            box-shadow: 4px 0 24px rgba(0,0,0,0.03);
-            padding: 32px 24px; z-index: 10;
-            display: flex; flex-direction: column; gap: 24px; }}
+            padding: var(--s-5) var(--s-4); z-index: 10;
+            display: flex; flex-direction: column; gap: var(--s-3); }}
 .canvas {{ flex: 1; position: relative; overflow: hidden;
            background: var(--bg); }}
 #scene-root {{ position: absolute; inset: 0; }}
@@ -91,76 +101,79 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 
 /* --- Card --- */
 .card {{ background: var(--surface); border: 1px solid var(--border-base);
-         border-radius: 4px; padding: 20px; }}
+         border-radius: var(--r); padding: var(--s-4); }}
 .card + .card {{ margin-top: 0; }}
-.card-title {{ font-family: var(--mono); font-weight: 500; font-size: 12px;
-               letter-spacing: 0.08em; text-transform: uppercase; color: var(--sub);
-               margin: 0 0 14px 0; padding: 0; }}
+.card-title {{ font-family: var(--mono); font-weight: 500; font-size: 11px;
+               letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub);
+               margin: 0 0 var(--s-3) 0; padding: 0 0 var(--s-2) 0;
+               border-bottom: 1px solid var(--border-l); }}
 .card-subtitle {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
                   text-transform: uppercase; color: var(--sub);
-                  margin-top: 14px; margin-bottom: 6px; }}
-.card section + section {{ border-top: 1px solid var(--border-l); margin-top: 14px;
-                           padding-top: 14px; }}
+                  margin-top: var(--s-3); margin-bottom: var(--s-1); }}
+.card section + section {{ border-top: 1px solid var(--border-l); margin-top: var(--s-3);
+                           padding-top: var(--s-3); }}
 
 /* --- Device rows --- */
-.device {{ display: grid; grid-template-columns: 36px 1fr auto; align-items: center;
-           gap: 12px; padding: 10px 0; }}
+.device {{ display: grid; grid-template-columns: 28px 1fr auto; align-items: center;
+           gap: var(--s-3); padding: var(--s-2) 0; }}
 .device + .device {{ border-top: 1px solid var(--border-l); }}
-.device .id {{ font-family: var(--mono); font-size: 16px; font-weight: 500; color: var(--ink);
+.device .id {{ font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--ink);
                letter-spacing: 0.04em; }}
-.device .meta {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+.device .meta {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
                  text-transform: uppercase; color: var(--sub); }}
 .device .meta em {{ font-style: normal; color: var(--ink-light); }}
-.device .sub {{ display: flex; gap: 14px; margin-top: 4px; }}
-.device .sub .item {{ font-family: var(--mono); font-size: 9px; letter-spacing: 0.16em;
+.device .sub {{ display: flex; gap: var(--s-3); margin-top: var(--s-1); }}
+.device .sub .item {{ font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em;
                       text-transform: uppercase; color: var(--sub);
-                      display: flex; align-items: center; gap: 5px; }}
+                      display: flex; align-items: center; gap: var(--s-1); }}
 .device .sub .dot {{ width: 6px; height: 6px; border-radius: 50%;
                      background: var(--border-base); display: inline-block; }}
-.device .sub .dot.ok {{ background: var(--contra); }}
-.device .sub .dot.warn {{ background: var(--dual); }}
-.device .sub .dot.bad {{ background: var(--dev); }}
+.device .sub .dot.ok {{ background: var(--passed); }}
+.device .sub .dot.warn {{ background: var(--warn); }}
+.device .sub .dot.bad {{ background: var(--failed); }}
 
-/* --- Chip (pill) --- */
-.chip {{ display: inline-block; padding: 4px 12px; border-radius: 12px;
+/* --- Chip (pill) — kg-admin badge style: flat, rectangular, subdued bg wash.
+   Single rectangle geometry with three semantic variants (passed/warn/failed)
+   replacing the former 10+ custom colors. */
+.chip {{ display: inline-block; padding: 2px 8px; border-radius: var(--r);
          font-family: var(--mono); font-size: 10px; font-weight: 500;
-         letter-spacing: 0.16em; text-transform: uppercase;
+         letter-spacing: 0.10em; text-transform: uppercase;
          border: 1px solid var(--border-base); color: var(--sub); background: transparent;
-         transition: all 0.2s ease; }}
-.chip.online {{ border-color: var(--contra); color: var(--contra); }}
-.chip.calibrated {{ background: var(--contra); border-color: var(--contra); color: var(--surface); }}
-.chip.armed {{ background: var(--contra); border-color: var(--contra); color: var(--surface); }}
-.chip.idle {{ color: var(--sub); border-color: var(--border-base); }}
-.chip.paired {{ background: var(--contra); border-color: var(--contra); color: var(--surface); }}
-.chip.partial {{ color: var(--sub); border-color: var(--border-base); }}
-.chip.paired_no_points {{ background: var(--dual); border-color: var(--dual); color: var(--surface); }}
-.chip.error {{ background: var(--dev); border-color: var(--dev); color: var(--surface); }}
-.chip.dual {{ color: var(--dual); border-color: var(--dual); }}
-.chip.single {{ color: var(--sub); border-color: var(--border-base); }}
-/* Capture-mode chips on event rows. camera-only shares the sub-palette
-   (it's the existing path); on-device stands out so operators can spot
-   mode-two sessions at a glance. */
-.chip.camera-only {{ color: var(--sub); border-color: var(--border-base); }}
-.chip.on-device {{ color: var(--contra); border-color: var(--contra); }}
+         transition: border-color 0.15s ease, color 0.15s ease; }}
+/* Green wash — online / calibrated / armed / paired successes */
+.chip.online, .chip.calibrated, .chip.armed, .chip.paired
+  {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
+/* Amber wash — degraded / partial / paired-no-points / on-device accent */
+.chip.partial, .chip.paired_no_points, .chip.on-device
+  {{ color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }}
+/* Red wash — explicit errors */
+.chip.error {{ color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }}
+/* Neutral (grey) — idle / single / camera-only default */
+.chip.idle, .chip.single, .chip.camera-only
+  {{ color: var(--sub); border-color: var(--border-base); background: transparent; }}
+/* Cam-identity dual chip — retains the B-camera orange tint so per-cam
+   rows still read as paired vs single at a glance. */
+.chip.dual {{ color: var(--dual); border-color: var(--dual); background: rgba(211,84,0,0.06); }}
 
 /* --- Session block --- */
-.session-head {{ display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }}
-.session-id {{ font-family: var(--mono); font-size: 14px; color: var(--ink);
+.session-head {{ display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-2); }}
+.session-id {{ font-family: var(--mono); font-size: 13px; color: var(--ink);
                letter-spacing: 0.04em; }}
-.session-actions {{ display: flex; gap: 8px; margin-top: 14px; }}
-.mode-row {{ display: flex; gap: 8px; align-items: center; margin-top: 14px;
+.session-actions {{ display: flex; gap: var(--s-2); margin-top: var(--s-3); }}
+.mode-row {{ display: flex; gap: var(--s-2); align-items: center; margin-top: var(--s-3);
              flex-wrap: wrap; }}
-.mode-label {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
-                text-transform: uppercase; color: var(--sub); min-width: 48px; }}
+.mode-label {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+                text-transform: uppercase; color: var(--sub); min-width: 44px; }}
 .mode-locked {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
-                 color: var(--sub); padding-left: 4px; }}
+                 color: var(--sub); padding-left: var(--s-1); }}
 
-/* --- Buttons --- */
+/* --- Buttons — unified geometry, single border-radius. Standard is
+   36px tall, mini variant (used in event delete) is 24px. --- */
 button.btn {{ font-family: var(--mono); font-size: 11px; font-weight: 500;
               letter-spacing: 0.08em; text-transform: uppercase;
-              padding: 10px 16px; border-radius: 2px; cursor: pointer;
+              padding: 8px 14px; border-radius: var(--r); cursor: pointer;
               background: var(--ink); color: var(--surface);
-              border: 1px solid var(--ink); transition: all 0.2s ease; }}
+              border: 1px solid var(--ink); transition: border-color 0.15s, background 0.15s, color 0.15s; }}
 button.btn:hover:not(:disabled) {{ background: var(--ink-light); }}
 button.btn.secondary {{ background: transparent; color: var(--ink);
                         border-color: var(--border-base); }}
@@ -171,37 +184,41 @@ button.btn.danger:hover:not(:disabled) {{ background: var(--dev); color: var(--s
 button.btn:disabled {{ opacity: 0.35; cursor: not-allowed; }}
 form.inline {{ display: inline-block; margin: 0; }}
 
-/* --- Events list --- */
-.events-empty {{ color: var(--sub); font-size: 13px; padding: 12px 0; font-style: italic; }}
+/* --- Events list — dense, hover-highlighted rows inspired by kg admin
+   tables. Row-level hover wash replaces the former negative-margin hack. */
+.events-empty {{ color: var(--sub); font-size: 12px; padding: var(--s-3) 0;
+                 font-style: italic; font-family: var(--mono); }}
 .event-item {{ display: flex; align-items: flex-start;
-               border-top: 1px solid var(--border-l); }}
+               border-top: 1px solid var(--border-l);
+               transition: background 0.12s ease; }}
 .event-item:first-child {{ border-top: 0; }}
-.event-item:hover {{ background: var(--bg); margin: 0 -8px; padding: 0 8px; }}
+.event-item:hover {{ background: var(--surface-hover); }}
 .event-row {{ flex: 1; min-width: 0; display: block; text-decoration: none;
-              color: inherit; padding: 12px 0; }}
-.event-top {{ display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+              color: inherit; padding: var(--s-2) var(--s-2); }}
+.event-top {{ display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-1);
               flex-wrap: wrap; }}
-.event-top .sid {{ font-family: var(--mono); font-size: 13px; color: var(--ink);
-                   letter-spacing: 0.04em; }}
-.event-stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 14px;
+.event-top .sid {{ font-family: var(--mono); font-size: 12px; font-weight: 500;
+                   color: var(--ink); letter-spacing: 0.04em; margin-right: var(--s-1); }}
+.event-stats {{ display: grid; grid-template-columns: repeat(3, 1fr);
+                gap: var(--s-1) var(--s-3);
                 font-family: var(--mono); font-size: 11px; color: var(--ink-light); }}
-.event-stats .k {{ color: var(--sub); letter-spacing: 0.08em; text-transform: uppercase;
-                   font-size: 9px; display: block; }}
+.event-stats .k {{ color: var(--sub); letter-spacing: 0.10em; text-transform: uppercase;
+                   font-size: 9px; display: block; margin-bottom: 1px; }}
 .event-stats .v {{ font-variant-numeric: tabular-nums; color: var(--ink); }}
-.event-delete-form {{ flex: 0 0 auto; margin: 10px 4px 0 8px; }}
+.event-delete-form {{ flex: 0 0 auto; margin: var(--s-2) var(--s-1) 0 0; }}
 .event-delete {{ background: transparent; border: 1px solid var(--border-base);
                  color: var(--sub); font-family: var(--mono); font-size: 13px;
-                 line-height: 1; padding: 2px 8px 3px; border-radius: 2px;
-                 cursor: pointer; transition: all 0.15s ease; }}
+                 line-height: 1; padding: 2px 8px 3px; border-radius: var(--r);
+                 cursor: pointer; transition: border-color 0.15s, color 0.15s, background 0.15s; }}
 .event-delete:hover {{ border-color: var(--dev); color: var(--dev);
                        background: var(--surface); }}
 
 /* --- Canvas overlay hint --- */
-.canvas-hint {{ position: absolute; left: 20px; top: 20px; z-index: 5;
-                font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+.canvas-hint {{ position: absolute; left: var(--s-4); top: var(--s-4); z-index: 5;
+                font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
                 text-transform: uppercase; color: var(--sub);
                 background: var(--surface); border: 1px solid var(--border-l);
-                padding: 6px 10px; pointer-events: none; }}
+                border-radius: var(--r); padding: var(--s-1) var(--s-2); pointer-events: none; }}
 """
 
 

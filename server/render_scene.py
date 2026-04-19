@@ -203,12 +203,17 @@ def render_viewer_html(
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
   :root {{
-    --bg: {_BG}; --surface: {_SURFACE}; --ink: {_INK}; --sub: {_SUB};
+    --bg: {_BG}; --surface: {_SURFACE}; --surface-hover: #F3F0EA;
+    --ink: {_INK}; --sub: {_SUB};
     --border-base: {_BORDER_BASE}; --border-l: {_BORDER_L};
     --contra: {_CONTRA}; --dual: {_DUAL}; --dev: {_DEV}; --accent: {_ACCENT};
     --ok: {_OK}; --pending: {_PENDING};
     --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     --sans: "Noto Sans TC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    /* Shared 8px spacing scale + single border radius — mirrors
+       render_dashboard.py so both pages share one rhythm. */
+    --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px;
+    --r: 3px;
   }}
   * {{ box-sizing: border-box; }}
   html, body {{ margin:0; padding:0; height:100%; background:var(--bg);
@@ -219,11 +224,11 @@ def render_viewer_html(
   /* --- Header (52px brand bar) --- */
   .nav {{ height:52px; flex:0 0 52px; background:var(--surface);
     border-bottom:1px solid var(--border-base); display:flex;
-    align-items:center; padding:0 24px; gap:20px; }}
+    align-items:center; padding:0 var(--s-5); gap:var(--s-4); }}
   .nav .brand {{ font-family:var(--mono); font-weight:700; font-size:14px;
     letter-spacing:0.16em; color:var(--ink); }}
   .nav .brand .dot {{ display:inline-block; width:7px; height:7px;
-    background:var(--ink); margin-right:10px; vertical-align:middle; }}
+    background:var(--ink); margin-right:var(--s-2); vertical-align:middle; }}
   .nav .back {{ margin-left:auto; font-family:var(--mono); font-size:11px;
     letter-spacing:0.12em; text-transform:uppercase; color:var(--sub);
     text-decoration:none; }}
@@ -234,41 +239,43 @@ def render_viewer_html(
      the right so two compact rows take vertical space proportional to
      the hero's bigness without ever cropping the digit. */
   .health {{ flex:0 0 auto; background:var(--surface);
-    border-bottom:1px solid var(--border-base); padding:18px 24px;
-    display:flex; flex-direction:column; gap:12px; }}
+    border-bottom:1px solid var(--border-base);
+    padding:var(--s-4) var(--s-5);
+    display:flex; flex-direction:column; gap:var(--s-3); }}
   .health-row {{ display:grid; grid-template-columns:1fr 1fr;
-    gap:16px; align-items:stretch; }}
-  .cam-stack {{ display:flex; flex-direction:column; gap:8px; }}
+    gap:var(--s-4); align-items:stretch; }}
+  .cam-stack {{ display:flex; flex-direction:column; gap:var(--s-2); }}
 
-  /* Hero card — the single biggest piece of information on the page. */
-  .hero-card {{ border:1px solid var(--border-base); border-radius:4px;
-    padding:16px 20px; background:var(--bg); display:flex;
-    flex-direction:column; justify-content:center; gap:6px; }}
+  /* Hero card — single biggest KPI on the page. 40px digit keeps it
+     authoritative without dwarfing the cam-cards beside it. */
+  .hero-card {{ border:1px solid var(--border-base); border-radius:var(--r);
+    padding:var(--s-3) var(--s-4); background:var(--bg); display:flex;
+    flex-direction:column; justify-content:center; gap:var(--s-1); }}
   .hero-card.ok {{ background:var(--surface); border-color:var(--accent); }}
   .hero-title {{ font-family:var(--mono); font-size:10px;
-    letter-spacing:0.18em; text-transform:uppercase; color:var(--sub); }}
-  .hero-tri {{ font-family:var(--mono); font-size:56px; font-weight:500;
-    line-height:1; color:var(--accent); letter-spacing:0.01em; }}
+    letter-spacing:0.12em; text-transform:uppercase; color:var(--sub); }}
+  .hero-tri {{ font-family:var(--mono); font-size:40px; font-weight:500;
+    line-height:1; color:var(--accent); letter-spacing:0.02em; }}
   .hero-tri.zero {{ color:var(--sub); }}
   .hero-note {{ font-family:var(--mono); font-size:11px;
     letter-spacing:0.04em; color:var(--sub); }}
   .hero-sub {{ font-family:var(--mono); font-size:11px;
-    letter-spacing:0.04em; color:var(--sub); margin-top:6px;
-    border-top:1px solid var(--border-l); padding-top:8px; }}
+    letter-spacing:0.04em; color:var(--sub); margin-top:var(--s-1);
+    border-top:1px solid var(--border-l); padding-top:var(--s-2); }}
 
   /* Compact per-camera row. `received` and `missing` share the
      `.cam-card` wrapper but missing is a single-line collapsed row. */
-  .cam-card {{ border:1px solid var(--border-base); border-radius:4px;
-    padding:10px 14px; background:var(--bg);
-    display:flex; flex-direction:column; gap:6px; }}
+  .cam-card {{ border:1px solid var(--border-base); border-radius:var(--r);
+    padding:var(--s-2) var(--s-3); background:var(--bg);
+    display:flex; flex-direction:column; gap:var(--s-1); }}
   .cam-card.received {{ background:var(--surface); }}
   .cam-card.missing {{ opacity:0.85; flex-direction:row;
     align-items:center; gap:10px; }}
   .cam-head {{ display:flex; align-items:center; gap:10px;
     flex-wrap:wrap; }}
   .cam-badge {{ font-family:var(--mono); font-weight:600; font-size:11px;
-    letter-spacing:0.18em; padding:3px 10px; border:1px solid;
-    border-radius:2px; }}
+    letter-spacing:0.18em; padding:2px 8px; border:1px solid;
+    border-radius:var(--r); }}
   .cam-badge.A {{ color:var(--contra); border-color:var(--contra); }}
   .cam-badge.B {{ color:var(--dual); border-color:var(--dual); }}
   .cam-state {{ font-family:var(--mono); font-size:11px;
@@ -296,8 +303,8 @@ def render_viewer_html(
   /* Detection-rate progress bar — purely decorative, the number to the
      right is still the source of truth, but the bar gives a 1-glance
      answer to "how much of the recording had a ball?". */
-  .rate-bar {{ flex:1 1 auto; min-width:60px; height:3px;
-    background:var(--border-l); border-radius:2px; overflow:hidden;
+  .rate-bar {{ flex:1 1 auto; min-width:60px; height:4px;
+    background:var(--border-l); border-radius:var(--r); overflow:hidden;
     display:inline-block; }}
   .rate-fill {{ display:block; height:100%; transition:width .3s; }}
   .rate-fill.ok {{ background:var(--ok); }}
@@ -307,10 +314,10 @@ def render_viewer_html(
     color:var(--sub); flex:1; }}
 
   .fail-strip {{ font-family:var(--mono); font-size:12px;
-    letter-spacing:0.02em; padding:8px 12px; border-radius:2px;
+    letter-spacing:0.02em; padding:var(--s-2) var(--s-3); border-radius:var(--r);
     border:1px solid var(--dev); color:var(--dev);
     background:rgba(192, 57, 43, 0.06); display:flex;
-    align-items:center; gap:10px; }}
+    align-items:center; gap:var(--s-2); }}
   .fail-strip .icon {{ font-weight:700; }}
 
   /* --- Main work area ---
@@ -328,37 +335,37 @@ def render_viewer_html(
   .work[data-mode="single-cam"] .scene-col {{ flex:7 1 0; }}
   .work[data-mode="single-cam"] .videos-col {{ flex:3 1 0;
     min-width:240px; }}
-  .vid-cell {{ flex:1 1 0; background:var(--surface); padding:10px 14px;
-    display:flex; flex-direction:column; gap:6px; min-height:0; }}
-  .vid-cell.collapsed {{ flex:0 0 auto; padding:8px 14px;
-    flex-direction:row; align-items:center; gap:10px; }}
-  .vid-head {{ display:flex; align-items:center; gap:10px; }}
+  .vid-cell {{ flex:1 1 0; background:var(--surface); padding:var(--s-2) var(--s-3);
+    display:flex; flex-direction:column; gap:var(--s-1); min-height:0; }}
+  .vid-cell.collapsed {{ flex:0 0 auto; padding:var(--s-2) var(--s-3);
+    flex-direction:row; align-items:center; gap:var(--s-2); }}
+  .vid-head {{ display:flex; align-items:center; gap:var(--s-2); }}
   .vid-label {{ font-family:var(--mono); font-size:10px; font-weight:600;
     letter-spacing:0.18em; border:1px solid; padding:2px 8px;
-    border-radius:2px; }}
+    border-radius:var(--r); }}
   .vid-hint {{ font-family:var(--mono); font-size:10px;
     letter-spacing:0.06em; color:var(--sub); text-transform:uppercase; }}
   .vid-frame {{ flex:1 1 auto; min-height:0; display:flex;
     align-items:center; justify-content:center; background:#000;
-    border-radius:2px; overflow:hidden; }}
+    border-radius:var(--r); overflow:hidden; }}
   .vid-frame video {{ width:100%; height:100%; object-fit:contain;
     display:block; }}
   .vid-frame.empty {{ background:var(--bg); border:1px dashed var(--border-base);
     color:var(--sub); font-family:var(--mono); font-size:11px;
-    letter-spacing:0.12em; text-transform:uppercase; }}
+    letter-spacing:0.12em; text-transform:uppercase; border-radius:var(--r); }}
 
   /* --- Timeline footer (two rows) --- */
   .timeline {{ flex:0 0 auto; background:var(--surface);
-    display:flex; flex-direction:column; gap:8px;
-    padding:10px 24px 12px; font-family:var(--mono); font-size:12px;
-    color:var(--sub); }}
-  .tl-row {{ display:flex; align-items:center; gap:12px; }}
+    display:flex; flex-direction:column; gap:var(--s-2);
+    padding:var(--s-2) var(--s-5) var(--s-3);
+    font-family:var(--mono); font-size:12px; color:var(--sub); }}
+  .tl-row {{ display:flex; align-items:center; gap:var(--s-3); }}
   .scrubber-wrap {{ flex:1 1 auto; display:flex; flex-direction:column;
     gap:3px; min-width:0; }}
   .scrubber-wrap input[type=range] {{ width:100%; accent-color:var(--ink);
     height:18px; margin:0; }}
   .scrubber-wrap canvas {{ display:block; width:100%; height:18px;
-    border:1px solid var(--border-base); border-radius:2px;
+    border:1px solid var(--border-base); border-radius:var(--r);
     background:var(--bg); image-rendering:pixelated; }}
   .strip-row {{ display:flex; align-items:center; gap:6px; }}
   .strip-row .strip-label {{ font-family:var(--mono); font-size:9px;
@@ -392,15 +399,15 @@ def render_viewer_html(
   #frame-input {{ width:60px; font:inherit; font-size:11px;
     background:var(--bg); border:1px solid var(--border-base);
     color:var(--ink); padding:1px 4px; text-align:center;
-    font-variant-numeric:tabular-nums; border-radius:2px; }}
+    font-variant-numeric:tabular-nums; border-radius:var(--r); }}
   #frame-input:focus {{ outline:none; border-color:var(--ink); }}
   #frame-input::-webkit-inner-spin-button,
   #frame-input::-webkit-outer-spin-button {{ opacity:0.4; }}
   .timeline button {{ padding:5px 12px; font:inherit; font-size:11px;
-    letter-spacing:0.1em; text-transform:uppercase;
+    letter-spacing:0.08em; text-transform:uppercase;
     border:1px solid var(--border-base); background:var(--bg);
-    color:var(--ink); border-radius:2px; cursor:pointer;
-    min-width:42px; }}
+    color:var(--ink); border-radius:var(--r); cursor:pointer;
+    min-width:42px; transition:border-color 0.15s, background 0.15s, color 0.15s; }}
   .timeline button:hover {{ border-color:var(--ink); }}
   .timeline button:disabled {{ opacity:0.4; cursor:not-allowed; }}
   .timeline .transport {{ display:inline-flex; gap:4px; }}
@@ -408,7 +415,7 @@ def render_viewer_html(
     font-size:13px; letter-spacing:0; }}
   .timeline .play-btn {{ min-width:70px; font-weight:500; }}
   .speed-group {{ display:inline-flex; border:1px solid var(--border-base);
-    border-radius:2px; overflow:hidden; }}
+    border-radius:var(--r); overflow:hidden; }}
   .speed-group button {{ border:none; background:transparent;
     color:var(--sub); padding:5px 10px; min-width:auto; border-radius:0;
     border-right:1px solid var(--border-base); }}
@@ -418,9 +425,9 @@ def render_viewer_html(
   /* Scene toolbar floats over the 3D scene. Groups the reset button and
      the trace-cutoff mode toggle in a single bordered bar so they read
      as one control surface instead of two separate floating chips. */
-  .scene-col .scene-toolbar {{ position:absolute; top:10px; right:10px;
+  .scene-col .scene-toolbar {{ position:absolute; top:var(--s-2); right:var(--s-2);
     z-index:5; display:inline-flex; align-items:stretch;
-    border:1px solid var(--border-base); border-radius:2px;
+    border:1px solid var(--border-base); border-radius:var(--r);
     overflow:hidden; background:var(--surface); }}
   .scene-col .scene-toolbar button {{ padding:5px 12px; border:none;
     background:transparent; color:var(--sub); cursor:pointer;
@@ -435,15 +442,15 @@ def render_viewer_html(
     background:var(--border-base); align-self:stretch; }}
   .hint-btn {{ font:inherit; font-size:11px; padding:3px 9px;
     border:1px solid var(--border-base); background:var(--bg);
-    color:var(--sub); border-radius:2px; cursor:pointer;
+    color:var(--sub); border-radius:var(--r); cursor:pointer;
     margin-left:auto; min-width:auto; font-weight:600;
     letter-spacing:0.04em; }}
   .hint-btn:hover, .hint-btn.open {{ color:var(--ink);
     border-color:var(--ink); }}
-  .hint-overlay {{ position:absolute; bottom:60px; right:24px;
+  .hint-overlay {{ position:absolute; bottom:60px; right:var(--s-5);
     background:var(--surface); border:1px solid var(--border-base);
-    padding:14px 18px; font:inherit; font-size:11px;
-    color:var(--ink); display:none; z-index:10; border-radius:2px;
+    padding:var(--s-3) var(--s-4); font:inherit; font-size:11px;
+    color:var(--ink); display:none; z-index:10; border-radius:var(--r);
     min-width:240px; }}
   .hint-overlay.open {{ display:block; }}
   .hint-overlay h4 {{ margin:0 0 8px; font-family:var(--mono);
