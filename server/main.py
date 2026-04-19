@@ -1244,7 +1244,14 @@ def results_for_session(session_id: str) -> SessionResult:
 
 def _scene_for_session(session_id: str):
     """Shared fetch+build for the two scene endpoints. Raises 404 when no
-    pitches have been received for this session yet."""
+    pitches have been received for this session yet.
+
+    Rescales intrinsics/homography into each pitch's MOV pixel grid the
+    same way `_triangulate_pair` does, so the virtual-camera canvas in
+    the viewer reprojects using the grid the rays were triangulated in —
+    otherwise reprojection overlay drifts by the calibration/MOV ratio
+    whenever the two differ (e.g. calibration @ 1080p, MOV @ 720p).
+    """
     # Local imports so the FastAPI app still boots when plotly is missing
     # (the JSON endpoint doesn't need it; the HTML one will surface a 500).
     from reconstruct import build_scene
@@ -1252,11 +1259,20 @@ def _scene_for_session(session_id: str):
     pitches = state.pitches_for_session(session_id)
     if not pitches:
         raise HTTPException(404, f"session {session_id} has no pitches")
+    calibrations = state.calibrations()
+    scaled_pitches = {
+        cam: scale_pitch_to_video_dims(
+            pitch,
+            (calibrations[cam].image_width_px, calibrations[cam].image_height_px)
+            if cam in calibrations else None,
+        )
+        for cam, pitch in pitches.items()
+    }
     result = state.get(session_id)
     triangulated = result.points if result is not None else []
     triangulated_on_device = result.points_on_device if result is not None else []
     return build_scene(
-        session_id, pitches, triangulated,
+        session_id, scaled_pitches, triangulated,
         triangulated_on_device=triangulated_on_device,
     )
 

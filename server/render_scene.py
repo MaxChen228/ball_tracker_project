@@ -181,13 +181,19 @@ def render_viewer_html(
         )
         for cam in ("A", "B")
     )
-    # Bottom row of the 2×2 grid: one virtual Plotly scene per camera,
-    # rendered from that camera's recovered pose. JS hydrates the empty
-    # `<div>` into a Plotly scene after page load; the Python side only
-    # emits the scaffolding.
-    cams_with_pose = {c.camera_id for c in scene.cameras}
+    # Bottom row of the 2×2 grid: one 2D reprojection canvas per camera,
+    # rendered from that camera's full K + [R|t] + distortion model.
+    # JS hydrates the canvas after page load.
+    cams_by_id = {c.camera_id: c for c in scene.cameras}
     virt_cells = "".join(
-        _virtual_cell_html(cam, pose_available=(cam in cams_with_pose))
+        _virtual_cell_html(
+            cam,
+            pose_available=(cam in cams_by_id),
+            image_width_px=(cams_by_id[cam].image_width_px
+                            if cam in cams_by_id else None),
+            image_height_px=(cams_by_id[cam].image_height_px
+                             if cam in cams_by_id else None),
+        )
         for cam in ("A", "B")
     )
 
@@ -358,18 +364,20 @@ def render_viewer_html(
   .virt-cell {{ background:var(--surface); padding:var(--s-2) var(--s-3);
     display:flex; flex-direction:column; gap:var(--s-1); min-height:0;
     min-width:0; position:relative; }}
-  /* 16:9 matches the iPhone main cam's 1080p landscape frame, so the
-     virtual cell has the same visible shape as the real MOV cell above.
-     min-height:0 + flex:1 keeps the cell filling the grid row's height
-     first; aspect-ratio is a width cap applied inside that height. */
-  .virt-frame {{ flex:1 1 auto; min-height:0; aspect-ratio:16/9;
-    width:100%; align-self:center; background:var(--bg);
-    border:1px solid var(--border-l); border-radius:var(--r);
-    overflow:hidden; cursor:default; }}
+  /* Aspect ratio is driven by each camera's actual image dims (inline
+     style on the div), so a 4:3 capture stays 4:3 and 16:9 stays 16:9.
+     min-height:0 + flex:1 keeps the cell filling the grid row height;
+     width:100% + max-width:100% lets aspect-ratio shrink the cell when
+     the row is too short to fit a full-width frame. */
+  .virt-frame {{ flex:1 1 auto; min-height:0; width:100%; max-width:100%;
+    align-self:center; background:#1A1714;
+    border:1px solid var(--border-base); border-radius:var(--r);
+    overflow:hidden; cursor:default; position:relative; }}
+  .virt-frame canvas {{ display:block; width:100%; height:100%; }}
   .virt-frame.empty {{ display:flex; align-items:center;
     justify-content:center; color:var(--sub); font-family:var(--mono);
     font-size:11px; letter-spacing:0.12em; text-transform:uppercase;
-    border-style:dashed; }}
+    border-style:dashed; background:var(--bg); }}
   /* VIRT badge uses a neutral sub-tone (no cam color) so it reads as
      "synthetic" at a glance and doesn't compete with REAL cam-tinted
      labels above. */
@@ -996,140 +1004,205 @@ def render_viewer_html(
     return out;
   }}
 
-  // --- Virtual camera views (bottom row of the 2×2 videos-col grid) ----
-  // Each iPhone with a recovered pose gets its own Plotly 3D scene with
-  // `scene.camera` locked to that camera's eye/forward/up in world frame.
-  // Traces are shared with the main scene; only the layout differs.
-  // Rays are filtered out because the ray from a camera to the ball
-  // projects onto a single line through the centre of that camera's
-  // virtual view — it adds no information, only clutter.
+  // --- Virtual camera canvases (bottom row of the 2×2 videos-col grid)
+  //
+  // Each iPhone with a recovered pose gets its own 2D <canvas> that
+  // draws the scene's 3D content (plate pentagon, triangulated
+  // trajectory) reprojected through this camera's full projection
+  // model: world → camera via R_wc + t_wc, pinhole divide, 5-coef
+  // Brown-Conrady distortion, K to get pixel coords.
+  //
+  // Why not Plotly 3D: Plotly's 3D camera is a fixed-FOV ideal pinhole
+  // with no distortion model, and rendering a 3D scene from inside the
+  // camera's pose still includes the camera's own geometry in frame
+  // (you see yourself). Proper reprojection solves all three — the
+  // camera cannot appear in its own image, FOV is driven by fx/fy,
+  // and distortion is honoured.
 
-  // IMPORTANT — Plotly's scene.camera is NOT in world coordinates. For
-  // aspectmode="data" the scene normalises each axis independently so
-  // the longest data span maps to [-1, 1] and the other axes sit
-  // proportionally inside. Feeding raw world coords produces a far-off
-  // third-person view. Compute the normalisation explicitly: find the
-  // scene bbox, take the longest span as d_max, then
-  //   scene[i] = (world[i] - center[i]) * 2 / d_max
-  // for positions; directions drop the offset. This lands the virtual
-  // eye AT the iPhone's physical location, looking along its optical
-  // axis — a real first-person view.
-  function computeSceneBounds() {{
-    const pts = [];
-    for (const c of (SCENE.cameras || [])) pts.push(c.center_world);
-    for (const p of (SCENE.triangulated || []))           pts.push([p.x, p.y, p.z]);
-    for (const p of (SCENE.triangulated_on_device || [])) pts.push([p.x, p.y, p.z]);
-    // Ground + plate baseline so an empty / single-cam session still
-    // has a stable bbox (otherwise d_max collapses when only one
-    // camera point exists).
-    pts.push([-1.5, -1.5, 0], [1.5, 1.5, 0], [0, 0.432, 0]);
-    const mins = [Infinity, Infinity, Infinity];
-    const maxs = [-Infinity, -Infinity, -Infinity];
-    for (const p of pts) {{
-      for (let i = 0; i < 3; i++) {{
-        if (p[i] < mins[i]) mins[i] = p[i];
-        if (p[i] > maxs[i]) maxs[i] = p[i];
+  // Home-plate pentagon in world coords. Matches reconstruct.py
+  // _PLATE_X/_PLATE_Y so the dashed outline lands where the operator
+  // taped the ChArUco board.
+  const PLATE_WORLD = [
+    [-0.216, 0.0,   0.0],
+    [ 0.216, 0.0,   0.0],
+    [ 0.216, 0.216, 0.0],
+    [ 0.0,   0.432, 0.0],
+    [-0.216, 0.216, 0.0],
+  ];
+
+  function projectWorldToPixel(P, cam) {{
+    // P_cam = R_wc * P + t_wc  (R_wc is row-major 3x3)
+    const R = cam.R_wc, t = cam.t_wc;
+    if (!R || !t) return null;
+    const Xc = R[0]*P[0] + R[1]*P[1] + R[2]*P[2] + t[0];
+    const Yc = R[3]*P[0] + R[4]*P[1] + R[5]*P[2] + t[1];
+    const Zc = R[6]*P[0] + R[7]*P[1] + R[8]*P[2] + t[2];
+    // Behind-camera / at-the-plane: drop. 1cm floor avoids numerical
+    // blow-up right at the optical centre.
+    if (Zc <= 0.01) return null;
+    const xn = Xc / Zc, yn = Yc / Zc;
+    const d = cam.distortion || [0, 0, 0, 0, 0];
+    const [k1, k2, p1, p2, k3] = d;
+    const r2 = xn*xn + yn*yn;
+    const r4 = r2*r2;
+    const r6 = r4*r2;
+    const radial = 1 + k1*r2 + k2*r4 + k3*r6;
+    const xd = xn*radial + 2*p1*xn*yn + p2*(r2 + 2*xn*xn);
+    const yd = yn*radial + p1*(r2 + 2*yn*yn) + 2*p2*xn*yn;
+    const u = cam.fx * xd + cam.cx;
+    const v = cam.fy * yd + cam.cy;
+    return {{u, v, z: Zc}};
+  }}
+
+  // --- Build the VIRT canvas handles once -------------------------
+  const VIRT_CANVASES = [];
+  for (const c of (SCENE.cameras || [])) {{
+    // A camera without full K/R/t/dims cannot be reprojected from —
+    // skip it. The Python side already rendered the `no calibration`
+    // placeholder div for those.
+    if (c.fx == null || c.R_wc == null || c.t_wc == null
+        || c.image_width_px == null || c.image_height_px == null) continue;
+    const canvas = document.getElementById(`virt-canvas-${{c.camera_id}}`);
+    if (!canvas) continue;
+    VIRT_CANVASES.push({{cam: c.camera_id, canvas, meta: c}});
+  }}
+
+  function sizeVirtCanvas(canvas) {{
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight;
+    if (!cssW || !cssH) return false;
+    const pxW = Math.max(1, Math.floor(cssW * dpr));
+    const pxH = Math.max(1, Math.floor(cssH * dpr));
+    if (canvas.width !== pxW || canvas.height !== pxH) {{
+      canvas.width = pxW;
+      canvas.height = pxH;
+    }}
+    return true;
+  }}
+
+  function drawVirtCanvas(entry, cutoff) {{
+    const {{canvas, meta}} = entry;
+    if (!sizeVirtCanvas(canvas)) return;
+    const ctx = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight;
+    ctx.clearRect(0, 0, cssW, cssH);
+    // Background — slightly darker than the main page surface so the
+    // reprojected geometry reads clearly even without strong contrast.
+    ctx.fillStyle = "#1A1714";
+    ctx.fillRect(0, 0, cssW, cssH);
+    // Image → canvas scale: camera pixel coords (0,0)..(W,H) map to the
+    // canvas CSS area. `clip()` stops off-frame extensions from bleeding
+    // into the cell margin.
+    const sx = cssW / meta.image_width_px;
+    const sy = cssH / meta.image_height_px;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, cssW, cssH);
+    ctx.clip();
+
+    // Principal-point cross — tiny reference mark at (cx, cy) so the
+    // operator knows where the optical centre lands in the frame.
+    const cxPx = meta.cx * sx, cyPx = meta.cy * sy;
+    ctx.strokeStyle = "rgba(219, 214, 205, 0.25)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cxPx - 6, cyPx); ctx.lineTo(cxPx + 6, cyPx);
+    ctx.moveTo(cxPx, cyPx - 6); ctx.lineTo(cxPx, cyPx + 6);
+    ctx.stroke();
+
+    // Plate pentagon — reference geometry the operator can match
+    // against the white board in the real MOV above.
+    const plateProj = PLATE_WORLD.map(P => projectWorldToPixel(P, meta));
+    if (plateProj.every(p => p !== null)) {{
+      ctx.strokeStyle = "rgba(219, 214, 205, 0.55)";
+      ctx.fillStyle = "rgba(219, 214, 205, 0.08)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      for (let i = 0; i < plateProj.length; i++) {{
+        const x = plateProj[i].u * sx;
+        const y = plateProj[i].v * sy;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }}
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
     }}
-    return {{mins, maxs}};
-  }}
-  const _sceneBounds = computeSceneBounds();
-  const SCENE_CENTER = _sceneBounds.maxs.map((v, i) => (v + _sceneBounds.mins[i]) / 2);
-  const SCENE_DMAX = Math.max(
-    1e-6,
-    ..._sceneBounds.maxs.map((v, i) => v - _sceneBounds.mins[i])
-  );
-  function worldPosToScene(P) {{
-    return {{
-      x: (P[0] - SCENE_CENTER[0]) * 2 / SCENE_DMAX,
-      y: (P[1] - SCENE_CENTER[1]) * 2 / SCENE_DMAX,
-      z: (P[2] - SCENE_CENTER[2]) * 2 / SCENE_DMAX,
-    }};
-  }}
-  function worldDirToScene(D) {{
-    return {{x: D[0] * 2 / SCENE_DMAX, y: D[1] * 2 / SCENE_DMAX, z: D[2] * 2 / SCENE_DMAX}};
+
+    // Trajectory — server then on-device, both reprojected into this
+    // camera's frame, both truncated by playback cutoff. Same accent
+    // hue as the main Plotly scene's trajectory so the eye ties "this
+    // point in the 3D canvas" to "this point in the virtual frame".
+    function drawTraj(pts, opts) {{
+      if (!pts || !pts.length) return;
+      const px = [];
+      for (const p of pts) {{
+        if (p.t_rel_s > cutoff) break;
+        const proj = projectWorldToPixel([p.x, p.y, p.z], meta);
+        if (proj === null) continue;
+        px.push({{x: proj.u * sx, y: proj.v * sy}});
+      }}
+      if (px.length < 1) return;
+      if (px.length >= 2) {{
+        ctx.strokeStyle = opts.color;
+        ctx.lineWidth = opts.width;
+        if (opts.dashed) ctx.setLineDash([3, 3]); else ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(px[0].x, px[0].y);
+        for (let i = 1; i < px.length; i++) ctx.lineTo(px[i].x, px[i].y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }}
+      // Per-point dots (light) + emphasise the last one (current frame
+      // position) so playback has a clear "you are here" marker.
+      ctx.fillStyle = opts.color;
+      for (const p of px) {{
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }}
+      const last = px[px.length - 1];
+      ctx.beginPath();
+      ctx.arc(last.x, last.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#F8F7F4";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }}
+
+    if (isLayerVisible("traj", "server")) {{
+      drawTraj(SCENE.triangulated, {{color: ACCENT, width: 2, dashed: false}});
+    }}
+    if (isLayerVisible("traj", "on_device")) {{
+      drawTraj(SCENE.triangulated_on_device,
+               {{color: ACCENT, width: 1.5, dashed: true}});
+    }}
+
+    ctx.restore();
   }}
 
-  function cameraForCam(cam) {{
-    const c = (SCENE.cameras || []).find(x => x.camera_id === cam);
-    if (!c) return null;
-    const eye = worldPosToScene(c.center_world);
-    const fwd = worldDirToScene(c.axis_forward_world);
-    // `center` is a target POINT (not direction). Step one forward unit
-    // from the eye — magnitude doesn't matter, Plotly only reads the
-    // (center − eye) direction.
-    const ctr = {{x: eye.x + fwd.x, y: eye.y + fwd.y, z: eye.z + fwd.z}};
-    const up = worldDirToScene(c.axis_up_world);
-    return {{eye, center: ctr, up, projection: {{type: "perspective"}}}};
-  }}
-  function makeVirtLayout(cam) {{
-    const camConf = cameraForCam(cam);
-    if (!camConf) return null;
-    const layout = JSON.parse(JSON.stringify(LAYOUT));
-    layout.scene = Object.assign({{}}, layout.scene || {{}}, {{
-      camera: camConf,
-      // Lock interaction: the virtual is a reference view, not an
-      // orbitable scene. Users who want to spin the geometry use the
-      // main canvas on the left. Separate uirevision per cam so the
-      // two virtual scenes can't bleed into each other.
-      dragmode: false,
-      uirevision: `virt-${{cam}}`,
-    }});
-    // Strip axes labels + gridlines — virtual POVs read as "from the
-    // camera", and ticks / axis titles clutter a small cell.
-    for (const k of ["xaxis", "yaxis", "zaxis"]) {{
-      const axis = Object.assign({{}}, layout.scene[k] || {{}});
-      axis.title = {{text: ""}};
-      axis.showticklabels = false;
-      axis.showgrid = false;
-      axis.zeroline = false;
-      layout.scene[k] = axis;
-    }}
-    layout.showlegend = false;
-    layout.margin = {{l: 0, r: 0, t: 0, b: 0}};
-    // The Cividis colorbar on the main trajectory is distracting when
-    // tiled in 3 scenes — it duplicates per cell and eats horizontal
-    // space. The main scene keeps it; virtuals drop it via a post-
-    // processing pass on traces in drawScene.
-    return layout;
-  }}
-  const VIRT_VIEWS = [];
-  for (const cam of ["A", "B"]) {{
-    const div = document.getElementById(`virt-scene-${{cam}}`);
-    if (!div) continue;  // pose_available=false → placeholder div, skip
-    const layout = makeVirtLayout(cam);
-    if (!layout) continue;
-    VIRT_VIEWS.push({{div, layout, cam}});
-  }}
-
-  function tracesForVirtual(allTraces) {{
-    // Rays emanate from the camera origin → render as one line through
-    // the virtual eye, which is visual noise not signal. Colorbars on
-    // the trajectory duplicate across 3 scenes → drop in virtuals.
-    return allTraces
-      .filter(t => !String(t.name || "").startsWith("Rays "))
-      .map(t => {{
-        if (t.marker && t.marker.showscale) {{
-          const clone = JSON.parse(JSON.stringify(t));
-          clone.marker.showscale = false;
-          delete clone.marker.colorbar;
-          return clone;
-        }}
-        return t;
-      }});
+  function drawVirtuals(cutoff) {{
+    for (const entry of VIRT_CANVASES) drawVirtCanvas(entry, cutoff);
   }}
 
   function drawScene() {{
     const cutoff = mode === "all" ? Infinity : currentT;
-    const allTraces = [...STATIC, ...buildDynamicTraces(cutoff)];
-    Plotly.react(sceneDiv, allTraces, LAYOUT, {{displayModeBar: false, responsive: true}});
-    if (VIRT_VIEWS.length) {{
-      const virtTraces = tracesForVirtual(allTraces);
-      for (const v of VIRT_VIEWS) {{
-        Plotly.react(v.div, virtTraces, v.layout, {{displayModeBar: false, responsive: true}});
-      }}
-    }}
+    Plotly.react(sceneDiv, [...STATIC, ...buildDynamicTraces(cutoff)], LAYOUT, {{displayModeBar: false, responsive: true}});
+    drawVirtuals(cutoff);
   }}
+
+  // Virtual canvases need to resize with the window (DPR + layout
+  // changes). Redraw with current cutoff after resize so the geometry
+  // doesn't stretch.
+  window.addEventListener("resize", () => {{
+    const cutoff = mode === "all" ? Infinity : currentT;
+    drawVirtuals(cutoff);
+  }});
 
   // --- Video sync via anchor-relative time ---
 
@@ -1722,35 +1795,51 @@ def _video_cell_html(
     )
 
 
-def _virtual_cell_html(cam: str, *, pose_available: bool) -> str:
+def _virtual_cell_html(
+    cam: str,
+    *,
+    pose_available: bool,
+    image_width_px: int | None = None,
+    image_height_px: int | None = None,
+) -> str:
     """One virtual-view cell below the real MOV cell for the same camera.
 
-    Renders a Plotly 3D scene locked to the camera's recovered pose so the
-    operator can visually compare "ball trajectory as seen by CAM A" vs
-    "ball trajectory as reconstructed from CAM A's calibration". Big
-    extrinsics / homography mistakes (wrong side, mirrored, rotated) jump
-    out immediately when real + virtual disagree.
+    Renders a 2D reprojection canvas: the triangulated 3D trajectory
+    and the plate pentagon projected back onto this camera's image plane
+    using its full `K + R + t + distortion` model. Unlike a Plotly 3D
+    scene this:
 
-    Limitations worth knowing: Plotly's 3D camera has no FOV knob, so the
-    virtual view's field-of-view (≈60° vertical) does not match the
-    iPhone main cam (≈38° vertical). Gross misalignments still read
-    correctly; pixel-accurate overlay would need a three.js renderer
-    that accepts real fx/fy.
+      1. Never shows the camera itself — a camera cannot project itself
+         onto its own image plane, so "seeing yourself" is geometrically
+         impossible with correct reprojection.
+      2. Honours real fx / fy / cx / cy → correct FOV for THIS camera.
+      3. Honours the 5-coefficient radial/tangential distortion → edge
+         curvature matches what the lens produces.
+      4. Uses the camera's actual image aspect (4:3 vs 16:9 per pitch).
+
+    The virtual canvas is the calibration-QA tool: if the reprojected
+    plate pentagon doesn't overlap the real plate in the MOV above, your
+    extrinsics / homography is off. If the reprojected trajectory doesn't
+    track the ball visible in the MOV, your triangulation is off.
     """
     label_color = _camera_color(cam)
     if not pose_available:
         body = '<div class="virt-frame empty">no calibration</div>'
+        aspect_style = ""
     else:
-        body = f'<div class="virt-frame" id="virt-scene-{cam}"></div>'
-    # Tooltip surfaces the limitations up-front so the operator doesn't
-    # interpret "virtual looks zoomed-out" as a calibration bug — it's
-    # Plotly's fixed ~60° FOV vs the iPhone main cam's ~37° vertical FOV,
-    # plus the lack of a distortion model.
+        w = image_width_px or 4
+        h = image_height_px or 3
+        aspect_style = f'style="aspect-ratio:{w}/{h}"'
+        body = (
+            f'<div class="virt-frame" {aspect_style} id="virt-frame-{cam}">'
+            f'<canvas id="virt-canvas-{cam}"></canvas>'
+            f'</div>'
+        )
     hint_title = (
-        "Plotly pinhole camera: ~60° vertical FOV, zero lens distortion. "
-        "iPhone main cam is ~37° vertical with 5-coefficient distortion — "
-        "use this view for gross pose checks (side/mirror/rotation), "
-        "not pixel-accurate overlay."
+        "2D reprojection through the camera's full K + distortion + "
+        "extrinsics. The plate pentagon should overlap the real plate "
+        "visible in the MOV above; the trajectory should track the "
+        "actual ball. Divergence = calibration / triangulation error."
     )
     return (
         f'<div class="virt-cell">'
@@ -1758,7 +1847,7 @@ def _virtual_cell_html(cam: str, *, pose_available: bool) -> str:
         f'<span class="vid-label virt" title="{hint_title}">VIRT</span>'
         f'<span class="vid-label" style="color:{label_color};'
         f'border-color:{label_color};">CAM {cam}</span>'
-        f'<span class="vid-hint" title="{hint_title}">pose-only · approx FOV</span>'
+        f'<span class="vid-hint" title="{hint_title}">reprojected K·[R|t]·P</span>'
         f'</div>'
         f'{body}'
         f'</div>'

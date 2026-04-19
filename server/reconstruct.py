@@ -59,6 +59,27 @@ class CameraView:
     axis_forward_world: list[float]   # cam +Z → world
     axis_right_world: list[float]     # cam +X → world
     axis_up_world: list[float]        # cam -Y (image down flipped) → world
+    # Full projection matrix for reprojection (world → pixel). The
+    # viewer's 2D virtual-camera canvas uses these fields to reproject
+    # the triangulated trajectory + plate pentagon back onto each
+    # camera's image plane, honouring fx/fy/cx/cy + 5-coef distortion
+    # exactly — the only honest way to show "where the ball lands in
+    # this camera's frame" for calibration QA. `None` for calibration-
+    # preview scenes that only know pose, not per-pitch intrinsics.
+    fx: float | None = None
+    fy: float | None = None
+    cx: float | None = None
+    cy: float | None = None
+    distortion: list[float] | None = None
+    # Row-major 3×3 world→camera rotation (9 floats) + 3-vector
+    # translation. Pair is what `P_cam = R_wc @ P_world + t_wc` needs.
+    R_wc: list[float] | None = None
+    t_wc: list[float] | None = None
+    # Image dimensions at intrinsics-native resolution (the pitch's
+    # rescaled grid; for the calibration-preview scene these are the
+    # source calibration resolution since no pitch is in play yet).
+    image_width_px: int | None = None
+    image_height_px: int | None = None
 
 
 @dataclass
@@ -269,6 +290,15 @@ def build_scene(
                 axis_forward_world=(forward / np.linalg.norm(forward)).tolist(),
                 axis_right_world=(right / np.linalg.norm(right)).tolist(),
                 axis_up_world=(up / np.linalg.norm(up)).tolist(),
+                fx=float(intr.fx),
+                fy=float(intr.fz),
+                cx=float(intr.cx),
+                cy=float(intr.cy),
+                distortion=list(intr.distortion) if intr.distortion else None,
+                R_wc=R_wc.flatten().tolist(),
+                t_wc=t_wc.flatten().tolist(),
+                image_width_px=pitch.image_width_px,
+                image_height_px=pitch.image_height_px,
             )
         )
 
@@ -321,6 +351,10 @@ def _camera_view_from_intrinsics_and_homography(
     cx: float,
     cy: float,
     homography: list[float],
+    *,
+    distortion: list[float] | None = None,
+    image_width_px: int | None = None,
+    image_height_px: int | None = None,
 ) -> CameraView:
     """Shared pose-recovery path. Same math `build_scene` does for each
     pitch — centralised here so the calibration-preview scene renders the
@@ -339,6 +373,15 @@ def _camera_view_from_intrinsics_and_homography(
         axis_forward_world=(forward / np.linalg.norm(forward)).tolist(),
         axis_right_world=(right / np.linalg.norm(right)).tolist(),
         axis_up_world=(up / np.linalg.norm(up)).tolist(),
+        fx=float(fx),
+        fy=float(fy),
+        cx=float(cx),
+        cy=float(cy),
+        distortion=list(distortion) if distortion else None,
+        R_wc=R_wc.flatten().tolist(),
+        t_wc=t_wc.flatten().tolist(),
+        image_width_px=image_width_px,
+        image_height_px=image_height_px,
     )
 
 
@@ -362,6 +405,9 @@ def build_calibration_scene(
                     cx=cal.intrinsics.cx,
                     cy=cal.intrinsics.cy,
                     homography=cal.homography,
+                    distortion=cal.intrinsics.distortion,
+                    image_width_px=cal.image_width_px,
+                    image_height_px=cal.image_height_px,
                 )
             )
         except Exception:
