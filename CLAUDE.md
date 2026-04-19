@@ -4,17 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## System overview
 
-Two-iPhone stereo tracker for a deep-blue baseball. Each phone runs the iOS app in role `A` or `B`, aimed at home plate. Both phones share time by jointly detecting an **audio chirp** (played from a third device) as a common sync anchor. Each phone then records a raw H.264 MOV — **no on-device ball detection, no per-frame metadata** — and uploads MOV + minimal JSON (camera_id, session_id, chirp anchor, video_start_pts_s, calibration) to a FastAPI server on the LAN. The server decodes each MOV with PyAV, runs HSV-threshold + connected-components ball detection per frame, reconstructs absolute session-clock PTS for each sample, pairs A/B frames within an 8 ms window of anchor-relative time, and triangulates 3D positions via ray-midpoint.
+Two-iPhone stereo tracker for a yellow-green tennis ball (the default HSV range; deep-blue baseball still supported via env override). Each phone runs the iOS app in role `A` or `B`, aimed at home plate. Both phones share time by jointly detecting an **audio chirp** (played from a third device) as a common sync anchor. The server pairs A/B frames within an 8 ms window of anchor-relative time and triangulates 3D positions via ray-midpoint.
 
-- **iOS app** — `ball_tracker/` (Swift, UIKit). Xcode project at `ball_tracker.xcodeproj`. Bundle ID `com.Max0228.ball-tracker`, iOS 26.2 target, Swift 5.0. Phone is a **pure camera** — calibration, time-sync, and video recording only.
-- **Server** — `server/` (FastAPI + `python-multipart` + PyAV + OpenCV). `uv`-managed venv at `server/.venv` (Python 3.13). In-memory state plus `data/` persistence (`pitches/`, `results/`, `videos/`); a restart reloads enriched pitch JSONs (frames already detected) and re-triangulates. `/pitch` requires a MOV — server-side detection is the sole data path.
+### Two capture modes
+
+The dashboard has a mode toggle that picks how detection is done; every `POST /sessions/arm` snapshots the current global mode into `Session.mode`, so a dashboard flip mid-cycle doesn't disturb an armed session.
+
+- **Mode one — `camera_only`** (default, safe path): iPhone is a pure camera. Records H.264 MOV, uploads MOV + minimal JSON; server decodes with PyAV, runs HSV + MOG2 + shape-gate detection per frame, triangulates. 20-60 MB per camera per cycle, 8-20 s end-to-end latency.
+- **Mode two — `on_device`**: iPhone runs the same HSV + MOG2 + shape-gate pipeline locally via `BTDetectionSession`, uploads only the per-frame detection results (no MOV). Server skips decode + detection and only pairs + triangulates. ~10 KB per camera, <0.5 s end-to-end latency. Detection algorithm constants are kept lock-step with `server/detection.py` + `server/pipeline.py` — see the header comment in `ball_tracker/BallDetector.mm`.
+
+### Components
+
+- **iOS app** — `ball_tracker/` (Swift + Obj-C++, UIKit). Xcode project at `ball_tracker.xcodeproj`. Bundle ID `com.Max0228.ball-tracker`, iOS 26.2 target, Swift 5.0. Reads effective mode from `/heartbeat` replies (session snapshot if armed, else dashboard global); HUD shows a `MODE · …` chip top-right. In mode-one the clip writer + detection queue both run (detection used as trim oracle); in mode-two the clip writer is skipped entirely and detection output goes directly into the upload payload's `frames` list.
+- **Server** — `server/` (FastAPI + `python-multipart` + PyAV + OpenCV). `uv`-managed venv at `server/.venv` (Python 3.13). In-memory state plus `data/` persistence (`pitches/`, `results/`, `videos/`); a restart reloads enriched pitch JSONs (frames already detected) and re-triangulates. `POST /pitch` accepts either a multipart `video` (mode-one, server runs detection) or a `frames` list in the JSON payload (mode-two, server skips decode); 422 when neither is supplied. Events + viewer tag each historical session by looking for a MOV on disk under `data/videos/session_<sid>_*`.
 
 ## Physical setup (current)
 
 Nominal rig used by the operator — actual per-session pose still comes from the homography solved on-device; these values are just the target the rig is built against:
 
 - **Camera**: iPhone 14-17 series, rear **main (1x wide) camera** only (`builtInWideAngleCamera`). Ultra Wide (0.5x, 120° FOV) is rejected — 5-coefficient distortion can't model it cleanly and the edges lose angular resolution.
-- **Resolution**: **1920×1080 (16:9), system-wide fixed**. No 720p option — the Settings UI and all downstream math assume 1080p. ChArUco calibration JSON is auto-scaled from the 4032×3024 source on import.
+- **Resolution**: default 1920×1080 (16:9); Settings → Camera → Resolution picks between 1080p / 720p / 540p (240 fps capped; 540p not supported on every device). Calibration always bakes at 1080p and the server rescales intrinsics + homography per-pitch to the MOV's actual pixel grid via `pairing.scale_pitch_to_video_dims`. ChArUco calibration JSON is auto-scaled from the 4032×3024 source on import.
 - **Orientation**: **landscape** on both phones. Sensor long-edge aligned with the pitcher→plate horizontal direction. ChArUco intrinsic-calibration shots must be taken in the same orientation.
 - **Baseline**: two phones placed ~3 m from home plate, both on the **first-base / third-base line** (i.e. 1B-side phone and 3B-side phone, aimed inward at the plate). This is a wide cross-baseline stereo setup — good depth separation for triangulation.
 - **Focus**: lock AF (`setFocusModeLocked`) to the plate distance both during ChArUco capture and during live recording. The main cam has OIS but static mounting keeps its drift negligible.
@@ -73,7 +82,12 @@ Runs on `camera.frame.queue` **only while the session is live** — 60 fps durin
 
 FPS is hard-capped by an exposure ceiling: `configureCaptureFormat` sets `activeMaxExposureDuration = frameDuration`, so iOS's auto-exposure can't stretch individual samples past 1/60 s (idle) or 1/240 s (recording). AE compensates with ISO — noisier in low light, but frame rate holds. Without this cap a dim room silently dropped the effective capture rate to ~14 fps.
 
-`captureOutput` does three things: advance `frameIndex` for debug logs, update the HUD FPS estimate, and (only in `.recording`) append the sample to `clipRecorder`. The first appended sample also kicks off `PitchRecorder` with the sample's session-clock PTS as `videoStartPtsS`. **No ball detection, no overlay, no per-frame payload work** — the phone is a pure capture client.
+`captureOutput` advances `frameIndex` for debug logs, updates the HUD FPS estimate, and branches on `currentCaptureMode`:
+
+- In mode-one: lazy-bootstraps `clipRecorder` from the first sample's dims and appends every sample to it. The MOV gets trimmed post-recording by `ClipTrimmer` using the detection queue's timestamps as a trim oracle; server-side detection is still authoritative.
+- In mode-two: skips `clipRecorder` entirely (no tmp MOV written), relies on `BTDetectionSession`'s accumulated `FramePayload` list, and ships it via `PitchPayload.frames` with `videoURL: nil`.
+
+Both modes run `dispatchDetectionIfDue` on every sample — throttled to 60 Hz on a utility queue so the ~12-18 ms HSV + CC + shape + MOG2 pipeline can't stall 240 fps capture. `PitchRecorder` is kicked off on the first captured sample in both modes using the sample's session-clock PTS as `videoStartPtsS`.
 
 ### Audio pipeline (`AudioChirpDetector`)
 Runs on `audio.chirp.queue`. `AVCaptureAudioDataOutput` delivers mic samples directly to the detector, which runs a normalized matched filter (cross-correlation against a reference chirp, divided by local window energy) at ~10 Hz. On a peak > `threshold`, parabolic sub-sample interpolation refines the location; the chirp-center session-clock PTS becomes the anchor. Audio sample rate 44.1 kHz → 22 μs per sample; detection precision typically **<100 μs** (40× better than the frame-granularity the earlier flash detector could hit).
