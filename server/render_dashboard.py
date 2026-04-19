@@ -173,13 +173,14 @@ form.inline {{ display: inline-block; margin: 0; }}
 
 /* --- Events list --- */
 .events-empty {{ color: var(--sub); font-size: 13px; padding: 12px 0; font-style: italic; }}
-.event-item {{ position: relative; border-top: 1px solid var(--border-l); }}
+.event-item {{ display: flex; align-items: flex-start;
+               border-top: 1px solid var(--border-l); }}
 .event-item:first-child {{ border-top: 0; }}
 .event-item:hover {{ background: var(--bg); margin: 0 -8px; padding: 0 8px; }}
-.event-row {{ display: block; text-decoration: none; color: inherit;
-              padding: 12px 0; }}
+.event-row {{ flex: 1; min-width: 0; display: block; text-decoration: none;
+              color: inherit; padding: 12px 0; }}
 .event-top {{ display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
-              padding-right: 32px; }}
+              flex-wrap: wrap; }}
 .event-top .sid {{ font-family: var(--mono); font-size: 13px; color: var(--ink);
                    letter-spacing: 0.04em; }}
 .event-stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 14px;
@@ -187,8 +188,7 @@ form.inline {{ display: inline-block; margin: 0; }}
 .event-stats .k {{ color: var(--sub); letter-spacing: 0.08em; text-transform: uppercase;
                    font-size: 9px; display: block; }}
 .event-stats .v {{ font-variant-numeric: tabular-nums; color: var(--ink); }}
-.event-delete-form {{ position: absolute; top: 10px; right: 4px; margin: 0; }}
-.event-item:hover .event-delete-form {{ right: 12px; }}
+.event-delete-form {{ flex: 0 0 auto; margin: 10px 4px 0 8px; }}
 .event-delete {{ background: transparent; border: 1px solid var(--border-base);
                  color: var(--sub); font-family: var(--mono); font-size: 13px;
                  line-height: 1; padding: 2px 8px 3px; border-radius: 2px;
@@ -294,7 +294,7 @@ _JS_TEMPLATE = r"""
           ${btn('camera_only')}${btn('on_device')}
         </div>`;
     }
-    sessionBox.innerHTML = `
+    const sessHtml = `
       <div class="session-head">${chip}${sid}</div>
       <div class="session-actions">
         <form class="inline" method="POST" action="/sessions/arm">
@@ -306,12 +306,13 @@ _JS_TEMPLATE = r"""
         ${clearBtn}
       </div>
       ${modeRow}`;
+    sessionBox.innerHTML = sessHtml;
 
     // Mirror into the nav's tiny status strip.
     if (navStatus) {
       const online = (state.devices || []).length;
       const cal = (state.calibrations || []).length;
-      navStatus.innerHTML = `
+      const navHtml = `
         <span class="pair"><span class="label">Devices</span><span class="val">${online}/2</span></span>
         <span class="pair"><span class="label">Calibrated</span><span class="val">${cal}/2</span></span>
         <span class="pair"><span class="label">Session</span>` +
@@ -319,6 +320,7 @@ _JS_TEMPLATE = r"""
           ? `<span class="val armed">${esc(s.id || '—')}</span>`
           : `<span class="val idle">idle</span>`) +
         `</span>`;
+      navStatus.innerHTML = navHtml;
     }
   }
 
@@ -328,11 +330,12 @@ _JS_TEMPLATE = r"""
   }
 
   function renderEvents(events) {
+    let evHtml;
     if (!events || events.length === 0) {
       eventsBox.innerHTML = `<div class="events-empty">No sessions received yet.</div>`;
       return;
     }
-    eventsBox.innerHTML = events.map(e => {
+    evHtml = events.map(e => {
       const cams = (e.cameras || []).join(' · ') || '—';
       const mode = (e.cameras || []).length >= 2 ? 'dual' : 'single';
       const stat = (e.status || '').replace(/_/g, ' ');
@@ -371,11 +374,60 @@ _JS_TEMPLATE = r"""
           </form>
         </div>`;
     }).join('');
+    eventsBox.innerHTML = evHtml;
   }
 
   let currentDevices = null;
   let currentSession = null;
   let currentCalibrations = null;
+  let currentCaptureMode = 'camera_only';
+
+  // Keys used to skip re-renders when nothing changed. We compare serialised
+  // state data rather than innerHTML strings because the browser re-serialises
+  // HTML differently from the raw template literals we build.
+  let _lastDevKey = null;
+  let _lastSessKey = null;
+  let _lastNavKey = null;
+  let _lastEvKey = null;
+
+  const _origRenderDevices = renderDevices;
+  renderDevices = function(state) {
+    const key = JSON.stringify({
+      devices: (state.devices || []).map(d => ({ id: d.camera_id, ts: d.time_synced })),
+      calibrations: (state.calibrations || []).slice().sort(),
+    });
+    if (key === _lastDevKey) return;
+    _lastDevKey = key;
+    _origRenderDevices(state);
+  };
+
+  const _origRenderSession = renderSession;
+  renderSession = function(state) {
+    const s = state.session;
+    const sessKey = JSON.stringify({
+      armed: !!(s && s.armed), id: s && s.id, mode: s && s.mode,
+      capture_mode: state.capture_mode,
+    });
+    const navKey = JSON.stringify({
+      online: (state.devices || []).length,
+      cal: (state.calibrations || []).length,
+      armed: !!(s && s.armed), id: s && s.id,
+    });
+    if (sessKey === _lastSessKey && navKey === _lastNavKey) return;
+    _lastSessKey = sessKey;
+    _lastNavKey = navKey;
+    _origRenderSession(state);
+  };
+
+  const _origRenderEvents = renderEvents;
+  renderEvents = function(events) {
+    const key = JSON.stringify((events || []).map(e => ({
+      id: e.session_id, status: e.status, n: e.n_triangulated,
+    })));
+    if (key === _lastEvKey) return;
+    _lastEvKey = key;
+    _origRenderEvents(events);
+  };
 
   async function tickStatus() {
     try {
@@ -387,6 +439,7 @@ _JS_TEMPLATE = r"""
       s.calibrations = currentCalibrations || [];
       currentDevices = s.devices || [];
       currentSession = s.session || null;
+      currentCaptureMode = s.capture_mode || 'camera_only';
       renderDevices(s);
       renderSession(s);
     } catch (e) { /* silent retry next tick */ }
@@ -399,7 +452,7 @@ _JS_TEMPLATE = r"""
       const payload = await r.json();
       currentCalibrations = (payload.calibrations || []).map(c => c.camera_id);
       renderDevices({ devices: currentDevices || [], calibrations: currentCalibrations });
-      renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations });
+      renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
       if (payload.plot && sceneRoot && window.Plotly) {
         Plotly.react(sceneRoot, payload.plot.data || [], payload.plot.layout || {}, { responsive: true });
       }
@@ -414,6 +467,25 @@ _JS_TEMPLATE = r"""
       renderEvents(events);
     } catch (e) { /* silent */ }
   }
+
+  // Mode toggle: intercept form submit via fetch + optimistic update so
+  // the button state never bounces back to the previous value between the
+  // POST and the next tickStatus round-trip.
+  document.addEventListener('submit', async (e) => {
+    const form = e.target;
+    if (form.action && form.action.endsWith('/sessions/set_mode')) {
+      e.preventDefault();
+      const mode = (form.querySelector('input[name="mode"]') || {}).value;
+      if (!mode) return;
+      currentCaptureMode = mode;
+      // Invalidate key so the next renderSession call repaints.
+      _lastSessKey = null;
+      renderSession({ devices: currentDevices || [], session: currentSession,
+                      calibrations: currentCalibrations || [], capture_mode: currentCaptureMode });
+      try { await fetch('/sessions/set_mode', { method: 'POST', body: new FormData(form) }); }
+      catch (_) {}
+    }
+  });
 
   // Prime all three immediately, then stagger polling so the UI stays
   // current without hammering the server. Status carries arming state

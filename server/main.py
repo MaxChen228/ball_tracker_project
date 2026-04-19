@@ -1282,13 +1282,14 @@ def _videos_for_session(
             best[cam] = name
 
     out: list[tuple[str, str, float, float, dict[str, list]]] = []
-    for cam in sorted(best):
-        name = best[cam]
+    # Include all cameras that either have a video file OR have on-device
+    # frames (mode on_device has no MOV but still needs a VIDEO_META entry
+    # so the detection strip in the viewer is populated).
+    all_cams = sorted(set(best) | {c for c in pitches if pitches[c].frames})
+    for cam in all_cams:
+        name = best.get(cam)
         pitch = pitches.get(cam)
         if pitch is None or pitch.sync_anchor_timestamp_s is None:
-            # Missing anchor → can't align to the master clock; fall back
-            # to a zero offset so the video at least plays from its own
-            # start. The viewer will just show drift between A and B.
             offset = 0.0
         else:
             offset = float(
@@ -1303,7 +1304,8 @@ def _videos_for_session(
             t_rel = []
             detected = []
         frames_info = {"t_rel_s": t_rel, "detected": detected}
-        out.append((cam, f"/videos/{name}", offset, fps, frames_info))
+        url = f"/videos/{name}" if name else None
+        out.append((cam, url, offset, fps, frames_info))
     return out
 
 
