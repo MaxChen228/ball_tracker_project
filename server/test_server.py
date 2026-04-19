@@ -608,6 +608,95 @@ def test_dashboard_drives_mode_one_end_to_end(tmp_path):
     assert "<video" in viewer_html
 
 
+def test_dashboard_drives_dual_mode_end_to_end(tmp_path):
+    """Dual mode smoke test: iPhone ships MOV + frames_on_device. Server
+    runs its own detection on the MOV AND keeps the iOS stream, then
+    triangulates both independently. Viewer surfaces both strips + both
+    3D point clouds; events row is tagged `dual`."""
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    P_true = np.array([0.1, 0.3, 1.0])
+    client = TestClient(app)
+
+    # 1. Dashboard → dual.
+    r = client.post(
+        "/sessions/set_mode",
+        data={"mode": "dual"},
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 200
+    assert r.json()["capture_mode"] == "dual"
+
+    # 2. Arm — session snapshot must be dual.
+    arm = client.post(
+        "/sessions/arm", headers={"Accept": "application/json"}
+    ).json()
+    session_id = arm["session"]["id"]
+    assert arm["session"]["mode"] == "dual"
+
+    # 3. Upload A and B with a MOV each + precomputed frames_on_device
+    #    covering the same projected pixel. In dual mode the server
+    #    overwrites `frames` with its own detection output; the iOS list
+    #    lives on `frames_on_device` untouched.
+    mov_a = _encode_single_ball_mov(
+        tmp_path, K, R_a, t_a, P_true, filename="dual_a.mov"
+    )
+    mov_b = _encode_single_ball_mov(
+        tmp_path, K, R_b, t_b, P_true, filename="dual_b.mov"
+    )
+    ua, va = _project_pixels(K, R_a, t_a, P_true)
+    ub, vb = _project_pixels(K, R_b, t_b, P_true)
+
+    body_a = _base_payload("A", session_id, K, H_a)
+    body_a["frames_on_device"] = [{
+        "frame_index": 0, "timestamp_s": 0.0,
+        "px": ua, "py": va, "ball_detected": True,
+    }]
+    body_b = _base_payload("B", session_id, K, H_b)
+    body_b["frames_on_device"] = [{
+        "frame_index": 0, "timestamp_s": 0.0,
+        "px": ub, "py": vb, "ball_detected": True,
+    }]
+
+    r_a = _post_pitch(client, body_a, mov_a)
+    assert r_a.status_code == 200, r_a.text
+    r_b = _post_pitch(client, body_b, mov_b)
+    assert r_b.status_code == 200, r_b.text
+    assert r_b.json()["paired"] is True
+
+    # 4. /results carries BOTH triangulation streams.
+    result = client.get(f"/results/{session_id}").json()
+    assert result["points"], "server-side triangulation missing"
+    assert result["points_on_device"], "on-device triangulation missing"
+    # On-device input is a single synthetic frame → exactly one point.
+    assert len(result["points_on_device"]) == 1
+    od_pt = result["points_on_device"][0]
+    assert abs(od_pt["x_m"] - P_true[0]) < 1e-6
+    assert abs(od_pt["y_m"] - P_true[1]) < 1e-6
+    assert abs(od_pt["z_m"] - P_true[2]) < 1e-6
+
+    # 5. Events row tagged dual + exposes both counts.
+    events = client.get("/events").json()
+    matched = [e for e in events if e["session_id"] == session_id]
+    assert matched, events
+    assert matched[0]["mode"] == "dual"
+    assert matched[0]["n_triangulated"] >= 1
+    assert matched[0]["n_triangulated_on_device"] == 1
+
+    # 6. Reconstruction scene carries rays tagged per source.
+    scene = client.get(f"/reconstruction/{session_id}").json()
+    sources_seen = {r.get("source", "server") for r in scene["rays"]}
+    assert "server" in sources_seen
+    assert "on_device" in sources_seen
+    assert scene["triangulated_on_device"], "scene missing on-device points"
+
+    # 7. Viewer HTML includes the dual strip + toggle.
+    viewer_html = client.get(f"/viewer/{session_id}").text
+    assert "detection-canvas-on-device" in viewer_html
+    assert "toggle-on-device" in viewer_html
+    # MOV must still be embedded (dual uploads the clip).
+    assert "<video" in viewer_html
+
+
 def test_pitch_writes_annotated_clip_alongside_raw(tmp_path):
     """After /pitch, server has BOTH the raw MOV and a `_annotated` sibling
     that re-encodes the clip with a circle drawn on every detected frame."""

@@ -140,7 +140,7 @@ def render_viewer_html(
           "frames": frames}
          for (cam, url, off, fps, frames) in videos]
     )
-    has_triangulated = bool(scene.triangulated)
+    has_triangulated = bool(scene.triangulated or scene.triangulated_on_device)
 
     # Adaptive split between the 3D scene and the video column. Default
     # ratio is set here as a fallback; CSS `data-mode` rules below
@@ -348,12 +348,26 @@ def render_viewer_html(
   .scrubber-wrap canvas {{ display:block; width:100%; height:18px;
     border:1px solid var(--border-base); border-radius:2px;
     background:var(--bg); image-rendering:pixelated; }}
+  .strip-row {{ display:flex; align-items:center; gap:6px; }}
+  .strip-row .strip-label {{ font-family:var(--mono); font-size:9px;
+    letter-spacing:0.1em; color:var(--sub); min-width:52px;
+    text-align:right; flex:0 0 52px; }}
+  .strip-row .strip-canvas {{ flex:1 1 auto; min-width:0; }}
+  .strip-row[hidden] {{ display:none; }}
   .strip-legend {{ font-size:10px; color:var(--sub); letter-spacing:0.06em;
     display:flex; gap:10px; align-items:center; flex-wrap:wrap;
     text-transform:uppercase; }}
   .strip-legend .sw {{ display:inline-block; width:10px; height:10px;
     vertical-align:middle; margin-right:4px;
     border:1px solid var(--border-base); }}
+  .source-toggles {{ margin-left:auto; display:flex; gap:10px;
+    align-items:center; }}
+  .source-toggles label {{ display:inline-flex; align-items:center;
+    gap:4px; cursor:pointer; text-transform:uppercase;
+    letter-spacing:0.08em; font-size:10px; color:var(--sub); }}
+  .source-toggles label[hidden] {{ display:none; }}
+  .source-toggles input[type=checkbox] {{ accent-color:var(--ink);
+    width:12px; height:12px; margin:0; }}
   .tl-row .frame-label {{ min-width:340px; text-align:right;
     color:var(--ink); font-weight:500; font-size:11px;
     letter-spacing:0.02em; white-space:nowrap;
@@ -452,15 +466,26 @@ def render_viewer_html(
     <div class="tl-row">
       <div class="scrubber-wrap">
         <div class="strip-legend" aria-hidden="true">
-          <span>detection density:</span>
+          <span>detection:</span>
           <span><span class="sw" style="background:var(--contra);border-color:var(--contra);"></span>A detected</span>
           <span><span class="sw" style="background:var(--dual);border-color:var(--dual);"></span>B detected</span>
           <span><span class="sw" style="background:rgba(122,117,108,0.35);"></span>missed</span>
           <span><span class="sw" style="background:rgba(232,228,219,0.6);"></span>no frame</span>
           <span><span class="sw" style="background:var(--accent);border-color:var(--accent);"></span>chirp anchor</span>
+          <span class="source-toggles" id="source-toggles">
+            <label><input type="checkbox" id="toggle-server" checked>Server</label>
+            <label id="toggle-on-device-wrap" hidden><input type="checkbox" id="toggle-on-device" checked>On-device</label>
+          </span>
         </div>
         <input id="scrubber" type="range" min="0" max="1" value="0" step="1" />
-        <canvas id="detection-canvas" height="18" aria-hidden="true"></canvas>
+        <div class="strip-row" id="strip-row-server">
+          <span class="strip-label">SERVER</span>
+          <canvas id="detection-canvas" class="strip-canvas" height="18" aria-hidden="true"></canvas>
+        </div>
+        <div class="strip-row" id="strip-row-on-device" hidden>
+          <span class="strip-label">ON-DEV</span>
+          <canvas id="detection-canvas-on-device" class="strip-canvas" height="18" aria-hidden="true"></canvas>
+        </div>
       </div>
       <span id="frame-label" class="frame-label">
         frame <input id="frame-input" type="number" min="0" max="0" value="0" step="1" title="Type a frame index to jump" /> / <span id="frame-total">0</span>
@@ -550,11 +575,23 @@ def render_viewer_html(
   const vids = Array.from(document.querySelectorAll("video[data-cam]"));
   const offsetByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.t_rel_offset_s]));
   const fpsByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.fps]));
-  const framesByCam = {{}};  // cam -> {{ t_rel_s: [...], detected: [...] }}
+  // Two parallel detection streams: server-side (authoritative MOV
+  // detection) and on-device (iOS upload in dual mode). Mono-mode
+  // sessions have empty `on_device` maps, so `camsWithFramesOnDevice`
+  // is `[]` and the second strip + checkbox hide.
+  const framesByCam = {{}};          // server detection
+  const framesByCamOnDevice = {{}};  // iOS detection (dual only)
   for (const v of VIDEO_META) {{
-    framesByCam[v.camera_id] = v.frames || {{ t_rel_s: [], detected: [] }};
+    const f = v.frames || {{ t_rel_s: [], detected: [] }};
+    framesByCam[v.camera_id] = {{ t_rel_s: f.t_rel_s || [], detected: f.detected || [] }};
+    const od = (f.on_device) || {{ t_rel_s: [], detected: [] }};
+    framesByCamOnDevice[v.camera_id] = {{ t_rel_s: od.t_rel_s || [], detected: od.detected || [] }};
   }}
   const camsWithFrames = Object.keys(framesByCam).filter(c => (framesByCam[c].t_rel_s || []).length);
+  const camsWithFramesOnDevice = Object.keys(framesByCamOnDevice).filter(c => (framesByCamOnDevice[c].t_rel_s || []).length);
+  const HAS_ON_DEVICE = camsWithFramesOnDevice.length > 0;
+  let showServer = true;
+  let showOnDevice = HAS_ON_DEVICE;  // default: both on if present
   // Master FPS for arrow-key half-second jumps. Pick the max reported
   // capture rate so a 240 Hz cam doesn't get under-stepped by a fallback.
   const MASTER_FPS = Math.max(60, ...Object.values(fpsByCam).filter(f => isFinite(f) && f > 0));
@@ -572,12 +609,22 @@ def render_viewer_html(
       if (!timeMap.has(q)) timeMap.set(q, t);
     }}
   }}
+  // On-device frames (dual mode) contribute to the same union timeline
+  // so the scrubber can step through detections the server missed —
+  // otherwise the strip for on-device would fall outside renderable t.
+  for (const cam of camsWithFramesOnDevice) {{
+    for (const t of framesByCamOnDevice[cam].t_rel_s) {{
+      const q = Math.round(t * QUANT);
+      if (!timeMap.has(q)) timeMap.set(q, t);
+    }}
+  }}
   // Fallback when the session has zero decoded frames (no video on disk):
   // use whatever scene points exist so the viewer still renders a usable
   // scrubber rather than collapsing to a 1-slot timeline.
   if (timeMap.size === 0) {{
     for (const r of SCENE.rays || []) timeMap.set(Math.round(r.t_rel_s * QUANT), r.t_rel_s);
     for (const p of SCENE.triangulated || []) timeMap.set(Math.round(p.t_rel_s * QUANT), p.t_rel_s);
+    for (const p of SCENE.triangulated_on_device || []) timeMap.set(Math.round(p.t_rel_s * QUANT), p.t_rel_s);
   }}
   const unionTimes = Array.from(timeMap.values()).sort((a, b) => a - b);
   if (unionTimes.length === 0) {{ unionTimes.push(0); unionTimes.push(0.05); }}
@@ -588,8 +635,8 @@ def render_viewer_html(
   // --- For each cam, precompute the nearest-cam-frame index per union
   // slot so the detection strip + frame-info panel read in O(1). `null`
   // means this union time falls outside the cam's capture window.
-  function buildCamIndex(cam) {{
-    const f = framesByCam[cam];
+  function buildCamIndexFor(frameMap, cam) {{
+    const f = frameMap[cam];
     const ts = f.t_rel_s, det = f.detected;
     const out = new Array(TOTAL_FRAMES).fill(null);
     if (!ts.length) return out;
@@ -603,8 +650,10 @@ def render_viewer_html(
     }}
     return out;
   }}
-  const camAtFrame = {{}};  // cam -> [{{idx,t,detected}}|null, ...]
-  for (const cam of camsWithFrames) camAtFrame[cam] = buildCamIndex(cam);
+  const camAtFrame = {{}};          // server detection, cam -> [...]
+  const camAtFrameOnDevice = {{}};  // iOS detection, cam -> [...]
+  for (const cam of camsWithFrames)           camAtFrame[cam]           = buildCamIndexFor(framesByCam, cam);
+  for (const cam of camsWithFramesOnDevice)   camAtFrameOnDevice[cam]   = buildCamIndexFor(framesByCamOnDevice, cam);
 
   let mode = "all";
   let currentFrame = 0;          // in [0, TOTAL_FRAMES - 1]
@@ -636,12 +685,20 @@ def render_viewer_html(
   function buildDynamicTraces(cutoff) {{
     const out = [];
 
-    // Rays per camera.
-    const raysByCam = {{}};
+    // Rays per (camera, source). Server source is solid; on-device is
+    // dashed and lower opacity so the two overlays are visually separable
+    // when they nearly coincide (which they should when both detectors
+    // agree — the whole point of dual mode is seeing the *divergence*).
+    const raysByKey = {{}};  // `${{cam}}|${{source}}` -> [rays]
     for (const r of (SCENE.rays || [])) {{
-      (raysByCam[r.camera_id] = raysByCam[r.camera_id] || []).push(r);
+      const src = r.source || "server";
+      if (src === "server" && !showServer) continue;
+      if (src === "on_device" && !showOnDevice) continue;
+      const key = `${{r.camera_id}}|${{src}}`;
+      (raysByKey[key] = raysByKey[key] || []).push(r);
     }}
-    for (const [cam, rays] of Object.entries(raysByCam)) {{
+    for (const [key, rays] of Object.entries(raysByKey)) {{
+      const [cam, src] = key.split("|");
       const color = CAM_COLOR[cam] || FALLBACK;
       const {{xs, ys, zs}} = ballDetectedRaysUpTo(rays, cutoff);
       if (!xs.length) continue;
@@ -649,47 +706,89 @@ def render_viewer_html(
         type: "scatter3d",
         x: xs, y: ys, z: zs,
         mode: "lines",
-        line: {{color: color, width: 2}},
-        opacity: 0.35,
-        name: `Rays ${{cam}} (${{Math.floor(xs.length / 3)}})`,
+        line: {{color: color, width: 2, dash: src === "on_device" ? "dot" : "solid"}},
+        opacity: src === "on_device" ? 0.22 : 0.35,
+        name: `Rays ${{cam}} (${{src === "on_device" ? "iOS" : "server"}}, ${{Math.floor(xs.length / 3)}})`,
         hoverinfo: "skip",
       }});
     }}
 
-    // Ground traces per camera — line + markers, dashed if a triangulated
-    // trajectory is also shown so the 3D trajectory visually dominates.
-    for (const [cam, trace] of Object.entries(SCENE.ground_traces || {{}})) {{
-      const filtered = trace.filter(p => p.t_rel_s <= cutoff);
-      if (!filtered.length) continue;
-      const color = CAM_COLOR[cam] || FALLBACK;
-      out.push({{
-        type: "scatter3d",
-        x: filtered.map(p => p.x),
-        y: filtered.map(p => p.y),
-        z: filtered.map(p => p.z),
-        mode: "lines+markers",
-        line: {{color: color, width: 3, dash: HAS_TRIANGULATED ? "dash" : "solid"}},
-        marker: {{size: 3, color: color}},
-        opacity: HAS_TRIANGULATED ? 0.45 : 0.7,
-        name: `Ground trace ${{cam}} (${{filtered.length}} pts)`,
-      }});
+    // Ground traces per camera — server and (in dual mode) on-device.
+    // Dashed when a triangulated trajectory is also shown so the 3D
+    // trajectory visually dominates; on-device uses a denser dot pattern
+    // so overlap with server ground traces stays disambiguated.
+    if (showServer) {{
+      for (const [cam, trace] of Object.entries(SCENE.ground_traces || {{}})) {{
+        const filtered = trace.filter(p => p.t_rel_s <= cutoff);
+        if (!filtered.length) continue;
+        const color = CAM_COLOR[cam] || FALLBACK;
+        out.push({{
+          type: "scatter3d",
+          x: filtered.map(p => p.x),
+          y: filtered.map(p => p.y),
+          z: filtered.map(p => p.z),
+          mode: "lines+markers",
+          line: {{color: color, width: 3, dash: HAS_TRIANGULATED ? "dash" : "solid"}},
+          marker: {{size: 3, color: color}},
+          opacity: HAS_TRIANGULATED ? 0.45 : 0.7,
+          name: `Ground trace ${{cam}} (server, ${{filtered.length}} pts)`,
+        }});
+      }}
+    }}
+    if (showOnDevice) {{
+      for (const [cam, trace] of Object.entries(SCENE.ground_traces_on_device || {{}})) {{
+        const filtered = trace.filter(p => p.t_rel_s <= cutoff);
+        if (!filtered.length) continue;
+        const color = CAM_COLOR[cam] || FALLBACK;
+        out.push({{
+          type: "scatter3d",
+          x: filtered.map(p => p.x),
+          y: filtered.map(p => p.y),
+          z: filtered.map(p => p.z),
+          mode: "lines+markers",
+          line: {{color: color, width: 3, dash: "dot"}},
+          marker: {{size: 3, color: color, symbol: "circle-open"}},
+          opacity: 0.55,
+          name: `Ground trace ${{cam}} (iOS, ${{filtered.length}} pts)`,
+        }});
+      }}
     }}
 
-    // Triangulated trajectory (A+B paired).
-    const triPts = (SCENE.triangulated || []).filter(p => p.t_rel_s <= cutoff);
-    if (triPts.length) {{
-      const ts = triPts.map(p => p.t_rel_s);
-      out.push({{
-        type: "scatter3d",
-        x: triPts.map(p => p.x),
-        y: triPts.map(p => p.y),
-        z: triPts.map(p => p.z),
-        mode: "lines+markers",
-        line: {{color: ACCENT, width: 4}},
-        marker: {{size: 4, color: ts, colorscale: "Cividis", showscale: true,
-          colorbar: {{title: "t (s)"}}}},
-        name: `3D trajectory (${{triPts.length}} pts)`,
-      }});
+    // Triangulated trajectories — server (solid, Cividis colorbar) and
+    // on-device (dot-dash, open markers, no colorbar so the legend stays
+    // readable). Both are filtered against the current playback cutoff.
+    if (showServer) {{
+      const triPts = (SCENE.triangulated || []).filter(p => p.t_rel_s <= cutoff);
+      if (triPts.length) {{
+        const ts = triPts.map(p => p.t_rel_s);
+        out.push({{
+          type: "scatter3d",
+          x: triPts.map(p => p.x),
+          y: triPts.map(p => p.y),
+          z: triPts.map(p => p.z),
+          mode: "lines+markers",
+          line: {{color: ACCENT, width: 4}},
+          marker: {{size: 4, color: ts, colorscale: "Cividis", showscale: true,
+            colorbar: {{title: "t (s)"}}}},
+          name: `3D trajectory (server, ${{triPts.length}} pts)`,
+        }});
+      }}
+    }}
+    if (showOnDevice) {{
+      const triPts = (SCENE.triangulated_on_device || []).filter(p => p.t_rel_s <= cutoff);
+      if (triPts.length) {{
+        out.push({{
+          type: "scatter3d",
+          x: triPts.map(p => p.x),
+          y: triPts.map(p => p.y),
+          z: triPts.map(p => p.z),
+          mode: "lines+markers",
+          line: {{color: ACCENT, width: 3, dash: "dot"}},
+          marker: {{size: 4, color: ACCENT, symbol: "circle-open"}},
+          opacity: 0.85,
+          name: `3D trajectory (iOS, ${{triPts.length}} pts)`,
+        }});
+      }}
     }}
 
     return out;
@@ -765,6 +864,22 @@ def render_viewer_html(
         const cls = entry.detected ? "det" : "det no";
         const mark = entry.detected ? "✓" : "·";
         parts.push(`<span class="sub">${{cam}}:${{entry.idx}}</span><span class="${{cls}}">${{mark}}</span>`);
+      }}
+    }}
+    // Dual-mode: surface iOS-side detections in parentheses alongside the
+    // server-side marks so the header row reads e.g. `A:42✓ (iOS A:41✓)`.
+    // Only emitted when any camera carries an on-device frame list.
+    if (HAS_ON_DEVICE) {{
+      const odParts = [];
+      for (const cam of camsWithFramesOnDevice) {{
+        const entry = camAtFrameOnDevice[cam][currentFrame];
+        if (entry === null) continue;
+        const cls = entry.detected ? "det" : "det no";
+        const mark = entry.detected ? "✓" : "·";
+        odParts.push(`<span class="sub">${{cam}}:${{entry.idx}}</span><span class="${{cls}}">${{mark}}</span>`);
+      }}
+      if (odParts.length) {{
+        parts.push(`<span class="sub">(iOS</span> ${{odParts.join(" ")}}<span class="sub">)</span>`);
       }}
     }}
     parts.push(`<span class="sub">t=${{tRel.toFixed(3)}}s</span>`);
@@ -1057,63 +1172,110 @@ def render_viewer_html(
   // The playhead mirrors the scrubber thumb as a dark vertical line so
   // the strip doubles as a quick "where am I" indicator.
   const detectionCanvas = document.getElementById("detection-canvas");
+  const detectionCanvasOnDevice = document.getElementById("detection-canvas-on-device");
+  const stripRowOnDevice = document.getElementById("strip-row-on-device");
+  const toggleOnDeviceWrap = document.getElementById("toggle-on-device-wrap");
+  const toggleServer = document.getElementById("toggle-server");
+  const toggleOnDevice = document.getElementById("toggle-on-device");
   const STRIP_MUTED = "rgba(122, 117, 108, 0.35)";
   const STRIP_EMPTY = "rgba(232, 228, 219, 0.6)";
   const STRIP_HEAD = "#2A2520";
   const STRIP_CHIRP = "rgba(230, 179, 0, 0.65)";  // _ACCENT, half-alpha
+  // Reveal the second strip + toggle when on-device data exists.
+  if (HAS_ON_DEVICE) {{
+    stripRowOnDevice.hidden = false;
+    toggleOnDeviceWrap.hidden = false;
+  }}
 
-  function resizeDetectionCanvas() {{
-    const cssW = detectionCanvas.clientWidth;
-    const cssH = detectionCanvas.clientHeight || 18;
+  function resizeOneCanvas(canvas) {{
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight || 18;
     const dpr = window.devicePixelRatio || 1;
     const pxW = Math.max(1, Math.floor(cssW * dpr));
     const pxH = Math.max(1, Math.floor(cssH * dpr));
-    if (detectionCanvas.width !== pxW || detectionCanvas.height !== pxH) {{
-      detectionCanvas.width = pxW;
-      detectionCanvas.height = pxH;
+    if (canvas.width !== pxW || canvas.height !== pxH) {{
+      canvas.width = pxW;
+      canvas.height = pxH;
     }}
+  }}
+
+  function resizeDetectionCanvas() {{
+    resizeOneCanvas(detectionCanvas);
+    if (HAS_ON_DEVICE) resizeOneCanvas(detectionCanvasOnDevice);
     renderDetectionStrip();
   }}
 
-  function renderDetectionStrip() {{
-    const W = detectionCanvas.width, H = detectionCanvas.height;
+  function drawStripInto(canvas, cams, strips) {{
+    const W = canvas.width, H = canvas.height;
     if (!W || !H) return;
-    const ctx = detectionCanvas.getContext("2d");
+    const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, W, H);
-    const cams = camsWithFrames;
     const rows = Math.max(1, cams.length);
     const rowH = Math.floor(H / rows);
     for (let ci = 0; ci < cams.length; ++ci) {{
       const cam = cams[ci];
-      const strip = camAtFrame[cam];
+      const strip = strips[cam];
       const color = CAM_COLOR[cam] || FALLBACK;
       const y = ci * rowH;
       ctx.fillStyle = STRIP_EMPTY;
       ctx.fillRect(0, y, W, rowH);
+      if (!strip) continue;
       for (let x = 0; x < W; ++x) {{
-        // Map canvas pixel x → union-timeline slot.
         const i = TOTAL_FRAMES <= 1 ? 0
           : Math.min(TOTAL_FRAMES - 1, Math.round(x * (TOTAL_FRAMES - 1) / (W - 1)));
         const e = strip[i];
-        if (e === null) continue;
+        if (e === null || e === undefined) continue;
         ctx.fillStyle = e.detected ? color : STRIP_MUTED;
         ctx.fillRect(x, y, 1, rowH);
       }}
     }}
-    // Chirp anchor marker — union time = 0 by construction, since each
-    // cam's t_rel_s is already anchor-relative. Drawn under the playhead
-    // so the operator's current scrub position always wins visually when
-    // they overlap (which happens at t=0).
     if (tMin <= 0 && tMax >= 0 && tMax > tMin) {{
       const xChirp = Math.round((-tMin) * (W - 1) / (tMax - tMin));
       ctx.fillStyle = STRIP_CHIRP;
       ctx.fillRect(Math.max(0, xChirp - 1), 0, 2, H);
     }}
-    // Playhead.
     const xHead = TOTAL_FRAMES <= 1 ? 0
       : Math.round(currentFrame * (W - 1) / (TOTAL_FRAMES - 1));
     ctx.fillStyle = STRIP_HEAD;
     ctx.fillRect(Math.max(0, xHead - 1), 0, 2, H);
+  }}
+
+  function renderDetectionStrip() {{
+    drawStripInto(detectionCanvas, camsWithFrames, camAtFrame);
+    if (HAS_ON_DEVICE) {{
+      drawStripInto(detectionCanvasOnDevice, camsWithFramesOnDevice, camAtFrameOnDevice);
+    }}
+  }}
+
+  // Source visibility checkboxes drive both the detection strips and
+  // the 3D scene overlays. Strip rows hide entirely when their source
+  // is toggled off so the vertical real estate collapses; 3D trace
+  // visibility is handled inside buildDynamicTraces via `showServer` /
+  // `showOnDevice`. The server strip never hides (mono-mode users would
+  // otherwise lose their only view); we just disable the checkbox.
+  if (!HAS_ON_DEVICE) {{
+    toggleServer.disabled = true;
+  }} else {{
+    toggleServer.addEventListener("change", () => {{
+      showServer = !!toggleServer.checked;
+      // Prevent both sources being off simultaneously — the viewer would
+      // render an empty scene and both strips blank, confusing rather
+      // than informative. Last checkbox toggled-off flips the other on.
+      if (!showServer && !showOnDevice) {{
+        showOnDevice = true; toggleOnDevice.checked = true;
+      }}
+      document.getElementById("strip-row-server").hidden = !showServer;
+      drawScene();
+    }});
+    toggleOnDevice.addEventListener("change", () => {{
+      showOnDevice = !!toggleOnDevice.checked;
+      if (!showServer && !showOnDevice) {{
+        showServer = true; toggleServer.checked = true;
+        document.getElementById("strip-row-server").hidden = false;
+      }}
+      stripRowOnDevice.hidden = !showOnDevice;
+      drawScene();
+    }});
   }}
 
   window.addEventListener("resize", resizeDetectionCanvas);

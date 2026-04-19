@@ -68,6 +68,12 @@ class Ray:
     frame_index: int
     origin: list[float]
     endpoint: list[float]
+    # Detection stream this ray was traced from. "server" = server-side
+    # HSV+MOG2 pipeline (authoritative path that existing viewers rely on);
+    # "on_device" = iPhone-end detection uploaded alongside the MOV in dual
+    # mode. Viewer overlays both with different colors so operators can see
+    # where the two detectors disagree while tuning constants.
+    source: str = "server"
 
 
 @dataclass
@@ -83,6 +89,12 @@ class Scene:
     # "assume the ball is on the ground"). Keyed by camera_id so multi-
     # camera scenes still draw one trace per phone.
     ground_traces: dict[str, list[dict[str, float]]] = field(default_factory=dict)
+    # Dual-mode parallel outputs from the iOS-end detection stream. Empty
+    # for camera_only / on_device sessions; populated for dual sessions so
+    # the viewer can overlay both point clouds. Structure mirrors the
+    # server-side fields above.
+    triangulated_on_device: list[dict[str, float]] = field(default_factory=list)
+    ground_traces_on_device: dict[str, list[dict[str, float]]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +104,10 @@ class Scene:
             "triangulated": list(self.triangulated),
             "ground_traces": {
                 cam: list(trace) for cam, trace in self.ground_traces.items()
+            },
+            "triangulated_on_device": list(self.triangulated_on_device),
+            "ground_traces_on_device": {
+                cam: list(trace) for cam, trace in self.ground_traces_on_device.items()
             },
         }
 
@@ -146,10 +162,72 @@ def _world_ray(
     return d_world / np.linalg.norm(d_world)
 
 
+def _rays_and_trace_for_source(
+    frames: list,
+    *, K: np.ndarray, R_wc: np.ndarray, C: np.ndarray,
+    dist: list[float] | None, anchor: float, cam_id: str, source: str,
+    viz_length: float,
+) -> tuple[list[Ray], list[dict[str, float]]]:
+    """Per-source ray + ground-trace builder. Factored out so dual mode
+    can run the same projection math twice — once over `pitch.frames`
+    (source="server") and once over `pitch.frames_on_device`
+    (source="on_device") — without duplicating the per-frame loop."""
+    rays: list[Ray] = []
+    trace: list[dict[str, float]] = []
+    for f in frames:
+        if not f.ball_detected:
+            continue
+        has_angles = f.theta_x_rad is not None and f.theta_z_rad is not None
+        has_pixels = f.px is not None and f.py is not None
+        if not (has_angles or has_pixels):
+            continue
+        try:
+            d_world = _world_ray(
+                f.theta_x_rad, f.theta_z_rad, f.px, f.py, K, dist, R_wc
+            )
+        except Exception:
+            continue
+        ground = _ray_ground_intersection(C, d_world)
+        ground_within_radius = (
+            ground is not None
+            and float(np.linalg.norm(ground - C)) <= _MAX_RENDER_DIST_M
+        )
+        if ground_within_radius:
+            endpoint = ground
+        else:
+            viz_len = (
+                _MAX_RENDER_DIST_M if ground is not None else min(viz_length, _MAX_RENDER_DIST_M)
+            )
+            endpoint = C + viz_len * d_world
+        t_rel = float(f.timestamp_s - anchor)
+        rays.append(
+            Ray(
+                camera_id=cam_id,
+                t_rel_s=t_rel,
+                frame_index=f.frame_index,
+                origin=C.tolist(),
+                endpoint=endpoint.tolist(),
+                source=source,
+            )
+        )
+        if ground_within_radius:
+            trace.append(
+                {
+                    "t_rel_s": t_rel,
+                    "x": float(ground[0]),
+                    "y": float(ground[1]),
+                    "z": float(ground[2]),
+                }
+            )
+    trace.sort(key=lambda p: p["t_rel_s"])
+    return rays, trace
+
+
 def build_scene(
     session_id: str,
     pitches: dict[str, "PitchPayload"],
     triangulated: list["TriangulatedPoint"] | None = None,
+    triangulated_on_device: list["TriangulatedPoint"] | None = None,
 ) -> Scene:
     """Construct a renderable `Scene` for one session.
 
@@ -157,7 +235,15 @@ def build_scene(
                to this session). Cameras missing intrinsics or homography
                are silently skipped — they show up as no camera + no rays
                in the viewer, which is itself the diagnostic signal.
-    `triangulated`: SessionResult.points if both cameras were paired.
+    `triangulated`: SessionResult.points (server source).
+    `triangulated_on_device`: SessionResult.points_on_device (iOS source,
+               dual mode only; None / empty on mono-mode sessions).
+
+    Rays and ground traces are emitted per detection source — server
+    frames produce `scene.rays[source="server"]` + `scene.ground_traces`,
+    on-device frames (when present) produce `scene.rays[source="on_device"]`
+    + `scene.ground_traces_on_device`. Cameras are emitted once regardless
+    of source count.
     """
     scene = Scene(session_id=session_id)
 
@@ -188,71 +274,27 @@ def build_scene(
 
         dist = intr.distortion
         anchor = pitch.sync_anchor_timestamp_s or 0.0
-        # Scene-scale fallback length for rays that don't cross the plate —
-        # scales with the camera's distance from the world origin so the
-        # line stays visually comparable to ground-hit rays drawn by the
-        # same camera. Floor at 5 m keeps it readable when the camera is
-        # very close to the plate.
         viz_length = max(5.0, 2.0 * float(np.linalg.norm(C)))
-        trace: list[dict[str, float]] = []
-        for f in pitch.frames:
-            if not f.ball_detected:
-                continue
-            has_angles = f.theta_x_rad is not None and f.theta_z_rad is not None
-            has_pixels = f.px is not None and f.py is not None
-            if not (has_angles or has_pixels):
-                continue
-            try:
-                d_world = _world_ray(
-                    f.theta_x_rad, f.theta_z_rad, f.px, f.py, K, dist, R_wc
-                )
-            except Exception:
-                continue
-            ground = _ray_ground_intersection(C, d_world)
-            # Clamp endpoint distance from camera to `_MAX_RENDER_DIST_M`.
-            # Near-horizontal rays would otherwise hit the plate tens of
-            # metres out, blowing up Plotly's auto-fit axis. Clamping
-            # (rather than skipping) preserves the ray's direction in the
-            # viewer while bounding the scene. Ground-trace points only
-            # contribute when the true intersection sits inside the
-            # radius — a trace point at the clamp boundary would lie, and
-            # mis-reads as "ball landed here".
-            ground_within_radius = (
-                ground is not None
-                and float(np.linalg.norm(ground - C)) <= _MAX_RENDER_DIST_M
-            )
-            if ground_within_radius:
-                endpoint = ground
-            else:
-                viz_len = (
-                    _MAX_RENDER_DIST_M if ground is not None else min(viz_length, _MAX_RENDER_DIST_M)
-                )
-                endpoint = C + viz_len * d_world
-            t_rel = float(f.timestamp_s - anchor)
-            scene.rays.append(
-                Ray(
-                    camera_id=cam_id,
-                    t_rel_s=t_rel,
-                    frame_index=f.frame_index,
-                    origin=C.tolist(),
-                    endpoint=endpoint.tolist(),
-                )
-            )
-            if ground_within_radius:
-                trace.append(
-                    {
-                        "t_rel_s": t_rel,
-                        "x": float(ground[0]),
-                        "y": float(ground[1]),
-                        "z": float(ground[2]),
-                    }
-                )
-        if trace:
-            trace.sort(key=lambda p: p["t_rel_s"])
-            scene.ground_traces[cam_id] = trace
 
-    if triangulated:
-        scene.triangulated = [
+        server_rays, server_trace = _rays_and_trace_for_source(
+            pitch.frames, K=K, R_wc=R_wc, C=C, dist=dist, anchor=anchor,
+            cam_id=cam_id, source="server", viz_length=viz_length,
+        )
+        scene.rays.extend(server_rays)
+        if server_trace:
+            scene.ground_traces[cam_id] = server_trace
+
+        if pitch.frames_on_device:
+            device_rays, device_trace = _rays_and_trace_for_source(
+                pitch.frames_on_device, K=K, R_wc=R_wc, C=C, dist=dist, anchor=anchor,
+                cam_id=cam_id, source="on_device", viz_length=viz_length,
+            )
+            scene.rays.extend(device_rays)
+            if device_trace:
+                scene.ground_traces_on_device[cam_id] = device_trace
+
+    def _pts_to_dicts(pts):
+        return [
             {
                 "t_rel_s": float(p.t_rel_s),
                 "x": float(p.x_m),
@@ -260,9 +302,14 @@ def build_scene(
                 "z": float(p.z_m),
                 "residual_m": float(p.residual_m),
             }
-            for p in triangulated
+            for p in pts
             if (p.x_m ** 2 + p.y_m ** 2 + p.z_m ** 2) ** 0.5 <= _MAX_RENDER_DIST_M
         ]
+
+    if triangulated:
+        scene.triangulated = _pts_to_dicts(triangulated)
+    if triangulated_on_device:
+        scene.triangulated_on_device = _pts_to_dicts(triangulated_on_device)
 
     return scene
 

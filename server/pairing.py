@@ -144,19 +144,27 @@ def _valid_frame(f: FramePayload) -> bool:
     return f.ball_detected and (has_angles or has_pixels)
 
 
-def _frame_items(p: PitchPayload):
+def _frame_items(p: PitchPayload, *, source: str = "server"):
     """Ball-bearing frames as `(t_rel, θx, θz, px, py)`, sorted by
-    anchor-relative time. `t_rel = timestamp_s − sync_anchor_timestamp_s`."""
+    anchor-relative time. `t_rel = timestamp_s − sync_anchor_timestamp_s`.
+
+    `source` picks the detection stream: `"server"` (default) reads
+    `p.frames` — the authoritative server-side detection result —
+    `"on_device"` reads `p.frames_on_device` which carries the iOS-end
+    result when the session was armed in `dual` mode."""
+    frames = p.frames_on_device if source == "on_device" else p.frames
     anchor = p.sync_anchor_timestamp_s
     out = [
         (f.timestamp_s - anchor, f.theta_x_rad, f.theta_z_rad, f.px, f.py)
-        for f in p.frames if _valid_frame(f)
+        for f in frames if _valid_frame(f)
     ]
     out.sort(key=lambda x: x[0])
     return out
 
 
-def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoint]:
+def triangulate_cycle(
+    a: PitchPayload, b: PitchPayload, *, source: str = "server",
+) -> list[TriangulatedPoint]:
     """Pair A and B frames within an 8 ms window of anchor-relative time and
     run ray-midpoint triangulation. Requires intrinsics + homography on both
     cameras."""
@@ -168,8 +176,8 @@ def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoin
     K_a, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
     K_b, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
 
-    items_a = _frame_items(a)
-    items_b = _frame_items(b)
+    items_a = _frame_items(a, source=source)
+    items_b = _frame_items(b, source=source)
 
     drop_outside_window = 0
     drop_near_parallel = 0
@@ -217,9 +225,9 @@ def triangulate_cycle(a: PitchPayload, b: PitchPayload) -> list[TriangulatedPoin
             )
 
     logger.info(
-        "pairing cycle complete session_id=%s pairs_in_a=%d pairs_in_b=%d "
+        "pairing cycle complete session_id=%s source=%s pairs_in_a=%d pairs_in_b=%d "
         "pairs_out=%d drop_outside_window=%d drop_near_parallel=%d max_dt=%.6f",
-        a.session_id, len(items_a), len(items_b), len(results),
+        a.session_id, source, len(items_a), len(items_b), len(results),
         drop_outside_window, drop_near_parallel, _MAX_DT_S,
     )
     return results
