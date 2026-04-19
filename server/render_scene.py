@@ -761,9 +761,15 @@ def render_viewer_html(
   const framesByCamOnDevice = {{}};  // iOS detection (dual only)
   for (const v of VIDEO_META) {{
     const f = v.frames || {{ t_rel_s: [], detected: [] }};
-    framesByCam[v.camera_id] = {{ t_rel_s: f.t_rel_s || [], detected: f.detected || [] }};
+    framesByCam[v.camera_id] = {{
+      t_rel_s: f.t_rel_s || [], detected: f.detected || [],
+      px: f.px || [], py: f.py || [],
+    }};
     const od = (f.on_device) || {{ t_rel_s: [], detected: [] }};
-    framesByCamOnDevice[v.camera_id] = {{ t_rel_s: od.t_rel_s || [], detected: od.detected || [] }};
+    framesByCamOnDevice[v.camera_id] = {{
+      t_rel_s: od.t_rel_s || [], detected: od.detected || [],
+      px: od.px || [], py: od.py || [],
+    }};
   }}
   const camsWithFrames = Object.keys(framesByCam).filter(c => (framesByCam[c].t_rel_s || []).length);
   const camsWithFramesOnDevice = Object.keys(framesByCamOnDevice).filter(c => (framesByCamOnDevice[c].t_rel_s || []).length);
