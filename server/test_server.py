@@ -382,13 +382,70 @@ def test_post_pitch_with_video_triangulates_server_side(tmp_path):
     assert abs(pt["z_m"] - P_true[2]) < 2e-3
 
 
-def test_post_pitch_missing_video_returns_422(tmp_path):
-    """Video is now mandatory — iPhone always produces one. Missing video
-    must fail validation, not silently succeed."""
+def test_post_pitch_without_video_or_frames_returns_422(tmp_path):
+    """Mode-one requires a video; mode-two requires frames. Sending neither
+    means there's nothing to triangulate — reject up-front instead of
+    silently recording an empty pitch."""
     K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
     client = TestClient(app)
     r = _post_pitch(client, _base_payload("A", sid(501), K, H_a), None)
     assert r.status_code == 422, r.text
+
+
+def test_post_pitch_mode_two_accepts_frames_without_video(tmp_path):
+    """Mode-two (on-device detection) path: iPhone posts precomputed frames
+    alongside metadata, no MOV. Server must skip decode + detection and
+    triangulate directly against the uploaded frames."""
+    K, *_, (R_a, t_a, C_a, H_a), (R_b, t_b, C_b, H_b) = _make_scene()
+    P_true = np.array([0.15, 0.35, 1.1])
+    session_id = sid(600)
+    client = TestClient(app)
+
+    # Project P_true into each camera to get ground-truth px/py.
+    def _project_to_px(R, t):
+        P_cam = R @ P_true + t
+        u = K[0, 0] * P_cam[0] / P_cam[2] + K[0, 2]
+        v = K[1, 1] * P_cam[1] / P_cam[2] + K[1, 2]
+        return float(u), float(v)
+
+    px_a, py_a = _project_to_px(R_a, t_a)
+    px_b, py_b = _project_to_px(R_b, t_b)
+
+    frames_a = [{
+        "frame_index": 0,
+        "timestamp_s": 0.0,
+        "px": px_a, "py": py_a,
+        "ball_detected": True,
+    }]
+    frames_b = [{
+        "frame_index": 0,
+        "timestamp_s": 0.0,
+        "px": px_b, "py": py_b,
+        "ball_detected": True,
+    }]
+
+    body_a = _base_payload("A", session_id, K, H_a)
+    body_a["frames"] = frames_a
+    body_b = _base_payload("B", session_id, K, H_b)
+    body_b["frames"] = frames_b
+
+    r1 = _post_pitch(client, body_a, None)
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["clip"] is None
+    assert r1.json()["triangulated_points"] == 0
+
+    r2 = _post_pitch(client, body_b, None)
+    assert r2.status_code == 200, r2.text
+    body2 = r2.json()
+    assert body2["paired"] is True
+    assert body2["triangulated_points"] == 1
+    assert body2["clip"] is None
+
+    result = client.get(f"/results/{session_id}").json()
+    pt = result["points"][0]
+    assert abs(pt["x_m"] - P_true[0]) < 1e-6
+    assert abs(pt["y_m"] - P_true[1]) < 1e-6
+    assert abs(pt["z_m"] - P_true[2]) < 1e-6
 
 
 def test_post_pitch_anchorless_sets_error(tmp_path):

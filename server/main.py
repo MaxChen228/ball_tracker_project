@@ -963,34 +963,26 @@ def _summarize_result(result: SessionResult) -> dict[str, Any]:
 async def pitch(
     request: Request,
     payload: str = Form(...),
-    video: UploadFile = File(...),
+    video: UploadFile | None = File(None),
 ) -> dict[str, Any]:
     """Ingest one armed-session upload as multipart/form-data.
 
     Required form fields:
-      - `payload` — JSON-encoded `PitchPayload` (camera_id, session_id,
-        sync_anchor_timestamp_s, video_start_pts_s, video_fps, intrinsics,
-        homography, image_{width,height}_px). No per-frame data.
-      - `video`   — H.264 MOV/MP4 of the cycle. Server decodes it, runs
-        HSV ball detection per frame, then triangulates with the partner
-        upload for this session.
+      - `payload` — JSON-encoded `PitchPayload`. In mode-one (`camera_only`)
+        carries only session-level metadata; in mode-two (`on_device`) also
+        carries the per-frame `frames: [FramePayload]` list produced by the
+        iPhone's own HSV+MOG2 detector.
 
-    Flow:
-      1. 413 guard on declared Content-Length
-      2. Validate JSON payload
-      3. Persist the clip bytes atomically
-      4. Decode the clip and synthesise per-frame detection results
-      5. `state.record()` stores the enriched payload + triangulates if B
-         (or A) is already on file
-      6. Return the session summary — triangulation stats for the dashboard.
+    Optional:
+      - `video` — H.264 MOV/MP4 of the cycle. Required in mode-one (server
+        decodes it and runs HSV detection). Omitted in mode-two — server
+        trusts the iPhone's detection output and only pairs + triangulates.
 
-    Uploads without a time-sync anchor (`sync_anchor_timestamp_s is None`)
-    skip detection + triangulation and surface `error="no time sync"` on
-    the session. Operator's cue to re-run 時間校正.
+    Requests with neither a video nor a non-empty `frames` list return 422:
+    there's no way to triangulate off nothing. Requests without a time-sync
+    anchor skip detection+triangulation and surface `error="no time sync"`.
     """
-    # Fail fast on oversize bodies when the client advertises Content-Length
-    # (Starlette has already buffered by the time we get here, but returning
-    # 413 early is still cheaper than processing the multipart parts).
+    # Fail fast on oversize bodies when the client advertises Content-Length.
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
@@ -1005,74 +997,87 @@ async def pitch(
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors())
 
-    data = await video.read()
-    # Defence in depth: re-check the actual read size in case the declared
-    # Content-Length was missing or spoofed.
-    if len(data) > _MAX_PITCH_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="video too large")
-    if not data:
-        raise HTTPException(status_code=422, detail="video attachment is empty")
-    ext = "mov"
-    if video.filename:
-        suffix = Path(video.filename).suffix.lstrip(".").lower()
-        if suffix:
-            ext = suffix
-    # Hand the heavy steps (disk write, PyAV decode + cv2 detection, PyAV
-    # re-encode, atomic JSON writes + triangulation) to the default thread
-    # executor. A 240 fps × 1080p clip's `detect_pitch` + `annotate_video`
-    # pair can hold the CPU for seconds — running it on the event loop
-    # would stall every other request (heartbeats, /status, dashboard
-    # ticks) for the same duration.
-    clip_path = await asyncio.to_thread(
-        state.save_clip,
-        payload_obj.camera_id, payload_obj.session_id, data, ext,
-    )
-    clip_info = {"filename": clip_path.name, "bytes": len(data)}
-
-    if payload_obj.sync_anchor_timestamp_s is None:
-        # No time anchor → pairing is impossible; skip detection so we
-        # don't waste CPU on data that will never triangulate.
-        payload_obj.frames = []
-        detection_ran = False
-    else:
-        payload_obj.frames = await asyncio.to_thread(
-            detect_pitch, clip_path, payload_obj.video_start_pts_s,
+    has_video = video is not None and (video.filename or video.size)
+    has_frames = bool(payload_obj.frames)
+    if not has_video and not has_frames:
+        raise HTTPException(
+            status_code=422,
+            detail="must supply either `video` (mode-one) or a non-empty "
+                   "`frames` list in payload (mode-two)",
         )
-        detection_ran = True
-        # Re-encode the clip with a green circle on every detected frame
-        # so the viewer shows "processed" footage by default. Failures
-        # here are logged-and-swallowed: raw clip is still on disk, the
-        # viewer just falls back to it.
-        annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
-        try:
-            await asyncio.to_thread(
-                annotate_video, clip_path, annotated_path, payload_obj.frames,
+
+    clip_info: dict[str, Any] | None = None
+    detection_ran = False
+
+    if has_video:
+        data = await video.read()
+        if len(data) > _MAX_PITCH_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="video too large")
+        if not data:
+            raise HTTPException(status_code=422, detail="video attachment is empty")
+        ext = "mov"
+        if video.filename:
+            suffix = Path(video.filename).suffix.lstrip(".").lower()
+            if suffix:
+                ext = suffix
+        # Hand the heavy steps (disk write, PyAV decode + cv2 detection,
+        # annotate_video re-encode, atomic JSON writes + triangulation)
+        # to the default thread executor.
+        clip_path = await asyncio.to_thread(
+            state.save_clip,
+            payload_obj.camera_id, payload_obj.session_id, data, ext,
+        )
+        clip_info = {"filename": clip_path.name, "bytes": len(data)}
+
+        if payload_obj.sync_anchor_timestamp_s is None:
+            payload_obj.frames = []
+        else:
+            # Mode-one: server-side detection is authoritative. We
+            # overwrite any `frames` the iPhone may have speculatively
+            # included alongside the MOV.
+            payload_obj.frames = await asyncio.to_thread(
+                detect_pitch, clip_path, payload_obj.video_start_pts_s,
             )
-        except Exception as exc:
-            logger.warning(
-                "annotate_video failed session=%s cam=%s err=%s",
-                payload_obj.session_id, payload_obj.camera_id, exc,
-            )
-            if annotated_path.exists():
-                try:
-                    annotated_path.unlink()
-                except OSError:
-                    pass
+            detection_ran = True
+            annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
+            try:
+                await asyncio.to_thread(
+                    annotate_video, clip_path, annotated_path, payload_obj.frames,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "annotate_video failed session=%s cam=%s err=%s",
+                    payload_obj.session_id, payload_obj.camera_id, exc,
+                )
+                if annotated_path.exists():
+                    try:
+                        annotated_path.unlink()
+                    except OSError:
+                        pass
+    else:
+        # Mode-two: iPhone already detected; we trust the frames list and
+        # only run pairing + triangulation. No disk write, no annotated
+        # clip — the viewer for this session will fall back to the
+        # per-frame trace from the payload JSON.
+        if payload_obj.sync_anchor_timestamp_s is None:
+            # Anchor missing ⇒ the session can't pair no matter what the
+            # frames say; drop them so downstream counts stay honest.
+            payload_obj.frames = []
+        else:
+            detection_ran = True  # "detection" already ran on the device
 
     result = await asyncio.to_thread(state.record, payload_obj)
     if payload_obj.sync_anchor_timestamp_s is None and result.error is None:
-        # Persist the "no time sync" diagnostic so the session reads
-        # consistently from /events / /results without re-running record().
         result.error = "no time sync"
     ball_frames = sum(1 for f in payload_obj.frames if f.ball_detected)
     logger.info(
-        "pitch camera=%s session=%s clip=%dB frames=%d ball=%d detected=%s triangulated=%d%s",
+        "pitch camera=%s session=%s clip=%s frames=%d ball=%d detected_on=%s triangulated=%d%s",
         payload_obj.camera_id,
         payload_obj.session_id,
-        clip_info["bytes"],
+        f"{clip_info['bytes']}B" if clip_info else "none",
         len(payload_obj.frames),
         ball_frames,
-        detection_ran,
+        "server" if has_video else ("device" if detection_ran else "skipped"),
         len(result.points),
         f" err={result.error}" if result.error else "",
     )
