@@ -279,7 +279,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             let enriched = self.enrichedPayload(from: payload)
             if let finishingClip {
                 finishingClip.finish { [weak self] videoURL in
-                    self?.persistCompletedCycle(enriched, videoURL: videoURL)
+                    self?.handleFinishedClip(enriched: enriched, videoURL: videoURL)
                 }
             } else {
                 self.persistCompletedCycle(enriched, videoURL: nil)
@@ -467,6 +467,88 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             switchCaptureFps(standbyFps)
         }
         updateUIForState()
+    }
+
+    // Pre/post-roll margins around the detected ball window. Two-camera
+    // trim ranges rarely align to the same frame (parallax + occlusion
+    // differences), so we pad the window on both ends — 300 ms absorbs up
+    // to ~250 ms of A/B disagreement while still shrinking the upload to
+    // under 2 s in the common case.
+    private static let trimPreRollS: Double = 0.3
+    private static let trimPostRollS: Double = 0.3
+    /// Hard ceiling on the trimmed clip duration, measured from the first
+    /// detection (minus pre-roll). Covers a realistic pitch + follow-through
+    /// without blowing the upload budget.
+    private static let trimMaxDurationS: Double = 1.5
+
+    /// Cycle-complete → post-recording trim oracle. Reads the detection
+    /// buffer, picks a trim window, hands the MOV to `ClipTrimmer`, and
+    /// routes the result (or a fallback) to `persistCompletedCycle`.
+    private func handleFinishedClip(
+        enriched: ServerUploader.PitchPayload,
+        videoURL: URL?
+    ) {
+        guard let videoURL else {
+            // No clip on disk (writer failed or was never started) — nothing
+            // to trim; the JSON-only pipeline still runs.
+            persistCompletedCycle(enriched, videoURL: nil)
+            return
+        }
+
+        let detections = drainBallDetections()
+        let originalStart = enriched.video_start_pts_s
+
+        guard !detections.isEmpty else {
+            // Step 4d fallback: operator armed + stopped without the ball
+            // entering the frame. Ship the full clip so the server can
+            // re-run its own detection against the authoritative video and
+            // we don't silently lose a session.
+            log.info("cycle trim skip reason=no_ball_detected session=\(enriched.session_id, privacy: .public)")
+            persistCompletedCycle(enriched, videoURL: videoURL)
+            return
+        }
+
+        let first = detections.min() ?? originalStart
+        let last = detections.max() ?? first
+        // Never trim before the MOV itself starts — the ClipTrimmer clamps
+        // negatives to 0 but we keep the semantics explicit here too.
+        let desiredStartAbs = max(first - Self.trimPreRollS, originalStart)
+        let desiredEndAbs = min(last + Self.trimPostRollS, desiredStartAbs + Self.trimMaxDurationS)
+        let startOffsetInMovS = desiredStartAbs - originalStart
+        let durationS = max(desiredEndAbs - desiredStartAbs, 0)
+
+        guard durationS > 0 else {
+            log.warning("cycle trim degenerate range — uploading full clip session=\(enriched.session_id, privacy: .public)")
+            persistCompletedCycle(enriched, videoURL: videoURL)
+            return
+        }
+
+        log.info("cycle trim plan session=\(enriched.session_id, privacy: .public) detections=\(detections.count) window=[\(desiredStartAbs),\(desiredEndAbs)] offset_in_mov=\(startOffsetInMovS) dur=\(durationS)")
+
+        let destination = payloadStore.makeTempVideoURL()
+        ClipTrimmer.trim(
+            source: videoURL,
+            startOffsetFromMovStartS: startOffsetInMovS,
+            durationS: durationS,
+            destination: destination,
+            originalVideoStartPtsS: originalStart
+        ) { [weak self] output in
+            guard let self else { return }
+            guard let output else {
+                // Trim failed for any reason — keep the full clip rather
+                // than losing the cycle. Server detection will still run
+                // against whatever MOV we send up.
+                log.warning("cycle trim failed — uploading full clip session=\(enriched.session_id, privacy: .public)")
+                self.persistCompletedCycle(enriched, videoURL: videoURL)
+                return
+            }
+            // Trim succeeded. Drop the original MOV; only the trimmed one
+            // needs to survive to the upload queue.
+            try? FileManager.default.removeItem(at: videoURL)
+            let updated = enriched.withVideoStartPts(output.absoluteStartPtsS)
+            log.info("cycle trimmed session=\(enriched.session_id, privacy: .public) abs_start=\(output.absoluteStartPtsS) dur=\(output.durationS)")
+            self.persistCompletedCycle(updated, videoURL: output.url)
+        }
     }
 
     private func persistCompletedCycle(
