@@ -242,6 +242,13 @@ form.inline {{ display: inline-block; margin: 0; }}
               flex-wrap: wrap; }}
 .event-top .sid {{ font-family: var(--mono); font-size: 12px; font-weight: 500;
                    color: var(--ink); letter-spacing: 0.04em; margin-right: var(--s-1); }}
+/* Capture-mode annotation next to sid — metadata, not a state badge, so
+   it's rendered as subdued inline text instead of a chip. Avoids the
+   prior double-"DUAL" collision with the cam-identity chip. */
+.event-top .capmode {{ font-family: var(--mono); font-size: 10px;
+                        letter-spacing: 0.10em; text-transform: uppercase;
+                        color: var(--sub); }}
+.event-top .capmode::before {{ content: "· "; opacity: 0.5; }}
 .event-stats {{ display: grid; grid-template-columns: repeat(3, 1fr);
                 gap: var(--s-1) var(--s-3);
                 font-family: var(--mono); font-size: 11px; color: var(--ink-light); }}
@@ -548,7 +555,6 @@ _JS_TEMPLATE = r"""
     }
     evHtml = events.map(e => {
       const cams = (e.cameras || []).join(' · ') || '—';
-      const mode = (e.cameras || []).length >= 2 ? 'dual' : 'single';
       const stat = (e.status || '').replace(/_/g, ' ');
       const peakZ = fmtNum(e.peak_z_m, 2);
       const duration = fmtNum(e.duration_s, 2);
@@ -566,7 +572,6 @@ _JS_TEMPLATE = r"""
       const captureMode = e.mode === 'on_device' ? 'on-device'
                         : e.mode === 'dual'       ? 'dual'
                         : 'camera-only';
-      const captureModeLabel = captureMode;
       // Trajectory overlay toggle: only sessions with 3D points qualify.
       // Sibling to event-row (not inside) so the checkbox click doesn't
       // trigger the wrapping link's navigation.
@@ -585,9 +590,8 @@ _JS_TEMPLATE = r"""
           <a class="event-row" href="/viewer/${sid}">
             <div class="event-top">
               <span class="sid">${sid}</span>
-              <span class="chip ${esc(mode)}">${mode}</span>
+              <span class="capmode">${esc(captureMode)}</span>
               <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
-              <span class="chip ${esc(captureMode)}">${esc(captureModeLabel)}</span>
             </div>
             ${hasMetrics ? `<div class="event-stats">
               <span><span class="k">Cams</span><span class="v">${esc(cams)}</span></span>
@@ -879,7 +883,6 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
     for e in events:
         sid = html.escape(e["session_id"])
         cams = " · ".join(html.escape(c) for c in e.get("cameras", [])) or "—"
-        cam_mode = "dual" if len(e.get("cameras", [])) >= 2 else "single"
         status = html.escape(e.get("status", ""))
         stat_label = status.replace("_", " ")
         mode_val = e.get("mode")
@@ -930,9 +933,8 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f'<a class="event-row" href="/viewer/{sid}">'
             f'<div class="event-top">'
             f'<span class="sid">{sid}</span>'
-            f'<span class="chip {cam_mode}">{cam_mode}</span>'
+            f'<span class="capmode">{capture_mode}</span>'
             f'<span class="chip {status}">{stat_label}</span>'
-            f'<span class="chip {capture_mode}">{capture_mode}</span>'
             f"</div>"
             f"{stats_html}"
             f"</a>"
