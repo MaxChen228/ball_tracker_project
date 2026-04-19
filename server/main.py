@@ -69,7 +69,7 @@ from threading import Lock
 from typing import Any, Callable
 
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
@@ -240,10 +240,11 @@ class State:
                 camera_b_received=b is not None,
             )
             if a is not None and b is not None:
-                try:
-                    result.points = self._triangulate_pair(a, b, source="server")
-                except Exception as e:
-                    result.error = f"{type(e).__name__}: {e}"
+                if self._has_server_frames(a) and self._has_server_frames(b):
+                    try:
+                        result.points = self._triangulate_pair(a, b, source="server")
+                    except Exception as e:
+                        result.error = f"{type(e).__name__}: {e}"
                 if self._has_on_device_frames(a) and self._has_on_device_frames(b):
                     try:
                         result.points_on_device = self._triangulate_pair(a, b, source="on_device")
@@ -326,6 +327,16 @@ class State:
         triangulation pass over the iOS detection stream."""
         return bool(pitch and pitch.frames_on_device)
 
+    @staticmethod
+    def _has_server_frames(pitch: PitchPayload) -> bool:
+        """True once the server-side MOV detection has populated
+        `pitch.frames`. Used to gate `_triangulate_pair(source="server")`
+        so the early-surface path (record runs before detection finishes,
+        with `frames=[]`) doesn't flag a spurious error — it just leaves
+        `result.points=[]` until the background detect task updates the
+        pitch and we re-record."""
+        return bool(pitch and pitch.frames)
+
     def _atomic_write(self, path: Path, payload: str) -> None:
         # Unique tmp filename per call so concurrent writers targeting the
         # same `path` (e.g. two simultaneous /pitch POSTs producing the same
@@ -378,10 +389,11 @@ class State:
             camera_b_received=b is not None,
         )
         if a is not None and b is not None:
-            try:
-                result.points = self._triangulate_pair(a, b, source="server")
-            except Exception as e:
-                result.error = f"{type(e).__name__}: {e}"
+            if self._has_server_frames(a) and self._has_server_frames(b):
+                try:
+                    result.points = self._triangulate_pair(a, b, source="server")
+                except Exception as e:
+                    result.error = f"{type(e).__name__}: {e}"
             if self._has_on_device_frames(a) and self._has_on_device_frames(b):
                 try:
                     result.points_on_device = self._triangulate_pair(a, b, source="on_device")
@@ -1021,6 +1033,7 @@ def _summarize_result(result: SessionResult) -> dict[str, Any]:
 @app.post("/pitch")
 async def pitch(
     request: Request,
+    background_tasks: BackgroundTasks,
     payload: str = Form(...),
     video: UploadFile | None = File(None),
 ) -> dict[str, Any]:
@@ -1071,7 +1084,8 @@ async def pitch(
         )
 
     clip_info: dict[str, Any] | None = None
-    detection_ran = False
+    clip_path: Path | None = None
+    detection_pending = False
 
     if has_video:
         data = await video.read()
@@ -1084,40 +1098,20 @@ async def pitch(
             suffix = Path(video.filename).suffix.lstrip(".").lower()
             if suffix:
                 ext = suffix
-        # Hand the heavy steps (disk write, PyAV decode + cv2 detection,
-        # annotate_video re-encode, atomic JSON writes + triangulation)
-        # to the default thread executor.
         clip_path = await asyncio.to_thread(
             state.save_clip,
             payload_obj.camera_id, payload_obj.session_id, data, ext,
         )
         clip_info = {"filename": clip_path.name, "bytes": len(data)}
 
-        if payload_obj.sync_anchor_timestamp_s is None:
-            payload_obj.frames = []
-        else:
-            # Mode-one: server-side detection is authoritative. We
-            # overwrite any `frames` the iPhone may have speculatively
-            # included alongside the MOV.
-            payload_obj.frames = await asyncio.to_thread(
-                detect_pitch, clip_path, payload_obj.video_start_pts_s,
-            )
-            detection_ran = True
-            annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
-            try:
-                await asyncio.to_thread(
-                    annotate_video, clip_path, annotated_path, payload_obj.frames,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "annotate_video failed session=%s cam=%s err=%s",
-                    payload_obj.session_id, payload_obj.camera_id, exc,
-                )
-                if annotated_path.exists():
-                    try:
-                        annotated_path.unlink()
-                    except OSError:
-                        pass
+        # Early-surface: do NOT block on detect_pitch (8-20 s). Record the
+        # payload with frames=[] so the dashboard + viewer + on-device
+        # triangulation see this cycle immediately, then schedule the
+        # server detection as a background task that will re-record the
+        # pitch once frames are filled.
+        payload_obj.frames = []
+        if payload_obj.sync_anchor_timestamp_s is not None:
+            detection_pending = True
     else:
         # Mode-two: iPhone already detected; we trust the frames list and
         # only run pairing + triangulation. No disk write, no annotated
@@ -1127,36 +1121,91 @@ async def pitch(
             # Anchor missing ⇒ the session can't pair no matter what the
             # frames say; drop them so downstream counts stay honest.
             payload_obj.frames = []
-        else:
-            detection_ran = True  # "detection" already ran on the device
 
     result = await asyncio.to_thread(state.record, payload_obj)
     if payload_obj.sync_anchor_timestamp_s is None and result.error is None:
         result.error = "no time sync"
+
+    if detection_pending and clip_path is not None:
+        # Background task: runs AFTER the response body is sent, so the
+        # dashboard's /events + /viewer can surface the on-device trace
+        # and session row immediately without waiting on the 8-20 s
+        # server detection.
+        background_tasks.add_task(_run_server_detection, clip_path, payload_obj)
+
     ball_frames = sum(1 for f in payload_obj.frames if f.ball_detected)
     logger.info(
-        "pitch camera=%s session=%s clip=%s frames=%d ball=%d detected_on=%s triangulated=%d%s",
+        "pitch camera=%s session=%s clip=%s frames=%d ball=%d detected_on=%s triangulated=%d%s%s",
         payload_obj.camera_id,
         payload_obj.session_id,
         f"{clip_info['bytes']}B" if clip_info else "none",
         len(payload_obj.frames),
         ball_frames,
-        "server" if has_video else ("device" if detection_ran else "skipped"),
+        "server-pending" if detection_pending else ("device" if payload_obj.frames else "skipped"),
         len(result.points),
+        f" on_device={len(result.points_on_device)}" if result.points_on_device else "",
         f" err={result.error}" if result.error else "",
     )
-    if result.points:
-        zs = [p.z_m for p in result.points]
+    if result.points_on_device:
+        zs = [p.z_m for p in result.points_on_device]
         logger.info(
-            "  session %s → %d pts, duration %.2fs, peak z = %.2fm",
+            "  session %s (on_device) → %d pts, duration %.2fs, peak z = %.2fm",
             result.session_id,
-            len(result.points),
-            result.points[-1].t_rel_s - result.points[0].t_rel_s,
+            len(result.points_on_device),
+            result.points_on_device[-1].t_rel_s - result.points_on_device[0].t_rel_s,
             max(zs),
         )
     response: dict[str, Any] = {"ok": True, **_summarize_result(result)}
     response["clip"] = clip_info
+    response["detection_pending"] = detection_pending
     return response
+
+
+async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
+    """Background task: decode the MOV, run HSV detection, annotate, then
+    re-record the pitch so `result.points` (and the annotated MP4) land on
+    disk. Runs after /pitch has already returned — the dashboard sees the
+    session + on-device points immediately, and this task backfills the
+    server-side trace 8-20 s later."""
+    try:
+        frames = await asyncio.to_thread(
+            detect_pitch, clip_path, pitch.video_start_pts_s,
+        )
+    except Exception as exc:
+        logger.warning(
+            "background detect_pitch failed session=%s cam=%s err=%s",
+            pitch.session_id, pitch.camera_id, exc,
+        )
+        return
+
+    pitch.frames = frames
+    try:
+        await asyncio.to_thread(state.record, pitch)
+    except Exception as exc:
+        logger.warning(
+            "background re-record failed session=%s cam=%s err=%s",
+            pitch.session_id, pitch.camera_id, exc,
+        )
+        return
+
+    annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
+    try:
+        await asyncio.to_thread(annotate_video, clip_path, annotated_path, frames)
+    except Exception as exc:
+        logger.warning(
+            "annotate_video failed session=%s cam=%s err=%s",
+            pitch.session_id, pitch.camera_id, exc,
+        )
+        if annotated_path.exists():
+            try:
+                annotated_path.unlink()
+            except OSError:
+                pass
+    ball = sum(1 for f in frames if f.ball_detected)
+    logger.info(
+        "background detection complete session=%s cam=%s frames=%d ball=%d",
+        pitch.session_id, pitch.camera_id, len(frames), ball,
+    )
 
 
 @app.get("/chirp.wav")
