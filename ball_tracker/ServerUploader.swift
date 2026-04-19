@@ -25,6 +25,18 @@ final class ServerUploader {
 
     /// Metadata accompanying the required H.264 MOV. The server decodes the
     /// video, runs HSV ball detection per frame, and triangulates.
+    /// One decoded / on-device-detected frame. Wire-identical to
+    /// `server/schemas.FramePayload`. `px` / `py` are nil on frames where
+    /// the detector didn't find a ball (mode-two still records those so
+    /// the server can see the timestamp coverage).
+    struct FramePayload: Codable {
+        let frame_index: Int
+        let timestamp_s: Double
+        let px: Double?
+        let py: Double?
+        let ball_detected: Bool
+    }
+
     struct PitchPayload: Codable {
         let camera_id: String
         /// Server-minted pairing key from `POST /sessions/arm`. A/B pairs
@@ -50,6 +62,53 @@ final class ServerUploader {
         let homography: [Double]?
         let image_width_px: Int?
         let image_height_px: Int?
+        /// Per-frame detection results. Empty in mode-one (`camera_only`):
+        /// the server runs detection on the uploaded MOV. Non-empty in
+        /// mode-two (`on_device`): iPhone ran its own BTDetectionSession
+        /// pipeline and ships the frame list alongside the metadata, no MOV.
+        /// Default [] so the field always encodes to a concrete array.
+        let frames: [FramePayload]
+
+        /// Return a copy of this payload with `video_start_pts_s` replaced.
+        /// Used by the post-recording trim pipeline: the trimmer writes a
+        /// new MOV whose first frame corresponds to some time offset into
+        /// the original clip, so the payload that ships alongside it must
+        /// point at the new absolute start to keep the server's PTS
+        /// reconstruction on the right session clock.
+        func withVideoStartPts(_ newVideoStartPtsS: Double) -> PitchPayload {
+            PitchPayload(
+                camera_id: camera_id,
+                session_id: session_id,
+                sync_anchor_timestamp_s: sync_anchor_timestamp_s,
+                video_start_pts_s: newVideoStartPtsS,
+                video_fps: video_fps,
+                local_recording_index: local_recording_index,
+                intrinsics: intrinsics,
+                homography: homography,
+                image_width_px: image_width_px,
+                image_height_px: image_height_px,
+                frames: frames
+            )
+        }
+
+        /// Return a copy of this payload with `frames` replaced. Used by
+        /// the mode-two cycle-complete path to attach the session's
+        /// BTDetectionSession output before shipping.
+        func withFrames(_ newFrames: [FramePayload]) -> PitchPayload {
+            PitchPayload(
+                camera_id: camera_id,
+                session_id: session_id,
+                sync_anchor_timestamp_s: sync_anchor_timestamp_s,
+                video_start_pts_s: video_start_pts_s,
+                video_fps: video_fps,
+                local_recording_index: local_recording_index,
+                intrinsics: intrinsics,
+                homography: homography,
+                image_width_px: image_width_px,
+                image_height_px: image_height_px,
+                frames: newFrames
+            )
+        }
     }
 
     /// Server `/pitch` response summary. Triangulation fields are optional
@@ -79,6 +138,10 @@ final class ServerUploader {
         let armed: Bool
         let started_at: Double
         let ended_at: Double?
+        /// Capture mode snapshotted at arm time. Once armed this is frozen
+        /// for the whole recording cycle — a dashboard toggle mid-session
+        /// doesn't mutate it. Optional to keep older server builds parseable.
+        let mode: String?
     }
 
     /// Response body shared by `POST /heartbeat` and `GET /status`.
@@ -89,6 +152,24 @@ final class ServerUploader {
         let devices: [HeartbeatDevice]?
         let session: HeartbeatSession?
         let commands: [String: String]?
+        /// Dashboard-wide capture mode toggle. iPhones read this in idle
+        /// to render the HUD mode chip; during an armed session the phone
+        /// prefers `session.mode` (the snapshot). Optional for back-compat.
+        let capture_mode: String?
+    }
+
+    /// iOS-side capture-mode enum. Kept string-valued so it round-trips
+    /// directly through HeartbeatResponse without a custom decoder.
+    enum CaptureMode: String, Codable {
+        case cameraOnly = "camera_only"
+        case onDevice = "on_device"
+
+        var displayLabel: String {
+            switch self {
+            case .cameraOnly: return "Camera-only"
+            case .onDevice:   return "On-device"
+            }
+        }
     }
 
     struct ServerConfig {

@@ -75,11 +75,30 @@ final class SettingsViewController: UIViewController {
     private static let keyIntrinsicsRms = "intrinsic_rms"
     private static let keyIntrinsicsCalibratedAt = "intrinsic_calibrated_at"
 
-    // Resolution is system-wide fixed. See CLAUDE.md "Physical setup" —
-    // every downstream math (HSV detection, intrinsics scaling, 1080p
-    // camera format pick) assumes 1080p 16:9.
+    // Calibration always bakes intrinsics at 1080p — every downstream math
+    // (HSV detection, intrinsics scaling, ChArUco import target) treats
+    // these as the reference resolution. The capture format itself can
+    // drop to 720p / 540p via the Settings picker, and the server rescales
+    // intrinsics + homography per-pitch through
+    // `pairing.scale_pitch_to_video_dims`.
     static let captureWidthFixed = 1920
     static let captureHeightFixed = 1080
+
+    /// Recording-resolution options shown in the SwiftUI Settings picker.
+    /// All 16:9. `CameraViewController.configureCaptureFormat` searches for
+    /// an AVCaptureDevice format matching (width, height) at 240 fps; 540p
+    /// isn't supported on every iPhone — the picker still offers it but
+    /// the format selection will fail loudly if the rig can't honour it.
+    struct CaptureResolution: Hashable {
+        let label: String
+        let width: Int
+        let height: Int
+    }
+    static let captureResolutions: [CaptureResolution] = [
+        CaptureResolution(label: "1080p", width: 1920, height: 1080),
+        CaptureResolution(label: "720p", width: 1280, height: 720),
+        CaptureResolution(label: "540p", width: 960, height: 540),
+    ]
 
     // MARK: - Container state
 
@@ -215,8 +234,14 @@ final class SettingsViewController: UIViewController {
         let pollInterval = doubleOrDefault(keyPollInterval, defaultValue: 1.0)
         let parkCameraInStandby = d.object(forKey: keyParkCameraInStandby) as? Bool ?? true
 
-        let captureWidth = captureWidthFixed
-        let captureHeight = captureHeightFixed
+        // Recording resolution is now user-pickable. Read the stored height
+        // and look up the matching CaptureResolution; fall back to 1080p
+        // when the stored value isn't in the supported set (stale prefs).
+        let storedH = intOrDefault(keyCaptureHeight, defaultValue: captureHeightFixed)
+        let resolution = captureResolutions.first { $0.height == storedH }
+            ?? captureResolutions[0]
+        let captureWidth = resolution.width
+        let captureHeight = resolution.height
 
         let manualEnabled = d.bool(forKey: keyManualIntrinsicsEnabled)
         let manualFx = manualEnabled ? doubleOrDefault(keyIntrinsicFx, defaultValue: 0) : 0

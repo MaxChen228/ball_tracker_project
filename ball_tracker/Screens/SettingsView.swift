@@ -15,6 +15,10 @@ final class SettingsViewModel {
 
     // Camera
     var cameraRoleIndex: Int = 0  // 0 == A, 1 == B
+    /// Recording-resolution picker. Stored as `height` so the SwiftUI
+    /// Picker can use `Int` tags directly; width is recovered at save
+    /// time via `SettingsViewController.captureResolutions`.
+    var captureHeight: Int = SettingsViewController.captureHeightFixed
 
     // Audio
     var chirpThreshold: String = "0.18"
@@ -42,6 +46,7 @@ final class SettingsViewModel {
         serverPort = String(s.serverPort)
         pollInterval = String(s.pollInterval)
         cameraRoleIndex = s.cameraRole == "B" ? 1 : 0
+        captureHeight = s.captureHeight
         chirpThreshold = String(s.chirpThreshold)
         manualIntrinsicsEnabled = s.manualIntrinsicsEnabled
         manualFx = s.manualFx > 0 ? String(s.manualFx) : ""
@@ -100,14 +105,21 @@ final class SettingsViewModel {
             meta = (0, 0, 0, nil)
         }
 
+        // Recover the recording resolution's width from the picker's
+        // height — captureResolutions is the single source of truth for
+        // the supported (width, height) pairs.
+        let pickedResolution = SettingsViewController.captureResolutions
+            .first { $0.height == captureHeight }
+            ?? SettingsViewController.captureResolutions[0]
+
         let settings = SettingsViewController.Settings(
             serverIP: normalizeServerIP(serverIP, fallback: current.serverIP),
             serverPort: Int(serverPort) ?? current.serverPort,
             cameraRole: cameraRoleIndex == 1 ? "B" : "A",
             chirpThreshold: Double(chirpThreshold) ?? current.chirpThreshold,
             pollInterval: min(60, max(1, Double(pollInterval) ?? current.pollInterval)),
-            captureWidth: SettingsViewController.captureWidthFixed,
-            captureHeight: SettingsViewController.captureHeightFixed,
+            captureWidth: pickedResolution.width,
+            captureHeight: pickedResolution.height,
             parkCameraInStandby: current.parkCameraInStandby,
             manualIntrinsicsEnabled: manualIntrinsicsEnabled,
             manualFx: Double(manualFx) ?? current.manualFx,
@@ -301,14 +313,24 @@ struct SettingsView: View {
     private var cameraSection: some View {
         sectionWithFooter(
             "Camera",
-            footer: "解析度系統固定 1080p。FPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。\nSTANDBY 的即時預覽用主畫面右上「預覽」按鈕切換。"
+            footer: "校正永遠以 1080p 為基準；改錄製解析度只影響上傳大小，server 會自動縮放內參。\n部分 iPhone 只支援 1080p / 720p @240fps；選 540p 若開啟失敗請降回 720p。\nFPS 自動切換：待機 60、錄影 240（曝光上限鎖定，暗室會噪聲化但不掉幀）。\nSTANDBY 的即時預覽用主畫面右上「預覽」按鈕切換。"
         ) {
-            AppFieldRow("Role") {
-                Picker("", selection: $viewModel.cameraRoleIndex) {
-                    Text("A · 1B 側").tag(0)
-                    Text("B · 3B 側").tag(1)
+            VStack(spacing: DesignTokens.Spacing.m) {
+                AppFieldRow("Role") {
+                    Picker("", selection: $viewModel.cameraRoleIndex) {
+                        Text("A · 1B 側").tag(0)
+                        Text("B · 3B 側").tag(1)
+                    }
+                    .pickerStyle(.segmented)
                 }
-                .pickerStyle(.segmented)
+                AppFieldRow("Resolution") {
+                    Picker("", selection: $viewModel.captureHeight) {
+                        ForEach(SettingsViewController.captureResolutions, id: \.height) { res in
+                            Text(res.label).tag(res.height)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
             }
         }
     }

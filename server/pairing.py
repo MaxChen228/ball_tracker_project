@@ -31,6 +31,79 @@ _DEFAULT_MAX_DT_S = 1.0 / 120.0
 _MAX_DT_S = float(os.environ.get("BALL_TRACKER_MAX_DT_S", _DEFAULT_MAX_DT_S))
 
 
+def _scale_intrinsics(intr: IntrinsicsPayload, sx: float, sy: float) -> IntrinsicsPayload:
+    # Pixel-unit quantities scale with resolution; radial/tangential
+    # distortion coefficients are dimensionless and stay put.
+    return IntrinsicsPayload(
+        fx=intr.fx * sx,
+        fz=intr.fz * sy,
+        cx=intr.cx * sx,
+        cy=intr.cy * sy,
+        distortion=list(intr.distortion) if intr.distortion is not None else None,
+    )
+
+
+def _scale_homography(h: list[float], sx: float, sy: float) -> list[float]:
+    # H maps (X,Y,1) on the plate plane to (u,v,1) pixel coords. Rescaling
+    # pixels to (sx·u, sy·v) left-multiplies by diag(sx, sy, 1). Normalise
+    # H[2,2] back to 1 so downstream code that assumes the convention keeps
+    # working.
+    H = np.array(h, dtype=float).reshape(3, 3)
+    H_new = np.diag([sx, sy, 1.0]) @ H
+    if abs(H_new[2, 2]) > 1e-12:
+        H_new = H_new / H_new[2, 2]
+    return H_new.flatten().tolist()
+
+
+def scale_pitch_to_video_dims(
+    pitch: PitchPayload,
+    calibration_dims: tuple[int, int] | None,
+) -> PitchPayload:
+    """Return a copy of `pitch` whose intrinsics + homography match the MOV's
+    pixel grid.
+
+    The iPhone persists intrinsics at calibration time (typically 1920×1080)
+    but may record the pitch MOV at a lower resolution (e.g. 1280×720) once
+    the resolution picker lands. Server detection yields pixel coordinates
+    in the MOV's grid, so `build_K` + `recover_extrinsics` must use intrinsics
+    that live on that same grid or triangulation goes systemically wrong.
+    This helper rescales fx/fy/cx/cy and H's first two rows by the ratio
+    between MOV dims and calibration dims.
+
+    No-op paths (the input is returned unchanged):
+      - pitch has no intrinsics / homography / image dims
+      - no calibration snapshot cached for this camera
+      - calibration dims already equal MOV dims
+    """
+    if (
+        pitch.intrinsics is None
+        or pitch.homography is None
+        or pitch.image_width_px is None
+        or pitch.image_height_px is None
+        or calibration_dims is None
+    ):
+        return pitch
+    ref_w, ref_h = calibration_dims
+    if ref_w <= 0 or ref_h <= 0:
+        return pitch
+    if ref_w == pitch.image_width_px and ref_h == pitch.image_height_px:
+        return pitch
+    sx = pitch.image_width_px / ref_w
+    sy = pitch.image_height_px / ref_h
+    logger.info(
+        "scaling intrinsics/homography camera=%s session=%s "
+        "calib=%dx%d video=%dx%d sx=%.4f sy=%.4f",
+        pitch.camera_id, pitch.session_id,
+        ref_w, ref_h, pitch.image_width_px, pitch.image_height_px, sx, sy,
+    )
+    return pitch.model_copy(
+        update={
+            "intrinsics": _scale_intrinsics(pitch.intrinsics, sx, sy),
+            "homography": _scale_homography(pitch.homography, sx, sy),
+        }
+    )
+
+
 def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):
     K = build_K(intr.fx, intr.fz, intr.cx, intr.cy)
     H = np.array(H_list, dtype=float).reshape(3, 3)
