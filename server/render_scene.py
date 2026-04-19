@@ -181,6 +181,15 @@ def render_viewer_html(
         )
         for cam in ("A", "B")
     )
+    # Bottom row of the 2×2 grid: one virtual Plotly scene per camera,
+    # rendered from that camera's recovered pose. JS hydrates the empty
+    # `<div>` into a Plotly scene after page load; the Python side only
+    # emits the scaffolding.
+    cams_with_pose = {c.camera_id for c in scene.cameras}
+    virt_cells = "".join(
+        _virtual_cell_html(cam, pose_available=(cam in cams_with_pose))
+        for cam in ("A", "B")
+    )
 
     # `data-mode` toggles layout rules in CSS — `single-cam` widens the
     # 3D scene at the expense of the videos column when only one phone
@@ -330,15 +339,36 @@ def render_viewer_html(
   .scene-col {{ flex:{scene_flex}; min-width:420px; position:relative;
     border-right:1px solid var(--border-base); background:var(--bg); }}
   #scene {{ position:absolute; inset:0; }}
-  .videos-col {{ flex:{videos_flex}; min-width:320px; display:flex;
-    flex-direction:column; gap:1px; background:var(--border-base); }}
+  /* 2×2 grid: top row = real MOV (CAM A / CAM B), bottom row = virtual
+     Plotly scene rendered from each camera's recovered pose. Lets the
+     operator eye-ball real vs virtual side-by-side for extrinsics /
+     homography sanity-checks. 480 px floor keeps each cell ≥ 240 px
+     wide — below that the scene hover tooltips clip. */
+  .videos-col {{ flex:{videos_flex}; min-width:480px; display:grid;
+    grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:1px;
+    background:var(--border-base); }}
   .work[data-mode="single-cam"] .scene-col {{ flex:7 1 0; }}
   .work[data-mode="single-cam"] .videos-col {{ flex:3 1 0;
-    min-width:240px; }}
-  .vid-cell {{ flex:1 1 0; background:var(--surface); padding:var(--s-2) var(--s-3);
-    display:flex; flex-direction:column; gap:var(--s-1); min-height:0; }}
-  .vid-cell.collapsed {{ flex:0 0 auto; padding:var(--s-2) var(--s-3);
+    min-width:360px; }}
+  .vid-cell {{ background:var(--surface); padding:var(--s-2) var(--s-3);
+    display:flex; flex-direction:column; gap:var(--s-1); min-height:0;
+    min-width:0; }}
+  .vid-cell.collapsed {{ padding:var(--s-2) var(--s-3);
     flex-direction:row; align-items:center; gap:var(--s-2); }}
+  .virt-cell {{ background:var(--surface); padding:var(--s-2) var(--s-3);
+    display:flex; flex-direction:column; gap:var(--s-1); min-height:0;
+    min-width:0; position:relative; }}
+  .virt-frame {{ flex:1 1 auto; min-height:0; background:var(--bg);
+    border:1px solid var(--border-l); border-radius:var(--r);
+    overflow:hidden; cursor:default; }}
+  .virt-frame.empty {{ display:flex; align-items:center;
+    justify-content:center; color:var(--sub); font-family:var(--mono);
+    font-size:11px; letter-spacing:0.12em; text-transform:uppercase;
+    border-style:dashed; }}
+  /* VIRT badge uses a neutral sub-tone (no cam color) so it reads as
+     "synthetic" at a glance and doesn't compete with REAL cam-tinted
+     labels above. */
+  .vid-label.virt {{ color:var(--sub); border-color:var(--border-base); }}
   .vid-head {{ display:flex; align-items:center; gap:var(--s-2); }}
   .vid-label {{ font-family:var(--mono); font-size:10px; font-weight:600;
     letter-spacing:0.18em; border:1px solid; padding:2px 8px;
@@ -545,7 +575,7 @@ def render_viewer_html(
         <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
       </div>
     </div>
-    <div class="videos-col">{video_cells}</div>
+    <div class="videos-col">{video_cells}{virt_cells}</div>
   </div>
   <div class="timeline">
     <div class="tl-row">
@@ -961,9 +991,93 @@ def render_viewer_html(
     return out;
   }}
 
+  // --- Virtual camera views (bottom row of the 2×2 videos-col grid) ----
+  // Each iPhone with a recovered pose gets its own Plotly 3D scene with
+  // `scene.camera` locked to that camera's eye/forward/up in world frame.
+  // Traces are shared with the main scene; only the layout differs.
+  // Rays are filtered out because the ray from a camera to the ball
+  // projects onto a single line through the centre of that camera's
+  // virtual view — it adds no information, only clutter.
+  function cameraForCam(cam) {{
+    const c = (SCENE.cameras || []).find(x => x.camera_id === cam);
+    if (!c) return null;
+    const C = c.center_world;
+    const F = c.axis_forward_world;
+    const U = c.axis_up_world;
+    return {{
+      eye:    {{x: C[0],           y: C[1],           z: C[2]          }},
+      center: {{x: C[0] + F[0],    y: C[1] + F[1],    z: C[2] + F[2]   }},
+      up:     {{x: U[0],           y: U[1],           z: U[2]          }},
+      projection: {{type: "perspective"}},
+    }};
+  }}
+  function makeVirtLayout(cam) {{
+    const camConf = cameraForCam(cam);
+    if (!camConf) return null;
+    const layout = JSON.parse(JSON.stringify(LAYOUT));
+    layout.scene = Object.assign({{}}, layout.scene || {{}}, {{
+      camera: camConf,
+      // Lock interaction: the virtual is a reference view, not an
+      // orbitable scene. Users who want to spin the geometry use the
+      // main canvas on the left. Separate uirevision per cam so the
+      // two virtual scenes can't bleed into each other.
+      dragmode: false,
+      uirevision: `virt-${{cam}}`,
+    }});
+    // Strip axes labels + gridlines — virtual POVs read as "from the
+    // camera", and ticks / axis titles clutter a small cell.
+    for (const k of ["xaxis", "yaxis", "zaxis"]) {{
+      const axis = Object.assign({{}}, layout.scene[k] || {{}});
+      axis.title = {{text: ""}};
+      axis.showticklabels = false;
+      axis.showgrid = false;
+      axis.zeroline = false;
+      layout.scene[k] = axis;
+    }}
+    layout.showlegend = false;
+    layout.margin = {{l: 0, r: 0, t: 0, b: 0}};
+    // The Cividis colorbar on the main trajectory is distracting when
+    // tiled in 3 scenes — it duplicates per cell and eats horizontal
+    // space. The main scene keeps it; virtuals drop it via a post-
+    // processing pass on traces in drawScene.
+    return layout;
+  }}
+  const VIRT_VIEWS = [];
+  for (const cam of ["A", "B"]) {{
+    const div = document.getElementById(`virt-scene-${{cam}}`);
+    if (!div) continue;  // pose_available=false → placeholder div, skip
+    const layout = makeVirtLayout(cam);
+    if (!layout) continue;
+    VIRT_VIEWS.push({{div, layout, cam}});
+  }}
+
+  function tracesForVirtual(allTraces) {{
+    // Rays emanate from the camera origin → render as one line through
+    // the virtual eye, which is visual noise not signal. Colorbars on
+    // the trajectory duplicate across 3 scenes → drop in virtuals.
+    return allTraces
+      .filter(t => !String(t.name || "").startsWith("Rays "))
+      .map(t => {{
+        if (t.marker && t.marker.showscale) {{
+          const clone = JSON.parse(JSON.stringify(t));
+          clone.marker.showscale = false;
+          delete clone.marker.colorbar;
+          return clone;
+        }}
+        return t;
+      }});
+  }}
+
   function drawScene() {{
     const cutoff = mode === "all" ? Infinity : currentT;
-    Plotly.react(sceneDiv, [...STATIC, ...buildDynamicTraces(cutoff)], LAYOUT, {{displayModeBar: false, responsive: true}});
+    const allTraces = [...STATIC, ...buildDynamicTraces(cutoff)];
+    Plotly.react(sceneDiv, allTraces, LAYOUT, {{displayModeBar: false, responsive: true}});
+    if (VIRT_VIEWS.length) {{
+      const virtTraces = tracesForVirtual(allTraces);
+      for (const v of VIRT_VIEWS) {{
+        Plotly.react(v.div, virtTraces, v.layout, {{displayModeBar: false, responsive: true}});
+      }}
+    }}
   }}
 
   // --- Video sync via anchor-relative time ---
@@ -1551,6 +1665,39 @@ def _video_cell_html(
         f'<span class="vid-label" style="color:{color};border-color:{color};">'
         f'CAM {cam}</span>'
         f'<span class="vid-hint">{hint}</span>'
+        f'</div>'
+        f'{body}'
+        f'</div>'
+    )
+
+
+def _virtual_cell_html(cam: str, *, pose_available: bool) -> str:
+    """One virtual-view cell below the real MOV cell for the same camera.
+
+    Renders a Plotly 3D scene locked to the camera's recovered pose so the
+    operator can visually compare "ball trajectory as seen by CAM A" vs
+    "ball trajectory as reconstructed from CAM A's calibration". Big
+    extrinsics / homography mistakes (wrong side, mirrored, rotated) jump
+    out immediately when real + virtual disagree.
+
+    Limitations worth knowing: Plotly's 3D camera has no FOV knob, so the
+    virtual view's field-of-view (≈60° vertical) does not match the
+    iPhone main cam (≈38° vertical). Gross misalignments still read
+    correctly; pixel-accurate overlay would need a three.js renderer
+    that accepts real fx/fy.
+    """
+    label_color = _camera_color(cam)
+    if not pose_available:
+        body = '<div class="virt-frame empty">no calibration</div>'
+    else:
+        body = f'<div class="virt-frame" id="virt-scene-{cam}"></div>'
+    return (
+        f'<div class="virt-cell">'
+        f'<div class="vid-head">'
+        f'<span class="vid-label virt">VIRT</span>'
+        f'<span class="vid-label" style="color:{label_color};'
+        f'border-color:{label_color};">CAM {cam}</span>'
+        f'<span class="vid-hint">pose-locked</span>'
         f'</div>'
         f'{body}'
         f'</div>'
