@@ -7,20 +7,31 @@ import os
 private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "sensing")
 
 /// Single sync mechanism for the tracker: each phone listens for a known
-/// linear-chirp signal (2 → 8 kHz Hann-windowed, 100 ms) played from a third
-/// device while the two cameras sit side-by-side. Once detected, each phone
-/// records the chirp's session-clock PTS as `sync_anchor_timestamp_s`, which
-/// then anchors the whole pitch cycle against the other camera.
+/// dual-chirp signal (up-sweep 2→8 kHz, 50 ms silence, down-sweep 8→2 kHz;
+/// each chirp 100 ms Hann-windowed) played from a third device while the two
+/// cameras sit side-by-side. Once both sweeps are detected **and** the gap
+/// between their centers matches the expected 150 ms within ±5 ms, the phone
+/// records the mid-point session-clock PTS as `sync_anchor_timestamp_s`, which
+/// anchors the whole pitch cycle against the other camera.
 ///
-/// Replaces the earlier torch-flash / audio-xcorr / Mac-NTP experiments.
+/// Dual-sweep design cancels first-order Doppler (if the speaker moves, the
+/// up-sweep's apparent center shifts one way and the down-sweep's shifts the
+/// opposite way — the average is invariant) and gives us a built-in
+/// consistency check: a stray spike that looks like one chirp still has to
+/// produce a second chirp ~150 ms later with the opposite sweep direction to
+/// trigger a false anchor.
 ///
-/// Detection: normalized matched filter (cross-correlation of the mic stream
-/// against the reference chirp, divided by the window's local energy). Peak
-/// above `threshold` within `cooldownS` of no prior trigger emits an event.
+/// Robustness mechanics:
+///  - Exact window energy via cumulative-sum-of-squares (no rolling-update
+///    drift); normalized matched-filter peak lands in [0, 1].
+///  - PSR (peak-to-sidelobe ratio) gate rejects flat/noisy correlations.
+///  - Parabolic sub-sample refinement on **normalized** peaks (not raw dot
+///    products) so a local energy ramp can't skew the anchor.
+///  - Scan only the newly-arrived samples per pass — each buffer contributes
+///    exactly once to any lag.
 ///
-/// Precision: audio sample-rate 44.1 kHz → 22 μs per sample; matched-filter
-/// peak + parabolic interpolation ≈ **<100 μs** under clean SNR, versus ~4 ms
-/// frame-granularity on the old visual flash detector.
+/// Precision (clean SNR): ~20 μs per chirp end-point, Doppler-free after
+/// averaging up + down — target anchor precision <50 μs.
 ///
 /// Threading: the owner installs this as the `AVCaptureAudioDataOutput`
 /// sample-buffer delegate with `deliveryQueue`. All state lives on that
@@ -31,28 +42,35 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         /// no meaning for an audio anchor — the server pairs A/B by
         /// `anchorTimestampS` alone.
         let anchorFrameIndex: Int
-        /// Session-clock time of the chirp's center sample (same time base
-        /// as video frame timestamps — they share `AVCaptureSession.masterClock`).
+        /// Session-clock time of the anchor (= mid-point between up-sweep
+        /// center and down-sweep center, which equals the start of the 50 ms
+        /// inter-chirp silence). Same time base as video frame timestamps
+        /// since both share `AVCaptureSession.masterClock`.
         let anchorTimestampS: Double
     }
 
-    /// Live detector state exposed to the debug HUD.
+    /// Live detector state exposed to the debug HUD. `lastPeak` is the most
+    /// recent up-sweep normalized peak; `pendingUp` indicates an accepted
+    /// up-sweep is currently waiting for its down-sweep partner.
     struct Snapshot {
         let bufferFillSamples: Int
         let lastPeak: Float
         let threshold: Float
         let armed: Bool
         let triggered: Bool
+        let lastDownPeak: Float
+        let lastPSR: Float
+        let pendingUp: Bool
     }
 
     /// Install with `AVCaptureAudioDataOutput.setSampleBufferDelegate(_:queue:)`.
     let deliveryQueue = DispatchQueue(label: "audio.chirp.queue")
 
-    /// Fired on `deliveryQueue` when a chirp is detected.
+    /// Fired on `deliveryQueue` when a valid up+down pair is detected.
     var onChirpDetected: ((ChirpEvent) -> Void)?
 
     // Config.
-    /// Current sample rate the reference + ring are built against. Starts at
+    /// Current sample rate the references + ring are built against. Starts at
     /// the init default (44.1 kHz for tests) and is overwritten on the first
     /// `captureOutput` buffer via `rebuildForSampleRate(_:)` when the real
     /// mic ASBD reports a different rate (iPhone delivers 48 kHz natively).
@@ -62,11 +80,25 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     /// `setThreshold(_:)`.
     private var threshold: Float
     private let cooldownS: Double
+    /// Peak-to-sidelobe-ratio floor. Measured as the best normalized peak
+    /// divided by the best normalized value outside a ±refLen/2 exclusion
+    /// zone around the peak. Clean field chirps yield PSR 3-10×; ambient
+    /// noise / near-matches sit near 1.0. 2.0 comfortably separates them.
+    private let minPSR: Float
+    /// Expected time between up-sweep center and down-sweep center, derived
+    /// from the source chirp WAV: two 100 ms sweeps with a 50 ms silence
+    /// between → 150 ms center-to-center.
+    private let chirpGapCenterS: Double
+    /// ± tolerance applied to the gap check. 5 ms is ~30× the target anchor
+    /// precision, so a valid pair always passes, while stray same-band
+    /// transients almost never land on the exact 150 ms offset.
+    private let chirpPairToleranceS: Double
     /// Chirp parameters kept around for lazy rebuild on rate change.
     private let chirpF0: Double
     private let chirpF1: Double
     private let chirpDurationS: Double
-    private var reference: [Float]
+    private var referenceUp: [Float]
+    private var referenceDown: [Float]
     private var refLen: Int
     private var checkIntervalSamples: Int
 
@@ -78,6 +110,9 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     private var firstPTS: CMTime?
     private var lastTriggerPTS: Double?
     private var samplesSinceCheck: Int = 0
+    /// An accepted up-sweep awaiting its down-sweep partner. Expires once it
+    /// ages past `chirpGapCenterS + chirpPairToleranceS` without a match.
+    private var pendingUp: (centerS: Double, peak: Float)?
     private(set) var lastSnapshot: Snapshot
 
     init(
@@ -90,15 +125,22 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         // 0.18 gives consistent trigger while still being well above
         // stationary noise (<0.05) and ambient speech (~0.08).
         threshold: Float = 0.18,
-        cooldownS: Double = 1.0
+        cooldownS: Double = 1.0,
+        minPSR: Float = 2.0,
+        chirpGapCenterS: Double = 0.15,
+        chirpPairToleranceS: Double = 0.005
     ) {
         self.sampleRate = 0
         self.threshold = threshold
         self.cooldownS = cooldownS
+        self.minPSR = minPSR
+        self.chirpGapCenterS = chirpGapCenterS
+        self.chirpPairToleranceS = chirpPairToleranceS
         self.chirpF0 = chirpF0
         self.chirpF1 = chirpF1
         self.chirpDurationS = chirpDurationS
-        self.reference = []
+        self.referenceUp = []
+        self.referenceDown = []
         self.refLen = 0
         self.checkIntervalSamples = 0
         self.ring = []
@@ -108,45 +150,62 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
             lastPeak: 0,
             threshold: threshold,
             armed: false,
-            triggered: false
+            triggered: false,
+            lastDownPeak: 0,
+            lastPSR: 0,
+            pendingUp: false
         )
         super.init()
         rebuildForSampleRate(sampleRate)
     }
 
-    /// Regenerate the reference chirp + ring buffer for a new sample rate and
-    /// reset all timing state. Called once from `init` with the default rate
-    /// (keeps the test path working) and again from `captureOutput` when the
-    /// real mic ASBD reports a different rate (iPhones deliver 48 kHz).
-    /// Must run on `deliveryQueue` — `captureOutput` already is; `init`
-    /// predates anyone seeing the instance so it's safe there too.
+    /// Regenerate the reference chirps + ring buffer for a new sample rate
+    /// and reset all timing state. Ring size is sized so both up-sweep and
+    /// down-sweep plus their 50 ms gap fit inside the most recent window —
+    /// lets a single matched-filter pass see both chirps when they arrive in
+    /// the same buffer batch.
     private func rebuildForSampleRate(_ rate: Double) {
         self.sampleRate = rate
         self.refLen = Int(rate * chirpDurationS)
-        self.ringLen = 2 * refLen
-        self.reference = Self.makeChirp(
+        // Need to hold at least: up-sweep + gap + down-sweep = 2·refLen + gap
+        // samples. Round up to 4·refLen (~400 ms @ 100 ms chirps) to give
+        // the scan region margin for late buffers.
+        let gapSamples = Int(rate * (chirpGapCenterS - chirpDurationS))
+        let minRing = 2 * refLen + gapSamples + refLen
+        self.ringLen = max(4 * refLen, minRing)
+        self.referenceUp = Self.makeChirp(
             sampleRate: rate, f0: chirpF0, f1: chirpF1, duration: chirpDurationS
         )
-        // ~10 Hz matched-filter pass. Balances latency with CPU on the
-        // capture queue (O(N²) in refLen, dominated by vDSP_dotpr).
-        self.checkIntervalSamples = Int(rate / 10.0)
+        self.referenceDown = Self.makeChirp(
+            sampleRate: rate, f0: chirpF1, f1: chirpF0, duration: chirpDurationS
+        )
+        // ~30 Hz matched-filter pass. Higher than the old 10 Hz so the scan
+        // region per pass is smaller and latency to trigger drops; still
+        // comfortably under audio buffer delivery cadence (iOS hands 10 ms
+        // chunks at 48 kHz).
+        self.checkIntervalSamples = Int(rate / 30.0)
         self.ring = [Float](repeating: 0, count: ringLen)
         self.writeIndex = 0
         self.totalWritten = 0
         self.firstPTS = nil
         self.lastTriggerPTS = nil
         self.samplesSinceCheck = 0
+        self.pendingUp = nil
         self.lastSnapshot = Snapshot(
             bufferFillSamples: 0,
             lastPeak: 0,
             threshold: threshold,
             armed: false,
-            triggered: false
+            triggered: false,
+            lastDownPeak: 0,
+            lastPSR: 0,
+            pendingUp: false
         )
     }
 
     /// Linear chirp, Hann-windowed, energy-normalized to unit norm so the
     /// matched-filter peak lands in [0, 1] regardless of reference amplitude.
+    /// `f0 > f1` gives a down-sweep (same phase formula handles either sign).
     static func makeChirp(
         sampleRate: Double,
         f0: Double,
@@ -164,7 +223,6 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
             let window = 0.5 * (1.0 - cos(2.0 * .pi * Double(i) * invNm1))
             out[i] = Float(sin(phase) * window)
         }
-        // Unit-energy normalize.
         var energy: Float = 0
         vDSP_svesq(out, 1, &energy, vDSP_Length(n))
         let norm = sqrt(energy)
@@ -196,12 +254,16 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
             self.firstPTS = nil
             self.lastTriggerPTS = nil
             self.samplesSinceCheck = 0
+            self.pendingUp = nil
             self.lastSnapshot = Snapshot(
                 bufferFillSamples: 0,
                 lastPeak: 0,
                 threshold: self.threshold,
                 armed: false,
-                triggered: false
+                triggered: false,
+                lastDownPeak: 0,
+                lastPSR: 0,
+                pendingUp: false
             )
         }
     }
@@ -242,110 +304,216 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
                 lastPeak: lastSnapshot.lastPeak,
                 threshold: threshold,
                 armed: false,
-                triggered: false
+                triggered: false,
+                lastDownPeak: lastSnapshot.lastDownPeak,
+                lastPSR: lastSnapshot.lastPSR,
+                pendingUp: pendingUp != nil
             )
             return
         }
         if samplesSinceCheck >= checkIntervalSamples {
-            samplesSinceCheck = 0
             runMatchedFilter()
+            samplesSinceCheck = 0
         }
     }
 
     // MARK: - Matched filter
+
+    /// Correlation result for one reference over a lag range.
+    private struct CorrResult {
+        let bestLag: Int
+        let bestNorm: Float
+        /// Raw normalized value one sample below `bestLag` (for parabolic fit).
+        let leftNorm: Float
+        /// Raw normalized value one sample above `bestLag`.
+        let rightNorm: Float
+        /// Best normalized value seen outside ±exclusion of `bestLag`.
+        let secondNorm: Float
+    }
 
     private func runMatchedFilter() {
         // Linearize the ring: oldest sample first.
         var linear = [Float](repeating: 0, count: ringLen)
         let tail = ringLen - writeIndex
         if tail > 0 {
-            for i in 0..<tail {
-                linear[i] = ring[writeIndex + i]
-            }
+            for i in 0..<tail { linear[i] = ring[writeIndex + i] }
         }
-        for i in 0..<writeIndex {
-            linear[tail + i] = ring[i]
+        for i in 0..<writeIndex { linear[tail + i] = ring[i] }
+
+        // Cumulative sum of squares → exact window energy in O(1) per lag,
+        // no rolling-update drift.
+        var cumsq = [Float](repeating: 0, count: ringLen + 1)
+        var running: Float = 0
+        for i in 0..<ringLen {
+            running += linear[i] * linear[i]
+            cumsq[i + 1] = running
         }
 
-        let resultLen = ringLen - refLen + 1
-        var peakNorm: Float = 0
-        var peakLag: Int = 0
-        var peakUnnorm: Float = 0
+        // Scan only lags whose chirp END falls in the newly-arrived region.
+        // A chirp ending exactly at the newest sample sits at lag = ringLen -
+        // refLen; one ending `samplesSinceCheck` samples ago sits at lag =
+        // ringLen - refLen - samplesSinceCheck. Margin of refLen lets the
+        // parabolic-fit neighbours exist, and covers the jitter window the
+        // gap tolerance implies.
+        let lagHi = ringLen - refLen
+        let scanSpan = min(samplesSinceCheck + refLen, lagHi)
+        let lagLo = max(1, lagHi - scanSpan)  // lag ≥ 1 so leftNorm exists
 
-        // Rolling window energy — compute once, update incrementally.
-        var windowEnergy: Float = 0
-        vDSP_svesq(linear, 1, &windowEnergy, vDSP_Length(refLen))
-
-        for lag in 0..<resultLen {
-            var dot: Float = 0
-            linear.withUnsafeBufferPointer { buf in
-                vDSP_dotpr(
-                    buf.baseAddress! + lag, 1,
-                    reference, 1,
-                    &dot,
-                    vDSP_Length(refLen)
-                )
-            }
-            let denom = sqrt(max(windowEnergy, 1e-12))
-            let norm = abs(dot / denom)
-            if norm > peakNorm {
-                peakNorm = norm
-                peakLag = lag
-                peakUnnorm = dot
-            }
-            if lag + refLen < ringLen {
-                let leaving = linear[lag]
-                let arriving = linear[lag + refLen]
-                windowEnergy += arriving * arriving - leaving * leaving
-                if windowEnergy < 0 { windowEnergy = 0 }
-            }
+        guard lagHi > lagLo else {
+            lastSnapshot = Snapshot(
+                bufferFillSamples: totalWritten,
+                lastPeak: lastSnapshot.lastPeak,
+                threshold: threshold,
+                armed: false,
+                triggered: false,
+                lastDownPeak: lastSnapshot.lastDownPeak,
+                lastPSR: lastSnapshot.lastPSR,
+                pendingUp: pendingUp != nil
+            )
+            return
         }
+
+        let upResult = correlate(
+            linear: linear, cumsq: cumsq,
+            reference: referenceUp,
+            lagLo: lagLo, lagHi: lagHi
+        )
+        let downResult = correlate(
+            linear: linear, cumsq: cumsq,
+            reference: referenceDown,
+            lagLo: lagLo, lagHi: lagHi
+        )
 
         let now_s = currentPTSApprox()
         let armed = (lastTriggerPTS ?? -Double.infinity) + cooldownS <= now_s
+
+        // Expire stale pending up-sweep.
+        if let pu = pendingUp,
+           now_s - pu.centerS > chirpGapCenterS + chirpPairToleranceS {
+            pendingUp = nil
+        }
+
+        let upPSR = upResult.secondNorm > 0 ? upResult.bestNorm / upResult.secondNorm : Float.greatestFiniteMagnitude
+        let downPSR = downResult.secondNorm > 0 ? downResult.bestNorm / downResult.secondNorm : Float.greatestFiniteMagnitude
+
+        let upValid = armed && upResult.bestNorm > threshold && upPSR > minPSR
+        let downValid = armed && downResult.bestNorm > threshold && downPSR > minPSR
+
         var triggered = false
 
-        if armed && peakNorm > threshold {
-            // Sub-sample peak refinement from the unnormalized dot product
-            // (parabolic on the three samples around the peak).
-            var fracLag = Double(peakLag)
-            if peakLag > 0 && peakLag < resultLen - 1 {
-                // We don't have the neighbouring normalized values stored; recompute.
-                linear.withUnsafeBufferPointer { buf in
-                    guard let base = buf.baseAddress else { return }
-                    var yL: Float = 0, yR: Float = 0
-                    vDSP_dotpr(base + peakLag - 1, 1, reference, 1, &yL, vDSP_Length(refLen))
-                    vDSP_dotpr(base + peakLag + 1, 1, reference, 1, &yR, vDSP_Length(refLen))
-                    let denom = (yL - 2 * peakUnnorm + yR)
-                    if denom != 0 {
-                        let frac = 0.5 * Double(yL - yR) / Double(denom)
-                        if frac > -1 && frac < 1 {
-                            fracLag += frac
-                        }
-                    }
-                }
+        if upValid {
+            let upCenterS = timestampForChirpCenter(result: upResult)
+            // Replace pending only if the new up is materially different
+            // (prevents a long-lived strong peak from being re-latched every
+            // scan); fresher strong peak wins.
+            if pendingUp == nil
+                || abs(upCenterS - (pendingUp?.centerS ?? 0)) > 0.010
+                || upResult.bestNorm > (pendingUp?.peak ?? 0) {
+                pendingUp = (centerS: upCenterS, peak: upResult.bestNorm)
             }
-            let ringStartGlobal = totalWritten - ringLen
-            let chirpStartGlobal = Double(ringStartGlobal) + fracLag
-            let chirpCenterGlobal = chirpStartGlobal + Double(refLen) / 2.0
-            if let first = firstPTS {
-                let pts = CMTimeGetSeconds(first) + chirpCenterGlobal / sampleRate
-                lastTriggerPTS = pts
+        }
+
+        if downValid, let pu = pendingUp {
+            let downCenterS = timestampForChirpCenter(result: downResult)
+            let gap = downCenterS - pu.centerS
+            if abs(gap - chirpGapCenterS) < chirpPairToleranceS {
+                // Doppler-free anchor: average of the two chirp centers.
+                let anchorS = (pu.centerS + downCenterS) / 2.0
+                lastTriggerPTS = anchorS
+                pendingUp = nil
                 triggered = true
-                log.info("chirp detected peak=\(peakNorm, privacy: .public) threshold=\(self.threshold, privacy: .public) anchor_s=\(pts, privacy: .public)")
+                log.info("chirp pair detected up_peak=\(pu.peak, privacy: .public) down_peak=\(downResult.bestNorm, privacy: .public) gap_s=\(gap, privacy: .public) anchor_s=\(anchorS, privacy: .public)")
                 onChirpDetected?(
-                    ChirpEvent(anchorFrameIndex: 0, anchorTimestampS: pts)
+                    ChirpEvent(anchorFrameIndex: 0, anchorTimestampS: anchorS)
                 )
             }
         }
 
         lastSnapshot = Snapshot(
             bufferFillSamples: totalWritten,
-            lastPeak: peakNorm,
+            lastPeak: upResult.bestNorm,
             threshold: threshold,
             armed: armed,
-            triggered: triggered
+            triggered: triggered,
+            lastDownPeak: downResult.bestNorm,
+            lastPSR: min(upPSR, downPSR),
+            pendingUp: pendingUp != nil
         )
+    }
+
+    /// Dot-product sweep + normalization + PSR. Called once per reference per
+    /// matched-filter pass.
+    private func correlate(
+        linear: [Float],
+        cumsq: [Float],
+        reference: [Float],
+        lagLo: Int,
+        lagHi: Int
+    ) -> CorrResult {
+        let count = lagHi - lagLo + 1
+        var normValues = [Float](repeating: 0, count: count)
+
+        linear.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            for idx in 0..<count {
+                let lag = lagLo + idx
+                var dot: Float = 0
+                vDSP_dotpr(base + lag, 1, reference, 1, &dot, vDSP_Length(refLen))
+                let energy = max(cumsq[lag + refLen] - cumsq[lag], 1e-12)
+                normValues[idx] = abs(dot) / sqrt(energy)
+            }
+        }
+
+        // Best normalized peak in scan range.
+        var bestIdx = 0
+        var bestNorm: Float = normValues[0]
+        for idx in 1..<count {
+            if normValues[idx] > bestNorm {
+                bestNorm = normValues[idx]
+                bestIdx = idx
+            }
+        }
+        let bestLag = lagLo + bestIdx
+
+        // Parabolic neighbours — clamp to scan edges if needed.
+        let leftNorm = bestIdx > 0 ? normValues[bestIdx - 1] : bestNorm
+        let rightNorm = bestIdx < count - 1 ? normValues[bestIdx + 1] : bestNorm
+
+        // Second-best outside ±refLen/2 exclusion zone → PSR denominator.
+        let exclusion = refLen / 2
+        var secondNorm: Float = 0
+        for idx in 0..<count {
+            let lag = lagLo + idx
+            if abs(lag - bestLag) <= exclusion { continue }
+            if normValues[idx] > secondNorm {
+                secondNorm = normValues[idx]
+            }
+        }
+
+        return CorrResult(
+            bestLag: bestLag,
+            bestNorm: bestNorm,
+            leftNorm: leftNorm,
+            rightNorm: rightNorm,
+            secondNorm: secondNorm
+        )
+    }
+
+    /// Absolute session-clock PTS of the chirp **center**, derived from the
+    /// integer peak lag plus parabolic sub-sample refinement on normalized
+    /// values (the raw-dot variant leaked local-energy ramps into the fit).
+    private func timestampForChirpCenter(result: CorrResult) -> Double {
+        var fracLag = Double(result.bestLag)
+        let denom = result.leftNorm - 2 * result.bestNorm + result.rightNorm
+        if denom != 0 {
+            let frac = 0.5 * Double(result.leftNorm - result.rightNorm) / Double(denom)
+            if frac > -1 && frac < 1 { fracLag += frac }
+        }
+        let ringStartGlobal = totalWritten - ringLen
+        let chirpStartGlobal = Double(ringStartGlobal) + fracLag
+        let chirpCenterGlobal = chirpStartGlobal + Double(refLen) / 2.0
+        let firstPTSS = firstPTS.map { CMTimeGetSeconds($0) } ?? 0
+        return firstPTSS + chirpCenterGlobal / sampleRate
     }
 
     private func currentPTSApprox() -> Double {

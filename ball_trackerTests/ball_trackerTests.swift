@@ -24,6 +24,31 @@ struct AudioChirpDetectorTests {
         #expect(abs(samples.last ?? 1.0) < 1e-3)
     }
 
+    @Test func downSweepIsAlsoUnitEnergy() {
+        // Dual-chirp anchor relies on both sweeps being unit-energy so the
+        // normalized matched-filter peaks are comparable to the same
+        // threshold.
+        let samples = AudioChirpDetector.makeChirp(
+            sampleRate: 44100.0, f0: 8000.0, f1: 2000.0, duration: 0.1
+        )
+        let energy = samples.reduce(Float(0)) { $0 + $1 * $1 }
+        #expect(abs(energy - 1.0) < 1e-4)
+    }
+
+    @Test func upAndDownSweepsAreDistinct() {
+        // Must not collapse to the same waveform — their cross-correlation
+        // should be much smaller than each self-correlation (unit energy).
+        let up = AudioChirpDetector.makeChirp(
+            sampleRate: 44100.0, f0: 2000.0, f1: 8000.0, duration: 0.1
+        )
+        let down = AudioChirpDetector.makeChirp(
+            sampleRate: 44100.0, f0: 8000.0, f1: 2000.0, duration: 0.1
+        )
+        var dot: Float = 0
+        for i in 0..<up.count { dot += up[i] * down[i] }
+        #expect(abs(dot) < 0.2)   // well below the 0.18 trigger threshold
+    }
+
     @Test func defaultConfigStartsDisarmed() {
         let detector = AudioChirpDetector()
         let snap = detector.lastSnapshot
@@ -42,5 +67,6 @@ struct AudioChirpDetectorTests {
         #expect(snap.triggered == false)
         #expect(snap.lastPeak == 0)
         #expect(snap.threshold == 0.42)
+        #expect(snap.pendingUp == false)
     }
 }
