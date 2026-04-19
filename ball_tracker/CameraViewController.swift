@@ -132,18 +132,34 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // Offloaded on-device ball detection. Runs on `detectionQueue` at
     // ≤60 Hz while the state is `.recording`, so 240 fps sample delivery on
-    // `processingQueue` never stalls. The timestamps accumulated here drive
-    // the post-recording MOV-trim decision (keep only [first-seen, last-seen]
-    // + a margin, capped at 1.5 s). Results are NOT uploaded — the server
-    // still runs its own detection on the uploaded MOV; this side is purely
-    // a trim oracle. Buffer is reset on every `enterRecordingMode` /
-    // `exitRecordingToStandby` transition.
+    // `processingQueue` never stalls. Serves two roles depending on
+    // currentCaptureMode:
+    //   - mode-one (camera_only): output is the trim-window oracle. Results
+    //     not uploaded — server re-runs its own authoritative detection on
+    //     the received MOV.
+    //   - mode-two (on_device): output IS the ground truth. Shipped to the
+    //     server as `PitchPayload.frames` with no MOV; server pairs +
+    //     triangulates directly.
+    // The same BTDetectionSession (shape gate + MOG2) drives both so the
+    // algorithm stays identical between modes and aligned with the server.
     private let detectionQueue = DispatchQueue(label: "camera.detection.queue", qos: .utility)
     private let detectionStateLock = NSLock()
     private var detectionInFlight = false
     private var lastDetectionDispatchTimeS: TimeInterval = 0
     private static let detectionIntervalS: TimeInterval = 1.0 / 60.0
-    private var ballDetectionPtsBuffer: [TimeInterval] = []
+    /// BTDetectionSession (MOG2 + shape-gated detection). One per recording
+    /// cycle — rebuilt on entry so the background model starts fresh.
+    /// Access serialised through `detectionStateLock` (or confined to
+    /// `detectionQueue`).
+    private var detectionSession: BTDetectionSession?
+    /// Accumulated per-frame detection results for the current cycle.
+    /// Drained at cycle-complete and either discarded (mode-one) or
+    /// attached to the upload payload (mode-two).
+    private var detectionFramesBuffer: [ServerUploader.FramePayload] = []
+    /// Monotonic counter used as `FramePayload.frame_index`. Bumped on
+    /// every dispatched detection call so the index mirrors the order
+    /// detections were run — not the capture-queue frame order.
+    private var detectionCallIndex: Int = 0
     /// Bumped on every cycle boundary so a detection closure dispatched for
     /// cycle N can discard its result if cycle N+1 has already started.
     private var detectionGeneration: Int = 0
@@ -490,37 +506,71 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// without blowing the upload budget.
     private static let trimMaxDurationS: Double = 1.5
 
-    /// Cycle-complete → post-recording trim oracle. Reads the detection
-    /// buffer, picks a trim window, hands the MOV to `ClipTrimmer`, and
-    /// routes the result (or a fallback) to `persistCompletedCycle`.
+    /// Cycle-complete router. Branches on the effective capture mode:
+    ///   - `onDevice` → attach the drained frames to the payload, delete
+    ///     the (unused) MOV, and upload frames-only.
+    ///   - `cameraOnly` → use detection timestamps as trim oracle and ship
+    ///     the trimmed MOV the existing Step 4 path.
+    ///
+    /// `currentCaptureMode` is read once at cycle-complete — if the
+    /// dashboard flips the toggle mid-recording the session still
+    /// finishes in the mode it armed with (that's what Session.mode
+    /// guarantees on the server side).
     private func handleFinishedClip(
         enriched: ServerUploader.PitchPayload,
         videoURL: URL?
     ) {
+        let frames = drainDetectedFrames()
+        let mode = currentCaptureMode
+        log.info("cycle complete session=\(enriched.session_id, privacy: .public) mode=\(mode.rawValue, privacy: .public) frames=\(frames.count) ball_frames=\(frames.filter { $0.ball_detected }.count) has_video=\(videoURL != nil)")
+
+        if mode == .onDevice {
+            handleOnDeviceCycle(enriched: enriched, videoURL: videoURL, frames: frames)
+            return
+        }
+        handleCameraOnlyCycle(enriched: enriched, videoURL: videoURL, frames: frames)
+    }
+
+    /// Mode-two: attach the frame list to the payload, delete any MOV
+    /// still sitting in tmp, and ship a frames-only payload (no video
+    /// part, bandwidth is a few KB).
+    private func handleOnDeviceCycle(
+        enriched: ServerUploader.PitchPayload,
+        videoURL: URL?,
+        frames: [ServerUploader.FramePayload]
+    ) {
+        if let videoURL {
+            try? FileManager.default.removeItem(at: videoURL)
+        }
+        let updated = enriched.withFrames(frames)
+        persistCompletedCycle(updated, videoURL: nil)
+    }
+
+    /// Mode-one: detection results are a trim oracle only; server re-runs
+    /// authoritative detection on the received MOV. Uses the timestamps of
+    /// `ball_detected == true` frames to pick the trim window, falling
+    /// back to uploading the full MOV when no ball was seen or trim fails.
+    private func handleCameraOnlyCycle(
+        enriched: ServerUploader.PitchPayload,
+        videoURL: URL?,
+        frames: [ServerUploader.FramePayload]
+    ) {
         guard let videoURL else {
-            // No clip on disk (writer failed or was never started) — nothing
-            // to trim; the JSON-only pipeline still runs.
             persistCompletedCycle(enriched, videoURL: nil)
             return
         }
 
-        let detections = drainBallDetections()
+        let ballTimestamps = frames.compactMap { $0.ball_detected ? $0.timestamp_s : nil }
         let originalStart = enriched.video_start_pts_s
 
-        guard !detections.isEmpty else {
-            // Step 4d fallback: operator armed + stopped without the ball
-            // entering the frame. Ship the full clip so the server can
-            // re-run its own detection against the authoritative video and
-            // we don't silently lose a session.
+        guard !ballTimestamps.isEmpty else {
             log.info("cycle trim skip reason=no_ball_detected session=\(enriched.session_id, privacy: .public)")
             persistCompletedCycle(enriched, videoURL: videoURL)
             return
         }
 
-        let first = detections.min() ?? originalStart
-        let last = detections.max() ?? first
-        // Never trim before the MOV itself starts — the ClipTrimmer clamps
-        // negatives to 0 but we keep the semantics explicit here too.
+        let first = ballTimestamps.min() ?? originalStart
+        let last = ballTimestamps.max() ?? first
         let desiredStartAbs = max(first - Self.trimPreRollS, originalStart)
         let desiredEndAbs = min(last + Self.trimPostRollS, desiredStartAbs + Self.trimMaxDurationS)
         let startOffsetInMovS = desiredStartAbs - originalStart
@@ -532,7 +582,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             return
         }
 
-        log.info("cycle trim plan session=\(enriched.session_id, privacy: .public) detections=\(detections.count) window=[\(desiredStartAbs),\(desiredEndAbs)] offset_in_mov=\(startOffsetInMovS) dur=\(durationS)")
+        log.info("cycle trim plan session=\(enriched.session_id, privacy: .public) ball_frames=\(ballTimestamps.count) window=[\(desiredStartAbs),\(desiredEndAbs)] offset_in_mov=\(startOffsetInMovS) dur=\(durationS)")
 
         let destination = payloadStore.makeTempVideoURL()
         ClipTrimmer.trim(
@@ -544,15 +594,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         ) { [weak self] output in
             guard let self else { return }
             guard let output else {
-                // Trim failed for any reason — keep the full clip rather
-                // than losing the cycle. Server detection will still run
-                // against whatever MOV we send up.
                 log.warning("cycle trim failed — uploading full clip session=\(enriched.session_id, privacy: .public)")
                 self.persistCompletedCycle(enriched, videoURL: videoURL)
                 return
             }
-            // Trim succeeded. Drop the original MOV; only the trimmed one
-            // needs to survive to the upload queue.
             try? FileManager.default.removeItem(at: videoURL)
             let updated = enriched.withVideoStartPts(output.absoluteStartPtsS)
             log.info("cycle trimmed session=\(enriched.session_id, privacy: .public) abs_start=\(output.absoluteStartPtsS) dur=\(output.durationS)")
@@ -1722,29 +1767,37 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    /// Fire off one BallDetector call on `detectionQueue` if (a) the throttle
-    /// window has elapsed (≥60 Hz cap) and (b) no previous detection is still
-    /// running. Called from `captureOutput` — must not block.
+    /// Fire off one BTDetectionSession step on `detectionQueue` if (a) the
+    /// throttle window has elapsed (≥60 Hz cap) and (b) no previous
+    /// detection is still running. Called from `captureOutput` — must not
+    /// block.
     ///
     /// A `detectionGeneration` check inside the async closure guards against
     /// a late detection landing in the wrong cycle's buffer (enter/exit of
-    /// recording bumps the generation). This replaces a `.sync` barrier so
-    /// main-thread transitions don't pay a full detection interval.
+    /// recording bumps the generation).
+    ///
+    /// Every dispatched detection produces a FramePayload entry: the server's
+    /// pipeline also records one entry per decoded frame (with null px/py
+    /// when no ball), so we mirror that shape to keep the two sides
+    /// substitutable.
     private func dispatchDetectionIfDue(pixelBuffer: CVPixelBuffer, timestampS: TimeInterval) {
         detectionStateLock.lock()
         let elapsed = timestampS - lastDetectionDispatchTimeS
         let shouldDispatch = !detectionInFlight && elapsed >= Self.detectionIntervalS
         let gen = detectionGeneration
-        if shouldDispatch {
-            detectionInFlight = true
-            lastDetectionDispatchTimeS = timestampS
+        guard let session = detectionSession, shouldDispatch else {
+            detectionStateLock.unlock()
+            return
         }
+        detectionInFlight = true
+        lastDetectionDispatchTimeS = timestampS
+        let callIndex = detectionCallIndex
+        detectionCallIndex += 1
         detectionStateLock.unlock()
-        guard shouldDispatch else { return }
 
         detectionQueue.async { [weak self] in
             guard let self else { return }
-            let detection = BTBallDetector.detect(in: pixelBuffer)
+            let detection = session.apply(pixelBuffer)
             self.detectionStateLock.lock()
             defer { self.detectionStateLock.unlock() }
             // Generation mismatch means the recording cycle we were dispatched
@@ -1752,32 +1805,39 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             // of contaminating the fresh cycle's buffer.
             guard gen == self.detectionGeneration else { return }
             self.detectionInFlight = false
-            if detection != nil {
-                self.ballDetectionPtsBuffer.append(timestampS)
-            }
+            let frame = ServerUploader.FramePayload(
+                frame_index: callIndex,
+                timestamp_s: timestampS,
+                px: detection.map { Double($0.px) },
+                py: detection.map { Double($0.py) },
+                ball_detected: detection != nil
+            )
+            self.detectionFramesBuffer.append(frame)
         }
     }
 
-    /// Bump the detection generation, clear the buffer, and reset the
-    /// throttle. Called at both ends of a recording cycle so no stale
-    /// state bleeds across arms.
+    /// Bump the detection generation, rebuild the session, clear the
+    /// buffer, reset the throttle. Called at both ends of a recording
+    /// cycle so no stale MOG2 state or detections bleed across arms.
     private func resetBallDetectionState() {
         detectionStateLock.lock()
         detectionGeneration &+= 1
-        ballDetectionPtsBuffer.removeAll()
+        detectionFramesBuffer.removeAll()
         detectionInFlight = false
         lastDetectionDispatchTimeS = 0
+        detectionCallIndex = 0
+        detectionSession = BTDetectionSession()
         detectionStateLock.unlock()
     }
 
-    /// Take ownership of the accumulated ball-detection timestamps for this
-    /// recording cycle. Used by the trim pipeline (Step 4c) and then the
-    /// buffer is cleared so the next cycle starts fresh.
-    func drainBallDetections() -> [TimeInterval] {
+    /// Take ownership of the accumulated per-frame detection results for
+    /// this recording cycle. Used by the cycle-complete path (mode-one
+    /// uses it as a trim oracle; mode-two ships it to the server).
+    func drainDetectedFrames() -> [ServerUploader.FramePayload] {
         detectionStateLock.lock()
         defer { detectionStateLock.unlock() }
-        let out = ballDetectionPtsBuffer
-        ballDetectionPtsBuffer.removeAll()
+        let out = detectionFramesBuffer
+        detectionFramesBuffer.removeAll()
         return out
     }
 
@@ -1821,7 +1881,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             intrinsics: IntrinsicsStore.loadIntrinsicsPayload(),
             homography: IntrinsicsStore.loadHomography(),
             image_width_px: dims?.width,
-            image_height_px: dims?.height
+            image_height_px: dims?.height,
+            frames: payload.frames
         )
     }
 }
