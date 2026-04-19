@@ -1275,9 +1275,21 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         if latest_mtime is None or mtime > latest_mtime:
             latest_mtime = mtime
 
-    # Infer capture mode from presence of MOV files — same rule as events().
+    # Infer capture mode — same rule as events(): MOV + frames_on_device =
+    # dual; MOV alone = camera_only; frames_on_device alone (no MOV) =
+    # on_device. Previously this path only checked MOV presence, so any
+    # dual session surfaced in the viewer hero as "camera-only" even
+    # though the scene had on-device rays overlaid.
     has_any_video = any(state.video_dir.glob(f"session_{session_id}_*"))
-    mode = "camera_only" if has_any_video else "on_device"
+    has_any_on_device_frames = any(
+        bool(p.frames_on_device) for p in pitches.values()
+    )
+    if has_any_video and has_any_on_device_frames:
+        mode = "dual"
+    elif has_any_video:
+        mode = "camera_only"
+    else:
+        mode = "on_device"
 
     return {
         "session_id": session_id,
