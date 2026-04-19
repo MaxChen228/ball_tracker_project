@@ -358,7 +358,12 @@ def render_viewer_html(
   .virt-cell {{ background:var(--surface); padding:var(--s-2) var(--s-3);
     display:flex; flex-direction:column; gap:var(--s-1); min-height:0;
     min-width:0; position:relative; }}
-  .virt-frame {{ flex:1 1 auto; min-height:0; background:var(--bg);
+  /* 16:9 matches the iPhone main cam's 1080p landscape frame, so the
+     virtual cell has the same visible shape as the real MOV cell above.
+     min-height:0 + flex:1 keeps the cell filling the grid row's height
+     first; aspect-ratio is a width cap applied inside that height. */
+  .virt-frame {{ flex:1 1 auto; min-height:0; aspect-ratio:16/9;
+    width:100%; align-self:center; background:var(--bg);
     border:1px solid var(--border-l); border-radius:var(--r);
     overflow:hidden; cursor:default; }}
   .virt-frame.empty {{ display:flex; align-items:center;
@@ -998,18 +1003,64 @@ def render_viewer_html(
   // Rays are filtered out because the ray from a camera to the ball
   // projects onto a single line through the centre of that camera's
   // virtual view — it adds no information, only clutter.
+
+  // IMPORTANT — Plotly's scene.camera is NOT in world coordinates. For
+  // aspectmode="data" the scene normalises each axis independently so
+  // the longest data span maps to [-1, 1] and the other axes sit
+  // proportionally inside. Feeding raw world coords produces a far-off
+  // third-person view. Compute the normalisation explicitly: find the
+  // scene bbox, take the longest span as d_max, then
+  //   scene[i] = (world[i] - center[i]) * 2 / d_max
+  // for positions; directions drop the offset. This lands the virtual
+  // eye AT the iPhone's physical location, looking along its optical
+  // axis — a real first-person view.
+  function computeSceneBounds() {{
+    const pts = [];
+    for (const c of (SCENE.cameras || [])) pts.push(c.center_world);
+    for (const p of (SCENE.triangulated || []))           pts.push([p.x, p.y, p.z]);
+    for (const p of (SCENE.triangulated_on_device || [])) pts.push([p.x, p.y, p.z]);
+    // Ground + plate baseline so an empty / single-cam session still
+    // has a stable bbox (otherwise d_max collapses when only one
+    // camera point exists).
+    pts.push([-1.5, -1.5, 0], [1.5, 1.5, 0], [0, 0.432, 0]);
+    const mins = [Infinity, Infinity, Infinity];
+    const maxs = [-Infinity, -Infinity, -Infinity];
+    for (const p of pts) {{
+      for (let i = 0; i < 3; i++) {{
+        if (p[i] < mins[i]) mins[i] = p[i];
+        if (p[i] > maxs[i]) maxs[i] = p[i];
+      }}
+    }}
+    return {{mins, maxs}};
+  }}
+  const _sceneBounds = computeSceneBounds();
+  const SCENE_CENTER = _sceneBounds.maxs.map((v, i) => (v + _sceneBounds.mins[i]) / 2);
+  const SCENE_DMAX = Math.max(
+    1e-6,
+    ..._sceneBounds.maxs.map((v, i) => v - _sceneBounds.mins[i])
+  );
+  function worldPosToScene(P) {{
+    return {{
+      x: (P[0] - SCENE_CENTER[0]) * 2 / SCENE_DMAX,
+      y: (P[1] - SCENE_CENTER[1]) * 2 / SCENE_DMAX,
+      z: (P[2] - SCENE_CENTER[2]) * 2 / SCENE_DMAX,
+    }};
+  }}
+  function worldDirToScene(D) {{
+    return {{x: D[0] * 2 / SCENE_DMAX, y: D[1] * 2 / SCENE_DMAX, z: D[2] * 2 / SCENE_DMAX}};
+  }}
+
   function cameraForCam(cam) {{
     const c = (SCENE.cameras || []).find(x => x.camera_id === cam);
     if (!c) return null;
-    const C = c.center_world;
-    const F = c.axis_forward_world;
-    const U = c.axis_up_world;
-    return {{
-      eye:    {{x: C[0],           y: C[1],           z: C[2]          }},
-      center: {{x: C[0] + F[0],    y: C[1] + F[1],    z: C[2] + F[2]   }},
-      up:     {{x: U[0],           y: U[1],           z: U[2]          }},
-      projection: {{type: "perspective"}},
-    }};
+    const eye = worldPosToScene(c.center_world);
+    const fwd = worldDirToScene(c.axis_forward_world);
+    // `center` is a target POINT (not direction). Step one forward unit
+    // from the eye — magnitude doesn't matter, Plotly only reads the
+    // (center − eye) direction.
+    const ctr = {{x: eye.x + fwd.x, y: eye.y + fwd.y, z: eye.z + fwd.z}};
+    const up = worldDirToScene(c.axis_up_world);
+    return {{eye, center: ctr, up, projection: {{type: "perspective"}}}};
   }}
   function makeVirtLayout(cam) {{
     const camConf = cameraForCam(cam);
@@ -1691,13 +1742,23 @@ def _virtual_cell_html(cam: str, *, pose_available: bool) -> str:
         body = '<div class="virt-frame empty">no calibration</div>'
     else:
         body = f'<div class="virt-frame" id="virt-scene-{cam}"></div>'
+    # Tooltip surfaces the limitations up-front so the operator doesn't
+    # interpret "virtual looks zoomed-out" as a calibration bug — it's
+    # Plotly's fixed ~60° FOV vs the iPhone main cam's ~37° vertical FOV,
+    # plus the lack of a distortion model.
+    hint_title = (
+        "Plotly pinhole camera: ~60° vertical FOV, zero lens distortion. "
+        "iPhone main cam is ~37° vertical with 5-coefficient distortion — "
+        "use this view for gross pose checks (side/mirror/rotation), "
+        "not pixel-accurate overlay."
+    )
     return (
         f'<div class="virt-cell">'
         f'<div class="vid-head">'
-        f'<span class="vid-label virt">VIRT</span>'
+        f'<span class="vid-label virt" title="{hint_title}">VIRT</span>'
         f'<span class="vid-label" style="color:{label_color};'
         f'border-color:{label_color};">CAM {cam}</span>'
-        f'<span class="vid-hint">pose-locked</span>'
+        f'<span class="vid-hint" title="{hint_title}">pose-only · approx FOV</span>'
         f'</div>'
         f'{body}'
         f'</div>'
