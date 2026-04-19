@@ -150,6 +150,26 @@ final class ServerUploader {
         let mode: String?
     }
 
+    /// Mutual chirp sync context carried in heartbeat/status responses.
+    /// `id` is the server-minted run identifier; phones dedupe sync_run
+    /// commands on this id so a repeat of an in-flight run doesn't
+    /// re-trigger emission.
+    struct SyncIntent: Codable {
+        let id: String
+        let started_at: Double
+        let reports_received: [String]?
+    }
+
+    /// Most recent solved mutual-sync result. `delta_s` is `A_clock − B_clock`
+    /// — positive means A runs ahead of B. Apply as `t_on_A = t_on_B + delta_s`
+    /// when re-timing B's events into A's timeline.
+    struct SyncResult: Codable {
+        let id: String
+        let delta_s: Double
+        let distance_m: Double
+        let solved_at: Double
+    }
+
     /// Response body shared by `POST /heartbeat` and `GET /status`.
     /// `commands[self.camera_id]` drives the dashboard-remote arm/disarm
     /// flow on iPhone.
@@ -162,6 +182,13 @@ final class ServerUploader {
         /// to render the HUD mode chip; during an armed session the phone
         /// prefers `session.mode` (the snapshot). Optional for back-compat.
         let capture_mode: String?
+        /// In-flight mutual chirp sync context. Present when a run is
+        /// active; `commands[self] == "sync_run"` will fire alongside.
+        let sync: SyncIntent?
+        /// Most recently solved Δ + D. Used for the dashboard UI; phones
+        /// can also read it to apply Δ locally if ever needed (not yet
+        /// wired — triangulation currently applies Δ server-side).
+        let last_sync: SyncResult?
     }
 
     /// iOS-side capture-mode enum. Kept string-valued so it round-trips
@@ -645,6 +672,128 @@ final class ServerUploader {
             completion?(.success(()))
         }
         task.resume()
+    }
+
+    /// Wire shape for `POST /sync/report`. Mirrors `server/schemas.py`'s
+    /// `SyncReport` — any field changes here MUST be reflected there too.
+    struct SyncReportPayload: Codable {
+        let camera_id: String
+        let sync_id: String
+        let role: String          // "A" | "B"
+        let t_self_s: Double      // mic PTS when own chirp was heard
+        let t_from_other_s: Double  // mic PTS when peer's chirp was heard
+        let emitted_band: String  // "A" | "B" — rig-config cross-check
+    }
+
+    /// Upload this phone's mutual-sync matched-filter report. Fire-and-
+    /// forget from the controller's perspective: the server waits on both
+    /// phones, solves, and publishes Δ via `/status → last_sync`. Retry
+    /// on transient failure is the operator's job (re-press the button).
+    func postSyncReport(
+        _ report: SyncReportPayload,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        guard let base = config.baseURL() else {
+            completion?(.failure(NSError(
+                domain: "ServerUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
+            )))
+            return
+        }
+        let url = base.appendingPathComponent("sync/report")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            request.httpBody = try JSONEncoder().encode(report)
+        } catch {
+            completion?(.failure(error))
+            return
+        }
+        let syncId = report.sync_id
+        let role = report.role
+        let task = URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error = error {
+                log.error("sync report failed sync=\(syncId, privacy: .public) role=\(role, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+                completion?(.failure(error))
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                log.error("sync report rejected sync=\(syncId, privacy: .public) role=\(role, privacy: .public) http=\(http.statusCode)")
+                completion?(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"]
+                )))
+                return
+            }
+            log.info("sync report ok sync=\(syncId, privacy: .public) role=\(role, privacy: .public)")
+            completion?(.success(()))
+        }
+        task.resume()
+    }
+
+    /// Push one diagnostic line to the server's mutual-sync log ring.
+    /// Fire-and-forget — failures are logged locally via `log.error` but
+    /// never surface to the caller, because a dropped log line must not
+    /// block the sync flow itself. `detail` is encoded as JSON; keep
+    /// values small + primitive (strings, numbers, bools).
+    func postSyncLog(
+        event: String,
+        detail: [String: AnyJSONValue] = [:]
+    ) {
+        guard let base = config.baseURL() else { return }
+        let url = base.appendingPathComponent("sync/log")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // `camera_id` is not available on this struct directly — caller
+        // supplies it via a global that ServerUploader doesn't own, so
+        // we accept the role out of band by reading UserDefaults here.
+        // Single source of truth (SettingsViewController) keeps the role
+        // stable; if it's empty we still send so server can log "unknown"
+        // rather than swallow the event.
+        let cameraId = UserDefaults.standard.string(forKey: "camera_role") ?? ""
+        let body: [String: Any] = [
+            "camera_id": cameraId,
+            "event": event,
+            "detail": detail.mapValues { $0.rawValue },
+        ]
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+        } catch {
+            log.error("sync log encode failed event=\(event, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+            return
+        }
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error = error {
+                log.error("sync log post failed event=\(event, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                log.error("sync log rejected event=\(event, privacy: .public) http=\(http.statusCode)")
+            }
+        }.resume()
+    }
+
+    /// Tiny JSON-value wrapper so callers can pass a heterogeneous dict
+    /// (`["peak": .double(0.42), "band": .string("A")]`) without fighting
+    /// Swift's `Any` type inference on `[String: Any]` literals.
+    enum AnyJSONValue {
+        case string(String)
+        case int(Int)
+        case double(Double)
+        case bool(Bool)
+        var rawValue: Any {
+            switch self {
+            case .string(let v): return v
+            case .int(let v): return v
+            case .double(let v): return v
+            case .bool(let v): return v
+            }
+        }
     }
 
     func fetchStatus(completion: @escaping (Result<[String: Any], Error>) -> Void) {

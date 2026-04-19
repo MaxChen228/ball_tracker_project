@@ -28,6 +28,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     enum AppState {
         case standby
         case timeSyncWaiting
+        case mutualSyncing
         case recording
         case uploading
     }
@@ -62,6 +63,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var audioInput: AVCaptureDeviceInput?
     private var audioOutput: AVCaptureAudioDataOutput?
     private var chirpDetector: AudioChirpDetector?
+    // Mutual chirp sync (dashboard-triggered). `syncDetector` replaces
+    // `chirpDetector` as the audio-output delegate while a run is active;
+    // restored on exit. `syncEmitter` owns the `AVAudioEngine` +
+    // `AVAudioPlayerNode` graph used to play this phone's own chirp.
+    private var syncDetector: AudioSyncDetector?
+    private var syncEmitter: ChirpEmitter?
+    private var pendingSyncId: String?
+    private var syncSelfPTS: Double?
+    private var syncFromOtherPTS: Double?
+    private var syncWatchdog: DispatchWorkItem?
 
     // State + frame index. `state` is read/written on main; `captureOutput`
     // (frame queue, up to 240 Hz) reads it via `frameStateBox.snapshot()` so
@@ -107,10 +118,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // them as instance vars would just be two stores out of sync.
 
     // Remote-control state (driven by the heartbeat response).
-    /// Last command key we acted on for this device (`"arm"` / `"disarm"` /
-    /// nil). Only state *transitions* cause local actions so repeated arm
-    /// replies during an armed session don't re-trigger enterSyncMode.
-    private var lastAppliedCommand: String?
+    /// Last (command, sync_id) tuple we acted on. Plain "arm" / "disarm"
+    /// use a nil sync_id; `"sync_run"` carries the server-minted run id so
+    /// back-to-back runs (same command string, different run) still fire.
+    /// Only state *transitions* cause local actions so repeated replies
+    /// during an active command don't re-trigger handlers.
+    private var lastAppliedCommand: (command: String, syncId: String?)?
     /// Reserved for future branching in the cycle-complete path (e.g. a
     /// re-arm that wants to skip the standby flash). Always true today
     /// because `.recording` always returns to `.standby` now.
@@ -419,6 +432,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         displayLink?.isPaused = true
         if state == .timeSyncWaiting {
             cancelTimeSync()
+        }
+        if state == .mutualSyncing {
+            abortMutualSync(reason: "view dismissed")
         }
     }
 
@@ -1117,15 +1133,19 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             }
             let cam = self.settings.cameraRole
             let cmd = response.commands?[cam]
+            let syncId = response.sync?.id
             // Log every transition so Xcode console shows the server's
             // intent reaching iOS. A steady-state "arm"/"disarm" echoing
             // every second is logged only when the value changed — see
             // handleDashboardCommand's guard.
-            if cmd != self.lastAppliedCommand {
-                log.info("heartbeat reply session_armed=\(response.session?.armed ?? false) session_id=\(sid ?? "nil", privacy: .public) command=\(cmd ?? "nil", privacy: .public) cam=\(cam, privacy: .public)")
+            let last = self.lastAppliedCommand
+            let changed = (last?.command != cmd) || (last?.syncId != syncId)
+            if changed {
+                log.info("heartbeat reply session_armed=\(response.session?.armed ?? false) session_id=\(sid ?? "nil", privacy: .public) command=\(cmd ?? "nil", privacy: .public) sync_id=\(syncId ?? "nil", privacy: .public) cam=\(cam, privacy: .public)")
             }
             self.handleDashboardCommand(
                 cmd,
+                syncId: syncId,
                 sessionArmed: response.session?.armed ?? false
             )
         }
@@ -1185,15 +1205,29 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     /// Dispatch the server's per-device command. Only reacts to state
     /// *transitions* (tracked via `lastAppliedCommand`) so repeated arm
-    /// replies during an armed session don't re-trigger enter.
-    private func handleDashboardCommand(_ command: String?, sessionArmed: Bool) {
-        defer { lastAppliedCommand = command }
-        guard command != lastAppliedCommand else { return }
+    /// replies during an armed session don't re-trigger enter. For
+    /// `"sync_run"`, the dedupe key additionally carries the server-minted
+    /// `syncId` so back-to-back runs fire once each.
+    private func handleDashboardCommand(
+        _ command: String?,
+        syncId: String?,
+        sessionArmed: Bool
+    ) {
+        defer { lastAppliedCommand = command.map { ($0, syncId) } }
+        let last = lastAppliedCommand
+        let same = (last?.command == command) && (last?.syncId == syncId)
+        if same { return }
         switch command {
         case "arm":
             applyRemoteArm()
         case "disarm":
             applyRemoteDisarm()
+        case "sync_run":
+            if let sid = syncId {
+                applyMutualSync(syncId: sid)
+            } else {
+                log.warning("sync_run command arrived without sync_id — ignoring")
+            }
         default:
             // No pending command. Recording only ends via an explicit
             // disarm — never a silent fallthrough.
@@ -1207,10 +1241,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         switch state {
         case .standby:
             enterRecordingMode()
-        case .timeSyncWaiting, .recording, .uploading:
+        case .timeSyncWaiting, .mutualSyncing, .recording, .uploading:
             // Active state — arm is a no-op. `.timeSyncWaiting` finishes
             // on its own and returns to standby; next heartbeat re-sends
             // the arm command and this branch flips us into recording.
+            // Server's session ↔ sync precondition makes the
+            // `.mutualSyncing` path impossible in practice.
             break
         }
     }
@@ -1222,6 +1258,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             break
         case .timeSyncWaiting:
             cancelTimeSync(reason: "disarmed")
+        case .mutualSyncing:
+            abortMutualSync(reason: "disarmed")
         case .uploading:
             // Upload flow runs its own course; state transitions back to
             // standby via persistCompletedCycle once the queue accepts.
@@ -1250,6 +1288,216 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 }
             }
         }
+    }
+
+    // MARK: - Mutual chirp sync
+
+    /// Enter mutual-sync mode. Both phones receive this command (distinct
+    /// `syncId` per run); each emits its own band's chirp, listens for
+    /// both bands, and POSTs the resulting 4 timestamps to the server.
+    /// `.mutualSyncing` can only be entered from `.standby` — arriving in
+    /// any other state is a server/client race we ignore (server guards
+    /// against sync ↔ session overlap, so this is a defense-in-depth log).
+    private func applyMutualSync(syncId: String) {
+        guard state == .standby else {
+            log.warning("sync_run ignored state=\(Self.stateText(self.state), privacy: .public) sync_id=\(syncId, privacy: .public)")
+            uploader.postSyncLog(event: "ignored", detail: [
+                "reason": .string("not_standby"),
+                "state": .string(Self.stateText(state)),
+                "sync_id": .string(syncId),
+            ])
+            return
+        }
+        log.info("camera entering mutual-sync sync_id=\(syncId, privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
+        uploader.postSyncLog(event: "enter", detail: [
+            "sync_id": .string(syncId),
+            "role": .string(settings.cameraRole),
+        ])
+        pendingSyncId = syncId
+        syncSelfPTS = nil
+        syncFromOtherPTS = nil
+        startMutualSync()
+    }
+
+    private func startMutualSync() {
+        let role = settings.cameraRole
+        guard role == "A" || role == "B" else {
+            log.error("sync_run rejected unknown role=\(role, privacy: .public)")
+            uploader.postSyncLog(event: "reject", detail: [
+                "reason": .string("unknown_role"),
+                "role": .string(role),
+            ])
+            pendingSyncId = nil
+            return
+        }
+        // Session must be live for the mic to deliver samples. Parked
+        // standby (session stopped) → spin up at idle fps first; the
+        // ~300-500 ms fps swap is well within the 8 s server timeout.
+        startCapture(at: standbyFps)
+
+        // Emitter: lazy-init, keeps AVAudioSession configured until
+        // shutdown() is called at exit.
+        if syncEmitter == nil {
+            syncEmitter = ChirpEmitter()
+        }
+
+        // Detector: fresh instance per run so ring-buffer state can't leak
+        // across runs. Swap the AVCaptureAudioDataOutput delegate off the
+        // legacy chirpDetector to the sync detector for the duration of
+        // the run.
+        let detector = AudioSyncDetector()
+        detector.onDetection = { [weak self] event in
+            guard let self else { return }
+            DispatchQueue.main.async { self.onSyncDetection(event) }
+        }
+        syncDetector = detector
+        let hadAudioOutput = audioOutput != nil
+        audioOutput?.setSampleBufferDelegate(detector, queue: detector.deliveryQueue)
+        uploader.postSyncLog(event: "detector_installed", detail: [
+            "had_audio_output": .bool(hadAudioOutput),
+            "role": .string(role),
+        ])
+
+        state = .mutualSyncing
+        frameStateBox.update(state: .mutualSyncing, pendingBootstrap: false, sessionId: nil)
+        warningLabel.text = "互相時間校正中… (\(role))"
+        warningLabel.isHidden = false
+        lastUploadStatusText = "Mutual sync · emitting"
+        updateUIForState()
+
+        // Fire the emission after a short delay so the capture session has
+        // had time to start delivering mic buffers — the matched filter
+        // needs to be watching before the speaker speaks.
+        let roleCaptured = role
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self, self.state == .mutualSyncing else { return }
+            self.uploader.postSyncLog(event: "emit", detail: [
+                "role": .string(roleCaptured),
+            ])
+            self.syncEmitter?.emit(role: roleCaptured)
+        }
+
+        // Watchdog: server also has an 8 s timeout; set ours to 6 s so we
+        // clean up + log before the server gives up, and the next heartbeat
+        // already shows the cleared sync context.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.state == .mutualSyncing else { return }
+            self.abortMutualSync(reason: "timeout")
+        }
+        syncWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: work)
+    }
+
+    private func onSyncDetection(_ event: AudioSyncDetector.DetectionEvent) {
+        guard state == .mutualSyncing else { return }
+        let ownRole = settings.cameraRole
+        let isSelfHear = event.band.rawValue == ownRole
+        uploader.postSyncLog(event: "band_fired", detail: [
+            "band": .string(event.band.rawValue),
+            "is_self": .bool(isSelfHear),
+            "peak": .double(Double(event.peakNorm)),
+            "center_s": .double(event.centerPTS),
+        ])
+        if isSelfHear {
+            // Already recorded? Keep the first (earliest) peak — any
+            // subsequent hit within the cooldown is discarded by the
+            // detector, but defense-in-depth here too.
+            if syncSelfPTS == nil {
+                syncSelfPTS = event.centerPTS
+                log.info("sync self-hear band=\(event.band.rawValue, privacy: .public) center_s=\(event.centerPTS, privacy: .public) peak=\(event.peakNorm, privacy: .public)")
+            }
+        } else {
+            if syncFromOtherPTS == nil {
+                syncFromOtherPTS = event.centerPTS
+                log.info("sync cross-hear band=\(event.band.rawValue, privacy: .public) center_s=\(event.centerPTS, privacy: .public) peak=\(event.peakNorm, privacy: .public)")
+            }
+        }
+        if let tSelf = syncSelfPTS, let tOther = syncFromOtherPTS {
+            completeMutualSync(tSelf: tSelf, tFromOther: tOther)
+        }
+    }
+
+    private func completeMutualSync(tSelf: Double, tFromOther: Double) {
+        guard let syncId = pendingSyncId else {
+            log.error("sync complete without pending sync_id — ignoring")
+            return
+        }
+        log.info("sync complete sync_id=\(syncId, privacy: .public) t_self=\(tSelf, privacy: .public) t_from_other=\(tFromOther, privacy: .public)")
+        uploader.postSyncLog(event: "complete", detail: [
+            "sync_id": .string(syncId),
+            "t_self_s": .double(tSelf),
+            "t_from_other_s": .double(tFromOther),
+        ])
+        syncWatchdog?.cancel()
+        syncWatchdog = nil
+
+        let role = settings.cameraRole
+        let report = ServerUploader.SyncReportPayload(
+            camera_id: role,
+            sync_id: syncId,
+            role: role,
+            t_self_s: tSelf,
+            t_from_other_s: tFromOther,
+            emitted_band: role
+        )
+        // Fire-and-forget; server publishes the result via /status →
+        // last_sync, so this controller doesn't need to branch on success.
+        uploader.postSyncReport(report) { [weak self] result in
+            switch result {
+            case .success:
+                DispatchQueue.main.async {
+                    self?.lastUploadStatusText = "Mutual sync · uploaded"
+                    self?.updateUIForState()
+                }
+            case .failure(let error):
+                log.error("sync report upload failed: \(error.localizedDescription, privacy: .public)")
+                DispatchQueue.main.async {
+                    self?.lastUploadStatusText = "Mutual sync · upload failed"
+                    self?.updateUIForState()
+                }
+            }
+        }
+
+        teardownMutualSync(status: "Mutual sync · done")
+    }
+
+    private func abortMutualSync(reason: String) {
+        log.warning("sync aborted reason=\(reason, privacy: .public) sync_id=\(self.pendingSyncId ?? "nil", privacy: .public)")
+        uploader.postSyncLog(event: "abort", detail: [
+            "reason": .string(reason),
+            "sync_id": .string(pendingSyncId ?? ""),
+            "have_self": .bool(syncSelfPTS != nil),
+            "have_other": .bool(syncFromOtherPTS != nil),
+        ])
+        syncWatchdog?.cancel()
+        syncWatchdog = nil
+        teardownMutualSync(status: "Mutual sync · \(reason)")
+    }
+
+    /// Common cleanup from both success and timeout paths. Restores the
+    /// legacy audio delegate, shuts the emitter down (releases the
+    /// AVAudioSession back to whatever the capture session owned), and
+    /// returns to `.standby`.
+    private func teardownMutualSync(status: String) {
+        if let chirp = chirpDetector {
+            audioOutput?.setSampleBufferDelegate(chirp, queue: chirp.deliveryQueue)
+        } else {
+            audioOutput?.setSampleBufferDelegate(nil, queue: nil)
+        }
+        syncDetector?.onDetection = nil
+        syncDetector = nil
+        syncEmitter?.shutdown()
+        pendingSyncId = nil
+        syncSelfPTS = nil
+        syncFromOtherPTS = nil
+        state = .standby
+        frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
+        warningLabel.isHidden = true
+        lastUploadStatusText = status
+        if settings.parkCameraInStandby {
+            stopCapture()
+        }
+        updateUIForState()
     }
 
     /// Force an immediate heartbeat probe, resetting backoff. Exposed for
@@ -1562,6 +1810,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         switch state {
         case .standby: return "STANDBY"
         case .timeSyncWaiting: return "TIME_SYNC"
+        case .mutualSyncing: return "MUTUAL_SYNC"
         case .recording: return "RECORDING"
         case .uploading: return "UPLOADING"
         }
@@ -1629,6 +1878,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             return .init(
                 borderColor: DesignTokens.Colors.accent, borderWidth: 8, pulse: true,
                 chipText: "時間校正中", chipStyle: .pending
+            )
+        case .mutualSyncing:
+            return .init(
+                borderColor: DesignTokens.Colors.accent, borderWidth: 8, pulse: true,
+                chipText: "互相同步中", chipStyle: .pending
             )
         case .recording:
             return .init(
