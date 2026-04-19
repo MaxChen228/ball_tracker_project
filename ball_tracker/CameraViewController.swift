@@ -49,6 +49,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // detection stalls into dropped-frame cascades (AVCaptureVideoDataOutput
     // has `alwaysDiscardsLateVideoFrames = true`).
     private let processingQueue = DispatchQueue(label: "camera.frame.queue", qos: .userInitiated)
+    // Dedicated queue for `session.startRunning / stopRunning / activeFormat`
+    // lifecycle ops. Apple's Thread Performance Checker warns when these hit
+    // the main thread — startRunning on a 240 fps format can block for
+    // 300-500 ms, stalling the run loop and causing visible HUD stutter +
+    // deferred frame delivery cascades. Keep this separate from the frame
+    // queue so a format swap can't interleave with sample-buffer delivery.
+    private let sessionQueue = DispatchQueue(label: "camera.session.queue", qos: .userInitiated)
 
     // Audio chirp sync. Mic input is always installed once granted so the
     // chirp detector can run as soon as the user taps 時間校正.
@@ -694,32 +701,44 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// which blocks the session for ~300-500 ms — deliberately called only
     /// at moments with no time-critical frame work in flight (entering
     /// sync while the user is placing the ball, or exiting back to idle).
+    /// Swap the capture format to a new fps on the session queue. Blocks
+    /// `~300-500 ms` inside `stopRunning → activeFormat = X → startRunning`
+    /// — *MUST* run off-main so the HUD / ReadyCard refresh and pending UI
+    /// gestures aren't stalled. All callers are fire-and-forget (no caller
+    /// needs the new fps to have applied synchronously).
     private func switchCaptureFps(_ targetFps: Double) {
         guard let device = currentCaptureDevice else { return }
-        let wasRunning = session.isRunning
-        if wasRunning { session.stopRunning() }
-        defer { if wasRunning { session.startRunning() } }
-
-        do {
-            try configureCaptureFormat(
-                device,
-                targetWidth: settings.captureWidth,
-                targetHeight: settings.captureHeight,
-                targetFps: targetFps
-            )
-            IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
-            // Read back the actually-applied rate so an operator can tell
-            // from logs whether the sensor is honouring our request. 240 fps
-            // formats typically crop the sensor ROI, so `videoFieldOfView`
-            // may differ between 60 and 240 fps — log it per switch so any
-            // FOV-approximation intrinsics drift is visible.
-            let applied = device.activeVideoMinFrameDuration
-            let appliedFps = applied.value > 0 ? Double(applied.timescale) / Double(applied.value) : 0
-            log.info("camera fps switched target=\(targetFps) applied=\(appliedFps) fov_rad=\(self.horizontalFovRadians)")
-        } catch {
-            log.error("camera fps switch failed target=\(targetFps) error=\(error.localizedDescription, privacy: .public)")
-            warningLabel.text = "FPS 切換失敗 (\(Int(targetFps))fps 不支援)"
-            warningLabel.isHidden = false
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            let wasRunning = self.session.isRunning
+            if wasRunning { self.session.stopRunning() }
+            defer { if wasRunning { self.session.startRunning() } }
+            do {
+                try self.configureCaptureFormat(
+                    device,
+                    targetWidth: self.settings.captureWidth,
+                    targetHeight: self.settings.captureHeight,
+                    targetFps: targetFps
+                )
+                IntrinsicsStore.setHorizontalFov(self.horizontalFovRadians)
+                // Read back the actually-applied rate so an operator can
+                // tell from logs whether the sensor is honouring our
+                // request. 240 fps formats typically crop the sensor ROI,
+                // so `videoFieldOfView` may differ between 60 and 240 fps
+                // — log it per switch so any FOV-approximation intrinsics
+                // drift is visible.
+                let applied = device.activeVideoMinFrameDuration
+                let appliedFps = applied.value > 0
+                    ? Double(applied.timescale) / Double(applied.value)
+                    : 0
+                log.info("camera fps switched target=\(targetFps) applied=\(appliedFps) fov_rad=\(self.horizontalFovRadians)")
+            } catch {
+                log.error("camera fps switch failed target=\(targetFps) error=\(error.localizedDescription, privacy: .public)")
+                DispatchQueue.main.async {
+                    self.warningLabel.text = "FPS 切換失敗 (\(Int(targetFps))fps 不支援)"
+                    self.warningLabel.isHidden = false
+                }
+            }
         }
     }
 
@@ -728,12 +747,45 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// or a manual 時間校正 window (`standbyFps`). If the session is already
     /// running, delegates to `switchCaptureFps` so the fps swap still
     /// happens. Safe to call from any state; no-op if no capture device.
+    /// Lifecycle ops run on `sessionQueue` so the caller (main thread)
+    /// doesn't block on `startRunning`.
     private func startCapture(at targetFps: Double) {
         guard let device = currentCaptureDevice else { return }
-        if session.isRunning {
-            switchCaptureFps(targetFps)
-            return
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if self.session.isRunning {
+                // Already running — delegate to fps swap, directly on this
+                // queue (we're already on sessionQueue; no dispatch needed).
+                self.reconfigureActiveSession(device: device, targetFps: targetFps)
+                return
+            }
+            do {
+                try self.configureCaptureFormat(
+                    device,
+                    targetWidth: self.settings.captureWidth,
+                    targetHeight: self.settings.captureHeight,
+                    targetFps: targetFps
+                )
+                IntrinsicsStore.setHorizontalFov(self.horizontalFovRadians)
+                self.session.startRunning()
+                log.info("camera capture started fps=\(targetFps)")
+            } catch {
+                log.error("camera capture start failed error=\(error.localizedDescription, privacy: .public)")
+                DispatchQueue.main.async {
+                    self.warningLabel.text = "相機啟動失敗 (\(Int(targetFps))fps)"
+                    self.warningLabel.isHidden = false
+                }
+            }
         }
+    }
+
+    /// Inner of `switchCaptureFps` (same body, no dispatch) for callers that
+    /// already ran themselves onto `sessionQueue`. Keeps the stop → apply
+    /// → start sequence atomic inside one queue task.
+    private func reconfigureActiveSession(device: AVCaptureDevice, targetFps: Double) {
+        let wasRunning = session.isRunning
+        if wasRunning { session.stopRunning() }
+        defer { if wasRunning { session.startRunning() } }
         do {
             try configureCaptureFormat(
                 device,
@@ -742,26 +794,35 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 targetFps: targetFps
             )
             IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
-            session.startRunning()
-            log.info("camera capture started fps=\(targetFps)")
+            let applied = device.activeVideoMinFrameDuration
+            let appliedFps = applied.value > 0
+                ? Double(applied.timescale) / Double(applied.value)
+                : 0
+            log.info("camera fps switched target=\(targetFps) applied=\(appliedFps) fov_rad=\(self.horizontalFovRadians)")
         } catch {
-            log.error("camera capture start failed error=\(error.localizedDescription, privacy: .public)")
-            warningLabel.text = "相機啟動失敗 (\(Int(targetFps))fps)"
-            warningLabel.isHidden = false
+            log.error("camera fps switch failed target=\(targetFps) error=\(error.localizedDescription, privacy: .public)")
+            DispatchQueue.main.async {
+                self.warningLabel.text = "FPS 切換失敗 (\(Int(targetFps))fps 不支援)"
+                self.warningLabel.isHidden = false
+            }
         }
     }
 
     /// Park the capture session. Camera + mic hardware go idle so the phone
     /// doesn't heat up under a long idle preview — only heartbeat keeps
-    /// running in standby. Safe to call when already stopped. Also zeroes
-    /// the HUD fps reading so the frozen "FPS 59.5" doesn't linger.
+    /// running in standby. Safe to call when already stopped. The fps HUD
+    /// reset stays on main (UI state); the hardware stop is off-main so we
+    /// don't hit the `startRunning/stopRunning on main thread` perf check.
     private func stopCapture() {
-        guard session.isRunning else { return }
-        session.stopRunning()
         fpsEstimate = 0
         framesSinceLastFpsTick = 0
         lastFrameTimestampForFps = CACurrentMediaTime()
-        log.info("camera capture stopped")
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            guard self.session.isRunning else { return }
+            self.session.stopRunning()
+            log.info("camera capture stopped")
+        }
     }
 
     private var currentCaptureDevice: AVCaptureDevice? {
