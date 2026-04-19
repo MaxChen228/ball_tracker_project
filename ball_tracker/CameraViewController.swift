@@ -130,18 +130,19 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // iterated against a canonical source of truth.
     private var clipRecorder: ClipRecorder?
 
-    // Offloaded on-device ball detection. Runs on `detectionQueue` at
-    // ≤60 Hz while the state is `.recording`, so 240 fps sample delivery on
-    // `processingQueue` never stalls. Serves two roles depending on
-    // currentCaptureMode:
+    // Offloaded on-device ball detection. Runs on `detectionQueue`, serialised
+    // by `detectionInFlight` (no time-based throttle — the HSV + shape pipeline
+    // is ~3-5 ms so effective rate tracks 240 fps capture). Serves two roles
+    // depending on currentCaptureMode:
     //   - mode-one (camera_only): output is the trim-window oracle. Results
     //     not uploaded — server re-runs its own authoritative detection on
     //     the received MOV.
     //   - mode-two (on_device): output IS the ground truth. Shipped to the
     //     server as `PitchPayload.frames` with no MOV; server pairs +
     //     triangulates directly.
-    // The same BTDetectionSession (shape gate + MOG2) drives both so the
-    // algorithm stays identical between modes and aligned with the server.
+    // Uses stateless BTBallDetector (HSV + shape gate). Server still runs
+    // MOG2 as a second filter on the decoded MOV path; on-device BGRA is
+    // clean enough that the shape gate alone suffices.
     private let detectionQueue = DispatchQueue(label: "camera.detection.queue", qos: .utility)
     private let detectionStateLock = NSLock()
     private var detectionInFlight = false
@@ -151,11 +152,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // can sustain (~55-80 Hz on A17-class hardware). Capture still runs at
     // 240 fps so the MOV / anchor clock are unaffected.
     private static let detectionIntervalS: TimeInterval = 0
-    /// BTDetectionSession (MOG2 + shape-gated detection). One per recording
-    /// cycle — rebuilt on entry so the background model starts fresh.
-    /// Access serialised through `detectionStateLock` (or confined to
-    /// `detectionQueue`).
-    private var detectionSession: BTDetectionSession?
+    /// On-device detection is now stateless HSV + shape gate (BTBallDetector).
+    /// MOG2 was dropped here: iOS gets BGRA directly (no H.264 decode noise),
+    /// the camera is static, and the shape gate (aspect ≥ 0.75, fill ≥ 0.60)
+    /// already rejects virtually everything MOG2 used to catch. Stateless =
+    /// no warmup, no per-cycle rebuild, ~3-5 ms/frame so the pipeline can
+    /// keep up with 240 fps capture on a single detection queue.
     /// Accumulated per-frame detection results for the current cycle.
     /// Drained at cycle-complete and either discarded (mode-one) or
     /// attached to the upload payload (mode-two).
@@ -1847,7 +1849,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let elapsed = timestampS - lastDetectionDispatchTimeS
         let shouldDispatch = !detectionInFlight && elapsed >= Self.detectionIntervalS
         let gen = detectionGeneration
-        guard let session = detectionSession, shouldDispatch else {
+        guard shouldDispatch else {
             detectionStateLock.unlock()
             return
         }
@@ -1859,7 +1861,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         detectionQueue.async { [weak self] in
             guard let self else { return }
-            let detection = session.apply(pixelBuffer)
+            let detection = BTBallDetector.detect(in: pixelBuffer)
             self.detectionStateLock.lock()
             defer { self.detectionStateLock.unlock() }
             // Generation mismatch means the recording cycle we were dispatched
@@ -1878,9 +1880,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    /// Bump the detection generation, rebuild the session, clear the
-    /// buffer, reset the throttle. Called at both ends of a recording
-    /// cycle so no stale MOG2 state or detections bleed across arms.
+    /// Bump the detection generation, clear the buffer, reset the throttle.
+    /// Called at both ends of a recording cycle so no stale detections
+    /// bleed across arms. Detector itself is stateless — nothing to rebuild.
     private func resetBallDetectionState() {
         detectionStateLock.lock()
         detectionGeneration &+= 1
@@ -1888,7 +1890,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         detectionInFlight = false
         lastDetectionDispatchTimeS = 0
         detectionCallIndex = 0
-        detectionSession = BTDetectionSession()
         detectionStateLock.unlock()
     }
 
