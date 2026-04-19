@@ -126,9 +126,19 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         // stationary noise (<0.05) and ambient speech (~0.08).
         threshold: Float = 0.18,
         cooldownS: Double = 1.0,
-        minPSR: Float = 2.0,
+        // PSR floor was 2.0 — too strict for real rooms. Mic AGC + room
+        // reverb pushes sidelobes up: clean lab PSR 5-10×, real living
+        // room 1.5-2.5×. Pure noise sits at PSR ≈ 1.0, so 1.5 is
+        // comfortably above noise while letting through realistic chirps.
+        // The down-sweep additionally bypasses PSR when a pending up
+        // exists (timing prior is enough — see runMatchedFilter).
+        minPSR: Float = 1.5,
         chirpGapCenterS: Double = 0.15,
-        chirpPairToleranceS: Double = 0.005
+        // 5 ms was sample-accurate-WAV tight. Real audio playback through
+        // CoreAudio / Bluetooth / browser stacks introduces ms-scale
+        // scheduling jitter. 10 ms still rules out same-band transients
+        // (which essentially never land on the exact 150 ms offset).
+        chirpPairToleranceS: Double = 0.010
     ) {
         self.sampleRate = 0
         self.threshold = threshold
@@ -448,19 +458,28 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         let downPSR = downResult.secondNorm > 0 ? downResult.bestNorm / downResult.secondNorm : 0
 
         let upValid = armed && upResult.bestNorm > threshold && upPSR > minPSR
-        let downValid = armed && downResult.bestNorm > threshold && downPSR > minPSR
+        // Down-sweep validation has TWO tiers:
+        //  - Strict (no pending): full PSR + threshold gate, same as up.
+        //  - Loose (pending up waiting): the 150 ms timing prior already
+        //    rules out random spikes, so PSR is dropped — a clean down with
+        //    weak sidelobes (common when AGC clips after the up burst)
+        //    still pairs. Standard "preamble-gated loose threshold" — what
+        //    makes the dual-sweep design actually fire in real rooms.
+        let downValid = armed && downResult.bestNorm > threshold &&
+            (pendingUp != nil || downPSR > minPSR)
 
         var triggered = false
 
         if upValid {
             let upCenterS = timestampForChirpCenter(result: upResult)
-            // Replace pending only if the new up is materially different
-            // (prevents a long-lived strong peak from being re-latched every
-            // scan); fresher strong peak wins.
-            if pendingUp == nil
+            let isNewLatch = (pendingUp == nil)
+            if isNewLatch
                 || abs(upCenterS - (pendingUp?.centerS ?? 0)) > 0.010
                 || upResult.bestNorm > (pendingUp?.peak ?? 0) {
                 pendingUp = (centerS: upCenterS, peak: upResult.bestNorm)
+                if isNewLatch {
+                    log.info("chirp up latched peak=\(upResult.bestNorm, privacy: .public) psr=\(upPSR, privacy: .public) center_s=\(upCenterS, privacy: .public)")
+                }
             }
         }
 
@@ -473,11 +492,19 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
                 lastTriggerPTS = anchorS
                 pendingUp = nil
                 triggered = true
-                log.info("chirp pair detected up_peak=\(pu.peak, privacy: .public) down_peak=\(downResult.bestNorm, privacy: .public) gap_s=\(gap, privacy: .public) anchor_s=\(anchorS, privacy: .public)")
+                log.info("chirp pair detected up_peak=\(pu.peak, privacy: .public) down_peak=\(downResult.bestNorm, privacy: .public) down_psr=\(downPSR, privacy: .public) gap_s=\(gap, privacy: .public) anchor_s=\(anchorS, privacy: .public)")
                 onChirpDetected?(
                     ChirpEvent(anchorFrameIndex: 0, anchorTimestampS: anchorS)
                 )
+            } else {
+                // Down candidate found but the gap is wrong — log so the
+                // operator sees how far off playback timing actually is.
+                log.info("chirp down candidate rejected gap_s=\(gap, privacy: .public) expected_s=\(self.chirpGapCenterS, privacy: .public) tol_s=\(self.chirpPairToleranceS, privacy: .public) down_peak=\(downResult.bestNorm, privacy: .public)")
             }
+        } else if downResult.bestNorm > threshold && pendingUp == nil {
+            // Down arrived without a preceding up — usually means the up
+            // was rejected (PSR/threshold) or playback was truncated.
+            log.info("chirp down-only seen peak=\(downResult.bestNorm, privacy: .public) psr=\(downPSR, privacy: .public) (no pending up)")
         }
 
         lastSnapshot = Snapshot(
