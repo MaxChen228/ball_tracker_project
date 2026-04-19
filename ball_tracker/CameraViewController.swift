@@ -804,6 +804,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         if let connection = preview.connection, connection.isVideoRotationAngleSupported(0) {
             connection.videoRotationAngle = 0
         }
+        // Preview starts hidden — session isn't running yet, and when we
+        // later stopCapture() AVCaptureVideoPreviewLayer keeps its last
+        // frame around, so toggling isHidden is what actually gives us
+        // black in standby (view.backgroundColor is .black).
+        preview.isHidden = true
         view.layer.insertSublayer(preview, at: 0)
         previewLayer = preview
     }
@@ -900,6 +905,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// needs the new fps to have applied synchronously).
     private func switchCaptureFps(_ targetFps: Double) {
         guard let device = currentCaptureDevice else { return }
+        // Surface the preview synchronously on main so there's no window
+        // where the layer is hidden while the sessionQueue hop is pending.
+        previewLayer?.isHidden = false
         sessionQueue.async { [weak self] in
             guard let self else { return }
             let wasRunning = self.session.isRunning
@@ -943,6 +951,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// doesn't block on `startRunning`.
     private func startCapture(at targetFps: Double) {
         guard let device = currentCaptureDevice else { return }
+        previewLayer?.isHidden = false
         sessionQueue.async { [weak self] in
             guard let self else { return }
             if self.session.isRunning {
@@ -1006,6 +1015,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// reset stays on main (UI state); the hardware stop is off-main so we
     /// don't hit the `startRunning/stopRunning on main thread` perf check.
     private func stopCapture() {
+        // Hide immediately on main so the last rendered frame doesn't linger
+        // while the sessionQueue hop runs stopRunning — the preview layer
+        // keeps its last frame until a new sample arrives, which looks
+        // identical to a still-live preview.
+        previewLayer?.isHidden = true
         fpsEstimate = 0
         framesSinceLastFpsTick = 0
         lastFrameTimestampForFps = CACurrentMediaTime()
