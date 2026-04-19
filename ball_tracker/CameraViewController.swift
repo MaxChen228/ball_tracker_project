@@ -516,7 +516,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// Hard ceiling on the trimmed clip duration, measured from the first
     /// detection (minus pre-roll). Covers a realistic pitch + follow-through
     /// without blowing the upload budget.
-    private static let trimMaxDurationS: Double = 1.5
+    private static let trimMaxDurationS: Double = 3.0
 
     /// Cycle-complete router. Branches on the effective capture mode:
     ///   - `onDevice` → attach the drained frames to the payload, delete
