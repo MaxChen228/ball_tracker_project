@@ -1131,8 +1131,8 @@ def _video_cell_html(
 
 def _hero_meta_subline(health: dict) -> str:
     """Sub line under the big triangulation count — session id, duration,
-    received-at — replacing the old nav-bar `.meta` strip so the metadata
-    lives next to the headline number it qualifies."""
+    received-at, and capture mode — replacing the old nav-bar `.meta` strip
+    so the metadata lives next to the headline number it qualifies."""
     import datetime as _dt
 
     parts: list[str] = [f'session {health["session_id"]}']
@@ -1143,6 +1143,10 @@ def _hero_meta_subline(health: dict) -> str:
     if rx is not None:
         ts = _dt.datetime.fromtimestamp(rx).strftime("%m-%d %H:%M")
         parts.append(f"received {ts}")
+    mode = health.get("mode")
+    if mode:
+        label = "on-device" if mode == "on_device" else "camera-only"
+        parts.append(f"mode {label}")
     return " · ".join(parts)
 
 

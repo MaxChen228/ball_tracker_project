@@ -1218,6 +1218,10 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         if latest_mtime is None or mtime > latest_mtime:
             latest_mtime = mtime
 
+    # Infer capture mode from presence of MOV files — same rule as events().
+    has_any_video = any(state.video_dir.glob(f"session_{session_id}_*"))
+    mode = "camera_only" if has_any_video else "on_device"
+
     return {
         "session_id": session_id,
         "cameras": cams,
@@ -1225,6 +1229,7 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         "error": result.error if result is not None else None,
         "duration_s": duration_s,
         "received_at": latest_mtime,
+        "mode": mode,
     }
 
 
