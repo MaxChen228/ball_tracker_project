@@ -68,6 +68,12 @@ final class ServerUploader {
         /// pipeline and ships the frame list alongside the metadata, no MOV.
         /// Default [] so the field always encodes to a concrete array.
         let frames: [FramePayload]
+        /// Dual-mode only: parallel iOS-end detection stream carried
+        /// alongside the MOV. Server keeps both streams so the viewer can
+        /// overlay them for HSV / shape-gate tuning. Empty list for
+        /// camera_only / on_device sessions. Default [] keeps the field
+        /// encoded concretely for consistency with `frames`.
+        let frames_on_device: [FramePayload]
 
         /// Return a copy of this payload with `video_start_pts_s` replaced.
         /// Used by the post-recording trim pipeline: the trimmer writes a
@@ -87,7 +93,8 @@ final class ServerUploader {
                 homography: homography,
                 image_width_px: image_width_px,
                 image_height_px: image_height_px,
-                frames: frames
+                frames: frames,
+                frames_on_device: frames_on_device
             )
         }
 
@@ -106,7 +113,29 @@ final class ServerUploader {
                 homography: homography,
                 image_width_px: image_width_px,
                 image_height_px: image_height_px,
-                frames: newFrames
+                frames: newFrames,
+                frames_on_device: frames_on_device
+            )
+        }
+
+        /// Return a copy of this payload with `frames_on_device` replaced.
+        /// Dual-mode cycle-complete uses this to attach the iOS-end
+        /// BTDetectionSession output while preserving the MOV path's
+        /// (empty) `frames`.
+        func withFramesOnDevice(_ newFramesOnDevice: [FramePayload]) -> PitchPayload {
+            PitchPayload(
+                camera_id: camera_id,
+                session_id: session_id,
+                sync_anchor_timestamp_s: sync_anchor_timestamp_s,
+                video_start_pts_s: video_start_pts_s,
+                video_fps: video_fps,
+                local_recording_index: local_recording_index,
+                intrinsics: intrinsics,
+                homography: homography,
+                image_width_px: image_width_px,
+                image_height_px: image_height_px,
+                frames: frames,
+                frames_on_device: newFramesOnDevice
             )
         }
     }
@@ -163,11 +192,13 @@ final class ServerUploader {
     enum CaptureMode: String, Codable {
         case cameraOnly = "camera_only"
         case onDevice = "on_device"
+        case dual = "dual"
 
         var displayLabel: String {
             switch self {
             case .cameraOnly: return "Camera-only"
             case .onDevice:   return "On-device"
+            case .dual:       return "Dual"
             }
         }
     }
