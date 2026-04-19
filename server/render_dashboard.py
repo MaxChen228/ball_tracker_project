@@ -166,6 +166,13 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 /* Cam-identity dual chip — retains the B-camera orange tint so per-cam
    rows still read as paired vs single at a glance. */
 .chip.dual {{ color: var(--dual); border-color: var(--dual); background: rgba(211,84,0,0.06); }}
+/* Fit-quality chips — RMS-bucketed from fitting.py. Drives operator trust
+   at a glance: green = ship it, amber = inspect, red = reject / recalibrate. */
+.chip.excellent {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
+.chip.good     {{ color: var(--passed); border-color: var(--passed); background: transparent; }}
+.chip.fair     {{ color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }}
+.chip.poor     {{ color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }}
+.chip.no-fit   {{ color: var(--sub); border-color: var(--border-base); background: transparent; opacity: 0.7; }}
 
 /* --- Session block --- */
 .session-head {{ display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-2); }}
@@ -263,12 +270,53 @@ form.inline {{ display: inline-block; margin: 0; }}
 .event-delete:hover {{ border-color: var(--dev); color: var(--dev);
                        background: var(--surface); }}
 
-/* --- Canvas overlay hint --- */
-.canvas-hint {{ position: absolute; left: var(--s-4); top: var(--s-4); z-index: 5;
+/* --- Canvas overlay hint --- moved to bottom-left to free the top row for
+   the mode toggle + Plotly's modebar. */
+.canvas-hint {{ position: absolute; left: var(--s-4); bottom: var(--s-4); z-index: 5;
                 font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
                 text-transform: uppercase; color: var(--sub);
                 background: var(--surface); border: 1px solid var(--border-l);
                 border-radius: var(--r); padding: var(--s-1) var(--s-2); pointer-events: none; }}
+
+/* --- Canvas mode toggle — top-left so it can't collide with Plotly's
+   modebar (camera/home/reset axes buttons), which always sits top-right
+   and can't be moved without reconstructing Plotly's config. */
+.canvas-mode-toggle {{ position: absolute; left: var(--s-4); top: var(--s-4); z-index: 6;
+                       display: inline-flex; gap: 0; font-family: var(--mono); font-size: 10px;
+                       letter-spacing: 0.12em; text-transform: uppercase;
+                       border: 1px solid var(--border-base); border-radius: var(--r);
+                       overflow: hidden; background: var(--surface); }}
+.canvas-mode-toggle button {{ background: transparent; color: var(--sub); border: 0;
+                              padding: var(--s-1) var(--s-3); cursor: pointer;
+                              font: inherit; letter-spacing: inherit; text-transform: inherit;
+                              transition: color 0.15s, background 0.15s; }}
+.canvas-mode-toggle button + button {{ border-left: 1px solid var(--border-base); }}
+.canvas-mode-toggle button:hover {{ color: var(--ink); }}
+.canvas-mode-toggle button.active {{ background: var(--ink); color: var(--surface); }}
+
+/* --- Replay playback bar (bottom-center, hidden when mode=inspect) --- */
+.playback-bar {{ position: absolute; left: 50%; bottom: var(--s-4); transform: translateX(-50%);
+                 z-index: 6; display: none; align-items: center; gap: var(--s-3);
+                 background: var(--surface); border: 1px solid var(--border-base);
+                 border-radius: var(--r); padding: var(--s-2) var(--s-3);
+                 font-family: var(--mono); font-size: 11px; color: var(--ink);
+                 min-width: 480px; max-width: 70%; }}
+.playback-bar.show {{ display: inline-flex; }}
+.playback-bar .playpause {{ background: var(--ink); color: var(--surface); border: 0;
+                            width: 28px; height: 22px; border-radius: var(--r);
+                            cursor: pointer; font: inherit; font-size: 10px; }}
+.playback-bar .playpause:hover {{ opacity: 0.85; }}
+.playback-bar input[type="range"] {{ flex: 1; accent-color: var(--ink); }}
+.playback-bar .time {{ color: var(--sub); font-size: 10px; letter-spacing: 0.08em;
+                       min-width: 88px; text-align: right; }}
+.playback-bar .speed {{ display: inline-flex; border: 1px solid var(--border-base);
+                        border-radius: var(--r); overflow: hidden; }}
+.playback-bar .speed button {{ background: transparent; border: 0; padding: 2px 8px;
+                               font: inherit; font-size: 10px; color: var(--sub); cursor: pointer; }}
+.playback-bar .speed button + button {{ border-left: 1px solid var(--border-base); }}
+.playback-bar .speed button.active {{ background: var(--ink); color: var(--surface); }}
+.playback-bar .empty {{ color: var(--sub); font-size: 10px; letter-spacing: 0.10em;
+                        text-transform: uppercase; }}
 """
 
 
@@ -297,7 +345,7 @@ _JS_TEMPLATE = r"""
       return new Set(raw ? JSON.parse(raw) : []);
     } catch { return new Set(); }
   })();
-  const trajCache = new Map();       // sid -> {points, points_on_device}
+  const trajCache = new Map();       // sid -> {points_on_device, fit_on_device}
   let basePlot = null;               // last /calibration/state .plot payload
 
   function persistTrajSelection() {
@@ -319,41 +367,232 @@ _JS_TEMPLATE = r"""
       const r = await fetch(`/results/${encodeURIComponent(sid)}`, { cache: 'no-store' });
       if (!r.ok) return null;
       const data = await r.json();
+      // Dashboard displays on-device (mode-two) only. Server (mode-one) data
+      // is forensic-only — it's still in the SessionResult payload but
+      // intentionally ignored here.
       const entry = {
-        points: data.points || [],
         points_on_device: data.points_on_device || [],
+        fit_on_device: data.fit_on_device || null,
       };
       trajCache.set(sid, entry);
       return entry;
     } catch { return null; }
   }
 
-  function trajTracesFor(sid, result, color) {
-    // Prefer on-device points when present (pre-encode, wider detection
-    // window in dual sessions); fall back to server points. Single line
-    // trace with markers so sparse trajectories (few pts) still read.
-    const src = (result.points_on_device && result.points_on_device.length)
-      ? result.points_on_device : (result.points || []);
-    if (!src.length) return [];
+  function evalQuadratic(coeffs, t) {
+    return coeffs[0] * t * t + coeffs[1] * t + coeffs[2];
+  }
+
+  function densifyFit(fit, n) {
+    const t0 = fit.t_min_s;
+    const t1 = (fit.plate_t_s !== null && fit.plate_t_s !== undefined) ? fit.plate_t_s : fit.t_max_s;
+    const xs = new Array(n), ys = new Array(n), zs = new Array(n);
+    for (let i = 0; i < n; ++i) {
+      const t = t0 + (t1 - t0) * (i / (n - 1));
+      xs[i] = evalQuadratic(fit.coeffs_x, t);
+      ys[i] = evalQuadratic(fit.coeffs_y, t);
+      zs[i] = evalQuadratic(fit.coeffs_z, t);
+    }
+    return { xs, ys, zs };
+  }
+
+  // --- Canvas mode + playback state ---------------------------------------
+  const CANVAS_MODE_KEY = 'ball_tracker_canvas_mode';
+  let canvasMode = (() => {
+    try { return localStorage.getItem(CANVAS_MODE_KEY) === 'replay' ? 'replay' : 'inspect'; }
+    catch { return 'inspect'; }
+  })();
+  // Playback state — single global progress in [0,1] mapped to each selected
+  // session's own [t_min, t_max]. This lets the scrubber stay coherent when
+  // multiple sessions are overlaid without caring that their durations
+  // differ; the UX reads as "show me all selected pitches synchronized to
+  // the same fraction of their flight".
+  let playheadFrac = 0.0;
+  let playbackSpeed = 1.0;
+  let isPlaying = false;
+  let lastFrameTs = null;
+
+  const playbackBar = document.getElementById('playback-bar');
+  const playpauseBtn = document.getElementById('playpause');
+  const scrubSlider = document.getElementById('scrub');
+  const timeReadout = document.getElementById('time-readout');
+
+  function activeReplaySid() {
+    // Most recently added selected session is the "active" one — its
+    // absolute time drives the readout while others animate at the same
+    // fraction of their own flight.
+    const arr = [...selectedTrajIds];
+    return arr.length ? arr[arr.length - 1] : null;
+  }
+
+  function activeFitDuration() {
+    const sid = activeReplaySid();
+    if (!sid) return 0;
+    const r = trajCache.get(sid);
+    if (!r || !r.fit_on_device) return 0;
+    return r.fit_on_device.t_max_s - r.fit_on_device.t_min_s;
+  }
+
+  function updateTimeReadout() {
+    const dur = activeFitDuration();
+    const now = dur * playheadFrac;
+    timeReadout.textContent = `${now.toFixed(2)} / ${dur.toFixed(2)} s`;
+    scrubSlider.value = Math.round(playheadFrac * 1000);
+  }
+
+  // --- Strike zone geometry: MLB-standard 17" wide at plate, Z in 0.5-1.2 m
+  // for a demo rig (no batter present). Drawn as a dashed wireframe so it
+  // reads as reference grid, not a solid obstacle.
+  const STRIKE_ZONE_HALF_W = 0.216;  // 17" / 2
+  const STRIKE_ZONE_Z_LO = 0.5;
+  const STRIKE_ZONE_Z_HI = 1.2;
+  function strikeZoneTrace() {
+    const hw = STRIKE_ZONE_HALF_W;
+    return {
+      type: 'scatter3d', mode: 'lines',
+      x: [-hw, +hw, +hw, -hw, -hw],
+      y: [0, 0, 0, 0, 0],
+      z: [STRIKE_ZONE_Z_LO, STRIKE_ZONE_Z_LO, STRIKE_ZONE_Z_HI, STRIKE_ZONE_Z_HI, STRIKE_ZONE_Z_LO],
+      line: { color: 'rgba(80,80,80,0.55)', width: 3, dash: 'dash' },
+      name: 'strike zone',
+      hoverinfo: 'skip',
+      showlegend: false,
+    };
+  }
+
+  function inspectTracesFor(sid, result, color) {
+    // Inspect mode: dense fitted quadratic + inlier dots + outlier X markers.
+    // Lets operator judge RANSAC decisions at a glance and spot sessions
+    // where the fit chose the wrong cluster.
+    const fit = result.fit_on_device;
+    const raw = result.points_on_device || [];
+    if (fit) {
+      const { xs, ys, zs } = densifyFit(fit, 64);
+      const inlierSet = new Set(fit.inlier_indices);
+      const inliers = raw.filter((_, i) => inlierSet.has(i));
+      const outliers = raw.filter((_, i) => !inlierSet.has(i));
+      const traces = [{
+        type: 'scatter3d',
+        mode: 'lines',
+        x: xs, y: ys, z: zs,
+        line: { color, width: 5 },
+        name: `${sid} · fit`,
+        hovertemplate: `${sid}<br>rms=${fit.rms_m.toFixed(3)}m<extra></extra>`,
+        showlegend: true,
+      }, {
+        type: 'scatter3d',
+        mode: 'markers',
+        x: inliers.map(p => p.x_m),
+        y: inliers.map(p => p.y_m),
+        z: inliers.map(p => p.z_m),
+        marker: { color, size: 3, opacity: 0.55 },
+        name: `${sid} · inliers`,
+        hovertemplate: `${sid}<br>t=%{customdata:.3f}s<br>x=%{x:.2f} y=%{y:.2f} z=%{z:.2f}<extra></extra>`,
+        customdata: inliers.map(p => p.t_rel_s),
+        showlegend: false,
+      }];
+      if (outliers.length) {
+        traces.push({
+          type: 'scatter3d',
+          mode: 'markers',
+          x: outliers.map(p => p.x_m),
+          y: outliers.map(p => p.y_m),
+          z: outliers.map(p => p.z_m),
+          marker: { color: '#C03A2B', size: 5, symbol: 'x', opacity: 0.9 },
+          name: `${sid} · outliers`,
+          hovertemplate: `${sid} OUTLIER<br>t=%{customdata:.3f}s<extra></extra>`,
+          customdata: outliers.map(p => p.t_rel_s),
+          showlegend: false,
+        });
+      }
+      return traces;
+    }
+    if (!raw.length) return [];
     return [{
       type: 'scatter3d',
       mode: 'lines+markers',
-      x: src.map(p => p.x_m),
-      y: src.map(p => p.y_m),
-      z: src.map(p => p.z_m),
-      line: { color, width: 4 },
-      marker: { color, size: 3, opacity: 0.85 },
-      name: `traj ${sid}`,
-      hovertemplate: `${sid}<br>t=%{customdata:.3f}s<br>x=%{x:.2f} y=%{y:.2f} z=%{z:.2f}<extra></extra>`,
-      customdata: src.map(p => p.t_rel_s),
+      x: raw.map(p => p.x_m),
+      y: raw.map(p => p.y_m),
+      z: raw.map(p => p.z_m),
+      line: { color, width: 3, dash: 'dot' },
+      marker: { color, size: 2, opacity: 0.6 },
+      name: `${sid} · raw`,
+      hovertemplate: `${sid} (unfit)<br>t=%{customdata:.3f}s<extra></extra>`,
+      customdata: raw.map(p => p.t_rel_s),
       showlegend: true,
     }];
   }
 
-  // Tracks whether the dashboard 3D canvas has been painted at least once,
-  // so subsequent paints can omit `scene.camera` and not stomp on the
-  // user's orbit. Declared above repaintCanvas so the function-scope
-  // closure binds without temporal-dead-zone risk.
+  function replayTracesFor(sid, result, color) {
+    // Replay mode: clean trajectory line + animated ball sphere + short
+    // motion trail. Inlier/outlier markers are suppressed — those are an
+    // inspect-mode concern, not a broadcast/demo concern.
+    const fit = result.fit_on_device;
+    if (!fit) return [];
+    const { xs, ys, zs } = densifyFit(fit, 80);
+    const tActive = fit.t_min_s + playheadFrac * (fit.t_max_s - fit.t_min_s);
+    const bx = evalQuadratic(fit.coeffs_x, tActive);
+    const by = evalQuadratic(fit.coeffs_y, tActive);
+    const bz = evalQuadratic(fit.coeffs_z, tActive);
+    // Short fading trail: 12 samples behind the ball, ~0.1 s worth.
+    const trailN = 12;
+    const trailDt = 0.01;
+    const trailX = [], trailY = [], trailZ = [];
+    for (let i = trailN; i >= 1; --i) {
+      const tt = tActive - i * trailDt;
+      if (tt < fit.t_min_s) continue;
+      trailX.push(evalQuadratic(fit.coeffs_x, tt));
+      trailY.push(evalQuadratic(fit.coeffs_y, tt));
+      trailZ.push(evalQuadratic(fit.coeffs_z, tt));
+    }
+    return [
+      {
+        type: 'scatter3d', mode: 'lines',
+        x: xs, y: ys, z: zs,
+        line: { color, width: 4 },
+        name: `${sid} · path`,
+        hovertemplate: `${sid}<br>rms=${fit.rms_m.toFixed(3)}m<extra></extra>`,
+        showlegend: true,
+        opacity: 0.45,
+      },
+      {
+        type: 'scatter3d', mode: 'lines',
+        x: trailX, y: trailY, z: trailZ,
+        line: { color, width: 6 },
+        name: `${sid} · trail`,
+        hoverinfo: 'skip',
+        showlegend: false,
+        opacity: 0.8,
+      },
+      {
+        type: 'scatter3d', mode: 'markers',
+        x: [bx], y: [by], z: [bz],
+        marker: {
+          color: '#D9A441', size: 9, symbol: 'circle',
+          line: { color: '#4A3E24', width: 1.5 },
+        },
+        name: `${sid} · ball`,
+        hovertemplate: `${sid}<br>t=%{customdata:.3f}s<br>(x,y,z)=(%{x:.2f}, %{y:.2f}, %{z:.2f})<extra></extra>`,
+        customdata: [tActive - fit.t_min_s],
+        showlegend: false,
+      },
+    ];
+  }
+
+  function trajTracesFor(sid, result, color) {
+    return canvasMode === 'replay'
+      ? replayTracesFor(sid, result, color)
+      : inspectTracesFor(sid, result, color);
+  }
+
+  // Layout is effectively static across the dashboard's lifetime (axes,
+  // aspect, uirevision never change — only trace data does). Cache the
+  // first layout we see and reuse the SAME object reference on every
+  // Plotly.react. Passing the identical reference is the most reliable
+  // way to tell Plotly "layout hasn't changed, don't touch the camera or
+  // recompute anything scene-related" — stronger than relying solely on
+  // uirevision heuristics, and cheap.
+  let cachedLayout = null;
   let canvasFirstPaintDone = false;
 
   async function repaintCanvas() {
@@ -362,27 +601,37 @@ _JS_TEMPLATE = r"""
     // Load any missing trajectories in parallel — checkbox clicks before
     // the first tick should still paint immediately.
     await Promise.all([...selectedTrajIds].map(sid => ensureTrajLoaded(sid)));
+    // Strike zone shown only in replay mode — serves as a reference target
+    // for where the pitch is going, irrelevant for outlier-inspection.
+    if (canvasMode === 'replay' && selectedTrajIds.size > 0) {
+      extraTraces.push(strikeZoneTrace());
+    }
     for (const sid of selectedTrajIds) {
       const result = trajCache.get(sid);
       if (!result) continue;
       extraTraces.push(...trajTracesFor(sid, result, trajColorFor(sid)));
     }
-    // After the first paint, strip `scene.camera` from the layout we
-    // hand to Plotly.react — otherwise every 5 s tickCalibration push
-    // resets the user's orbit back to the default eye position. Plotly
-    // leaves the existing camera alone if the new layout doesn't carry
-    // one. First paint must keep the camera so the initial view is the
-    // designed default rather than wherever Plotly auto-fits.
-    let layout = basePlot.layout || {};
-    if (canvasFirstPaintDone && layout.scene && layout.scene.camera) {
-      layout = JSON.parse(JSON.stringify(layout));
-      delete layout.scene.camera;
+    if (cachedLayout === null) {
+      // One-time build from the first basePlot.layout we see. The server
+      // sets scene.uirevision='dashboard-canvas' in both SSR and tick
+      // responses — matching the value already embedded by fig.to_html
+      // means Plotly never sees a uirevision transition and UI state
+      // stays under user control from frame zero.
+      cachedLayout = JSON.parse(JSON.stringify(basePlot.layout || {}));
+      if (!cachedLayout.scene) cachedLayout.scene = {};
+      cachedLayout.scene.uirevision = 'dashboard-canvas';
     }
     Plotly.react(
       sceneRoot,
       [...(basePlot.data || []), ...extraTraces],
-      layout,
-      { responsive: true, scrollZoom: true },
+      cachedLayout,
+      // doubleClick:false — Plotly 3D ships a built-in "reset camera on
+      // double-click anywhere in the scene" gesture. Users bump into it
+      // accidentally (especially on trackpads where a firm tap registers
+      // as dblclick) and it overrides uirevision preservation. Kill it.
+      // scrollZoom stays true so the native + our wheel handler both
+      // work for panning the eye distance.
+      { responsive: true, scrollZoom: true, doubleClick: false },
     );
     canvasFirstPaintDone = true;
   }
@@ -424,10 +673,130 @@ _JS_TEMPLATE = r"""
     const cb = e.target.closest('input[data-traj-sid]');
     if (!cb) return;
     const sid = cb.dataset.trajSid;
-    if (cb.checked) selectedTrajIds.add(sid);
-    else selectedTrajIds.delete(sid);
+    // Single-select preview: clicking one row always replaces the
+    // selection (clicking again on the same row deselects). Multi-select
+    // was confusing when replays had different durations + made the fit
+    // outlier inspector busy when several sessions overlapped in space.
+    if (cb.checked) {
+      selectedTrajIds.clear();
+      selectedTrajIds.add(sid);
+      // Uncheck every other checkbox in the events list so the DOM
+      // reflects the one-at-a-time invariant without waiting for the
+      // next events tick to re-render.
+      eventsBox.querySelectorAll('input[data-traj-sid]').forEach(other => {
+        if (other !== cb) other.checked = false;
+      });
+      // Reset playhead so the new selection starts from t=0 rather
+      // than wherever the previous pitch was mid-animation.
+      playheadFrac = 0.0;
+    } else {
+      selectedTrajIds.delete(sid);
+    }
     persistTrajSelection();
+    if (canvasMode === 'replay') updateTimeReadout();
     repaintCanvas();
+  });
+
+  // --- Canvas mode toggle: INSPECT vs REPLAY -------------------------------
+  function applyCanvasMode(nextMode) {
+    if (nextMode !== 'inspect' && nextMode !== 'replay') return;
+    canvasMode = nextMode;
+    try { localStorage.setItem(CANVAS_MODE_KEY, canvasMode); } catch {}
+    document.querySelectorAll('.canvas-mode-toggle button').forEach(b => {
+      b.classList.toggle('active', b.dataset.canvasMode === canvasMode);
+    });
+    // Playback bar only makes sense in replay mode; pause + reset the
+    // scrubber when leaving so we don't keep the animation loop running
+    // invisibly (wasted frames + broken readout on return).
+    if (canvasMode === 'replay') {
+      playbackBar.classList.add('show');
+      updateTimeReadout();
+    } else {
+      playbackBar.classList.remove('show');
+      setPlaying(false);
+    }
+    repaintCanvas();
+  }
+  document.querySelectorAll('.canvas-mode-toggle button').forEach(btn => {
+    btn.addEventListener('click', () => applyCanvasMode(btn.dataset.canvasMode));
+  });
+  // Initial mode sync (localStorage value may already be 'replay').
+  applyCanvasMode(canvasMode);
+
+  // --- Playback controls ---------------------------------------------------
+  // Track whether the user is currently mid-drag on the canvas. Plotly
+  // 3D orbit/pan rely on a continuous pointer-down gesture with no
+  // DOM-level repaint interruptions between mousedown and mouseup —
+  // every Plotly.react during that window wipes the drag state before
+  // the next mousemove can extend it. During replay playback we issue
+  // Plotly.react every frame for the ball's new position, which stomps
+  // on any orbit attempt and manifests as "only wheel zoom works".
+  // Suppress visual repaints (not the playhead logic) while dragging;
+  // the ball will catch up on mouseup.
+  let isUserInteracting = false;
+  if (sceneRoot) {
+    sceneRoot.addEventListener('pointerdown', () => { isUserInteracting = true; });
+    // mouseup/pointerup can fire OUTSIDE the canvas if the user releases
+    // after dragging away — bind to window, not sceneRoot, so we never
+    // miss the release and leave the flag stuck true.
+    window.addEventListener('pointerup', () => { isUserInteracting = false; });
+    window.addEventListener('pointercancel', () => { isUserInteracting = false; });
+  }
+
+  function setPlaying(flag) {
+    isPlaying = !!flag;
+    playpauseBtn.textContent = isPlaying ? '❚❚' : '▶';
+    if (isPlaying) {
+      lastFrameTs = null;
+      requestAnimationFrame(animationTick);
+    }
+  }
+  function animationTick(ts) {
+    if (!isPlaying) return;
+    if (lastFrameTs !== null) {
+      const dur = activeFitDuration();
+      if (dur > 0) {
+        const dt = (ts - lastFrameTs) / 1000.0;
+        playheadFrac += (dt * playbackSpeed) / dur;
+        if (playheadFrac >= 1.0) {
+          // Loop back to start so the operator can keep playing without
+          // clicking ▶ after every pitch. If single-shot is ever desired,
+          // gate on a `loop` flag from a future UI element.
+          playheadFrac = 0.0;
+        }
+        updateTimeReadout();
+        // Skip the heavy repaint while the user is mid-drag — playhead
+        // still advances silently so playback resumes at the correct
+        // time on pointerup.
+        if (!isUserInteracting) repaintCanvas();
+      }
+    }
+    lastFrameTs = ts;
+    if (isPlaying) requestAnimationFrame(animationTick);
+  }
+  playpauseBtn.addEventListener('click', () => {
+    if (activeFitDuration() <= 0) return;  // nothing to play
+    setPlaying(!isPlaying);
+  });
+  scrubSlider.addEventListener('input', () => {
+    playheadFrac = Math.max(0, Math.min(1, parseInt(scrubSlider.value, 10) / 1000.0));
+    setPlaying(false);  // user scrub pauses playback
+    updateTimeReadout();
+    repaintCanvas();
+  });
+  document.querySelectorAll('.playback-bar .speed button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      playbackSpeed = parseFloat(btn.dataset.speed);
+      document.querySelectorAll('.playback-bar .speed button').forEach(b =>
+        b.classList.toggle('active', b === btn)
+      );
+    });
+  });
+  // Spacebar: play/pause when replay visible and user isn't typing in a form.
+  window.addEventListener('keydown', (e) => {
+    if (canvasMode !== 'replay') return;
+    if (e.target.matches('input, textarea, select')) return;
+    if (e.code === 'Space') { e.preventDefault(); playpauseBtn.click(); }
   });
 
   function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
@@ -554,28 +923,28 @@ _JS_TEMPLATE = r"""
       return;
     }
     evHtml = events.map(e => {
-      const cams = (e.cameras || []).join(' · ') || '—';
-      const stat = (e.status || '').replace(/_/g, ' ');
-      const peakZ = fmtNum(e.peak_z_m, 2);
-      const duration = fmtNum(e.duration_s, 2);
-      const mean = fmtNum(e.mean_residual_m, 4);
       const sid = esc(e.session_id);
-      // Sessions with no triangulated output (error / no sync / single cam)
-      // carry all-null metrics; skip the stats row entirely so the events
-      // list stays dense and the meaningful rows don't drown in "—" cells.
-      const hasMetrics = (e.n_triangulated || 0) > 0
-        || peakZ !== '—' || duration !== '—' || mean !== '—';
-      // Delete form is a sibling of the event-row link so submitting it
-      // does not navigate via the wrapping anchor. Confirm dialog guards
-      // against accidental clicks — once removed, disk files are gone.
+      const stat = (e.status || '').replace(/_/g, ' ');
+      const speedKmh = e.speed_mps != null ? (e.speed_mps * 3.6).toFixed(1) : null;
+      const duration = fmtNum(e.fit_duration_s != null ? e.fit_duration_s : e.duration_s, 2);
+      const rms = fmtNum(e.rms_m, 3);
+      const plateX = e.plate_xz_m ? e.plate_xz_m[0].toFixed(2) : null;
+      const plateZ = e.plate_xz_m ? e.plate_xz_m[1].toFixed(2) : null;
+      // Quality chip from fit RMS: <10mm excellent, <30mm good, <80mm fair, else poor.
+      // Sessions without a fit get a neutral `no-fit` chip — they still list
+      // (the operator may want to forensic them) but signal loudly.
+      let qualityClass = 'no-fit', qualityLabel = 'no fit';
+      if (e.rms_m != null) {
+        if (e.rms_m < 0.010)      { qualityClass = 'excellent'; qualityLabel = 'excellent'; }
+        else if (e.rms_m < 0.030) { qualityClass = 'good';      qualityLabel = 'good'; }
+        else if (e.rms_m < 0.080) { qualityClass = 'fair';      qualityLabel = 'fair'; }
+        else                      { qualityClass = 'poor';      qualityLabel = 'poor'; }
+      }
       const confirmMsg = `刪除 session ${e.session_id}？此動作無法復原。`;
-      const captureMode = e.mode === 'on_device' ? 'on-device'
-                        : e.mode === 'dual'       ? 'dual'
-                        : 'camera-only';
-      // Trajectory overlay toggle: only sessions with 3D points qualify.
-      // Sibling to event-row (not inside) so the checkbox click doesn't
-      // trigger the wrapping link's navigation.
-      const hasTraj = (e.n_triangulated || 0) > 0;
+      // Trajectory overlay toggle: only sessions with on-device points qualify.
+      // Mode-one (camera_only) sessions are intentionally not overlayable on
+      // the LIVE dashboard — use the forensic viewer for those.
+      const hasTraj = (e.n_triangulated_on_device || 0) > 0;
       const color = hasTraj ? trajColorFor(e.session_id) : '';
       const checked = selectedTrajIds.has(e.session_id) ? 'checked' : '';
       const toggle = hasTraj
@@ -584,22 +953,23 @@ _JS_TEMPLATE = r"""
              <span class="swatch" style="background:${color}"></span>
            </label>`
         : `<span class="traj-toggle-placeholder" aria-hidden="true"></span>`;
+      const metricsRow = e.has_fit ? `
+          <div class="event-stats">
+            ${speedKmh != null ? `<span><span class="k">Speed</span><span class="v">${speedKmh} km/h</span></span>` : ''}
+            ${plateX != null ? `<span><span class="k">Plate (x,z)</span><span class="v">${plateX}, ${plateZ} m</span></span>` : ''}
+            <span><span class="k">Dur</span><span class="v">${duration} s</span></span>
+            <span><span class="k">RMS</span><span class="v">${rms} m</span></span>
+          </div>` : '';
       return `
         <div class="event-item">
           ${toggle}
           <a class="event-row" href="/viewer/${sid}">
             <div class="event-top">
               <span class="sid">${sid}</span>
-              <span class="capmode">${esc(captureMode)}</span>
+              <span class="quality chip ${qualityClass}" title="fit RMS quality">${qualityLabel}</span>
               <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
             </div>
-            ${hasMetrics ? `<div class="event-stats">
-              <span><span class="k">Cams</span><span class="v">${esc(cams)}</span></span>
-              <span><span class="k">3D pts</span><span class="v">${e.n_triangulated || 0}</span></span>
-              <span><span class="k">Mean resid (m)</span><span class="v">${mean}</span></span>
-              <span><span class="k">Peak Z (m)</span><span class="v">${peakZ}</span></span>
-              <span><span class="k">Duration (s)</span><span class="v">${duration}</span></span>
-            </div>` : ''}
+            ${metricsRow}
           </a>
           <form class="event-delete-form" method="POST"
                 action="/sessions/${sid}/delete"
@@ -680,6 +1050,12 @@ _JS_TEMPLATE = r"""
     } catch (e) { /* silent retry next tick */ }
   }
 
+  // Digest of the last basePlot we actually repainted from. Calibrations
+  // rarely change between 5 s ticks; skipping the Plotly.react call when
+  // the payload is identical (same cameras, same poses) eliminates the
+  // most-frequent opportunity for an accidental camera snap-back and
+  // avoids ~ms of churn per tick.
+  let lastBasePlotDigest = null;
   async function tickCalibration() {
     try {
       const r = await fetch('/calibration/state', { cache: 'no-store' });
@@ -689,10 +1065,21 @@ _JS_TEMPLATE = r"""
       renderDevices({ devices: currentDevices || [], calibrations: currentCalibrations });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
       if (payload.plot && sceneRoot && window.Plotly) {
-        // Cache the base plot so checkbox toggles can re-overlay
-        // trajectories between /calibration/state ticks without refetching.
-        basePlot = payload.plot;
-        repaintCanvas();
+        // Only (re)assign basePlot when its contents actually changed.
+        // The canvas still repaints for overlay/animation updates via the
+        // event-handler path; this just suppresses the periodic no-op
+        // repaint that otherwise fires every 5 s on an idle dashboard.
+        const digest = JSON.stringify(payload.plot);
+        if (digest !== lastBasePlotDigest) {
+          lastBasePlotDigest = digest;
+          basePlot = payload.plot;
+          repaintCanvas();
+        } else if (basePlot === null) {
+          // First tick: even if digest already matched (shouldn't happen),
+          // we still need to paint once.
+          basePlot = payload.plot;
+          repaintCanvas();
+        }
       }
     } catch (e) { /* silent */ }
   }
@@ -1004,6 +1391,14 @@ def render_events_index_html(
         scene_zaxis_range=[-0.2, 2.0],
         scene_aspectmode="manual",
         scene_aspectratio=dict(x=1.0, y=1.0, z=0.45),
+        # Pin scene uirevision to the SAME string both at first SSR paint
+        # and on every /calibration/state tick. Without this override,
+        # _build_figure's default ("viewer-scene") disagrees with whatever
+        # the dashboard JS sends via Plotly.react, and each mismatch
+        # triggers Plotly to treat UI state (camera/zoom) as "stale" and
+        # snap it back to the default eye position. Same-string across
+        # all paints = camera stays wherever the user dragged it.
+        scene_uirevision="dashboard-canvas",
     )
     scene_div = fig.to_html(include_plotlyjs=False, full_html=False, div_id="scene-root")
 
@@ -1039,8 +1434,23 @@ def render_events_index_html(
         "</div>"
         "</aside>"
         '<section class="canvas">'
-        '<div class="canvas-hint">Live calibration preview · drag to rotate</div>'
+        '<div class="canvas-hint">Drag to rotate</div>'
+        '<div class="canvas-mode-toggle" role="radiogroup" aria-label="Canvas mode">'
+        '  <button type="button" data-canvas-mode="inspect" class="active">INSPECT</button>'
+        '  <button type="button" data-canvas-mode="replay">REPLAY</button>'
+        '</div>'
         f"{scene_div}"
+        '<div class="playback-bar" id="playback-bar">'
+        '  <button type="button" class="playpause" id="playpause">▶</button>'
+        '  <input type="range" id="scrub" min="0" max="1000" step="1" value="0">'
+        '  <span class="time" id="time-readout">0.00 / 0.00 s</span>'
+        '  <span class="speed" role="radiogroup" aria-label="Playback speed">'
+        '    <button type="button" data-speed="0.25">0.25×</button>'
+        '    <button type="button" data-speed="0.5">0.5×</button>'
+        '    <button type="button" data-speed="1" class="active">1×</button>'
+        '    <button type="button" data-speed="2">2×</button>'
+        '  </span>'
+        '</div>'
         "</section>"
         "</div>"
         f"<script>{_JS_TEMPLATE}</script>"
