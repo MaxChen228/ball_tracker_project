@@ -239,8 +239,12 @@ class SyncTraceSample(BaseModel):
 class SyncReport(BaseModel):
     """Wire payload for `POST /sync/report`. Each phone submits one of
     these once both the self-hear and cross-hear matched-filter peaks have
-    fired on its mic stream. Both timestamps MUST live on the same
-    `AVCaptureSession.masterClock` so the solver's algebra holds."""
+    fired on its mic stream. Both timestamps MUST live on the same mach
+    host clock as video-frame PTS — iOS wires both `AVCaptureSession.masterClock`
+    and `AVAudioTime.hostTime` to `CMClockGetHostTimeClock()`, so the
+    capture-session path and the mutual-sync `AVAudioEngine` tap path
+    produce interchangeable timestamps. The solver's algebra only depends
+    on that single-clock invariant."""
     camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
     sync_id: str = Field(..., pattern=_SYNC_ID_PATTERN)
     role: Literal["A", "B"]

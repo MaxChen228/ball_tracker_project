@@ -20,17 +20,21 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "sync"
 ///    within the same emission can't double-fire.
 ///  - No Doppler-cancel averaging: emission is on-device, distances are
 ///    O(m), and the mutual-sync algebra tolerates hundreds of μs of
-///    per-report jitter. The simpler design is a better fit for the
-///    measurement than the pair machinery.
+///    per-report jitter.
 ///
-/// Both timestamps ride `AVCaptureSession.masterClock` via the same
-/// `CMSampleBuffer` PTS pipeline that video samples use. This is what
-/// makes the reported (t_self, t_from_other) comparable across phones
-/// once the server applies Δ.
+/// I/O is decoupled from `AVCaptureSession`. The owner (`MutualSyncAudio`)
+/// installs an `AVAudioEngine` input tap and forwards `AVAudioPCMBuffer`
+/// frames via `ingestPCMBuffer(_:at:)`. Timestamps are converted from the
+/// tap's mach host ticks (`AVAudioTime.hostTime`) to seconds on the host
+/// clock via `CMClockMakeHostTimeFromSystemUnits`. On iOS,
+/// `AVCaptureSession.masterClock` is `CMClockGetHostTimeClock()` by default,
+/// so the resulting `t_self_s` / `t_from_other_s` remain directly
+/// comparable to video-frame PTS — the sole invariant the solver needs.
 ///
-/// Threading: install as the `AVCaptureAudioDataOutput` sample-buffer
-/// delegate with `deliveryQueue`. All state lives on that serial queue.
-final class AudioSyncDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+/// Threading: all state lives on `deliveryQueue`. `ingestPCMBuffer` hops
+/// to that queue synchronously so callers can deliver buffers from any
+/// tap callback without extra plumbing.
+final class AudioSyncDetector {
     enum Band: String {
         case A
         case B
@@ -38,8 +42,9 @@ final class AudioSyncDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDel
 
     struct DetectionEvent {
         let band: Band
-        /// Session-clock PTS of the chirp **center** (absolute, same clock
-        /// the video frame timestamps live on).
+        /// Host-clock seconds at the chirp **center** — directly comparable
+        /// to video frame PTS (`AVCaptureSession.masterClock` derives from
+        /// the same host clock).
         let centerPTS: Double
         /// Normalized matched-filter peak value in [0, 1]. Kept for logs;
         /// callers typically only need `centerPTS`.
@@ -87,7 +92,10 @@ final class AudioSyncDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     private var ringLen: Int = 0
     private var writeIndex: Int = 0
     private var totalWritten: Int = 0
-    private var firstPTS: CMTime?
+    /// First buffer's host-clock seconds. `centerPTS` = `firstPTS` + offset
+    /// in samples / sampleRate, which is exactly the same algebra the
+    /// legacy capture-session path used with `CMSampleBuffer` PTS.
+    private var firstPTS: Double?
     private var samplesSinceCheck: Int = 0
     private var lastTriggerA: Double?
     private var lastTriggerB: Double?
@@ -127,7 +135,6 @@ final class AudioSyncDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         self.threshold = threshold
         self.minPSR = minPSR
         self.perBandCooldownS = perBandCooldownS
-        super.init()
     }
 
     /// Tear down state + arm for a fresh sync run. Safe from any thread.
@@ -170,62 +177,98 @@ final class AudioSyncDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         return out
     }
 
-    // MARK: - AVCaptureAudioDataOutputSampleBufferDelegate
+    // MARK: - AVAudioEngine input-tap ingest
 
-    func captureOutput(
-        _ output: AVCaptureOutput,
-        didOutput sampleBuffer: CMSampleBuffer,
-        from connection: AVCaptureConnection
-    ) {
-        // deliveryQueue.
-        if let rate = Self.firstSampleRate(sampleBuffer),
-           abs(rate - sampleRate) > 0.5 {
-            log.info("sync detector rebuilding for sample_rate_hz=\(rate, privacy: .public) (was \(self.sampleRate, privacy: .public))")
-            rebuildForSampleRate(rate)
-        }
-        if firstPTS == nil {
-            firstPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        }
-        guard let samples = Self.extractMonoFloat(sampleBuffer), !samples.isEmpty else {
-            return
-        }
-        samples.withUnsafeBufferPointer { srcBuf in
-            guard let src = srcBuf.baseAddress else { return }
-            for i in 0..<samples.count {
-                ring[writeIndex] = src[i]
-                writeIndex += 1
-                if writeIndex >= ringLen { writeIndex = 0 }
-                totalWritten += 1
+    /// Called by the owner's `AVAudioEngine` input-tap closure with one
+    /// PCM buffer and its capture host-time. Hops to `deliveryQueue` and
+    /// executes the same ring-buffer + matched-filter work the legacy
+    /// `captureOutput` delegate did — the only difference is the clock
+    /// conversion below.
+    ///
+    /// Host-tick → seconds conversion uses `CMClockMakeHostTimeFromSystemUnits`,
+    /// which is the canonical bridge from mach ticks to `CMTime` on the
+    /// host clock. `AVCaptureSession.masterClock` on iOS is by default the
+    /// same `CMClockGetHostTimeClock()`, so the resulting PTS is identical
+    /// to what `CMSampleBufferGetPresentationTimeStamp` returned in the
+    /// old path — modulo scheduling jitter of the tap vs. the capture
+    /// callback (both sub-ms).
+    func ingestPCMBuffer(_ buffer: AVAudioPCMBuffer, at audioTime: AVAudioTime) {
+        let rate = buffer.format.sampleRate
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0, rate > 0,
+              let channelData = buffer.floatChannelData else { return }
+
+        // Flatten to mono on the caller's thread — cheap (≤1024 samples per
+        // buffer typical), avoids holding the AVAudioPCMBuffer past the tap
+        // closure (its storage is reused by the engine).
+        let channels = Int(buffer.format.channelCount)
+        var mono = [Float](repeating: 0, count: frameCount)
+        if channels == 1 {
+            let src = channelData[0]
+            for i in 0..<frameCount { mono[i] = src[i] }
+        } else {
+            let gain = 1.0 / Float(channels)
+            for i in 0..<frameCount {
+                var sum: Float = 0
+                for c in 0..<channels { sum += channelData[c][i] }
+                mono[i] = sum * gain
             }
         }
-        samplesSinceCheck += samples.count
 
-        // Ring MUST be fully populated before the matched filter runs. An
-        // earlier draft gated on `refLen` (one chirp length) which let
-        // `correlate` normalize windows dominated by zero-padding: any lag
-        // whose window straddled the unwritten tail had near-zero energy,
-        // the `max(energy, 1e-12)` clamp inflated `dot / sqrt(energy)` by
-        // ~10⁶, and the resulting `peak=114.6` slipped past the 0.18
-        // threshold + PSR gate. The fix matches `AudioChirpDetector`'s
-        // original design: only scan once the ring holds `ringLen` real
-        // samples end-to-end so every lag's energy is real.
-        guard totalWritten >= ringLen else { return }
-        if samplesSinceCheck >= checkIntervalSamples {
-            runMatchedFilter()
-            samplesSinceCheck = 0
+        // Host ticks → host-clock seconds. `audioTime.hostTime` is in mach
+        // absolute-time units; `CMClockMakeHostTimeFromSystemUnits` is the
+        // documented bridge and returns a `CMTime` on the host clock.
+        let bufferStartS: Double
+        if audioTime.isHostTimeValid {
+            let hostCMTime = CMClockMakeHostTimeFromSystemUnits(audioTime.hostTime)
+            bufferStartS = CMTimeGetSeconds(hostCMTime)
+        } else {
+            // Fall back to the current host time if the tap ever hands us
+            // an invalid timestamp — jitter bounded by one buffer duration.
+            let hostCMTime = CMClockGetTime(CMClockGetHostTimeClock())
+            bufferStartS = CMTimeGetSeconds(hostCMTime)
+        }
+
+        deliveryQueue.async { [weak self] in
+            guard let self else { return }
+            if abs(rate - self.sampleRate) > 0.5 {
+                log.info("sync detector rebuilding for sample_rate_hz=\(rate, privacy: .public) (was \(self.sampleRate, privacy: .public))")
+                self.rebuildForSampleRate(rate)
+            }
+            if self.firstPTS == nil {
+                self.firstPTS = bufferStartS
+            }
+            for i in 0..<frameCount {
+                self.ring[self.writeIndex] = mono[i]
+                self.writeIndex += 1
+                if self.writeIndex >= self.ringLen { self.writeIndex = 0 }
+                self.totalWritten += 1
+            }
+            self.samplesSinceCheck += frameCount
+
+            // Ring MUST be fully populated before the matched filter runs.
+            // See original design note in rebuildForSampleRate — a zero-
+            // padded tail inflates normalized peaks via the energy clamp.
+            guard self.totalWritten >= self.ringLen else { return }
+            if self.samplesSinceCheck >= self.checkIntervalSamples {
+                self.runMatchedFilter()
+                self.samplesSinceCheck = 0
+            }
         }
     }
 
     // MARK: - Test injection
 
-    /// Push synthetic samples directly. Mirrors captureOutput's cadence so a
-    /// test can drive the dual-band pipeline without AVFoundation.
+    /// Push synthetic samples directly. Mirrors `ingestPCMBuffer`'s cadence
+    /// so a test can drive the dual-band pipeline without AVFoundation.
+    /// `firstPTS` is seconds on whatever clock the test asserts against
+    /// (the detector itself doesn't care — it only adds offsets).
     func _testFeed(samples: [Float], sampleRate rate: Double, firstPTS pts: CMTime) {
         deliveryQueue.sync {
             if abs(rate - sampleRate) > 0.5 {
                 rebuildForSampleRate(rate)
             }
-            if firstPTS == nil { firstPTS = pts }
+            if firstPTS == nil { firstPTS = CMTimeGetSeconds(pts) }
             var offset = 0
             let chunk = max(1, Int(rate * 0.01))
             while offset < samples.count {
@@ -309,9 +352,7 @@ final class AudioSyncDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         let now = currentPTSApprox()
         // Append one trace sample per band BEFORE the fire-gate so
         // sub-threshold peaks (the whole reason this buffer exists)
-        // reach the debug plot. `t` is run-relative: the chirp center
-        // timestamp minus firstPTS, which equals the same expression
-        // with firstPTS cancelled.
+        // reach the debug plot.
         appendTrace(.A, result: resA)
         appendTrace(.B, result: resB)
         maybeFire(band: .A, result: resA, now: now)
@@ -431,93 +472,12 @@ final class AudioSyncDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         let ringStartGlobal = totalWritten - ringLen
         let chirpStartGlobal = Double(ringStartGlobal) + fracLag
         let chirpCenterGlobal = chirpStartGlobal + Double(refLen) / 2.0
-        let firstPTSS = firstPTS.map { CMTimeGetSeconds($0) } ?? 0
+        let firstPTSS = firstPTS ?? 0
         return firstPTSS + chirpCenterGlobal / sampleRate
     }
 
     private func currentPTSApprox() -> Double {
         guard let first = firstPTS else { return 0 }
-        return CMTimeGetSeconds(first) + Double(totalWritten) / sampleRate
-    }
-
-    // MARK: - PCM extraction (duplicated from AudioChirpDetector)
-
-    private static func firstSampleRate(_ sampleBuffer: CMSampleBuffer) -> Double? {
-        guard let fmt = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(fmt) else {
-            return nil
-        }
-        let rate = asbdPtr.pointee.mSampleRate
-        return rate > 0 ? rate : nil
-    }
-
-    private static func extractMonoFloat(_ sampleBuffer: CMSampleBuffer) -> [Float]? {
-        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer),
-              let fmt = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(fmt) else {
-            return nil
-        }
-        let asbd = asbdPtr.pointee
-        let numSamples = CMSampleBufferGetNumSamples(sampleBuffer)
-        if numSamples <= 0 { return [] }
-        var totalLen = 0
-        var dataPtr: UnsafeMutablePointer<Int8>?
-        let status = CMBlockBufferGetDataPointer(
-            blockBuffer,
-            atOffset: 0,
-            lengthAtOffsetOut: nil,
-            totalLengthOut: &totalLen,
-            dataPointerOut: &dataPtr
-        )
-        guard status == noErr, let dataPtr else { return nil }
-
-        let channels = Int(asbd.mChannelsPerFrame)
-        let isFloat = asbd.mFormatID == kAudioFormatLinearPCM &&
-            (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0 &&
-            asbd.mBitsPerChannel == 32
-        let isInt16 = asbd.mFormatID == kAudioFormatLinearPCM &&
-            (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0 &&
-            asbd.mBitsPerChannel == 16
-        let interleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
-
-        if isFloat {
-            let srcFloat = dataPtr.withMemoryRebound(to: Float.self, capacity: totalLen / 4) { $0 }
-            if channels == 1 {
-                return Array(UnsafeBufferPointer(start: srcFloat, count: numSamples))
-            }
-            if interleaved {
-                var out = [Float](repeating: 0, count: numSamples)
-                let gain = 1.0 / Float(channels)
-                for i in 0..<numSamples {
-                    var sum: Float = 0
-                    for c in 0..<channels {
-                        sum += srcFloat[i * channels + c]
-                    }
-                    out[i] = sum * gain
-                }
-                return out
-            }
-            return Array(UnsafeBufferPointer(start: srcFloat, count: numSamples))
-        }
-        if isInt16 {
-            let srcI16 = dataPtr.withMemoryRebound(to: Int16.self, capacity: totalLen / 2) { $0 }
-            var out = [Float](repeating: 0, count: numSamples)
-            if channels == 1 || !interleaved {
-                for i in 0..<numSamples {
-                    out[i] = Float(srcI16[i]) / 32768.0
-                }
-            } else {
-                let gain = 1.0 / (32768.0 * Float(channels))
-                for i in 0..<numSamples {
-                    var sum: Int32 = 0
-                    for c in 0..<channels {
-                        sum += Int32(srcI16[i * channels + c])
-                    }
-                    out[i] = Float(sum) * gain
-                }
-            }
-            return out
-        }
-        return nil
+        return first + Double(totalWritten) / sampleRate
     }
 }
