@@ -131,25 +131,31 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
    heights. `auto` → min-content keeps the chip column tight. */
 .device {{ padding: var(--s-2) 0; }}
 .device + .device {{ border-top: 1px solid var(--border-l); }}
-.device-head {{ display: grid; grid-template-columns: 28px minmax(0, 1fr) min-content;
-                align-items: center; gap: var(--s-3); }}
-.device-head .chip-col {{ justify-self: end; }}
+/* Row 1: id (fixed 28px) | blank stretch | chip (auto). Sub-line gets
+   its own full-width row below so long labels like "time sync · not
+   synced" + "pose · last 16:13" never collide with the chip. */
+.device-head {{ display: grid; grid-template-columns: 28px 1fr auto;
+                align-items: center; gap: var(--s-2) var(--s-3); }}
+.device-head .id {{ grid-column: 1; grid-row: 1; }}
+.device-head .chip-col {{ grid-column: 3; grid-row: 1; justify-self: end; }}
+.device-head .sub {{ grid-column: 1 / -1; grid-row: 2; }}
 .device-actions {{ display: flex; gap: var(--s-2); margin-top: var(--s-2); flex-wrap: wrap; }}
 .device .id {{ font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--ink);
                letter-spacing: 0.04em; }}
 .device .meta {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
                  text-transform: uppercase; color: var(--sub); }}
 .device .meta em {{ font-style: normal; color: var(--ink-light); }}
-/* Two-column grid forces both items onto the same line and guarantees
-   identical row height regardless of per-device label length. */
-.device .sub {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-                gap: var(--s-2); margin-top: var(--s-1); }}
-.device .sub .item {{ font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em;
+/* Sub-line stacks vertically so long labels ("not synced", "last 16:13")
+   never get truncated. One item per line, full card width. */
+.device .sub {{ display: flex; flex-direction: column; gap: 2px;
+                margin-top: var(--s-1); }}
+.device .sub .item {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
                       text-transform: uppercase; color: var(--sub);
-                      display: flex; align-items: center; gap: var(--s-1);
-                      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-.device .sub .dot {{ width: 6px; height: 6px; border-radius: 50%;
-                     background: var(--border-base); display: inline-block; }}
+                      display: flex; align-items: center; gap: var(--s-2);
+                      white-space: nowrap; }}
+.device .sub .dot {{ width: 7px; height: 7px; border-radius: 50%;
+                     background: var(--border-base); display: inline-block;
+                     flex-shrink: 0; }}
 .device .sub .dot.ok {{ background: var(--passed); }}
 .device .sub .dot.warn {{ background: var(--warn); }}
 .device .sub .dot.bad {{ background: var(--failed); }}
@@ -1570,8 +1576,27 @@ _MODE_LABELS = {
 def _render_session_body(
     session: dict[str, Any] | None,
     capture_mode: str = "camera_only",
+    devices: list[dict[str, Any]] | None = None,
+    calibrations: list[str] | None = None,
 ) -> str:
     armed = session is not None and session.get("armed")
+    devices = devices or []
+    calibrated = set(calibrations or [])
+    online = {d["camera_id"] for d in devices}
+    synced = {d["camera_id"] for d in devices if d.get("time_synced")}
+    # Demo-safety preconditions: both expected cams (A, B) must be online,
+    # calibrated, AND time-synced before Arm is allowed. Server accepts the
+    # POST regardless — this is UI-level safety so the operator doesn't
+    # silently arm a session that will flag error="no time sync" or similar.
+    missing: list[str] = []
+    for cam in ("A", "B"):
+        if cam not in online:
+            missing.append(f"{cam} offline")
+        elif cam not in calibrated:
+            missing.append(f"{cam} not calibrated")
+        elif cam not in synced:
+            missing.append(f"{cam} not time-synced")
+    arm_ok = not missing
     chip_html = (
         '<span class="chip armed">armed</span>'
         if armed
@@ -1582,9 +1607,12 @@ def _render_session_body(
         if session and session.get("id")
         else ""
     )
+    arm_disabled = armed or not arm_ok
+    arm_title = "; ".join(missing) if missing else "Ready to record"
     arm_btn = (
         '<form class="inline" method="POST" action="/sessions/arm">'
-        f'<button class="btn" type="submit"{" disabled" if armed else ""}>Arm session</button>'
+        f'<button class="btn" type="submit"{" disabled" if arm_disabled else ""} '
+        f'title="{html.escape(arm_title)}">Arm session</button>'
         "</form>"
     )
     stop_btn = (
@@ -1637,9 +1665,17 @@ def _render_session_body(
             "</div></div>"
         )
 
+    gate_row = ""
+    if not armed and missing:
+        gate_row = (
+            '<div class="arm-gate">'
+            f'<span class="gate-label">Need:</span> {html.escape(", ".join(missing))}'
+            "</div>"
+        )
     return (
         f'<div class="session-head">{chip_html}{sid_html}</div>'
         f'<div class="session-actions">{arm_btn}{stop_btn}{sync_btn}{clear_btn}</div>'
+        f'{gate_row}'
         f'{mode_row}'
     )
 
