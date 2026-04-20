@@ -58,6 +58,12 @@ class TrackingExposureCapMode(str, Enum):
 _DEFAULT_TRACKING_EXPOSURE_CAP_MODE = TrackingExposureCapMode.frame_duration
 
 
+# Shared sync-run identifier used by both the mutual two-way chirp flow
+# and the legacy third-device chirp-anchor flow. Distinct `sy_` prefix so
+# logs can visually separate sync runs from pitch/session ids.
+_SYNC_ID_PATTERN = r"^sy_[0-9a-f]{4,32}$"
+
+
 class IntrinsicsPayload(BaseModel):
     fx: float
     fz: float
@@ -117,6 +123,11 @@ class PitchPayload(BaseModel):
     # their own counters. Pattern matches `_new_session_id()`; also safe to
     # interpolate into filenames.
     session_id: str = Field(..., pattern=r"^s_[0-9a-f]{4,32}$")
+    # Shared sync-run identifier for the legacy third-device chirp flow.
+    # When present, both A and B MUST match for the session to be
+    # triangulatable; mismatches indicate the phones latched different chirp
+    # runs and their `sync_anchor_timestamp_s` values are incomparable.
+    sync_id: str | None = Field(default=None, pattern=_SYNC_ID_PATTERN)
     # Shared time anchor for A/B pairing, recovered from an audio-chirp
     # matched-filter hit on the 時間校正 step. Nil when the operator armed
     # without running a fresh time sync → server marks the session as
@@ -231,6 +242,9 @@ class HeartbeatBody(BaseModel):
     # upload. Optional + defaults False so older iOS builds that don't
     # send the field still validate.
     time_synced: bool = False
+    # Sync-run provenance of the currently-held legacy chirp anchor.
+    # Optional for back-compat: older iOS builds only report the boolean.
+    time_sync_id: str | None = Field(default=None, pattern=_SYNC_ID_PATTERN)
 
 
 class CalibrationSnapshot(BaseModel):
@@ -259,8 +273,6 @@ _DEFAULT_SESSION_TIMEOUT_S = 60.0
 # for Δ (A−B clock offset) and D (inter-phone distance). Pairing within
 # the /pitch flow then uses Δ to align B's timeline onto A's — replacing
 # the third-device chirp anchor that `sync_anchor_timestamp_s` carried.
-
-_SYNC_ID_PATTERN = r"^sy_[0-9a-f]{4,32}$"
 
 
 # Mirror the defaults baked into `AudioSyncDetector.swift` (threshold=0.18,
@@ -403,13 +415,15 @@ class Device:
     """Most recent heartbeat from a single iPhone. `last_seen_at` is a wall
     clock unix timestamp so `now - last_seen_at` compares cleanly even
     across server restarts (the dict is memory-only, so restart implies no
-    device is online yet). `time_synced` is the latest value the phone
-    asserted on its heartbeat — the phone is authoritative because only
-    it owns the chirp-detector state, so every heartbeat simply overwrites
-    the cached flag."""
+    device is online yet). `time_synced` is the latest boolean the phone
+    asserted on its heartbeat; `time_sync_id` / `time_sync_at` identify
+    which legacy chirp run produced the currently-held anchor and when the
+    server most recently heard about it."""
     camera_id: str
     last_seen_at: float
     time_synced: bool = False
+    time_sync_id: str | None = None
+    time_sync_at: float | None = None
 
 
 @dataclass
@@ -434,6 +448,11 @@ class Session:
     # Snapshot of the dashboard's tracking exposure-cap policy at arm time.
     # Once armed this is frozen for the whole session, matching `mode`.
     tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
+    # Shared legacy chirp sync id observed across the online rig when this
+    # session armed. Nil means the rig was not in a provably common synced
+    # state (missing, stale, or mismatched ids) and any later triangulation
+    # must rely on the payload pair validating itself.
+    sync_id: str | None = None
 
     @property
     def armed(self) -> bool:
@@ -449,4 +468,5 @@ class Session:
             "uploads_received": list(self.uploads_received),
             "mode": self.mode.value,
             "tracking_exposure_cap": self.tracking_exposure_cap.value,
+            "sync_id": self.sync_id,
         }

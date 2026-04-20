@@ -157,6 +157,22 @@ def test_arm_session_creates_session_and_is_idempotent(tmp_path):
     assert session_b.id == session_a.id
 
 
+def test_arm_session_snapshots_common_time_sync_id(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef")
+    s.heartbeat("B", time_synced=True, time_sync_id="sy_deadbeef")
+    session = s.arm_session()
+    assert session.sync_id == "sy_deadbeef"
+
+
+def test_arm_session_drops_mismatched_time_sync_ids(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    s.heartbeat("A", time_synced=True, time_sync_id="sy_aaaaaaaa")
+    s.heartbeat("B", time_synced=True, time_sync_id="sy_bbbbbbbb")
+    session = s.arm_session()
+    assert session.sync_id is None
+
+
 def test_stop_session_transitions_to_ended(tmp_path):
     s = main.State(data_dir=tmp_path)
     session = s.arm_session()
@@ -986,6 +1002,7 @@ def _minimal_pitch(camera_id: str, session_id: str) -> main.PitchPayload:
     return main.PitchPayload(
         camera_id=camera_id,
         session_id=session_id,
+        sync_id="sy_deadbeef",
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,

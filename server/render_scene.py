@@ -1072,7 +1072,8 @@ def render_viewer_html(
   // camera's rays are irrelevant to where the point lands in THIS
   // camera's frame. So we skip triangulation entirely and just draw
   // the per-frame (px, py) detection stream at the current playback
-  // time.
+  // time. Visibility therefore follows the per-camera ray toggle
+  // (`Rays A` / `Rays B`), not the global trajectory toggle.
   //
   // Plate pentagon IS reprojected (world 3D corners → this cam's
   // image plane) because the plate has no per-frame detection data —
@@ -1234,10 +1235,11 @@ def render_viewer_html(
     }}
 
     const cam = meta.camera_id;
-    if (isLayerVisible("traj", "server")) {{
+    const camLayer = `cam${{cam}}`;
+    if (isLayerVisible(camLayer, "server")) {{
       drawCurrentDetection(framesByCam[cam], {{color: ACCENT}});
     }}
-    if (isLayerVisible("traj", "on_device")) {{
+    if (isLayerVisible(camLayer, "on_device")) {{
       drawCurrentDetection(framesByCamOnDevice[cam],
                            {{color: "rgb(175, 210, 255)"}});
     }}

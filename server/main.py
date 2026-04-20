@@ -64,6 +64,7 @@ import secrets
 import socket
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
@@ -160,6 +161,15 @@ _SYNC_COOLDOWN_S = 10.0
 # seconds so a stale command doesn't fire if the operator gave up.
 _SYNC_COMMAND_TTL_S = 10.0
 
+# Legacy third-device chirp sync ids stay shareable for one listening
+# window so two phones that begin 時間校正 a few seconds apart can still
+# claim the same run id.
+_TIME_SYNC_INTENT_WINDOW_S = 20.0
+
+# Maximum server-observed age of a legacy chirp sync before it no longer
+# counts as "ready" for a fresh arm.
+_TIME_SYNC_MAX_AGE_S = 30.0
+
 # Hard cap on `/pitch` video upload size. A 5 s cycle at 4K / 240 fps sits
 # comfortably under this; anything beyond is almost certainly a misbehaving
 # client or a denial-of-service attempt. FastAPI buffers the full multipart
@@ -225,6 +235,13 @@ def _validate_calibration_snapshot(snap: CalibrationSnapshot) -> None:
 _CALIBRATION_FRAME_TTL_S = 10.0
 
 
+@dataclass
+class _LegacyTimeSyncIntent:
+    id: str
+    started_at: float
+    expires_at: float
+
+
 class State:
     def __init__(
         self,
@@ -276,13 +293,12 @@ class State:
         # Time Sync panel renders the last N entries. 500 lines ≈ 20 runs'
         # worth of detail — plenty for diagnosing a single failed run.
         self._sync_log: deque[SyncLogEntry] = deque(maxlen=500)
-        # Per-camera pending time-sync command → expiry wall-clock time.
-        # `trigger_sync_command()` sets entries; the heartbeat handler
-        # consumes + clears them one-shot, and stale entries past their
-        # TTL are swept on read. In-memory only — restart drops any
-        # pending command, which is the right failure mode (the operator
-        # will just click the dashboard button again).
-        self._sync_command_pending: dict[str, float] = {}
+        # Legacy third-device chirp sync intent. A live intent supplies the
+        # shared `sync_id` both phones should stamp onto their recovered
+        # anchors. The dashboard-remote path also fans this intent out as
+        # per-camera pending commands consumed on heartbeat.
+        self._current_time_sync_intent: _LegacyTimeSyncIntent | None = None
+        self._sync_command_pending: dict[str, _LegacyTimeSyncIntent] = {}
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
         # Runtime tunables pushed from the dashboard, hot-applied on the
@@ -379,13 +395,17 @@ class State:
                 camera_b_received=b is not None,
             )
             if a is not None and b is not None:
-                if self._has_server_frames(a) and self._has_server_frames(b):
+                sync_error = self._validate_pair_sync(a, b)
+                if sync_error is not None:
+                    result.error = sync_error
+                    result.error_on_device = sync_error
+                elif self._has_server_frames(a) and self._has_server_frames(b):
                     try:
                         result.points = self._triangulate_pair(a, b, source="server")
                         result.fit = fit_trajectory(result.points)
                     except Exception as e:
                         result.error = f"{type(e).__name__}: {e}"
-                if self._has_on_device_frames(a) and self._has_on_device_frames(b):
+                if sync_error is None and self._has_on_device_frames(a) and self._has_on_device_frames(b):
                     try:
                         result.points_on_device = self._triangulate_pair(a, b, source="on_device")
                         result.fit_on_device = fit_trajectory(result.points_on_device)
@@ -497,6 +517,33 @@ class State:
         pitch and we re-record."""
         return bool(pitch and pitch.frames)
 
+    def _session_sync_id_locked(self, session_id: str) -> str | None:
+        for session in (self._current_session, self._last_ended_session):
+            if session is not None and session.id == session_id:
+                return session.sync_id
+        return None
+
+    def _validate_pair_sync(self, a: PitchPayload, b: PitchPayload) -> str | None:
+        """Return a stable error string when the paired payloads do not
+        belong to the same legacy chirp sync run."""
+        if a.sync_anchor_timestamp_s is None or b.sync_anchor_timestamp_s is None:
+            return "no time sync"
+        with self._lock:
+            expected_sync_id = self._session_sync_id_locked(a.session_id)
+        if a.sync_id is None and b.sync_id is None:
+            # Backward-compat: historical sessions recorded before sync_id
+            # existed still carry valid anchor-relative timing, so keep
+            # loading them unless this armed session explicitly expected a
+            # shared sync id snapshot.
+            return "sync id missing" if expected_sync_id is not None else None
+        if a.sync_id is None or b.sync_id is None:
+            return "sync id missing"
+        if a.sync_id != b.sync_id:
+            return "sync id mismatch"
+        if expected_sync_id is not None and a.sync_id != expected_sync_id:
+            return "sync id mismatch for armed session"
+        return None
+
     def _atomic_write(self, path: Path, payload: str) -> None:
         # Unique tmp filename per call so concurrent writers targeting the
         # same `path` (e.g. two simultaneous /pitch POSTs producing the same
@@ -549,13 +596,17 @@ class State:
             camera_b_received=b is not None,
         )
         if a is not None and b is not None:
-            if self._has_server_frames(a) and self._has_server_frames(b):
+            sync_error = self._validate_pair_sync(a, b)
+            if sync_error is not None:
+                result.error = sync_error
+                result.error_on_device = sync_error
+            elif self._has_server_frames(a) and self._has_server_frames(b):
                 try:
                     result.points = self._triangulate_pair(a, b, source="server")
                     result.fit = fit_trajectory(result.points)
                 except Exception as e:
                     result.error = f"{type(e).__name__}: {e}"
-            if self._has_on_device_frames(a) and self._has_on_device_frames(b):
+            if sync_error is None and self._has_on_device_frames(a) and self._has_on_device_frames(b):
                 try:
                     result.points_on_device = self._triangulate_pair(a, b, source="on_device")
                     result.fit_on_device = fit_trajectory(result.points_on_device)
@@ -684,10 +735,43 @@ class State:
                 return None
             return got
 
-    def heartbeat(self, camera_id: str, time_synced: bool = False) -> None:
+    def _live_time_sync_intent_locked(self, now: float) -> _LegacyTimeSyncIntent | None:
+        intent = self._current_time_sync_intent
+        if intent is None:
+            return None
+        if intent.expires_at <= now:
+            self._current_time_sync_intent = None
+            return None
+        return intent
+
+    def _claim_time_sync_intent_locked(self, now: float) -> _LegacyTimeSyncIntent:
+        intent = self._live_time_sync_intent_locked(now)
+        if intent is not None:
+            return intent
+        intent = _LegacyTimeSyncIntent(
+            id=_new_sync_id(),
+            started_at=now,
+            expires_at=now + _TIME_SYNC_INTENT_WINDOW_S,
+        )
+        self._current_time_sync_intent = intent
+        return intent
+
+    def claim_time_sync_intent(self) -> _LegacyTimeSyncIntent:
+        """Return the currently-live legacy chirp sync run id, minting a
+        fresh one when the prior listening window expired."""
+        now = self._time_fn()
+        with self._lock:
+            return self._claim_time_sync_intent_locked(now)
+
+    def heartbeat(
+        self,
+        camera_id: str,
+        time_synced: bool = False,
+        time_sync_id: str | None = None,
+    ) -> None:
         """Record one liveness ping. Overwrites the previous entry for this
-        camera so `last_seen_at` and `time_synced` always reflect the latest
-        beat — the phone is the authoritative source for both. Prunes any
+        camera so `last_seen_at`, `time_synced`, and the currently-held
+        legacy chirp sync id always reflect the latest beat. Prunes any
         entry older than `_DEVICE_GC_AFTER_S` and enforces a hard size cap
         (evicts the oldest by `last_seen_at`) so a misbehaving client can't
         grow the registry without bound."""
@@ -697,6 +781,8 @@ class State:
                 camera_id=camera_id,
                 last_seen_at=now,
                 time_synced=time_synced,
+                time_sync_id=(time_sync_id if time_synced else None),
+                time_sync_at=(now if time_synced and time_sync_id is not None else None),
             )
             # GC stale entries first — cheap and keeps the cap hit rare.
             stale = [
@@ -712,6 +798,27 @@ class State:
                     key=lambda kv: kv[1].last_seen_at,
                 )[0]
                 del self._devices[oldest]
+
+    def _common_time_sync_id_locked(self, now: float) -> str | None:
+        fresh = [
+            d for d in self._devices.values()
+            if now - d.last_seen_at <= _DEVICE_STALE_S
+        ]
+        if len(fresh) < 2:
+            return None
+        sync_ids: set[str] = set()
+        for dev in fresh:
+            if (
+                not dev.time_synced
+                or dev.time_sync_id is None
+                or dev.time_sync_at is None
+                or now - dev.time_sync_at > _TIME_SYNC_MAX_AGE_S
+            ):
+                return None
+            sync_ids.add(dev.time_sync_id)
+        if len(sync_ids) != 1:
+            return None
+        return next(iter(sync_ids))
 
     def online_devices(
         self, stale_after_s: float = _DEVICE_STALE_S
@@ -766,8 +873,10 @@ class State:
                 max_duration_s=max_duration_s,
                 mode=self._current_mode,
                 tracking_exposure_cap=self._tracking_exposure_cap,
+                sync_id=self._common_time_sync_id_locked(now),
             )
             self._current_session = session
+            self._current_time_sync_intent = None
             return session
 
     def current_mode(self) -> CaptureMode:
@@ -1102,7 +1211,6 @@ class State:
         flag just refreshes its TTL expiry. The phone still fires once on
         the next heartbeat because flag consumption is one-shot."""
         now = self._time_fn()
-        expiry = now + _SYNC_COMMAND_TTL_S
         online_ids = [d.camera_id for d in self.online_devices()]
         current = self.current_session()  # applies timeout
         with self._lock:
@@ -1119,23 +1227,29 @@ class State:
                 # Skip every online camera — every online cam during an
                 # armed session is considered "recording" in this rig.
                 targets = []
+            intent = self._claim_time_sync_intent_locked(now) if targets else None
             dispatched: list[str] = []
             for cam in sorted(set(targets)):
-                self._sync_command_pending[cam] = expiry
+                assert intent is not None
+                self._sync_command_pending[cam] = _LegacyTimeSyncIntent(
+                    id=intent.id,
+                    started_at=intent.started_at,
+                    expires_at=now + _SYNC_COMMAND_TTL_S,
+                )
                 dispatched.append(cam)
             # Also sweep any expired entries so the map can't grow forever
             # even if `consume_sync_command` never runs for a stale cam.
             stale = [
-                c for c, exp in self._sync_command_pending.items()
-                if exp <= now
+                c for c, pending in self._sync_command_pending.items()
+                if pending.expires_at <= now
             ]
             for c in stale:
                 del self._sync_command_pending[c]
         return dispatched
 
-    def consume_sync_command(self, camera_id: str) -> str | None:
+    def consume_sync_command(self, camera_id: str) -> tuple[str | None, str | None]:
         """Atomically pop + return a pending time-sync command for the
-        named camera, or None when there's nothing queued. Used by the
+        named camera, or `(None, None)` when there's nothing queued. Used by the
         /heartbeat handler so the same beat that reports liveness also
         clears the flag — one-shot dispatch, matching how arm/disarm
         commands self-cancel on consumption.
@@ -1144,12 +1258,12 @@ class State:
         without firing — the operator is presumed to have moved on."""
         now = self._time_fn()
         with self._lock:
-            expiry = self._sync_command_pending.pop(camera_id, None)
-        if expiry is None:
-            return None
-        if expiry <= now:
-            return None
-        return "start"
+            pending = self._sync_command_pending.pop(camera_id, None)
+        if pending is None:
+            return None, None
+        if pending.expires_at <= now:
+            return None, None
+        return "start", pending.id
 
     def pending_sync_commands(self) -> dict[str, str]:
         """Snapshot of cameras with a currently-live pending time-sync
@@ -1160,8 +1274,8 @@ class State:
         with self._lock:
             return {
                 cam: "start"
-                for cam, exp in self._sync_command_pending.items()
-                if exp > now
+                for cam, pending in self._sync_command_pending.items()
+                if pending.expires_at > now
             }
 
     def start_sync(self) -> tuple[SyncRun | None, str | None]:
@@ -1721,13 +1835,23 @@ def _build_status_response() -> dict[str, Any]:
     session = state.session_snapshot()
     sync_run = state.current_sync()
     last_sync = state.last_sync_result()
+    now = state._time_fn()
     return {
         **summary,
         "devices": [
             {
                 "camera_id": d.camera_id,
                 "last_seen_at": d.last_seen_at,
-                "time_synced": d.time_synced,
+                "time_synced": (
+                    d.time_synced
+                    and d.time_sync_id is not None
+                    and d.time_sync_at is not None
+                    and now - d.time_sync_at <= _TIME_SYNC_MAX_AGE_S
+                ),
+                "time_sync_id": d.time_sync_id,
+                "time_sync_age_s": (
+                    None if d.time_sync_at is None else float(now - d.time_sync_at)
+                ),
             }
             for d in state.online_devices()
         ],
@@ -1794,13 +1918,19 @@ def heartbeat(body: HeartbeatBody) -> dict[str, Any]:
     consumption is one-shot: once a phone receives `sync_command: "start"`
     the server clears the flag so back-to-back heartbeats don't re-trigger
     the chirp listener."""
-    state.heartbeat(body.camera_id, time_synced=body.time_synced)
+    state.heartbeat(
+        body.camera_id,
+        time_synced=body.time_synced,
+        time_sync_id=body.time_sync_id,
+    )
     resp = _build_status_response()
     # Per-camera: pop the pending flag and surface it on THIS reply only.
     # Decoupled from `commands` (arm/disarm) because sync is orthogonal to
     # armed-session state; overloading the arm/disarm vocabulary would
     # force iPhone-side branching on a mixed-purpose field.
-    resp["sync_command"] = state.consume_sync_command(body.camera_id)
+    sync_command, sync_command_id = state.consume_sync_command(body.camera_id)
+    resp["sync_command"] = sync_command
+    resp["sync_command_id"] = sync_command_id
     # Per-camera scalar: does THIS phone owe the server a full-res
     # calibration JPEG? The global map above is observational for the
     # dashboard; this scalar is what the phone's captureOutput reads.
@@ -2119,6 +2249,23 @@ async def sync_trigger(request: Request) -> Any:
     return {"ok": True, "dispatched_to": dispatched}
 
 
+@app.post("/sync/claim")
+def sync_claim() -> dict[str, Any]:
+    """Claim the currently-live legacy chirp sync id, minting a fresh one
+    when the prior listening window expired.
+
+    Used by the phone-local 時間校正 button so both phones can converge on
+    the same shared `sync_id` even when the operator taps them a few
+    seconds apart instead of using the dashboard-remote trigger."""
+    intent = state.claim_time_sync_intent()
+    return {
+        "ok": True,
+        "sync_id": intent.id,
+        "started_at": intent.started_at,
+        "expires_at": intent.expires_at,
+    }
+
+
 @app.post("/sync/log")
 async def sync_log_post(body: SyncLogBody) -> dict[str, Any]:
     """Phone-pushed diagnostic event. Phones call this at each major step
@@ -2188,10 +2335,11 @@ async def pitch(
     """Ingest one armed-session upload as multipart/form-data.
 
     Required form fields:
-      - `payload` — JSON-encoded `PitchPayload`. In mode-one (`camera_only`)
-        carries only session-level metadata; in mode-two (`on_device`) also
-        carries the per-frame `frames: [FramePayload]` list produced by the
-        iPhone's own HSV+MOG2 detector.
+      - `payload` — JSON-encoded `PitchPayload`. Carries session-level
+        metadata including the legacy chirp `sync_id` provenance tag; in
+        mode-two (`on_device`) also carries the per-frame
+        `frames: [FramePayload]` list produced by the iPhone's own
+        HSV+MOG2 detector.
 
     Optional:
       - `video` — H.264 MOV/MP4 of the cycle. Required in mode-one (server

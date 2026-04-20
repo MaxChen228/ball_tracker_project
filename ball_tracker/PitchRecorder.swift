@@ -17,6 +17,7 @@ final class PitchRecorder {
     /// recordings within a single app lifetime; not persisted.
     private var localRecordingIndex: Int = 0
 
+    private var syncId: String?
     private var syncAnchorTimestampS: Double?
     private var videoStartPtsS: Double = 0.0
     private var sessionId: String = ""
@@ -39,6 +40,7 @@ final class PitchRecorder {
     func reset() {
         isRecording = false
         sessionId = ""
+        syncId = nil
         syncAnchorTimestampS = nil
         videoStartPtsS = 0.0
         captureTelemetry = nil
@@ -52,6 +54,7 @@ final class PitchRecorder {
     /// server to reconstruct absolute PTS per decoded frame).
     func startRecording(
         sessionId: String,
+        syncId: String?,
         anchorTimestampS: Double?,
         videoStartPtsS: Double,
         captureTelemetry: ServerUploader.CaptureTelemetry?
@@ -59,12 +62,13 @@ final class PitchRecorder {
         guard !isRecording else { return }
 
         self.sessionId = sessionId
+        self.syncId = syncId
         self.syncAnchorTimestampS = anchorTimestampS
         self.videoStartPtsS = videoStartPtsS
         self.captureTelemetry = captureTelemetry
         isRecording = true
         localRecordingIndex += 1
-        log.info("recorder start session=\(sessionId, privacy: .public) cam=\(self.cameraId, privacy: .public) idx=\(self.localRecordingIndex) anchor_ts=\(anchorTimestampS ?? .nan) video_start=\(videoStartPtsS)")
+        log.info("recorder start session=\(sessionId, privacy: .public) cam=\(self.cameraId, privacy: .public) idx=\(self.localRecordingIndex) sync_id=\(syncId ?? "nil", privacy: .public) anchor_ts=\(anchorTimestampS ?? .nan) video_start=\(videoStartPtsS)")
         onRecordingStarted?(localRecordingIndex)
     }
 
@@ -79,6 +83,7 @@ final class PitchRecorder {
         let payload = ServerUploader.PitchPayload(
             camera_id: cameraId,
             session_id: sessionId,
+            sync_id: syncId,
             sync_anchor_timestamp_s: syncAnchorTimestampS,
             video_start_pts_s: videoStartPtsS,
             local_recording_index: localRecordingIndex,
@@ -88,6 +93,7 @@ final class PitchRecorder {
         )
         onCycleComplete?(payload)
         sessionId = ""
+        syncId = nil
         syncAnchorTimestampS = nil
         videoStartPtsS = 0.0
         captureTelemetry = nil

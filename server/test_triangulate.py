@@ -196,6 +196,7 @@ def _pitch_at(
     return PitchPayload(
         camera_id="A",
         session_id="s_cafebabe",
+        sync_id="sy_deadbeef",
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,

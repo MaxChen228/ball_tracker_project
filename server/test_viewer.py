@@ -78,6 +78,7 @@ def _pitch(cam_id, cycle, K, R, t, H, P_trajectory):
     return schemas.PitchPayload(
         camera_id=cam_id,
         session_id=sid(cycle),
+        sync_id="sy_deadbeef",
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
@@ -495,6 +496,7 @@ def test_viewer_health_banner_rate_bar_colour_tiers():
     pitch = schemas.PitchPayload(
         camera_id="A",
         session_id=session_id,
+        sync_id="sy_deadbeef",
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
@@ -574,6 +576,23 @@ def test_viewer_ships_interactive_diagnostic_widgets():
     assert "ball-detected" in body
 
 
+def test_viewer_virtual_detection_follows_per_camera_ray_toggle():
+    """The VIRT dot is the current camera's own ray collapsed to (px, py),
+    so its visibility must follow `Rays A/B`, not the global trajectory
+    toggle. Otherwise hiding 3D trajectory incorrectly blanks the virtual
+    camera even though the per-camera detection stream is still enabled."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(714)
+    _record_pitch(_pitch("A", 714, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert 'const camLayer = `cam${cam}`;' in body
+    assert 'if (isLayerVisible(camLayer, "server")) {' in body
+    assert 'if (isLayerVisible(camLayer, "on_device")) {' in body
+
+
 def test_viewer_locks_layout_to_viewport_without_page_scroll():
     """The viewer should fit in a single viewport: body scrolling is
     disabled and the root container owns a fixed 100vh layout."""
@@ -616,6 +635,7 @@ def test_viewer_exposes_camera_t_rel_offsets(tmp_path):
     pitch = schemas.PitchPayload(
         camera_id="A",
         session_id=session_id,
+        sync_id="sy_deadbeef",
         sync_anchor_timestamp_s=100.0,  # chirp hit at session-clock 100 s
         video_start_pts_s=101.5,        # first MOV frame at 101.5 s
         video_fps=240.0,
