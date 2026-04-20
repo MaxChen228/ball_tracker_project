@@ -253,9 +253,20 @@ button.btn.preview-btn {{ padding: 3px 8px; font-size: 9px; letter-spacing: 0.10
 button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface);
                                   border-color: var(--passed); }}
 .preview-panel {{ margin-top: 8px; width: 320px; max-width: 100%;
-                   aspect-ratio: 16 / 9; background: #000; border: 1px solid var(--border-base);
-                   border-radius: var(--r); overflow: hidden; }}
+                   aspect-ratio: 16 / 9; background: #000;
+                   border: 1px solid var(--border-base);
+                   border-radius: var(--r); overflow: hidden;
+                   position: relative; }}
 .preview-panel img {{ width: 100%; height: 100%; object-fit: contain; display: block; }}
+.preview-panel .placeholder {{ position: absolute; inset: 0;
+                                display: flex; align-items: center; justify-content: center;
+                                color: rgba(255, 255, 255, 0.55);
+                                font-family: var(--mono); font-size: 11px;
+                                letter-spacing: 0.14em; text-transform: uppercase;
+                                text-align: center; padding: var(--s-2);
+                                pointer-events: none; }}
+.preview-panel.off img {{ display: none; }}
+.preview-panel.off .placeholder {{ color: rgba(255, 255, 255, 0.6); }}
 
 /* Calibration card (Phase 5). Per-camera auto-calibrate row + an
    extended-markers block. Visually aligned with .device rows so the
@@ -951,9 +962,13 @@ _JS_TEMPLATE = r"""
         `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}">` +
         `${previewOn ? 'PREVIEW ON' : 'PREVIEW'}</button>`;
       const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}">Auto calibrate</button>`;
-      const previewPanel = previewOn
-        ? `<div class="preview-panel" data-preview-panel="${esc(cam)}"><img data-preview-img="${esc(cam)}" src="/camera/${encodeURIComponent(cam)}/preview?annotate=1&t=${Date.now()}" alt="preview ${esc(cam)}" onerror="this.style.opacity=0.3"></div>`
-        : '';
+      // Always render the panel so the row height stays stable; off
+      // state shows a black placeholder. When on, the tickPreviewImages
+      // loop (see below) cache-busts the <img src>.
+      const previewPanel = `<div class="preview-panel${previewOn ? '' : ' off'}" data-preview-panel="${esc(cam)}">` +
+        `<img data-preview-img="${esc(cam)}" src="${previewOn ? ('/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now()) : ''}" alt="preview ${esc(cam)}">` +
+        `<div class="placeholder">${previewOn ? '…' : 'Preview off'}</div>` +
+        `</div>`;
       return `
         <div class="device">
           <div class="device-head">
@@ -1359,6 +1374,11 @@ _JS_TEMPLATE = r"""
     for (const img of document.querySelectorAll('img[data-preview-img]')) {
       const cam = img.dataset.previewImg;
       if (!cam) continue;
+      // Panel is always present; only poll the <img> src when the
+      // camera is actually preview-enabled. Off state stays on the
+      // black placeholder.
+      const panel = img.closest('.preview-panel');
+      if (!panel || panel.classList.contains('off')) continue;
       img.src = '/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + t;
       img.style.opacity = 1;
     }
@@ -1530,13 +1550,18 @@ def _render_device_rows(
             f'<button type="button" class="btn small" '
             f'data-auto-cal="{html.escape(cam_id)}">Auto calibrate</button>'
         )
+        # Panel always renders for stable layout — off state shows a
+        # black placeholder. JS tick swaps the <img src> when enabled.
+        _off_cls = "" if preview_on else " off"
+        _src = f"/camera/{html.escape(cam_id)}/preview?annotate=1" if preview_on else ""
+        _placeholder = "…" if preview_on else "Preview off"
         preview_panel = (
-            f'<div class="preview-panel" data-preview-panel="{html.escape(cam_id)}">'
+            f'<div class="preview-panel{_off_cls}" data-preview-panel="{html.escape(cam_id)}">'
             f'<img data-preview-img="{html.escape(cam_id)}" '
-            f'src="/camera/{html.escape(cam_id)}/preview?annotate=1" '
-            f'alt="preview {html.escape(cam_id)}" onerror="this.style.opacity=0.3">'
+            f'src="{_src}" alt="preview {html.escape(cam_id)}">'
+            f'<div class="placeholder">{_placeholder}</div>'
             f'</div>'
-        ) if preview_on else ""
+        )
         return (
             f'<div class="device">'
             f'<div class="device-head">'

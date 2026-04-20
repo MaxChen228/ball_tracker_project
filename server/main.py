@@ -2978,26 +2978,39 @@ async def calibration_markers_register(
     camera_id: str,
     request: Request,
 ) -> dict[str, Any]:
-    """Phase 5: register extended markers from the latest preview frame of
-    `camera_id`. Detects every DICT_4X4_50 marker in the image, solves the
-    plate homography from IDs 0-5, and inverse-projects each non-plate
-    marker's centroid to world (x, y). Persists + returns the new rows."""
+    """Register extended markers from a full-resolution frame of
+    `camera_id`. Same one-shot cal-frame path as `/calibration/auto` —
+    request, poll up to 2 s, run ArUco at native capture resolution so
+    the recovered world (x, y) coordinates are as precise as the plate
+    homography allows. 408 on no-delivery; no preview fallback."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_id):
         raise HTTPException(status_code=400, detail="invalid camera_id")
 
     import cv2  # noqa: WPS433
+    import asyncio as _asyncio  # noqa: WPS433
 
-    got = state._preview.latest(camera_id)
-    if got is None:
+    state.request_calibration_frame(camera_id)
+    jpeg_bytes: bytes | None = None
+    for _ in range(20):
+        got = state.consume_calibration_frame(camera_id)
+        if got is not None:
+            jpeg_bytes, _ts = got
+            break
+        await _asyncio.sleep(0.1)
+
+    if jpeg_bytes is None:
         raise HTTPException(
-            status_code=404,
-            detail=f"no preview frame cached for camera {camera_id!r}",
+            status_code=408,
+            detail=(
+                f"camera {camera_id!r} did not deliver a calibration "
+                "frame within 2 s — check the phone is online and awake"
+            ),
         )
-    jpeg_bytes, _ts = got
+
     arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if bgr is None:
-        raise HTTPException(status_code=422, detail="preview frame is not a decodable JPEG")
+        raise HTTPException(status_code=422, detail="calibration frame is not a decodable JPEG")
 
     try:
         registered = state._extended_markers.register_from_image(bgr)
