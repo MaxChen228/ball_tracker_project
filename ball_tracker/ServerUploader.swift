@@ -672,8 +672,10 @@ final class ServerUploader {
         let camera_id: String
         let sync_id: String
         let role: String          // "A" | "B"
-        let t_self_s: Double      // mic PTS when own chirp was heard
-        let t_from_other_s: Double  // mic PTS when peer's chirp was heard
+        // Nullable: null when aborted without that band's detection. Server
+        // routes any-null reports to the diagnostic (aborted) path.
+        let t_self_s: Double?
+        let t_from_other_s: Double?
         let emitted_band: String  // "A" | "B" — rig-config cross-check
         // Optional matched-filter traces (own-band + other-band) for the
         // `/sync` debug plot. Mirrors `SyncTraceSample` / `SyncReport` on
@@ -681,6 +683,12 @@ final class ServerUploader {
         // support still validates.
         let trace_self: [TraceSamplePayload]?
         let trace_other: [TraceSamplePayload]?
+        // Abort telemetry. `aborted=true` means the phone gave up before
+        // both bands fired — the report still ships to give the server
+        // post-mortem data (sub-threshold peaks, noise floor, which band
+        // fired, timing).
+        let aborted: Bool
+        let abort_reason: String?
     }
 
     struct TraceSamplePayload: Codable {

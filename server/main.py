@@ -905,7 +905,10 @@ class State:
         """Drop `_current_sync` if it has been waiting past the timeout.
         Caller must hold `self._lock`. Also latches the cooldown so a new
         run can't start immediately after a timeout — gives the operator
-        a window to see the failure surface on the dashboard."""
+        a window to see the failure surface on the dashboard. Synthesises
+        an aborted `SyncResult` carrying whatever partial reports landed
+        (incl. traces) so the `/sync` panel can show sub-threshold peaks /
+        noise floor from a failed run instead of going blank."""
         s = self._current_sync
         if s is None:
             return
@@ -918,8 +921,101 @@ class State:
             logger.warning(
                 "sync timeout id=%s received=%s", s.id, received
             )
+            self._last_sync_result = self._build_aborted_result_locked(s, now)
             self._current_sync = None
             self._sync_cooldown_until = now + _SYNC_COOLDOWN_S
+
+    def _log_trace_post_mortem_locked(
+        self, run_id: str, label: str,
+        trace: list | None, threshold: float,
+    ) -> None:
+        """Compute + log {best_peak, t_best, median, p90, margin_to_threshold}
+        for one matched-filter trace so post-mortem failures show up in the
+        sync log (and the terminal) with quantitative context. Silently
+        skips empty / missing traces — the log entry exists purely to let
+        me read `how close did that band come to firing?`."""
+        if not trace:
+            self._sync_log.append(SyncLogEntry(
+                ts=self._time_fn(), source="server", event="post_mortem",
+                detail={"id": run_id, "stream": label, "status": "no_trace"},
+            ))
+            logger.info("sync post_mortem id=%s stream=%s status=no_trace", run_id, label)
+            return
+        peaks = sorted(float(s.peak) for s in trace)
+        n = len(peaks)
+        best = peaks[-1]
+        median = peaks[n // 2]
+        p90 = peaks[min(n - 1, int(n * 0.9))]
+        # Find t of best sample (first occurrence)
+        t_best = None
+        for s in trace:
+            if float(s.peak) == best:
+                t_best = float(s.t)
+                break
+        margin = best / threshold if threshold > 0 else 0.0
+        detail = {
+            "id": run_id, "stream": label, "status": "ok",
+            "n": n, "best": round(best, 4), "t_best": round(t_best or 0.0, 3),
+            "noise_median": round(median, 4), "noise_p90": round(p90, 4),
+            "threshold": round(threshold, 4),
+            "margin_x_threshold": round(margin, 3),
+        }
+        self._sync_log.append(SyncLogEntry(
+            ts=self._time_fn(), source="server", event="post_mortem",
+            detail=detail,
+        ))
+        logger.info(
+            "sync post_mortem id=%s stream=%s best=%.3f@%.2fs noise_med=%.3f p90=%.3f thr=%.3f margin=%.2fx n=%d",
+            run_id, label, best, t_best or 0.0, median, p90, threshold, margin, n,
+        )
+
+    def _build_aborted_result_locked(
+        self, run: "SyncRun", solved_at: float
+    ) -> SyncResult:
+        """Build a diagnostic-only `SyncResult` from a timed-out or
+        partially-reported run. Pulls whatever traces + abort reasons the
+        phones shipped so the dashboard can render the failed run's
+        matched-filter plot. delta / distance / raw timestamps stay None;
+        aborted=True is the flag dashboards should branch on."""
+        rep_a = run.reports.get("A")
+        rep_b = run.reports.get("B")
+        reasons: dict[str, str] = {}
+        if rep_a is not None and rep_a.aborted and rep_a.abort_reason:
+            reasons["A"] = rep_a.abort_reason
+        if rep_b is not None and rep_b.aborted and rep_b.abort_reason:
+            reasons["B"] = rep_b.abort_reason
+        if rep_a is None:
+            reasons.setdefault("A", "no_report")
+        if rep_b is None:
+            reasons.setdefault("B", "no_report")
+        # Post-mortem per stream: logs best peak, noise floor, and the
+        # margin to threshold so I can read the log and learn why this
+        # run failed (too far? wrong band? speaker silent?).
+        thr = self._chirp_detect_threshold
+        self._log_trace_post_mortem_locked(
+            run.id, "A.self",  rep_a.trace_self if rep_a else None, thr)
+        self._log_trace_post_mortem_locked(
+            run.id, "A.other", rep_a.trace_other if rep_a else None, thr)
+        self._log_trace_post_mortem_locked(
+            run.id, "B.self",  rep_b.trace_self if rep_b else None, thr)
+        self._log_trace_post_mortem_locked(
+            run.id, "B.other", rep_b.trace_other if rep_b else None, thr)
+        return SyncResult(
+            id=run.id,
+            delta_s=None,
+            distance_m=None,
+            solved_at=solved_at,
+            t_a_self_s=rep_a.t_self_s if rep_a else None,
+            t_a_from_b_s=rep_a.t_from_other_s if rep_a else None,
+            t_b_self_s=rep_b.t_self_s if rep_b else None,
+            t_b_from_a_s=rep_b.t_from_other_s if rep_b else None,
+            aborted=True,
+            abort_reasons=reasons,
+            trace_a_self=rep_a.trace_self if rep_a else None,
+            trace_a_other=rep_a.trace_other if rep_a else None,
+            trace_b_self=rep_b.trace_self if rep_b else None,
+            trace_b_other=rep_b.trace_other if rep_b else None,
+        )
 
     def current_sync(self) -> SyncRun | None:
         """Snapshot of the in-progress sync run (None when idle). Lazily
@@ -1126,16 +1222,47 @@ class State:
             )
             if not run.complete:
                 return run, None, None
-            result = compute_mutual_sync(
-                run.reports["A"], run.reports["B"], solved_at=now
+            rep_a = run.reports["A"]
+            rep_b = run.reports["B"]
+            # Abort path: either phone flagged aborted, OR one of its
+            # required timestamps is None. Solver needs four non-null
+            # timestamps; anything less → synthesize a diagnostic-only
+            # result carrying the traces + reasons so the /sync panel
+            # still visualises the failure.
+            any_aborted = (
+                rep_a.aborted or rep_b.aborted
+                or rep_a.t_self_s is None or rep_a.t_from_other_s is None
+                or rep_b.t_self_s is None or rep_b.t_from_other_s is None
             )
+            if any_aborted:
+                result = self._build_aborted_result_locked(run, now)
+                self._last_sync_result = result
+                self._current_sync = None
+                self._sync_cooldown_until = now + _SYNC_COOLDOWN_S
+                self._sync_log.append(SyncLogEntry(
+                    ts=now, source="server", event="aborted",
+                    detail={
+                        "id": result.id,
+                        "reasons": result.abort_reasons,
+                        "had_traces": {
+                            "a_self": rep_a.trace_self is not None,
+                            "a_other": rep_a.trace_other is not None,
+                            "b_self": rep_b.trace_self is not None,
+                            "b_other": rep_b.trace_other is not None,
+                        },
+                    },
+                ))
+                logger.warning(
+                    "sync aborted id=%s reasons=%s",
+                    result.id, result.abort_reasons,
+                )
+                return None, result, None
+            result = compute_mutual_sync(rep_a, rep_b, solved_at=now)
             # Attach per-role matched-filter traces so the /sync debug
             # plot can render post-hoc (page reload / past-run inspection)
             # — the /sync/state live tick also rides this payload via
             # model_dump. Silently None when the iPhone didn't include
             # them (old builds).
-            rep_a = run.reports["A"]
-            rep_b = run.reports["B"]
             result = result.model_copy(update={
                 "trace_a_self": rep_a.trace_self,
                 "trace_a_other": rep_a.trace_other,

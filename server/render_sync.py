@@ -132,7 +132,12 @@ _JS_TEMPLATE = r"""
     }
 
     let lastLine;
-    if (lastSync) {
+    if (lastSync && lastSync.aborted) {
+      const reasons = lastSync.abort_reasons || {};
+      const parts = Object.keys(reasons).sort().map(r => `${r}: ${reasons[r]}`);
+      const reasonTxt = parts.length ? parts.join(' · ') : 'unknown';
+      lastLine = `<div class="meta" style="color: var(--failed)">Last · ABORTED · ${esc(reasonTxt)}</div>`;
+    } else if (lastSync && lastSync.delta_s != null && lastSync.distance_m != null) {
       const deltaMs = Number(lastSync.delta_s) * 1000.0;
       const dist = Number(lastSync.distance_m);
       const sign = deltaMs >= 0 ? '+' : '';

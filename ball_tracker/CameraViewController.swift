@@ -1637,7 +1637,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             t_from_other_s: tFromOther,
             emitted_band: role,
             trace_self: traceSelfPayload.isEmpty ? nil : traceSelfPayload,
-            trace_other: traceOtherPayload.isEmpty ? nil : traceOtherPayload
+            trace_other: traceOtherPayload.isEmpty ? nil : traceOtherPayload,
+            aborted: false,
+            abort_reason: nil
         )
         // Fire-and-forget; server publishes the result via /status →
         // last_sync, so this controller doesn't need to branch on success.
@@ -1668,6 +1670,45 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             "have_self": .bool(syncSelfPTS != nil),
             "have_other": .bool(syncFromOtherPTS != nil),
         ])
+        // Ship the failure report: whatever partial timestamps we got plus
+        // the full matched-filter trace so the server can see how close
+        // we came (sub-threshold peaks, noise floor, which band fired).
+        // Without this, aborted runs left the server with no diagnostic
+        // data — every failure looked identical in logs.
+        if let syncId = pendingSyncId {
+            let role = settings.cameraRole
+            let traceSelf: [ServerUploader.TraceSamplePayload]
+            let traceOther: [ServerUploader.TraceSamplePayload]
+            if let detector = syncDetector {
+                let traces = detector.drainTraces(role: role)
+                traceSelf = traces.self_.map {
+                    ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
+                }
+                traceOther = traces.other.map {
+                    ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
+                }
+            } else {
+                traceSelf = []
+                traceOther = []
+            }
+            let report = ServerUploader.SyncReportPayload(
+                camera_id: role,
+                sync_id: syncId,
+                role: role,
+                t_self_s: syncSelfPTS,
+                t_from_other_s: syncFromOtherPTS,
+                emitted_band: role,
+                trace_self: traceSelf.isEmpty ? nil : traceSelf,
+                trace_other: traceOther.isEmpty ? nil : traceOther,
+                aborted: true,
+                abort_reason: reason
+            )
+            uploader.postSyncReport(report) { result in
+                if case .failure(let err) = result {
+                    log.error("abort report upload failed: \(err.localizedDescription, privacy: .public)")
+                }
+            }
+        }
         syncWatchdog?.cancel()
         syncWatchdog = nil
         teardownMutualSync(status: "Mutual sync · \(reason)")

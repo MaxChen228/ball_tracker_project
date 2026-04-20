@@ -252,10 +252,12 @@ class SyncReport(BaseModel):
     camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
     sync_id: str = Field(..., pattern=_SYNC_ID_PATTERN)
     role: Literal["A", "B"]
-    # mic PTS when this phone heard its own chirp (own-band matched filter)
-    t_self_s: float
-    # mic PTS when this phone heard the other phone's chirp (other-band filter)
-    t_from_other_s: float
+    # mic PTS when this phone heard its own chirp. Null when aborted without
+    # self-hear (speaker muted, silent switch on, etc.).
+    t_self_s: float | None = None
+    # mic PTS when this phone heard the other phone's chirp. Null when
+    # aborted without cross-hear (peer silent, too far, band mismatch).
+    t_from_other_s: float | None = None
     # Which frequency band this phone actually emitted — cross-checked
     # against role at the server to catch role-config drift on the rig.
     emitted_band: Literal["A", "B"]
@@ -264,22 +266,41 @@ class SyncReport(BaseModel):
     # omit these fields and the Pydantic default keeps validation passing.
     trace_self: list[SyncTraceSample] | None = None
     trace_other: list[SyncTraceSample] | None = None
+    # Failure-mode telemetry: when the phone gave up (timeout, dismissed,
+    # disarmed) it still POSTs this report with whatever traces it has so
+    # server-side post-mortem can surface sub-threshold peaks + noise floor.
+    # `aborted=true` implies at least one of `t_self_s` / `t_from_other_s`
+    # will typically be null — the whole point is shipping partial data.
+    aborted: bool = False
+    abort_reason: str | None = None
 
 
 class SyncResult(BaseModel):
-    """Solved outcome of one mutual-sync run. `delta_s` is **A clock
-    minus B clock** (a positive value means A is ahead of B). Apply it
-    as `t_on_A = t_on_B + delta_s` when re-timing B's events into A's
-    timeline."""
+    """Outcome of one mutual-sync run — solved OR aborted. `delta_s` is
+    **A clock minus B clock** (a positive value means A is ahead of B).
+    Apply it as `t_on_A = t_on_B + delta_s` when re-timing B's events into
+    A's timeline.
+
+    When `aborted=True`, `delta_s` / `distance_m` / raw timestamps are
+    None and the row is a diagnostic carrier: the traces + `abort_reasons`
+    map still describe what each phone heard (and didn't), so a post-hoc
+    dashboard / log reader can see sub-threshold peaks and noise floor."""
     id: str
-    delta_s: float
-    distance_m: float
+    delta_s: float | None = None
+    distance_m: float | None = None
     solved_at: float
     # Raw timestamps preserved for post-hoc debugging / viewer overlays.
-    t_a_self_s: float
-    t_a_from_b_s: float
-    t_b_self_s: float
-    t_b_from_a_s: float
+    # Null on aborted runs where that phone never heard the corresponding
+    # chirp.
+    t_a_self_s: float | None = None
+    t_a_from_b_s: float | None = None
+    t_b_self_s: float | None = None
+    t_b_from_a_s: float | None = None
+    # Failure-mode fields. `aborted=True` when at least one of the two
+    # phones couldn't produce a full timestamp pair. `abort_reasons` maps
+    # role → reason string ("timeout", "dismissed", "disarmed", ...).
+    aborted: bool = False
+    abort_reasons: dict[str, str] = Field(default_factory=dict)
     # Per-role matched-filter traces copied off the incoming SyncReports so
     # the /sync page can render the full peak timeline post-hoc (page
     # reload, or inspecting a past run). Optional: old iOS builds ship
