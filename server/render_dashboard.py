@@ -252,8 +252,12 @@ form.inline {{ display: inline-block; margin: 0; }}
 button.btn.preview-btn {{ padding: 3px 8px; font-size: 9px; letter-spacing: 0.10em; }}
 button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface);
                                   border-color: var(--passed); }}
-.preview-pair {{ margin-top: 8px; display: grid; grid-template-columns: 1fr 1fr;
-                  gap: var(--s-2); width: 100%; max-width: 660px; }}
+/* Devices grid: two equal columns for A and B. Each column stacks
+   header → real preview → virtual reprojection canvas. 2x2 grid in
+   total, mirrors the viewer's camera/VIRT layout. */
+.devices-grid {{ display: grid; grid-template-columns: 1fr 1fr;
+                  gap: var(--s-3); width: 100%; align-items: start; }}
+.device {{ display: flex; flex-direction: column; gap: var(--s-2); }}
 .preview-panel {{ width: 100%;
                    aspect-ratio: 16 / 9; background: #000;
                    border: 1px solid var(--border-base);
@@ -269,16 +273,28 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                                 pointer-events: none; }}
 .preview-panel.off img {{ display: none; }}
 .preview-panel.off .placeholder {{ color: rgba(255, 255, 255, 0.6); }}
-.virtual-cam {{ width: 100%; aspect-ratio: 16 / 9;
-                 background: var(--surface); border: 1px solid var(--border-base);
-                 border-radius: var(--r); overflow: hidden; position: relative; }}
-.virtual-cam .placeholder {{ position: absolute; inset: 0;
-                              display: flex; align-items: center; justify-content: center;
-                              color: var(--sub); font-family: var(--mono); font-size: 10px;
-                              letter-spacing: 0.14em; text-transform: uppercase;
-                              pointer-events: none; }}
-.virtual-cam .plot-host {{ width: 100%; height: 100%; }}
-.virtual-cam.has-plot .placeholder {{ display: none; }}
+/* Virtual camera: 2D canvas showing the plate pentagon + principal-point
+   cross reprojected through this camera's own K·[R|t]·P. Same idea as
+   the viewer's bottom-row virt canvas — if the reprojected outline
+   doesn't align with the plate in the real preview above, calibration
+   is off. */
+.virt-cell {{ width: 100%; aspect-ratio: 16 / 9;
+               background: #1A1714; border: 1px solid var(--border-base);
+               border-radius: var(--r); overflow: hidden; position: relative; }}
+.virt-cell canvas {{ width: 100%; height: 100%; display: block; }}
+.virt-cell .placeholder {{ position: absolute; inset: 0;
+                            display: flex; align-items: center; justify-content: center;
+                            color: rgba(219, 214, 205, 0.55);
+                            font-family: var(--mono); font-size: 11px;
+                            letter-spacing: 0.14em; text-transform: uppercase;
+                            pointer-events: none; }}
+.virt-cell.ready .placeholder {{ display: none; }}
+.virt-label {{ position: absolute; top: 6px; left: 6px;
+                font-family: var(--mono); font-size: 9px; letter-spacing: 0.14em;
+                color: rgba(219, 214, 205, 0.75);
+                background: rgba(26, 23, 20, 0.55); padding: 2px 6px;
+                border: 1px solid rgba(219, 214, 205, 0.2); border-radius: 3px;
+                pointer-events: none; }}
 
 /* Calibration card (Phase 5). Per-camera auto-calibrate row + an
    extended-markers block. Visually aligned with .device rows so the
@@ -981,11 +997,11 @@ _JS_TEMPLATE = r"""
         `<img data-preview-img="${esc(cam)}" src="${previewOn ? ('/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now()) : ''}" alt="preview ${esc(cam)}">` +
         `<div class="placeholder">${previewOn ? '…' : 'Preview off'}</div>` +
         `</div>`;
-      const virtualCam = `<div class="virtual-cam" data-virtual-cam="${esc(cam)}">` +
-        `<div class="plot-host" data-virtual-host="${esc(cam)}"></div>` +
-        `<div class="placeholder">${isCal ? 'loading pose…' : 'not calibrated'}</div>` +
+      const virtCell = `<div class="virt-cell" data-virt-cell="${esc(cam)}">` +
+        `<canvas data-virt-canvas="${esc(cam)}"></canvas>` +
+        `<div class="virt-label">VIRT · ${esc(cam)}</div>` +
+        `<div class="placeholder">${isCal ? 'loading…' : 'not calibrated'}</div>` +
         `</div>`;
-      const previewPair = `<div class="preview-pair">${previewPanel}${virtualCam}</div>`;
       return `
         <div class="device">
           <div class="device-head">
@@ -997,7 +1013,8 @@ _JS_TEMPLATE = r"""
             <div class="chip-col">${statusChip(cam, online, isCal)}</div>
           </div>
           <div class="device-actions">${previewBtn}${autoCalBtn}</div>
-          ${previewPair}
+          ${previewPanel}
+          ${virtCell}
         </div>`;
     }
 
@@ -1005,10 +1022,10 @@ _JS_TEMPLATE = r"""
     const extras = (state.devices || [])
       .filter(d => !EXPECTED.includes(d.camera_id))
       .map(d => row(d.camera_id, d)).join('');
-    devicesBox.innerHTML = rows + extras;
-    // The innerHTML rebuild above destroys any existing Plotly plot hosts
-    // inside the virtual-cam panels — re-mount them on the fresh DOM.
-    if (typeof repaintVirtualCams === 'function') repaintVirtualCams();
+    devicesBox.innerHTML = `<div class="devices-grid">${rows + extras}</div>`;
+    // The innerHTML rebuild above destroys any existing canvases inside
+    // the virt cells — redraw them on the fresh DOM.
+    if (typeof redrawAllVirtCanvases === 'function') redrawAllVirtCanvases();
   }
 
   const MODE_LABELS = { camera_only: 'Camera-only', on_device: 'On-device', dual: 'Dual' };
@@ -1276,23 +1293,22 @@ _JS_TEMPLATE = r"""
         calibration_last_ts: currentCalibrationLastTs,
       });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
-      // basePlot is shared between the main 3D canvas (only on /) and the
-      // per-camera mini pose panels (on / and /setup). Don't gate on
-      // sceneRoot — /setup has no scene-root div but still needs basePlot
-      // populated so repaintVirtualCams can filter traces by camera_id.
-      if (payload.plot && window.Plotly) {
+      // Update per-camera virt reprojection metadata from scene.cameras
+      // (carries fx/fy/cx/cy/R_wc/t_wc/distortion/dims).
+      virtCamMeta.clear();
+      for (const c of ((payload.scene || {}).cameras || [])) {
+        virtCamMeta.set(c.camera_id, c);
+      }
+      redrawAllVirtCanvases();
+      // Main 3D canvas lives only on `/`. Don't gate the metadata update
+      // above on sceneRoot — `/setup` still needs virt canvases drawn.
+      if (payload.plot && sceneRoot && window.Plotly) {
         const digest = JSON.stringify(payload.plot);
-        const changed = digest !== lastBasePlotDigest;
-        if (changed || basePlot === null) {
+        if (digest !== lastBasePlotDigest || basePlot === null) {
           lastBasePlotDigest = digest;
           basePlot = payload.plot;
-          if (sceneRoot) repaintCanvas();
+          repaintCanvas();
         }
-        // Always repaint virtual cams: even when basePlot content is
-        // unchanged, the device-row innerHTML rebuild (every 1 s status
-        // tick) destroys plot hosts, so we must re-mount on every
-        // calibration tick too.
-        repaintVirtualCams();
       }
     } catch (e) { /* silent */ }
   }
@@ -1410,50 +1426,94 @@ _JS_TEMPLATE = r"""
   // Reuses `basePlot` (from /calibration/state) by keeping traces with
   // meta.camera_id == this cam PLUS shared world traces (no meta/camera_id).
   // Tiny Plotly react on each calibration tick; layout cached per host.
-  function virtualCamLayoutFor(cam) {
-    return {
-      uirevision: 'virtual-cam-' + cam,
-      showlegend: false,
-      margin: { l: 0, r: 0, t: 0, b: 0 },
-      autosize: true,
-      paper_bgcolor: 'rgba(0,0,0,0)',
-      plot_bgcolor: 'rgba(0,0,0,0)',
-      scene: {
-        uirevision: 'virtual-cam-' + cam,
-        aspectmode: 'data',
-        xaxis: { showticklabels: false, title: { text: '' }, showgrid: false, zeroline: false, showbackground: false },
-        yaxis: { showticklabels: false, title: { text: '' }, showgrid: false, zeroline: false, showbackground: false },
-        zaxis: { showticklabels: false, title: { text: '' }, showgrid: false, zeroline: false, showbackground: false },
-        camera: { eye: { x: 1.6, y: -1.6, z: 1.1 } },
-      },
-    };
+  // Per-camera 2D reprojection (K·[R|t]·P). Ported from the viewer's
+  // drawVirtCanvas: project the home-plate pentagon through THIS camera's
+  // own calibration so the dashed outline lands where the camera sees the
+  // plate. If the reprojected outline doesn't sit on top of the plate in
+  // the real preview above, calibration is off.
+  const PLATE_WORLD = [
+    [-0.216, 0.0,   0.0],
+    [ 0.216, 0.0,   0.0],
+    [ 0.216, 0.216, 0.0],
+    [ 0.0,   0.432, 0.0],
+    [-0.216, 0.216, 0.0],
+  ];
+  // Populated by tickCalibration from /calibration/state `scene.cameras`.
+  const virtCamMeta = new Map();
+  function projectWorldToPixel(P, cam) {
+    const R = cam.R_wc, t = cam.t_wc;
+    if (!R || !t) return null;
+    const Xc = R[0]*P[0] + R[1]*P[1] + R[2]*P[2] + t[0];
+    const Yc = R[3]*P[0] + R[4]*P[1] + R[5]*P[2] + t[1];
+    const Zc = R[6]*P[0] + R[7]*P[1] + R[8]*P[2] + t[2];
+    if (Zc <= 0.01) return null;
+    const xn = Xc / Zc, yn = Yc / Zc;
+    const d = cam.distortion || [0, 0, 0, 0, 0];
+    const k1 = d[0] || 0, k2 = d[1] || 0, p1 = d[2] || 0, p2 = d[3] || 0, k3 = d[4] || 0;
+    const r2 = xn*xn + yn*yn, r4 = r2*r2, r6 = r4*r2;
+    const radial = 1 + k1*r2 + k2*r4 + k3*r6;
+    const xd = xn*radial + 2*p1*xn*yn + p2*(r2 + 2*xn*xn);
+    const yd = yn*radial + p1*(r2 + 2*yn*yn) + 2*p2*xn*yn;
+    return { u: cam.fx * xd + cam.cx, v: cam.fy * yd + cam.cy, z: Zc };
   }
-  function repaintVirtualCams() {
-    if (!basePlot || !window.Plotly) return;
-    const allTraces = basePlot.data || [];
-    for (const host of document.querySelectorAll('[data-virtual-host]')) {
-      const cam = host.dataset.virtualHost;
-      if (!cam) continue;
-      const container = host.closest('.virtual-cam');
-      const traces = allTraces.filter(tr => {
-        const cid = tr && tr.meta && tr.meta.camera_id;
-        return !cid || cid === cam;
-      });
-      const hasCam = traces.some(tr => tr && tr.meta && tr.meta.trace_kind === 'camera');
-      if (!hasCam) {
-        if (container) container.classList.remove('has-plot');
-        continue;
+  function drawVirtCanvas(canvas, cam) {
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth, cssH = canvas.clientHeight;
+    if (!cssW || !cssH) return false;
+    const pxW = Math.max(1, Math.floor(cssW * dpr));
+    const pxH = Math.max(1, Math.floor(cssH * dpr));
+    if (canvas.width !== pxW || canvas.height !== pxH) {
+      canvas.width = pxW; canvas.height = pxH;
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    ctx.fillStyle = '#1A1714';
+    ctx.fillRect(0, 0, cssW, cssH);
+    if (!cam || cam.fx == null || !cam.R_wc || !cam.t_wc
+        || !cam.image_width_px || !cam.image_height_px) return false;
+    const sx = cssW / cam.image_width_px;
+    const sy = cssH / cam.image_height_px;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, cssW, cssH); ctx.clip();
+    // Principal-point cross
+    const cxPx = cam.cx * sx, cyPx = cam.cy * sy;
+    ctx.strokeStyle = 'rgba(219, 214, 205, 0.25)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cxPx - 6, cyPx); ctx.lineTo(cxPx + 6, cyPx);
+    ctx.moveTo(cxPx, cyPx - 6); ctx.lineTo(cxPx, cyPx + 6);
+    ctx.stroke();
+    // Plate pentagon
+    const proj = PLATE_WORLD.map(P => projectWorldToPixel(P, cam));
+    if (proj.every(p => p !== null)) {
+      ctx.strokeStyle = 'rgba(219, 214, 205, 0.65)';
+      ctx.fillStyle = 'rgba(219, 214, 205, 0.08)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 3]);
+      ctx.beginPath();
+      for (let i = 0; i < proj.length; i++) {
+        const x = proj[i].u * sx, y = proj[i].v * sy;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
-      if (container) container.classList.add('has-plot');
-      try {
-        Plotly.react(host, traces, virtualCamLayoutFor(cam), {
-          responsive: true, displayModeBar: false, scrollZoom: true, doubleClick: false,
-        });
-      } catch (err) {
-        console.warn('virtual-cam render failed for', cam, err);
-      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+    return true;
+  }
+  function redrawAllVirtCanvases() {
+    for (const canvas of document.querySelectorAll('[data-virt-canvas]')) {
+      const cam = canvas.dataset.virtCanvas;
+      const meta = virtCamMeta.get(cam);
+      const cell = canvas.closest('.virt-cell');
+      const ok = drawVirtCanvas(canvas, meta);
+      if (cell) cell.classList.toggle('ready', ok);
     }
   }
+  window.addEventListener('resize', () => redrawAllVirtCanvases());
 
   // Prime all three immediately, then stagger polling so the UI stays
   // current without hammering the server. Status carries arming state
@@ -1632,16 +1692,14 @@ def _render_device_rows(
             f'<div class="placeholder">{_placeholder}</div>'
             f'</div>'
         )
-        virtual_cam = (
-            f'<div class="virtual-cam" data-virtual-cam="{html.escape(cam_id)}">'
-            f'<div class="plot-host" data-virtual-host="{html.escape(cam_id)}"></div>'
+        virt_cell = (
+            f'<div class="virt-cell" data-virt-cell="{html.escape(cam_id)}">'
+            f'<canvas data-virt-canvas="{html.escape(cam_id)}"></canvas>'
+            f'<div class="virt-label">VIRT &middot; {html.escape(cam_id)}</div>'
             f'<div class="placeholder">'
-            f'{"loading pose…" if is_cal else "not calibrated"}'
+            f'{"loading…" if is_cal else "not calibrated"}'
             f'</div>'
             f'</div>'
-        )
-        preview_pair = (
-            f'<div class="preview-pair">{preview_panel}{virtual_cam}</div>'
         )
         return (
             f'<div class="device">'
@@ -1654,13 +1712,14 @@ def _render_device_rows(
             f'<div class="chip-col"><span class="chip {chip_cls}">{chip_label}</span></div>'
             f'</div>'
             f'<div class="device-actions">{preview_btn}{auto_cal_btn}</div>'
-            f'{preview_pair}'
+            f'{preview_panel}'
+            f'{virt_cell}'
             f'</div>'
         )
 
     rows = [render_row(cam) for cam in ("A", "B")]
     rows.extend(render_row(d["camera_id"]) for d in devices if d["camera_id"] not in ("A", "B"))
-    return "".join(rows)
+    return f'<div class="devices-grid">{"".join(rows)}</div>'
 
 
 def _render_extended_markers_body(
