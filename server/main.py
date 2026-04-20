@@ -231,6 +231,13 @@ class State:
         self._sync_command_pending: dict[str, float] = {}
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
+        # Runtime tunables pushed from the dashboard, hot-applied on the
+        # iPhone via the heartbeat reply. Persisted so a server restart
+        # doesn't silently drop the operator's last-chosen values.
+        self._chirp_detect_threshold: float = 0.18
+        self._heartbeat_interval_s: float = 1.0
+        self._runtime_settings_path = data_dir / "runtime_settings.json"
+        self._load_runtime_settings_from_disk()
         # Calibrations first — _load_from_disk re-triangulates every cached
         # pitch, and triangulation needs the calibration snapshot to decide
         # the intrinsic-scale factor (MOV dims vs. calibration dims).
@@ -609,6 +616,87 @@ class State:
         with self._lock:
             self._current_mode = mode
             return mode
+
+    # ---- Runtime tunables (chirp detection threshold + heartbeat cadence) --
+    #
+    # Both are pushed from the dashboard, surface on every heartbeat reply,
+    # and are hot-applied by iOS. Persisted together to a single JSON file
+    # so a restart doesn't drop the operator's choice. iOS Settings UI still
+    # holds a local bootstrap default but the server push wins on first
+    # heartbeat.
+
+    _CHIRP_THRESHOLD_MIN = 0.01
+    _CHIRP_THRESHOLD_MAX = 1.0
+    _HEARTBEAT_INTERVAL_MIN = 1.0
+    _HEARTBEAT_INTERVAL_MAX = 60.0
+
+    def _load_runtime_settings_from_disk(self) -> None:
+        path = self._runtime_settings_path
+        if not path.exists():
+            return
+        try:
+            obj = json.loads(path.read_text())
+        except Exception as e:
+            logger.warning("skip corrupt runtime_settings %s: %s", path, e)
+            return
+        thr = obj.get("chirp_detect_threshold")
+        if isinstance(thr, (int, float)) and self._CHIRP_THRESHOLD_MIN <= thr <= self._CHIRP_THRESHOLD_MAX:
+            self._chirp_detect_threshold = float(thr)
+        ivl = obj.get("heartbeat_interval_s")
+        if isinstance(ivl, (int, float)) and self._HEARTBEAT_INTERVAL_MIN <= ivl <= self._HEARTBEAT_INTERVAL_MAX:
+            self._heartbeat_interval_s = float(ivl)
+        logger.info(
+            "restored runtime_settings: chirp=%.3f interval_s=%.2f",
+            self._chirp_detect_threshold,
+            self._heartbeat_interval_s,
+        )
+
+    def _persist_runtime_settings_locked(self) -> None:
+        """Caller must hold `self._lock`. Atomic write."""
+        payload = json.dumps(
+            {
+                "chirp_detect_threshold": self._chirp_detect_threshold,
+                "heartbeat_interval_s": self._heartbeat_interval_s,
+            },
+            indent=2,
+        )
+        self._atomic_write(self._runtime_settings_path, payload)
+
+    def chirp_detect_threshold(self) -> float:
+        with self._lock:
+            return self._chirp_detect_threshold
+
+    def set_chirp_detect_threshold(self, value: float) -> float:
+        if not isinstance(value, (int, float)):
+            raise ValueError("threshold must be numeric")
+        v = float(value)
+        if not (self._CHIRP_THRESHOLD_MIN <= v <= self._CHIRP_THRESHOLD_MAX):
+            raise ValueError(
+                f"threshold {v} out of range "
+                f"[{self._CHIRP_THRESHOLD_MIN}, {self._CHIRP_THRESHOLD_MAX}]"
+            )
+        with self._lock:
+            self._chirp_detect_threshold = v
+            self._persist_runtime_settings_locked()
+            return v
+
+    def heartbeat_interval_s(self) -> float:
+        with self._lock:
+            return self._heartbeat_interval_s
+
+    def set_heartbeat_interval_s(self, value: float) -> float:
+        if not isinstance(value, (int, float)):
+            raise ValueError("interval must be numeric")
+        v = float(value)
+        if not (self._HEARTBEAT_INTERVAL_MIN <= v <= self._HEARTBEAT_INTERVAL_MAX):
+            raise ValueError(
+                f"interval {v} out of range "
+                f"[{self._HEARTBEAT_INTERVAL_MIN}, {self._HEARTBEAT_INTERVAL_MAX}]"
+            )
+        with self._lock:
+            self._heartbeat_interval_s = v
+            self._persist_runtime_settings_locked()
+            return v
 
     def stop_session(self) -> Session | None:
         """End the current armed session (operator pressed Stop on the
@@ -1303,6 +1391,11 @@ def _build_status_response() -> dict[str, Any]:
         # clears the flag. `/status` surfaces this map so the dashboard
         # can paint a "pending" badge until the phone drains it.
         "sync_commands": state.pending_sync_commands(),
+        # Runtime tunables pushed from the dashboard. iOS hot-applies any
+        # changes on every heartbeat reply (matched-filter threshold into
+        # AudioChirpDetector; cadence into ServerHealthMonitor).
+        "chirp_detect_threshold": state.chirp_detect_threshold(),
+        "heartbeat_interval_s": state.heartbeat_interval_s(),
     }
 
 
@@ -1383,6 +1476,68 @@ async def sessions_set_mode(
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "capture_mode": applied.value}
+
+
+@app.post("/settings/chirp_threshold")
+async def settings_chirp_threshold(request: Request):
+    """Set the chirp matched-filter detection threshold. Accepts either a
+    JSON body `{threshold: float}` or a form field `threshold`. HTML form
+    callers get 303 back to /; JSON callers get `{ok, value}`."""
+    threshold: float | None = None
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json()
+        try:
+            threshold = float(body.get("threshold"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="missing or invalid 'threshold'")
+    else:
+        form = await request.form()
+        raw = form.get("threshold")
+        if raw is None:
+            raise HTTPException(status_code=400, detail="missing 'threshold'")
+        try:
+            threshold = float(raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid 'threshold'")
+    try:
+        applied = state.set_chirp_detect_threshold(threshold)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "value": applied}
+
+
+@app.post("/settings/heartbeat_interval")
+async def settings_heartbeat_interval(request: Request):
+    """Set the iPhone heartbeat base cadence (seconds). Accepts JSON
+    `{interval_s: float}` or form field `interval_s`. HTML callers get
+    303 back to /; JSON callers get `{ok, value}`."""
+    interval: float | None = None
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json()
+        try:
+            interval = float(body.get("interval_s"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="missing or invalid 'interval_s'")
+    else:
+        form = await request.form()
+        raw = form.get("interval_s")
+        if raw is None:
+            raise HTTPException(status_code=400, detail="missing 'interval_s'")
+        try:
+            interval = float(raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid 'interval_s'")
+    try:
+        applied = state.set_heartbeat_interval_s(interval)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "value": applied}
 
 
 @app.post("/sessions/clear")
@@ -2219,6 +2374,8 @@ def events_index() -> HTMLResponse:
             capture_mode=state.current_mode().value,
             sync=sync_run.to_dict() if sync_run is not None else None,
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
+            chirp_detect_threshold=state.chirp_detect_threshold(),
+            heartbeat_interval_s=state.heartbeat_interval_s(),
         )
     )
 

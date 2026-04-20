@@ -206,6 +206,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// reads this at cycle-complete to decide whether to upload the MOV or
     /// just the detection JSON.
     private var currentCaptureMode: ServerUploader.CaptureMode = .cameraOnly
+    /// Cache of the server-pushed runtime tunables so the heartbeat
+    /// callback can skip hot-apply when the value hasn't changed. `nil`
+    /// means "never heard from the server yet" — the first heartbeat
+    /// triggers the initial apply regardless of whether the server
+    /// value happens to equal the local Settings bootstrap default.
+    private var lastServerChirpThreshold: Double?
+    private var lastServerHeartbeatInterval: Double?
     private let readyCard = ReadyCard()
     private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
@@ -1135,6 +1142,26 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self.currentCaptureMode = mode
             DispatchQueue.main.async {
                 self.modeLabel.text = "MODE · \(mode.displayLabel.uppercased())"
+            }
+            // Hot-apply server-pushed runtime tunables. Dashboard-pushed
+            // values win over local Settings once the first heartbeat
+            // arrives; we only call the setters when the value actually
+            // changed, so a steady-state heartbeat is a no-op.
+            if let pushedThr = response.chirp_detect_threshold,
+               self.lastServerChirpThreshold != pushedThr {
+                self.lastServerChirpThreshold = pushedThr
+                DispatchQueue.main.async {
+                    self.chirpDetector?.setThreshold(Float(pushedThr))
+                    log.info("chirp threshold hot-applied from server: \(pushedThr)")
+                }
+            }
+            if let pushedIvl = response.heartbeat_interval_s,
+               self.lastServerHeartbeatInterval != pushedIvl {
+                self.lastServerHeartbeatInterval = pushedIvl
+                DispatchQueue.main.async {
+                    self.healthMonitor.updateBaseInterval(pushedIvl)
+                    log.info("heartbeat interval hot-applied from server: \(pushedIvl)s")
+                }
             }
             let cam = self.settings.cameraRole
             let cmd = response.commands?[cam]
