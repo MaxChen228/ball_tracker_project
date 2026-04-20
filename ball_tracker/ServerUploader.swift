@@ -45,6 +45,10 @@ final class ServerUploader {
         /// by this alone — iPhones no longer mint any pairing identifier.
         /// Pattern: `s_` + 4–16 hex chars (matches the server regex).
         let session_id: String
+        /// Shared legacy chirp sync-run id. Both phones must stamp the
+        /// same id onto their recovered chirp anchor; a mismatch means the
+        /// anchors came from different sync attempts and are incomparable.
+        let sync_id: String?
         /// Session-clock PTS of the audio-chirp peak (from 時間校正). Nil
         /// when the operator armed without running a fresh time sync; the
         /// server flags this session as unpaireable.
@@ -90,6 +94,7 @@ final class ServerUploader {
             PitchPayload(
                 camera_id: camera_id,
                 session_id: session_id,
+                sync_id: sync_id,
                 sync_anchor_timestamp_s: sync_anchor_timestamp_s,
                 video_start_pts_s: video_start_pts_s,
                 local_recording_index: local_recording_index,
@@ -107,6 +112,7 @@ final class ServerUploader {
             PitchPayload(
                 camera_id: camera_id,
                 session_id: session_id,
+                sync_id: sync_id,
                 sync_anchor_timestamp_s: sync_anchor_timestamp_s,
                 video_start_pts_s: video_start_pts_s,
                 local_recording_index: local_recording_index,
@@ -151,6 +157,9 @@ final class ServerUploader {
     struct HeartbeatDevice: Codable {
         let camera_id: String
         let last_seen_at: Double
+        let time_synced: Bool?
+        let time_sync_id: String?
+        let time_sync_age_s: Double?
     }
 
     /// Current armed/ended session, or nil when the server has never
@@ -215,6 +224,10 @@ final class ServerUploader {
         /// the local 時間校正 button triggers. Null when idle. Optional
         /// for back-compat with older server builds.
         let sync_command: String?
+        /// Shared legacy chirp sync id paired with `sync_command`.
+        /// Present on newer servers so the phone can stamp the same
+        /// `sync_id` into the anchor it recovers from that run.
+        let sync_command_id: String?
         /// Server-pushed matched-filter chirp detection threshold.
         /// Hot-applied via `AudioChirpDetector.setThreshold(_:)`. The
         /// local iOS Settings value acts as a bootstrap default; once a
@@ -680,6 +693,7 @@ final class ServerUploader {
     func sendHeartbeat(
         cameraId: String,
         timeSynced: Bool = false,
+        timeSyncId: String? = nil,
         completion: @escaping (Result<HeartbeatResponse, Error>) -> Void
     ) {
         guard let base = config.baseURL() else {
@@ -698,10 +712,15 @@ final class ServerUploader {
         struct HeartbeatRequestBody: Codable {
             let camera_id: String
             let time_synced: Bool
+            let time_sync_id: String?
         }
         do {
             request.httpBody = try JSONEncoder().encode(
-                HeartbeatRequestBody(camera_id: cameraId, time_synced: timeSynced)
+                HeartbeatRequestBody(
+                    camera_id: cameraId,
+                    time_synced: timeSynced,
+                    time_sync_id: timeSyncId
+                )
             )
         } catch {
             completion(.failure(error))
@@ -732,6 +751,63 @@ final class ServerUploader {
             do {
                 let decoded = try JSONDecoder().decode(HeartbeatResponse.self, from: data)
                 completion(.success(decoded))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+        task.resume()
+    }
+
+    struct TimeSyncClaimResponse: Codable {
+        let ok: Bool
+        let sync_id: String
+        let started_at: Double
+        let expires_at: Double
+    }
+
+    /// Claim the currently-live legacy chirp sync run id from the server,
+    /// minting a fresh one when the previous listening window expired.
+    /// Both phones calling this within the same window receive the same
+    /// `sync_id`, which is what lets their third-device chirp anchors be
+    /// proven to belong to the same event.
+    func claimTimeSyncIntent(
+        completion: @escaping (Result<TimeSyncClaimResponse, Error>) -> Void
+    ) {
+        guard let base = config.baseURL() else {
+            completion(.failure(NSError(
+                domain: "ServerUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
+            )))
+            return
+        }
+        let url = base.appendingPathComponent("sync/claim")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                completion(.failure(error))
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                completion(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
+                )))
+                return
+            }
+            guard let data else {
+                completion(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "Empty response"]
+                )))
+                return
+            }
+            do {
+                completion(.success(try JSONDecoder().decode(TimeSyncClaimResponse.self, from: data)))
             } catch {
                 completion(.failure(error))
             }

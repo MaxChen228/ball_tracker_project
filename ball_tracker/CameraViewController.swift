@@ -32,6 +32,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case uploading
     }
 
+    private struct SyncAnchor {
+        let syncId: String
+        let anchorTimestampS: Double
+    }
+
     // Adaptive capture rate. Idle / time-sync runs at 60 fps to keep the
     // sensor + ISP cool and save battery; `.recording` switches to 240 fps
     // so the 8 ms A/B pair window gets sub-frame resolution server-side.
@@ -189,7 +194,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // chirp peak from the mic matched filter. Stamped onto outgoing
     // payloads as `sync_anchor_timestamp_s`. Nil until the user completes
     // a 時間校正; server rejects unpaired sessions whose anchor is nil.
-    private var lastSyncAnchorTimestampS: Double?
+    private var lastSyncAnchor: SyncAnchor?
+    private var pendingTimeSyncId: String?
+    private var timeSyncClaimGeneration: Int = 0
+    private var lastSyncAnchorTimestampS: Double? { lastSyncAnchor?.anchorTimestampS }
+    private var lastSyncId: String? { lastSyncAnchor?.syncId }
 
     // Time-sync timeout task so we can cancel if the user aborts early.
     private var timeSyncTimeoutWork: DispatchWorkItem?
@@ -340,6 +349,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             guard let self else { return }
             let finishingClip = self.clipRecorder
             self.clipRecorder = nil
+            if payload.sync_id != nil {
+                self.lastSyncAnchor = nil
+                self.healthMonitor?.updateTimeSyncId(nil)
+                DispatchQueue.main.async { self.updateUIForState() }
+            }
             log.info("camera cycle complete session=\(payload.session_id, privacy: .public) cam=\(payload.camera_id, privacy: .public) has_clip=\(finishingClip != nil)")
             // End-of-recording feedback — haptic + system sound so the
             // operator knows the cycle finished without looking down.
@@ -680,7 +694,39 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         updateUIForState()
     }
 
-    private func startTimeSync() {
+    private func startTimeSync(syncId: String? = nil) {
+        if let syncId {
+            beginTimeSync(syncId: syncId)
+            return
+        }
+        timeSyncClaimGeneration &+= 1
+        let generation = timeSyncClaimGeneration
+        warningLabel.text = "向伺服器請求時間校正識別碼…"
+        warningLabel.isHidden = false
+        lastUploadStatusText = "時間校正中 · 取得 sync id"
+        uploader.claimTimeSyncIntent { [weak self] result in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                guard generation == self.timeSyncClaimGeneration else { return }
+                guard self.state == .standby else { return }
+                switch result {
+                case .success(let response):
+                    self.beginTimeSync(syncId: response.sync_id)
+                case .failure(let error):
+                    log.error("time-sync claim failed cam=\(self.settings.cameraRole, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
+                    self.pendingTimeSyncId = nil
+                    self.warningLabel.text = "無法取得同步識別碼：檢查伺服器連線"
+                    self.warningLabel.textColor = DesignTokens.Colors.destructive
+                    self.warningLabel.isHidden = false
+                    self.lastUploadStatusText = "時間校正失敗 · sync id"
+                    self.updateUIForState()
+                }
+            }
+        }
+    }
+
+    private func beginTimeSync(syncId: String) {
+        pendingTimeSyncId = syncId
         guard let detector = chirpDetector else {
             // Mic permission still pending or denied — try once more.
             setupAudioCapture()
@@ -703,6 +749,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         state = .timeSyncWaiting
         frameStateBox.update(state: .timeSyncWaiting, pendingBootstrap: false, sessionId: nil)
         warningLabel.text = "等待同步音頻觸發中… (把兩機並排，第三裝置播 chirp)"
+        warningLabel.textColor = DesignTokens.Colors.ink
         warningLabel.isHidden = false
         lastUploadStatusText = "時間校正中 · 等待聲波"
 
@@ -716,10 +763,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func cancelTimeSync(reason: String = "cancelled") {
         log.info("camera cancel time-sync reason=\(reason, privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
+        timeSyncClaimGeneration &+= 1
         timeSyncTimeoutWork?.cancel()
         timeSyncTimeoutWork = nil
         chirpDetector?.onChirpDetected = nil
         latestChirpSnapshot = nil
+        pendingTimeSyncId = nil
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
         // Already at standbyFps — leave the session running for preview.
@@ -751,14 +800,20 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func completeTimeSync(_ event: AudioChirpDetector.ChirpEvent) {
         guard state == .timeSyncWaiting else { return }
-        log.info("camera complete time-sync anchor_frame=\(event.anchorFrameIndex) anchor_ts=\(event.anchorTimestampS) cam=\(self.settings.cameraRole, privacy: .public)")
+        guard let syncId = pendingTimeSyncId else {
+            log.error("camera complete time-sync without sync_id cam=\(self.settings.cameraRole, privacy: .public)")
+            cancelTimeSync(reason: "missing_sync_id")
+            return
+        }
+        log.info("camera complete time-sync anchor_frame=\(event.anchorFrameIndex) anchor_ts=\(event.anchorTimestampS) sync_id=\(syncId, privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         timeSyncTimeoutWork?.cancel()
         timeSyncTimeoutWork = nil
         chirpDetector?.onChirpDetected = nil
-        lastSyncAnchorTimestampS = event.anchorTimestampS
+        pendingTimeSyncId = nil
+        lastSyncAnchor = SyncAnchor(syncId: syncId, anchorTimestampS: event.anchorTimestampS)
         // Surface the freshly-acquired anchor to the dashboard via the
         // next heartbeat so the sidebar's "time sync" dot flips green.
-        healthMonitor?.updateTimeSynced(true)
+        healthMonitor?.updateTimeSyncId(syncId)
         latestChirpSnapshot = nil
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
@@ -1540,7 +1595,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             if response.sync_command == "start" {
                 DispatchQueue.main.async {
                     if self.state == .standby {
-                        self.startTimeSync()
+                        if let syncId = response.sync_command_id {
+                            self.startTimeSync(syncId: syncId)
+                        } else {
+                            log.warning("ignore dashboard time-sync: missing sync_command_id")
+                        }
                         self.updateUIForState()
                     } else {
                         log.info("ignore dashboard time-sync: state=\(String(describing: self.state), privacy: .public) not standby")
@@ -2238,6 +2297,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case "timeout": return "逾時"
         case "cancelled": return "已取消"
         case "disarmed": return "已取消（dashboard 停止）"
+        case "missing_sync_id": return "缺少 sync id"
         default: return reason
         }
     }
@@ -2438,6 +2498,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             log.info("camera first frame, starting recorder session=\(sid, privacy: .public) mode=\(self.currentCaptureMode.rawValue, privacy: .public) video_start_pts=\(timestampS) anchor=\(self.lastSyncAnchorTimestampS ?? .nan)")
             recorder.startRecording(
                 sessionId: sid,
+                syncId: lastSyncId,
                 anchorTimestampS: lastSyncAnchorTimestampS,
                 videoStartPtsS: timestampS,
                 captureTelemetry: currentCaptureTelemetry(targetFps: trackingFps)
