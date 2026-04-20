@@ -703,6 +703,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         session.beginConfiguration()
 
         if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
+            dumpAvailableFormats(for: device)
             do {
                 try configureCaptureFormat(
                     device,
@@ -748,6 +749,35 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         preview.isHidden = true
         view.layer.insertSublayer(preview, at: 0)
         previewLayer = preview
+    }
+
+    private func dumpAvailableFormats(for device: AVCaptureDevice) {
+        log.info("camera format dump begin device=\(device.localizedName, privacy: .public) uniqueID=\(device.uniqueID, privacy: .public)")
+        for (index, format) in device.formats.enumerated() {
+            let desc = format.formatDescription
+            let dims = CMVideoFormatDescriptionGetDimensions(desc)
+            let width = Int(dims.width)
+            let height = Int(dims.height)
+            let aspect = String(format: "%.4f", Double(width) / Double(height))
+            let fpsRanges = format.videoSupportedFrameRateRanges.map { range in
+                String(format: "%.0f-%.0f", range.minFrameRate, range.maxFrameRate)
+            }.joined(separator: ",")
+            let supports120 = format.videoSupportedFrameRateRanges.contains { range in
+                range.minFrameRate <= 120 && range.maxFrameRate >= 120
+            }
+            let supports240 = format.videoSupportedFrameRateRanges.contains { range in
+                range.minFrameRate <= 240 && range.maxFrameRate >= 240
+            }
+            let mediaSubType = CMFormatDescriptionGetMediaSubType(desc)
+            let isBinned = format.isVideoBinned
+            let fov = format.videoFieldOfView
+            let fovText = String(format: "%.3f", fov)
+            let subTypeText = String(format: "%08X", mediaSubType)
+            log.info(
+                "camera format[\(index)] \(width)x\(height) aspect=\(aspect, privacy: .public) fps_ranges=[\(fpsRanges, privacy: .public)] supports120=\(supports120, privacy: .public) supports240=\(supports240, privacy: .public) fov_deg=\(fovText, privacy: .public) binned=\(isBinned, privacy: .public) subtype=\(subTypeText, privacy: .public)"
+            )
+        }
+        log.info("camera format dump end count=\(device.formats.count)")
     }
 
     enum CaptureFormatError: LocalizedError {
@@ -2237,4 +2267,3 @@ final class FrameStateBox {
         return prev
     }
 }
-
