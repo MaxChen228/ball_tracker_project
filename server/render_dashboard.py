@@ -548,6 +548,7 @@ _JS_TEMPLATE = r"""
   }
 
   function updateTimeReadout() {
+    if (!timeReadout || !scrubSlider) return;
     const dur = activeFitDuration();
     const now = dur * playheadFrac;
     timeReadout.textContent = `${now.toFixed(2)} / ${dur.toFixed(2)} s`;
@@ -780,10 +781,10 @@ _JS_TEMPLATE = r"""
   // Delegated change handler — event list re-renders on every tick, so we
   // can't rebind per-checkbox. Capture click on the wrapping <label> to
   // prevent the event-row <a> from swallowing the toggle.
-  eventsBox.addEventListener('click', (e) => {
+  if (eventsBox) eventsBox.addEventListener('click', (e) => {
     if (e.target.closest('.traj-toggle')) e.stopPropagation();
   });
-  eventsBox.addEventListener('change', (e) => {
+  if (eventsBox) eventsBox.addEventListener('change', (e) => {
     const cb = e.target.closest('input[data-traj-sid]');
     if (!cb) return;
     const sid = cb.dataset.trajSid;
@@ -823,10 +824,10 @@ _JS_TEMPLATE = r"""
     // scrubber when leaving so we don't keep the animation loop running
     // invisibly (wasted frames + broken readout on return).
     if (canvasMode === 'replay') {
-      playbackBar.classList.add('show');
+      if (playbackBar) playbackBar.classList.add('show');
       updateTimeReadout();
     } else {
-      playbackBar.classList.remove('show');
+      if (playbackBar) playbackBar.classList.remove('show');
       setPlaying(false);
     }
     repaintCanvas();
@@ -859,7 +860,7 @@ _JS_TEMPLATE = r"""
 
   function setPlaying(flag) {
     isPlaying = !!flag;
-    playpauseBtn.textContent = isPlaying ? '❚❚' : '▶';
+    if (playpauseBtn) playpauseBtn.textContent = isPlaying ? '❚❚' : '▶';
     if (isPlaying) {
       lastFrameTs = null;
       requestAnimationFrame(animationTick);
@@ -888,11 +889,11 @@ _JS_TEMPLATE = r"""
     lastFrameTs = ts;
     if (isPlaying) requestAnimationFrame(animationTick);
   }
-  playpauseBtn.addEventListener('click', () => {
+  if (playpauseBtn) playpauseBtn.addEventListener('click', () => {
     if (activeFitDuration() <= 0) return;  // nothing to play
     setPlaying(!isPlaying);
   });
-  scrubSlider.addEventListener('input', () => {
+  if (scrubSlider) scrubSlider.addEventListener('input', () => {
     playheadFrac = Math.max(0, Math.min(1, parseInt(scrubSlider.value, 10) / 1000.0));
     setPlaying(false);  // user scrub pauses playback
     updateTimeReadout();
@@ -922,6 +923,7 @@ _JS_TEMPLATE = r"""
   }
 
   function renderDevices(state) {
+    if (!devicesBox) return;
     const devByCam = new Map((state.devices || []).map(d => [d.camera_id, d]));
     const calibrated = new Set(state.calibrations || []);
     const syncPending = state.sync_commands || {};
@@ -977,6 +979,7 @@ _JS_TEMPLATE = r"""
   const MODE_LABELS = { camera_only: 'Camera-only', on_device: 'On-device', dual: 'Dual' };
 
   function renderSession(state) {
+    if (!sessionBox) { /* nav-only render still executes below */ }
     const s = state.session;
     const armed = !!(s && s.armed);
     const chip = armed ? `<span class="chip armed">armed</span>` : `<span class="chip idle">idle</span>`;
@@ -1026,12 +1029,14 @@ _JS_TEMPLATE = r"""
         ${clearBtn}
       </div>
       ${modeRow}`;
-    sessionBox.innerHTML = sessHtml;
+    if (sessionBox) sessionBox.innerHTML = sessHtml;
 
     // Mirror into the nav's tiny status strip. Also surface a tiny Sync
-    // chip (syncing / cooldown / idle) + a link to /sync so the operator
-    // sees sync state at a glance from the main dashboard.
-    if (navStatus) {
+    // chip (syncing / cooldown / idle) + a link to /setup so the operator
+    // sees sync state at a glance from the main dashboard. Suppressed on
+    // /setup where render_sync.py's renderNav owns the nav instead (its
+    // link says "← Dashboard" and it also tracks matched-filter state).
+    if (navStatus && document.body.dataset.page !== 'setup') {
       const online = (state.devices || []).length;
       const cal = (state.calibrations || []).length;
       const countCls = n => (n >= 2 ? 'full' : 'partial');
@@ -1049,7 +1054,7 @@ _JS_TEMPLATE = r"""
           : `<span class="val idle">idle</span>`) +
         `</span>` +
         `<span class="pair"><span class="label">Sync</span><span class="val ${syncCls}">${syncLabel}</span></span>` +
-        `<a class="nav-link" href="/sync">Sync &rarr;</a>`;
+        `<a class="nav-link" href="/setup">Setup &rarr;</a>`;
       navStatus.innerHTML = navHtml;
     }
   }
@@ -1064,6 +1069,7 @@ _JS_TEMPLATE = r"""
   // in the nav status strip, populated by renderSession off /status.)
 
   function renderEvents(events) {
+    if (!eventsBox) return;
     let evHtml;
     if (!events || events.length === 0) {
       eventsBox.innerHTML = `<div class="events-empty">No sessions received yet.</div>`;
@@ -1810,7 +1816,7 @@ def _render_nav_status(
         f'<span class="pair"><span class="label">Calibrated</span><span class="val {cal_cls}">{len(calibrations)}/2</span></span>'
         f'<span class="pair"><span class="label">Session</span>{session_html}</span>'
         f'<span class="pair"><span class="label">Sync</span><span class="val {sync_cls}">{sync_label}</span></span>'
-        f'<a class="nav-link" href="/sync">Sync &rarr;</a>'
+        f'<a class="nav-link" href="/setup">Setup &rarr;</a>'
     )
 
 
@@ -1950,17 +1956,8 @@ def render_events_index_html(
         '<div class="layout">'
         '<aside class="sidebar">'
         '<div class="card">'
-        '<h2 class="card-title">Devices &middot; Calibration</h2>'
-        f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested)}</div>'
-        f'<div id="extended-markers-body">{_render_extended_markers_body(["A", "B"], extended_markers)}</div>'
-        "</div>"
-        '<div class="card">'
         '<h2 class="card-title">Session</h2>'
         f'<div id="session-body">{_render_session_body(session, capture_mode)}</div>'
-        "</div>"
-        '<div class="card">'
-        '<h2 class="card-title">Runtime &middot; Tuning</h2>'
-        f'<div id="tuning-body">{_render_tuning_body(chirp_detect_threshold, heartbeat_interval_s, capture_height_px)}</div>'
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Events</h2>'
