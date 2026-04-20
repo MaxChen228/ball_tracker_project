@@ -259,6 +259,11 @@ class CalibrationSnapshot(BaseModel):
     homography: list[float] = Field(..., min_length=9, max_length=9)
     image_width_px: int
     image_height_px: int
+    # Optional: the grid the intrinsics were ORIGINALLY COMPUTED FROM (e.g.
+    # 4032×3024 ChArUco stills subsequently scaled + cropped to the capture
+    # grid). Knowing both lets the server detect 4:3→16:9 basis mismatches.
+    source_width_px: int | None = None
+    source_height_px: int | None = None
 
 
 # nobody threw anything" — otherwise /status would keep dispatching arm

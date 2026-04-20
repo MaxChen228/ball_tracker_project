@@ -87,6 +87,19 @@ def scale_pitch_to_video_dims(
     if ref_w <= 0 or ref_h <= 0:
         return pitch
     if ref_w == pitch.image_width_px and ref_h == pitch.image_height_px:
+        # No scaling needed, but still sanity-check the intrinsics that
+        # will actually drive triangulation — catches the dims-match-but-
+        # basis-is-wrong case where calibration metadata agrees with the
+        # MOV grid yet cx/cy sit far off centre because the intrinsics
+        # were baked from a cropped 4:3 source and someone lied about
+        # the scale history.
+        _log_intrinsics_sanity(
+            pitch.intrinsics,
+            pitch.image_width_px,
+            pitch.image_height_px,
+            pitch.camera_id,
+            pitch.session_id,
+        )
         return pitch
     sx = pitch.image_width_px / ref_w
     sy = pitch.image_height_px / ref_h
@@ -96,12 +109,73 @@ def scale_pitch_to_video_dims(
         pitch.camera_id, pitch.session_id,
         ref_w, ref_h, pitch.image_width_px, pitch.image_height_px, sx, sy,
     )
+    scaled_intrinsics = _scale_intrinsics(pitch.intrinsics, sx, sy)
+    # After rescaling, cx/cy should live near the MOV's image centre. Log
+    # whenever they don't — that's almost always a basis-dims mismatch
+    # (calibration recorded at grid A, intrinsics actually baked at B)
+    # which would otherwise produce silently-wrong 3D positions.
+    _log_intrinsics_sanity(
+        scaled_intrinsics,
+        pitch.image_width_px,
+        pitch.image_height_px,
+        pitch.camera_id,
+        pitch.session_id,
+    )
     return pitch.model_copy(
         update={
-            "intrinsics": _scale_intrinsics(pitch.intrinsics, sx, sy),
+            "intrinsics": scaled_intrinsics,
             "homography": _scale_homography(pitch.homography, sx, sy),
         }
     )
+
+
+# Principal point (cx, cy) is expected to sit near the image centre for a
+# correctly-calibrated main rear camera — deviations of a few percent are
+# normal from sensor/lens decentering, but anything beyond this tolerance
+# usually means the intrinsics basis doesn't match the declared image
+# dimensions (e.g. calibration baked at 4032×3024 but snapshot claims
+# 1920×1080, with no rescale applied). We WARN rather than reject so
+# forensic inspection still works — a silently wrong triangulation is
+# worse than an explicit warning in logs.
+_PRINCIPAL_POINT_MAX_OFFSET_FRAC = 0.15
+
+
+def _log_intrinsics_sanity(
+    intr: IntrinsicsPayload,
+    image_w: int | None,
+    image_h: int | None,
+    camera_id: str,
+    session_id: str,
+) -> None:
+    """Sanity-check the intrinsics against the declared image dimensions.
+
+    Emits a single INFO log per pitch summarising (cx/w, cy/h) and a
+    WARNING when either fraction deviates from 0.5 by more than
+    `_PRINCIPAL_POINT_MAX_OFFSET_FRAC`. The common silent-failure pattern
+    in this codebase is: calibration ships intrinsics baked at grid A
+    while the pitch metadata claims grid B with no scale applied —
+    manifesting as cx/cy being offset nowhere near image centre.
+    """
+    if image_w is None or image_h is None or image_w <= 0 or image_h <= 0:
+        return
+    cx_frac = intr.cx / float(image_w)
+    cy_frac = intr.cy / float(image_h)
+    cx_off = abs(cx_frac - 0.5)
+    cy_off = abs(cy_frac - 0.5)
+    if cx_off > _PRINCIPAL_POINT_MAX_OFFSET_FRAC or cy_off > _PRINCIPAL_POINT_MAX_OFFSET_FRAC:
+        logger.warning(
+            "intrinsics principal-point OFF camera=%s session=%s "
+            "cx=%.1f cy=%.1f dims=%dx%d cx/w=%.3f cy/h=%.3f "
+            "(expected ~0.5, tolerance ±%.2f) — basis/dims mismatch likely",
+            camera_id, session_id, intr.cx, intr.cy, image_w, image_h,
+            cx_frac, cy_frac, _PRINCIPAL_POINT_MAX_OFFSET_FRAC,
+        )
+    else:
+        logger.info(
+            "intrinsics principal-point ok camera=%s session=%s "
+            "cx/w=%.3f cy/h=%.3f dims=%dx%d",
+            camera_id, session_id, cx_frac, cy_frac, image_w, image_h,
+        )
 
 
 def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):

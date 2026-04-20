@@ -196,7 +196,6 @@ def _pitch_at(
     return PitchPayload(
         camera_id="A",
         session_id="s_cafebabe",
-        sync_id="sy_deadbeef",
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
@@ -305,3 +304,59 @@ def test_scale_pitch_roundtrip_preserves_projected_pixel():
     sx = 1280 / 1920
     sy = 720 / 1080
     np.testing.assert_allclose(pix_720, pix_1080 * np.array([sx, sy]), atol=1e-9)
+
+
+# --------------------------- intrinsics sanity check ------------------------
+
+
+def test_sanity_check_quiet_on_centered_intrinsics(caplog):
+    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=540.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1920, 1080, intr, H)
+    import logging
+    with caplog.at_level(logging.WARNING, logger="pairing"):
+        scale_pitch_to_video_dims(pitch, (1920, 1080))
+    # No WARNING for a well-centered cx/cy.
+    assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_sanity_check_warns_when_principal_point_off_center(caplog):
+    # cy=800 out of 1080 ⇒ cy/h=0.741 — exactly the footprint of a 4:3→16:9
+    # crop basis mismatch.
+    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=800.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1920, 1080, intr, H)
+    import logging
+    with caplog.at_level(logging.WARNING, logger="pairing"):
+        scale_pitch_to_video_dims(pitch, (1920, 1080))
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "principal-point OFF" in warnings[0].getMessage()
+
+
+def test_sanity_check_runs_after_scaling(caplog):
+    # Intrinsics baked at 1920×1080 but video actually at 1280×720. After
+    # scale_pitch rescales cx/cy proportionally, they should still be near
+    # the centre of the new grid — so no warning fires.
+    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=540.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, intr, H)
+    import logging
+    with caplog.at_level(logging.WARNING, logger="pairing"):
+        scale_pitch_to_video_dims(pitch, (1920, 1080))
+    assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_sanity_check_warns_on_wrong_basis_after_scaling(caplog):
+    # Intrinsics baked at 4032×3024 (iPhone photo), metadata lies and
+    # claims 1920×1080. Our rescale from 1920→1280 then leaves cx/cy way
+    # past the frame — loud warning is exactly the outcome we want.
+    intr = IntrinsicsPayload(fx=3000.0, fz=3000.0, cx=2016.0, cy=1512.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, intr, H)
+    import logging
+    with caplog.at_level(logging.WARNING, logger="pairing"):
+        scale_pitch_to_video_dims(pitch, (1920, 1080))
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "principal-point OFF" in warnings[0].getMessage()
