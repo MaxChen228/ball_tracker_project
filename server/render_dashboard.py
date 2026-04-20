@@ -146,13 +146,22 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
                  text-transform: uppercase; color: var(--sub); }}
 .device .meta em {{ font-style: normal; color: var(--ink-light); }}
 /* Sub-line stacks vertically so long labels ("not synced", "last 16:13")
-   never get truncated. One item per line, full card width. */
-.device .sub {{ display: flex; flex-direction: column; gap: 2px;
+   never get truncated. One item per line, full card width. Warn/bad
+   states get an obvious tinted background so an offline / not-synced
+   camera jumps out of the card at a glance. */
+.device .sub {{ display: flex; flex-direction: column; gap: 3px;
                 margin-top: var(--s-1); }}
 .device .sub .item {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
                       text-transform: uppercase; color: var(--sub);
                       display: flex; align-items: center; gap: var(--s-2);
+                      padding: 3px 8px; border-radius: var(--r);
                       white-space: nowrap; }}
+.device .sub .item.ok {{ background: rgba(56, 142, 60, 0.06);
+                         color: var(--ink); }}
+.device .sub .item.warn {{ background: rgba(230, 145, 40, 0.14);
+                           color: #8a4a00; font-weight: 700; }}
+.device .sub .item.bad {{ background: rgba(210, 50, 50, 0.14);
+                          color: #a6262f; font-weight: 700; }}
 .device .sub .dot {{ width: 7px; height: 7px; border-radius: 50%;
                      background: var(--border-base); display: inline-block;
                      flex-shrink: 0; }}
@@ -941,15 +950,15 @@ _JS_TEMPLATE = r"""
         `${previewOn ? 'PREVIEW ON' : 'PREVIEW'}</button>`;
       const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}">Auto calibrate</button>`;
       const previewPanel = previewOn
-        ? `<div class="preview-panel" data-preview-panel="${esc(cam)}"><img data-preview-img="${esc(cam)}" src="/camera/${encodeURIComponent(cam)}/preview?t=${Date.now()}" alt="preview ${esc(cam)}" onerror="this.style.opacity=0.3"></div>`
+        ? `<div class="preview-panel" data-preview-panel="${esc(cam)}"><img data-preview-img="${esc(cam)}" src="/camera/${encodeURIComponent(cam)}/preview?annotate=1&t=${Date.now()}" alt="preview ${esc(cam)}" onerror="this.style.opacity=0.3"></div>`
         : '';
       return `
         <div class="device">
           <div class="device-head">
             <div class="id">${esc(cam)}</div>
             <div class="sub">
-              <span class="item"><span class="dot ${syncDot}"></span>time sync · ${esc(syncLabel)}</span>
-              <span class="item"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>
+              <span class="item ${syncDot}"><span class="dot ${syncDot}"></span>time sync · ${esc(syncLabel)}</span>
+              <span class="item ${calDot}"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>
             </div>
             <div class="chip-col">${statusChip(cam, online, isCal)}</div>
           </div>
@@ -1344,7 +1353,7 @@ _JS_TEMPLATE = r"""
     for (const img of document.querySelectorAll('img[data-preview-img]')) {
       const cam = img.dataset.previewImg;
       if (!cam) continue;
-      img.src = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + t;
+      img.src = '/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + t;
       img.style.opacity = 1;
     }
   }
@@ -1518,7 +1527,7 @@ def _render_device_rows(
         preview_panel = (
             f'<div class="preview-panel" data-preview-panel="{html.escape(cam_id)}">'
             f'<img data-preview-img="{html.escape(cam_id)}" '
-            f'src="/camera/{html.escape(cam_id)}/preview" '
+            f'src="/camera/{html.escape(cam_id)}/preview?annotate=1" '
             f'alt="preview {html.escape(cam_id)}" onerror="this.style.opacity=0.3">'
             f'</div>'
         ) if preview_on else ""
@@ -1527,8 +1536,8 @@ def _render_device_rows(
             f'<div class="device-head">'
             f'<div class="id">{html.escape(cam_id)}</div>'
             f'<div class="sub">'
-            f'<span class="item"><span class="dot {sync_dot}"></span>time sync · {sync_label}</span>'
-            f'<span class="item"><span class="dot {cal_dot}"></span>pose · {cal_label}</span>'
+            f'<span class="item {sync_dot}"><span class="dot {sync_dot}"></span>time sync · {sync_label}</span>'
+            f'<span class="item {cal_dot}"><span class="dot {cal_dot}"></span>pose · {cal_label}</span>'
             f'</div>'
             f'<div class="chip-col"><span class="chip {chip_cls}">{chip_label}</span></div>'
             f'</div>'
