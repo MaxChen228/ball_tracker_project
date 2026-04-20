@@ -683,6 +683,18 @@ final class ServerUploader {
         let t_self_s: Double      // mic PTS when own chirp was heard
         let t_from_other_s: Double  // mic PTS when peer's chirp was heard
         let emitted_band: String  // "A" | "B" — rig-config cross-check
+        // Optional matched-filter traces (own-band + other-band) for the
+        // `/sync` debug plot. Mirrors `SyncTraceSample` / `SyncReport` on
+        // the server — both fields optional so a build without trace
+        // support still validates.
+        let trace_self: [TraceSamplePayload]?
+        let trace_other: [TraceSamplePayload]?
+    }
+
+    struct TraceSamplePayload: Codable {
+        let t: Double
+        let peak: Float
+        let psr: Float
     }
 
     /// Upload this phone's mutual-sync matched-filter report. Fire-and-

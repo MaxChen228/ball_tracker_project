@@ -782,6 +782,19 @@ class State:
             result = compute_mutual_sync(
                 run.reports["A"], run.reports["B"], solved_at=now
             )
+            # Attach per-role matched-filter traces so the /sync debug
+            # plot can render post-hoc (page reload / past-run inspection)
+            # — the /sync/state live tick also rides this payload via
+            # model_dump. Silently None when the iPhone didn't include
+            # them (old builds).
+            rep_a = run.reports["A"]
+            rep_b = run.reports["B"]
+            result = result.model_copy(update={
+                "trace_a_self": rep_a.trace_self,
+                "trace_a_other": rep_a.trace_other,
+                "trace_b_self": rep_b.trace_self,
+                "trace_b_other": rep_b.trace_other,
+            })
             self._last_sync_result = result
             self._current_sync = None
             self._sync_cooldown_until = now + _SYNC_COOLDOWN_S
@@ -1993,7 +2006,6 @@ def events_index() -> HTMLResponse:
 
     session = state.session_snapshot()
     sync_run = state.current_sync()
-    last_sync = state.last_sync_result()
     return HTMLResponse(
         render_events_index_html(
             events=state.events(),
@@ -2008,6 +2020,34 @@ def events_index() -> HTMLResponse:
             session=session.to_dict() if session is not None else None,
             calibrations=sorted(state.calibrations().keys()),
             capture_mode=state.current_mode().value,
+            sync=sync_run.to_dict() if sync_run is not None else None,
+            sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
+        )
+    )
+
+
+@app.get("/sync", response_class=HTMLResponse)
+def sync_page() -> HTMLResponse:
+    """Dedicated Time Sync page — control card, matched-filter trace plot,
+    and the diagnostic log. Split out of `/` so long-distance sync debug
+    has room for the plot without crowding the sidebar."""
+    from render_sync import render_sync_html
+
+    session = state.session_snapshot()
+    sync_run = state.current_sync()
+    last_sync = state.last_sync_result()
+    return HTMLResponse(
+        render_sync_html(
+            devices=[
+                {
+                    "camera_id": d.camera_id,
+                    "last_seen_at": d.last_seen_at,
+                    "time_synced": d.time_synced,
+                }
+                for d in state.online_devices()
+            ],
+            session=session.to_dict() if session is not None else None,
+            calibrations=sorted(state.calibrations().keys()),
             sync=sync_run.to_dict() if sync_run is not None else None,
             last_sync=last_sync.model_dump() if last_sync is not None else None,
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),

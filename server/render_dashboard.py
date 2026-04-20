@@ -86,6 +86,14 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
    as actionable instead of reading as a flat label next to "1/2 cal". */
 .nav .status-line .val.partial {{ color: var(--warn); }}
 .nav .status-line .val.full    {{ color: var(--passed); }}
+/* Standalone nav link (points at /sync). Monospace, uppercase, subtle
+   underline on hover — same rhythm as the surrounding label/val pairs. */
+.nav .status-line .nav-link {{ color: var(--ink); text-decoration: none;
+                                font-family: var(--mono); font-size: 11px;
+                                letter-spacing: 0.10em; text-transform: uppercase;
+                                border-bottom: 1px solid transparent;
+                                padding-bottom: 1px; }}
+.nav .status-line .nav-link:hover {{ border-bottom-color: var(--ink); }}
 
 /* --- Main layout: sidebar + canvas --- */
 .layout {{ display: flex; height: 100vh; padding-top: var(--nav-h); }}
@@ -344,7 +352,6 @@ _JS_TEMPLATE = r"""
   const sceneRoot = document.getElementById('scene-root');
   const devicesBox = document.getElementById('devices-body');
   const sessionBox = document.getElementById('session-body');
-  const syncBox = document.getElementById('sync-body');
   const eventsBox = document.getElementById('events-body');
   const navStatus = document.getElementById('nav-status');
 
@@ -912,11 +919,18 @@ _JS_TEMPLATE = r"""
       ${modeRow}`;
     sessionBox.innerHTML = sessHtml;
 
-    // Mirror into the nav's tiny status strip.
+    // Mirror into the nav's tiny status strip. Also surface a tiny Sync
+    // chip (syncing / cooldown / idle) + a link to /sync so the operator
+    // sees sync state at a glance from the main dashboard.
     if (navStatus) {
       const online = (state.devices || []).length;
       const cal = (state.calibrations || []).length;
       const countCls = n => (n >= 2 ? 'full' : 'partial');
+      const cooldown = Number(state.sync_cooldown_remaining_s || 0);
+      const syncLabel = state.sync ? 'syncing'
+                                   : (cooldown > 0 ? 'cooldown' : 'idle');
+      const syncCls = state.sync ? 'armed'
+                                : (cooldown > 0 ? 'partial' : 'idle');
       const navHtml = `
         <span class="pair"><span class="label">Devices</span><span class="val ${countCls(online)}">${online}/2</span></span>
         <span class="pair"><span class="label">Calibrated</span><span class="val ${countCls(cal)}">${cal}/2</span></span>
@@ -924,7 +938,9 @@ _JS_TEMPLATE = r"""
         (armed
           ? `<span class="val armed">${esc(s.id || '—')}</span>`
           : `<span class="val idle">idle</span>`) +
-        `</span>`;
+        `</span>` +
+        `<span class="pair"><span class="label">Sync</span><span class="val ${syncCls}">${syncLabel}</span></span>` +
+        `<a class="nav-link" href="/sync">Sync &rarr;</a>`;
       navStatus.innerHTML = navHtml;
     }
   }
@@ -934,190 +950,9 @@ _JS_TEMPLATE = r"""
     return Number(v).toFixed(digits);
   }
 
-  let _lastSyncRenderKey = null;
-
-  // Update the cooldown countdown text in place without rebuilding the
-  // card. Called on every tickStatus even when the dedup key is unchanged,
-  // so the number stays live while buttons retain their :hover state.
-  function updateSyncCountdown(state) {
-    const el = document.getElementById('sync-cooldown-val');
-    if (!el) return;
-    const cooldown = Number(state.sync_cooldown_remaining_s || 0);
-    if (cooldown > 0) {
-      el.textContent = `Ready in ${cooldown.toFixed(1)} s`;
-    } else {
-      el.textContent = '';
-    }
-  }
-
-  function renderSync(state) {
-    if (!syncBox) return;
-    const sync = state.sync;
-    const lastSync = state.last_sync;
-    const sessionArmed = !!(state.session && state.session.armed);
-    const cooldown = Number(state.sync_cooldown_remaining_s || 0);
-    const onlineIds = new Set((state.devices || []).map(d => d.camera_id));
-    const bothOnline = onlineIds.has('A') && onlineIds.has('B');
-    const syncing = !!sync;
-    const cooling = cooldown > 0;
-    const disabled = syncing || sessionArmed || !bothOnline || cooling;
-
-    // Dedup key intentionally EXCLUDES the numerical cooldown value —
-    // including it rebuilt the card 20× during each 10 s cooldown and
-    // every rebuild swapped syncBox.innerHTML, wiping :hover on the
-    // Run / Copy / Clear buttons and causing a visible flicker. The
-    // live countdown updates via `updateSyncCountdown` instead, which
-    // only touches the text node inside #sync-cooldown-val and leaves
-    // button DOM nodes (and their pseudo-state) intact.
-    const receivedKey = sync ? (sync.reports_received || []).join(',') : '';
-    const lastKey = lastSync
-      ? `${lastSync.id}:${lastSync.delta_s}:${lastSync.distance_m}`
-      : '';
-    const key = JSON.stringify({
-      syncing, sessionArmed, bothOnline, cooling,
-      received: receivedKey, last: lastKey,
-    });
-    if (key === _lastSyncRenderKey) {
-      // Card structure hasn't changed — still refresh the in-place
-      // cooldown text so the user sees it tick down.
-      updateSyncCountdown(state);
-      return;
-    }
-    _lastSyncRenderKey = key;
-
-    let chip, statusLine = '';
-    if (syncing) {
-      chip = '<span class="chip armed">syncing</span>';
-      const received = (sync.reports_received || []).join(', ') || '—';
-      statusLine = `<div class="meta">Waiting for reports · ${esc(received)}</div>`;
-    } else if (cooling) {
-      chip = '<span class="chip idle">cooldown</span>';
-      // Seconds text lives in a targeted span so updateSyncCountdown can
-      // update it in place without rebuilding the card (and wiping
-      // :hover styles on the surrounding buttons).
-      statusLine = `<div class="meta" id="sync-cooldown-val">Ready in ${cooldown.toFixed(1)} s</div>`;
-    } else {
-      chip = '<span class="chip idle">idle</span>';
-    }
-
-    let lastLine;
-    if (lastSync) {
-      const deltaMs = Number(lastSync.delta_s) * 1000.0;
-      const dist = Number(lastSync.distance_m);
-      const sign = deltaMs >= 0 ? '+' : '';
-      lastLine = `<div class="meta">Last · Δ=${sign}${deltaMs.toFixed(3)} ms · D=${dist.toFixed(3)} m</div>`;
-    } else {
-      lastLine = '<div class="meta">No sync yet.</div>';
-    }
-
-    let title = '';
-    if (!bothOnline) title = ' title="Need both A and B online"';
-    else if (sessionArmed) title = ' title="Stop the armed session first"';
-    else if (syncing) title = ' title="Sync in progress"';
-    else if (cooling) title = ` title="Cooldown: ${cooldown.toFixed(1)} s remaining"`;
-
-    const btn = `<form class="inline" method="POST" action="/sync/start" id="sync-form">
-        <button class="btn" type="submit" ${disabled ? 'disabled' : ''}${title}>Run mutual sync</button>
-      </form>`;
-
-    // Preserve the <pre id="sync-log"> content across re-renders (it's
-    // populated by the dedicated /sync/state tick, and a full syncBox
-    // rebuild would wipe the text the user is about to copy).
-    const existingLog = document.getElementById('sync-log');
-    const savedLog = existingLog ? existingLog.textContent : '';
-
-    syncBox.innerHTML = `
-      <div class="session-head">${chip}</div>
-      ${statusLine}
-      ${lastLine}
-      <div class="session-actions">${btn}</div>
-      <div class="sync-log-head">
-        <span class="sync-log-label">Log</span>
-        <button type="button" class="btn secondary small" id="sync-log-copy">Copy</button>
-        <button type="button" class="btn secondary small" id="sync-log-clear">Clear view</button>
-      </div>
-      <pre class="sync-log" id="sync-log"></pre>`;
-
-    const logEl = document.getElementById('sync-log');
-    if (logEl && savedLog) logEl.textContent = savedLog;
-  }
-
-  // --- Sync log tick ---------------------------------------------------
-  //
-  // Separate tick from /status so a full log fetch (a few KB) doesn't
-  // piggyback on the 1 s status ping. 2 s is fast enough to see events
-  // scroll during a run without inflating bandwidth when idle.
-  let _syncLogClearedAtTs = 0;
-  function fmtSyncLogEntry(entry) {
-    const d = new Date(entry.ts * 1000);
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mm = String(d.getMinutes()).padStart(2, '0');
-    const ss = String(d.getSeconds()).padStart(2, '0');
-    const ms = String(d.getMilliseconds()).padStart(3, '0');
-    const src = (entry.source || '?').padEnd(6);
-    const detail = entry.detail && Object.keys(entry.detail).length
-      ? ' ' + Object.entries(entry.detail)
-          .map(([k, v]) => {
-            const sv = typeof v === 'object' ? JSON.stringify(v)
-                       : (typeof v === 'number' && !Number.isInteger(v))
-                         ? Number(v).toFixed(6)
-                         : String(v);
-            return `${k}=${sv}`;
-          })
-          .join(' ')
-      : '';
-    return `[${hh}:${mm}:${ss}.${ms}] ${src} ${entry.event}${detail}`;
-  }
-
-  async function tickSyncLog() {
-    const logEl = document.getElementById('sync-log');
-    if (!logEl) return;
-    try {
-      const r = await fetch('/sync/state?log_limit=200', { cache: 'no-store' });
-      if (!r.ok) return;
-      const body = await r.json();
-      const entries = (body.logs || []).filter(e => e.ts >= _syncLogClearedAtTs);
-      if (!entries.length) {
-        logEl.textContent = '';
-        return;
-      }
-      const text = entries.map(fmtSyncLogEntry).join('\n');
-      if (text !== logEl.textContent) {
-        const atBottom = (logEl.scrollTop + logEl.clientHeight) >= (logEl.scrollHeight - 4);
-        logEl.textContent = text;
-        if (atBottom) logEl.scrollTop = logEl.scrollHeight;
-      }
-    } catch (e) { /* silent */ }
-  }
-
-  document.addEventListener('click', async (e) => {
-    const t = e.target;
-    if (!(t instanceof HTMLElement)) return;
-    if (t.id === 'sync-log-copy') {
-      const logEl = document.getElementById('sync-log');
-      if (!logEl) return;
-      const text = logEl.textContent || '';
-      try {
-        await navigator.clipboard.writeText(text);
-        const orig = t.textContent;
-        t.textContent = 'Copied';
-        setTimeout(() => { t.textContent = orig; }, 1200);
-      } catch (_) {
-        // Fallback: select the pre so the user can copy with Cmd-C.
-        const range = document.createRange();
-        range.selectNodeContents(logEl);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-      }
-    } else if (t.id === 'sync-log-clear') {
-      // Client-side only — doesn't delete server ring entries, just hides
-      // anything older than this moment so the panel resets to "empty".
-      _syncLogClearedAtTs = Date.now() / 1000;
-      const logEl = document.getElementById('sync-log');
-      if (logEl) logEl.textContent = '';
-    }
-  });
+  // (Time Sync rendering lives on /sync now — render_sync.py. The
+  // dashboard still surfaces a tiny "Sync · syncing/cooldown/idle" chip
+  // in the nav status strip, populated by renderSession off /status.)
 
   function renderEvents(events) {
     let evHtml;
@@ -1216,10 +1051,12 @@ _JS_TEMPLATE = r"""
       armed: !!(s && s.armed), id: s && s.id, mode: s && s.mode,
       capture_mode: state.capture_mode,
     });
+    const cooldownBucket = Number(state.sync_cooldown_remaining_s || 0) > 0 ? 1 : 0;
     const navKey = JSON.stringify({
       online: (state.devices || []).length,
       cal: (state.calibrations || []).length,
       armed: !!(s && s.armed), id: s && s.id,
+      syncing: !!state.sync, cooling: cooldownBucket,
     });
     if (sessKey === _lastSessKey && navKey === _lastNavKey) return;
     _lastSessKey = sessKey;
@@ -1250,7 +1087,6 @@ _JS_TEMPLATE = r"""
       currentCaptureMode = s.capture_mode || 'camera_only';
       renderDevices(s);
       renderSession(s);
-      renderSync(s);
     } catch (e) { /* silent retry next tick */ }
   }
 
@@ -1328,33 +1164,7 @@ _JS_TEMPLATE = r"""
       catch (_) {}
       return;
     }
-    // Mutual-sync kickoff: fetch POST so the UI doesn't do a full-page
-    // redirect. Conflicts (409) surface as a brief inline hint; success
-    // flips the card into "syncing" via the next /status tick.
-    if (form.action && form.action.endsWith('/sync/start')) {
-      e.preventDefault();
-      const btn = form.querySelector('button');
-      if (btn) btn.disabled = true;
-      try {
-        const resp = await fetch('/sync/start', { method: 'POST' });
-        if (!resp.ok) {
-          let reason = 'sync failed';
-          try {
-            const body = await resp.json();
-            reason = (body.detail && body.detail.error) || reason;
-          } catch (_) {}
-          // Transient hint until the next tickStatus paints the real state.
-          const hint = document.createElement('div');
-          hint.className = 'meta';
-          hint.style.color = 'var(--bad, #b00)';
-          hint.textContent = 'Error: ' + reason;
-          syncBox.appendChild(hint);
-          setTimeout(() => hint.remove(), 3000);
-        }
-      } catch (_) {
-        // Network-level failure: next tickStatus will re-enable the button.
-      }
-    }
+    // (Mutual-sync kickoff is handled on /sync now.)
   });
 
   // Prime all three immediately, then stagger polling so the UI stays
@@ -1363,11 +1173,9 @@ _JS_TEMPLATE = r"""
   tickStatus();
   tickCalibration();
   tickEvents();
-  tickSyncLog();
   setInterval(tickStatus, 1000);
   setInterval(tickCalibration, 5000);
   setInterval(tickEvents, 5000);
-  setInterval(tickSyncLog, 2000);
 })();
 """
 
@@ -1497,82 +1305,6 @@ def _render_session_body(
     )
 
 
-def _render_sync_body(
-    sync: dict[str, Any] | None,
-    last_sync: dict[str, Any] | None,
-    devices: list[dict[str, Any]],
-    session: dict[str, Any] | None,
-    cooldown_remaining_s: float,
-) -> str:
-    """Initial paint for the Time Sync card. JS `renderSync` replaces this
-    on first `/status` tick. Button disable logic mirrors the JS so SSR
-    and hydrated states agree."""
-    session_armed = session is not None and session.get("armed")
-    syncing = sync is not None
-    online_ids = {d.get("camera_id") for d in devices}
-    both_online = "A" in online_ids and "B" in online_ids
-    cooling = cooldown_remaining_s > 0.0
-    disabled = syncing or session_armed or not both_online or cooling
-
-    if syncing:
-        chip = '<span class="chip armed">syncing</span>'
-        received = ", ".join(sync.get("reports_received") or []) or "—"
-        status_line = f'<div class="meta">Waiting for reports · {html.escape(received)}</div>'
-    elif cooling:
-        chip = '<span class="chip idle">cooldown</span>'
-        status_line = (
-            f'<div class="meta" id="sync-cooldown-val">'
-            f'Ready in {cooldown_remaining_s:.1f} s</div>'
-        )
-    else:
-        chip = '<span class="chip idle">idle</span>'
-        status_line = ""
-
-    if last_sync:
-        delta_ms = last_sync.get("delta_s", 0.0) * 1000.0
-        dist_m = last_sync.get("distance_m", 0.0)
-        last_line = (
-            f'<div class="meta">Last · Δ={delta_ms:+.3f} ms · D={dist_m:.3f} m</div>'
-        )
-    else:
-        last_line = '<div class="meta">No sync yet.</div>'
-
-    reason = ""
-    if not both_online:
-        reason = " title=\"Need both A and B online\""
-    elif session_armed:
-        reason = " title=\"Stop the armed session first\""
-    elif syncing:
-        reason = " title=\"Sync in progress\""
-    elif cooling:
-        reason = f" title=\"Cooldown: {cooldown_remaining_s:.1f} s remaining\""
-
-    btn_attrs = ' disabled' if disabled else ''
-    btn = (
-        '<form class="inline" method="POST" action="/sync/start" id="sync-form">'
-        f'<button class="btn" type="submit"{btn_attrs}{reason}>Run mutual sync</button>'
-        "</form>"
-    )
-    # Diagnostic log panel: populated by `renderSync` off the 1 s
-    # tickStatus — SSR just provides the container so the first paint
-    # isn't a layout shift.
-    log_panel = (
-        '<div class="sync-log-head">'
-        '<span class="sync-log-label">Log</span>'
-        '<button type="button" class="btn secondary small" id="sync-log-copy">Copy</button>'
-        '<button type="button" class="btn secondary small" id="sync-log-clear">Clear view</button>'
-        '</div>'
-        '<pre class="sync-log" id="sync-log"></pre>'
-    )
-    return (
-        f'<div class="session-head">{chip}</div>'
-        f'{status_line}'
-        f'{last_line}'
-        f'<div class="session-actions">{btn}</div>'
-        f'{log_panel}'
-    )
-
-
 def _render_events_body(events: list[dict[str, Any]]) -> str:
     if not events:
         return '<div class="events-empty">No sessions received yet.</div>'
@@ -1650,6 +1382,8 @@ def _render_nav_status(
     devices: list[dict[str, Any]],
     session: dict[str, Any] | None,
     calibrations: list[str],
+    sync: dict[str, Any] | None = None,
+    sync_cooldown_remaining_s: float = 0.0,
 ) -> str:
     armed = session is not None and session.get("armed")
     session_html = (
@@ -1658,13 +1392,21 @@ def _render_nav_status(
         else '<span class="val idle">idle</span>'
     )
     def _count_cls(n: int) -> str:
-        return "full" if n >= 2 else ("partial" if n >= 1 else "partial")
+        return "full" if n >= 2 else "partial"
     dev_cls = _count_cls(len(devices))
     cal_cls = _count_cls(len(calibrations))
+    if sync is not None:
+        sync_label, sync_cls = "syncing", "armed"
+    elif sync_cooldown_remaining_s > 0.0:
+        sync_label, sync_cls = "cooldown", "partial"
+    else:
+        sync_label, sync_cls = "idle", "idle"
     return (
         f'<span class="pair"><span class="label">Devices</span><span class="val {dev_cls}">{len(devices)}/2</span></span>'
         f'<span class="pair"><span class="label">Calibrated</span><span class="val {cal_cls}">{len(calibrations)}/2</span></span>'
         f'<span class="pair"><span class="label">Session</span>{session_html}</span>'
+        f'<span class="pair"><span class="label">Sync</span><span class="val {sync_cls}">{sync_label}</span></span>'
+        f'<a class="nav-link" href="/sync">Sync &rarr;</a>'
     )
 
 
@@ -1675,7 +1417,6 @@ def render_events_index_html(
     calibrations: list[str] | None = None,
     capture_mode: str = "camera_only",
     sync: dict[str, Any] | None = None,
-    last_sync: dict[str, Any] | None = None,
     sync_cooldown_remaining_s: float = 0.0,
 ) -> str:
     """Render the dashboard: top nav + sidebar (devices / session / events)
@@ -1729,7 +1470,7 @@ def render_events_index_html(
         "</head><body>"
         '<nav class="nav">'
         '<span class="brand"><span class="dot"></span>BALL_TRACKER</span>'
-        f'<div class="status-line" id="nav-status">{_render_nav_status(devices, session, calibrations)}</div>'
+        f'<div class="status-line" id="nav-status">{_render_nav_status(devices, session, calibrations, sync, sync_cooldown_remaining_s)}</div>'
         "</nav>"
         '<div class="layout">'
         '<aside class="sidebar">'
@@ -1740,10 +1481,6 @@ def render_events_index_html(
         '<div class="card">'
         '<h2 class="card-title">Session</h2>'
         f'<div id="session-body">{_render_session_body(session, capture_mode)}</div>'
-        "</div>"
-        '<div class="card">'
-        '<h2 class="card-title">Time Sync</h2>'
-        f'<div id="sync-body">{_render_sync_body(sync, last_sync, devices, session, sync_cooldown_remaining_s)}</div>'
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Events</h2>'

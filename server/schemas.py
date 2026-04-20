@@ -214,6 +214,28 @@ _DEFAULT_SESSION_TIMEOUT_S = 60.0
 _SYNC_ID_PATTERN = r"^sy_[0-9a-f]{4,32}$"
 
 
+# Mirror the defaults baked into `AudioSyncDetector.swift` (threshold=0.18,
+# minPSR=1.5 at runtime but the debug plot reference line uses a looser 3.0
+# to match the historical sync-health bar). Exposed here so the sync page
+# can draw a reference line without plumbing them through render code.
+SYNC_TRACE_THRESHOLD = 0.18
+SYNC_TRACE_MIN_PSR = 3.0
+
+
+class SyncTraceSample(BaseModel):
+    """One matched-filter sample from a phone's dual-band detector. The
+    trace buffer collects these at ~30 Hz during a sync run so the
+    dashboard can plot sub-threshold peaks (the whole point of the debug
+    view — long-distance failures manifest as peaks that never crossed
+    0.18)."""
+    # Run-relative seconds (subtract firstPTS from the sample's PTS).
+    t: float
+    # Normalized matched-filter peak in [0, 1] — same metric the gate uses.
+    peak: float
+    # Peak-to-sidelobe ratio (best / second-best outside exclusion window).
+    psr: float
+
+
 class SyncReport(BaseModel):
     """Wire payload for `POST /sync/report`. Each phone submits one of
     these once both the self-hear and cross-hear matched-filter peaks have
@@ -229,6 +251,11 @@ class SyncReport(BaseModel):
     # Which frequency band this phone actually emitted — cross-checked
     # against role at the server to catch role-config drift on the rig.
     emitted_band: Literal["A", "B"]
+    # Optional rolling matched-filter traces (own-band + other-band) for
+    # the sync debug plot. Old iOS builds that don't collect traces simply
+    # omit these fields and the Pydantic default keeps validation passing.
+    trace_self: list[SyncTraceSample] | None = None
+    trace_other: list[SyncTraceSample] | None = None
 
 
 class SyncResult(BaseModel):
@@ -245,6 +272,14 @@ class SyncResult(BaseModel):
     t_a_from_b_s: float
     t_b_self_s: float
     t_b_from_a_s: float
+    # Per-role matched-filter traces copied off the incoming SyncReports so
+    # the /sync page can render the full peak timeline post-hoc (page
+    # reload, or inspecting a past run). Optional: old iOS builds ship
+    # reports without traces.
+    trace_a_self: list[SyncTraceSample] | None = None
+    trace_a_other: list[SyncTraceSample] | None = None
+    trace_b_self: list[SyncTraceSample] | None = None
+    trace_b_other: list[SyncTraceSample] | None = None
 
 
 class SyncLogEntry(BaseModel):

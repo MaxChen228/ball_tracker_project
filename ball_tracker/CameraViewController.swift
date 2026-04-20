@@ -1432,13 +1432,31 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         syncWatchdog = nil
 
         let role = settings.cameraRole
+        // Drain the detector's rolling matched-filter traces so the server
+        // can render the `/sync` debug plot. Empty arrays if this run
+        // never populated them (shouldn't happen in normal flow, but old
+        // detectors / aborted runs could land here).
+        let traces: (self_: [AudioSyncDetector.TraceSample], other: [AudioSyncDetector.TraceSample])
+        if let detector = syncDetector {
+            traces = detector.drainTraces(role: role)
+        } else {
+            traces = ([], [])
+        }
+        let traceSelfPayload = traces.self_.map {
+            ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
+        }
+        let traceOtherPayload = traces.other.map {
+            ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
+        }
         let report = ServerUploader.SyncReportPayload(
             camera_id: role,
             sync_id: syncId,
             role: role,
             t_self_s: tSelf,
             t_from_other_s: tFromOther,
-            emitted_band: role
+            emitted_band: role,
+            trace_self: traceSelfPayload.isEmpty ? nil : traceSelfPayload,
+            trace_other: traceOtherPayload.isEmpty ? nil : traceOtherPayload
         )
         // Fire-and-forget; server publishes the result via /status →
         // last_sync, so this controller doesn't need to branch on success.
