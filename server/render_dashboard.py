@@ -941,7 +941,7 @@ _JS_TEMPLATE = r"""
         `${previewOn ? 'PREVIEW ON' : 'PREVIEW'}</button>`;
       const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}">Auto calibrate</button>`;
       const previewPanel = previewOn
-        ? `<div class="preview-panel" data-preview-panel="${esc(cam)}"><img src="/camera/${encodeURIComponent(cam)}/preview.mjpeg?t=${Date.now()}" alt="preview ${esc(cam)}"></div>`
+        ? `<div class="preview-panel" data-preview-panel="${esc(cam)}"><img data-preview-img="${esc(cam)}" src="/camera/${encodeURIComponent(cam)}/preview?t=${Date.now()}" alt="preview ${esc(cam)}" onerror="this.style.opacity=0.3"></div>`
         : '';
       return `
         <div class="device">
@@ -1332,6 +1332,24 @@ _JS_TEMPLATE = r"""
   }
   setInterval(tickPreviewRefresh, 2000);
 
+  // Preview image polling. MJPEG streaming via <img> is flaky across
+  // browsers (Chrome silently aborts when the server's first multipart
+  // boundary doesn't land within a short window), so we bump a
+  // cache-busting query-string on every <img data-preview-img> every
+  // 200 ms — ~5 fps preview, trivial to debug via the Network tab, and
+  // each frame is a normal GET /camera/{id}/preview that returns a
+  // single JPEG or 404.
+  function tickPreviewImages() {
+    const t = Date.now();
+    for (const img of document.querySelectorAll('img[data-preview-img]')) {
+      const cam = img.dataset.previewImg;
+      if (!cam) continue;
+      img.src = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + t;
+      img.style.opacity = 1;
+    }
+  }
+  setInterval(tickPreviewImages, 200);
+
   // Prime all three immediately, then stagger polling so the UI stays
   // current without hammering the server. Status carries arming state
   // --- CALIBRATION card (Phase 5) -------------------------------------
@@ -1499,7 +1517,9 @@ def _render_device_rows(
         )
         preview_panel = (
             f'<div class="preview-panel" data-preview-panel="{html.escape(cam_id)}">'
-            f'<img src="/camera/{html.escape(cam_id)}/preview.mjpeg" alt="preview {html.escape(cam_id)}">'
+            f'<img data-preview-img="{html.escape(cam_id)}" '
+            f'src="/camera/{html.escape(cam_id)}/preview" '
+            f'alt="preview {html.escape(cam_id)}" onerror="this.style.opacity=0.3">'
             f'</div>'
         ) if preview_on else ""
         return (
