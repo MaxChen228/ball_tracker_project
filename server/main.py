@@ -244,6 +244,11 @@ class State:
         # doesn't silently drop the operator's last-chosen values.
         self._chirp_detect_threshold: float = 0.18
         self._heartbeat_interval_s: float = 1.0
+        # Capture resolution (image height in px) pushed to iOS via heartbeat.
+        # Allowed set is {540, 720, 1080}; 540p may not be supported on every
+        # iPhone but iOS's format search falls back and logs a clear error so
+        # the operator can bump back. Default 1080p — always works.
+        self._capture_height_px: int = 1080
         self._runtime_settings_path = data_dir / "runtime_settings.json"
         self._load_runtime_settings_from_disk()
         # Live-preview buffer (Phase 4a). Keeps one latest JPEG per camera
@@ -664,11 +669,17 @@ class State:
         ivl = obj.get("heartbeat_interval_s")
         if isinstance(ivl, (int, float)) and self._HEARTBEAT_INTERVAL_MIN <= ivl <= self._HEARTBEAT_INTERVAL_MAX:
             self._heartbeat_interval_s = float(ivl)
+        ch = obj.get("capture_height_px")
+        if isinstance(ch, int) and ch in self._ALLOWED_CAPTURE_HEIGHTS:
+            self._capture_height_px = ch
         logger.info(
-            "restored runtime_settings: chirp=%.3f interval_s=%.2f",
+            "restored runtime_settings: chirp=%.3f interval_s=%.2f capture_h=%d",
             self._chirp_detect_threshold,
             self._heartbeat_interval_s,
+            self._capture_height_px,
         )
+
+    _ALLOWED_CAPTURE_HEIGHTS = (540, 720, 1080)
 
     def _persist_runtime_settings_locked(self) -> None:
         """Caller must hold `self._lock`. Atomic write."""
@@ -676,10 +687,27 @@ class State:
             {
                 "chirp_detect_threshold": self._chirp_detect_threshold,
                 "heartbeat_interval_s": self._heartbeat_interval_s,
+                "capture_height_px": self._capture_height_px,
             },
             indent=2,
         )
         self._atomic_write(self._runtime_settings_path, payload)
+
+    def capture_height_px(self) -> int:
+        with self._lock:
+            return self._capture_height_px
+
+    def set_capture_height_px(self, value: int) -> int:
+        if not isinstance(value, int):
+            raise ValueError("capture_height must be an int")
+        if value not in self._ALLOWED_CAPTURE_HEIGHTS:
+            raise ValueError(
+                f"capture_height {value} not in {self._ALLOWED_CAPTURE_HEIGHTS}"
+            )
+        with self._lock:
+            self._capture_height_px = value
+            self._persist_runtime_settings_locked()
+            return value
 
     def chirp_detect_threshold(self) -> float:
         with self._lock:
@@ -1415,6 +1443,11 @@ def _build_status_response() -> dict[str, Any]:
         # AudioChirpDetector; cadence into ServerHealthMonitor).
         "chirp_detect_threshold": state.chirp_detect_threshold(),
         "heartbeat_interval_s": state.heartbeat_interval_s(),
+        # Capture resolution (image height px) pushed to iOS. Phone rebuilds
+        # its AVCaptureSession at the new height when this differs from the
+        # currently-applied value — only while in .standby so an armed clip
+        # is never disrupted mid-recording.
+        "capture_height_px": state.capture_height_px(),
         # Per-camera live-preview request flags (Phase 4a). Dashboard
         # renders a toggle per Devices row from this map; iPhones read
         # their own flag off the heartbeat reply (separate sibling field,
@@ -1560,6 +1593,34 @@ async def settings_heartbeat_interval(request: Request):
             raise HTTPException(status_code=400, detail="invalid 'interval_s'")
     try:
         applied = state.set_heartbeat_interval_s(interval)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "value": applied}
+
+
+@app.post("/settings/capture_height")
+async def settings_capture_height(request: Request):
+    """Set the iPhone capture resolution (image height in px). Accepts JSON
+    `{height: int}` or form field `height`. Allowed: 540 / 720 / 1080.
+    HTML callers get 303 back to /; JSON callers get `{ok, value}`."""
+    height_raw: Any
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json()
+        height_raw = body.get("height")
+    else:
+        form = await request.form()
+        height_raw = form.get("height")
+    if height_raw is None:
+        raise HTTPException(status_code=400, detail="missing 'height'")
+    try:
+        height = int(height_raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid 'height'")
+    try:
+        applied = state.set_capture_height_px(height)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if _wants_html(request):
@@ -2754,6 +2815,7 @@ def events_index() -> HTMLResponse:
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
             chirp_detect_threshold=state.chirp_detect_threshold(),
             heartbeat_interval_s=state.heartbeat_interval_s(),
+            capture_height_px=state.capture_height_px(),
             calibration_last_ts={
                 cam: p.stat().st_mtime
                 for cam in state.calibrations().keys()

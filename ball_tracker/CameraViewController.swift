@@ -212,6 +212,24 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// value happens to equal the local Settings bootstrap default.
     private var lastServerChirpThreshold: Double?
     private var lastServerHeartbeatInterval: Double?
+    /// Currently-applied capture image height. Initialised from
+    /// SettingsViewController.captureHeightFixed (1080). Server pushes a
+    /// value via heartbeat; when it differs, rebuild the capture session
+    /// — but only while in .standby so an armed clip isn't disrupted.
+    private var currentCaptureHeight: Int = SettingsViewController.captureHeightFixed
+    /// Paired 16:9 width for `currentCaptureHeight`. Used by every
+    /// `configureCaptureFormat` call site so fps swaps preserve the
+    /// active resolution (no snap-back to 1080p after server pushes 720).
+    private var currentCaptureWidth: Int { captureWidthForHeight(currentCaptureHeight) }
+
+    private func captureWidthForHeight(_ h: Int) -> Int {
+        switch h {
+        case 540:  return 960
+        case 720:  return 1280
+        case 1080: return 1920
+        default:   return SettingsViewController.captureWidthFixed
+        }
+    }
 
     // Phase 4a live preview. `previewRequestedByServer` mirrors the
     // heartbeat-reply flag for THIS camera; `previewUploader` lazily
@@ -688,8 +706,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             do {
                 try configureCaptureFormat(
                     device,
-                    targetWidth: SettingsViewController.captureWidthFixed,
-                    targetHeight: SettingsViewController.captureHeightFixed,
+                    targetWidth: self.currentCaptureWidth,
+                    targetHeight: self.currentCaptureHeight,
                     targetFps: standbyFps
                 )
 
@@ -822,6 +840,47 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// — *MUST* run off-main so the HUD / ReadyCard refresh and pending UI
     /// gestures aren't stalled. All callers are fire-and-forget (no caller
     /// needs the new fps to have applied synchronously).
+    /// Apply a dashboard-pushed capture resolution. Only reachable via the
+    /// heartbeat handler, which guards to `.standby` — rebuilding the
+    /// capture session mid-recording would lose the clip. Updates
+    /// `currentCaptureHeight` and reconfigures the live session.
+    private func applyServerCaptureHeight(_ newHeight: Int) {
+        guard let device = currentCaptureDevice else { return }
+        // 16:9 standard widths for the three allowed heights.
+        let width: Int
+        switch newHeight {
+        case 540:  width = 960
+        case 720:  width = 1280
+        case 1080: width = 1920
+        default:
+            log.warning("ignore unsupported capture_height \(newHeight)")
+            return
+        }
+        currentCaptureHeight = newHeight
+        previewLayer?.isHidden = false
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            let wasRunning = self.session.isRunning
+            if wasRunning { self.session.stopRunning() }
+            defer { if wasRunning { self.session.startRunning() } }
+            do {
+                try self.configureCaptureFormat(
+                    device,
+                    targetWidth: width,
+                    targetHeight: newHeight,
+                    targetFps: self.standbyFps
+                )
+                log.info("camera resolution swapped to \(width)x\(newHeight) from server push")
+            } catch {
+                log.error("camera resolution swap failed target=\(width)x\(newHeight) error=\(error.localizedDescription, privacy: .public)")
+                DispatchQueue.main.async {
+                    self.warningLabel.text = "解析度切換失敗 (\(newHeight)p 不支援)"
+                    self.warningLabel.isHidden = false
+                }
+            }
+        }
+    }
+
     private func switchCaptureFps(_ targetFps: Double) {
         guard let device = currentCaptureDevice else { return }
         // Surface the preview synchronously on main so there's no window
@@ -835,8 +894,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             do {
                 try self.configureCaptureFormat(
                     device,
-                    targetWidth: SettingsViewController.captureWidthFixed,
-                    targetHeight: SettingsViewController.captureHeightFixed,
+                    targetWidth: self.currentCaptureWidth,
+                    targetHeight: self.currentCaptureHeight,
                     targetFps: targetFps
                 )
                 // Read back the actually-applied rate so an operator can
@@ -881,8 +940,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             do {
                 try self.configureCaptureFormat(
                     device,
-                    targetWidth: SettingsViewController.captureWidthFixed,
-                    targetHeight: SettingsViewController.captureHeightFixed,
+                    targetWidth: self.currentCaptureWidth,
+                    targetHeight: self.currentCaptureHeight,
                     targetFps: targetFps
                 )
                 self.session.startRunning()
@@ -907,8 +966,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         do {
             try configureCaptureFormat(
                 device,
-                targetWidth: SettingsViewController.captureWidthFixed,
-                targetHeight: SettingsViewController.captureHeightFixed,
+                targetWidth: self.currentCaptureWidth,
+                targetHeight: self.currentCaptureHeight,
                 targetFps: targetFps
             )
             let applied = device.activeVideoMinFrameDuration
@@ -1113,6 +1172,21 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 DispatchQueue.main.async {
                     self.healthMonitor.updateBaseInterval(pushedIvl)
                     log.info("heartbeat interval hot-applied from server: \(pushedIvl)s")
+                }
+            }
+            // Server-pushed capture resolution. Only rebuild the session
+            // when (a) the value actually changed AND (b) we're in .standby
+            // — rebuilding mid-recording would lose the clip. If a change
+            // arrives while non-standby we just cache it; the next return
+            // to .standby will re-check and apply.
+            if let pushedH = response.capture_height_px,
+               pushedH != self.currentCaptureHeight {
+                DispatchQueue.main.async {
+                    guard self.state == .standby else {
+                        log.info("capture_height change to \(pushedH) deferred: state=\(String(describing: self.state), privacy: .public)")
+                        return
+                    }
+                    self.applyServerCaptureHeight(pushedH)
                 }
             }
             // Phase 4a: dashboard-gated live preview. Flip the cached flag

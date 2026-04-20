@@ -1788,6 +1788,7 @@ def _render_nav_status(
 def _render_tuning_body(
     chirp_detect_threshold: float,
     heartbeat_interval_s: float,
+    capture_height_px: int = 1080,
 ) -> str:
     """Two linked slider + number-input rows. Each form posts on
     submit — the `<input>`s share a `form` attribute and an `oninput`
@@ -1826,6 +1827,26 @@ def _render_tuning_body(
         'onchange="this.form.submit()">'
         '<span class="tuning-unit">s</span>'
         '</form>'
+        # Capture-resolution row. Three-button segmented picker — only
+        # applied by iOS when state == .standby so an armed clip isn't
+        # disrupted mid-recording. FPS stays locked at 240 (the whole
+        # point of the rig).
+        + ''.join(
+            '<div class="tuning-row">'
+            '<span class="tuning-label">Capture</span>'
+            '<div class="res-segmented" role="radiogroup" aria-label="Capture resolution">'
+            + ''.join(
+                f'<form class="inline" method="POST" action="/settings/capture_height">'
+                f'<input type="hidden" name="height" value="{h}">'
+                f'<button class="btn{"" if h == capture_height_px else " secondary"} small" '
+                f'type="submit">{h}p</button>'
+                f'</form>'
+                for h in (540, 720, 1080)
+            )
+            + '</div>'
+            '</div>'
+            for _ in (0,)  # run the wrapper exactly once
+        )
     )
 
 
@@ -1839,6 +1860,7 @@ def render_events_index_html(
     sync_cooldown_remaining_s: float = 0.0,
     chirp_detect_threshold: float = 0.18,
     heartbeat_interval_s: float = 1.0,
+    capture_height_px: int = 1080,
     calibration_last_ts: dict[str, float] | None = None,
     extended_markers: list[dict[str, Any]] | None = None,
     preview_requested: dict[str, bool] | None = None,
@@ -1909,7 +1931,7 @@ def render_events_index_html(
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Runtime &middot; Tuning</h2>'
-        f'<div id="tuning-body">{_render_tuning_body(chirp_detect_threshold, heartbeat_interval_s)}</div>'
+        f'<div id="tuning-body">{_render_tuning_body(chirp_detect_threshold, heartbeat_interval_s, capture_height_px)}</div>'
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Events</h2>'

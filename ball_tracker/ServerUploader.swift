@@ -187,6 +187,12 @@ final class ServerUploader {
         /// `ServerHealthMonitor.updateBaseInterval(_:)`. Optional for
         /// back-compat with older server builds.
         let heartbeat_interval_s: Double?
+        /// Server-pushed capture image height (540 / 720 / 1080). iOS
+        /// rebuilds the capture session at this height when it differs
+        /// from the currently-applied value, but only while in .standby
+        /// so an armed clip is never disrupted mid-recording. Optional
+        /// for back-compat with older server builds.
+        let capture_height_px: Int?
         /// Phase 4a live-preview gate. True when the dashboard's Devices
         /// card toggle for THIS camera is on (server-side TTL 5 s). iOS
         /// starts pushing JPEGs via `PreviewUploader` while true; stops
