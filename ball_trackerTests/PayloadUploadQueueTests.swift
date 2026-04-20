@@ -279,12 +279,7 @@ final class PayloadUploadQueueTests: XCTestCase {
             session_id: sessionId,
             sync_anchor_timestamp_s: 1.0,
             video_start_pts_s: 0.5,
-            video_fps: 240.0,
             local_recording_index: 0,
-            intrinsics: nil,
-            homography: nil,
-            image_width_px: nil,
-            image_height_px: nil,
             frames: [],
             frames_on_device: []
         )

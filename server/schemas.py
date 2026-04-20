@@ -94,8 +94,12 @@ class PitchPayload(BaseModel):
     # adds this to each container-relative frame PTS so `FramePayload.timestamp_s`
     # lives on the same iOS master clock as `sync_anchor_timestamp_s`.
     video_start_pts_s: float
-    # Nominal capture rate of the MOV. Sanity-check + detection log.
-    video_fps: float
+    # Nominal capture rate of the MOV. Sanity-check + detection log only —
+    # optional since the iPhone no longer echoes it on every upload (it was
+    # constant per build and the server had no authoritative use for the
+    # value beyond the render-scene URL builder, which now defaults to
+    # 240 fps when absent).
+    video_fps: float | None = None
     # Optional device-local recording counter. Not used for pairing; kept
     # purely for operator debugging.
     local_recording_index: int | None = None

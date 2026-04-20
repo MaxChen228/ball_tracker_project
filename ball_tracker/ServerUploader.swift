@@ -52,16 +52,9 @@ final class ServerUploader {
         /// relative frame PTS to reconstruct the iOS master clock — which
         /// is the space `sync_anchor_timestamp_s` lives in.
         let video_start_pts_s: Double
-        /// Nominal capture rate of the MOV. Server uses this as a sanity
-        /// check against the decoded frame count.
-        let video_fps: Double
         /// Device-local recording counter, for operator debugging only —
         /// server doesn't pair on it. Optional so a phone can omit it.
         let local_recording_index: Int?
-        let intrinsics: IntrinsicsPayload?
-        let homography: [Double]?
-        let image_width_px: Int?
-        let image_height_px: Int?
         /// Per-frame detection results. Empty in mode-one (`camera_only`):
         /// the server runs detection on the uploaded MOV. Non-empty in
         /// mode-two (`on_device`): iPhone ran its own BTDetectionSession
@@ -75,6 +68,15 @@ final class ServerUploader {
         /// encoded concretely for consistency with `frames`.
         let frames_on_device: [FramePayload]
 
+        // NOTE: Intrinsics / homography / image dims / video_fps used to
+        // live on this struct and were echoed on every upload. Phase 1 of
+        // the iOS decoupling refactor moved that into the server's
+        // calibration DB (populated via POST /calibration), which is now
+        // the single source of truth. The server fills those fields in-
+        // memory from the cached snapshot before running detection +
+        // triangulation, so the wire shape shrinks to just session-level
+        // metadata + per-frame detection output.
+
         /// Return a copy of this payload with `frames` replaced. Used by
         /// the mode-two cycle-complete path to attach the session's
         /// BTDetectionSession output before shipping.
@@ -84,12 +86,7 @@ final class ServerUploader {
                 session_id: session_id,
                 sync_anchor_timestamp_s: sync_anchor_timestamp_s,
                 video_start_pts_s: video_start_pts_s,
-                video_fps: video_fps,
                 local_recording_index: local_recording_index,
-                intrinsics: intrinsics,
-                homography: homography,
-                image_width_px: image_width_px,
-                image_height_px: image_height_px,
                 frames: newFrames,
                 frames_on_device: frames_on_device
             )
@@ -105,12 +102,7 @@ final class ServerUploader {
                 session_id: session_id,
                 sync_anchor_timestamp_s: sync_anchor_timestamp_s,
                 video_start_pts_s: video_start_pts_s,
-                video_fps: video_fps,
                 local_recording_index: local_recording_index,
-                intrinsics: intrinsics,
-                homography: homography,
-                image_width_px: image_width_px,
-                image_height_px: image_height_px,
                 frames: frames,
                 frames_on_device: newFramesOnDevice
             )

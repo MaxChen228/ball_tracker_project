@@ -1451,6 +1451,36 @@ async def pitch(
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=e.errors())
 
+    # Phase 1 of the iOS-decoupling refactor: calibration DB
+    # (`data/calibrations/<camera_id>.json`, populated via POST /calibration)
+    # is the single source of truth for per-camera intrinsics, homography,
+    # and image dims. iPhones no longer echo these on every /pitch upload.
+    # If any field is missing we fill it from the cached snapshot so all
+    # downstream code (detection scaling, triangulation, on-disk pitch JSON
+    # persistence, scale_pitch_to_video_dims) stays unchanged. No cached
+    # snapshot ⇒ hard 422: the new contract is "calibrate before you pitch".
+    needs_calibration_fill = (
+        payload_obj.intrinsics is None
+        or payload_obj.homography is None
+        or payload_obj.image_width_px is None
+        or payload_obj.image_height_px is None
+    )
+    if needs_calibration_fill:
+        cal_snap = state.calibrations().get(payload_obj.camera_id)
+        if cal_snap is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"no calibration on file for camera {payload_obj.camera_id!r}",
+            )
+        if payload_obj.intrinsics is None:
+            payload_obj.intrinsics = cal_snap.intrinsics
+        if payload_obj.homography is None:
+            payload_obj.homography = list(cal_snap.homography)
+        if payload_obj.image_width_px is None:
+            payload_obj.image_width_px = cal_snap.image_width_px
+        if payload_obj.image_height_px is None:
+            payload_obj.image_height_px = cal_snap.image_height_px
+
     has_video = video is not None and (video.filename or video.size)
     # Either stream counts as "data the server can work with": `frames`
     # from mode-two (iOS detection, authoritative for its session) or
@@ -1881,7 +1911,7 @@ def _videos_for_session(
             offset = float(
                 pitch.video_start_pts_s - pitch.sync_anchor_timestamp_s
             )
-        fps = float(pitch.video_fps) if pitch is not None else 240.0
+        fps = float(pitch.video_fps) if (pitch is not None and pitch.video_fps is not None) else 240.0
         anchor = pitch.sync_anchor_timestamp_s if pitch is not None else None
         if pitch is not None and anchor is not None:
             t_rel = [float(f.timestamp_s - anchor) for f in pitch.frames]
