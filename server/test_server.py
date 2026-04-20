@@ -1511,3 +1511,95 @@ def test_runtime_settings_restored_from_disk_on_state_init(tmp_path):
     s2 = main.State(data_dir=tmp_path)
     assert s2.chirp_detect_threshold() == pytest.approx(0.18)
     assert s2.heartbeat_interval_s() == pytest.approx(1.0)
+
+
+# ---------------------------- Phase 4a · live preview -------------------------
+
+
+def _minimal_jpeg() -> bytes:
+    """A tiny valid-enough JPEG for the buffer round-trip tests. We don't
+    decode it — the buffer treats the bytes opaquely — so a few bytes with
+    a JPEG SOI/EOI is enough to represent a "frame"."""
+    # SOI + a single APP0 + EOI — not a displayable image, but `push`
+    # accepts it and `latest` round-trips exactly these bytes.
+    return b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+
+
+def test_preview_push_rejected_when_not_requested():
+    client = TestClient(app)
+    r = client.post("/camera/A/preview_frame", content=_minimal_jpeg(),
+                    headers={"Content-Type": "image/jpeg"})
+    assert r.status_code == 409
+    # Buffer must not have stored anything.
+    assert main.state._preview.latest("A") is None
+
+
+def test_preview_push_and_fetch_round_trip():
+    client = TestClient(app)
+    # Dashboard enables preview.
+    r = client.post("/camera/A/preview_request", json={"enabled": True})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "enabled": True}
+    # Status surfaces the flag.
+    assert client.get("/status").json()["preview_requested"] == {"A": True}
+    # Phone pushes a frame (raw image/jpeg body).
+    jpeg = _minimal_jpeg()
+    r = client.post("/camera/A/preview_frame", content=jpeg,
+                    headers={"Content-Type": "image/jpeg"})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # Dashboard fetches the latest JPEG.
+    r = client.get("/camera/A/preview")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("image/jpeg")
+    assert r.content == jpeg
+    # Disable → flag drops AND cached frame is cleared.
+    r = client.post("/camera/A/preview_request", json={"enabled": False})
+    assert r.status_code == 200 and r.json()["enabled"] is False
+    assert main.state._preview.latest("A") is None
+    r = client.get("/camera/A/preview")
+    assert r.status_code == 404
+
+
+def test_preview_request_flag_expires_after_ttl(tmp_path, monkeypatch):
+    clock = [1000.0]
+    def fake_time() -> float:
+        return clock[0]
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
+    main.state._preview.request("A", enabled=True)
+    assert main.state._preview.is_requested("A")
+    # Walk past the TTL.
+    clock[0] += main._PREVIEW_REQUEST_TTL_S + 0.1
+    assert not main.state._preview.is_requested("A")
+    # Lazy sweep dropped the entry — requested_map is empty.
+    assert main.state._preview.requested_map() == {}
+
+
+def test_preview_oversize_rejected_413():
+    client = TestClient(app)
+    client.post("/camera/A/preview_request", json={"enabled": True})
+    # 2 MB + 1 byte.
+    huge = b"\xff\xd8" + b"\x00" * (2 * 1024 * 1024)
+    r = client.post("/camera/A/preview_frame", content=huge,
+                    headers={"Content-Type": "image/jpeg"})
+    assert r.status_code == 413
+    assert main.state._preview.latest("A") is None
+
+
+def test_status_surfaces_preview_requested_map():
+    client = TestClient(app)
+    # Initially empty.
+    assert client.get("/status").json().get("preview_requested") == {}
+    client.post("/camera/A/preview_request", json={"enabled": True})
+    client.post("/camera/B/preview_request", json={"enabled": True})
+    got = client.get("/status").json()["preview_requested"]
+    assert got == {"A": True, "B": True}
+    # Heartbeat reply carries the per-camera scalar for the beating phone.
+    hb = client.post("/heartbeat", json={"camera_id": "A"})
+    assert hb.status_code == 200
+    assert hb.json()["preview_requested"] is True
+    # Turn A off; B's flag is independent.
+    client.post("/camera/A/preview_request", json={"enabled": False})
+    hb = client.post("/heartbeat", json={"camera_id": "A"})
+    assert hb.json()["preview_requested"] is False
+    hb = client.post("/heartbeat", json={"camera_id": "B"})
+    assert hb.json()["preview_requested"] is True

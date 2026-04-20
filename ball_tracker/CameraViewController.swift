@@ -213,6 +213,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// value happens to equal the local Settings bootstrap default.
     private var lastServerChirpThreshold: Double?
     private var lastServerHeartbeatInterval: Double?
+
+    // Phase 4a live preview. `previewRequestedByServer` mirrors the
+    // heartbeat-reply flag for THIS camera; `previewUploader` lazily
+    // constructs on first push. When the flag flips true→false we reset
+    // the uploader so a stale in-flight POST doesn't land after toggle-off.
+    //
+    // NB: preview only works when `parkCameraInStandby == false`. With
+    // the toggle ON the AVCaptureSession is stopped in .standby so there
+    // are no pixel buffers to sample. HUD warning painted in
+    // updateUIForState() when preview is requested but we're parked.
+    private var previewRequestedByServer: Bool = false
+    private var previewUploader: PreviewUploader?
     private let readyCard = ReadyCard()
     private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
@@ -1163,6 +1175,26 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     log.info("heartbeat interval hot-applied from server: \(pushedIvl)s")
                 }
             }
+            // Phase 4a: dashboard-gated live preview. Flip the cached flag
+            // whenever the reply changes; true→false resets the uploader
+            // so an in-flight POST doesn't land after the dashboard
+            // stopped watching. Lazy-create the uploader on first enable.
+            let pushedPrev = response.preview_requested ?? false
+            if self.previewRequestedByServer != pushedPrev {
+                self.previewRequestedByServer = pushedPrev
+                if pushedPrev {
+                    if self.previewUploader == nil {
+                        self.previewUploader = PreviewUploader(
+                            uploader: self.uploader,
+                            cameraId: self.settings.cameraRole
+                        )
+                    }
+                    log.info("preview requested by server: enabling push")
+                } else {
+                    self.previewUploader?.reset()
+                    log.info("preview no longer requested: stopping push")
+                }
+            }
             let cam = self.settings.cameraRole
             let cmd = response.commands?[cam]
             let syncId = response.sync?.id
@@ -2008,6 +2040,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // idle) for steady monitoring.
         if frameIndex <= 3 || frameIndex % 240 == 0 {
             log.info("camera frame idx=\(self.frameIndex) state=\(Self.stateText(snap.state), privacy: .public) pendingBootstrap=\(snap.pendingBootstrap) sid=\(snap.sessionId ?? "nil", privacy: .public)")
+        }
+
+        // Phase 4a: push a preview JPEG to the server when requested AND
+        // we're not doing anything time-critical. `.recording` owns every
+        // frame for ClipRecorder; `.timeSyncWaiting` is mic-centric and
+        // the preview encode would compete for CPU. Outside those two
+        // states the capture queue is otherwise idle on idle frames,
+        // which makes this the cheapest place to hook in.
+        if self.previewRequestedByServer
+            && snap.state != .recording
+            && snap.state != .timeSyncWaiting {
+            self.previewUploader?.pushFrame(pixelBuffer)
         }
 
         // Only the `.recording` state cares about samples.
