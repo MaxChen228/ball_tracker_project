@@ -193,6 +193,12 @@ final class ServerUploader {
         /// so an armed clip is never disrupted mid-recording. Optional
         /// for back-compat with older server builds.
         let capture_height_px: Int?
+        /// One-shot flag from `/calibration/auto` — when true iOS captures
+        /// the next `CMSampleBuffer` at native resolution, encodes JPEG
+        /// at q=0.9, and POSTs to `/camera/{id}/calibration_frame`. Server
+        /// clears the flag on receipt so back-to-back heartbeats won't
+        /// re-fire. Optional for back-compat with older server builds.
+        let calibration_frame_requested: Bool?
         /// Phase 4a live-preview gate. True when the dashboard's Devices
         /// card toggle for THIS camera is on (server-side TTL 5 s). iOS
         /// starts pushing JPEGs via `PreviewUploader` while true; stops
