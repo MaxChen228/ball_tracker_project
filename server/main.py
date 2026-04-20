@@ -2374,6 +2374,8 @@ def events_index() -> HTMLResponse:
             capture_mode=state.current_mode().value,
             sync=sync_run.to_dict() if sync_run is not None else None,
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
+            chirp_detect_threshold=state.chirp_detect_threshold(),
+            heartbeat_interval_s=state.heartbeat_interval_s(),
         )
     )
 
