@@ -23,7 +23,6 @@ final class SettingsViewController: UIViewController {
     private static let keyServerIP = "server_ip"
     private static let keyServerPort = "server_port"
     private static let keyCameraRole = "camera_role"
-
     // Capture resolution is fixed at 1080p — the only 240 fps slow-mo preset
     // that is baseline across every shipping iPhone. `CameraViewController`
     // reads these directly via `SettingsViewController.capture{Width,Height}Fixed`.

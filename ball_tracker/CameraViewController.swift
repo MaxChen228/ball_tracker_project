@@ -89,6 +89,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // Collaborators.
     private var settings: SettingsViewController.Settings!
+    private var trackingExposureCapMode: ServerUploader.TrackingExposureCapMode = .frameDuration
     private var recorder: PitchRecorder!
     private var uploader: ServerUploader!
     private var serverConfig: ServerUploader.ServerConfig!
@@ -212,6 +213,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// value happens to equal the local Settings bootstrap default.
     private var lastServerChirpThreshold: Double?
     private var lastServerHeartbeatInterval: Double?
+    private var lastServerTrackingExposureCapMode: ServerUploader.TrackingExposureCapMode?
     /// Currently-applied capture image height. Initialised from
     /// SettingsViewController.captureHeightFixed (1080). Server pushes a
     /// value via heartbeat; when it differs, rebuild the capture session
@@ -312,6 +314,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         settings = SettingsViewController.loadFromUserDefaults()
         serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: settings.serverPort)
+        DiagnosticsData.shared.update(trackingExposureCapLabel: trackingExposureCapMode.label)
 
         recorder = PitchRecorder()
         recorder.setCameraId(settings.cameraRole)
@@ -741,8 +744,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         session.commitConfiguration()
 
         let preview = AVCaptureVideoPreviewLayer(session: session)
-        preview.videoGravity = .resizeAspectFill
-        preview.frame = view.bounds
+        // With tracking locked to 16:9 @ 240 fps, show the exact recorded
+        // frame instead of cropping it to fill the phone's taller display.
+        preview.videoGravity = .resizeAspect
+        preview.frame = previewFrame(in: view.bounds)
         // App is locked to landscape (Info.plist). Pin the preview connection
         // to sensor-native angle 0 so the on-screen image matches the raw
         // CVPixelBuffer orientation ArUco calibration consumes; a stale
@@ -758,6 +763,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         preview.isHidden = true
         view.layer.insertSublayer(preview, at: 0)
         previewLayer = preview
+    }
+
+    private func previewFrame(in bounds: CGRect) -> CGRect {
+        let aspect = CGSize(width: currentCaptureWidth, height: currentCaptureHeight)
+        return AVMakeRect(aspectRatio: aspect, insideRect: bounds).integral
     }
 
     private func dumpAvailableFormats(for device: AVCaptureDevice) {
@@ -806,20 +816,31 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         targetHeight: Int,
         targetFps: Double
     ) throws {
-        var selected: AVCaptureDevice.Format?
-        for format in device.formats {
+        var candidates: [(index: Int, format: AVCaptureDevice.Format, maxFrameRate: Double)] = []
+        for (index, format) in device.formats.enumerated() {
             let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
             let w = Int(dims.width)
             let h = Int(dims.height)
             let matchesRes = (w == targetWidth && h == targetHeight) || (w == targetHeight && h == targetWidth)
-            let supportsFps = format.videoSupportedFrameRateRanges.contains { range in
+            let matchingRanges = format.videoSupportedFrameRateRanges.filter { range in
                 range.minFrameRate <= targetFps && range.maxFrameRate >= targetFps
             }
-            if matchesRes && supportsFps {
-                selected = format
-                break
+            if matchesRes, let bestRange = matchingRanges.max(by: { $0.maxFrameRate < $1.maxFrameRate }) {
+                candidates.append((index: index, format: format, maxFrameRate: bestRange.maxFrameRate))
             }
         }
+        let selectedCandidate = candidates.max { lhs, rhs in
+            let lhsFov = lhs.format.videoFieldOfView
+            let rhsFov = rhs.format.videoFieldOfView
+            if lhsFov != rhsFov {
+                return lhsFov < rhsFov
+            }
+            if lhs.maxFrameRate != rhs.maxFrameRate {
+                return lhs.maxFrameRate < rhs.maxFrameRate
+            }
+            return lhs.index > rhs.index
+        }
+        let selected = selectedCandidate?.format
         guard let selected else {
             // Dump every (w×h @ fps_range) the device offers so Console.app
             // shows exactly why the search missed — usually either the target
@@ -840,30 +861,69 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         defer { device.unlockForConfiguration() }
 
         device.activeFormat = selected
+        if let selectedCandidate {
+            let selectedDims = CMVideoFormatDescriptionGetDimensions(selected.formatDescription)
+            log.info(
+                "camera format selected idx=\(selectedCandidate.index) \(selectedDims.width)x\(selectedDims.height) target_fps=\(targetFps) fov_deg=\(String(format: "%.3f", selected.videoFieldOfView), privacy: .public) max_fps=\(selectedCandidate.maxFrameRate, privacy: .public) binned=\(selected.isVideoBinned, privacy: .public)"
+            )
+        }
         let frameDuration = CMTime(value: 1, timescale: Int32(targetFps))
         device.activeVideoMinFrameDuration = frameDuration
         device.activeVideoMaxFrameDuration = frameDuration
+        try applyExposureConfiguration(device, format: selected, targetFps: targetFps)
 
+        horizontalFovRadians = Double(device.activeFormat.videoFieldOfView) * Double.pi / 180.0
+    }
+
+    private func applyExposureConfiguration(
+        _ device: AVCaptureDevice,
+        format: AVCaptureDevice.Format,
+        targetFps: Double
+    ) throws {
+        let frameDuration = CMTime(value: 1, timescale: Int32(targetFps))
         // Cap the AE exposure time to the target frame duration. Without this,
         // iOS lengthens individual exposures in low light to brighten the
         // image, which drags the effective capture rate down (a room that
         // wants 70 ms exposures drops a "240 fps" session to ~14 fps). Capped
         // AE keeps the sensor locked to the target rate and compensates with
         // ISO — noisier in dim rooms, but frame rate holds.
-        let lo = selected.minExposureDuration
-        let hi = selected.maxExposureDuration
+        let lo = format.minExposureDuration
+        let hi = format.maxExposureDuration
+        let requestedCap = requestedExposureCapDuration(targetFps: targetFps) ?? frameDuration
         let capped: CMTime
-        if CMTimeCompare(frameDuration, lo) < 0 {
+        if CMTimeCompare(requestedCap, lo) < 0 {
             capped = lo
-        } else if CMTimeCompare(frameDuration, hi) > 0 {
+        } else if CMTimeCompare(requestedCap, hi) > 0 {
             capped = hi
         } else {
-            capped = frameDuration
+            capped = requestedCap
         }
         device.activeMaxExposureDuration = capped
         device.exposureMode = .continuousAutoExposure
+        let cappedExposureS = CMTimeGetSeconds(capped)
+        let exposureCapText = cappedExposureS > 0
+            ? String(format: "1/%.0f", 1.0 / cappedExposureS)
+            : "n/a"
+        log.info(
+            "camera exposure configured target_fps=\(targetFps) mode=\(self.trackingExposureCapMode.rawValue, privacy: .public) max_exposure=\(exposureCapText, privacy: .public) iso_range=[\(format.minISO, privacy: .public),\(format.maxISO, privacy: .public)] current_iso=\(device.iso, privacy: .public)"
+        )
+    }
 
-        horizontalFovRadians = Double(device.activeFormat.videoFieldOfView) * Double.pi / 180.0
+    private func requestedExposureCapDuration(targetFps: Double) -> CMTime? {
+        guard abs(targetFps - trackingFps) < 0.5,
+              let seconds = trackingExposureCapMode.maxExposureSeconds else {
+            return nil
+        }
+        return CMTime(seconds: seconds, preferredTimescale: 1_000_000)
+    }
+
+    private func currentTargetFps() -> Double {
+        switch state {
+        case .recording:
+            return trackingFps
+        case .standby, .timeSyncWaiting, .mutualSyncing, .uploading:
+            return standbyFps
+        }
     }
 
     /// Swap the active capture format to a new frame rate at the current
@@ -896,6 +956,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             return
         }
         currentCaptureHeight = newHeight
+        previewLayer?.frame = previewFrame(in: view.bounds)
         previewLayer?.isHidden = false
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -977,10 +1038,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 )
                 // Read back the actually-applied rate so an operator can
                 // tell from logs whether the sensor is honouring our
-                // request. 240 fps formats typically crop the sensor ROI,
-                // so `videoFieldOfView` may differ between 60 and 240 fps
-                // — log it per switch so any FOV-approximation intrinsics
-                // drift is visible.
+                // request. Field of view can differ across same-resolution
+                // formats, so log it per switch to catch accidental
+                // selection of a narrower crop path.
                 let applied = device.activeVideoMinFrameDuration
                 let appliedFps = applied.value > 0
                     ? Double(applied.timescale) / Double(applied.value)
@@ -1148,7 +1208,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        previewLayer?.frame = view.bounds
+        previewLayer?.frame = previewFrame(in: view.bounds)
         // Border path follows the root view bounds; regenerated on every
         // layout pass so rotation / safe-area changes stay in sync.
         stateBorderLayer.frame = view.bounds
@@ -1249,6 +1309,30 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 DispatchQueue.main.async {
                     self.healthMonitor.updateBaseInterval(pushedIvl)
                     log.info("heartbeat interval hot-applied from server: \(pushedIvl)s")
+                }
+            }
+            let exposureModeStr = response.session?.tracking_exposure_cap
+                ?? response.tracking_exposure_cap
+                ?? ServerUploader.TrackingExposureCapMode.frameDuration.rawValue
+            let exposureMode = ServerUploader.TrackingExposureCapMode(rawValue: exposureModeStr) ?? .frameDuration
+            if self.lastServerTrackingExposureCapMode != exposureMode {
+                self.lastServerTrackingExposureCapMode = exposureMode
+                self.trackingExposureCapMode = exposureMode
+                DiagnosticsData.shared.update(trackingExposureCapLabel: exposureMode.label)
+                if let device = self.currentCaptureDevice {
+                    self.sessionQueue.async { [weak self] in
+                        guard let self else { return }
+                        do {
+                            try self.applyExposureConfiguration(
+                                device,
+                                format: device.activeFormat,
+                                targetFps: self.currentTargetFps()
+                            )
+                            log.info("tracking exposure cap hot-applied from server: \(exposureMode.rawValue, privacy: .public)")
+                        } catch {
+                            log.error("tracking exposure cap apply failed mode=\(exposureMode.rawValue, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                        }
+                    }
                 }
             }
             // Server-pushed capture resolution. Only rebuild the session

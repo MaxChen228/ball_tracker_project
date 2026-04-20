@@ -44,6 +44,20 @@ class CaptureMode(str, Enum):
 _DEFAULT_CAPTURE_MODE = CaptureMode.camera_only
 
 
+class TrackingExposureCapMode(str, Enum):
+    """Server-owned tracking exposure policy pushed to iOS via heartbeat.
+
+    This only affects the high-speed tracking path. Standby / sync windows
+    stay capped at the frame duration so the rig's idle behaviour doesn't
+    unexpectedly darken."""
+    frame_duration = "frame_duration"
+    shutter_500 = "shutter_500"
+    shutter_1000 = "shutter_1000"
+
+
+_DEFAULT_TRACKING_EXPOSURE_CAP_MODE = TrackingExposureCapMode.frame_duration
+
+
 class IntrinsicsPayload(BaseModel):
     fx: float
     fz: float
@@ -386,6 +400,9 @@ class Session:
     # the session's mode is immutable — a late dashboard toggle only
     # affects the next session.
     mode: CaptureMode = _DEFAULT_CAPTURE_MODE
+    # Snapshot of the dashboard's tracking exposure-cap policy at arm time.
+    # Once armed this is frozen for the whole session, matching `mode`.
+    tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
 
     @property
     def armed(self) -> bool:
@@ -400,4 +417,5 @@ class Session:
             "max_duration_s": self.max_duration_s,
             "uploads_received": list(self.uploads_received),
             "mode": self.mode.value,
+            "tracking_exposure_cap": self.tracking_exposure_cap.value,
         }
