@@ -91,7 +91,9 @@ from schemas import (
     SyncReport,
     SyncResult,
     SyncRun,
+    TrackingExposureCapMode,
     TriangulatedPoint,
+    _DEFAULT_TRACKING_EXPOSURE_CAP_MODE,
     _DEFAULT_SESSION_TIMEOUT_S,
 )
 from collections import deque
@@ -286,6 +288,7 @@ class State:
         # doesn't silently drop the operator's last-chosen values.
         self._chirp_detect_threshold: float = 0.18
         self._heartbeat_interval_s: float = 1.0
+        self._tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
         # Capture resolution (image height in px) pushed to iOS via heartbeat.
         # Allowed set is {540, 720, 1080}; 540p may not be supported on every
         # iPhone but iOS's format search falls back and logs a clear error so
@@ -739,6 +742,7 @@ class State:
                 started_at=now,
                 max_duration_s=max_duration_s,
                 mode=self._current_mode,
+                tracking_exposure_cap=self._tracking_exposure_cap,
             )
             self._current_session = session
             return session
@@ -788,11 +792,18 @@ class State:
         ch = obj.get("capture_height_px")
         if isinstance(ch, int) and ch in self._ALLOWED_CAPTURE_HEIGHTS:
             self._capture_height_px = ch
+        tec = obj.get("tracking_exposure_cap")
+        if isinstance(tec, str):
+            try:
+                self._tracking_exposure_cap = TrackingExposureCapMode(tec)
+            except ValueError:
+                pass
         logger.info(
-            "restored runtime_settings: chirp=%.3f interval_s=%.2f capture_h=%d",
+            "restored runtime_settings: chirp=%.3f interval_s=%.2f capture_h=%d tracking_exposure=%s",
             self._chirp_detect_threshold,
             self._heartbeat_interval_s,
             self._capture_height_px,
+            self._tracking_exposure_cap.value,
         )
 
     _ALLOWED_CAPTURE_HEIGHTS = (540, 720, 1080)
@@ -804,6 +815,7 @@ class State:
                 "chirp_detect_threshold": self._chirp_detect_threshold,
                 "heartbeat_interval_s": self._heartbeat_interval_s,
                 "capture_height_px": self._capture_height_px,
+                "tracking_exposure_cap": self._tracking_exposure_cap.value,
             },
             indent=2,
         )
@@ -860,6 +872,16 @@ class State:
             self._heartbeat_interval_s = v
             self._persist_runtime_settings_locked()
             return v
+
+    def tracking_exposure_cap(self) -> TrackingExposureCapMode:
+        with self._lock:
+            return self._tracking_exposure_cap
+
+    def set_tracking_exposure_cap(self, mode: TrackingExposureCapMode) -> TrackingExposureCapMode:
+        with self._lock:
+            self._tracking_exposure_cap = mode
+            self._persist_runtime_settings_locked()
+            return mode
 
     def stop_session(self) -> Session | None:
         """End the current armed session (operator pressed Stop on the
@@ -1686,6 +1708,7 @@ def _build_status_response() -> dict[str, Any]:
         # AudioChirpDetector; cadence into ServerHealthMonitor).
         "chirp_detect_threshold": state.chirp_detect_threshold(),
         "heartbeat_interval_s": state.heartbeat_interval_s(),
+        "tracking_exposure_cap": state.tracking_exposure_cap().value,
         # Capture resolution (image height px) pushed to iOS. Phone rebuilds
         # its AVCaptureSession at the new height when this differs from the
         # currently-applied value — only while in .standby so an armed clip
@@ -1855,6 +1878,34 @@ async def settings_heartbeat_interval(request: Request):
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "value": applied}
+
+
+@app.post("/settings/tracking_exposure_cap")
+async def settings_tracking_exposure_cap(request: Request):
+    """Set the server-owned 240 fps exposure-cap policy. Accepts JSON
+    `{mode: str}` or form field `mode`. HTML callers get 303 back to `/`;
+    JSON callers get `{ok, value}`."""
+    mode_raw: Any
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json()
+        mode_raw = body.get("mode")
+    else:
+        form = await request.form()
+        mode_raw = form.get("mode")
+    if mode_raw is None:
+        raise HTTPException(status_code=400, detail="missing 'mode'")
+    try:
+        mode = TrackingExposureCapMode(str(mode_raw))
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid 'mode'; expected one of {[m.value for m in TrackingExposureCapMode]}",
+        )
+    applied = state.set_tracking_exposure_cap(mode)
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "value": applied.value}
 
 
 @app.post("/settings/capture_height")
@@ -3269,6 +3320,7 @@ def events_index() -> HTMLResponse:
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
             chirp_detect_threshold=state.chirp_detect_threshold(),
             heartbeat_interval_s=state.heartbeat_interval_s(),
+            tracking_exposure_cap=state.tracking_exposure_cap().value,
             capture_height_px=state.capture_height_px(),
             calibration_last_ts={
                 cam: p.stat().st_mtime
@@ -3321,6 +3373,7 @@ def setup_page() -> HTMLResponse:
             chirp_detect_threshold=state.chirp_detect_threshold(),
             heartbeat_interval_s=state.heartbeat_interval_s(),
             capture_height_px=state.capture_height_px(),
+            tracking_exposure_cap=state.tracking_exposure_cap().value,
             calibration_last_ts={
                 cam: p.stat().st_mtime
                 for cam in state.calibrations().keys()

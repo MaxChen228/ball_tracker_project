@@ -18,7 +18,7 @@ import chirp
 import main
 from conftest import sid
 from main import app
-from schemas import SyncReport
+from schemas import SyncReport, TrackingExposureCapMode
 
 
 # --- Device heartbeat + staleness ------------------------------------------
@@ -452,6 +452,33 @@ def test_session_to_dict_includes_mode(tmp_path):
     s.set_mode(CaptureMode.on_device)
     session = s.arm_session()
     assert session.to_dict()["mode"] == "on_device"
+
+
+def test_default_tracking_exposure_cap_is_frame_duration(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    assert s.tracking_exposure_cap() == TrackingExposureCapMode.frame_duration
+
+
+def test_arm_session_snapshots_tracking_exposure_cap(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    s.set_tracking_exposure_cap(TrackingExposureCapMode.shutter_1000)
+    session = s.arm_session()
+    assert session.tracking_exposure_cap == TrackingExposureCapMode.shutter_1000
+
+
+def test_tracking_exposure_change_after_arm_does_not_affect_armed_session(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    session = s.arm_session()
+    s.set_tracking_exposure_cap(TrackingExposureCapMode.shutter_500)
+    assert session.tracking_exposure_cap == TrackingExposureCapMode.frame_duration
+    assert s.tracking_exposure_cap() == TrackingExposureCapMode.shutter_500
+
+
+def test_status_and_heartbeat_include_tracking_exposure_cap():
+    client = TestClient(app)
+    assert client.get("/status").json()["tracking_exposure_cap"] == "frame_duration"
+    hb = client.post("/heartbeat", json={"camera_id": "A"})
+    assert hb.json()["tracking_exposure_cap"] == "frame_duration"
 
 
 def test_events_tags_mode_one_when_video_on_disk(tmp_path):

@@ -545,6 +545,7 @@ def render_setup_html(
     chirp_detect_threshold: float = 0.18,
     heartbeat_interval_s: float = 1.0,
     capture_height_px: int = 1080,
+    tracking_exposure_cap: str = "frame_duration",
     calibration_last_ts: dict[str, float] | None = None,
     extended_markers: list[dict[str, Any]] | None = None,
     preview_requested: dict[str, bool] | None = None,
@@ -622,7 +623,7 @@ def render_setup_html(
         '<div class="setup-section-title">Runtime &middot; Tuning</div>'
         '<div class="card">'
         '<h2 class="card-title">Runtime &middot; Tuning</h2>'
-        f'<div id="tuning-body">{_render_tuning_body(chirp_detect_threshold, heartbeat_interval_s, capture_height_px)}</div>'
+        f'<div id="tuning-body">{_render_tuning_body(chirp_detect_threshold, heartbeat_interval_s, tracking_exposure_cap, capture_height_px)}</div>'
         "</div>"
         "</main>"
         # Dashboard JS drives devices, extended markers, auto-cal clicks,

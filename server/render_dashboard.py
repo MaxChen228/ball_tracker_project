@@ -2000,6 +2000,7 @@ def _render_nav_status(
 def _render_tuning_body(
     chirp_detect_threshold: float,
     heartbeat_interval_s: float,
+    tracking_exposure_cap: str = "frame_duration",
     capture_height_px: int = 1080,
 ) -> str:
     """Two linked slider + number-input rows. Each form posts on
@@ -2039,6 +2040,28 @@ def _render_tuning_body(
         'onchange="this.form.submit()">'
         '<span class="tuning-unit">s</span>'
         '</form>'
+        # Tracking exposure-cap row. Server-owned policy; iOS hot-applies
+        # it on heartbeat and armed sessions snapshot it at arm time.
+        + ''.join(
+            '<div class="tuning-row">'
+            '<span class="tuning-label">Tracking exp</span>'
+            '<div class="res-segmented" role="radiogroup" aria-label="Tracking exposure cap">'
+            + ''.join(
+                f'<form class="inline" method="POST" action="/settings/tracking_exposure_cap">'
+                f'<input type="hidden" name="mode" value="{mode}">'
+                f'<button class="btn{"" if mode == tracking_exposure_cap else " secondary"} small" '
+                f'type="submit">{label}</button>'
+                f'</form>'
+                for mode, label in (
+                    ("frame_duration", "1/240"),
+                    ("shutter_500", "1/500"),
+                    ("shutter_1000", "1/1000"),
+                )
+            )
+            + '</div>'
+            '</div>'
+            for _ in (0,)
+        )
         # Capture-resolution row. Three-button segmented picker — only
         # applied by iOS when state == .standby so an armed clip isn't
         # disrupted mid-recording. FPS stays locked at 240 (the whole
@@ -2072,6 +2095,7 @@ def render_events_index_html(
     sync_cooldown_remaining_s: float = 0.0,
     chirp_detect_threshold: float = 0.18,
     heartbeat_interval_s: float = 1.0,
+    tracking_exposure_cap: str = "frame_duration",
     capture_height_px: int = 1080,
     calibration_last_ts: dict[str, float] | None = None,
     extended_markers: list[dict[str, Any]] | None = None,

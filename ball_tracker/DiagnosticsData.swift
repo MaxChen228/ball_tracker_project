@@ -18,19 +18,22 @@ final class DiagnosticsData {
     private var _sessionId: String?
     private var _localRecordingIndex: Int?
     private var _serverStatusText: String = "unknown"
+    private var _trackingExposureCapLabel: String = "1/240"
 
     var fpsEstimate: Double { get { lock.lock(); defer { lock.unlock() }; return _fpsEstimate } }
     var lastContactAt: Date? { get { lock.lock(); defer { lock.unlock() }; return _lastContactAt } }
     var sessionId: String? { get { lock.lock(); defer { lock.unlock() }; return _sessionId } }
     var localRecordingIndex: Int? { get { lock.lock(); defer { lock.unlock() }; return _localRecordingIndex } }
     var serverStatusText: String { get { lock.lock(); defer { lock.unlock() }; return _serverStatusText } }
+    var trackingExposureCapLabel: String { get { lock.lock(); defer { lock.unlock() }; return _trackingExposureCapLabel } }
 
     func update(
         fpsEstimate: Double? = nil,
         lastContactAt: Date?? = nil,
         sessionId: String?? = nil,
         localRecordingIndex: Int?? = nil,
-        serverStatusText: String? = nil
+        serverStatusText: String? = nil,
+        trackingExposureCapLabel: String? = nil
     ) {
         lock.lock()
         defer { lock.unlock() }
@@ -39,5 +42,6 @@ final class DiagnosticsData {
         if let v = sessionId { _sessionId = v }
         if let v = localRecordingIndex { _localRecordingIndex = v }
         if let v = serverStatusText { _serverStatusText = v }
+        if let v = trackingExposureCapLabel { _trackingExposureCapLabel = v }
     }
 }

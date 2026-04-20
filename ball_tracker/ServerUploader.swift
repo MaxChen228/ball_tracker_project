@@ -130,6 +130,10 @@ final class ServerUploader {
         /// for the whole recording cycle — a dashboard toggle mid-session
         /// doesn't mutate it. Optional to keep older server builds parseable.
         let mode: String?
+        /// Tracking exposure-cap policy snapshotted at arm time. iOS prefers
+        /// this over the global heartbeat field while armed. Optional for
+        /// back-compat with older server builds.
+        let tracking_exposure_cap: String?
     }
 
     /// Mutual chirp sync context carried in heartbeat/status responses.
@@ -187,6 +191,9 @@ final class ServerUploader {
         /// `ServerHealthMonitor.updateBaseInterval(_:)`. Optional for
         /// back-compat with older server builds.
         let heartbeat_interval_s: Double?
+        /// Server-owned tracking exposure-cap policy for the 240 fps path.
+        /// Armed sessions prefer `session.tracking_exposure_cap`.
+        let tracking_exposure_cap: String?
         /// Server-pushed capture image height (540 / 720 / 1080). iOS
         /// rebuilds the capture session at this height when it differs
         /// from the currently-applied value, but only while in .standby
@@ -218,6 +225,31 @@ final class ServerUploader {
             case .cameraOnly: return "Camera-only"
             case .onDevice:   return "On-device"
             case .dual:       return "Dual"
+            }
+        }
+    }
+
+    enum TrackingExposureCapMode: String, Codable {
+        case frameDuration = "frame_duration"
+        case shutter500 = "shutter_500"
+        case shutter1000 = "shutter_1000"
+
+        var label: String {
+            switch self {
+            case .frameDuration: return "1/240"
+            case .shutter500: return "1/500"
+            case .shutter1000: return "1/1000"
+            }
+        }
+
+        var maxExposureSeconds: Double? {
+            switch self {
+            case .frameDuration:
+                return nil
+            case .shutter500:
+                return 1.0 / 500.0
+            case .shutter1000:
+                return 1.0 / 1000.0
             }
         }
     }

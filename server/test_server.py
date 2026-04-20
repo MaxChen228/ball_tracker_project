@@ -1494,15 +1494,59 @@ def test_heartbeat_interval_rejects_out_of_range(tmp_path, monkeypatch):
         main.state.set_heartbeat_interval_s(0.1)
 
 
+def test_tracking_exposure_cap_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+
+    r = client.get("/status")
+    assert r.json()["tracking_exposure_cap"] == "frame_duration"
+
+    r = client.post("/settings/tracking_exposure_cap", json={"mode": "shutter_1000"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "value": "shutter_1000"}
+
+    assert client.get("/status").json()["tracking_exposure_cap"] == "shutter_1000"
+    hb = client.post("/heartbeat", json={"camera_id": "A"})
+    assert hb.json()["tracking_exposure_cap"] == "shutter_1000"
+
+    r = client.post(
+        "/settings/tracking_exposure_cap",
+        data={"mode": "shutter_500"},
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert main.state.tracking_exposure_cap().value == "shutter_500"
+
+    persisted = _json.loads((tmp_path / "runtime_settings.json").read_text())
+    assert persisted["tracking_exposure_cap"] == "shutter_500"
+
+
+def test_tracking_exposure_cap_rejects_invalid_value(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+    for bad in ("", "1/1000", "fast", "240fps"):
+        r = client.post("/settings/tracking_exposure_cap", json={"mode": bad})
+        assert r.status_code == 400, f"expected 400 for {bad!r}"
+    assert main.state.tracking_exposure_cap().value == "frame_duration"
+
+
 def test_runtime_settings_restored_from_disk_on_state_init(tmp_path):
     import main
     # Seed a file and confirm a fresh State picks it up.
     (tmp_path / "runtime_settings.json").write_text(
-        _json.dumps({"chirp_detect_threshold": 0.42, "heartbeat_interval_s": 7.5})
+        _json.dumps({
+            "chirp_detect_threshold": 0.42,
+            "heartbeat_interval_s": 7.5,
+            "tracking_exposure_cap": "shutter_1000",
+        })
     )
     s = main.State(data_dir=tmp_path)
     assert s.chirp_detect_threshold() == pytest.approx(0.42)
     assert s.heartbeat_interval_s() == pytest.approx(7.5)
+    assert s.tracking_exposure_cap().value == "shutter_1000"
 
     # Out-of-range values on disk are ignored, defaults retained.
     (tmp_path / "runtime_settings.json").write_text(
