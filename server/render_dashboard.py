@@ -240,6 +240,46 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                    border-radius: var(--r); overflow: hidden; }}
 .preview-panel img {{ width: 100%; height: 100%; object-fit: contain; display: block; }}
 
+/* Calibration card (Phase 5). Per-camera auto-calibrate row + an
+   extended-markers block. Visually aligned with .device rows so the
+   card reads as "calibration plane" beneath Devices/Session. */
+.calib-row {{ display: grid; grid-template-columns: 28px minmax(0, 1fr) min-content;
+               align-items: center; gap: var(--s-2);
+               padding: var(--s-2) 0; }}
+.calib-row + .calib-row {{ border-top: 1px solid var(--border-l); }}
+.calib-row .id {{ font-family: var(--mono); font-size: 11px; font-weight: 700;
+                    color: var(--ink); letter-spacing: 0.08em; }}
+.calib-row .meta {{ font-family: var(--sans); font-size: 11px; color: var(--sub); }}
+.calib-sub {{ margin-top: var(--s-3); padding-top: var(--s-3);
+               border-top: 1px solid var(--border-l); }}
+.calib-sub h3 {{ font-family: var(--mono); font-size: 10px; font-weight: 500;
+                  letter-spacing: 0.14em; text-transform: uppercase;
+                  color: var(--sub); margin: 0 0 var(--s-2) 0; }}
+.calib-register-row {{ display: flex; gap: var(--s-2); align-items: center;
+                         flex-wrap: wrap; margin-bottom: var(--s-2); }}
+.calib-register-row select {{ font-family: var(--mono); font-size: 11px;
+                                padding: 6px 8px; border-radius: var(--r);
+                                border: 1px solid var(--border-base);
+                                background: var(--surface); color: var(--ink); }}
+.marker-list {{ display: flex; flex-direction: column; gap: 0;
+                 border: 1px solid var(--border-l); border-radius: var(--r);
+                 background: var(--surface-hover); }}
+.marker-list:empty {{ display: none; }}
+.marker-row {{ display: flex; align-items: center; justify-content: space-between;
+                padding: 6px var(--s-2); border-top: 1px solid var(--border-l);
+                font-family: var(--mono); font-size: 11px; color: var(--ink); }}
+.marker-row:first-child {{ border-top: 0; }}
+.marker-row .mid {{ font-weight: 700; min-width: 28px; }}
+.marker-row .mxy {{ color: var(--sub); flex: 1; padding-left: var(--s-2); }}
+.marker-row button {{ background: transparent; border: 0; color: var(--sub);
+                       font-family: var(--mono); font-size: 14px; line-height: 1;
+                       cursor: pointer; padding: 2px 6px; border-radius: var(--r); }}
+.marker-row button:hover {{ color: var(--dev); background: var(--surface); }}
+.marker-list-empty {{ color: var(--sub); font-style: italic; font-size: 11px;
+                        padding: var(--s-2) 0; font-family: var(--mono); }}
+.calib-last {{ font-family: var(--mono); font-size: 10px; color: var(--sub);
+                 letter-spacing: 0.06em; }}
+
 /* Runtime tunables card — two slider + number-input rows. Server owns
    the persisted value; sliders POST on `change` (keystroke commits on
    blur). Matches the segmented / button family visually. */
@@ -1252,13 +1292,115 @@ _JS_TEMPLATE = r"""
 
   // Prime all three immediately, then stagger polling so the UI stays
   // current without hammering the server. Status carries arming state
+  // --- CALIBRATION card (Phase 5) -------------------------------------
+  // Click "Auto calibrate" → POST /calibration/auto/<cam>. Optimistic:
+  // button disables while in flight; toast on failure.
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-auto-cal]');
+    if (!btn) return;
+    const cam = btn.dataset.autoCal;
+    btn.disabled = true;
+    const originalLabel = btn.textContent;
+    btn.textContent = 'Calibrating…';
+    try {
+      const r = await fetch('/calibration/auto/' + encodeURIComponent(cam),
+                            { method: 'POST' });
+      if (!r.ok) {
+        let msg = 'Calibration failed';
+        try { const body = await r.json(); if (body.detail) msg = body.detail; } catch (_) {}
+        alert(msg);
+        return;
+      }
+      // Immediate calibration tick + markers refresh.
+      tickCalibration();
+      tickExtendedMarkers();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+    }
+  });
+
+  // Register extended markers from the picked camera.
+  document.addEventListener('click', async (e) => {
+    if (e.target && e.target.id === 'marker-register-btn') {
+      const sel = document.getElementById('marker-register-cam');
+      const cam = sel && sel.value;
+      if (!cam) return;
+      e.target.disabled = true;
+      try {
+        const r = await fetch('/calibration/markers/register/' + encodeURIComponent(cam),
+                              { method: 'POST' });
+        if (!r.ok) {
+          let msg = 'Register failed';
+          try { const body = await r.json(); if (body.detail) msg = body.detail; } catch (_) {}
+          alert(msg);
+        }
+        tickExtendedMarkers();
+      } finally {
+        e.target.disabled = false;
+      }
+      return;
+    }
+    if (e.target && e.target.id === 'marker-clear-btn') {
+      if (!confirm('Clear all extended markers?')) return;
+      try {
+        await fetch('/calibration/markers/clear', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' } });
+      } catch (_) {}
+      tickExtendedMarkers();
+      return;
+    }
+    const remBtn = e.target.closest('[data-marker-remove]');
+    if (remBtn) {
+      const mid = remBtn.dataset.markerRemove;
+      try {
+        await fetch('/calibration/markers/' + encodeURIComponent(mid),
+                    { method: 'DELETE' });
+      } catch (_) {}
+      tickExtendedMarkers();
+    }
+  });
+
+  function renderExtendedMarkers(markers) {
+    const listEl = document.getElementById('marker-list');
+    if (!listEl) return;
+    if (!markers || markers.length === 0) {
+      listEl.innerHTML = '<div class="marker-list-empty">No extended markers registered.</div>';
+      return;
+    }
+    const rows = markers.map(row => {
+      const id = Number(row.id);
+      const wx = Number(row.wx);
+      const wy = Number(row.wy);
+      const fmt = v => (v >= 0 ? '+' : '') + v.toFixed(3);
+      return '<div class="marker-row">' +
+             '<span class="mid">#' + id + '</span>' +
+             '<span class="mxy">(' + fmt(wx) + ', ' + fmt(wy) + ') m</span>' +
+             '<button type="button" data-marker-remove="' + id +
+             '" title="Remove marker ' + id + '">&times;</button>' +
+             '</div>';
+    }).join('');
+    listEl.innerHTML = '<div class="marker-list">' + rows + '</div>';
+  }
+
+  async function tickExtendedMarkers() {
+    try {
+      const r = await fetch('/calibration/markers', { cache: 'no-store' });
+      if (!r.ok) return;
+      const body = await r.json();
+      renderExtendedMarkers(body.markers || []);
+    } catch (e) { /* silent */ }
+  }
+
   // (1 s) and is the only high-frequency tick.
   tickStatus();
   tickCalibration();
   tickEvents();
+  tickExtendedMarkers();
   setInterval(tickStatus, 1000);
   setInterval(tickCalibration, 5000);
   setInterval(tickEvents, 5000);
+  setInterval(tickExtendedMarkers, 5000);
 })();
 """
 
@@ -1310,6 +1452,83 @@ def _render_device_rows(
     rows = [render_row(cam) for cam in ("A", "B")]
     rows.extend(render_row(d["camera_id"]) for d in devices if d["camera_id"] not in ("A", "B"))
     return "".join(rows)
+
+
+def _fmt_hhmm(ts: float | None) -> str:
+    if ts is None:
+        return "—"
+    return _dt.datetime.fromtimestamp(ts).strftime("%H:%M")
+
+
+def _render_calibration_body(
+    device_ids: list[str],
+    calibrations: list[str],
+    calibration_last_ts: dict[str, float] | None = None,
+    extended_markers: list[dict[str, Any]] | None = None,
+) -> str:
+    """CALIBRATION card (Phase 5). Per-camera auto-calibrate button +
+    extended-markers subsection. All actions are dashboard-triggered,
+    fire-and-forget AJAX from the JS tick — the SSR paint produces
+    usable buttons even without JS."""
+    calibrated = set(calibrations)
+    calibration_last_ts = calibration_last_ts or {}
+    extended_markers = extended_markers or []
+
+    def cal_row(cam_id: str) -> str:
+        is_cal = cam_id in calibrated
+        last_ts = calibration_last_ts.get(cam_id)
+        last_html = (
+            f'<span class="calib-last">last {html.escape(_fmt_hhmm(last_ts))}</span>'
+            if is_cal and last_ts
+            else '<span class="calib-last">not calibrated</span>'
+        )
+        btn = (
+            f'<button type="button" class="btn small" '
+            f'data-auto-cal="{html.escape(cam_id)}">Auto calibrate</button>'
+        )
+        return (
+            f'<div class="calib-row">'
+            f'<div class="id">{html.escape(cam_id)}</div>'
+            f'<div class="meta">{last_html}</div>'
+            f'<div>{btn}</div>'
+            f'</div>'
+        )
+
+    rows_html = "".join(cal_row(cam) for cam in device_ids)
+
+    # Extended-markers sub-section.
+    cam_options = "".join(
+        f'<option value="{html.escape(cam)}">{html.escape(cam)}</option>'
+        for cam in device_ids
+    )
+    if extended_markers:
+        list_items = "".join(
+            f'<div class="marker-row">'
+            f'<span class="mid">#{int(row["id"])}</span>'
+            f'<span class="mxy">({float(row["wx"]):+0.3f}, {float(row["wy"]):+0.3f}) m</span>'
+            f'<button type="button" data-marker-remove="{int(row["id"])}" '
+            f'title="Remove marker {int(row["id"])}">&times;</button>'
+            f'</div>'
+            for row in extended_markers
+        )
+        list_html = f'<div class="marker-list">{list_items}</div>'
+    else:
+        list_html = '<div class="marker-list-empty">No extended markers registered.</div>'
+
+    sub_html = (
+        '<div class="calib-sub">'
+        '<h3>Extended markers</h3>'
+        '<div class="calib-register-row">'
+        f'<select id="marker-register-cam">{cam_options}</select>'
+        '<button type="button" class="btn small" id="marker-register-btn">'
+        'Register from this camera</button>'
+        '<button type="button" class="btn small secondary" id="marker-clear-btn">'
+        'Clear all</button>'
+        '</div>'
+        f'<div id="marker-list">{list_html}</div>'
+        '</div>'
+    )
+    return rows_html + sub_html
 
 
 _MODE_LABELS = {
@@ -1555,6 +1774,8 @@ def render_events_index_html(
     sync_cooldown_remaining_s: float = 0.0,
     chirp_detect_threshold: float = 0.18,
     heartbeat_interval_s: float = 1.0,
+    calibration_last_ts: dict[str, float] | None = None,
+    extended_markers: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render the dashboard: top nav + sidebar (devices / session / events)
     + a canvas showing the current calibration scene. All three panels
@@ -1622,6 +1843,10 @@ def render_events_index_html(
         '<div class="card">'
         '<h2 class="card-title">Runtime &middot; Tuning</h2>'
         f'<div id="tuning-body">{_render_tuning_body(chirp_detect_threshold, heartbeat_interval_s)}</div>'
+        "</div>"
+        '<div class="card">'
+        '<h2 class="card-title">Calibration</h2>'
+        f'<div id="calibration-body">{_render_calibration_body(["A", "B"], calibrations, calibration_last_ts, extended_markers)}</div>'
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Events</h2>'

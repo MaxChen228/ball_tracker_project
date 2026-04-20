@@ -62,6 +62,15 @@ def detect_plate_markers(bgr_image: np.ndarray) -> list[DetectedMarker]:
     markers with IDs in the plate-landmark set (0-5). Extra / unknown IDs
     are silently dropped so a stray marker in the background can't poison
     the homography solve."""
+    return [m for m in detect_all_markers_in_dict(bgr_image)
+            if m.id in PLATE_MARKER_WORLD]
+
+
+def detect_all_markers_in_dict(bgr_image: np.ndarray) -> list[DetectedMarker]:
+    """Run ArUco (DICT_4X4_50) detection and return every detected marker
+    (IDs 0-49). Used by Phase 5's extended-markers registration + the
+    generalised `solve_homography_from_world_map` so operators can tape
+    additional markers on the plate plane as landmarks beyond IDs 0-5."""
     if bgr_image.ndim != 3 or bgr_image.shape[2] != 3:
         raise ValueError(f"expected BGR image, got shape {bgr_image.shape}")
     gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
@@ -73,8 +82,6 @@ def detect_plate_markers(bgr_image: np.ndarray) -> list[DetectedMarker]:
         return []
     results: list[DetectedMarker] = []
     for corner_set, marker_id in zip(corners, ids.flatten().tolist()):
-        if marker_id not in PLATE_MARKER_WORLD:
-            continue
         # corner_set shape (1, 4, 2) → (4, 2)
         pts = np.asarray(corner_set, dtype=np.float64).reshape(4, 2)
         results.append(DetectedMarker(id=int(marker_id), corners=pts))
@@ -119,6 +126,50 @@ def solve_homography(
         return None
     # Normalize h33 to 1 so downstream consumers (server pairing, dashboard
     # preview canvas) can assume a canonical representation.
+    if abs(H[2, 2]) < 1e-12:
+        return None
+    H = H / H[2, 2]
+    return CalibrationSolveResult(
+        homography_row_major=H.flatten().tolist(),
+        detected_ids=detected_ids,
+        missing_ids=missing_ids,
+        image_width_px=int(image_size[0]),
+        image_height_px=int(image_size[1]),
+    )
+
+
+def solve_homography_from_world_map(
+    detected: Iterable[DetectedMarker],
+    world_map: dict[int, tuple[float, float]],
+    image_size: tuple[int, int],
+) -> CalibrationSolveResult | None:
+    """Generalised homography solve — like `solve_homography` but accepts an
+    arbitrary `world_map` (plate markers ∪ extended markers). Needs ≥5 of
+    the detected markers to appear as keys in `world_map`; returns None
+    otherwise. Detected markers whose IDs are absent from `world_map` are
+    silently dropped (same policy as `detect_plate_markers` → unknown IDs
+    can't poison the solve).
+
+    `missing_ids` in the result is always relative to the plate-landmark
+    set (IDs 0-5) so dashboards keep a stable "which plate marker did we
+    miss?" signal regardless of how many extended markers were in play."""
+    markers_by_id = {m.id: m for m in detected if m.id in world_map}
+    detected_ids = sorted(markers_by_id.keys())
+    missing_ids = [i for i in _ALL_MARKER_IDS if i not in markers_by_id]
+    if len(detected_ids) < _MIN_MARKERS_FOR_SOLVE:
+        return None
+
+    world_pts = np.array(
+        [world_map[i] for i in detected_ids],
+        dtype=np.float64,
+    )
+    image_pts = np.array(
+        [markers_by_id[i].corners.mean(axis=0) for i in detected_ids],
+        dtype=np.float64,
+    )
+    H, _mask = cv2.findHomography(world_pts, image_pts, cv2.RANSAC, 3.0)
+    if H is None:
+        return None
     if abs(H[2, 2]) < 1e-12:
         return None
     H = H / H[2, 2]
