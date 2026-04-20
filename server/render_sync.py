@@ -1,14 +1,20 @@
-"""Renderer for `/sync` — a dedicated Time Sync page split out from the
-dashboard so long-distance sync debugging has room for a matched-filter
-trace plot + the diagnostic log without crowding the sidebar. Reuses the
-dashboard's `_CSS` / design tokens verbatim so the visual language stays
-consistent with `/` and `/viewer/...`."""
+"""Renderer for `/setup` — the configuration surface. Stacks DEVICES ·
+CALIBRATION + TIME SYNC (with matched-filter trace plot and log) +
+RUNTIME · TUNING in a single-column layout. The operational `/` page is
+session + events + canvas only. Reuses the dashboard's `_CSS` / design
+tokens verbatim so the visual language stays consistent."""
 from __future__ import annotations
 
 import html
 from typing import Any
 
-from render_dashboard import _CSS
+from render_dashboard import (
+    _CSS,
+    _JS_TEMPLATE as _DASHBOARD_JS_TEMPLATE,
+    _render_device_rows,
+    _render_extended_markers_body,
+    _render_tuning_body,
+)
 from schemas import SYNC_TRACE_MIN_PSR, SYNC_TRACE_THRESHOLD
 
 
@@ -18,10 +24,16 @@ from schemas import SYNC_TRACE_MIN_PSR, SYNC_TRACE_THRESHOLD
 # nav via render_dashboard.py so the link can be rendered there too).
 _SYNC_CSS = """
 .main-sync {
-  max-width: 960px; margin: 0 auto;
+  max-width: 1100px; margin: 0 auto;
   padding: calc(var(--nav-h) + var(--s-5)) var(--s-4) var(--s-5) var(--s-4);
   display: flex; flex-direction: column; gap: var(--s-3);
 }
+.setup-section-title {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--sub);
+  margin: var(--s-4) 0 calc(-1 * var(--s-2)) var(--s-1);
+}
+.setup-section-title:first-child { margin-top: 0; }
 #sync-trace {
   width: 100%; height: 400px;
   background: var(--surface-hover);
@@ -166,7 +178,7 @@ _JS_TEMPLATE = r"""
       (armed ? `<span class="val armed">${esc(s.id || '—')}</span>`
              : `<span class="val idle">idle</span>`) + `</span>` +
       `<span class="pair"><span class="label">Sync</span><span class="val ${syncCls}">${syncLabel}</span></span>` +
-      `<a class="nav-link" href="/">← Dashboard</a>`;
+      `<a class="nav-link" href="/">← Back to home</a>`;
   }
 
   // --- Trace plot ----------------------------------------------------------
@@ -505,22 +517,34 @@ def _render_nav_status(
         f'<span class="pair"><span class="label">Calibrated</span><span class="val {cal_cls}">{len(calibrations)}/2</span></span>'
         f'<span class="pair"><span class="label">Session</span>{session_html}</span>'
         f'<span class="pair"><span class="label">Sync</span><span class="val {sync_cls}">{sync_label}</span></span>'
-        f'<a class="nav-link" href="/">&larr; Dashboard</a>'
+        f'<a class="nav-link" href="/">&larr; Back to home</a>'
     )
 
 
-def render_sync_html(
+def render_setup_html(
     devices: list[dict[str, Any]] | None = None,
     session: dict[str, Any] | None = None,
     calibrations: list[str] | None = None,
     sync: dict[str, Any] | None = None,
     last_sync: dict[str, Any] | None = None,
     sync_cooldown_remaining_s: float = 0.0,
+    chirp_detect_threshold: float = 0.18,
+    heartbeat_interval_s: float = 1.0,
+    capture_height_px: int = 1080,
+    calibration_last_ts: dict[str, float] | None = None,
+    extended_markers: list[dict[str, Any]] | None = None,
+    preview_requested: dict[str, bool] | None = None,
 ) -> str:
+    """Full configuration page. Sections (stacked, full-width):
+    DEVICES · CALIBRATION (device rows + extended markers) · TIME SYNC
+    (mutual-chirp control + matched-filter trace + diagnostic log) ·
+    RUNTIME · TUNING (chirp threshold, heartbeat interval, capture
+    resolution). The `/` dashboard is purely operational (Session +
+    Events + 3D canvas)."""
     devices = devices or []
     calibrations = calibrations or []
 
-    js = (
+    sync_js = (
         _JS_TEMPLATE
         .replace("__THRESHOLD__", repr(float(SYNC_TRACE_THRESHOLD)))
         .replace("__MIN_PSR__", repr(float(SYNC_TRACE_MIN_PSR)))
@@ -541,20 +565,29 @@ def render_sync_html(
         "<html lang=\"en\"><head>"
         "<meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        "<title>ball_tracker · sync</title>"
+        "<title>ball_tracker · setup</title>"
         "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">"
         "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
         "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
         "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
         f"<style>{_CSS}{_SYNC_CSS}</style>"
-        "</head><body>"
+        "</head><body data-page=\"setup\">"
         '<nav class="nav">'
         '<a class="brand" href="/" style="text-decoration:none"><span class="dot"></span>BALL_TRACKER</a>'
         f'<div class="status-line" id="nav-status">{_render_nav_status(devices, session, calibrations, sync, sync_cooldown_remaining_s)}</div>'
         "</nav>"
         '<main class="main-sync">'
+        # DEVICES · CALIBRATION
+        '<div class="setup-section-title">Devices &middot; Calibration</div>'
         '<div class="card">'
-        '<h2 class="card-title">Time Sync · Control</h2>'
+        '<h2 class="card-title">Devices &middot; Calibration</h2>'
+        f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested)}</div>'
+        f'<div id="extended-markers-body">{_render_extended_markers_body(["A", "B"], extended_markers)}</div>'
+        "</div>"
+        # TIME SYNC
+        '<div class="setup-section-title">Time Sync</div>'
+        '<div class="card">'
+        '<h2 class="card-title">Mutual sync &middot; Control</h2>'
         f'<div id="sync-body">{_render_sync_body(sync, last_sync, devices, session, sync_cooldown_remaining_s)}</div>'
         "</div>"
         '<div class="card">'
@@ -565,13 +598,25 @@ def render_sync_html(
         '<div class="card">'
         '<h2 class="card-title">Log</h2>'
         '<div class="sync-log-head">'
-        '<span class="sync-log-label">Diagnostic events · server + A + B</span>'
+        '<span class="sync-log-label">Diagnostic events &middot; server + A + B</span>'
         '<button type="button" class="btn secondary small" id="sync-log-copy">Copy</button>'
         '<button type="button" class="btn secondary small" id="sync-log-clear">Clear view</button>'
         '</div>'
         '<pre class="sync-log" id="sync-log"></pre>'
         "</div>"
+        # RUNTIME · TUNING
+        '<div class="setup-section-title">Runtime &middot; Tuning</div>'
+        '<div class="card">'
+        '<h2 class="card-title">Runtime &middot; Tuning</h2>'
+        f'<div id="tuning-body">{_render_tuning_body(chirp_detect_threshold, heartbeat_interval_s, capture_height_px)}</div>'
+        "</div>"
         "</main>"
-        f"<script>{js}</script>"
+        # Dashboard JS drives devices, extended markers, auto-cal clicks,
+        # preview toggle + refresh, nav status; its renderSession/
+        # renderEvents/canvas paths no-op via null guards when those
+        # containers are absent. Sync JS owns the mutual-sync form, the
+        # matched-filter trace plot, and the diagnostic log panel.
+        f"<script>{_DASHBOARD_JS_TEMPLATE}</script>"
+        f"<script>{sync_js}</script>"
         "</body></html>"
     )

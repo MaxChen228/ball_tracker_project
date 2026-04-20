@@ -670,23 +670,42 @@ def test_dashboard_renders_control_panel():
     r = client.get("/")
     assert r.status_code == 200
     body = r.text
-    # Nav brand + the three SSR-hydrated panel containers the JS polls into.
+    # `/` is operational-only now: Session + Events + 3D canvas. Devices,
+    # calibration, extended markers, and tuning all live on /setup.
     assert "BALL_TRACKER" in body
     assert 'action="/sessions/arm"' in body
     assert 'action="/sessions/stop"' in body
-    assert 'id="devices-body"' in body
     assert 'id="session-body"' in body
     assert 'id="events-body"' in body
     assert 'id="scene-root"' in body
+    assert 'href="/setup"' in body  # nav link points at the new config page
+
+
+def test_setup_page_renders_all_config_surfaces():
+    client = TestClient(app)
+    r = client.get("/setup")
+    assert r.status_code == 200
+    body = r.text
+    # DEVICES · CALIBRATION + TIME SYNC + RUNTIME · TUNING all live here.
+    assert 'id="devices-body"' in body
+    assert 'id="extended-markers-body"' in body
+    assert 'id="sync-body"' in body
+    assert 'id="sync-trace"' in body
+    assert 'id="sync-log"' in body
+    assert 'id="tuning-body"' in body
+
+
+def test_sync_page_redirects_to_setup():
+    client = TestClient(app)
+    r = client.get("/sync", follow_redirects=False)
+    assert r.status_code == 301
+    assert r.headers["location"] == "/setup"
 
 
 def test_dashboard_marks_expected_cameras_offline_when_absent():
     client = TestClient(app)
-    r = client.get("/")
-    # Neither A nor B have heartbeated → both rendered with the "offline"
-    # chip in the initial server-rendered Devices card. `in` (not `count`)
-    # so incidental matches inside the inline JS template don't throw off
-    # the assertion.
+    # Device status is now surfaced on /setup, not /.
+    r = client.get("/setup")
     body = r.text
     assert '<div class="id">A</div>' in body
     assert '<div class="id">B</div>' in body
