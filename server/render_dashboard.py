@@ -273,6 +273,18 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                                 pointer-events: none; }}
 .preview-panel.off img {{ display: none; }}
 .preview-panel.off .placeholder {{ color: rgba(255, 255, 255, 0.6); }}
+/* Crosshair at geometric centre of the real preview — reference mark
+   for the operator to visually align against the virt canvas's
+   principal-point cross below. Hidden when preview is off. */
+.preview-panel::before,
+.preview-panel::after {{ content: ''; position: absolute;
+                          background: rgba(255, 255, 255, 0.55);
+                          pointer-events: none; }}
+.preview-panel::before {{ left: 50%; top: calc(50% - 8px);
+                           width: 1px; height: 16px; transform: translateX(-0.5px); }}
+.preview-panel::after {{ top: 50%; left: calc(50% - 8px);
+                          width: 16px; height: 1px; transform: translateY(-0.5px); }}
+.preview-panel.off::before, .preview-panel.off::after {{ display: none; }}
 /* Virtual camera: 2D canvas showing the plate pentagon + principal-point
    cross reprojected through this camera's own K·[R|t]·P. Same idea as
    the viewer's bottom-row virt canvas — if the reprojected outline
