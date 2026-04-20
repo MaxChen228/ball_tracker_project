@@ -1704,12 +1704,12 @@ def test_calibration_auto_returns_422_when_too_few_markers(tmp_path, monkeypatch
 
 def test_calibration_auto_returns_408_when_no_frame_delivered(tmp_path, monkeypatch):
     """No pre-seeded cal frame + no iOS uploader in the test harness →
-    /calibration/auto polls for 2 s then times out with 408."""
+    /calibration/auto polls the burst budget then times out with 408."""
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(app)
     r = client.post("/calibration/auto/A")
     assert r.status_code == 408, r.text
-    assert "within 2 s" in r.json()["detail"].lower()
+    assert "within 5 s" in r.json()["detail"].lower()
 
 
 def test_extended_markers_register_from_image_recovers_world_coords(tmp_path, monkeypatch):

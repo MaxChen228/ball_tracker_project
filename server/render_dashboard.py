@@ -252,7 +252,9 @@ form.inline {{ display: inline-block; margin: 0; }}
 button.btn.preview-btn {{ padding: 3px 8px; font-size: 9px; letter-spacing: 0.10em; }}
 button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface);
                                   border-color: var(--passed); }}
-.preview-panel {{ margin-top: 8px; width: 320px; max-width: 100%;
+.preview-pair {{ margin-top: 8px; display: grid; grid-template-columns: 1fr 1fr;
+                  gap: var(--s-2); width: 100%; max-width: 660px; }}
+.preview-panel {{ width: 100%;
                    aspect-ratio: 16 / 9; background: #000;
                    border: 1px solid var(--border-base);
                    border-radius: var(--r); overflow: hidden;
@@ -267,6 +269,16 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                                 pointer-events: none; }}
 .preview-panel.off img {{ display: none; }}
 .preview-panel.off .placeholder {{ color: rgba(255, 255, 255, 0.6); }}
+.virtual-cam {{ width: 100%; aspect-ratio: 16 / 9;
+                 background: var(--surface); border: 1px solid var(--border-base);
+                 border-radius: var(--r); overflow: hidden; position: relative; }}
+.virtual-cam .placeholder {{ position: absolute; inset: 0;
+                              display: flex; align-items: center; justify-content: center;
+                              color: var(--sub); font-family: var(--mono); font-size: 10px;
+                              letter-spacing: 0.14em; text-transform: uppercase;
+                              pointer-events: none; }}
+.virtual-cam .plot-host {{ width: 100%; height: 100%; }}
+.virtual-cam.has-plot .placeholder {{ display: none; }}
 
 /* Calibration card (Phase 5). Per-camera auto-calibrate row + an
    extended-markers block. Visually aligned with .device rows so the
@@ -969,6 +981,11 @@ _JS_TEMPLATE = r"""
         `<img data-preview-img="${esc(cam)}" src="${previewOn ? ('/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now()) : ''}" alt="preview ${esc(cam)}">` +
         `<div class="placeholder">${previewOn ? '…' : 'Preview off'}</div>` +
         `</div>`;
+      const virtualCam = `<div class="virtual-cam" data-virtual-cam="${esc(cam)}">` +
+        `<div class="plot-host" data-virtual-host="${esc(cam)}"></div>` +
+        `<div class="placeholder">${isCal ? 'loading pose…' : 'not calibrated'}</div>` +
+        `</div>`;
+      const previewPair = `<div class="preview-pair">${previewPanel}${virtualCam}</div>`;
       return `
         <div class="device">
           <div class="device-head">
@@ -980,7 +997,7 @@ _JS_TEMPLATE = r"""
             <div class="chip-col">${statusChip(cam, online, isCal)}</div>
           </div>
           <div class="device-actions">${previewBtn}${autoCalBtn}</div>
-          ${previewPanel}
+          ${previewPair}
         </div>`;
     }
 
@@ -1266,11 +1283,18 @@ _JS_TEMPLATE = r"""
           lastBasePlotDigest = digest;
           basePlot = payload.plot;
           repaintCanvas();
+          repaintVirtualCams();
         } else if (basePlot === null) {
           // First tick: even if digest already matched (shouldn't happen),
           // we still need to paint once.
           basePlot = payload.plot;
           repaintCanvas();
+          repaintVirtualCams();
+        } else {
+          // digest match but devices render may have just created/removed
+          // virtual-cam hosts (preview toggles re-render the Devices card).
+          // Cheap repaint keeps each host in sync with DOM lifecycle.
+          repaintVirtualCams();
         }
       }
     } catch (e) { /* silent */ }
@@ -1384,6 +1408,44 @@ _JS_TEMPLATE = r"""
     }
   }
   setInterval(tickPreviewImages, 200);
+
+  // Per-camera mini 3D pose canvas — renders beside each preview panel.
+  // Reuses `basePlot` (from /calibration/state) by keeping traces with
+  // meta.camera_id == this cam PLUS shared world traces (no meta/camera_id).
+  // Tiny Plotly react on each calibration tick; layout cached per host.
+  const virtualCamLayouts = {};
+  function repaintVirtualCams() {
+    if (!basePlot || !window.Plotly) return;
+    const allTraces = basePlot.data || [];
+    for (const host of document.querySelectorAll('[data-virtual-host]')) {
+      const cam = host.dataset.virtualHost;
+      if (!cam) continue;
+      const container = host.closest('.virtual-cam');
+      const traces = allTraces.filter(tr => {
+        const cid = tr && tr.meta && tr.meta.camera_id;
+        return !cid || cid === cam;
+      });
+      const hasCam = traces.some(tr => tr && tr.meta && tr.meta.trace_kind === 'camera');
+      if (!hasCam) {
+        if (container) container.classList.remove('has-plot');
+        continue;
+      }
+      if (container) container.classList.add('has-plot');
+      let layout = virtualCamLayouts[cam];
+      if (!layout) {
+        layout = JSON.parse(JSON.stringify(basePlot.layout || {}));
+        if (!layout.scene) layout.scene = {};
+        layout.scene.uirevision = 'virtual-cam-' + cam;
+        layout.showlegend = false;
+        layout.margin = { l: 0, r: 0, t: 0, b: 0 };
+        layout.autosize = true;
+        virtualCamLayouts[cam] = layout;
+      }
+      Plotly.react(host, traces, layout, {
+        responsive: true, displayModeBar: false, scrollZoom: true, doubleClick: false,
+      });
+    }
+  }
 
   // Prime all three immediately, then stagger polling so the UI stays
   // current without hammering the server. Status carries arming state
@@ -1562,6 +1624,17 @@ def _render_device_rows(
             f'<div class="placeholder">{_placeholder}</div>'
             f'</div>'
         )
+        virtual_cam = (
+            f'<div class="virtual-cam" data-virtual-cam="{html.escape(cam_id)}">'
+            f'<div class="plot-host" data-virtual-host="{html.escape(cam_id)}"></div>'
+            f'<div class="placeholder">'
+            f'{"loading pose…" if is_cal else "not calibrated"}'
+            f'</div>'
+            f'</div>'
+        )
+        preview_pair = (
+            f'<div class="preview-pair">{preview_panel}{virtual_cam}</div>'
+        )
         return (
             f'<div class="device">'
             f'<div class="device-head">'
@@ -1573,7 +1646,7 @@ def _render_device_rows(
             f'<div class="chip-col"><span class="chip {chip_cls}">{chip_label}</span></div>'
             f'</div>'
             f'<div class="device-actions">{preview_btn}{auto_cal_btn}</div>'
-            f'{preview_panel}'
+            f'{preview_pair}'
             f'</div>'
         )
 

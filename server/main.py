@@ -2862,44 +2862,77 @@ async def calibration_auto(
     import cv2  # noqa: WPS433
     import asyncio as _asyncio  # noqa: WPS433
 
-    state.request_calibration_frame(camera_id)
-    jpeg_bytes: bytes | None = None
-    for _ in range(20):  # 20 × 100 ms = 2 s budget
-        got = state.consume_calibration_frame(camera_id)
-        if got is not None:
-            jpeg_bytes, _ts = got
+    # Burst: request up to 6 frames over ~5 s, aggregate marker detections
+    # across frames. Camera wobble + JPEG artifacts cause single-frame
+    # flicker where frame N sees markers {0,3} and frame N+1 sees {1,4,5} —
+    # union across the burst recovers the full set. For each ID we average
+    # the 4 corner points across every frame that saw it (single-frame
+    # outliers get damped by ≥2 other consistent sightings).
+    from calibration_solver import DetectedMarker
+    max_frames = 6
+    burst_deadline = _asyncio.get_event_loop().time() + 5.0
+    frames_seen = 0
+    per_id_corners: dict[int, list[np.ndarray]] = {}
+    first_shape: tuple[int, int] | None = None
+    world_map: dict[int, tuple[float, float]] = dict(PLATE_MARKER_WORLD)
+    world_map.update(state._extended_markers.all())
+    while frames_seen < max_frames and _asyncio.get_event_loop().time() < burst_deadline:
+        state.request_calibration_frame(camera_id)
+        got: tuple[bytes, float] | None = None
+        for _ in range(20):  # up to 2 s per frame
+            got = state.consume_calibration_frame(camera_id)
+            if got is not None:
+                break
+            await _asyncio.sleep(0.1)
+        if got is None:
             break
-        await _asyncio.sleep(0.1)
+        jpeg_bytes, _ts = got
+        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is None:
+            continue
+        if first_shape is None:
+            first_shape = bgr.shape[:2]  # (h, w)
+        for m in detect_all_markers_in_dict(bgr):
+            if m.id in world_map:
+                per_id_corners.setdefault(m.id, []).append(m.corners)
+        frames_seen += 1
+        # Early exit once we have enough plate markers from at least 2
+        # frames each (stable detection, not a one-shot lucky hit).
+        plate_ids_with_2 = [i for i, c in per_id_corners.items()
+                            if i in PLATE_MARKER_WORLD and len(c) >= 2]
+        if len(plate_ids_with_2) >= 5 and frames_seen >= 2:
+            break
 
-    if jpeg_bytes is None:
+    if frames_seen == 0 or first_shape is None:
         raise HTTPException(
             status_code=408,
             detail=(
                 f"camera {camera_id!r} did not deliver a calibration "
-                "frame within 2 s — check the phone is online, awake, "
-                "and running the current build"
+                "frame within 5 s — check the phone is online, awake, "
+                "preview is enabled, and running the current build"
             ),
         )
 
-    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise HTTPException(status_code=422, detail="calibration frame is not a decodable JPEG")
-
-    h_img, w_img = bgr.shape[:2]
-    world_map: dict[int, tuple[float, float]] = dict(PLATE_MARKER_WORLD)
-    world_map.update(state._extended_markers.all())
-
-    detected = detect_all_markers_in_dict(bgr)
+    h_img, w_img = first_shape
+    aggregated: list[DetectedMarker] = [
+        DetectedMarker(id=mid, corners=np.mean(np.stack(corner_list), axis=0))
+        for mid, corner_list in per_id_corners.items()
+    ]
+    detected = aggregated
     result = solve_homography_from_world_map(
         detected, world_map, image_size=(w_img, h_img)
     )
     if result is None:
+        seen_counts = ", ".join(
+            f"id{mid}×{len(cs)}" for mid, cs in sorted(per_id_corners.items())
+        )
         raise HTTPException(
             status_code=422,
             detail=(
                 f"need ≥5 known markers (plate 0-5 ∪ extended registry) "
-                f"visible in the preview; detected {len(detected)} marker(s)"
+                f"across {frames_seen} frame(s); got: "
+                f"{seen_counts or '(none)'}"
             ),
         )
 
@@ -2946,8 +2979,8 @@ async def calibration_auto(
         cam_world = (-R.T @ t).flatten()
         dist_m = float(np.linalg.norm(cam_world))
         logger.info(
-            "calibration_auto cam=%s dims=%dx%d detected=%s world_pos=(%.2f,%.2f,%.2f) dist=%.2fm intr=(fx=%.0f fy=%.0f cx=%.0f cy=%.0f)%s",
-            camera_id, w_img, h_img, result.detected_ids,
+            "calibration_auto cam=%s frames=%d dims=%dx%d detected=%s world_pos=(%.2f,%.2f,%.2f) dist=%.2fm intr=(fx=%.0f fy=%.0f cx=%.0f cy=%.0f)%s",
+            camera_id, frames_seen, w_img, h_img, result.detected_ids,
             cam_world[0], cam_world[1], cam_world[2], dist_m,
             intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy,
             " (prior intrinsics reused)" if prior is not None and h_fov_deg is None else " (FOV-derived)",
