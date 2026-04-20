@@ -13,16 +13,6 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "netwo
 ///                  detection is the sole data path; no detection runs on
 ///                  the phone any more)
 final class ServerUploader {
-    struct IntrinsicsPayload: Codable {
-        let fx: Double
-        let fz: Double
-        let cx: Double
-        let cy: Double
-        /// OpenCV 5-coefficient distortion `[k1, k2, p1, p2, k3]`. Nil when
-        /// no ChArUco calibration has been imported for this camera.
-        let distortion: [Double]?
-    }
-
     /// Metadata accompanying the required H.264 MOV. The server decodes the
     /// video, runs HSV ball detection per frame, and triangulates.
     /// One decoded / on-device-detected frame. Wire-identical to
@@ -620,71 +610,6 @@ final class ServerUploader {
     /// and the defensive `invalidResponse` case.
     static func isTransient(_ error: UploadError) -> Bool {
         return error.isTransient
-    }
-
-    /// Standalone calibration snapshot — sent after the user saves a fresh
-    /// ArUco or manual-handle calibration so the dashboard can draw the
-    /// camera's pose in its 3D canvas immediately, without waiting for a
-    /// first pitch upload. `image_width_px` / `image_height_px` come from
-    /// the live capture frame dimensions (matches what the ball-detection
-    /// pipeline already writes to `IntrinsicsStore`).
-    struct CalibrationPayload: Codable {
-        let camera_id: String
-        let intrinsics: IntrinsicsPayload
-        let homography: [Double]
-        let image_width_px: Int
-        let image_height_px: Int
-    }
-
-    /// POST the freshly-solved calibration to the server. Fire-and-forget
-    /// from the caller's perspective: failures are logged but don't block
-    /// the local UserDefaults write — the phone has already persisted the
-    /// values locally, the server-side copy is a convenience for the
-    /// dashboard canvas only.
-    func postCalibration(
-        _ payload: CalibrationPayload,
-        completion: ((Result<Void, Error>) -> Void)? = nil
-    ) {
-        guard let base = config.baseURL() else {
-            completion?(.failure(NSError(
-                domain: "ServerUploader",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
-            )))
-            return
-        }
-        let url = base.appendingPathComponent("calibration")
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        do {
-            request.httpBody = try JSONEncoder().encode(payload)
-        } catch {
-            completion?(.failure(error))
-            return
-        }
-
-        let cam = payload.camera_id
-        let task = URLSession.shared.dataTask(with: request) { _, response, error in
-            if let error = error {
-                log.error("calibration post failed cam=\(cam, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
-                completion?(.failure(error))
-                return
-            }
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                log.error("calibration post failed cam=\(cam, privacy: .public) http=\(http.statusCode)")
-                completion?(.failure(NSError(
-                    domain: "ServerUploader",
-                    code: http.statusCode,
-                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
-                )))
-                return
-            }
-            log.info("calibration post ok cam=\(cam, privacy: .public)")
-            completion?(.success(()))
-        }
-        task.resume()
     }
 
     /// Generic "POST raw bytes as Content-Type: image/jpeg" used by

@@ -1,8 +1,10 @@
 import UIKit
 
 /// The standby-state "Ready card". Shows whether this phone is ready to
-/// record: calibration / time-sync / server reachability, plus the next
-/// action the operator should take. Hidden while recording.
+/// record: time-sync / server reachability, plus the next action the
+/// operator should take. Hidden while recording. Phase 6: 位置校正 gate
+/// dropped — calibration is dashboard-owned and iOS has no way to query
+/// the server-side state.
 final class ReadyCard: UIView {
     /// Single-row inputs to the card. Built by the caller once per tick.
     struct Gate {
@@ -14,7 +16,6 @@ final class ReadyCard: UIView {
 
     struct Model {
         let cameraRole: String
-        let calibration: Gate
         let timeSync: Gate
         let server: Gate
         let hint: String
@@ -22,7 +23,6 @@ final class ReadyCard: UIView {
 
     private let headerLabel = UILabel()
     private let stateLabel = UILabel()
-    private let calibrationRow = GateRow()
     private let timeSyncRow = GateRow()
     private let serverRow = GateRow()
     private let hintLabel = UILabel()
@@ -55,7 +55,7 @@ final class ReadyCard: UIView {
         headerStack.axis = .vertical
         headerStack.spacing = DesignTokens.Spacing.xs
 
-        let gateStack = UIStackView(arrangedSubviews: [calibrationRow, timeSyncRow, serverRow])
+        let gateStack = UIStackView(arrangedSubviews: [timeSyncRow, serverRow])
         gateStack.axis = .vertical
         gateStack.spacing = DesignTokens.Spacing.m
 
@@ -76,15 +76,13 @@ final class ReadyCard: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func update(_ model: Model) {
-        let ready = model.calibration.state == .pass
-            && model.timeSync.state == .pass
+        let ready = model.timeSync.state == .pass
             && model.server.state == .pass
         headerLabel.text = "Cam \(model.cameraRole)"
         stateLabel.text = ready ? "READY" : "尚未就緒"
         stateLabel.textColor = ready ? DesignTokens.Colors.success : DesignTokens.Colors.warning
         hintLabel.text = model.hint
         hintLabel.isHidden = model.hint.isEmpty
-        apply(model.calibration, to: calibrationRow)
         apply(model.timeSync, to: timeSyncRow)
         apply(model.server, to: serverRow)
     }
