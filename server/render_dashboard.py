@@ -1915,9 +1915,9 @@ def render_events_index_html(
     #    fits naturally.
     fig.update_layout(
         title=None, margin=dict(l=0, r=0, t=8, b=0),
-        scene_xaxis_range=[-3.5, 3.5],
-        scene_yaxis_range=[-3.5, 3.5],
-        scene_zaxis_range=[-0.2, 2.0],
+        scene_xaxis_range=[-6.0, 6.0],
+        scene_yaxis_range=[-6.0, 6.0],
+        scene_zaxis_range=[-0.2, 3.5],
         scene_aspectmode="manual",
         scene_aspectratio=dict(x=1.0, y=1.0, z=0.45),
         # Pin scene uirevision to the SAME string both at first SSR paint
