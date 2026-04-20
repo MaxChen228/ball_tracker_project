@@ -395,7 +395,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     @objc private func openCalibration() {
-        let vc = CalibrationChooserViewController()
+        // Auto ArUco is the only on-device calibration path. Dashboard
+        // Phase 5 auto-cal is the primary flow; this VC stays as a field
+        // fallback if the dashboard is unreachable.
+        let vc = AutoCalibrationViewController()
         let nav = UINavigationController(rootViewController: vc)
         nav.modalPresentationStyle = .fullScreen
         present(nav, animated: true)
