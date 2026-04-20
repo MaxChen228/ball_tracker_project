@@ -179,6 +179,48 @@ def _new_sync_id() -> str:
     return "sy_" + secrets.token_hex(4)
 
 
+def _validate_calibration_snapshot(snap: CalibrationSnapshot) -> None:
+    """Gatekeep CalibrationSnapshot writes: K, H, and dims must all be in
+    the same pixel coordinate system. An optical centre outside the image,
+    non-positive focal lengths, or wildly asymmetric fx/fy all indicate
+    the snapshot was built from mismatched sources and would produce
+    nonsense extrinsics downstream. Raise ValueError on the way in rather
+    than debugging bad poses on the way out."""
+    w, h = snap.image_width_px, snap.image_height_px
+    if w <= 0 or h <= 0:
+        raise ValueError(f"invalid image dims {w}x{h}")
+    k = snap.intrinsics
+    if k.fx <= 0 or k.fz <= 0:
+        raise ValueError(f"non-positive focal length fx={k.fx} fy={k.fz}")
+    # fx and fy should be within a factor of ~2 for any real lens + square
+    # pixels. Bigger asymmetry almost always signals a unit-system bug.
+    if max(k.fx, k.fz) / min(k.fx, k.fz) > 2.0:
+        raise ValueError(f"fx/fy ratio out of bounds: fx={k.fx} fy={k.fz}")
+    # Optical centre must be inside the image. We allow a small outside
+    # margin (5% of dimension) because lens off-axis shifts happen, but
+    # more than that is almost certainly a dims-mismatch bug.
+    if not (-0.05 * w <= k.cx <= 1.05 * w):
+        raise ValueError(
+            f"cx={k.cx} outside image width {w} — K likely from a "
+            f"different resolution than image_dims claim"
+        )
+    if not (-0.05 * h <= k.cy <= 1.05 * h):
+        raise ValueError(
+            f"cy={k.cy} outside image height {h} — K likely from a "
+            f"different resolution than image_dims claim"
+        )
+    # Homography must be invertible (h33 normalized ≈ 1).
+    H_flat = snap.homography
+    if len(H_flat) != 9 or abs(H_flat[8]) < 1e-9:
+        raise ValueError(f"degenerate homography: h33={H_flat[8] if len(H_flat) == 9 else 'wrong length'}")
+
+
+# Calibration-frame buffer TTL. One-shot: iOS pushes a full-resolution
+# JPEG on request, server consumes it, flag auto-clears. 10 s is plenty
+# for capture→encode→POST round-trip even on a busy LAN.
+_CALIBRATION_FRAME_TTL_S = 10.0
+
+
 class State:
     def __init__(
         self,
@@ -256,6 +298,13 @@ class State:
         # with a 5 s TTL. Shares the State-level `_time_fn` so clock-drift
         # tests apply here too without a parallel shim.
         self._preview = PreviewBuffer(time_fn=time_fn)
+        # One-shot high-resolution calibration frame per camera. Separate
+        # buffer from preview (preview is 480p, advisory; calibration
+        # frames are native capture res, accuracy-critical). `_cal_frames`
+        # holds (jpeg_bytes, ts) keyed by camera_id; `_cal_frame_requested`
+        # flags pending requests that iOS drains on its next captureOutput.
+        self._cal_frames: dict[str, tuple[bytes, float]] = {}
+        self._cal_frame_requested: dict[str, float] = {}  # cam_id → expiry ts
         # Phase 5: extended-marker registry (operator-taped DICT_4X4_50
         # markers 6-49 on the plate plane, world coords auto-recovered
         # from the plate homography). Persisted to
@@ -368,9 +417,13 @@ class State:
 
     def set_calibration(self, snapshot: CalibrationSnapshot) -> None:
         """Record (or overwrite) one camera's calibration and persist it
-        atomically so the dashboard survives a restart. Last write wins —
-        the phone re-POSTs every time the user completes a Calibration
-        screen save, so there's no attempt to version older snapshots."""
+        atomically so the dashboard survives a restart. Last write wins.
+
+        Validates K/H/dims self-consistency before storing — an earlier bug
+        mixed 1080p intrinsics with 480p homography which silently produced
+        garbage extrinsics downstream. Catching it at the boundary saves
+        hours of "why is Cam A at Z=0.66m" debugging."""
+        _validate_calibration_snapshot(snapshot)
         payload = snapshot.model_dump_json(indent=2)
         with self._lock:
             self._calibrations[snapshot.camera_id] = snapshot
@@ -541,6 +594,54 @@ class State:
     # ------------------------------------------------------------------
     # Dashboard-control plumbing: heartbeat registry + session state
     # ------------------------------------------------------------------
+
+    # --- Calibration frame (one-shot high-res) ---------------------------
+    # Preview is 480p JPEG (advisory). For auto-calibration we want the
+    # full capture resolution — ArUco corner precision scales linearly
+    # with pixel count, and the intrinsics we derive downstream must
+    # match MOV dims exactly or `recover_extrinsics` produces garbage
+    # poses. iOS pushes a native-resolution JPEG when the heartbeat reply
+    # sets `calibration_frame_requested: true` for this camera.
+
+    def request_calibration_frame(self, camera_id: str) -> None:
+        """Flag a camera to send one full-res JPEG on its next captureOutput.
+        Idempotent — re-POST refreshes the TTL."""
+        now = self._time_fn()
+        with self._lock:
+            self._cal_frame_requested[camera_id] = now + _CALIBRATION_FRAME_TTL_S
+
+    def is_calibration_frame_requested(self, camera_id: str) -> bool:
+        """True if the flag is pending and within TTL. Lazy-sweeps stale."""
+        now = self._time_fn()
+        with self._lock:
+            exp = self._cal_frame_requested.get(camera_id)
+            if exp is None:
+                return False
+            if now >= exp:
+                self._cal_frame_requested.pop(camera_id, None)
+                return False
+            return True
+
+    def store_calibration_frame(self, camera_id: str, jpeg_bytes: bytes) -> None:
+        """Phone pushed a calibration frame; stash it and clear the flag."""
+        now = self._time_fn()
+        with self._lock:
+            self._cal_frames[camera_id] = (jpeg_bytes, now)
+            self._cal_frame_requested.pop(camera_id, None)
+
+    def consume_calibration_frame(
+        self, camera_id: str, max_age_s: float = _CALIBRATION_FRAME_TTL_S,
+    ) -> tuple[bytes, float] | None:
+        """Atomic pop-if-fresh. Returns None if no frame cached or stale."""
+        now = self._time_fn()
+        with self._lock:
+            got = self._cal_frames.pop(camera_id, None)
+            if got is None:
+                return None
+            _, ts = got
+            if now - ts > max_age_s:
+                return None
+            return got
 
     def heartbeat(self, camera_id: str, time_synced: bool = False) -> None:
         """Record one liveness ping. Overwrites the previous entry for this
@@ -1453,6 +1554,16 @@ def _build_status_response() -> dict[str, Any]:
         # their own flag off the heartbeat reply (separate sibling field,
         # see below) to decide whether to push preview JPEGs.
         "preview_requested": state._preview.requested_map(),
+        # Per-camera one-shot calibration-frame pending map. Dashboard
+        # paints a "capturing…" chip while true. The beating camera
+        # reads its own flag off the heartbeat reply's sibling
+        # `calibration_frame_requested` scalar (added in the /heartbeat
+        # handler) and uploads one full-resolution JPEG.
+        "calibration_frame_requested": {
+            cam: True
+            for cam in state._cal_frame_requested.keys()
+            if state.is_calibration_frame_requested(cam)
+        },
     }
 
 
@@ -1477,6 +1588,10 @@ def heartbeat(body: HeartbeatBody) -> dict[str, Any]:
     # armed-session state; overloading the arm/disarm vocabulary would
     # force iPhone-side branching on a mixed-purpose field.
     resp["sync_command"] = state.consume_sync_command(body.camera_id)
+    # Per-camera scalar: does THIS phone owe the server a full-res
+    # calibration JPEG? The global map above is observational for the
+    # dashboard; this scalar is what the phone's captureOutput reads.
+    resp["calibration_frame_requested"] = state.is_calibration_frame_requested(body.camera_id)
     # Per-camera preview flag: separate field (not overloaded onto
     # `commands`) so arm/disarm vocabulary stays narrow. Phase 4a.
     resp["preview_requested"] = state._preview.is_requested(body.camera_id)
@@ -2084,6 +2199,44 @@ def _validate_camera_id_or_422(camera_id: str) -> None:
         raise HTTPException(status_code=422, detail="invalid camera_id")
 
 
+@app.post("/camera/{camera_id}/calibration_frame")
+async def camera_calibration_frame(camera_id: str, request: Request) -> dict[str, Any]:
+    """iPhone pushes ONE full-resolution JPEG (native capture res, e.g.
+    1920×1080) here in response to `calibration_frame_requested: true`
+    on its last heartbeat reply. Server stashes it so the next
+    `/calibration/auto/{camera_id}` call consumes it — running ArUco at
+    native resolution gives 4x the corner-precision of a 480p preview
+    frame and keeps the derived intrinsics in the same pixel coord
+    system as the MOVs triangulation will consume later. Eliminates the
+    preview-vs-capture dims-mismatch class of bugs at the source.
+
+    Accepts raw `image/jpeg` body or multipart with `file` field. 8 MB
+    cap (native 1080p @ q=0.9 is ~500 KB; 8 MB leaves room for ChArUco
+    board captures from iPhone main cam if we ever support that).
+    """
+    _validate_camera_id_or_422(camera_id)
+    if not state.is_calibration_frame_requested(camera_id):
+        raise HTTPException(
+            status_code=409,
+            detail="calibration frame not requested for this camera",
+        )
+    content_type = request.headers.get("content-type", "").lower()
+    if content_type.startswith("multipart/"):
+        form = await request.form()
+        file_field = form.get("file")
+        if file_field is None or not hasattr(file_field, "read"):
+            raise HTTPException(status_code=422, detail="missing `file` part")
+        body = await file_field.read()
+    else:
+        body = await request.body()
+    if not body:
+        raise HTTPException(status_code=422, detail="empty body")
+    if len(body) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="calibration frame too large")
+    state.store_calibration_frame(camera_id, bytes(body))
+    return {"ok": True, "bytes": len(body)}
+
+
 @app.post("/camera/{camera_id}/preview_frame")
 async def camera_preview_frame(camera_id: str, request: Request) -> dict[str, Any]:
     """iPhone pushes one JPEG frame here while the dashboard is watching.
@@ -2677,13 +2830,20 @@ async def calibration_auto(
     request: Request,
     h_fov_deg: float | None = None,
 ) -> dict[str, Any]:
-    """Phase 5: dashboard-triggered auto-calibration. Pulls the latest
-    preview frame cached for `camera_id`, runs ArUco against the merged
-    `plate ∪ extended` world map, solves the homography, derives FOV-based
-    pinhole intrinsics, and persists a `CalibrationSnapshot` via the
-    existing `state.set_calibration` path (same storage the iOS
-    `/calibration` POST writes to — dashboard + phone calibrations are
-    byte-compatible)."""
+    """Dashboard-triggered auto-calibration.
+
+    Preferred path (Phase 7): request a one-shot full-resolution frame
+    from the phone via heartbeat, wait up to 2 s for it to arrive, run
+    ArUco at native capture resolution. Calibration snapshot is in the
+    same pixel coord system as the MOVs the phone will later upload for
+    triangulation → no rescaling at pitch time, no preview-vs-capture
+    dims-mismatch bugs.
+
+    Fallback: if no calibration frame arrives (older iOS build without
+    support, phone offline, TTL expired), consume the most recent
+    preview JPEG (~480p) and proceed in degraded mode with a loud log
+    warning. Keeps demos working on a stale iOS build.
+    """
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_id):
         raise HTTPException(status_code=400, detail="invalid camera_id")
 
@@ -2691,18 +2851,48 @@ async def calibration_auto(
     # that never hit this endpoint.
     import cv2  # noqa: WPS433
 
-    got = state._preview.latest(camera_id)
-    if got is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"no preview frame cached for camera {camera_id!r} — "
-                   "enable preview in the dashboard first",
+    # Flag the phone to send us a native-resolution JPEG on its next
+    # captureOutput. Poll the cal-frame buffer for up to 2 s.
+    state.request_calibration_frame(camera_id)
+    import asyncio as _asyncio  # noqa: WPS433 — local import to avoid
+    # top-of-module coupling in case future refactors move the handler
+    # off the asyncio event loop.
+    jpeg_bytes: bytes | None = None
+    source = "calibration_frame"
+    for _ in range(20):  # 20 × 100 ms = 2 s budget
+        got = state.consume_calibration_frame(camera_id)
+        if got is not None:
+            jpeg_bytes, _ts = got
+            break
+        await _asyncio.sleep(0.1)
+
+    if jpeg_bytes is None:
+        # Fall back to preview buffer. Accuracy will be lower (480p vs
+        # 1080p), and intrinsics will be in preview coords which the
+        # downstream `scale_pitch_to_video_dims` has to rescale per pitch.
+        source = "preview_fallback"
+        got = state._preview.latest(camera_id)
+        if got is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"no calibration frame or preview cached for "
+                    f"camera {camera_id!r} — is the phone online and "
+                    "running a Phase 7+ build?"
+                ),
+            )
+        jpeg_bytes, _ts = got
+        logger.warning(
+            "calibration_auto cam=%s using preview fallback — iOS did "
+            "not supply a native-res calibration frame within 2 s "
+            "(older build or slow upload)",
+            camera_id,
         )
-    jpeg_bytes, _ts = got
+
     arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if bgr is None:
-        raise HTTPException(status_code=422, detail="preview frame is not a decodable JPEG")
+        raise HTTPException(status_code=422, detail=f"{source} frame is not a decodable JPEG")
 
     h_img, w_img = bgr.shape[:2]
     world_map: dict[int, tuple[float, float]] = dict(PLATE_MARKER_WORLD)
@@ -2764,8 +2954,8 @@ async def calibration_auto(
         cam_world = (-R.T @ t).flatten()
         dist_m = float(np.linalg.norm(cam_world))
         logger.info(
-            "calibration_auto cam=%s detected=%s world_pos=(%.2f,%.2f,%.2f) dist=%.2fm intr=(fx=%.0f fy=%.0f cx=%.0f cy=%.0f)%s",
-            camera_id, result.detected_ids,
+            "calibration_auto cam=%s source=%s dims=%dx%d detected=%s world_pos=(%.2f,%.2f,%.2f) dist=%.2fm intr=(fx=%.0f fy=%.0f cx=%.0f cy=%.0f)%s",
+            camera_id, source, w_img, h_img, result.detected_ids,
             cam_world[0], cam_world[1], cam_world[2], dist_m,
             intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy,
             " (prior intrinsics reused)" if prior is not None and h_fov_deg is None else " (FOV-derived)",
