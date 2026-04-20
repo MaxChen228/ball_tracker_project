@@ -23,8 +23,7 @@ final class PitchRecorderTests: XCTestCase {
         recorder.startRecording(
             sessionId: "s_test01",
             anchorTimestampS: 12.345,
-            videoStartPtsS: 42.125,
-            videoFps: 240.0
+            videoStartPtsS: 42.125
         )
         XCTAssertTrue(recorder.isActive)
         XCTAssertEqual(startedIndices, [1])
@@ -37,7 +36,6 @@ final class PitchRecorderTests: XCTestCase {
         XCTAssertEqual(emitted?.session_id, "s_test01")
         XCTAssertEqual(emitted?.sync_anchor_timestamp_s, 12.345)
         XCTAssertEqual(emitted?.video_start_pts_s, 42.125)
-        XCTAssertEqual(emitted?.video_fps, 240.0)
         XCTAssertEqual(emitted?.local_recording_index, 1)
     }
 
@@ -51,8 +49,7 @@ final class PitchRecorderTests: XCTestCase {
         recorder.startRecording(
             sessionId: "s_noanc",
             anchorTimestampS: nil,
-            videoStartPtsS: 0.0,
-            videoFps: 240.0
+            videoStartPtsS: 0.0
         )
         recorder.forceFinishIfRecording()
 
@@ -82,14 +79,12 @@ final class PitchRecorderTests: XCTestCase {
         recorder.startRecording(
             sessionId: "s_once",
             anchorTimestampS: 1.0,
-            videoStartPtsS: 0.0,
-            videoFps: 240.0
+            videoStartPtsS: 0.0
         )
         recorder.startRecording(
             sessionId: "s_twice",
             anchorTimestampS: 2.0,
-            videoStartPtsS: 0.0,
-            videoFps: 240.0
+            videoStartPtsS: 0.0
         )
         XCTAssertEqual(startedIndices, [1], "Second startRecording while active must be ignored")
     }
@@ -104,8 +99,7 @@ final class PitchRecorderTests: XCTestCase {
         recorder.startRecording(
             sessionId: "s_dbl",
             anchorTimestampS: 0.0,
-            videoStartPtsS: 0.0,
-            videoFps: 240.0
+            videoStartPtsS: 0.0
         )
         recorder.forceFinishIfRecording()
         recorder.forceFinishIfRecording()
@@ -122,8 +116,7 @@ final class PitchRecorderTests: XCTestCase {
         recorder.startRecording(
             sessionId: "s_a",
             anchorTimestampS: 0.0,
-            videoStartPtsS: 0.0,
-            videoFps: 240.0
+            videoStartPtsS: 0.0
         )
         recorder.forceFinishIfRecording()
         XCTAssertEqual(startedIndices, [1])
@@ -133,8 +126,7 @@ final class PitchRecorderTests: XCTestCase {
         recorder.startRecording(
             sessionId: "s_b",
             anchorTimestampS: 0.0,
-            videoStartPtsS: 0.0,
-            videoFps: 240.0
+            videoStartPtsS: 0.0
         )
         XCTAssertEqual(startedIndices, [1, 2], "localRecordingIndex must NOT reset")
     }

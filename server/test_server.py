@@ -453,6 +453,78 @@ def test_post_pitch_mode_two_accepts_frames_without_video(tmp_path):
     assert abs(pt["z_m"] - P_true[2]) < 1e-6
 
 
+def test_pitch_upload_fills_from_calibration_db(tmp_path):
+    """Phase-1 iOS decoupling: a pitch upload without intrinsics /
+    homography / image dims gets those fields filled from the per-camera
+    calibration snapshot persisted via POST /calibration. The enriched
+    pitch on disk carries the filled values so restart-reload triangulation
+    keeps working unchanged."""
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    P_true = np.array([0.1, 0.3, 1.0])
+    session_id = sid(700)
+    client = TestClient(app)
+
+    # Seed the calibration DB for camera A via the public endpoint so the
+    # test exercises the same code path the iPhone actually uses.
+    cal_body = {
+        "camera_id": "A",
+        "intrinsics": {
+            "fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
+        },
+        "homography": H_a.flatten().tolist(),
+        "image_width_px": 1920,
+        "image_height_px": 1080,
+    }
+    r_cal = client.post("/calibration", json=cal_body)
+    assert r_cal.status_code == 200, r_cal.text
+
+    mov = _encode_single_ball_mov(
+        tmp_path, K, R_a, t_a, P_true, filename="fill.mov"
+    )
+
+    # Slim wire payload — NO intrinsics / homography / image dims / video_fps.
+    slim_body = {
+        "camera_id": "A",
+        "session_id": session_id,
+        "sync_anchor_timestamp_s": 0.0,
+        "video_start_pts_s": 0.0,
+    }
+    r = _post_pitch(client, slim_body, mov)
+    assert r.status_code == 200, r.text
+
+    # Verify the enriched pitch now carries the values from the calibration DB.
+    stored = main.state.pitches[("A", session_id)]
+    assert stored.intrinsics is not None
+    assert stored.homography is not None and len(stored.homography) == 9
+    assert stored.image_width_px == 1920
+    assert stored.image_height_px == 1080
+    assert abs(stored.intrinsics.fx - K[0, 0]) < 1e-9
+
+
+def test_pitch_upload_rejected_when_no_calibration(tmp_path):
+    """Phase-1 iOS decoupling contract: if the iPhone omits intrinsics and
+    the server has no calibration snapshot on file for that camera, the
+    upload is rejected with 422. "Calibrate before you pitch" replaces the
+    old "echo your calibration on every upload" path."""
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    P_true = np.array([0.1, 0.3, 1.0])
+    mov = _encode_single_ball_mov(
+        tmp_path, K, R_a, t_a, P_true, filename="nocal.mov"
+    )
+
+    client = TestClient(app)
+    # No prior POST /calibration → state._calibrations is empty.
+    slim_body = {
+        "camera_id": "A",
+        "session_id": sid(701),
+        "sync_anchor_timestamp_s": 0.0,
+        "video_start_pts_s": 0.0,
+    }
+    r = _post_pitch(client, slim_body, mov)
+    assert r.status_code == 422, r.text
+    assert "no calibration on file" in r.text
+
+
 def test_post_pitch_anchorless_sets_error(tmp_path):
     """Upload with `sync_anchor_timestamp_s=null` is accepted (so the clip
     still lands on disk for forensics) but the session is flagged
