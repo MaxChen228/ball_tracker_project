@@ -37,4 +37,13 @@ cat <<EOF
 EOF
 
 cd "$SERVER_DIR"
-exec uv run uvicorn main:app --host 0.0.0.0 --port "$PORT"
+# --no-access-log: silence per-request HTTP access lines. Steady state is
+# ~30 lines/s (heartbeat 1 Hz + preview_frame 10 Hz per cam, dashboard
+# polling 5 Hz per preview, /status 1 Hz) which buries every app-level
+# info log (detection, calibration, drift warnings). App logs unaffected.
+# Re-enable with BALL_TRACKER_ACCESS_LOG=1 ./start.sh for HTTP debug.
+ACCESS_FLAG="--no-access-log"
+if [ "${BALL_TRACKER_ACCESS_LOG:-0}" = "1" ]; then
+  ACCESS_FLAG="--access-log"
+fi
+exec uv run uvicorn main:app --host 0.0.0.0 --port "$PORT" $ACCESS_FLAG
