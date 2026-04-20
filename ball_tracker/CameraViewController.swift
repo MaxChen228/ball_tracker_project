@@ -303,9 +303,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             previewToggleItem,
         ]
         navigationItem.rightBarButtonItems = [
-            UIBarButtonItem(title: "時間校正", style: .plain, target: self, action: #selector(onTapTimeCalibration)),
             UIBarButtonItem(title: "位置校正", style: .plain, target: self, action: #selector(openCalibration)),
         ]
+        // 時間校正 nav button removed — both sync modalities are now
+        // dashboard-controlled:
+        //   - third-party chirp: dashboard "Calibrate time" → heartbeat
+        //     `sync_command:"start"` → iOS enters `.timeSyncWaiting`.
+        //   - mutual two-device chirp: dashboard /sync page → server
+        //     `sync_run` command → iOS enters `.mutualSyncing`.
+        // iOS keeps the ReadyCard gate as display-only status.
 
         settings = SettingsViewController.loadFromUserDefaults()
         serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: settings.serverPort)
@@ -1780,8 +1786,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let timeSyncGate = ReadyCard.Gate(
             state: timeSyncOK ? .pass : (state == .timeSyncWaiting ? .pending : .fail),
             label: "時間校正",
-            action: (timeSyncOK || state == .timeSyncWaiting) ? nil : "按這裡開始",
-            onTap: (timeSyncOK || state == .timeSyncWaiting) ? nil : { [weak self] in self?.onTapTimeCalibration() }
+            action: (timeSyncOK || state == .timeSyncWaiting) ? nil : "請從 dashboard 校時",
+            onTap: nil
         )
         let serverGate = ReadyCard.Gate(
             state: serverOK ? .pass : .fail,
