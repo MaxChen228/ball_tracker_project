@@ -2832,17 +2832,12 @@ async def calibration_auto(
 ) -> dict[str, Any]:
     """Dashboard-triggered auto-calibration.
 
-    Preferred path (Phase 7): request a one-shot full-resolution frame
-    from the phone via heartbeat, wait up to 2 s for it to arrive, run
-    ArUco at native capture resolution. Calibration snapshot is in the
-    same pixel coord system as the MOVs the phone will later upload for
-    triangulation → no rescaling at pitch time, no preview-vs-capture
-    dims-mismatch bugs.
-
-    Fallback: if no calibration frame arrives (older iOS build without
-    support, phone offline, TTL expired), consume the most recent
-    preview JPEG (~480p) and proceed in degraded mode with a loud log
-    warning. Keeps demos working on a stale iOS build.
+    Request a one-shot full-resolution JPEG from the phone via heartbeat,
+    poll the buffer for up to 2 s, run ArUco at native capture resolution.
+    The snapshot lives in the SAME pixel coord system as the MOVs the
+    phone later uploads for triangulation → K doesn't need rescaling at
+    pitch time and the preview-vs-capture dims-mismatch class of bugs
+    is gone at the source. 408 on no-delivery; no preview fallback.
     """
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_id):
         raise HTTPException(status_code=400, detail="invalid camera_id")
@@ -2850,15 +2845,10 @@ async def calibration_auto(
     # cv2 is imported lazily — keeps cold-start unchanged for the paths
     # that never hit this endpoint.
     import cv2  # noqa: WPS433
+    import asyncio as _asyncio  # noqa: WPS433
 
-    # Flag the phone to send us a native-resolution JPEG on its next
-    # captureOutput. Poll the cal-frame buffer for up to 2 s.
     state.request_calibration_frame(camera_id)
-    import asyncio as _asyncio  # noqa: WPS433 — local import to avoid
-    # top-of-module coupling in case future refactors move the handler
-    # off the asyncio event loop.
     jpeg_bytes: bytes | None = None
-    source = "calibration_frame"
     for _ in range(20):  # 20 × 100 ms = 2 s budget
         got = state.consume_calibration_frame(camera_id)
         if got is not None:
@@ -2867,32 +2857,19 @@ async def calibration_auto(
         await _asyncio.sleep(0.1)
 
     if jpeg_bytes is None:
-        # Fall back to preview buffer. Accuracy will be lower (480p vs
-        # 1080p), and intrinsics will be in preview coords which the
-        # downstream `scale_pitch_to_video_dims` has to rescale per pitch.
-        source = "preview_fallback"
-        got = state._preview.latest(camera_id)
-        if got is None:
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"no calibration frame or preview cached for "
-                    f"camera {camera_id!r} — is the phone online and "
-                    "running a Phase 7+ build?"
-                ),
-            )
-        jpeg_bytes, _ts = got
-        logger.warning(
-            "calibration_auto cam=%s using preview fallback — iOS did "
-            "not supply a native-res calibration frame within 2 s "
-            "(older build or slow upload)",
-            camera_id,
+        raise HTTPException(
+            status_code=408,
+            detail=(
+                f"camera {camera_id!r} did not deliver a calibration "
+                "frame within 2 s — check the phone is online, awake, "
+                "and running the current build"
+            ),
         )
 
     arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if bgr is None:
-        raise HTTPException(status_code=422, detail=f"{source} frame is not a decodable JPEG")
+        raise HTTPException(status_code=422, detail="calibration frame is not a decodable JPEG")
 
     h_img, w_img = bgr.shape[:2]
     world_map: dict[int, tuple[float, float]] = dict(PLATE_MARKER_WORLD)
@@ -2954,8 +2931,8 @@ async def calibration_auto(
         cam_world = (-R.T @ t).flatten()
         dist_m = float(np.linalg.norm(cam_world))
         logger.info(
-            "calibration_auto cam=%s source=%s dims=%dx%d detected=%s world_pos=(%.2f,%.2f,%.2f) dist=%.2fm intr=(fx=%.0f fy=%.0f cx=%.0f cy=%.0f)%s",
-            camera_id, source, w_img, h_img, result.detected_ids,
+            "calibration_auto cam=%s dims=%dx%d detected=%s world_pos=(%.2f,%.2f,%.2f) dist=%.2fm intr=(fx=%.0f fy=%.0f cx=%.0f cy=%.0f)%s",
+            camera_id, w_img, h_img, result.detected_ids,
             cam_world[0], cam_world[1], cam_world[2], dist_m,
             intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy,
             " (prior intrinsics reused)" if prior is not None and h_fov_deg is None else " (FOV-derived)",
