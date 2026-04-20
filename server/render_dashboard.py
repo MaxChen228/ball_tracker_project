@@ -228,6 +228,26 @@ button.btn:disabled {{ opacity: 0.35; cursor: not-allowed; }}
 button.btn.small {{ padding: 4px 10px; font-size: 10px; }}
 form.inline {{ display: inline-block; margin: 0; }}
 
+/* Runtime tunables card — two slider + number-input rows. Server owns
+   the persisted value; sliders POST on `change` (keystroke commits on
+   blur). Matches the segmented / button family visually. */
+.tuning-row {{ display: flex; align-items: center; gap: var(--s-2);
+                margin-top: var(--s-3); flex-wrap: nowrap; }}
+.tuning-row:first-child {{ margin-top: var(--s-2); }}
+.tuning-label {{ font-family: var(--mono); font-size: 10px;
+                  letter-spacing: 0.12em; text-transform: uppercase;
+                  color: var(--sub); min-width: 96px; }}
+.tuning-row input[type="range"] {{ flex: 1; accent-color: var(--ink);
+                                     min-width: 0; }}
+.tuning-row input[type="number"] {{ width: 64px; font-family: var(--mono);
+                                     font-size: 11px; padding: 4px 6px;
+                                     border: 1px solid var(--border-base);
+                                     border-radius: var(--r);
+                                     background: var(--surface); color: var(--ink); }}
+.tuning-row input[type="number"]:focus {{ outline: none; border-color: var(--ink); }}
+.tuning-unit {{ font-family: var(--mono); font-size: 10px; color: var(--sub);
+                 letter-spacing: 0.08em; min-width: 14px; }}
+
 /* Time Sync diagnostic log panel — fixed-height scrollable <pre> with a
    Copy button that writes the visible text to the clipboard. Lines are
    server/A/B event traces; the operator copies and pastes back into the
@@ -1426,6 +1446,50 @@ def _render_nav_status(
     )
 
 
+def _render_tuning_body(
+    chirp_detect_threshold: float,
+    heartbeat_interval_s: float,
+) -> str:
+    """Two linked slider + number-input rows. Each form posts on
+    submit — the `<input>`s share a `form` attribute and an `oninput`
+    handler that mirrors slider <-> number, so the operator sees the
+    number update as they drag. Submit fires on the change event after
+    release (slider) or blur / Enter (number)."""
+    thr = f"{chirp_detect_threshold:.2f}"
+    ivl = f"{heartbeat_interval_s:g}"
+    return (
+        # Chirp threshold row.
+        '<form class="tuning-row" method="POST" '
+        'action="/settings/chirp_threshold" id="tuning-chirp-form">'
+        '<span class="tuning-label">Chirp thr</span>'
+        f'<input type="range" name="threshold" min="0.05" max="0.60" step="0.01" '
+        f'value="{thr}" '
+        'oninput="document.getElementById(\'tuning-chirp-num\').value=this.value" '
+        'onchange="this.form.submit()">'
+        f'<input type="number" id="tuning-chirp-num" name="threshold" '
+        f'min="0.05" max="0.60" step="0.01" value="{thr}" '
+        'form="tuning-chirp-form" '
+        'oninput="this.form.querySelector(\'input[type=range]\').value=this.value" '
+        'onchange="this.form.submit()">'
+        '</form>'
+        # Heartbeat interval row.
+        '<form class="tuning-row" method="POST" '
+        'action="/settings/heartbeat_interval" id="tuning-hb-form">'
+        '<span class="tuning-label">Heartbeat</span>'
+        f'<input type="range" name="interval_s" min="1" max="10" step="0.5" '
+        f'value="{ivl}" '
+        'oninput="document.getElementById(\'tuning-hb-num\').value=this.value" '
+        'onchange="this.form.submit()">'
+        f'<input type="number" id="tuning-hb-num" name="interval_s" '
+        f'min="1" max="10" step="0.5" value="{ivl}" '
+        'form="tuning-hb-form" '
+        'oninput="this.form.querySelector(\'input[type=range]\').value=this.value" '
+        'onchange="this.form.submit()">'
+        '<span class="tuning-unit">s</span>'
+        '</form>'
+    )
+
+
 def render_events_index_html(
     events: list[dict[str, Any]],
     devices: list[dict[str, Any]] | None = None,
@@ -1434,6 +1498,8 @@ def render_events_index_html(
     capture_mode: str = "camera_only",
     sync: dict[str, Any] | None = None,
     sync_cooldown_remaining_s: float = 0.0,
+    chirp_detect_threshold: float = 0.18,
+    heartbeat_interval_s: float = 1.0,
 ) -> str:
     """Render the dashboard: top nav + sidebar (devices / session / events)
     + a canvas showing the current calibration scene. All three panels
@@ -1497,6 +1563,10 @@ def render_events_index_html(
         '<div class="card">'
         '<h2 class="card-title">Session</h2>'
         f'<div id="session-body">{_render_session_body(session, capture_mode)}</div>'
+        "</div>"
+        '<div class="card">'
+        '<h2 class="card-title">Runtime &middot; Tuning</h2>'
+        f'<div id="tuning-body">{_render_tuning_body(chirp_detect_threshold, heartbeat_interval_s)}</div>'
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Events</h2>'

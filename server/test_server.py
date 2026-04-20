@@ -1398,3 +1398,116 @@ def test_sync_command_expires_after_ttl(tmp_path, monkeypatch):
     clock[0] += main._SYNC_COMMAND_TTL_S + 1.0
     assert main.state.consume_sync_command("A") is None
     assert main.state.pending_sync_commands() == {}
+
+
+# ----------------- Runtime tunables (chirp threshold + heartbeat interval) ----
+
+
+def test_chirp_threshold_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+
+    # Default surfaces on /status.
+    r = client.get("/status")
+    assert r.status_code == 200
+    assert r.json()["chirp_detect_threshold"] == pytest.approx(0.18)
+
+    # JSON push.
+    r = client.post("/settings/chirp_threshold", json={"threshold": 0.27})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "value": pytest.approx(0.27)}
+
+    # Surfaces on /status and /heartbeat.
+    assert client.get("/status").json()["chirp_detect_threshold"] == pytest.approx(0.27)
+    hb = client.post("/heartbeat", json={"camera_id": "A"})
+    assert hb.status_code == 200
+    assert hb.json()["chirp_detect_threshold"] == pytest.approx(0.27)
+
+    # Form push (HTML caller) redirects 303.
+    r = client.post(
+        "/settings/chirp_threshold",
+        data={"threshold": "0.33"},
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert main.state.chirp_detect_threshold() == pytest.approx(0.33)
+
+    # Persisted to disk.
+    persisted = _json.loads((tmp_path / "runtime_settings.json").read_text())
+    assert persisted["chirp_detect_threshold"] == pytest.approx(0.33)
+
+
+def test_chirp_threshold_rejects_out_of_range(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+    for bad in (0.0, -0.1, 1.5, 10.0):
+        r = client.post("/settings/chirp_threshold", json={"threshold": bad})
+        assert r.status_code == 400, f"expected 400 for {bad}"
+    # State unchanged.
+    assert main.state.chirp_detect_threshold() == pytest.approx(0.18)
+    # Direct setter also raises.
+    with pytest.raises(ValueError):
+        main.state.set_chirp_detect_threshold(2.0)
+
+
+def test_heartbeat_interval_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+
+    r = client.get("/status")
+    assert r.json()["heartbeat_interval_s"] == pytest.approx(1.0)
+
+    r = client.post("/settings/heartbeat_interval", json={"interval_s": 3.5})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "value": pytest.approx(3.5)}
+
+    assert client.get("/status").json()["heartbeat_interval_s"] == pytest.approx(3.5)
+    hb = client.post("/heartbeat", json={"camera_id": "A"})
+    assert hb.json()["heartbeat_interval_s"] == pytest.approx(3.5)
+
+    r = client.post(
+        "/settings/heartbeat_interval",
+        data={"interval_s": "5"},
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert main.state.heartbeat_interval_s() == pytest.approx(5.0)
+
+    persisted = _json.loads((tmp_path / "runtime_settings.json").read_text())
+    assert persisted["heartbeat_interval_s"] == pytest.approx(5.0)
+
+
+def test_heartbeat_interval_rejects_out_of_range(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+    for bad in (0.0, 0.5, 61.0, -1.0):
+        r = client.post("/settings/heartbeat_interval", json={"interval_s": bad})
+        assert r.status_code == 400, f"expected 400 for {bad}"
+    assert main.state.heartbeat_interval_s() == pytest.approx(1.0)
+    with pytest.raises(ValueError):
+        main.state.set_heartbeat_interval_s(0.1)
+
+
+def test_runtime_settings_restored_from_disk_on_state_init(tmp_path):
+    import main
+    # Seed a file and confirm a fresh State picks it up.
+    (tmp_path / "runtime_settings.json").write_text(
+        _json.dumps({"chirp_detect_threshold": 0.42, "heartbeat_interval_s": 7.5})
+    )
+    s = main.State(data_dir=tmp_path)
+    assert s.chirp_detect_threshold() == pytest.approx(0.42)
+    assert s.heartbeat_interval_s() == pytest.approx(7.5)
+
+    # Out-of-range values on disk are ignored, defaults retained.
+    (tmp_path / "runtime_settings.json").write_text(
+        _json.dumps({"chirp_detect_threshold": 99.0, "heartbeat_interval_s": 0.001})
+    )
+    s2 = main.State(data_dir=tmp_path)
+    assert s2.chirp_detect_threshold() == pytest.approx(0.18)
+    assert s2.heartbeat_interval_s() == pytest.approx(1.0)

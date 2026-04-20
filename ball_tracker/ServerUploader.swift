@@ -187,6 +187,16 @@ final class ServerUploader {
         /// the local 時間校正 button triggers. Null when idle. Optional
         /// for back-compat with older server builds.
         let sync_command: String?
+        /// Server-pushed matched-filter chirp detection threshold.
+        /// Hot-applied via `AudioChirpDetector.setThreshold(_:)`. The
+        /// local iOS Settings value acts as a bootstrap default; once a
+        /// heartbeat arrives the server push wins. Optional for
+        /// back-compat with older server builds.
+        let chirp_detect_threshold: Double?
+        /// Server-pushed base heartbeat cadence, seconds. Hot-applied via
+        /// `ServerHealthMonitor.updateBaseInterval(_:)`. Optional for
+        /// back-compat with older server builds.
+        let heartbeat_interval_s: Double?
     }
 
     /// iOS-side capture-mode enum. Kept string-valued so it round-trips
