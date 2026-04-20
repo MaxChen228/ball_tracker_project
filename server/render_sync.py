@@ -19,7 +19,7 @@ from schemas import SYNC_TRACE_MIN_PSR, SYNC_TRACE_THRESHOLD
 _SYNC_CSS = """
 .main-sync {
   max-width: 960px; margin: 0 auto;
-  padding: var(--s-5) var(--s-4) var(--s-5) var(--s-4);
+  padding: calc(var(--nav-h) + var(--s-5)) var(--s-4) var(--s-5) var(--s-4);
   display: flex; flex-direction: column; gap: var(--s-3);
 }
 #sync-trace {
