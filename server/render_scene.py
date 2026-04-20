@@ -235,10 +235,11 @@ def render_viewer_html(
     --r: 3px;
   }}
   * {{ box-sizing: border-box; }}
-  html, body {{ margin:0; padding:0; height:100%; background:var(--bg);
-    color:var(--ink); font-family:var(--sans); font-weight:300; line-height:1.6;
-    -webkit-font-smoothing:antialiased; }}
-  .viewer {{ display:flex; flex-direction:column; min-height:100vh; }}
+  html, body {{ margin:0; padding:0; height:100%; overflow:hidden;
+    background:var(--bg); color:var(--ink); font-family:var(--sans);
+    font-weight:300; line-height:1.6; -webkit-font-smoothing:antialiased; }}
+  .viewer {{ display:grid; grid-template-rows:52px auto minmax(0, 1fr) auto;
+    height:100vh; min-height:0; overflow:hidden; }}
 
   /* --- Header (52px brand bar) --- */
   .nav {{ height:52px; flex:0 0 52px; background:var(--surface);
@@ -259,33 +260,34 @@ def render_viewer_html(
      the hero's bigness without ever cropping the digit. */
   .health {{ flex:0 0 auto; background:var(--surface);
     border-bottom:1px solid var(--border-base);
-    padding:var(--s-4) var(--s-5);
-    display:flex; flex-direction:column; gap:var(--s-3); }}
+    padding:var(--s-3) var(--s-5);
+    display:flex; flex-direction:column; gap:var(--s-2); }}
   .health-row {{ display:grid; grid-template-columns:1fr 1fr;
-    gap:var(--s-4); align-items:stretch; }}
+    gap:var(--s-3); align-items:stretch; }}
   .cam-stack {{ display:flex; flex-direction:column; gap:var(--s-2); }}
 
   /* Hero card — single biggest KPI on the page. 40px digit keeps it
      authoritative without dwarfing the cam-cards beside it. */
   .hero-card {{ border:1px solid var(--border-base); border-radius:var(--r);
-    padding:var(--s-3) var(--s-4); background:var(--bg); display:flex;
+    padding:var(--s-2) var(--s-4); background:var(--bg); display:flex;
     flex-direction:column; justify-content:center; gap:var(--s-1); }}
   .hero-card.ok {{ background:var(--surface); border-color:var(--accent); }}
   .hero-title {{ font-family:var(--mono); font-size:10px;
     letter-spacing:0.12em; text-transform:uppercase; color:var(--sub); }}
-  .hero-tri {{ font-family:var(--mono); font-size:40px; font-weight:500;
+  .hero-tri {{ font-family:var(--mono);
+    font-size:clamp(30px, 3.2vh, 40px); font-weight:500;
     line-height:1; color:var(--accent); letter-spacing:0.02em; }}
   .hero-tri.zero {{ color:var(--sub); }}
   .hero-note {{ font-family:var(--mono); font-size:11px;
     letter-spacing:0.04em; color:var(--sub); }}
   .hero-sub {{ font-family:var(--mono); font-size:11px;
     letter-spacing:0.04em; color:var(--sub); margin-top:var(--s-1);
-    border-top:1px solid var(--border-l); padding-top:var(--s-2); }}
+    border-top:1px solid var(--border-l); padding-top:6px; }}
 
   /* Compact per-camera row. `received` and `missing` share the
      `.cam-card` wrapper but missing is a single-line collapsed row. */
   .cam-card {{ border:1px solid var(--border-base); border-radius:var(--r);
-    padding:var(--s-2) var(--s-3); background:var(--bg);
+    padding:6px 10px; background:var(--bg);
     display:flex; flex-direction:column; gap:var(--s-1); }}
   .cam-card.received {{ background:var(--surface); }}
   .cam-card.missing {{ opacity:0.85; flex-direction:row;
@@ -344,9 +346,9 @@ def render_viewer_html(
      keeps the default 3:2 split (both video cells equal); single-cam
      widens the scene to ~70% since the missing video collapses; empty
      falls through to the default flex values. */
-  .work {{ flex:1 1 auto; display:flex; min-height:460px;
+  .work {{ flex:1 1 auto; display:flex; min-height:0;
     border-bottom:1px solid var(--border-base); }}
-  .scene-col {{ flex:{scene_flex}; min-width:420px; position:relative;
+  .scene-col {{ flex:{scene_flex}; min-width:380px; position:relative;
     border-right:1px solid var(--border-base); background:var(--bg); }}
   #scene {{ position:absolute; inset:0; }}
   /* 2×2 grid: top row = real MOV (CAM A / CAM B), bottom row = virtual
@@ -354,12 +356,12 @@ def render_viewer_html(
      operator eye-ball real vs virtual side-by-side for extrinsics /
      homography sanity-checks. 480 px floor keeps each cell ≥ 240 px
      wide — below that the scene hover tooltips clip. */
-  .videos-col {{ flex:{videos_flex}; min-width:480px; display:grid;
+  .videos-col {{ flex:{videos_flex}; min-width:420px; display:grid;
     grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:1px;
     background:var(--border-base); }}
   .work[data-mode="single-cam"] .scene-col {{ flex:7 1 0; }}
   .work[data-mode="single-cam"] .videos-col {{ flex:3 1 0;
-    min-width:360px; }}
+    min-width:320px; }}
   .vid-cell {{ background:var(--surface); padding:var(--s-2) var(--s-3);
     display:flex; flex-direction:column; gap:var(--s-1); min-height:0;
     min-width:0; }}
@@ -419,20 +421,20 @@ def render_viewer_html(
   /* --- Timeline footer (two rows) --- */
   .timeline {{ flex:0 0 auto; background:var(--surface);
     display:flex; flex-direction:column; gap:var(--s-2);
-    padding:var(--s-2) var(--s-5) var(--s-3);
+    padding:var(--s-2) var(--s-5);
     font-family:var(--mono); font-size:12px; color:var(--sub); }}
-  .tl-row {{ display:flex; align-items:center; gap:var(--s-3); }}
+  .tl-row {{ display:flex; align-items:center; gap:10px; }}
   .scrubber-wrap {{ flex:1 1 auto; display:flex; flex-direction:column;
     gap:3px; min-width:0; }}
   .scrubber-wrap input[type=range] {{ width:100%; accent-color:var(--ink);
-    height:18px; margin:0; }}
+    height:16px; margin:0; }}
   .scrubber-wrap canvas {{ display:block; width:100%; height:18px;
     border:1px solid var(--border-base); border-radius:var(--r);
     background:var(--bg); image-rendering:pixelated; }}
   .strip-row {{ display:flex; align-items:center; gap:6px; }}
   .strip-row .strip-label {{ font-family:var(--mono); font-size:9px;
-    letter-spacing:0.1em; color:var(--sub); min-width:52px;
-    text-align:right; flex:0 0 52px; }}
+    letter-spacing:0.1em; color:var(--sub); min-width:46px;
+    text-align:right; flex:0 0 46px; }}
   .strip-row .strip-canvas {{ flex:1 1 auto; min-width:0; }}
   .strip-row[hidden] {{ display:none; }}
   /* Dual-mode: server stream is post-encode (lossy) reference; on-device
@@ -443,7 +445,7 @@ def render_viewer_html(
     color:var(--sub); font-weight:400; }}
   .strip-note {{ font-size:9px; color:var(--sub); letter-spacing:0.04em;
     text-transform:none; font-style:italic;
-    padding:2px 0 0 58px; line-height:1.4; }}
+    padding:2px 0 0 52px; line-height:1.35; }}
   .strip-legend {{ font-size:10px; color:var(--sub); letter-spacing:0.06em;
     display:flex; gap:10px; align-items:center; flex-wrap:wrap;
     text-transform:uppercase; }}
@@ -477,16 +479,16 @@ def render_viewer_html(
     background:var(--ink); color:var(--surface); border-color:var(--ink); }}
   .layer-toggles .layer-pill:hover {{ border-color:var(--ink); }}
   .layer-toggles .layer-pill[hidden] {{ display:none; }}
-  .tl-row .frame-label {{ min-width:340px; text-align:right;
-    color:var(--ink); font-weight:500; font-size:11px;
+  .tl-row .frame-label {{ min-width:300px; text-align:right;
+    color:var(--ink); font-weight:500; font-size:10px;
     letter-spacing:0.02em; white-space:nowrap;
     font-variant-numeric:tabular-nums;
     display:inline-flex; align-items:center; justify-content:flex-end;
-    gap:6px; }}
+    gap:4px; }}
   .tl-row .frame-label .sub {{ color:var(--sub); font-weight:400; }}
   .tl-row .frame-label .det {{ color:var(--contra); font-weight:500; }}
   .tl-row .frame-label .det.no {{ color:var(--sub); }}
-  #frame-input {{ width:60px; font:inherit; font-size:11px;
+  #frame-input {{ width:58px; font:inherit; font-size:10px;
     background:var(--bg); border:1px solid var(--border-base);
     color:var(--ink); padding:1px 4px; text-align:center;
     font-variant-numeric:tabular-nums; border-radius:var(--r); }}
@@ -507,11 +509,11 @@ def render_viewer_html(
      sits in `--surface` so it visually separates from the timeline
      background even on light themes. */
   .timeline .transport {{ display:inline-flex; align-items:center;
-    gap:0; padding:3px;
+    gap:0; padding:2px;
     background:var(--bg); border:1px solid var(--border-base);
     border-radius:999px; }}
   .timeline .transport button {{ border:none; background:transparent;
-    width:30px; height:30px; min-width:30px; padding:0; font-size:13px;
+    width:28px; height:28px; min-width:28px; padding:0; font-size:13px;
     color:var(--ink-light); border-radius:50%;
     display:inline-flex; align-items:center; justify-content:center;
     letter-spacing:0; }}
@@ -520,7 +522,7 @@ def render_viewer_html(
   .timeline .transport button:disabled:hover {{ background:transparent;
     color:var(--ink-light); }}
   .timeline .transport .play-btn {{ min-width:64px; width:auto;
-    height:32px; padding:0 14px;
+    height:30px; padding:0 14px;
     background:var(--ink); color:var(--surface);
     font-weight:500; font-size:11px; letter-spacing:0.10em;
     text-transform:uppercase; border-radius:999px;
@@ -534,7 +536,7 @@ def render_viewer_html(
      currently bolded one". */
   .speed-group {{ display:inline-flex; border:1px solid var(--border-base);
     border-radius:var(--r); overflow:hidden;
-    background:var(--surface); height:32px; }}
+    background:var(--surface); height:30px; }}
   .speed-group button {{ border:none; background:transparent;
     color:var(--sub); padding:0 12px; min-width:auto; border-radius:0;
     font-size:10px; letter-spacing:0.06em; height:100%;
@@ -567,7 +569,7 @@ def render_viewer_html(
      speed. `margin-left:auto` keeps it pinned to the right corner so
      the visual weight stays on the central transport cluster. */
   .hint-btn {{ font:inherit; font-size:12px; padding:0;
-    width:28px; height:28px;
+    width:26px; height:26px;
     border:1px solid var(--border-base); background:var(--surface);
     color:var(--sub); border-radius:50%; cursor:pointer;
     margin-left:auto; min-width:auto; font-weight:600;
@@ -589,6 +591,21 @@ def render_viewer_html(
   .hint-overlay td:first-child {{ color:var(--sub);
     font-family:var(--mono); white-space:nowrap; }}
   .timeline {{ position:relative; }}
+  @media (max-height: 980px) {{
+    .health {{ padding:var(--s-2) var(--s-5); gap:6px; }}
+    .health-row {{ gap:10px; }}
+    .cam-stack {{ gap:6px; }}
+    .hero-card {{ padding:6px 10px; }}
+    .hero-tri {{ font-size:28px; }}
+    .hero-note, .hero-sub, .cam-note, .cam-state, .check, .cam-stats {{
+      font-size:10px;
+    }}
+    .timeline {{ gap:6px; padding:6px var(--s-5); }}
+    .scrubber-wrap canvas {{ height:16px; }}
+    .strip-row .strip-label {{ min-width:42px; flex-basis:42px; }}
+    .strip-note {{ padding-left:48px; }}
+    .scene-col .scene-toolbar {{ top:6px; right:6px; }}
+  }}
 </style>
 </head><body>
 <div class="viewer">
@@ -753,6 +770,16 @@ def render_viewer_html(
   const vids = Array.from(document.querySelectorAll("video[data-cam]"));
   const offsetByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.t_rel_offset_s]));
   const fpsByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.fps]));
+  function pickMasterVideo() {{
+    if (!vids.length) return null;
+    let master = vids[0];
+    let masterCount = -1;
+    for (const v of vids) {{
+      const n = (framesByCam[v.dataset.cam]?.t_rel_s || []).length;
+      if (n > masterCount) {{ master = v; masterCount = n; }}
+    }}
+    return master;
+  }}
   // Two parallel detection streams: server-side (authoritative MOV
   // detection) and on-device (iOS upload in dual mode). Mono-mode
   // sessions have empty `on_device` maps, so `camsWithFramesOnDevice`
@@ -875,6 +902,14 @@ def render_viewer_html(
   let currentT = tMin;           // derived = unionTimes[currentFrame]
   let rvfcEnabled = false;       // set to true once we register rVFC
   let seekRafPending = false;    // coalesces rapid seeks onto one rAF tick
+  let sceneDrawRaf = null;       // coalesces expensive Plotly.react work
+  let virtualDrawRaf = null;     // coalesces 2D reprojection redraws
+  let isScrubbing = false;       // true while the timeline thumb is dragged
+  let suppressVideoFeedbackUntilMs = 0;
+  const masterVideo = pickMasterVideo();
+  const HARD_SYNC_THRESHOLD_S = 0.040;
+  const SOFT_SYNC_THRESHOLD_S = 0.008;
+  const MAX_RATE_NUDGE = 0.12;
 
   // Scrubber indexes the union timeline directly.
   scrubber.max = String(TOTAL_FRAMES - 1);
@@ -1220,6 +1255,22 @@ def render_viewer_html(
     drawVirtuals();
   }}
 
+  function scheduleSceneDraw() {{
+    if (sceneDrawRaf !== null) return;
+    sceneDrawRaf = requestAnimationFrame(() => {{
+      sceneDrawRaf = null;
+      drawScene();
+    }});
+  }}
+
+  function scheduleVirtualDraw() {{
+    if (virtualDrawRaf !== null) return;
+    virtualDrawRaf = requestAnimationFrame(() => {{
+      virtualDrawRaf = null;
+      drawVirtuals();
+    }});
+  }}
+
   // Virtual canvases need to resize with the window (DPR + layout
   // changes). Redraw with current ball position after resize.
   window.addEventListener("resize", () => drawVirtuals());
@@ -1231,9 +1282,67 @@ def render_viewer_html(
   // independent seek operations and visibly stutters. Collapse them to
   // one write per animation frame. No threshold — the scrubber is
   // frame-granular now and sub-frame gaps (~5 ms) must actually land.
+  function markManualSeekWindow(ms = 180) {{
+    suppressVideoFeedbackUntilMs = Math.max(
+      suppressVideoFeedbackUntilMs,
+      performance.now() + ms
+    );
+  }}
+
+  function shouldIgnoreVideoFeedback() {{
+    return isScrubbing || performance.now() < suppressVideoFeedbackUntilMs;
+  }}
+
+  function beginTimelineInteraction() {{
+    pauseAllPlayback();
+    markManualSeekWindow();
+    updatePlayBtnLabel();
+  }}
+
+  function resetVideoPlaybackRates() {{
+    for (const v of vids) {{
+      if (Math.abs(v.playbackRate - currentRate) > 0.001) {{
+        v.playbackRate = currentRate;
+      }}
+    }}
+  }}
+
+  function syncFollowerVideosToMaster(masterT) {{
+    if (!masterVideo || !isFinite(masterT)) return;
+    for (const v of vids) {{
+      if (v === masterVideo) continue;
+      const off = offsetByCam[v.dataset.cam] ?? 0;
+      const want = Math.max(0, masterT - off);
+      if (!isFinite(v.currentTime)) continue;
+      const drift = v.currentTime - want;
+      if (Math.abs(drift) >= HARD_SYNC_THRESHOLD_S) {{
+        try {{ v.currentTime = want; }} catch (e) {{}}
+        if (Math.abs(v.playbackRate - currentRate) > 0.001) {{
+          v.playbackRate = currentRate;
+        }}
+        continue;
+      }}
+      if (v.paused || Math.abs(drift) <= SOFT_SYNC_THRESHOLD_S) {{
+        if (Math.abs(v.playbackRate - currentRate) > 0.001) {{
+          v.playbackRate = currentRate;
+        }}
+        continue;
+      }}
+      const correction = Math.max(
+        -MAX_RATE_NUDGE,
+        Math.min(MAX_RATE_NUDGE, -drift * 6.0)
+      );
+      const targetRate = Math.max(0.1, currentRate * (1 + correction));
+      if (Math.abs(v.playbackRate - targetRate) > 0.001) {{
+        v.playbackRate = targetRate;
+      }}
+    }}
+  }}
+
   function syncVideosToT(t) {{
     if (!isFinite(t)) return;
     seekTargetT = t;
+    markManualSeekWindow();
     if (seekRafPending) return;
     seekRafPending = true;
     requestAnimationFrame(() => {{
@@ -1242,14 +1351,19 @@ def render_viewer_html(
       for (const v of vids) {{
         const off = offsetByCam[v.dataset.cam] ?? 0;
         const want = Math.max(0, tt - off);
+        if (Math.abs((v.currentTime || 0) - want) < 1e-4) continue;
         try {{ v.currentTime = want; }} catch (e) {{}}
       }}
+      resetVideoPlaybackRates();
     }});
   }}
   let seekTargetT = tMin;
 
   function readMasterTFromVideo() {{
-    // Pick the first ready video; else fall back to current scrubber.
+    if (masterVideo && !isNaN(masterVideo.currentTime)) {{
+      const off = offsetByCam[masterVideo.dataset.cam] ?? 0;
+      return masterVideo.currentTime + off;
+    }}
     for (const v of vids) {{
       if (!isNaN(v.currentTime)) {{
         const off = offsetByCam[v.dataset.cam] ?? 0;
@@ -1318,11 +1432,11 @@ def render_viewer_html(
     renderFrameLabel();
     renderDetectionStrip();
     if (seekVideos) syncVideosToT(currentT);
-    if (mode === "playback") drawScene();
+    if (mode === "playback") scheduleSceneDraw();
     // Virtual canvases always reflect the current moment (no trail),
     // independent of the main-scene All/Playback toggle — that toggle
     // gates the 3D trajectory cutoff, not the virtual cams.
-    drawVirtuals();
+    if (mode !== "playback") scheduleVirtualDraw();
   }}
 
   function setT(t, opts) {{
@@ -1369,13 +1483,13 @@ def render_viewer_html(
   }}
   function pauseAllPlayback() {{
     vids.forEach(v => v.pause());
+    resetVideoPlaybackRates();
     stopVirtualClock();
   }}
 
   function stepFrames(delta) {{
-    pauseAllPlayback();
+    beginTimelineInteraction();
     setFrame(currentFrame + delta);
-    updatePlayBtnLabel();
   }}
 
   // Jump to the previous/next union slot where *any* cam detected the
@@ -1386,7 +1500,7 @@ def render_viewer_html(
     while (i >= 0 && i < TOTAL_FRAMES) {{
       for (const cam of camsWithFrames) {{
         const e = camAtFrame[cam][i];
-        if (e && e.detected) {{ pauseAllPlayback(); setFrame(i); updatePlayBtnLabel(); return; }}
+        if (e && e.detected) {{ beginTimelineInteraction(); setFrame(i); return; }}
       }}
       i += dir;
     }}
@@ -1396,8 +1510,9 @@ def render_viewer_html(
     // Fallback path when requestVideoFrameCallback isn't available.
     // rAF-coalesce the read so high-frequency timeupdate bursts don't
     // fight our own scrubber-driven seeks.
-    if (rvfcEnabled || seekRafPending) return;
+    if (rvfcEnabled || seekRafPending || shouldIgnoreVideoFeedback()) return;
     requestAnimationFrame(() => {{
+      if (shouldIgnoreVideoFeedback()) return;
       const t = readMasterTFromVideo();
       setFrame(frameIndexForT(t), {{ seekVideos: false }});
     }});
@@ -1410,6 +1525,8 @@ def render_viewer_html(
     if (vids.length > 0) {{
       const anyPaused = vids.some(v => v.paused);
       if (anyPaused) {{
+        syncFollowerVideosToMaster(readMasterTFromVideo());
+        resetVideoPlaybackRates();
         vids.forEach(v => {{ try {{ v.play(); }} catch (e) {{}} }});
       }} else {{
         vids.forEach(v => v.pause());
@@ -1437,23 +1554,19 @@ def render_viewer_html(
   const hasRVFC = typeof HTMLVideoElement !== 'undefined'
     && 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
   function driveWithRVFC() {{
-    if (!vids.length) return;
+    if (!masterVideo) return;
     rvfcEnabled = true;
-    // Pick the cam with the most decoded frames as master — it carries
-    // the richest timeline, so its PTS stream drives the scrubber at
-    // highest resolution. Falls back to vids[0] when frame info is
-    // missing (e.g. non-detection-skipped session).
-    let master = vids[0];
-    let masterCount = -1;
-    for (const v of vids) {{
-      const n = (framesByCam[v.dataset.cam]?.t_rel_s || []).length;
-      if (n > masterCount) {{ master = v; masterCount = n; }}
-    }}
+    const master = masterVideo;
     const off = offsetByCam[master.dataset.cam] ?? 0;
     const onFrame = (_now, metadata) => {{
+      if (shouldIgnoreVideoFeedback()) {{
+        master.requestVideoFrameCallback(onFrame);
+        return;
+      }}
       const mediaT = (metadata && typeof metadata.mediaTime === 'number')
         ? metadata.mediaTime : master.currentTime;
       const t = mediaT + off;
+      syncFollowerVideosToMaster(t);
       setFrame(frameIndexForT(t), {{ seekVideos: false }});
       master.requestVideoFrameCallback(onFrame);
     }};
@@ -1465,16 +1578,56 @@ def render_viewer_html(
     v.addEventListener("pause", updatePlayBtnLabel);
     v.addEventListener("timeupdate", onVideoTimeUpdate);
     v.addEventListener("seeked",     onVideoTimeUpdate);
-    v.addEventListener("ratechange", () => {{
-      // Keep all rates in lockstep with whichever one changed.
-      const r = v.playbackRate;
-      for (const other of vids) {{ if (other !== v && other.playbackRate !== r) other.playbackRate = r; }}
-    }});
   }});
   if (hasRVFC) driveWithRVFC();
 
+  scrubber.addEventListener("pointerdown", () => {{
+    isScrubbing = true;
+    beginTimelineInteraction();
+  }});
+  const endScrub = () => {{
+    if (!isScrubbing) return;
+    isScrubbing = false;
+    markManualSeekWindow(120);
+  }};
+  scrubber.addEventListener("pointerup", endScrub);
+  scrubber.addEventListener("pointercancel", endScrub);
+  scrubber.addEventListener("blur", endScrub);
+  window.addEventListener("pointerup", endScrub);
+
   scrubber.addEventListener("input", () => {{
+    beginTimelineInteraction();
     setFrame(Number(scrubber.value));
+  }});
+  scrubber.addEventListener("keydown", (ev) => {{
+    switch (ev.key) {{
+      case "ArrowLeft":
+        ev.preventDefault();
+        stepFrames(-1);
+        break;
+      case "ArrowRight":
+        ev.preventDefault();
+        stepFrames(+1);
+        break;
+      case "Home":
+        ev.preventDefault();
+        beginTimelineInteraction();
+        setFrame(0);
+        break;
+      case "End":
+        ev.preventDefault();
+        beginTimelineInteraction();
+        setFrame(TOTAL_FRAMES - 1);
+        break;
+      case "PageUp":
+        ev.preventDefault();
+        stepFrames(-10);
+        break;
+      case "PageDown":
+        ev.preventDefault();
+        stepFrames(+10);
+        break;
+    }}
   }});
 
   // Frame input — type a frame index, hit Enter or blur to jump.
@@ -1483,9 +1636,8 @@ def render_viewer_html(
   frameInput.addEventListener("change", () => {{
     const f = Number(frameInput.value);
     if (!isFinite(f)) {{ frameInput.value = String(currentFrame); return; }}
-    pauseAllPlayback();
+    beginTimelineInteraction();
     setFrame(f);
-    updatePlayBtnLabel();
   }});
   frameInput.addEventListener("keydown", (ev) => {{
     if (ev.key === "Enter") {{ ev.preventDefault(); frameInput.blur(); }}
@@ -1505,7 +1657,7 @@ def render_viewer_html(
     const r = parseFloat(btn.dataset.rate);
     if (!isFinite(r) || r <= 0) return;
     currentRate = r;
-    vids.forEach(v => {{ v.playbackRate = r; }});
+    resetVideoPlaybackRates();
     for (const b of speedGroup.querySelectorAll("button")) {{
       b.classList.toggle("active", b === btn);
     }}
@@ -1579,7 +1731,7 @@ def render_viewer_html(
     mode = next;
     modeAll.classList.toggle("active", next === "all");
     modePlayback.classList.toggle("active", next === "playback");
-    drawScene();
+    scheduleSceneDraw();
   }}
   modeAll.addEventListener("click", () => setMode("all"));
   modePlayback.addEventListener("click", () => setMode("playback"));
@@ -1764,7 +1916,7 @@ def render_viewer_html(
   // Initial render. Canvas sizing must happen after layout, so defer the
   // first strip paint one frame so clientWidth is non-zero.
   setFrame(0, {{ seekVideos: true }});
-  drawScene();
+  scheduleSceneDraw();
   updatePlayBtnLabel();
   requestAnimationFrame(resizeDetectionCanvas);
 }})();

@@ -574,6 +574,39 @@ def test_viewer_ships_interactive_diagnostic_widgets():
     assert "ball-detected" in body
 
 
+def test_viewer_locks_layout_to_viewport_without_page_scroll():
+    """The viewer should fit in a single viewport: body scrolling is
+    disabled and the root container owns a fixed 100vh layout."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(712)
+    _record_pitch(_pitch("A", 712, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert "overflow:hidden" in body
+    assert "grid-template-rows:52px auto minmax(0, 1fr) auto" in body
+    assert "height:100vh" in body
+
+
+def test_viewer_scrubber_uses_manual_seek_guards_and_keyboard_stepper():
+    """Manual timeline interactions must suppress stale video callbacks
+    and own ArrowLeft/ArrowRight while the scrubber has focus."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(713)
+    _record_pitch(_pitch("A", 713, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert "function shouldIgnoreVideoFeedback()" in body
+    assert 'scrubber.addEventListener("pointerdown"' in body
+    assert 'scrubber.addEventListener("keydown"' in body
+    assert 'case "ArrowLeft":' in body
+    assert 'case "ArrowRight":' in body
+    assert "scheduleSceneDraw()" in body
+
+
 def test_viewer_exposes_camera_t_rel_offsets(tmp_path):
     """Video metadata passed to JS must carry per-camera
     `t_rel_offset_s = video_start_pts_s − sync_anchor_timestamp_s` so
