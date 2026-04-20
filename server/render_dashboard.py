@@ -228,6 +228,18 @@ button.btn:disabled {{ opacity: 0.35; cursor: not-allowed; }}
 button.btn.small {{ padding: 4px 10px; font-size: 10px; }}
 form.inline {{ display: inline-block; margin: 0; }}
 
+/* Live-preview toggle + panel (Phase 4a). Mini button sits inline with
+   the sub-line dots; the <img> panel sits full-width in the device row
+   thanks to grid-column:1/-1 applied inline. 320×180 keeps the 440 px
+   sidebar tidy. */
+button.btn.preview-btn {{ padding: 3px 8px; font-size: 9px; letter-spacing: 0.10em; }}
+button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface);
+                                  border-color: var(--passed); }}
+.preview-panel {{ margin-top: 8px; width: 320px; max-width: 100%;
+                   aspect-ratio: 16 / 9; background: #000; border: 1px solid var(--border-base);
+                   border-radius: var(--r); overflow: hidden; }}
+.preview-panel img {{ width: 100%; height: 100%; object-fit: contain; display: block; }}
+
 /* Runtime tunables card — two slider + number-input rows. Server owns
    the persisted value; sliders POST on `change` (keystroke commits on
    blur). Matches the segmented / button family visually. */
@@ -1052,6 +1064,7 @@ _JS_TEMPLATE = r"""
   let currentSession = null;
   let currentCalibrations = null;
   let currentCaptureMode = 'camera_only';
+  let currentPreviewRequested = {};
 
   // Keys used to skip re-renders when nothing changed. We compare serialised
   // state data rather than innerHTML strings because the browser re-serialises
@@ -1113,6 +1126,7 @@ _JS_TEMPLATE = r"""
       currentDevices = s.devices || [];
       currentSession = s.session || null;
       currentCaptureMode = s.capture_mode || 'camera_only';
+      currentPreviewRequested = s.preview_requested || {};
       renderDevices(s);
       renderSession(s);
     } catch (e) { /* silent retry next tick */ }
@@ -1130,7 +1144,7 @@ _JS_TEMPLATE = r"""
       if (!r.ok) return;
       const payload = await r.json();
       currentCalibrations = (payload.calibrations || []).map(c => c.camera_id);
-      renderDevices({ devices: currentDevices || [], calibrations: currentCalibrations });
+      renderDevices({ devices: currentDevices || [], calibrations: currentCalibrations, preview_requested: currentPreviewRequested });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
       if (payload.plot && sceneRoot && window.Plotly) {
         // Only (re)assign basePlot when its contents actually changed.
@@ -1194,6 +1208,47 @@ _JS_TEMPLATE = r"""
     }
     // (Mutual-sync kickoff is handled on /sync now.)
   });
+
+  // Live-preview toggle (Phase 4a). Click flips the server-side flag;
+  // optimistic update paints immediately so there's no round-trip stall.
+  const previewOn = new Set();
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-preview-cam]');
+    if (!btn) return;
+    const cam = btn.dataset.previewCam;
+    const enabled = btn.dataset.previewEnabled !== '1';
+    if (enabled) previewOn.add(cam); else previewOn.delete(cam);
+    _lastDevKey = null;
+    const merged = Object.fromEntries([...previewOn].map(c => [c, true]));
+    renderDevices({
+      devices: currentDevices || [],
+      calibrations: currentCalibrations || [],
+      preview_requested: merged,
+      sync_commands: {},
+    });
+    try {
+      await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+    } catch (_) { /* next tick surfaces failure via /status */ }
+  });
+
+  // Keep server-side TTL alive. Server flag lapses in 5 s; 2 s refresh
+  // absorbs one missed tick.
+  async function tickPreviewRefresh() {
+    for (const cam of previewOn) {
+      try {
+        await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: true }),
+        });
+      } catch (_) { /* swallow; next tick retries */ }
+    }
+  }
+  setInterval(tickPreviewRefresh, 2000);
 
   // Prime all three immediately, then stagger polling so the UI stays
   // current without hammering the server. Status carries arming state
