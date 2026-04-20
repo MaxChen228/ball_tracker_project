@@ -231,7 +231,11 @@ final class SettingsViewController: UIViewController {
 
         let chirpThreshold = doubleOrDefault(keyChirpThreshold, defaultValue: 0.18)
         let pollInterval = doubleOrDefault(keyPollInterval, defaultValue: 1.0)
-        let parkCameraInStandby = d.object(forKey: keyParkCameraInStandby) as? Bool ?? true
+        // Default FALSE so live preview works out of the box — operator
+        // doesn't have to flip a setting per install. Phones run slightly
+        // warmer in standby (capture session live at 60 fps) but that's
+        // within the thermal budget for demo / short-session use.
+        let parkCameraInStandby = d.object(forKey: keyParkCameraInStandby) as? Bool ?? false
 
         // Recording resolution is now user-pickable. Read the stored height
         // and look up the matching CaptureResolution; fall back to 1080p
