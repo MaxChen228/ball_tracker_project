@@ -2114,8 +2114,14 @@ async def camera_preview_frame(camera_id: str, request: Request) -> dict[str, An
 
 
 @app.get("/camera/{camera_id}/preview")
-def camera_preview_latest(camera_id: str) -> Response:
+def camera_preview_latest(camera_id: str, annotate: int = 0) -> Response:
     """Return the most recently pushed JPEG as an `image/jpeg` response.
+
+    `annotate=1` runs cv2.aruco on the buffered JPEG and draws a green box
+    + ID label on every detected DICT_4X4_50 marker (IDs 0-5 green,
+    extended markers blue). Slower per-request (~20-40 ms on a 480p frame)
+    but invaluable for debugging "is server seeing marker N?" questions
+    without spinning up a separate debug tool.
 
     404 when the buffer has no frame for this camera (either preview was
     never requested, the phone hasn't started pushing yet, or the TTL
@@ -2126,6 +2132,8 @@ def camera_preview_latest(camera_id: str) -> Response:
     if got is None:
         raise HTTPException(status_code=404, detail="no preview frame")
     jpeg_bytes, _ = got
+    if annotate:
+        jpeg_bytes = _annotate_preview_jpeg(jpeg_bytes)
     return Response(
         content=jpeg_bytes,
         media_type="image/jpeg",
@@ -2136,6 +2144,50 @@ def camera_preview_latest(camera_id: str) -> Response:
             "Pragma": "no-cache",
         },
     )
+
+
+def _annotate_preview_jpeg(jpeg_bytes: bytes) -> bytes:
+    """Decode → detect ArUco markers → draw box + ID → re-encode. Used by
+    `/camera/{id}/preview?annotate=1`. Green for plate landmarks (IDs 0-5),
+    blue for extended markers (IDs 6+). Falls back to returning the raw
+    bytes if anything goes sideways so the dashboard never sees a 500."""
+    import cv2  # noqa: WPS433
+    try:
+        from calibration_solver import (
+            PLATE_MARKER_WORLD,
+            detect_all_markers_in_dict,
+        )
+        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is None:
+            return jpeg_bytes
+        for m in detect_all_markers_in_dict(bgr):
+            is_plate = m.id in PLATE_MARKER_WORLD
+            colour = (60, 200, 60) if is_plate else (230, 160, 60)  # BGR
+            pts = m.corners.astype(np.int32).reshape(-1, 1, 2)
+            cv2.polylines(bgr, [pts], isClosed=True, color=colour, thickness=3)
+            cx, cy = m.corners.mean(axis=0)
+            label = f"ID {m.id}"
+            # Drop a filled background behind the text so it stays readable
+            # over busy marker patterns.
+            (tw, th), _base = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2,
+            )
+            tx, ty = int(cx) - tw // 2, int(cy) + th // 2
+            cv2.rectangle(
+                bgr,
+                (tx - 4, ty - th - 4), (tx + tw + 4, ty + 6),
+                colour, -1,
+            )
+            cv2.putText(
+                bgr, label, (tx, ty),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA,
+            )
+        ok, encoded = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        return bytes(encoded.tobytes()) if ok else jpeg_bytes
+    except Exception as e:  # noqa: BLE001
+        logger.debug("annotate_preview failed: %s", e)
+        return jpeg_bytes
 
 
 @app.get("/camera/{camera_id}/preview.mjpeg")
