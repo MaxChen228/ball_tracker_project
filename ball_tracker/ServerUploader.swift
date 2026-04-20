@@ -197,6 +197,11 @@ final class ServerUploader {
         /// `ServerHealthMonitor.updateBaseInterval(_:)`. Optional for
         /// back-compat with older server builds.
         let heartbeat_interval_s: Double?
+        /// Phase 4a live-preview gate. True when the dashboard's Devices
+        /// card toggle for THIS camera is on (server-side TTL 5 s). iOS
+        /// starts pushing JPEGs via `PreviewUploader` while true; stops
+        /// (and resets throttle state) when it flips back to false.
+        let preview_requested: Bool?
     }
 
     /// iOS-side capture-mode enum. Kept string-valued so it round-trips
@@ -677,6 +682,48 @@ final class ServerUploader {
                 return
             }
             log.info("calibration post ok cam=\(cam, privacy: .public)")
+            completion?(.success(()))
+        }
+        task.resume()
+    }
+
+    /// Generic "POST raw bytes as Content-Type: image/jpeg" used by
+    /// `PreviewUploader` (Phase 4a). Not tied to a specific endpoint —
+    /// the caller provides the path so this can grow to support other
+    /// tiny-body binary POSTs without a second copy of this plumbing.
+    /// Fire-and-forget from the caller's POV: preview is transient, we
+    /// don't retry a dropped frame.
+    func postRawJPEG(
+        path: String,
+        jpeg: Data,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        guard let base = config.baseURL() else {
+            completion?(.failure(NSError(
+                domain: "ServerUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
+            )))
+            return
+        }
+        let url = base.appendingPathComponent(path.hasPrefix("/") ? String(path.dropFirst()) : path)
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jpeg
+        let task = URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error = error {
+                completion?(.failure(error))
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                completion?(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
+                )))
+                return
+            }
             completion?(.success(()))
         }
         task.resume()
