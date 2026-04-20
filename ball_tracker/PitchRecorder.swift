@@ -19,7 +19,6 @@ final class PitchRecorder {
 
     private var syncAnchorTimestampS: Double?
     private var videoStartPtsS: Double = 0.0
-    private var videoFps: Double = 0.0
     private var sessionId: String = ""
     private var cameraId: String = "A"
 
@@ -41,7 +40,6 @@ final class PitchRecorder {
         sessionId = ""
         syncAnchorTimestampS = nil
         videoStartPtsS = 0.0
-        videoFps = 0.0
         // localRecordingIndex intentionally NOT reset — it's a run-of-
         // app counter used only for debug logs.
     }
@@ -53,18 +51,16 @@ final class PitchRecorder {
     func startRecording(
         sessionId: String,
         anchorTimestampS: Double?,
-        videoStartPtsS: Double,
-        videoFps: Double
+        videoStartPtsS: Double
     ) {
         guard !isRecording else { return }
 
         self.sessionId = sessionId
         self.syncAnchorTimestampS = anchorTimestampS
         self.videoStartPtsS = videoStartPtsS
-        self.videoFps = videoFps
         isRecording = true
         localRecordingIndex += 1
-        log.info("recorder start session=\(sessionId, privacy: .public) cam=\(self.cameraId, privacy: .public) idx=\(self.localRecordingIndex) anchor_ts=\(anchorTimestampS ?? .nan) video_start=\(videoStartPtsS) fps=\(videoFps)")
+        log.info("recorder start session=\(sessionId, privacy: .public) cam=\(self.cameraId, privacy: .public) idx=\(self.localRecordingIndex) anchor_ts=\(anchorTimestampS ?? .nan) video_start=\(videoStartPtsS)")
         onRecordingStarted?(localRecordingIndex)
     }
 
@@ -81,12 +77,7 @@ final class PitchRecorder {
             session_id: sessionId,
             sync_anchor_timestamp_s: syncAnchorTimestampS,
             video_start_pts_s: videoStartPtsS,
-            video_fps: videoFps,
             local_recording_index: localRecordingIndex,
-            intrinsics: nil,
-            homography: nil,
-            image_width_px: nil,
-            image_height_px: nil,
             frames: [],
             frames_on_device: []
         )
@@ -94,6 +85,5 @@ final class PitchRecorder {
         sessionId = ""
         syncAnchorTimestampS = nil
         videoStartPtsS = 0.0
-        videoFps = 0.0
     }
 }

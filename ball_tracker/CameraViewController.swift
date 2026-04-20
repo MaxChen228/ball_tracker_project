@@ -321,10 +321,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 AudioServicesPlaySystemSound(self.endRecSoundID)
                 self.endRecHaptic.notificationOccurred(.success)
             }
-            let enriched = self.enrichedPayload(from: payload)
+            // Phase 1 of the iOS decoupling refactor: intrinsics /
+            // homography / image dims no longer ride along on the pitch
+            // payload — server reads them from its calibration DB
+            // (seeded by CalibrationViewController's POST /calibration).
+            // Upload shape is now just session-level metadata + frames.
             if let finishingClip {
                 finishingClip.finish { [weak self] videoURL in
-                    self?.handleFinishedClip(enriched: enriched, videoURL: videoURL)
+                    self?.handleFinishedClip(enriched: payload, videoURL: videoURL)
                 }
             } else {
                 // Mode-two (no clip recorder built) or mode-one with a
@@ -333,7 +337,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 // detection buffer and routes through handleOnDeviceCycle;
                 // in the degenerate mode-one case with no MOV it falls
                 // through to a JSON-only upload.
-                self.handleFinishedClip(enriched: enriched, videoURL: nil)
+                self.handleFinishedClip(enriched: payload, videoURL: nil)
             }
         }
 
@@ -2020,8 +2024,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             recorder.startRecording(
                 sessionId: sid,
                 anchorTimestampS: lastSyncAnchorTimestampS,
-                videoStartPtsS: timestampS,
-                videoFps: trackingFps
+                videoStartPtsS: timestampS
             )
         }
     }
@@ -2125,25 +2128,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         DiagnosticsData.shared.update(fpsEstimate: fpsEstimate)
     }
 
-    // MARK: - Payload enrichment
-
-    private func enrichedPayload(from payload: ServerUploader.PitchPayload) -> ServerUploader.PitchPayload {
-        let dims = IntrinsicsStore.loadImageDimensions()
-        return ServerUploader.PitchPayload(
-            camera_id: payload.camera_id,
-            session_id: payload.session_id,
-            sync_anchor_timestamp_s: payload.sync_anchor_timestamp_s,
-            video_start_pts_s: payload.video_start_pts_s,
-            video_fps: payload.video_fps,
-            local_recording_index: payload.local_recording_index,
-            intrinsics: IntrinsicsStore.loadIntrinsicsPayload(),
-            homography: IntrinsicsStore.loadHomography(),
-            image_width_px: dims?.width,
-            image_height_px: dims?.height,
-            frames: payload.frames,
-            frames_on_device: payload.frames_on_device
-        )
-    }
 }
 
 /// Lock-protected mirror of the three fields `captureOutput` reads across
