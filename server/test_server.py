@@ -1603,3 +1603,177 @@ def test_status_surfaces_preview_requested_map():
     assert hb.json()["preview_requested"] is False
     hb = client.post("/heartbeat", json={"camera_id": "B"})
     assert hb.json()["preview_requested"] is True
+
+
+# =======================================================================
+# Phase 5: dashboard auto-calibration + extended markers
+# =======================================================================
+
+
+def _render_aruco_scene(
+    marker_world_xy: dict[int, tuple[float, float]],
+    image_size: tuple[int, int] = (1920, 1080),
+    scale_px_per_m: float = 800.0,
+    center_px: tuple[float, float] | None = None,
+    marker_side_m: float = 0.08,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Render a synthetic BGR image with DICT_4X4_50 markers pasted at
+    world-projected locations. Uses a pure-scale+translate homography so
+    the inverse is exact and the registration math can be checked against
+    sub-cm tolerances.
+
+    Returns `(bgr_image, H_3x3)` where H maps world (wx, wy, 1) → image
+    pixels in homogeneous coords (h33 normalised to 1)."""
+    w_img, h_img = image_size
+    if center_px is None:
+        center_px = (w_img / 2.0, h_img / 2.0)
+    H = np.array([
+        [scale_px_per_m, 0.0, center_px[0]],
+        [0.0, scale_px_per_m, center_px[1]],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+
+    bgr = np.full((h_img, w_img, 3), 255, dtype=np.uint8)
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    side_px = int(round(marker_side_m * scale_px_per_m))
+    assert side_px >= 40, "marker too small for robust detection"
+    for mid, (wx, wy) in marker_world_xy.items():
+        proj = H @ np.array([wx, wy, 1.0])
+        cx, cy = proj[:2] / proj[2]
+        x0 = int(round(cx - side_px / 2))
+        y0 = int(round(cy - side_px / 2))
+        if x0 < 0 or y0 < 0 or x0 + side_px > w_img or y0 + side_px > h_img:
+            raise ValueError(f"marker {mid} falls off the canvas")
+        marker_img = cv2.aruco.generateImageMarker(aruco_dict, mid, side_px)
+        bgr[y0:y0 + side_px, x0:x0 + side_px] = marker_img[:, :, None]
+    return bgr, H
+
+
+def _jpeg_encode(bgr: np.ndarray) -> bytes:
+    ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    assert ok
+    return buf.tobytes()
+
+
+def _enable_preview_and_push(client: TestClient, camera_id: str, jpeg: bytes) -> None:
+    r = client.post(f"/camera/{camera_id}/preview_request", json={"enabled": True})
+    assert r.status_code == 200, r.text
+    r = client.post(
+        f"/camera/{camera_id}/preview_frame",
+        content=jpeg,
+        headers={"Content-Type": "image/jpeg"},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_calibration_auto_writes_snapshot_from_preview(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    from calibration_solver import PLATE_MARKER_WORLD
+    bgr, _H = _render_aruco_scene(PLATE_MARKER_WORLD)
+    _enable_preview_and_push(client, "A", _jpeg_encode(bgr))
+
+    r = client.post("/calibration/auto/A")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["camera_id"] == "A"
+    assert sorted(body["detected_ids"]) == sorted(PLATE_MARKER_WORLD.keys())
+    assert body["missing_plate_ids"] == []
+    assert body["n_extended_used"] == 0
+    assert body["image_width_px"] == 1920
+    assert body["image_height_px"] == 1080
+    assert len(body["homography"]) == 9
+
+    cal_state = client.get("/calibration/state").json()
+    cam_ids = {c["camera_id"] for c in cal_state["calibrations"]}
+    assert "A" in cam_ids
+    assert (tmp_path / "calibrations" / "A.json").exists()
+
+
+def test_calibration_auto_returns_422_when_too_few_markers(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    from calibration_solver import PLATE_MARKER_WORLD
+    partial = {k: PLATE_MARKER_WORLD[k] for k in (0, 1, 5)}
+    bgr, _H = _render_aruco_scene(partial)
+    _enable_preview_and_push(client, "A", _jpeg_encode(bgr))
+
+    r = client.post("/calibration/auto/A")
+    assert r.status_code == 422, r.text
+    assert "need" in r.json()["detail"].lower()
+
+
+def test_calibration_auto_returns_404_when_no_preview(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+    r = client.post("/calibration/auto/A")
+    assert r.status_code == 404
+
+
+def test_extended_markers_register_from_image_recovers_world_coords(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    from calibration_solver import PLATE_MARKER_WORLD
+    truth_extended = {7: (0.80, -0.40), 12: (-0.60, 0.50)}
+    scene = {**PLATE_MARKER_WORLD, **truth_extended}
+    bgr, _H = _render_aruco_scene(scene)
+    _enable_preview_and_push(client, "A", _jpeg_encode(bgr))
+
+    r = client.post("/calibration/markers/register/A")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    reg_by_id = {row["id"]: (row["wx"], row["wy"]) for row in body["registered"]}
+    for mid, (wx, wy) in truth_extended.items():
+        assert mid in reg_by_id, f"marker {mid} missing from registration"
+        dx = reg_by_id[mid][0] - wx
+        dy = reg_by_id[mid][1] - wy
+        assert (dx * dx + dy * dy) ** 0.5 < 0.01, f"marker {mid} off by {dx},{dy}"
+
+    listed = client.get("/calibration/markers").json()["markers"]
+    listed_by_id = {row["id"]: (row["wx"], row["wy"]) for row in listed}
+    assert set(listed_by_id.keys()) == set(truth_extended.keys())
+
+
+def test_extended_markers_crud_and_persistence(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    state = main.state
+    state._extended_markers.register(7, (1.0, 2.0))
+    state._extended_markers.register(8, (-1.0, 0.5))
+    assert client.get("/calibration/markers").json()["markers"] == [
+        {"id": 7, "wx": 1.0, "wy": 2.0},
+        {"id": 8, "wx": -1.0, "wy": 0.5},
+    ]
+
+    # Persistence: recreate State from the same dir, registry must survive.
+    main.state = main.State(data_dir=tmp_path)
+    assert main.state._extended_markers.all() == {7: (1.0, 2.0), 8: (-1.0, 0.5)}
+
+    r = client.delete("/calibration/markers/7")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert 7 not in main.state._extended_markers.all()
+
+    r = client.delete("/calibration/markers/99")
+    assert r.status_code == 404
+
+    r = client.post("/calibration/markers/clear")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "cleared_count": 1}
+    assert client.get("/calibration/markers").json()["markers"] == []
+
+
+def test_extended_markers_reject_plate_reserved_ids(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    db = main.state._extended_markers
+    for reserved in (0, 1, 2, 3, 4, 5):
+        with pytest.raises(ValueError):
+            db.register(reserved, (0.0, 0.0))
+    with pytest.raises(ValueError):
+        db.register(50, (0.0, 0.0))  # outside DICT_4X4_50 range

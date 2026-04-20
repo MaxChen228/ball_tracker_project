@@ -101,6 +101,13 @@ from pipeline import annotate_video, detect_pitch
 from video import probe_dims
 from chirp import chirp_wav_bytes
 from preview import PreviewBuffer, REQUEST_TTL_S as _PREVIEW_REQUEST_TTL_S
+from extended_markers import ExtendedMarkersDB
+from calibration_solver import (
+    PLATE_MARKER_WORLD,
+    derive_fov_intrinsics,
+    detect_all_markers_in_dict,
+    solve_homography_from_world_map,
+)
 from sync_solver import compute_mutual_sync
 from cleanup_old_sessions import cleanup_expired_sessions
 
@@ -244,6 +251,12 @@ class State:
         # with a 5 s TTL. Shares the State-level `_time_fn` so clock-drift
         # tests apply here too without a parallel shim.
         self._preview = PreviewBuffer(time_fn=time_fn)
+        # Phase 5: extended-marker registry (operator-taped DICT_4X4_50
+        # markers 6-49 on the plate plane, world coords auto-recovered
+        # from the plate homography). Persisted to
+        # `data/extended_markers.json` so dashboard-registered markers
+        # survive a server restart.
+        self._extended_markers = ExtendedMarkersDB(data_dir)
         # Calibrations first — _load_from_disk re-triangulates every cached
         # pitch, and triangulation needs the calibration snapshot to decide
         # the intrinsic-scale factor (MOV dims vs. calibration dims).
@@ -2536,6 +2549,169 @@ def calibration_state() -> dict[str, Any]:
             "layout": fig_json.get("layout", {}),
         },
     }
+
+
+@app.post("/calibration/auto/{camera_id}")
+async def calibration_auto(
+    camera_id: str,
+    request: Request,
+    h_fov_deg: float | None = None,
+) -> dict[str, Any]:
+    """Phase 5: dashboard-triggered auto-calibration. Pulls the latest
+    preview frame cached for `camera_id`, runs ArUco against the merged
+    `plate ∪ extended` world map, solves the homography, derives FOV-based
+    pinhole intrinsics, and persists a `CalibrationSnapshot` via the
+    existing `state.set_calibration` path (same storage the iOS
+    `/calibration` POST writes to — dashboard + phone calibrations are
+    byte-compatible)."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_id):
+        raise HTTPException(status_code=400, detail="invalid camera_id")
+
+    # cv2 is imported lazily — keeps cold-start unchanged for the paths
+    # that never hit this endpoint.
+    import cv2  # noqa: WPS433
+
+    got = state._preview.latest(camera_id)
+    if got is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no preview frame cached for camera {camera_id!r} — "
+                   "enable preview in the dashboard first",
+        )
+    jpeg_bytes, _ts = got
+    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise HTTPException(status_code=422, detail="preview frame is not a decodable JPEG")
+
+    h_img, w_img = bgr.shape[:2]
+    world_map: dict[int, tuple[float, float]] = dict(PLATE_MARKER_WORLD)
+    world_map.update(state._extended_markers.all())
+
+    detected = detect_all_markers_in_dict(bgr)
+    result = solve_homography_from_world_map(
+        detected, world_map, image_size=(w_img, h_img)
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"need ≥5 known markers (plate 0-5 ∪ extended registry) "
+                f"visible in the preview; detected {len(detected)} marker(s)"
+            ),
+        )
+
+    # FOV default: 65° ≈ 1.1345 rad — iPhone 14-17 main wide approximation.
+    h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else 1.1345
+    fx, fy, cx, cy = derive_fov_intrinsics(w_img, h_img, h_fov_rad)
+
+    snapshot = CalibrationSnapshot(
+        camera_id=camera_id,
+        intrinsics=IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy),
+        homography=result.homography_row_major,
+        image_width_px=w_img,
+        image_height_px=h_img,
+    )
+    state.set_calibration(snapshot)
+    n_extended_used = sum(
+        1 for mid in result.detected_ids if mid not in PLATE_MARKER_WORLD
+    )
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)  # type: ignore[return-value]
+    return {
+        "ok": True,
+        "camera_id": camera_id,
+        "detected_ids": result.detected_ids,
+        "missing_plate_ids": result.missing_ids,
+        "homography": result.homography_row_major,
+        "image_width_px": w_img,
+        "image_height_px": h_img,
+        "n_extended_used": n_extended_used,
+    }
+
+
+@app.post("/calibration/markers/register/{camera_id}")
+async def calibration_markers_register(
+    camera_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    """Phase 5: register extended markers from the latest preview frame of
+    `camera_id`. Detects every DICT_4X4_50 marker in the image, solves the
+    plate homography from IDs 0-5, and inverse-projects each non-plate
+    marker's centroid to world (x, y). Persists + returns the new rows."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_id):
+        raise HTTPException(status_code=400, detail="invalid camera_id")
+
+    import cv2  # noqa: WPS433
+
+    got = state._preview.latest(camera_id)
+    if got is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no preview frame cached for camera {camera_id!r}",
+        )
+    jpeg_bytes, _ts = got
+    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise HTTPException(status_code=422, detail="preview frame is not a decodable JPEG")
+
+    try:
+        registered = state._extended_markers.register_from_image(bgr)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    skipped: list[int] = []
+    persisted: list[dict[str, Any]] = []
+    for mid, (wx, wy) in sorted(registered.items()):
+        try:
+            state._extended_markers.register(mid, (wx, wy))
+        except ValueError:
+            skipped.append(mid)
+            continue
+        persisted.append({"id": mid, "wx": wx, "wy": wy})
+
+    total_known = len(state._extended_markers.all())
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)  # type: ignore[return-value]
+    return {
+        "ok": True,
+        "camera_id": camera_id,
+        "registered": persisted,
+        "skipped": skipped,
+        "total_known": total_known,
+    }
+
+
+@app.get("/calibration/markers")
+def calibration_markers_list() -> dict[str, Any]:
+    """Dashboard polls this (~5 s) to repaint the extended-markers list.
+    Sorted by id so the rendered order is stable across polls."""
+    markers = state._extended_markers.all()
+    return {
+        "markers": [
+            {"id": mid, "wx": wx, "wy": wy}
+            for mid, (wx, wy) in sorted(markers.items())
+        ],
+    }
+
+
+@app.delete("/calibration/markers/{marker_id}")
+def calibration_markers_delete(marker_id: int) -> dict[str, Any]:
+    existed = state._extended_markers.remove(marker_id)
+    if not existed:
+        raise HTTPException(status_code=404, detail=f"marker {marker_id} not registered")
+    return {"ok": True, "marker_id": marker_id}
+
+
+@app.post("/calibration/markers/clear")
+async def calibration_markers_clear(request: Request):
+    """Dashboard "Clear all" button. Form callers (HTML) get a 303 back to
+    /; JSON callers get `{ok, cleared_count}`."""
+    cleared = state._extended_markers.clear()
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "cleared_count": cleared}
 
 
 @app.get("/", response_class=HTMLResponse)
