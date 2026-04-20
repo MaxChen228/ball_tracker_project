@@ -2637,9 +2637,9 @@ def calibration_state() -> dict[str, Any]:
     # can't shrink the 0.5 m plate via aspectmode="data" autoscaling.
     fig.update_layout(
         title=None, margin=dict(l=0, r=0, t=8, b=0),
-        scene_xaxis_range=[-3.5, 3.5],
-        scene_yaxis_range=[-3.5, 3.5],
-        scene_zaxis_range=[-0.2, 2.0],
+        scene_xaxis_range=[-6.0, 6.0],
+        scene_yaxis_range=[-6.0, 6.0],
+        scene_zaxis_range=[-0.2, 3.5],
         scene_aspectmode="manual",
         scene_aspectratio=dict(x=1.0, y=1.0, z=0.45),
         # Match the value used by render_events_index_html SSR so the tick
@@ -2733,6 +2733,36 @@ async def calibration_auto(
         h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else 1.1345
         fx, fy, cx, cy = derive_fov_intrinsics(w_img, h_img, h_fov_rad)
         intrinsics = IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy)
+
+    # Sanity-check the recovered camera position. If the math says the
+    # camera is absurdly far from the plate (typical failure: operator's
+    # marker layout is physically smaller than PLATE_MARKER_WORLD expects,
+    # so the solve inflates depth to compensate), log loudly — the
+    # dashboard canvas will clip anything beyond its bbox.
+    try:
+        from triangulate import recover_extrinsics, build_K
+        K = build_K(intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy)
+        H_mat = np.array(result.homography_row_major).reshape(3, 3)
+        R, t = recover_extrinsics(K, H_mat)
+        cam_world = (-R.T @ t).flatten()
+        dist_m = float(np.linalg.norm(cam_world))
+        logger.info(
+            "calibration_auto cam=%s detected=%s world_pos=(%.2f,%.2f,%.2f) dist=%.2fm intr=(fx=%.0f fy=%.0f cx=%.0f cy=%.0f)%s",
+            camera_id, result.detected_ids,
+            cam_world[0], cam_world[1], cam_world[2], dist_m,
+            intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy,
+            " (prior intrinsics reused)" if prior is not None and h_fov_deg is None else " (FOV-derived)",
+        )
+        if dist_m > 6.0:
+            logger.warning(
+                "calibration_auto cam=%s recovered distance %.1fm exceeds 6m "
+                "— marker layout likely smaller than the assumed home-plate "
+                "(FL↔FR=43.2cm, MF↔BT=43.2cm). Measure your physical layout "
+                "and patch PLATE_MARKER_WORLD in calibration_solver.py.",
+                camera_id, dist_m,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("calibration_auto sanity-check skipped: %s", e)
 
     snapshot = CalibrationSnapshot(
         camera_id=camera_id,
