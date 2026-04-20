@@ -407,6 +407,21 @@ class State:
             except Exception as e:
                 logger.warning("skip corrupt calibration file %s: %s", path.name, e)
                 continue
+            # Also screen via the same K/H/dims consistency rules the
+            # write path enforces — old snapshots from earlier buggy
+            # write paths may have K in one pixel scale and dims in
+            # another, which would poison every downstream solve. Drop
+            # them on load with a loud warning so `auto-cal` takes the
+            # "no prior" path and rebuilds cleanly.
+            try:
+                _validate_calibration_snapshot(snap)
+            except ValueError as e:
+                logger.warning(
+                    "skip inconsistent calibration %s: %s — "
+                    "delete the file and re-run Auto Calibrate",
+                    path.name, e,
+                )
+                continue
             self._calibrations[snap.camera_id] = snap
         if self._calibrations:
             logger.info(
