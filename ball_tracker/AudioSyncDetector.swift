@@ -56,7 +56,11 @@ final class AudioSyncDetector {
     /// point of the debug view (long-distance failures never cross the
     /// 0.18 gate so live `onDetection` alone hides the reason).
     struct TraceSample {
-        /// Run-relative seconds (sample PTS minus `firstPTS`).
+        /// Scan-time relative to the run start (seconds since `firstPTS`).
+        /// This is **when the matched filter was evaluated**, not the
+        /// arrival time of any chirp inside the ring — plotting peak vs
+        /// scan-time shows the noise floor with a clean spike where the
+        /// chirp lived.
         let t: Double
         /// Same `bestNorm` the gate uses; [0, 1].
         let peak: Float
@@ -353,17 +357,24 @@ final class AudioSyncDetector {
         // Append one trace sample per band BEFORE the fire-gate so
         // sub-threshold peaks (the whole reason this buffer exists)
         // reach the debug plot.
-        appendTrace(.A, result: resA)
-        appendTrace(.B, result: resB)
+        appendTrace(.A, result: resA, scanTime: now)
+        appendTrace(.B, result: resB, scanTime: now)
         maybeFire(band: .A, result: resA, now: now)
         maybeFire(band: .B, result: resB, now: now)
     }
 
-    private func appendTrace(_ band: Band, result: CorrResult) {
+    private func appendTrace(_ band: Band, result: CorrResult, scanTime: Double) {
         let psr: Float = result.secondNorm > 0 ? result.bestNorm / result.secondNorm : 0
-        let ringStartGlobal = totalWritten - ringLen
-        let chirpCenterGlobal = Double(ringStartGlobal + result.bestLag) + Double(refLen) / 2.0
-        let tRel = sampleRate > 0 ? chirpCenterGlobal / sampleRate : 0
+        // The trace's `t` is **scan time relative to the first buffer**
+        // (i.e. "when did this correlation measurement happen"), NOT the
+        // chirp-arrival time inside the ring. Earlier versions stored the
+        // latter which produced a misleading drift-line on the debug plot:
+        // once the real chirp fell out of the ring, `bestLag` wandered with
+        // the loudest noise spike and drew a downward-sloping line all the
+        // way across the x-axis. Plotting peak-vs-scan-time instead gives
+        // the operator the actual noise-floor-with-spike profile they want.
+        let firstPTSSnapshot = firstPTS ?? scanTime
+        let tRel = scanTime - firstPTSSnapshot
         let sample = TraceSample(t: tRel, peak: result.bestNorm, psr: psr)
         switch band {
         case .A:
