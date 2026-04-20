@@ -2359,6 +2359,7 @@ def _build_figure(scene: Scene):
                 # tooltip still works; Rays/Ground traces keep their
                 # legend rows so per-cam colour mapping stays discoverable.
                 showlegend=False,
+                meta=dict(trace_kind="camera", camera_id=cam.camera_id),
                 hovertemplate=(
                     f"Camera {cam.camera_id}"
                     "<br>x=%{x:.2f} m"
@@ -2386,6 +2387,7 @@ def _build_figure(scene: Scene):
                     line=dict(color=axis_color, width=4),
                     hoverinfo="skip",
                     showlegend=False,
+                    meta=dict(trace_kind="camera_axis", camera_id=cam.camera_id),
                 )
             )
 

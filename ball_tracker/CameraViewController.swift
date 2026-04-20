@@ -418,12 +418,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Preview always live at standbyFps when idle — the capture session
-        // stays running so the operator gets a continuous framing aid on the
-        // phone and dashboard live preview (Phase 4a) works out of the box.
-        if state == .standby {
-            startCapture(at: standbyFps)
-        }
+        // Capture session is gated on the dashboard `preview_requested` flag
+        // (Phase 7 power gate) — stays parked until heartbeat says preview
+        // is on, so idle phones don't burn camera/mic for nothing.
         healthMonitor.start()
         displayLink?.isPaused = false
     }
@@ -514,9 +511,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.clipRecorder = nil
         }
         warningLabel.isHidden = true
-        // Keep the preview live — drop fps back to idle so the sensor
-        // stops running at 240.
-        switchCaptureFps(standbyFps)
+        // Drop fps back to idle so the sensor stops running at 240. If the
+        // dashboard isn't watching this cam's preview, park the session
+        // entirely to save power.
+        if previewRequestedByServer {
+            switchCaptureFps(standbyFps)
+        } else {
+            stopCapture()
+        }
         updateUIForState()
     }
 
@@ -1259,10 +1261,21 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                         )
                     }
                     log.info("preview requested by server: enabling push")
+                    if self.state == .standby {
+                        self.startCapture(at: self.standbyFps)
+                    }
                 } else {
                     self.previewUploader?.reset()
                     log.info("preview no longer requested: stopping push")
+                    if self.state == .standby {
+                        self.stopCapture()
+                    }
                 }
+            }
+            if response.calibration_frame_requested == true,
+               self.state == .standby,
+               !self.previewRequestedByServer {
+                self.startCapture(at: self.standbyFps)
             }
             let cam = self.settings.cameraRole
             let cmd = response.commands?[cam]
