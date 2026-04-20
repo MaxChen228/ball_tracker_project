@@ -2601,13 +2601,22 @@ async def calibration_auto(
             ),
         )
 
-    # FOV default: 65° ≈ 1.1345 rad — iPhone 14-17 main wide approximation.
-    h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else 1.1345
-    fx, fy, cx, cy = derive_fov_intrinsics(w_img, h_img, h_fov_rad)
+    # Prefer intrinsics from an existing calibration (from a prior dashboard
+    # auto-cal, iOS auto-cal, or ChArUco upload). Those were derived from
+    # either the real FOV at capture time or measured ChArUco — both beat
+    # the 65° approximation below. If no prior snapshot exists, fall back
+    # to FOV-derived (h_fov_deg query override → 65° iPhone default).
+    prior = state.calibrations().get(camera_id)
+    if prior is not None and h_fov_deg is None:
+        intrinsics = prior.intrinsics
+    else:
+        h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else 1.1345
+        fx, fy, cx, cy = derive_fov_intrinsics(w_img, h_img, h_fov_rad)
+        intrinsics = IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy)
 
     snapshot = CalibrationSnapshot(
         camera_id=camera_id,
-        intrinsics=IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy),
+        intrinsics=intrinsics,
         homography=result.homography_row_major,
         image_width_px=w_img,
         image_height_px=h_img,
