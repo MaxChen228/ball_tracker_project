@@ -2721,15 +2721,32 @@ async def calibration_auto(
             ),
         )
 
-    # Prefer intrinsics from an existing calibration (from a prior dashboard
-    # auto-cal, iOS auto-cal, or ChArUco upload). Those were derived from
-    # either the real FOV at capture time or measured ChArUco — both beat
-    # the 65° approximation below. If no prior snapshot exists, fall back
-    # to FOV-derived (h_fov_deg query override → 65° iPhone default).
+    # Prefer intrinsics from an existing calibration (from iOS auto-cal or
+    # ChArUco upload) over the 65° FOV approximation. BUT: prior snapshots
+    # were solved against the ORIGINAL capture dims (e.g. 1920×1080 from
+    # the iOS path). The homography we're about to solve here is in the
+    # preview image's pixel space (~854×480). K and H must agree on scale,
+    # otherwise the cx/cy/fx/fy don't match the image coordinate system
+    # and `recover_extrinsics` yields nonsense (camera at the wrong depth
+    # or height). Rescale K to preview dims by the per-axis ratio.
     prior = state.calibrations().get(camera_id)
     if prior is not None and h_fov_deg is None:
-        intrinsics = prior.intrinsics
-    else:
+        prior_w = prior.image_width_px
+        prior_h = prior.image_height_px
+        if prior_w > 0 and prior_h > 0:
+            sx = w_img / prior_w
+            sy = h_img / prior_h
+            intrinsics = IntrinsicsPayload(
+                fx=prior.intrinsics.fx * sx,
+                fz=prior.intrinsics.fz * sy,
+                cx=prior.intrinsics.cx * sx,
+                cy=prior.intrinsics.cy * sy,
+                distortion=prior.intrinsics.distortion,  # unit-less
+            )
+        else:
+            # Defensive: malformed prior; fall through to FOV default.
+            prior = None
+    if prior is None or h_fov_deg is not None:
         h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else 1.1345
         fx, fy, cx, cy = derive_fov_intrinsics(w_img, h_img, h_fov_rad)
         intrinsics = IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy)
