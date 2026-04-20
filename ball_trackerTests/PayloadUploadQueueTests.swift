@@ -277,6 +277,7 @@ final class PayloadUploadQueueTests: XCTestCase {
         return ServerUploader.PitchPayload(
             camera_id: "A",
             session_id: sessionId,
+            sync_id: nil,
             sync_anchor_timestamp_s: 1.0,
             video_start_pts_s: 0.5,
             local_recording_index: 0,
