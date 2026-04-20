@@ -63,12 +63,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var audioInput: AVCaptureDeviceInput?
     private var audioOutput: AVCaptureAudioDataOutput?
     private var chirpDetector: AudioChirpDetector?
-    // Mutual chirp sync (dashboard-triggered). `syncDetector` replaces
-    // `chirpDetector` as the audio-output delegate while a run is active;
-    // restored on exit. `syncEmitter` owns the `AVAudioEngine` +
-    // `AVAudioPlayerNode` graph used to play this phone's own chirp.
+    // Mutual chirp sync (dashboard-triggered). Runs on its own
+    // `AVAudioEngine` (owned by `syncAudio`) — fully decoupled from
+    // `AVCaptureSession`, so sync works regardless of capture state
+    // (parked / standby-fps / tracking-fps). `syncDetector` holds the
+    // matched-filter state; buffers flow in via `syncAudio`'s input tap.
     private var syncDetector: AudioSyncDetector?
-    private var syncEmitter: ChirpEmitter?
+    private var syncAudio: MutualSyncAudio?
     private var pendingSyncId: String?
     private var syncSelfPTS: Double?
     private var syncFromOtherPTS: Double?
@@ -1330,31 +1331,25 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             pendingSyncId = nil
             return
         }
-        // Session must be live for the mic to deliver samples. Parked
-        // standby (session stopped) → spin up at idle fps first; the
-        // ~300-500 ms fps swap is well within the 8 s server timeout.
-        startCapture(at: standbyFps)
 
-        // Emitter: lazy-init, keeps AVAudioSession configured until
-        // shutdown() is called at exit.
-        if syncEmitter == nil {
-            syncEmitter = ChirpEmitter()
-        }
+        // Mutual sync runs on a dedicated `AVAudioEngine` owned by
+        // `MutualSyncAudio` — completely decoupled from `AVCaptureSession`.
+        // The capture state (parked / standby-fps / tracking-fps) is
+        // irrelevant; we do NOT call startCapture here. This is the whole
+        // point of the dedicated-engine refactor: engine.start is ~hundreds
+        // of ms vs. the 14-23 s cold-boot the capture session used to
+        // impose when `parkCameraInStandby=ON`.
 
-        // Detector: fresh instance per run so ring-buffer state can't leak
-        // across runs. Swap the AVCaptureAudioDataOutput delegate off the
-        // legacy chirpDetector to the sync detector for the duration of
-        // the run.
         let detector = AudioSyncDetector()
         detector.onDetection = { [weak self] event in
             guard let self else { return }
             DispatchQueue.main.async { self.onSyncDetection(event) }
         }
         syncDetector = detector
-        let hadAudioOutput = audioOutput != nil
-        audioOutput?.setSampleBufferDelegate(detector, queue: detector.deliveryQueue)
+
+        let audio = MutualSyncAudio(detector: detector)
+        syncAudio = audio
         uploader.postSyncLog(event: "detector_installed", detail: [
-            "had_audio_output": .bool(hadAudioOutput),
             "role": .string(role),
         ])
 
@@ -1365,16 +1360,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         lastUploadStatusText = "Mutual sync · emitting"
         updateUIForState()
 
-        // Fire the emission after a short delay so the capture session has
-        // had time to start delivering mic buffers — the matched filter
-        // needs to be watching before the speaker speaks.
         let roleCaptured = role
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self, self.state == .mutualSyncing else { return }
-            self.uploader.postSyncLog(event: "emit", detail: [
+        audio.beginSync(emittedRole: roleCaptured) { [weak self] in
+            self?.uploader.postSyncLog(event: "emit", detail: [
                 "role": .string(roleCaptured),
             ])
-            self.syncEmitter?.emit(role: roleCaptured)
         }
 
         // Watchdog: server also has an 8 s timeout; set ours to 6 s so we
@@ -1492,19 +1482,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         teardownMutualSync(status: "Mutual sync · \(reason)")
     }
 
-    /// Common cleanup from both success and timeout paths. Restores the
-    /// legacy audio delegate, shuts the emitter down (releases the
-    /// AVAudioSession back to whatever the capture session owned), and
-    /// returns to `.standby`.
+    /// Common cleanup from both success and timeout paths. Tears down the
+    /// mutual-sync audio engine (releases the AVAudioSession) and returns
+    /// to `.standby`. Does NOT touch the capture session — mutual sync
+    /// never owned it, so there's nothing for us to restore.
     private func teardownMutualSync(status: String) {
-        if let chirp = chirpDetector {
-            audioOutput?.setSampleBufferDelegate(chirp, queue: chirp.deliveryQueue)
-        } else {
-            audioOutput?.setSampleBufferDelegate(nil, queue: nil)
-        }
         syncDetector?.onDetection = nil
         syncDetector = nil
-        syncEmitter?.shutdown()
+        syncAudio?.endSync()
+        syncAudio = nil
         pendingSyncId = nil
         syncSelfPTS = nil
         syncFromOtherPTS = nil
@@ -1512,9 +1498,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
         warningLabel.isHidden = true
         lastUploadStatusText = status
-        if settings.parkCameraInStandby {
-            stopCapture()
-        }
         updateUIForState()
     }
 
