@@ -23,7 +23,6 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "camer
 /// - `ServerHealthMonitor` owns the 1 Hz heartbeat, backoff, and
 ///   "last contact" tick timer.
 /// - `PayloadUploadQueue` owns the cached-pitch upload worker.
-/// - `IntrinsicsStore` owns UserDefaults keys for calibration artefacts.
 final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
     enum AppState {
         case standby
@@ -104,9 +103,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var fpsEstimate: Double = 0
     private var displayLink: CADisplayLink?
 
-    // Last observed capture dimensions; mirrored into IntrinsicsStore so
-    // the payload enrichment path and the server-side detection pipeline
-    // agree on what resolution the MOV was recorded at.
+    // Last observed capture dimensions — used only for FPS debug and the
+    // capture-dim change log. Phase 6: no longer mirrored to UserDefaults;
+    // the server owns all calibration state now.
     private var latestImageWidth: Int = 0
     private var latestImageHeight: Int = 0
 
@@ -218,11 +217,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // heartbeat-reply flag for THIS camera; `previewUploader` lazily
     // constructs on first push. When the flag flips true→false we reset
     // the uploader so a stale in-flight POST doesn't land after toggle-off.
-    //
-    // NB: preview only works when `parkCameraInStandby == false`. With
-    // the toggle ON the AVCaptureSession is stopped in .standby so there
-    // are no pixel buffers to sample. HUD warning painted in
-    // updateUIForState() when preview is requested but we're parked.
+    // Phase 6: capture session is always live at standbyFps when idle, so
+    // pixel buffers are guaranteed to be flowing whenever preview is asked.
     private var previewRequestedByServer: Bool = false
     private var previewUploader: PreviewUploader?
     private let readyCard = ReadyCard()
@@ -243,20 +239,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let recTimerLabel = UILabel()
     private var recTimer: Timer?
     private var recStartTime: CFTimeInterval = 0
-
-    // Nav-bar toggle that flips `settings.parkCameraInStandby`. Title
-    // reflects the **current** state so a tap is read as "flip this".
-    // Lives next to Settings so the operator can jump between "live
-    // framing" and "parked / cool" in one tap without entering a modal.
-    private lazy var previewToggleItem: UIBarButtonItem = {
-        let item = UIBarButtonItem(
-            title: "",
-            style: .plain,
-            target: self,
-            action: #selector(togglePreviewPark)
-        )
-        return item
-    }()
 
     // Last state whose visuals (border stroke, pulse animation, REC timer)
     // were applied. `updateUIForState` fires on every heartbeat tick and
@@ -293,25 +275,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         super.viewDidLoad()
         view.backgroundColor = .black
 
-        navigationItem.leftBarButtonItems = [
-            UIBarButtonItem(
-                title: "Settings",
-                style: .plain,
-                target: self,
-                action: #selector(openSettings)
-            ),
-            previewToggleItem,
-        ]
-        navigationItem.rightBarButtonItems = [
-            UIBarButtonItem(title: "位置校正", style: .plain, target: self, action: #selector(openCalibration)),
-        ]
-        // 時間校正 nav button removed — both sync modalities are now
-        // dashboard-controlled:
-        //   - third-party chirp: dashboard "Calibrate time" → heartbeat
-        //     `sync_command:"start"` → iOS enters `.timeSyncWaiting`.
-        //   - mutual two-device chirp: dashboard /sync page → server
-        //     `sync_run` command → iOS enters `.mutualSyncing`.
-        // iOS keeps the ReadyCard gate as display-only status.
+        navigationItem.leftBarButtonItem = UIBarButtonItem(
+            title: "Settings",
+            style: .plain,
+            target: self,
+            action: #selector(openSettings)
+        )
+        // Phase 6: iOS UI reduced to display-only + Settings. All calibration
+        // and sync modalities are dashboard-controlled; the ReadyCard shows
+        // status only.
 
         settings = SettingsViewController.loadFromUserDefaults()
         serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: settings.serverPort)
@@ -387,7 +359,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         healthMonitor = ServerHealthMonitor(
             uploader: uploader,
             cameraId: settings.cameraRole,
-            baseIntervalS: settings.pollInterval
+            // Phase 3: dashboard pushes heartbeat_interval via heartbeat
+            // replies. 1 s is the bootstrap value until the first reply
+            // lands.
+            baseIntervalS: 1.0
         )
         wireHealthMonitorCallbacks()
 
@@ -396,35 +371,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         setupAudioCapture()
         setupDisplayLink()
         healthMonitor.start()
-        updatePreviewToggleTitle()
         updateUIForState()
-    }
-
-    @objc private func openCalibration() {
-        // Auto ArUco is the only on-device calibration path. Dashboard
-        // Phase 5 auto-cal is the primary flow; this VC stays as a field
-        // fallback if the dashboard is unreachable.
-        let vc = AutoCalibrationViewController()
-        let nav = UINavigationController(rootViewController: vc)
-        nav.modalPresentationStyle = .fullScreen
-        present(nav, animated: true)
-    }
-
-    @objc private func togglePreviewPark() {
-        let newValue = !settings.parkCameraInStandby
-        SettingsViewController.setParkCameraInStandby(newValue)
-        // Re-diff with the rest of settings-driven wiring untouched. The
-        // park branch inside applyUpdatedSettings handles start/stop when
-        // state == .standby; other states are no-ops.
-        applyUpdatedSettings()
-    }
-
-    /// Sync the nav-bar button title to `settings.parkCameraInStandby`.
-    /// Title shows the **current** mode so a tap reads as "flip this".
-    private func updatePreviewToggleTitle() {
-        previewToggleItem.title = settings.parkCameraInStandby
-            ? "預覽：關"
-            : "預覽：開"
     }
 
     @objc private func openSettings() {
@@ -446,13 +393,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Default: capture session stays OFF in standby — the phone was
-        // heating up from an idle 60 fps preview. Session is spun up on-
-        // demand only by `enterRecordingMode` (arm) or `startTimeSync`
-        // (manual 時間校正). Settings → Camera → "Park in STANDBY" can flip
-        // this off; in that case we keep the preview running at the idle
-        // fps so the operator gets a continuous framing aid.
-        if !settings.parkCameraInStandby && state == .standby {
+        // Preview always live at standbyFps when idle — the capture session
+        // stays running so the operator gets a continuous framing aid on the
+        // phone and dashboard live preview (Phase 4a) works out of the box.
+        if state == .standby {
             startCapture(at: standbyFps)
         }
         healthMonitor.start()
@@ -545,13 +489,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.clipRecorder = nil
         }
         warningLabel.isHidden = true
-        if settings.parkCameraInStandby {
-            stopCapture()
-        } else {
-            // Keep the preview live — drop fps back to idle so the sensor
-            // stops running at 240.
-            switchCaptureFps(standbyFps)
-        }
+        // Keep the preview live — drop fps back to idle so the sensor
+        // stops running at 240.
+        switchCaptureFps(standbyFps)
         updateUIForState()
     }
 
@@ -694,11 +634,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         latestChirpSnapshot = nil
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
-        // Already at standbyFps — if the operator asked to keep the preview,
-        // just leave the session running; otherwise park it.
-        if settings.parkCameraInStandby {
-            stopCapture()
-        }
+        // Already at standbyFps — leave the session running for preview.
         lastUploadStatusText = "時間校正 · \(Self.localizedCancelReason(reason))"
 
         if reason == "timeout" {
@@ -738,9 +674,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         latestChirpSnapshot = nil
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
-        if settings.parkCameraInStandby {
-            stopCapture()
-        }
         warningLabel.isHidden = true
         lastUploadStatusText = "時間校正完成"
         updateUIForState()
@@ -755,11 +688,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             do {
                 try configureCaptureFormat(
                     device,
-                    targetWidth: settings.captureWidth,
-                    targetHeight: settings.captureHeight,
+                    targetWidth: SettingsViewController.captureWidthFixed,
+                    targetHeight: SettingsViewController.captureHeightFixed,
                     targetFps: standbyFps
                 )
-                IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
 
                 let input = try AVCaptureDeviceInput(device: device)
                 if session.canAddInput(input) {
@@ -903,11 +835,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             do {
                 try self.configureCaptureFormat(
                     device,
-                    targetWidth: self.settings.captureWidth,
-                    targetHeight: self.settings.captureHeight,
+                    targetWidth: SettingsViewController.captureWidthFixed,
+                    targetHeight: SettingsViewController.captureHeightFixed,
                     targetFps: targetFps
                 )
-                IntrinsicsStore.setHorizontalFov(self.horizontalFovRadians)
                 // Read back the actually-applied rate so an operator can
                 // tell from logs whether the sensor is honouring our
                 // request. 240 fps formats typically crop the sensor ROI,
@@ -950,11 +881,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             do {
                 try self.configureCaptureFormat(
                     device,
-                    targetWidth: self.settings.captureWidth,
-                    targetHeight: self.settings.captureHeight,
+                    targetWidth: SettingsViewController.captureWidthFixed,
+                    targetHeight: SettingsViewController.captureHeightFixed,
                     targetFps: targetFps
                 )
-                IntrinsicsStore.setHorizontalFov(self.horizontalFovRadians)
                 self.session.startRunning()
                 log.info("camera capture started fps=\(targetFps)")
             } catch {
@@ -977,11 +907,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         do {
             try configureCaptureFormat(
                 device,
-                targetWidth: settings.captureWidth,
-                targetHeight: settings.captureHeight,
+                targetWidth: SettingsViewController.captureWidthFixed,
+                targetHeight: SettingsViewController.captureHeightFixed,
                 targetFps: targetFps
             )
-            IntrinsicsStore.setHorizontalFov(horizontalFovRadians)
             let applied = device.activeVideoMinFrameDuration
             let appliedFps = applied.value > 0
                 ? Double(applied.timescale) / Double(applied.value)
@@ -1068,7 +997,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         session.addOutput(output)
 
-        let detector = AudioChirpDetector(threshold: Float(settings.chirpThreshold))
+        // Phase 3: dashboard pushes chirp_threshold via heartbeat replies;
+        // 0.18 is the bootstrap default used before the first reply lands.
+        let detector = AudioChirpDetector(threshold: 0.18)
         output.setSampleBufferDelegate(detector, queue: detector.deliveryQueue)
         session.commitConfiguration()
 
@@ -1426,7 +1357,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // irrelevant; we do NOT call startCapture here. This is the whole
         // point of the dedicated-engine refactor: engine.start is ~hundreds
         // of ms vs. the 14-23 s cold-boot the capture session used to
-        // impose when `parkCameraInStandby=ON`.
+        // impose when the capture session was parked in idle.
 
         let detector = AudioSyncDetector()
         detector.onDetection = { [weak self] event in
@@ -1598,17 +1529,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     /// Settings-dismiss callback. Re-diffs UserDefaults and reconfigures
-    /// anything settings-driven. Replaces the old per-poll diffing.
+    /// anything settings-driven. Phase 6: Settings is bootstrap-only
+    /// (IP / port / role), so the only knobs here are the server endpoint
+    /// and the camera role. Chirp threshold + heartbeat interval come from
+    /// the dashboard via heartbeat replies (Phase 3).
     private func applyUpdatedSettings() {
         let latest = SettingsViewController.loadFromUserDefaults()
         let serverChanged = latest.serverIP != settings.serverIP
             || latest.serverPort != settings.serverPort
-        let formatChanged = latest.captureWidth != settings.captureWidth
-            || latest.captureHeight != settings.captureHeight
-        let chirpThresholdChanged = latest.chirpThreshold != settings.chirpThreshold
-        let pollIntervalChanged = latest.pollInterval != settings.pollInterval
         let cameraRoleChanged = latest.cameraRole != settings.cameraRole
-        let parkChanged = latest.parkCameraInStandby != settings.parkCameraInStandby
 
         settings = latest
 
@@ -1618,44 +1547,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             healthMonitor.updateUploader(uploader)
             uploadQueue.updateUploader(uploader)
         }
-        if formatChanged {
-            // User picked a different capture resolution in Settings.
-            // `settings` has already been updated to `latest` above, so
-            // switchCaptureFps → configureCaptureFormat will look up the
-            // new target dims via self.settings.
-            let fps = (state == .standby || state == .timeSyncWaiting) ? standbyFps : trackingFps
-            switchCaptureFps(fps)
-        }
-        if chirpThresholdChanged {
-            chirpDetector?.setThreshold(Float(latest.chirpThreshold))
-        }
         if cameraRoleChanged {
             healthMonitor.updateCameraId(latest.cameraRole)
         }
-        if pollIntervalChanged {
-            healthMonitor.updateBaseInterval(latest.pollInterval)
-        }
         recorder?.setCameraId(latest.cameraRole)
 
-        if serverChanged || pollIntervalChanged {
-            // New endpoint or new cadence — invalidate in-flight probe, reset
-            // backoff, and re-probe immediately so the HUD reflects reality.
+        if serverChanged {
+            // New endpoint — invalidate in-flight probe, reset backoff, and
+            // re-probe immediately so the HUD reflects reality.
             healthMonitor.resetBackoff()
             healthMonitor.probeNow()
-        }
-
-        // Park-mode only takes effect in standby — the active states own
-        // their own capture lifecycle and we'd rather not yank the session
-        // out from under a live recording or a time-sync listener.
-        if parkChanged && state == .standby {
-            if latest.parkCameraInStandby {
-                stopCapture()
-            } else {
-                startCapture(at: standbyFps)
-            }
-        }
-        if parkChanged {
-            updatePreviewToggleTitle()
         }
     }
 
@@ -1763,29 +1664,22 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     /// Recompute ready-card gate states + hint, then repaint. Called every
-    /// time `updateUIForState` fires.
+    /// time `updateUIForState` fires. Phase 6: iOS is display-only; the
+    /// 位置校正 gate was dropped (calibration is dashboard-owned, iOS has no
+    /// way to know the server-side state).
     private func updateReadyCard() {
-        let calibrationOK = IntrinsicsStore.hasHomography()
         let timeSyncOK = lastSyncAnchorTimestampS != nil
         let serverOK = healthMonitor?.isReachable ?? false
 
         let hint: String
         if !serverOK {
             hint = "無法接收開始指令：檢查 Wi-Fi 或 Settings 中的伺服器 IP"
-        } else if !calibrationOK {
-            hint = "本機還沒校正鏡頭位置，無法三角化"
         } else if !timeSyncOK {
             hint = "尚未時間校正，錄影將無法與另一台配對"
         } else {
             hint = "等待開始指令…（由 Dashboard 控制）"
         }
 
-        let calibrationGate = ReadyCard.Gate(
-            state: calibrationOK ? .pass : .fail,
-            label: "位置校正",
-            action: calibrationOK ? nil : "按這裡開始",
-            onTap: calibrationOK ? nil : { [weak self] in self?.openCalibration() }
-        )
         let timeSyncGate = ReadyCard.Gate(
             state: timeSyncOK ? .pass : (state == .timeSyncWaiting ? .pending : .fail),
             label: "時間校正",
@@ -1800,7 +1694,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         )
         readyCard.update(.init(
             cameraRole: settings.cameraRole,
-            calibration: calibrationGate,
             timeSync: timeSyncGate,
             server: serverGate,
             hint: hint
@@ -2027,9 +1920,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-        if latestImageWidth != width || latestImageHeight != height {
-            IntrinsicsStore.setImageDimensions(width: width, height: height)
-        }
         latestImageWidth = width
         latestImageHeight = height
 
