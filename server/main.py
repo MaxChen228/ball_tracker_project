@@ -2738,6 +2738,16 @@ def events_index() -> HTMLResponse:
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
             chirp_detect_threshold=state.chirp_detect_threshold(),
             heartbeat_interval_s=state.heartbeat_interval_s(),
+            calibration_last_ts={
+                cam: p.stat().st_mtime
+                for cam in state.calibrations().keys()
+                for p in [state._calibration_path(cam)]
+                if p.exists()
+            },
+            extended_markers=[
+                {"id": mid, "wx": wx, "wy": wy}
+                for mid, (wx, wy) in sorted(state._extended_markers.all().items())
+            ],
         )
     )
 
