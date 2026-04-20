@@ -78,11 +78,13 @@ from pydantic import ValidationError
 # from the split modules directly (schemas / pairing / chirp / render_*).
 from schemas import (
     CalibrationSnapshot,
+    CaptureTelemetryPayload,
     CaptureMode,
     Device,
     FramePayload,
     HeartbeatBody,
     IntrinsicsPayload,
+    PitchAnalysisPayload,
     PitchPayload,
     Session,
     SessionResult,
@@ -570,6 +572,27 @@ class State:
         with self._lock:
             self.results[pitch.session_id] = result
         return result
+
+    def attach_on_device_analysis(
+        self,
+        analysis: PitchAnalysisPayload,
+    ) -> SessionResult:
+        """Merge a late-arriving on-device post-pass into an existing pitch.
+
+        The base pitch must already exist (raw MOV upload in `camera_only` /
+        `dual`, or an earlier frames-only `/pitch` in `on_device`). We overwrite
+        `frames_on_device` wholesale because each upload is an authoritative
+        rerun over the finalized local MOV, not an incremental append."""
+        with self._lock:
+            existing = self.pitches.get((analysis.camera_id, analysis.session_id))
+        if existing is None:
+            raise KeyError((analysis.camera_id, analysis.session_id))
+
+        merged = existing.model_copy(deep=True)
+        merged.frames_on_device = list(analysis.frames_on_device)
+        if analysis.capture_telemetry is not None:
+            merged.capture_telemetry = analysis.capture_telemetry
+        return self.record(merged)
 
     def summary(self) -> dict[str, Any]:
         with self._lock:
@@ -1404,7 +1427,17 @@ class State:
         # --- Critical section: snapshot only the in-memory data we need.
         with self._lock:
             sessions = sorted({sid for _, sid in self.pitches.keys()})
-            snapshots: list[tuple[str, list[str], dict[str, int], dict[str, int], SessionResult | None]] = []
+            snapshots: list[
+                tuple[
+                    str,
+                    list[str],
+                    dict[str, int],
+                    dict[str, int],
+                    bool,
+                    dict[str, CaptureTelemetryPayload | None],
+                    SessionResult | None,
+                ]
+            ] = []
             for sid in sessions:
                 cams_present = sorted(
                     cam for (cam, s) in self.pitches.keys() if s == sid
@@ -1430,14 +1463,25 @@ class State:
                     bool(self.pitches[(cam, sid)].frames_on_device)
                     for cam in cams_present
                 )
+                cam_capture_telemetry = {
+                    cam: self.pitches[(cam, sid)].capture_telemetry
+                    for cam in cams_present
+                }
                 snapshots.append(
-                    (sid, cams_present, cam_frame_counts, cam_frame_counts_on_device,
-                     has_any_on_device_frames, self.results.get(sid))
+                    (
+                        sid,
+                        cams_present,
+                        cam_frame_counts,
+                        cam_frame_counts_on_device,
+                        has_any_on_device_frames,
+                        cam_capture_telemetry,
+                        self.results.get(sid),
+                    )
                 )
 
         # --- Outside the lock: file stats + summary derivation.
         events: list[dict[str, Any]] = []
-        for sid, cams_present, cam_frame_counts, cam_frame_counts_on_device, has_any_on_device_frames, result in snapshots:
+        for sid, cams_present, cam_frame_counts, cam_frame_counts_on_device, has_any_on_device_frames, cam_capture_telemetry, result in snapshots:
             latest_mtime: float | None = None
             for cam in cams_present:
                 try:
@@ -1523,6 +1567,10 @@ class State:
                     "peak_z_m": peak_z,
                     "mean_residual_m": mean_res,
                     "duration_s": duration,
+                    "capture_telemetry": {
+                        cam: (tele.model_dump(mode="json") if tele is not None else None)
+                        for cam, tele in cam_capture_telemetry.items()
+                    },
                     "error": error,
                     "error_on_device": error_on_device,
                     # Fit-derived summary (LIVE dashboard). All None when
@@ -2312,6 +2360,45 @@ async def pitch(
     return response
 
 
+@app.post("/pitch_analysis")
+async def pitch_analysis(payload: PitchAnalysisPayload) -> dict[str, Any]:
+    """Attach a late on-device post-pass analysis to an already-recorded pitch.
+
+    This is the PR61 second leg: raw capture arrives first, then iOS decodes
+    its finalized local MOV and uploads the authoritative on-device frame list
+    later. Dashboard/viewer state updates immediately once the merge lands."""
+    if not payload.frames_on_device:
+        raise HTTPException(
+            status_code=422,
+            detail="frames_on_device must be non-empty",
+        )
+    try:
+        result = await asyncio.to_thread(state.attach_on_device_analysis, payload)
+    except KeyError:
+        raise HTTPException(
+            status_code=409,
+            detail="base pitch not found for analysis upload",
+        )
+
+    logger.info(
+        "pitch_analysis camera=%s session=%s frames=%d detected=%d triangulated_on_device=%d%s",
+        payload.camera_id,
+        payload.session_id,
+        len(payload.frames_on_device),
+        sum(1 for f in payload.frames_on_device if f.ball_detected),
+        len(result.points_on_device),
+        f" err={result.error_on_device}" if result.error_on_device else "",
+    )
+    return {
+        "ok": True,
+        "session_id": payload.session_id,
+        "camera_id": payload.camera_id,
+        "frames_on_device": len(payload.frames_on_device),
+        "triangulated_on_device": len(result.points_on_device),
+        "error_on_device": result.error_on_device,
+    }
+
+
 async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
     """Background task: decode the MOV, run HSV detection, annotate, then
     re-record the pitch so `result.points` (and the annotated MP4) land on
@@ -2750,6 +2837,7 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
                 "time_synced": False,
                 "n_frames": 0,
                 "n_detected": 0,
+                "capture_telemetry": None,
             }
         else:
             cams[cam_id] = {
@@ -2758,6 +2846,10 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
                 "time_synced": p.sync_anchor_timestamp_s is not None,
                 "n_frames": len(p.frames),
                 "n_detected": sum(1 for f in p.frames if f.ball_detected),
+                "capture_telemetry": (
+                    p.capture_telemetry.model_dump(mode="json")
+                    if p.capture_telemetry is not None else None
+                ),
             }
 
     # Duration must NOT span raw `timestamp_s` across pitches — each

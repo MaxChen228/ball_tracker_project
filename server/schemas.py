@@ -85,6 +85,24 @@ class FramePayload(BaseModel):
     ball_detected: bool
 
 
+class CaptureTelemetryPayload(BaseModel):
+    """Actual capture conditions observed on-device for one uploaded pitch.
+
+    This is intentionally "applied telemetry", not policy. Dashboard controls
+    the desired mode/exposure; iOS reports what format/exposure path the
+    hardware actually ended up using so post-mortems can answer "what really
+    happened on this take?"."""
+    width_px: int
+    height_px: int
+    target_fps: float
+    applied_fps: float | None = None
+    format_fov_deg: float | None = None
+    format_index: int | None = None
+    is_video_binned: bool | None = None
+    tracking_exposure_cap: TrackingExposureCapMode | None = None
+    applied_max_exposure_s: float | None = None
+
+
 class PitchPayload(BaseModel):
     """Wire + in-memory shape. The iPhone posts the wire subset (no `frames`);
     server detection populates `frames` before triangulation and re-saves
@@ -130,6 +148,19 @@ class PitchPayload(BaseModel):
     homography: list[float] | None = None
     image_width_px: int | None = None
     image_height_px: int | None = None
+    capture_telemetry: CaptureTelemetryPayload | None = None
+
+
+class PitchAnalysisPayload(BaseModel):
+    """Late-arriving on-device post-pass analysis keyed to an existing pitch.
+
+    Used by the PR61 analysis plane: the raw MOV (or mode-one payload) lands
+    first, then the iPhone decodes its finalized local MOV and uploads the
+    authoritative on-device frame list later."""
+    camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
+    session_id: str = Field(..., pattern=r"^s_[0-9a-f]{4,32}$")
+    frames_on_device: list[FramePayload] = Field(default_factory=list)
+    capture_telemetry: CaptureTelemetryPayload | None = None
 
 
 class TriangulatedPoint(BaseModel):

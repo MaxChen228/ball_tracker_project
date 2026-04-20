@@ -27,6 +27,18 @@ final class ServerUploader {
         let ball_detected: Bool
     }
 
+    struct CaptureTelemetry: Codable {
+        let width_px: Int
+        let height_px: Int
+        let target_fps: Double
+        let applied_fps: Double?
+        let format_fov_deg: Double?
+        let format_index: Int?
+        let is_video_binned: Bool?
+        let tracking_exposure_cap: String?
+        let applied_max_exposure_s: Double?
+    }
+
     struct PitchPayload: Codable {
         let camera_id: String
         /// Server-minted pairing key from `POST /sessions/arm`. A/B pairs
@@ -57,6 +69,10 @@ final class ServerUploader {
         /// camera_only / on_device sessions. Default [] keeps the field
         /// encoded concretely for consistency with `frames`.
         let frames_on_device: [FramePayload]
+        /// Actual capture conditions the phone observed while recording
+        /// this take. Server persists this into the session so the web
+        /// UI can answer "what format/FOV/exposure did this clip really use?"
+        let capture_telemetry: CaptureTelemetry?
 
         // NOTE: Intrinsics / homography / image dims / video_fps used to
         // live on this struct and were echoed on every upload. Phase 1 of
@@ -78,7 +94,8 @@ final class ServerUploader {
                 video_start_pts_s: video_start_pts_s,
                 local_recording_index: local_recording_index,
                 frames: newFrames,
-                frames_on_device: frames_on_device
+                frames_on_device: frames_on_device,
+                capture_telemetry: capture_telemetry
             )
         }
 
@@ -94,9 +111,26 @@ final class ServerUploader {
                 video_start_pts_s: video_start_pts_s,
                 local_recording_index: local_recording_index,
                 frames: frames,
-                frames_on_device: newFramesOnDevice
+                frames_on_device: newFramesOnDevice,
+                capture_telemetry: capture_telemetry
             )
         }
+    }
+
+    struct PitchAnalysisPayload: Codable {
+        let camera_id: String
+        let session_id: String
+        let frames_on_device: [FramePayload]
+        let capture_telemetry: CaptureTelemetry?
+    }
+
+    struct PitchAnalysisResponse: Codable {
+        let ok: Bool
+        let session_id: String
+        let camera_id: String
+        let frames_on_device: Int
+        let triangulated_on_device: Int
+        let error_on_device: String?
     }
 
     /// Server `/pitch` response summary. Triangulation fields are optional
@@ -430,6 +464,62 @@ final class ServerUploader {
             }
             task.resume()
         }
+    }
+
+    func uploadPitchAnalysis(
+        _ payload: PitchAnalysisPayload,
+        completion: @escaping (Result<PitchAnalysisResponse, UploadError>) -> Void
+    ) {
+        guard let base = config.baseURL() else {
+            completion(.failure(.network(URLError(.badURL))))
+            return
+        }
+        let url = base.appendingPathComponent("pitch_analysis")
+        let body: Data
+        do {
+            body = try JSONEncoder().encode(payload)
+        } catch {
+            completion(.failure(.decoding(error)))
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let sid = payload.session_id
+        let cam = payload.camera_id
+        let task = URLSession.shared.uploadTask(with: request, from: body) { data, response, error in
+            if let error = error {
+                let urlError = (error as? URLError) ?? URLError(.unknown)
+                log.error("analysis upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=\(urlError.localizedDescription, privacy: .public) code=\(urlError.code.rawValue)")
+                completion(.failure(.network(urlError)))
+                return
+            }
+            guard let http = response as? HTTPURLResponse else {
+                completion(.failure(.invalidResponse))
+                return
+            }
+            if !(200...299).contains(http.statusCode) {
+                if (500...599).contains(http.statusCode) {
+                    completion(.failure(.server(statusCode: http.statusCode, body: data)))
+                } else {
+                    completion(.failure(.client(statusCode: http.statusCode, body: data)))
+                }
+                return
+            }
+            guard let data else {
+                completion(.failure(.decoding(URLError(.cannotDecodeContentData))))
+                return
+            }
+            do {
+                let decoded = try JSONDecoder().decode(PitchAnalysisResponse.self, from: data)
+                log.info("analysis upload ok session=\(sid, privacy: .public) cam=\(cam, privacy: .public) frames=\(decoded.frames_on_device) triangulated=\(decoded.triangulated_on_device)")
+                completion(.success(decoded))
+            } catch {
+                completion(.failure(.decoding(error)))
+            }
+        }
+        task.resume()
     }
 
     /// Serial background queue for streaming-multipart-body assembly so a

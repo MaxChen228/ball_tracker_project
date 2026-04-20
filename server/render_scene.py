@@ -2168,11 +2168,29 @@ def _cam_card_html(cam_id: str, cam: dict) -> str:
 
     n_det = cam["n_detected"]
     n_frames = cam["n_frames"]
+    telemetry = cam.get("capture_telemetry") or {}
 
     stats_html = (
         f'<span class="n">{n_det}</span>'
         f'<span class="of"> detected / {n_frames} frames</span>'
     )
+    telemetry_html = ""
+    if telemetry:
+        dims = (
+            f'{telemetry.get("width_px")}×{telemetry.get("height_px")}'
+            if telemetry.get("width_px") and telemetry.get("height_px")
+            else "—"
+        )
+        fps = telemetry.get("applied_fps") or telemetry.get("target_fps")
+        fps_text = f"{fps:.0f} fps" if isinstance(fps, (int, float)) else "—"
+        fov = telemetry.get("format_fov_deg")
+        fov_text = f'{fov:.1f}°' if isinstance(fov, (int, float)) else "—"
+        exposure = telemetry.get("tracking_exposure_cap") or "—"
+        telemetry_html = (
+            f'<div class="cam-note">'
+            f'capture {dims} · {fps_text} · fov {fov_text} · exp {exposure}'
+            f'</div>'
+        )
     if n_frames == 0:
         # Zero decodable frames — a 0/0 bar would be misleading.
         rate_html = '<span class="rate-empty">—</span>'
@@ -2202,6 +2220,7 @@ def _cam_card_html(cam_id: str, cam: dict) -> str:
         f'</div>'
         f'<div class="cam-rate">{rate_html}<span class="cam-stats">'
         f'{stats_html}</span></div>'
+        f'{telemetry_html}'
         f'</div>'
     )
 
