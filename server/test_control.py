@@ -683,14 +683,16 @@ def test_dashboard_renders_control_panel():
 def test_dashboard_marks_expected_cameras_offline_when_absent():
     client = TestClient(app)
     r = client.get("/")
-    # Neither A nor B have heartbeated → both rendered with the "Not seen"
-    # caption and the idle/offline chip in the initial server-rendered
-    # device list. `in` (not `count`) so incidental matches inside the
-    # inline JS template don't throw off the assertion.
+    # Neither A nor B have heartbeated → both rendered with the "offline"
+    # chip in the initial server-rendered Devices card. `in` (not `count`)
+    # so incidental matches inside the inline JS template don't throw off
+    # the assertion.
     body = r.text
     assert '<div class="id">A</div>' in body
     assert '<div class="id">B</div>' in body
-    assert body.count('<div class="meta">Not seen</div>') >= 2
+    # Each cam row renders its own "offline" chip + "offline" sub-labels;
+    # count ≥ 2 rows present.
+    assert body.count('<span class="chip idle">offline</span>') >= 2
 
 
 # --- Mutual chirp sync -----------------------------------------------------

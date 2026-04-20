@@ -2534,12 +2534,19 @@ def calibration_state() -> dict[str, Any]:
         scene_uirevision="dashboard-canvas",
     )
     fig_json = json.loads(fig.to_json())
+    def _cal_mtime(cam_id: str) -> float | None:
+        p = state._calibration_path(cam_id)
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return None
     return {
         "calibrations": [
             {
                 "camera_id": cam_id,
                 "image_width_px": snap.image_width_px,
                 "image_height_px": snap.image_height_px,
+                "last_ts": _cal_mtime(cam_id),
             }
             for cam_id, snap in sorted(cals.items())
         ],
@@ -2757,6 +2764,7 @@ def events_index() -> HTMLResponse:
                 {"id": mid, "wx": wx, "wy": wy}
                 for mid, (wx, wy) in sorted(state._extended_markers.all().items())
             ],
+            preview_requested=state._preview.requested_map(),
         )
     )
 

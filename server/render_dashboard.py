@@ -129,10 +129,12 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 /* Middle column uses minmax so a wider chip (CALIBRATED vs OFFLINE) can't
    squeeze the sub-row into a second line and make A / B rows different
    heights. `auto` → min-content keeps the chip column tight. */
-.device {{ display: grid; grid-template-columns: 28px minmax(0, 1fr) min-content;
-           align-items: center;
-           gap: var(--s-3); padding: var(--s-2) 0; }}
+.device {{ padding: var(--s-2) 0; }}
 .device + .device {{ border-top: 1px solid var(--border-l); }}
+.device-head {{ display: grid; grid-template-columns: 28px minmax(0, 1fr) min-content;
+                align-items: center; gap: var(--s-3); }}
+.device-head .chip-col {{ justify-self: end; }}
+.device-actions {{ display: flex; gap: var(--s-2); margin-top: var(--s-2); flex-wrap: wrap; }}
 .device .id {{ font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--ink);
                letter-spacing: 0.04em; }}
 .device .meta {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
@@ -907,34 +909,46 @@ _JS_TEMPLATE = r"""
   function renderDevices(state) {
     const devByCam = new Map((state.devices || []).map(d => [d.camera_id, d]));
     const calibrated = new Set(state.calibrations || []);
-    // Dashboard CALIBRATE TIME sets a per-camera pending flag that drains
-    // on the phone's next heartbeat. Overlay a "pending" sync label on
-    // any camera in this set so the operator sees the command in flight.
     const syncPending = state.sync_commands || {};
+    const previewReq = state.preview_requested || {};
+    const calLastTs = state.calibration_last_ts || {};
+    function hhmm(ts) {
+      if (!ts) return '';
+      const d = new Date(ts * 1000);
+      return d.toTimeString().slice(0, 5);
+    }
 
     function row(cam, deviceRecord) {
       const online = !!deviceRecord;
       const timeSynced = !!(deviceRecord && deviceRecord.time_synced);
       const pending = !!syncPending[cam];
       const isCal = calibrated.has(cam);
-      const meta = !online ? 'Not seen'
-                   : isCal ? 'Ready · pose known'
-                           : 'Awaiting calibration';
+      const previewOn = !!previewReq[cam];
+      const lastTs = calLastTs[cam];
       const calDot = isCal ? 'ok' : (online ? 'warn' : 'bad');
       const syncDot = !online ? 'bad' : (pending ? 'warn' : (timeSynced ? 'ok' : 'warn'));
       const syncLabel = !online ? 'offline' : (pending ? 'pending…' : (timeSynced ? 'synced' : 'not synced'));
-      const calLabel = !online ? 'offline' : (isCal ? 'calibrated' : 'pending');
+      const calLabel = (isCal && lastTs) ? ('last ' + hhmm(lastTs))
+                     : (!online ? 'offline' : (isCal ? 'calibrated' : 'pending'));
+      const previewBtn = `<button type="button" class="btn small preview-btn${previewOn ? ' active' : ''}" ` +
+        `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}">` +
+        `${previewOn ? 'PREVIEW ON' : 'PREVIEW'}</button>`;
+      const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}">Auto calibrate</button>`;
+      const previewPanel = previewOn
+        ? `<div class="preview-panel" data-preview-panel="${esc(cam)}"><img src="/camera/${encodeURIComponent(cam)}/preview.mjpeg?t=${Date.now()}" alt="preview ${esc(cam)}"></div>`
+        : '';
       return `
         <div class="device">
-          <div class="id">${esc(cam)}</div>
-          <div>
-            <div class="meta">${esc(meta)}</div>
+          <div class="device-head">
+            <div class="id">${esc(cam)}</div>
             <div class="sub">
               <span class="item"><span class="dot ${syncDot}"></span>time sync · ${esc(syncLabel)}</span>
               <span class="item"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>
             </div>
+            <div class="chip-col">${statusChip(cam, online, isCal)}</div>
           </div>
-          <div>${statusChip(cam, online, isCal)}</div>
+          <div class="device-actions">${previewBtn}${autoCalBtn}</div>
+          ${previewPanel}
         </div>`;
     }
 
@@ -1105,6 +1119,7 @@ _JS_TEMPLATE = r"""
   let currentCalibrations = null;
   let currentCaptureMode = 'camera_only';
   let currentPreviewRequested = {};
+  let currentCalibrationLastTs = {};
 
   // Keys used to skip re-renders when nothing changed. We compare serialised
   // state data rather than innerHTML strings because the browser re-serialises
@@ -1119,6 +1134,9 @@ _JS_TEMPLATE = r"""
     const key = JSON.stringify({
       devices: (state.devices || []).map(d => ({ id: d.camera_id, ts: d.time_synced })),
       calibrations: (state.calibrations || []).slice().sort(),
+      preview: state.preview_requested || {},
+      last_ts: state.calibration_last_ts || {},
+      sync_pending: Object.keys(state.sync_commands || {}).sort(),
     });
     if (key === _lastDevKey) return;
     _lastDevKey = key;
@@ -1167,7 +1185,13 @@ _JS_TEMPLATE = r"""
       currentSession = s.session || null;
       currentCaptureMode = s.capture_mode || 'camera_only';
       currentPreviewRequested = s.preview_requested || {};
-      renderDevices(s);
+      renderDevices({
+        devices: s.devices || [],
+        calibrations: currentCalibrations || [],
+        preview_requested: currentPreviewRequested,
+        sync_commands: s.sync_commands || {},
+        calibration_last_ts: currentCalibrationLastTs || {},
+      });
       renderSession(s);
     } catch (e) { /* silent retry next tick */ }
   }
@@ -1184,7 +1208,17 @@ _JS_TEMPLATE = r"""
       if (!r.ok) return;
       const payload = await r.json();
       currentCalibrations = (payload.calibrations || []).map(c => c.camera_id);
-      renderDevices({ devices: currentDevices || [], calibrations: currentCalibrations, preview_requested: currentPreviewRequested });
+      currentCalibrationLastTs = {};
+      for (const c of (payload.calibrations || [])) {
+        if (c.last_ts != null) currentCalibrationLastTs[c.camera_id] = c.last_ts;
+      }
+      renderDevices({
+        devices: currentDevices || [],
+        calibrations: currentCalibrations,
+        preview_requested: currentPreviewRequested,
+        sync_commands: {},
+        calibration_last_ts: currentCalibrationLastTs,
+      });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
       if (payload.plot && sceneRoot && window.Plotly) {
         // Only (re)assign basePlot when its contents actually changed.
@@ -1260,11 +1294,13 @@ _JS_TEMPLATE = r"""
     if (enabled) previewOn.add(cam); else previewOn.delete(cam);
     _lastDevKey = null;
     const merged = Object.fromEntries([...previewOn].map(c => [c, true]));
+    currentPreviewRequested = merged;
     renderDevices({
       devices: currentDevices || [],
       calibrations: currentCalibrations || [],
       preview_requested: merged,
       sync_commands: {},
+      calibration_last_ts: currentCalibrationLastTs || {},
     });
     try {
       await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
@@ -1414,38 +1450,64 @@ def _fmt_received_at(ts: float | None) -> str:
 def _render_device_rows(
     devices: list[dict[str, Any]],
     calibrations: list[str],
+    calibration_last_ts: dict[str, float] | None = None,
+    preview_requested: dict[str, bool] | None = None,
 ) -> str:
-    """Server-rendered initial paint. JS will replace this within 1 s but we
-    avoid a flash of empty content on first load."""
+    """Merged Devices card row — status + per-cam calibration actions +
+    per-cam preview toggle + inline MJPEG panel. JS will replace within
+    1 s; SSR paints usable buttons so there's no flash of empty state."""
     device_by_id = {d["camera_id"]: d for d in devices}
     calibrated = set(calibrations)
+    calibration_last_ts = calibration_last_ts or {}
+    preview_requested = preview_requested or {}
 
     def render_row(cam_id: str) -> str:
         dev = device_by_id.get(cam_id)
         online = dev is not None
         time_synced = bool(dev.get("time_synced")) if dev else False
         is_cal = cam_id in calibrated
+        preview_on = bool(preview_requested.get(cam_id))
+        last_ts = calibration_last_ts.get(cam_id) if is_cal else None
         if not online:
-            meta, chip_cls, chip_label = "Not seen", "idle", "offline"
+            chip_cls, chip_label = "idle", "offline"
         elif is_cal:
-            meta, chip_cls, chip_label = "Ready · pose known", "calibrated", "calibrated"
+            chip_cls, chip_label = "calibrated", "calibrated"
         else:
-            meta, chip_cls, chip_label = "Awaiting calibration", "online", "online"
+            chip_cls, chip_label = "online", "online"
         cal_dot = "ok" if is_cal else ("warn" if online else "bad")
         sync_dot = "ok" if time_synced else ("warn" if online else "bad")
         sync_label = "synced" if time_synced else ("not synced" if online else "offline")
-        cal_label = "calibrated" if is_cal else ("pending" if online else "offline")
+        cal_label = (
+            f"last {html.escape(_fmt_hhmm(last_ts))}" if (is_cal and last_ts)
+            else ("pending" if online else "offline")
+        )
+        preview_btn = (
+            f'<button type="button" class="btn small preview-btn{" active" if preview_on else ""}" '
+            f'data-preview-cam="{html.escape(cam_id)}" '
+            f'data-preview-enabled="{1 if preview_on else 0}">'
+            f'{"PREVIEW ON" if preview_on else "PREVIEW"}</button>'
+        )
+        auto_cal_btn = (
+            f'<button type="button" class="btn small" '
+            f'data-auto-cal="{html.escape(cam_id)}">Auto calibrate</button>'
+        )
+        preview_panel = (
+            f'<div class="preview-panel" data-preview-panel="{html.escape(cam_id)}">'
+            f'<img src="/camera/{html.escape(cam_id)}/preview.mjpeg" alt="preview {html.escape(cam_id)}">'
+            f'</div>'
+        ) if preview_on else ""
         return (
             f'<div class="device">'
+            f'<div class="device-head">'
             f'<div class="id">{html.escape(cam_id)}</div>'
-            f'<div>'
-            f'<div class="meta">{html.escape(meta)}</div>'
             f'<div class="sub">'
             f'<span class="item"><span class="dot {sync_dot}"></span>time sync · {sync_label}</span>'
             f'<span class="item"><span class="dot {cal_dot}"></span>pose · {cal_label}</span>'
             f'</div>'
+            f'<div class="chip-col"><span class="chip {chip_cls}">{chip_label}</span></div>'
             f'</div>'
-            f'<div><span class="chip {chip_cls}">{chip_label}</span></div>'
+            f'<div class="device-actions">{preview_btn}{auto_cal_btn}</div>'
+            f'{preview_panel}'
             f'</div>'
         )
 
@@ -1454,49 +1516,14 @@ def _render_device_rows(
     return "".join(rows)
 
 
-def _fmt_hhmm(ts: float | None) -> str:
-    if ts is None:
-        return "—"
-    return _dt.datetime.fromtimestamp(ts).strftime("%H:%M")
-
-
-def _render_calibration_body(
+def _render_extended_markers_body(
     device_ids: list[str],
-    calibrations: list[str],
-    calibration_last_ts: dict[str, float] | None = None,
     extended_markers: list[dict[str, Any]] | None = None,
 ) -> str:
-    """CALIBRATION card (Phase 5). Per-camera auto-calibrate button +
-    extended-markers subsection. All actions are dashboard-triggered,
-    fire-and-forget AJAX from the JS tick — the SSR paint produces
-    usable buttons even without JS."""
-    calibrated = set(calibrations)
-    calibration_last_ts = calibration_last_ts or {}
+    """Extended-markers subsection — register new markers by auto-projecting
+    them through the plate homography from a selected camera's preview
+    frame. Sits at the bottom of the merged Devices card."""
     extended_markers = extended_markers or []
-
-    def cal_row(cam_id: str) -> str:
-        is_cal = cam_id in calibrated
-        last_ts = calibration_last_ts.get(cam_id)
-        last_html = (
-            f'<span class="calib-last">last {html.escape(_fmt_hhmm(last_ts))}</span>'
-            if is_cal and last_ts
-            else '<span class="calib-last">not calibrated</span>'
-        )
-        btn = (
-            f'<button type="button" class="btn small" '
-            f'data-auto-cal="{html.escape(cam_id)}">Auto calibrate</button>'
-        )
-        return (
-            f'<div class="calib-row">'
-            f'<div class="id">{html.escape(cam_id)}</div>'
-            f'<div class="meta">{last_html}</div>'
-            f'<div>{btn}</div>'
-            f'</div>'
-        )
-
-    rows_html = "".join(cal_row(cam) for cam in device_ids)
-
-    # Extended-markers sub-section.
     cam_options = "".join(
         f'<option value="{html.escape(cam)}">{html.escape(cam)}</option>'
         for cam in device_ids
@@ -1514,21 +1541,23 @@ def _render_calibration_body(
         list_html = f'<div class="marker-list">{list_items}</div>'
     else:
         list_html = '<div class="marker-list-empty">No extended markers registered.</div>'
-
-    sub_html = (
+    return (
         '<div class="calib-sub">'
         '<h3>Extended markers</h3>'
         '<div class="calib-register-row">'
         f'<select id="marker-register-cam">{cam_options}</select>'
-        '<button type="button" class="btn small" id="marker-register-btn">'
-        'Register from this camera</button>'
-        '<button type="button" class="btn small secondary" id="marker-clear-btn">'
-        'Clear all</button>'
+        '<button type="button" class="btn small" id="marker-register-btn">Register from this camera</button>'
+        '<button type="button" class="btn small secondary" id="marker-clear-btn">Clear all</button>'
         '</div>'
         f'<div id="marker-list">{list_html}</div>'
         '</div>'
     )
-    return rows_html + sub_html
+
+
+def _fmt_hhmm(ts: float | None) -> str:
+    if ts is None:
+        return "—"
+    return _dt.datetime.fromtimestamp(ts).strftime("%H:%M")
 
 
 _MODE_LABELS = {
@@ -1776,6 +1805,7 @@ def render_events_index_html(
     heartbeat_interval_s: float = 1.0,
     calibration_last_ts: dict[str, float] | None = None,
     extended_markers: list[dict[str, Any]] | None = None,
+    preview_requested: dict[str, bool] | None = None,
 ) -> str:
     """Render the dashboard: top nav + sidebar (devices / session / events)
     + a canvas showing the current calibration scene. All three panels
@@ -1833,8 +1863,9 @@ def render_events_index_html(
         '<div class="layout">'
         '<aside class="sidebar">'
         '<div class="card">'
-        '<h2 class="card-title">Devices</h2>'
-        f'<div id="devices-body">{_render_device_rows(devices, calibrations)}</div>'
+        '<h2 class="card-title">Devices &middot; Calibration</h2>'
+        f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested)}</div>'
+        f'<div id="extended-markers-body">{_render_extended_markers_body(["A", "B"], extended_markers)}</div>'
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Session</h2>'
@@ -1843,10 +1874,6 @@ def render_events_index_html(
         '<div class="card">'
         '<h2 class="card-title">Runtime &middot; Tuning</h2>'
         f'<div id="tuning-body">{_render_tuning_body(chirp_detect_threshold, heartbeat_interval_s)}</div>'
-        "</div>"
-        '<div class="card">'
-        '<h2 class="card-title">Calibration</h2>'
-        f'<div id="calibration-body">{_render_calibration_body(["A", "B"], calibrations, calibration_last_ts, extended_markers)}</div>'
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Events</h2>'
