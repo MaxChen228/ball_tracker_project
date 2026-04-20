@@ -40,6 +40,12 @@ final class AutoCalibrationViewController: UIViewController {
         view.backgroundColor = .black
         title = "自動校正"
 
+        navigationItem.leftBarButtonItem = UIBarButtonItem(
+            title: "關閉",
+            style: .plain,
+            target: self,
+            action: #selector(closeCalibration)
+        )
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             title: "拍照校正",
             style: .done,
@@ -157,6 +163,10 @@ final class AutoCalibrationViewController: UIViewController {
         let devX = CGFloat(p.x) / CGFloat(imageWidth)
         let devY = CGFloat(p.y) / CGFloat(imageHeight)
         return previewLayer.layerPointConverted(fromCaptureDevicePoint: CGPoint(x: devX, y: devY))
+    }
+
+    @objc private func closeCalibration() {
+        dismiss(animated: true)
     }
 
     @objc private func saveArucoCalibration() {

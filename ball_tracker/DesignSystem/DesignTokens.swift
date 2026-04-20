@@ -112,8 +112,8 @@ enum DesignTokens {
         static let l: CGFloat = 16
         /// Page horizontal padding (kg --page-h-padding).
         static let pageH: CGFloat = 20
-        /// Keep existing value 24 so UIKit call-sites (ReadyCard bottom,
-        /// CalibrationChooser top) don't shift.
+        /// Keep existing value 24 so UIKit call-sites (ReadyCard bottom)
+        /// don't shift.
         static let xl: CGFloat = 24
         static let xxl: CGFloat = 32
         static let huge: CGFloat = 48
