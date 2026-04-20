@@ -2930,18 +2930,26 @@ def events_index() -> HTMLResponse:
     )
 
 
-@app.get("/sync", response_class=HTMLResponse)
-def sync_page() -> HTMLResponse:
-    """Dedicated Time Sync page — control card, matched-filter trace plot,
-    and the diagnostic log. Split out of `/` so long-distance sync debug
-    has room for the plot without crowding the sidebar."""
-    from render_sync import render_sync_html
+@app.get("/sync")
+def sync_redirect() -> RedirectResponse:
+    """Preserve old bookmarks. `/sync` is now `/setup` — devices + mutual
+    chirp sync + tuning all live on the configuration page."""
+    return RedirectResponse("/setup", status_code=301)
+
+
+@app.get("/setup", response_class=HTMLResponse)
+def setup_page() -> HTMLResponse:
+    """Configuration surface. Stacks DEVICES · CALIBRATION (per-camera
+    rows + extended markers) + TIME SYNC (mutual chirp + matched-filter
+    trace + log) + RUNTIME · TUNING. `/` is operational-only (Session +
+    Events + 3D canvas)."""
+    from render_sync import render_setup_html
 
     session = state.session_snapshot()
     sync_run = state.current_sync()
     last_sync = state.last_sync_result()
     return HTMLResponse(
-        render_sync_html(
+        render_setup_html(
             devices=[
                 {
                     "camera_id": d.camera_id,
@@ -2955,6 +2963,20 @@ def sync_page() -> HTMLResponse:
             sync=sync_run.to_dict() if sync_run is not None else None,
             last_sync=last_sync.model_dump() if last_sync is not None else None,
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
+            chirp_detect_threshold=state.chirp_detect_threshold(),
+            heartbeat_interval_s=state.heartbeat_interval_s(),
+            capture_height_px=state.capture_height_px(),
+            calibration_last_ts={
+                cam: p.stat().st_mtime
+                for cam in state.calibrations().keys()
+                for p in [state._calibration_path(cam)]
+                if p.exists()
+            },
+            extended_markers=[
+                {"id": mid, "wx": wx, "wy": wy}
+                for mid, (wx, wy) in sorted(state._extended_markers.all().items())
+            ],
+            preview_requested=state._preview.requested_map(),
         )
     )
 
