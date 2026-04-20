@@ -1006,6 +1006,9 @@ _JS_TEMPLATE = r"""
       .filter(d => !EXPECTED.includes(d.camera_id))
       .map(d => row(d.camera_id, d)).join('');
     devicesBox.innerHTML = rows + extras;
+    // The innerHTML rebuild above destroys any existing Plotly plot hosts
+    // inside the virtual-cam panels — re-mount them on the fresh DOM.
+    if (typeof repaintVirtualCams === 'function') repaintVirtualCams();
   }
 
   const MODE_LABELS = { camera_only: 'Camera-only', on_device: 'On-device', dual: 'Dual' };
@@ -1413,7 +1416,24 @@ _JS_TEMPLATE = r"""
   // Reuses `basePlot` (from /calibration/state) by keeping traces with
   // meta.camera_id == this cam PLUS shared world traces (no meta/camera_id).
   // Tiny Plotly react on each calibration tick; layout cached per host.
-  const virtualCamLayouts = {};
+  function virtualCamLayoutFor(cam) {
+    return {
+      uirevision: 'virtual-cam-' + cam,
+      showlegend: false,
+      margin: { l: 0, r: 0, t: 0, b: 0 },
+      autosize: true,
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      scene: {
+        uirevision: 'virtual-cam-' + cam,
+        aspectmode: 'data',
+        xaxis: { showticklabels: false, title: { text: '' }, showgrid: false, zeroline: false, showbackground: false },
+        yaxis: { showticklabels: false, title: { text: '' }, showgrid: false, zeroline: false, showbackground: false },
+        zaxis: { showticklabels: false, title: { text: '' }, showgrid: false, zeroline: false, showbackground: false },
+        camera: { eye: { x: 1.6, y: -1.6, z: 1.1 } },
+      },
+    };
+  }
   function repaintVirtualCams() {
     if (!basePlot || !window.Plotly) return;
     const allTraces = basePlot.data || [];
@@ -1431,19 +1451,13 @@ _JS_TEMPLATE = r"""
         continue;
       }
       if (container) container.classList.add('has-plot');
-      let layout = virtualCamLayouts[cam];
-      if (!layout) {
-        layout = JSON.parse(JSON.stringify(basePlot.layout || {}));
-        if (!layout.scene) layout.scene = {};
-        layout.scene.uirevision = 'virtual-cam-' + cam;
-        layout.showlegend = false;
-        layout.margin = { l: 0, r: 0, t: 0, b: 0 };
-        layout.autosize = true;
-        virtualCamLayouts[cam] = layout;
+      try {
+        Plotly.react(host, traces, virtualCamLayoutFor(cam), {
+          responsive: true, displayModeBar: false, scrollZoom: true, doubleClick: false,
+        });
+      } catch (err) {
+        console.warn('virtual-cam render failed for', cam, err);
       }
-      Plotly.react(host, traces, layout, {
-        responsive: true, displayModeBar: false, scrollZoom: true, doubleClick: false,
-      });
     }
   }
 
