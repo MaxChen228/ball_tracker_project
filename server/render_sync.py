@@ -461,9 +461,18 @@ def _render_sync_body(
         chip = '<span class="chip idle">idle</span>'
         status_line = ""
 
-    if last_sync:
-        delta_ms = last_sync.get("delta_s", 0.0) * 1000.0
-        dist_m = last_sync.get("distance_m", 0.0)
+    if last_sync and last_sync.get("aborted"):
+        reasons = last_sync.get("abort_reasons") or {}
+        parts = [f"{k}: {html.escape(str(v))}" for k, v in sorted(reasons.items())]
+        reason_txt = " · ".join(parts) if parts else "unknown"
+        last_line = (
+            '<div class="meta" style="color: var(--failed)">'
+            f'Last · ABORTED · {reason_txt}</div>'
+        )
+    elif (last_sync and last_sync.get("delta_s") is not None
+          and last_sync.get("distance_m") is not None):
+        delta_ms = last_sync["delta_s"] * 1000.0
+        dist_m = last_sync["distance_m"]
         last_line = (
             f'<div class="meta">Last · Δ={delta_ms:+.3f} ms · D={dist_m:.3f} m</div>'
         )
