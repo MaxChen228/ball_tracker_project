@@ -22,6 +22,7 @@ final class PitchRecorderTests: XCTestCase {
 
         recorder.startRecording(
             sessionId: "s_test01",
+            syncId: nil,
             anchorTimestampS: 12.345,
             videoStartPtsS: 42.125
         )
@@ -48,6 +49,7 @@ final class PitchRecorderTests: XCTestCase {
 
         recorder.startRecording(
             sessionId: "s_noanc",
+            syncId: nil,
             anchorTimestampS: nil,
             videoStartPtsS: 0.0
         )
@@ -78,11 +80,13 @@ final class PitchRecorderTests: XCTestCase {
 
         recorder.startRecording(
             sessionId: "s_once",
+            syncId: nil,
             anchorTimestampS: 1.0,
             videoStartPtsS: 0.0
         )
         recorder.startRecording(
             sessionId: "s_twice",
+            syncId: nil,
             anchorTimestampS: 2.0,
             videoStartPtsS: 0.0
         )
@@ -98,6 +102,7 @@ final class PitchRecorderTests: XCTestCase {
 
         recorder.startRecording(
             sessionId: "s_dbl",
+            syncId: nil,
             anchorTimestampS: 0.0,
             videoStartPtsS: 0.0
         )
@@ -115,6 +120,7 @@ final class PitchRecorderTests: XCTestCase {
 
         recorder.startRecording(
             sessionId: "s_a",
+            syncId: nil,
             anchorTimestampS: 0.0,
             videoStartPtsS: 0.0
         )
@@ -125,6 +131,7 @@ final class PitchRecorderTests: XCTestCase {
 
         recorder.startRecording(
             sessionId: "s_b",
+            syncId: nil,
             anchorTimestampS: 0.0,
             videoStartPtsS: 0.0
         )
