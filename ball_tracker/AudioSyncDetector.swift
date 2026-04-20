@@ -46,6 +46,19 @@ final class AudioSyncDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         let peakNorm: Float
     }
 
+    /// One matched-filter sample captured during a sync run. Shipped to
+    /// the server so `/sync` can plot sub-threshold peaks — the whole
+    /// point of the debug view (long-distance failures never cross the
+    /// 0.18 gate so live `onDetection` alone hides the reason).
+    struct TraceSample {
+        /// Run-relative seconds (sample PTS minus `firstPTS`).
+        let t: Double
+        /// Same `bestNorm` the gate uses; [0, 1].
+        let peak: Float
+        /// Peak-to-sidelobe ratio (best / second-best outside exclusion).
+        let psr: Float
+    }
+
     let deliveryQueue = DispatchQueue(label: "audio.sync.queue")
 
     /// Fired on `deliveryQueue` the first time each band crosses threshold.
@@ -82,6 +95,14 @@ final class AudioSyncDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDel
     /// caller collecting both can pull them off synchronously.
     private(set) var latestA: DetectionEvent?
     private(set) var latestB: DetectionEvent?
+
+    /// Per-band rolling trace buffers. Every matched-filter scan appends
+    /// one sample BEFORE the threshold/PSR gate so sub-threshold peaks
+    /// are visible on the `/sync` debug plot. Capped at
+    /// `traceMaxSamples` so a long run doesn't unbounded-grow.
+    private var traceA: [TraceSample] = []
+    private var traceB: [TraceSample] = []
+    private let traceMaxSamples = 600
 
     init(
         // Bands mirror `server/chirp.py`'s SYNC_BAND_*_F0/F1. If you change
@@ -121,10 +142,32 @@ final class AudioSyncDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDel
             self.lastTriggerB = nil
             self.latestA = nil
             self.latestB = nil
+            self.traceA.removeAll(keepingCapacity: true)
+            self.traceB.removeAll(keepingCapacity: true)
             if !self.ring.isEmpty {
                 self.ring = [Float](repeating: 0, count: self.ringLen)
             }
         }
+    }
+
+    /// Pull the accumulated traces and reset the buffers. `self_` is the
+    /// emitter's own band given the caller's role (role "A" → traceA);
+    /// `other` is the cross-band. Safe to call from any thread — blocks
+    /// briefly on `deliveryQueue` to snapshot atomically.
+    func drainTraces(role: String) -> (self_: [TraceSample], other: [TraceSample]) {
+        var out: (self_: [TraceSample], other: [TraceSample]) = ([], [])
+        deliveryQueue.sync {
+            let a = self.traceA
+            let b = self.traceB
+            self.traceA.removeAll(keepingCapacity: true)
+            self.traceB.removeAll(keepingCapacity: true)
+            if role == "A" {
+                out = (self_: a, other: b)
+            } else {
+                out = (self_: b, other: a)
+            }
+        }
+        return out
     }
 
     // MARK: - AVCaptureAudioDataOutputSampleBufferDelegate
@@ -264,8 +307,35 @@ final class AudioSyncDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDel
         )
 
         let now = currentPTSApprox()
+        // Append one trace sample per band BEFORE the fire-gate so
+        // sub-threshold peaks (the whole reason this buffer exists)
+        // reach the debug plot. `t` is run-relative: the chirp center
+        // timestamp minus firstPTS, which equals the same expression
+        // with firstPTS cancelled.
+        appendTrace(.A, result: resA)
+        appendTrace(.B, result: resB)
         maybeFire(band: .A, result: resA, now: now)
         maybeFire(band: .B, result: resB, now: now)
+    }
+
+    private func appendTrace(_ band: Band, result: CorrResult) {
+        let psr: Float = result.secondNorm > 0 ? result.bestNorm / result.secondNorm : 0
+        let ringStartGlobal = totalWritten - ringLen
+        let chirpCenterGlobal = Double(ringStartGlobal + result.bestLag) + Double(refLen) / 2.0
+        let tRel = sampleRate > 0 ? chirpCenterGlobal / sampleRate : 0
+        let sample = TraceSample(t: tRel, peak: result.bestNorm, psr: psr)
+        switch band {
+        case .A:
+            traceA.append(sample)
+            if traceA.count > traceMaxSamples {
+                traceA.removeFirst(traceA.count - traceMaxSamples)
+            }
+        case .B:
+            traceB.append(sample)
+            if traceB.count > traceMaxSamples {
+                traceB.removeFirst(traceB.count - traceMaxSamples)
+            }
+        }
     }
 
     private struct CorrResult {
