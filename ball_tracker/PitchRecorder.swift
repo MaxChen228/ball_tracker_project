@@ -21,6 +21,7 @@ final class PitchRecorder {
     private var videoStartPtsS: Double = 0.0
     private var sessionId: String = ""
     private var cameraId: String = "A"
+    private var captureTelemetry: ServerUploader.CaptureTelemetry?
 
     var onCycleComplete: ((ServerUploader.PitchPayload) -> Void)?
     var onRecordingStarted: ((Int) -> Void)?
@@ -40,6 +41,7 @@ final class PitchRecorder {
         sessionId = ""
         syncAnchorTimestampS = nil
         videoStartPtsS = 0.0
+        captureTelemetry = nil
         // localRecordingIndex intentionally NOT reset — it's a run-of-
         // app counter used only for debug logs.
     }
@@ -51,13 +53,15 @@ final class PitchRecorder {
     func startRecording(
         sessionId: String,
         anchorTimestampS: Double?,
-        videoStartPtsS: Double
+        videoStartPtsS: Double,
+        captureTelemetry: ServerUploader.CaptureTelemetry?
     ) {
         guard !isRecording else { return }
 
         self.sessionId = sessionId
         self.syncAnchorTimestampS = anchorTimestampS
         self.videoStartPtsS = videoStartPtsS
+        self.captureTelemetry = captureTelemetry
         isRecording = true
         localRecordingIndex += 1
         log.info("recorder start session=\(sessionId, privacy: .public) cam=\(self.cameraId, privacy: .public) idx=\(self.localRecordingIndex) anchor_ts=\(anchorTimestampS ?? .nan) video_start=\(videoStartPtsS)")
@@ -79,11 +83,13 @@ final class PitchRecorder {
             video_start_pts_s: videoStartPtsS,
             local_recording_index: localRecordingIndex,
             frames: [],
-            frames_on_device: []
+            frames_on_device: [],
+            capture_telemetry: captureTelemetry
         )
         onCycleComplete?(payload)
         sessionId = ""
         syncAnchorTimestampS = nil
         videoStartPtsS = 0.0
+        captureTelemetry = nil
     }
 }

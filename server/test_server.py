@@ -168,11 +168,12 @@ def _base_payload(
     width: int = 1920,
     height: int = 1080,
     distortion: list[float] | None = None,
+    capture_telemetry: dict | None = None,
 ) -> dict:
     intr: dict = {"fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2]}
     if distortion is not None:
         intr["distortion"] = distortion
-    return {
+    payload = {
         "camera_id": cam_id,
         "session_id": session_id,
         "sync_anchor_timestamp_s": anchor_ts,
@@ -183,6 +184,9 @@ def _base_payload(
         "image_width_px": width,
         "image_height_px": height,
     }
+    if capture_telemetry is not None:
+        payload["capture_telemetry"] = capture_telemetry
+    return payload
 
 
 # --------------------------- Unit tests --------------------------------------
@@ -860,6 +864,107 @@ def test_dual_mode_on_device_surfaces_before_server_detection(tmp_path, monkeypa
     matched = [e for e in events if e["session_id"] == session_id]
     assert matched
     assert matched[0]["n_triangulated_on_device"] == 1
+
+
+def test_pitch_analysis_merges_late_on_device_frames_and_capture_telemetry(tmp_path):
+    main.state = main.State(data_dir=tmp_path)
+    client = TestClient(app)
+
+    K, *_ , (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    P_true = np.array([0.08, 0.55, 1.10])
+    u_a, v_a = _project_pixels(K, R_a, t_a, P_true)
+    u_b, v_b = _project_pixels(K, R_b, t_b, P_true)
+
+    session_id = "s_a1b2c3d4"
+    body_a = _base_payload(
+        "A", session_id, K, H_a, anchor_ts=0.0, video_start_pts=0.0,
+        capture_telemetry={
+            "width_px": 1920,
+            "height_px": 1080,
+            "target_fps": 240.0,
+            "applied_fps": 240.0,
+            "format_fov_deg": 73.828,
+            "format_index": 38,
+            "is_video_binned": True,
+            "tracking_exposure_cap": "shutter_1000",
+            "applied_max_exposure_s": 0.001,
+        },
+    )
+    body_b = _base_payload(
+        "B", session_id, K, H_b, anchor_ts=0.0, video_start_pts=0.0,
+        capture_telemetry={
+            "width_px": 1920,
+            "height_px": 1080,
+            "target_fps": 240.0,
+            "applied_fps": 240.0,
+            "format_fov_deg": 73.828,
+            "format_index": 39,
+            "is_video_binned": True,
+            "tracking_exposure_cap": "shutter_1000",
+            "applied_max_exposure_s": 0.001,
+        },
+    )
+    body_a["frames"] = [{
+        "frame_index": 0, "timestamp_s": 0.0, "px": u_a, "py": v_a, "ball_detected": True,
+    }]
+    body_b["frames"] = [{
+        "frame_index": 0, "timestamp_s": 0.0, "px": u_b, "py": v_b, "ball_detected": True,
+    }]
+
+    assert client.post("/pitch", data={"payload": _json.dumps(body_a)}).status_code == 200
+    assert client.post("/pitch", data={"payload": _json.dumps(body_b)}).status_code == 200
+
+    analysis_a = {
+        "camera_id": "A",
+        "session_id": session_id,
+        "frames_on_device": [{
+            "frame_index": 0, "timestamp_s": 0.0, "px": u_a, "py": v_a, "ball_detected": True,
+        }],
+        "capture_telemetry": body_a["capture_telemetry"],
+    }
+    analysis_b = {
+        "camera_id": "B",
+        "session_id": session_id,
+        "frames_on_device": [{
+            "frame_index": 0, "timestamp_s": 0.0, "px": u_b, "py": v_b, "ball_detected": True,
+        }],
+        "capture_telemetry": body_b["capture_telemetry"],
+    }
+
+    r = client.post("/pitch_analysis", json=analysis_a)
+    assert r.status_code == 200
+    r = client.post("/pitch_analysis", json=analysis_b)
+    assert r.status_code == 200
+    assert r.json()["triangulated_on_device"] == 1
+
+    result = client.get(f"/results/{session_id}").json()
+    assert len(result["points_on_device"]) == 1
+
+    events = client.get("/events").json()
+    match = [e for e in events if e["session_id"] == session_id]
+    assert match
+    assert match[0]["capture_telemetry"]["A"]["tracking_exposure_cap"] == "shutter_1000"
+
+    health = main._build_viewer_health(session_id)
+    assert health["cameras"]["A"]["capture_telemetry"]["format_index"] == 38
+    assert health["cameras"]["B"]["capture_telemetry"]["format_fov_deg"] == 73.828
+
+
+def test_pitch_analysis_requires_existing_base_pitch(tmp_path):
+    main.state = main.State(data_dir=tmp_path)
+    client = TestClient(app)
+    r = client.post("/pitch_analysis", json={
+        "camera_id": "A",
+        "session_id": "s_deadbeef",
+        "frames_on_device": [{
+            "frame_index": 0,
+            "timestamp_s": 0.0,
+            "px": 10.0,
+            "py": 10.0,
+            "ball_detected": True,
+        }],
+    })
+    assert r.status_code == 409
 
 
 def test_pitch_writes_annotated_clip_alongside_raw(tmp_path):
