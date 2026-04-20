@@ -1340,3 +1340,61 @@ def test_iter_frames_reconstructs_absolute_pts(tmp_path):
         assert b > a
     # Frame 4 is 4/30 s after the start.
     assert ptses[-1] == pytest.approx(start + 4.0 / 30.0, abs=1.0 / 30.0)
+
+
+# --- Dashboard-triggered time-sync (CALIBRATE TIME button) ----------------
+
+
+def test_sync_trigger_flags_all_online_cameras():
+    """With no camera_ids argument, trigger_sync_command targets every
+    currently-online camera and returns them sorted + deduped."""
+    import main
+    main.state.heartbeat("A")
+    main.state.heartbeat("B")
+    dispatched = main.state.trigger_sync_command(None)
+    assert dispatched == ["A", "B"]
+    # Both cams show up in the pending-commands snapshot.
+    assert set(main.state.pending_sync_commands()) == {"A", "B"}
+
+
+def test_sync_trigger_skips_armed_session():
+    """Firing CALIBRATE TIME while a session is armed must dispatch to NO
+    camera — running a chirp-listen in the middle of a recording would
+    disrupt the armed clip."""
+    import main
+    main.state.heartbeat("A")
+    main.state.heartbeat("B")
+    main.state.arm_session()
+    dispatched = main.state.trigger_sync_command(None)
+    assert dispatched == []
+    assert main.state.pending_sync_commands() == {}
+
+
+def test_sync_command_drains_on_heartbeat_consumption():
+    """Once a phone consumes the flag via heartbeat, subsequent heartbeats
+    don't re-fire (one-shot dispatch)."""
+    import main
+    main.state.heartbeat("A")
+    main.state.trigger_sync_command(["A"])
+    # First consume returns the command.
+    assert main.state.consume_sync_command("A") == "start"
+    # Second consume is None — flag drained.
+    assert main.state.consume_sync_command("A") is None
+    assert main.state.pending_sync_commands() == {}
+
+
+def test_sync_command_expires_after_ttl(tmp_path, monkeypatch):
+    """Stale flags self-expire after _SYNC_COMMAND_TTL_S so a command
+    doesn't fire hours later if the operator gave up on the request."""
+    import main
+    clock = [1000.0]
+    def fake_time() -> float:
+        return clock[0]
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
+    main.state.heartbeat("A")
+    main.state.trigger_sync_command(["A"])
+    assert "A" in main.state.pending_sync_commands()
+    # Advance past the TTL.
+    clock[0] += main._SYNC_COMMAND_TTL_S + 1.0
+    assert main.state.consume_sync_command("A") is None
+    assert main.state.pending_sync_commands() == {}

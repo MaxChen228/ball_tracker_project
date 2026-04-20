@@ -141,6 +141,13 @@ _SYNC_TIMEOUT_S = 8.0
 # the state transition and gives the operator time to read the result.
 _SYNC_COOLDOWN_S = 10.0
 
+# Time-sync (single-listener chirp) command TTL. When the dashboard's
+# CALIBRATE TIME button fires, each target camera gets a pending
+# `sync_command: "start"` flag. A camera consumes it on its next
+# heartbeat (one-shot), or the flag self-expires after this many
+# seconds so a stale command doesn't fire if the operator gave up.
+_SYNC_COMMAND_TTL_S = 10.0
+
 # Hard cap on `/pitch` video upload size. A 5 s cycle at 4K / 240 fps sits
 # comfortably under this; anything beyond is almost certainly a misbehaving
 # client or a denial-of-service attempt. FastAPI buffers the full multipart
@@ -215,6 +222,13 @@ class State:
         # Time Sync panel renders the last N entries. 500 lines ≈ 20 runs'
         # worth of detail — plenty for diagnosing a single failed run.
         self._sync_log: deque[SyncLogEntry] = deque(maxlen=500)
+        # Per-camera pending time-sync command → expiry wall-clock time.
+        # `trigger_sync_command()` sets entries; the heartbeat handler
+        # consumes + clears them one-shot, and stale entries past their
+        # TTL are swept on read. In-memory only — restart drops any
+        # pending command, which is the right failure mode (the operator
+        # will just click the dashboard button again).
+        self._sync_command_pending: dict[str, float] = {}
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
         # Calibrations first — _load_from_disk re-triangulates every cached
@@ -675,6 +689,88 @@ class State:
         now = self._time_fn()
         with self._lock:
             return max(0.0, self._sync_cooldown_until - now)
+
+    # --- Time-sync command dispatch (single-listener, third-device chirp) ---
+    #
+    # Distinct from the mutual-chirp `/sync/start` flow above — this is the
+    # dashboard-remote equivalent of the iPhone's local 時間校正 button: a
+    # one-shot "listen for a chirp now" command each target phone consumes
+    # on its next heartbeat.
+
+    def trigger_sync_command(
+        self, camera_ids: list[str] | None = None,
+    ) -> list[str]:
+        """Set a pending time-sync command flag for the given cameras (or
+        all currently-online cameras when `camera_ids` is None). Skips any
+        camera participating in a currently-armed session — firing a chirp
+        listen in the middle of a recording would disrupt the armed clip.
+        Returns the list of camera_ids actually targeted (sorted, deduped).
+
+        Idempotent: re-dispatching to a camera that already has a pending
+        flag just refreshes its TTL expiry. The phone still fires once on
+        the next heartbeat because flag consumption is one-shot."""
+        now = self._time_fn()
+        expiry = now + _SYNC_COMMAND_TTL_S
+        online_ids = [d.camera_id for d in self.online_devices()]
+        current = self.current_session()  # applies timeout
+        with self._lock:
+            armed = current is not None and current.ended_at is None
+            if camera_ids is None:
+                targets = list(online_ids)
+            else:
+                # Only dispatch to cams we've actually seen heartbeat from;
+                # an unknown id is silently dropped (phone will register on
+                # its next heartbeat and the operator can re-click).
+                online_set = set(online_ids)
+                targets = [c for c in camera_ids if c in online_set]
+            if armed:
+                # Skip every online camera — every online cam during an
+                # armed session is considered "recording" in this rig.
+                targets = []
+            dispatched: list[str] = []
+            for cam in sorted(set(targets)):
+                self._sync_command_pending[cam] = expiry
+                dispatched.append(cam)
+            # Also sweep any expired entries so the map can't grow forever
+            # even if `consume_sync_command` never runs for a stale cam.
+            stale = [
+                c for c, exp in self._sync_command_pending.items()
+                if exp <= now
+            ]
+            for c in stale:
+                del self._sync_command_pending[c]
+        return dispatched
+
+    def consume_sync_command(self, camera_id: str) -> str | None:
+        """Atomically pop + return a pending time-sync command for the
+        named camera, or None when there's nothing queued. Used by the
+        /heartbeat handler so the same beat that reports liveness also
+        clears the flag — one-shot dispatch, matching how arm/disarm
+        commands self-cancel on consumption.
+
+        Expired entries (past `_SYNC_COMMAND_TTL_S`) are silently dropped
+        without firing — the operator is presumed to have moved on."""
+        now = self._time_fn()
+        with self._lock:
+            expiry = self._sync_command_pending.pop(camera_id, None)
+        if expiry is None:
+            return None
+        if expiry <= now:
+            return None
+        return "start"
+
+    def pending_sync_commands(self) -> dict[str, str]:
+        """Snapshot of cameras with a currently-live pending time-sync
+        command. Read-only — used by /status so the dashboard can render
+        a "pending" indicator on each device chip until the phone's next
+        heartbeat drains the flag."""
+        now = self._time_fn()
+        with self._lock:
+            return {
+                cam: "start"
+                for cam, exp in self._sync_command_pending.items()
+                if exp > now
+            }
 
     def start_sync(self) -> tuple[SyncRun | None, str | None]:
         """Begin a mutual-sync run. Returns `(run, None)` on success or
@@ -1201,6 +1297,12 @@ def _build_status_response() -> dict[str, Any]:
         "sync": sync_run.to_dict() if sync_run is not None else None,
         "last_sync": last_sync.model_dump() if last_sync is not None else None,
         "sync_cooldown_remaining_s": state.sync_cooldown_remaining_s(),
+        # Pending dashboard-triggered time-sync commands, keyed by camera.
+        # Observational only: the phone reads its own command via
+        # `sync_command` (set on the heartbeat reply), and consumption
+        # clears the flag. `/status` surfaces this map so the dashboard
+        # can paint a "pending" badge until the phone drains it.
+        "sync_commands": state.pending_sync_commands(),
     }
 
 
@@ -1212,9 +1314,20 @@ def status() -> dict[str, Any]:
 @app.post("/heartbeat")
 def heartbeat(body: HeartbeatBody) -> dict[str, Any]:
     """iPhone liveness ping. Responds with the same payload as /status so
-    the phone can decide arm/disarm from the reply without a second call."""
+    the phone can decide arm/disarm from the reply without a second call.
+
+    Also drains any pending time-sync command for this camera — the
+    consumption is one-shot: once a phone receives `sync_command: "start"`
+    the server clears the flag so back-to-back heartbeats don't re-trigger
+    the chirp listener."""
     state.heartbeat(body.camera_id, time_synced=body.time_synced)
-    return _build_status_response()
+    resp = _build_status_response()
+    # Per-camera: pop the pending flag and surface it on THIS reply only.
+    # Decoupled from `commands` (arm/disarm) because sync is orthogonal to
+    # armed-session state; overloading the arm/disarm vocabulary would
+    # force iPhone-side branching on a mixed-purpose field.
+    resp["sync_command"] = state.consume_sync_command(body.camera_id)
+    return resp
 
 
 def _wants_html(request: Request) -> bool:
@@ -1351,6 +1464,60 @@ def sync_state(log_limit: int = 200) -> dict[str, Any]:
         "cooldown_remaining_s": state.sync_cooldown_remaining_s(),
         "logs": [entry.model_dump() for entry in logs],
     }
+
+
+@app.post("/sync/trigger")
+async def sync_trigger(request: Request) -> Any:
+    """Dashboard-remote time-sync trigger: flags each target camera with
+    a pending `sync_command: "start"` that the phone consumes on its next
+    heartbeat and acts on the same way the local 時間校正 button does.
+
+    Body shapes:
+      - Empty / no body → target every currently-online camera.
+      - JSON `{"camera_ids": ["A"]}` → target only the listed cameras.
+      - Form field `camera_ids` (comma or space separated) → same.
+
+    Idempotent — re-POSTing to a camera already flagged just refreshes
+    its TTL. Silently skips cameras participating in a currently-armed
+    session (sync would disrupt an in-flight recording).
+
+    HTML form callers (dashboard button) get a 303 back to /; JSON
+    callers get `{ok, dispatched_to: [...]}` so a CLI probe can see
+    which cameras were actually flagged vs. skipped."""
+    ctype = request.headers.get("content-type", "").lower()
+    is_form = (
+        "application/x-www-form-urlencoded" in ctype
+        or "multipart/form-data" in ctype
+    )
+    camera_ids: list[str] | None = None
+    if "application/json" in ctype:
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict):
+            raw = body.get("camera_ids")
+            if isinstance(raw, list):
+                camera_ids = [str(c) for c in raw]
+            elif raw is not None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="camera_ids must be a list of strings",
+                )
+    elif is_form:
+        form = await request.form()
+        raw = form.get("camera_ids")
+        if raw is not None:
+            # Accept "A,B" or "A B" — either way, splitting on whitespace +
+            # commas keeps the form shape flexible for hand-curl'd probes.
+            camera_ids = [
+                c for c in (str(raw).replace(",", " ").split()) if c
+            ]
+
+    dispatched = state.trigger_sync_command(camera_ids)
+    if is_form:
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "dispatched_to": dispatched}
 
 
 @app.post("/sync/log")

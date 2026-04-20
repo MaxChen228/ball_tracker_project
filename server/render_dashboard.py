@@ -835,17 +835,22 @@ _JS_TEMPLATE = r"""
   function renderDevices(state) {
     const devByCam = new Map((state.devices || []).map(d => [d.camera_id, d]));
     const calibrated = new Set(state.calibrations || []);
+    // Dashboard CALIBRATE TIME sets a per-camera pending flag that drains
+    // on the phone's next heartbeat. Overlay a "pending" sync label on
+    // any camera in this set so the operator sees the command in flight.
+    const syncPending = state.sync_commands || {};
 
     function row(cam, deviceRecord) {
       const online = !!deviceRecord;
       const timeSynced = !!(deviceRecord && deviceRecord.time_synced);
+      const pending = !!syncPending[cam];
       const isCal = calibrated.has(cam);
       const meta = !online ? 'Not seen'
                    : isCal ? 'Ready · pose known'
                            : 'Awaiting calibration';
       const calDot = isCal ? 'ok' : (online ? 'warn' : 'bad');
-      const syncDot = !online ? 'bad' : (timeSynced ? 'ok' : 'warn');
-      const syncLabel = !online ? 'offline' : (timeSynced ? 'synced' : 'not synced');
+      const syncDot = !online ? 'bad' : (pending ? 'warn' : (timeSynced ? 'ok' : 'warn'));
+      const syncLabel = !online ? 'offline' : (pending ? 'pending…' : (timeSynced ? 'synced' : 'not synced'));
       const calLabel = !online ? 'offline' : (isCal ? 'calibrated' : 'pending');
       return `
         <div class="device">
@@ -913,6 +918,9 @@ _JS_TEMPLATE = r"""
         </form>
         <form class="inline" method="POST" action="/sessions/stop">
           <button class="btn danger" type="submit" ${armed ? '' : 'disabled'}>Stop</button>
+        </form>
+        <form class="inline" method="POST" action="/sync/trigger">
+          <button class="btn secondary" type="submit" ${armed ? 'disabled' : ''}>Calibrate time</button>
         </form>
         ${clearBtn}
       </div>
@@ -1261,6 +1269,14 @@ def _render_session_body(
         f'<button class="btn danger" type="submit"{"" if armed else " disabled"}>Stop</button>'
         "</form>"
     )
+    # CALIBRATE TIME broadcasts a single-listener chirp-listen command to
+    # every online camera on its next heartbeat. Disabled while armed —
+    # firing a time-sync mid-recording would disrupt the armed clip.
+    sync_btn = (
+        '<form class="inline" method="POST" action="/sync/trigger">'
+        f'<button class="btn secondary" type="submit"{" disabled" if armed else ""}>Calibrate time</button>'
+        "</form>"
+    )
     clear_btn = ""
     if not armed and session and session.get("id"):
         clear_btn = (
@@ -1300,7 +1316,7 @@ def _render_session_body(
 
     return (
         f'<div class="session-head">{chip_html}{sid_html}</div>'
-        f'<div class="session-actions">{arm_btn}{stop_btn}{clear_btn}</div>'
+        f'<div class="session-actions">{arm_btn}{stop_btn}{sync_btn}{clear_btn}</div>'
         f'{mode_row}'
     )
 

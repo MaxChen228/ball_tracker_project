@@ -1153,6 +1153,22 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 syncId: syncId,
                 sessionArmed: response.session?.armed ?? false
             )
+            // Dashboard-triggered time-sync (single-listener). Orthogonal to
+            // arm/disarm — the server only sends "start" when this camera is
+            // idle (not recording) AND the dashboard CALIBRATE TIME button
+            // was pressed. Server drains the flag on this very reply, so
+            // back-to-back heartbeats won't re-fire; all we must do is
+            // actually enter .timeSyncWaiting when we're in .standby.
+            if response.sync_command == "start" {
+                DispatchQueue.main.async {
+                    if self.state == .standby {
+                        self.startTimeSync()
+                        self.updateUIForState()
+                    } else {
+                        log.info("ignore dashboard time-sync: state=\(String(describing: self.state), privacy: .public) not standby")
+                    }
+                }
+            }
         }
         healthMonitor.onLastContactTick = { [weak self] date in
             self?.updateLastContactLabel(from: date)

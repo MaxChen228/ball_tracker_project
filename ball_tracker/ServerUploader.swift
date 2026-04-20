@@ -181,6 +181,12 @@ final class ServerUploader {
         /// can also read it to apply Δ locally if ever needed (not yet
         /// wired — triangulation currently applies Δ server-side).
         let last_sync: SyncResult?
+        /// Dashboard-triggered single-listener time-sync command. Set to
+        /// `"start"` (one-shot; server clears on the next heartbeat reply)
+        /// to tell THIS phone to enter the same `.timeSyncWaiting` state
+        /// the local 時間校正 button triggers. Null when idle. Optional
+        /// for back-compat with older server builds.
+        let sync_command: String?
     }
 
     /// iOS-side capture-mode enum. Kept string-valued so it round-trips
