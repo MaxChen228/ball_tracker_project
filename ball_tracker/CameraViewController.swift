@@ -239,6 +239,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // pixel buffers are guaranteed to be flowing whenever preview is asked.
     private var previewRequestedByServer: Bool = false
     private var previewUploader: PreviewUploader?
+    /// One-shot latch for the server's `calibration_frame_requested` flag.
+    /// When true, the next `captureOutput` sample will be encoded at
+    /// native resolution (NO downsample) and POSTed to
+    /// `/camera/{id}/calibration_frame`. Cleared after upload regardless
+    /// of success — the server-side flag drains the moment ANY request
+    /// arrives, so retrying from the same heartbeat would just double-POST.
+    private var calibrationFrameCaptureArmed: Bool = false
     private let readyCard = ReadyCard()
     private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
@@ -881,6 +888,44 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
+    /// Encode the given pixel buffer at its NATIVE resolution (no
+    /// downsample, no scale) as a high-quality JPEG and POST it to the
+    /// server's calibration-frame endpoint. Runs on the capture queue so
+    /// as not to block the main thread; hop off-queue for the HTTP call
+    /// so the capture queue doesn't stall on network latency.
+    private func uploadCalibrationFrame(_ pixelBuffer: CVPixelBuffer) {
+        let w = CVPixelBufferGetWidth(pixelBuffer)
+        let h = CVPixelBufferGetHeight(pixelBuffer)
+        let cam = settings.cameraRole
+        // CIImage is retain-counted + thread-safe; constructing here on
+        // the capture queue is fine. The encode itself we hop onto a
+        // utility queue so the next sample isn't delayed.
+        let ci = CIImage(cvPixelBuffer: pixelBuffer)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let ctx = CIContext(options: [.useSoftwareRenderer: false])
+            guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+                  let jpeg = ctx.jpegRepresentation(
+                      of: ci, colorSpace: cs,
+                      options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.9]
+                  )
+            else {
+                log.warning("calibration frame: native-res JPEG encode failed")
+                return
+            }
+            log.info("calibration frame: encoded \(w)x\(h) bytes=\(jpeg.count)")
+            let path = "/camera/\(cam)/calibration_frame"
+            self.uploader.postRawJPEG(path: path, jpeg: jpeg) { result in
+                switch result {
+                case .success:
+                    log.info("calibration frame upload ok cam=\(cam, privacy: .public) bytes=\(jpeg.count)")
+                case .failure(let err):
+                    log.error("calibration frame upload failed cam=\(cam, privacy: .public) err=\(err.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+    }
+
     private func switchCaptureFps(_ targetFps: Double) {
         guard let device = currentCaptureDevice else { return }
         // Surface the preview synchronously on main so there's no window
@@ -1188,6 +1233,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     }
                     self.applyServerCaptureHeight(pushedH)
                 }
+            }
+            // Calibration frame request (one-shot). Arm the latch on
+            // true — the next captureOutput sample gets encoded at
+            // native resolution and POSTed. Don't re-arm while a prior
+            // capture is still pending (latch value already true).
+            if response.calibration_frame_requested == true,
+               !self.calibrationFrameCaptureArmed,
+               self.state != .recording {
+                self.calibrationFrameCaptureArmed = true
+                log.info("calibration frame requested by server — arming next-frame capture")
             }
             // Phase 4a: dashboard-gated live preview. Flip the cached flag
             // whenever the reply changes; true→false resets the uploader
@@ -2025,6 +2080,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             && snap.state != .recording
             && snap.state != .timeSyncWaiting {
             self.previewUploader?.pushFrame(pixelBuffer)
+        }
+        // Phase 7: one-shot native-resolution calibration frame. The
+        // heartbeat arms the latch; the next captured sample gets
+        // encoded at full (uncropped, un-downsampled) resolution and
+        // POSTed to /camera/{id}/calibration_frame. Drain the latch
+        // synchronously so a slow POST can't double-fire if the next
+        // heartbeat flips the flag back on.
+        if self.calibrationFrameCaptureArmed
+            && snap.state != .recording
+            && snap.state != .timeSyncWaiting {
+            self.calibrationFrameCaptureArmed = false
+            self.uploadCalibrationFrame(pixelBuffer)
         }
 
         // Only the `.recording` state cares about samples.
