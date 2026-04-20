@@ -1276,29 +1276,23 @@ _JS_TEMPLATE = r"""
         calibration_last_ts: currentCalibrationLastTs,
       });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
-      if (payload.plot && sceneRoot && window.Plotly) {
-        // Only (re)assign basePlot when its contents actually changed.
-        // The canvas still repaints for overlay/animation updates via the
-        // event-handler path; this just suppresses the periodic no-op
-        // repaint that otherwise fires every 5 s on an idle dashboard.
+      // basePlot is shared between the main 3D canvas (only on /) and the
+      // per-camera mini pose panels (on / and /setup). Don't gate on
+      // sceneRoot — /setup has no scene-root div but still needs basePlot
+      // populated so repaintVirtualCams can filter traces by camera_id.
+      if (payload.plot && window.Plotly) {
         const digest = JSON.stringify(payload.plot);
-        if (digest !== lastBasePlotDigest) {
+        const changed = digest !== lastBasePlotDigest;
+        if (changed || basePlot === null) {
           lastBasePlotDigest = digest;
           basePlot = payload.plot;
-          repaintCanvas();
-          repaintVirtualCams();
-        } else if (basePlot === null) {
-          // First tick: even if digest already matched (shouldn't happen),
-          // we still need to paint once.
-          basePlot = payload.plot;
-          repaintCanvas();
-          repaintVirtualCams();
-        } else {
-          // digest match but devices render may have just created/removed
-          // virtual-cam hosts (preview toggles re-render the Devices card).
-          // Cheap repaint keeps each host in sync with DOM lifecycle.
-          repaintVirtualCams();
+          if (sceneRoot) repaintCanvas();
         }
+        // Always repaint virtual cams: even when basePlot content is
+        // unchanged, the device-row innerHTML rebuild (every 1 s status
+        // tick) destroys plot hosts, so we must re-mount on every
+        // calibration tick too.
+        repaintVirtualCams();
       }
     } catch (e) { /* silent */ }
   }
