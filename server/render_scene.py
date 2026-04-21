@@ -15,6 +15,7 @@ at 40% for world axes.
 from __future__ import annotations
 
 from reconstruct import Scene
+from render_compare import DRAW_PLATE_OVERLAY_JS, DRAW_VIRTUAL_BASE_JS, PLATE_WORLD_JS, PROJECTION_JS
 
 # Design-system tokens reused across the dashboard and this scene so the
 # 3D canvas visually belongs to the same page as the sidebar.
@@ -1084,40 +1085,10 @@ def render_viewer_html(
   // image plane) because the plate has no per-frame detection data —
   // it's fixed geometry the operator uses to eyeball calibration.
 
-  // Home-plate pentagon in world coords. Matches reconstruct.py
-  // _PLATE_X/_PLATE_Y so the dashed outline lands where the operator
-  // taped the ChArUco board.
-  const PLATE_WORLD = [
-    [-0.216, 0.0,   0.0],
-    [ 0.216, 0.0,   0.0],
-    [ 0.216, 0.216, 0.0],
-    [ 0.0,   0.432, 0.0],
-    [-0.216, 0.216, 0.0],
-  ];
-
-  function projectWorldToPixel(P, cam) {{
-    // P_cam = R_wc * P + t_wc  (R_wc is row-major 3x3)
-    const R = cam.R_wc, t = cam.t_wc;
-    if (!R || !t) return null;
-    const Xc = R[0]*P[0] + R[1]*P[1] + R[2]*P[2] + t[0];
-    const Yc = R[3]*P[0] + R[4]*P[1] + R[5]*P[2] + t[1];
-    const Zc = R[6]*P[0] + R[7]*P[1] + R[8]*P[2] + t[2];
-    // Behind-camera / at-the-plane: drop. 1cm floor avoids numerical
-    // blow-up right at the optical centre.
-    if (Zc <= 0.01) return null;
-    const xn = Xc / Zc, yn = Yc / Zc;
-    const d = cam.distortion || [0, 0, 0, 0, 0];
-    const [k1, k2, p1, p2, k3] = d;
-    const r2 = xn*xn + yn*yn;
-    const r4 = r2*r2;
-    const r6 = r4*r2;
-    const radial = 1 + k1*r2 + k2*r4 + k3*r6;
-    const xd = xn*radial + 2*p1*xn*yn + p2*(r2 + 2*xn*xn);
-    const yd = yn*radial + p1*(r2 + 2*yn*yn) + 2*p2*xn*yn;
-    const u = cam.fx * xd + cam.cx;
-    const v = cam.fy * yd + cam.cy;
-    return {{u, v, z: Zc}};
-  }}
+  {PLATE_WORLD_JS}
+  {PROJECTION_JS}
+  {DRAW_VIRTUAL_BASE_JS}
+  {DRAW_PLATE_OVERLAY_JS}
 
   // --- Build the VIRT canvas handles once -------------------------
   const VIRT_CANVASES = [];
@@ -1151,56 +1122,14 @@ def render_viewer_html(
 
   function drawVirtCanvas(entry) {{
     const {{canvas, meta}} = entry;
-    if (!sizeVirtCanvas(canvas)) return;
-    const ctx = canvas.getContext("2d");
-    const dpr = window.devicePixelRatio || 1;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const cssW = canvas.clientWidth;
-    const cssH = canvas.clientHeight;
-    ctx.clearRect(0, 0, cssW, cssH);
-    // Background — slightly darker than the main page surface so the
-    // reprojected geometry reads clearly even without strong contrast.
-    ctx.fillStyle = "#1A1714";
-    ctx.fillRect(0, 0, cssW, cssH);
-    // Image → canvas scale: camera pixel coords (0,0)..(W,H) map to the
-    // canvas CSS area. `clip()` stops off-frame extensions from bleeding
-    // into the cell margin.
-    const sx = cssW / meta.image_width_px;
-    const sy = cssH / meta.image_height_px;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, cssW, cssH);
-    ctx.clip();
-
-    // Principal-point cross — tiny reference mark at (cx, cy) so the
-    // operator knows where the optical centre lands in the frame.
-    const cxPx = meta.cx * sx, cyPx = meta.cy * sy;
-    ctx.strokeStyle = "rgba(219, 214, 205, 0.25)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(cxPx - 6, cyPx); ctx.lineTo(cxPx + 6, cyPx);
-    ctx.moveTo(cxPx, cyPx - 6); ctx.lineTo(cxPx, cyPx + 6);
-    ctx.stroke();
-
-    // Plate pentagon — reference geometry the operator can match
-    // against the white board in the real MOV above.
-    const plateProj = PLATE_WORLD.map(P => projectWorldToPixel(P, meta));
-    if (plateProj.every(p => p !== null)) {{
-      ctx.strokeStyle = "rgba(219, 214, 205, 0.55)";
-      ctx.fillStyle = "rgba(219, 214, 205, 0.08)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 3]);
-      ctx.beginPath();
-      for (let i = 0; i < plateProj.length; i++) {{
-        const x = plateProj[i].u * sx;
-        const y = plateProj[i].v * sy;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }}
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }}
+    const base = drawVirtualBase(canvas, meta, {{
+      plateStroke: "rgba(219, 214, 205, 0.55)",
+      plateFill: "rgba(219, 214, 205, 0.08)",
+      plateLineWidth: 1,
+      plateDash: [4, 3],
+    }});
+    if (!base) return;
+    const {{ctx, sx, sy}} = base;
 
     // Nearest detection at the current playback time. The frame data
     // comes from VIDEO_META (Python already built `frames.px/py/t_rel_s/
@@ -1262,17 +1191,7 @@ def render_viewer_html(
   function drawRealPlateOverlays() {{
     for (const entry of REAL_OVERLAYS) {{
       const {{overlay, meta}} = entry;
-      if (!overlay || !meta || meta.image_width_px == null || meta.image_height_px == null) continue;
-      const poly = overlay.querySelector("polygon");
-      if (!poly) continue;
-      const proj = PLATE_WORLD.map(P => projectWorldToPixel(P, meta));
-      if (!proj.every(p => p !== null)) {{
-        poly.setAttribute("points", "");
-        overlay.removeAttribute("viewBox");
-        continue;
-      }}
-      overlay.setAttribute("viewBox", `0 0 ${{meta.image_width_px}} ${{meta.image_height_px}}`);
-      poly.setAttribute("points", proj.map(p => `${{p.u.toFixed(2)}},${{p.v.toFixed(2)}}`).join(" "));
+      redrawPlateOverlay(overlay, meta);
     }}
   }}
 
