@@ -19,10 +19,11 @@ Endpoints:
                                        required `payload` JSON carrying
                                        `session_id`, optional `video`
                                        MOV/MP4 clip)
-  POST /heartbeat                   — iPhone 1 Hz liveness ping;
-                                       body: {"camera_id"}. Reply mirrors
-                                       /status so the phone can drive
-                                       arm/disarm from one round-trip.
+  WS   /ws/device/{camera_id}       — iPhone live transport. Carries
+                                       arm/disarm/settings/sync_command
+                                       downstream + liveness + live
+                                       frame stream upstream. Replaces
+                                       the retired POST /heartbeat.
   POST /sessions/arm                — dashboard: begin an armed session.
                                        Server returns the new session id
                                        (idempotent on re-arm). /status
@@ -94,7 +95,6 @@ from schemas import (
     DetectionPath,
     Device,
     FramePayload,
-    HeartbeatBody,
     IntrinsicsPayload,
     MarkerBatchUpsertRequest,
     MarkerDraft,
@@ -2298,7 +2298,7 @@ sse_hub = SSEHub()
 
 
 def _build_status_response() -> dict[str, Any]:
-    """Shared shape for GET /status and POST /heartbeat responses. Anything
+    """Shared shape for GET /status and dashboard-facing snapshots. Anything
     an iPhone needs to decide whether to arm / disarm is in here — the
     phone just polls this and reacts to `commands[self.camera_id]`."""
     summary = state.summary()
@@ -2558,39 +2558,6 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
         )
 
 
-@app.post("/heartbeat")
-def heartbeat(body: HeartbeatBody) -> dict[str, Any]:
-    """iPhone liveness ping. Responds with the same payload as /status so
-    the phone can decide arm/disarm from the reply without a second call.
-
-    Also drains any pending time-sync command for this camera — the
-    consumption is one-shot: once a phone receives `sync_command: "start"`
-    the server clears the flag so back-to-back heartbeats don't re-trigger
-    the chirp listener."""
-    state.heartbeat(
-        body.camera_id,
-        time_synced=body.time_synced,
-        time_sync_id=body.time_sync_id,
-        sync_anchor_timestamp_s=body.sync_anchor_timestamp_s,
-    )
-    resp = _build_status_response()
-    # Per-camera: pop the pending flag and surface it on THIS reply only.
-    # Decoupled from `commands` (arm/disarm) because sync is orthogonal to
-    # armed-session state; overloading the arm/disarm vocabulary would
-    # force iPhone-side branching on a mixed-purpose field.
-    sync_command, sync_command_id = state.consume_sync_command(body.camera_id)
-    resp["sync_command"] = sync_command
-    resp["sync_command_id"] = sync_command_id
-    # Per-camera scalar: does THIS phone owe the server a full-res
-    # calibration JPEG? The global map above is observational for the
-    # dashboard; this scalar is what the phone's captureOutput reads.
-    resp["calibration_frame_requested"] = state.is_calibration_frame_requested(body.camera_id)
-    # Per-camera preview flag: separate field (not overloaded onto
-    # `commands`) so arm/disarm vocabulary stays narrow. Phase 4a.
-    resp["preview_requested"] = state._preview.is_requested(body.camera_id)
-    return resp
-
-
 def _wants_html(request: Request) -> bool:
     """Returns True when the request looks like a browser form submission
     (Accept: text/html). Lets one endpoint serve both dashboard buttons
@@ -2736,6 +2703,9 @@ async def settings_chirp_threshold(request: Request):
         applied = state.set_chirp_detect_threshold(threshold)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await device_ws.broadcast(
+        {cmd.camera_id: _settings_message_for(cmd.camera_id) for cmd in state.online_devices()}
+    )
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "value": applied}
@@ -2767,6 +2737,9 @@ async def settings_heartbeat_interval(request: Request):
         applied = state.set_heartbeat_interval_s(interval)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await device_ws.broadcast(
+        {cmd.camera_id: _settings_message_for(cmd.camera_id) for cmd in state.online_devices()}
+    )
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "value": applied}
@@ -2795,6 +2768,9 @@ async def settings_tracking_exposure_cap(request: Request):
             detail=f"invalid 'mode'; expected one of {[m.value for m in TrackingExposureCapMode]}",
         )
     applied = state.set_tracking_exposure_cap(mode)
+    await device_ws.broadcast(
+        {cmd.camera_id: _settings_message_for(cmd.camera_id) for cmd in state.online_devices()}
+    )
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "value": applied.value}
@@ -2823,6 +2799,9 @@ async def settings_capture_height(request: Request):
         applied = state.set_capture_height_px(height)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await device_ws.broadcast(
+        {cmd.camera_id: _settings_message_for(cmd.camera_id) for cmd in state.online_devices()}
+    )
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "value": applied}
@@ -3370,7 +3349,7 @@ def chirp_wav() -> Response:
 # Live preview (Phase 4a)
 # ---------------------------------------------------------------------------
 
-# Camera-id pattern mirrors the one on PitchPayload / HeartbeatBody. Path
+# Camera-id pattern mirrors the one on PitchPayload / ws_device route. Path
 # params don't go through Pydantic so we validate here to avoid storing a
 # preview keyed by an arbitrary client-chosen string.
 _CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
@@ -3619,6 +3598,7 @@ async def camera_preview_request(
     else:
         flag = bool(raw)
     state._preview.request(camera_id, enabled=flag)
+    await device_ws.send(camera_id, _settings_message_for(camera_id))
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     import json as _stdjson
@@ -4034,6 +4014,7 @@ async def _await_calibration_frame(camera_id: str, *, timeout_s: float = 2.0) ->
     import asyncio as _asyncio  # noqa: WPS433
 
     state.request_calibration_frame(camera_id)
+    await device_ws.send(camera_id, _settings_message_for(camera_id))
     loops = max(1, int(round(timeout_s / 0.1)))
     for _ in range(loops):
         got = state.consume_calibration_frame(camera_id)
@@ -4371,6 +4352,7 @@ async def _run_auto_calibration(
 
     while frames_seen < max_frames and _asyncio.get_event_loop().time() < burst_deadline:
         state.request_calibration_frame(camera_id)
+        await device_ws.send(camera_id, _settings_message_for(camera_id))
         got: tuple[bytes, float] | None = None
         for _ in range(20):
             got = state.consume_calibration_frame(camera_id)

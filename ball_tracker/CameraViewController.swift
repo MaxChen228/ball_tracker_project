@@ -129,7 +129,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// back-to-back runs (same command string, different run) still fire.
     /// Only state *transitions* cause local actions so repeated replies
     /// during an active command don't re-trigger handlers.
-    private var lastAppliedCommand: (command: String, syncId: String?)?
     /// Reserved for future branching in the cycle-complete path (e.g. a
     /// re-arm that wants to skip the standby flash). Always true today
     /// because `.recording` always returns to `.standby` now.
@@ -163,30 +162,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // results to a post-recording analysis pass over the finalized MOV; this
     // queue stays useful for HUD/debug and as a degraded fallback if clip
     // writing fails.
-    private let detectionQueue = DispatchQueue(
-        label: "camera.detection.queue",
-        qos: .userInteractive,
-        attributes: .concurrent
-    )
+    private let detectionPool = ConcurrentDetectionPool(maxConcurrency: 3)
+    /// Streams per-frame detection results over WebSocket when the live path
+    /// is active. Created lazily (after settings are available).
+    private var frameDispatcher: LiveFrameDispatcher?
     private let detectionStateLock = NSLock()
-    private let detectionSemaphore = DispatchSemaphore(value: 3)
-    /// On-device detection is now stateless HSV + shape gate (BTBallDetector).
-    /// MOG2 was dropped here: iOS gets BGRA directly (no H.264 decode noise),
-    /// the camera is static, and the shape gate (aspect ≥ 0.75, fill ≥ 0.60)
-    /// already rejects virtually everything MOG2 used to catch. Stateless =
-    /// no warmup, no per-cycle rebuild, ~3-5 ms/frame so the pipeline can
-    /// keep up with 240 fps capture on a single detection queue.
     /// Accumulated per-frame detection results for the current cycle.
     /// Drained at cycle-complete and either discarded (mode-one) or
     /// attached to the upload payload (mode-two).
     private var detectionFramesBuffer: [ServerUploader.FramePayload] = []
-    /// Monotonic counter used as `FramePayload.frame_index`. Bumped on
-    /// every dispatched detection call so the index mirrors the order
-    /// detections were run — not the capture-queue frame order.
-    private var detectionCallIndex: Int = 0
-    /// Bumped on every cycle boundary so a detection closure dispatched for
-    /// cycle N can discard its result if cycle N+1 has already started.
-    private var detectionGeneration: Int = 0
 
     // Most recently recovered chirp anchor — session-clock PTS of the
     // chirp peak from the mic matched filter. Stamped onto outgoing
@@ -215,10 +199,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// just the detection JSON.
     private var currentCaptureMode: ServerUploader.CaptureMode = .cameraOnly
     private var currentSessionPaths: Set<ServerUploader.DetectionPath> = [.serverPost]
-    private var webSocketTask: URLSessionWebSocketTask?
-    private let webSocketQueue = DispatchQueue(label: "camera.websocket.queue", qos: .utility)
-    private var webSocketConnected = false
-    private var webSocketReconnectWork: DispatchWorkItem?
+    /// WebSocket transport. Lazily initialized so the base URL (built from
+    /// settings) is read after `viewDidLoad` where UserDefaults are stable.
+    private var ws: ServerWebSocketConnection?
     /// Cache of the server-pushed runtime tunables so the heartbeat
     /// callback can skip hot-apply when the value hasn't changed. `nil`
     /// means "never heard from the server yet" — the first heartbeat
@@ -315,6 +298,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         super.viewDidLoad()
         view.backgroundColor = .black
 
+        detectionPool.onFrame = { [weak self] frame in
+            self?.handleDetectedFrame(frame)
+        }
+
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             title: "Settings",
             style: .plain,
@@ -405,11 +392,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         analysisQueue.processNextIfNeeded()
 
         healthMonitor = ServerHealthMonitor(
-            uploader: uploader,
-            cameraId: settings.cameraRole,
-            // Phase 3: dashboard pushes heartbeat_interval via heartbeat
-            // replies. 1 s is the bootstrap value until the first reply
-            // lands.
             baseIntervalS: 1.0
         )
         wireHealthMonitorCallbacks()
@@ -420,6 +402,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         setupDisplayLink()
         healthMonitor.start()
         connectWebSocket()
+        // frameDispatcher needs the ws connection (set up inside connectWebSocket())
+        if let wsConn = ws {
+            frameDispatcher = LiveFrameDispatcher(
+                connection: wsConn,
+                cameraId: settings.cameraRole,
+                currentSessionId: { [weak self] in self?.currentSessionId },
+                currentPaths: { [weak self] in self?.currentSessionPaths ?? [] }
+            )
+        }
         updateUIForState()
     }
 
@@ -593,12 +584,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             }
         }
         if paths.contains(.live) {
-            sendWebSocketJSON([
-                "type": "cycle_end",
-                "cam": settings.cameraRole,
-                "sid": payload.session_id,
-                "reason": "disarmed",
-            ])
+            frameDispatcher?.dispatchCycleEnd(sessionId: payload.session_id, reason: "disarmed")
         }
         if !paths.contains(.serverPost) && !paths.contains(.iosPost) {
             // Live-only fallback still persists metadata so the cycle
@@ -1451,17 +1437,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         comps.scheme = "ws"
         comps.host = host
         comps.port = Int(serverConfig.serverPort)
-        comps.path = "/ws/device/\(settings.cameraRole)"
+        // path is built inside ServerWebSocketConnection; just build the base URL here
         return comps.url
     }
 
     private func connectWebSocket() {
-        guard webSocketTask == nil, let url = webSocketURL() else { return }
-        let task = URLSession.shared.webSocketTask(with: url)
-        webSocketTask = task
-        task.resume()
-        webSocketConnected = true
-        sendWebSocketJSON([
+        guard let baseURL = webSocketURL() else { return }
+        if ws == nil {
+            let conn = ServerWebSocketConnection(baseURL: baseURL, cameraId: settings.cameraRole)
+            conn.delegate = self
+            ws = conn
+        }
+        ws?.connect(initialHello: [
             "type": "hello",
             "cam": settings.cameraRole,
             "session_id": currentSessionId as Any,
@@ -1469,110 +1456,51 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             "time_sync_id": lastSyncId as Any,
             "sync_anchor_timestamp_s": lastSyncAnchorTimestampS as Any,
         ])
-        receiveNextWebSocketMessage()
     }
 
     private func disconnectWebSocket() {
-        webSocketReconnectWork?.cancel()
-        webSocketReconnectWork = nil
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
-        webSocketConnected = false
-    }
-
-    private func scheduleWebSocketReconnect() {
-        guard webSocketTask == nil else { return }
-        webSocketReconnectWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.connectWebSocket()
-        }
-        webSocketReconnectWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
-    }
-
-    private func receiveNextWebSocketMessage() {
-        webSocketTask?.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .failure(let error):
-                log.error("websocket receive failed err=\(error.localizedDescription, privacy: .public)")
-                self.webSocketTask = nil
-                self.webSocketConnected = false
-                self.scheduleWebSocketReconnect()
-            case .success(let message):
-                switch message {
-                case .string(let text):
-                    self.handleWebSocketText(text)
-                case .data(let data):
-                    if let text = String(data: data, encoding: .utf8) {
-                        self.handleWebSocketText(text)
-                    }
-                @unknown default:
-                    break
-                }
-                self.receiveNextWebSocketMessage()
-            }
-        }
-    }
-
-    private func handleWebSocketText(_ text: String) {
-        guard
-            let data = text.data(using: .utf8),
-            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let type = obj["type"] as? String
-        else { return }
-        switch type {
-        case "arm":
-            if let sid = obj["sid"] as? String { currentSessionId = sid }
-            if let raw = obj["paths"] as? [String] {
-                let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
-                if !parsed.isEmpty { currentSessionPaths = parsed }
-            }
-            DispatchQueue.main.async {
-                self.modeLabel.text = "MODE · \(self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ").uppercased())"
-                self.applyRemoteArm()
-            }
-        case "disarm":
-            DispatchQueue.main.async { self.applyRemoteDisarm() }
-        case "settings":
-            if let raw = obj["paths"] as? [String] {
-                let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
-                if !parsed.isEmpty { currentSessionPaths = parsed }
-            }
-            if let threshold = obj["chirp_detect_threshold"] as? Double {
-                DispatchQueue.main.async { self.chirpDetector?.setThreshold(Float(threshold)) }
-            }
-            if let interval = obj["heartbeat_interval_s"] as? Double {
-                DispatchQueue.main.async { self.healthMonitor.updateBaseInterval(interval) }
-            }
-            if let preview = obj["preview_requested"] as? Bool {
-                previewRequestedByServer = preview
-            }
-            if let calFrame = obj["calibration_frame_requested"] as? Bool {
-                calibrationFrameCaptureArmed = calFrame
-            }
-            DispatchQueue.main.async {
-                self.modeLabel.text = "MODE · \(self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ").uppercased())"
-            }
-        default:
-            break
-        }
+        ws?.disconnect()
+        ws = nil
     }
 
     private func sendWebSocketJSON(_ obj: [String: Any]) {
-        guard
-            webSocketConnected,
-            let task = webSocketTask,
-            JSONSerialization.isValidJSONObject(obj),
-            let data = try? JSONSerialization.data(withJSONObject: obj),
-            let text = String(data: data, encoding: .utf8)
-        else { return }
-        task.send(.string(text)) { [weak self] error in
-            if let error {
-                log.error("websocket send failed err=\(error.localizedDescription, privacy: .public)")
-                self?.webSocketTask = nil
-                self?.webSocketConnected = false
-                self?.scheduleWebSocketReconnect()
+        ws?.send(obj)
+    }
+
+    private func handlePushedTrackingExposureCap(_ modeStr: String) {
+        let exposureMode = ServerUploader.TrackingExposureCapMode(rawValue: modeStr) ?? .frameDuration
+        if self.lastServerTrackingExposureCapMode != exposureMode {
+            self.lastServerTrackingExposureCapMode = exposureMode
+            self.trackingExposureCapMode = exposureMode
+            DiagnosticsData.shared.update(trackingExposureCapLabel: exposureMode.label)
+            if let device = self.currentCaptureDevice {
+                self.sessionQueue.async { [weak self] in
+                    guard let self else { return }
+                    do {
+                        let appliedMaxExposureS = try self.applyExposureConfiguration(
+                            device,
+                            format: device.activeFormat,
+                            targetFps: self.currentTargetFps()
+                        )
+                        let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+                        let applied = device.activeVideoMinFrameDuration
+                        let appliedFps = applied.value > 0
+                            ? Double(applied.timescale) / Double(applied.value)
+                            : self.currentTargetFps()
+                        self.setAppliedCaptureTelemetry(
+                            widthPx: Int(dims.width),
+                            heightPx: Int(dims.height),
+                            appliedFps: appliedFps,
+                            formatFovDeg: Double(device.activeFormat.videoFieldOfView),
+                            formatIndex: self.appliedFormatIndex,
+                            isVideoBinned: device.activeFormat.isVideoBinned,
+                            appliedMaxExposureS: appliedMaxExposureS
+                        )
+                        log.info("tracking exposure cap hot-applied from server: \(exposureMode.rawValue, privacy: .public)")
+                    } catch {
+                        log.error("tracking exposure cap apply failed mode=\(exposureMode.rawValue, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                    }
+                }
             }
         }
     }
@@ -1582,190 +1510,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             DiagnosticsData.shared.update(serverStatusText: text)
             self?.updateUIForState()
         }
-        healthMonitor.onHeartbeatSuccess = { [weak self] response in
+        healthMonitor.sendWSHeartbeat = { [weak self] timeSynced, timeSyncId in
             guard let self else { return }
-            // Cache the server's session id so `startRecording` can stamp
-            // it onto uploads without another round-trip. Nil when idle.
-            let sid = (response.session?.armed == true) ? response.session?.id : nil
-            self.currentSessionId = sid
-            DiagnosticsData.shared.update(sessionId: .some(sid))
-            let rawPaths = response.session?.paths ?? response.default_paths ?? [ServerUploader.DetectionPath.serverPost.rawValue]
-            let parsedPaths = Set(rawPaths.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
-            self.currentSessionPaths = parsedPaths.isEmpty ? [.serverPost] : parsedPaths
-            // Effective mode: snapshot from the armed session if present,
-            // otherwise the dashboard's global toggle. Unknown / missing
-            // fields fall back to cameraOnly for backwards compat with
-            // pre-mode-split server builds.
-            let modeStr = response.session?.mode ?? response.capture_mode
-                ?? ServerUploader.CaptureMode.cameraOnly.rawValue
-            let mode = ServerUploader.CaptureMode(rawValue: modeStr) ?? .cameraOnly
-            if self.currentCaptureMode != mode {
-                log.info("capture mode changed to \(mode.rawValue, privacy: .public)")
-            }
-            self.currentCaptureMode = mode
-            DispatchQueue.main.async {
-                let pathLabel = self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ")
-                self.modeLabel.text = "MODE · \(pathLabel.uppercased())"
-            }
             self.sendWebSocketJSON([
                 "type": "heartbeat",
                 "cam": self.settings.cameraRole,
                 "t_session_s": CACurrentMediaTime(),
-                "time_synced": self.lastSyncAnchorTimestampS != nil,
-                "time_sync_id": self.lastSyncId as Any,
+                "time_synced": timeSynced,
+                "time_sync_id": timeSyncId as Any,
                 "sync_anchor_timestamp_s": self.lastSyncAnchorTimestampS as Any,
             ])
-            // Hot-apply server-pushed runtime tunables. Dashboard-pushed
-            // values win over local Settings once the first heartbeat
-            // arrives; we only call the setters when the value actually
-            // changed, so a steady-state heartbeat is a no-op.
-            if let pushedThr = response.chirp_detect_threshold,
-               self.lastServerChirpThreshold != pushedThr {
-                self.lastServerChirpThreshold = pushedThr
-                DispatchQueue.main.async {
-                    self.chirpDetector?.setThreshold(Float(pushedThr))
-                    log.info("chirp threshold hot-applied from server: \(pushedThr)")
-                }
-            }
-            if let pushedIvl = response.heartbeat_interval_s,
-               self.lastServerHeartbeatInterval != pushedIvl {
-                self.lastServerHeartbeatInterval = pushedIvl
-                DispatchQueue.main.async {
-                    self.healthMonitor.updateBaseInterval(pushedIvl)
-                    log.info("heartbeat interval hot-applied from server: \(pushedIvl)s")
-                }
-            }
-            let exposureModeStr = response.session?.tracking_exposure_cap
-                ?? response.tracking_exposure_cap
-                ?? ServerUploader.TrackingExposureCapMode.frameDuration.rawValue
-            let exposureMode = ServerUploader.TrackingExposureCapMode(rawValue: exposureModeStr) ?? .frameDuration
-            if self.lastServerTrackingExposureCapMode != exposureMode {
-                self.lastServerTrackingExposureCapMode = exposureMode
-                self.trackingExposureCapMode = exposureMode
-                DiagnosticsData.shared.update(trackingExposureCapLabel: exposureMode.label)
-                if let device = self.currentCaptureDevice {
-                    self.sessionQueue.async { [weak self] in
-                        guard let self else { return }
-                        do {
-                            let appliedMaxExposureS = try self.applyExposureConfiguration(
-                                device,
-                                format: device.activeFormat,
-                                targetFps: self.currentTargetFps()
-                            )
-                            let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
-                            let applied = device.activeVideoMinFrameDuration
-                            let appliedFps = applied.value > 0
-                                ? Double(applied.timescale) / Double(applied.value)
-                                : self.currentTargetFps()
-                            self.setAppliedCaptureTelemetry(
-                                widthPx: Int(dims.width),
-                                heightPx: Int(dims.height),
-                                appliedFps: appliedFps,
-                                formatFovDeg: Double(device.activeFormat.videoFieldOfView),
-                                formatIndex: self.appliedFormatIndex,
-                                isVideoBinned: device.activeFormat.isVideoBinned,
-                                appliedMaxExposureS: appliedMaxExposureS
-                            )
-                            log.info("tracking exposure cap hot-applied from server: \(exposureMode.rawValue, privacy: .public)")
-                        } catch {
-                            log.error("tracking exposure cap apply failed mode=\(exposureMode.rawValue, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-                        }
-                    }
-                }
-            }
-            // Server-pushed capture resolution. Only rebuild the session
-            // when (a) the value actually changed AND (b) we're in .standby
-            // — rebuilding mid-recording would lose the clip. If a change
-            // arrives while non-standby we just cache it; the next return
-            // to .standby will re-check and apply.
-            if let pushedH = response.capture_height_px,
-               pushedH != self.currentCaptureHeight {
-                DispatchQueue.main.async {
-                    guard self.state == .standby else {
-                        log.info("capture_height change to \(pushedH) deferred: state=\(String(describing: self.state), privacy: .public)")
-                        return
-                    }
-                    self.applyServerCaptureHeight(pushedH)
-                }
-            }
-            // Calibration frame request (one-shot). Arm the latch on
-            // true — the next captureOutput sample gets encoded at
-            // native resolution and POSTed. Don't re-arm while a prior
-            // capture is still pending (latch value already true).
-            if response.calibration_frame_requested == true,
-               !self.calibrationFrameCaptureArmed,
-               self.state != .recording {
-                self.calibrationFrameCaptureArmed = true
-                log.info("calibration frame requested by server — arming next-frame capture")
-            }
-            // Phase 4a: dashboard-gated live preview. Flip the cached flag
-            // whenever the reply changes; true→false resets the uploader
-            // so an in-flight POST doesn't land after the dashboard
-            // stopped watching. Lazy-create the uploader on first enable.
-            let pushedPrev = response.preview_requested ?? false
-            if self.previewRequestedByServer != pushedPrev {
-                self.previewRequestedByServer = pushedPrev
-                if pushedPrev {
-                    if self.previewUploader == nil {
-                        self.previewUploader = PreviewUploader(
-                            uploader: self.uploader,
-                            cameraId: self.settings.cameraRole
-                        )
-                    }
-                    log.info("preview requested by server: enabling push")
-                    if self.state == .standby {
-                        self.startCapture(at: self.standbyFps)
-                    }
-                } else {
-                    self.previewUploader?.reset()
-                    log.info("preview no longer requested: stopping push")
-                    if self.state == .standby {
-                        self.stopCapture()
-                    }
-                }
-            }
-            if response.calibration_frame_requested == true,
-               self.state == .standby,
-               !self.previewRequestedByServer {
-                self.startCapture(at: self.standbyFps)
-            }
-            let cam = self.settings.cameraRole
-            let cmd = response.commands?[cam]
-            let syncId = response.sync?.id
-            // Log every transition so Xcode console shows the server's
-            // intent reaching iOS. A steady-state "arm"/"disarm" echoing
-            // every second is logged only when the value changed — see
-            // handleDashboardCommand's guard.
-            let last = self.lastAppliedCommand
-            let changed = (last?.command != cmd) || (last?.syncId != syncId)
-            if changed {
-                log.info("heartbeat reply session_armed=\(response.session?.armed ?? false) session_id=\(sid ?? "nil", privacy: .public) command=\(cmd ?? "nil", privacy: .public) sync_id=\(syncId ?? "nil", privacy: .public) cam=\(cam, privacy: .public)")
-            }
-            self.handleDashboardCommand(
-                cmd,
-                syncId: syncId,
-                sessionArmed: response.session?.armed ?? false
-            )
-            // Dashboard-triggered time-sync (single-listener). Orthogonal to
-            // arm/disarm — the server only sends "start" when this camera is
-            // idle (not recording) AND the dashboard CALIBRATE TIME button
-            // was pressed. Server drains the flag on this very reply, so
-            // back-to-back heartbeats won't re-fire; all we must do is
-            // actually enter .timeSyncWaiting when we're in .standby.
-            if response.sync_command == "start" {
-                DispatchQueue.main.async {
-                    if self.state == .standby {
-                        if let syncId = response.sync_command_id {
-                            self.startTimeSync(syncId: syncId)
-                        } else {
-                            log.warning("ignore dashboard time-sync: missing sync_command_id")
-                        }
-                        self.updateUIForState()
-                    } else {
-                        log.info("ignore dashboard time-sync: state=\(String(describing: self.state), privacy: .public) not standby")
-                    }
-                }
-            }
         }
         healthMonitor.onLastContactTick = { [weak self] date in
             self?.updateLastContactLabel(from: date)
@@ -1834,38 +1588,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    /// Dispatch the server's per-device command. Only reacts to state
-    /// *transitions* (tracked via `lastAppliedCommand`) so repeated arm
-    /// replies during an armed session don't re-trigger enter. For
-    /// `"sync_run"`, the dedupe key additionally carries the server-minted
-    /// `syncId` so back-to-back runs fire once each.
-    private func handleDashboardCommand(
-        _ command: String?,
-        syncId: String?,
-        sessionArmed: Bool
-    ) {
-        defer { lastAppliedCommand = command.map { ($0, syncId) } }
-        let last = lastAppliedCommand
-        let same = (last?.command == command) && (last?.syncId == syncId)
-        if same { return }
-        switch command {
-        case "arm":
-            applyRemoteArm()
-        case "disarm":
-            applyRemoteDisarm()
-        case "sync_run":
-            if let sid = syncId {
-                applyMutualSync(syncId: sid)
-            } else {
-                log.warning("sync_run command arrived without sync_id — ignoring")
-            }
-        default:
-            // No pending command. Recording only ends via an explicit
-            // disarm — never a silent fallthrough.
-            break
-        }
-        _ = sessionArmed  // reserved for future "did the session id change?" logic
-    }
+
 
     private func applyRemoteArm() {
         log.info("camera received arm command state=\(Self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
@@ -2176,7 +1899,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// the Settings → Diagnostics "Test connection" action (formerly a
     /// HUD button on the main screen).
     func testServerConnection() {
-        healthMonitor.resetBackoff()
         healthMonitor.probeNow()
     }
 
@@ -2196,25 +1918,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         if serverChanged {
             serverConfig = ServerUploader.ServerConfig(serverIP: latest.serverIP, serverPort: latest.serverPort)
             uploader = ServerUploader(config: serverConfig)
-            healthMonitor.updateUploader(uploader)
             uploadQueue.updateUploader(uploader)
             analysisQueue.updateUploader(uploader)
             disconnectWebSocket()
             connectWebSocket()
+            healthMonitor.probeNow()
         }
         if cameraRoleChanged {
-            healthMonitor.updateCameraId(latest.cameraRole)
             disconnectWebSocket()
             connectWebSocket()
         }
         recorder?.setCameraId(latest.cameraRole)
-
-        if serverChanged {
-            // New endpoint — invalidate in-flight probe, reset backoff, and
-            // re-probe immediately so the HUD reflects reality.
-            healthMonitor.resetBackoff()
-            healthMonitor.probeNow()
-        }
     }
 
     /// Forward the heartbeat monitor's tick to the shared Diagnostics
@@ -2670,51 +2384,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func dispatchDetection(pixelBuffer: CVPixelBuffer, timestampS: TimeInterval) {
-        guard detectionSemaphore.wait(timeout: .now()) == .success else { return }
+        _ = detectionPool.enqueue(pixelBuffer: pixelBuffer, timestampS: timestampS)
+    }
+
+    private func handleDetectedFrame(_ frame: ServerUploader.FramePayload) {
         detectionStateLock.lock()
-        let gen = detectionGeneration
-        let callIndex = detectionCallIndex
-        detectionCallIndex += 1
+        detectionFramesBuffer.append(frame)
         detectionStateLock.unlock()
-        let retainedPixelBuffer = Unmanaged.passRetained(pixelBuffer)
-        detectionQueue.async { [weak self] in
-            let pixelBuffer = retainedPixelBuffer.takeUnretainedValue()
-            guard let self else {
-                retainedPixelBuffer.release()
-                return
-            }
-            defer {
-                retainedPixelBuffer.release()
-                self.detectionSemaphore.signal()
-            }
-            let detection = BTBallDetector.detect(in: pixelBuffer)
-            let frame = ServerUploader.FramePayload(
-                frame_index: callIndex,
-                timestamp_s: timestampS,
-                px: detection.map { Double($0.px) },
-                py: detection.map { Double($0.py) },
-                ball_detected: detection != nil
-            )
-            self.detectionStateLock.lock()
-            let stillCurrent = (gen == self.detectionGeneration)
-            if stillCurrent {
-                self.detectionFramesBuffer.append(frame)
-            }
-            self.detectionStateLock.unlock()
-            guard stillCurrent else { return }
-            if self.currentSessionPaths.contains(.live), let sid = self.currentSessionId {
-                self.sendWebSocketJSON([
-                    "type": "frame",
-                    "cam": self.settings.cameraRole,
-                    "sid": sid,
-                    "i": frame.frame_index,
-                    "ts": frame.timestamp_s,
-                    "px": frame.px as Any,
-                    "py": frame.py as Any,
-                    "detected": frame.ball_detected,
-                ])
-            }
-        }
+
+        frameDispatcher?.dispatchFrame(frame)
     }
 
     /// Bump the detection generation, clear the buffer, reset the throttle.
@@ -2722,10 +2400,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// bleed across arms. Detector itself is stateless — nothing to rebuild.
     private func resetBallDetectionState() {
         detectionStateLock.lock()
-        detectionGeneration &+= 1
         detectionFramesBuffer.removeAll()
-        detectionCallIndex = 0
         detectionStateLock.unlock()
+        detectionPool.invalidateGeneration()
+        detectionPool.reset()
     }
 
     /// Take ownership of the accumulated per-frame detection results for
@@ -2765,6 +2443,116 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         DiagnosticsData.shared.update(fpsEstimate: fpsEstimate)
     }
 
+}
+
+// MARK: - ServerWebSocketDelegate
+
+extension CameraViewController: ServerWebSocketDelegate {
+
+    func webSocketDidConnect(_ connection: ServerWebSocketConnection) {
+        healthMonitor.recordConnectionSuccess(status: "WS_OPEN")
+    }
+
+    func webSocketDidDisconnect(_ connection: ServerWebSocketConnection, reason: String?) {
+        healthMonitor.recordConnectionDrop()
+    }
+
+    func webSocket(_ connection: ServerWebSocketConnection, didReceive message: [String: Any]) {
+        guard let type = message["type"] as? String else { return }
+
+        healthMonitor.recordConnectionSuccess(
+            status: type == "arm" ? "ARMED (\(message["sid"] as? String ?? "-"))" : "IDLE"
+        )
+
+        switch type {
+        case "sync_run":
+            if let sid = message["sync_id"] as? String {
+                DispatchQueue.main.async { self.applyMutualSync(syncId: sid) }
+            }
+        case "sync_command":
+            if let cmd = message["command"] as? String, cmd == "start" {
+                DispatchQueue.main.async {
+                    if self.state == .standby {
+                        if let syncId = message["sync_command_id"] as? String {
+                            self.startTimeSync(syncId: syncId)
+                        }
+                        self.updateUIForState()
+                    }
+                }
+            }
+        case "arm":
+            if let sid = message["sid"] as? String { currentSessionId = sid }
+            if let raw = message["paths"] as? [String] {
+                let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
+                if !parsed.isEmpty { currentSessionPaths = parsed }
+            }
+            if let capStr = message["tracking_exposure_cap"] as? String {
+                self.handlePushedTrackingExposureCap(capStr)
+            }
+            DispatchQueue.main.async {
+                self.modeLabel.text = "MODE · \(self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ").uppercased())"
+                self.applyRemoteArm()
+            }
+        case "disarm":
+            DispatchQueue.main.async { self.applyRemoteDisarm() }
+        case "settings":
+            if let raw = message["paths"] as? [String] {
+                let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
+                if !parsed.isEmpty { currentSessionPaths = parsed }
+            }
+            if let threshold = message["chirp_detect_threshold"] as? Double,
+               self.lastServerChirpThreshold != threshold {
+                self.lastServerChirpThreshold = threshold
+                DispatchQueue.main.async {
+                    self.chirpDetector?.setThreshold(Float(threshold))
+                    log.info("chirp threshold hot-applied from server: \(threshold)")
+                }
+            }
+            if let interval = message["heartbeat_interval_s"] as? Double,
+               self.lastServerHeartbeatInterval != interval {
+                self.lastServerHeartbeatInterval = interval
+                DispatchQueue.main.async {
+                    self.healthMonitor.updateBaseInterval(interval)
+                    log.info("heartbeat interval hot-applied: \(interval)s")
+                }
+            }
+            if let capStr = message["tracking_exposure_cap"] as? String {
+                self.handlePushedTrackingExposureCap(capStr)
+            }
+            if let pushedH = message["capture_height_px"] as? Int, pushedH != self.currentCaptureHeight {
+                DispatchQueue.main.async {
+                    guard self.state == .standby else { return }
+                    self.applyServerCaptureHeight(pushedH)
+                }
+            }
+            let pushedPrev = message["preview_requested"] as? Bool ?? false
+            if self.previewRequestedByServer != pushedPrev {
+                self.previewRequestedByServer = pushedPrev
+                if pushedPrev {
+                    if self.previewUploader == nil {
+                        self.previewUploader = PreviewUploader(uploader: self.uploader, cameraId: self.settings.cameraRole)
+                    }
+                    if self.state == .standby { self.startCapture(at: self.standbyFps) }
+                } else {
+                    self.previewUploader?.reset()
+                    if self.state == .standby { self.stopCapture() }
+                }
+            }
+            let calFrame = message["calibration_frame_requested"] as? Bool ?? false
+            if calFrame, !self.calibrationFrameCaptureArmed, self.state != .recording {
+                self.calibrationFrameCaptureArmed = true
+                if self.state == .standby && !self.previewRequestedByServer {
+                    self.startCapture(at: self.standbyFps)
+                }
+            }
+            DispatchQueue.main.async {
+                let pathLabel = self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ")
+                self.modeLabel.text = "MODE · \(pathLabel.uppercased())"
+            }
+        default:
+            break
+        }
+    }
 }
 
 /// Lock-protected mirror of the three fields `captureOutput` reads across

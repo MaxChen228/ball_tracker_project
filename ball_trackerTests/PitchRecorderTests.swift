@@ -24,7 +24,8 @@ final class PitchRecorderTests: XCTestCase {
             sessionId: "s_test01",
             syncId: nil,
             anchorTimestampS: 12.345,
-            videoStartPtsS: 42.125
+            videoStartPtsS: 42.125,
+            captureTelemetry: nil
         )
         XCTAssertTrue(recorder.isActive)
         XCTAssertEqual(startedIndices, [1])
@@ -51,7 +52,8 @@ final class PitchRecorderTests: XCTestCase {
             sessionId: "s_noanc",
             syncId: nil,
             anchorTimestampS: nil,
-            videoStartPtsS: 0.0
+            videoStartPtsS: 0.0,
+            captureTelemetry: nil
         )
         recorder.forceFinishIfRecording()
 
@@ -82,13 +84,15 @@ final class PitchRecorderTests: XCTestCase {
             sessionId: "s_once",
             syncId: nil,
             anchorTimestampS: 1.0,
-            videoStartPtsS: 0.0
+            videoStartPtsS: 0.0,
+            captureTelemetry: nil
         )
         recorder.startRecording(
             sessionId: "s_twice",
             syncId: nil,
             anchorTimestampS: 2.0,
-            videoStartPtsS: 0.0
+            videoStartPtsS: 0.0,
+            captureTelemetry: nil
         )
         XCTAssertEqual(startedIndices, [1], "Second startRecording while active must be ignored")
     }
@@ -104,7 +108,8 @@ final class PitchRecorderTests: XCTestCase {
             sessionId: "s_dbl",
             syncId: nil,
             anchorTimestampS: 0.0,
-            videoStartPtsS: 0.0
+            videoStartPtsS: 0.0,
+            captureTelemetry: nil
         )
         recorder.forceFinishIfRecording()
         recorder.forceFinishIfRecording()
@@ -122,7 +127,8 @@ final class PitchRecorderTests: XCTestCase {
             sessionId: "s_a",
             syncId: nil,
             anchorTimestampS: 0.0,
-            videoStartPtsS: 0.0
+            videoStartPtsS: 0.0,
+            captureTelemetry: nil
         )
         recorder.forceFinishIfRecording()
         XCTAssertEqual(startedIndices, [1])
@@ -133,7 +139,8 @@ final class PitchRecorderTests: XCTestCase {
             sessionId: "s_b",
             syncId: nil,
             anchorTimestampS: 0.0,
-            videoStartPtsS: 0.0
+            videoStartPtsS: 0.0,
+            captureTelemetry: nil
         )
         XCTAssertEqual(startedIndices, [1, 2], "localRecordingIndex must NOT reset")
     }

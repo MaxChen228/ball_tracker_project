@@ -1702,6 +1702,16 @@ def test_paired_payloads_with_mismatched_sync_ids_fail_before_triangulation(tmp_
 # ----------------- Runtime tunables (chirp threshold + heartbeat interval) ----
 
 
+def _fetch_ws_settings(test_client, camera_id: str):
+    with test_client.websocket_connect(f"/ws/device/{camera_id}") as ws:
+        ws.send_json({"type": "hello"})
+        for _ in range(5):
+            msg = ws.receive_json()
+            if msg.get("type") == "settings":
+                return msg
+        return {}
+
+
 def test_chirp_threshold_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
@@ -1717,11 +1727,10 @@ def test_chirp_threshold_post_persists_and_surfaces_on_status(tmp_path, monkeypa
     assert r.status_code == 200
     assert r.json() == {"ok": True, "value": pytest.approx(0.27)}
 
-    # Surfaces on /status and /heartbeat.
+    # Surfaces on /status and WS settings message.
     assert client.get("/status").json()["chirp_detect_threshold"] == pytest.approx(0.27)
-    hb = client.post("/heartbeat", json={"camera_id": "A"})
-    assert hb.status_code == 200
-    assert hb.json()["chirp_detect_threshold"] == pytest.approx(0.27)
+    hb_json = _fetch_ws_settings(client, "A")
+    assert hb_json["chirp_detect_threshold"] == pytest.approx(0.27)
 
     # Form push (HTML caller) redirects 303.
     r = client.post(
@@ -1765,8 +1774,8 @@ def test_heartbeat_interval_post_persists_and_surfaces_on_status(tmp_path, monke
     assert r.json() == {"ok": True, "value": pytest.approx(3.5)}
 
     assert client.get("/status").json()["heartbeat_interval_s"] == pytest.approx(3.5)
-    hb = client.post("/heartbeat", json={"camera_id": "A"})
-    assert hb.json()["heartbeat_interval_s"] == pytest.approx(3.5)
+    hb_json = _fetch_ws_settings(client, "A")
+    assert hb_json["heartbeat_interval_s"] == pytest.approx(3.5)
 
     r = client.post(
         "/settings/heartbeat_interval",
@@ -1806,8 +1815,8 @@ def test_tracking_exposure_cap_post_persists_and_surfaces_on_status(tmp_path, mo
     assert r.json() == {"ok": True, "value": "shutter_1000"}
 
     assert client.get("/status").json()["tracking_exposure_cap"] == "shutter_1000"
-    hb = client.post("/heartbeat", json={"camera_id": "A"})
-    assert hb.json()["tracking_exposure_cap"] == "shutter_1000"
+    hb_json = _fetch_ws_settings(client, "A")
+    assert hb_json["tracking_exposure_cap"] == "shutter_1000"
 
     r = client.post(
         "/settings/tracking_exposure_cap",
@@ -1936,16 +1945,15 @@ def test_status_surfaces_preview_requested_map():
     client.post("/camera/B/preview_request", json={"enabled": True})
     got = client.get("/status").json()["preview_requested"]
     assert got == {"A": True, "B": True}
-    # Heartbeat reply carries the per-camera scalar for the beating phone.
-    hb = client.post("/heartbeat", json={"camera_id": "A"})
-    assert hb.status_code == 200
-    assert hb.json()["preview_requested"] is True
+    # WS response carries the per-camera scalar for the connected phone.
+    hb_json = _fetch_ws_settings(client, "A")
+    assert hb_json["preview_requested"] is True
     # Turn A off; B's flag is independent.
     client.post("/camera/A/preview_request", json={"enabled": False})
-    hb = client.post("/heartbeat", json={"camera_id": "A"})
-    assert hb.json()["preview_requested"] is False
-    hb = client.post("/heartbeat", json={"camera_id": "B"})
-    assert hb.json()["preview_requested"] is True
+    hb_json = _fetch_ws_settings(client, "A")
+    assert hb_json["preview_requested"] is False
+    hb_json_b = _fetch_ws_settings(client, "B")
+    assert hb_json_b["preview_requested"] is True
 
 
 # =======================================================================
