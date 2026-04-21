@@ -761,6 +761,13 @@ def test_markers_page_renders_workspace():
     assert r.status_code == 200
     body = r.text
     assert 'id="markers-plot"' in body
+    assert 'id="compare-root"' in body
+    assert 'data-preview-img="A"' in body
+    assert 'data-preview-img="B"' in body
+    assert 'data-markers-virt-canvas="A"' in body
+    assert 'data-markers-virt-canvas="B"' in body
+    assert 'data-preview-overlay="A"' in body
+    assert 'data-preview-overlay="B"' in body
     assert 'id="candidate-body"' in body
     assert 'id="stored-body"' in body
     assert 'id="details-body"' in body
