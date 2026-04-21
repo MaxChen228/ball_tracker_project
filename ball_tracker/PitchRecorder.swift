@@ -87,6 +87,7 @@ final class PitchRecorder {
             sync_anchor_timestamp_s: syncAnchorTimestampS,
             video_start_pts_s: videoStartPtsS,
             local_recording_index: localRecordingIndex,
+            paths: nil,
             frames: [],
             frames_on_device: [],
             capture_telemetry: captureTelemetry

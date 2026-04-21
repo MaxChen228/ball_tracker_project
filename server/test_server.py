@@ -791,6 +791,137 @@ def test_dashboard_drives_dual_mode_end_to_end(tmp_path):
     assert "<video" in viewer_html
 
 
+def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    P_true = np.array([0.08, 0.34, 0.92])
+    client = TestClient(app)
+
+    cal_a = {
+        "camera_id": "A",
+        "intrinsics": {
+            "fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
+        },
+        "homography": H_a.flatten().tolist(),
+        "image_width_px": 1920,
+        "image_height_px": 1080,
+    }
+    cal_b = {
+        "camera_id": "B",
+        "intrinsics": {
+            "fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
+        },
+        "homography": H_b.flatten().tolist(),
+        "image_width_px": 1920,
+        "image_height_px": 1080,
+    }
+    assert client.post("/calibration", json=cal_a).status_code == 200
+    assert client.post("/calibration", json=cal_b).status_code == 200
+
+    events: list[tuple[str, dict]] = []
+
+    class _CaptureHub:
+        async def broadcast(self, event: str, data: dict) -> None:
+            events.append((event, data))
+
+        async def subscribe(self):
+            if False:
+                yield ""
+
+    monkeypatch.setattr(main, "sse_hub", _CaptureHub())
+    monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
+
+    with client.websocket_connect("/ws/device/A") as ws_a, client.websocket_connect("/ws/device/B") as ws_b:
+        assert ws_a.receive_json()["type"] == "settings"
+        assert ws_b.receive_json()["type"] == "settings"
+
+        ws_a.send_json({
+            "type": "hello",
+            "cam": "A",
+            "time_synced": True,
+            "time_sync_id": "sy_deadbeef",
+            "sync_anchor_timestamp_s": 0.0,
+        })
+        ws_b.send_json({
+            "type": "hello",
+            "cam": "B",
+            "time_synced": True,
+            "time_sync_id": "sy_deadbeef",
+            "sync_anchor_timestamp_s": 0.0,
+        })
+        assert ws_a.receive_json()["type"] == "settings"
+        assert ws_b.receive_json()["type"] == "settings"
+
+        arm = client.post(
+            "/sessions/arm",
+            json={"paths": ["live"]},
+            headers={"Accept": "application/json"},
+        )
+        assert arm.status_code == 200, arm.text
+        session_id = arm.json()["session"]["id"]
+        assert arm.json()["session"]["paths"] == ["live"]
+
+        assert ws_a.receive_json()["type"] == "arm"
+        assert ws_b.receive_json()["type"] == "arm"
+
+        ua, va = _project_pixels(K, R_a, t_a, P_true)
+        ub, vb = _project_pixels(K, R_b, t_b, P_true)
+        ws_a.send_json({
+            "type": "frame",
+            "cam": "A",
+            "sid": session_id,
+            "i": 0,
+            "ts": 0.25,
+            "px": ua,
+            "py": va,
+            "detected": True,
+        })
+        ws_b.send_json({
+            "type": "frame",
+            "cam": "B",
+            "sid": session_id,
+            "i": 0,
+            "ts": 0.25,
+            "px": ub,
+            "py": vb,
+            "detected": True,
+        })
+        ws_a.send_json({
+            "type": "cycle_end",
+            "cam": "A",
+            "sid": session_id,
+            "reason": "disarmed",
+        })
+        ws_b.send_json({
+            "type": "cycle_end",
+            "cam": "B",
+            "sid": session_id,
+            "reason": "disarmed",
+        })
+
+    result = client.get(f"/results/{session_id}").json()
+    assert len(result["points"]) == 1
+    pt = result["points"][0]
+    assert abs(pt["x_m"] - P_true[0]) < 1e-6
+    assert abs(pt["y_m"] - P_true[1]) < 1e-6
+    assert abs(pt["z_m"] - P_true[2]) < 1e-6
+    assert result["paths_completed"] == ["live"]
+    assert result["triangulated_by_path"]["live"]
+
+    live_status = client.get("/status").json()["live_session"]
+    assert live_status["session_id"] == session_id
+    assert live_status["frame_counts"] == {"A": 1, "B": 1}
+    assert live_status["point_count"] == 1
+
+    event_names = [name for name, _ in events]
+    assert "device_status" in event_names
+    assert ("session_armed", {"sid": session_id, "paths": ["live"], "armed_at": arm.json()["session"]["started_at"]}) in events
+    assert any(name == "frame_count" and data["cam"] == "A" and data["count"] == 1 for name, data in events)
+    assert any(name == "frame_count" and data["cam"] == "B" and data["count"] == 1 for name, data in events)
+    assert any(name == "point" and data["sid"] == session_id and abs(data["x"] - P_true[0]) < 1e-6 for name, data in events)
+    assert any(name == "path_completed" and data["sid"] == session_id and data["cam"] == "A" for name, data in events)
+    assert any(name == "path_completed" and data["sid"] == session_id and data["point_count"] == 1 for name, data in events)
+
+
 def test_dual_mode_on_device_surfaces_before_server_detection(tmp_path, monkeypatch):
     """Early-surface guarantee: in dual mode, `result.points_on_device`
     becomes available as soon as both cameras' payloads arrive, even if

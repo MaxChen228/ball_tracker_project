@@ -13,6 +13,20 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "netwo
 ///                  detection is the sole data path; no detection runs on
 ///                  the phone any more)
 final class ServerUploader {
+    enum DetectionPath: String, Codable, CaseIterable {
+        case live = "live"
+        case iosPost = "ios_post"
+        case serverPost = "server_post"
+
+        var displayLabel: String {
+            switch self {
+            case .live: return "Live stream"
+            case .iosPost: return "iOS post-pass"
+            case .serverPost: return "Server post-pass"
+            }
+        }
+    }
+
     /// Metadata accompanying the required H.264 MOV. The server decodes the
     /// video, runs HSV ball detection per frame, and triangulates.
     /// One decoded / on-device-detected frame. Wire-identical to
@@ -61,6 +75,8 @@ final class ServerUploader {
         /// Device-local recording counter, for operator debugging only —
         /// server doesn't pair on it. Optional so a phone can omit it.
         let local_recording_index: Int?
+        /// Snapshot of the enabled detection paths for this session.
+        let paths: [String]?
         /// Per-frame detection results. Empty in mode-one (`camera_only`):
         /// the server runs detection on the uploaded MOV. Non-empty in
         /// mode-two (`on_device`): iPhone ran its own BTDetectionSession
@@ -98,6 +114,7 @@ final class ServerUploader {
                 sync_anchor_timestamp_s: sync_anchor_timestamp_s,
                 video_start_pts_s: video_start_pts_s,
                 local_recording_index: local_recording_index,
+                paths: paths,
                 frames: newFrames,
                 frames_on_device: frames_on_device,
                 capture_telemetry: capture_telemetry
@@ -116,8 +133,24 @@ final class ServerUploader {
                 sync_anchor_timestamp_s: sync_anchor_timestamp_s,
                 video_start_pts_s: video_start_pts_s,
                 local_recording_index: local_recording_index,
+                paths: paths,
                 frames: frames,
                 frames_on_device: newFramesOnDevice,
+                capture_telemetry: capture_telemetry
+            )
+        }
+
+        func withPaths(_ newPaths: [DetectionPath]) -> PitchPayload {
+            PitchPayload(
+                camera_id: camera_id,
+                session_id: session_id,
+                sync_id: sync_id,
+                sync_anchor_timestamp_s: sync_anchor_timestamp_s,
+                video_start_pts_s: video_start_pts_s,
+                local_recording_index: local_recording_index,
+                paths: newPaths.map(\.rawValue),
+                frames: frames,
+                frames_on_device: frames_on_device,
                 capture_telemetry: capture_telemetry
             )
         }
@@ -177,6 +210,7 @@ final class ServerUploader {
         /// this over the global heartbeat field while armed. Optional for
         /// back-compat with older server builds.
         let tracking_exposure_cap: String?
+        let paths: [String]?
     }
 
     /// Mutual chirp sync context carried in heartbeat/status responses.
@@ -211,6 +245,7 @@ final class ServerUploader {
         /// to render the HUD mode chip; during an armed session the phone
         /// prefers `session.mode` (the snapshot). Optional for back-compat.
         let capture_mode: String?
+        let default_paths: [String]?
         /// In-flight mutual chirp sync context. Present when a run is
         /// active; `commands[self] == "sync_run"` will fire alongside.
         let sync: SyncIntent?
@@ -258,6 +293,19 @@ final class ServerUploader {
         /// starts pushing JPEGs via `PreviewUploader` while true; stops
         /// (and resets throttle state) when it flips back to false.
         let preview_requested: Bool?
+    }
+
+    struct DeviceSocketEvent: Codable {
+        let type: String
+        let sid: String?
+        let paths: [String]?
+        let max_duration_s: Double?
+        let tracking_exposure_cap: String?
+        let chirp_detect_threshold: Double?
+        let heartbeat_interval_s: Double?
+        let capture_height_px: Int?
+        let preview_requested: Bool?
+        let calibration_frame_requested: Bool?
     }
 
     /// iOS-side capture-mode enum. Kept string-valued so it round-trips
