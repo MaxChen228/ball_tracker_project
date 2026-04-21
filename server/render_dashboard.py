@@ -980,6 +980,8 @@ _JS_TEMPLATE = r"""
     const syncPending = state.sync_commands || {};
     const previewReq = state.preview_requested || {};
     const calLastTs = state.calibration_last_ts || {};
+    const autoCalActive = (state.auto_calibration && state.auto_calibration.active) || {};
+    const autoCalLast = (state.auto_calibration && state.auto_calibration.last) || {};
     function hhmm(ts) {
       if (!ts) return '';
       const d = new Date(ts * 1000);
@@ -993,15 +995,26 @@ _JS_TEMPLATE = r"""
       const isCal = calibrated.has(cam);
       const previewOn = !!previewReq[cam];
       const lastTs = calLastTs[cam];
+      const autoRun = autoCalActive[cam] || null;
+      const autoLast = autoCalLast[cam] || null;
       const calDot = isCal ? 'ok' : (online ? 'warn' : 'bad');
       const syncDot = !online ? 'bad' : (pending ? 'warn' : (timeSynced ? 'ok' : 'warn'));
+      const autoDot = autoRun ? 'warn'
+                    : (autoLast && autoLast.status === 'completed' ? 'ok'
+                    : (autoLast && autoLast.status === 'failed' ? 'bad' : (online ? 'warn' : 'bad')));
       const syncLabel = !online ? 'offline' : (pending ? 'pending…' : (timeSynced ? 'synced' : 'not synced'));
       const calLabel = (isCal && lastTs) ? ('last ' + hhmm(lastTs))
                      : (!online ? 'offline' : (isCal ? 'calibrated' : 'pending'));
+      const autoLabel = autoRun
+        ? `${autoRun.status} · ${autoRun.stable_frames || 0} stable`
+        : (autoLast
+          ? `${autoLast.status}${autoLast.result && autoLast.result.reprojection_px != null ? ' · ' + Number(autoLast.result.reprojection_px).toFixed(1) + 'px' : ''}`
+          : (online ? 'idle' : 'offline'));
       const previewBtn = `<button type="button" class="btn small preview-btn${previewOn ? ' active' : ''}" ` +
         `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}">` +
         `${previewOn ? 'PREVIEW ON' : 'PREVIEW'}</button>`;
-      const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}">Auto calibrate</button>`;
+      const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}" ${autoRun ? 'disabled' : ''}>` +
+        `${autoRun ? 'Auto-cal…' : 'Run auto-cal'}</button>`;
       // Always render the panel so the row height stays stable; off
       // state shows a black placeholder. When on, the tickPreviewImages
       // loop (see below) cache-busts the <img src>.
@@ -1021,6 +1034,7 @@ _JS_TEMPLATE = r"""
             <div class="sub">
               <span class="item ${syncDot}"><span class="dot ${syncDot}"></span>time sync · ${esc(syncLabel)}</span>
               <span class="item ${calDot}"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>
+              <span class="item ${autoDot}"><span class="dot ${autoDot}"></span>auto-cal · ${esc(autoLabel)}</span>
             </div>
             <div class="chip-col">${statusChip(cam, online, isCal)}</div>
           </div>
@@ -1118,7 +1132,8 @@ _JS_TEMPLATE = r"""
           : `<span class="val idle">idle</span>`) +
         `</span>` +
         `<span class="pair"><span class="label">Sync</span><span class="val ${syncCls}">${syncLabel}</span></span>` +
-        `<a class="nav-link" href="/setup">Setup &rarr;</a>`;
+        `<a class="nav-link" href="/setup">Setup</a>` +
+        `<a class="nav-link" href="/markers">Markers</a>`;
       navStatus.innerHTML = navHtml;
     }
   }
@@ -1538,9 +1553,9 @@ _JS_TEMPLATE = r"""
     const cam = btn.dataset.autoCal;
     btn.disabled = true;
     const originalLabel = btn.textContent;
-    btn.textContent = 'Calibrating…';
+    btn.textContent = 'Starting…';
     try {
-      const r = await fetch('/calibration/auto/' + encodeURIComponent(cam),
+      const r = await fetch('/calibration/auto/start/' + encodeURIComponent(cam),
                             { method: 'POST' });
       if (!r.ok) {
         let msg = 'Calibration failed';
@@ -1548,9 +1563,7 @@ _JS_TEMPLATE = r"""
         alert(msg);
         return;
       }
-      // Immediate calibration tick + markers refresh.
-      tickCalibration();
-      tickExtendedMarkers();
+      tickStatus();
     } finally {
       btn.disabled = false;
       btn.textContent = originalLabel;
@@ -1690,7 +1703,7 @@ def _render_device_rows(
         )
         auto_cal_btn = (
             f'<button type="button" class="btn small" '
-            f'data-auto-cal="{html.escape(cam_id)}">Auto calibrate</button>'
+            f'data-auto-cal="{html.escape(cam_id)}">Run auto-cal</button>'
         )
         # Panel always renders for stable layout — off state shows a
         # black placeholder. JS tick swaps the <img src> when enabled.
@@ -1720,6 +1733,7 @@ def _render_device_rows(
             f'<div class="sub">'
             f'<span class="item {sync_dot}"><span class="dot {sync_dot}"></span>time sync · {sync_label}</span>'
             f'<span class="item {cal_dot}"><span class="dot {cal_dot}"></span>pose · {cal_label}</span>'
+            f'<span class="item {"warn" if online else "bad"}"><span class="dot {"warn" if online else "bad"}"></span>auto-cal · {"idle" if online else "offline"}</span>'
             f'</div>'
             f'<div class="chip-col"><span class="chip {chip_cls}">{chip_label}</span></div>'
             f'</div>'
@@ -1993,7 +2007,8 @@ def _render_nav_status(
         f'<span class="pair"><span class="label">Calibrated</span><span class="val {cal_cls}">{len(calibrations)}/2</span></span>'
         f'<span class="pair"><span class="label">Session</span>{session_html}</span>'
         f'<span class="pair"><span class="label">Sync</span><span class="val {sync_cls}">{sync_label}</span></span>'
-        f'<a class="nav-link" href="/setup">Setup &rarr;</a>'
+        f'<a class="nav-link" href="/setup">Setup</a>'
+        f'<a class="nav-link" href="/markers">Markers</a>'
     )
 
 

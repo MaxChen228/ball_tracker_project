@@ -12,7 +12,6 @@ from render_dashboard import (
     _CSS,
     _JS_TEMPLATE as _DASHBOARD_JS_TEMPLATE,
     _render_device_rows,
-    _render_extended_markers_body,
     _render_tuning_body,
 )
 from schemas import SYNC_TRACE_MIN_PSR, SYNC_TRACE_THRESHOLD
@@ -55,6 +54,13 @@ _SYNC_CSS = """
 .trace-legend .swatch {
   display: inline-block; width: 10px; height: 2px; margin-right: 6px;
   vertical-align: middle;
+}
+.markers-link-row {
+  margin-top: var(--s-3); display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s-3); flex-wrap: wrap; padding-top: var(--s-3); border-top: 1px solid var(--border-l);
+}
+.markers-link-copy {
+  max-width: 640px; color: var(--ink-light);
 }
 """
 
@@ -183,6 +189,7 @@ _JS_TEMPLATE = r"""
       (armed ? `<span class="val armed">${esc(s.id || '—')}</span>`
              : `<span class="val idle">idle</span>`) + `</span>` +
       `<span class="pair"><span class="label">Sync</span><span class="val ${syncCls}">${syncLabel}</span></span>` +
+      `<a class="nav-link" href="/markers">Markers</a>` +
       `<a class="nav-link" href="/">← Back to home</a>`;
   }
 
@@ -531,6 +538,7 @@ def _render_nav_status(
         f'<span class="pair"><span class="label">Calibrated</span><span class="val {cal_cls}">{len(calibrations)}/2</span></span>'
         f'<span class="pair"><span class="label">Session</span>{session_html}</span>'
         f'<span class="pair"><span class="label">Sync</span><span class="val {sync_cls}">{sync_label}</span></span>'
+        f'<a class="nav-link" href="/markers">Markers</a>'
         f'<a class="nav-link" href="/">&larr; Back to home</a>'
     )
 
@@ -547,11 +555,11 @@ def render_setup_html(
     capture_height_px: int = 1080,
     tracking_exposure_cap: str = "frame_duration",
     calibration_last_ts: dict[str, float] | None = None,
-    extended_markers: list[dict[str, Any]] | None = None,
+    markers_count: int = 0,
     preview_requested: dict[str, bool] | None = None,
 ) -> str:
     """Full configuration page. Sections (stacked, full-width):
-    DEVICES · CALIBRATION (device rows + extended markers) · TIME SYNC
+    DEVICES · CALIBRATION (device rows + marker-workspace link) · TIME SYNC
     (mutual-chirp control + matched-filter trace + diagnostic log) ·
     RUNTIME · TUNING (chirp threshold, heartbeat interval, capture
     resolution). The `/` dashboard is purely operational (Session +
@@ -597,7 +605,13 @@ def render_setup_html(
         '<div class="card">'
         '<h2 class="card-title">Devices &middot; Calibration</h2>'
         f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested)}</div>'
-        f'<div id="extended-markers-body">{_render_extended_markers_body(["A", "B"], extended_markers)}</div>'
+        '<div class="markers-link-row">'
+        '<div class="markers-link-copy">'
+        f'<div class="card-subtitle">Markers &middot; Workspace</div>'
+        f'<div>Manage dual-camera marker scans on the dedicated workspace. {markers_count} saved marker{"s" if markers_count != 1 else ""} currently in the registry.</div>'
+        '</div>'
+        '<a class="btn secondary" href="/markers">Open markers workspace</a>'
+        '</div>'
         "</div>"
         # TIME SYNC
         '<div class="setup-section-title">Time Sync</div>'
