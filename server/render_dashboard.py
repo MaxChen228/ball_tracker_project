@@ -264,13 +264,21 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                    border-radius: var(--r); overflow: hidden;
                    position: relative; }}
 .preview-panel img {{ width: 100%; height: 100%; object-fit: contain; display: block; }}
+.preview-panel .plate-overlay {{ position: absolute; inset: 0;
+                                  width: 100%; height: 100%;
+                                  pointer-events: none; z-index: 2; }}
+.preview-panel .plate-overlay polygon {{ fill: none;
+                                          stroke: rgba(217, 59, 59, 0.92);
+                                          stroke-width: 1.8;
+                                          stroke-dasharray: 8 5;
+                                          stroke-linejoin: round; }}
 .preview-panel .placeholder {{ position: absolute; inset: 0;
                                 display: flex; align-items: center; justify-content: center;
                                 color: rgba(255, 255, 255, 0.55);
                                 font-family: var(--mono); font-size: 11px;
                                 letter-spacing: 0.14em; text-transform: uppercase;
                                 text-align: center; padding: var(--s-2);
-                                pointer-events: none; }}
+                                pointer-events: none; z-index: 3; }}
 .preview-panel.off img {{ display: none; }}
 .preview-panel.off .placeholder {{ color: rgba(255, 255, 255, 0.6); }}
 /* Crosshair at geometric centre of the real preview — reference mark
@@ -1020,6 +1028,7 @@ _JS_TEMPLATE = r"""
       // loop (see below) cache-busts the <img src>.
       const previewPanel = `<div class="preview-panel${previewOn ? '' : ' off'}" data-preview-panel="${esc(cam)}">` +
         `<img data-preview-img="${esc(cam)}" src="${previewOn ? ('/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now()) : ''}" alt="preview ${esc(cam)}">` +
+        `<svg class="plate-overlay" data-preview-overlay="${esc(cam)}" aria-hidden="true"><polygon></polygon></svg>` +
         `<div class="placeholder">${previewOn ? '…' : 'Preview off'}</div>` +
         `</div>`;
       const virtCell = `<div class="virt-cell" data-virt-cell="${esc(cam)}">` +
@@ -1050,8 +1059,9 @@ _JS_TEMPLATE = r"""
       .map(d => row(d.camera_id, d)).join('');
     devicesBox.innerHTML = `<div class="devices-grid">${rows + extras}</div>`;
     // The innerHTML rebuild above destroys any existing canvases inside
-    // the virt cells — redraw them on the fresh DOM.
+    // the virt cells and preview overlays — redraw them on the fresh DOM.
     if (typeof redrawAllVirtCanvases === 'function') redrawAllVirtCanvases();
+    if (typeof redrawAllPreviewPlateOverlays === 'function') redrawAllPreviewPlateOverlays();
   }
 
   const MODE_LABELS = { camera_only: 'Camera-only', on_device: 'On-device', dual: 'Dual' };
@@ -1327,6 +1337,7 @@ _JS_TEMPLATE = r"""
         virtCamMeta.set(c.camera_id, c);
       }
       redrawAllVirtCanvases();
+      redrawAllPreviewPlateOverlays();
       // Main 3D canvas lives only on `/`. Don't gate the metadata update
       // above on sceneRoot — `/setup` still needs virt canvases drawn.
       if (payload.plot && sceneRoot && window.Plotly) {
@@ -1540,7 +1551,31 @@ _JS_TEMPLATE = r"""
       if (cell) cell.classList.toggle('ready', ok);
     }
   }
-  window.addEventListener('resize', () => redrawAllVirtCanvases());
+  function redrawAllPreviewPlateOverlays() {
+    for (const svg of document.querySelectorAll('[data-preview-overlay]')) {
+      const cam = svg.dataset.previewOverlay;
+      const meta = virtCamMeta.get(cam);
+      const panel = svg.closest('.preview-panel');
+      const poly = svg.querySelector('polygon');
+      if (!panel || !poly || !meta || meta.image_width_px == null || meta.image_height_px == null) {
+        if (poly) poly.setAttribute('points', '');
+        svg.removeAttribute('viewBox');
+        continue;
+      }
+      const proj = PLATE_WORLD.map(P => projectWorldToPixel(P, meta));
+      if (!proj.every(p => p !== null)) {
+        poly.setAttribute('points', '');
+        svg.removeAttribute('viewBox');
+        continue;
+      }
+      svg.setAttribute('viewBox', `0 0 ${meta.image_width_px} ${meta.image_height_px}`);
+      poly.setAttribute('points', proj.map(p => `${p.u.toFixed(2)},${p.v.toFixed(2)}`).join(' '));
+    }
+  }
+  window.addEventListener('resize', () => {
+    redrawAllVirtCanvases();
+    redrawAllPreviewPlateOverlays();
+  });
 
   // Prime all three immediately, then stagger polling so the UI stays
   // current without hammering the server. Status carries arming state
@@ -1714,6 +1749,8 @@ def _render_device_rows(
             f'<div class="preview-panel{_off_cls}" data-preview-panel="{html.escape(cam_id)}">'
             f'<img data-preview-img="{html.escape(cam_id)}" '
             f'src="{_src}" alt="preview {html.escape(cam_id)}">'
+            f'<svg class="plate-overlay" data-preview-overlay="{html.escape(cam_id)}" '
+            f'aria-hidden="true"><polygon></polygon></svg>'
             f'<div class="placeholder">{_placeholder}</div>'
             f'</div>'
         )

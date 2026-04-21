@@ -738,6 +738,8 @@ def test_setup_page_renders_all_config_surfaces():
     assert 'id="sync-trace"' in body
     assert 'id="sync-log"' in body
     assert 'id="tuning-body"' in body
+    assert 'data-preview-overlay="A"' in body
+    assert 'data-preview-overlay="B"' in body
 
 
 def test_markers_page_renders_workspace():
