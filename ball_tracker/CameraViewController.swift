@@ -1534,6 +1534,29 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             }
         case "disarm":
             DispatchQueue.main.async { self.applyRemoteDisarm() }
+        case "sync_command":
+            guard (obj["command"] as? String) == "start" else { break }
+            let syncId = obj["sync_command_id"] as? String
+            DispatchQueue.main.async {
+                if self.state == .standby {
+                    if let syncId {
+                        self.startTimeSync(syncId: syncId)
+                        self.updateUIForState()
+                    } else {
+                        log.warning("ignore websocket time-sync: missing sync_command_id")
+                    }
+                } else {
+                    log.info("ignore websocket time-sync: state=\(String(describing: self.state), privacy: .public) not standby")
+                }
+            }
+        case "calibration_updated":
+            let changedCam = obj["cam"] as? String ?? "?"
+            log.info("websocket calibration update cam=\(changedCam, privacy: .public) local=\(self.settings.cameraRole, privacy: .public)")
+            // iOS no longer owns calibration state, but a sibling-camera pose
+            // change can affect any server-owned setup status surfaced on the HUD.
+            DispatchQueue.main.async {
+                self.healthMonitor.probeNow()
+            }
         case "settings":
             if let raw = obj["paths"] as? [String] {
                 let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
