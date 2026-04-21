@@ -400,6 +400,11 @@ def render_viewer_html(
     width:100%; max-width:100%; align-self:center; }}
   .vid-frame video {{ width:100%; height:100%; object-fit:contain;
     display:block; }}
+  .plate-overlay-real {{ position:absolute; inset:0; width:100%; height:100%;
+    pointer-events:none; z-index:1; }}
+  .plate-overlay-real polygon {{ fill:none;
+    stroke:rgba(217,59,59,0.92); stroke-width:1.8;
+    stroke-dasharray:8 5; stroke-linejoin:round; }}
   /* Principal-point cross: same (cx, cy) reference mark the virtual
      canvas draws. Overlaying it on the real MOV lets the operator check
      whether the camera's optical centre actually falls where ChArUco
@@ -1116,6 +1121,7 @@ def render_viewer_html(
 
   // --- Build the VIRT canvas handles once -------------------------
   const VIRT_CANVASES = [];
+  const REAL_OVERLAYS = [];
   for (const c of (SCENE.cameras || [])) {{
     // A camera without full K/R/t/dims cannot be reprojected from —
     // skip it. The Python side already rendered the `no calibration`
@@ -1125,6 +1131,8 @@ def render_viewer_html(
     const canvas = document.getElementById(`virt-canvas-${{c.camera_id}}`);
     if (!canvas) continue;
     VIRT_CANVASES.push({{cam: c.camera_id, canvas, meta: c}});
+    const overlay = document.getElementById(`real-plate-overlay-${{c.camera_id}}`);
+    if (overlay) REAL_OVERLAYS.push({{cam: c.camera_id, overlay, meta: c}});
   }}
 
   function sizeVirtCanvas(canvas) {{
@@ -1251,10 +1259,28 @@ def render_viewer_html(
     for (const entry of VIRT_CANVASES) drawVirtCanvas(entry);
   }}
 
+  function drawRealPlateOverlays() {{
+    for (const entry of REAL_OVERLAYS) {{
+      const {{overlay, meta}} = entry;
+      if (!overlay || !meta || meta.image_width_px == null || meta.image_height_px == null) continue;
+      const poly = overlay.querySelector("polygon");
+      if (!poly) continue;
+      const proj = PLATE_WORLD.map(P => projectWorldToPixel(P, meta));
+      if (!proj.every(p => p !== null)) {{
+        poly.setAttribute("points", "");
+        overlay.removeAttribute("viewBox");
+        continue;
+      }}
+      overlay.setAttribute("viewBox", `0 0 ${{meta.image_width_px}} ${{meta.image_height_px}}`);
+      poly.setAttribute("points", proj.map(p => `${{p.u.toFixed(2)}},${{p.v.toFixed(2)}}`).join(" "));
+    }}
+  }}
+
   function drawScene() {{
     const cutoff = mode === "all" ? Infinity : currentT;
     Plotly.react(sceneDiv, [...STATIC, ...buildDynamicTraces(cutoff)], LAYOUT, {{displayModeBar: false, responsive: true}});
     drawVirtuals();
+    drawRealPlateOverlays();
   }}
 
   function scheduleSceneDraw() {{
@@ -1275,7 +1301,10 @@ def render_viewer_html(
 
   // Virtual canvases need to resize with the window (DPR + layout
   // changes). Redraw with current ball position after resize.
-  window.addEventListener("resize", () => drawVirtuals());
+  window.addEventListener("resize", () => {{
+    drawVirtuals();
+    drawRealPlateOverlays();
+  }});
 
   // --- Video sync via anchor-relative time ---
 
@@ -1986,6 +2015,8 @@ def _video_cell_html(
             f'<div class="vid-frame"{frame_style}>'
             f'<video data-cam="{cam}" preload="auto" playsinline muted '
             f'src="{url}"></video>'
+            f'<svg class="plate-overlay-real" id="real-plate-overlay-{cam}" '
+            f'aria-hidden="true"><polygon></polygon></svg>'
             f'{pp_html}'
             f'</div>'
         )

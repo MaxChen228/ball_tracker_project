@@ -693,6 +693,8 @@ def test_dashboard_drives_mode_one_end_to_end(tmp_path):
     viewer_html = client.get(f"/viewer/{session_id}").text
     assert "mode camera-only" in viewer_html
     assert "<video" in viewer_html
+    assert 'id="real-plate-overlay-A"' in viewer_html
+    assert 'id="real-plate-overlay-B"' in viewer_html
 
 
 def test_dashboard_drives_dual_mode_end_to_end(tmp_path):
