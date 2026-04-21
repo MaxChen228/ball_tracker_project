@@ -738,17 +738,32 @@ def test_setup_page_renders_all_config_surfaces():
     r = client.get("/setup")
     assert r.status_code == 200
     body = r.text
-    # DEVICES · CALIBRATION + TIME SYNC + RUNTIME · TUNING all live here.
+    # `/setup` is now geometry-only.
     assert 'id="devices-body"' in body
     assert 'href="/markers"' in body
     assert 'Open markers workspace' in body
+    assert 'Camera Position Setup' in body
+    assert 'href="/sync"' in body
+    assert 'data-preview-overlay="A"' in body
+    assert 'data-preview-overlay="B"' in body
+
+
+def test_sync_page_renders_time_sync_and_tuning_surfaces():
+    client = TestClient(app)
+    r = client.get("/sync")
+    assert r.status_code == 200
+    body = r.text
     assert 'id="sync-body"' in body
     assert 'id="sync-trace"' in body
     assert 'id="sync-log"' in body
     assert 'id="tuning-body"' in body
     assert 'id="tuning-status"' in body
-    assert 'data-preview-overlay="A"' in body
-    assert 'data-preview-overlay="B"' in body
+    assert 'id="tuning-chirp-form"' in body
+    assert 'id="tuning-hb-form"' in body
+    assert 'id="telemetry-panel"' in body
+    assert 'id="telemetry-body"' in body
+    assert 'action="/sync/trigger"' in body
+    assert 'action="/sync/start"' in body
 
 
 def test_markers_page_renders_workspace():
@@ -770,11 +785,20 @@ def test_markers_page_renders_workspace():
     assert 'id="show-aruco-ids"' in body
 
 
-def test_sync_page_redirects_to_setup():
+def test_dashboard_no_longer_renders_telemetry_overlay():
     client = TestClient(app)
-    r = client.get("/sync", follow_redirects=False)
-    assert r.status_code == 301
-    assert r.headers["location"] == "/setup"
+    r = client.get("/")
+    assert r.status_code == 200
+    body = r.text
+    assert 'id="telemetry-panel"' not in body
+    assert 'id="telemetry-body"' not in body
+
+
+def test_sync_page_no_longer_redirects_to_setup():
+    client = TestClient(app)
+    r = client.get("/sync")
+    assert r.status_code == 200
+    assert 'Time Sync' in r.text
 
 
 def test_dashboard_marks_expected_cameras_offline_when_absent():

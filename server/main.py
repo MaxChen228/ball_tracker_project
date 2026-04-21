@@ -4851,26 +4851,17 @@ def events_index() -> HTMLResponse:
     )
 
 
-@app.get("/sync")
-def sync_redirect() -> RedirectResponse:
-    """Preserve old bookmarks. `/sync` is now `/setup` — devices + mutual
-    chirp sync + tuning all live on the configuration page."""
-    return RedirectResponse("/setup", status_code=301)
-
-
-@app.get("/setup", response_class=HTMLResponse)
-def setup_page() -> HTMLResponse:
-    """Configuration surface. Stacks DEVICES · CALIBRATION (per-camera
-    rows + extended markers) + TIME SYNC (mutual chirp + matched-filter
-    trace + log) + RUNTIME · TUNING. `/` is operational-only (Session +
-    Events + 3D canvas)."""
-    from render_sync import render_setup_html
+@app.get("/sync", response_class=HTMLResponse)
+def sync_page() -> HTMLResponse:
+    """Dedicated time-sync surface. Keeps chirp workflows and runtime
+    tuning separate from geometric camera calibration."""
+    from render_sync import render_sync_html
 
     session = state.session_snapshot()
     sync_run = state.current_sync()
     last_sync = state.last_sync_result()
     return HTMLResponse(
-        render_setup_html(
+        render_sync_html(
             devices=[
                 {
                     "camera_id": d.camera_id,
@@ -4888,6 +4879,29 @@ def setup_page() -> HTMLResponse:
             heartbeat_interval_s=state.heartbeat_interval_s(),
             capture_height_px=state.capture_height_px(),
             tracking_exposure_cap=state.tracking_exposure_cap().value,
+        )
+    )
+
+
+@app.get("/setup", response_class=HTMLResponse)
+def setup_page() -> HTMLResponse:
+    """Calibration surface for device positioning and reprojection checks."""
+    from render_sync import render_setup_html
+
+    session = state.session_snapshot()
+    return HTMLResponse(
+        render_setup_html(
+            devices=[
+                {
+                    "camera_id": d.camera_id,
+                    "last_seen_at": d.last_seen_at,
+                    "time_synced": d.time_synced,
+                }
+                for d in state.online_devices()
+            ],
+            session=session.to_dict() if session is not None else None,
+            calibrations=sorted(state.calibrations().keys()),
+            sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
             calibration_last_ts={
                 cam: p.stat().st_mtime
                 for cam in state.calibrations().keys()

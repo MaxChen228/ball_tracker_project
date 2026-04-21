@@ -12,7 +12,7 @@ from render_compare import (
     PROJECTION_JS,
     render_live_compare_camera,
 )
-from render_dashboard import _CSS
+from render_dashboard import _CSS, _render_app_nav
 
 
 _MARKERS_CSS = """
@@ -880,13 +880,6 @@ def render_markers_html(
         {"markers": markers, "scene": scene, "compare_markers": compare_markers},
         ensure_ascii=False,
     )
-    session_html = (
-        f'<span class="val armed">{session.get("id", "—")}</span>'
-        if session and session.get("armed")
-        else '<span class="val idle">idle</span>'
-    )
-    devices_cls = "full" if len(devices) >= 2 else "partial"
-    cal_cls = "full" if len(calibrations) >= 2 else "partial"
     return (
         "<!DOCTYPE html>"
         "<html lang=\"en\"><head>"
@@ -899,16 +892,7 @@ def render_markers_html(
         "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
         f"<style>{_CSS}{_MARKERS_CSS}</style>"
         "</head><body data-page=\"markers\">"
-        '<nav class="nav">'
-        '<span class="brand"><span class="dot"></span>BALL_TRACKER</span>'
-        '<div class="status-line">'
-        f'<span class="pair"><span class="label">Devices</span><span class="val {devices_cls}">{len(devices)}/2</span></span>'
-        f'<span class="pair"><span class="label">Calibrated</span><span class="val {cal_cls}">{len(calibrations)}/2</span></span>'
-        f'<span class="pair"><span class="label">Session</span>{session_html}</span>'
-        '<a class="nav-link" href="/setup">Setup</a>'
-        '<a class="nav-link" href="/">Home</a>'
-        '</div>'
-        "</nav>"
+        f'{_render_app_nav("markers", devices, session, calibrations)}'
         '<main class="main-markers">'
         '<section class="card markers-hero">'
         '<div class="hero-copy">'
