@@ -23,7 +23,7 @@ Endpoints:
                                        arm/disarm/settings/sync_command
                                        downstream + liveness + live
                                        frame stream upstream. Replaces
-                                       the retired POST /heartbeat.
+                                       the retired HTTP /heartbeat endpoint.
   POST /sessions/arm                — dashboard: begin an armed session.
                                        Server returns the new session id
                                        (idempotent on re-arm). /status
@@ -365,21 +365,19 @@ class State:
         # Legacy third-device chirp sync intent. A live intent supplies the
         # shared `sync_id` both phones should stamp onto their recovered
         # anchors. The dashboard-remote path also fans this intent out as
-        # per-camera pending commands consumed on heartbeat.
+        # per-camera pending commands consumed on the next WS heartbeat.
         self._current_time_sync_intent: _LegacyTimeSyncIntent | None = None
         self._sync_command_pending: dict[str, _LegacyTimeSyncIntent] = {}
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
         # Runtime tunables pushed from the dashboard, hot-applied on the
-        # iPhone via the heartbeat reply. Persisted so a server restart
+        # iPhone via WS `settings` messages. Persisted so a server restart
         # doesn't silently drop the operator's last-chosen values.
         self._chirp_detect_threshold: float = 0.18
         self._heartbeat_interval_s: float = 1.0
         self._tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
-        # Capture resolution (image height in px) pushed to iOS via heartbeat.
-        # Allowed set is {540, 720, 1080}; 540p may not be supported on every
-        # iPhone but iOS's format search falls back and logs a clear error so
-        # the operator can bump back. Default 1080p — always works.
+        # Capture resolution (image height in px) pushed to iOS via WS settings.
+        # Allowed set is {720, 1080}. Default 1080p — always works.
         self._capture_height_px: int = 1080
         self._runtime_settings_path = data_dir / "runtime_settings.json"
         self._load_runtime_settings_from_disk()
@@ -993,7 +991,7 @@ class State:
     # full capture resolution — ArUco corner precision scales linearly
     # with pixel count, and the intrinsics we derive downstream must
     # match MOV dims exactly or `recover_extrinsics` produces garbage
-    # poses. iOS pushes a native-resolution JPEG when the heartbeat reply
+    # poses. iOS pushes a native-resolution JPEG when the WS settings message
     # sets `calibration_frame_requested: true` for this camera.
 
     def request_calibration_frame(self, camera_id: str) -> None:
@@ -1307,8 +1305,8 @@ class State:
 
     def current_mode(self) -> CaptureMode:
         """Dashboard-selected capture mode (global, not session-scoped).
-        iPhones read this from status/heartbeat to render the HUD mode chip
-        even while idle."""
+        iPhones read this from WS settings messages to render the HUD mode
+        chip even while idle."""
         with self._lock:
             return mode_for_paths(self._default_paths)
 
@@ -1334,13 +1332,13 @@ class State:
             self._persist_runtime_settings_locked()
             return set(self._default_paths)
 
-    # ---- Runtime tunables (chirp detection threshold + heartbeat cadence) --
+    # ---- Runtime tunables (chirp detection threshold + WS heartbeat cadence) --
     #
-    # Both are pushed from the dashboard, surface on every heartbeat reply,
+    # Both are pushed from the dashboard, surface in WS settings messages,
     # and are hot-applied by iOS. Persisted together to a single JSON file
     # so a restart doesn't drop the operator's choice. iOS Settings UI still
     # holds a local bootstrap default but the server push wins on first
-    # heartbeat.
+    # successful WS settings round-trip.
 
     _CHIRP_THRESHOLD_MIN = 0.01
     _CHIRP_THRESHOLD_MAX = 1.0
@@ -1393,7 +1391,7 @@ class State:
             sorted(p.value for p in self._default_paths),
         )
 
-    _ALLOWED_CAPTURE_HEIGHTS = (540, 720, 1080)
+    _ALLOWED_CAPTURE_HEIGHTS = (720, 1080)
 
     def _persist_runtime_settings_locked(self) -> None:
         """Caller must hold `self._lock`. Atomic write."""
@@ -1665,7 +1663,7 @@ class State:
 
         Idempotent: re-dispatching to a camera that already has a pending
         flag just refreshes its TTL expiry. The phone still fires once on
-        the next heartbeat because flag consumption is one-shot."""
+        the next WS heartbeat tick because flag consumption is one-shot."""
         now = self._time_fn()
         online_ids = [d.camera_id for d in self.online_devices()]
         current = self.current_session()  # applies timeout
@@ -1706,7 +1704,7 @@ class State:
     def consume_sync_command(self, camera_id: str) -> tuple[str | None, str | None]:
         """Atomically pop + return a pending time-sync command for the
         named camera, or `(None, None)` when there's nothing queued. Used by the
-        /heartbeat handler so the same beat that reports liveness also
+        WS heartbeat handler so the same beat that reports liveness also
         clears the flag — one-shot dispatch, matching how arm/disarm
         commands self-cancel on consumption.
 
@@ -2355,12 +2353,12 @@ def _build_status_response() -> dict[str, Any]:
         "sync_cooldown_remaining_s": state.sync_cooldown_remaining_s(),
         # Pending dashboard-triggered time-sync commands, keyed by camera.
         # Observational only: the phone reads its own command via
-        # `sync_command` (set on the heartbeat reply), and consumption
+        # `sync_command` (set on the WS heartbeat / push path), and consumption
         # clears the flag. `/status` surfaces this map so the dashboard
         # can paint a "pending" badge until the phone drains it.
         "sync_commands": state.pending_sync_commands(),
         # Runtime tunables pushed from the dashboard. iOS hot-applies any
-        # changes on every heartbeat reply (matched-filter threshold into
+        # changes from WS settings messages (matched-filter threshold into
         # AudioChirpDetector; cadence into ServerHealthMonitor).
         "chirp_detect_threshold": state.chirp_detect_threshold(),
         "heartbeat_interval_s": state.heartbeat_interval_s(),
@@ -2372,14 +2370,14 @@ def _build_status_response() -> dict[str, Any]:
         "capture_height_px": state.capture_height_px(),
         # Per-camera live-preview request flags (Phase 4a). Dashboard
         # renders a toggle per Devices row from this map; iPhones read
-        # their own flag off the heartbeat reply (separate sibling field,
+        # their own flag off the WS settings payload (separate sibling field,
         # see below) to decide whether to push preview JPEGs.
         "preview_requested": state._preview.requested_map(),
         # Per-camera one-shot calibration-frame pending map. Dashboard
         # paints a "capturing…" chip while true. The beating camera
-        # reads its own flag off the heartbeat reply's sibling
-        # `calibration_frame_requested` scalar (added in the /heartbeat
-        # handler) and uploads one full-resolution JPEG.
+        # reads its own flag off the WS settings payload's sibling
+        # `calibration_frame_requested` scalar and uploads one
+        # full-resolution JPEG.
         "calibration_frame_requested": {
             cam: True
             for cam in state._cal_frame_requested.keys()
@@ -2780,7 +2778,7 @@ async def settings_tracking_exposure_cap(request: Request):
 @app.post("/settings/capture_height")
 async def settings_capture_height(request: Request):
     """Set the iPhone capture resolution (image height in px). Accepts JSON
-    `{height: int}` or form field `height`. Allowed: 540 / 720 / 1080.
+    `{height: int}` or form field `height`. Allowed: 720 / 1080.
     HTML callers get 303 back to /; JSON callers get `{ok, value}`."""
     height_raw: Any
     ctype = request.headers.get("content-type", "").lower()
@@ -2939,9 +2937,8 @@ async def sync_trigger(request: Request) -> Any:
 
     dispatched = state.trigger_sync_command(camera_ids)
     # Push the sync_command over WS too so phones on the live transport
-    # don't have to wait for the next /heartbeat reply to pick it up. HTTP
-    # heartbeat fallback still carries the flag, so this is an accelerant
-    # not a dependency.
+    # don't have to wait for the next periodic heartbeat tick to pick it up.
+    # The pending flag still exists as the authoritative one-shot drain path.
     pending = state.pending_sync_commands()
     ws_messages = {
         cam: {"type": "sync_command", "command": "start", "sync_command_id": sid}
@@ -3146,7 +3143,7 @@ async def pitch(
 
         # Reconcile image dims: the iPhone's IntrinsicsStore sometimes
         # ships calibration-time dims (e.g. 1920×1080) even when the MOV
-        # encoder produced a lower resolution (720p / 540p). Server
+        # encoder produced a lower resolution (720p). Server
         # detection then returns px/py in MOV-pixel coords while the
         # payload claims the MOV is 1080p — downstream scaling ends up
         # 1.5× off. Probe the real MOV dims once and overwrite the
@@ -3365,7 +3362,7 @@ def _validate_camera_id_or_422(camera_id: str) -> None:
 async def camera_calibration_frame(camera_id: str, request: Request) -> dict[str, Any]:
     """iPhone pushes ONE full-resolution JPEG (native capture res, e.g.
     1920×1080) here in response to `calibration_frame_requested: true`
-    on its last heartbeat reply. Server stashes it so the next
+    on its last WS settings payload. Server stashes it so the next
     `/calibration/auto/{camera_id}` call consumes it — running ArUco at
     native resolution gives 4x the corner-precision of a 480p preview
     frame and keeps the derived intrinsics in the same pixel coord
@@ -4554,7 +4551,7 @@ async def calibration_auto(
 ) -> dict[str, Any]:
     """Dashboard-triggered auto-calibration.
 
-    Request a one-shot full-resolution JPEG from the phone via heartbeat,
+    Request a one-shot full-resolution JPEG from the phone via the WS settings path,
     poll the buffer for up to 2 s, run ArUco at native capture resolution.
     The snapshot lives in the SAME pixel coord system as the MOVs the
     phone later uploads for triangulation → K doesn't need rescaling at
@@ -4854,26 +4851,17 @@ def events_index() -> HTMLResponse:
     )
 
 
-@app.get("/sync")
-def sync_redirect() -> RedirectResponse:
-    """Preserve old bookmarks. `/sync` is now `/setup` — devices + mutual
-    chirp sync + tuning all live on the configuration page."""
-    return RedirectResponse("/setup", status_code=301)
-
-
-@app.get("/setup", response_class=HTMLResponse)
-def setup_page() -> HTMLResponse:
-    """Configuration surface. Stacks DEVICES · CALIBRATION (per-camera
-    rows + extended markers) + TIME SYNC (mutual chirp + matched-filter
-    trace + log) + RUNTIME · TUNING. `/` is operational-only (Session +
-    Events + 3D canvas)."""
-    from render_sync import render_setup_html
+@app.get("/sync", response_class=HTMLResponse)
+def sync_page() -> HTMLResponse:
+    """Dedicated time-sync surface. Keeps chirp workflows and runtime
+    tuning separate from geometric camera calibration."""
+    from render_sync import render_sync_html
 
     session = state.session_snapshot()
     sync_run = state.current_sync()
     last_sync = state.last_sync_result()
     return HTMLResponse(
-        render_setup_html(
+        render_sync_html(
             devices=[
                 {
                     "camera_id": d.camera_id,
@@ -4891,6 +4879,29 @@ def setup_page() -> HTMLResponse:
             heartbeat_interval_s=state.heartbeat_interval_s(),
             capture_height_px=state.capture_height_px(),
             tracking_exposure_cap=state.tracking_exposure_cap().value,
+        )
+    )
+
+
+@app.get("/setup", response_class=HTMLResponse)
+def setup_page() -> HTMLResponse:
+    """Calibration surface for device positioning and reprojection checks."""
+    from render_sync import render_setup_html
+
+    session = state.session_snapshot()
+    return HTMLResponse(
+        render_setup_html(
+            devices=[
+                {
+                    "camera_id": d.camera_id,
+                    "last_seen_at": d.last_seen_at,
+                    "time_synced": d.time_synced,
+                }
+                for d in state.online_devices()
+            ],
+            session=session.to_dict() if session is not None else None,
+            calibrations=sorted(state.calibrations().keys()),
+            sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
             calibration_last_ts={
                 cam: p.stat().st_mtime
                 for cam in state.calibrations().keys()

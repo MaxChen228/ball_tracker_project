@@ -10,11 +10,11 @@ Request semantics:
   - Dashboard POSTs `/camera/{id}/preview_request {enabled: true}` every
     ~2 s while its preview panel is open.
   - Server keeps the flag live for `REQUEST_TTL_S` (5 s) after each call.
-  - Heartbeat replies carry `preview_requested: bool` for the beating
+  - WS settings payloads carry `preview_requested: bool` for the beating
     camera; iPhones start/stop pushing based on that field.
   - When the dashboard panel closes (or the browser tab dies), the
     dashboard stops calling preview_request; the TTL lapses; the phone's
-    next heartbeat reply sets `preview_requested=false` and the uploader
+    next WS settings payload sets `preview_requested=false` and the uploader
     stops.
 
 Thread-safety: single `threading.Lock` covers all mutations + reads. The

@@ -60,7 +60,7 @@ _CSS = f"""
   --idle-bg:     rgba(105,114,125,.06);
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: "Noto Sans TC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --nav-h: 52px;
+  --nav-h: 96px;
   --sidebar-w: 440px;
   /* Unified 8px-grid spacing + single border-radius. Use var(--r)
      everywhere; the old 4/12/2 mix collapses to one rhythm. */
@@ -73,35 +73,43 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
               font-family: var(--sans); font-weight: 300; line-height: 1.8;
               -webkit-font-smoothing: antialiased; }}
 
-/* --- Top nav --- */
-.nav {{ position: fixed; top: 0; left: 0; right: 0; height: var(--nav-h);
-        background: var(--surface); border-bottom: 1px solid var(--border-base);
-        display: flex; align-items: center; padding: 0 24px;
-        z-index: 20; gap: 24px; }}
+/* --- App header --- */
+.nav {{ position: fixed; top: 0; left: 0; right: 0; min-height: var(--nav-h);
+        background: rgba(252, 251, 250, 0.96); backdrop-filter: blur(10px);
+        border-bottom: 1px solid var(--border-base); padding: 14px 24px 12px 24px;
+        z-index: 20; display: flex; flex-direction: column; gap: 10px; }}
+.nav-main {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }}
+.nav-brand-block {{ display: flex; align-items: flex-start; gap: 18px; min-width: 0; }}
 .nav .brand {{ font-family: var(--mono); font-weight: 700; font-size: 14px;
-               letter-spacing: 0.16em; color: var(--ink); }}
+               letter-spacing: 0.16em; color: var(--ink); text-decoration: none;
+               line-height: 1.3; white-space: nowrap; }}
 .nav .brand .dot {{ display: inline-block; width: 7px; height: 7px; background: var(--ink);
                     margin-right: 10px; vertical-align: middle; border-radius: 0; }}
-.nav .status-line {{ margin-left: auto; font-family: var(--mono); font-size: 11px;
+.nav-page {{ display: flex; flex-direction: column; gap: 2px; min-width: 0; }}
+.nav-page-kicker {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
+                    text-transform: uppercase; color: var(--sub); }}
+.nav-page-title {{ font-family: var(--mono); font-size: 18px; line-height: 1.1;
+                   letter-spacing: 0.02em; color: var(--ink); }}
+.nav-page-copy {{ font-size: 12px; line-height: 1.5; color: var(--ink-light); max-width: 560px; }}
+.nav-tabs {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }}
+.nav-tab {{ display: inline-flex; align-items: center; min-height: 32px;
+            padding: 6px 12px; border: 1px solid var(--border-base); border-radius: var(--r);
+            text-decoration: none; background: transparent; color: var(--sub);
+            font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em;
+            text-transform: uppercase; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease; }}
+.nav-tab:hover {{ border-color: var(--ink); color: var(--ink); background: var(--surface-hover); }}
+.nav-tab.active {{ background: var(--ink); border-color: var(--ink); color: var(--surface); }}
+.nav-status-row {{ display: flex; justify-content: flex-end; }}
+.nav .status-line {{ font-family: var(--mono); font-size: 11px;
                      letter-spacing: 0.08em; text-transform: uppercase; color: var(--sub);
-                     display: flex; gap: 20px; align-items: center; }}
+                     display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }}
 .nav .status-line .pair {{ display: flex; gap: 6px; align-items: center; }}
 .nav .status-line .label {{ color: var(--sub); }}
 .nav .status-line .val {{ color: var(--ink); font-weight: 500; }}
 .nav .status-line .val.armed {{ color: var(--passed); }}
 .nav .status-line .val.idle {{ color: var(--sub); }}
-/* Warn-tinted count when < 2 cams report — makes "0/2 devices" jump out
-   as actionable instead of reading as a flat label next to "1/2 cal". */
 .nav .status-line .val.partial {{ color: var(--warn); }}
 .nav .status-line .val.full    {{ color: var(--passed); }}
-/* Standalone nav link (points at /sync). Monospace, uppercase, subtle
-   underline on hover — same rhythm as the surrounding label/val pairs. */
-.nav .status-line .nav-link {{ color: var(--ink); text-decoration: none;
-                                font-family: var(--mono); font-size: 11px;
-                                letter-spacing: 0.10em; text-transform: uppercase;
-                                border-bottom: 1px solid transparent;
-                                padding-bottom: 1px; }}
-.nav .status-line .nav-link:hover {{ border-bottom-color: var(--ink); }}
 
 /* --- Main layout: sidebar + canvas --- */
 .layout {{ display: flex; height: 100vh; padding-top: var(--nav-h); }}
@@ -211,7 +219,14 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .session-head {{ display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-2); }}
 .session-id {{ font-family: var(--mono); font-size: 13px; color: var(--ink);
                letter-spacing: 0.04em; }}
-.session-actions {{ display: flex; gap: var(--s-2); margin-top: var(--s-3); }}
+.session-actions {{ display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }}
+.sidebar .session-actions button.btn {{ padding: 7px 12px; }}
+.sidebar .arm-gate {{ margin-top: 8px; font-size: 11px; line-height: 1.45; color: var(--ink); }}
+.sidebar .gate-label {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.10em;
+                        text-transform: uppercase; color: var(--sub); margin-right: 6px; }}
+.sidebar .paths-stack {{ gap: 10px; margin-top: 12px; }}
+.sidebar .path-option {{ padding: 6px 8px; }}
+.sidebar .paths-actions {{ margin-top: 10px; }}
 .active-head {{ display:flex; align-items:center; gap:var(--s-2); margin-bottom:var(--s-2); }}
 .active-grid {{ display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:var(--s-2); margin-top:var(--s-3); }}
 .active-grid span {{ display:flex; flex-direction:column; gap:2px; padding:6px 8px;
@@ -313,6 +328,14 @@ button.btn.danger {{ background: transparent; color: var(--dev);
 button.btn.danger:hover:not(:disabled) {{ background: var(--dev); color: var(--surface); }}
 button.btn:disabled {{ opacity: 0.35; cursor: not-allowed; }}
 button.btn.small {{ padding: 4px 10px; font-size: 10px; }}
+a.btn-link {{ display:inline-flex; align-items:center; justify-content:center;
+              font-family: var(--mono); font-size: 11px; font-weight: 500;
+              letter-spacing: 0.08em; text-transform: uppercase;
+              padding: 8px 14px; border-radius: var(--r); text-decoration: none;
+              background: var(--ink); color: var(--surface); border: 1px solid var(--ink);
+              transition: border-color 0.15s, background 0.15s, color 0.15s; }}
+a.btn-link.secondary {{ background: transparent; color: var(--ink); border-color: var(--border-base); }}
+a.btn-link.secondary:hover {{ border-color: var(--ink); }}
 form.inline {{ display: inline-block; margin: 0; }}
 
 /* Live-preview toggle + panel (Phase 4a). Mini button sits inline with
@@ -500,7 +523,8 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                     font-family: var(--mono); font-size: 11px; color: var(--failed);
                     letter-spacing: 0.04em; max-width: 80%; }}
 .degraded-banner .degraded-icon {{ font-size: 14px; }}
-.telemetry-panel {{ position: absolute; left: var(--s-4); bottom: var(--s-4); z-index: 7;
+.telemetry-panel {{ position: absolute; left: var(--s-4);
+                    top: calc(var(--s-4) + 42px); z-index: 7;
                     background: var(--surface); border: 1px solid var(--border-base);
                     border-radius: var(--r); max-width: 320px; font-family: var(--mono);
                     font-size: 11px; color: var(--ink); }}
@@ -512,7 +536,8 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .telemetry-panel[open] summary::after {{ content: ' ▾'; color: var(--ink); }}
 .telemetry-panel[open] summary {{ color: var(--ink); border-bottom: 1px solid var(--border-l); }}
 .telemetry-body {{ padding: var(--s-2) var(--s-3); display: flex; flex-direction: column;
-                   gap: var(--s-2); max-height: 340px; overflow-y: auto; }}
+                   gap: var(--s-2); max-height: min(340px, calc(100vh - var(--nav-h) - 120px));
+                   overflow-y: auto; }}
 .tel-row {{ display: grid; grid-template-columns: 60px 80px 1fr; align-items: center;
             gap: var(--s-2); }}
 .tel-row .k {{ font-size: 10px; color: var(--sub); letter-spacing: 0.08em; }}
@@ -563,6 +588,12 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .playback-bar .speed button.active {{ background: var(--ink); color: var(--surface); }}
 .playback-bar .empty {{ color: var(--sub); font-size: 10px; letter-spacing: 0.10em;
                         text-transform: uppercase; }}
+@media (max-width: 1100px) {{
+  .nav {{ padding-left: 16px; padding-right: 16px; }}
+  .nav-main {{ flex-direction: column; align-items: stretch; }}
+  .nav-tabs {{ justify-content: flex-start; }}
+  .nav-status-row {{ justify-content: flex-start; }}
+}}
 """
 
 
@@ -1469,20 +1500,23 @@ _JS_TEMPLATE = r"""
         <form class="inline" method="POST" action="/sessions/stop">
           <button class="btn danger" type="submit" ${armed ? '' : 'disabled'}>Stop</button>
         </form>
-        <form class="inline" method="POST" action="/sync/trigger">
-          <button class="btn secondary" type="submit" ${armed ? 'disabled' : ''}>Calibrate time</button>
-        </form>
         ${clearBtn}
+      </div>
+      <div class="card-subtitle">Time Sync</div>
+      <div class="session-actions">
+        <form class="inline" method="POST" action="/sync/trigger">
+          <button class="btn secondary" type="submit" ${armed ? 'disabled' : ''}>Quick chirp</button>
+        </form>
+        <form class="inline" method="POST" action="/sync/start">
+          <button class="btn secondary" type="submit" ${armed ? 'disabled' : ''}>Mutual sync</button>
+        </form>
+        <a class="btn-link secondary" href="/sync">Open sync page</a>
       </div>
       ${renderDetectionPaths(s)}`;
     if (sessionBox) sessionBox.innerHTML = sessHtml;
     renderActiveSession(currentLiveSession);
 
-    // Mirror into the nav's tiny status strip. Also surface a tiny Sync
-    // chip (syncing / cooldown / idle) + a link to /setup so the operator
-    // sees sync state at a glance from the main dashboard. Suppressed on
-    // /setup where render_sync.py's renderNav owns the nav instead (its
-    // link says "← Dashboard" and it also tracks matched-filter state).
+    // Mirror live state into the shared app-header status strip.
     if (navStatus && document.body.dataset.page !== 'setup') {
       const online = (state.devices || []).length;
       const cal = (state.calibrations || []).length;
@@ -1510,9 +1544,7 @@ _JS_TEMPLATE = r"""
         `</span>` +
         `<span class="pair"><span class="label">Stream</span><span class="val ${armed ? 'armed' : 'idle'}">${wsA}${wsB} ${liveRate}</span></span>` +
         `<span class="pair"><span class="label">RTT</span><span class="val ${rttVals.length ? 'full' : 'idle'}">${rtt}</span></span>` +
-        `<span class="pair"><span class="label">Sync</span><span class="val ${syncCls}">${syncLabel}</span></span>` +
-        `<a class="nav-link" href="/setup">Setup</a>` +
-        `<a class="nav-link" href="/markers">Markers</a>`;
+        `<span class="pair"><span class="label">Sync</span><span class="val ${syncCls}">${syncLabel}</span></span>`;
       navStatus.innerHTML = navHtml;
     }
   }
@@ -1522,9 +1554,8 @@ _JS_TEMPLATE = r"""
     return Number(v).toFixed(digits);
   }
 
-  // (Time Sync rendering lives on /sync now — render_sync.py. The
-  // dashboard still surfaces a tiny "Sync · syncing/cooldown/idle" chip
-  // in the nav status strip, populated by renderSession off /status.)
+  // Full time-sync controls live on /sync. The dashboard only mirrors
+  // current sync state in the shared header.
 
   function renderEvents(events) {
     if (!eventsBox) return;
@@ -2628,11 +2659,16 @@ def _render_session_body(
         "</form>"
     )
     # CALIBRATE TIME broadcasts a single-listener chirp-listen command to
-    # every online camera on its next heartbeat. Disabled while armed —
+    # every online camera on its next WS heartbeat tick. Disabled while armed —
     # firing a time-sync mid-recording would disrupt the armed clip.
-    sync_btn = (
+    sync_trigger_btn = (
         '<form class="inline" method="POST" action="/sync/trigger">'
-        f'<button class="btn secondary" type="submit"{" disabled" if armed else ""}>Calibrate time</button>'
+        f'<button class="btn secondary" type="submit"{" disabled" if armed else ""}>Quick chirp</button>'
+        "</form>"
+    )
+    sync_start_btn = (
+        '<form class="inline" method="POST" action="/sync/start">'
+        f'<button class="btn secondary" type="submit"{" disabled" if armed else ""}>Mutual sync</button>'
         "</form>"
     )
     clear_btn = ""
@@ -2652,8 +2688,10 @@ def _render_session_body(
         )
     return (
         f'<div class="session-head">{chip_html}{sid_html}</div>'
-        f'<div class="session-actions">{arm_btn}{stop_btn}{sync_btn}{clear_btn}</div>'
+        f'<div class="session-actions">{arm_btn}{stop_btn}{clear_btn}</div>'
         f'{gate_row}'
+        '<div class="card-subtitle">Time Sync</div>'
+        f'<div class="session-actions">{sync_trigger_btn}{sync_start_btn}<a class="btn-link secondary" href="/sync">Open sync page</a></div>'
         f'{_render_detection_paths_body(default_paths, session)}'
     )
 
@@ -2765,26 +2803,78 @@ def _render_nav_status(
         f'<span class="pair"><span class="label">Calibrated</span><span class="val {cal_cls}">{len(calibrations)}/2</span></span>'
         f'<span class="pair"><span class="label">Session</span>{session_html}</span>'
         f'<span class="pair"><span class="label">Sync</span><span class="val {sync_cls}">{sync_label}</span></span>'
-        f'<a class="nav-link" href="/setup">Setup</a>'
-        f'<a class="nav-link" href="/markers">Markers</a>'
     )
 
 
-def _render_tuning_body(
-    chirp_detect_threshold: float,
-    heartbeat_interval_s: float,
-    tracking_exposure_cap: str = "frame_duration",
-    capture_height_px: int = 1080,
+_PAGE_META: dict[str, tuple[str, str, str]] = {
+    "dashboard": (
+        "Operator Surface",
+        "Dashboard",
+        "Run sessions, inspect live state, and review captured events.",
+    ),
+    "setup": (
+        "Calibration",
+        "Setup",
+        "Position-calibrate cameras and verify plate alignment before recording.",
+    ),
+    "sync": (
+        "Time Sync",
+        "Sync",
+        "Run quick chirp or mutual sync workflows, then tune sync-related runtime behaviour.",
+    ),
+    "markers": (
+        "Registry",
+        "Markers",
+        "Scan, compare, and store shared ArUco/world-marker positions.",
+    ),
+}
+
+
+def _render_primary_nav(active_page: str) -> str:
+    items = [
+        ("dashboard", "/", "Dashboard"),
+        ("setup", "/setup", "Setup"),
+        ("sync", "/sync", "Sync"),
+        ("markers", "/markers", "Markers"),
+    ]
+    return "".join(
+        f'<a class="nav-tab{" active" if key == active_page else ""}" href="{href}">{label}</a>'
+        for key, href, label in items
+    )
+
+
+def _render_app_nav(
+    active_page: str,
+    devices: list[dict[str, Any]],
+    session: dict[str, Any] | None,
+    calibrations: list[str],
+    sync: dict[str, Any] | None = None,
+    sync_cooldown_remaining_s: float = 0.0,
 ) -> str:
-    """Two linked slider + number-input rows. Each form posts on
-    submit — the `<input>`s share a `form` attribute and an `oninput`
-    handler that mirrors slider <-> number, so the operator sees the
-    number update as they drag. Submit fires on the change event after
-    release (slider) or blur / Enter (number)."""
-    thr = f"{chirp_detect_threshold:.2f}"
-    ivl = f"{heartbeat_interval_s:g}"
+    kicker, title, copy = _PAGE_META.get(active_page, _PAGE_META["dashboard"])
     return (
-        # Chirp threshold row.
+        '<nav class="nav">'
+        '<div class="nav-main">'
+        '<div class="nav-brand-block">'
+        '<a class="brand" href="/"><span class="dot"></span>BALL_TRACKER</a>'
+        '<div class="nav-page">'
+        f'<div class="nav-page-kicker">{html.escape(kicker)}</div>'
+        f'<div class="nav-page-title">{html.escape(title)}</div>'
+        f'<div class="nav-page-copy">{html.escape(copy)}</div>'
+        '</div>'
+        '</div>'
+        f'<div class="nav-tabs">{_render_primary_nav(active_page)}</div>'
+        '</div>'
+        '<div class="nav-status-row">'
+        f'<div class="status-line" id="nav-status">{_render_nav_status(devices, session, calibrations, sync, sync_cooldown_remaining_s)}</div>'
+        '</div>'
+        '</nav>'
+    )
+
+
+def _render_chirp_threshold_body(chirp_detect_threshold: float) -> str:
+    thr = f"{chirp_detect_threshold:.2f}"
+    return (
         '<form class="tuning-row" method="POST" '
         'action="/settings/chirp_threshold" id="tuning-chirp-form">'
         '<span class="tuning-label">Chirp thr</span>'
@@ -2798,6 +2888,21 @@ def _render_tuning_body(
         'oninput="this.form.querySelector(\'input[type=range]\').value=this.value" '
         'onchange="this.form.submit()">'
         '</form>'
+    )
+
+
+def _render_tuning_body(
+    heartbeat_interval_s: float,
+    tracking_exposure_cap: str = "frame_duration",
+    capture_height_px: int = 1080,
+) -> str:
+    """Linked slider + segmented-control rows. Each form posts on
+    submit — the `<input>`s share a `form` attribute and an `oninput`
+    handler that mirrors slider <-> number, so the operator sees the
+    number update as they drag. Submit fires on the change event after
+    release (slider) or blur / Enter (number)."""
+    ivl = f"{heartbeat_interval_s:g}"
+    return (
         # Heartbeat interval row.
         '<form class="tuning-row" method="POST" '
         'action="/settings/heartbeat_interval" id="tuning-hb-form">'
@@ -2814,7 +2919,7 @@ def _render_tuning_body(
         '<span class="tuning-unit">s</span>'
         '</form>'
         # Tracking exposure-cap row. Server-owned policy; iOS hot-applies
-        # it on heartbeat and armed sessions snapshot it at arm time.
+        # it on WS settings messages and armed sessions snapshot it at arm time.
         + ''.join(
             '<div class="tuning-row">'
             '<span class="tuning-label">Tracking exp</span>'
@@ -2849,7 +2954,7 @@ def _render_tuning_body(
                 f'<button class="btn{"" if h == capture_height_px else " secondary"} small" '
                 f'type="submit">{h}p</button>'
                 f'</form>'
-                for h in (540, 720, 1080)
+                for h in (720, 1080)
             )
             + '</div>'
             '</div>'
@@ -2924,11 +3029,8 @@ def render_events_index_html(
         "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
         "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
         f"<style>{_CSS}</style>"
-        "</head><body>"
-        '<nav class="nav">'
-        '<span class="brand"><span class="dot"></span>BALL_TRACKER</span>'
-        f'<div class="status-line" id="nav-status">{_render_nav_status(devices, session, calibrations, sync, sync_cooldown_remaining_s)}</div>'
-        "</nav>"
+        "</head><body data-page=\"dashboard\">"
+        f'{_render_app_nav("dashboard", devices, session, calibrations, sync, sync_cooldown_remaining_s)}'
         '<div class="layout">'
         '<aside class="sidebar">'
         '<div class="card">'
@@ -2949,10 +3051,6 @@ def render_events_index_html(
         '  <span class="degraded-icon">⚠</span>'
         '  <span data-degraded-body>Live stream degraded.</span>'
         '</div>'
-        '<details id="telemetry-panel" class="telemetry-panel">'
-        '  <summary>TELEMETRY</summary>'
-        '  <div id="telemetry-body" class="telemetry-body"></div>'
-        '</details>'
         '<div class="canvas-hint">Drag to rotate</div>'
         '<div class="canvas-mode-toggle" role="radiogroup" aria-label="Canvas mode">'
         '  <button type="button" data-canvas-mode="inspect" class="active">INSPECT</button>'

@@ -123,7 +123,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // the camera VC itself never reads them after the push, so duplicating
     // them as instance vars would just be two stores out of sync.
 
-    // Remote-control state (driven by the heartbeat response).
+    // Remote-control state (driven by WS heartbeat / settings traffic).
     /// Last (command, sync_id) tuple we acted on. Plain "arm" / "disarm"
     /// use a nil sync_id; `"sync_run"` carries the server-minted run id so
     /// back-to-back runs (same command string, different run) still fire.
@@ -134,7 +134,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// because `.recording` always returns to `.standby` now.
     private var returnToStandbyAfterCycle: Bool = false
     /// Server-minted pairing key for the currently armed session. Read
-    /// off each heartbeat reply; tagged onto every recording that starts
+    /// off WS arm/settings traffic; tagged onto every recording that starts
     /// while the session is armed. Nil when the server has no active
     /// session. iPhones never mint this themselves.
     private var currentSessionId: String?
@@ -191,7 +191,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let topStatusChip = StatusChip()
     /// Small HUD chip showing the currently-effective capture mode
     /// (session snapshot if armed, otherwise the dashboard's global
-    /// toggle). Driven by `/heartbeat` replies.
+    /// toggle). Driven by WS settings / arm traffic.
     private let modeLabel = UILabel()
     /// Last-known capture mode from the server. Starts at cameraOnly so a
     /// network-unreachable launch degrades to the pre-split behaviour. Step 2
@@ -202,9 +202,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// WebSocket transport. Lazily initialized so the base URL (built from
     /// settings) is read after `viewDidLoad` where UserDefaults are stable.
     private var ws: ServerWebSocketConnection?
-    /// Cache of the server-pushed runtime tunables so the heartbeat
+    /// Cache of the server-pushed runtime tunables so the WS settings
     /// callback can skip hot-apply when the value hasn't changed. `nil`
-    /// means "never heard from the server yet" — the first heartbeat
+    /// means "never heard from the server yet" — the first settings payload
     /// triggers the initial apply regardless of whether the server
     /// value happens to equal the local Settings bootstrap default.
     private var lastServerChirpThreshold: Double?
@@ -212,7 +212,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var lastServerTrackingExposureCapMode: ServerUploader.TrackingExposureCapMode?
     /// Currently-applied capture image height. Initialised from
     /// SettingsViewController.captureHeightFixed (1080). Server pushes a
-    /// value via heartbeat; when it differs, rebuild the capture session
+    /// value via WS settings; when it differs, rebuild the capture session
     /// — but only while in .standby so an armed clip isn't disrupted.
     private var currentCaptureHeight: Int = SettingsViewController.captureHeightFixed
     /// Paired 16:9 width for `currentCaptureHeight`. Used by every
@@ -222,7 +222,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func captureWidthForHeight(_ h: Int) -> Int {
         switch h {
-        case 540:  return 960
         case 720:  return 1280
         case 1080: return 1920
         default:   return SettingsViewController.captureWidthFixed
@@ -230,7 +229,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     // Phase 4a live preview. `previewRequestedByServer` mirrors the
-    // heartbeat-reply flag for THIS camera; `previewUploader` lazily
+    // WS settings flag for THIS camera; `previewUploader` lazily
     // constructs on first push. When the flag flips true→false we reset
     // the uploader so a stale in-flight POST doesn't land after toggle-off.
     // Phase 6: capture session is always live at standbyFps when idle, so
@@ -1108,10 +1107,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// `currentCaptureHeight` and reconfigures the live session.
     private func applyServerCaptureHeight(_ newHeight: Int) {
         guard let device = currentCaptureDevice else { return }
-        // 16:9 standard widths for the three allowed heights.
+        // 16:9 standard widths for the allowed heights.
         let width: Int
         switch newHeight {
-        case 540:  width = 960
         case 720:  width = 1280
         case 1080: width = 1920
         default:
@@ -1356,8 +1354,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         session.addOutput(output)
 
-        // Phase 3: dashboard pushes chirp_threshold via heartbeat replies;
-        // 0.18 is the bootstrap default used before the first reply lands.
+        // Phase 3: dashboard pushes chirp_threshold via WS settings;
+        // 0.18 is the bootstrap default used before the first payload lands.
         let detector = AudioChirpDetector(threshold: 0.18)
         output.setSampleBufferDelegate(detector, queue: detector.deliveryQueue)
         session.commitConfiguration()
@@ -1906,7 +1904,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// anything settings-driven. Phase 6: Settings is bootstrap-only
     /// (IP / port / role), so the only knobs here are the server endpoint
     /// and the camera role. Chirp threshold + heartbeat interval come from
-    /// the dashboard via heartbeat replies (Phase 3).
+    /// the dashboard via WS settings (Phase 3).
     private func applyUpdatedSettings() {
         let latest = SettingsViewController.loadFromUserDefaults()
         let serverChanged = latest.serverIP != settings.serverIP
@@ -1944,7 +1942,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         topStatusChip.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(topStatusChip)
 
-        // Top-right mode indicator. Populated from heartbeat replies; shows
+        // Top-right mode indicator. Populated from WS settings / arm traffic; shows
         // the effective capture mode so the operator always knows whether
         // an arm will record+upload MOV (camera-only) or run detection on
         // device (on-device).

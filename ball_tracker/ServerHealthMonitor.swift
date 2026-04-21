@@ -3,9 +3,8 @@ import os
 
 private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "network")
 
-/// 1 Hz `/heartbeat` poller with exponential backoff on failure. Owns
-/// the liveness-probe timer, the stale-response generation token, and
-/// the "last contact" tick timer that drives the HUD label.
+/// 1 Hz WS heartbeat scheduler. Owns the liveness-probe timer and the
+/// "last contact" tick timer that drives the HUD label.
 ///
 /// Decoupled from UIKit: callers register callbacks for state changes.
 /// Every callback fires on the main queue.
@@ -14,7 +13,7 @@ final class ServerHealthMonitor {
 
     private var baseIntervalS: TimeInterval
     /// Mirrored from the camera VC whenever a legacy chirp anchor is set
-    /// or cleared. Stamped onto every outgoing heartbeat so the dashboard
+    /// or cleared. Stamped onto every outgoing WS heartbeat so the dashboard
     /// can distinguish "has some anchor" from "has the current sync id".
     private var timeSyncId: String?
 
