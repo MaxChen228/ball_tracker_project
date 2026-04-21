@@ -34,6 +34,57 @@ _MARKERS_CSS = """
   display: grid; grid-template-columns: minmax(460px, 1.4fr) minmax(360px, 1fr);
   gap: var(--s-3); align-items: start;
 }
+.compare-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-3);
+}
+.camera-compare {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.camera-compare-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-2);
+}
+.compare-heading {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s-2); flex-wrap: wrap;
+}
+.compare-title {
+  margin: 0; font-family: var(--mono); font-size: 12px;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink);
+}
+.compare-note {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--sub);
+}
+.compare-cell-label {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  z-index: 3;
+  padding: 3px 7px;
+  border-radius: var(--r);
+  background: rgba(26, 23, 20, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #F8F7F4;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.compare-cell-label.real {
+  border-color: rgba(202, 61, 47, 0.32);
+}
+.compare-cell-label.virt {
+  border-color: rgba(219, 214, 205, 0.18);
+}
+.camera-compare .preview-panel .placeholder {
+  display: none;
+}
 .markers-right { display: flex; flex-direction: column; gap: var(--s-3); }
 .controls-row {
   display: flex; gap: var(--s-2); align-items: end; flex-wrap: wrap;
@@ -118,6 +169,8 @@ _MARKERS_CSS = """
 .good-text { color: var(--passed); }
 .subtle-text { color: var(--sub); }
 @media (max-width: 1100px) {
+  .compare-grid { grid-template-columns: 1fr; }
+  .camera-compare-grid { grid-template-columns: 1fr; }
   .markers-grid { grid-template-columns: 1fr; }
   #markers-plot { height: 480px; }
 }
@@ -137,15 +190,27 @@ _MARKERS_JS = r"""
   const clearBtn = document.getElementById('clear-markers-btn');
   const camAEl = document.getElementById('camera-a');
   const camBEl = document.getElementById('camera-b');
+  const compareRoot = document.getElementById('compare-root');
+  const compareStatus = document.getElementById('compare-status');
 
   const state = {
     markers: INITIAL.markers || [],
     candidates: [],
     scanMeta: INITIAL.scanMeta || null,
     scene: INITIAL.scene || {},
+    compareMarkers: INITIAL.compare_markers || [],
     selectedKind: null,
     selectedId: null,
   };
+
+  const PLATE_WORLD = [
+    [-0.216, 0.0,   0.0],
+    [ 0.216, 0.0,   0.0],
+    [ 0.216, 0.216, 0.0],
+    [ 0.0,   0.432, 0.0],
+    [-0.216, 0.216, 0.0],
+  ];
+  const virtCamMeta = new Map((state.scene.cameras || []).map(cam => [cam.camera_id, cam]));
 
   function esc(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
@@ -290,6 +355,216 @@ _MARKERS_JS = r"""
       state.selectedKind = row[0] === 'candidate' ? 'candidate' : 'stored';
       state.selectedId = Number(row[1]);
       renderAll();
+    });
+  }
+
+  function compareRows() {
+    const rows = [];
+    (state.compareMarkers || []).forEach(row => rows.push({ ...row, origin: 'known' }));
+    state.markers.forEach(row => {
+      if (!rows.find(existing => Number(existing.marker_id) === Number(row.marker_id))) {
+        rows.push({ ...row, kind: 'stored', origin: 'stored' });
+      }
+    });
+    state.candidates.forEach(row => {
+      const idx = rows.findIndex(existing => Number(existing.marker_id) === Number(row.marker_id));
+      const next = { ...row, kind: 'candidate', origin: 'candidate' };
+      if (idx >= 0) rows[idx] = next;
+      else rows.push(next);
+    });
+    return rows;
+  }
+
+  function projectWorldToPixel(P, cam) {
+    const R = cam.R_wc, t = cam.t_wc;
+    if (!R || !t) return null;
+    const Xc = R[0]*P[0] + R[1]*P[1] + R[2]*P[2] + t[0];
+    const Yc = R[3]*P[0] + R[4]*P[1] + R[5]*P[2] + t[1];
+    const Zc = R[6]*P[0] + R[7]*P[1] + R[8]*P[2] + t[2];
+    if (Zc <= 0.01) return null;
+    const xn = Xc / Zc, yn = Yc / Zc;
+    const d = cam.distortion || [0, 0, 0, 0, 0];
+    const k1 = d[0] || 0, k2 = d[1] || 0, p1 = d[2] || 0, p2 = d[3] || 0, k3 = d[4] || 0;
+    const r2 = xn*xn + yn*yn, r4 = r2*r2, r6 = r4*r2;
+    const radial = 1 + k1*r2 + k2*r4 + k3*r6;
+    const xd = xn*radial + 2*p1*xn*yn + p2*(r2 + 2*xn*xn);
+    const yd = yn*radial + p1*(r2 + 2*yn*yn) + 2*p2*xn*yn;
+    return { u: cam.fx * xd + cam.cx, v: cam.fy * yd + cam.cy, z: Zc };
+  }
+
+  function markerColor(row) {
+    if (row.kind === 'plate') return '#256246';
+    if (row.kind === 'candidate') return '#A7372A';
+    return row.on_plate_plane ? '#256246' : '#9B6B16';
+  }
+
+  function markerDash(row) {
+    if (row.kind === 'candidate') return [5, 3];
+    if (row.kind === 'plate') return [3, 2];
+    return row.on_plate_plane ? [4, 3] : [8, 4];
+  }
+
+  function drawMarkerFootprint(ctx, row, cam, sx, sy, selected) {
+    const half = Number(row.side_m || 0.08) / 2.0;
+    const x = Number(row.x_m || 0);
+    const y = Number(row.y_m || 0);
+    const z = Number(row.z_m || 0);
+    const quad = [
+      [x - half, y - half, z],
+      [x + half, y - half, z],
+      [x + half, y + half, z],
+      [x - half, y + half, z],
+    ].map(P => projectWorldToPixel(P, cam));
+    const centroid = projectWorldToPixel([x, y, z], cam);
+    if (!centroid) return;
+    const color = markerColor(row);
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = selected ? 2.4 : 1.5;
+    ctx.setLineDash(markerDash(row));
+    if (quad.every(Boolean)) {
+      ctx.beginPath();
+      for (let i = 0; i < quad.length; i++) {
+        const px = quad[i].u * sx;
+        const py = quad[i].v * sy;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    } else {
+      const cx = centroid.u * sx;
+      const cy = centroid.v * sy;
+      const box = selected ? 18 : 14;
+      ctx.strokeRect(cx - box / 2, cy - box / 2, box, box);
+    }
+    ctx.setLineDash([]);
+    const lx = centroid.u * sx;
+    const ly = centroid.v * sy;
+    const label = `ID ${row.marker_id}`;
+    ctx.font = '11px "JetBrains Mono", monospace';
+    const tw = ctx.measureText(label).width;
+    const pad = 4;
+    const bh = 18;
+    ctx.fillStyle = color;
+    ctx.fillRect(lx - tw / 2 - pad, ly - 22, tw + pad * 2, bh);
+    ctx.fillStyle = '#1A1714';
+    ctx.fillText(label, lx - tw / 2, ly - 9);
+  }
+
+  function drawCompareVirtual(canvas, camId) {
+    const cam = virtCamMeta.get(camId);
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight;
+    if (!cssW || !cssH) return false;
+    const pxW = Math.max(1, Math.floor(cssW * dpr));
+    const pxH = Math.max(1, Math.floor(cssH * dpr));
+    if (canvas.width !== pxW || canvas.height !== pxH) {
+      canvas.width = pxW;
+      canvas.height = pxH;
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    ctx.fillStyle = '#1A1714';
+    ctx.fillRect(0, 0, cssW, cssH);
+    if (!cam || cam.fx == null || !cam.R_wc || !cam.t_wc || !cam.image_width_px || !cam.image_height_px) {
+      return false;
+    }
+    const sx = cssW / cam.image_width_px;
+    const sy = cssH / cam.image_height_px;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, cssW, cssH);
+    ctx.clip();
+    const cxPx = cam.cx * sx;
+    const cyPx = cam.cy * sy;
+    ctx.strokeStyle = 'rgba(219, 214, 205, 0.25)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cxPx - 6, cyPx); ctx.lineTo(cxPx + 6, cyPx);
+    ctx.moveTo(cxPx, cyPx - 6); ctx.lineTo(cxPx, cyPx + 6);
+    ctx.stroke();
+    const plateProj = PLATE_WORLD.map(P => projectWorldToPixel(P, cam));
+    if (plateProj.every(Boolean)) {
+      ctx.strokeStyle = 'rgba(202, 61, 47, 0.95)';
+      ctx.fillStyle = 'rgba(202, 61, 47, 0.10)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 3]);
+      ctx.beginPath();
+      for (let i = 0; i < plateProj.length; i++) {
+        const x = plateProj[i].u * sx;
+        const y = plateProj[i].v * sy;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    const selected = currentSelection();
+    compareRows().forEach(row => {
+      drawMarkerFootprint(
+        ctx,
+        row,
+        cam,
+        sx,
+        sy,
+        selected && Number(selected.marker_id) === Number(row.marker_id),
+      );
+    });
+    ctx.restore();
+    return true;
+  }
+
+  function redrawCompareViews() {
+    compareRoot.querySelectorAll('[data-markers-virt-canvas]').forEach(canvas => {
+      const camId = canvas.dataset.markersVirtCanvas;
+      const cell = canvas.closest('.virt-cell');
+      const ok = drawCompareVirtual(canvas, camId);
+      if (cell) cell.classList.toggle('ready', ok);
+    });
+    compareRoot.querySelectorAll('[data-preview-overlay]').forEach(svg => {
+      const camId = svg.dataset.previewOverlay;
+      const meta = virtCamMeta.get(camId);
+      const poly = svg.querySelector('polygon');
+      if (!poly || !meta || meta.image_width_px == null || meta.image_height_px == null) {
+        if (poly) poly.setAttribute('points', '');
+        svg.removeAttribute('viewBox');
+        return;
+      }
+      const proj = PLATE_WORLD.map(P => projectWorldToPixel(P, meta));
+      if (!proj.every(Boolean)) {
+        poly.setAttribute('points', '');
+        svg.removeAttribute('viewBox');
+        return;
+      }
+      svg.setAttribute('viewBox', `0 0 ${meta.image_width_px} ${meta.image_height_px}`);
+      poly.setAttribute('points', proj.map(p => `${p.u.toFixed(2)},${p.v.toFixed(2)}`).join(' '));
+    });
+  }
+
+  async function tickPreviewRefresh() {
+    const cams = ['A', 'B'];
+    await Promise.all(cams.map(async cam => {
+      try {
+        await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: true }),
+        });
+      } catch (_) {}
+    }));
+  }
+
+  function tickPreviewImages() {
+    const t = Date.now();
+    compareRoot.querySelectorAll('img[data-preview-img]').forEach(img => {
+      const cam = img.dataset.previewImg;
+      if (!cam) return;
+      img.src = '/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + t;
+      img.style.opacity = 1;
     });
   }
 
@@ -486,6 +761,7 @@ _MARKERS_JS = r"""
     renderStored();
     renderDetails();
     bindTableActions();
+    redrawCompareViews();
   }
 
   scanBtn.onclick = async function () {
@@ -579,6 +855,11 @@ _MARKERS_JS = r"""
     renderAll();
   };
 
+  window.addEventListener('resize', redrawCompareViews);
+  tickPreviewRefresh();
+  tickPreviewImages();
+  setInterval(tickPreviewRefresh, 2000);
+  setInterval(tickPreviewImages, 250);
   renderAll();
 })();
 """
@@ -587,12 +868,16 @@ _MARKERS_JS = r"""
 def render_markers_html(
     *,
     markers: list[dict[str, Any]],
+    compare_markers: list[dict[str, Any]],
     scene: dict[str, Any],
     devices: list[dict[str, Any]],
     session: dict[str, Any] | None,
     calibrations: list[str],
 ) -> str:
-    initial_state = json.dumps({"markers": markers, "scene": scene}, ensure_ascii=False)
+    initial_state = json.dumps(
+        {"markers": markers, "scene": scene, "compare_markers": compare_markers},
+        ensure_ascii=False,
+    )
     session_html = (
         f'<span class="val armed">{session.get("id", "—")}</span>'
         if session and session.get("armed")
@@ -632,6 +917,49 @@ def render_markers_html(
         '<div class="hero-actions">'
         '<span class="chip calibrated">Shared style system</span>'
         '<span class="chip partial">Independent page</span>'
+        '</div>'
+        '</section>'
+        '<section class="card">'
+        '<div class="compare-heading">'
+        '<div>'
+        '<h2 class="card-title">Camera Compare</h2>'
+        '<div class="compare-note">Real previews use server-side annotated marker boxes. Virtual views project plate and known markers through the same camera calibration used by setup and viewer.</div>'
+        '</div>'
+        '<div id="compare-status" class="muted-note">REAL = annotated preview · VIRT = projected marker registry</div>'
+        '</div>'
+        '<div id="compare-root" class="compare-grid">'
+        '<section class="camera-compare">'
+        '<h3 class="compare-title">Camera A</h3>'
+        '<div class="camera-compare-grid">'
+        '<div class="preview-panel" data-preview-panel="A">'
+        '<span class="compare-cell-label real">Real · A</span>'
+        '<img data-preview-img="A" src="/camera/A/preview?annotate=1&t=0" alt="preview A">'
+        '<svg class="plate-overlay" data-preview-overlay="A" aria-hidden="true"><polygon></polygon></svg>'
+        '<div class="placeholder">Waiting for preview…</div>'
+        '</div>'
+        '<div class="virt-cell" data-virt-cell="A">'
+        '<span class="compare-cell-label virt">Virt · A</span>'
+        '<canvas data-markers-virt-canvas="A"></canvas>'
+        '<div class="placeholder">Not calibrated</div>'
+        '</div>'
+        '</div>'
+        '</section>'
+        '<section class="camera-compare">'
+        '<h3 class="compare-title">Camera B</h3>'
+        '<div class="camera-compare-grid">'
+        '<div class="preview-panel" data-preview-panel="B">'
+        '<span class="compare-cell-label real">Real · B</span>'
+        '<img data-preview-img="B" src="/camera/B/preview?annotate=1&t=0" alt="preview B">'
+        '<svg class="plate-overlay" data-preview-overlay="B" aria-hidden="true"><polygon></polygon></svg>'
+        '<div class="placeholder">Waiting for preview…</div>'
+        '</div>'
+        '<div class="virt-cell" data-virt-cell="B">'
+        '<span class="compare-cell-label virt">Virt · B</span>'
+        '<canvas data-markers-virt-canvas="B"></canvas>'
+        '<div class="placeholder">Not calibrated</div>'
+        '</div>'
+        '</div>'
+        '</section>'
         '</div>'
         '</section>'
         '<section class="markers-grid">'

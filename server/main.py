@@ -4861,6 +4861,26 @@ def markers_page() -> HTMLResponse:
 
     session = state.session_snapshot()
     markers = [_serialize_marker(rec) for rec in state._marker_registry.all_records()]
+    compare_markers = [
+        {
+            "marker_id": int(mid),
+            "x_m": float(xy[0]),
+            "y_m": float(xy[1]),
+            "z_m": 0.0,
+            "label": f"Plate {mid}",
+            "on_plate_plane": True,
+            "kind": "plate",
+            "side_m": 0.08,
+        }
+        for mid, xy in sorted(PLATE_MARKER_WORLD.items())
+    ] + [
+        {
+            **_serialize_marker(rec),
+            "kind": "stored",
+            "side_m": 0.08,
+        }
+        for rec in state._marker_registry.all_records()
+    ]
     scene = build_calibration_scene(state.calibrations()).to_dict()
     scene["plate"] = [
         {"x": -0.432 / 2.0, "y": 0.0, "z": 0.0},
@@ -4872,6 +4892,7 @@ def markers_page() -> HTMLResponse:
     return HTMLResponse(
         render_markers_html(
             markers=markers,
+            compare_markers=compare_markers,
             scene=scene,
             devices=[
                 {
