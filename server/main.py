@@ -687,6 +687,18 @@ class State:
         for pitch in (a, b):
             if pitch is not None:
                 candidate_paths |= self._paths_for_pitch(pitch)
+                # Auto-include paths when frames are actually present, even if
+                # neither the session nor the pitch explicitly listed them —
+                # /pitch_analysis can attach iOS frames post-hoc into a session
+                # that was armed server_post-only, and we still owe the caller
+                # a triangulation over those frames.
+                if pitch.frames_ios_post or pitch.frames_on_device:
+                    candidate_paths.add(DetectionPath.ios_post)
+                # Only auto-include server_post when the bucket is populated.
+                # Legacy `pitch.frames` alone is ambiguous — in on_device-only
+                # sessions it should map to ios_post, not resurrect server_post.
+                if pitch.frames_server_post:
+                    candidate_paths.add(DetectionPath.server_post)
         if live is not None and live.frame_counts:
             candidate_paths.add(DetectionPath.live)
         if not candidate_paths:
@@ -745,7 +757,22 @@ class State:
                 authority = pts
                 break
         result.triangulated = authority
-        result.points = authority
+        # Legacy `points` semantics: in dual-like sessions (server_post is in
+        # the candidate set) keep it strictly on the server stream so iOS
+        # post-pass doesn't leak across the points/points_on_device boundary.
+        # In mono-like sessions (on_device-only, live-only, etc) collapse to
+        # whichever path actually produced data — older consumers (viewer,
+        # /events) expect `points` to hold the session's single result when
+        # no dual split is in play.
+        if DetectionPath.server_post in candidate_paths:
+            legacy_points = result.triangulated_by_path.get(DetectionPath.server_post.value, [])
+        else:
+            legacy_points = (
+                result.triangulated_by_path.get(DetectionPath.ios_post.value)
+                or result.triangulated_by_path.get(DetectionPath.live.value)
+                or []
+            )
+        result.points = list(legacy_points)
         if result.triangulated_by_path.get(DetectionPath.ios_post.value):
             result.points_on_device = list(result.triangulated_by_path[DetectionPath.ios_post.value])
         elif result.triangulated_by_path.get(DetectionPath.live.value):
@@ -2990,7 +3017,7 @@ def _summarize_result(result: SessionResult) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "session_id": result.session_id,
         "paired": paired,
-        "triangulated_points": len(result.points),
+        "triangulated_points": len(result.triangulated),
         "error": result.error,
     }
     if result.points:
