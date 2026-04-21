@@ -721,7 +721,8 @@ def test_dashboard_renders_control_panel():
     assert 'id="session-body"' in body
     assert 'id="events-body"' in body
     assert 'id="scene-root"' in body
-    assert 'href="/setup"' in body  # nav link points at the new config page
+    assert 'href="/setup"' in body
+    assert 'href="/markers"' in body
 
 
 def test_setup_page_renders_all_config_surfaces():
@@ -731,11 +732,23 @@ def test_setup_page_renders_all_config_surfaces():
     body = r.text
     # DEVICES · CALIBRATION + TIME SYNC + RUNTIME · TUNING all live here.
     assert 'id="devices-body"' in body
-    assert 'id="extended-markers-body"' in body
+    assert 'href="/markers"' in body
+    assert 'Open markers workspace' in body
     assert 'id="sync-body"' in body
     assert 'id="sync-trace"' in body
     assert 'id="sync-log"' in body
     assert 'id="tuning-body"' in body
+
+
+def test_markers_page_renders_workspace():
+    client = TestClient(app)
+    r = client.get("/markers")
+    assert r.status_code == 200
+    body = r.text
+    assert 'id="markers-plot"' in body
+    assert 'id="candidate-body"' in body
+    assert 'id="stored-body"' in body
+    assert 'id="details-body"' in body
 
 
 def test_sync_page_redirects_to_setup():

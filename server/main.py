@@ -85,6 +85,10 @@ from schemas import (
     FramePayload,
     HeartbeatBody,
     IntrinsicsPayload,
+    MarkerBatchUpsertRequest,
+    MarkerDraft,
+    MarkerRecord,
+    MarkerUpdateRequest,
     PitchAnalysisPayload,
     PitchPayload,
     Session,
@@ -106,13 +110,14 @@ from pipeline import annotate_video, detect_pitch
 from video import probe_dims
 from chirp import chirp_wav_bytes
 from preview import PreviewBuffer, REQUEST_TTL_S as _PREVIEW_REQUEST_TTL_S
-from extended_markers import ExtendedMarkersDB
+from marker_registry import MarkerRegistryDB
 from calibration_solver import (
     PLATE_MARKER_WORLD,
     derive_fov_intrinsics,
     detect_all_markers_in_dict,
     solve_homography_from_world_map,
 )
+from triangulate import build_K, camera_center_world, recover_extrinsics, triangulate_rays, undistorted_ray_cam
 from sync_solver import compute_mutual_sync
 from cleanup_old_sessions import cleanup_expired_sessions
 
@@ -242,6 +247,50 @@ class _LegacyTimeSyncIntent:
     expires_at: float
 
 
+@dataclass
+class _AutoCalibrationRun:
+    id: str
+    camera_id: str
+    status: str
+    started_at: float
+    updated_at: float
+    frames_seen: int = 0
+    good_frames: int = 0
+    stable_frames: int = 0
+    markers_visible: int = 0
+    solver: str | None = None
+    reprojection_px: float | None = None
+    position_jitter_cm: float | None = None
+    angle_jitter_deg: float | None = None
+    applied: bool = False
+    summary: str | None = None
+    detail: str | None = None
+    detected_ids: list[int] | None = None
+    result: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "camera_id": self.camera_id,
+            "status": self.status,
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+            "frames_seen": self.frames_seen,
+            "good_frames": self.good_frames,
+            "stable_frames": self.stable_frames,
+            "markers_visible": self.markers_visible,
+            "solver": self.solver,
+            "reprojection_px": self.reprojection_px,
+            "position_jitter_cm": self.position_jitter_cm,
+            "angle_jitter_deg": self.angle_jitter_deg,
+            "applied": self.applied,
+            "summary": self.summary,
+            "detail": self.detail,
+            "detected_ids": list(self.detected_ids or []),
+            "result": dict(self.result or {}),
+        }
+
+
 class State:
     def __init__(
         self,
@@ -326,12 +375,15 @@ class State:
         # flags pending requests that iOS drains on its next captureOutput.
         self._cal_frames: dict[str, tuple[bytes, float]] = {}
         self._cal_frame_requested: dict[str, float] = {}  # cam_id → expiry ts
-        # Phase 5: extended-marker registry (operator-taped DICT_4X4_50
-        # markers 6-49 on the plate plane, world coords auto-recovered
-        # from the plate homography). Persisted to
-        # `data/extended_markers.json` so dashboard-registered markers
-        # survive a server restart.
-        self._extended_markers = ExtendedMarkersDB(data_dir)
+        # Operator-managed marker registry. Stores 3D world coords plus a
+        # "on plate plane" flag so the current planar auto-calibration path
+        # can keep consuming only the eligible subset.
+        self._marker_registry = MarkerRegistryDB(data_dir)
+        # Per-camera auto-calibration run state. Long-running server-side
+        # observation window updates this so `/setup` can show
+        # searching/stabilizing/solving/verified instead of a blind spinner.
+        self._auto_cal_runs: dict[str, _AutoCalibrationRun] = {}
+        self._auto_cal_last: dict[str, _AutoCalibrationRun] = {}
         # Calibrations first — _load_from_disk re-triangulates every cached
         # pitch, and triangulation needs the calibration snapshot to decide
         # the intrinsic-scale factor (MOV dims vs. calibration dims).
@@ -734,6 +786,73 @@ class State:
             if now - ts > max_age_s:
                 return None
             return got
+
+    # --- Auto-calibration runs -------------------------------------------
+
+    def start_auto_cal_run(self, camera_id: str) -> _AutoCalibrationRun:
+        now = self._time_fn()
+        with self._lock:
+            current = self._auto_cal_runs.get(camera_id)
+            if current is not None and current.status not in {"completed", "failed"}:
+                raise ValueError(f"auto calibration already running for camera {camera_id}")
+            run = _AutoCalibrationRun(
+                id=f"acr_{secrets.token_hex(4)}",
+                camera_id=camera_id,
+                status="searching",
+                started_at=now,
+                updated_at=now,
+                summary="Waiting for enough stable frames",
+            )
+            self._auto_cal_runs[camera_id] = run
+            return _AutoCalibrationRun(**run.to_dict())
+
+    def update_auto_cal_run(self, camera_id: str, **updates: Any) -> _AutoCalibrationRun | None:
+        now = self._time_fn()
+        with self._lock:
+            run = self._auto_cal_runs.get(camera_id)
+            if run is None:
+                return None
+            for key, value in updates.items():
+                if hasattr(run, key):
+                    setattr(run, key, value)
+            run.updated_at = now
+            return _AutoCalibrationRun(**run.to_dict())
+
+    def finish_auto_cal_run(
+        self,
+        camera_id: str,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+        summary: str | None = None,
+        detail: str | None = None,
+        applied: bool | None = None,
+    ) -> _AutoCalibrationRun | None:
+        now = self._time_fn()
+        with self._lock:
+            run = self._auto_cal_runs.get(camera_id)
+            if run is None:
+                return None
+            run.status = status
+            run.updated_at = now
+            run.result = result
+            if summary is not None:
+                run.summary = summary
+            if detail is not None:
+                run.detail = detail
+            if applied is not None:
+                run.applied = applied
+            snap = _AutoCalibrationRun(**run.to_dict())
+            self._auto_cal_last[camera_id] = snap
+            if status in {"completed", "failed"}:
+                self._auto_cal_runs.pop(camera_id, None)
+            return snap
+
+    def auto_cal_status(self) -> dict[str, Any]:
+        with self._lock:
+            active = {cam: run.to_dict() for cam, run in self._auto_cal_runs.items()}
+            last = {cam: run.to_dict() for cam, run in self._auto_cal_last.items()}
+            return {"active": active, "last": last}
 
     def _live_time_sync_intent_locked(self, now: float) -> _LegacyTimeSyncIntent | None:
         intent = self._current_time_sync_intent
@@ -1901,6 +2020,7 @@ def _build_status_response() -> dict[str, Any]:
             for cam in state._cal_frame_requested.keys()
             if state.is_calibration_frame_requested(cam)
         },
+        "auto_calibration": state.auto_cal_status(),
     }
 
 
@@ -3257,6 +3377,539 @@ def calibration_state() -> dict[str, Any]:
     }
 
 
+async def _await_calibration_frame(camera_id: str, *, timeout_s: float = 2.0) -> bytes:
+    import asyncio as _asyncio  # noqa: WPS433
+
+    state.request_calibration_frame(camera_id)
+    loops = max(1, int(round(timeout_s / 0.1)))
+    for _ in range(loops):
+        got = state.consume_calibration_frame(camera_id)
+        if got is not None:
+            jpeg_bytes, _ts = got
+            return jpeg_bytes
+        await _asyncio.sleep(0.1)
+    raise HTTPException(
+        status_code=408,
+        detail=(
+            f"camera {camera_id!r} did not deliver a calibration "
+            f"frame within {timeout_s:.0f} s — check the phone is online and awake"
+        ),
+    )
+
+
+def _decode_calibration_jpeg(jpeg_bytes: bytes) -> np.ndarray:
+    import cv2  # noqa: WPS433
+
+    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise HTTPException(status_code=422, detail="calibration frame is not a decodable JPEG")
+    return bgr
+
+
+def _marker_camera_pose(snapshot: CalibrationSnapshot) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    K = build_K(
+        snapshot.intrinsics.fx,
+        snapshot.intrinsics.fz,
+        snapshot.intrinsics.cx,
+        snapshot.intrinsics.cy,
+    )
+    H = np.asarray(snapshot.homography, dtype=np.float64).reshape(3, 3)
+    R_wc, t_wc = recover_extrinsics(K, H)
+    C_world = camera_center_world(R_wc, t_wc)
+    return K, R_wc, C_world
+
+
+def _all_marker_world_xyz() -> dict[int, tuple[float, float, float]]:
+    world_xyz = {
+        mid: (float(xy[0]), float(xy[1]), 0.0)
+        for mid, xy in PLATE_MARKER_WORLD.items()
+    }
+    for rec in state._marker_registry.all_records():
+        world_xyz[rec.marker_id] = (rec.x_m, rec.y_m, rec.z_m)
+    return world_xyz
+
+
+def _residual_bucket(residual_m: float) -> str:
+    if residual_m <= 0.01:
+        return "excellent"
+    if residual_m <= 0.03:
+        return "good"
+    if residual_m <= 0.06:
+        return "warn"
+    return "poor"
+
+
+def _triangulate_marker_candidates(
+    *,
+    camera_a_id: str,
+    camera_b_id: str,
+    bgr_a: np.ndarray,
+    bgr_b: np.ndarray,
+) -> dict[str, Any]:
+    snap_a = state.calibrations().get(camera_a_id)
+    snap_b = state.calibrations().get(camera_b_id)
+    if snap_a is None or snap_b is None:
+        missing = [cid for cid, snap in ((camera_a_id, snap_a), (camera_b_id, snap_b)) if snap is None]
+        raise HTTPException(
+            status_code=422,
+            detail=f"missing calibration for camera(s): {', '.join(missing)}",
+        )
+
+    K_a, R_a, C_a = _marker_camera_pose(snap_a)
+    K_b, R_b, C_b = _marker_camera_pose(snap_b)
+    dist_a = np.asarray(snap_a.intrinsics.distortion or [0, 0, 0, 0, 0], dtype=np.float64)
+    dist_b = np.asarray(snap_b.intrinsics.distortion or [0, 0, 0, 0, 0], dtype=np.float64)
+
+    det_a = {m.id: m for m in detect_all_markers_in_dict(bgr_a)}
+    det_b = {m.id: m for m in detect_all_markers_in_dict(bgr_b)}
+    existing = {rec.marker_id: rec for rec in state._marker_registry.all_records()}
+    common_ids = sorted(set(det_a.keys()) & set(det_b.keys()))
+    candidates: list[dict[str, Any]] = []
+    for marker_id in common_ids:
+        if marker_id in PLATE_MARKER_WORLD:
+            continue
+        centroid_a = det_a[marker_id].corners.mean(axis=0)
+        centroid_b = det_b[marker_id].corners.mean(axis=0)
+        ray_a_cam = undistorted_ray_cam(float(centroid_a[0]), float(centroid_a[1]), K_a, dist_a)
+        ray_b_cam = undistorted_ray_cam(float(centroid_b[0]), float(centroid_b[1]), K_b, dist_b)
+        ray_a_world = R_a.T @ ray_a_cam
+        ray_b_world = R_b.T @ ray_b_cam
+        point, gap = triangulate_rays(C_a, ray_a_world, C_b, ray_b_world)
+        if point is None:
+            continue
+        existing_rec = existing.get(int(marker_id))
+        delta_existing_m = None
+        if existing_rec is not None:
+            delta_existing_m = float(
+                np.linalg.norm(
+                    np.array([existing_rec.x_m, existing_rec.y_m, existing_rec.z_m], dtype=np.float64)
+                    - point
+                )
+            )
+        candidates.append(
+            {
+                "marker_id": int(marker_id),
+                "x_m": float(point[0]),
+                "y_m": float(point[1]),
+                "z_m": float(point[2]),
+                "residual_m": float(gap),
+                "residual_bucket": _residual_bucket(float(gap)),
+                "source_camera_ids": [camera_a_id, camera_b_id],
+                "suggest_on_plate_plane": abs(float(point[2])) <= 0.03,
+                "detected_in": [camera_a_id, camera_b_id],
+                "existing_marker": existing_rec is not None,
+                "existing_label": existing_rec.label if existing_rec is not None else None,
+                "existing_on_plate_plane": existing_rec.on_plate_plane if existing_rec is not None else None,
+                "delta_existing_m": delta_existing_m,
+                "update_action": (
+                    "keep"
+                    if existing_rec is None
+                    else ("refresh" if delta_existing_m is not None and delta_existing_m <= 0.03 else "conflict")
+                ),
+            }
+        )
+    only_a_ids = sorted(
+        mid for mid in det_a.keys() - det_b.keys()
+        if mid not in PLATE_MARKER_WORLD
+    )
+    only_b_ids = sorted(
+        mid for mid in det_b.keys() - det_a.keys()
+        if mid not in PLATE_MARKER_WORLD
+    )
+    return {
+        "candidates": candidates,
+        "visibility": {
+            "shared_ids": [row["marker_id"] for row in candidates],
+            "camera_a_only_ids": only_a_ids,
+            "camera_b_only_ids": only_b_ids,
+            "camera_a_detected_ids": sorted(det_a.keys()),
+            "camera_b_detected_ids": sorted(det_b.keys()),
+        },
+    }
+
+
+def _solve_pnp_homography(
+    detected: list[Any],
+    *,
+    intrinsics: IntrinsicsPayload,
+    image_size: tuple[int, int],
+) -> tuple[list[float], list[int]] | None:
+    import cv2  # noqa: WPS433
+
+    world_xyz = _all_marker_world_xyz()
+    markers_by_id = {m.id: m for m in detected if m.id in world_xyz}
+    detected_ids = sorted(markers_by_id.keys())
+    if len(detected_ids) < 4:
+        return None
+    object_pts = np.array([world_xyz[mid] for mid in detected_ids], dtype=np.float64)
+    image_pts = np.array(
+        [markers_by_id[mid].corners.mean(axis=0) for mid in detected_ids],
+        dtype=np.float64,
+    )
+    if np.linalg.matrix_rank(object_pts - object_pts.mean(axis=0, keepdims=True)) < 3:
+        return None
+    K = build_K(intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy).astype(np.float64)
+    dist = np.asarray(intrinsics.distortion or [0, 0, 0, 0, 0], dtype=np.float64)
+    ok, rvec, tvec, inliers = cv2.solvePnPRansac(
+        object_pts,
+        image_pts,
+        K,
+        dist,
+        flags=cv2.SOLVEPNP_ITERATIVE,
+        reprojectionError=4.0,
+        iterationsCount=200,
+        confidence=0.995,
+    )
+    if not ok:
+        return None
+    try:
+        rvec, tvec = cv2.solvePnPRefineLM(object_pts, image_pts, K, dist, rvec, tvec)
+    except Exception:
+        pass
+    R_wc, _ = cv2.Rodrigues(rvec)
+    H = K @ np.column_stack([R_wc[:, 0], R_wc[:, 1], tvec.reshape(3)])
+    if abs(H[2, 2]) < 1e-12:
+        return None
+    H = H / H[2, 2]
+    inlier_ids = (
+        [detected_ids[int(i)] for i in inliers.flatten().tolist()]
+        if inliers is not None
+        else detected_ids
+    )
+    return H.flatten().tolist(), inlier_ids
+
+
+def _derive_auto_cal_intrinsics(
+    camera_id: str,
+    *,
+    w_img: int,
+    h_img: int,
+    h_fov_deg: float | None = None,
+) -> tuple[IntrinsicsPayload, CalibrationSnapshot | None]:
+    prior = state.calibrations().get(camera_id)
+    if prior is not None and h_fov_deg is None:
+        prior_w = prior.image_width_px
+        prior_h = prior.image_height_px
+        if prior_w > 0 and prior_h > 0:
+            sx = w_img / prior_w
+            sy = h_img / prior_h
+            intrinsics = IntrinsicsPayload(
+                fx=prior.intrinsics.fx * sx,
+                fz=prior.intrinsics.fz * sy,
+                cx=prior.intrinsics.cx * sx,
+                cy=prior.intrinsics.cy * sy,
+                distortion=prior.intrinsics.distortion,
+            )
+            return intrinsics, prior
+        prior = None
+    h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else 1.1345
+    fx, fy, cx, cy = derive_fov_intrinsics(w_img, h_img, h_fov_rad)
+    return IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy), None
+
+
+def _solve_auto_cal_solution(
+    detected: list[Any],
+    *,
+    intrinsics: IntrinsicsPayload,
+    image_size: tuple[int, int],
+) -> tuple[Any | None, str, list[int]]:
+    world_map: dict[int, tuple[float, float]] = dict(PLATE_MARKER_WORLD)
+    world_map.update(state._marker_registry.planar_world_map())
+    planar = solve_homography_from_world_map(
+        detected, world_map, image_size=image_size
+    )
+    pnp_solution = _solve_pnp_homography(
+        detected, intrinsics=intrinsics, image_size=image_size
+    )
+    if pnp_solution is None:
+        return planar, "planar_homography", []
+    H_pnp, pnp_detected_ids = pnp_solution
+    if planar is None:
+        from calibration_solver import CalibrationSolveResult
+
+        planar = CalibrationSolveResult(
+            homography_row_major=H_pnp,
+            detected_ids=sorted(pnp_detected_ids),
+            missing_ids=[i for i in sorted(PLATE_MARKER_WORLD.keys()) if i not in pnp_detected_ids],
+            image_width_px=int(image_size[0]),
+            image_height_px=int(image_size[1]),
+        )
+    else:
+        planar = planar.__class__(
+            homography_row_major=H_pnp,
+            detected_ids=sorted(set(planar.detected_ids) | set(pnp_detected_ids)),
+            missing_ids=planar.missing_ids,
+            image_width_px=planar.image_width_px,
+            image_height_px=planar.image_height_px,
+        )
+    return planar, "pnp_pose", pnp_detected_ids
+
+
+def _pose_from_homography(
+    intrinsics: IntrinsicsPayload,
+    homography_row_major: list[float],
+) -> tuple[np.ndarray, np.ndarray]:
+    K = build_K(intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy)
+    H_mat = np.array(homography_row_major, dtype=np.float64).reshape(3, 3)
+    R_wc, t_wc = recover_extrinsics(K, H_mat)
+    center = camera_center_world(R_wc, t_wc)
+    forward = R_wc.T @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    forward = forward / np.linalg.norm(forward)
+    return center, forward
+
+
+def _reprojection_error_px(
+    intrinsics: IntrinsicsPayload,
+    homography_row_major: list[float],
+    detected: list[Any],
+) -> float | None:
+    import cv2  # noqa: WPS433
+
+    world_xyz = _all_marker_world_xyz()
+    K = build_K(
+        intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy
+    ).astype(np.float64)
+    H_mat = np.array(homography_row_major, dtype=np.float64).reshape(3, 3)
+    R_wc, t_wc = recover_extrinsics(K, H_mat)
+    rvec, _ = cv2.Rodrigues(R_wc)
+    dist = np.asarray(intrinsics.distortion or [0, 0, 0, 0, 0], dtype=np.float64)
+    errs: list[float] = []
+    for m in detected:
+        if m.id not in world_xyz:
+            continue
+        obj = np.array([[world_xyz[m.id]]], dtype=np.float64)
+        proj, _ = cv2.projectPoints(obj, rvec, t_wc.reshape(3, 1), K, dist)
+        pred = proj.reshape(2)
+        obs = m.corners.mean(axis=0)
+        errs.append(float(np.linalg.norm(pred - obs)))
+    return float(np.mean(errs)) if errs else None
+
+
+async def _run_auto_calibration(
+    camera_id: str,
+    *,
+    h_fov_deg: float | None = None,
+    track_run: bool = False,
+) -> dict[str, Any]:
+    import cv2  # noqa: WPS433
+    import asyncio as _asyncio  # noqa: WPS433
+    from calibration_solver import DetectedMarker
+
+    max_frames = 10
+    burst_deadline = _asyncio.get_event_loop().time() + 6.0
+    frames_seen = 0
+    good_frames = 0
+    stable_frames = 0
+    first_shape: tuple[int, int] | None = None
+    intrinsics: IntrinsicsPayload | None = None
+    prior: CalibrationSnapshot | None = None
+    aggregated_corners: dict[int, list[np.ndarray]] = {}
+    recent_centers: list[np.ndarray] = []
+    recent_forwards: list[np.ndarray] = []
+    recent_errors: list[float] = []
+
+    if track_run:
+        state.update_auto_cal_run(
+            camera_id,
+            status="searching",
+            summary="Searching for known markers",
+        )
+
+    while frames_seen < max_frames and _asyncio.get_event_loop().time() < burst_deadline:
+        state.request_calibration_frame(camera_id)
+        got: tuple[bytes, float] | None = None
+        for _ in range(20):
+            got = state.consume_calibration_frame(camera_id)
+            if got is not None:
+                break
+            await _asyncio.sleep(0.1)
+        if got is None:
+            break
+        jpeg_bytes, _ts = got
+        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is None:
+            continue
+        if first_shape is None:
+            first_shape = bgr.shape[:2]
+            intrinsics, prior = _derive_auto_cal_intrinsics(
+                camera_id,
+                w_img=first_shape[1],
+                h_img=first_shape[0],
+                h_fov_deg=h_fov_deg,
+            )
+        assert intrinsics is not None
+        h_img, w_img = bgr.shape[:2]
+        detected = [
+            m for m in detect_all_markers_in_dict(bgr)
+            if (m.id in PLATE_MARKER_WORLD or state._marker_registry.get(m.id) is not None)
+        ]
+        frames_seen += 1
+        if not detected:
+            if track_run:
+                state.update_auto_cal_run(
+                    camera_id,
+                    status="searching",
+                    frames_seen=frames_seen,
+                    markers_visible=0,
+                    summary="Searching for known markers",
+                )
+            continue
+        frame_solution, solver, _pnp_ids = _solve_auto_cal_solution(
+            detected,
+            intrinsics=intrinsics,
+            image_size=(w_img, h_img),
+        )
+        markers_visible = len(detected)
+        if frame_solution is None:
+            if track_run:
+                state.update_auto_cal_run(
+                    camera_id,
+                    status="tracking",
+                    frames_seen=frames_seen,
+                    markers_visible=markers_visible,
+                    summary="Tracking markers; need more stable geometry",
+                    detected_ids=sorted(m.id for m in detected),
+                )
+            continue
+        reproj_px = _reprojection_error_px(
+            intrinsics, frame_solution.homography_row_major, detected
+        )
+        center, forward = _pose_from_homography(
+            intrinsics, frame_solution.homography_row_major
+        )
+        recent_centers.append(center)
+        recent_forwards.append(forward)
+        if reproj_px is not None:
+            recent_errors.append(reproj_px)
+        if len(recent_centers) > 5:
+            recent_centers.pop(0)
+            recent_forwards.pop(0)
+        if len(recent_errors) > 5:
+            recent_errors.pop(0)
+        pos_jitter_cm = None
+        ang_jitter_deg = None
+        if len(recent_centers) >= 3:
+            pos_jitter_cm = float(
+                np.mean(np.std(np.stack(recent_centers), axis=0)) * 100.0
+            )
+            dots = [
+                float(np.clip(np.dot(recent_forwards[0], v), -1.0, 1.0))
+                for v in recent_forwards[1:]
+            ]
+            if dots:
+                ang_jitter_deg = float(np.degrees(np.mean(np.arccos(dots))))
+        frame_good = (
+            reproj_px is not None
+            and reproj_px <= 3.5
+            and pos_jitter_cm is not None
+            and pos_jitter_cm <= 1.5
+            and ang_jitter_deg is not None
+            and ang_jitter_deg <= 0.8
+        )
+        if frame_good:
+            good_frames += 1
+            stable_frames += 1
+        else:
+            stable_frames = 0
+        if markers_visible >= 4:
+            for m in detected:
+                aggregated_corners.setdefault(m.id, []).append(m.corners)
+        if track_run:
+            state.update_auto_cal_run(
+                camera_id,
+                status="stabilizing" if good_frames > 0 else "tracking",
+                frames_seen=frames_seen,
+                good_frames=good_frames,
+                stable_frames=stable_frames,
+                markers_visible=markers_visible,
+                solver=solver,
+                reprojection_px=reproj_px,
+                position_jitter_cm=pos_jitter_cm,
+                angle_jitter_deg=ang_jitter_deg,
+                summary=(
+                    f"Holding steady · {stable_frames} stable frame(s)"
+                    if good_frames > 0
+                    else "Tracking markers; waiting for stability"
+                ),
+                detected_ids=sorted(m.id for m in detected),
+            )
+        if stable_frames >= 4 and good_frames >= 4:
+            break
+
+    if frames_seen == 0 or first_shape is None or intrinsics is None:
+        raise HTTPException(
+            status_code=408,
+            detail=(
+                f"camera {camera_id!r} did not deliver a calibration "
+                "frame within 6 s — check the phone is online, awake, "
+                "preview is enabled, and running the current build"
+            ),
+        )
+
+    aggregated: list[DetectedMarker] = [
+        DetectedMarker(id=mid, corners=np.mean(np.stack(corner_list), axis=0))
+        for mid, corner_list in aggregated_corners.items()
+    ]
+    if track_run:
+        state.update_auto_cal_run(
+            camera_id,
+            status="solving",
+            summary="Solving camera pose from stabilized observations",
+        )
+    result, solver, pnp_detected_ids = _solve_auto_cal_solution(
+        aggregated,
+        intrinsics=intrinsics,
+        image_size=(first_shape[1], first_shape[0]),
+    )
+    if result is None:
+        seen_counts = ", ".join(
+            f"id{mid}×{len(cs)}" for mid, cs in sorted(aggregated_corners.items())
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "need known markers for calibration "
+                f"across {frames_seen} frame(s); got: {seen_counts or '(none)'}"
+            ),
+        )
+    reproj_px = _reprojection_error_px(
+        intrinsics, result.homography_row_major, aggregated
+    )
+    center_new, forward_new = _pose_from_homography(
+        intrinsics, result.homography_row_major
+    )
+    delta_pos_cm = None
+    delta_ang_deg = None
+    if prior is not None:
+        prior_intrinsics, _ = _derive_auto_cal_intrinsics(
+            camera_id,
+            w_img=first_shape[1],
+            h_img=first_shape[0],
+            h_fov_deg=None,
+        )
+        center_old, forward_old = _pose_from_homography(
+            prior_intrinsics, prior.homography
+        )
+        delta_pos_cm = float(np.linalg.norm(center_new - center_old) * 100.0)
+        delta_ang_deg = float(
+            np.degrees(np.arccos(np.clip(np.dot(forward_new, forward_old), -1.0, 1.0)))
+        )
+    return {
+        "frames_seen": frames_seen,
+        "good_frames": good_frames,
+        "stable_frames": stable_frames,
+        "intrinsics": intrinsics,
+        "result": result,
+        "solver": solver,
+        "reprojection_px": reproj_px,
+        "delta_position_cm": delta_pos_cm,
+        "delta_angle_deg": delta_ang_deg,
+        "pnp_detected_ids": pnp_detected_ids,
+    }
+
+
 @app.post("/calibration/auto/{camera_id}")
 async def calibration_auto(
     camera_id: str,
@@ -3274,152 +3927,16 @@ async def calibration_auto(
     """
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_id):
         raise HTTPException(status_code=400, detail="invalid camera_id")
-
-    # cv2 is imported lazily — keeps cold-start unchanged for the paths
-    # that never hit this endpoint.
-    import cv2  # noqa: WPS433
-    import asyncio as _asyncio  # noqa: WPS433
-
-    # Burst: request up to 6 frames over ~5 s, aggregate marker detections
-    # across frames. Camera wobble + JPEG artifacts cause single-frame
-    # flicker where frame N sees markers {0,3} and frame N+1 sees {1,4,5} —
-    # union across the burst recovers the full set. For each ID we average
-    # the 4 corner points across every frame that saw it (single-frame
-    # outliers get damped by ≥2 other consistent sightings).
-    from calibration_solver import DetectedMarker
-    max_frames = 6
-    burst_deadline = _asyncio.get_event_loop().time() + 5.0
-    frames_seen = 0
-    per_id_corners: dict[int, list[np.ndarray]] = {}
-    first_shape: tuple[int, int] | None = None
-    world_map: dict[int, tuple[float, float]] = dict(PLATE_MARKER_WORLD)
-    world_map.update(state._extended_markers.all())
-    while frames_seen < max_frames and _asyncio.get_event_loop().time() < burst_deadline:
-        state.request_calibration_frame(camera_id)
-        got: tuple[bytes, float] | None = None
-        for _ in range(20):  # up to 2 s per frame
-            got = state.consume_calibration_frame(camera_id)
-            if got is not None:
-                break
-            await _asyncio.sleep(0.1)
-        if got is None:
-            break
-        jpeg_bytes, _ts = got
-        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if bgr is None:
-            continue
-        if first_shape is None:
-            first_shape = bgr.shape[:2]  # (h, w)
-        for m in detect_all_markers_in_dict(bgr):
-            if m.id in world_map:
-                per_id_corners.setdefault(m.id, []).append(m.corners)
-        frames_seen += 1
-        # Early exit once we have enough plate markers from at least 2
-        # frames each (stable detection, not a one-shot lucky hit).
-        plate_ids_with_2 = [i for i, c in per_id_corners.items()
-                            if i in PLATE_MARKER_WORLD and len(c) >= 2]
-        if len(plate_ids_with_2) >= 5 and frames_seen >= 2:
-            break
-
-    if frames_seen == 0 or first_shape is None:
-        raise HTTPException(
-            status_code=408,
-            detail=(
-                f"camera {camera_id!r} did not deliver a calibration "
-                "frame within 5 s — check the phone is online, awake, "
-                "preview is enabled, and running the current build"
-            ),
-        )
-
-    h_img, w_img = first_shape
-    aggregated: list[DetectedMarker] = [
-        DetectedMarker(id=mid, corners=np.mean(np.stack(corner_list), axis=0))
-        for mid, corner_list in per_id_corners.items()
-    ]
-    detected = aggregated
-    result = solve_homography_from_world_map(
-        detected, world_map, image_size=(w_img, h_img)
-    )
-    if result is None:
-        seen_counts = ", ".join(
-            f"id{mid}×{len(cs)}" for mid, cs in sorted(per_id_corners.items())
-        )
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"need ≥5 known markers (plate 0-5 ∪ extended registry) "
-                f"across {frames_seen} frame(s); got: "
-                f"{seen_counts or '(none)'}"
-            ),
-        )
-
-    # Prefer intrinsics from an existing calibration (from iOS auto-cal or
-    # ChArUco upload) over the 65° FOV approximation. BUT: prior snapshots
-    # were solved against the ORIGINAL capture dims (e.g. 1920×1080 from
-    # the iOS path). The homography we're about to solve here is in the
-    # preview image's pixel space (~854×480). K and H must agree on scale,
-    # otherwise the cx/cy/fx/fy don't match the image coordinate system
-    # and `recover_extrinsics` yields nonsense (camera at the wrong depth
-    # or height). Rescale K to preview dims by the per-axis ratio.
-    prior = state.calibrations().get(camera_id)
-    if prior is not None and h_fov_deg is None:
-        prior_w = prior.image_width_px
-        prior_h = prior.image_height_px
-        if prior_w > 0 and prior_h > 0:
-            sx = w_img / prior_w
-            sy = h_img / prior_h
-            intrinsics = IntrinsicsPayload(
-                fx=prior.intrinsics.fx * sx,
-                fz=prior.intrinsics.fz * sy,
-                cx=prior.intrinsics.cx * sx,
-                cy=prior.intrinsics.cy * sy,
-                distortion=prior.intrinsics.distortion,  # unit-less
-            )
-        else:
-            # Defensive: malformed prior; fall through to FOV default.
-            prior = None
-    if prior is None or h_fov_deg is not None:
-        h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else 1.1345
-        fx, fy, cx, cy = derive_fov_intrinsics(w_img, h_img, h_fov_rad)
-        intrinsics = IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy)
-
-    # Sanity-check the recovered camera position. If the math says the
-    # camera is absurdly far from the plate (typical failure: operator's
-    # marker layout is physically smaller than PLATE_MARKER_WORLD expects,
-    # so the solve inflates depth to compensate), log loudly — the
-    # dashboard canvas will clip anything beyond its bbox.
-    try:
-        from triangulate import recover_extrinsics, build_K
-        K = build_K(intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy)
-        H_mat = np.array(result.homography_row_major).reshape(3, 3)
-        R, t = recover_extrinsics(K, H_mat)
-        cam_world = (-R.T @ t).flatten()
-        dist_m = float(np.linalg.norm(cam_world))
-        logger.info(
-            "calibration_auto cam=%s frames=%d dims=%dx%d detected=%s world_pos=(%.2f,%.2f,%.2f) dist=%.2fm intr=(fx=%.0f fy=%.0f cx=%.0f cy=%.0f)%s",
-            camera_id, frames_seen, w_img, h_img, result.detected_ids,
-            cam_world[0], cam_world[1], cam_world[2], dist_m,
-            intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy,
-            " (prior intrinsics reused)" if prior is not None and h_fov_deg is None else " (FOV-derived)",
-        )
-        if dist_m > 6.0:
-            logger.warning(
-                "calibration_auto cam=%s recovered distance %.1fm exceeds 6m "
-                "— marker layout likely smaller than the assumed home-plate "
-                "(FL↔FR=43.2cm, MF↔BT=43.2cm). Measure your physical layout "
-                "and patch PLATE_MARKER_WORLD in calibration_solver.py.",
-                camera_id, dist_m,
-            )
-    except Exception as e:  # noqa: BLE001
-        logger.debug("calibration_auto sanity-check skipped: %s", e)
-
+    auto = await _run_auto_calibration(camera_id, h_fov_deg=h_fov_deg, track_run=False)
+    result = auto["result"]
+    intrinsics = auto["intrinsics"]
+    frames_seen = auto["frames_seen"]
     snapshot = CalibrationSnapshot(
         camera_id=camera_id,
         intrinsics=intrinsics,
         homography=result.homography_row_major,
-        image_width_px=w_img,
-        image_height_px=h_img,
+        image_width_px=result.image_width_px,
+        image_height_px=result.image_height_px,
     )
     state.set_calibration(snapshot)
     n_extended_used = sum(
@@ -3433,107 +3950,233 @@ async def calibration_auto(
         "detected_ids": result.detected_ids,
         "missing_plate_ids": result.missing_ids,
         "homography": result.homography_row_major,
-        "image_width_px": w_img,
-        "image_height_px": h_img,
+        "image_width_px": result.image_width_px,
+        "image_height_px": result.image_height_px,
         "n_extended_used": n_extended_used,
+        "used_pose_solver": auto["solver"] == "pnp_pose",
+        "n_3d_markers_used": sum(
+            1 for mid in auto["pnp_detected_ids"]
+            if mid not in PLATE_MARKER_WORLD
+        ),
+        "frames_seen": frames_seen,
+        "good_frames": auto["good_frames"],
+        "stable_frames": auto["stable_frames"],
+        "reprojection_px": auto["reprojection_px"],
+        "delta_position_cm": auto["delta_position_cm"],
+        "delta_angle_deg": auto["delta_angle_deg"],
     }
 
 
-@app.post("/calibration/markers/register/{camera_id}")
-async def calibration_markers_register(
+@app.post("/calibration/auto/start/{camera_id}")
+async def calibration_auto_start(
     camera_id: str,
-    request: Request,
+    h_fov_deg: float | None = None,
 ) -> dict[str, Any]:
-    """Register extended markers from a full-resolution frame of
-    `camera_id`. Same one-shot cal-frame path as `/calibration/auto` —
-    request, poll up to 2 s, run ArUco at native capture resolution so
-    the recovered world (x, y) coordinates are as precise as the plate
-    homography allows. 408 on no-delivery; no preview fallback."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_id):
         raise HTTPException(status_code=400, detail="invalid camera_id")
-
-    import cv2  # noqa: WPS433
-    import asyncio as _asyncio  # noqa: WPS433
-
-    state.request_calibration_frame(camera_id)
-    jpeg_bytes: bytes | None = None
-    for _ in range(20):
-        got = state.consume_calibration_frame(camera_id)
-        if got is not None:
-            jpeg_bytes, _ts = got
-            break
-        await _asyncio.sleep(0.1)
-
-    if jpeg_bytes is None:
-        raise HTTPException(
-            status_code=408,
-            detail=(
-                f"camera {camera_id!r} did not deliver a calibration "
-                "frame within 2 s — check the phone is online and awake"
-            ),
-        )
-
-    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise HTTPException(status_code=422, detail="calibration frame is not a decodable JPEG")
-
     try:
-        registered = state._extended_markers.register_from_image(bgr)
+        run = state.start_auto_cal_run(camera_id)
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
-    skipped: list[int] = []
-    persisted: list[dict[str, Any]] = []
-    for mid, (wx, wy) in sorted(registered.items()):
+    async def _runner() -> None:
         try:
-            state._extended_markers.register(mid, (wx, wy))
-        except ValueError:
-            skipped.append(mid)
-            continue
-        persisted.append({"id": mid, "wx": wx, "wy": wy})
+            auto = await _run_auto_calibration(camera_id, h_fov_deg=h_fov_deg, track_run=True)
+            result = auto["result"]
+            snapshot = CalibrationSnapshot(
+                camera_id=camera_id,
+                intrinsics=auto["intrinsics"],
+                homography=result.homography_row_major,
+                image_width_px=result.image_width_px,
+                image_height_px=result.image_height_px,
+            )
+            state.set_calibration(snapshot)
+            state.finish_auto_cal_run(
+                camera_id,
+                status="completed",
+                applied=True,
+                summary="Verified and applied",
+                detail=(
+                    f"frames={auto['frames_seen']} stable={auto['stable_frames']} "
+                    f"reproj={auto['reprojection_px']:.2f}px"
+                    if auto["reprojection_px"] is not None
+                    else f"frames={auto['frames_seen']} stable={auto['stable_frames']}"
+                ),
+                result={
+                    "frames_seen": auto["frames_seen"],
+                    "good_frames": auto["good_frames"],
+                    "stable_frames": auto["stable_frames"],
+                    "reprojection_px": auto["reprojection_px"],
+                    "used_pose_solver": auto["solver"] == "pnp_pose",
+                    "delta_position_cm": auto["delta_position_cm"],
+                    "delta_angle_deg": auto["delta_angle_deg"],
+                    "detected_ids": result.detected_ids,
+                },
+            )
+        except HTTPException as e:
+            state.finish_auto_cal_run(
+                camera_id,
+                status="failed",
+                applied=False,
+                summary="Auto-cal failed",
+                detail=str(e.detail),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("auto calibration background run failed camera=%s", camera_id)
+            state.finish_auto_cal_run(
+                camera_id,
+                status="failed",
+                applied=False,
+                summary="Auto-cal failed",
+                detail=f"{type(e).__name__}: {e}",
+            )
 
-    total_known = len(state._extended_markers.all())
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)  # type: ignore[return-value]
+    asyncio.create_task(_runner())
+    return {"ok": True, "camera_id": camera_id, "run_id": run.id}
+
+
+def _serialize_marker(record: MarkerRecord) -> dict[str, Any]:
+    return {
+        "marker_id": record.marker_id,
+        "label": record.label,
+        "x_m": record.x_m,
+        "y_m": record.y_m,
+        "z_m": record.z_m,
+        "on_plate_plane": record.on_plate_plane,
+        "residual_m": record.residual_m,
+        "source_camera_ids": list(record.source_camera_ids),
+    }
+
+
+@app.post("/markers/scan")
+async def markers_scan(
+    camera_a_id: str = "A",
+    camera_b_id: str = "B",
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_a_id):
+        raise HTTPException(status_code=400, detail="invalid camera_a_id")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_b_id):
+        raise HTTPException(status_code=400, detail="invalid camera_b_id")
+    if camera_a_id == camera_b_id:
+        raise HTTPException(status_code=400, detail="camera_a_id and camera_b_id must differ")
+
+    jpeg_a, jpeg_b = await asyncio.gather(
+        _await_calibration_frame(camera_a_id),
+        _await_calibration_frame(camera_b_id),
+    )
+    bgr_a = _decode_calibration_jpeg(jpeg_a)
+    bgr_b = _decode_calibration_jpeg(jpeg_b)
+    scan = _triangulate_marker_candidates(
+        camera_a_id=camera_a_id,
+        camera_b_id=camera_b_id,
+        bgr_a=bgr_a,
+        bgr_b=bgr_b,
+    )
+    existing_ids = {rec.marker_id for rec in state._marker_registry.all_records()}
     return {
         "ok": True,
-        "camera_id": camera_id,
-        "registered": persisted,
-        "skipped": skipped,
-        "total_known": total_known,
+        "camera_ids": [camera_a_id, camera_b_id],
+        "candidates": scan["candidates"],
+        "visibility": scan["visibility"],
+        "existing_marker_ids": sorted(existing_ids),
     }
 
 
-@app.get("/calibration/markers")
-def calibration_markers_list() -> dict[str, Any]:
-    """Dashboard polls this (~5 s) to repaint the extended-markers list.
-    Sorted by id so the rendered order is stable across polls."""
-    markers = state._extended_markers.all()
+@app.get("/markers/state")
+def markers_state() -> dict[str, Any]:
+    records = state._marker_registry.all_records()
     return {
-        "markers": [
-            {"id": mid, "wx": wx, "wy": wy}
-            for mid, (wx, wy) in sorted(markers.items())
-        ],
+        "markers": [_serialize_marker(rec) for rec in records],
+        "planar_marker_ids": [rec.marker_id for rec in records if rec.on_plate_plane],
+        "reserved_marker_ids": sorted(PLATE_MARKER_WORLD.keys()),
     }
 
 
-@app.delete("/calibration/markers/{marker_id}")
-def calibration_markers_delete(marker_id: int) -> dict[str, Any]:
-    existed = state._extended_markers.remove(marker_id)
+@app.post("/markers")
+def markers_batch_upsert(body: MarkerBatchUpsertRequest) -> dict[str, Any]:
+    persisted: list[dict[str, Any]] = []
+    for draft in body.markers:
+        z_m = 0.0 if draft.snap_to_plate_plane or draft.on_plate_plane else draft.z_m
+        record = MarkerRecord(
+            marker_id=draft.marker_id,
+            x_m=draft.x_m,
+            y_m=draft.y_m,
+            z_m=z_m,
+            label=(draft.label or "").strip() or None,
+            on_plate_plane=bool(draft.on_plate_plane),
+            residual_m=draft.residual_m,
+            source_camera_ids=list(draft.source_camera_ids),
+        )
+        persisted.append(_serialize_marker(state._marker_registry.upsert(record)))
+    return {"ok": True, "markers": persisted}
+
+
+@app.patch("/markers/{marker_id}")
+def marker_update(marker_id: int, body: MarkerUpdateRequest) -> dict[str, Any]:
+    existing = state._marker_registry.get(marker_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"marker {marker_id} not registered")
+    x_m = existing.x_m if body.x_m is None else body.x_m
+    y_m = existing.y_m if body.y_m is None else body.y_m
+    z_m = existing.z_m if body.z_m is None else body.z_m
+    on_plate_plane = existing.on_plate_plane if body.on_plate_plane is None else body.on_plate_plane
+    if body.snap_to_plate_plane or on_plate_plane:
+        z_m = 0.0
+    updated = MarkerRecord(
+        marker_id=existing.marker_id,
+        x_m=x_m,
+        y_m=y_m,
+        z_m=z_m,
+        label=(body.label.strip() if body.label is not None else existing.label) or None,
+        on_plate_plane=bool(on_plate_plane),
+        residual_m=existing.residual_m,
+        source_camera_ids=list(existing.source_camera_ids),
+    )
+    state._marker_registry.upsert(updated)
+    return {"ok": True, "marker": _serialize_marker(updated)}
+
+
+@app.delete("/markers/{marker_id}")
+def marker_delete(marker_id: int) -> dict[str, Any]:
+    existed = state._marker_registry.remove(marker_id)
     if not existed:
         raise HTTPException(status_code=404, detail=f"marker {marker_id} not registered")
     return {"ok": True, "marker_id": marker_id}
 
 
-@app.post("/calibration/markers/clear")
-async def calibration_markers_clear(request: Request):
-    """Dashboard "Clear all" button. Form callers (HTML) get a 303 back to
-    /; JSON callers get `{ok, cleared_count}`."""
-    cleared = state._extended_markers.clear()
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
+@app.post("/markers/clear")
+def markers_clear() -> dict[str, Any]:
+    cleared = state._marker_registry.clear()
     return {"ok": True, "cleared_count": cleared}
+
+
+@app.post("/calibration/markers/register/{camera_id}")
+async def calibration_markers_register_legacy(camera_id: str) -> dict[str, Any]:
+    raise HTTPException(
+        status_code=409,
+        detail="single-camera marker registration was removed; use /markers and scan with both cameras",
+    )
+
+
+@app.get("/calibration/markers")
+def calibration_markers_list_legacy() -> dict[str, Any]:
+    return {
+        "markers": [
+            {"id": rec.marker_id, "wx": rec.x_m, "wy": rec.y_m}
+            for rec in state._marker_registry.all_records()
+            if rec.on_plate_plane
+        ],
+    }
+
+
+@app.delete("/calibration/markers/{marker_id}")
+def calibration_markers_delete_legacy(marker_id: int) -> dict[str, Any]:
+    return marker_delete(marker_id)
+
+
+@app.post("/calibration/markers/clear")
+def calibration_markers_clear_legacy() -> dict[str, Any]:
+    return markers_clear()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -3568,10 +4211,6 @@ def events_index() -> HTMLResponse:
                 for p in [state._calibration_path(cam)]
                 if p.exists()
             },
-            extended_markers=[
-                {"id": mid, "wx": wx, "wy": wy}
-                for mid, (wx, wy) in sorted(state._extended_markers.all().items())
-            ],
             preview_requested=state._preview.requested_map(),
         )
     )
@@ -3620,11 +4259,41 @@ def setup_page() -> HTMLResponse:
                 for p in [state._calibration_path(cam)]
                 if p.exists()
             },
-            extended_markers=[
-                {"id": mid, "wx": wx, "wy": wy}
-                for mid, (wx, wy) in sorted(state._extended_markers.all().items())
-            ],
+            markers_count=len(state._marker_registry.all_records()),
             preview_requested=state._preview.requested_map(),
+        )
+    )
+
+
+@app.get("/markers", response_class=HTMLResponse)
+def markers_page() -> HTMLResponse:
+    from render_markers import render_markers_html
+    from reconstruct import build_calibration_scene
+
+    session = state.session_snapshot()
+    markers = [_serialize_marker(rec) for rec in state._marker_registry.all_records()]
+    scene = build_calibration_scene(state.calibrations()).to_dict()
+    scene["plate"] = [
+        {"x": -0.432 / 2.0, "y": 0.0, "z": 0.0},
+        {"x": 0.432 / 2.0, "y": 0.0, "z": 0.0},
+        {"x": 0.432 / 2.0, "y": 0.216, "z": 0.0},
+        {"x": 0.0, "y": 0.432, "z": 0.0},
+        {"x": -0.432 / 2.0, "y": 0.216, "z": 0.0},
+    ]
+    return HTMLResponse(
+        render_markers_html(
+            markers=markers,
+            scene=scene,
+            devices=[
+                {
+                    "camera_id": d.camera_id,
+                    "last_seen_at": d.last_seen_at,
+                    "time_synced": d.time_synced,
+                }
+                for d in state.online_devices()
+            ],
+            session=session.to_dict() if session is not None else None,
+            calibrations=sorted(state.calibrations().keys()),
         )
     )
 

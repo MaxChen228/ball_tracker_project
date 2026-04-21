@@ -259,6 +259,50 @@ class CalibrationSnapshot(BaseModel):
     homography: list[float] = Field(..., min_length=9, max_length=9)
     image_width_px: int
     image_height_px: int
+
+
+class MarkerRecord(BaseModel):
+    """Persisted operator-managed ArUco landmark.
+
+    `on_plate_plane=True` means the marker is known to lie on the same
+    physical plane as home plate and is therefore eligible for the current
+    planar homography auto-calibration path. Free-space markers remain useful
+    for registry / layout / future pose-solving work, but are excluded from
+    today's planar auto-cal.
+    """
+    marker_id: int = Field(..., ge=6, le=49)
+    x_m: float
+    y_m: float
+    z_m: float
+    label: str | None = None
+    on_plate_plane: bool = False
+    residual_m: float | None = None
+    source_camera_ids: list[str] = Field(default_factory=list)
+
+
+class MarkerDraft(BaseModel):
+    marker_id: int = Field(..., ge=6, le=49)
+    x_m: float
+    y_m: float
+    z_m: float
+    label: str | None = None
+    on_plate_plane: bool = False
+    snap_to_plate_plane: bool = False
+    residual_m: float | None = None
+    source_camera_ids: list[str] = Field(default_factory=list)
+
+
+class MarkerBatchUpsertRequest(BaseModel):
+    markers: list[MarkerDraft] = Field(default_factory=list)
+
+
+class MarkerUpdateRequest(BaseModel):
+    label: str | None = None
+    x_m: float | None = None
+    y_m: float | None = None
+    z_m: float | None = None
+    on_plate_plane: bool | None = None
+    snap_to_plate_plane: bool = False
     # Optional: the grid the intrinsics were ORIGINALLY COMPUTED FROM (e.g.
     # 4032×3024 ChArUco stills subsequently scaled + cropped to the capture
     # grid). Knowing both lets the server detect 4:3→16:9 basis mismatches.
