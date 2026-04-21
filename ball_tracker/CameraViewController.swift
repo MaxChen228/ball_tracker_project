@@ -2495,6 +2495,15 @@ extension CameraViewController: ServerWebSocketDelegate {
             }
         case "disarm":
             DispatchQueue.main.async { self.applyRemoteDisarm() }
+        case "calibration_updated":
+            // A sibling camera's calibration just changed server-side. iOS no
+            // longer owns the calibration state (Phase 1 decoupling — the
+            // server is authoritative), but a fresh poll against the server's
+            // status endpoint surfaces any knock-on setup change on the HUD
+            // without waiting for the next 5s tick.
+            let changedCam = (message["cam"] as? String) ?? "?"
+            log.info("ws calibration update cam=\(changedCam, privacy: .public) local=\(self.settings.cameraRole, privacy: .public)")
+            DispatchQueue.main.async { self.healthMonitor.probeNow() }
         case "settings":
             if let raw = message["paths"] as? [String] {
                 let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))

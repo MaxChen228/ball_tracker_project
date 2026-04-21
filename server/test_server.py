@@ -986,6 +986,8 @@ def test_dual_mode_on_device_surfaces_before_server_detection(tmp_path, monkeypa
     result = client.get(f"/results/{session_id}").json()
     assert result["points_on_device"], "on-device triangulation must run independently of server detect_pitch"
     assert result["points"] == [], "stub detect_pitch → server points stays empty"
+    assert len(result["triangulated"]) == 1, "authority should still surface the successful ios_post path"
+    assert result["error"] is None, "ios_post-only success in dual mode must not be downgraded to no detection completed"
     od = result["points_on_device"][0]
     assert abs(od["x_m"] - P_true[0]) < 1e-6
     assert abs(od["y_m"] - P_true[1]) < 1e-6
@@ -1000,7 +1002,91 @@ def test_dual_mode_on_device_surfaces_before_server_detection(tmp_path, monkeypa
     events = client.get("/events").json()
     matched = [e for e in events if e["session_id"] == session_id]
     assert matched
+    assert matched[0]["status"] == "paired"
+    assert matched[0]["n_triangulated"] == 1
     assert matched[0]["n_triangulated_on_device"] == 1
+    assert matched[0]["peak_z_m"] == pytest.approx(P_true[2], abs=1e-6)
+
+
+def test_sync_trigger_broadcasts_websocket_command(monkeypatch):
+    client = TestClient(app)
+
+    monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
+
+    with client.websocket_connect("/ws/device/A") as ws_a, client.websocket_connect("/ws/device/B") as ws_b:
+        assert ws_a.receive_json()["type"] == "settings"
+        assert ws_b.receive_json()["type"] == "settings"
+
+        ws_a.send_json({"type": "hello", "cam": "A"})
+        ws_b.send_json({"type": "hello", "cam": "B"})
+        assert ws_a.receive_json()["type"] == "settings"
+        assert ws_b.receive_json()["type"] == "settings"
+
+        resp = client.post("/sync/trigger", json={"camera_ids": ["A", "B"]})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["dispatched_to"] == ["A", "B"]
+
+        msg_a = ws_a.receive_json()
+        msg_b = ws_b.receive_json()
+        assert msg_a["type"] == "sync_command"
+        assert msg_b["type"] == "sync_command"
+        assert msg_a["command"] == "start"
+        assert msg_b["command"] == "start"
+        assert msg_a["sync_command_id"] == msg_b["sync_command_id"]
+
+
+def test_calibration_post_broadcasts_websocket_update_to_siblings(monkeypatch):
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    client = TestClient(app)
+
+    monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
+
+    class _CaptureHub:
+        async def broadcast(self, event: str, data: dict) -> None:
+            return None
+
+        async def subscribe(self):
+            if False:
+                yield ""
+
+    monkeypatch.setattr(main, "sse_hub", _CaptureHub())
+
+    with client.websocket_connect("/ws/device/A") as ws_a, client.websocket_connect("/ws/device/B") as ws_b:
+        assert ws_a.receive_json()["type"] == "settings"
+        assert ws_b.receive_json()["type"] == "settings"
+
+        ws_a.send_json({"type": "hello", "cam": "A"})
+        ws_b.send_json({"type": "hello", "cam": "B"})
+        assert ws_a.receive_json()["type"] == "settings"
+        assert ws_b.receive_json()["type"] == "settings"
+
+        cal_a = {
+            "camera_id": "A",
+            "intrinsics": {
+                "fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
+            },
+            "homography": H_a.flatten().tolist(),
+            "image_width_px": 1920,
+            "image_height_px": 1080,
+        }
+        assert client.post("/calibration", json=cal_a).status_code == 200
+
+        msg_b = ws_b.receive_json()
+        assert msg_b == {"type": "calibration_updated", "cam": "A"}
+
+        cal_b = {
+            "camera_id": "B",
+            "intrinsics": {
+                "fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
+            },
+            "homography": H_b.flatten().tolist(),
+            "image_width_px": 1920,
+            "image_height_px": 1080,
+        }
+        assert client.post("/calibration", json=cal_b).status_code == 200
+
+        msg_a = ws_a.receive_json()
+        assert msg_a == {"type": "calibration_updated", "cam": "B"}
 
 
 def test_pitch_analysis_merges_late_on_device_frames_and_capture_telemetry(tmp_path):

@@ -788,7 +788,7 @@ class State:
                 result.fit_on_device = fit_trajectory(result.points_on_device)
             except Exception:
                 result.fit_on_device = None
-        if not result.points and result.error is None and (a is not None or b is not None):
+        if not result.triangulated and result.error is None and (a is not None or b is not None):
             if result.abort_reasons:
                 result.aborted = True
             elif a is not None and b is not None:
@@ -2061,7 +2061,8 @@ class State:
                 if latest_mtime is None or mtime > latest_mtime:
                     latest_mtime = mtime
 
-            n_triangulated = len(result.points) if result is not None else 0
+            authority_points = result.triangulated if result is not None else []
+            n_triangulated = len(authority_points) if result is not None else 0
             n_triangulated_on_device = len(result.points_on_device) if result is not None else 0
             error = result.error if result is not None else None
             error_on_device = result.error_on_device if result is not None else None
@@ -2078,14 +2079,14 @@ class State:
             peak_z: float | None = None
             mean_res: float | None = None
             duration: float | None = None
-            if result is not None and result.points:
-                zs = [p.z_m for p in result.points]
+            if authority_points:
+                zs = [p.z_m for p in authority_points]
                 peak_z = float(max(zs))
                 mean_res = float(
-                    sum(p.residual_m for p in result.points)
-                    / len(result.points)
+                    sum(p.residual_m for p in authority_points)
+                    / len(authority_points)
                 )
-                ts = [p.t_rel_s for p in result.points]
+                ts = [p.t_rel_s for p in authority_points]
                 duration = float(ts[-1] - ts[0])
 
             # Dashboard-LIVE view summary: derived exclusively from the
