@@ -1234,6 +1234,14 @@ class State:
         fresh.sort(key=lambda d: d.camera_id)
         return fresh
 
+    def known_camera_ids(self) -> list[str]:
+        """All camera ids that have ever heartbeated this run — used by WS
+        broadcast targets that want to notify siblings regardless of current
+        liveness (e.g. calibration updates, which the other cam might care
+        about even if its heartbeat lapsed briefly)."""
+        with self._lock:
+            return list(self._devices.keys())
+
     def device_snapshot(self, camera_id: str) -> Device | None:
         with self._lock:
             dev = self._devices.get(camera_id)
@@ -2950,6 +2958,18 @@ async def sync_trigger(request: Request) -> Any:
             ]
 
     dispatched = state.trigger_sync_command(camera_ids)
+    # Push the sync_command over WS too so phones on the live transport
+    # don't have to wait for the next /heartbeat reply to pick it up. HTTP
+    # heartbeat fallback still carries the flag, so this is an accelerant
+    # not a dependency.
+    pending = state.pending_sync_commands()
+    ws_messages = {
+        cam: {"type": "sync_command", "command": "start", "sync_command_id": sid}
+        for cam, sid in pending.items()
+        if cam in dispatched
+    }
+    if ws_messages:
+        await device_ws.broadcast(ws_messages)
     if is_form:
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "dispatched_to": dispatched}
@@ -3921,12 +3941,31 @@ def events() -> list[dict[str, Any]]:
 
 
 @app.post("/calibration")
-def post_calibration(snapshot: CalibrationSnapshot) -> dict[str, Any]:
+async def post_calibration(snapshot: CalibrationSnapshot) -> dict[str, Any]:
     """iPhone pushes its freshly-solved calibration (intrinsics + homography)
     so the dashboard canvas can show where the camera is positioned in world
     space, even before the first pitch is ever recorded. Idempotent overwrite:
     each camera only keeps its latest snapshot."""
     state.set_calibration(snapshot)
+    # Notify dashboards (SSE) and any other connected phones (WS) that the
+    # calibration for this camera changed. Dashboard can repaint the canvas
+    # without its 5s polling tick; the other phone can refresh its stored
+    # extrinsics if it cares about cross-cam pose consistency.
+    await sse_hub.broadcast(
+        "calibration_changed",
+        {
+            "cam": snapshot.camera_id,
+            "image_width_px": snapshot.image_width_px,
+            "image_height_px": snapshot.image_height_px,
+        },
+    )
+    await device_ws.broadcast(
+        {
+            cam: {"type": "calibration_updated", "cam": snapshot.camera_id}
+            for cam in state.known_camera_ids()
+            if cam != snapshot.camera_id
+        }
+    )
     return {
         "ok": True,
         "camera_id": snapshot.camera_id,
