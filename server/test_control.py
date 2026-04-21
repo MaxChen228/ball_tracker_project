@@ -725,6 +725,19 @@ def test_dashboard_renders_control_panel():
     assert 'href="/markers"' in body
 
 
+def test_dashboard_renders_live_session_and_detection_path_controls():
+    client = TestClient(app)
+    r = client.get("/")
+    assert r.status_code == 200
+    body = r.text
+    assert 'id="active-body"' in body
+    assert 'action="/detection/paths"' in body
+    assert 'name="paths"' in body
+    assert 'value="live"' in body
+    assert 'value="ios_post"' in body
+    assert 'value="server_post"' in body
+
+
 def test_setup_page_renders_all_config_surfaces():
     client = TestClient(app)
     r = client.get("/setup")

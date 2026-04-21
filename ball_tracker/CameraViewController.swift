@@ -163,15 +163,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // results to a post-recording analysis pass over the finalized MOV; this
     // queue stays useful for HUD/debug and as a degraded fallback if clip
     // writing fails.
-    private let detectionQueue = DispatchQueue(label: "camera.detection.queue", qos: .utility)
+    private let detectionQueue = DispatchQueue(
+        label: "camera.detection.queue",
+        qos: .userInteractive,
+        attributes: .concurrent
+    )
     private let detectionStateLock = NSLock()
-    private var detectionInFlight = false
-    private var lastDetectionDispatchTimeS: TimeInterval = 0
-    // 0 = no time-based throttle; detectionInFlight serialises the pipeline,
-    // so the effective rate floats to whatever the HSV + MOG2 + shape pipeline
-    // can sustain (~55-80 Hz on A17-class hardware). Capture still runs at
-    // 240 fps so the MOV / anchor clock are unaffected.
-    private static let detectionIntervalS: TimeInterval = 0
+    private let detectionSemaphore = DispatchSemaphore(value: 3)
     /// On-device detection is now stateless HSV + shape gate (BTBallDetector).
     /// MOG2 was dropped here: iOS gets BGRA directly (no H.264 decode noise),
     /// the camera is static, and the shape gate (aspect ≥ 0.75, fill ≥ 0.60)
@@ -216,6 +214,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// reads this at cycle-complete to decide whether to upload the MOV or
     /// just the detection JSON.
     private var currentCaptureMode: ServerUploader.CaptureMode = .cameraOnly
+    private var currentSessionPaths: Set<ServerUploader.DetectionPath> = [.serverPost]
+    private var webSocketTask: URLSessionWebSocketTask?
+    private let webSocketQueue = DispatchQueue(label: "camera.websocket.queue", qos: .utility)
+    private var webSocketConnected = false
+    private var webSocketReconnectWork: DispatchWorkItem?
     /// Cache of the server-pushed runtime tunables so the heartbeat
     /// callback can skip hot-apply when the value hasn't changed. `nil`
     /// means "never heard from the server yet" — the first heartbeat
@@ -416,6 +419,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         setupAudioCapture()
         setupDisplayLink()
         healthMonitor.start()
+        connectWebSocket()
         updateUIForState()
     }
 
@@ -442,12 +446,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // (Phase 7 power gate) — stays parked until heartbeat says preview
         // is on, so idle phones don't burn camera/mic for nothing.
         healthMonitor.start()
+        connectWebSocket()
         displayLink?.isPaused = false
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         healthMonitor.stop()
+        disconnectWebSocket()
         displayLink?.isPaused = true
         if state == .timeSyncWaiting {
             cancelTimeSync()
@@ -557,54 +563,61 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         videoURL: URL?
     ) {
         let advisoryFrames = drainDetectedFrames()
-        let mode = currentCaptureMode
-        log.info("cycle complete session=\(enriched.session_id, privacy: .public) mode=\(mode.rawValue, privacy: .public) advisory_frames=\(advisoryFrames.count) ball_frames=\(advisoryFrames.filter { $0.ball_detected }.count) has_video=\(videoURL != nil)")
+        let paths = currentSessionPaths
+        log.info("cycle complete session=\(enriched.session_id, privacy: .public) paths=\(paths.map(\.rawValue).sorted().joined(separator: ","), privacy: .public) advisory_frames=\(advisoryFrames.count) ball_frames=\(advisoryFrames.filter { $0.ball_detected }.count) has_video=\(videoURL != nil)")
+        let payload = enriched.withPaths(Array(paths))
 
         guard let videoURL else {
             handleFallbackCycleWithoutVideo(
-                enriched: enriched,
+                enriched: payload,
                 advisoryFrames: advisoryFrames,
-                mode: mode
+                paths: paths
             )
             return
         }
 
-        switch mode {
-        case .cameraOnly:
-            handleCameraOnlyCycle(enriched: enriched, videoURL: videoURL)
-        case .onDevice:
-            persistAnalysisJob(
-                payload: enriched,
-                videoURL: videoURL,
-                uploadMode: .onDevicePrimary
-            )
-        case .dual:
-            let analysisVideoURL = duplicateVideoForAnalysis(from: videoURL)
-            handleCameraOnlyCycle(enriched: enriched, videoURL: videoURL)
+        if paths.contains(.serverPost) {
+            handleCameraOnlyCycle(enriched: payload, videoURL: videoURL)
+        }
+        if paths.contains(.iosPost) {
+            let uploadMode: AnalysisJobStore.Job.UploadMode = paths.contains(.serverPost) ? .dualSidecar : .onDevicePrimary
+            let analysisVideoURL = paths.contains(.serverPost) ? duplicateVideoForAnalysis(from: videoURL) : videoURL
             if let analysisVideoURL {
                 persistAnalysisJob(
-                    payload: enriched,
+                    payload: payload,
                     videoURL: analysisVideoURL,
-                    uploadMode: .dualSidecar
+                    uploadMode: uploadMode
                 )
             } else {
-                log.error("camera failed to duplicate clip for dual post-pass session=\(enriched.session_id, privacy: .public)")
+                log.error("camera failed to prepare clip for iOS post-pass session=\(payload.session_id, privacy: .public)")
             }
+        }
+        if paths.contains(.live) {
+            sendWebSocketJSON([
+                "type": "cycle_end",
+                "cam": settings.cameraRole,
+                "sid": payload.session_id,
+                "reason": "disarmed",
+            ])
+        }
+        if !paths.contains(.serverPost) && !paths.contains(.iosPost) {
+            // Live-only fallback still persists metadata so the cycle
+            // remains recoverable if the WS stream degraded mid-flight.
+            persistCompletedCycle(payload, videoURL: videoURL)
         }
     }
 
     private func handleFallbackCycleWithoutVideo(
         enriched: ServerUploader.PitchPayload,
         advisoryFrames: [ServerUploader.FramePayload],
-        mode: ServerUploader.CaptureMode
+        paths: Set<ServerUploader.DetectionPath>
     ) {
-        switch mode {
-        case .cameraOnly:
+        if paths.contains(.serverPost) {
             persistCompletedCycle(enriched, videoURL: nil)
-        case .onDevice:
+        } else if paths.contains(.iosPost) {
             persistCompletedCycle(enriched.withFrames(advisoryFrames), videoURL: nil)
-        case .dual:
-            persistCompletedCycle(enriched.withFramesOnDevice(advisoryFrames), videoURL: nil)
+        } else {
+            persistCompletedCycle(enriched.withFrames(advisoryFrames), videoURL: nil)
         }
     }
 
@@ -1429,6 +1442,141 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // MARK: - Server health + upload queue wiring
 
+    private func webSocketURL() -> URL? {
+        guard
+            let host = serverConfig.serverIP.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
+            !host.isEmpty
+        else { return nil }
+        var comps = URLComponents()
+        comps.scheme = "ws"
+        comps.host = host
+        comps.port = Int(serverConfig.serverPort)
+        comps.path = "/ws/device/\(settings.cameraRole)"
+        return comps.url
+    }
+
+    private func connectWebSocket() {
+        guard webSocketTask == nil, let url = webSocketURL() else { return }
+        let task = URLSession.shared.webSocketTask(with: url)
+        webSocketTask = task
+        task.resume()
+        webSocketConnected = true
+        sendWebSocketJSON([
+            "type": "hello",
+            "cam": settings.cameraRole,
+            "session_id": currentSessionId as Any,
+            "time_synced": lastSyncAnchorTimestampS != nil,
+            "time_sync_id": lastSyncId as Any,
+            "sync_anchor_timestamp_s": lastSyncAnchorTimestampS as Any,
+        ])
+        receiveNextWebSocketMessage()
+    }
+
+    private func disconnectWebSocket() {
+        webSocketReconnectWork?.cancel()
+        webSocketReconnectWork = nil
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
+        webSocketConnected = false
+    }
+
+    private func scheduleWebSocketReconnect() {
+        guard webSocketTask == nil else { return }
+        webSocketReconnectWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.connectWebSocket()
+        }
+        webSocketReconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    private func receiveNextWebSocketMessage() {
+        webSocketTask?.receive { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .failure(let error):
+                log.error("websocket receive failed err=\(error.localizedDescription, privacy: .public)")
+                self.webSocketTask = nil
+                self.webSocketConnected = false
+                self.scheduleWebSocketReconnect()
+            case .success(let message):
+                switch message {
+                case .string(let text):
+                    self.handleWebSocketText(text)
+                case .data(let data):
+                    if let text = String(data: data, encoding: .utf8) {
+                        self.handleWebSocketText(text)
+                    }
+                @unknown default:
+                    break
+                }
+                self.receiveNextWebSocketMessage()
+            }
+        }
+    }
+
+    private func handleWebSocketText(_ text: String) {
+        guard
+            let data = text.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let type = obj["type"] as? String
+        else { return }
+        switch type {
+        case "arm":
+            if let sid = obj["sid"] as? String { currentSessionId = sid }
+            if let raw = obj["paths"] as? [String] {
+                let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
+                if !parsed.isEmpty { currentSessionPaths = parsed }
+            }
+            DispatchQueue.main.async {
+                self.modeLabel.text = "MODE · \(self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ").uppercased())"
+                self.applyRemoteArm()
+            }
+        case "disarm":
+            DispatchQueue.main.async { self.applyRemoteDisarm() }
+        case "settings":
+            if let raw = obj["paths"] as? [String] {
+                let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
+                if !parsed.isEmpty { currentSessionPaths = parsed }
+            }
+            if let threshold = obj["chirp_detect_threshold"] as? Double {
+                DispatchQueue.main.async { self.chirpDetector?.setThreshold(Float(threshold)) }
+            }
+            if let interval = obj["heartbeat_interval_s"] as? Double {
+                DispatchQueue.main.async { self.healthMonitor.updateBaseInterval(interval) }
+            }
+            if let preview = obj["preview_requested"] as? Bool {
+                previewRequestedByServer = preview
+            }
+            if let calFrame = obj["calibration_frame_requested"] as? Bool {
+                calibrationFrameCaptureArmed = calFrame
+            }
+            DispatchQueue.main.async {
+                self.modeLabel.text = "MODE · \(self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ").uppercased())"
+            }
+        default:
+            break
+        }
+    }
+
+    private func sendWebSocketJSON(_ obj: [String: Any]) {
+        guard
+            webSocketConnected,
+            let task = webSocketTask,
+            JSONSerialization.isValidJSONObject(obj),
+            let data = try? JSONSerialization.data(withJSONObject: obj),
+            let text = String(data: data, encoding: .utf8)
+        else { return }
+        task.send(.string(text)) { [weak self] error in
+            if let error {
+                log.error("websocket send failed err=\(error.localizedDescription, privacy: .public)")
+                self?.webSocketTask = nil
+                self?.webSocketConnected = false
+                self?.scheduleWebSocketReconnect()
+            }
+        }
+    }
+
     private func wireHealthMonitorCallbacks() {
         healthMonitor.onStatusChanged = { [weak self] text, _ in
             DiagnosticsData.shared.update(serverStatusText: text)
@@ -1441,6 +1589,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             let sid = (response.session?.armed == true) ? response.session?.id : nil
             self.currentSessionId = sid
             DiagnosticsData.shared.update(sessionId: .some(sid))
+            let rawPaths = response.session?.paths ?? response.default_paths ?? [ServerUploader.DetectionPath.serverPost.rawValue]
+            let parsedPaths = Set(rawPaths.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
+            self.currentSessionPaths = parsedPaths.isEmpty ? [.serverPost] : parsedPaths
             // Effective mode: snapshot from the armed session if present,
             // otherwise the dashboard's global toggle. Unknown / missing
             // fields fall back to cameraOnly for backwards compat with
@@ -1453,8 +1604,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             }
             self.currentCaptureMode = mode
             DispatchQueue.main.async {
-                self.modeLabel.text = "MODE · \(mode.displayLabel.uppercased())"
+                let pathLabel = self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ")
+                self.modeLabel.text = "MODE · \(pathLabel.uppercased())"
             }
+            self.sendWebSocketJSON([
+                "type": "heartbeat",
+                "cam": self.settings.cameraRole,
+                "t_session_s": CACurrentMediaTime(),
+                "time_synced": self.lastSyncAnchorTimestampS != nil,
+                "time_sync_id": self.lastSyncId as Any,
+                "sync_anchor_timestamp_s": self.lastSyncAnchorTimestampS as Any,
+            ])
             // Hot-apply server-pushed runtime tunables. Dashboard-pushed
             // values win over local Settings once the first heartbeat
             // arrives; we only call the setters when the value actually
@@ -2039,9 +2199,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             healthMonitor.updateUploader(uploader)
             uploadQueue.updateUploader(uploader)
             analysisQueue.updateUploader(uploader)
+            disconnectWebSocket()
+            connectWebSocket()
         }
         if cameraRoleChanged {
             healthMonitor.updateCameraId(latest.cameraRole)
+            disconnectWebSocket()
+            connectWebSocket()
         }
         recorder?.setCameraId(latest.cameraRole)
 
@@ -2074,7 +2238,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         modeLabel.textColor = DesignTokens.Colors.sub
         modeLabel.textAlignment = .right
         modeLabel.translatesAutoresizingMaskIntoConstraints = false
-        modeLabel.text = "MODE · CAMERA-ONLY"
+        modeLabel.text = "MODE · SERVER POST-PASS"
         view.addSubview(modeLabel)
 
         // Transient banner for error / progress text. Hidden by default;
@@ -2479,10 +2643,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         clipRecorder?.append(sampleBuffer: sampleBuffer)
 
-        // Detection runs in both modes — same BTDetectionSession algorithm,
-        // just different fates for its output (trim oracle vs. uploaded
-        // payload).
-        dispatchDetectionIfDue(pixelBuffer: pixelBuffer, timestampS: timestampS)
+        // Detection now fans out over a bounded concurrent pool. Live WS
+        // streaming consumes the same FramePayloads as post-pass fallback.
+        dispatchDetection(pixelBuffer: pixelBuffer, timestampS: timestampS)
 
         // Bootstrap the PitchRecorder on the first sample regardless of
         // mode. In mode-one this fires on the same sample clipRecorder
@@ -2506,44 +2669,25 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    /// Fire off one BTDetectionSession step on `detectionQueue` if (a) the
-    /// throttle window has elapsed (≥60 Hz cap) and (b) no previous
-    /// detection is still running. Called from `captureOutput` — must not
-    /// block.
-    ///
-    /// A `detectionGeneration` check inside the async closure guards against
-    /// a late detection landing in the wrong cycle's buffer (enter/exit of
-    /// recording bumps the generation).
-    ///
-    /// Every dispatched detection produces a FramePayload entry: the server's
-    /// pipeline also records one entry per decoded frame (with null px/py
-    /// when no ball), so we mirror that shape to keep the two sides
-    /// substitutable.
-    private func dispatchDetectionIfDue(pixelBuffer: CVPixelBuffer, timestampS: TimeInterval) {
+    private func dispatchDetection(pixelBuffer: CVPixelBuffer, timestampS: TimeInterval) {
+        guard detectionSemaphore.wait(timeout: .now()) == .success else { return }
         detectionStateLock.lock()
-        let elapsed = timestampS - lastDetectionDispatchTimeS
-        let shouldDispatch = !detectionInFlight && elapsed >= Self.detectionIntervalS
         let gen = detectionGeneration
-        guard shouldDispatch else {
-            detectionStateLock.unlock()
-            return
-        }
-        detectionInFlight = true
-        lastDetectionDispatchTimeS = timestampS
         let callIndex = detectionCallIndex
         detectionCallIndex += 1
         detectionStateLock.unlock()
-
+        let retainedPixelBuffer = Unmanaged.passRetained(pixelBuffer)
         detectionQueue.async { [weak self] in
-            guard let self else { return }
+            let pixelBuffer = retainedPixelBuffer.takeUnretainedValue()
+            guard let self else {
+                retainedPixelBuffer.release()
+                return
+            }
+            defer {
+                retainedPixelBuffer.release()
+                self.detectionSemaphore.signal()
+            }
             let detection = BTBallDetector.detect(in: pixelBuffer)
-            self.detectionStateLock.lock()
-            defer { self.detectionStateLock.unlock() }
-            // Generation mismatch means the recording cycle we were dispatched
-            // for has already ended — drop this result on the floor instead
-            // of contaminating the fresh cycle's buffer.
-            guard gen == self.detectionGeneration else { return }
-            self.detectionInFlight = false
             let frame = ServerUploader.FramePayload(
                 frame_index: callIndex,
                 timestamp_s: timestampS,
@@ -2551,7 +2695,25 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 py: detection.map { Double($0.py) },
                 ball_detected: detection != nil
             )
-            self.detectionFramesBuffer.append(frame)
+            self.detectionStateLock.lock()
+            let stillCurrent = (gen == self.detectionGeneration)
+            if stillCurrent {
+                self.detectionFramesBuffer.append(frame)
+            }
+            self.detectionStateLock.unlock()
+            guard stillCurrent else { return }
+            if self.currentSessionPaths.contains(.live), let sid = self.currentSessionId {
+                self.sendWebSocketJSON([
+                    "type": "frame",
+                    "cam": self.settings.cameraRole,
+                    "sid": sid,
+                    "i": frame.frame_index,
+                    "ts": frame.timestamp_s,
+                    "px": frame.px as Any,
+                    "py": frame.py as Any,
+                    "detected": frame.ball_detected,
+                ])
+            }
         }
     }
 
@@ -2562,8 +2724,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         detectionStateLock.lock()
         detectionGeneration &+= 1
         detectionFramesBuffer.removeAll()
-        detectionInFlight = false
-        lastDetectionDispatchTimeS = 0
         detectionCallIndex = 0
         detectionStateLock.unlock()
     }

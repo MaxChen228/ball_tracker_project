@@ -70,8 +70,18 @@ from threading import Lock
 from typing import Any, Callable
 
 import numpy as np
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
 # Re-exports so `from main import PitchPayload, ...` keeps working for the
@@ -81,6 +91,7 @@ from schemas import (
     CalibrationSnapshot,
     CaptureTelemetryPayload,
     CaptureMode,
+    DetectionPath,
     Device,
     FramePayload,
     HeartbeatBody,
@@ -102,6 +113,9 @@ from schemas import (
     TriangulatedPoint,
     _DEFAULT_TRACKING_EXPOSURE_CAP_MODE,
     _DEFAULT_SESSION_TIMEOUT_S,
+    _DEFAULT_PATHS,
+    mode_for_paths,
+    paths_for_mode,
 )
 from collections import deque
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
@@ -120,6 +134,9 @@ from calibration_solver import (
 from triangulate import build_K, camera_center_world, recover_extrinsics, triangulate_rays, undistorted_ray_cam
 from sync_solver import compute_mutual_sync
 from cleanup_old_sessions import cleanup_expired_sessions
+from live_pairing import LivePairingSession
+from sse import SSEHub
+from ws import DeviceSocketManager
 
 logger = logging.getLogger("ball_tracker")
 
@@ -322,6 +339,9 @@ class State:
         # `camera_only` preserves the pre-mode-split behaviour for anyone
         # upgrading a running server without touching the dashboard.
         self._current_mode: CaptureMode = CaptureMode.camera_only
+        # New authority: orthogonal detection path set snapshotted onto each
+        # session. Kept in sync with `_current_mode` for backward-compat.
+        self._default_paths: set[DetectionPath] = set(_DEFAULT_PATHS)
         # Per-camera calibration snapshots. Written by POST /calibration,
         # read by the dashboard canvas so the 3D preview shows where each
         # phone "thinks it is" relative to the plate, independent of any
@@ -384,6 +404,8 @@ class State:
         # searching/stabilizing/solving/verified instead of a blind spinner.
         self._auto_cal_runs: dict[str, _AutoCalibrationRun] = {}
         self._auto_cal_last: dict[str, _AutoCalibrationRun] = {}
+        # Live streaming state keyed by session id.
+        self._live_pairings: dict[str, LivePairingSession] = {}
         # Calibrations first — _load_from_disk re-triangulates every cached
         # pitch, and triangulation needs the calibration snapshot to decide
         # the intrinsic-scale factor (MOV dims vs. calibration dims).
@@ -431,6 +453,8 @@ class State:
         for path in sorted(self._pitch_dir.glob("session_*.json")):
             try:
                 obj = json.loads(path.read_text())
+                if "frames" in obj and "frames_server_post" not in obj and not obj.get("frames_on_device"):
+                    obj["frames_server_post"] = obj.get("frames", [])
                 pitch = PitchPayload.model_validate(obj)
             except Exception as e:
                 logger.warning("skip corrupt pitch file %s: %s", path.name, e)
@@ -439,31 +463,7 @@ class State:
 
         seen_sessions = {sid for _, sid in self.pitches.keys()}
         for sid in sorted(seen_sessions):
-            a = self.pitches.get(("A", sid))
-            b = self.pitches.get(("B", sid))
-            result = SessionResult(
-                session_id=sid,
-                camera_a_received=a is not None,
-                camera_b_received=b is not None,
-            )
-            if a is not None and b is not None:
-                sync_error = self._validate_pair_sync(a, b)
-                if sync_error is not None:
-                    result.error = sync_error
-                    result.error_on_device = sync_error
-                elif self._has_server_frames(a) and self._has_server_frames(b):
-                    try:
-                        result.points = self._triangulate_pair(a, b, source="server")
-                        result.fit = fit_trajectory(result.points)
-                    except Exception as e:
-                        result.error = f"{type(e).__name__}: {e}"
-                if sync_error is None and self._has_on_device_frames(a) and self._has_on_device_frames(b):
-                    try:
-                        result.points_on_device = self._triangulate_pair(a, b, source="on_device")
-                        result.fit_on_device = fit_trajectory(result.points_on_device)
-                    except Exception as e:
-                        result.error_on_device = f"{type(e).__name__}: {e}"
-            self.results[sid] = result
+            self.results[sid] = self._rebuild_result_for_session(sid)
 
         if self.pitches:
             logger.info(
@@ -553,6 +553,47 @@ class State:
         return triangulate_cycle(a_scaled, b_scaled, source=source)
 
     @staticmethod
+    def _normalize_paths(
+        raw_paths: list[str] | set[DetectionPath] | None,
+    ) -> set[DetectionPath]:
+        if raw_paths is None:
+            return set()
+        parsed: set[DetectionPath] = set()
+        for item in raw_paths:
+            try:
+                parsed.add(item if isinstance(item, DetectionPath) else DetectionPath(str(item)))
+            except ValueError:
+                continue
+        return parsed
+
+    def _paths_for_pitch(self, pitch: PitchPayload) -> set[DetectionPath]:
+        explicit = self._normalize_paths(pitch.paths)
+        if explicit:
+            return explicit
+        with self._lock:
+            for session in (self._current_session, self._last_ended_session):
+                if session is not None and session.id == pitch.session_id:
+                    return set(session.paths)
+            return set(self._default_paths)
+
+    def _get_path_frames(self, pitch: PitchPayload, path: DetectionPath) -> list[FramePayload]:
+        if path == DetectionPath.live:
+            return list(pitch.frames_live)
+        if path == DetectionPath.ios_post:
+            if pitch.frames_ios_post:
+                return list(pitch.frames_ios_post)
+            if pitch.frames_on_device:
+                return list(pitch.frames_on_device)
+            if DetectionPath.server_post not in self._paths_for_pitch(pitch) and pitch.frames:
+                return list(pitch.frames)
+            return []
+        if pitch.frames_server_post:
+            return list(pitch.frames_server_post)
+        if pitch.frames and (pitch.frames_on_device or DetectionPath.ios_post not in self._paths_for_pitch(pitch)):
+            return list(pitch.frames)
+        return []
+
+    @staticmethod
     def _has_on_device_frames(pitch: PitchPayload) -> bool:
         """Dual-mode detection: if any pitch carries `frames_on_device`,
         the session was armed dual and we owe the caller a second
@@ -568,6 +609,21 @@ class State:
         `result.points=[]` until the background detect task updates the
         pitch and we re-record."""
         return bool(pitch and pitch.frames)
+
+    def _pitch_with_path_frames(
+        self,
+        pitch: PitchPayload,
+        path: DetectionPath,
+    ) -> PitchPayload:
+        clone = pitch.model_copy(deep=True)
+        clone.frames_on_device = []
+        if path == DetectionPath.live:
+            clone.frames = list(pitch.frames_live)
+        elif path == DetectionPath.ios_post:
+            clone.frames = self._get_path_frames(pitch, DetectionPath.ios_post)
+        else:
+            clone.frames = self._get_path_frames(pitch, DetectionPath.server_post)
+        return clone
 
     def _session_sync_id_locked(self, session_id: str) -> str | None:
         for session in (self._current_session, self._last_ended_session):
@@ -596,6 +652,185 @@ class State:
             return "sync id mismatch for armed session"
         return None
 
+    def _empty_result_for_session(
+        self,
+        session_id: str,
+        *,
+        camera_a_received: bool,
+        camera_b_received: bool,
+    ) -> SessionResult:
+        return SessionResult(
+            session_id=session_id,
+            camera_a_received=camera_a_received,
+            camera_b_received=camera_b_received,
+            solved_at=self._time_fn(),
+        )
+
+    def _rebuild_result_for_session(self, session_id: str) -> SessionResult:
+        with self._lock:
+            a = self.pitches.get(("A", session_id))
+            b = self.pitches.get(("B", session_id))
+            live = self._live_pairings.get(session_id)
+            current = self._current_session if self._current_session and self._current_session.id == session_id else None
+            ended = self._last_ended_session if self._last_ended_session and self._last_ended_session.id == session_id else None
+            session_obj = current or ended
+
+        result = self._empty_result_for_session(
+            session_id,
+            camera_a_received=a is not None,
+            camera_b_received=b is not None,
+        )
+
+        candidate_paths: set[DetectionPath] = set()
+        if session_obj is not None:
+            candidate_paths |= set(session_obj.paths)
+        for pitch in (a, b):
+            if pitch is not None:
+                candidate_paths |= self._paths_for_pitch(pitch)
+        if live is not None and live.frame_counts:
+            candidate_paths.add(DetectionPath.live)
+        if not candidate_paths:
+            candidate_paths = set(_DEFAULT_PATHS)
+
+        if live is not None:
+            result.frame_counts_by_path[DetectionPath.live.value] = {
+                cam: int(count) for cam, count in live.frame_counts.items() if count
+            }
+            if live.triangulated:
+                result.triangulated_by_path[DetectionPath.live.value] = list(live.triangulated)
+                result.paths_completed.add(DetectionPath.live.value)
+            if live.abort_reasons:
+                result.abort_reasons.update({f"live:{cam}": why for cam, why in live.abort_reasons.items()})
+
+        sync_error = None
+        if a is not None and b is not None:
+            sync_error = self._validate_pair_sync(a, b)
+            if sync_error is not None:
+                result.error = sync_error
+                result.error_on_device = sync_error
+
+        if sync_error is None and a is not None and b is not None:
+            for path in sorted(candidate_paths, key=lambda p: p.value):
+                if path == DetectionPath.live:
+                    continue
+                frames_a = self._get_path_frames(a, path)
+                frames_b = self._get_path_frames(b, path)
+                if frames_a or frames_b:
+                    result.frame_counts_by_path[path.value] = {
+                        "A": len(frames_a),
+                        "B": len(frames_b),
+                    }
+                if not frames_a or not frames_b:
+                    continue
+                try:
+                    pts = self._triangulate_pair(
+                        self._pitch_with_path_frames(a, path),
+                        self._pitch_with_path_frames(b, path),
+                        source="server",
+                    )
+                except Exception as exc:
+                    result.abort_reasons[path.value] = f"{type(exc).__name__}: {exc}"
+                    continue
+                result.triangulated_by_path[path.value] = pts
+                result.paths_completed.add(path.value)
+
+        authority: list[TriangulatedPoint] = []
+        for path in (
+            DetectionPath.ios_post.value,
+            DetectionPath.server_post.value,
+            DetectionPath.live.value,
+        ):
+            pts = result.triangulated_by_path.get(path)
+            if pts:
+                authority = pts
+                break
+        result.triangulated = authority
+        result.points = authority
+        if result.triangulated_by_path.get(DetectionPath.ios_post.value):
+            result.points_on_device = list(result.triangulated_by_path[DetectionPath.ios_post.value])
+        elif result.triangulated_by_path.get(DetectionPath.live.value):
+            result.points_on_device = list(result.triangulated_by_path[DetectionPath.live.value])
+
+        if result.points:
+            try:
+                result.fit = fit_trajectory(result.points)
+            except Exception:
+                result.fit = None
+        if result.points_on_device:
+            try:
+                result.fit_on_device = fit_trajectory(result.points_on_device)
+            except Exception:
+                result.fit_on_device = None
+        if not result.points and result.error is None and (a is not None or b is not None):
+            if result.abort_reasons:
+                result.aborted = True
+            elif a is not None and b is not None:
+                result.error = "no detection completed"
+        return result
+
+    def ingest_live_frame(
+        self,
+        camera_id: str,
+        session_id: str,
+        frame: FramePayload,
+    ) -> tuple[list[TriangulatedPoint], dict[str, int]]:
+        with self._lock:
+            live = self._live_pairings.setdefault(session_id, LivePairingSession(session_id))
+            cal_a = self._calibrations.get("A")
+            cal_b = self._calibrations.get("B")
+            dev_a = self._devices.get("A")
+            dev_b = self._devices.get("B")
+            session_obj = None
+            for candidate in (self._current_session, self._last_ended_session):
+                if candidate is not None and candidate.id == session_id:
+                    session_obj = candidate
+                    break
+
+        def triangulate_live(cam: str, first: FramePayload, second: FramePayload) -> TriangulatedPoint | None:
+            left_frame, right_frame = (first, second) if cam == "A" else (second, first)
+            if cal_a is None or cal_b is None or dev_a is None or dev_b is None:
+                return None
+            if dev_a.sync_anchor_timestamp_s is None or dev_b.sync_anchor_timestamp_s is None:
+                return None
+            pa = PitchPayload(
+                camera_id="A",
+                session_id=session_id,
+                sync_id=session_obj.sync_id if session_obj is not None else dev_a.time_sync_id,
+                sync_anchor_timestamp_s=dev_a.sync_anchor_timestamp_s,
+                video_start_pts_s=left_frame.timestamp_s,
+                paths=[DetectionPath.live.value],
+                frames=[left_frame],
+                intrinsics=cal_a.intrinsics,
+                homography=list(cal_a.homography),
+                image_width_px=cal_a.image_width_px,
+                image_height_px=cal_a.image_height_px,
+            )
+            pb = PitchPayload(
+                camera_id="B",
+                session_id=session_id,
+                sync_id=session_obj.sync_id if session_obj is not None else dev_b.time_sync_id,
+                sync_anchor_timestamp_s=dev_b.sync_anchor_timestamp_s,
+                video_start_pts_s=right_frame.timestamp_s,
+                paths=[DetectionPath.live.value],
+                frames=[right_frame],
+                intrinsics=cal_b.intrinsics,
+                homography=list(cal_b.homography),
+                image_width_px=cal_b.image_width_px,
+                image_height_px=cal_b.image_height_px,
+            )
+            pts = self._triangulate_pair(pa, pb, source="server")
+            return pts[0] if pts else None
+
+        created = live.ingest(camera_id, frame, triangulate_live)
+        return created, dict(live.frame_counts)
+
+    def mark_live_path_ended(self, camera_id: str, session_id: str, reason: str | None = None) -> None:
+        with self._lock:
+            live = self._live_pairings.setdefault(session_id, LivePairingSession(session_id))
+            live.mark_completed(camera_id)
+            if reason and reason != "disarmed":
+                live.mark_aborted(camera_id, reason)
+
     def _atomic_write(self, path: Path, payload: str) -> None:
         # Unique tmp filename per call so concurrent writers targeting the
         # same `path` (e.g. two simultaneous /pitch POSTs producing the same
@@ -622,6 +857,10 @@ class State:
         yield the same points; last-writer-wins on `self.results[sid]`
         and on the result JSON file (both atomic)."""
         pitch_path = self._pitch_path(pitch.camera_id, pitch.session_id)
+        normalized_paths = self._normalize_paths(pitch.paths)
+        if not normalized_paths:
+            normalized_paths = self._paths_for_pitch(pitch)
+        pitch.paths = sorted(p.value for p in normalized_paths)
 
         # --- Critical section 1: mutate pitches + drive session FSM. ---
         # Grab the pair snapshot here so triangulation below runs against a
@@ -633,8 +872,6 @@ class State:
             # camera, if it was also recording, gets "disarm" on its next
             # /status poll and cleans up.
             self._register_upload_in_session_locked(pitch)
-            a = self.pitches.get(("A", pitch.session_id))
-            b = self.pitches.get(("B", pitch.session_id))
 
         # --- Outside the lock: write pitch JSON. Filename is unique per
         # (camera, session) and each pitch uses its own tmp file, so two
@@ -642,28 +879,7 @@ class State:
         self._atomic_write(pitch_path, pitch.model_dump_json())
 
         # --- Outside the lock: build the result + triangulate if paired. ---
-        result = SessionResult(
-            session_id=pitch.session_id,
-            camera_a_received=a is not None,
-            camera_b_received=b is not None,
-        )
-        if a is not None and b is not None:
-            sync_error = self._validate_pair_sync(a, b)
-            if sync_error is not None:
-                result.error = sync_error
-                result.error_on_device = sync_error
-            elif self._has_server_frames(a) and self._has_server_frames(b):
-                try:
-                    result.points = self._triangulate_pair(a, b, source="server")
-                    result.fit = fit_trajectory(result.points)
-                except Exception as e:
-                    result.error = f"{type(e).__name__}: {e}"
-            if sync_error is None and self._has_on_device_frames(a) and self._has_on_device_frames(b):
-                try:
-                    result.points_on_device = self._triangulate_pair(a, b, source="on_device")
-                    result.fit_on_device = fit_trajectory(result.points_on_device)
-                except Exception as e:
-                    result.error_on_device = f"{type(e).__name__}: {e}"
+        result = self._rebuild_result_for_session(pitch.session_id)
 
         # --- Outside the lock: persist the result JSON. ---
         self._atomic_write(
@@ -692,6 +908,7 @@ class State:
             raise KeyError((analysis.camera_id, analysis.session_id))
 
         merged = existing.model_copy(deep=True)
+        merged.frames_ios_post = list(analysis.frames_on_device)
         merged.frames_on_device = list(analysis.frames_on_device)
         if analysis.capture_telemetry is not None:
             merged.capture_telemetry = analysis.capture_telemetry
@@ -723,6 +940,11 @@ class State:
     def get(self, session_id: str) -> SessionResult | None:
         with self._lock:
             return self.results.get(session_id)
+
+    def store_result(self, result: SessionResult) -> None:
+        self._atomic_write(self._result_path(result.session_id), result.model_dump_json())
+        with self._lock:
+            self.results[result.session_id] = result
 
     def pitches_for_session(self, session_id: str) -> dict[str, PitchPayload]:
         """Snapshot of all pitches currently stored for `session_id`, keyed
@@ -854,6 +1076,31 @@ class State:
             last = {cam: run.to_dict() for cam, run in self._auto_cal_last.items()}
             return {"active": active, "last": last}
 
+    def live_session_summary(self) -> dict[str, Any] | None:
+        session = self.session_snapshot()
+        if session is None:
+            return None
+        with self._lock:
+            live = self._live_pairings.get(session.id)
+        if live is None:
+            return {
+                "session_id": session.id,
+                "armed": session.armed,
+                "paths": sorted(p.value for p in session.paths),
+                "frame_counts": {},
+                "point_count": 0,
+                "abort_reasons": {},
+            }
+        return {
+            "session_id": session.id,
+            "armed": session.armed,
+            "paths": sorted(p.value for p in session.paths),
+            "frame_counts": dict(live.frame_counts),
+            "point_count": len(live.triangulated),
+            "completed_cameras": sorted(live.completed_cameras),
+            "abort_reasons": dict(live.abort_reasons),
+        }
+
     def _live_time_sync_intent_locked(self, now: float) -> _LegacyTimeSyncIntent | None:
         intent = self._current_time_sync_intent
         if intent is None:
@@ -887,6 +1134,7 @@ class State:
         camera_id: str,
         time_synced: bool = False,
         time_sync_id: str | None = None,
+        sync_anchor_timestamp_s: float | None = None,
     ) -> None:
         """Record one liveness ping. Overwrites the previous entry for this
         camera so `last_seen_at`, `time_synced`, and the currently-held
@@ -902,6 +1150,11 @@ class State:
                 time_synced=time_synced,
                 time_sync_id=(time_sync_id if time_synced else None),
                 time_sync_at=(now if time_synced and time_sync_id is not None else None),
+                sync_anchor_timestamp_s=(
+                    float(sync_anchor_timestamp_s)
+                    if time_synced and sync_anchor_timestamp_s is not None
+                    else None
+                ),
             )
             # GC stale entries first — cheap and keeps the cap hit rare.
             stale = [
@@ -954,6 +1207,20 @@ class State:
         fresh.sort(key=lambda d: d.camera_id)
         return fresh
 
+    def device_snapshot(self, camera_id: str) -> Device | None:
+        with self._lock:
+            dev = self._devices.get(camera_id)
+            if dev is None:
+                return None
+            return Device(
+                camera_id=dev.camera_id,
+                last_seen_at=dev.last_seen_at,
+                time_synced=dev.time_synced,
+                time_sync_id=dev.time_sync_id,
+                time_sync_at=dev.time_sync_at,
+                sync_anchor_timestamp_s=dev.sync_anchor_timestamp_s,
+            )
+
     def _check_session_timeout_locked(self, now: float) -> None:
         """If the current session has exceeded its max_duration_s, transition
         it to ended. Assumes the caller holds `self._lock`."""
@@ -975,7 +1242,9 @@ class State:
             return self._current_session
 
     def arm_session(
-        self, max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S
+        self,
+        max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S,
+        paths: set[DetectionPath] | None = None,
     ) -> Session:
         """Begin a new armed session. If one is already armed, return it
         unchanged (idempotent so dashboard double-clicks don't double-arm).
@@ -986,14 +1255,17 @@ class State:
             self._check_session_timeout_locked(now)
             if self._current_session is not None:
                 return self._current_session
+            chosen_paths = set(paths or self._default_paths or _DEFAULT_PATHS)
             session = Session(
                 id=_new_session_id(),
                 started_at=now,
                 max_duration_s=max_duration_s,
-                mode=self._current_mode,
+                paths=chosen_paths,
+                mode=mode_for_paths(chosen_paths),
                 tracking_exposure_cap=self._tracking_exposure_cap,
                 sync_id=self._common_time_sync_id_locked(now),
             )
+            self._live_pairings[session.id] = LivePairingSession(session.id)
             self._current_session = session
             self._current_time_sync_intent = None
             return session
@@ -1003,14 +1275,29 @@ class State:
         iPhones read this from status/heartbeat to render the HUD mode chip
         even while idle."""
         with self._lock:
-            return self._current_mode
+            return mode_for_paths(self._default_paths)
+
+    def default_paths(self) -> set[DetectionPath]:
+        with self._lock:
+            return set(self._default_paths)
 
     def set_mode(self, mode: CaptureMode) -> CaptureMode:
         """Record the dashboard's mode choice. Only affects sessions armed
         after this call — in-flight sessions keep their snapshot mode."""
         with self._lock:
             self._current_mode = mode
+            self._default_paths = paths_for_mode(mode)
+            self._persist_runtime_settings_locked()
             return mode
+
+    def set_default_paths(self, paths: set[DetectionPath]) -> set[DetectionPath]:
+        if not paths:
+            raise ValueError("at least one detection path must be enabled")
+        with self._lock:
+            self._default_paths = set(paths)
+            self._current_mode = mode_for_paths(self._default_paths)
+            self._persist_runtime_settings_locked()
+            return set(self._default_paths)
 
     # ---- Runtime tunables (chirp detection threshold + heartbeat cadence) --
     #
@@ -1049,12 +1336,26 @@ class State:
                 self._tracking_exposure_cap = TrackingExposureCapMode(tec)
             except ValueError:
                 pass
+        paths = obj.get("default_paths")
+        if isinstance(paths, list):
+            parsed: set[DetectionPath] = set()
+            for item in paths:
+                if not isinstance(item, str):
+                    continue
+                try:
+                    parsed.add(DetectionPath(item))
+                except ValueError:
+                    continue
+            if parsed:
+                self._default_paths = parsed
+                self._current_mode = mode_for_paths(parsed)
         logger.info(
-            "restored runtime_settings: chirp=%.3f interval_s=%.2f capture_h=%d tracking_exposure=%s",
+            "restored runtime_settings: chirp=%.3f interval_s=%.2f capture_h=%d tracking_exposure=%s paths=%s",
             self._chirp_detect_threshold,
             self._heartbeat_interval_s,
             self._capture_height_px,
             self._tracking_exposure_cap.value,
+            sorted(p.value for p in self._default_paths),
         )
 
     _ALLOWED_CAPTURE_HEIGHTS = (540, 720, 1080)
@@ -1067,6 +1368,7 @@ class State:
                 "heartbeat_interval_s": self._heartbeat_interval_s,
                 "capture_height_px": self._capture_height_px,
                 "tracking_exposure_cap": self._tracking_exposure_cap.value,
+                "default_paths": sorted(p.value for p in self._default_paths),
             },
             indent=2,
         )
@@ -1771,11 +2073,8 @@ class State:
                 if fod.plate_xyz_m is not None:
                     plate_xz_m = [float(fod.plate_xyz_m[0]), float(fod.plate_xyz_m[2])]
 
-            # Infer the session's capture mode from payload shape:
-            # - any pitch carries frames_on_device → dual OR on_device
-            # - any MOV exists on disk → camera_only OR dual
-            # Combine: on_device+MOV = dual; frames_on_device only = on_device;
-            # MOV only = camera_only.
+            # Infer the legacy mode label for compatibility. The richer UI
+            # should prefer `path_status`.
             has_any_video = any(
                 self._video_dir.glob(f"session_{sid}_*")
             )
@@ -1785,6 +2084,20 @@ class State:
                 mode = "camera_only"
             else:
                 mode = "on_device"
+            path_status = {
+                DetectionPath.live.value: (
+                    "done" if result is not None and DetectionPath.live.value in result.paths_completed
+                    else ("error" if result is not None and any(key.startswith("live:") for key in result.abort_reasons) else "-")
+                ),
+                DetectionPath.ios_post.value: (
+                    "done" if result is not None and DetectionPath.ios_post.value in result.paths_completed
+                    else ("error" if result is not None and DetectionPath.ios_post.value in result.abort_reasons else "-")
+                ),
+                DetectionPath.server_post.value: (
+                    "done" if result is not None and DetectionPath.server_post.value in result.paths_completed
+                    else ("error" if result is not None and DetectionPath.server_post.value in result.abort_reasons else "-")
+                ),
+            }
 
             events.append(
                 {
@@ -1806,6 +2119,7 @@ class State:
                     },
                     "error": error,
                     "error_on_device": error_on_device,
+                    "path_status": path_status,
                     # Fit-derived summary (LIVE dashboard). All None when
                     # fit_on_device is missing — frontend hides the row in
                     # that case.
@@ -1944,6 +2258,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="ball_tracker server", lifespan=lifespan)
 state = State()
+device_ws = DeviceSocketManager()
+sse_hub = SSEHub()
 
 
 def _build_status_response() -> dict[str, Any]:
@@ -1955,6 +2271,7 @@ def _build_status_response() -> dict[str, Any]:
     sync_run = state.current_sync()
     last_sync = state.last_sync_result()
     now = state._time_fn()
+    ws_snapshot = device_ws.snapshot()
     return {
         **summary,
         "devices": [
@@ -1971,6 +2288,17 @@ def _build_status_response() -> dict[str, Any]:
                 "time_sync_age_s": (
                     None if d.time_sync_at is None else float(now - d.time_sync_at)
                 ),
+                "sync_anchor_timestamp_s": d.sync_anchor_timestamp_s,
+                "ws_connected": (
+                    ws_snapshot.get(d.camera_id).connected
+                    if ws_snapshot.get(d.camera_id) is not None
+                    else False
+                ),
+                "ws_latency_ms": (
+                    ws_snapshot.get(d.camera_id).last_latency_ms
+                    if ws_snapshot.get(d.camera_id) is not None
+                    else None
+                ),
             }
             for d in state.online_devices()
         ],
@@ -1981,6 +2309,7 @@ def _build_status_response() -> dict[str, Any]:
         # session they read session.mode instead (it's the snapshot that
         # can't drift from under them).
         "capture_mode": state.current_mode().value,
+        "default_paths": sorted(p.value for p in state.default_paths()),
         # Mutual-sync context. `sync.id` is the sole dedupe key the phone
         # uses to decide whether a fresh `sync_run` command has arrived
         # vs. a repeat of an in-flight run. `last_sync` lets the dashboard
@@ -2021,12 +2350,177 @@ def _build_status_response() -> dict[str, Any]:
             if state.is_calibration_frame_requested(cam)
         },
         "auto_calibration": state.auto_cal_status(),
+        "live_session": state.live_session_summary(),
+        "ws_devices": {
+            cam: {
+                "connected": snap.connected,
+                "connected_at": snap.connected_at,
+                "last_seen_at": snap.last_seen_at,
+                "last_latency_ms": snap.last_latency_ms,
+            }
+            for cam, snap in ws_snapshot.items()
+        },
+    }
+
+
+def _settings_message_for(camera_id: str) -> dict[str, Any]:
+    status = _build_status_response()
+    return {
+        "type": "settings",
+        "camera_id": camera_id,
+        "paths": status.get("default_paths", []),
+        "chirp_detect_threshold": status.get("chirp_detect_threshold"),
+        "heartbeat_interval_s": status.get("heartbeat_interval_s"),
+        "tracking_exposure_cap": status.get("tracking_exposure_cap"),
+        "capture_height_px": status.get("capture_height_px"),
+        "preview_requested": status.get("preview_requested", {}).get(camera_id, False),
+        "calibration_frame_requested": status.get("calibration_frame_requested", {}).get(camera_id, False),
+    }
+
+
+def _arm_message_for(session: Session) -> dict[str, Any]:
+    return {
+        "type": "arm",
+        "sid": session.id,
+        "paths": sorted(p.value for p in session.paths),
+        "max_duration_s": session.max_duration_s,
+        "tracking_exposure_cap": session.tracking_exposure_cap.value,
+    }
+
+
+def _disarm_message_for(session: Session) -> dict[str, Any]:
+    return {
+        "type": "disarm",
+        "sid": session.id,
     }
 
 
 @app.get("/status")
 def status() -> dict[str, Any]:
     return _build_status_response()
+
+
+@app.get("/stream")
+async def stream() -> StreamingResponse:
+    async def event_gen():
+        yield "event: hello\ndata: {}\n\n"
+        async for payload in sse_hub.subscribe():
+            yield payload
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.websocket("/ws/device/{camera_id}")
+async def ws_device(camera_id: str, websocket: WebSocket) -> None:
+    _validate_camera_id_or_422(camera_id)
+    await device_ws.connect(camera_id, websocket)
+    try:
+        await device_ws.send(camera_id, _settings_message_for(camera_id))
+        session = state.current_session()
+        if session is not None and session.armed:
+            await device_ws.send(camera_id, _arm_message_for(session))
+        await sse_hub.broadcast(
+            "device_status",
+            {"cam": camera_id, "online": True, "ws_connected": True},
+        )
+        while True:
+            msg = await websocket.receive_json()
+            mtype = msg.get("type")
+            if mtype == "hello":
+                device_ws.note_seen(camera_id)
+                state.heartbeat(
+                    camera_id,
+                    time_synced=bool(msg.get("time_synced", False)),
+                    time_sync_id=msg.get("time_sync_id"),
+                    sync_anchor_timestamp_s=msg.get("sync_anchor_timestamp_s"),
+                )
+                await device_ws.send(camera_id, _settings_message_for(camera_id))
+                continue
+            if mtype == "heartbeat":
+                device_ws.note_seen(camera_id)
+                state.heartbeat(
+                    camera_id,
+                    time_synced=bool(msg.get("time_synced", False)),
+                    time_sync_id=msg.get("time_sync_id"),
+                    sync_anchor_timestamp_s=msg.get("sync_anchor_timestamp_s"),
+                )
+                continue
+            if mtype == "frame":
+                device_ws.note_seen(camera_id)
+                frame = FramePayload(
+                    frame_index=int(msg.get("i", 0)),
+                    timestamp_s=float(msg["ts"]),
+                    px=None if msg.get("px") is None else float(msg["px"]),
+                    py=None if msg.get("py") is None else float(msg["py"]),
+                    ball_detected=bool(msg.get("detected", False)),
+                )
+                session_id = str(msg.get("sid") or "")
+                if not session_id:
+                    continue
+                new_points, counts = await asyncio.to_thread(
+                    state.ingest_live_frame,
+                    camera_id,
+                    session_id,
+                    frame,
+                )
+                await sse_hub.broadcast(
+                    "frame_count",
+                    {
+                        "sid": session_id,
+                        "cam": camera_id,
+                        "path": DetectionPath.live.value,
+                        "count": counts.get(camera_id, 0),
+                    },
+                )
+                for point in new_points:
+                    await sse_hub.broadcast(
+                        "point",
+                        {
+                            "sid": session_id,
+                            "path": DetectionPath.live.value,
+                            "x": point.x_m,
+                            "y": point.y_m,
+                            "z": point.z_m,
+                            "t_rel_s": point.t_rel_s,
+                        },
+                    )
+                if new_points:
+                    result = await asyncio.to_thread(state._rebuild_result_for_session, session_id)
+                    await asyncio.to_thread(state.store_result, result)
+                continue
+            if mtype == "cycle_end":
+                session_id = str(msg.get("sid") or "")
+                reason = msg.get("reason")
+                if session_id:
+                    await asyncio.to_thread(state.mark_live_path_ended, camera_id, session_id, reason)
+                    result = await asyncio.to_thread(state._rebuild_result_for_session, session_id)
+                    await asyncio.to_thread(state.store_result, result)
+                    await sse_hub.broadcast(
+                        "path_completed",
+                        {
+                            "sid": session_id,
+                            "path": DetectionPath.live.value,
+                            "cam": camera_id,
+                            "reason": reason,
+                            "point_count": len(result.triangulated_by_path.get(DetectionPath.live.value, [])),
+                        },
+                    )
+                continue
+    except WebSocketDisconnect:
+        pass
+    finally:
+        device_ws.disconnect(camera_id, websocket)
+        await sse_hub.broadcast(
+            "device_status",
+            {"cam": camera_id, "online": False, "ws_connected": False},
+        )
 
 
 @app.post("/heartbeat")
@@ -2042,6 +2536,7 @@ def heartbeat(body: HeartbeatBody) -> dict[str, Any]:
         body.camera_id,
         time_synced=body.time_synced,
         time_sync_id=body.time_sync_id,
+        sync_anchor_timestamp_s=body.sync_anchor_timestamp_s,
     )
     resp = _build_status_response()
     # Per-camera: pop the pending flag and surface it on THIS reply only.
@@ -2075,7 +2570,28 @@ async def sessions_arm(
 ):
     """Begin an armed session. HTML-form callers (dashboard buttons) get a
     303 redirect back to /. Machine callers get the session JSON."""
-    session = state.arm_session(max_duration_s=max_duration_s)
+    requested_paths: set[DetectionPath] | None = None
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json()
+        raw_paths = body.get("paths")
+        if isinstance(raw_paths, list):
+            requested_paths = state._normalize_paths(raw_paths)
+    session = state.arm_session(max_duration_s=max_duration_s, paths=requested_paths)
+    await device_ws.broadcast(
+        {
+            cam.camera_id: _arm_message_for(session)
+            for cam in state.online_devices()
+        }
+    )
+    await sse_hub.broadcast(
+        "session_armed",
+        {
+            "sid": session.id,
+            "paths": sorted(p.value for p in session.paths),
+            "armed_at": session.started_at,
+        },
+    )
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "session": session.to_dict()}
@@ -2091,6 +2607,19 @@ async def sessions_stop(request: Request):
         return RedirectResponse("/", status_code=303)
     if ended is None:
         raise HTTPException(status_code=409, detail="no armed session")
+    await device_ws.broadcast(
+        {
+            cam.camera_id: _disarm_message_for(ended)
+            for cam in state.online_devices()
+        }
+    )
+    await sse_hub.broadcast(
+        "session_ended",
+        {
+            "sid": ended.id,
+            "paths_completed": sorted(state.results.get(ended.id, SessionResult(session_id=ended.id, camera_a_received=False, camera_b_received=False)).paths_completed),
+        },
+    )
     return {"ok": True, "session": ended.to_dict()}
 
 
@@ -2111,9 +2640,39 @@ async def sessions_set_mode(
             detail=f"invalid mode {mode!r}; expected one of: {[m.value for m in CaptureMode]}",
         )
     state.set_mode(applied)
+    await device_ws.broadcast(
+        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
+    )
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "capture_mode": applied.value}
+
+
+@app.post("/detection/paths")
+async def detection_paths(request: Request):
+    ctype = request.headers.get("content-type", "").lower()
+    raw_paths: list[str] | None = None
+    if "application/json" in ctype:
+        body = await request.json()
+        if isinstance(body.get("paths"), list):
+            raw_paths = body["paths"]
+    else:
+        form = await request.form()
+        raw = form.getlist("paths")
+        raw_paths = [str(v) for v in raw]
+    paths = state._normalize_paths(raw_paths or [])
+    if not paths:
+        raise HTTPException(status_code=400, detail="at least one detection path is required")
+    try:
+        applied = state.set_default_paths(paths)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await device_ws.broadcast(
+        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
+    )
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "paths": sorted(p.value for p in applied)}
 
 
 @app.post("/settings/chirp_threshold")
@@ -2515,13 +3074,21 @@ async def pitch(
         if payload_obj.image_height_px is None:
             payload_obj.image_height_px = cal_snap.image_height_px
 
+    payload_paths = state._normalize_paths(payload_obj.paths) or state._paths_for_pitch(payload_obj)
+    payload_obj.paths = sorted(p.value for p in payload_paths)
     has_video = video is not None and (video.filename or video.size)
     # Either stream counts as "data the server can work with": `frames`
     # from mode-two (iOS detection, authoritative for its session) or
     # `frames_on_device` from a degraded-dual upload (dual-mode cycle
     # where the MOV writer failed but the on-device detector still
     # produced a frame list). Both land in the triangulation pipeline.
-    has_frames = bool(payload_obj.frames) or bool(payload_obj.frames_on_device)
+    has_frames = (
+        bool(payload_obj.frames)
+        or bool(payload_obj.frames_live)
+        or bool(payload_obj.frames_ios_post)
+        or bool(payload_obj.frames_server_post)
+        or bool(payload_obj.frames_on_device)
+    )
     if not has_video and not has_frames:
         raise HTTPException(
             status_code=422,
@@ -2577,7 +3144,11 @@ async def pitch(
         # server detection as a background task that will re-record the
         # pitch once frames are filled.
         payload_obj.frames = []
-        if payload_obj.sync_anchor_timestamp_s is not None:
+        payload_obj.frames_server_post = []
+        if (
+            payload_obj.sync_anchor_timestamp_s is not None
+            and DetectionPath.server_post in payload_paths
+        ):
             detection_pending = True
     else:
         # Mode-two: iPhone already detected; we trust the frames list and
@@ -2588,6 +3159,11 @@ async def pitch(
             # Anchor missing ⇒ the session can't pair no matter what the
             # frames say; drop them so downstream counts stay honest.
             payload_obj.frames = []
+            payload_obj.frames_ios_post = []
+            payload_obj.frames_live = []
+            payload_obj.frames_server_post = []
+        elif payload_obj.frames and not payload_obj.frames_ios_post and DetectionPath.server_post not in payload_paths:
+            payload_obj.frames_ios_post = list(payload_obj.frames)
 
     result = await asyncio.to_thread(state.record, payload_obj)
     if payload_obj.sync_anchor_timestamp_s is None and result.error is None:
@@ -2600,18 +3176,28 @@ async def pitch(
         # server detection.
         background_tasks.add_task(_run_server_detection, clip_path, payload_obj)
 
-    ball_frames = sum(1 for f in payload_obj.frames if f.ball_detected)
+    ball_frames = sum(
+        1
+        for f in (
+            payload_obj.frames_server_post
+            or payload_obj.frames_ios_post
+            or payload_obj.frames_live
+            or payload_obj.frames
+        )
+        if f.ball_detected
+    )
     logger.info(
-        "pitch camera=%s session=%s clip=%s frames=%d ball=%d detected_on=%s triangulated=%d%s%s",
+        "pitch camera=%s session=%s clip=%s frames=%d ball=%d detected_on=%s triangulated=%d%s%s paths=%s",
         payload_obj.camera_id,
         payload_obj.session_id,
         f"{clip_info['bytes']}B" if clip_info else "none",
-        len(payload_obj.frames),
+        len(payload_obj.frames_server_post or payload_obj.frames_ios_post or payload_obj.frames_live or payload_obj.frames),
         ball_frames,
         "server-pending" if detection_pending else ("device" if payload_obj.frames else "skipped"),
         len(result.points),
         f" on_device={len(result.points_on_device)}" if result.points_on_device else "",
         f" err={result.error}" if result.error else "",
+        payload_obj.paths,
     )
     if result.points_on_device:
         zs = [p.z_m for p in result.points_on_device]
@@ -2685,6 +3271,7 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         return
 
     pitch.frames = frames
+    pitch.frames_server_post = frames
     try:
         await asyncio.to_thread(state.record, pitch)
     except Exception as exc:
@@ -4199,6 +4786,8 @@ def events_index() -> HTMLResponse:
             session=session.to_dict() if session is not None else None,
             calibrations=sorted(state.calibrations().keys()),
             capture_mode=state.current_mode().value,
+            default_paths=sorted(p.value for p in state.default_paths()),
+            live_session=state.live_session_summary(),
             sync=sync_run.to_dict() if sync_run is not None else None,
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
             chirp_detect_threshold=state.chirp_detect_threshold(),

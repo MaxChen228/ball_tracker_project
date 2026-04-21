@@ -204,12 +204,34 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .session-id {{ font-family: var(--mono); font-size: 13px; color: var(--ink);
                letter-spacing: 0.04em; }}
 .session-actions {{ display: flex; gap: var(--s-2); margin-top: var(--s-3); }}
+.active-head {{ display:flex; align-items:center; gap:var(--s-2); margin-bottom:var(--s-2); }}
+.active-grid {{ display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:var(--s-2); margin-top:var(--s-3); }}
+.active-grid span {{ display:flex; flex-direction:column; gap:2px; padding:6px 8px;
+                      border:1px solid var(--border-l); border-radius:var(--r);
+                      background:rgba(42,37,32,0.02); }}
+.active-grid .k {{ font-family:var(--mono); font-size:10px; letter-spacing:0.10em;
+                   text-transform:uppercase; color:var(--sub); }}
+.active-grid .v {{ font-family:var(--mono); font-size:13px; color:var(--ink); }}
+.active-empty {{ font-family:var(--mono); font-size:11px; letter-spacing:0.08em; color:var(--sub); }}
 .mode-row {{ display: flex; gap: var(--s-2); align-items: center; margin-top: var(--s-3);
              flex-wrap: wrap; }}
 .mode-label {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
                 text-transform: uppercase; color: var(--sub); min-width: 44px; }}
 .mode-locked {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
                  color: var(--sub); padding-left: var(--s-1); }}
+.paths-stack {{ display:flex; flex-direction:column; gap:var(--s-2); margin-top:var(--s-3); }}
+.path-option {{ display:flex; gap:var(--s-2); align-items:flex-start; padding:8px;
+                border:1px solid var(--border-l); border-radius:var(--r); }}
+.path-option input {{ margin-top:3px; }}
+.path-option .copy {{ display:flex; flex-direction:column; gap:1px; }}
+.path-option .title {{ font-family:var(--mono); font-size:11px; color:var(--ink); letter-spacing:0.06em; }}
+.path-option .sub {{ font-family:var(--sans); font-size:11px; color:var(--sub); line-height:1.5; }}
+.paths-actions {{ margin-top:var(--s-2); }}
+.path-chip-row {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:var(--s-2); }}
+.path-chip {{ display:inline-block; padding:2px 8px; border:1px solid var(--border-base);
+              border-radius:var(--r); font-family:var(--mono); font-size:10px;
+              letter-spacing:0.08em; text-transform:uppercase; color:var(--sub); }}
+.path-chip.on {{ color:var(--passed); border-color:var(--passed); background:var(--passed-bg); }}
 /* Segmented control: the three mode buttons share one outer border and
    collapse their individual borders/radius so the eye reads them as a
    single exclusive choice, not three separate CTAs. */
@@ -429,6 +451,8 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                         letter-spacing: 0.10em; text-transform: uppercase;
                         color: var(--sub); }}
 .event-top .capmode::before {{ content: "· "; opacity: 0.5; }}
+.event-top .event-paths {{ display:flex; gap:4px; flex-wrap:wrap; margin-left:auto; }}
+.event-top .event-paths .path-chip {{ font-size:9px; padding:1px 5px; }}
 .event-stats {{ display: grid; grid-template-columns: repeat(3, 1fr);
                 gap: var(--s-1) var(--s-3);
                 font-family: var(--mono); font-size: 11px; color: var(--ink-light); }}
@@ -499,9 +523,13 @@ _JS_TEMPLATE = r"""
 
   const sceneRoot = document.getElementById('scene-root');
   const devicesBox = document.getElementById('devices-body');
+  const activeBox = document.getElementById('active-body');
   const sessionBox = document.getElementById('session-body');
   const eventsBox = document.getElementById('events-body');
   const navStatus = document.getElementById('nav-status');
+  let currentDefaultPaths = ['server_post'];
+  let currentLiveSession = null;
+  const livePointStore = new Map();   // sid -> [{x,y,z,t_rel_s}]
 
   // --- Trajectory overlay state --------------------------------------------
   // Persisted set of session_ids whose triangulated trajectory is currently
@@ -759,6 +787,30 @@ _JS_TEMPLATE = r"""
       : inspectTracesFor(sid, result, color);
   }
 
+  function liveTraces() {
+    if (!currentLiveSession || !currentLiveSession.session_id) return [];
+    const sid = currentLiveSession.session_id;
+    const pts = livePointStore.get(sid) || [];
+    if (!pts.length) return [];
+    return [{
+      type: 'scatter3d',
+      mode: 'lines+markers',
+      x: pts.map(p => p.x),
+      y: pts.map(p => p.y),
+      z: pts.map(p => p.z),
+      marker: {
+        size: 4,
+        color: pts.map(p => p.t_rel_s),
+        colorscale: 'YlOrRd',
+        opacity: 0.95,
+      },
+      line: { color: '#C0392B', width: 4 },
+      name: `${sid} · live`,
+      hovertemplate: `${sid}<br>t=%{marker.color:.3f}s<br>x=%{x:.2f} y=%{y:.2f} z=%{z:.2f}<extra></extra>`,
+      showlegend: true,
+    }];
+  }
+
   // Layout is effectively static across the dashboard's lifetime (axes,
   // aspect, uirevision never change — only trace data does). Cache the
   // first layout we see and reuse the SAME object reference on every
@@ -785,6 +837,7 @@ _JS_TEMPLATE = r"""
       if (!result) continue;
       extraTraces.push(...trajTracesFor(sid, result, trajColorFor(sid)));
     }
+    extraTraces.push(...liveTraces());
     if (cachedLayout === null) {
       // One-time build from the first basePlot.layout we see. The server
       // sets scene.uirevision='dashboard-canvas' in both SSR and tick
@@ -1065,11 +1118,67 @@ _JS_TEMPLATE = r"""
   }
 
   const MODE_LABELS = { camera_only: 'Camera-only', on_device: 'On-device', dual: 'Dual' };
+  const PATH_LABELS = {
+    live: ['Live stream', 'iOS → WS'],
+    ios_post: ['iOS post-pass', 'on-device analyzer'],
+    server_post: ['Server post-pass', 'PyAV + OpenCV'],
+  };
+
+  function renderActiveSession(liveSession) {
+    if (!activeBox) return;
+    if (!liveSession || !liveSession.session_id) {
+      activeBox.innerHTML = `<div class="active-empty">No active live stream.</div>`;
+      return;
+    }
+    const sid = esc(liveSession.session_id);
+    const frameCounts = liveSession.frame_counts || {};
+    const chips = (liveSession.paths || []).map(path =>
+      `<span class="path-chip on">${esc((PATH_LABELS[path] || [path])[0])}</span>`
+    ).join('') || `<span class="path-chip">none</span>`;
+    activeBox.innerHTML = `
+      <div class="active-head">
+        <span class="chip armed">live</span>
+        <span class="session-id">${sid}</span>
+      </div>
+      <div class="path-chip-row">${chips}</div>
+      <div class="active-grid">
+        <span><span class="k">A frames</span><span class="v">${Number(frameCounts.A || 0)}</span></span>
+        <span><span class="k">B frames</span><span class="v">${Number(frameCounts.B || 0)}</span></span>
+        <span><span class="k">Live 3D pts</span><span class="v">${Number(liveSession.point_count || 0)}</span></span>
+      </div>`;
+  }
+
+  function renderDetectionPaths(session) {
+    const armed = !!(session && session.armed);
+    const active = new Set(armed ? (session.paths || currentDefaultPaths || []) : (currentDefaultPaths || []));
+    if (armed) {
+      const chips = [...active].map(path =>
+        `<span class="path-chip on">${esc((PATH_LABELS[path] || [path])[0])}</span>`
+      ).join('') || `<span class="path-chip">none</span>`;
+      return `<div class="path-lock"><span class="mode-label">Paths</span><div class="path-chip-row">${chips}</div></div>`;
+    }
+    const options = ['live', 'ios_post', 'server_post'].map(path => {
+      const [title, sub] = PATH_LABELS[path] || [path, ''];
+      return `<label class="path-option">
+          <input type="checkbox" name="paths" value="${path}" ${active.has(path) ? 'checked' : ''}>
+          <span class="copy">
+            <span class="title">${esc(title)}</span>
+            <span class="sub">${esc(sub)}</span>
+          </span>
+        </label>`;
+    }).join('');
+    return `<form method="POST" action="/detection/paths" id="paths-form">
+      <div class="paths-stack">${options}</div>
+      <div class="paths-actions"><button class="btn" type="submit">Apply</button></div>
+    </form>`;
+  }
 
   function renderSession(state) {
     if (!sessionBox) { /* nav-only render still executes below */ }
     const s = state.session;
     const armed = !!(s && s.armed);
+    currentDefaultPaths = state.default_paths || currentDefaultPaths || ['server_post'];
+    currentLiveSession = state.live_session || currentLiveSession;
     const chip = armed ? `<span class="chip armed">armed</span>` : `<span class="chip idle">idle</span>`;
     const sid = s && s.id ? `<span class="session-id">${esc(s.id)}</span>` : '';
     const clearBtn = (!armed && s && s.id)
@@ -1077,31 +1186,6 @@ _JS_TEMPLATE = r"""
            <button class="btn" type="submit">Clear</button>
          </form>`
       : '';
-    const captureMode = state.capture_mode || 'camera_only';
-    let modeRow;
-    if (armed) {
-      const sessionMode = (s && s.mode) || captureMode;
-      const label = MODE_LABELS[sessionMode] || sessionMode;
-      modeRow = `<div class="mode-row">
-          <span class="mode-label">Mode</span>
-          <span class="mode-locked">locked · ${esc(label)}</span>
-        </div>`;
-    } else {
-      const btn = (val) => {
-        const active = val === captureMode;
-        const cls = active ? 'btn' : 'btn secondary';
-        return `<form class="inline" method="POST" action="/sessions/set_mode">
-            <input type="hidden" name="mode" value="${val}">
-            <button class="${cls}" type="submit">${MODE_LABELS[val]}</button>
-          </form>`;
-      };
-      modeRow = `<div class="mode-row">
-          <span class="mode-label">Mode</span>
-          <div class="mode-segmented" role="radiogroup" aria-label="Capture mode">
-            ${btn('camera_only')}${btn('on_device')}${btn('dual')}
-          </div>
-        </div>`;
-    }
     const sessHtml = `
       <div class="session-head">${chip}${sid}</div>
       <div class="session-actions">
@@ -1116,8 +1200,9 @@ _JS_TEMPLATE = r"""
         </form>
         ${clearBtn}
       </div>
-      ${modeRow}`;
+      ${renderDetectionPaths(s)}`;
     if (sessionBox) sessionBox.innerHTML = sessHtml;
+    renderActiveSession(currentLiveSession);
 
     // Mirror into the nav's tiny status strip. Also surface a tiny Sync
     // chip (syncing / cooldown / idle) + a link to /setup so the operator
@@ -1133,6 +1218,14 @@ _JS_TEMPLATE = r"""
                                    : (cooldown > 0 ? 'cooldown' : 'idle');
       const syncCls = state.sync ? 'armed'
                                 : (cooldown > 0 ? 'partial' : 'idle');
+      const live = state.live_session || {};
+      const frameCounts = live.frame_counts || {};
+      const liveRate = `${Number(frameCounts.A || 0)}/${Number(frameCounts.B || 0)} frames`;
+      const ws = state.ws_devices || {};
+      const wsA = ws.A && ws.A.connected ? '●' : '○';
+      const wsB = ws.B && ws.B.connected ? '●' : '○';
+      const rttVals = [ws.A && ws.A.last_latency_ms, ws.B && ws.B.last_latency_ms].filter(v => v != null).map(Number);
+      const rtt = rttVals.length ? `${(rttVals.reduce((a, b) => a + b, 0) / rttVals.length).toFixed(0)}ms` : '—';
       const navHtml = `
         <span class="pair"><span class="label">Devices</span><span class="val ${countCls(online)}">${online}/2</span></span>
         <span class="pair"><span class="label">Calibrated</span><span class="val ${countCls(cal)}">${cal}/2</span></span>
@@ -1141,6 +1234,8 @@ _JS_TEMPLATE = r"""
           ? `<span class="val armed">${esc(s.id || '—')}</span>`
           : `<span class="val idle">idle</span>`) +
         `</span>` +
+        `<span class="pair"><span class="label">Stream</span><span class="val ${armed ? 'armed' : 'idle'}">${wsA}${wsB} ${liveRate}</span></span>` +
+        `<span class="pair"><span class="label">RTT</span><span class="val ${rttVals.length ? 'full' : 'idle'}">${rtt}</span></span>` +
         `<span class="pair"><span class="label">Sync</span><span class="val ${syncCls}">${syncLabel}</span></span>` +
         `<a class="nav-link" href="/setup">Setup</a>` +
         `<a class="nav-link" href="/markers">Markers</a>`;
@@ -1172,6 +1267,10 @@ _JS_TEMPLATE = r"""
       const rms = fmtNum(e.rms_m, 3);
       const plateX = e.plate_xz_m ? e.plate_xz_m[0].toFixed(2) : null;
       const plateZ = e.plate_xz_m ? e.plate_xz_m[1].toFixed(2) : null;
+      const pathStatus = e.path_status || {};
+      const pathChips = [['live', 'L'], ['ios_post', 'I'], ['server_post', 'S']]
+        .map(([path, label]) => `<span class="path-chip${pathStatus[path] === 'done' ? ' on' : ''}">${label}</span>`)
+        .join('');
       // Quality chip from fit RMS: <10mm excellent, <30mm good, <80mm fair, else poor.
       // Sessions without a fit get a neutral `no-fit` chip — they still list
       // (the operator may want to forensic them) but signal loudly.
@@ -1208,6 +1307,7 @@ _JS_TEMPLATE = r"""
           <a class="event-row" href="/viewer/${sid}">
             <div class="event-top">
               <span class="sid">${sid}</span>
+              <span class="event-paths">${pathChips}</span>
               <span class="quality chip ${qualityClass}" title="fit RMS quality">${qualityLabel}</span>
               <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
             </div>
@@ -1259,6 +1359,8 @@ _JS_TEMPLATE = r"""
     const sessKey = JSON.stringify({
       armed: !!(s && s.armed), id: s && s.id, mode: s && s.mode,
       capture_mode: state.capture_mode,
+      paths: state.default_paths || [],
+      live_session: state.live_session || null,
     });
     const cooldownBucket = Number(state.sync_cooldown_remaining_s || 0) > 0 ? 1 : 0;
     const navKey = JSON.stringify({
@@ -1677,7 +1779,65 @@ _JS_TEMPLATE = r"""
     } catch (e) { /* silent */ }
   }
 
+  function initLiveStream() {
+    if (!window.EventSource) return;
+    const es = new EventSource('/stream');
+    es.addEventListener('session_armed', (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        currentLiveSession = {
+          session_id: data.sid,
+          armed: true,
+          paths: data.paths || [],
+          frame_counts: {},
+          point_count: 0,
+        };
+        livePointStore.set(data.sid, []);
+        renderActiveSession(currentLiveSession);
+        repaintCanvas();
+      } catch (_) {}
+    });
+    es.addEventListener('frame_count', (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (!currentLiveSession || currentLiveSession.session_id !== data.sid) return;
+        currentLiveSession.frame_counts = currentLiveSession.frame_counts || {};
+        currentLiveSession.frame_counts[data.cam] = Number(data.count || 0);
+        renderActiveSession(currentLiveSession);
+      } catch (_) {}
+    });
+    es.addEventListener('point', (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        const sid = data.sid;
+        const arr = livePointStore.get(sid) || [];
+        arr.push({
+          x: Number(data.x),
+          y: Number(data.y),
+          z: Number(data.z),
+          t_rel_s: Number(data.t_rel_s || 0),
+        });
+        livePointStore.set(sid, arr);
+        if (currentLiveSession && currentLiveSession.session_id === sid) {
+          currentLiveSession.point_count = arr.length;
+          renderActiveSession(currentLiveSession);
+        }
+        repaintCanvas();
+      } catch (_) {}
+    });
+    es.addEventListener('session_ended', (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (currentLiveSession && currentLiveSession.session_id === data.sid) {
+          currentLiveSession.armed = false;
+          renderActiveSession(currentLiveSession);
+        }
+      } catch (_) {}
+    });
+  }
+
   // (1 s) and is the only high-frequency tick.
+  initLiveStream();
   tickStatus();
   tickCalibration();
   tickEvents();
@@ -1835,10 +1995,89 @@ _MODE_LABELS = {
     "dual": "Dual",
 }
 
+_PATH_LABELS = {
+    "live": ("Live stream", "iOS → WS"),
+    "ios_post": ("iOS post-pass", "on-device analyzer"),
+    "server_post": ("Server post-pass", "PyAV + OpenCV"),
+}
+
+
+def _render_detection_paths_body(
+    default_paths: list[str] | None,
+    session: dict[str, Any] | None = None,
+) -> str:
+    armed = bool(session and session.get("armed"))
+    active = set(default_paths or ["server_post"])
+    if armed:
+        active = set(session.get("paths") or active)
+        chips = "".join(
+            f'<span class="path-chip on">{html.escape(_PATH_LABELS.get(path, (path, ""))[0])}</span>'
+            for path in ("live", "ios_post", "server_post")
+            if path in active
+        ) or '<span class="path-chip">none</span>'
+        return (
+            '<div class="path-lock">'
+            '<span class="mode-label">Paths</span>'
+            f'<div class="path-chip-row">{chips}</div>'
+            "</div>"
+        )
+
+    rows: list[str] = []
+    for path in ("live", "ios_post", "server_post"):
+        title, subtitle = _PATH_LABELS.get(path, (path, ""))
+        checked = " checked" if path in active else ""
+        rows.append(
+            '<label class="path-option">'
+            f'<input type="checkbox" name="paths" value="{path}"{checked}>'
+            '<span class="copy">'
+            f'<span class="title">{html.escape(title)}</span>'
+            f'<span class="sub">{html.escape(subtitle)}</span>'
+            "</span>"
+            "</label>"
+        )
+    return (
+        '<form method="POST" action="/detection/paths" id="paths-form">'
+        '<div class="paths-stack">'
+        f'{"".join(rows)}'
+        '</div>'
+        '<div class="paths-actions">'
+        '<button class="btn" type="submit">Apply</button>'
+        '</div>'
+        '</form>'
+    )
+
+
+def _render_active_session_body(live_session: dict[str, Any] | None) -> str:
+    if not live_session:
+        return '<div class="active-empty">No active live stream.</div>'
+    sid = html.escape(live_session.get("session_id", "—"))
+    frame_counts = live_session.get("frame_counts") or {}
+    paths = live_session.get("paths") or []
+    path_chips = "".join(
+        f'<span class="path-chip on">{html.escape(_PATH_LABELS.get(path, (path, ""))[0])}</span>'
+        for path in paths
+    ) or '<span class="path-chip">none</span>'
+    point_count = int(live_session.get("point_count") or 0)
+    a_frames = int(frame_counts.get("A") or 0)
+    b_frames = int(frame_counts.get("B") or 0)
+    return (
+        '<div class="active-head">'
+        '<span class="chip armed">live</span>'
+        f'<span class="session-id">{sid}</span>'
+        '</div>'
+        f'<div class="path-chip-row">{path_chips}</div>'
+        '<div class="active-grid">'
+        f'<span><span class="k">A frames</span><span class="v">{a_frames}</span></span>'
+        f'<span><span class="k">B frames</span><span class="v">{b_frames}</span></span>'
+        f'<span><span class="k">Live 3D pts</span><span class="v">{point_count}</span></span>'
+        '</div>'
+    )
+
 
 def _render_session_body(
     session: dict[str, Any] | None,
     capture_mode: str = "camera_only",
+    default_paths: list[str] | None = None,
     devices: list[dict[str, Any]] | None = None,
     calibrations: list[str] | None = None,
 ) -> str:
@@ -1899,35 +2138,6 @@ def _render_session_body(
             "</form>"
         )
 
-    # Mode picker. When armed, the armed session's snapshot mode is shown as
-    # locked — flipping only affects the next arm, so disabling the buttons
-    # avoids the mental-model drift of "I clicked but nothing changed".
-    if armed:
-        session_mode = (session or {}).get("mode", capture_mode)
-        mode_row = (
-            '<div class="mode-row">'
-            '<span class="mode-label">Mode</span>'
-            f'<span class="mode-locked">locked · {html.escape(_MODE_LABELS.get(session_mode, session_mode))}</span>'
-            "</div>"
-        )
-    else:
-        def _mode_button(value: str) -> str:
-            active = value == capture_mode
-            cls = "btn" if active else "btn secondary"
-            return (
-                '<form class="inline" method="POST" action="/sessions/set_mode">'
-                f'<input type="hidden" name="mode" value="{value}">'
-                f'<button class="{cls}" type="submit">{_MODE_LABELS[value]}</button>'
-                "</form>"
-            )
-        mode_row = (
-            '<div class="mode-row">'
-            '<span class="mode-label">Mode</span>'
-            '<div class="mode-segmented" role="radiogroup" aria-label="Capture mode">'
-            f'{_mode_button("camera_only")}{_mode_button("on_device")}{_mode_button("dual")}'
-            "</div></div>"
-        )
-
     gate_row = ""
     if not armed and missing:
         gate_row = (
@@ -1939,7 +2149,7 @@ def _render_session_body(
         f'<div class="session-head">{chip_html}{sid_html}</div>'
         f'<div class="session-actions">{arm_btn}{stop_btn}{sync_btn}{clear_btn}</div>'
         f'{gate_row}'
-        f'{mode_row}'
+        f'{_render_detection_paths_body(default_paths, session)}'
     )
 
 
@@ -1957,6 +2167,11 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             "on-device" if mode_val == "on_device"
             else "dual" if mode_val == "dual"
             else "camera-only"
+        )
+        path_status = e.get("path_status") or {}
+        path_html = ''.join(
+            f'<span class="path-chip{" on" if path_status.get(path) == "done" else ""}">{label}</span>'
+            for path, label in (("live", "L"), ("ios_post", "I"), ("server_post", "S"))
         )
         mean = "—" if e.get("mean_residual_m") is None else format(e["mean_residual_m"], ".4f")
         peak_z = "—" if e.get("peak_z_m") is None else format(e["peak_z_m"], ".2f")
@@ -2001,6 +2216,7 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f'<div class="event-top">'
             f'<span class="sid">{sid}</span>'
             f'<span class="capmode">{capture_mode}</span>'
+            f'<span class="event-paths">{path_html}</span>'
             f'<span class="chip {status}">{stat_label}</span>'
             f"</div>"
             f"{stats_html}"
@@ -2143,6 +2359,8 @@ def render_events_index_html(
     session: dict[str, Any] | None = None,
     calibrations: list[str] | None = None,
     capture_mode: str = "camera_only",
+    default_paths: list[str] | None = None,
+    live_session: dict[str, Any] | None = None,
     sync: dict[str, Any] | None = None,
     sync_cooldown_remaining_s: float = 0.0,
     chirp_detect_threshold: float = 0.18,
@@ -2209,8 +2427,12 @@ def render_events_index_html(
         '<div class="layout">'
         '<aside class="sidebar">'
         '<div class="card">'
+        '<h2 class="card-title">Active Session</h2>'
+        f'<div id="active-body">{_render_active_session_body(live_session)}</div>'
+        "</div>"
+        '<div class="card">'
         '<h2 class="card-title">Session</h2>'
-        f'<div id="session-body">{_render_session_body(session, capture_mode)}</div>'
+        f'<div id="session-body">{_render_session_body(session, capture_mode, default_paths, devices, calibrations)}</div>'
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Events</h2>'

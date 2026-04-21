@@ -44,6 +44,47 @@ class CaptureMode(str, Enum):
 _DEFAULT_CAPTURE_MODE = CaptureMode.camera_only
 
 
+class DetectionPath(str, Enum):
+    """Orthogonal detection pipelines that can be enabled together.
+
+    `CaptureMode` stays around as a backwards-compat preset vocabulary for
+    older iOS / dashboard code, but new code should snapshot a set of
+    `DetectionPath`s onto each armed session."""
+
+    live = "live"
+    ios_post = "ios_post"
+    server_post = "server_post"
+
+
+_DEFAULT_PATHS = frozenset({DetectionPath.server_post})
+
+
+_MODE_TO_PATHS: dict[CaptureMode, frozenset[DetectionPath]] = {
+    CaptureMode.camera_only: frozenset({DetectionPath.server_post}),
+    CaptureMode.on_device: frozenset({DetectionPath.ios_post}),
+    CaptureMode.dual: frozenset({DetectionPath.ios_post, DetectionPath.server_post}),
+}
+
+
+def paths_for_mode(mode: CaptureMode) -> set[DetectionPath]:
+    return set(_MODE_TO_PATHS.get(mode, _DEFAULT_PATHS))
+
+
+def mode_for_paths(paths: set[DetectionPath] | frozenset[DetectionPath]) -> CaptureMode:
+    """Best-effort legacy preset representing `paths`.
+
+    `CaptureMode` cannot express `live`-only or `live+server_post`. We map
+    those to the nearest older preset purely for backward-compat clients; the
+    authoritative detail lives in `paths`."""
+
+    norm = set(paths)
+    if norm == {DetectionPath.ios_post}:
+        return CaptureMode.on_device
+    if norm == {DetectionPath.ios_post, DetectionPath.server_post}:
+        return CaptureMode.dual
+    return CaptureMode.camera_only
+
+
 class TrackingExposureCapMode(str, Enum):
     """Server-owned tracking exposure policy pushed to iOS via heartbeat.
 
@@ -146,11 +187,21 @@ class PitchPayload(BaseModel):
     # Optional device-local recording counter. Not used for pairing; kept
     # purely for operator debugging.
     local_recording_index: int | None = None
+    # Snapshot of the session's requested detection paths. Optional so
+    # older clients that only know `mode` keep validating.
+    paths: list[str] | None = None
     # Server-side synthesised per-frame data (populated after detection).
     # For `camera_only` / `dual` modes the iPhone omits this on the wire and
     # server detection fills it before triangulation. For `on_device` mode
     # the iPhone populates it directly and server detection is skipped.
     frames: list[FramePayload] = Field(default_factory=list)
+    # Live-streamed frame detections captured over WebSocket during the
+    # active session. Persisted for forensics / future viewer switching.
+    frames_live: list[FramePayload] = Field(default_factory=list)
+    # Finalized iOS-side post-pass results over the local MOV.
+    frames_ios_post: list[FramePayload] = Field(default_factory=list)
+    # Finalized server-side post-pass results decoded from the uploaded MOV.
+    frames_server_post: list[FramePayload] = Field(default_factory=list)
     # Parallel detection stream shipped by the iPhone when the session was
     # armed in `dual` mode. Lets the server keep both iOS-end and server-end
     # detection results for side-by-side comparison. Empty list otherwise.
@@ -226,6 +277,13 @@ class SessionResult(BaseModel):
     session_id: str
     camera_a_received: bool
     camera_b_received: bool
+    solved_at: float | None = None
+    triangulated: list[TriangulatedPoint] = []
+    triangulated_by_path: dict[str, list[TriangulatedPoint]] = Field(default_factory=dict)
+    frame_counts_by_path: dict[str, dict[str, int]] = Field(default_factory=dict)
+    paths_completed: set[str] = Field(default_factory=set)
+    aborted: bool = False
+    abort_reasons: dict[str, str] = Field(default_factory=dict)
     points: list[TriangulatedPoint] = []
     error: str | None = None
     points_on_device: list[TriangulatedPoint] = []
@@ -245,6 +303,13 @@ class HeartbeatBody(BaseModel):
     # Sync-run provenance of the currently-held legacy chirp anchor.
     # Optional for back-compat: older iOS builds only report the boolean.
     time_sync_id: str | None = Field(default=None, pattern=_SYNC_ID_PATTERN)
+    # Absolute session-clock timestamp of the currently-held chirp anchor.
+    # Needed for live WS pairing; older clients omit it.
+    sync_anchor_timestamp_s: float | None = None
+    # WebSocket-capable clients can push the currently-effective path
+    # snapshot here so the server can surface richer diagnostics even while
+    # still accepting legacy heartbeat control traffic.
+    paths: list[str] | None = None
 
 
 class CalibrationSnapshot(BaseModel):
@@ -473,6 +538,7 @@ class Device:
     time_synced: bool = False
     time_sync_id: str | None = None
     time_sync_at: float | None = None
+    sync_anchor_timestamp_s: float | None = None
 
 
 @dataclass
@@ -490,6 +556,10 @@ class Session:
     # the current one. Dashboard reads this to render "session s_abc →
     # A, B".
     uploads_received: list[str] = field(default_factory=list)
+    # Snapshot of the dashboard's path-set at arm time. New code should read
+    # this. The legacy `mode` field below is derived from the same choice so
+    # pre-path clients still see a familiar preset string.
+    paths: set[DetectionPath] = field(default_factory=lambda: set(_DEFAULT_PATHS))
     # Snapshot of the dashboard's `capture_mode` at arm time. Once armed
     # the session's mode is immutable — a late dashboard toggle only
     # affects the next session.
@@ -508,6 +578,7 @@ class Session:
         return self.ended_at is None
 
     def to_dict(self) -> dict[str, Any]:
+        mode = mode_for_paths(self.paths)
         return {
             "id": self.id,
             "armed": self.armed,
@@ -515,7 +586,17 @@ class Session:
             "ended_at": self.ended_at,
             "max_duration_s": self.max_duration_s,
             "uploads_received": list(self.uploads_received),
-            "mode": self.mode.value,
+            "mode": mode.value,
+            "paths": sorted(p.value for p in self.paths),
             "tracking_exposure_cap": self.tracking_exposure_cap.value,
             "sync_id": self.sync_id,
         }
+
+
+class StoredPitch(PitchPayload):
+    """On-disk enriched payload shape.
+
+    Exists mainly as a semantic marker so migration code can say "stored
+    payload" while staying wire-compatible with `PitchPayload`."""
+
+    pass
