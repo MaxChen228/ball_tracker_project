@@ -213,6 +213,46 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
                    text-transform:uppercase; color:var(--sub); }}
 .active-grid .v {{ font-family:var(--mono); font-size:13px; color:var(--ink); }}
 .active-empty {{ font-family:var(--mono); font-size:11px; letter-spacing:0.08em; color:var(--sub); }}
+.active-head .elapsed {{ margin-left:auto; font-family:var(--mono); font-size:11px; color:var(--sub);
+                         letter-spacing:0.04em; }}
+.chip.armed.pulse {{ animation: rec-pulse 1.4s ease-in-out infinite; }}
+@keyframes rec-pulse {{
+  0%, 100% {{ opacity: 1; }}
+  50% {{ opacity: 0.45; }}
+}}
+.cam-row {{ display:grid; grid-template-columns: 80px 18px 1fr auto; align-items:center;
+            gap:var(--s-2); padding:6px 8px; margin-top:var(--s-2);
+            border:1px solid var(--border-l); border-radius:var(--r);
+            background:rgba(42,37,32,0.02); }}
+.cam-row .spark {{ width:80px; height:18px; display:block; }}
+.cam-row .k {{ font-family:var(--mono); font-size:11px; color:var(--ink); font-weight:600; }}
+.cam-row .v {{ font-family:var(--mono); font-size:11px; color:var(--ink); }}
+.cam-row .vsub {{ font-family:var(--mono); font-size:10px; color:var(--sub); }}
+.live-pairs {{ display:flex; gap:var(--s-2); align-items:center; padding:6px 8px;
+               margin-top:var(--s-2); border:1px solid var(--border-l);
+               border-radius:var(--r); background:rgba(42,37,32,0.02);
+               transition: background 120ms, border-color 120ms; }}
+.live-pairs .k {{ font-family:var(--mono); font-size:10px; letter-spacing:0.10em;
+                  text-transform:uppercase; color:var(--sub); }}
+.live-pairs .v {{ font-family:var(--mono); font-size:12px; color:var(--ink); }}
+.live-pairs .vsub {{ font-family:var(--mono); font-size:10px; color:var(--sub); margin-left:auto; }}
+.live-pairs.stale {{ border-color:var(--failed); background:var(--failed-bg); }}
+.postpass-row {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:var(--s-2); }}
+.postpass-chip {{ font-family:var(--mono); font-size:10px; letter-spacing:0.04em;
+                  padding:2px 6px; border:1px solid var(--border-base);
+                  border-radius:var(--r); color:var(--sub); }}
+.postpass-chip.done {{ color:var(--passed); border-color:var(--passed); background:var(--passed-bg); }}
+.postpass-chip.pending {{ color:var(--sub); }}
+.postpass-chip.running {{ color:var(--ink); border-color:var(--ink); }}
+.active-actions {{ display:flex; gap:var(--s-2); margin-top:var(--s-3); }}
+.active-actions .btn-stop {{ padding:4px 12px; font:inherit; font-size:11px;
+                              background:var(--failed); color:white; border:none;
+                              border-radius:var(--r); cursor:pointer; }}
+.active-actions .btn-reset {{ padding:4px 12px; font:inherit; font-size:11px;
+                               background:transparent; color:var(--sub);
+                               border:1px solid var(--border-base);
+                               border-radius:var(--r); cursor:pointer; }}
+.active-actions .btn-reset:hover {{ color:var(--ink); border-color:var(--ink); }}
 .mode-row {{ display: flex; gap: var(--s-2); align-items: center; margin-top: var(--s-3);
              flex-wrap: wrap; }}
 .mode-label {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
@@ -478,6 +518,13 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 /* --- Canvas mode toggle — top-left so it can't collide with Plotly's
    modebar (camera/home/reset axes buttons), which always sits top-right
    and can't be moved without reconstructing Plotly's config. */
+.degraded-banner {{ position: absolute; top: var(--s-3); left: 50%; transform: translateX(-50%);
+                    z-index: 8; display: flex; align-items: center; gap: var(--s-2);
+                    padding: var(--s-2) var(--s-4); background: var(--failed-bg);
+                    border: 1px solid var(--failed); border-radius: var(--r);
+                    font-family: var(--mono); font-size: 11px; color: var(--failed);
+                    letter-spacing: 0.04em; max-width: 80%; }}
+.degraded-banner .degraded-icon {{ font-size: 14px; }}
 .canvas-mode-toggle {{ position: absolute; left: var(--s-4); top: var(--s-4); z-index: 6;
                        display: inline-flex; gap: 0; font-family: var(--mono); font-size: 10px;
                        letter-spacing: 0.12em; text-transform: uppercase;
@@ -530,6 +577,13 @@ _JS_TEMPLATE = r"""
   let currentDefaultPaths = ['server_post'];
   let currentLiveSession = null;
   const livePointStore = new Map();   // sid -> [{x,y,z,t_rel_s}]
+  let lastEndedLiveSid = null;        // For ghost-preview on the next arm
+  // Per-cam WS connection state from SSE device_status events. Keyed by
+  // camera id; value shape: {connected: bool, since_ms: number}. The
+  // degraded banner fires when an armed session has any cam that's been
+  // disconnected for more than the grace window.
+  const WS_GRACE_MS = 10_000;
+  const wsStatus = new Map();
 
   // --- Trajectory overlay state --------------------------------------------
   // Persisted set of session_ids whose triangulated trajectory is currently
@@ -787,12 +841,42 @@ _JS_TEMPLATE = r"""
       : inspectTracesFor(sid, result, color);
   }
 
+  function ghostTrace(pts, sid) {
+    // Rendered before the active-session trace so the active one paints
+    // on top. Alpha kept low — this is a "camera framing hasn't moved"
+    // visual cue, not a thing to compare against.
+    return {
+      type: 'scatter3d',
+      mode: 'lines',
+      x: pts.map(p => p.x),
+      y: pts.map(p => p.y),
+      z: pts.map(p => p.z),
+      line: { color: 'rgba(192,57,43,0.20)', width: 2 },
+      name: `${sid} · ghost`,
+      hoverinfo: 'skip',
+      showlegend: false,
+    };
+  }
+
   function liveTraces() {
-    if (!currentLiveSession || !currentLiveSession.session_id) return [];
+    const traces = [];
+    // Ghost preview of the previous live session — shown BETWEEN arm
+    // cycles (no current session armed) so the operator can confirm
+    // camera framing still matches the last pitch's trail before
+    // throwing again. Suppressed once a new session arms to avoid
+    // clutter on the active canvas.
+    if (
+      (!currentLiveSession || !currentLiveSession.session_id) &&
+      lastEndedLiveSid
+    ) {
+      const ghostPts = livePointStore.get(lastEndedLiveSid) || [];
+      if (ghostPts.length) traces.push(ghostTrace(ghostPts, lastEndedLiveSid));
+    }
+    if (!currentLiveSession || !currentLiveSession.session_id) return traces;
     const sid = currentLiveSession.session_id;
     const pts = livePointStore.get(sid) || [];
-    if (!pts.length) return [];
-    return [{
+    if (!pts.length) return traces;
+    traces.push({
       type: 'scatter3d',
       mode: 'lines+markers',
       x: pts.map(p => p.x),
@@ -808,7 +892,8 @@ _JS_TEMPLATE = r"""
       name: `${sid} · live`,
       hovertemplate: `${sid}<br>t=%{marker.color:.3f}s<br>x=%{x:.2f} y=%{y:.2f} z=%{z:.2f}<extra></extra>`,
       showlegend: true,
-    }];
+    });
+    return traces;
   }
 
   // Layout is effectively static across the dashboard's lifetime (axes,
@@ -820,6 +905,35 @@ _JS_TEMPLATE = r"""
   // uirevision heuristics, and cheap.
   let cachedLayout = null;
   let canvasFirstPaintDone = false;
+  // Index of the live-trace inside the plot's data array after the most
+  // recent Plotly.react. -1 = not painted yet / stale. extendLivePoint()
+  // uses Plotly.extendTraces to append a single point without walking the
+  // full trace tree — the per-point append cost drops from ~5-20ms
+  // (Plotly.react with full trace rebuild) to <1ms. Any structural change
+  // (session flip, mode switch, trajectory toggle) must reset this to -1
+  // so the next point event falls back to a full repaint and the slot
+  // re-anchors.
+  let liveTraceIdx = -1;
+
+  function extendLivePoint(pt) {
+    if (liveTraceIdx < 0 || !sceneRoot || !window.Plotly) return false;
+    try {
+      Plotly.extendTraces(
+        sceneRoot,
+        {
+          x: [[pt.x]],
+          y: [[pt.y]],
+          z: [[pt.z]],
+          'marker.color': [[pt.t_rel_s]],
+        },
+        [liveTraceIdx],
+      );
+      return true;
+    } catch (_) {
+      liveTraceIdx = -1;  // slot invalid — force repaint next time
+      return false;
+    }
+  }
 
   async function repaintCanvas() {
     if (!basePlot || !window.Plotly) return;
@@ -848,9 +962,10 @@ _JS_TEMPLATE = r"""
       if (!cachedLayout.scene) cachedLayout.scene = {};
       cachedLayout.scene.uirevision = 'dashboard-canvas';
     }
+    const finalTraces = [...(basePlot.data || []), ...extraTraces];
     Plotly.react(
       sceneRoot,
-      [...(basePlot.data || []), ...extraTraces],
+      finalTraces,
       cachedLayout,
       // doubleClick:false — Plotly 3D ships a built-in "reset camera on
       // double-click anywhere in the scene" gesture. Users bump into it
@@ -860,6 +975,18 @@ _JS_TEMPLATE = r"""
       // work for panning the eye distance.
       { responsive: true, scrollZoom: true, doubleClick: false },
     );
+    // Anchor the live-trace slot for subsequent extendTraces calls. The
+    // live trace (when present) is the last one liveTraces() appends.
+    liveTraceIdx = -1;
+    if (currentLiveSession && currentLiveSession.session_id) {
+      for (let i = finalTraces.length - 1; i >= 0; i--) {
+        const t = finalTraces[i];
+        if (t && typeof t.name === 'string' && t.name.endsWith(' · live')) {
+          liveTraceIdx = i;
+          break;
+        }
+      }
+    }
     canvasFirstPaintDone = true;
   }
 
@@ -1124,6 +1251,65 @@ _JS_TEMPLATE = r"""
     server_post: ['Server post-pass', 'PyAV + OpenCV'],
   };
 
+  // Instantaneous fps derived from the most recent pair of frame_count
+  // samples. Returns 0 when <2 samples or the window is too short to be
+  // meaningful. Keeps the sparkline-per-cam history bounded to 60 entries
+  // (~60s at 1Hz frame_count emission) so arbitrary-long sessions don't
+  // grow unbounded.
+  const FPS_HISTORY_CAP = 60;
+  function pushFrameSample(liveSession, cam, count) {
+    liveSession.frame_samples = liveSession.frame_samples || { A: [], B: [] };
+    const arr = liveSession.frame_samples[cam] = liveSession.frame_samples[cam] || [];
+    const now = Date.now();
+    const prev = arr.length ? arr[arr.length - 1] : null;
+    arr.push({ t: now, count });
+    if (arr.length > FPS_HISTORY_CAP) arr.shift();
+    // fps from most recent two samples
+    if (arr.length >= 2) {
+      const a = arr[arr.length - 2];
+      const b = arr[arr.length - 1];
+      const dtS = Math.max(0.001, (b.t - a.t) / 1000);
+      liveSession.frame_fps = liveSession.frame_fps || {};
+      liveSession.frame_fps[cam] = Math.max(0, (b.count - a.count) / dtS);
+    }
+    return prev;
+  }
+
+  function drawSparkline(canvas, samples) {
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width = canvas.clientWidth;
+    const H = canvas.height = canvas.clientHeight;
+    ctx.clearRect(0, 0, W, H);
+    if (!samples || samples.length < 2) return;
+    // Derive per-sample fps on the fly
+    const fps = [];
+    for (let i = 1; i < samples.length; i++) {
+      const dtS = Math.max(0.001, (samples[i].t - samples[i - 1].t) / 1000);
+      fps.push((samples[i].count - samples[i - 1].count) / dtS);
+    }
+    const maxFps = Math.max(240, ...fps);  // keep 240 as visual cap
+    ctx.strokeStyle = '#C0392B';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    fps.forEach((f, i) => {
+      const x = (i / (fps.length - 1 || 1)) * W;
+      const y = H - (f / maxFps) * H;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  function fmtElapsed(ms) {
+    if (!ms || ms < 0) return '00:00.0';
+    const total = ms / 1000;
+    const m = Math.floor(total / 60);
+    const s = Math.floor(total % 60);
+    const ds = Math.floor((total * 10) % 10);
+    return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${ds}`;
+  }
+
   function renderActiveSession(liveSession) {
     if (!activeBox) return;
     if (!liveSession || !liveSession.session_id) {
@@ -1132,20 +1318,92 @@ _JS_TEMPLATE = r"""
     }
     const sid = esc(liveSession.session_id);
     const frameCounts = liveSession.frame_counts || {};
+    const fps = liveSession.frame_fps || {};
+    const armed = liveSession.armed !== false;
     const chips = (liveSession.paths || []).map(path =>
       `<span class="path-chip on">${esc((PATH_LABELS[path] || [path])[0])}</span>`
     ).join('') || `<span class="path-chip">none</span>`;
+    const elapsedMs = liveSession.armed_at_ms
+      ? (armed ? Date.now() : (liveSession.ended_at_ms || Date.now())) - liveSession.armed_at_ms
+      : 0;
+    // Last-point-age flips red after 200ms of silence during an armed
+    // session — operator signal that triangulation has stalled (lost
+    // sync, ball left frame, or a stream is dropping frames).
+    const lastPtMs = liveSession.last_point_at_ms
+      ? Date.now() - liveSession.last_point_at_ms
+      : null;
+    const lastPtClass = (armed && lastPtMs !== null && lastPtMs > 200) ? 'stale' : '';
+    const lastPtTxt = lastPtMs === null
+      ? '—'
+      : (lastPtMs < 1000 ? `${lastPtMs}ms ago` : `${(lastPtMs/1000).toFixed(1)}s ago`);
+    const depths = liveSession.point_depths || [];
+    let depthTxt = '—';
+    if (depths.length) {
+      const mean = depths.reduce((a,b)=>a+b,0) / depths.length;
+      const variance = depths.reduce((a,b)=>a+(b-mean)*(b-mean),0) / depths.length;
+      const std = Math.sqrt(variance);
+      depthTxt = `${mean.toFixed(2)}m ± ${std.toFixed(2)}`;
+    }
+    // Post-pass rows: which paths are part of the session and their status
+    const pathsOn = new Set(liveSession.paths || []);
+    const completed = new Set(liveSession.paths_completed || []);
+    const postPassRow = (path, label) => {
+      if (!pathsOn.has(path)) return '';
+      const state = completed.has(path) ? 'done' : (armed ? 'pending' : 'running');
+      return `<span class="postpass-chip ${state}">${esc(label)}: ${state}</span>`;
+    };
+    const postPassChips = [
+      postPassRow('ios_post', 'iOS'),
+      postPassRow('server_post', 'srv'),
+    ].filter(Boolean).join('');
     activeBox.innerHTML = `
       <div class="active-head">
-        <span class="chip armed">live</span>
+        <span class="chip armed ${armed ? 'pulse' : ''}">${armed ? '●REC' : 'ended'}</span>
         <span class="session-id">${sid}</span>
+        <span class="elapsed" data-elapsed>${fmtElapsed(elapsedMs)}</span>
       </div>
       <div class="path-chip-row">${chips}</div>
-      <div class="active-grid">
-        <span><span class="k">A frames</span><span class="v">${Number(frameCounts.A || 0)}</span></span>
-        <span><span class="k">B frames</span><span class="v">${Number(frameCounts.B || 0)}</span></span>
-        <span><span class="k">Live 3D pts</span><span class="v">${Number(liveSession.point_count || 0)}</span></span>
+      <div class="cam-row" data-cam="A">
+        <canvas class="spark" data-spark="A"></canvas>
+        <span class="k">A</span>
+        <span class="v">${(fps.A || 0).toFixed(0)} fps</span>
+        <span class="vsub">${Number(frameCounts.A || 0)} frames</span>
+      </div>
+      <div class="cam-row" data-cam="B">
+        <canvas class="spark" data-spark="B"></canvas>
+        <span class="k">B</span>
+        <span class="v">${(fps.B || 0).toFixed(0)} fps</span>
+        <span class="vsub">${Number(frameCounts.B || 0)} frames</span>
+      </div>
+      <div class="live-pairs ${lastPtClass}">
+        <span class="k">Live pairs</span>
+        <span class="v">${Number(liveSession.point_count || 0)} pts</span>
+        <span class="vsub">last ${lastPtTxt} · ${depthTxt}</span>
+      </div>
+      ${postPassChips ? `<div class="postpass-row">${postPassChips}</div>` : ''}
+      <div class="active-actions">
+        ${armed ? `<form method="post" action="/sessions/cancel" style="display:inline"><button type="submit" class="btn-stop">Stop</button></form>` : ''}
+        <button type="button" class="btn-reset" data-reset-trail>Reset trail</button>
       </div>`;
+    // Redraw sparklines after DOM replacement (canvas clears on innerHTML).
+    ['A','B'].forEach(cam => {
+      const canvas = activeBox.querySelector(`[data-spark="${cam}"]`);
+      const samples = ((liveSession.frame_samples || {})[cam]) || [];
+      drawSparkline(canvas, samples);
+    });
+    const resetBtn = activeBox.querySelector('[data-reset-trail]');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        if (!currentLiveSession) return;
+        livePointStore.set(currentLiveSession.session_id, []);
+        currentLiveSession.point_count = 0;
+        currentLiveSession.point_depths = [];
+        currentLiveSession.last_point_at_ms = null;
+        liveTraceIdx = -1;
+        renderActiveSession(currentLiveSession);
+        repaintCanvas();
+      });
+    }
   }
 
   function renderDetectionPaths(session) {
@@ -1790,11 +2048,24 @@ _JS_TEMPLATE = r"""
           armed: true,
           paths: data.paths || [],
           frame_counts: {},
+          frame_samples: { A: [], B: [] },
+          frame_fps: {},
           point_count: 0,
+          point_depths: [],
+          paths_completed: [],
+          armed_at_ms: Date.now(),
         };
         livePointStore.set(data.sid, []);
+        liveTraceIdx = -1;
+        // Ghost trail is deliberately preserved across arm — it'll stay
+        // rendered until a real point for the new session lands, at which
+        // point liveTraces() stops emitting it (the new session trace
+        // takes over visually). lastEndedLiveSid is not cleared here so
+        // the operator can still see framing drift even on the first
+        // moments of the new cycle.
         renderActiveSession(currentLiveSession);
         repaintCanvas();
+        playCue('armed');
       } catch (_) {}
     });
     es.addEventListener('frame_count', (evt) => {
@@ -1803,26 +2074,57 @@ _JS_TEMPLATE = r"""
         if (!currentLiveSession || currentLiveSession.session_id !== data.sid) return;
         currentLiveSession.frame_counts = currentLiveSession.frame_counts || {};
         currentLiveSession.frame_counts[data.cam] = Number(data.count || 0);
+        pushFrameSample(currentLiveSession, data.cam, Number(data.count || 0));
         renderActiveSession(currentLiveSession);
       } catch (_) {}
+    });
+    es.addEventListener('path_completed', (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (!currentLiveSession || currentLiveSession.session_id !== data.sid) return;
+        const done = new Set(currentLiveSession.paths_completed || []);
+        done.add(data.path);
+        currentLiveSession.paths_completed = [...done];
+        renderActiveSession(currentLiveSession);
+      } catch (_) {}
+    });
+    es.addEventListener('calibration_changed', () => {
+      // Skip the 5s polling tick — repaint canvas immediately so the new
+      // pose lands on screen. tickCalibration() still runs on schedule as
+      // a safety net if the SSE event arrives before the dashboard has
+      // its first paint done.
+      if (typeof tickCalibration === 'function') tickCalibration();
     });
     es.addEventListener('point', (evt) => {
       try {
         const data = JSON.parse(evt.data);
         const sid = data.sid;
-        const arr = livePointStore.get(sid) || [];
-        arr.push({
+        const pt = {
           x: Number(data.x),
           y: Number(data.y),
           z: Number(data.z),
           t_rel_s: Number(data.t_rel_s || 0),
-        });
+        };
+        const arr = livePointStore.get(sid) || [];
+        arr.push(pt);
         livePointStore.set(sid, arr);
         if (currentLiveSession && currentLiveSession.session_id === sid) {
           currentLiveSession.point_count = arr.length;
+          currentLiveSession.last_point_at_ms = Date.now();
+          if (!currentLiveSession.point_depths) currentLiveSession.point_depths = [];
+          currentLiveSession.point_depths.push(pt.z);
+          if (currentLiveSession.point_depths.length > 20) {
+            currentLiveSession.point_depths.shift();
+          }
           renderActiveSession(currentLiveSession);
+          // Fast path: append to the already-anchored live trace slot.
+          // Falls back to a full repaint if the slot is stale (e.g. first
+          // point after an arm, or after a structural change invalidated
+          // the cached index).
+          if (!extendLivePoint(pt)) repaintCanvas();
+        } else {
+          repaintCanvas();
         }
-        repaintCanvas();
       } catch (_) {}
     });
     es.addEventListener('session_ended', (evt) => {
@@ -1830,10 +2132,103 @@ _JS_TEMPLATE = r"""
         const data = JSON.parse(evt.data);
         if (currentLiveSession && currentLiveSession.session_id === data.sid) {
           currentLiveSession.armed = false;
+          currentLiveSession.ended_at_ms = Date.now();
+          if (Array.isArray(data.paths_completed)) {
+            currentLiveSession.paths_completed = data.paths_completed;
+          }
           renderActiveSession(currentLiveSession);
+          // Retain the trail reference for ghost preview on the next arm.
+          // Clear currentLiveSession after a short delay so the active card
+          // stays visible briefly with its final counters.
+          lastEndedLiveSid = data.sid;
+          setTimeout(() => {
+            if (currentLiveSession && currentLiveSession.session_id === data.sid && !currentLiveSession.armed) {
+              currentLiveSession = null;
+              liveTraceIdx = -1;
+              renderActiveSession(null);
+              repaintCanvas();
+            }
+          }, 3000);
+          playCue('ended');
         }
       } catch (_) {}
     });
+    es.addEventListener('device_status', (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (!data || !data.cam) return;
+        const prev = wsStatus.get(data.cam);
+        const connected = !!data.ws_connected;
+        if (!prev || prev.connected !== connected) {
+          wsStatus.set(data.cam, { connected, since_ms: Date.now() });
+        }
+        updateDegradedBanner();
+      } catch (_) {}
+    });
+  }
+
+  // ------ Audio cues (opt-in via localStorage toggle) --------------------
+  let audioCtx = null;
+  function audioEnabled() {
+    try { return localStorage.getItem('ball_tracker_audio_cues') === '1'; } catch { return false; }
+  }
+  function playCue(kind) {
+    if (!audioEnabled()) return;
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      const freq = kind === 'armed' ? 220 : kind === 'ended' ? 440 : 150;
+      const durS = kind === 'degraded' ? 0.2 : 0.08;
+      osc.frequency.value = freq;
+      osc.type = 'sine';
+      gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + durS);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + durS);
+    } catch (_) {}
+  }
+
+  // ------ Degraded banner: WS lost > grace window on an armed cam ---------
+  let lastDegradedState = false;
+  function updateDegradedBanner() {
+    const banner = document.getElementById('degraded-banner');
+    if (!banner) return;
+    const now = Date.now();
+    const armed = currentLiveSession && currentLiveSession.armed;
+    const stale = [];
+    for (const [cam, st] of wsStatus) {
+      if (!st.connected && now - st.since_ms > WS_GRACE_MS) stale.push(cam);
+    }
+    const degraded = armed && stale.length > 0;
+    if (degraded) {
+      banner.style.display = 'flex';
+      banner.querySelector('[data-degraded-body]').textContent =
+        `Cam ${stale.join(', ')} WebSocket lost — falling back to post-pass. Next session will be 2-8s latency.`;
+    } else {
+      banner.style.display = 'none';
+    }
+    if (degraded && !lastDegradedState) playCue('degraded');
+    lastDegradedState = degraded;
+  }
+
+  // 10 Hz tick for the time-sensitive active-session fields (elapsed
+  // counter + last-point-age). Cheaper than re-rendering the whole card
+  // on every SSE event, and ensures the "stale" flag trips within 100 ms
+  // of the 200 ms threshold being crossed.
+  function tickActiveSession() {
+    if (!currentLiveSession || !currentLiveSession.armed) return;
+    const elapsedEl = activeBox && activeBox.querySelector('[data-elapsed]');
+    if (elapsedEl && currentLiveSession.armed_at_ms) {
+      elapsedEl.textContent = fmtElapsed(Date.now() - currentLiveSession.armed_at_ms);
+    }
+    // Re-evaluate stale flag without a full re-render
+    const pairsEl = activeBox && activeBox.querySelector('.live-pairs');
+    if (pairsEl && currentLiveSession.last_point_at_ms) {
+      const age = Date.now() - currentLiveSession.last_point_at_ms;
+      pairsEl.classList.toggle('stale', age > 200);
+    }
   }
 
   // (1 s) and is the only high-frequency tick.
@@ -1846,6 +2241,38 @@ _JS_TEMPLATE = r"""
   setInterval(tickCalibration, 5000);
   setInterval(tickEvents, 5000);
   setInterval(tickExtendedMarkers, 5000);
+  setInterval(tickActiveSession, 100);
+  // Re-check the degraded banner without waiting for a new device_status
+  // event — the grace window ticks forward even when no events arrive,
+  // so the banner needs its own cadence to flip on at the right moment.
+  setInterval(updateDegradedBanner, 1000);
+
+  // ------ Keyboard shortcuts --------------------------------------------
+  // Deliberately NOT including Space for Arm/Stop — operator typically
+  // has a ball in-hand when near the phone and accidentally hitting
+  // Space on a tablet keyboard while moving is a real footgun. Space
+  // stays bound to replay play/pause (existing behavior).
+  document.addEventListener('keydown', (e) => {
+    // Ignore when user is typing in an input / textarea
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'r' || e.key === 'R') {
+      const btn = activeBox && activeBox.querySelector('[data-reset-trail]');
+      if (btn) { e.preventDefault(); btn.click(); }
+    } else if (e.key === 'c' || e.key === 'C') {
+      // Scroll devices sidebar card into view — closest we have to
+      // "open calibration panel" since auto-cal is per-device inline.
+      const devices = document.getElementById('devices-body');
+      if (devices) { e.preventDefault(); devices.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    } else if (e.key === 'm' || e.key === 'M') {
+      // Toggle audio cues. Shown in the nav strip when enabled.
+      try {
+        const cur = localStorage.getItem('ball_tracker_audio_cues') === '1';
+        localStorage.setItem('ball_tracker_audio_cues', cur ? '0' : '1');
+      } catch (_) {}
+    }
+  });
 })();
 """
 
@@ -2440,6 +2867,10 @@ def render_events_index_html(
         "</div>"
         "</aside>"
         '<section class="canvas">'
+        '<div id="degraded-banner" class="degraded-banner" role="alert" style="display:none">'
+        '  <span class="degraded-icon">⚠</span>'
+        '  <span data-degraded-body>Live stream degraded.</span>'
+        '</div>'
         '<div class="canvas-hint">Drag to rotate</div>'
         '<div class="canvas-mode-toggle" role="radiogroup" aria-label="Canvas mode">'
         '  <button type="button" data-canvas-mode="inspect" class="active">INSPECT</button>'
