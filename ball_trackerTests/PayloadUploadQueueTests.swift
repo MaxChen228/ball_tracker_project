@@ -281,8 +281,10 @@ final class PayloadUploadQueueTests: XCTestCase {
             sync_anchor_timestamp_s: 1.0,
             video_start_pts_s: 0.5,
             local_recording_index: 0,
+            paths: nil,
             frames: [],
-            frames_on_device: []
+            frames_on_device: [],
+            capture_telemetry: nil
         )
     }
 

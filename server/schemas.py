@@ -1,9 +1,9 @@
 """Wire-contract + in-memory domain model for the ball-tracker server.
 
 This module holds the Pydantic models that define the HTTP payload shape
-(`POST /pitch`, `POST /heartbeat`, triangulation results) as well as the
-lightweight dataclasses backing the in-memory device registry and armed
-session machine. Split out of `main.py` so the request handlers, state
+(`POST /pitch`, triangulation results, WS message envelopes) as well as
+the lightweight dataclasses backing the in-memory device registry and
+armed session machine. Split out of `main.py` so the request handlers, state
 container, and persistence layer can import the types without pulling in
 FastAPI app plumbing."""
 
@@ -292,24 +292,7 @@ class SessionResult(BaseModel):
     fit_on_device: TrajectoryFit | None = None
 
 
-class HeartbeatBody(BaseModel):
-    camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
-    # Whether this phone currently has a valid audio-chirp sync anchor
-    # cached locally. Surfaced on `/status` so the dashboard can show a
-    # per-device "time sync ✓/✗" badge without waiting for a pitch
-    # upload. Optional + defaults False so older iOS builds that don't
-    # send the field still validate.
-    time_synced: bool = False
-    # Sync-run provenance of the currently-held legacy chirp anchor.
-    # Optional for back-compat: older iOS builds only report the boolean.
-    time_sync_id: str | None = Field(default=None, pattern=_SYNC_ID_PATTERN)
-    # Absolute session-clock timestamp of the currently-held chirp anchor.
-    # Needed for live WS pairing; older clients omit it.
-    sync_anchor_timestamp_s: float | None = None
-    # WebSocket-capable clients can push the currently-effective path
-    # snapshot here so the server can surface richer diagnostics even while
-    # still accepting legacy heartbeat control traffic.
-    paths: list[str] | None = None
+
 
 
 class CalibrationSnapshot(BaseModel):

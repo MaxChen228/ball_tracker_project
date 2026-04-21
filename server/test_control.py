@@ -55,9 +55,10 @@ def test_online_devices_custom_threshold(tmp_path):
 
 
 def test_heartbeat_prunes_stale_entries_on_write(tmp_path):
-    """A malformed client hammering /heartbeat with random camera_ids must
-    not grow `_devices` without bound — entries older than the GC window
-    get dropped on the next heartbeat write."""
+    """A malformed client hammering state.heartbeat() with random camera_ids
+    must not grow `_devices` without bound — entries older than the GC
+    window get dropped on the next heartbeat write. (Post-/heartbeat-endpoint
+    retirement the same invariant applies to WS connect / `hello` writes.)"""
     clock = {"now": 1000.0}
     s = main.State(data_dir=tmp_path, time_fn=lambda: clock["now"])
     for i in range(10):
@@ -281,27 +282,21 @@ def test_upload_from_stale_session_does_not_disarm_current(tmp_path):
 # --- HTTP endpoints --------------------------------------------------------
 
 
-def test_heartbeat_endpoint_registers_device_and_returns_status():
-    client = TestClient(app)
-    r = client.post("/heartbeat", json={"camera_id": "A"})
-    assert r.status_code == 200
-    body = r.json()
-    assert any(d["camera_id"] == "A" for d in body["devices"])
-    # Shape check: heartbeat response carries the same /status fields.
-    for key in ("state", "devices", "session", "commands"):
-        assert key in body
-
-
-def test_heartbeat_rejects_path_traversal_in_camera_id():
-    client = TestClient(app)
-    r = client.post("/heartbeat", json={"camera_id": "../etc"})
-    assert r.status_code == 422
+# HTTP /heartbeat endpoint retired — registration + shape coverage now
+# lives in WS tests (ws_device connect handler) and /status tests. The
+# old two tests (endpoint_registers_device_and_returns_status,
+# rejects_path_traversal_in_camera_id) are dropped; path-traversal is
+# enforced by the WS route via _validate_camera_id_or_422.
 
 
 def test_status_surfaces_session_and_commands_during_arm():
     client = TestClient(app)
-    client.post("/heartbeat", json={"camera_id": "A"})
-    client.post("/heartbeat", json={"camera_id": "B"})
+    # Post-retirement: register devices via state.heartbeat directly (the
+    # HTTP endpoint is gone; WS carries the live-path equivalent). /status
+    # still derives `commands` from the device registry + session state,
+    # so the dashboard path is unchanged.
+    main.state.heartbeat("A")
+    main.state.heartbeat("B")
 
     assert client.post("/sessions/arm", headers={"Accept": "application/json"}).status_code == 200
 
@@ -364,8 +359,8 @@ def test_pitch_upload_keeps_session_armed_until_stop():
     on already-ended sessions; this test covers the rare in-flight
     case and asserts the session stays armed."""
     client = TestClient(app)
-    client.post("/heartbeat", json={"camera_id": "A"})
-    client.post("/heartbeat", json={"camera_id": "B"})
+    main.state.heartbeat("A")
+    main.state.heartbeat("B")
     arm_reply = client.post(
         "/sessions/arm", headers={"Accept": "application/json"}
     ).json()
@@ -420,10 +415,9 @@ def test_status_includes_capture_mode():
     assert status["capture_mode"] == "camera_only"
 
 
-def test_heartbeat_reply_includes_capture_mode():
-    client = TestClient(app)
-    r = client.post("/heartbeat", json={"camera_id": "A"})
-    assert r.json()["capture_mode"] == "camera_only"
+# test_heartbeat_reply_includes_capture_mode deleted — /heartbeat is
+# retired. capture_mode surfaces on /status (test_status_includes_capture_mode)
+# and on the WS settings message on connect.
 
 
 def test_set_mode_endpoint_persists_on_device_choice():
@@ -490,11 +484,12 @@ def test_tracking_exposure_change_after_arm_does_not_affect_armed_session(tmp_pa
     assert s.tracking_exposure_cap() == TrackingExposureCapMode.shutter_500
 
 
-def test_status_and_heartbeat_include_tracking_exposure_cap():
+def test_status_surfaces_tracking_exposure_cap():
+    # /heartbeat retirement: the field now lives on /status (and on the
+    # WS settings message broadcast to each device). Previous two-way
+    # coverage collapses to one-way.
     client = TestClient(app)
     assert client.get("/status").json()["tracking_exposure_cap"] == "frame_duration"
-    hb = client.post("/heartbeat", json={"camera_id": "A"})
-    assert hb.json()["tracking_exposure_cap"] == "frame_duration"
 
 
 def test_events_tags_mode_one_when_video_on_disk(tmp_path):
@@ -667,7 +662,7 @@ def test_sessions_delete_json_returns_404_for_unknown():
 
 def test_sessions_delete_json_returns_409_when_armed():
     client = TestClient(app)
-    client.post("/heartbeat", json={"camera_id": "A"})
+    main.state.heartbeat("A")
     armed = client.post(
         "/sessions/arm", headers={"Accept": "application/json"}
     ).json()["session"]
@@ -796,8 +791,12 @@ def test_dashboard_marks_expected_cameras_offline_when_absent():
 
 
 def _heartbeat_both(client: TestClient) -> None:
-    client.post("/heartbeat", json={"camera_id": "A"})
-    client.post("/heartbeat", json={"camera_id": "B"})
+    # HTTP /heartbeat has been retired (live transport is WS-only). For
+    # tests that only need "pretend A and B are online", reach into the
+    # state directly rather than spinning up a WS in every call — the WS
+    # handler for each connect/disconnect is covered elsewhere.
+    main.state.heartbeat("A")
+    main.state.heartbeat("B")
 
 
 def _build_sync_report(
@@ -823,7 +822,7 @@ def _build_sync_report(
 
 def test_sync_start_requires_two_devices():
     client = TestClient(app)
-    client.post("/heartbeat", json={"camera_id": "A"})
+    main.state.heartbeat("A")
 
     r = client.post("/sync/start")
     assert r.status_code == 409
@@ -858,12 +857,13 @@ def test_sync_end_to_end_solves_delta_and_distance():
     start = client.post("/sync/start").json()
     sync_id = start["sync"]["id"]
 
-    # Heartbeat now surfaces the sync_run command for both phones + the
-    # top-level sync context carrying the id.
-    hb = client.post("/heartbeat", json={"camera_id": "A"}).json()
-    assert hb["commands"].get("A") == "sync_run"
-    assert hb["sync"]["id"] == sync_id
-    assert hb["sync"]["reports_received"] == []
+    # After /heartbeat retirement, /sync/state is the canonical inspection
+    # surface (previously heartbeat reply mirrored it). Semantics otherwise
+    # unchanged: the armed sync run exposes its id + the reports received
+    # so far, and cooldown / last_sync take over after completion.
+    st = client.get("/sync/state").json()
+    assert st["sync"]["id"] == sync_id
+    assert st["sync"]["reports_received"] == []
 
     delta_truth = 0.007
     distance_truth = 2.8
@@ -874,12 +874,8 @@ def test_sync_end_to_end_solves_delta_and_distance():
     assert r_a.status_code == 200
     assert r_a.json()["solved"] is False
 
-    # After A reports, commands[A] drops but commands[B] still says sync_run
-    # so B knows it must still act.
-    hb2 = client.post("/heartbeat", json={"camera_id": "A"}).json()
-    assert "A" not in hb2["commands"]
-    assert hb2["commands"].get("B") == "sync_run"
-    assert hb2["sync"]["reports_received"] == ["A"]
+    st2 = client.get("/sync/state").json()
+    assert st2["sync"]["reports_received"] == ["A"]
 
     b_report = _build_sync_report(
         role="B", sync_id=sync_id, delta_s=delta_truth, distance_m=distance_truth,
@@ -891,13 +887,10 @@ def test_sync_end_to_end_solves_delta_and_distance():
     assert body["result"]["delta_s"] == pytest.approx(delta_truth, abs=1e-9)
     assert body["result"]["distance_m"] == pytest.approx(distance_truth, abs=1e-5)
 
-    # Sync is cleared, last_sync populated, commands empty, cooldown counting
-    # down.
-    hb3 = client.post("/heartbeat", json={"camera_id": "A"}).json()
-    assert hb3["sync"] is None
-    assert hb3["last_sync"]["id"] == sync_id
-    assert hb3["sync_cooldown_remaining_s"] > 0.0
-    assert "A" not in hb3["commands"]
+    st3 = client.get("/sync/state").json()
+    assert st3["sync"] is None
+    assert st3["last_sync"]["id"] == sync_id
+    assert st3["cooldown_remaining_s"] > 0.0
 
 
 def test_sync_stale_report_is_rejected(tmp_path):
