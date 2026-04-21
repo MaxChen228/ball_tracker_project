@@ -1927,6 +1927,47 @@ def test_tracking_exposure_cap_rejects_invalid_value(tmp_path, monkeypatch):
     assert main.state.tracking_exposure_cap().value == "frame_duration"
 
 
+def test_capture_height_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+
+    r = client.get("/status")
+    assert r.json()["capture_height_px"] == 1080
+
+    r = client.post("/settings/capture_height", json={"height": 720})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "value": 720}
+
+    assert client.get("/status").json()["capture_height_px"] == 720
+    ws_json = _fetch_ws_settings(client, "A")
+    assert ws_json["capture_height_px"] == 720
+
+    r = client.post(
+        "/settings/capture_height",
+        data={"height": "1080"},
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert main.state.capture_height_px() == 1080
+
+    persisted = _json.loads((tmp_path / "runtime_settings.json").read_text())
+    assert persisted["capture_height_px"] == 1080
+
+
+def test_capture_height_rejects_540_and_other_invalid_values(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+    for bad in (540, 0, 999, 2160):
+        r = client.post("/settings/capture_height", json={"height": bad})
+        assert r.status_code == 400, f"expected 400 for {bad}"
+    assert main.state.capture_height_px() == 1080
+    with pytest.raises(ValueError):
+        main.state.set_capture_height_px(540)
+
+
 def test_runtime_settings_restored_from_disk_on_state_init(tmp_path):
     import main
     # Seed a file and confirm a fresh State picks it up.

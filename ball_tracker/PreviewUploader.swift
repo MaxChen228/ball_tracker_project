@@ -1,7 +1,7 @@
 // Live-preview push pipeline (Phase 4a).
 //
 // Called from `CameraViewController.captureOutput` whenever the server's
-// heartbeat reply says `preview_requested == true` for THIS camera AND the
+// live settings message says `preview_requested == true` for THIS camera AND the
 // state machine is in `.standby`/`.uploading` (i.e. not recording and not
 // in 時間校正). Each call downsamples the incoming CVPixelBuffer to 480p,
 // JPEG-encodes at quality 0.5, and POSTs to

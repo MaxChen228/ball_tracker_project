@@ -86,7 +86,7 @@ def mode_for_paths(paths: set[DetectionPath] | frozenset[DetectionPath]) -> Capt
 
 
 class TrackingExposureCapMode(str, Enum):
-    """Server-owned tracking exposure policy pushed to iOS via heartbeat.
+    """Server-owned tracking exposure policy pushed to iOS via WS settings.
 
     This only affects the high-speed tracking path. Standby / sync windows
     stay capped at the frame duration so the rig's idle behaviour doesn't

@@ -41,7 +41,7 @@ struct DiagnosticsView: View {
                             Text("只影響高速錄影路線；用來比較 motion blur 與亮度噪點的取捨。")
                                 .font(DesignTokens.Swift.caption)
                                 .foregroundStyle(theme.palette.sub)
-                            row("Source", value: "Dashboard / heartbeat")
+                            row("Source", value: "Dashboard / WS settings")
                             row("Effective", value: data.trackingExposureCapLabel)
                         }
                     }
