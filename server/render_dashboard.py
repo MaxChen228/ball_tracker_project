@@ -2628,7 +2628,7 @@ def _render_session_body(
         "</form>"
     )
     # CALIBRATE TIME broadcasts a single-listener chirp-listen command to
-    # every online camera on its next heartbeat. Disabled while armed —
+    # every online camera on its next WS heartbeat tick. Disabled while armed —
     # firing a time-sync mid-recording would disrupt the armed clip.
     sync_btn = (
         '<form class="inline" method="POST" action="/sync/trigger">'
@@ -2814,7 +2814,7 @@ def _render_tuning_body(
         '<span class="tuning-unit">s</span>'
         '</form>'
         # Tracking exposure-cap row. Server-owned policy; iOS hot-applies
-        # it on heartbeat and armed sessions snapshot it at arm time.
+        # it on WS settings messages and armed sessions snapshot it at arm time.
         + ''.join(
             '<div class="tuning-row">'
             '<span class="tuning-label">Tracking exp</span>'
@@ -2849,7 +2849,7 @@ def _render_tuning_body(
                 f'<button class="btn{"" if h == capture_height_px else " secondary"} small" '
                 f'type="submit">{h}p</button>'
                 f'</form>'
-                for h in (540, 720, 1080)
+                for h in (720, 1080)
             )
             + '</div>'
             '</div>'

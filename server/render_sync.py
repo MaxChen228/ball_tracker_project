@@ -62,6 +62,17 @@ _SYNC_CSS = """
 .markers-link-copy {
   max-width: 640px; color: var(--ink-light);
 }
+.tuning-status {
+  min-height: 18px;
+  margin-bottom: var(--s-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sub);
+}
+.tuning-status.ok { color: var(--passed); }
+.tuning-status.error { color: var(--failed); }
 """
 
 
@@ -70,6 +81,7 @@ _JS_TEMPLATE = r"""
   const syncBox = document.getElementById('sync-body');
   const traceBox = document.getElementById('sync-trace');
   const navStatus = document.getElementById('nav-status');
+  const tuningStatus = document.getElementById('tuning-status');
 
   // Design-token colors mirrored from render_dashboard.py _CSS root vars.
   const COLOR_A_SELF  = '#C0392B';   // --dev
@@ -85,6 +97,12 @@ _JS_TEMPLATE = r"""
   const MIN_PSR = __MIN_PSR__;
 
   function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+  function setTuningStatus(msg, cls) {
+    if (!tuningStatus) return;
+    tuningStatus.className = 'tuning-status' + (cls ? (' ' + cls) : '');
+    tuningStatus.textContent = msg || '';
+  }
 
   let _lastSyncRenderKey = null;
 
@@ -407,6 +425,7 @@ _JS_TEMPLATE = r"""
   // full-page reload).
   document.addEventListener('submit', async (e) => {
     const form = e.target;
+    if (!(form instanceof HTMLFormElement)) return;
     if (form.action && form.action.endsWith('/sync/start')) {
       e.preventDefault();
       const btn = form.querySelector('button');
@@ -427,6 +446,48 @@ _JS_TEMPLATE = r"""
           setTimeout(() => hint.remove(), 3000);
         }
       } catch (_) {}
+      finally {
+        if (btn) btn.disabled = false;
+      }
+      return;
+    }
+    const tuningActions = [
+      '/settings/chirp_threshold',
+      '/settings/heartbeat_interval',
+      '/settings/tracking_exposure_cap',
+      '/settings/capture_height',
+    ];
+    if (tuningActions.some(path => form.action.endsWith(path))) {
+      e.preventDefault();
+      const btn = form.querySelector('button');
+      const field = form.querySelector('input[name="threshold"], input[name="interval_s"], input[name="mode"], input[name="height"]');
+      if (btn instanceof HTMLButtonElement) btn.disabled = true;
+      if (field instanceof HTMLInputElement) field.disabled = true;
+      setTuningStatus('Applying runtime tuning…', '');
+      try {
+        const resp = await fetch(form.action, { method: 'POST', body: new FormData(form) });
+        if (!resp.ok) {
+          let reason = 'update failed';
+          try {
+            const body = await resp.json();
+            reason = body.detail || reason;
+          } catch (_) {}
+          setTuningStatus('Runtime tuning rejected: ' + reason, 'error');
+          return;
+        }
+        setTuningStatus('Runtime tuning applied.', 'ok');
+        setTimeout(() => {
+          if (tuningStatus && tuningStatus.textContent === 'Runtime tuning applied.') {
+            setTuningStatus('', '');
+          }
+        }, 1500);
+        tickSyncStatus();
+      } catch (_) {
+        setTuningStatus('Runtime tuning update failed.', 'error');
+      } finally {
+        if (btn instanceof HTMLButtonElement) btn.disabled = false;
+        if (field instanceof HTMLInputElement) field.disabled = false;
+      }
     }
   });
 
@@ -637,6 +698,7 @@ def render_setup_html(
         '<div class="setup-section-title">Runtime &middot; Tuning</div>'
         '<div class="card">'
         '<h2 class="card-title">Runtime &middot; Tuning</h2>'
+        '<div id="tuning-status" class="tuning-status"></div>'
         f'<div id="tuning-body">{_render_tuning_body(chirp_detect_threshold, heartbeat_interval_s, tracking_exposure_cap, capture_height_px)}</div>'
         "</div>"
         "</main>"

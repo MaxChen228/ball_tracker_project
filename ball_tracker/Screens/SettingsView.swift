@@ -7,7 +7,7 @@ import SwiftUI
 /// `save()` at commit time, which is the only point we coerce back to Int.
 ///
 /// Phase 6: Settings is bootstrap-only. All other runtime tuning is
-/// dashboard-pushed via heartbeat replies.
+/// dashboard-pushed over the live WS settings + heartbeat channel.
 @Observable
 final class SettingsViewModel {
     // Server

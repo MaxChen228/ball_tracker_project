@@ -48,6 +48,26 @@ _MARKERS_CSS = """
   align-items: center;
   flex-wrap: wrap;
 }
+.hero-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-base);
+  border-radius: var(--r);
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.hero-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #2A2520;
+}
 .markers-grid {
   display: grid; grid-template-columns: minmax(640px, 1.35fr) minmax(340px, 0.9fr);
   gap: var(--s-3); align-items: start;
@@ -190,6 +210,7 @@ _MARKERS_JS = r"""
   const camAEl = document.getElementById('camera-a');
   const camBEl = document.getElementById('camera-b');
   const compareRoot = document.getElementById('compare-root');
+  const showIdsEl = document.getElementById('show-aruco-ids');
 
   const state = {
     markers: INITIAL.markers || [],
@@ -199,6 +220,7 @@ _MARKERS_JS = r"""
     compareMarkers: INITIAL.compare_markers || [],
     selectedKind: null,
     selectedId: null,
+    showArucoIds: true,
   };
 
   """ + PLATE_WORLD_JS + """
@@ -309,17 +331,17 @@ _MARKERS_JS = r"""
       if (!rows.length) return;
       traces.push({
         type: 'scatter3d',
-        mode: 'markers+text',
+        mode: state.showArucoIds ? 'markers+text' : 'markers',
         name,
         x: rows.map(r => r.x_m),
         y: rows.map(r => r.y_m),
         z: rows.map(r => r.z_m),
-        text: rows.map(r => String(r.marker_id)),
-        textposition: 'top center',
+        text: state.showArucoIds ? rows.map(r => String(r.marker_id)) : undefined,
+        textposition: state.showArucoIds ? 'top center' : undefined,
         marker: { size: 6, color, symbol, line: { color: '#2A2520', width: 1 } },
         customdata: rows.map(r => [kind, r.marker_id]),
         hovertemplate:
-          'ID %{text}<br>x=%{x:.3f} m<br>y=%{y:.3f} m<br>z=%{z:.3f} m<extra>' + name + '</extra>',
+          'ID %{customdata[1]}<br>x=%{x:.3f} m<br>y=%{y:.3f} m<br>z=%{z:.3f} m<extra>' + name + '</extra>',
       });
     }
 
@@ -417,6 +439,7 @@ _MARKERS_JS = r"""
       ctx.strokeRect(cx - box / 2, cy - box / 2, box, box);
     }
     ctx.setLineDash([]);
+    if (!state.showArucoIds) return;
     const lx = centroid.u * sx;
     const ly = centroid.v * sy;
     const label = `ID ${row.marker_id}`;
@@ -479,8 +502,6 @@ _MARKERS_JS = r"""
     compareRows().forEach(row => {
       const point = projectWorldToPixel([row.x_m, row.y_m, row.z_m], meta);
       if (!point) return;
-      const text = String(row.marker_id);
-      const width = labelWidth(text);
       const x = point.u;
       const y = point.v;
       const g = svgNode('g', {
@@ -493,21 +514,25 @@ _MARKERS_JS = r"""
         fill: markerColor(row),
         class: 'marker-dot',
       }));
-      g.appendChild(svgNode('rect', {
-        x: x - width / 2,
-        y: y - 28,
-        width,
-        height: 18,
-        fill: markerColor(row),
-        class: 'marker-tag',
-      }));
-      const textEl = svgNode('text', {
-        x,
-        y: y - 19,
-        class: 'marker-text',
-      });
-      textEl.textContent = text;
-      g.appendChild(textEl);
+      if (state.showArucoIds) {
+        const text = String(row.marker_id);
+        const width = labelWidth(text);
+        g.appendChild(svgNode('rect', {
+          x: x - width / 2,
+          y: y - 28,
+          width,
+          height: 18,
+          fill: markerColor(row),
+          class: 'marker-tag',
+        }));
+        const textEl = svgNode('text', {
+          x,
+          y: y - 19,
+          class: 'marker-text',
+        });
+        textEl.textContent = text;
+        g.appendChild(textEl);
+      }
       layer.appendChild(g);
     });
   }
@@ -824,6 +849,14 @@ _MARKERS_JS = r"""
     renderAll();
   };
 
+  if (showIdsEl) {
+    showIdsEl.checked = !!state.showArucoIds;
+    showIdsEl.onchange = () => {
+      state.showArucoIds = !!showIdsEl.checked;
+      renderAll();
+    };
+  }
+
   window.addEventListener('resize', redrawCompareViews);
   tickPreviewRefresh();
   tickPreviewImages();
@@ -883,6 +916,10 @@ def render_markers_html(
         '<h1 class="hero-title">Marker Registry</h1>'
         '</div>'
         '<div class="hero-actions">'
+        '<label class="hero-toggle" for="show-aruco-ids">'
+        '<input id="show-aruco-ids" type="checkbox" checked>'
+        '<span>Show ArUco IDs</span>'
+        '</label>'
         '<button class="btn" type="button" id="scan-btn">Scan</button>'
         '<button class="btn secondary" type="button" id="save-candidates-btn">Save Selected</button>'
         '<button class="btn danger" type="button" id="clear-markers-btn">Clear All</button>'
