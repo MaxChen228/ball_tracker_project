@@ -4,34 +4,52 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from render_compare import (
+    DRAW_VIRTUAL_BASE_JS,
+    DRAW_PLATE_OVERLAY_JS,
+    LIVE_COMPARE_CSS,
+    PLATE_WORLD_JS,
+    PROJECTION_JS,
+    render_live_compare_camera,
+)
 from render_dashboard import _CSS
 
 
 _MARKERS_CSS = """
 .main-markers {
-  max-width: 1360px; margin: 0 auto;
-  padding: calc(var(--nav-h) + var(--s-5)) var(--s-4) var(--s-5) var(--s-4);
+  max-width: 1500px; margin: 0 auto;
+  padding: calc(var(--nav-h) + var(--s-4)) var(--s-4) var(--s-5) var(--s-4);
   display: flex; flex-direction: column; gap: var(--s-3);
 }
 .markers-hero {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  gap: var(--s-4); flex-wrap: wrap;
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: 20px 24px;
+  flex-wrap: wrap;
 }
-.hero-copy { max-width: 780px; }
+.hero-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 .hero-kicker {
   font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
-  text-transform: uppercase; color: var(--sub); margin-bottom: var(--s-1);
+  text-transform: uppercase; color: var(--sub); margin: 0;
 }
 .hero-title {
-  font-family: var(--mono); font-size: 20px; letter-spacing: 0.04em;
-  color: var(--ink); margin: 0 0 var(--s-1) 0;
+  font-family: var(--mono); font-size: 28px; line-height: 1.05; letter-spacing: 0.02em;
+  color: var(--ink); margin: 0;
 }
-.hero-text {
-  margin: 0; color: var(--ink-light); max-width: 70ch;
+.hero-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
 }
-.hero-actions { display: flex; gap: var(--s-2); align-items: center; flex-wrap: wrap; }
 .markers-grid {
-  display: grid; grid-template-columns: minmax(460px, 1.4fr) minmax(360px, 1fr);
+  display: grid; grid-template-columns: minmax(640px, 1.35fr) minmax(340px, 0.9fr);
   gap: var(--s-3); align-items: start;
 }
 .compare-grid {
@@ -42,46 +60,26 @@ _MARKERS_CSS = """
 .camera-compare {
   display: flex;
   flex-direction: column;
-  gap: var(--s-2);
+  gap: 12px;
 }
 .camera-compare-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--s-2);
+  gap: 12px;
 }
 .compare-heading {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: var(--s-2); flex-wrap: wrap;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+  margin-bottom: 14px;
 }
 .compare-title {
-  margin: 0; font-family: var(--mono); font-size: 12px;
+  margin: 0; font-family: var(--mono); font-size: 13px;
   letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink);
 }
-.compare-note {
-  font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--sub);
-}
-.compare-cell-label {
-  position: absolute;
-  left: 10px;
-  top: 10px;
-  z-index: 3;
-  padding: 3px 7px;
-  border-radius: var(--r);
-  background: rgba(26, 23, 20, 0.84);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #F8F7F4;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-.compare-cell-label.real {
-  border-color: rgba(202, 61, 47, 0.32);
-}
-.compare-cell-label.virt {
-  border-color: rgba(219, 214, 205, 0.18);
-}
+""" + LIVE_COMPARE_CSS + """
 .camera-compare .preview-panel .placeholder {
   display: none;
 }
@@ -114,6 +112,14 @@ _MARKERS_CSS = """
   background: var(--surface-hover); border: 1px solid var(--border-l);
   border-radius: var(--r);
 }
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.section-head .card-title { margin: 0; }
 .list-table {
   width: 100%; border-collapse: collapse;
   font-family: var(--mono); font-size: 11px;
@@ -157,14 +163,6 @@ _MARKERS_CSS = """
 .status-banner.error { color: var(--failed); }
 .status-banner.ok { color: var(--passed); }
 .candidate-check { margin-top: 10px; }
-.scan-summary {
-  margin-top: var(--s-2); display: flex; flex-direction: column; gap: 6px;
-}
-.scan-summary .line {
-  font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--sub);
-}
-.scan-summary .line strong { color: var(--ink); font-weight: 600; }
 .warning-text { color: var(--failed); }
 .good-text { color: var(--passed); }
 .subtle-text { color: var(--sub); }
@@ -173,6 +171,7 @@ _MARKERS_CSS = """
   .camera-compare-grid { grid-template-columns: 1fr; }
   .markers-grid { grid-template-columns: 1fr; }
   #markers-plot { height: 480px; }
+  .hero-title { font-size: 22px; }
 }
 """
 
@@ -191,7 +190,6 @@ _MARKERS_JS = r"""
   const camAEl = document.getElementById('camera-a');
   const camBEl = document.getElementById('camera-b');
   const compareRoot = document.getElementById('compare-root');
-  const compareStatus = document.getElementById('compare-status');
 
   const state = {
     markers: INITIAL.markers || [],
@@ -203,14 +201,11 @@ _MARKERS_JS = r"""
     selectedId: null,
   };
 
-  const PLATE_WORLD = [
-    [-0.216, 0.0,   0.0],
-    [ 0.216, 0.0,   0.0],
-    [ 0.216, 0.216, 0.0],
-    [ 0.0,   0.432, 0.0],
-    [-0.216, 0.216, 0.0],
-  ];
+  """ + PLATE_WORLD_JS + """
   const virtCamMeta = new Map((state.scene.cameras || []).map(cam => [cam.camera_id, cam]));
+  """ + PROJECTION_JS + """
+  """ + DRAW_VIRTUAL_BASE_JS + """
+  """ + DRAW_PLATE_OVERLAY_JS + """
 
   function esc(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
@@ -375,23 +370,6 @@ _MARKERS_JS = r"""
     return rows;
   }
 
-  function projectWorldToPixel(P, cam) {
-    const R = cam.R_wc, t = cam.t_wc;
-    if (!R || !t) return null;
-    const Xc = R[0]*P[0] + R[1]*P[1] + R[2]*P[2] + t[0];
-    const Yc = R[3]*P[0] + R[4]*P[1] + R[5]*P[2] + t[1];
-    const Zc = R[6]*P[0] + R[7]*P[1] + R[8]*P[2] + t[2];
-    if (Zc <= 0.01) return null;
-    const xn = Xc / Zc, yn = Yc / Zc;
-    const d = cam.distortion || [0, 0, 0, 0, 0];
-    const k1 = d[0] || 0, k2 = d[1] || 0, p1 = d[2] || 0, p2 = d[3] || 0, k3 = d[4] || 0;
-    const r2 = xn*xn + yn*yn, r4 = r2*r2, r6 = r4*r2;
-    const radial = 1 + k1*r2 + k2*r4 + k3*r6;
-    const xd = xn*radial + 2*p1*xn*yn + p2*(r2 + 2*xn*xn);
-    const yd = yn*radial + p1*(r2 + 2*yn*yn) + 2*p2*xn*yn;
-    return { u: cam.fx * xd + cam.cx, v: cam.fy * yd + cam.cy, z: Zc };
-  }
-
   function markerColor(row) {
     if (row.kind === 'plate') return '#256246';
     if (row.kind === 'candidate') return '#A7372A';
@@ -454,55 +432,14 @@ _MARKERS_JS = r"""
 
   function drawCompareVirtual(canvas, camId) {
     const cam = virtCamMeta.get(camId);
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = canvas.clientWidth;
-    const cssH = canvas.clientHeight;
-    if (!cssW || !cssH) return false;
-    const pxW = Math.max(1, Math.floor(cssW * dpr));
-    const pxH = Math.max(1, Math.floor(cssH * dpr));
-    if (canvas.width !== pxW || canvas.height !== pxH) {
-      canvas.width = pxW;
-      canvas.height = pxH;
-    }
-    const ctx = canvas.getContext('2d');
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, cssW, cssH);
-    ctx.fillStyle = '#1A1714';
-    ctx.fillRect(0, 0, cssW, cssH);
-    if (!cam || cam.fx == null || !cam.R_wc || !cam.t_wc || !cam.image_width_px || !cam.image_height_px) {
+    const base = drawVirtualBase(canvas, cam, {
+      plateStroke: 'rgba(202, 61, 47, 0.95)',
+      plateFill: 'rgba(202, 61, 47, 0.10)',
+    });
+    if (!base) {
       return false;
     }
-    const sx = cssW / cam.image_width_px;
-    const sy = cssH / cam.image_height_px;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, cssW, cssH);
-    ctx.clip();
-    const cxPx = cam.cx * sx;
-    const cyPx = cam.cy * sy;
-    ctx.strokeStyle = 'rgba(219, 214, 205, 0.25)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(cxPx - 6, cyPx); ctx.lineTo(cxPx + 6, cyPx);
-    ctx.moveTo(cxPx, cyPx - 6); ctx.lineTo(cxPx, cyPx + 6);
-    ctx.stroke();
-    const plateProj = PLATE_WORLD.map(P => projectWorldToPixel(P, cam));
-    if (plateProj.every(Boolean)) {
-      ctx.strokeStyle = 'rgba(202, 61, 47, 0.95)';
-      ctx.fillStyle = 'rgba(202, 61, 47, 0.10)';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 3]);
-      ctx.beginPath();
-      for (let i = 0; i < plateProj.length; i++) {
-        const x = plateProj[i].u * sx;
-        const y = plateProj[i].v * sy;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
+    const { ctx, sx, sy } = base;
     const selected = currentSelection();
     compareRows().forEach(row => {
       drawMarkerFootprint(
@@ -518,6 +455,63 @@ _MARKERS_JS = r"""
     return true;
   }
 
+  function svgNode(name, attrs) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', name);
+    Object.entries(attrs || {}).forEach(([k, v]) => el.setAttribute(k, String(v)));
+    return el;
+  }
+
+  function labelWidth(text) {
+    return Math.max(18, 10 + String(text).length * 8);
+  }
+
+  function drawPreviewOverlay(svg, camId) {
+    const meta = virtCamMeta.get(camId);
+    const ok = redrawPlateOverlay(svg, meta);
+    let layer = svg.querySelector('[data-role="marker-layer"]');
+    if (!layer) {
+      layer = svgNode('g', { 'data-role': 'marker-layer' });
+      svg.appendChild(layer);
+    }
+    layer.replaceChildren();
+    if (!ok) return;
+    const selected = currentSelection();
+    compareRows().forEach(row => {
+      const point = projectWorldToPixel([row.x_m, row.y_m, row.z_m], meta);
+      if (!point) return;
+      const text = String(row.marker_id);
+      const width = labelWidth(text);
+      const x = point.u;
+      const y = point.v;
+      const g = svgNode('g', {
+        class: `preview-marker${selected && Number(selected.marker_id) === Number(row.marker_id) ? ' is-selected' : ''}`,
+      });
+      g.appendChild(svgNode('circle', {
+        cx: x,
+        cy: y,
+        r: 4.5,
+        fill: markerColor(row),
+        class: 'marker-dot',
+      }));
+      g.appendChild(svgNode('rect', {
+        x: x - width / 2,
+        y: y - 28,
+        width,
+        height: 18,
+        fill: markerColor(row),
+        class: 'marker-tag',
+      }));
+      const textEl = svgNode('text', {
+        x,
+        y: y - 19,
+        class: 'marker-text',
+      });
+      textEl.textContent = text;
+      g.appendChild(textEl);
+      layer.appendChild(g);
+    });
+  }
+
   function redrawCompareViews() {
     compareRoot.querySelectorAll('[data-markers-virt-canvas]').forEach(canvas => {
       const camId = canvas.dataset.markersVirtCanvas;
@@ -526,22 +520,7 @@ _MARKERS_JS = r"""
       if (cell) cell.classList.toggle('ready', ok);
     });
     compareRoot.querySelectorAll('[data-preview-overlay]').forEach(svg => {
-      const camId = svg.dataset.previewOverlay;
-      const meta = virtCamMeta.get(camId);
-      const poly = svg.querySelector('polygon');
-      if (!poly || !meta || meta.image_width_px == null || meta.image_height_px == null) {
-        if (poly) poly.setAttribute('points', '');
-        svg.removeAttribute('viewBox');
-        return;
-      }
-      const proj = PLATE_WORLD.map(P => projectWorldToPixel(P, meta));
-      if (!proj.every(Boolean)) {
-        poly.setAttribute('points', '');
-        svg.removeAttribute('viewBox');
-        return;
-      }
-      svg.setAttribute('viewBox', `0 0 ${meta.image_width_px} ${meta.image_height_px}`);
-      poly.setAttribute('points', proj.map(p => `${p.u.toFixed(2)},${p.v.toFixed(2)}`).join(' '));
+      drawPreviewOverlay(svg, svg.dataset.previewOverlay);
     });
   }
 
@@ -563,7 +542,7 @@ _MARKERS_JS = r"""
     compareRoot.querySelectorAll('img[data-preview-img]').forEach(img => {
       const cam = img.dataset.previewImg;
       if (!cam) return;
-      img.src = '/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + t;
+      img.src = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + t;
       img.style.opacity = 1;
     });
   }
@@ -574,14 +553,7 @@ _MARKERS_JS = r"""
       return;
     }
     const selectedKey = markerKey(state.selectedKind, state.selectedId);
-    const summary = state.scanMeta ? `
-      <div class="scan-summary">
-        <div class="line"><strong>Shared</strong> · ${(state.scanMeta.shared_ids || []).join(', ') || '—'}</div>
-        <div class="line"><strong>${esc(state.scanMeta.camera_a_id || 'A')} only</strong> · ${(state.scanMeta.camera_a_only_ids || []).join(', ') || '—'}</div>
-        <div class="line"><strong>${esc(state.scanMeta.camera_b_id || 'B')} only</strong> · ${(state.scanMeta.camera_b_only_ids || []).join(', ') || '—'}</div>
-      </div>` : '';
     candidatesBody.innerHTML = `
-      ${summary}
       <table class="list-table">
         <tr><th>Save</th><th>ID</th><th>Label</th><th>Pose</th><th>Plane</th><th>Quality</th></tr>
         ${state.candidates.map(row => {
@@ -637,7 +609,6 @@ _MARKERS_JS = r"""
       detailsBody.innerHTML = `
         <div class="stack">
           <div class="marker-inline"><span class="chip partial">Candidate</span><span class="pill-note">ID ${row.marker_id}</span></div>
-          <div class="muted-note">Dual-camera triangulated estimate</div>
           <div class="split-fields three">
             <div class="field"><label>X (m)</label><input value="${fmt(row.x_m)}" readonly></div>
             <div class="field"><label>Y (m)</label><input value="${fmt(row.y_m)}" readonly></div>
@@ -651,7 +622,6 @@ _MARKERS_JS = r"""
             <div class="field"><label>Update mode</label><input value="${esc(row.update_action || 'new')}" readonly></div>
             <div class="field"><label>Seen by</label><input value="${(row.detected_in || []).join(' + ') || '—'}" readonly></div>
           </div>
-          <div class="muted-note">Adjust label / plane flags in the candidate list, then save selected.</div>
         </div>`;
       return;
     }
@@ -674,7 +644,6 @@ _MARKERS_JS = r"""
           <button class="btn" type="button" id="detail-save-btn">Save marker</button>
           <button class="btn danger" type="button" id="detail-delete-btn">Delete marker</button>
         </div>
-        <div class="muted-note">Sources · ${(row.source_camera_ids || []).join(' + ') || 'manual'}</div>
       </div>`;
 
     document.getElementById('detail-save-btn').onclick = async function () {
@@ -911,69 +880,30 @@ def render_markers_html(
         '<section class="card markers-hero">'
         '<div class="hero-copy">'
         '<div class="hero-kicker">Dual-camera marker registry</div>'
-        '<h1 class="hero-title">Scan, inspect, and manage calibration markers</h1>'
-        '<p class="hero-text">New markers are registered only when both cameras see them in the same scan. Keep markers that truly lie on the home-plate plane flagged as <code>plate plane</code>; free-space markers stay in the 3D registry for layout and future workflows without contaminating planar auto-calibration.</p>'
+        '<h1 class="hero-title">Marker Registry</h1>'
         '</div>'
         '<div class="hero-actions">'
-        '<span class="chip calibrated">Shared style system</span>'
-        '<span class="chip partial">Independent page</span>'
+        '<button class="btn" type="button" id="scan-btn">Scan</button>'
+        '<button class="btn secondary" type="button" id="save-candidates-btn">Save Selected</button>'
+        '<button class="btn danger" type="button" id="clear-markers-btn">Clear All</button>'
         '</div>'
         '</section>'
         '<section class="card">'
         '<div class="compare-heading">'
-        '<div>'
         '<h2 class="card-title">Camera Compare</h2>'
-        '<div class="compare-note">Real previews use server-side annotated marker boxes. Virtual views project plate and known markers through the same camera calibration used by setup and viewer.</div>'
-        '</div>'
-        '<div id="compare-status" class="muted-note">REAL = annotated preview · VIRT = projected marker registry</div>'
         '</div>'
         '<div id="compare-root" class="compare-grid">'
-        '<section class="camera-compare">'
-        '<h3 class="compare-title">Camera A</h3>'
-        '<div class="camera-compare-grid">'
-        '<div class="preview-panel" data-preview-panel="A">'
-        '<span class="compare-cell-label real">Real · A</span>'
-        '<img data-preview-img="A" src="/camera/A/preview?annotate=1&t=0" alt="preview A">'
-        '<svg class="plate-overlay" data-preview-overlay="A" aria-hidden="true"><polygon></polygon></svg>'
-        '<div class="placeholder">Waiting for preview…</div>'
-        '</div>'
-        '<div class="virt-cell" data-virt-cell="A">'
-        '<span class="compare-cell-label virt">Virt · A</span>'
-        '<canvas data-markers-virt-canvas="A"></canvas>'
-        '<div class="placeholder">Not calibrated</div>'
-        '</div>'
-        '</div>'
-        '</section>'
-        '<section class="camera-compare">'
-        '<h3 class="compare-title">Camera B</h3>'
-        '<div class="camera-compare-grid">'
-        '<div class="preview-panel" data-preview-panel="B">'
-        '<span class="compare-cell-label real">Real · B</span>'
-        '<img data-preview-img="B" src="/camera/B/preview?annotate=1&t=0" alt="preview B">'
-        '<svg class="plate-overlay" data-preview-overlay="B" aria-hidden="true"><polygon></polygon></svg>'
-        '<div class="placeholder">Waiting for preview…</div>'
-        '</div>'
-        '<div class="virt-cell" data-virt-cell="B">'
-        '<span class="compare-cell-label virt">Virt · B</span>'
-        '<canvas data-markers-virt-canvas="B"></canvas>'
-        '<div class="placeholder">Not calibrated</div>'
-        '</div>'
-        '</div>'
-        '</section>'
+        f'{render_live_compare_camera("A", preview_src="/camera/A/preview?t=0", virt_canvas_attr="data-markers-virt-canvas")}'
+        f'{render_live_compare_camera("B", preview_src="/camera/B/preview?t=0", virt_canvas_attr="data-markers-virt-canvas")}'
         '</div>'
         '</section>'
         '<section class="markers-grid">'
         '<div class="card">'
-        '<h2 class="card-title">Spatial View</h2>'
+        '<div class="section-head"><h2 class="card-title">Spatial View</h2><div id="markers-status" class="status-banner"></div></div>'
         '<div class="controls-row">'
         '<div class="field"><label for="camera-a">Camera A</label><select id="camera-a"><option value="A">A</option><option value="B">B</option></select></div>'
         '<div class="field"><label for="camera-b">Camera B</label><select id="camera-b"><option value="B">B</option><option value="A">A</option></select></div>'
-        '<button class="btn" type="button" id="scan-btn">Scan From Both Cameras</button>'
-        '<button class="btn secondary" type="button" id="save-candidates-btn">Save Selected</button>'
-        '<button class="btn danger" type="button" id="clear-markers-btn">Clear All</button>'
         '</div>'
-        '<div class="muted-note">Plot click selects a candidate or stored marker. Green = plate-plane markers. Amber = free-space stored markers. Red = new scan candidates.</div>'
-        '<div id="markers-status" class="status-banner"></div>'
         '<div id="markers-plot"></div>'
         '</div>'
         '<div class="markers-right">'

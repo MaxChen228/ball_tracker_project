@@ -12,6 +12,14 @@ import html
 from typing import Any
 
 from reconstruct import build_calibration_scene
+from render_compare import (
+    DRAW_VIRTUAL_BASE_JS,
+    DRAW_PLATE_OVERLAY_JS,
+    LIVE_COMPARE_CSS,
+    PLATE_WORLD_JS,
+    PROJECTION_JS,
+    render_live_compare_camera,
+)
 from render_scene import _build_figure
 from schemas import Device, Session
 
@@ -320,27 +328,10 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .devices-grid {{ display: grid; grid-template-columns: 1fr 1fr;
                   gap: var(--s-3); width: 100%; align-items: start; }}
 .device {{ display: flex; flex-direction: column; gap: var(--s-2); }}
-.preview-panel {{ width: 100%;
-                   aspect-ratio: 16 / 9; background: #000;
-                   border: 1px solid var(--border-base);
-                   border-radius: var(--r); overflow: hidden;
-                   position: relative; }}
-.preview-panel img {{ width: 100%; height: 100%; object-fit: contain; display: block; }}
-.preview-panel .plate-overlay {{ position: absolute; inset: 0;
-                                  width: 100%; height: 100%;
-                                  pointer-events: none; z-index: 2; }}
-.preview-panel .plate-overlay polygon {{ fill: none;
-                                          stroke: rgba(217, 59, 59, 0.92);
-                                          stroke-width: 1.8;
-                                          stroke-dasharray: 8 5;
-                                          stroke-linejoin: round; }}
-.preview-panel .placeholder {{ position: absolute; inset: 0;
-                                display: flex; align-items: center; justify-content: center;
-                                color: rgba(255, 255, 255, 0.55);
-                                font-family: var(--mono); font-size: 11px;
-                                letter-spacing: 0.14em; text-transform: uppercase;
-                                text-align: center; padding: var(--s-2);
-                                pointer-events: none; z-index: 3; }}
+.camera-compare {{ display: flex; flex-direction: column; gap: 8px; }}
+.camera-compare-grid {{ display: grid; grid-template-columns: 1fr; gap: 8px; }}
+.compare-title {{ margin: 0; font-family: var(--mono); font-size: 11px;
+                  letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink); }}
 .preview-panel.off img {{ display: none; }}
 .preview-panel.off .placeholder {{ color: rgba(255, 255, 255, 0.6); }}
 /* Crosshair at geometric centre of the real preview — reference mark
@@ -360,23 +351,7 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
    the viewer's bottom-row virt canvas — if the reprojected outline
    doesn't align with the plate in the real preview above, calibration
    is off. */
-.virt-cell {{ width: 100%; aspect-ratio: 16 / 9;
-               background: #1A1714; border: 1px solid var(--border-base);
-               border-radius: var(--r); overflow: hidden; position: relative; }}
-.virt-cell canvas {{ width: 100%; height: 100%; display: block; }}
-.virt-cell .placeholder {{ position: absolute; inset: 0;
-                            display: flex; align-items: center; justify-content: center;
-                            color: rgba(219, 214, 205, 0.55);
-                            font-family: var(--mono); font-size: 11px;
-                            letter-spacing: 0.14em; text-transform: uppercase;
-                            pointer-events: none; }}
-.virt-cell.ready .placeholder {{ display: none; }}
-.virt-label {{ position: absolute; top: 6px; left: 6px;
-                font-family: var(--mono); font-size: 9px; letter-spacing: 0.14em;
-                color: rgba(219, 214, 205, 0.75);
-                background: rgba(26, 23, 20, 0.55); padding: 2px 6px;
-                border: 1px solid rgba(219, 214, 205, 0.2); border-radius: 3px;
-                pointer-events: none; }}
+{LIVE_COMPARE_CSS}
 
 /* Calibration card (Phase 5). Per-camera auto-calibrate row + an
    extended-markers block. Visually aligned with .device rows so the
@@ -1869,7 +1844,7 @@ _JS_TEMPLATE = r"""
       // black placeholder.
       const panel = img.closest('.preview-panel');
       if (!panel || panel.classList.contains('off')) continue;
-      img.src = '/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + t;
+      img.src = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + t;
       img.style.opacity = 1;
     }
   }
@@ -1884,78 +1859,14 @@ _JS_TEMPLATE = r"""
   // own calibration so the dashed outline lands where the camera sees the
   // plate. If the reprojected outline doesn't sit on top of the plate in
   // the real preview above, calibration is off.
-  const PLATE_WORLD = [
-    [-0.216, 0.0,   0.0],
-    [ 0.216, 0.0,   0.0],
-    [ 0.216, 0.216, 0.0],
-    [ 0.0,   0.432, 0.0],
-    [-0.216, 0.216, 0.0],
-  ];
+  {PLATE_WORLD_JS}
   // Populated by tickCalibration from /calibration/state `scene.cameras`.
   const virtCamMeta = new Map();
-  function projectWorldToPixel(P, cam) {
-    const R = cam.R_wc, t = cam.t_wc;
-    if (!R || !t) return null;
-    const Xc = R[0]*P[0] + R[1]*P[1] + R[2]*P[2] + t[0];
-    const Yc = R[3]*P[0] + R[4]*P[1] + R[5]*P[2] + t[1];
-    const Zc = R[6]*P[0] + R[7]*P[1] + R[8]*P[2] + t[2];
-    if (Zc <= 0.01) return null;
-    const xn = Xc / Zc, yn = Yc / Zc;
-    const d = cam.distortion || [0, 0, 0, 0, 0];
-    const k1 = d[0] || 0, k2 = d[1] || 0, p1 = d[2] || 0, p2 = d[3] || 0, k3 = d[4] || 0;
-    const r2 = xn*xn + yn*yn, r4 = r2*r2, r6 = r4*r2;
-    const radial = 1 + k1*r2 + k2*r4 + k3*r6;
-    const xd = xn*radial + 2*p1*xn*yn + p2*(r2 + 2*xn*xn);
-    const yd = yn*radial + p1*(r2 + 2*yn*yn) + 2*p2*xn*yn;
-    return { u: cam.fx * xd + cam.cx, v: cam.fy * yd + cam.cy, z: Zc };
-  }
+  {PROJECTION_JS}
+  {DRAW_VIRTUAL_BASE_JS}
+  {DRAW_PLATE_OVERLAY_JS}
   function drawVirtCanvas(canvas, cam) {
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = canvas.clientWidth, cssH = canvas.clientHeight;
-    if (!cssW || !cssH) return false;
-    const pxW = Math.max(1, Math.floor(cssW * dpr));
-    const pxH = Math.max(1, Math.floor(cssH * dpr));
-    if (canvas.width !== pxW || canvas.height !== pxH) {
-      canvas.width = pxW; canvas.height = pxH;
-    }
-    const ctx = canvas.getContext('2d');
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, cssW, cssH);
-    ctx.fillStyle = '#1A1714';
-    ctx.fillRect(0, 0, cssW, cssH);
-    if (!cam || cam.fx == null || !cam.R_wc || !cam.t_wc
-        || !cam.image_width_px || !cam.image_height_px) return false;
-    const sx = cssW / cam.image_width_px;
-    const sy = cssH / cam.image_height_px;
-    ctx.save();
-    ctx.beginPath(); ctx.rect(0, 0, cssW, cssH); ctx.clip();
-    // Principal-point cross
-    const cxPx = cam.cx * sx, cyPx = cam.cy * sy;
-    ctx.strokeStyle = 'rgba(219, 214, 205, 0.25)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(cxPx - 6, cyPx); ctx.lineTo(cxPx + 6, cyPx);
-    ctx.moveTo(cxPx, cyPx - 6); ctx.lineTo(cxPx, cyPx + 6);
-    ctx.stroke();
-    // Plate pentagon
-    const proj = PLATE_WORLD.map(P => projectWorldToPixel(P, cam));
-    if (proj.every(p => p !== null)) {
-      ctx.strokeStyle = 'rgba(219, 214, 205, 0.65)';
-      ctx.fillStyle = 'rgba(219, 214, 205, 0.08)';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 3]);
-      ctx.beginPath();
-      for (let i = 0; i < proj.length; i++) {
-        const x = proj[i].u * sx, y = proj[i].v * sy;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-    ctx.restore();
-    return true;
+    return !!drawVirtualBase(canvas, cam);
   }
   function redrawAllVirtCanvases() {
     for (const canvas of document.querySelectorAll('[data-virt-canvas]')) {
@@ -1970,21 +1881,7 @@ _JS_TEMPLATE = r"""
     for (const svg of document.querySelectorAll('[data-preview-overlay]')) {
       const cam = svg.dataset.previewOverlay;
       const meta = virtCamMeta.get(cam);
-      const panel = svg.closest('.preview-panel');
-      const poly = svg.querySelector('polygon');
-      if (!panel || !poly || !meta || meta.image_width_px == null || meta.image_height_px == null) {
-        if (poly) poly.setAttribute('points', '');
-        svg.removeAttribute('viewBox');
-        continue;
-      }
-      const proj = PLATE_WORLD.map(P => projectWorldToPixel(P, meta));
-      if (!proj.every(p => p !== null)) {
-        poly.setAttribute('points', '');
-        svg.removeAttribute('viewBox');
-        continue;
-      }
-      svg.setAttribute('viewBox', `0 0 ${meta.image_width_px} ${meta.image_height_px}`);
-      poly.setAttribute('points', proj.map(p => `${p.u.toFixed(2)},${p.v.toFixed(2)}`).join(' '));
+      redrawPlateOverlay(svg, meta);
     }
   }
   window.addEventListener('resize', () => {
@@ -2525,28 +2422,12 @@ def _render_device_rows(
             f'<button type="button" class="btn small" '
             f'data-auto-cal="{html.escape(cam_id)}">Run auto-cal</button>'
         )
-        # Panel always renders for stable layout — off state shows a
-        # black placeholder. JS tick swaps the <img src> when enabled.
-        _off_cls = "" if preview_on else " off"
-        _src = f"/camera/{html.escape(cam_id)}/preview?annotate=1" if preview_on else ""
-        _placeholder = "…" if preview_on else "Preview off"
-        preview_panel = (
-            f'<div class="preview-panel{_off_cls}" data-preview-panel="{html.escape(cam_id)}">'
-            f'<img data-preview-img="{html.escape(cam_id)}" '
-            f'src="{_src}" alt="preview {html.escape(cam_id)}">'
-            f'<svg class="plate-overlay" data-preview-overlay="{html.escape(cam_id)}" '
-            f'aria-hidden="true"><polygon></polygon></svg>'
-            f'<div class="placeholder">{_placeholder}</div>'
-            f'</div>'
-        )
-        virt_cell = (
-            f'<div class="virt-cell" data-virt-cell="{html.escape(cam_id)}">'
-            f'<canvas data-virt-canvas="{html.escape(cam_id)}"></canvas>'
-            f'<div class="virt-label">VIRT &middot; {html.escape(cam_id)}</div>'
-            f'<div class="placeholder">'
-            f'{"loading…" if is_cal else "not calibrated"}'
-            f'</div>'
-            f'</div>'
+        compare_block = render_live_compare_camera(
+            cam_id,
+            preview_src=(f"/camera/{html.escape(cam_id)}/preview" if preview_on else ""),
+            preview_placeholder=("…" if preview_on else "Preview off"),
+            virt_placeholder=("loading…" if is_cal else "not calibrated"),
+            preview_off=not preview_on,
         )
         return (
             f'<div class="device">'
@@ -2560,8 +2441,7 @@ def _render_device_rows(
             f'<div class="chip-col"><span class="chip {chip_cls}">{chip_label}</span></div>'
             f'</div>'
             f'<div class="device-actions">{preview_btn}{auto_cal_btn}</div>'
-            f'{preview_panel}'
-            f'{virt_cell}'
+            f'{compare_block}'
             f'</div>'
         )
 
