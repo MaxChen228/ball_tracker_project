@@ -83,7 +83,6 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
-from pydantic import ValidationError
 
 # Re-exports so `from main import PitchPayload, ...` keeps working for the
 # existing test suite and any downstream tooling. New callers should import
@@ -120,7 +119,7 @@ from schemas import (
 from collections import deque
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from fitting import fit_trajectory
-from pipeline import annotate_video, detect_pitch
+from pitch_ingest import attach_pitch_analysis, ingest_pitch
 from video import probe_dims
 from chirp import chirp_wav_bytes
 from preview import PreviewBuffer, REQUEST_TTL_S as _PREVIEW_REQUEST_TTL_S
@@ -137,6 +136,16 @@ from cleanup_old_sessions import cleanup_expired_sessions
 from live_pairing import LivePairingSession
 from sse import SSEHub
 from ws import DeviceSocketManager
+from pitch_routes import build_pitch_router
+from control_routes import (
+    arm_message_for,
+    build_control_router,
+    disarm_message_for,
+    settings_message_for,
+    wants_html,
+)
+from device_ws_routes import build_device_ws_router
+from sync_routes import build_sync_router
 
 logger = logging.getLogger("ball_tracker")
 
@@ -2294,691 +2303,42 @@ app = FastAPI(title="ball_tracker server", lifespan=lifespan)
 state = State()
 device_ws = DeviceSocketManager()
 sse_hub = SSEHub()
-
-
-def _build_status_response() -> dict[str, Any]:
-    """Shared shape for GET /status and dashboard-facing snapshots. Anything
-    an iPhone needs to decide whether to arm / disarm is in here — the
-    phone just polls this and reacts to `commands[self.camera_id]`."""
-    summary = state.summary()
-    session = state.session_snapshot()
-    sync_run = state.current_sync()
-    last_sync = state.last_sync_result()
-    now = state._time_fn()
-    ws_snapshot = device_ws.snapshot()
-    return {
-        **summary,
-        "devices": [
-            {
-                "camera_id": d.camera_id,
-                "last_seen_at": d.last_seen_at,
-                "time_synced": (
-                    d.time_synced
-                    and d.time_sync_id is not None
-                    and d.time_sync_at is not None
-                    and now - d.time_sync_at <= _TIME_SYNC_MAX_AGE_S
-                ),
-                "time_sync_id": d.time_sync_id,
-                "time_sync_age_s": (
-                    None if d.time_sync_at is None else float(now - d.time_sync_at)
-                ),
-                "sync_anchor_timestamp_s": d.sync_anchor_timestamp_s,
-                "ws_connected": (
-                    ws_snapshot.get(d.camera_id).connected
-                    if ws_snapshot.get(d.camera_id) is not None
-                    else False
-                ),
-                "ws_latency_ms": (
-                    ws_snapshot.get(d.camera_id).last_latency_ms
-                    if ws_snapshot.get(d.camera_id) is not None
-                    else None
-                ),
-            }
-            for d in state.online_devices()
-        ],
-        "session": session.to_dict() if session is not None else None,
-        "commands": state.commands_for_devices(),
-        # Global dashboard mode choice. iPhones show this on the HUD in idle
-        # and fall back to it when there's no armed session; during an armed
-        # session they read session.mode instead (it's the snapshot that
-        # can't drift from under them).
-        "capture_mode": state.current_mode().value,
-        "default_paths": sorted(p.value for p in state.default_paths()),
-        # Mutual-sync context. `sync.id` is the sole dedupe key the phone
-        # uses to decide whether a fresh `sync_run` command has arrived
-        # vs. a repeat of an in-flight run. `last_sync` lets the dashboard
-        # surface Δ + D without waiting for the next pitch upload.
-        "sync": sync_run.to_dict() if sync_run is not None else None,
-        "last_sync": last_sync.model_dump() if last_sync is not None else None,
-        "sync_cooldown_remaining_s": state.sync_cooldown_remaining_s(),
-        # Pending dashboard-triggered time-sync commands, keyed by camera.
-        # Observational only: the phone reads its own command via
-        # `sync_command` (set on the WS heartbeat / push path), and consumption
-        # clears the flag. `/status` surfaces this map so the dashboard
-        # can paint a "pending" badge until the phone drains it.
-        "sync_commands": state.pending_sync_commands(),
-        # Runtime tunables pushed from the dashboard. iOS hot-applies any
-        # changes from WS settings messages (matched-filter threshold into
-        # AudioChirpDetector; cadence into ServerHealthMonitor).
-        "chirp_detect_threshold": state.chirp_detect_threshold(),
-        "heartbeat_interval_s": state.heartbeat_interval_s(),
-        "tracking_exposure_cap": state.tracking_exposure_cap().value,
-        # Capture resolution (image height px) pushed to iOS. Phone rebuilds
-        # its AVCaptureSession at the new height when this differs from the
-        # currently-applied value — only while in .standby so an armed clip
-        # is never disrupted mid-recording.
-        "capture_height_px": state.capture_height_px(),
-        # Per-camera live-preview request flags (Phase 4a). Dashboard
-        # renders a toggle per Devices row from this map; iPhones read
-        # their own flag off the WS settings payload (separate sibling field,
-        # see below) to decide whether to push preview JPEGs.
-        "preview_requested": state._preview.requested_map(),
-        # Per-camera one-shot calibration-frame pending map. Dashboard
-        # paints a "capturing…" chip while true. The beating camera
-        # reads its own flag off the WS settings payload's sibling
-        # `calibration_frame_requested` scalar and uploads one
-        # full-resolution JPEG.
-        "calibration_frame_requested": {
-            cam: True
-            for cam in state._cal_frame_requested.keys()
-            if state.is_calibration_frame_requested(cam)
-        },
-        "auto_calibration": state.auto_cal_status(),
-        "live_session": state.live_session_summary(),
-        "ws_devices": {
-            cam: {
-                "connected": snap.connected,
-                "connected_at": snap.connected_at,
-                "last_seen_at": snap.last_seen_at,
-                "last_latency_ms": snap.last_latency_ms,
-            }
-            for cam, snap in ws_snapshot.items()
-        },
-    }
-
-
-def _settings_message_for(camera_id: str) -> dict[str, Any]:
-    status = _build_status_response()
-    return {
-        "type": "settings",
-        "camera_id": camera_id,
-        "paths": status.get("default_paths", []),
-        "chirp_detect_threshold": status.get("chirp_detect_threshold"),
-        "heartbeat_interval_s": status.get("heartbeat_interval_s"),
-        "tracking_exposure_cap": status.get("tracking_exposure_cap"),
-        "capture_height_px": status.get("capture_height_px"),
-        "preview_requested": status.get("preview_requested", {}).get(camera_id, False),
-        "calibration_frame_requested": status.get("calibration_frame_requested", {}).get(camera_id, False),
-    }
-
-
-def _arm_message_for(session: Session) -> dict[str, Any]:
-    return {
-        "type": "arm",
-        "sid": session.id,
-        "paths": sorted(p.value for p in session.paths),
-        "max_duration_s": session.max_duration_s,
-        "tracking_exposure_cap": session.tracking_exposure_cap.value,
-    }
-
-
-def _disarm_message_for(session: Session) -> dict[str, Any]:
-    return {
-        "type": "disarm",
-        "sid": session.id,
-    }
-
-
-@app.get("/status")
-def status() -> dict[str, Any]:
-    return _build_status_response()
-
-
-@app.get("/stream")
-async def stream() -> StreamingResponse:
-    async def event_gen():
-        yield "event: hello\ndata: {}\n\n"
-        async for payload in sse_hub.subscribe():
-            yield payload
-
-    return StreamingResponse(
-        event_gen(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
+app.include_router(
+    build_control_router(
+        get_state=lambda: state,
+        get_device_ws=lambda: device_ws,
+        get_sse_hub=lambda: sse_hub,
+        default_session_timeout_s=_DEFAULT_SESSION_TIMEOUT_S,
+        time_sync_max_age_s=_TIME_SYNC_MAX_AGE_S,
+    )
+)
+app.include_router(
+    build_device_ws_router(
+        get_state=lambda: state,
+        get_device_ws=lambda: device_ws,
+        get_sse_hub=lambda: sse_hub,
+        validate_camera_id_or_422=lambda camera_id: _validate_camera_id_or_422(camera_id),
+        time_sync_max_age_s=_TIME_SYNC_MAX_AGE_S,
+    )
+)
+app.include_router(
+    build_sync_router(
+        get_state=lambda: state,
+        get_device_ws=lambda: device_ws,
+        sync_start_status_for_reason={
+            "session_armed": 409,
+            "sync_in_progress": 409,
+            "cooldown": 409,
+            "devices_missing": 409,
         },
     )
-
-
-@app.websocket("/ws/device/{camera_id}")
-async def ws_device(camera_id: str, websocket: WebSocket) -> None:
-    _validate_camera_id_or_422(camera_id)
-    await device_ws.connect(camera_id, websocket)
-    try:
-        await device_ws.send(camera_id, _settings_message_for(camera_id))
-        session = state.current_session()
-        if session is not None and session.armed:
-            await device_ws.send(camera_id, _arm_message_for(session))
-        await sse_hub.broadcast(
-            "device_status",
-            {"cam": camera_id, "online": True, "ws_connected": True},
-        )
-        while True:
-            msg = await websocket.receive_json()
-            mtype = msg.get("type")
-            if mtype == "hello":
-                device_ws.note_seen(camera_id)
-                state.heartbeat(
-                    camera_id,
-                    time_synced=bool(msg.get("time_synced", False)),
-                    time_sync_id=msg.get("time_sync_id"),
-                    sync_anchor_timestamp_s=msg.get("sync_anchor_timestamp_s"),
-                )
-                await device_ws.send(camera_id, _settings_message_for(camera_id))
-                continue
-            if mtype == "heartbeat":
-                device_ws.note_seen(camera_id)
-                state.heartbeat(
-                    camera_id,
-                    time_synced=bool(msg.get("time_synced", False)),
-                    time_sync_id=msg.get("time_sync_id"),
-                    sync_anchor_timestamp_s=msg.get("sync_anchor_timestamp_s"),
-                )
-                continue
-            if mtype == "frame":
-                device_ws.note_seen(camera_id)
-                frame = FramePayload(
-                    frame_index=int(msg.get("i", 0)),
-                    timestamp_s=float(msg["ts"]),
-                    px=None if msg.get("px") is None else float(msg["px"]),
-                    py=None if msg.get("py") is None else float(msg["py"]),
-                    ball_detected=bool(msg.get("detected", False)),
-                )
-                session_id = str(msg.get("sid") or "")
-                if not session_id:
-                    continue
-                new_points, counts = await asyncio.to_thread(
-                    state.ingest_live_frame,
-                    camera_id,
-                    session_id,
-                    frame,
-                )
-                await sse_hub.broadcast(
-                    "frame_count",
-                    {
-                        "sid": session_id,
-                        "cam": camera_id,
-                        "path": DetectionPath.live.value,
-                        "count": counts.get(camera_id, 0),
-                    },
-                )
-                for point in new_points:
-                    await sse_hub.broadcast(
-                        "point",
-                        {
-                            "sid": session_id,
-                            "path": DetectionPath.live.value,
-                            "x": point.x_m,
-                            "y": point.y_m,
-                            "z": point.z_m,
-                            "t_rel_s": point.t_rel_s,
-                        },
-                    )
-                if new_points:
-                    result = await asyncio.to_thread(state._rebuild_result_for_session, session_id)
-                    await asyncio.to_thread(state.store_result, result)
-                continue
-            if mtype == "cycle_end":
-                session_id = str(msg.get("sid") or "")
-                reason = msg.get("reason")
-                if session_id:
-                    await asyncio.to_thread(state.mark_live_path_ended, camera_id, session_id, reason)
-                    result = await asyncio.to_thread(state._rebuild_result_for_session, session_id)
-                    await asyncio.to_thread(state.store_result, result)
-                    await sse_hub.broadcast(
-                        "path_completed",
-                        {
-                            "sid": session_id,
-                            "path": DetectionPath.live.value,
-                            "cam": camera_id,
-                            "reason": reason,
-                            "point_count": len(result.triangulated_by_path.get(DetectionPath.live.value, [])),
-                        },
-                    )
-                continue
-    except WebSocketDisconnect:
-        pass
-    finally:
-        device_ws.disconnect(camera_id, websocket)
-        await sse_hub.broadcast(
-            "device_status",
-            {"cam": camera_id, "online": False, "ws_connected": False},
-        )
-
-
-def _wants_html(request: Request) -> bool:
-    """Returns True when the request looks like a browser form submission
-    (Accept: text/html). Lets one endpoint serve both dashboard buttons
-    and JSON API callers without a second URL."""
-    return "text/html" in request.headers.get("accept", "").lower()
-
-
-@app.post("/sessions/arm")
-async def sessions_arm(
-    request: Request,
-    max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S,
-):
-    """Begin an armed session. HTML-form callers (dashboard buttons) get a
-    303 redirect back to /. Machine callers get the session JSON."""
-    requested_paths: set[DetectionPath] | None = None
-    ctype = request.headers.get("content-type", "").lower()
-    if "application/json" in ctype:
-        body = await request.json()
-        raw_paths = body.get("paths")
-        if isinstance(raw_paths, list):
-            requested_paths = state._normalize_paths(raw_paths)
-    session = state.arm_session(max_duration_s=max_duration_s, paths=requested_paths)
-    await device_ws.broadcast(
-        {
-            cam.camera_id: _arm_message_for(session)
-            for cam in state.online_devices()
-        }
+)
+app.include_router(
+    build_pitch_router(
+        get_state=lambda: state,
+        get_max_pitch_upload_bytes=lambda: _MAX_PITCH_UPLOAD_BYTES,
     )
-    await sse_hub.broadcast(
-        "session_armed",
-        {
-            "sid": session.id,
-            "paths": sorted(p.value for p in session.paths),
-            "armed_at": session.started_at,
-        },
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "session": session.to_dict()}
-
-
-@app.post("/sessions/stop")
-async def sessions_stop(request: Request):
-    """End the armed session (operator Stop). Returns 409 to API callers
-    when nothing was armed; HTML callers always get a 303 redirect back
-    to the dashboard so the button never looks broken."""
-    ended = state.stop_session()
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    if ended is None:
-        raise HTTPException(status_code=409, detail="no armed session")
-    await device_ws.broadcast(
-        {
-            cam.camera_id: _disarm_message_for(ended)
-            for cam in state.online_devices()
-        }
-    )
-    await sse_hub.broadcast(
-        "session_ended",
-        {
-            "sid": ended.id,
-            "paths_completed": sorted(state.results.get(ended.id, SessionResult(session_id=ended.id, camera_a_received=False, camera_b_received=False)).paths_completed),
-        },
-    )
-    return {"ok": True, "session": ended.to_dict()}
-
-
-@app.post("/sessions/set_mode")
-async def sessions_set_mode(
-    request: Request,
-    mode: str = Form(...),
-):
-    """Dashboard mode picker target. Records the global capture mode which
-    the next `arm_session()` will snapshot. HTML form callers (dashboard
-    radio buttons) get a 303 back to /; JSON API callers get the applied
-    mode echoed so they can confirm the write."""
-    try:
-        applied = CaptureMode(mode)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"invalid mode {mode!r}; expected one of: {[m.value for m in CaptureMode]}",
-        )
-    state.set_mode(applied)
-    await device_ws.broadcast(
-        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "capture_mode": applied.value}
-
-
-@app.post("/detection/paths")
-async def detection_paths(request: Request):
-    ctype = request.headers.get("content-type", "").lower()
-    raw_paths: list[str] | None = None
-    if "application/json" in ctype:
-        body = await request.json()
-        if isinstance(body.get("paths"), list):
-            raw_paths = body["paths"]
-    else:
-        form = await request.form()
-        raw = form.getlist("paths")
-        raw_paths = [str(v) for v in raw]
-    paths = state._normalize_paths(raw_paths or [])
-    if not paths:
-        raise HTTPException(status_code=400, detail="at least one detection path is required")
-    try:
-        applied = state.set_default_paths(paths)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    await device_ws.broadcast(
-        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "paths": sorted(p.value for p in applied)}
-
-
-@app.post("/settings/chirp_threshold")
-async def settings_chirp_threshold(request: Request):
-    """Set the chirp matched-filter detection threshold. Accepts either a
-    JSON body `{threshold: float}` or a form field `threshold`. HTML form
-    callers get 303 back to /; JSON callers get `{ok, value}`."""
-    threshold: float | None = None
-    ctype = request.headers.get("content-type", "").lower()
-    if "application/json" in ctype:
-        body = await request.json()
-        try:
-            threshold = float(body.get("threshold"))
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="missing or invalid 'threshold'")
-    else:
-        form = await request.form()
-        raw = form.get("threshold")
-        if raw is None:
-            raise HTTPException(status_code=400, detail="missing 'threshold'")
-        try:
-            threshold = float(raw)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="invalid 'threshold'")
-    try:
-        applied = state.set_chirp_detect_threshold(threshold)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    await device_ws.broadcast(
-        {cmd.camera_id: _settings_message_for(cmd.camera_id) for cmd in state.online_devices()}
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "value": applied}
-
-
-@app.post("/settings/heartbeat_interval")
-async def settings_heartbeat_interval(request: Request):
-    """Set the iPhone heartbeat base cadence (seconds). Accepts JSON
-    `{interval_s: float}` or form field `interval_s`. HTML callers get
-    303 back to /; JSON callers get `{ok, value}`."""
-    interval: float | None = None
-    ctype = request.headers.get("content-type", "").lower()
-    if "application/json" in ctype:
-        body = await request.json()
-        try:
-            interval = float(body.get("interval_s"))
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="missing or invalid 'interval_s'")
-    else:
-        form = await request.form()
-        raw = form.get("interval_s")
-        if raw is None:
-            raise HTTPException(status_code=400, detail="missing 'interval_s'")
-        try:
-            interval = float(raw)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="invalid 'interval_s'")
-    try:
-        applied = state.set_heartbeat_interval_s(interval)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    await device_ws.broadcast(
-        {cmd.camera_id: _settings_message_for(cmd.camera_id) for cmd in state.online_devices()}
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "value": applied}
-
-
-@app.post("/settings/tracking_exposure_cap")
-async def settings_tracking_exposure_cap(request: Request):
-    """Set the server-owned 240 fps exposure-cap policy. Accepts JSON
-    `{mode: str}` or form field `mode`. HTML callers get 303 back to `/`;
-    JSON callers get `{ok, value}`."""
-    mode_raw: Any
-    ctype = request.headers.get("content-type", "").lower()
-    if "application/json" in ctype:
-        body = await request.json()
-        mode_raw = body.get("mode")
-    else:
-        form = await request.form()
-        mode_raw = form.get("mode")
-    if mode_raw is None:
-        raise HTTPException(status_code=400, detail="missing 'mode'")
-    try:
-        mode = TrackingExposureCapMode(str(mode_raw))
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"invalid 'mode'; expected one of {[m.value for m in TrackingExposureCapMode]}",
-        )
-    applied = state.set_tracking_exposure_cap(mode)
-    await device_ws.broadcast(
-        {cmd.camera_id: _settings_message_for(cmd.camera_id) for cmd in state.online_devices()}
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "value": applied.value}
-
-
-@app.post("/settings/capture_height")
-async def settings_capture_height(request: Request):
-    """Set the iPhone capture resolution (image height in px). Accepts JSON
-    `{height: int}` or form field `height`. Allowed: 720 / 1080.
-    HTML callers get 303 back to /; JSON callers get `{ok, value}`."""
-    height_raw: Any
-    ctype = request.headers.get("content-type", "").lower()
-    if "application/json" in ctype:
-        body = await request.json()
-        height_raw = body.get("height")
-    else:
-        form = await request.form()
-        height_raw = form.get("height")
-    if height_raw is None:
-        raise HTTPException(status_code=400, detail="missing 'height'")
-    try:
-        height = int(height_raw)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="invalid 'height'")
-    try:
-        applied = state.set_capture_height_px(height)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    await device_ws.broadcast(
-        {cmd.camera_id: _settings_message_for(cmd.camera_id) for cmd in state.online_devices()}
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "value": applied}
-
-
-@app.post("/sessions/clear")
-async def sessions_clear(request: Request):
-    """Drop the last-ended session pointer so the dashboard card returns
-    to blank. HTML callers get a 303 back to /; JSON callers get 409 when
-    nothing was there to clear (idle with no previous session)."""
-    cleared = state.clear_last_ended_session()
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    if not cleared:
-        raise HTTPException(status_code=409, detail="nothing to clear")
-    return {"ok": True}
-
-
-# HTTP status codes used by the /sync/start conflict mapping. One integer
-# per reason keeps the handler legible without a bespoke error type.
-_SYNC_START_STATUS_FOR_REASON: dict[str, int] = {
-    "session_armed": 409,
-    "sync_in_progress": 409,
-    "cooldown": 409,
-    "devices_missing": 409,
-}
-
-
-@app.post("/sync/start")
-async def sync_start(request: Request) -> dict[str, Any]:
-    """Begin a mutual chirp sync run. Both online phones receive
-    `commands[cam] == "sync_run"` on their next heartbeat and enter the
-    mutual-sync flow. Returns 409 with a `reason` field on conflict."""
-    run, reason = state.start_sync()
-    if reason is not None:
-        status_code = _SYNC_START_STATUS_FOR_REASON.get(reason, 409)
-        raise HTTPException(
-            status_code=status_code,
-            detail={"ok": False, "error": reason},
-        )
-    assert run is not None  # reason is None → run is always set
-    return {"ok": True, "sync": run.to_dict()}
-
-
-@app.post("/sync/report")
-async def sync_report(report: SyncReport) -> dict[str, Any]:
-    """Phone-side callback after both matched filters have fired on its
-    mic stream. Returns `solved: false` on the first report, and
-    `solved: true` with the result on the second (triggering the
-    solver)."""
-    run_after, result, reason = state.record_sync_report(report)
-    if reason == "no_sync":
-        raise HTTPException(
-            status_code=409,
-            detail={"ok": False, "error": "no_sync"},
-        )
-    if reason == "stale_sync_id":
-        raise HTTPException(
-            status_code=409,
-            detail={"ok": False, "error": "stale_sync_id"},
-        )
-    resp: dict[str, Any] = {"ok": True, "solved": result is not None}
-    if result is not None:
-        resp["result"] = result.model_dump()
-    elif run_after is not None:
-        resp["run"] = run_after.to_dict()
-    return resp
-
-
-@app.get("/sync/state")
-def sync_state(log_limit: int = 200) -> dict[str, Any]:
-    """Dashboard + CLI probe endpoint. Includes the diagnostic log ring
-    so the UI can render the full A/B/server timeline without a second
-    round-trip. `log_limit` caps how many recent entries are returned
-    (default 200, enough for several runs' worth of events)."""
-    run = state.current_sync()
-    last = state.last_sync_result()
-    logs = state.sync_logs(limit=log_limit)
-    return {
-        "sync": run.to_dict() if run is not None else None,
-        "last_sync": last.model_dump() if last is not None else None,
-        "cooldown_remaining_s": state.sync_cooldown_remaining_s(),
-        "logs": [entry.model_dump() for entry in logs],
-    }
-
-
-@app.post("/sync/trigger")
-async def sync_trigger(request: Request) -> Any:
-    """Dashboard-remote time-sync trigger: flags each target camera with
-    a pending `sync_command: "start"` that the phone consumes on its next
-    heartbeat and acts on the same way the local 時間校正 button does.
-
-    Body shapes:
-      - Empty / no body → target every currently-online camera.
-      - JSON `{"camera_ids": ["A"]}` → target only the listed cameras.
-      - Form field `camera_ids` (comma or space separated) → same.
-
-    Idempotent — re-POSTing to a camera already flagged just refreshes
-    its TTL. Silently skips cameras participating in a currently-armed
-    session (sync would disrupt an in-flight recording).
-
-    HTML form callers (dashboard button) get a 303 back to /; JSON
-    callers get `{ok, dispatched_to: [...]}` so a CLI probe can see
-    which cameras were actually flagged vs. skipped."""
-    ctype = request.headers.get("content-type", "").lower()
-    is_form = (
-        "application/x-www-form-urlencoded" in ctype
-        or "multipart/form-data" in ctype
-    )
-    camera_ids: list[str] | None = None
-    if "application/json" in ctype:
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
-        if isinstance(body, dict):
-            raw = body.get("camera_ids")
-            if isinstance(raw, list):
-                camera_ids = [str(c) for c in raw]
-            elif raw is not None:
-                raise HTTPException(
-                    status_code=422,
-                    detail="camera_ids must be a list of strings",
-                )
-    elif is_form:
-        form = await request.form()
-        raw = form.get("camera_ids")
-        if raw is not None:
-            # Accept "A,B" or "A B" — either way, splitting on whitespace +
-            # commas keeps the form shape flexible for hand-curl'd probes.
-            camera_ids = [
-                c for c in (str(raw).replace(",", " ").split()) if c
-            ]
-
-    dispatched = state.trigger_sync_command(camera_ids)
-    # Push the sync_command over WS too so phones on the live transport
-    # don't have to wait for the next periodic heartbeat tick to pick it up.
-    # The pending flag still exists as the authoritative one-shot drain path.
-    pending = state.pending_sync_commands()
-    ws_messages = {
-        cam: {"type": "sync_command", "command": "start", "sync_command_id": sid}
-        for cam, sid in pending.items()
-        if cam in dispatched
-    }
-    if ws_messages:
-        await device_ws.broadcast(ws_messages)
-    if is_form:
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "dispatched_to": dispatched}
-
-
-@app.post("/sync/claim")
-def sync_claim() -> dict[str, Any]:
-    """Claim the currently-live legacy chirp sync id, minting a fresh one
-    when the prior listening window expired.
-
-    Used by the phone-local 時間校正 button so both phones can converge on
-    the same shared `sync_id` even when the operator taps them a few
-    seconds apart instead of using the dashboard-remote trigger."""
-    intent = state.claim_time_sync_intent()
-    return {
-        "ok": True,
-        "sync_id": intent.id,
-        "started_at": intent.started_at,
-        "expires_at": intent.expires_at,
-    }
-
-
-@app.post("/sync/log")
-async def sync_log_post(body: SyncLogBody) -> dict[str, Any]:
-    """Phone-pushed diagnostic event. Phones call this at each major step
-    of the mutual-sync flow (entering state, chirp emit, band fired,
-    complete, aborted) so the dashboard can reconstruct the full
-    A/B/server timeline in one place."""
-    state.log_sync_event(
-        source=body.camera_id, event=body.event, detail=body.detail
-    )
-    return {"ok": True}
+)
 
 
 # Matches the `Session.id` schema regex — keeps the path parameter from
@@ -2993,336 +2353,20 @@ async def sessions_delete(request: Request, session_id: str):
     the dashboard so the list visibly shrinks. JSON callers get 404 for
     unknown sessions and 409 when the session is still armed."""
     if not _SESSION_ID_RE.match(session_id):
-        if _wants_html(request):
+        if wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=422, detail="invalid session_id")
     try:
         removed = state.delete_session(session_id)
     except RuntimeError as e:
-        if _wants_html(request):
+        if wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail=str(e))
-    if _wants_html(request):
+    if wants_html(request):
         return RedirectResponse("/", status_code=303)
     if not removed:
         raise HTTPException(status_code=404, detail=f"session {session_id} not found")
     return {"ok": True, "session_id": session_id}
-
-
-def _summarize_result(result: SessionResult) -> dict[str, Any]:
-    paired = result.camera_a_received and result.camera_b_received
-    summary: dict[str, Any] = {
-        "session_id": result.session_id,
-        "paired": paired,
-        "triangulated_points": len(result.triangulated),
-        "error": result.error,
-    }
-    if result.points:
-        residuals = [p.residual_m for p in result.points]
-        zs = [p.z_m for p in result.points]
-        ts = [p.t_rel_s for p in result.points]
-        summary["mean_residual_m"] = float(np.mean(residuals))
-        summary["max_residual_m"] = float(np.max(residuals))
-        summary["peak_z_m"] = float(max(zs))
-        summary["duration_s"] = float(ts[-1] - ts[0])
-    return summary
-
-
-@app.post("/pitch")
-async def pitch(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    payload: str = Form(...),
-    video: UploadFile | None = File(None),
-) -> dict[str, Any]:
-    """Ingest one armed-session upload as multipart/form-data.
-
-    Required form fields:
-      - `payload` — JSON-encoded `PitchPayload`. Carries session-level
-        metadata including the legacy chirp `sync_id` provenance tag; in
-        mode-two (`on_device`) also carries the per-frame
-        `frames: [FramePayload]` list produced by the iPhone's own
-        HSV+MOG2 detector.
-
-    Optional:
-      - `video` — H.264 MOV/MP4 of the cycle. Required in mode-one (server
-        decodes it and runs HSV detection). Omitted in mode-two — server
-        trusts the iPhone's detection output and only pairs + triangulates.
-
-    Requests with neither a video nor a non-empty `frames` list return 422:
-    there's no way to triangulate off nothing. Requests without a time-sync
-    anchor skip detection+triangulation and surface `error="no time sync"`.
-    """
-    # Fail fast on oversize bodies when the client advertises Content-Length.
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            declared = int(content_length)
-        except ValueError:
-            declared = -1
-        if declared > _MAX_PITCH_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="video too large")
-
-    try:
-        payload_obj = PitchPayload.model_validate_json(payload)
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors())
-
-    # Phase 1 of the iOS-decoupling refactor: calibration DB
-    # (`data/calibrations/<camera_id>.json`, populated via POST /calibration)
-    # is the single source of truth for per-camera intrinsics, homography,
-    # and image dims. iPhones no longer echo these on every /pitch upload.
-    # If any field is missing we fill it from the cached snapshot so all
-    # downstream code (detection scaling, triangulation, on-disk pitch JSON
-    # persistence, scale_pitch_to_video_dims) stays unchanged. No cached
-    # snapshot ⇒ hard 422: the new contract is "calibrate before you pitch".
-    needs_calibration_fill = (
-        payload_obj.intrinsics is None
-        or payload_obj.homography is None
-        or payload_obj.image_width_px is None
-        or payload_obj.image_height_px is None
-    )
-    if needs_calibration_fill:
-        cal_snap = state.calibrations().get(payload_obj.camera_id)
-        if cal_snap is None:
-            raise HTTPException(
-                status_code=422,
-                detail=f"no calibration on file for camera {payload_obj.camera_id!r}",
-            )
-        if payload_obj.intrinsics is None:
-            payload_obj.intrinsics = cal_snap.intrinsics
-        if payload_obj.homography is None:
-            payload_obj.homography = list(cal_snap.homography)
-        if payload_obj.image_width_px is None:
-            payload_obj.image_width_px = cal_snap.image_width_px
-        if payload_obj.image_height_px is None:
-            payload_obj.image_height_px = cal_snap.image_height_px
-
-    payload_paths = state._normalize_paths(payload_obj.paths) or state._paths_for_pitch(payload_obj)
-    payload_obj.paths = sorted(p.value for p in payload_paths)
-    has_video = video is not None and (video.filename or video.size)
-    # Either stream counts as "data the server can work with": `frames`
-    # from mode-two (iOS detection, authoritative for its session) or
-    # `frames_on_device` from a degraded-dual upload (dual-mode cycle
-    # where the MOV writer failed but the on-device detector still
-    # produced a frame list). Both land in the triangulation pipeline.
-    has_frames = (
-        bool(payload_obj.frames)
-        or bool(payload_obj.frames_live)
-        or bool(payload_obj.frames_ios_post)
-        or bool(payload_obj.frames_server_post)
-        or bool(payload_obj.frames_on_device)
-    )
-    if not has_video and not has_frames:
-        raise HTTPException(
-            status_code=422,
-            detail="must supply either `video` (mode-one / dual) or a "
-                   "non-empty `frames` / `frames_on_device` list in payload",
-        )
-
-    clip_info: dict[str, Any] | None = None
-    clip_path: Path | None = None
-    detection_pending = False
-
-    if has_video:
-        data = await video.read()
-        if len(data) > _MAX_PITCH_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="video too large")
-        if not data:
-            raise HTTPException(status_code=422, detail="video attachment is empty")
-        ext = "mov"
-        if video.filename:
-            suffix = Path(video.filename).suffix.lstrip(".").lower()
-            if suffix:
-                ext = suffix
-        clip_path = await asyncio.to_thread(
-            state.save_clip,
-            payload_obj.camera_id, payload_obj.session_id, data, ext,
-        )
-        clip_info = {"filename": clip_path.name, "bytes": len(data)}
-
-        # Reconcile image dims: the iPhone's IntrinsicsStore sometimes
-        # ships calibration-time dims (e.g. 1920×1080) even when the MOV
-        # encoder produced a lower resolution (720p). Server
-        # detection then returns px/py in MOV-pixel coords while the
-        # payload claims the MOV is 1080p — downstream scaling ends up
-        # 1.5× off. Probe the real MOV dims once and overwrite the
-        # payload fields so every downstream consumer (triangulation
-        # rescale, viewer virtual-cam canvas) speaks the same grid.
-        actual_dims = await asyncio.to_thread(probe_dims, clip_path)
-        if actual_dims is not None:
-            mw, mh = actual_dims
-            if payload_obj.image_width_px != mw or payload_obj.image_height_px != mh:
-                logger.info(
-                    "reconciling image dims camera=%s session=%s payload=%sx%s mov=%dx%d",
-                    payload_obj.camera_id, payload_obj.session_id,
-                    payload_obj.image_width_px, payload_obj.image_height_px,
-                    mw, mh,
-                )
-                payload_obj.image_width_px = mw
-                payload_obj.image_height_px = mh
-
-        # Early-surface: do NOT block on detect_pitch (8-20 s). Record the
-        # payload with frames=[] so the dashboard + viewer + on-device
-        # triangulation see this cycle immediately, then schedule the
-        # server detection as a background task that will re-record the
-        # pitch once frames are filled.
-        payload_obj.frames = []
-        payload_obj.frames_server_post = []
-        if (
-            payload_obj.sync_anchor_timestamp_s is not None
-            and DetectionPath.server_post in payload_paths
-        ):
-            detection_pending = True
-    else:
-        # Mode-two: iPhone already detected; we trust the frames list and
-        # only run pairing + triangulation. No disk write, no annotated
-        # clip — the viewer for this session will fall back to the
-        # per-frame trace from the payload JSON.
-        if payload_obj.sync_anchor_timestamp_s is None:
-            # Anchor missing ⇒ the session can't pair no matter what the
-            # frames say; drop them so downstream counts stay honest.
-            payload_obj.frames = []
-            payload_obj.frames_ios_post = []
-            payload_obj.frames_live = []
-            payload_obj.frames_server_post = []
-        elif payload_obj.frames and not payload_obj.frames_ios_post and DetectionPath.server_post not in payload_paths:
-            payload_obj.frames_ios_post = list(payload_obj.frames)
-
-    result = await asyncio.to_thread(state.record, payload_obj)
-    if payload_obj.sync_anchor_timestamp_s is None and result.error is None:
-        result.error = "no time sync"
-
-    if detection_pending and clip_path is not None:
-        # Background task: runs AFTER the response body is sent, so the
-        # dashboard's /events + /viewer can surface the on-device trace
-        # and session row immediately without waiting on the 8-20 s
-        # server detection.
-        background_tasks.add_task(_run_server_detection, clip_path, payload_obj)
-
-    ball_frames = sum(
-        1
-        for f in (
-            payload_obj.frames_server_post
-            or payload_obj.frames_ios_post
-            or payload_obj.frames_live
-            or payload_obj.frames
-        )
-        if f.ball_detected
-    )
-    logger.info(
-        "pitch camera=%s session=%s clip=%s frames=%d ball=%d detected_on=%s triangulated=%d%s%s paths=%s",
-        payload_obj.camera_id,
-        payload_obj.session_id,
-        f"{clip_info['bytes']}B" if clip_info else "none",
-        len(payload_obj.frames_server_post or payload_obj.frames_ios_post or payload_obj.frames_live or payload_obj.frames),
-        ball_frames,
-        "server-pending" if detection_pending else ("device" if payload_obj.frames else "skipped"),
-        len(result.points),
-        f" on_device={len(result.points_on_device)}" if result.points_on_device else "",
-        f" err={result.error}" if result.error else "",
-        payload_obj.paths,
-    )
-    if result.points_on_device:
-        zs = [p.z_m for p in result.points_on_device]
-        logger.info(
-            "  session %s (on_device) → %d pts, duration %.2fs, peak z = %.2fm",
-            result.session_id,
-            len(result.points_on_device),
-            result.points_on_device[-1].t_rel_s - result.points_on_device[0].t_rel_s,
-            max(zs),
-        )
-    response: dict[str, Any] = {"ok": True, **_summarize_result(result)}
-    response["clip"] = clip_info
-    response["detection_pending"] = detection_pending
-    return response
-
-
-@app.post("/pitch_analysis")
-async def pitch_analysis(payload: PitchAnalysisPayload) -> dict[str, Any]:
-    """Attach a late on-device post-pass analysis to an already-recorded pitch.
-
-    This is the PR61 second leg: raw capture arrives first, then iOS decodes
-    its finalized local MOV and uploads the authoritative on-device frame list
-    later. Dashboard/viewer state updates immediately once the merge lands."""
-    if not payload.frames_on_device:
-        raise HTTPException(
-            status_code=422,
-            detail="frames_on_device must be non-empty",
-        )
-    try:
-        result = await asyncio.to_thread(state.attach_on_device_analysis, payload)
-    except KeyError:
-        raise HTTPException(
-            status_code=409,
-            detail="base pitch not found for analysis upload",
-        )
-
-    logger.info(
-        "pitch_analysis camera=%s session=%s frames=%d detected=%d triangulated_on_device=%d%s",
-        payload.camera_id,
-        payload.session_id,
-        len(payload.frames_on_device),
-        sum(1 for f in payload.frames_on_device if f.ball_detected),
-        len(result.points_on_device),
-        f" err={result.error_on_device}" if result.error_on_device else "",
-    )
-    return {
-        "ok": True,
-        "session_id": payload.session_id,
-        "camera_id": payload.camera_id,
-        "frames_on_device": len(payload.frames_on_device),
-        "triangulated_on_device": len(result.points_on_device),
-        "error_on_device": result.error_on_device,
-    }
-
-
-async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
-    """Background task: decode the MOV, run HSV detection, annotate, then
-    re-record the pitch so `result.points` (and the annotated MP4) land on
-    disk. Runs after /pitch has already returned — the dashboard sees the
-    session + on-device points immediately, and this task backfills the
-    server-side trace 8-20 s later."""
-    try:
-        frames = await asyncio.to_thread(
-            detect_pitch, clip_path, pitch.video_start_pts_s,
-        )
-    except Exception as exc:
-        logger.warning(
-            "background detect_pitch failed session=%s cam=%s err=%s",
-            pitch.session_id, pitch.camera_id, exc,
-        )
-        return
-
-    pitch.frames = frames
-    pitch.frames_server_post = frames
-    try:
-        await asyncio.to_thread(state.record, pitch)
-    except Exception as exc:
-        logger.warning(
-            "background re-record failed session=%s cam=%s err=%s",
-            pitch.session_id, pitch.camera_id, exc,
-        )
-        return
-
-    annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
-    try:
-        await asyncio.to_thread(annotate_video, clip_path, annotated_path, frames)
-    except Exception as exc:
-        logger.warning(
-            "annotate_video failed session=%s cam=%s err=%s",
-            pitch.session_id, pitch.camera_id, exc,
-        )
-        if annotated_path.exists():
-            try:
-                annotated_path.unlink()
-            except OSError:
-                pass
-    ball = sum(1 for f in frames if f.ball_detected)
-    logger.info(
-        "background detection complete session=%s cam=%s frames=%d ball=%d",
-        pitch.session_id, pitch.camera_id, len(frames), ball,
-    )
 
 
 @app.get("/chirp.wav")
@@ -3596,8 +2640,16 @@ async def camera_preview_request(
     else:
         flag = bool(raw)
     state._preview.request(camera_id, enabled=flag)
-    await device_ws.send(camera_id, _settings_message_for(camera_id))
-    if _wants_html(request):
+    await device_ws.send(
+        camera_id,
+        settings_message_for(
+            camera_id=camera_id,
+            state=state,
+            device_ws=device_ws,
+            time_sync_max_age_s=_TIME_SYNC_MAX_AGE_S,
+        ),
+    )
+    if wants_html(request):
         return RedirectResponse("/", status_code=303)
     import json as _stdjson
     return Response(
@@ -4012,7 +3064,15 @@ async def _await_calibration_frame(camera_id: str, *, timeout_s: float = 2.0) ->
     import asyncio as _asyncio  # noqa: WPS433
 
     state.request_calibration_frame(camera_id)
-    await device_ws.send(camera_id, _settings_message_for(camera_id))
+    await device_ws.send(
+        camera_id,
+        settings_message_for(
+            camera_id=camera_id,
+            state=state,
+            device_ws=device_ws,
+            time_sync_max_age_s=_TIME_SYNC_MAX_AGE_S,
+        ),
+    )
     loops = max(1, int(round(timeout_s / 0.1)))
     for _ in range(loops):
         got = state.consume_calibration_frame(camera_id)
@@ -4350,7 +3410,15 @@ async def _run_auto_calibration(
 
     while frames_seen < max_frames and _asyncio.get_event_loop().time() < burst_deadline:
         state.request_calibration_frame(camera_id)
-        await device_ws.send(camera_id, _settings_message_for(camera_id))
+        await device_ws.send(
+            camera_id,
+            settings_message_for(
+                camera_id=camera_id,
+                state=state,
+                device_ws=device_ws,
+                time_sync_max_age_s=_TIME_SYNC_MAX_AGE_S,
+            ),
+        )
         got: tuple[bytes, float] | None = None
         for _ in range(20):
             got = state.consume_calibration_frame(camera_id)
@@ -4575,7 +3643,7 @@ async def calibration_auto(
     n_extended_used = sum(
         1 for mid in result.detected_ids if mid not in PLATE_MARKER_WORLD
     )
-    if _wants_html(request):
+    if wants_html(request):
         return RedirectResponse("/", status_code=303)  # type: ignore[return-value]
     return {
         "ok": True,
