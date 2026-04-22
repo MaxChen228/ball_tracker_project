@@ -99,6 +99,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var serverConfig: ServerUploader.ServerConfig!
     private var healthMonitor: ServerHealthMonitor!
     private var uploadQueue: PayloadUploadQueue!
+    private var commandRouter: CameraCommandRouter!
 
     // UI state.
     private var lastUploadStatusText: String = ""
@@ -396,6 +397,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             baseIntervalS: 1.0
         )
         wireHealthMonitorCallbacks()
+        commandRouter = buildCommandRouter()
 
         setupUI()
         setupPreviewAndCapture()
@@ -1540,6 +1542,93 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
+    private func buildCommandRouter() -> CameraCommandRouter {
+        CameraCommandRouter(
+            dependencies: .init(
+                getState: { [weak self] in self?.state ?? .standby },
+                getCameraRole: { [weak self] in self?.settings.cameraRole ?? "?" },
+                healthMonitor: healthMonitor,
+                getCurrentSessionPaths: { [weak self] in self?.currentSessionPaths ?? [] },
+                setCurrentSessionId: { [weak self] in self?.currentSessionId = $0 },
+                setCurrentSessionPaths: { [weak self] in self?.currentSessionPaths = $0 },
+                refreshModeLabel: { [weak self] in self?.refreshModeLabel() },
+                startTimeSync: { [weak self] syncId in self?.startTimeSync(syncId: syncId) },
+                applyMutualSync: { [weak self] syncId in self?.applyMutualSync(syncId: syncId) },
+                applyRemoteArm: { [weak self] in self?.applyRemoteArm() },
+                applyRemoteDisarm: { [weak self] in self?.applyRemoteDisarm() },
+                updateTimeSyncServerState: { [weak self] confirmed, syncId in
+                    self?.updateServerTimeSyncState(confirmed: confirmed, syncId: syncId)
+                },
+                chirpThresholdDidPush: { [weak self] threshold in
+                    self?.applyPushedChirpThreshold(threshold)
+                },
+                mutualSyncThresholdDidPush: { [weak self] threshold in
+                    self?.applyPushedMutualSyncThreshold(threshold)
+                },
+                heartbeatIntervalDidPush: { [weak self] interval in
+                    self?.applyPushedHeartbeatInterval(interval)
+                },
+                handleTrackingExposureCap: { [weak self] cap in
+                    self?.handlePushedTrackingExposureCap(cap)
+                },
+                currentCaptureHeight: { [weak self] in self?.currentCaptureHeight ?? SettingsViewController.captureHeightFixed },
+                applyServerCaptureHeight: { [weak self] height in self?.applyServerCaptureHeight(height) },
+                isPreviewRequested: { [weak self] in self?.previewRequestedByServer ?? false },
+                setPreviewRequested: { [weak self] in self?.previewRequestedByServer = $0 },
+                ensurePreviewUploader: { [weak self] in self?.ensurePreviewUploader() },
+                resetPreviewUploader: { [weak self] in self?.previewUploader?.reset() },
+                startStandbyCapture: { [weak self] in self?.startCapture(at: self?.standbyFps ?? 60) },
+                stopCapture: { [weak self] in self?.stopCapture() },
+                isCalibrationFrameCaptureArmed: { [weak self] in self?.calibrationFrameCaptureArmed ?? false },
+                setCalibrationFrameCaptureArmed: { [weak self] in self?.calibrationFrameCaptureArmed = $0 }
+            )
+        )
+    }
+
+    private func refreshModeLabel() {
+        let pathLabel = currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ")
+        modeLabel.text = "MODE · \(pathLabel.uppercased())"
+    }
+
+    private func updateServerTimeSyncState(confirmed: Bool, syncId: String?) {
+        if serverTimeSyncConfirmed != confirmed || serverTimeSyncId != syncId {
+            serverTimeSyncConfirmed = confirmed
+            serverTimeSyncId = syncId
+            DispatchQueue.main.async { self.updateUIForState() }
+        }
+    }
+
+    private func applyPushedChirpThreshold(_ threshold: Double) {
+        guard lastServerChirpThreshold != threshold else { return }
+        lastServerChirpThreshold = threshold
+        DispatchQueue.main.async {
+            self.chirpDetector?.setThreshold(Float(threshold))
+            log.info("quick-chirp threshold hot-applied from server: \(threshold)")
+        }
+    }
+
+    private func applyPushedMutualSyncThreshold(_ threshold: Double) {
+        // iOS no longer runs the mutual-sync matched filter; cache only.
+        if lastServerMutualThreshold != threshold {
+            lastServerMutualThreshold = threshold
+        }
+    }
+
+    private func applyPushedHeartbeatInterval(_ interval: Double) {
+        guard lastServerHeartbeatInterval != interval else { return }
+        lastServerHeartbeatInterval = interval
+        DispatchQueue.main.async {
+            self.healthMonitor.updateBaseInterval(interval)
+            log.info("heartbeat interval hot-applied: \(interval)s")
+        }
+    }
+
+    private func ensurePreviewUploader() {
+        if previewUploader == nil {
+            previewUploader = PreviewUploader(uploader: uploader, cameraId: settings.cameraRole)
+        }
+    }
+
     private func wireHealthMonitorCallbacks() {
         healthMonitor.onStatusChanged = { [weak self] text, _ in
             DiagnosticsData.shared.update(serverStatusText: text)
@@ -2433,145 +2522,11 @@ extension CameraViewController: ServerWebSocketDelegate {
     }
 
     func webSocketDidDisconnect(_ connection: ServerWebSocketConnection, reason: String?) {
-        healthMonitor.recordConnectionDrop()
-        // Preview is a separate HTTP path, but the operator treats it as
-        // part of the same "server/control plane is alive" story. If the
-        // WS control channel drops, stop latched preview pushes so the
-        // dashboard can't keep showing live frames for a camera it marks
-        // offline. A later `settings` payload will re-enable it after a
-        // real reconnect.
-        previewRequestedByServer = false
-        previewUploader?.reset()
-        if state == .standby {
-            stopCapture()
-        }
+        commandRouter.didDisconnect()
     }
 
     func webSocket(_ connection: ServerWebSocketConnection, didReceive message: [String: Any]) {
-        guard let type = message["type"] as? String else { return }
-
-        healthMonitor.recordConnectionSuccess(
-            status: type == "arm" ? "ARMED (\(message["sid"] as? String ?? "-"))" : "IDLE"
-        )
-
-        switch type {
-        case "sync_run":
-            if let sid = message["sync_id"] as? String {
-                DispatchQueue.main.async { self.applyMutualSync(syncId: sid) }
-            }
-        case "sync_command":
-            if let cmd = message["command"] as? String, cmd == "start" {
-                DispatchQueue.main.async {
-                    if self.state == .standby {
-                        if let syncId = message["sync_command_id"] as? String {
-                            self.startTimeSync(syncId: syncId)
-                        }
-                        self.updateUIForState()
-                    }
-                }
-            }
-        case "arm":
-            if let sid = message["sid"] as? String { currentSessionId = sid }
-            if let raw = message["paths"] as? [String] {
-                let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
-                if !parsed.isEmpty { currentSessionPaths = parsed }
-            }
-            if let capStr = message["tracking_exposure_cap"] as? String {
-                self.handlePushedTrackingExposureCap(capStr)
-            }
-            DispatchQueue.main.async {
-                self.modeLabel.text = "MODE · \(self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ").uppercased())"
-                self.applyRemoteArm()
-            }
-        case "disarm":
-            DispatchQueue.main.async { self.applyRemoteDisarm() }
-        case "calibration_updated":
-            // A sibling camera's calibration just changed server-side. iOS no
-            // longer owns the calibration state (Phase 1 decoupling — the
-            // server is authoritative), but a fresh poll against the server's
-            // status endpoint surfaces any knock-on setup change on the HUD
-            // without waiting for the next 5s tick.
-            let changedCam = (message["cam"] as? String) ?? "?"
-            log.info("ws calibration update cam=\(changedCam, privacy: .public) local=\(self.settings.cameraRole, privacy: .public)")
-            DispatchQueue.main.async { self.healthMonitor.probeNow() }
-        case "settings":
-            let pushedTimeSync = message["device_time_synced"] as? Bool ?? false
-            let pushedTimeSyncId = message["device_time_sync_id"] as? String
-            if self.serverTimeSyncConfirmed != pushedTimeSync || self.serverTimeSyncId != pushedTimeSyncId {
-                self.serverTimeSyncConfirmed = pushedTimeSync
-                self.serverTimeSyncId = pushedTimeSyncId
-                DispatchQueue.main.async { self.updateUIForState() }
-            }
-            if let raw = message["paths"] as? [String] {
-                let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
-                if !parsed.isEmpty { currentSessionPaths = parsed }
-            }
-            if let threshold = message["chirp_detect_threshold"] as? Double,
-               self.lastServerChirpThreshold != threshold {
-                self.lastServerChirpThreshold = threshold
-                DispatchQueue.main.async {
-                    // Quick-chirp path only. Mutual-sync now has its
-                    // own slider so tuning one doesn't clobber the
-                    // other — the two modalities see very different
-                    // peak magnitudes and shared gate made long-range
-                    // mutual impossible without letting quick-chirp
-                    // slip into false positives.
-                    self.chirpDetector?.setThreshold(Float(threshold))
-                    log.info("quick-chirp threshold hot-applied from server: \(threshold)")
-                }
-            }
-            if let mThreshold = message["mutual_sync_threshold"] as? Double,
-               self.lastServerMutualThreshold != mThreshold {
-                // Phase A: iOS no longer runs the mutual-sync matched
-                // filter — threshold applies server-side now. Cache the
-                // value only so an older iOS build wouldn't resend, and
-                // skip the local setter path entirely.
-                self.lastServerMutualThreshold = mThreshold
-            }
-            if let interval = message["heartbeat_interval_s"] as? Double,
-               self.lastServerHeartbeatInterval != interval {
-                self.lastServerHeartbeatInterval = interval
-                DispatchQueue.main.async {
-                    self.healthMonitor.updateBaseInterval(interval)
-                    log.info("heartbeat interval hot-applied: \(interval)s")
-                }
-            }
-            if let capStr = message["tracking_exposure_cap"] as? String {
-                self.handlePushedTrackingExposureCap(capStr)
-            }
-            if let pushedH = message["capture_height_px"] as? Int, pushedH != self.currentCaptureHeight {
-                DispatchQueue.main.async {
-                    guard self.state == .standby else { return }
-                    self.applyServerCaptureHeight(pushedH)
-                }
-            }
-            let pushedPrev = message["preview_requested"] as? Bool ?? false
-            if self.previewRequestedByServer != pushedPrev {
-                self.previewRequestedByServer = pushedPrev
-                if pushedPrev {
-                    if self.previewUploader == nil {
-                        self.previewUploader = PreviewUploader(uploader: self.uploader, cameraId: self.settings.cameraRole)
-                    }
-                    if self.state == .standby { self.startCapture(at: self.standbyFps) }
-                } else {
-                    self.previewUploader?.reset()
-                    if self.state == .standby { self.stopCapture() }
-                }
-            }
-            let calFrame = message["calibration_frame_requested"] as? Bool ?? false
-            if calFrame, !self.calibrationFrameCaptureArmed, self.state != .recording {
-                self.calibrationFrameCaptureArmed = true
-                if self.state == .standby && !self.previewRequestedByServer {
-                    self.startCapture(at: self.standbyFps)
-                }
-            }
-            DispatchQueue.main.async {
-                let pathLabel = self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ")
-                self.modeLabel.text = "MODE · \(pathLabel.uppercased())"
-            }
-        default:
-            break
-        }
+        commandRouter.handle(message: message)
     }
 }
 
