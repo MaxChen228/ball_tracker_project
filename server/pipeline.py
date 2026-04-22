@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 # Type alias for dependency-injected frame iterators. `detect_pitch` defaults
 # to the real PyAV decoder; tests substitute a synthetic generator.
 FrameIteratorFactory = Callable[[Path, float], Iterator[tuple[float, np.ndarray]]]
+CancelCheck = Callable[[], bool]
+
+
+class ProcessingCanceled(RuntimeError):
+    """Raised when an operator cancels a server-side post-processing job."""
 
 
 # MOG2 background subtractor warm-up: the first few frames MOG2 emits a
@@ -58,6 +63,7 @@ def detect_pitch(
     frame_iter: FrameIteratorFactory = iter_frames,
     *,
     enable_bg_subtraction: bool = True,
+    should_cancel: CancelCheck | None = None,
 ) -> list[FramePayload]:
     """Decode `video_path`, run HSV + (optional) MOG2 background
     subtraction on every frame, and return one `FramePayload` per decoded
@@ -79,6 +85,8 @@ def detect_pitch(
     )
     out: list[FramePayload] = []
     for idx, (absolute_pts_s, bgr) in enumerate(frame_iter(video_path, video_start_pts_s)):
+        if should_cancel is not None and should_cancel():
+            raise ProcessingCanceled(f"detection canceled for {video_path.name}")
         fg_mask = None
         if subtractor is not None:
             fg_mask_raw = subtractor.apply(bgr)
@@ -135,6 +143,8 @@ def annotate_video(
     input_path: Path,
     output_path: Path,
     frames: list[FramePayload],
+    *,
+    should_cancel: CancelCheck | None = None,
 ) -> None:
     """Re-encode `input_path` to `output_path` with a green circle drawn
     at each detected ball centroid. Frames without a detection pass
@@ -162,6 +172,8 @@ def annotate_video(
             frames_iter = iter(frames)
             annotated = 0
             for decoded in in_container.decode(in_stream):
+                if should_cancel is not None and should_cancel():
+                    raise ProcessingCanceled(f"annotation canceled for {input_path.name}")
                 if decoded.pts is None:
                     continue
                 try:
