@@ -3493,6 +3493,25 @@ async def sync_start(request: Request) -> dict[str, Any]:
     return {"ok": True, "sync": run.to_dict()}
 
 
+_SYNC_WAV_RE = re.compile(r"^sy_[0-9a-f]{4,32}_[A-Za-z0-9_-]{1,16}\.wav$")
+
+
+@app.get("/sync/audio/{filename}")
+def sync_audio_download(filename: str) -> FileResponse:
+    """Serve persisted mutual-sync WAVs for offline replay + Copy-AI-
+    Debug attachment. `filename` must match `sy_<hex>_<cam>.wav` —
+    same shape the upload endpoint writes — to prevent path traversal
+    via the URL (re pattern is anchored + character-class-bounded)."""
+    if not _SYNC_WAV_RE.match(filename):
+        raise HTTPException(status_code=400, detail="invalid sync audio filename")
+    wav_path = state.data_dir / "sync_audio" / filename
+    if not wav_path.exists():
+        raise HTTPException(status_code=404, detail="wav not found")
+    return FileResponse(
+        wav_path, media_type="audio/wav", filename=filename
+    )
+
+
 @app.post("/sync/audio_upload")
 async def sync_audio_upload(
     payload: str = Form(...),

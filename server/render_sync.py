@@ -56,6 +56,11 @@ _SYNC_CSS = """
   border: 1px solid var(--border-l);
   border-radius: var(--r);
 }
+.wav-link {
+  color: var(--ink); text-decoration: underline; text-decoration-style: dotted;
+  text-underline-offset: 2px; font-family: var(--mono); font-size: 11px;
+}
+.wav-link:hover { color: var(--accent); }
 .trace-empty {
   height: 400px; display: flex; align-items: center; justify-content: center;
   font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em;
@@ -237,16 +242,25 @@ _JS_TEMPLATE = r"""
     }
 
     let lastLine;
+    // Phase A: every attempt persists both cams' raw WAVs to
+    // data/sync_audio/. Surface a pair of download links on the last-
+    // sync row so the operator (or an AI pasting Copy-AI-Debug) can
+    // grab the exact recordings for offline replay + tuning.
+    function wavLinks(sid) {
+      if (!sid) return '';
+      return ` · <a class="wav-link" href="/sync/audio/${esc(sid)}_A.wav">A.wav</a>` +
+             ` · <a class="wav-link" href="/sync/audio/${esc(sid)}_B.wav">B.wav</a>`;
+    }
     if (lastSync && lastSync.aborted) {
       const reasons = lastSync.abort_reasons || {};
       const parts = Object.keys(reasons).sort().map(r => `${r}: ${reasons[r]}`);
       const reasonTxt = parts.length ? parts.join(' · ') : 'unknown';
-      lastLine = `<div class="meta" style="color: var(--failed)">Last · ABORTED · ${esc(reasonTxt)}</div>`;
+      lastLine = `<div class="meta" style="color: var(--failed)">Last · ABORTED · ${esc(reasonTxt)}${wavLinks(lastSync.id)}</div>`;
     } else if (lastSync && lastSync.delta_s != null && lastSync.distance_m != null) {
       const deltaMs = Number(lastSync.delta_s) * 1000.0;
       const dist = Number(lastSync.distance_m);
       const sign = deltaMs >= 0 ? '+' : '';
-      lastLine = `<div class="meta">Last · Δ=${sign}${deltaMs.toFixed(3)} ms · D=${dist.toFixed(3)} m</div>`;
+      lastLine = `<div class="meta">Last · Δ=${sign}${deltaMs.toFixed(3)} ms · D=${dist.toFixed(3)} m${wavLinks(lastSync.id)}</div>`;
     } else {
       lastLine = '<div class="meta">No sync yet.</div>';
     }
@@ -260,22 +274,15 @@ _JS_TEMPLATE = r"""
     const btn = `<form class="inline" method="POST" action="/sync/start" id="sync-form">
         <button class="btn" type="submit" ${disabled ? 'disabled' : ''}${title}>Run mutual sync</button>
       </form>`;
-    // Quick chirp is a separate, legacy single-listener path — third
-    // device plays the up+down chirp and whichever phone hears it
-    // anchors its clock. Only gated on armed session; independent of
-    // the mutual-sync run state.
-    const quickDisabled = sessionArmed;
-    const quickTitle = sessionArmed ? ' title="Stop the armed session first"' : '';
-    const quickBtn = `<form class="inline" method="POST" action="/sync/trigger" id="sync-trigger-form">
-        <button class="btn secondary" type="submit" ${quickDisabled ? 'disabled' : ''}${quickTitle}>Quick chirp</button>
-      </form>`;
+    // Quick chirp fallback lives on the dashboard now. /sync is the
+    // mutual-sync tuning surface.
 
     syncBox.innerHTML = `
       <div class="session-head">${chip}</div>
       ${statusLine}
       ${lastLine}
       <div class="card-subtitle">Methods</div>
-      <div class="session-actions">${quickBtn}${btn}</div>`;
+      <div class="session-actions">${btn}</div>`;
   }
 
   // --- Nav chip mirror (syncing / cooldown) --------------------------------
@@ -599,7 +606,7 @@ _JS_TEMPLATE = r"""
         : isListening
           ? `<div class="pcs-meta">waiting for chirp…</div>`
           : online
-            ? `<div class="pcs-meta">press Quick chirp / Run mutual sync</div>`
+            ? `<div class="pcs-meta">press Run mutual sync</div>`
             : `<div class="pcs-meta">device offline</div>`;
       return `<div class="pcs-cam ${cls}">
         <div class="led"></div>
@@ -661,25 +668,22 @@ _JS_TEMPLATE = r"""
   document.addEventListener('submit', async (e) => {
     const form = e.target;
     if (!(form instanceof HTMLFormElement)) return;
-    if (form.action && (form.action.endsWith('/sync/start') || form.action.endsWith('/sync/trigger'))) {
-      // Both kick-off paths: intercept so the 303 → / redirect the server
-      // sends to HTML form callers doesn't yank us off the debug page.
+    if (form.action && form.action.endsWith('/sync/start')) {
+      // Mutual sync kick-off: intercept so the 303 → / redirect the
+      // server sends to HTML form callers doesn't yank us off the
+      // debug page. Quick chirp auto-play lives on the dashboard;
+      // mutual sync needs no auto-played audio (phones emit their own
+      // chirps via MutualSyncAudio).
       e.preventDefault();
       const btn = form.querySelector('button');
       if (btn) btn.disabled = true;
-      const isQuick = form.action.endsWith('/sync/trigger');
-      // Pre-build the Audio element INSIDE the click handler so the
-      // browser's autoplay policy counts this as a user gesture. If we
-      // did `new Audio().play()` inside setTimeout later, Safari/Chrome
-      // would reject the call as non-gesture and the chirp wouldn't play.
-      const chirpAudio = isQuick ? new Audio('/chirp.wav') : null;
       try {
         const resp = await fetch(form.action, {
           method: 'POST',
           headers: { 'Accept': 'application/json' },
         });
         if (!resp.ok) {
-          let reason = isQuick ? 'quick chirp failed' : 'sync failed';
+          let reason = 'sync failed';
           try {
             const body = await resp.json();
             reason = (body.detail && body.detail.error) || body.detail || reason;
@@ -690,22 +694,6 @@ _JS_TEMPLATE = r"""
           hint.textContent = 'Error: ' + reason;
           syncBox.appendChild(hint);
           setTimeout(() => hint.remove(), 3000);
-        } else if (chirpAudio) {
-          // Give iOS a moment to receive the WS sync_command and spin up
-          // the mic detector before we start the waveform. 500 ms is safe
-          // across LAN + iOS capture-session reconfiguration latency; the
-          // chirp WAV has 500 ms leading silence of its own too, so the
-          // effective detection window is 1 s of slack before the sweep.
-          setTimeout(() => {
-            chirpAudio.play().catch((err) => {
-              const hint = document.createElement('div');
-              hint.className = 'meta';
-              hint.style.color = 'var(--failed)';
-              hint.textContent = 'Browser blocked autoplay: ' + (err.message || err);
-              syncBox.appendChild(hint);
-              setTimeout(() => hint.remove(), 4000);
-            });
-          }, 500);
         }
         tickSyncStatus();
         tickSyncState();
@@ -823,14 +811,12 @@ def _render_sync_body(
         reason = f" title=\"Cooldown: {cooldown_remaining_s:.1f} s remaining\""
 
     btn_attrs = ' disabled' if disabled else ''
+    # Quick chirp lives on the dashboard now (fallback path only).
+    # /sync is the mutual-sync tuning surface; only the mutual button
+    # ships here.
     mutual_btn = (
         '<form class="inline" method="POST" action="/sync/start" id="sync-form">'
         f'<button class="btn" type="submit"{btn_attrs}{reason}>Run mutual sync</button>'
-        "</form>"
-    )
-    quick_btn = (
-        '<form class="inline" method="POST" action="/sync/trigger" id="sync-trigger-form">'
-        f'<button class="btn secondary" type="submit"{" disabled" if session_armed else ""}>Quick chirp</button>'
         "</form>"
     )
     return (
@@ -838,7 +824,7 @@ def _render_sync_body(
         f'{status_line}'
         f'{last_line}'
         '<div class="card-subtitle">Methods</div>'
-        f'<div class="session-actions">{quick_btn}{mutual_btn}</div>'
+        f'<div class="session-actions">{mutual_btn}</div>'
     )
 
 

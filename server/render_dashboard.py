@@ -230,7 +230,25 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .session-head {{ display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-2); }}
 .session-id {{ font-family: var(--mono); font-size: 13px; color: var(--ink);
                letter-spacing: 0.04em; }}
-.session-actions {{ display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }}
+.session-actions {{ display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap;
+                     align-items: center; }}
+/* Per-cam sync indicator next to the Quick chirp button. Three states:
+   off = no device in registry; waiting = online but not time-synced;
+   synced = holds a valid sync anchor. Operator reads this at a glance
+   to answer "did my last quick chirp actually land on both cams?". */
+.sync-led {{ display: inline-flex; align-items: center; gap: 4px;
+             padding: 4px 8px; border-radius: 999px;
+             border: 1px solid var(--border-l);
+             background: var(--surface-hover);
+             font-family: var(--mono); font-size: 10px;
+             letter-spacing: 0.08em; color: var(--sub);
+             line-height: 1; }}
+.sync-led::before {{ content: ''; width: 7px; height: 7px;
+                     border-radius: 50%; background: var(--border-l); }}
+.sync-led.off::before      {{ background: var(--sub); opacity: 0.35; }}
+.sync-led.waiting::before  {{ background: var(--partial, #D9A441); }}
+.sync-led.synced::before   {{ background: var(--full, #4C7A3F); }}
+.sync-led.synced {{ color: var(--ink); border-color: var(--full, #4C7A3F); }}
 .sidebar .session-actions button.btn {{ padding: 7px 12px; }}
 .sidebar .arm-gate {{ margin-top: 8px; font-size: 11px; line-height: 1.45; color: var(--ink); }}
 .sidebar .gate-label {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.10em;
@@ -1583,6 +1601,32 @@ _JS_TEMPLATE_RAW = r"""
     </form>`;
   }
 
+  // Per-cam sync indicator shown next to Quick chirp. States:
+  //   off     → device not in registry (no heartbeat recently).
+  //   waiting → device online but no valid time-sync anchor yet.
+  //   synced  → cam is holding an anchor from a recent successful sync.
+  // Reads directly off `state.devices[*].time_synced` since the server
+  // owns that truth. `time_sync_age_s` tooltip so operator can tell how
+  // fresh "synced" is.
+  function renderSyncLed(state, cam) {
+    const devs = (state && state.devices) || [];
+    const dev = devs.find(d => d.camera_id === cam);
+    let cls = 'off';
+    let tip = cam + ': offline';
+    if (dev) {
+      if (dev.time_synced) {
+        cls = 'synced';
+        const age = (typeof dev.time_sync_age_s === 'number')
+          ? ' · ' + dev.time_sync_age_s.toFixed(0) + 's ago' : '';
+        tip = cam + ': synced' + age;
+      } else {
+        cls = 'waiting';
+        tip = cam + ': waiting';
+      }
+    }
+    return `<span class="sync-led ${cls}" title="${esc(tip)}">${esc(cam)}</span>`;
+  }
+
   function renderSession(state) {
     if (!sessionBox) { /* nav-only render still executes below */ }
     const s = state.session;
@@ -1612,9 +1656,8 @@ _JS_TEMPLATE_RAW = r"""
         <form class="inline" method="POST" action="/sync/trigger">
           <button class="btn secondary" type="submit" ${armed ? 'disabled' : ''}>Quick chirp</button>
         </form>
-        <form class="inline" method="POST" action="/sync/start">
-          <button class="btn secondary" type="submit" ${armed ? 'disabled' : ''}>Mutual sync</button>
-        </form>
+        ${renderSyncLed(state, 'A')}
+        ${renderSyncLed(state, 'B')}
       </div>
       ${renderDetectionPaths(s)}`;
     if (sessionBox) sessionBox.innerHTML = sessHtml;
@@ -1965,7 +2008,39 @@ _JS_TEMPLATE_RAW = r"""
       await tickEvents();
       return;
     }
-    // (Mutual-sync kickoff is handled on /sync now.)
+    if (form.action && form.action.endsWith('/sync/trigger')) {
+      // Quick chirp: dispatch the WS sync_command, then auto-play
+      // /chirp.wav through this browser tab 500 ms later so the
+      // operator doesn't have to fumble with a separate third device.
+      // The Audio element MUST be constructed inside the gesture
+      // (this submit handler) so Safari/Chrome count the later
+      // setTimeout .play() as user-initiated.
+      e.preventDefault();
+      const btn = form.querySelector('button');
+      if (btn) btn.disabled = true;
+      const chirpAudio = new Audio('/chirp.wav');
+      try {
+        const resp = await fetch(form.action, {
+          method: 'POST',
+          headers: { 'Accept': 'application/json' },
+        });
+        if (resp.ok) {
+          // 500 ms lets iOS receive the WS sync_command and spin up
+          // the mic detector before the sweep starts; combined with
+          // the WAV's 500 ms leading silence, there's ~1 s of slack
+          // before the actual chirp sweep begins.
+          setTimeout(() => {
+            chirpAudio.play().catch(() => { /* autoplay blocked — silent */ });
+          }, 500);
+        }
+      } catch (_) {}
+      finally {
+        // Re-enable shortly after; /status tick will reconcile real state.
+        setTimeout(() => { if (btn) btn.disabled = false; }, 600);
+      }
+      return;
+    }
+    // (Mutual-sync kickoff lives on /sync now.)
   });
 
   // Live-preview toggle. Server is authoritative — click POSTs the
@@ -2848,16 +2923,37 @@ def _render_session_body(
     # CALIBRATE TIME broadcasts a single-listener chirp-listen command to
     # every online camera on its next WS heartbeat tick. Disabled while armed —
     # firing a time-sync mid-recording would disrupt the armed clip.
+    # Dashboard-level Time Sync exposes only the Quick chirp fallback.
+    # Mutual sync lives on `/sync` — it's the primary path and needs its
+    # own surface for trace plots, WAV replay, and tuning. Keeping it off
+    # the dashboard stops operators from firing it without the
+    # visualisations that make it diagnosable.
     sync_trigger_btn = (
         '<form class="inline" method="POST" action="/sync/trigger">'
         f'<button class="btn secondary" type="submit"{" disabled" if armed else ""}>Quick chirp</button>'
         "</form>"
     )
-    sync_start_btn = (
-        '<form class="inline" method="POST" action="/sync/start">'
-        f'<button class="btn secondary" type="submit"{" disabled" if armed else ""}>Mutual sync</button>'
-        "</form>"
-    )
+
+    # Per-cam sync LEDs rendered server-side for initial paint. JS
+    # `renderSession` repaints them on each /status tick from the same
+    # `devices[*].time_synced` state, so the three visual states
+    # (off / waiting / synced) stay in sync with server truth within
+    # one heartbeat interval.
+    def _sync_led_html(cam: str) -> str:
+        dev = next((d for d in devices if d.get("camera_id") == cam), None)
+        if dev is None:
+            cls, tip = "off", f"{cam}: offline"
+        elif dev.get("time_synced"):
+            age = dev.get("time_sync_age_s")
+            age_txt = f" · {age:.0f}s ago" if isinstance(age, (int, float)) else ""
+            cls, tip = "synced", f"{cam}: synced{age_txt}"
+        else:
+            cls, tip = "waiting", f"{cam}: waiting"
+        return (
+            f'<span class="sync-led {cls}" title="{html.escape(tip)}">{cam}</span>'
+        )
+    sync_leds = _sync_led_html("A") + _sync_led_html("B")
+
     clear_btn = ""
     if not armed and session and session.get("id"):
         clear_btn = (
@@ -2878,7 +2974,7 @@ def _render_session_body(
         f'<div class="session-actions">{arm_btn}{stop_btn}{clear_btn}</div>'
         f'{gate_row}'
         '<div class="card-subtitle">Time Sync</div>'
-        f'<div class="session-actions">{sync_trigger_btn}{sync_start_btn}</div>'
+        f'<div class="session-actions">{sync_trigger_btn}{sync_leds}</div>'
         f'{_render_detection_paths_body(default_paths, session)}'
     )
 
