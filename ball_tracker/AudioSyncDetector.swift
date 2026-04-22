@@ -116,6 +116,27 @@ final class AudioSyncDetector {
     private var traceB: [TraceSample] = []
     private let traceMaxSamples = 600
 
+    /// Per-band CFAR noise-floor estimators. Feed every non-chirp scan's
+    /// bestNorm value here; the fire gate multiplies the estimate by
+    /// `cfarNoiseMultiplier` to decide if a peak is really "above noise"
+    /// regardless of absolute signal level. Makes the detector
+    /// self-calibrating across phones with different speaker / mic
+    /// levels — a weak-speaker rig produces smaller noise AND smaller
+    /// signals, ratio stays the same.
+    private var cfarA = CFARNoiseFloor()
+    private var cfarB = CFARNoiseFloor()
+    /// Signal must be at least K × noise-floor to fire. K=5 is the
+    /// classic "5 sigma" radar-adjacent rule — observed field noise
+    /// floors (p90 ~0.04) × 5 = 0.2, which is a reasonable "clean
+    /// chirp" peak value. Lower = more sensitive + more false positives;
+    /// higher = misses faint chirps. Configurable via `setCFARMultiplier`.
+    private var cfarNoiseMultiplier: Float = 5.0
+    /// CFAR's p75 estimate needs a warm-up period — with 0-2 samples the
+    /// estimator is essentially random. Require this many non-chirp
+    /// observations before the CFAR gate has any say; before that the
+    /// legacy absolute-threshold gate is the sole arbiter.
+    private let cfarMinSamples: Int = 8
+
     init(
         // Bands mirror `server/chirp.py`'s SYNC_BAND_*_F0/F1. If you change
         // one side you MUST update the other — iOS emitter + iOS listener +
@@ -126,9 +147,14 @@ final class AudioSyncDetector {
         bandBF1: Double = 7000.0,
         chirpDurationS: Double = 0.1,
         threshold: Float = 0.18,
-        // Same value as legacy chirp detector — field-tuned and works for
-        // real rooms (AGC + reverb push sidelobes up to ~1.5-2.5×).
-        minPSR: Float = 1.5,
+        // Was 1.5 — too strict for the broad first scan where the whole
+        // 2s ring is searched and sidelobes / startup-artefact peaks drag
+        // PSR toward ~1.3. Field observation: A.other legit peak 0.407
+        // (3.4× threshold) got rejected because PSR landed at ~1.36.
+        // 1.3 still keeps random-noise bursts out (noise floor ratios in
+        // the observed traces are typically 1.5-2× between adjacent
+        // lags) while unlocking real-but-noisy detections.
+        minPSR: Float = 1.3,
         perBandCooldownS: Double = 0.5
     ) {
         self.bandAF0 = bandAF0
@@ -394,11 +420,23 @@ final class AudioSyncDetector {
             if traceA.count > traceMaxSamples {
                 traceA.removeFirst(traceA.count - traceMaxSamples)
             }
+            cfarA.observe(result.bestNorm)
         case .B:
             traceB.append(sample)
             if traceB.count > traceMaxSamples {
                 traceB.removeFirst(traceB.count - traceMaxSamples)
             }
+            cfarB.observe(result.bestNorm)
+        }
+    }
+
+    /// Live-tunable CFAR multiplier. Pushed from the dashboard via WS
+    /// settings so field-ops can dial sensitivity without a rebuild.
+    /// Clamped to a sane range — below ~2 is so loose any noise burst
+    /// fires; above ~12 is so strict even clean chirps miss.
+    func setCFARMultiplier(_ value: Float) {
+        deliveryQueue.async { [weak self] in
+            self?.cfarNoiseMultiplier = max(2.0, min(12.0, value))
         }
     }
 
@@ -478,7 +516,19 @@ final class AudioSyncDetector {
 
     private func maybeFire(band: Band, result: CorrResult, now: Double) {
         let psr = result.secondNorm > 0 ? result.bestNorm / result.secondNorm : 0
-        guard result.bestNorm > threshold, psr > minPSR else { return }
+        // CFAR gate: signal must be both above an absolute floor AND
+        // multiple × current per-band noise estimate. This is what makes
+        // the detector hardware-agnostic — a rig where everything runs
+        // 10× louder raises both floor and signal proportionally, and
+        // the ratio gate fires just the same.
+        let cfar: CFARNoiseFloor
+        switch band {
+        case .A: cfar = cfarA
+        case .B: cfar = cfarB
+        }
+        let cfarReady = cfar.sampleCount >= cfarMinSamples
+        let cfarGate = !cfarReady || result.bestNorm > cfarNoiseMultiplier * cfar.estimate
+        guard result.bestNorm > threshold, psr > minPSR, cfarGate else { return }
         // Per-band cooldown — skip if this band already fired recently.
         let lastTrigger: Double?
         switch band {
@@ -497,7 +547,7 @@ final class AudioSyncDetector {
             lastTriggerB = now
             latestB = event
         }
-        log.info("sync band \(band.rawValue, privacy: .public) fired peak=\(result.bestNorm, privacy: .public) psr=\(psr, privacy: .public) center_s=\(centerS, privacy: .public)")
+        log.info("sync band \(band.rawValue, privacy: .public) fired peak=\(result.bestNorm, privacy: .public) psr=\(psr, privacy: .public) cfar_floor=\(cfar.estimate, privacy: .public) cfar_k=\(self.cfarNoiseMultiplier, privacy: .public) center_s=\(centerS, privacy: .public)")
         onDetection?(event)
     }
 
