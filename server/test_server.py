@@ -1035,6 +1035,56 @@ def test_sync_trigger_broadcasts_websocket_command(monkeypatch):
         assert msg_a["sync_command_id"] == msg_b["sync_command_id"]
 
 
+def test_sync_start_broadcasts_sync_run_over_websocket(monkeypatch):
+    client = TestClient(app)
+
+    monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
+
+    with client.websocket_connect("/ws/device/A") as ws_a, client.websocket_connect("/ws/device/B") as ws_b:
+        assert ws_a.receive_json()["type"] == "settings"
+        assert ws_b.receive_json()["type"] == "settings"
+
+        ws_a.send_json({"type": "hello", "cam": "A"})
+        ws_b.send_json({"type": "hello", "cam": "B"})
+        assert ws_a.receive_json()["type"] == "settings"
+        assert ws_b.receive_json()["type"] == "settings"
+
+        resp = client.post("/sync/start")
+        assert resp.status_code == 200, resp.text
+        sync_id = resp.json()["sync"]["id"]
+
+        msg_a = ws_a.receive_json()
+        msg_b = ws_b.receive_json()
+        assert msg_a == {"type": "sync_run", "sync_id": sync_id}
+        assert msg_b == {"type": "sync_run", "sync_id": sync_id}
+
+
+def test_ws_device_reconnect_receives_active_sync_run(monkeypatch):
+    client = TestClient(app)
+
+    monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
+
+    with client.websocket_connect("/ws/device/A") as ws_a, client.websocket_connect("/ws/device/B") as ws_b:
+        assert ws_a.receive_json()["type"] == "settings"
+        assert ws_b.receive_json()["type"] == "settings"
+
+        ws_a.send_json({"type": "hello", "cam": "A"})
+        ws_b.send_json({"type": "hello", "cam": "B"})
+        assert ws_a.receive_json()["type"] == "settings"
+        assert ws_b.receive_json()["type"] == "settings"
+
+        resp = client.post("/sync/start")
+        assert resp.status_code == 200, resp.text
+        sync_id = resp.json()["sync"]["id"]
+
+        assert ws_a.receive_json() == {"type": "sync_run", "sync_id": sync_id}
+        assert ws_b.receive_json() == {"type": "sync_run", "sync_id": sync_id}
+
+    with client.websocket_connect("/ws/device/A") as ws_a_reconnected:
+        assert ws_a_reconnected.receive_json()["type"] == "settings"
+        assert ws_a_reconnected.receive_json() == {"type": "sync_run", "sync_id": sync_id}
+
+
 def test_calibration_post_broadcasts_websocket_update_to_siblings(monkeypatch):
     K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
     client = TestClient(app)

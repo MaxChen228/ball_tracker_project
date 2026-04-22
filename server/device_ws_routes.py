@@ -40,6 +40,12 @@ def build_device_ws_router(
             session = state.current_session()
             if session is not None and session.armed:
                 await device_ws.send(camera_id, arm_message_for(session))
+            active_sync = state.current_sync()
+            if active_sync is not None and camera_id not in active_sync.reports:
+                await device_ws.send(
+                    camera_id,
+                    {"type": "sync_run", "sync_id": active_sync.id},
+                )
             await sse_hub.broadcast(
                 "device_status",
                 {"cam": camera_id, "online": True, "ws_connected": True},

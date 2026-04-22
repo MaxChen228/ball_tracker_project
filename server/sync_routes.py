@@ -20,6 +20,7 @@ def build_sync_router(
     @router.post("/sync/start")
     async def sync_start(request: Request) -> dict[str, Any]:
         state = get_state()
+        device_ws = get_device_ws()
         run, reason = state.start_sync()
         if reason is not None:
             status_code = sync_start_status_for_reason.get(reason, 409)
@@ -28,6 +29,12 @@ def build_sync_router(
                 detail={"ok": False, "error": reason},
             )
         assert run is not None
+        await device_ws.broadcast(
+            {
+                cam.camera_id: {"type": "sync_run", "sync_id": run.id}
+                for cam in state.online_devices()
+            }
+        )
         return {"ok": True, "sync": run.to_dict()}
 
     @router.post("/sync/report")
