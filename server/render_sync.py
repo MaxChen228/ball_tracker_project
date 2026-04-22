@@ -129,6 +129,23 @@ _SYNC_CSS = """
 .qct-head .age.stale { color: var(--sub); border-style: dashed; }
 .qct-cam.stale .qct-row .fill { opacity: 0.5; }
 .qct-cam.stale { opacity: 0.92; }
+.per-cam-sync { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                gap: var(--s-3); }
+.pcs-cam { border: 1px solid var(--border); padding: var(--s-3);
+           display: flex; align-items: center; gap: var(--s-3); }
+.pcs-cam .led { width: 14px; height: 14px; border-radius: 50%;
+                background: var(--border); flex-shrink: 0; }
+.pcs-cam.synced .led { background: var(--passed);
+                       box-shadow: 0 0 8px rgba(125, 255, 192, 0.5); }
+.pcs-cam.offline .led { background: var(--border); }
+.pcs-cam.listening .led { background: var(--warn);
+                          box-shadow: 0 0 6px rgba(255, 207, 122, 0.5); }
+.pcs-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pcs-head { font-family: var(--mono); font-size: 12px; letter-spacing: 0.10em;
+            text-transform: uppercase; color: var(--ink); }
+.pcs-meta { font-family: var(--mono); font-size: 10px; color: var(--sub);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pcs-meta .sync-id { color: var(--ink); font-weight: 500; }
 """
 
 
@@ -523,7 +540,50 @@ _JS_TEMPLATE = r"""
       const s = await r.json();
       renderSync(s);
       renderNav(s);
+      renderPerCamSync(s);
     } catch (e) { /* silent */ }
+  }
+
+  function renderPerCamSync(state) {
+    const host = document.getElementById('per-cam-sync');
+    if (!host) return;
+    const devs = state.devices || [];
+    const pending = state.sync_commands || {};
+    const run = state.sync || null;
+    const expected = ['A', 'B'];
+    const byId = new Map(devs.map(d => [d.camera_id, d]));
+    const cards = expected.map(cam => {
+      const d = byId.get(cam);
+      const online = !!d;
+      const synced = online && !!d.time_synced;
+      const isListening = online && !!(pending[cam] || (run && !run.ended_at));
+      const cls = !online ? 'offline'
+                : synced  ? 'synced'
+                : isListening ? 'listening'
+                : 'waiting';
+      const headLabel = !online ? 'offline'
+                      : synced  ? 'synced'
+                      : isListening ? 'listening…'
+                      : 'not synced';
+      const sid = d && d.time_sync_id;
+      const ageS = d && typeof d.time_sync_age_s === 'number' ? d.time_sync_age_s : null;
+      const ageTxt = ageS != null ? ` · ${ageS.toFixed(0)}s ago` : '';
+      const meta = synced
+        ? `<div class="pcs-meta">sync_id <span class="sync-id">${esc(sid || '—')}</span>${ageTxt}</div>`
+        : isListening
+          ? `<div class="pcs-meta">waiting for chirp…</div>`
+          : online
+            ? `<div class="pcs-meta">press Quick chirp / Run mutual sync</div>`
+            : `<div class="pcs-meta">device offline</div>`;
+      return `<div class="pcs-cam ${cls}">
+        <div class="led"></div>
+        <div class="pcs-body">
+          <div class="pcs-head">Cam ${esc(cam)} · ${headLabel}</div>
+          ${meta}
+        </div>
+      </div>`;
+    });
+    host.innerHTML = cards.join('');
   }
 
   // Log buttons (Copy / Clear).
@@ -805,6 +865,7 @@ def render_sync_html(
     last_sync: dict[str, Any] | None = None,
     sync_cooldown_remaining_s: float = 0.0,
     chirp_detect_threshold: float = 0.18,
+    mutual_sync_threshold: float = 0.10,
     heartbeat_interval_s: float = 1.0,
     capture_height_px: int = 1080,
     tracking_exposure_cap: str = "frame_duration",
@@ -836,11 +897,16 @@ def render_sync_html(
         '<h1 class="page-title">Time Sync</h1>'
         '</div>'
         '</section>'
+        '<div class="setup-section-title">Per-device sync state</div>'
+        '<div class="card">'
+        '<h2 class="card-title">Device sync</h2>'
+        '<div id="per-cam-sync" class="per-cam-sync"><div class="trace-empty">Waiting for device status…</div></div>'
+        '</div>'
         '<div class="setup-section-title">Time Sync</div>'
         '<div class="card">'
         '<h2 class="card-title">Sync Control</h2>'
         f'<div id="sync-body">{_render_sync_body(sync, last_sync, devices, session, sync_cooldown_remaining_s)}</div>'
-        f'{_render_chirp_threshold_body(chirp_detect_threshold)}'
+        f'{_render_chirp_threshold_body(chirp_detect_threshold, mutual_sync_threshold)}'
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Matched-filter trace</h2>'

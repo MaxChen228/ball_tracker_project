@@ -149,11 +149,23 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 /* Row 1: id (fixed 28px) | blank stretch | chip (auto). Sub-line gets
    its own full-width row below so long labels like "time sync · not
    synced" + "pose · last 16:13" never collide with the chip. */
-.device-head {{ display: grid; grid-template-columns: 28px 1fr auto;
+.device-head {{ display: grid; grid-template-columns: 14px 28px 1fr auto;
                 align-items: center; gap: var(--s-2) var(--s-3); }}
-.device-head .id {{ grid-column: 1; grid-row: 1; }}
-.device-head .chip-col {{ grid-column: 3; grid-row: 1; justify-self: end; }}
+.device-head .sync-led {{ grid-column: 1; grid-row: 1;
+                          width: 12px; height: 12px; border-radius: 50%;
+                          background: var(--border); justify-self: center; }}
+.device-head .sync-led.synced {{ background: var(--passed);
+                                 box-shadow: 0 0 8px rgba(125, 255, 192, 0.5); }}
+.device-head .sync-led.waiting {{ background: var(--border);
+                                  border: 1px dashed var(--sub); }}
+.device-head .sync-led.listening {{ background: var(--warn); }}
+.device-head .sync-led.offline {{ background: var(--border); opacity: 0.45; }}
+.device-head .id {{ grid-column: 2; grid-row: 1; }}
+.device-head .chip-col {{ grid-column: 4; grid-row: 1; justify-self: end; }}
 .device-head .sub {{ grid-column: 1 / -1; grid-row: 2; }}
+.sync-id-chip {{ margin-left: 6px; padding: 1px 5px; font-family: var(--mono);
+                 font-size: 9px; border: 1px solid var(--border);
+                 color: var(--sub); }}
 .device-actions {{ display: flex; gap: var(--s-2); margin-top: var(--s-2); flex-wrap: wrap; }}
 .device .id {{ font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--ink);
                letter-spacing: 0.04em; }}
@@ -1334,7 +1346,7 @@ _JS_TEMPLATE_RAW = r"""
       // the browser eagerly fetches the <img> src on every render and
       // spams 404s for cams with preview off.
       const initialSrc = previewOn
-        ? ('/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now())
+        ? ('/camera/' + encodeURIComponent(cam) + '/preview?t=' + Date.now())
         : '';
       const previewPanel = `<div class="preview-panel${previewOn ? '' : ' off'}" data-preview-panel="${esc(cam)}">` +
         `<img data-preview-img="${esc(cam)}" src="${initialSrc}" alt="preview ${esc(cam)}">` +
@@ -1346,12 +1358,19 @@ _JS_TEMPLATE_RAW = r"""
         `<div class="virt-label">VIRT · ${esc(cam)}</div>` +
         `<div class="placeholder">${isCal ? 'loading…' : 'not calibrated'}</div>` +
         `</div>`;
+      const syncLedCls = !online ? 'offline'
+                        : pending ? 'listening'
+                        : timeSynced ? 'synced'
+                        : 'waiting';
+      const syncId = deviceRecord && deviceRecord.time_sync_id;
+      const syncIdTxt = (timeSynced && syncId) ? `<span class="sync-id-chip">${esc(syncId)}</span>` : '';
       return `
         <div class="device">
           <div class="device-head">
+            <span class="sync-led ${syncLedCls}" title="time sync · ${esc(syncLabel)}"></span>
             <div class="id">${esc(cam)}</div>
             <div class="sub">
-              <span class="item ${syncDot}"><span class="dot ${syncDot}"></span>time sync · ${esc(syncLabel)}</span>
+              <span class="item ${syncDot}"><span class="dot ${syncDot}"></span>time sync · ${esc(syncLabel)}${syncIdTxt}</span>
               <span class="item ${calDot}"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>
               <span class="item ${autoDot}"><span class="dot ${autoDot}"></span>auto-cal · ${esc(autoLabel)}</span>
             </div>
@@ -2616,9 +2635,11 @@ def _render_device_rows(
             virt_placeholder=("loading…" if is_cal else "not calibrated"),
             preview_off=(not always_on and not preview_on),
         )
+        sync_led_cls = "offline" if not online else ("synced" if time_synced else "waiting")
         return (
             f'<div class="device">'
             f'<div class="device-head">'
+            f'<span class="sync-led {sync_led_cls}" title="time sync · {sync_label}"></span>'
             f'<div class="id">{html.escape(cam_id)}</div>'
             f'<div class="sub">'
             f'<span class="item {sync_dot}"><span class="dot {sync_dot}"></span>time sync · {sync_label}</span>'
@@ -3054,19 +3075,41 @@ def _render_app_nav(
     )
 
 
-def _render_chirp_threshold_body(chirp_detect_threshold: float) -> str:
-    thr = f"{chirp_detect_threshold:.2f}"
+def _render_chirp_threshold_body(
+    chirp_detect_threshold: float,
+    mutual_sync_threshold: float = 0.10,
+) -> str:
+    """Two independent threshold rows — quick-chirp (third-device up+down
+    sweep; strong signal) vs mutual-sync (two-phone cross-detection; the
+    far phone's chirp can land much quieter). Shared slider in the
+    original design forced operators to tune for the weaker modality,
+    losing false-positive margin on the stronger one."""
+    q = f"{chirp_detect_threshold:.2f}"
+    m = f"{mutual_sync_threshold:.2f}"
     return (
         '<form class="tuning-row" method="POST" '
         'action="/settings/chirp_threshold" id="tuning-chirp-form">'
-        '<span class="tuning-label">Chirp thr</span>'
-        f'<input type="range" name="threshold" min="0.05" max="0.60" step="0.01" '
-        f'value="{thr}" '
+        '<span class="tuning-label">Quick chirp thr</span>'
+        f'<input type="range" name="threshold" min="0.02" max="0.60" step="0.01" '
+        f'value="{q}" '
         'oninput="document.getElementById(\'tuning-chirp-num\').value=this.value" '
         'onchange="this.form.submit()">'
         f'<input type="number" id="tuning-chirp-num" name="threshold" '
-        f'min="0.05" max="0.60" step="0.01" value="{thr}" '
+        f'min="0.02" max="0.60" step="0.01" value="{q}" '
         'form="tuning-chirp-form" '
+        'oninput="this.form.querySelector(\'input[type=range]\').value=this.value" '
+        'onchange="this.form.submit()">'
+        '</form>'
+        '<form class="tuning-row" method="POST" '
+        'action="/settings/mutual_sync_threshold" id="tuning-mutual-form">'
+        '<span class="tuning-label">Mutual sync thr</span>'
+        f'<input type="range" name="threshold" min="0.02" max="0.60" step="0.01" '
+        f'value="{m}" '
+        'oninput="document.getElementById(\'tuning-mutual-num\').value=this.value" '
+        'onchange="this.form.submit()">'
+        f'<input type="number" id="tuning-mutual-num" name="threshold" '
+        f'min="0.02" max="0.60" step="0.01" value="{m}" '
+        'form="tuning-mutual-form" '
         'oninput="this.form.querySelector(\'input[type=range]\').value=this.value" '
         'onchange="this.form.submit()">'
         '</form>'
