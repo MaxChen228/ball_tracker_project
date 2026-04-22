@@ -162,13 +162,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var serverTimeSyncId: String?
 
     // UI containers. Preview stays full-screen; a small overlay panel exposes
-    // the only remaining local controls: server endpoint, role, and link /
-    // preview status.
+    // the only remaining local controls: role, link, and preview status.
     private let topStatusChip = StatusChip()
     private let controlPanel = UIView()
-    private let serverIPField = UITextField()
     private let roleControl = UISegmentedControl(items: ["A", "B"])
-    private let applySettingsButton = UIButton(type: .system)
     private let connectionLabel = UILabel()
     private let previewLabel = UILabel()
     /// Last-known capture mode from the server. Starts at cameraOnly so a
@@ -1655,29 +1652,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         controlPanel.layer.borderColor = DesignTokens.Colors.cardBorder.cgColor
         view.addSubview(controlPanel)
 
-        let serverLabel = makePanelLabel("SERVER")
         let roleLabel = makePanelLabel("ROLE")
-
-        serverIPField.translatesAutoresizingMaskIntoConstraints = false
-        serverIPField.borderStyle = .roundedRect
-        serverIPField.autocapitalizationType = .none
-        serverIPField.autocorrectionType = .no
-        serverIPField.clearButtonMode = .whileEditing
-        serverIPField.keyboardType = .numbersAndPunctuation
-        serverIPField.placeholder = "192.168.1.100"
-        serverIPField.font = DesignTokens.Fonts.mono(size: 14, weight: .medium)
 
         roleControl.translatesAutoresizingMaskIntoConstraints = false
         roleControl.selectedSegmentTintColor = DesignTokens.Colors.accent
         roleControl.setTitleTextAttributes([.foregroundColor: DesignTokens.Colors.ink], for: .normal)
         roleControl.setTitleTextAttributes([.foregroundColor: DesignTokens.Colors.cardBackground], for: .selected)
-
-        applySettingsButton.translatesAutoresizingMaskIntoConstraints = false
-        applySettingsButton.configuration = .filled()
-        applySettingsButton.configuration?.title = "Apply"
-        applySettingsButton.configuration?.baseBackgroundColor = DesignTokens.Colors.accent
-        applySettingsButton.configuration?.baseForegroundColor = DesignTokens.Colors.cardBackground
-        applySettingsButton.addTarget(self, action: #selector(applyInlineSettingsTapped), for: .touchUpInside)
+        roleControl.addTarget(self, action: #selector(roleControlChanged), for: .valueChanged)
 
         connectionLabel.font = DesignTokens.Fonts.mono(size: 12, weight: .medium)
         connectionLabel.textColor = DesignTokens.Colors.ink
@@ -1685,12 +1666,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         previewLabel.font = DesignTokens.Fonts.mono(size: 12, weight: .medium)
         previewLabel.textColor = DesignTokens.Colors.sub
 
-        let serverRow = UIStackView(arrangedSubviews: [serverLabel, serverIPField])
-        serverRow.axis = .horizontal
-        serverRow.alignment = .center
-        serverRow.spacing = DesignTokens.Spacing.s
-
-        let roleRow = UIStackView(arrangedSubviews: [roleLabel, roleControl, applySettingsButton])
+        let roleRow = UIStackView(arrangedSubviews: [roleLabel, roleControl])
         roleRow.axis = .horizontal
         roleRow.alignment = .center
         roleRow.spacing = DesignTokens.Spacing.s
@@ -1700,18 +1676,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         statusRow.alignment = .leading
         statusRow.spacing = DesignTokens.Spacing.xs
 
-        let root = UIStackView(arrangedSubviews: [serverRow, roleRow, statusRow])
+        let root = UIStackView(arrangedSubviews: [roleRow, statusRow])
         root.axis = .vertical
         root.spacing = DesignTokens.Spacing.s
         root.translatesAutoresizingMaskIntoConstraints = false
         controlPanel.addSubview(root)
 
         NSLayoutConstraint.activate([
-            serverLabel.widthAnchor.constraint(equalToConstant: 52),
             roleLabel.widthAnchor.constraint(equalToConstant: 52),
-            serverIPField.widthAnchor.constraint(equalToConstant: 156),
             roleControl.widthAnchor.constraint(equalToConstant: 120),
-            applySettingsButton.widthAnchor.constraint(equalToConstant: 84),
 
             root.topAnchor.constraint(equalTo: controlPanel.topAnchor, constant: DesignTokens.Spacing.m),
             root.leadingAnchor.constraint(equalTo: controlPanel.leadingAnchor, constant: DesignTokens.Spacing.m),
@@ -1729,19 +1702,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func syncInlineControlsFromSettings() {
-        serverIPField.text = settings.serverIP
         roleControl.selectedSegmentIndex = settings.cameraRole == "B" ? 1 : 0
     }
 
-    @objc private func applyInlineSettingsTapped() {
-        view.endEditing(true)
-        let serverIP = serverIPField.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !serverIP.isEmpty else {
-            showErrorBanner("Server IP 不可為空")
-            return
-        }
+    @objc private func roleControlChanged() {
         let updated = AppSettings(
-            serverIP: serverIP,
+            serverIP: settings.serverIP,
             cameraRole: roleControl.selectedSegmentIndex == 1 ? "B" : "A"
         )
         AppSettingsStore.save(updated)
