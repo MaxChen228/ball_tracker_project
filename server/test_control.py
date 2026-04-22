@@ -1153,7 +1153,7 @@ def test_sync_state_endpoint_reflects_run_and_last():
 
     assert client.get("/sync/state").json() == {
         "sync": None, "last_sync": None,
-        "cooldown_remaining_s": 0.0, "logs": [],
+        "cooldown_remaining_s": 0.0, "logs": [], "telemetry": {},
     }
 
     start = client.post("/sync/start").json()
