@@ -165,10 +165,14 @@ from state import (
     _TIME_SYNC_MAX_AGE_S,
     _validate_calibration_snapshot,
     State,
-    state,
 )
 
 logger = logging.getLogger("ball_tracker")
+
+# Single authoritative instance. Held here so tests can monkeypatch `main.state`
+# and all route handlers (including those in routes/* that use late imports) see
+# the same object.
+state = State()
 
 def _lan_ip() -> str:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -204,6 +208,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ball_tracker server", lifespan=lifespan)
+
+from routes import markers as _markers_routes
+app.include_router(_markers_routes.router)
 
 
 @app.middleware("http")
@@ -2985,19 +2992,6 @@ async def calibration_auto_start(
     return {"ok": True, "camera_id": camera_id, "run_id": run.id}
 
 
-def _serialize_marker(record: MarkerRecord) -> dict[str, Any]:
-    return {
-        "marker_id": record.marker_id,
-        "label": record.label,
-        "x_m": record.x_m,
-        "y_m": record.y_m,
-        "z_m": record.z_m,
-        "on_plate_plane": record.on_plate_plane,
-        "residual_m": record.residual_m,
-        "source_camera_ids": list(record.source_camera_ids),
-    }
-
-
 @app.post("/markers/scan")
 async def markers_scan(
     camera_a_id: str = "A",
@@ -3030,103 +3024,6 @@ async def markers_scan(
         "visibility": scan["visibility"],
         "existing_marker_ids": sorted(existing_ids),
     }
-
-
-@app.get("/markers/state")
-def markers_state() -> dict[str, Any]:
-    records = state._marker_registry.all_records()
-    return {
-        "markers": [_serialize_marker(rec) for rec in records],
-        "planar_marker_ids": [rec.marker_id for rec in records if rec.on_plate_plane],
-        "reserved_marker_ids": sorted(PLATE_MARKER_WORLD.keys()),
-    }
-
-
-@app.post("/markers")
-def markers_batch_upsert(body: MarkerBatchUpsertRequest) -> dict[str, Any]:
-    persisted: list[dict[str, Any]] = []
-    for draft in body.markers:
-        z_m = 0.0 if draft.snap_to_plate_plane or draft.on_plate_plane else draft.z_m
-        record = MarkerRecord(
-            marker_id=draft.marker_id,
-            x_m=draft.x_m,
-            y_m=draft.y_m,
-            z_m=z_m,
-            label=(draft.label or "").strip() or None,
-            on_plate_plane=bool(draft.on_plate_plane),
-            residual_m=draft.residual_m,
-            source_camera_ids=list(draft.source_camera_ids),
-        )
-        persisted.append(_serialize_marker(state._marker_registry.upsert(record)))
-    return {"ok": True, "markers": persisted}
-
-
-@app.patch("/markers/{marker_id}")
-def marker_update(marker_id: int, body: MarkerUpdateRequest) -> dict[str, Any]:
-    existing = state._marker_registry.get(marker_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail=f"marker {marker_id} not registered")
-    x_m = existing.x_m if body.x_m is None else body.x_m
-    y_m = existing.y_m if body.y_m is None else body.y_m
-    z_m = existing.z_m if body.z_m is None else body.z_m
-    on_plate_plane = existing.on_plate_plane if body.on_plate_plane is None else body.on_plate_plane
-    if body.snap_to_plate_plane or on_plate_plane:
-        z_m = 0.0
-    updated = MarkerRecord(
-        marker_id=existing.marker_id,
-        x_m=x_m,
-        y_m=y_m,
-        z_m=z_m,
-        label=(body.label.strip() if body.label is not None else existing.label) or None,
-        on_plate_plane=bool(on_plate_plane),
-        residual_m=existing.residual_m,
-        source_camera_ids=list(existing.source_camera_ids),
-    )
-    state._marker_registry.upsert(updated)
-    return {"ok": True, "marker": _serialize_marker(updated)}
-
-
-@app.delete("/markers/{marker_id}")
-def marker_delete(marker_id: int) -> dict[str, Any]:
-    existed = state._marker_registry.remove(marker_id)
-    if not existed:
-        raise HTTPException(status_code=404, detail=f"marker {marker_id} not registered")
-    return {"ok": True, "marker_id": marker_id}
-
-
-@app.post("/markers/clear")
-def markers_clear() -> dict[str, Any]:
-    cleared = state._marker_registry.clear()
-    return {"ok": True, "cleared_count": cleared}
-
-
-@app.post("/calibration/markers/register/{camera_id}")
-async def calibration_markers_register_legacy(camera_id: str) -> dict[str, Any]:
-    raise HTTPException(
-        status_code=409,
-        detail="single-camera marker registration was removed; use /markers and scan with both cameras",
-    )
-
-
-@app.get("/calibration/markers")
-def calibration_markers_list_legacy() -> dict[str, Any]:
-    return {
-        "markers": [
-            {"id": rec.marker_id, "wx": rec.x_m, "wy": rec.y_m}
-            for rec in state._marker_registry.all_records()
-            if rec.on_plate_plane
-        ],
-    }
-
-
-@app.delete("/calibration/markers/{marker_id}")
-def calibration_markers_delete_legacy(marker_id: int) -> dict[str, Any]:
-    return marker_delete(marker_id)
-
-
-@app.post("/calibration/markers/clear")
-def calibration_markers_clear_legacy() -> dict[str, Any]:
-    return markers_clear()
 
 
 @app.get("/", response_class=HTMLResponse)

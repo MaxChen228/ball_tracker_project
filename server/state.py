@@ -2658,8 +2658,3 @@ class State:
                 for path in self._video_dir.glob("cycle_*"):
                     path.unlink(missing_ok=True)
                 self._session_meta_path.unlink(missing_ok=True)
-
-
-
-
-state = State()
