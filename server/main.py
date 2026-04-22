@@ -137,6 +137,7 @@ from live_pairing import LivePairingSession
 from sse import SSEHub
 from ws import DeviceSocketManager
 from markers_routes import build_markers_router
+from misc_routes import build_misc_router
 from pages_routes import build_pages_router
 from pitch_routes import build_pitch_router
 from control_routes import (
@@ -2386,30 +2387,9 @@ app.include_router(
         get_state=lambda: state,
     )
 )
-
-
-@app.get("/chirp.wav")
-def chirp_wav() -> Response:
-    """Reference sync chirp for the 時間校正 step.
-
-    Users download this on any device (browser) and play it near the two
-    iPhones. Each phone's AudioChirpDetector runs matched filtering and
-    pins the session-clock PTS of the peak as the per-cycle anchor.
-
-    Signal: linear sweep 2 → 8 kHz, 100 ms, Hann-windowed, surrounded by
-    0.5 s of silence either side so the phones can catch it mid-stream.
-    """
-    return Response(
-        content=chirp_wav_bytes(),
-        media_type="audio/wav",
-        headers={"Content-Disposition": 'inline; filename="chirp.wav"'},
+app.include_router(
+    build_misc_router(
+        get_state=lambda: state,
     )
+)
 
-
-# ---------------------------------------------------------------------------
-# Live preview (Phase 4a)
-# ---------------------------------------------------------------------------
-@app.post("/reset")
-def reset(purge: bool = False) -> dict[str, bool]:
-    state.reset(purge_disk=purge)
-    return {"ok": True, "purged": purge}
