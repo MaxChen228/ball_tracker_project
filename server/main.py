@@ -1194,10 +1194,21 @@ class State:
             return None
         return intent
 
-    def _claim_time_sync_intent_locked(self, now: float) -> _LegacyTimeSyncIntent:
-        intent = self._live_time_sync_intent_locked(now)
-        if intent is not None:
-            return intent
+    def _claim_time_sync_intent_locked(
+        self, now: float, *, force_new: bool = False,
+    ) -> _LegacyTimeSyncIntent:
+        """`force_new=True` always mints a fresh id. Used by the
+        dashboard-remote trigger where each button click is a distinct
+        attempt — otherwise a second click inside the intent window
+        would hand back the same id, and cams already synced from the
+        prior attempt wouldn't flip their LED red (the id_match stayed
+        true). The per-phone POST /sync/claim path still gets the dedup
+        behavior so two phones claiming within a few seconds of each
+        other converge on one id."""
+        if not force_new:
+            intent = self._live_time_sync_intent_locked(now)
+            if intent is not None:
+                return intent
         intent = _LegacyTimeSyncIntent(
             id=_new_sync_id(),
             started_at=now,
@@ -1928,7 +1939,13 @@ class State:
                 # Skip every online camera — every online cam during an
                 # armed session is considered "recording" in this rig.
                 targets = []
-            intent = self._claim_time_sync_intent_locked(now) if targets else None
+            # Dashboard trigger = explicit new attempt. Force a fresh id
+            # so previously-synced cams' LEDs flip red (id_match breaks)
+            # instead of silently reusing the previous intent's id.
+            intent = (
+                self._claim_time_sync_intent_locked(now, force_new=True)
+                if targets else None
+            )
             dispatched: list[str] = []
             for cam in sorted(set(targets)):
                 assert intent is not None
