@@ -379,6 +379,14 @@ class State:
         # per-camera pending commands consumed on the next WS heartbeat.
         self._current_time_sync_intent: _LegacyTimeSyncIntent | None = None
         self._sync_command_pending: dict[str, _LegacyTimeSyncIntent] = {}
+        # Per-cam "the id we EXPECT this cam to report back with after the
+        # current attempt succeeds". Set on every /sync/trigger (quick)
+        # and /sync/start (mutual); a heartbeat's `time_sync_id` is
+        # treated as synced-for-UI only when it matches. Without this, a
+        # phone that successfully synced a previous attempt keeps its
+        # LED green forever, so the operator can't see the current
+        # attempt's progress.
+        self._expected_sync_id_per_cam: dict[str, str] = {}
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
         # Runtime tunables pushed from the dashboard, hot-applied on the
@@ -1971,6 +1979,21 @@ class State:
                 if pending.expires_at > now
             }
 
+    def set_expected_sync_id(self, camera_ids: list[str], sync_id: str) -> None:
+        """Record `sync_id` as the id we expect the listed cams to report
+        after the current listen window succeeds. Heartbeats reporting
+        anything else are rendered as not-synced on the dashboard,
+        which gives the operator a per-cam "listening" → "synced"
+        transition instead of a stuck-green LED from a previous
+        attempt."""
+        with self._lock:
+            for cam in camera_ids:
+                self._expected_sync_id_per_cam[cam] = sync_id
+
+    def expected_sync_id_snapshot(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._expected_sync_id_per_cam)
+
     def pending_sync_command_ids(self) -> dict[str, str]:
         """Per-cam mapping from cam → the actual legacy-sync intent id,
         for WS push to iOS. The public `pending_sync_commands()` returns
@@ -2781,6 +2804,7 @@ def _build_device_status_rows(
     now = state._time_fn() if now is None else now
     ws_snapshot = device_ws.snapshot() if ws_snapshot is None else ws_snapshot
     fresh_devices = {d.camera_id: d for d in state.online_devices()}
+    expected = state.expected_sync_id_snapshot()
     device_ids = set(fresh_devices) | {
         cam for cam, snap in ws_snapshot.items()
         if snap.connected
@@ -2789,6 +2813,17 @@ def _build_device_status_rows(
     for cam in sorted(device_ids):
         d = fresh_devices.get(cam) or state.device_snapshot(cam)
         ws = ws_snapshot.get(cam)
+        # An attempt is in progress for this cam IFF we've stamped an
+        # expected id AND the phone hasn't yet echoed it. Until it
+        # matches, the dashboard paints this cam as listening (red LED)
+        # even if iOS is still reporting an old sync_id from a prior
+        # successful attempt.
+        exp = expected.get(cam)
+        id_match = (
+            d is not None
+            and d.time_sync_id is not None
+            and (exp is None or d.time_sync_id == exp)
+        )
         devices.append(
             {
                 "camera_id": cam,
@@ -2803,6 +2838,7 @@ def _build_device_status_rows(
                     and d.time_sync_id is not None
                     and d.time_sync_at is not None
                     and now - d.time_sync_at <= _TIME_SYNC_MAX_AGE_S
+                    and id_match
                 ),
                 "time_sync_id": (d.time_sync_id if d is not None else None),
                 "time_sync_age_s": (
@@ -3407,8 +3443,14 @@ async def sync_start(request: Request) -> dict[str, Any]:
         )
     assert run is not None  # reason is None → run is always set
     # Fresh listening window → reset per-cam peak maxima so the
-    # telemetry card reads peaks for THIS attempt only.
+    # telemetry card reads peaks for THIS attempt only, and stamp
+    # the run id as the expected-sync-id for every currently-online
+    # cam so LEDs flip red until this run's id comes back.
     state.reset_sync_telemetry_peaks(None)
+    state.set_expected_sync_id(
+        [d.camera_id for d in state.online_devices()],
+        run.id,
+    )
     # WS-only live transport: phones get the sync_run signal here. Without
     # this push iOS never knows the run started — the HTTP /heartbeat
     # retirement (a66d5db) removed the `commands` channel and this push
@@ -3525,6 +3567,11 @@ async def sync_trigger(request: Request) -> Any:
     # don't have to wait for the next periodic heartbeat tick to pick it up.
     # The pending flag still exists as the authoritative one-shot drain path.
     pending_ids = state.pending_sync_command_ids()
+    # Stamp the expected id per cam so the dashboard LED flips red
+    # until this specific attempt's id echoes back in a heartbeat.
+    for cam, sid in pending_ids.items():
+        if cam in dispatched:
+            state.set_expected_sync_id([cam], sid)
     ws_messages = {
         cam: {"type": "sync_command", "command": "start", "sync_command_id": sid}
         for cam, sid in pending_ids.items()
