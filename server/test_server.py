@@ -933,7 +933,7 @@ def test_dual_mode_on_device_surfaces_before_server_detection(tmp_path, monkeypa
 
     detect_calls: list[Path] = []
 
-    def _stub_detect(clip_path, video_start_pts_s):
+    def _stub_detect(clip_path, video_start_pts_s, should_cancel=None, **kwargs):
         detect_calls.append(Path(clip_path))
         return []
 
