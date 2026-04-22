@@ -46,17 +46,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // has `alwaysDiscardsLateVideoFrames = true`).
     private let processingQueue = DispatchQueue(label: "camera.frame.queue", qos: .userInitiated)
     private var captureRuntime: CameraCaptureRuntime!
-    // State + frame index. `state` is read/written on main; `captureOutput`
-    // (frame queue, up to 240 Hz) reads it via `frameStateBox.snapshot()` so
-    // it never observes a partially-updated AppState while `applyRemoteDisarm`
-    // mutates it on main. `frameIndex` is touched only on the frame queue.
-    private var state: AppState = .standby
+    private var stateController: CameraStateController!
+    private var state: AppState { stateController.currentState }
+    // State + frame index. `state` is owned by `stateController`; the frame
+    // queue consumes locked snapshots from it so recording bootstrap and
+    // session-id visibility stay coherent while main-thread transitions land.
     private var frameIndex: Int = 0
-
-    // Lock-protected mirror of the three fields `captureOutput` reads
-    // across queues. Main thread is the sole writer; the frame queue
-    // takes a single locked snapshot per delivered sample.
-    private let frameStateBox = FrameStateBox()
 
     // Collaborators.
     private var settings: AppSettings!
@@ -79,10 +74,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var latestImageWidth: Int = 0
     private var latestImageHeight: Int = 0
 
-    // The `.recording`-was-just-entered bootstrap flag and the snapshot of
-    // `currentSessionId` taken at arm time both live in `frameStateBox`;
-    // the camera VC itself never reads them after the push, so duplicating
-    // them as instance vars would just be two stores out of sync.
+    // The `.recording` bootstrap flag and the arm-time session snapshot both
+    // live inside `stateController`; duplicating them here would create a
+    // second source of truth across queues.
 
     // Remote-control state (driven by WS heartbeat / settings traffic).
     /// Last (command, sync_id) tuple we acted on. Plain "arm" / "disarm"
@@ -197,6 +191,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         detectionPool.onFrame = { [weak self] frame in
             self?.handleDetectedFrame(frame)
         }
+        stateController = CameraStateController(onStateChanged: { [weak self] in
+            self?.updateUIForState()
+        })
 
         settings = AppSettingsStore.load()
         serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: AppSettings.serverPortFixed)
@@ -230,8 +227,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     self?.updateUIForState()
                 },
                 transitionState: { [weak self] newState, pendingBootstrap, sessionId in
-                    self?.state = newState
-                    self?.frameStateBox.update(state: newState, pendingBootstrap: pendingBootstrap, sessionId: sessionId)
+                    self?.transitionState(to: newState, pendingBootstrap: pendingBootstrap, sessionId: sessionId)
                 },
                 reconcileStandbyCaptureState: { [weak self] in self?.reconcileStandbyCaptureState() },
                 refreshUI: { [weak self] in self?.updateUIForState() }
@@ -743,8 +739,21 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func transitionSyncState(to newState: AppState) {
-        state = newState
-        frameStateBox.update(state: newState, pendingBootstrap: false, sessionId: nil)
+        transitionState(to: newState)
+    }
+
+    private func transitionState(
+        to newState: AppState,
+        pendingBootstrap: Bool = false,
+        sessionId: String? = nil,
+        refreshUI: Bool = true
+    ) {
+        stateController.transition(
+            to: newState,
+            pendingBootstrap: pendingBootstrap,
+            sessionId: sessionId,
+            refreshUI: refreshUI
+        )
     }
 
     private func showErrorBanner(_ text: String) {
@@ -1067,7 +1076,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         // Locked snapshot of state, pending-bootstrap, and the session id
         // frozen at arm time. The rest of this method only touches `snap`.
-        let snap = frameStateBox.snapshot()
+        let snap = stateController.snapshot()
 
         // Rate-limited debug heartbeat so Xcode console can confirm frames
         // are actually flowing and which state the capture thread sees.
@@ -1102,7 +1111,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         // PR61: all modes write a local MOV so any on-device result can be
         // generated later from the finalized file instead of the live callback.
-        if frameStateBox.consumePendingBootstrap() {
+        if stateController.consumePendingBootstrap() {
             if !recordingWorkflow.bootstrapClipRecorder(width: width, height: height, sessionId: snap.sessionId) {
                 DispatchQueue.main.async {
                     self.exitRecordingToStandby()
@@ -1190,49 +1199,5 @@ extension CameraViewController: ServerWebSocketDelegate {
 
     func webSocket(_ connection: ServerWebSocketConnection, didReceive message: [String: Any]) {
         commandRouter.handle(message: message)
-    }
-}
-
-/// Lock-protected mirror of the fields `captureOutput` reads across
-/// queues (`state`, `pendingRecordingBootstrap`, `pendingSessionId`).
-final class FrameStateBox {
-    struct Snapshot {
-        let state: CameraViewController.AppState
-        let pendingBootstrap: Bool
-        let sessionId: String?
-    }
-
-    private var lock = os_unfair_lock_s()
-    private var _state: CameraViewController.AppState = .standby
-    private var _pendingBootstrap: Bool = false
-    private var _sessionId: String?
-
-    func snapshot() -> Snapshot {
-        os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
-        return Snapshot(
-            state: _state,
-            pendingBootstrap: _pendingBootstrap,
-            sessionId: _sessionId
-        )
-    }
-
-    func update(state: CameraViewController.AppState, pendingBootstrap: Bool, sessionId: String?) {
-        os_unfair_lock_lock(&lock)
-        _state = state
-        _pendingBootstrap = pendingBootstrap
-        _sessionId = sessionId
-        os_unfair_lock_unlock(&lock)
-    }
-
-    /// Edge-trigger helper for the frame queue: clears the bootstrap flag
-    /// once the writer is up. Returns the previous value so the caller can
-    /// branch on whether *this* sample owned the bootstrap.
-    func consumePendingBootstrap() -> Bool {
-        os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
-        let prev = _pendingBootstrap
-        _pendingBootstrap = false
-        return prev
     }
 }
