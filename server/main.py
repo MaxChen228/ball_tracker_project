@@ -120,7 +120,7 @@ from schemas import (
 from collections import deque
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from fitting import fit_trajectory
-from pipeline import annotate_video, detect_pitch
+from pipeline import ProcessingCanceled, annotate_video, detect_pitch
 from video import probe_dims
 from chirp import chirp_wav_bytes
 from preview import PreviewBuffer, REQUEST_TTL_S as _PREVIEW_REQUEST_TTL_S
@@ -325,6 +325,7 @@ class State:
         self._result_dir = data_dir / "results"
         self._video_dir = data_dir / "videos"
         self._calibration_dir = data_dir / "calibrations"
+        self._session_meta_path = data_dir / "session_meta.json"
         self._pitch_dir.mkdir(parents=True, exist_ok=True)
         self._result_dir.mkdir(parents=True, exist_ok=True)
         self._video_dir.mkdir(parents=True, exist_ok=True)
@@ -404,10 +405,17 @@ class State:
         self._auto_cal_last: dict[str, _AutoCalibrationRun] = {}
         # Live streaming state keyed by session id.
         self._live_pairings: dict[str, LivePairingSession] = {}
+        # Session-level trash + processing-control metadata. Trash is
+        # persisted; processing state is in-memory orchestration around
+        # server-side post-processing jobs.
+        self._trashed_sessions: dict[str, float] = {}
+        self._server_post_jobs: dict[tuple[str, str], str] = {}
+        self._server_post_active_tasks: set[tuple[str, str]] = set()
         # Calibrations first — _load_from_disk re-triangulates every cached
         # pitch, and triangulation needs the calibration snapshot to decide
         # the intrinsic-scale factor (MOV dims vs. calibration dims).
         self._load_calibrations_from_disk()
+        self._load_session_meta_from_disk()
         self._load_from_disk()
 
     @property
@@ -470,6 +478,28 @@ class State:
                 len(seen_sessions),
                 self._data_dir,
             )
+
+    def _load_session_meta_from_disk(self) -> None:
+        path = self._session_meta_path
+        if not path.exists():
+            return
+        try:
+            obj = json.loads(path.read_text())
+        except Exception as e:
+            logger.warning("skip corrupt session_meta %s: %s", path, e)
+            return
+        trashed = obj.get("trashed_sessions")
+        if isinstance(trashed, dict):
+            for sid, ts in trashed.items():
+                if isinstance(sid, str) and isinstance(ts, (int, float)):
+                    self._trashed_sessions[sid] = float(ts)
+
+    def _persist_session_meta_locked(self) -> None:
+        payload = json.dumps(
+            {"trashed_sessions": self._trashed_sessions},
+            indent=2,
+        )
+        self._atomic_write(self._session_meta_path, payload)
 
     def _calibration_path(self, camera_id: str) -> Path:
         return self._calibration_dir / f"{camera_id}.json"
@@ -1732,6 +1762,167 @@ class State:
                 if pending.expires_at > now
             }
 
+    def _session_is_trashed_locked(self, session_id: str) -> bool:
+        return session_id in self._trashed_sessions
+
+    def trash_session(self, session_id: str) -> bool:
+        now = self._time_fn()
+        with self._lock:
+            current = self._current_session
+            if (
+                current is not None
+                and current.ended_at is None
+                and current.id == session_id
+            ):
+                raise RuntimeError(
+                    f"cannot trash armed session {session_id}; stop it first"
+                )
+            known = any(sid == session_id for _, sid in self.pitches) or session_id in self.results
+            if not known:
+                return False
+            self._trashed_sessions[session_id] = now
+            for key, status in list(self._server_post_jobs.items()):
+                sid, _cam = key
+                if sid == session_id and status in {"queued", "processing"}:
+                    self._server_post_jobs[key] = "canceled"
+            self._persist_session_meta_locked()
+            return True
+
+    def restore_session(self, session_id: str) -> bool:
+        with self._lock:
+            if session_id not in self._trashed_sessions:
+                return False
+            self._trashed_sessions.pop(session_id, None)
+            self._persist_session_meta_locked()
+            return True
+
+    def trash_count(self) -> int:
+        with self._lock:
+            return len(self._trashed_sessions)
+
+    def _session_server_post_candidates(self, session_id: str) -> list[tuple[str, PitchPayload, Path]]:
+        with self._lock:
+            pitches = [
+                (cam, pitch)
+                for (cam, sid), pitch in self.pitches.items()
+                if sid == session_id
+            ]
+        candidates: list[tuple[str, PitchPayload, Path]] = []
+        for cam, pitch in pitches:
+            if self._session_is_trashed(session_id):
+                continue
+            if DetectionPath.server_post not in self._paths_for_pitch(pitch):
+                continue
+            if pitch.sync_anchor_timestamp_s is None:
+                continue
+            if pitch.frames_server_post:
+                continue
+            clip_path = self._find_video_for_session_camera(session_id, cam)
+            if clip_path is None:
+                continue
+            candidates.append((cam, pitch, clip_path))
+        return candidates
+
+    def _find_video_for_session_camera(self, session_id: str, camera_id: str) -> Path | None:
+        matches = sorted(self._video_dir.glob(f"session_{session_id}_{camera_id}.*"))
+        for path in matches:
+            if path.name.endswith(".tmp"):
+                continue
+            if "_annotated." in path.name:
+                continue
+            return path
+        return None
+
+    def _session_is_trashed(self, session_id: str) -> bool:
+        with self._lock:
+            return self._session_is_trashed_locked(session_id)
+
+    def mark_server_post_queued(self, session_id: str, camera_id: str) -> None:
+        with self._lock:
+            if self._session_is_trashed_locked(session_id):
+                return
+            key = (camera_id, session_id)
+            if key in self._server_post_active_tasks:
+                return
+            if self._server_post_jobs.get(key) == "processing":
+                return
+            self._server_post_jobs[key] = "queued"
+
+    def start_server_post_job(self, session_id: str, camera_id: str) -> bool:
+        with self._lock:
+            if self._session_is_trashed_locked(session_id):
+                return False
+            key = (camera_id, session_id)
+            status = self._server_post_jobs.get(key)
+            if status == "canceled":
+                return False
+            self._server_post_jobs[key] = "processing"
+            self._server_post_active_tasks.add(key)
+            return True
+
+    def should_cancel_server_post_job(self, session_id: str, camera_id: str) -> bool:
+        with self._lock:
+            key = (camera_id, session_id)
+            return (
+                self._session_is_trashed_locked(session_id)
+                or self._server_post_jobs.get(key) == "canceled"
+            )
+
+    def finish_server_post_job(self, session_id: str, camera_id: str, *, canceled: bool) -> None:
+        with self._lock:
+            key = (camera_id, session_id)
+            self._server_post_active_tasks.discard(key)
+            if canceled:
+                self._server_post_jobs[key] = "canceled"
+            else:
+                self._server_post_jobs.pop(key, None)
+
+    def cancel_processing(self, session_id: str) -> bool:
+        changed = False
+        for cam, _pitch, _clip in self._session_server_post_candidates(session_id):
+            key = (cam, session_id)
+            with self._lock:
+                if self._server_post_jobs.get(key) != "canceled":
+                    self._server_post_jobs[key] = "canceled"
+                    changed = True
+        return changed
+
+    def resume_processing(self, session_id: str) -> list[tuple[Path, PitchPayload]]:
+        queued: list[tuple[Path, PitchPayload]] = []
+        for cam, pitch, clip_path in self._session_server_post_candidates(session_id):
+            key = (cam, session_id)
+            with self._lock:
+                if key in self._server_post_active_tasks:
+                    continue
+                self._server_post_jobs[key] = "queued"
+            queued.append((clip_path, pitch.model_copy(deep=True)))
+        return queued
+
+    def session_processing_summary(self, session_id: str) -> tuple[str | None, bool]:
+        candidates = self._session_server_post_candidates(session_id)
+        pending_keys = {(cam, session_id) for cam, _pitch, _clip in candidates}
+        with self._lock:
+            job_states = [
+                self._server_post_jobs.get(key)
+                for key in pending_keys
+                if self._server_post_jobs.get(key) is not None
+            ]
+        if any(state == "processing" for state in job_states):
+            return "processing", True
+        if any(state == "queued" for state in job_states) or (pending_keys and not job_states):
+            return "queued", True
+        if any(state == "canceled" for state in job_states):
+            return "canceled", bool(pending_keys)
+        if not candidates:
+            with self._lock:
+                completed = any(
+                    sid == session_id and bool(pitch.frames_server_post)
+                    for (cam, sid), pitch in self.pitches.items()
+                )
+            if completed:
+                return "completed", False
+        return None, False
+
     def start_sync(self) -> tuple[SyncRun | None, str | None]:
         """Begin a mutual-sync run. Returns `(run, None)` on success or
         `(None, reason)` on conflict. Precondition priority (match the
@@ -1982,7 +2173,7 @@ class State:
                     cmds[cam] = "disarm"
         return cmds
 
-    def events(self) -> list[dict[str, Any]]:
+    def events(self, *, bucket: str = "active") -> list[dict[str, Any]]:
         """Summary row per session for the events panel — one entry per
         session_id, collapsing A/B uploads into a single event.
 
@@ -2050,6 +2241,11 @@ class State:
         # --- Outside the lock: file stats + summary derivation.
         events: list[dict[str, Any]] = []
         for sid, cams_present, cam_frame_counts, cam_frame_counts_on_device, has_any_on_device_frames, cam_capture_telemetry, result in snapshots:
+            trashed = self._session_is_trashed(sid)
+            if bucket == "active" and trashed:
+                continue
+            if bucket == "trash" and not trashed:
+                continue
             latest_mtime: float | None = None
             for cam in cams_present:
                 try:
@@ -2132,6 +2328,7 @@ class State:
                     else ("error" if result is not None and DetectionPath.server_post.value in result.abort_reasons else "-")
                 ),
             }
+            processing_state, processing_resumable = self.session_processing_summary(sid)
 
             events.append(
                 {
@@ -2154,6 +2351,9 @@ class State:
                     "error": error,
                     "error_on_device": error_on_device,
                     "path_status": path_status,
+                    "trashed": trashed,
+                    "processing_state": processing_state,
+                    "processing_resumable": processing_resumable,
                     # Fit-derived summary (LIVE dashboard). All None when
                     # fit_on_device is missing — frontend hides the row in
                     # that case.
@@ -2205,11 +2405,17 @@ class State:
             for key in keys_to_drop:
                 self.pitches.pop(key, None)
             self.results.pop(session_id, None)
+            self._trashed_sessions.pop(session_id, None)
             if (
                 self._last_ended_session is not None
                 and self._last_ended_session.id == session_id
             ):
                 self._last_ended_session = None
+            for key in list(self._server_post_jobs.keys()):
+                if key[1] == session_id:
+                    self._server_post_jobs.pop(key, None)
+                    self._server_post_active_tasks.discard(key)
+            self._persist_session_meta_locked()
 
         # Disk cleanup outside the lock — same pattern record() uses.
         for pattern in (
@@ -2239,6 +2445,10 @@ class State:
             self._devices.clear()
             self._current_session = None
             self._last_ended_session = None
+            self._trashed_sessions.clear()
+            self._server_post_jobs.clear()
+            self._server_post_active_tasks.clear()
+            self._persist_session_meta_locked()
             if purge_disk:
                 for path in self._pitch_dir.glob("session_*.json*"):
                     path.unlink(missing_ok=True)
@@ -2255,6 +2465,7 @@ class State:
                     path.unlink(missing_ok=True)
                 for path in self._video_dir.glob("cycle_*"):
                     path.unlink(missing_ok=True)
+                self._session_meta_path.unlink(missing_ok=True)
 
 
 def _lan_ip() -> str:
@@ -3009,6 +3220,75 @@ async def sessions_delete(request: Request, session_id: str):
     return {"ok": True, "session_id": session_id}
 
 
+@app.post("/sessions/{session_id}/trash")
+async def sessions_trash(request: Request, session_id: str):
+    if not _SESSION_ID_RE.match(session_id):
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=422, detail="invalid session_id")
+    try:
+        moved = state.trash_session(session_id)
+    except RuntimeError as e:
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=409, detail=str(e))
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    if not moved:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+    return {"ok": True, "session_id": session_id}
+
+
+@app.post("/sessions/{session_id}/restore")
+async def sessions_restore(request: Request, session_id: str):
+    if not _SESSION_ID_RE.match(session_id):
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=422, detail="invalid session_id")
+    restored = state.restore_session(session_id)
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    if not restored:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not in trash")
+    return {"ok": True, "session_id": session_id}
+
+
+@app.post("/sessions/{session_id}/cancel_processing")
+async def sessions_cancel_processing(request: Request, session_id: str):
+    if not _SESSION_ID_RE.match(session_id):
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=422, detail="invalid session_id")
+    canceled = state.cancel_processing(session_id)
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    if not canceled:
+        raise HTTPException(status_code=409, detail="no cancelable processing")
+    return {"ok": True, "session_id": session_id}
+
+
+@app.post("/sessions/{session_id}/resume_processing")
+async def sessions_resume_processing(request: Request, session_id: str):
+    if not _SESSION_ID_RE.match(session_id):
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=422, detail="invalid session_id")
+    queued = state.resume_processing(session_id)
+    if not queued:
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=409, detail="no resumable processing")
+    for clip_path, pitch in queued:
+        asyncio.create_task(_run_server_detection(clip_path, pitch))
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "queued": len(queued),
+    }
+
+
 def _summarize_result(result: SessionResult) -> dict[str, Any]:
     paired = result.camera_a_received and result.camera_b_received
     summary: dict[str, Any] = {
@@ -3194,6 +3474,7 @@ async def pitch(
         result.error = "no time sync"
 
     if detection_pending and clip_path is not None:
+        state.mark_server_post_queued(payload_obj.session_id, payload_obj.camera_id)
         # Background task: runs AFTER the response body is sent, so the
         # dashboard's /events + /viewer can surface the on-device trace
         # and session row immediately without waiting on the 8-20 s
@@ -3283,22 +3564,47 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
     disk. Runs after /pitch has already returned — the dashboard sees the
     session + on-device points immediately, and this task backfills the
     server-side trace 8-20 s later."""
+    if not state.start_server_post_job(pitch.session_id, pitch.camera_id):
+        logger.info(
+            "background detection skipped session=%s cam=%s reason=not-runnable",
+            pitch.session_id, pitch.camera_id,
+        )
+        return
     try:
         frames = await asyncio.to_thread(
-            detect_pitch, clip_path, pitch.video_start_pts_s,
+            detect_pitch,
+            clip_path,
+            pitch.video_start_pts_s,
+            should_cancel=lambda: state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id),
         )
+    except ProcessingCanceled:
+        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=True)
+        logger.info(
+            "background detection canceled session=%s cam=%s",
+            pitch.session_id, pitch.camera_id,
+        )
+        return
     except Exception as exc:
+        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
         logger.warning(
             "background detect_pitch failed session=%s cam=%s err=%s",
             pitch.session_id, pitch.camera_id, exc,
         )
         return
 
+    if state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id):
+        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=True)
+        logger.info(
+            "background detection discarded after cancel session=%s cam=%s",
+            pitch.session_id, pitch.camera_id,
+        )
+        return
     pitch.frames = frames
     pitch.frames_server_post = frames
     try:
         await asyncio.to_thread(state.record, pitch)
     except Exception as exc:
+        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
         logger.warning(
             "background re-record failed session=%s cam=%s err=%s",
             pitch.session_id, pitch.camera_id, exc,
@@ -3307,8 +3613,27 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
 
     annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
     try:
-        await asyncio.to_thread(annotate_video, clip_path, annotated_path, frames)
+        await asyncio.to_thread(
+            annotate_video,
+            clip_path,
+            annotated_path,
+            frames,
+            should_cancel=lambda: state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id),
+        )
+    except ProcessingCanceled:
+        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=True)
+        logger.info(
+            "background annotation canceled session=%s cam=%s",
+            pitch.session_id, pitch.camera_id,
+        )
+        if annotated_path.exists():
+            try:
+                annotated_path.unlink()
+            except OSError:
+                pass
+        return
     except Exception as exc:
+        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
         logger.warning(
             "annotate_video failed session=%s cam=%s err=%s",
             pitch.session_id, pitch.camera_id, exc,
@@ -3323,6 +3648,7 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         "background detection complete session=%s cam=%s frames=%d ball=%d",
         pitch.session_id, pitch.camera_id, len(frames), ball,
     )
+    state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
 
 
 @app.get("/chirp.wav")
@@ -3914,8 +4240,10 @@ def serve_video(filename: str) -> FileResponse:
 
 
 @app.get("/events")
-def events() -> list[dict[str, Any]]:
-    return state.events()
+def events(bucket: str = "active") -> list[dict[str, Any]]:
+    if bucket not in {"active", "trash"}:
+        raise HTTPException(status_code=422, detail="bucket must be 'active' or 'trash'")
+    return state.events(bucket=bucket)
 
 
 @app.post("/calibration")
@@ -4821,6 +5149,7 @@ def events_index() -> HTMLResponse:
     return HTMLResponse(
         render_events_index_html(
             events=state.events(),
+            trash_count=state.trash_count(),
             devices=[
                 {
                     "camera_id": d.camera_id,

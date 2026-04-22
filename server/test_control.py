@@ -638,6 +638,47 @@ def test_sessions_delete_html_form_redirects():
     assert sid(2) not in main.state.results
 
 
+def test_trash_session_hides_from_active_events_and_restore_brings_it_back(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    s.record(_minimal_pitch("A", session_id=sid(6)))
+
+    assert [e["session_id"] for e in s.events(bucket="active")] == [sid(6)]
+    assert s.trash_session(sid(6)) is True
+    assert s.events(bucket="active") == []
+    trash = s.events(bucket="trash")
+    assert [e["session_id"] for e in trash] == [sid(6)]
+    assert trash[0]["trashed"] is True
+
+    assert s.restore_session(sid(6)) is True
+    assert [e["session_id"] for e in s.events(bucket="active")] == [sid(6)]
+
+
+def test_cancel_and_resume_processing_summary(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    pitch = _minimal_pitch("A", session_id=sid(7)).model_copy(deep=True)
+    pitch.frames = []
+    pitch.frames_server_post = []
+    pitch.paths = [main.DetectionPath.server_post.value]
+    s.record(pitch)
+    (tmp_path / "videos" / f"session_{sid(7)}_A.mov").write_bytes(b"fake mov")
+
+    s.mark_server_post_queued(sid(7), "A")
+    status, resumable = s.session_processing_summary(sid(7))
+    assert status == "queued"
+    assert resumable is True
+
+    assert s.cancel_processing(sid(7)) is True
+    status, resumable = s.session_processing_summary(sid(7))
+    assert status == "canceled"
+    assert resumable is True
+
+    queued = s.resume_processing(sid(7))
+    assert len(queued) == 1
+    status, resumable = s.session_processing_summary(sid(7))
+    assert status == "queued"
+    assert resumable is True
+
+
 def test_sessions_delete_json_api():
     client = TestClient(app)
     main.state.record(_minimal_pitch("A", session_id=sid(3)))
@@ -649,6 +690,53 @@ def test_sessions_delete_json_api():
     assert r.status_code == 200
     assert r.json() == {"ok": True, "session_id": sid(3)}
     assert sid(3) not in main.state.results
+
+
+def test_sessions_trash_and_restore_json_api():
+    client = TestClient(app)
+    main.state.record(_minimal_pitch("A", session_id=sid(33)))
+
+    trash = client.post(
+        f"/sessions/{sid(33)}/trash",
+        headers={"Accept": "application/json"},
+    )
+    assert trash.status_code == 200
+    assert trash.json() == {"ok": True, "session_id": sid(33)}
+    assert [e["session_id"] for e in main.state.events(bucket="trash")] == [sid(33)]
+
+    restore = client.post(
+        f"/sessions/{sid(33)}/restore",
+        headers={"Accept": "application/json"},
+    )
+    assert restore.status_code == 200
+    assert restore.json() == {"ok": True, "session_id": sid(33)}
+    assert [e["session_id"] for e in main.state.events(bucket="active")] == [sid(33)]
+
+
+def test_sessions_cancel_and_resume_processing_json_api(tmp_path):
+    client = TestClient(app)
+    pitch = _minimal_pitch("A", session_id=sid(34)).model_copy(deep=True)
+    pitch.frames = []
+    pitch.frames_server_post = []
+    pitch.paths = [main.DetectionPath.server_post.value]
+    main.state.record(pitch)
+    (main.state.video_dir / f"session_{sid(34)}_A.mov").write_bytes(b"fake mov")
+    main.state.mark_server_post_queued(sid(34), "A")
+
+    cancel = client.post(
+        f"/sessions/{sid(34)}/cancel_processing",
+        headers={"Accept": "application/json"},
+    )
+    assert cancel.status_code == 200
+    assert cancel.json() == {"ok": True, "session_id": sid(34)}
+
+    resume = client.post(
+        f"/sessions/{sid(34)}/resume_processing",
+        headers={"Accept": "application/json"},
+    )
+    assert resume.status_code == 200
+    assert resume.json()["ok"] is True
+    assert resume.json()["queued"] == 1
 
 
 def test_sessions_delete_json_returns_404_for_unknown():
@@ -695,12 +783,12 @@ def test_sessions_delete_malformed_html_redirects():
     assert r.status_code == 303
 
 
-def test_dashboard_events_list_renders_delete_form():
+def test_dashboard_events_list_renders_trash_form():
     client = TestClient(app)
     main.state.record(_minimal_pitch("A", session_id=sid(5)))
     body = client.get("/").text
-    assert f'action="/sessions/{sid(5)}/delete"' in body
-    assert 'class="event-delete"' in body
+    assert f'action="/sessions/{sid(5)}/trash"' in body
+    assert 'data-events-bucket="trash"' in body
 
 
 def test_dashboard_renders_control_panel():

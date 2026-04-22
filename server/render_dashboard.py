@@ -60,7 +60,7 @@ _CSS = f"""
   --idle-bg:     rgba(105,114,125,.06);
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: "Noto Sans TC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --nav-h: 96px;
+  --nav-h: 82px;
   --sidebar-w: 440px;
   /* Unified 8px-grid spacing + single border-radius. Use var(--r)
      everywhere; the old 4/12/2 mix collapses to one rhythm. */
@@ -76,10 +76,10 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 /* --- App header --- */
 .nav {{ position: fixed; top: 0; left: 0; right: 0; min-height: var(--nav-h);
         background: rgba(252, 251, 250, 0.96); backdrop-filter: blur(10px);
-        border-bottom: 1px solid var(--border-base); padding: 14px 24px 12px 24px;
-        z-index: 20; display: flex; flex-direction: column; gap: 10px; }}
-.nav-main {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }}
-.nav-brand-block {{ display: flex; align-items: flex-start; gap: 18px; min-width: 0; }}
+        border-bottom: 1px solid var(--border-base); padding: 12px 24px 10px 24px;
+        z-index: 20; display: flex; flex-direction: column; gap: 8px; }}
+.nav-main {{ display: flex; align-items: center; justify-content: space-between; gap: 24px; }}
+.nav-brand-block {{ display: flex; align-items: center; gap: 18px; min-width: 0; }}
 .nav .brand {{ font-family: var(--mono); font-weight: 700; font-size: 14px;
                letter-spacing: 0.16em; color: var(--ink); text-decoration: none;
                line-height: 1.3; white-space: nowrap; }}
@@ -90,7 +90,6 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
                     text-transform: uppercase; color: var(--sub); }}
 .nav-page-title {{ font-family: var(--mono); font-size: 18px; line-height: 1.1;
                    letter-spacing: 0.02em; color: var(--ink); }}
-.nav-page-copy {{ font-size: 12px; line-height: 1.5; color: var(--ink-light); max-width: 560px; }}
 .nav-tabs {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }}
 .nav-tab {{ display: inline-flex; align-items: center; min-height: 32px;
             padding: 6px 12px; border: 1px solid var(--border-base); border-radius: var(--r);
@@ -99,7 +98,7 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
             text-transform: uppercase; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease; }}
 .nav-tab:hover {{ border-color: var(--ink); color: var(--ink); background: var(--surface-hover); }}
 .nav-tab.active {{ background: var(--ink); border-color: var(--ink); color: var(--surface); }}
-.nav-status-row {{ display: flex; justify-content: flex-end; }}
+.nav-status-row {{ display: flex; justify-content: flex-end; min-height: 16px; }}
 .nav .status-line {{ font-family: var(--mono); font-size: 11px;
                      letter-spacing: 0.08em; text-transform: uppercase; color: var(--sub);
                      display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }}
@@ -504,6 +503,28 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                  cursor: pointer; transition: border-color 0.15s, color 0.15s, background 0.15s; }}
 .event-delete:hover {{ border-color: var(--dev); color: var(--dev);
                        background: var(--surface); }}
+.events-toolbar {{ display:flex; align-items:center; justify-content:space-between;
+                   gap:var(--s-2); margin-bottom:var(--s-2); }}
+.events-filters {{ display:flex; gap:6px; }}
+.events-filter {{ background:transparent; border:1px solid var(--border-base);
+                  color:var(--sub); font-family:var(--mono); font-size:10px;
+                  letter-spacing:0.10em; text-transform:uppercase;
+                  padding:4px 8px; border-radius:var(--r); cursor:pointer; }}
+.events-filter.active {{ background:var(--ink); color:var(--surface); border-color:var(--ink); }}
+.event-actions {{ display:flex; flex-direction:column; gap:6px; margin:var(--s-2) var(--s-1) 0 0; }}
+.event-action-form {{ margin:0; }}
+.event-action {{ background:transparent; border:1px solid var(--border-base);
+                 color:var(--sub); font-family:var(--mono); font-size:10px;
+                 letter-spacing:0.08em; text-transform:uppercase;
+                 line-height:1; padding:5px 8px; border-radius:var(--r);
+                 cursor:pointer; transition:border-color 0.15s,color 0.15s,background 0.15s; }}
+.event-action.warn:hover {{ border-color:var(--warn); color:var(--warn); background:var(--surface); }}
+.event-action.dev:hover {{ border-color:var(--dev); color:var(--dev); background:var(--surface); }}
+.event-action.ok:hover {{ border-color:var(--passed); color:var(--passed); background:var(--surface); }}
+.chip.processing {{ color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }}
+.chip.queued {{ color: var(--sub); border-color: var(--border-base); background: transparent; }}
+.chip.canceled {{ color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }}
+.chip.completed {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
 
 /* --- Canvas overlay hint --- moved to bottom-left to free the top row for
    the mode toggle + Plotly's modebar. */
@@ -1070,6 +1091,16 @@ _JS_TEMPLATE = r"""
   if (eventsBox) eventsBox.addEventListener('click', (e) => {
     if (e.target.closest('.traj-toggle')) e.stopPropagation();
   });
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-events-bucket]');
+    if (!btn) return;
+    e.preventDefault();
+    currentEventsBucket = btn.dataset.eventsBucket === 'trash' ? 'trash' : 'active';
+    document.querySelectorAll('[data-events-bucket]').forEach(node => {
+      node.classList.toggle('active', node.dataset.eventsBucket === currentEventsBucket);
+    });
+    tickEvents();
+  });
   if (eventsBox) eventsBox.addEventListener('change', (e) => {
     const cb = e.target.closest('input[data-traj-sid]');
     if (!cb) return;
@@ -1587,6 +1618,7 @@ _JS_TEMPLATE = r"""
         else                      { qualityClass = 'poor';      qualityLabel = 'poor'; }
       }
       const confirmMsg = `刪除 session ${e.session_id}？此動作無法復原。`;
+      const trashMsg = `移動 session ${e.session_id} 到垃圾桶？`;
       // Trajectory overlay toggle: only sessions with on-device points qualify.
       // Mode-one (camera_only) sessions are intentionally not overlayable on
       // the LIVE dashboard — use the forensic viewer for those.
@@ -1606,6 +1638,32 @@ _JS_TEMPLATE = r"""
             <span><span class="k">Dur</span><span class="v">${duration} s</span></span>
             <span><span class="k">RMS</span><span class="v">${rms} m</span></span>
           </div>` : '';
+      const processingState = e.processing_state ? `<span class="chip ${esc(e.processing_state)}">${esc(e.processing_state)}</span>` : '';
+      const processingAction = e.processing_state === 'queued' || e.processing_state === 'processing'
+        ? `<form class="event-action-form" method="POST" action="/sessions/${sid}/cancel_processing">
+             <button class="event-action warn" type="submit">Cancel Proc</button>
+           </form>`
+        : (e.processing_state === 'canceled' && e.processing_resumable)
+          ? `<form class="event-action-form" method="POST" action="/sessions/${sid}/resume_processing">
+               <button class="event-action ok" type="submit">Resume</button>
+             </form>`
+          : '';
+      const lifecycleAction = currentEventsBucket === 'trash'
+        ? `
+            <form class="event-action-form" method="POST" action="/sessions/${sid}/restore">
+              <button class="event-action ok" type="submit">Restore</button>
+            </form>
+            <form class="event-action-form" method="POST"
+                  action="/sessions/${sid}/delete"
+                  onsubmit="return confirm(${JSON.stringify(confirmMsg)});">
+              <button class="event-action dev" type="submit">Delete</button>
+            </form>`
+        : `
+            <form class="event-action-form" method="POST"
+                  action="/sessions/${sid}/trash"
+                  onsubmit="return confirm(${JSON.stringify(trashMsg)});">
+              <button class="event-action dev" type="submit">Trash</button>
+            </form>`;
       return `
         <div class="event-item">
           ${toggle}
@@ -1614,16 +1672,15 @@ _JS_TEMPLATE = r"""
               <span class="sid">${sid}</span>
               <span class="event-paths">${pathChips}</span>
               <span class="quality chip ${qualityClass}" title="fit RMS quality">${qualityLabel}</span>
+              ${processingState}
               <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
             </div>
             ${metricsRow}
           </a>
-          <form class="event-delete-form" method="POST"
-                action="/sessions/${sid}/delete"
-                onsubmit="return confirm(${JSON.stringify(confirmMsg)});">
-            <button class="event-delete" type="submit"
-                    aria-label="Delete session ${sid}">&times;</button>
-          </form>
+          <div class="event-actions">
+            ${processingAction}
+            ${lifecycleAction}
+          </div>
         </div>`;
     }).join('');
     eventsBox.innerHTML = evHtml;
@@ -1635,6 +1692,7 @@ _JS_TEMPLATE = r"""
   let currentCaptureMode = 'camera_only';
   let currentPreviewRequested = {};
   let currentCalibrationLastTs = {};
+  let currentEventsBucket = 'active';
 
   // Keys used to skip re-renders when nothing changed. We compare serialised
   // state data rather than innerHTML strings because the browser re-serialises
@@ -1683,7 +1741,7 @@ _JS_TEMPLATE = r"""
   const _origRenderEvents = renderEvents;
   renderEvents = function(events) {
     const key = JSON.stringify((events || []).map(e => ({
-      id: e.session_id, status: e.status, n: e.n_triangulated,
+      id: e.session_id, status: e.status, n: e.n_triangulated, p: e.processing_state,
     })));
     if (key === _lastEvKey) return;
     _lastEvKey = key;
@@ -1773,7 +1831,7 @@ _JS_TEMPLATE = r"""
   let currentEvents = [];
   async function tickEvents() {
     try {
-      const r = await fetch('/events', { cache: 'no-store' });
+      const r = await fetch(`/events?bucket=${encodeURIComponent(currentEventsBucket)}`, { cache: 'no-store' });
       if (!r.ok) return;
       const events = await r.json();
       currentEvents = events;
@@ -1810,6 +1868,14 @@ _JS_TEMPLATE = r"""
                       calibrations: currentCalibrations || [], capture_mode: currentCaptureMode });
       try { await fetch('/sessions/set_mode', { method: 'POST', body: new FormData(form) }); }
       catch (_) {}
+      return;
+    }
+    if (form.action && /\/sessions\/[^/]+\/(trash|restore|delete|cancel_processing|resume_processing)$/.test(form.action)) {
+      e.preventDefault();
+      try {
+        await fetch(form.action, { method: 'POST', body: new FormData(form), headers: { 'Accept': 'application/json' } });
+      } catch (_) {}
+      await tickEvents();
       return;
     }
     // (Mutual-sync kickoff is handled on /sync now.)
@@ -2749,6 +2815,41 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             )
         else:
             toggle_html = '<span class="traj-toggle-placeholder" aria-hidden="true"></span>'
+        processing_state = e.get("processing_state")
+        processing_chip = (
+            f'<span class="chip {html.escape(processing_state)}">{html.escape(processing_state)}</span>'
+            if processing_state else ""
+        )
+        if e.get("trashed"):
+            lifecycle_html = (
+                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/restore">'
+                f'<button class="event-action ok" type="submit">Restore</button>'
+                f"</form>"
+                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/delete" '
+                f'onsubmit="return confirm(\'刪除 session {sid}？此動作無法復原。\');">'
+                f'<button class="event-action dev" type="submit">Delete</button>'
+                f"</form>"
+            )
+        else:
+            lifecycle_html = (
+                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/trash" '
+                f'onsubmit="return confirm(\'移動 session {sid} 到垃圾桶？\');">'
+                f'<button class="event-action dev" type="submit">Trash</button>'
+                f"</form>"
+            )
+        processing_html = ""
+        if processing_state in {"queued", "processing"}:
+            processing_html = (
+                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/cancel_processing">'
+                f'<button class="event-action warn" type="submit">Cancel Proc</button>'
+                f"</form>"
+            )
+        elif processing_state == "canceled" and e.get("processing_resumable"):
+            processing_html = (
+                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/resume_processing">'
+                f'<button class="event-action ok" type="submit">Resume</button>'
+                f"</form>"
+            )
         parts.append(
             # event-row is a link into the viewer; the delete form + traj
             # toggle are siblings (not descendants) so their clicks don't
@@ -2760,16 +2861,12 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f'<span class="sid">{sid}</span>'
             f'<span class="capmode">{capture_mode}</span>'
             f'<span class="event-paths">{path_html}</span>'
+            f"{processing_chip}"
             f'<span class="chip {status}">{stat_label}</span>'
             f"</div>"
             f"{stats_html}"
             f"</a>"
-            f'<form class="event-delete-form" method="POST" '
-            f'action="/sessions/{sid}/delete" '
-            f'onsubmit="return confirm(\'刪除 session {sid}？此動作無法復原。\');">'
-            f'<button class="event-delete" type="submit" '
-            f'aria-label="Delete session {sid}">&times;</button>'
-            f"</form>"
+            f'<div class="event-actions">{processing_html}{lifecycle_html}</div>'
             f"</div>"
         )
     return "".join(parts)
@@ -2806,26 +2903,22 @@ def _render_nav_status(
     )
 
 
-_PAGE_META: dict[str, tuple[str, str, str]] = {
+_PAGE_META: dict[str, tuple[str, str]] = {
     "dashboard": (
         "Operator Surface",
         "Dashboard",
-        "Run sessions, inspect live state, and review captured events.",
     ),
     "setup": (
         "Calibration",
         "Setup",
-        "Position-calibrate cameras and verify plate alignment before recording.",
     ),
     "sync": (
         "Time Sync",
         "Sync",
-        "Run quick chirp or mutual sync workflows, then tune sync-related runtime behaviour.",
     ),
     "markers": (
         "Registry",
         "Markers",
-        "Scan, compare, and store shared ArUco/world-marker positions.",
     ),
 }
 
@@ -2851,7 +2944,7 @@ def _render_app_nav(
     sync: dict[str, Any] | None = None,
     sync_cooldown_remaining_s: float = 0.0,
 ) -> str:
-    kicker, title, copy = _PAGE_META.get(active_page, _PAGE_META["dashboard"])
+    kicker, title = _PAGE_META.get(active_page, _PAGE_META["dashboard"])
     return (
         '<nav class="nav">'
         '<div class="nav-main">'
@@ -2860,7 +2953,6 @@ def _render_app_nav(
         '<div class="nav-page">'
         f'<div class="nav-page-kicker">{html.escape(kicker)}</div>'
         f'<div class="nav-page-title">{html.escape(title)}</div>'
-        f'<div class="nav-page-copy">{html.escape(copy)}</div>'
         '</div>'
         '</div>'
         f'<div class="nav-tabs">{_render_primary_nav(active_page)}</div>'
@@ -2965,6 +3057,7 @@ def _render_tuning_body(
 
 def render_events_index_html(
     events: list[dict[str, Any]],
+    trash_count: int = 0,
     devices: list[dict[str, Any]] | None = None,
     session: dict[str, Any] | None = None,
     calibrations: list[str] | None = None,
@@ -3042,7 +3135,13 @@ def render_events_index_html(
         f'<div id="session-body">{_render_session_body(session, capture_mode, default_paths, devices, calibrations)}</div>'
         "</div>"
         '<div class="card">'
-        '<h2 class="card-title">Events</h2>'
+        '<div class="events-toolbar">'
+        '<h2 class="card-title" style="margin:0;border-bottom:0;padding:0;">Events</h2>'
+        '<div class="events-filters">'
+        '<button type="button" class="events-filter active" data-events-bucket="active">Active</button>'
+        f'<button type="button" class="events-filter" data-events-bucket="trash">Trash {trash_count}</button>'
+        '</div>'
+        '</div>'
         f'<div id="events-body">{_render_events_body(events)}</div>'
         "</div>"
         "</aside>"
