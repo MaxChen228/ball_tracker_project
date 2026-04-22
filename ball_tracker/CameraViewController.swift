@@ -70,13 +70,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // Mutual chirp sync (dashboard-triggered). Runs on its own
     // `AVAudioEngine` (owned by `syncAudio`) — fully decoupled from
     // `AVCaptureSession`, so sync works regardless of capture state
-    // (parked / standby-fps / tracking-fps). `syncDetector` holds the
-    // matched-filter state; buffers flow in via `syncAudio`'s input tap.
-    private var syncDetector: AudioSyncDetector?
+    // (parked / standby-fps / tracking-fps). Phase A: iOS only records;
+    // detection happens server-side. `syncAudio` drives the 3-second
+    // listening window + WAV upload; timeout is a belt-and-braces
+    // watchdog in case MutualSyncAudio never fires its completion.
     private var syncAudio: MutualSyncAudio?
     private var pendingSyncId: String?
-    private var syncSelfPTS: Double?
-    private var syncFromOtherPTS: Double?
     private var syncWatchdog: DispatchWorkItem?
 
     // State + frame index. `state` is read/written on main; `captureOutput`
@@ -1722,8 +1721,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             "role": .string(settings.cameraRole),
         ])
         pendingSyncId = syncId
-        syncSelfPTS = nil
-        syncFromOtherPTS = nil
         startMutualSync()
     }
 
@@ -1739,30 +1736,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             return
         }
 
-        // Mutual sync runs on a dedicated `AVAudioEngine` owned by
-        // `MutualSyncAudio` — completely decoupled from `AVCaptureSession`.
-        // The capture state (parked / standby-fps / tracking-fps) is
-        // irrelevant; we do NOT call startCapture here. This is the whole
-        // point of the dedicated-engine refactor: engine.start is ~hundreds
-        // of ms vs. the 14-23 s cold-boot the capture session used to
-        // impose when the capture session was parked in idle.
-
-        // Seed threshold from the most-recent server push; falls back to
-        // the detector's internal default if no setting message has
-        // arrived yet. Previously AudioSyncDetector() always used the
-        // compile-time 0.18 — dashboard slider was silently ignored for
-        // mutual sync, forcing rebuilds to unlock quieter rigs.
-        let seedThreshold = Float(lastServerMutualThreshold ?? 0.10)
-        let detector = AudioSyncDetector(threshold: seedThreshold)
-        detector.onDetection = { [weak self] event in
-            guard let self else { return }
-            DispatchQueue.main.async { self.onSyncDetection(event) }
-        }
-        syncDetector = detector
-
-        let audio = MutualSyncAudio(detector: detector)
+        // Phase A mutual sync: iOS is a dumb recorder. MutualSyncAudio
+        // emits this cam's chirp and records the full 3 s listening
+        // window as raw PCM; the completion callback hands us an
+        // encoded WAV which we POST to /sync/audio_upload, where the
+        // server runs the matched filter and feeds the shared state
+        // machine. No on-device detector / CFAR / PSR gating here.
+        let audio = MutualSyncAudio()
         syncAudio = audio
-        uploader.postSyncLog(event: "detector_installed", detail: [
+        uploader.postSyncLog(event: "recording_started", detail: [
             "role": .string(role),
         ])
 
@@ -1770,19 +1752,30 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         frameStateBox.update(state: .mutualSyncing, pendingBootstrap: false, sessionId: nil)
         warningLabel.text = "互相時間校正中… (\(role))"
         warningLabel.isHidden = false
-        lastUploadStatusText = "Mutual sync · emitting"
+        lastUploadStatusText = "Mutual sync · recording"
         updateUIForState()
 
         let roleCaptured = role
-        audio.beginSync(emittedRole: roleCaptured) { [weak self] in
-            self?.uploader.postSyncLog(event: "emit", detail: [
-                "role": .string(roleCaptured),
-            ])
-        }
+        audio.beginSync(
+            emittedRole: roleCaptured,
+            onEmitted: { [weak self] in
+                self?.uploader.postSyncLog(event: "emit", detail: [
+                    "role": .string(roleCaptured),
+                ])
+            },
+            onRecordingComplete: { [weak self] result in
+                self?.handleMutualSyncRecording(result: result, role: roleCaptured)
+            },
+            onError: { [weak self] message in
+                self?.abortMutualSync(reason: "audio_init_failed: \(message)")
+            }
+        )
 
-        // Watchdog: server also has an 8 s timeout; set ours to 6 s so we
-        // clean up + log before the server gives up, and the next heartbeat
-        // already shows the cleared sync context.
+        // Watchdog: server has an 8 s timeout; set ours to 6 s so we
+        // clean up + log before the server gives up. In the Phase A
+        // flow the recording duration alone is 3 s plus ~1 s of
+        // engine-start / upload latency — watchdog exists for the edge
+        // case where MutualSyncAudio never hits its own completion.
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.state == .mutualSyncing else { return }
             self.abortMutualSync(reason: "timeout")
@@ -1791,97 +1784,54 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: work)
     }
 
-    private func onSyncDetection(_ event: AudioSyncDetector.DetectionEvent) {
+    private func handleMutualSyncRecording(
+        result: MutualSyncAudio.RecordingResult,
+        role: String
+    ) {
         guard state == .mutualSyncing else { return }
-        let ownRole = settings.cameraRole
-        let isSelfHear = event.band.rawValue == ownRole
-        uploader.postSyncLog(event: "band_fired", detail: [
-            "band": .string(event.band.rawValue),
-            "is_self": .bool(isSelfHear),
-            "peak": .double(Double(event.peakNorm)),
-            "center_s": .double(event.centerPTS),
-        ])
-        if isSelfHear {
-            // Already recorded? Keep the first (earliest) peak — any
-            // subsequent hit within the cooldown is discarded by the
-            // detector, but defense-in-depth here too.
-            if syncSelfPTS == nil {
-                syncSelfPTS = event.centerPTS
-                log.info("sync self-hear band=\(event.band.rawValue, privacy: .public) center_s=\(event.centerPTS, privacy: .public) peak=\(event.peakNorm, privacy: .public)")
-            }
-        } else {
-            if syncFromOtherPTS == nil {
-                syncFromOtherPTS = event.centerPTS
-                log.info("sync cross-hear band=\(event.band.rawValue, privacy: .public) center_s=\(event.centerPTS, privacy: .public) peak=\(event.peakNorm, privacy: .public)")
-            }
-        }
-        if let tSelf = syncSelfPTS, let tOther = syncFromOtherPTS {
-            completeMutualSync(tSelf: tSelf, tFromOther: tOther)
-        }
-    }
-
-    private func completeMutualSync(tSelf: Double, tFromOther: Double) {
         guard let syncId = pendingSyncId else {
-            log.error("sync complete without pending sync_id — ignoring")
+            log.error("recording complete without pending sync_id — ignoring")
+            teardownMutualSync(status: "Mutual sync · orphan")
             return
         }
-        log.info("sync complete sync_id=\(syncId, privacy: .public) t_self=\(tSelf, privacy: .public) t_from_other=\(tFromOther, privacy: .public)")
-        uploader.postSyncLog(event: "complete", detail: [
-            "sync_id": .string(syncId),
-            "t_self_s": .double(tSelf),
-            "t_from_other_s": .double(tFromOther),
-        ])
         syncWatchdog?.cancel()
         syncWatchdog = nil
 
-        let role = settings.cameraRole
-        // Drain the detector's rolling matched-filter traces so the server
-        // can render the `/sync` debug plot. Empty arrays if this run
-        // never populated them (shouldn't happen in normal flow, but old
-        // detectors / aborted runs could land here).
-        let traces: (self_: [AudioSyncDetector.TraceSample], other: [AudioSyncDetector.TraceSample])
-        if let detector = syncDetector {
-            traces = detector.drainTraces(role: role)
-        } else {
-            traces = ([], [])
-        }
-        let traceSelfPayload = traces.self_.map {
-            ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
-        }
-        let traceOtherPayload = traces.other.map {
-            ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
-        }
-        let report = ServerUploader.SyncReportPayload(
-            camera_id: role,
+        uploader.postSyncLog(event: "recording_complete", detail: [
+            "sync_id": .string(syncId),
+            "wav_bytes": .int(result.wavData.count),
+            "duration_s": .double(
+                Double(result.wavData.count) / max(1.0, result.sampleRate * 2.0)
+            ),
+            "audio_start_pts_s": .double(result.audioStartPtsS),
+        ])
+
+        lastUploadStatusText = "Mutual sync · uploading"
+        updateUIForState()
+
+        let meta = ServerUploader.SyncAudioUploadMeta(
             sync_id: syncId,
+            camera_id: role,
             role: role,
-            t_self_s: tSelf,
-            t_from_other_s: tFromOther,
-            emitted_band: role,
-            trace_self: traceSelfPayload.isEmpty ? nil : traceSelfPayload,
-            trace_other: traceOtherPayload.isEmpty ? nil : traceOtherPayload,
-            aborted: false,
-            abort_reason: nil
+            audio_start_pts_s: result.audioStartPtsS,
+            sample_rate: Int(result.sampleRate),
+            emission_pts_s: result.emissionPtsS
         )
-        // Fire-and-forget; server publishes the result via /status →
-        // last_sync, so this controller doesn't need to branch on success.
-        uploader.postSyncReport(report) { [weak self] result in
-            switch result {
-            case .success:
-                DispatchQueue.main.async {
-                    self?.lastUploadStatusText = "Mutual sync · uploaded"
-                    self?.updateUIForState()
+        uploader.uploadSyncAudio(meta: meta, wavData: result.wavData) { [weak self] upResult in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch upResult {
+                case .success:
+                    self.lastUploadStatusText = "Mutual sync · done"
+                case .failure(let error):
+                    log.error("sync audio upload failed: \(error.localizedDescription, privacy: .public)")
+                    self.lastUploadStatusText = "Mutual sync · upload failed"
                 }
-            case .failure(let error):
-                log.error("sync report upload failed: \(error.localizedDescription, privacy: .public)")
-                DispatchQueue.main.async {
-                    self?.lastUploadStatusText = "Mutual sync · upload failed"
-                    self?.updateUIForState()
-                }
+                self.updateUIForState()
             }
         }
 
-        teardownMutualSync(status: "Mutual sync · done")
+        teardownMutualSync(status: "Mutual sync · uploaded")
     }
 
     private func abortMutualSync(reason: String) {
@@ -1889,48 +1839,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         uploader.postSyncLog(event: "abort", detail: [
             "reason": .string(reason),
             "sync_id": .string(pendingSyncId ?? ""),
-            "have_self": .bool(syncSelfPTS != nil),
-            "have_other": .bool(syncFromOtherPTS != nil),
         ])
-        // Ship the failure report: whatever partial timestamps we got plus
-        // the full matched-filter trace so the server can see how close
-        // we came (sub-threshold peaks, noise floor, which band fired).
-        // Without this, aborted runs left the server with no diagnostic
-        // data — every failure looked identical in logs.
-        if let syncId = pendingSyncId {
-            let role = settings.cameraRole
-            let traceSelf: [ServerUploader.TraceSamplePayload]
-            let traceOther: [ServerUploader.TraceSamplePayload]
-            if let detector = syncDetector {
-                let traces = detector.drainTraces(role: role)
-                traceSelf = traces.self_.map {
-                    ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
-                }
-                traceOther = traces.other.map {
-                    ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
-                }
-            } else {
-                traceSelf = []
-                traceOther = []
-            }
-            let report = ServerUploader.SyncReportPayload(
-                camera_id: role,
-                sync_id: syncId,
-                role: role,
-                t_self_s: syncSelfPTS,
-                t_from_other_s: syncFromOtherPTS,
-                emitted_band: role,
-                trace_self: traceSelf.isEmpty ? nil : traceSelf,
-                trace_other: traceOther.isEmpty ? nil : traceOther,
-                aborted: true,
-                abort_reason: reason
-            )
-            uploader.postSyncReport(report) { result in
-                if case .failure(let err) = result {
-                    log.error("abort report upload failed: \(err.localizedDescription, privacy: .public)")
-                }
-            }
-        }
+        // Phase A: aborted runs don't ship a partial report — server
+        // has its own timeout that produces the aborted SyncResult and
+        // renders whatever diagnostic it has (none yet, since there's
+        // no trace data to ship). Future enhancement: if the recording
+        // reached non-zero length before abort, upload the truncated
+        // WAV too so we can still see "how far we got".
         syncWatchdog?.cancel()
         syncWatchdog = nil
         teardownMutualSync(status: "Mutual sync · \(reason)")
@@ -1941,13 +1856,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// `.standby`, then reconciles capture ownership back to preview /
     /// calibration-frame / parked standby.
     private func teardownMutualSync(status: String) {
-        syncDetector?.onDetection = nil
-        syncDetector = nil
         syncAudio?.endSync()
         syncAudio = nil
         pendingSyncId = nil
-        syncSelfPTS = nil
-        syncFromOtherPTS = nil
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
         reconcileStandbyCaptureState()
@@ -2611,11 +2522,11 @@ extension CameraViewController: ServerWebSocketDelegate {
             }
             if let mThreshold = message["mutual_sync_threshold"] as? Double,
                self.lastServerMutualThreshold != mThreshold {
+                // Phase A: iOS no longer runs the mutual-sync matched
+                // filter — threshold applies server-side now. Cache the
+                // value only so an older iOS build wouldn't resend, and
+                // skip the local setter path entirely.
                 self.lastServerMutualThreshold = mThreshold
-                DispatchQueue.main.async {
-                    self.syncDetector?.setThreshold(Float(mThreshold))
-                    log.info("mutual-sync threshold hot-applied from server: \(mThreshold)")
-                }
             }
             if let interval = message["heartbeat_interval_s"] as? Double,
                self.lastServerHeartbeatInterval != interval {

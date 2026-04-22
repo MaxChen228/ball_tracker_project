@@ -9,9 +9,11 @@ import Foundation
 /// scale-invariant — a rig where everything runs 10× louder doesn't need
 /// threshold re-tuning, because the noise floor moves with it.
 ///
-/// Used by `AudioSyncDetector` and `AudioChirpDetector` so both sync
-/// modalities (mutual chirp + legacy quick-chirp) share one detection
-/// policy. Each detector band gets its own instance.
+/// Used by `AudioChirpDetector` (quick-chirp fallback path). Mutual
+/// sync used to share this estimator via the now-deleted
+/// `AudioSyncDetector`; Phase A moved mutual detection to the server,
+/// so only the quick-chirp caller remains on iOS. Each detector band
+/// gets its own instance.
 ///
 /// The key subtlety: feed only scans that are NOT a real chirp into the
 /// estimator, otherwise the chirp's own peak bumps the floor up and
