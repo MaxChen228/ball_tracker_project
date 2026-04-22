@@ -115,6 +115,18 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     private var pendingUp: (centerS: Double, peak: Float)?
     private(set) var lastSnapshot: Snapshot
 
+    /// CFAR noise-floor estimators, one per sweep. Feed every non-chirp
+    /// scan's bestNorm; fire gate multiplies the estimate by
+    /// `cfarNoiseMultiplier` to check "signal really above noise" on top
+    /// of the absolute threshold. Makes quick-chirp self-calibrate across
+    /// phones with different mic sensitivity / AGC — same robust design
+    /// the mutual-sync detector uses. Both sync modalities now share one
+    /// detection policy so tuning on one rig stays valid on the other.
+    private var cfarUp = CFARNoiseFloor()
+    private var cfarDown = CFARNoiseFloor()
+    private var cfarNoiseMultiplier: Float = 5.0
+    private let cfarMinSamples: Int = 8
+
     init(
         sampleRate: Double = 44100.0,
         chirpF0: Double = 2000.0,
@@ -253,6 +265,15 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         }
     }
 
+    /// Hot-apply CFAR multiplier from dashboard. Mirrors the shape on
+    /// AudioSyncDetector so the two detectors expose the same control
+    /// surface.
+    func setCFARMultiplier(_ value: Float) {
+        deliveryQueue.async { [weak self] in
+            self?.cfarNoiseMultiplier = max(2.0, min(12.0, value))
+        }
+    }
+
     /// Discard all buffered audio and timing state. Safe to call from any
     /// thread (bounces onto deliveryQueue).
     func reset() {
@@ -265,6 +286,8 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
             self.lastTriggerPTS = nil
             self.samplesSinceCheck = 0
             self.pendingUp = nil
+            self.cfarUp.reset()
+            self.cfarDown.reset()
             self.lastSnapshot = Snapshot(
                 bufferFillSamples: 0,
                 lastPeak: 0,
@@ -432,6 +455,12 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
             reference: referenceDown,
             lagLo: lagLo, lagHi: lagHi
         )
+        // Feed every scan's bestNorm into the CFAR estimator. The
+        // saturationCap inside CFARNoiseFloor excludes the chirp itself
+        // (peaks > ~0.15 are assumed signal) so our own chirp can't
+        // bias the noise floor upward.
+        cfarUp.observe(upResult.bestNorm)
+        cfarDown.observe(downResult.bestNorm)
 
         let now_s = currentPTSApprox()
         let armed = (lastTriggerPTS ?? -Double.infinity) + cooldownS <= now_s
@@ -457,7 +486,18 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         let upPSR = upResult.secondNorm > 0 ? upResult.bestNorm / upResult.secondNorm : 0
         let downPSR = downResult.secondNorm > 0 ? downResult.bestNorm / downResult.secondNorm : 0
 
-        let upValid = armed && upResult.bestNorm > threshold && upPSR > minPSR
+        // CFAR gates: signal must also be multiple × current noise floor
+        // on top of the absolute threshold. Before warm-up (minSamples),
+        // CFAR stays transparent — absolute-threshold + PSR alone arbitrate.
+        let upCFARReady = cfarUp.sampleCount >= cfarMinSamples
+        let downCFARReady = cfarDown.sampleCount >= cfarMinSamples
+        let upCFARGate = !upCFARReady
+            || upResult.bestNorm > cfarNoiseMultiplier * cfarUp.estimate
+        let downCFARGate = !downCFARReady
+            || downResult.bestNorm > cfarNoiseMultiplier * cfarDown.estimate
+
+        let upValid = armed && upResult.bestNorm > threshold
+            && upPSR > minPSR && upCFARGate
         // Down-sweep validation has TWO tiers:
         //  - Strict (no pending): full PSR + threshold gate, same as up.
         //  - Loose (pending up waiting): the 150 ms timing prior already
@@ -465,8 +505,12 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         //    weak sidelobes (common when AGC clips after the up burst)
         //    still pairs. Standard "preamble-gated loose threshold" — what
         //    makes the dual-sweep design actually fire in real rooms.
-        let downValid = armed && downResult.bestNorm > threshold &&
-            (pendingUp != nil || downPSR > minPSR)
+        // CFAR gate applies in BOTH tiers — even a pending-latched down
+        // has to rise above the noise floor. Otherwise an ambient hiss
+        // peak at the right 150 ms offset would trigger a false pair.
+        let downValid = armed && downResult.bestNorm > threshold
+            && downCFARGate
+            && (pendingUp != nil || downPSR > minPSR)
 
         var triggered = false
 
@@ -478,7 +522,7 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
                 || upResult.bestNorm > (pendingUp?.peak ?? 0) {
                 pendingUp = (centerS: upCenterS, peak: upResult.bestNorm)
                 if isNewLatch {
-                    log.info("chirp up latched peak=\(upResult.bestNorm, privacy: .public) psr=\(upPSR, privacy: .public) center_s=\(upCenterS, privacy: .public)")
+                    log.info("chirp up latched peak=\(upResult.bestNorm, privacy: .public) psr=\(upPSR, privacy: .public) cfar_floor=\(self.cfarUp.estimate, privacy: .public) cfar_k=\(self.cfarNoiseMultiplier, privacy: .public) center_s=\(upCenterS, privacy: .public)")
                 }
             }
         }
@@ -492,7 +536,7 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
                 lastTriggerPTS = anchorS
                 pendingUp = nil
                 triggered = true
-                log.info("chirp pair detected up_peak=\(pu.peak, privacy: .public) down_peak=\(downResult.bestNorm, privacy: .public) down_psr=\(downPSR, privacy: .public) gap_s=\(gap, privacy: .public) anchor_s=\(anchorS, privacy: .public)")
+                log.info("chirp pair detected up_peak=\(pu.peak, privacy: .public) down_peak=\(downResult.bestNorm, privacy: .public) down_psr=\(downPSR, privacy: .public) cfar_up_floor=\(self.cfarUp.estimate, privacy: .public) cfar_down_floor=\(self.cfarDown.estimate, privacy: .public) cfar_k=\(self.cfarNoiseMultiplier, privacy: .public) gap_s=\(gap, privacy: .public) anchor_s=\(anchorS, privacy: .public)")
                 onChirpDetected?(
                     ChirpEvent(anchorFrameIndex: 0, anchorTimestampS: anchorS)
                 )
