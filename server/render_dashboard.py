@@ -2325,6 +2325,10 @@ _JS_TEMPLATE = r"""
         if (!prev || prev.connected !== connected) {
           wsStatus.set(data.cam, { connected, since_ms: Date.now() });
           if (!connected) recordError('ws_disconnect', `Cam ${data.cam} WebSocket dropped`);
+          // Device came online or went offline — refresh the Devices panel
+          // immediately rather than waiting for the 1 s tickStatus cadence.
+          _lastDevKey = null;
+          tickStatus();
         }
         updateDegradedBanner();
       } catch (_) {}
