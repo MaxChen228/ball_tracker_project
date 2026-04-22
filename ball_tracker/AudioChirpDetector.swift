@@ -280,8 +280,8 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     }
 
     /// Hot-apply CFAR multiplier from dashboard. Mirrors the shape on
-    /// AudioSyncDetector so the two detectors expose the same control
-    /// surface.
+    /// live dashboard — same control surface as the old AudioSyncDetector
+    /// (now replaced by server-side detection).
     func setCFARMultiplier(_ value: Float) {
         deliveryQueue.async { [weak self] in
             self?.cfarNoiseMultiplier = max(2.0, min(12.0, value))

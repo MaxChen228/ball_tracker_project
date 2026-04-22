@@ -763,6 +763,110 @@ final class ServerUploader {
     /// forget from the controller's perspective: the server waits on both
     /// phones, solves, and publishes Δ via `/status → last_sync`. Retry
     /// on transient failure is the operator's job (re-press the button).
+    /// Metadata ferried alongside a raw-PCM WAV to `/sync/audio_upload`.
+    /// Phase A of the sync refactor — iOS is a dumb recorder; server
+    /// runs the matched filter and fills in the `SyncReport` shape from
+    /// the WAV + these fields.
+    struct SyncAudioUploadMeta: Encodable {
+        let sync_id: String
+        let camera_id: String
+        let role: String
+        /// Host-clock seconds of the first recorded sample. Server uses
+        /// this to convert its detected chirp sample offsets back into
+        /// iOS session-clock PTS (same clock as video frame PTS).
+        let audio_start_pts_s: Double
+        /// Informational — WAV header is authoritative on decode.
+        let sample_rate: Int
+        /// Host-clock seconds at which the local player node was
+        /// instructed to play this run's chirp. Optional; debug cross-
+        /// check only — the server compares it against its detected
+        /// self-chirp center to diagnose "did we emit when planned?".
+        let emission_pts_s: Double?
+    }
+
+    /// Ship the full 3 s listening window to the server for detection.
+    /// Multipart body: `payload` (JSON metadata) + `audio` (WAV bytes).
+    /// ~288 KB at 48 kHz × 3 s × 16-bit mono — fits in RAM cleanly,
+    /// no streaming-upload plumbing needed.
+    func uploadSyncAudio(
+        meta: SyncAudioUploadMeta,
+        wavData: Data,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        guard let base = config.baseURL() else {
+            completion?(.failure(NSError(
+                domain: "ServerUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
+            )))
+            return
+        }
+        let url = base.appendingPathComponent("sync/audio_upload")
+
+        let metaData: Data
+        do {
+            metaData = try JSONEncoder().encode(meta)
+        } catch {
+            completion?(.failure(error))
+            return
+        }
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(
+            "multipart/form-data; boundary=\(boundary)",
+            forHTTPHeaderField: "Content-Type"
+        )
+
+        var body = Data()
+        func appendLine(_ s: String) {
+            if let d = (s + "\r\n").data(using: .utf8) { body.append(d) }
+        }
+        // payload field (JSON string)
+        appendLine("--\(boundary)")
+        appendLine("Content-Disposition: form-data; name=\"payload\"")
+        appendLine("Content-Type: application/json")
+        appendLine("")
+        body.append(metaData)
+        appendLine("")
+        // audio field (WAV file)
+        appendLine("--\(boundary)")
+        appendLine(
+            "Content-Disposition: form-data; name=\"audio\"; "
+            + "filename=\"\(meta.sync_id)_\(meta.camera_id).wav\""
+        )
+        appendLine("Content-Type: audio/wav")
+        appendLine("")
+        body.append(wavData)
+        appendLine("")
+        appendLine("--\(boundary)--")
+
+        request.httpBody = body
+        let syncId = meta.sync_id
+        let role = meta.role
+        let wavBytes = wavData.count
+        let task = URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error = error {
+                log.error("sync audio upload failed sync=\(syncId, privacy: .public) role=\(role, privacy: .public) bytes=\(wavBytes) err=\(error.localizedDescription, privacy: .public)")
+                completion?(.failure(error))
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                log.error("sync audio upload rejected sync=\(syncId, privacy: .public) role=\(role, privacy: .public) http=\(http.statusCode)")
+                completion?(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"]
+                )))
+                return
+            }
+            log.info("sync audio upload ok sync=\(syncId, privacy: .public) role=\(role, privacy: .public) bytes=\(wavBytes)")
+            completion?(.success(()))
+        }
+        task.resume()
+    }
+
     func postSyncReport(
         _ report: SyncReportPayload,
         completion: ((Result<Void, Error>) -> Void)? = nil
