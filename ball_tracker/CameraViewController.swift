@@ -103,7 +103,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // UI state.
     private var lastUploadStatusText: String = ""
-    private var lastResultText: String = CameraViewController.initialLastResultText
+    private var lastResultText: String = ""
     private var lastFrameTimestampForFps: CFTimeInterval = CACurrentMediaTime()
     private var framesSinceLastFpsTick: Int = 0
     private var fpsEstimate: Double = 0
@@ -187,14 +187,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // Time-sync timeout task so we can cancel if the user aborts early.
     private var timeSyncTimeoutWork: DispatchWorkItem?
 
-    // UI containers. Layout is a Ready card (left-centered, standby only)
-    // plus the existing state chip (top-left) + REC indicator (top-right).
-    // FPS / last-contact / Test are Settings → Diagnostics now.
+    // UI containers. Preview stays full-screen; a small overlay panel exposes
+    // the only remaining local controls: server endpoint, role, and link /
+    // preview status.
     private let topStatusChip = StatusChip()
-    /// Small HUD chip showing the currently-effective capture mode
-    /// (session snapshot if armed, otherwise the dashboard's global
-    /// toggle). Driven by WS settings / arm traffic.
-    private let modeLabel = UILabel()
+    private let controlPanel = UIView()
+    private let serverIPField = UITextField()
+    private let serverPortField = UITextField()
+    private let roleControl = UISegmentedControl(items: ["A", "B"])
+    private let applySettingsButton = UIButton(type: .system)
+    private let connectionLabel = UILabel()
+    private let previewLabel = UILabel()
     /// Last-known capture mode from the server. Starts at cameraOnly so a
     /// network-unreachable launch degrades to the pre-split behaviour. Step 2
     /// reads this at cycle-complete to decide whether to upload the MOV or
@@ -246,12 +249,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// of success — the server-side flag drains the moment ANY request
     /// arrives, so retrying from the same heartbeat would just double-POST.
     private var calibrationFrameCaptureArmed: Bool = false
-    private let readyCard = ReadyCard()
-    private let lastResultLabel = UILabel()
     private let warningLabel = UILabel()
-    private let chirpDebugLabel = UILabel()
-    /// Last upload status, short label: "暫存完成", "時間校正完成" etc.
-    private let uploadStatusLabel = UILabel()
 
     // Full-screen colored border that reflects AppState. Stroke width +
     // tint change per state; pulses opacity in WAITING states so the
@@ -303,16 +301,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         detectionPool.onFrame = { [weak self] frame in
             self?.handleDetectedFrame(frame)
         }
-
-        navigationItem.leftBarButtonItem = UIBarButtonItem(
-            title: "Settings",
-            style: .plain,
-            target: self,
-            action: #selector(openSettings)
-        )
-        // Phase 6: iOS UI reduced to display-only + Settings. All calibration
-        // and sync modalities are dashboard-controlled; the ReadyCard shows
-        // status only.
 
         settings = SettingsViewController.loadFromUserDefaults()
         serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: settings.serverPort)
@@ -415,17 +403,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             )
         }
         updateUIForState()
-    }
-
-    @objc private func openSettings() {
-        let vc = SettingsViewController()
-        vc.cameraVC = self
-        vc.onDismiss = { [weak self] in
-            self?.applyUpdatedSettings()
-        }
-        let nav = UINavigationController(rootViewController: vc)
-        nav.modalPresentationStyle = .formSheet
-        present(nav, animated: true)
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -1425,41 +1402,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func updateChirpDebugOverlay() {
-        guard state == .timeSyncWaiting, let detector = chirpDetector else {
-            return
-        }
-        // Read-only access to the last snapshot; audio-queue writes may race
-        // but the HUD only needs a near-instant view.
+        guard state == .timeSyncWaiting, let detector = chirpDetector else { return }
         latestChirpSnapshot = detector.lastSnapshot
-        guard let snap = latestChirpSnapshot else { return }
-        let statusText: String
-        let color: UIColor
-        if !snap.armed {
-            statusText = "warming up"
-            color = DesignTokens.Colors.sub
-        } else if snap.triggered {
-            statusText = "TRIGGER"
-            color = DesignTokens.Colors.success
-        } else if snap.pendingUp {
-            // Up latched, waiting for the down-sweep partner. Surfaces the
-            // dual-chirp middle state so a stuck pair (down rejected by
-            // PSR / threshold / gap) is visible instead of being hidden
-            // behind the same "close" yellow as a borderline up.
-            statusText = "PENDING"
-            color = DesignTokens.Colors.warning
-        } else if snap.lastPeak >= snap.threshold * 0.8 {
-            statusText = "close"
-            color = DesignTokens.Colors.warning
-        } else {
-            statusText = "listening"
-            color = DesignTokens.Colors.sub
-        }
-        chirpDebugLabel.text = String(
-            format: "up %.2f dn %.2f / %.2f psr %.1f  buf %d  %@",
-            snap.lastPeak, snap.lastDownPeak, snap.threshold,
-            snap.lastPSR, snap.bufferFillSamples, statusText
-        )
-        chirpDebugLabel.textColor = color
     }
 
     // MARK: - Server health + upload queue wiring
@@ -1587,7 +1531,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func refreshModeLabel() {
         let pathLabel = currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ")
-        modeLabel.text = "MODE · \(pathLabel.uppercased())"
+        let previewState = previewRequestedByServer ? "REMOTE ON" : (session.isRunning ? "LOCAL ACTIVE" : "OFF")
+        previewLabel.text = "PREVIEW · \(previewState) · \(pathLabel.uppercased())"
     }
 
     private func updateServerTimeSyncState(confirmed: Bool, syncId: String?) {
@@ -1676,9 +1621,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         uploadQueue.onLastResultChanged = { [weak self] text in
             guard let self else { return }
             self.lastResultText = text
-            // A successful upload arrived — clear any sticky red from a
-            // previous dropped-payload banner so the green default returns.
-            self.lastResultLabel.textColor = DesignTokens.Colors.ok
             self.updateUIForState()
         }
         uploadQueue.onUploadingChanged = { [weak self] _ in
@@ -1689,11 +1631,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             let basename = fileURL.deletingPathExtension().lastPathComponent
             let detail = Self.describeUploadError(error)
             log.error("camera payload dropped file=\(basename, privacy: .public) reason=\(detail, privacy: .public)")
-            // Surface a sticky red banner on the "Last:" row — the green
-            // success line gets overwritten by the next paired pitch, but
-            // a dropped payload is data loss the operator must notice.
             self.lastResultText = "上傳失敗已丟棄: \(basename) — \(detail)"
-            self.lastResultLabel.textColor = DesignTokens.Colors.fail
             self.updateUIForState()
         }
     }
@@ -1706,7 +1644,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         analysisQueue.onLastResultChanged = { [weak self] text in
             guard let self else { return }
             self.lastResultText = text
-            self.lastResultLabel.textColor = DesignTokens.Colors.ok
             self.updateUIForState()
         }
     }
@@ -1992,6 +1929,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             connectWebSocket()
         }
         recorder?.setCameraId(latest.cameraRole)
+        syncInlineControlsFromSettings()
     }
 
     /// Forward the heartbeat monitor's tick to the shared Diagnostics
@@ -2003,23 +1941,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func setupUI() {
-        // Top-left state chip.
         topStatusChip.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(topStatusChip)
 
-        // Top-right mode indicator. Populated from WS settings / arm traffic; shows
-        // the effective capture mode so the operator always knows whether
-        // an arm will record+upload MOV (camera-only) or run detection on
-        // device (on-device).
-        modeLabel.font = DesignTokens.Fonts.mono(size: 11, weight: .medium)
-        modeLabel.textColor = DesignTokens.Colors.sub
-        modeLabel.textAlignment = .right
-        modeLabel.translatesAutoresizingMaskIntoConstraints = false
-        modeLabel.text = "MODE · SERVER POST-PASS"
-        view.addSubview(modeLabel)
+        setupControlPanel()
 
-        // Transient banner for error / progress text. Hidden by default;
-        // state-change paths set text + reveal, and a timer usually hides it.
         warningLabel.font = DesignTokens.Fonts.sans(size: 18, weight: .bold)
         warningLabel.textColor = DesignTokens.Colors.ink
         warningLabel.backgroundColor = DesignTokens.Colors.warning.withAlphaComponent(0.85)
@@ -2031,108 +1957,143 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         warningLabel.isHidden = true
         view.addSubview(warningLabel)
 
-        // Chirp peak / buffer debug — only visible during time-sync. This
-        // is the one on-screen debug overlay we keep because the operator
-        // needs it to tune chirp threshold in real time.
-        chirpDebugLabel.font = DesignTokens.Fonts.mono(size: 13, weight: .medium)
-        chirpDebugLabel.textColor = DesignTokens.Colors.sub
-        chirpDebugLabel.numberOfLines = 0
-        chirpDebugLabel.textAlignment = .center
-        chirpDebugLabel.translatesAutoresizingMaskIntoConstraints = false
-        chirpDebugLabel.isHidden = true
-        view.addSubview(chirpDebugLabel)
-
-        // Last successful result — hidden until the first result arrives so
-        // an empty "(尚無結果)" doesn't linger as noise on cold launch.
-        lastResultLabel.font = DesignTokens.Fonts.sans(size: 14, weight: .medium)
-        lastResultLabel.textColor = DesignTokens.Colors.ok
-        lastResultLabel.numberOfLines = 2
-        lastResultLabel.translatesAutoresizingMaskIntoConstraints = false
-        lastResultLabel.isHidden = true
-        view.addSubview(lastResultLabel)
-
-        // Upload status — one-liner under the Ready card. Hidden when the
-        // text is "Idle" so only meaningful phases show up.
-        uploadStatusLabel.font = DesignTokens.Fonts.sans(size: 13, weight: .medium)
-        uploadStatusLabel.textColor = DesignTokens.Colors.sub
-        uploadStatusLabel.numberOfLines = 1
-        uploadStatusLabel.translatesAutoresizingMaskIntoConstraints = false
-        uploadStatusLabel.isHidden = true
-        view.addSubview(uploadStatusLabel)
-
-        // The Ready card. Centered horizontally, sitting above the bottom
-        // safe area so it doesn't fight the camera preview mid-frame.
-        view.addSubview(readyCard)
-
         NSLayoutConstraint.activate([
             topStatusChip.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: DesignTokens.Spacing.m),
             topStatusChip.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.m),
 
-            modeLabel.centerYAnchor.constraint(equalTo: topStatusChip.centerYAnchor),
-            modeLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DesignTokens.Spacing.m),
+            controlPanel.topAnchor.constraint(equalTo: topStatusChip.bottomAnchor, constant: DesignTokens.Spacing.s),
+            controlPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.m),
+            controlPanel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -DesignTokens.Spacing.xl),
 
-            warningLabel.topAnchor.constraint(equalTo: topStatusChip.bottomAnchor, constant: DesignTokens.Spacing.s),
+            warningLabel.topAnchor.constraint(equalTo: controlPanel.bottomAnchor, constant: DesignTokens.Spacing.s),
             warningLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),
             warningLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DesignTokens.Spacing.l),
-
-            readyCard.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            readyCard.widthAnchor.constraint(lessThanOrEqualToConstant: 480),
-            readyCard.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),
-            readyCard.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -DesignTokens.Spacing.l),
-            readyCard.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -DesignTokens.Spacing.xl),
-
-            uploadStatusLabel.topAnchor.constraint(equalTo: readyCard.bottomAnchor, constant: DesignTokens.Spacing.s),
-            uploadStatusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-
-            lastResultLabel.topAnchor.constraint(equalTo: uploadStatusLabel.bottomAnchor, constant: DesignTokens.Spacing.xs),
-            lastResultLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),
-            lastResultLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DesignTokens.Spacing.l),
-
-            chirpDebugLabel.bottomAnchor.constraint(equalTo: readyCard.topAnchor, constant: -DesignTokens.Spacing.s),
-            chirpDebugLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),
-            chirpDebugLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DesignTokens.Spacing.l),
         ])
 
         setupStateBorder()
         setupRecIndicator()
+        syncInlineControlsFromSettings()
     }
 
-    /// Recompute ready-card gate states + hint, then repaint. Called every
-    /// time `updateUIForState` fires. Phase 6: iOS is display-only; the
-    /// 位置校正 gate was dropped (calibration is dashboard-owned, iOS has no
-    /// way to know the server-side state).
-    private func updateReadyCard() {
-        let timeSyncOK = serverTimeSyncConfirmed
-        let serverOK = healthMonitor?.isReachable ?? false
+    private func setupControlPanel() {
+        controlPanel.translatesAutoresizingMaskIntoConstraints = false
+        controlPanel.backgroundColor = DesignTokens.Colors.hudSurface
+        controlPanel.layer.cornerRadius = DesignTokens.CornerRadius.card
+        controlPanel.layer.borderWidth = 1
+        controlPanel.layer.borderColor = DesignTokens.Colors.cardBorder.cgColor
+        view.addSubview(controlPanel)
 
-        let hint: String
-        if !serverOK {
-            hint = "無法接收開始指令：檢查 Wi-Fi 或 Settings 中的伺服器 IP"
-        } else if !timeSyncOK {
-            hint = "尚未時間校正，錄影將無法與另一台配對"
-        } else {
-            hint = "等待開始指令…（由 Dashboard 控制）"
+        let serverLabel = makePanelLabel("SERVER")
+        let roleLabel = makePanelLabel("ROLE")
+
+        serverIPField.translatesAutoresizingMaskIntoConstraints = false
+        serverIPField.borderStyle = .roundedRect
+        serverIPField.autocapitalizationType = .none
+        serverIPField.autocorrectionType = .no
+        serverIPField.clearButtonMode = .whileEditing
+        serverIPField.keyboardType = .numbersAndPunctuation
+        serverIPField.placeholder = "192.168.1.100"
+        serverIPField.font = DesignTokens.Fonts.mono(size: 14, weight: .medium)
+
+        serverPortField.translatesAutoresizingMaskIntoConstraints = false
+        serverPortField.borderStyle = .roundedRect
+        serverPortField.keyboardType = .numberPad
+        serverPortField.placeholder = "8765"
+        serverPortField.font = DesignTokens.Fonts.mono(size: 14, weight: .medium)
+
+        roleControl.translatesAutoresizingMaskIntoConstraints = false
+        roleControl.selectedSegmentTintColor = DesignTokens.Colors.accent
+        roleControl.setTitleTextAttributes([.foregroundColor: DesignTokens.Colors.ink], for: .normal)
+        roleControl.setTitleTextAttributes([.foregroundColor: DesignTokens.Colors.cardBackground], for: .selected)
+
+        applySettingsButton.translatesAutoresizingMaskIntoConstraints = false
+        applySettingsButton.configuration = .filled()
+        applySettingsButton.configuration?.title = "Apply"
+        applySettingsButton.configuration?.baseBackgroundColor = DesignTokens.Colors.accent
+        applySettingsButton.configuration?.baseForegroundColor = DesignTokens.Colors.cardBackground
+        applySettingsButton.addTarget(self, action: #selector(applyInlineSettingsTapped), for: .touchUpInside)
+
+        connectionLabel.font = DesignTokens.Fonts.mono(size: 12, weight: .medium)
+        connectionLabel.textColor = DesignTokens.Colors.ink
+
+        previewLabel.font = DesignTokens.Fonts.mono(size: 12, weight: .medium)
+        previewLabel.textColor = DesignTokens.Colors.sub
+
+        let serverRow = UIStackView(arrangedSubviews: [serverLabel, serverIPField, serverPortField])
+        serverRow.axis = .horizontal
+        serverRow.alignment = .center
+        serverRow.spacing = DesignTokens.Spacing.s
+
+        let roleRow = UIStackView(arrangedSubviews: [roleLabel, roleControl, applySettingsButton])
+        roleRow.axis = .horizontal
+        roleRow.alignment = .center
+        roleRow.spacing = DesignTokens.Spacing.s
+
+        let statusRow = UIStackView(arrangedSubviews: [connectionLabel, previewLabel])
+        statusRow.axis = .vertical
+        statusRow.alignment = .leading
+        statusRow.spacing = DesignTokens.Spacing.xs
+
+        let root = UIStackView(arrangedSubviews: [serverRow, roleRow, statusRow])
+        root.axis = .vertical
+        root.spacing = DesignTokens.Spacing.s
+        root.translatesAutoresizingMaskIntoConstraints = false
+        controlPanel.addSubview(root)
+
+        NSLayoutConstraint.activate([
+            serverLabel.widthAnchor.constraint(equalToConstant: 52),
+            roleLabel.widthAnchor.constraint(equalToConstant: 52),
+            serverIPField.widthAnchor.constraint(equalToConstant: 156),
+            serverPortField.widthAnchor.constraint(equalToConstant: 76),
+            roleControl.widthAnchor.constraint(equalToConstant: 120),
+            applySettingsButton.widthAnchor.constraint(equalToConstant: 84),
+
+            root.topAnchor.constraint(equalTo: controlPanel.topAnchor, constant: DesignTokens.Spacing.m),
+            root.leadingAnchor.constraint(equalTo: controlPanel.leadingAnchor, constant: DesignTokens.Spacing.m),
+            root.trailingAnchor.constraint(equalTo: controlPanel.trailingAnchor, constant: -DesignTokens.Spacing.m),
+            root.bottomAnchor.constraint(equalTo: controlPanel.bottomAnchor, constant: -DesignTokens.Spacing.m),
+        ])
+    }
+
+    private func makePanelLabel(_ text: String) -> UILabel {
+        let label = UILabel()
+        label.font = DesignTokens.Fonts.mono(size: 12, weight: .bold)
+        label.textColor = DesignTokens.Colors.sub
+        label.text = text
+        return label
+    }
+
+    private func syncInlineControlsFromSettings() {
+        serverIPField.text = settings.serverIP
+        serverPortField.text = "\(settings.serverPort)"
+        roleControl.selectedSegmentIndex = settings.cameraRole == "B" ? 1 : 0
+    }
+
+    @objc private func applyInlineSettingsTapped() {
+        view.endEditing(true)
+        let serverIP = serverIPField.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !serverIP.isEmpty else {
+            warningLabel.text = "Server IP 不可為空"
+            warningLabel.isHidden = false
+            return
+        }
+        guard let portText = serverPortField.text?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let serverPort = Int(portText),
+              (1...65535).contains(serverPort) else {
+            warningLabel.text = "Port 必須是 1-65535"
+            warningLabel.isHidden = false
+            return
         }
 
-        let timeSyncGate = ReadyCard.Gate(
-            state: timeSyncOK ? .pass : .fail,
-            label: "時間校正",
-            action: timeSyncOK ? nil : "以 dashboard 為準",
-            onTap: nil
+        let updated = SettingsViewController.Settings(
+            serverIP: serverIP,
+            serverPort: serverPort,
+            cameraRole: roleControl.selectedSegmentIndex == 1 ? "B" : "A"
         )
-        let serverGate = ReadyCard.Gate(
-            state: serverOK ? .pass : .fail,
-            label: serverOK ? "伺服器已連線" : "伺服器離線",
-            action: serverOK ? nil : "檢查 Wi-Fi / Settings IP",
-            onTap: nil
-        )
-        readyCard.update(.init(
-            cameraRole: settings.cameraRole,
-            timeSync: timeSyncGate,
-            server: serverGate,
-            hint: hint
-        ))
-        readyCard.isHidden = (state != .standby)
+        SettingsViewController.saveToUserDefaults(updated)
+        warningLabel.isHidden = true
+        applyUpdatedSettings()
+        updateUIForState()
     }
 
     private func setupStateBorder() {
@@ -2183,26 +2144,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func updateUIForState() {
-        // Upload status — hide the uninformative "Idle" default so the HUD
-        // only surfaces meaningful phases ("暫存完成", "時間校正完成", etc).
-        if lastUploadStatusText.isEmpty || lastUploadStatusText == "Idle" {
-            uploadStatusLabel.isHidden = true
-            uploadStatusLabel.text = nil
-        } else {
-            uploadStatusLabel.isHidden = false
-            uploadStatusLabel.text = lastUploadStatusText
+        connectionLabel.text = "LINK · \((healthMonitor?.statusText ?? "offline").uppercased())"
+        if !lastUploadStatusText.isEmpty, lastUploadStatusText != "Idle" {
+            connectionLabel.text = "\(connectionLabel.text ?? "") · \(lastUploadStatusText.uppercased())"
         }
-
-        // Last result line — reveal only once a real result has landed.
-        if !hasReceivedFirstResult {
-            lastResultLabel.isHidden = true
-        } else {
-            lastResultLabel.isHidden = false
-            lastResultLabel.text = lastResultText
-        }
-
-        chirpDebugLabel.isHidden = (state != .timeSyncWaiting)
-        updateReadyCard()
+        let previewState = previewRequestedByServer ? "REMOTE ON" : (session.isRunning ? "LOCAL ACTIVE" : "OFF")
+        let pathLabel = currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ")
+        previewLabel.text = "PREVIEW · \(previewState) · \(pathLabel.uppercased())"
 
         // State-transition-only side effects: re-running applyStateVisuals
         // on every tick resets the REC timer and rebuilds the pulse
@@ -2213,14 +2161,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             lastRenderedState = state
         }
     }
-
-    /// True once at least one upload result (success or fail) has been
-    /// observed, so we can start showing the `lastResultLabel`. Before then
-    /// the placeholder text would just be noise on first launch.
-    private var hasReceivedFirstResult: Bool {
-        lastResultText != Self.initialLastResultText
-    }
-    private static let initialLastResultText = "(尚無結果)"
 
     static func stateText(_ state: AppState) -> String {
         switch state {
