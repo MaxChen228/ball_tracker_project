@@ -621,6 +621,8 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 _JS_TEMPLATE = r"""
 (function () {
   const EXPECTED = ['A', 'B'];
+  const pageMode = document.body?.dataset.page || '';
+  const setupCompareMode = pageMode === 'setup';
 
   const sceneRoot = document.getElementById('scene-root');
   const devicesBox = document.getElementById('devices-body');
@@ -1259,7 +1261,7 @@ _JS_TEMPLATE = r"""
       const timeSynced = !!(deviceRecord && deviceRecord.time_synced);
       const pending = !!syncPending[cam];
       const isCal = calibrated.has(cam);
-      const previewOn = !!previewReq[cam];
+      const previewOn = setupCompareMode || !!previewReq[cam];
       const lastTs = calLastTs[cam];
       const autoRun = autoCalActive[cam] || null;
       const autoLast = autoCalLast[cam] || null;
@@ -1276,18 +1278,18 @@ _JS_TEMPLATE = r"""
         : (autoLast
           ? `${autoLast.status}${autoLast.result && autoLast.result.reprojection_px != null ? ' · ' + Number(autoLast.result.reprojection_px).toFixed(1) + 'px' : ''}`
           : (online ? 'idle' : 'offline'));
-      const previewBtn = `<button type="button" class="btn small preview-btn${previewOn ? ' active' : ''}" ` +
+      const previewBtn = setupCompareMode ? '' : (`<button type="button" class="btn small preview-btn${previewOn ? ' active' : ''}" ` +
         `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}">` +
-        `${previewOn ? 'PREVIEW ON' : 'PREVIEW'}</button>`;
+        `${previewOn ? 'PREVIEW ON' : 'PREVIEW'}</button>`);
       const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}" ${autoRun ? 'disabled' : ''}>` +
         `${autoRun ? 'Auto-cal…' : 'Run auto-cal'}</button>`;
       // Always render the panel so the row height stays stable; off
       // state shows a black placeholder. When on, the tickPreviewImages
       // loop (see below) cache-busts the <img src>.
       const previewPanel = `<div class="preview-panel${previewOn ? '' : ' off'}" data-preview-panel="${esc(cam)}">` +
-        `<img data-preview-img="${esc(cam)}" src="${previewOn ? ('/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now()) : ''}" alt="preview ${esc(cam)}">` +
+        `<img data-preview-img="${esc(cam)}" src="${'/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now()}" alt="preview ${esc(cam)}">` +
         `<svg class="plate-overlay" data-preview-overlay="${esc(cam)}" aria-hidden="true"><polygon></polygon></svg>` +
-        `<div class="placeholder">${previewOn ? '…' : 'Preview off'}</div>` +
+        `<div class="placeholder">${setupCompareMode ? '' : (previewOn ? '…' : 'Preview off')}</div>` +
         `</div>`;
       const virtCell = `<div class="virt-cell" data-virt-cell="${esc(cam)}">` +
         `<canvas data-virt-canvas="${esc(cam)}"></canvas>` +
@@ -1541,7 +1543,6 @@ _JS_TEMPLATE = r"""
         <form class="inline" method="POST" action="/sync/start">
           <button class="btn secondary" type="submit" ${armed ? 'disabled' : ''}>Mutual sync</button>
         </form>
-        <a class="btn-link secondary" href="/sync">Open sync page</a>
       </div>
       ${renderDetectionPaths(s)}`;
     if (sessionBox) sessionBox.innerHTML = sessHtml;
@@ -1912,6 +1913,20 @@ _JS_TEMPLATE = r"""
   // Keep server-side TTL alive. Server flag lapses in 5 s; 2 s refresh
   // absorbs one missed tick.
   async function tickPreviewRefresh() {
+    if (setupCompareMode) {
+      for (const img of document.querySelectorAll('img[data-preview-img]')) {
+        const cam = img.dataset.previewImg;
+        if (!cam) continue;
+        try {
+          await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: true }),
+          });
+        } catch (_) { /* swallow; next tick retries */ }
+      }
+      return;
+    }
     for (const cam of previewOn) {
       try {
         await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
@@ -1936,11 +1951,8 @@ _JS_TEMPLATE = r"""
     for (const img of document.querySelectorAll('img[data-preview-img]')) {
       const cam = img.dataset.previewImg;
       if (!cam) continue;
-      // Panel is always present; only poll the <img> src when the
-      // camera is actually preview-enabled. Off state stays on the
-      // black placeholder.
       const panel = img.closest('.preview-panel');
-      if (!panel || panel.classList.contains('off')) continue;
+      if (!panel || (!setupCompareMode && panel.classList.contains('off'))) continue;
       img.src = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + t;
       img.style.opacity = 1;
     }
@@ -2480,6 +2492,7 @@ def _render_device_rows(
     calibrations: list[str],
     calibration_last_ts: dict[str, float] | None = None,
     preview_requested: dict[str, bool] | None = None,
+    compare_mode: str = "toggle",
 ) -> str:
     """Merged Devices card row — status + per-cam calibration actions +
     per-cam preview toggle + inline MJPEG panel. JS will replace within
@@ -2494,7 +2507,8 @@ def _render_device_rows(
         online = dev is not None
         time_synced = bool(dev.get("time_synced")) if dev else False
         is_cal = cam_id in calibrated
-        preview_on = bool(preview_requested.get(cam_id))
+        always_on = compare_mode == "always_on"
+        preview_on = always_on or bool(preview_requested.get(cam_id))
         last_ts = calibration_last_ts.get(cam_id) if is_cal else None
         if not online:
             chip_cls, chip_label = "idle", "offline"
@@ -2509,22 +2523,22 @@ def _render_device_rows(
             f"last {html.escape(_fmt_hhmm(last_ts))}" if (is_cal and last_ts)
             else ("pending" if online else "offline")
         )
+        auto_cal_btn = (
+            f'<button type="button" class="btn small" '
+            f'data-auto-cal="{html.escape(cam_id)}">Run auto-cal</button>'
+        )
         preview_btn = (
             f'<button type="button" class="btn small preview-btn{" active" if preview_on else ""}" '
             f'data-preview-cam="{html.escape(cam_id)}" '
             f'data-preview-enabled="{1 if preview_on else 0}">'
             f'{"PREVIEW ON" if preview_on else "PREVIEW"}</button>'
-        )
-        auto_cal_btn = (
-            f'<button type="button" class="btn small" '
-            f'data-auto-cal="{html.escape(cam_id)}">Run auto-cal</button>'
-        )
+        ) if not always_on else ""
         compare_block = render_live_compare_camera(
             cam_id,
-            preview_src=(f"/camera/{html.escape(cam_id)}/preview" if preview_on else ""),
-            preview_placeholder=("…" if preview_on else "Preview off"),
+            preview_src=f"/camera/{html.escape(cam_id)}/preview?t=0",
+            preview_placeholder=("" if always_on else ("…" if preview_on else "Preview off")),
             virt_placeholder=("loading…" if is_cal else "not calibrated"),
-            preview_off=not preview_on,
+            preview_off=(not always_on and not preview_on),
         )
         return (
             f'<div class="device">'
@@ -2757,7 +2771,7 @@ def _render_session_body(
         f'<div class="session-actions">{arm_btn}{stop_btn}{clear_btn}</div>'
         f'{gate_row}'
         '<div class="card-subtitle">Time Sync</div>'
-        f'<div class="session-actions">{sync_trigger_btn}{sync_start_btn}<a class="btn-link secondary" href="/sync">Open sync page</a></div>'
+        f'<div class="session-actions">{sync_trigger_btn}{sync_start_btn}</div>'
         f'{_render_detection_paths_body(default_paths, session)}'
     )
 
