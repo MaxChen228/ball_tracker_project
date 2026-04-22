@@ -369,6 +369,18 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .preview-panel::after {{ top: 50%; left: calc(50% - 8px);
                           width: 16px; height: 1px; transform: translateY(-0.5px); }}
 .preview-panel.off::before, .preview-panel.off::after {{ display: none; }}
+/* Minimal marker-count chip. Top-left of the preview panel so it
+   doesn't cover the plate where the operator is framing. Only shown
+   when preview is on and the chip has data. */
+.marker-chip {{ position: absolute; top: 6px; left: 6px; z-index: 2;
+                 padding: 2px 6px; border-radius: 3px;
+                 font: 500 10px/1 var(--mono); letter-spacing: 0.08em;
+                 background: rgba(0, 0, 0, 0.55); color: #eaeaea;
+                 pointer-events: none; }}
+.marker-chip.ok {{ color: #7dffc0; }}
+.marker-chip.warn {{ color: #ffcf7a; }}
+.marker-chip.bad {{ color: #ff9a9a; }}
+.preview-panel.off .marker-chip {{ display: none; }}
 /* Virtual camera: 2D canvas showing the plate pentagon + principal-point
    cross reprojected through this camera's own K·[R|t]·P. Same idea as
    the viewer's bottom-row virt canvas — if the reprojected outline
@@ -1281,16 +1293,19 @@ _JS_TEMPLATE = r"""
         : (autoLast
           ? `${autoLast.status}${autoLast.result && autoLast.result.reprojection_px != null ? ' · ' + Number(autoLast.result.reprojection_px).toFixed(1) + 'px' : ''}`
           : (online ? 'idle' : 'offline'));
+      const previewDisabled = previewBusy || !online;
+      const autoCalDisabled = !!autoRun || !online;
       const previewBtn = (`<button type="button" class="btn small preview-btn${previewOn ? ' active' : ''}" ` +
         `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}" ` +
-        `${previewBusy ? 'disabled' : ''}>` +
+        `${previewDisabled ? 'disabled' : ''}>` +
         `${previewBusy ? (previewOn ? 'PREVIEW ON…' : 'PREVIEW…') : (previewOn ? 'PREVIEW ON' : 'PREVIEW')}</button>`);
-      const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}" ${autoRun ? 'disabled' : ''}>` +
+      const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}" ${autoCalDisabled ? 'disabled' : ''}>` +
         `${autoRun ? 'Auto-cal…' : 'Run auto-cal'}</button>`;
       // Always render the panel so the row height stays stable; off
       // state shows a black placeholder. When on, the tickPreviewImages
       // loop (see below) cache-busts the <img src>.
       const previewPanel = `<div class="preview-panel${previewOn ? '' : ' off'}" data-preview-panel="${esc(cam)}">` +
+        `<div class="marker-chip" data-marker-chip="${esc(cam)}">– markers</div>` +
         `<img data-preview-img="${esc(cam)}" src="${'/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now()}" alt="preview ${esc(cam)}">` +
         `<svg class="plate-overlay" data-preview-overlay="${esc(cam)}" aria-hidden="true"><polygon></polygon></svg>` +
         `<div class="placeholder">${previewOn ? '…' : 'Preview off'}</div>` +
@@ -1901,9 +1916,11 @@ _JS_TEMPLATE = r"""
   document.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-preview-cam]');
     if (!btn) return;
+    if (btn.disabled) return;
     const cam = btn.dataset.previewCam;
     if (!cam || pendingPreviewMutations.has(cam)) return;
     const enabled = btn.dataset.previewEnabled !== '1';
+    markPreviewOwned(cam, enabled);
     _lastDevKey = null;
     pendingPreviewMutations.add(cam);
     if (currentDevices !== null || currentCalibrations !== null) {
@@ -1940,10 +1957,47 @@ _JS_TEMPLATE = r"""
     }
   });
 
+  // Preview ownership is per-tab (sessionStorage), NOT server-persistent.
+  // Without this, reloading the page inherits whatever flag was last held
+  // by the prior tab session + keeps extending its TTL, so preview can
+  // never be "off by default after reload". Here we: (a) only refresh
+  // TTLs that THIS tab explicitly turned on, and (b) on first load, actively
+  // clear any server-side flag the tab doesn't own so the iPhone stops
+  // its capture without the 5 s TTL wait.
+  const PREVIEW_OWNED_KEY = 'ball_tracker.preview_owned';
+  function ownedPreviewCams() {
+    try { return new Set(JSON.parse(sessionStorage.getItem(PREVIEW_OWNED_KEY) || '[]')); }
+    catch { return new Set(); }
+  }
+  function persistOwnedPreviewCams(s) {
+    try { sessionStorage.setItem(PREVIEW_OWNED_KEY, JSON.stringify([...s])); } catch {}
+  }
+  function markPreviewOwned(cam, on) {
+    const s = ownedPreviewCams();
+    if (on) s.add(cam); else s.delete(cam);
+    persistOwnedPreviewCams(s);
+  }
+  async function resetUnownedPreviewsOnce() {
+    // Runs after the first tickStatus populates currentPreviewRequested.
+    const owned = ownedPreviewCams();
+    const toClear = Object.keys(currentPreviewRequested || {}).filter(c => !owned.has(c));
+    for (const cam of toClear) {
+      try {
+        await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: false }),
+        });
+      } catch (_) {}
+    }
+    if (toClear.length) await tickStatus();
+  }
   // Keep server-side TTL alive. Server flag lapses in 5 s; 2 s refresh
-  // absorbs one missed tick.
+  // absorbs one missed tick. Only refresh cams THIS tab owns.
   async function tickPreviewRefresh() {
+    const owned = ownedPreviewCams();
     for (const cam of Object.keys(currentPreviewRequested || {})) {
+      if (!owned.has(cam)) continue;
       try {
         await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
           method: 'POST',
@@ -1974,6 +2028,29 @@ _JS_TEMPLATE = r"""
     }
   }
   setInterval(tickPreviewImages, 200);
+
+  // Marker count chip. Polls each ACTIVE preview camera at ~1 Hz and
+  // paints a minimal "N markers" chip over the real-preview panel. The
+  // server endpoint runs aruco on the latest buffered JPEG — no extra
+  // iPhone traffic. Colour-codes so operator can tell at a glance
+  // whether auto-cal has anything to work with: ≥4 ok, 1-3 warn, 0 bad.
+  async function tickMarkerChips() {
+    const cams = Object.keys(currentPreviewRequested || {});
+    for (const cam of cams) {
+      const chip = document.querySelector(`[data-marker-chip="${CSS.escape(cam)}"]`);
+      if (!chip) continue;
+      try {
+        const r = await fetch('/camera/' + encodeURIComponent(cam) + '/marker_count', { cache: 'no-store' });
+        if (!r.ok) continue;
+        const body = await r.json();
+        const count = Number(body.count || 0);
+        chip.textContent = `${count} marker${count === 1 ? '' : 's'}`;
+        chip.classList.remove('ok', 'warn', 'bad');
+        chip.classList.add(count >= 4 ? 'ok' : (count > 0 ? 'warn' : 'bad'));
+      } catch (_) { /* next tick retries */ }
+    }
+  }
+  setInterval(tickMarkerChips, 1000);
 
   // Per-camera mini 3D pose canvas — renders beside each preview panel.
   // Reuses `basePlot` (from /calibration/state) by keeping traces with
@@ -2022,6 +2099,7 @@ _JS_TEMPLATE = r"""
   document.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-auto-cal]');
     if (!btn) return;
+    if (btn.disabled) return;
     const cam = btn.dataset.autoCal;
     btn.disabled = true;
     const originalLabel = btn.textContent;
@@ -2447,7 +2525,7 @@ _JS_TEMPLATE = r"""
 
   // (1 s) and is the only high-frequency tick.
   initLiveStream();
-  tickStatus();
+  tickStatus().then(resetUnownedPreviewsOnce);
   tickCalibration();
   tickEvents();
   tickExtendedMarkers();
@@ -2539,14 +2617,15 @@ def _render_device_rows(
             f"last {html.escape(_fmt_hhmm(last_ts))}" if (is_cal and last_ts)
             else ("pending" if online else "offline")
         )
+        disabled_attr = "" if online else " disabled"
         auto_cal_btn = (
             f'<button type="button" class="btn small" '
-            f'data-auto-cal="{html.escape(cam_id)}">Run auto-cal</button>'
+            f'data-auto-cal="{html.escape(cam_id)}"{disabled_attr}>Run auto-cal</button>'
         )
         preview_btn = (
             f'<button type="button" class="btn small preview-btn{" active" if preview_on else ""}" '
             f'data-preview-cam="{html.escape(cam_id)}" '
-            f'data-preview-enabled="{1 if preview_on else 0}">'
+            f'data-preview-enabled="{1 if preview_on else 0}"{disabled_attr}>'
             f'{"PREVIEW ON" if preview_on else "PREVIEW"}</button>'
         ) if not always_on else ""
         compare_block = render_live_compare_camera(

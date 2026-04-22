@@ -1237,6 +1237,26 @@ class State:
                 )[0]
                 del self._devices[oldest]
 
+    def mark_device_offline(self, camera_id: str) -> None:
+        """Age out `last_seen_at` so the device shows offline on the very
+        next `/status` poll instead of waiting for the stale window to
+        close. Called from the WS disconnect `finally` — the phone has
+        explicitly dropped its control channel (e.g. screen lock, app
+        backgrounded), so the 3 s grace that a dropped heartbeat would
+        earn is no longer appropriate."""
+        with self._lock:
+            dev = self._devices.get(camera_id)
+            if dev is None:
+                return
+            self._devices[camera_id] = Device(
+                camera_id=dev.camera_id,
+                last_seen_at=self._time_fn() - _DEVICE_STALE_S - 0.1,
+                time_synced=dev.time_synced,
+                time_sync_id=dev.time_sync_id,
+                time_sync_at=dev.time_sync_at,
+                sync_anchor_timestamp_s=dev.sync_anchor_timestamp_s,
+            )
+
     def _common_time_sync_id_locked(self, now: float) -> str | None:
         fresh = [
             d for d in self._devices.values()
@@ -2885,6 +2905,14 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
         pass
     finally:
         device_ws.disconnect(camera_id, websocket)
+        # Dashboard `/status` derives online-ness from `Device.last_seen_at`
+        # with a 3 s stale window, so without this the UI keeps painting the
+        # cam as online for up to 3 s after the phone sleeps / drops WS.
+        state.mark_device_offline(camera_id)
+        # Also clear any live preview request — there's no client to push
+        # to anymore, and leaving the TTL alive would re-arm the phone the
+        # instant it reconnects.
+        state._preview.request(camera_id, enabled=False)
         await sse_hub.broadcast(
             "device_status",
             {"cam": camera_id, "online": False, "ws_connected": False},
@@ -4022,6 +4050,42 @@ def camera_preview_mjpeg(camera_id: str) -> Response:
     )
 
 
+@app.get("/camera/{camera_id}/marker_count")
+def camera_marker_count(camera_id: str) -> dict[str, Any]:
+    """Return `{count, plate_ids, extended_ids}` for whatever markers are
+    visible in the latest buffered preview JPEG. Used by the dashboard to
+    paint a minimal count chip over each preview panel so the operator
+    knows whether auto-cal has anything to work with BEFORE pressing the
+    button. Returns zeros when there's no frame yet — still a valid
+    answer (the panel just paints "0 markers")."""
+    _validate_camera_id_or_422(camera_id)
+    got = state._preview.latest(camera_id, max_age_s=_PREVIEW_FRAME_MAX_AGE_S)
+    if got is None:
+        return {"count": 0, "plate_ids": [], "extended_ids": []}
+    jpeg_bytes, _ = got
+    try:
+        from calibration_solver import (
+            PLATE_MARKER_WORLD,
+            detect_all_markers_in_dict,
+        )
+        import cv2  # noqa: WPS433
+        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is None:
+            return {"count": 0, "plate_ids": [], "extended_ids": []}
+        markers = detect_all_markers_in_dict(bgr)
+        plate_ids = sorted(m.id for m in markers if m.id in PLATE_MARKER_WORLD)
+        extended_ids = sorted(m.id for m in markers if m.id not in PLATE_MARKER_WORLD)
+        return {
+            "count": len(markers),
+            "plate_ids": plate_ids,
+            "extended_ids": extended_ids,
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.debug("marker_count failed camera=%s: %s", camera_id, e)
+        return {"count": 0, "plate_ids": [], "extended_ids": []}
+
+
 @app.post("/camera/{camera_id}/preview_request")
 async def camera_preview_request(
     camera_id: str,
@@ -4796,6 +4860,11 @@ async def _run_auto_calibration(
     frames_seen = 0
     good_frames = 0
     stable_frames = 0
+    # Bail quickly when the view has nothing to solve against — the full
+    # 6 s / 10-frame burst is only useful once at least one known marker
+    # has appeared. Two consecutive empty frames is a strong enough signal
+    # that the phone isn't pointed at the plate.
+    consecutive_empty_frames = 0
     first_shape: tuple[int, int] | None = None
     intrinsics: IntrinsicsPayload | None = None
     prior: CalibrationSnapshot | None = None
@@ -4843,6 +4912,7 @@ async def _run_auto_calibration(
         ]
         frames_seen += 1
         if not detected:
+            consecutive_empty_frames += 1
             if track_run:
                 state.update_auto_cal_run(
                     camera_id,
@@ -4851,7 +4921,17 @@ async def _run_auto_calibration(
                     markers_visible=0,
                     summary="Searching for known markers",
                 )
+            if consecutive_empty_frames >= 2:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"no known markers visible on camera {camera_id!r} "
+                        "after 2 frames — aim the lens at the plate (IDs 0-5) "
+                        "before retrying"
+                    ),
+                )
             continue
+        consecutive_empty_frames = 0
         frame_solution, solver, _pnp_ids = _solve_auto_cal_solution(
             detected,
             intrinsics=intrinsics,
