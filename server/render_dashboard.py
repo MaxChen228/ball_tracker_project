@@ -633,6 +633,7 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 
 _JS_TEMPLATE = r"""
 (function () {
+  console.info('[ball_tracker] dashboard JS boot', { build: 'preview-refactor-v2' });
   const EXPECTED = ['A', 'B'];
   const pageMode = document.body?.dataset.page || '';
   const setupCompareMode = pageMode === 'setup';
@@ -1910,18 +1911,27 @@ _JS_TEMPLATE = r"""
     // (Mutual-sync kickoff is handled on /sync now.)
   });
 
-  // Live-preview toggle (Phase 4a). Server is authoritative: the client
-  // only disables the button while the POST is in flight, then re-hydrates
-  // from `/status` immediately after the server acknowledges.
-  document.addEventListener('click', async (e) => {
+  // Live-preview toggle. Server is authoritative — click POSTs the
+  // intent, the next /status tick reconciles. Previously we awaited
+  // tickStatus inline which, under connection-pool saturation (preview
+  // img poll + marker_count poll + status poll + SSE), would hang the
+  // finally block and leave the cam in pendingPreviewMutations — then
+  // every subsequent click hit the `pendingPreviewMutations.has(cam)`
+  // early-return and felt "stuck". Now: fire-and-forget. 4 s watchdog
+  // guarantees pending clears even if the POST hangs.
+  document.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-preview-cam]');
     if (!btn) return;
     if (btn.disabled) return;
     const cam = btn.dataset.previewCam;
     if (!cam || pendingPreviewMutations.has(cam)) return;
     const enabled = btn.dataset.previewEnabled !== '1';
-    _lastDevKey = null;
     pendingPreviewMutations.add(cam);
+    // Optimistic: flip currentPreviewRequested immediately so the next
+    // renderDevices paints the final state. /status tick will reconcile.
+    if (enabled) currentPreviewRequested[cam] = true;
+    else delete currentPreviewRequested[cam];
+    _lastDevKey = null;
     if (currentDevices !== null || currentCalibrations !== null) {
       renderDevices({
         devices: currentDevices || [],
@@ -1932,15 +1942,7 @@ _JS_TEMPLATE = r"""
         calibration_last_ts: currentCalibrationLastTs || {},
       });
     }
-    try {
-      await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled }),
-      });
-      await tickStatus();
-    } catch (_) { /* next tick surfaces failure via /status */ }
-    finally {
+    const clearPending = () => {
       pendingPreviewMutations.delete(cam);
       _lastDevKey = null;
       if (currentDevices !== null || currentCalibrations !== null) {
@@ -1953,7 +1955,19 @@ _JS_TEMPLATE = r"""
           calibration_last_ts: currentCalibrationLastTs || {},
         });
       }
-    }
+    };
+    const watchdog = setTimeout(clearPending, 4000);
+    fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    })
+      .catch(() => {})
+      .finally(() => {
+        clearTimeout(watchdog);
+        clearPending();
+        tickStatus();
+      });
   });
 
   // Preview is a simple server-owned flag: click flips it, server pushes
