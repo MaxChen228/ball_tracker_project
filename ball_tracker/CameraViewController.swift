@@ -461,7 +461,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                     self?.flashErrorBanner(text, duration: duration)
                 },
                 refreshUI: { [weak self] in self?.updateUIForState() },
-                makeMutualSyncAudio: { MutualSyncAudio() }
+                makeMutualSyncAudio: { emitAtS, recordDurationS in
+                    MutualSyncAudio(emitAtS: emitAtS, recordingDurationS: recordDurationS)
+                }
             )
         )
     }
@@ -484,7 +486,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 getSyncAnchorTimestampS: { [weak self] in self?.syncCoordinator.lastSyncAnchorTimestampS },
                 getChirpSnapshot: { [weak self] in self?.captureRuntime.chirpSnapshot() },
                 startTimeSync: { [weak self] syncId in self?.syncCoordinator.startTimeSync(syncId: syncId) },
-                applyMutualSync: { [weak self] syncId in self?.syncCoordinator.applyMutualSync(syncId: syncId) },
+                applyMutualSync: { [weak self] syncId, emitAtS, recordDurationS in
+                    self?.syncCoordinator.applyMutualSync(syncId: syncId, emitAtS: emitAtS, recordDurationS: recordDurationS)
+                },
                 applyRemoteArm: { [weak self] in self?.applyRemoteArm() },
                 applyRemoteDisarm: { [weak self] in self?.applyRemoteDisarm() },
                 updateTimeSyncServerState: { [weak self] confirmed, syncId in

@@ -777,11 +777,10 @@ final class ServerUploader: @unchecked Sendable {
         let audio_start_pts_s: Double
         /// Informational — WAV header is authoritative on decode.
         let sample_rate: Int
-        /// Host-clock seconds at which the local player node was
-        /// instructed to play this run's chirp. Optional; debug cross-
-        /// check only — the server compares it against its detected
-        /// self-chirp center to diagnose "did we emit when planned?".
-        let emission_pts_s: Double?
+        /// Host-clock seconds at which each burst chirp was played.
+        /// One entry per scheduled emission; matches the emit_at_s
+        /// count the server pushed in the sync_run WS message.
+        let emission_pts_s: [Double]
     }
 
     /// Ship the full 3 s listening window to the server for detection.

@@ -7,7 +7,7 @@ import re
 import secrets
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
@@ -46,6 +46,23 @@ from live_pairing import LivePairingSession
 logger = logging.getLogger("ball_tracker")
 
 _DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
+
+
+@dataclass
+class SyncParams:
+    """Server-owned burst parameters for one mutual-sync run.
+    Pushed per-camera in the WS sync_run message so iOS never needs a
+    rebuild to adjust timing, burst count, or recording duration.
+
+    A emits during emit_a_at_s; B emits during emit_b_at_s. Staggered
+    (non-overlapping) windows eliminate self-interference without needing
+    disjoint frequency bands, though dual-band is still used as an extra
+    disambiguation layer. search_window_s controls the ±window the server's
+    windowed detector searches around each expected emission time."""
+    emit_a_at_s: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.7])
+    emit_b_at_s: list[float] = field(default_factory=lambda: [1.8, 2.0, 2.2])
+    record_duration_s: float = 4.0
+    search_window_s: float = 0.3
 
 # Seconds a heartbeat remains fresh. A phone beating at 1 Hz drops off the
 # "online" list after missing ~3 beats — conservative enough to tolerate a
@@ -302,6 +319,7 @@ class State:
         self._chirp_detect_threshold: float = 0.18
         self._mutual_sync_threshold: float = 0.10
         self._heartbeat_interval_s: float = 1.0
+        self._sync_params: SyncParams = SyncParams()
         self._tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
         # Capture resolution (image height in px) pushed to iOS via WS settings.
         # Allowed set is {720, 1080}. Default 1080p — always works.
@@ -1529,6 +1547,14 @@ class State:
             self._mutual_sync_threshold = v
             self._persist_runtime_settings_locked()
             return v
+
+    def sync_params(self) -> SyncParams:
+        with self._lock:
+            return self._sync_params
+
+    def set_sync_params(self, params: SyncParams) -> None:
+        with self._lock:
+            self._sync_params = params
 
     def heartbeat_interval_s(self) -> float:
         with self._lock:

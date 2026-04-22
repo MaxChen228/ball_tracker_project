@@ -26,7 +26,7 @@ final class CameraSyncCoordinator {
         let hideBanner: () -> Void
         let flashErrorBanner: (String, TimeInterval) -> Void
         let refreshUI: () -> Void
-        let makeMutualSyncAudio: () -> MutualSyncAudio
+        let makeMutualSyncAudio: ([Double], Double) -> MutualSyncAudio
     }
 
     private let deps: Dependencies
@@ -38,6 +38,8 @@ final class CameraSyncCoordinator {
 
     private var syncAudio: MutualSyncAudio?
     private var pendingSyncId: String?
+    private var pendingSyncEmitAtS: [Double] = [0.3]
+    private var pendingSyncRecordDurationS: Double = 3.0
     private var syncWatchdog: DispatchWorkItem?
 
     init(dependencies: Dependencies) {
@@ -98,7 +100,7 @@ final class CameraSyncCoordinator {
         deps.refreshUI()
     }
 
-    func applyMutualSync(syncId: String) {
+    func applyMutualSync(syncId: String, emitAtS: [Double] = [0.3], recordDurationS: Double = 3.0) {
         guard deps.getState() == .standby else {
             syncLog.warning("sync_run ignored state=\(CameraViewController.stateText(self.deps.getState()), privacy: .public) sync_id=\(syncId, privacy: .public)")
             deps.uploader().postSyncLog(event: "ignored", detail: [
@@ -108,12 +110,15 @@ final class CameraSyncCoordinator {
             ])
             return
         }
-        syncLog.info("camera entering mutual-sync sync_id=\(syncId, privacy: .public) cam=\(self.deps.getCameraRole(), privacy: .public)")
+        syncLog.info("camera entering mutual-sync sync_id=\(syncId, privacy: .public) cam=\(self.deps.getCameraRole(), privacy: .public) n_bursts=\(emitAtS.count, privacy: .public) record_s=\(recordDurationS, privacy: .public)")
         deps.uploader().postSyncLog(event: "enter", detail: [
             "sync_id": .string(syncId),
             "role": .string(deps.getCameraRole()),
+            "n_bursts": .int(emitAtS.count),
         ])
         pendingSyncId = syncId
+        pendingSyncEmitAtS = emitAtS.isEmpty ? [0.3] : emitAtS
+        pendingSyncRecordDurationS = max(recordDurationS, 1.0)
         startMutualSync()
     }
 
@@ -186,7 +191,7 @@ final class CameraSyncCoordinator {
             return
         }
 
-        let audio = deps.makeMutualSyncAudio()
+        let audio = deps.makeMutualSyncAudio(pendingSyncEmitAtS, pendingSyncRecordDurationS)
         syncAudio = audio
         deps.uploader().postSyncLog(event: "recording_started", detail: [
             "role": .string(role),
@@ -212,12 +217,13 @@ final class CameraSyncCoordinator {
             }
         )
 
+        let timeoutS = pendingSyncRecordDurationS + 3.0
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.deps.getState() == .mutualSyncing else { return }
             self.abortMutualSync(reason: "timeout")
         }
         syncWatchdog = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeoutS, execute: work)
     }
 
     private func handleMutualSyncRecording(
@@ -253,6 +259,7 @@ final class CameraSyncCoordinator {
             sample_rate: Int(result.sampleRate),
             emission_pts_s: result.emissionPtsS
         )
+        syncLog.info("sync uploading wav_bytes=\(result.wavData.count) n_emissions=\(result.emissionPtsS.count, privacy: .public)")
         deps.uploader().uploadSyncAudio(meta: meta, wavData: result.wavData) { [weak self] upResult in
             DispatchQueue.main.async {
                 guard let self else { return }

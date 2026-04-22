@@ -8,6 +8,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
 from schemas import SyncLogBody, SyncReport
+from state import SyncParams
 
 router = APIRouter()
 
@@ -31,9 +32,17 @@ async def sync_start(request: Request) -> dict[str, Any]:
     assert run is not None
     state.reset_sync_telemetry_peaks(None)
     state.set_expected_sync_id([d.camera_id for d in state.online_devices()], run.id)
-    await device_ws.broadcast(
-        {cam.camera_id: {"type": "sync_run", "sync_id": run.id} for cam in state.online_devices()}
-    )
+    params = state.sync_params()
+    per_cam = {
+        cam.camera_id: {
+            "type": "sync_run",
+            "sync_id": run.id,
+            "emit_at_s": params.emit_a_at_s if cam.camera_id == "A" else params.emit_b_at_s,
+            "record_duration_s": params.record_duration_s,
+        }
+        for cam in state.online_devices()
+    }
+    await device_ws.broadcast(per_cam)
     return {"ok": True, "sync": run.to_dict()}
 
 
@@ -82,10 +91,15 @@ async def sync_audio_upload(
     audio_dir.mkdir(parents=True, exist_ok=True)
     wav_path = audio_dir / f"{sync_id}_{camera_id}.wav"
     wav_path.write_bytes(wav_bytes)
+    params = state.sync_params()
+    emit_at_self = params.emit_a_at_s if role == "A" else params.emit_b_at_s
+    emit_at_other = params.emit_b_at_s if role == "A" else params.emit_a_at_s
     try:
         report, debug = sync_audio_detect.detect_sync_report(
             wav_bytes=wav_bytes, sync_id=sync_id, camera_id=camera_id,
             role=role, audio_start_pts_s=audio_start_pts_s,
+            emit_at_s_self=emit_at_self, emit_at_s_other=emit_at_other,
+            search_window_s=params.search_window_s,
         )
     except Exception as e:
         logger.exception("sync_audio_upload detection failed cam=%s", camera_id)
@@ -114,6 +128,8 @@ async def sync_audio_upload(
             "psr_other": debug["psr_other"],
             "duration_s": debug["duration_s"],
             "sample_rate": debug["sample_rate"],
+            "n_burst": debug["n_burst"],
+            "windowed": debug["windowed"],
             "emission_pts_s": emission_pts_s,
             "wav_path": str(wav_path.relative_to(state.data_dir)),
         },
@@ -233,3 +249,42 @@ async def sync_log_post(body: SyncLogBody) -> dict[str, Any]:
     from main import state
     state.log_sync_event(source=body.camera_id, event=body.event, detail=body.detail)
     return {"ok": True}
+
+
+@router.get("/sync/params")
+def sync_params_get() -> dict[str, Any]:
+    from main import state
+    p = state.sync_params()
+    return {
+        "emit_a_at_s": p.emit_a_at_s,
+        "emit_b_at_s": p.emit_b_at_s,
+        "record_duration_s": p.record_duration_s,
+        "search_window_s": p.search_window_s,
+    }
+
+
+@router.post("/settings/sync_params")
+async def sync_params_set(request: Request) -> dict[str, Any]:
+    from main import state
+    try:
+        body = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"JSON parse error: {e}") from e
+    cur = state.sync_params()
+    emit_a = body.get("emit_a_at_s", cur.emit_a_at_s)
+    emit_b = body.get("emit_b_at_s", cur.emit_b_at_s)
+    dur = float(body.get("record_duration_s", cur.record_duration_s))
+    win = float(body.get("search_window_s", cur.search_window_s))
+    if not isinstance(emit_a, list) or not isinstance(emit_b, list):
+        raise HTTPException(status_code=422, detail="emit_a_at_s and emit_b_at_s must be arrays")
+    if dur < 1.0 or dur > 30.0:
+        raise HTTPException(status_code=422, detail="record_duration_s must be 1-30 s")
+    if win < 0.05 or win > 2.0:
+        raise HTTPException(status_code=422, detail="search_window_s must be 0.05-2.0 s")
+    state.set_sync_params(SyncParams(
+        emit_a_at_s=[float(t) for t in emit_a],
+        emit_b_at_s=[float(t) for t in emit_b],
+        record_duration_s=dur,
+        search_window_s=win,
+    ))
+    return {"ok": True, **sync_params_get()}

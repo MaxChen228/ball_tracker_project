@@ -476,10 +476,13 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
         # until the run times out.
         active_sync = state.current_sync()
         if active_sync is not None and camera_id not in active_sync.reports:
-            await device_ws.send(
-                camera_id,
-                {"type": "sync_run", "sync_id": active_sync.id},
-            )
+            _p = state.sync_params()
+            await device_ws.send(camera_id, {
+                "type": "sync_run",
+                "sync_id": active_sync.id,
+                "emit_at_s": _p.emit_a_at_s if camera_id == "A" else _p.emit_b_at_s,
+                "record_duration_s": _p.record_duration_s,
+            })
         await sse_hub.broadcast(
             "device_status",
             {"cam": camera_id, "online": True, "ws_connected": True},
