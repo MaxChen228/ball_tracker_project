@@ -884,6 +884,13 @@ def test_dashboard_no_longer_renders_telemetry_overlay():
     assert 'id="telemetry-body"' not in body
 
 
+def test_setup_page_no_longer_renders_preview_marker_count_chip():
+    client = TestClient(app)
+    r = client.get("/setup")
+    assert r.status_code == 200
+    assert "data-marker-chip=" not in r.text
+
+
 def test_sync_page_no_longer_redirects_to_setup():
     client = TestClient(app)
     r = client.get("/sync")

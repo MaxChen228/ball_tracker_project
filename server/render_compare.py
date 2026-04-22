@@ -247,7 +247,6 @@ def render_live_compare_camera(
         f'<div class="camera-compare-grid">'
         f'<div class="preview-panel{off_cls}{extra_cls}" {preview_panel_attr}="{cam}">'
         f'<span class="compare-cell-label real">{real}</span>'
-        f'<div class="marker-chip" data-marker-chip="{cam}">– markers</div>'
         # Skip src when panel is off so the browser doesn't auto-fetch a
         # preview endpoint that's guaranteed to 404 (no buffered frame
         # because iOS isn't pushing).
