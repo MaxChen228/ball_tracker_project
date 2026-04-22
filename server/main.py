@@ -126,7 +126,6 @@ from chirp import chirp_wav_bytes
 from preview import (
     FRAME_MAX_AGE_S as _PREVIEW_FRAME_MAX_AGE_S,
     PreviewBuffer,
-    REQUEST_TTL_S as _PREVIEW_REQUEST_TTL_S,
 )
 from marker_registry import MarkerRegistryDB
 from calibration_solver import (
@@ -4039,12 +4038,12 @@ def camera_preview_mjpeg(camera_id: str) -> Response:
                     else:
                         # No new frame this tick — keep stream alive.
                         if idle_deadline is None:
-                            idle_deadline = now + _PREVIEW_REQUEST_TTL_S * 2
+                            idle_deadline = now + 10.0
                         elif now > idle_deadline:
                             break
                 else:
                     if idle_deadline is None:
-                        idle_deadline = now + _PREVIEW_REQUEST_TTL_S * 2
+                        idle_deadline = now + 10.0
                     elif now > idle_deadline:
                         break
                 time.sleep(tick_s)

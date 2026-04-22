@@ -1,24 +1,25 @@
 """Live-preview buffer for the dashboard's "what's the phone framing?" panel.
 
-Part of Phase 4a (iOS-decoupling). The iPhone pushes JPEG-encoded preview
-frames (~10 fps, 480p, quality 0.5) to the server ONLY when the dashboard
-has requested preview for that camera. The buffer keeps one latest JPEG per
-camera in memory; the dashboard pulls via `/camera/{id}/preview` (one-shot)
-or `/camera/{id}/preview.mjpeg` (multipart stream).
+Single source of truth for whether a camera is streaming preview frames:
 
-Request semantics:
-  - Dashboard POSTs `/camera/{id}/preview_request {enabled: true}` every
-    ~2 s while its preview panel is open.
-  - Server keeps the flag live for `REQUEST_TTL_S` (5 s) after each call.
-  - WS settings payloads carry `preview_requested: bool` for the beating
-    camera; iPhones start/stop pushing based on that field.
-  - When the dashboard panel closes (or the browser tab dies), the
-    dashboard stops calling preview_request; the TTL lapses; the phone's
-    next WS settings payload sets `preview_requested=false` and the uploader
-    stops.
+  - Dashboard POSTs `/camera/{id}/preview_request {enabled: bool}` — flips
+    a per-camera flag. No TTL, no keep-alive, no client heartbeat games.
+  - WS settings payloads carry `preview_requested: bool`; iPhones start /
+    stop pushing based on it.
+  - When the phone's WS drops (sleep, app background, network blip) the
+    server flips the flag back to False in the WS-disconnect `finally`,
+    so a reconnecting phone doesn't resume pushing from a stale operator
+    intent. Operator must explicitly re-enable.
+
+Earlier designs kept a client-side heartbeat that extended a server TTL.
+That was brittle: three concurrent loops (tickPreviewRefresh, SSE,
+tickStatus) plus sessionStorage-gated ownership meant a toggle-off could
+silently be re-armed by a stale refresh from another path. First-principle
+fix: the server owns state, the client only mutates + observes.
 
 Thread-safety: single `threading.Lock` covers all mutations + reads. The
-buffer is tiny (2 cameras × 1 JPEG each) so coarse locking is fine.
+buffer is tiny (a handful of cameras × 1 JPEG each) so coarse locking is
+fine.
 """
 from __future__ import annotations
 
@@ -31,11 +32,6 @@ from typing import Callable
 # is ~30× slack to reject a misbehaving client pushing full-size stills
 # without rejecting legitimate mid-quality frames.
 _MAX_JPEG_BYTES = 2 * 1024 * 1024
-
-# How long a `request()` call keeps the per-camera flag live. Dashboard
-# JS re-hits the endpoint every ~2 s while its preview panel is open, so
-# 5 s absorbs one missed tick without flapping.
-REQUEST_TTL_S = 5.0
 
 # Preview is expected to refresh at ~10 fps while active. If the newest
 # buffered frame is older than this, treat it as stale and hide it rather
@@ -54,9 +50,10 @@ class PreviewBuffer:
         self._lock = Lock()
         # camera_id → (jpeg_bytes, timestamp_s). One slot per camera.
         self._frames: dict[str, tuple[bytes, float]] = {}
-        # camera_id → wall-clock expiry. Absent / past-expiry means the
-        # dashboard is not currently watching this camera.
-        self._requests: dict[str, float] = {}
+        # Set of camera_ids the operator has requested preview for. No TTL:
+        # entries are flipped on/off only by explicit request() calls or
+        # by the WS-disconnect handler in main.py.
+        self._requested: set[str] = set()
         self._time_fn = time_fn
 
     # ---------- frame plane ----------
@@ -93,7 +90,7 @@ class PreviewBuffer:
 
     def clear(self, camera_id: str) -> None:
         """Drop the cached frame for one camera. Used when its request
-        flag lapses so a stale thumbnail can't leak into a later
+        flag flips off so a stale thumbnail can't leak into a later
         dashboard session."""
         with self._lock:
             self._frames.pop(camera_id, None)
@@ -101,47 +98,25 @@ class PreviewBuffer:
     # ---------- request-flag plane ----------
 
     def request(self, camera_id: str, enabled: bool) -> None:
-        """Turn preview on or off for this camera. `enabled=True` refreshes
-        the TTL; `enabled=False` both clears the flag and drops any cached
-        frame so the dashboard doesn't serve a stale thumbnail after
-        toggling off."""
+        """Flip preview on or off for this camera. No TTL — the flag
+        persists until an explicit `enabled=False` call or the WS
+        disconnect handler clears it. `enabled=False` also drops the
+        cached frame so the dashboard can't paint a stale thumbnail."""
         with self._lock:
             if enabled:
-                self._requests[camera_id] = self._time_fn() + REQUEST_TTL_S
+                self._requested.add(camera_id)
             else:
-                self._requests.pop(camera_id, None)
+                self._requested.discard(camera_id)
                 self._frames.pop(camera_id, None)
 
     def is_requested(self, camera_id: str) -> bool:
-        """True if the dashboard's TTL-gated flag for this camera is
-        still live. Lazily sweeps past-expiry entries on read so a
-        closed dashboard panel doesn't keep phones pushing forever."""
+        """True when the operator has preview turned on for this cam."""
         with self._lock:
-            exp = self._requests.get(camera_id)
-            if exp is None:
-                return False
-            if self._time_fn() >= exp:
-                # Lazy sweep: the dashboard stopped pinging. Drop the
-                # frame too so a later viewer doesn't see stale bytes.
-                self._requests.pop(camera_id, None)
-                self._frames.pop(camera_id, None)
-                return False
-            return True
+            return camera_id in self._requested
 
     def requested_map(self) -> dict[str, bool]:
-        """Snapshot of `{camera_id: is_requested}` across every known
-        camera. Used by `/status` so the dashboard JS can paint each
-        Devices row with the right toggle state. Lazily sweeps too."""
-        out: dict[str, bool] = {}
-        now = self._time_fn()
+        """Snapshot of `{camera_id: True}` for every cam with preview on.
+        Used by `/status` so the dashboard paints each Devices row with
+        the right toggle state."""
         with self._lock:
-            dead: list[str] = []
-            for cam, exp in self._requests.items():
-                if now >= exp:
-                    dead.append(cam)
-                else:
-                    out[cam] = True
-            for cam in dead:
-                self._requests.pop(cam, None)
-                self._frames.pop(cam, None)
-        return out
+            return {cam: True for cam in self._requested}

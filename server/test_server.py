@@ -2039,17 +2039,22 @@ def test_preview_push_and_fetch_round_trip():
     assert r.status_code == 404
 
 
-def test_preview_request_flag_expires_after_ttl(tmp_path, monkeypatch):
+def test_preview_request_flag_persists_without_ttl(tmp_path, monkeypatch):
+    # Preview is a server-owned bool — no TTL / keep-alive. Enabled stays
+    # enabled until an explicit False or a WS-disconnect clears it.
     clock = [1000.0]
     def fake_time() -> float:
         return clock[0]
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
     main.state._preview.request("A", enabled=True)
     assert main.state._preview.is_requested("A")
-    # Walk past the TTL.
-    clock[0] += main._PREVIEW_REQUEST_TTL_S + 0.1
+    # Jump an hour into the future — flag must NOT auto-expire.
+    clock[0] += 3600.0
+    assert main.state._preview.is_requested("A")
+    assert main.state._preview.requested_map() == {"A": True}
+    # Explicit off — flag drops.
+    main.state._preview.request("A", enabled=False)
     assert not main.state._preview.is_requested("A")
-    # Lazy sweep dropped the entry — requested_map is empty.
     assert main.state._preview.requested_map() == {}
 
 
