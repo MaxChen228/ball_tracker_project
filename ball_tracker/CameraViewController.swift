@@ -60,14 +60,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // Collaborators.
     private var settings: AppSettings!
-    private var recorder: PitchRecorder!
     private var uploader: ServerUploader!
     private var serverConfig: ServerUploader.ServerConfig!
     private var healthMonitor: ServerHealthMonitor!
-    private var uploadQueue: PayloadUploadQueue!
     private var commandRouter: CameraCommandRouter!
     private var syncCoordinator: CameraSyncCoordinator!
     private var statusPresenter: CameraStatusPresenter!
+    private var recordingWorkflow: CameraRecordingWorkflow!
 
     // UI state.
     private var lastUploadStatusText: String = ""
@@ -89,23 +88,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// Last (command, sync_id) tuple we acted on. Plain "arm" / "disarm"
     /// use a nil sync_id; `"sync_run"` carries the server-minted run id so
     /// back-to-back runs (same command string, different run) still fire.
-    /// Only state *transitions* cause local actions so repeated replies
-    /// during an active command don't re-trigger handlers.
-    private var returnToStandbyAfterCycle: Bool = false
     /// Server-minted pairing key for the currently armed session. Read
     /// off WS arm/settings traffic; tagged onto every recording that starts
     /// while the session is armed. Nil when the server has no active
     /// session. iPhones never mint this themselves.
     private var currentSessionId: String?
 
-    // Payload persistence.
-    private let payloadStore = PitchPayloadStore()
-    private let analysisStore = AnalysisJobStore()
-    private var analysisQueue: AnalysisUploadQueue!
-
-    // Per-cycle H.264 clip writer, created on entry to .recording and
-    // finalised when the cycle ends.
-    private var clipRecorder: ClipRecorder?
     private let captureTelemetryLock = NSLock()
     private var appliedCaptureWidthPx: Int = 1920
     private var appliedCaptureHeightPx: Int = 1080
@@ -213,53 +201,60 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         settings = AppSettingsStore.load()
         serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: AppSettings.serverPortFixed)
 
-        recorder = PitchRecorder()
-        recorder.setCameraId(settings.cameraRole)
-        recorder.onRecordingStarted = { [weak self] idx in
+        uploader = ServerUploader(config: serverConfig)
+        recordingWorkflow = CameraRecordingWorkflow(
+            uploader: uploader,
+            trackingFps: trackingFps,
+            processingQueue: processingQueue,
+            dependencies: .init(
+                getCameraRole: { [weak self] in self?.settings.cameraRole ?? "?" },
+                getCurrentSessionPaths: { [weak self] in self?.currentSessionPaths ?? [] },
+                getCurrentCaptureMode: { [weak self] in self?.currentCaptureMode ?? .cameraOnly },
+                getSyncId: { [weak self] in self?.syncCoordinator.lastSyncId },
+                getSyncAnchorTimestampS: { [weak self] in self?.syncCoordinator.lastSyncAnchorTimestampS },
+                currentCaptureTelemetry: { [weak self] fps in
+                    self?.currentCaptureTelemetry(targetFps: fps)
+                        ?? ServerUploader.CaptureTelemetry(width_px: 0, height_px: 0, target_fps: fps, applied_fps: 0, format_fov_deg: nil, format_index: nil, is_video_binned: nil, tracking_exposure_cap: nil, applied_max_exposure_s: nil)
+                },
+                startCapture: { [weak self] fps in self?.startCapture(at: fps) },
+                resetDetectionState: { [weak self] in self?.resetBallDetectionState() },
+                drainDetectedFrames: { [weak self] in self?.drainDetectedFrames() ?? [] },
+                clearRecoveredAnchor: { [weak self] in self?.syncCoordinator.clearRecoveredAnchor() },
+                dispatchLiveCycleEnd: { [weak self] sessionId, reason in
+                    self?.frameDispatcher?.dispatchCycleEnd(sessionId: sessionId, reason: reason)
+                },
+                showErrorBanner: { [weak self] text in self?.showErrorBanner(text) },
+                hideBanner: { [weak self] in self?.hideBanner() },
+                setStatusText: { [weak self] text in
+                    self?.lastUploadStatusText = text
+                    self?.updateUIForState()
+                },
+                transitionState: { [weak self] newState, pendingBootstrap, sessionId in
+                    self?.state = newState
+                    self?.frameStateBox.update(state: newState, pendingBootstrap: pendingBootstrap, sessionId: sessionId)
+                },
+                reconcileStandbyCaptureState: { [weak self] in self?.reconcileStandbyCaptureState() },
+                refreshUI: { [weak self] in self?.updateUIForState() }
+            )
+        )
+        recordingWorkflow.onRecordingStarted = { [weak self] idx in
             DispatchQueue.main.async {
                 guard let self else { return }
-                // Keep the "尚未時間校正" warning up while recording — the
-                // upload will still go but the server will skip triangulation,
-                // and the operator needs to keep seeing why.
                 if self.serverTimeSyncConfirmed {
                     self.hideBanner()
                 }
-                // Start-of-recording feedback: short tone + a medium
-                // haptic so the operator registers the transition even
-                // if looking away from the screen.
                 AudioServicesPlaySystemSound(self.startRecSoundID)
                 self.startRecHaptic.impactOccurred()
             }
         }
-        recorder.onCycleComplete = { [weak self] payload in
+        recordingWorkflow.onCycleCompleted = { [weak self] in
             guard let self else { return }
-            let finishingClip = self.clipRecorder
-            self.clipRecorder = nil
-            if payload.sync_id != nil {
-                self.syncCoordinator.clearRecoveredAnchor()
-                DispatchQueue.main.async { self.updateUIForState() }
-            }
-            log.info("camera cycle complete session=\(payload.session_id, privacy: .public) cam=\(payload.camera_id, privacy: .public) has_clip=\(finishingClip != nil)")
-            // End-of-recording feedback — haptic + system sound so the
-            // operator knows the cycle finished without looking down.
-            DispatchQueue.main.async {
-                AudioServicesPlaySystemSound(self.endRecSoundID)
-                self.endRecHaptic.notificationOccurred(.success)
-            }
-            if let finishingClip {
-                finishingClip.finish { [weak self] videoURL in
-                    self?.handleFinishedClip(enriched: payload, videoURL: videoURL)
-                }
-            } else {
-                // Degenerate path: clip bootstrap failed before any MOV
-                // existed. Fall back to the advisory live-detection buffer
-                // so the cycle is not silently lost.
-                self.handleFinishedClip(enriched: payload, videoURL: nil)
-            }
+            AudioServicesPlaySystemSound(self.endRecSoundID)
+            self.endRecHaptic.notificationOccurred(.success)
         }
 
         do {
-            try payloadStore.ensureDirectory()
+            try recordingWorkflow.ensurePersistenceDirectories()
         } catch {
             lastUploadStatusText = "暫存初始化失敗 · \(error.localizedDescription)"
         }
@@ -289,18 +284,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             }
         )
 
-        uploader = ServerUploader(config: serverConfig)
-        uploadQueue = PayloadUploadQueue(store: payloadStore, uploader: uploader)
-        analysisQueue = AnalysisUploadQueue(store: analysisStore, uploader: uploader)
         wireUploadQueueCallbacks()
         wireAnalysisQueueCallbacks()
-        // Rehydrate cached payloads on launch so failed uploads resume as
-        // soon as the server is reachable.
-        try? uploadQueue.reloadPending()
-        uploadQueue.processNextIfNeeded()
-        try? analysisStore.ensureDirectory()
-        try? analysisQueue.reloadPending()
-        analysisQueue.processNextIfNeeded()
+        recordingWorkflow.reloadPendingQueues()
 
         healthMonitor = ServerHealthMonitor(
             baseIntervalS: 1.0
@@ -367,26 +353,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// frame so the writer uses the real pixel-buffer dimensions.
     func enterRecordingMode() {
         guard state == .standby else { return }
-        // Snapshot the server-minted session id at arm time and freeze it
-        // into the frame-state box. `self.currentSessionId` may flip during
-        // the ~300-500 ms fps-switch window, so the captureOutput path
-        // reads this snapshot rather than the live property.
-        let snapshotSessionId = currentSessionId
-        log.info("camera entering recording session=\(snapshotSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
-        if !serverTimeSyncConfirmed {
-            showErrorBanner("尚未時間校正，將無法三角化")
-            log.warning("arm without server-confirmed time sync — server will skip triangulation")
-        } else {
-            hideBanner()
-        }
-        startCapture(at: trackingFps)
-        recorder.reset()
-        resetBallDetectionState()
-        state = .recording
-        frameStateBox.update(state: .recording, pendingBootstrap: true, sessionId: snapshotSessionId)
-        updateUIForState()
-        // Acknowledge arm with a light tap; pre-warm the next two haptics
-        // so their first fire isn't lazy-initialised.
+        recordingWorkflow.enterRecordingMode(
+            sessionId: currentSessionId,
+            serverTimeSyncConfirmed: serverTimeSyncConfirmed
+        )
         armHaptic.impactOccurred()
         startRecHaptic.prepare()
         endRecHaptic.prepare()
@@ -401,165 +371,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// and the queue lifecycle is now owned by `viewDidLoad` instead of
     /// the sync-mode enter/exit boundaries.
     func exitRecordingToStandby() {
-        log.info("camera exit recording → standby session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public) state=\(Self.stateText(self.state), privacy: .public)")
-        state = .standby
-        frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
-        recorder.reset()
-        // Bump the detection generation so any closure still running on
-        // detectionQueue discards its result; also clears the buffer of
-        // anything that landed before this point.
-        resetBallDetectionState()
-        processingQueue.async { [weak self] in
-            self?.clipRecorder?.cancel()
-            self?.clipRecorder = nil
-        }
-        hideBanner()
-        // Drop the sensor back to whatever standby currently requires.
-        reconcileStandbyCaptureState()
-        updateUIForState()
-    }
-
-    /// Cycle-complete router. PR61 makes the finalized local MOV the
-    /// authority for any on-device result:
-    ///   - `cameraOnly` → raw MOV upload only; server remains authoritative.
-    ///   - `onDevice` → persist the MOV locally, run post-pass analysis,
-    ///     upload frames-only once analysis completes.
-    ///   - `dual` → upload the raw MOV immediately AND enqueue a late
-    ///     post-pass sidecar upload carrying `frames_on_device`.
-    ///
-    /// Live detection is drained here only as a degraded fallback when clip
-    /// writing failed and no MOV exists to analyze.
-    private func handleFinishedClip(
-        enriched: ServerUploader.PitchPayload,
-        videoURL: URL?
-    ) {
-        let advisoryFrames = drainDetectedFrames()
-        let paths = currentSessionPaths
-        log.info("cycle complete session=\(enriched.session_id, privacy: .public) paths=\(paths.map(\.rawValue).sorted().joined(separator: ","), privacy: .public) advisory_frames=\(advisoryFrames.count) ball_frames=\(advisoryFrames.filter { $0.ball_detected }.count) has_video=\(videoURL != nil)")
-        let payload = enriched.withPaths(Array(paths))
-
-        guard let videoURL else {
-            handleFallbackCycleWithoutVideo(
-                enriched: payload,
-                advisoryFrames: advisoryFrames,
-                paths: paths
-            )
-            return
-        }
-
-        if paths.contains(.serverPost) {
-            handleCameraOnlyCycle(enriched: payload, videoURL: videoURL)
-        }
-        if paths.contains(.iosPost) {
-            let uploadMode: AnalysisJobStore.Job.UploadMode = paths.contains(.serverPost) ? .dualSidecar : .onDevicePrimary
-            let analysisVideoURL = paths.contains(.serverPost) ? duplicateVideoForAnalysis(from: videoURL) : videoURL
-            if let analysisVideoURL {
-                persistAnalysisJob(
-                    payload: payload,
-                    videoURL: analysisVideoURL,
-                    uploadMode: uploadMode
-                )
-            } else {
-                log.error("camera failed to prepare clip for iOS post-pass session=\(payload.session_id, privacy: .public)")
-            }
-        }
-        if paths.contains(.live) {
-            frameDispatcher?.dispatchCycleEnd(sessionId: payload.session_id, reason: "disarmed")
-        }
-        if !paths.contains(.serverPost) && !paths.contains(.iosPost) {
-            // Live-only fallback still persists metadata so the cycle
-            // remains recoverable if the WS stream degraded mid-flight.
-            persistCompletedCycle(payload, videoURL: videoURL)
-        }
-    }
-
-    private func handleFallbackCycleWithoutVideo(
-        enriched: ServerUploader.PitchPayload,
-        advisoryFrames: [ServerUploader.FramePayload],
-        paths: Set<ServerUploader.DetectionPath>
-    ) {
-        if paths.contains(.serverPost) {
-            persistCompletedCycle(enriched, videoURL: nil)
-        } else if paths.contains(.iosPost) {
-            persistCompletedCycle(enriched.withFrames(advisoryFrames), videoURL: nil)
-        } else {
-            persistCompletedCycle(enriched.withFrames(advisoryFrames), videoURL: nil)
-        }
-    }
-
-    /// Mode-one / dual: ship the full recorded MOV as-is. Server runs
-    /// authoritative detection on the received clip.
-    private func handleCameraOnlyCycle(
-        enriched: ServerUploader.PitchPayload,
-        videoURL: URL?
-    ) {
-        persistCompletedCycle(enriched, videoURL: videoURL)
-    }
-
-    private func persistCompletedCycle(
-        _ payload: ServerUploader.PitchPayload,
-        videoURL: URL?
-    ) {
-        do {
-            let fileURL = try payloadStore.save(payload, videoURL: videoURL)
-            DispatchQueue.main.async {
-                self.lastUploadStatusText = "暫存完成 · 等待上傳"
-                self.uploadQueue.enqueue(fileURL)
-                // Every cycle-complete returns to standby. Dashboard re-arm
-                // happens via the next heartbeat.
-                self.returnToStandbyAfterCycle = false
-                self.exitRecordingToStandby()
-            }
-        } catch {
-            log.error("camera cycle persist failed session=\(payload.session_id, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            // Even if the JSON save failed, drop any orphan tmp video.
-            if let videoURL {
-                try? FileManager.default.removeItem(at: videoURL)
-            }
-            DispatchQueue.main.async {
-                self.lastUploadStatusText = "暫存失敗 · \(error.localizedDescription)"
-                self.returnToStandbyAfterCycle = false
-                self.exitRecordingToStandby()
-            }
-        }
-    }
-
-    private func persistAnalysisJob(
-        payload: ServerUploader.PitchPayload,
-        videoURL: URL,
-        uploadMode: AnalysisJobStore.Job.UploadMode
-    ) {
-        let job = AnalysisJobStore.Job(uploadMode: uploadMode, pitch: payload)
-        do {
-            let fileURL = try analysisStore.save(job, videoURL: videoURL)
-            DispatchQueue.main.async {
-                self.lastUploadStatusText = "暫存完成 · 等待錄後分析"
-                self.analysisQueue.enqueue(fileURL)
-                self.returnToStandbyAfterCycle = false
-                self.exitRecordingToStandby()
-            }
-        } catch {
-            log.error("camera analysis persist failed session=\(payload.session_id, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            try? FileManager.default.removeItem(at: videoURL)
-            DispatchQueue.main.async {
-                self.lastUploadStatusText = "錄後分析暫存失敗 · \(error.localizedDescription)"
-                self.returnToStandbyAfterCycle = false
-                self.exitRecordingToStandby()
-            }
-        }
-    }
-
-    private func duplicateVideoForAnalysis(from sourceURL: URL) -> URL? {
-        let ext = sourceURL.pathExtension.isEmpty ? "mov" : sourceURL.pathExtension
-        let dest = FileManager.default.temporaryDirectory
-            .appendingPathComponent("analysis_\(UUID().uuidString).\(ext)")
-        do {
-            try FileManager.default.copyItem(at: sourceURL, to: dest)
-            return dest
-        } catch {
-            log.error("camera analysis clip copy failed src=\(sourceURL.lastPathComponent, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
-            return nil
-        }
+        recordingWorkflow.exitRecordingToStandby(
+            currentSessionId: currentSessionId,
+            currentState: state
+        )
     }
 
     private func setAppliedCaptureTelemetry(
@@ -879,17 +694,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func wireUploadQueueCallbacks() {
-        uploadQueue.onStatusTextChanged = { [weak self] text in
+        recordingWorkflow.payloadUploadQueue.onStatusTextChanged = { [weak self] text in
             self?.lastUploadStatusText = text
             self?.updateUIForState()
         }
-        uploadQueue.onLastResultChanged = { [weak self] _ in
+        recordingWorkflow.payloadUploadQueue.onLastResultChanged = { [weak self] _ in
             self?.updateUIForState()
         }
-        uploadQueue.onUploadingChanged = { [weak self] _ in
+        recordingWorkflow.payloadUploadQueue.onUploadingChanged = { [weak self] _ in
             self?.updateUIForState()
         }
-        uploadQueue.onPayloadDropped = { [weak self] fileURL, error in
+        recordingWorkflow.payloadUploadQueue.onPayloadDropped = { [weak self] fileURL, error in
             guard let self else { return }
             let basename = fileURL.deletingPathExtension().lastPathComponent
             let detail = Self.describeUploadError(error)
@@ -899,11 +714,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func wireAnalysisQueueCallbacks() {
-        analysisQueue.onStatusTextChanged = { [weak self] text in
+        recordingWorkflow.analysisUploadQueue.onStatusTextChanged = { [weak self] text in
             self?.lastUploadStatusText = text
             self?.updateUIForState()
         }
-        analysisQueue.onLastResultChanged = { [weak self] _ in
+        recordingWorkflow.analysisUploadQueue.onLastResultChanged = { [weak self] _ in
             self?.updateUIForState()
         }
     }
@@ -978,28 +793,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             // standby via persistCompletedCycle once the queue accepts.
             break
         case .recording:
-            returnToStandbyAfterCycle = true
-            processingQueue.async { [weak self] in
-                guard let self else { return }
-                let active = self.recorder.isActive
-                log.info("camera disarm while recording: recorder_active=\(active) clip_exists=\(self.clipRecorder != nil)")
-                if active {
-                    // Normal path: flush whatever frames the clip contains;
-                    // onCycleComplete drives persist + standby transition.
-                    self.recorder.forceFinishIfRecording()
-                } else {
-                    // Disarm arrived before the first frame reached us
-                    // (happens if stop is pressed in the ~300 ms fps
-                    // switch window). Tear down cleanly on main.
-                    log.warning("camera disarm before first frame: no payload produced — frames never reached captureOutput or clip.append failed")
-                    self.clipRecorder?.cancel()
-                    self.clipRecorder = nil
-                    DispatchQueue.main.async {
-                        self.returnToStandbyAfterCycle = false
-                        self.exitRecordingToStandby()
-                    }
-                }
-            }
+            recordingWorkflow.handleRemoteDisarm(
+                currentSessionId: currentSessionId,
+                currentState: state
+            )
         }
     }
 
@@ -1017,8 +814,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 serverPort: AppSettings.serverPortFixed
             )
             uploader = ServerUploader(config: serverConfig)
-            uploadQueue.updateUploader(uploader)
-            analysisQueue.updateUploader(uploader)
+            recordingWorkflow.updateUploader(uploader)
             previewUploader?.updateUploader(uploader)
             disconnectWebSocket()
             connectWebSocket()
@@ -1029,7 +825,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             disconnectWebSocket()
             connectWebSocket()
         }
-        recorder?.setCameraId(latest.cameraRole)
+        recordingWorkflow.updateCameraRole(latest.cameraRole)
         syncInlineControlsFromSettings()
     }
 
@@ -1307,19 +1103,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // PR61: all modes write a local MOV so any on-device result can be
         // generated later from the finalized file instead of the live callback.
         if frameStateBox.consumePendingBootstrap() {
-            log.info("camera clip bootstrap start width=\(width) height=\(height) sid=\(snap.sessionId ?? "nil", privacy: .public)")
-            startClipRecorder(width: width, height: height)
-            if clipRecorder == nil {
-                log.error("camera clip bootstrap failed session=\(snap.sessionId ?? "nil", privacy: .public)")
+            if !recordingWorkflow.bootstrapClipRecorder(width: width, height: height, sessionId: snap.sessionId) {
                 DispatchQueue.main.async {
-                    self.returnToStandbyAfterCycle = false
                     self.exitRecordingToStandby()
                 }
                 return
             }
-            log.info("camera clip bootstrap ok session=\(snap.sessionId ?? "nil", privacy: .public)")
         }
-        clipRecorder?.append(sampleBuffer: sampleBuffer)
+        recordingWorkflow.appendSample(sampleBuffer)
 
         // Detection fans out over a bounded concurrent pool. Live WS
         // streaming consumes the same FramePayloads as the local fallback.
@@ -1327,19 +1118,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         // Bootstrap the PitchRecorder on the first sample. The payload's
         // `video_start_pts_s` always comes from this sample's session-clock PTS.
-        if !recorder.isActive {
-            guard let sid = snap.sessionId, !sid.isEmpty else {
-                log.error("camera recording started without session_id cam=\(self.settings.cameraRole, privacy: .public)")
-                return
-            }
-            log.info("camera first frame, starting recorder session=\(sid, privacy: .public) mode=\(self.currentCaptureMode.rawValue, privacy: .public) video_start_pts=\(timestampS) anchor=\(self.syncCoordinator.lastSyncAnchorTimestampS ?? .nan)")
-            recorder.startRecording(
-                sessionId: sid,
-                syncId: syncCoordinator.lastSyncId,
-                anchorTimestampS: syncCoordinator.lastSyncAnchorTimestampS,
-                videoStartPtsS: timestampS,
-                captureTelemetry: currentCaptureTelemetry(targetFps: trackingFps)
-            )
+        if let sid = snap.sessionId, !sid.isEmpty {
+            recordingWorkflow.startRecorderIfNeeded(sessionId: sid, timestampS: timestampS)
+        } else {
+            log.error("camera recording started without session_id cam=\(self.settings.cameraRole, privacy: .public)")
+            return
         }
     }
 
@@ -1374,20 +1157,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let out = detectionFramesBuffer
         detectionFramesBuffer.removeAll()
         return out
-    }
-
-    private func startClipRecorder(width: Int, height: Int) {
-        let tmpURL = payloadStore.makeTempVideoURL()
-        let cr = ClipRecorder(outputURL: tmpURL)
-        do {
-            try cr.prepare(width: width, height: height)
-            clipRecorder = cr
-        } catch {
-            // If AVAssetWriter rejects the configuration we degrade to
-            // JSON-only and keep recording.
-            log.error("camera clip recorder prepare failed error=\(error.localizedDescription, privacy: .public)")
-            clipRecorder = nil
-        }
     }
 
     private func updateFpsEstimate() {
