@@ -11,10 +11,10 @@ from typing import Any
 
 from render_dashboard import (
     _JS_TEMPLATE as _DASHBOARD_JS_TEMPLATE,
-    _render_chirp_threshold_body,
     _render_device_rows,
 )
 from render_shared import _CSS, _render_app_nav
+from render_tuning import _render_chirp_threshold_body, _render_tuning_body
 from schemas import SYNC_TRACE_MIN_PSR, SYNC_TRACE_THRESHOLD
 
 

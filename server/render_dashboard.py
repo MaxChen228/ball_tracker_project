@@ -27,6 +27,10 @@ from render_shared import (
     _render_nav_status as _shared_render_nav_status,
     _render_primary_nav as _shared_render_primary_nav,
 )
+from render_tuning import (
+    _render_chirp_threshold_body as _shared_render_chirp_threshold_body,
+    _render_tuning_body as _shared_render_tuning_body,
+)
 from schemas import Device, Session
 
 
@@ -3299,6 +3303,8 @@ _CSS = _SHARED_CSS
 _render_nav_status = _shared_render_nav_status
 _render_primary_nav = _shared_render_primary_nav
 _render_app_nav = _shared_render_app_nav
+_render_chirp_threshold_body = _shared_render_chirp_threshold_body
+_render_tuning_body = _shared_render_tuning_body
 
 
 def _render_chirp_threshold_body(
@@ -3412,6 +3418,10 @@ def _render_tuning_body(
             for _ in (0,)  # run the wrapper exactly once
         )
     )
+
+
+_render_chirp_threshold_body = _shared_render_chirp_threshold_body
+_render_tuning_body = _shared_render_tuning_body
 
 
 def render_events_index_html(
