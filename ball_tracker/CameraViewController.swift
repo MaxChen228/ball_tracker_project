@@ -45,13 +45,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // detection stalls into dropped-frame cascades (AVCaptureVideoDataOutput
     // has `alwaysDiscardsLateVideoFrames = true`).
     private let processingQueue = DispatchQueue(label: "camera.frame.queue", qos: .userInitiated)
+    nonisolated(unsafe) private let frameStateBox = FrameStateBox()
+    nonisolated(unsafe) private let frameProcessingState = CameraFrameProcessingState()
+    nonisolated(unsafe) private var captureQueueCameraRole: String = "A"
+    nonisolated(unsafe) private var captureQueueUploader: ServerUploader!
+    nonisolated(unsafe) private var captureQueueRecordingWorkflow: CameraRecordingWorkflow!
+    nonisolated(unsafe) private var captureQueueTransportCoordinator: CameraTransportCoordinator!
     private var captureRuntime: CameraCaptureRuntime!
     private var stateController: CameraStateController!
     private var state: AppState { stateController.currentState }
-    // State + frame index. `state` is owned by `stateController`; the frame
-    // queue consumes locked snapshots from it so recording bootstrap and
-    // session-id visibility stay coherent while main-thread transitions land.
-    private var frameIndex: Int = 0
 
     // Collaborators.
     private var settings: AppSettings!
@@ -66,14 +68,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // UI state.
     private var lastUploadStatusText: String = ""
-    private var lastFrameTimestampForFps: CFTimeInterval = CACurrentMediaTime()
-    private var framesSinceLastFpsTick: Int = 0
-    private var fpsEstimate: Double = 0
-
-    // Last observed capture dimensions — used only for FPS debug and the
-    // capture-dim change log.
-    private var latestImageWidth: Int = 0
-    private var latestImageHeight: Int = 0
 
     // The `.recording` bootstrap flag and the arm-time session snapshot both
     // live inside `stateController`; duplicating them here would create a
@@ -100,7 +94,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // Live detection is advisory only. It still feeds WS streaming and the
     // local fallback path if clip writing fails.
-    private let detectionPool = ConcurrentDetectionPool(maxConcurrency: 3)
+    nonisolated(unsafe) private let detectionPool = ConcurrentDetectionPool(maxConcurrency: 3)
     private let detectionStateLock = NSLock()
     /// Accumulated per-frame detection results for the current cycle.
     /// Drained at cycle-complete and either discarded (mode-one) or
@@ -150,7 +144,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         detectionPool.onFrame = { [weak self] frame in
             self?.handleDetectedFrame(frame)
         }
-        stateController = CameraStateController(onStateChanged: { [weak self] in
+        stateController = CameraStateController(frameStateBox: frameStateBox, onStateChanged: { [weak self] in
             self?.updateUIForState()
         })
 
@@ -207,6 +201,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             AudioServicesPlaySystemSound(self.endRecSoundID)
             self.endRecHaptic.notificationOccurred(.success)
         }
+        captureQueueRecordingWorkflow = recordingWorkflow
 
         do {
             try recordingWorkflow.ensurePersistenceDirectories()
@@ -249,6 +244,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         wireHealthMonitorStatusCallbacks()
         syncCoordinator = buildSyncCoordinator()
         transportCoordinator = buildTransportCoordinator()
+        captureQueueTransportCoordinator = transportCoordinator
 
         setupUI()
         captureRuntime.configureCaptureGraph(
@@ -258,6 +254,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             processingQueue: processingQueue
         )
         captureRuntime.requestAudioCaptureAccess(cameraRole: settings.cameraRole)
+        captureQueueCameraRole = settings.cameraRole
+        captureQueueUploader = uploader
         healthMonitor.start()
         transportCoordinator.connect()
         updateUIForState()
@@ -355,9 +353,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             isVideoBinned: appliedFormatIsVideoBinned,
             appliedMaxExposureS: appliedMaxExposureS
         )
+        let latestDimensions = frameProcessingState.latestDimensions()
         return captureRuntime.currentCaptureTelemetry(
-            latestImageWidth: latestImageWidth,
-            latestImageHeight: latestImageHeight,
+            latestImageWidth: latestDimensions.width,
+            latestImageHeight: latestDimensions.height,
             targetFps: targetFps,
             appliedTelemetry: appliedTelemetry
         )
@@ -381,16 +380,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// server's calibration-frame endpoint. Runs on the capture queue so
     /// as not to block the main thread; hop off-queue for the HTTP call
     /// so the capture queue doesn't stall on network latency.
-    private func uploadCalibrationFrame(_ pixelBuffer: CVPixelBuffer) {
+    nonisolated private func uploadCalibrationFrame(_ pixelBuffer: CVPixelBuffer) {
         let w = CVPixelBufferGetWidth(pixelBuffer)
         let h = CVPixelBufferGetHeight(pixelBuffer)
-        let cam = settings.cameraRole
+        let cam = captureQueueCameraRole
+        guard let uploader = captureQueueUploader else { return }
         // CIImage is retain-counted + thread-safe; constructing here on
         // the capture queue is fine. The encode itself we hop onto a
         // utility queue so the next sample isn't delayed.
         let ci = CIImage(cvPixelBuffer: pixelBuffer)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
             let ctx = CIContext(options: [.useSoftwareRenderer: false])
             guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
                   let jpeg = ctx.jpegRepresentation(
@@ -403,7 +402,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             }
             log.info("calibration frame: encoded \(w)x\(h) bytes=\(jpeg.count)")
             let path = "/camera/\(cam)/calibration_frame"
-            self.uploader.postRawJPEG(path: path, jpeg: jpeg) { result in
+            uploader.postRawJPEG(path: path, jpeg: jpeg) { result in
                 switch result {
                 case .success:
                     log.info("calibration frame upload ok cam=\(cam, privacy: .public) bytes=\(jpeg.count)")
@@ -426,12 +425,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func stopCapture() {
-        captureRuntime.stopCapture { [weak self] in
-            guard let self else { return }
-            self.fpsEstimate = 0
-            self.framesSinceLastFpsTick = 0
-            self.lastFrameTimestampForFps = CACurrentMediaTime()
-        }
+        captureRuntime.stopCapture(resetFpsState: {})
     }
 
     // MARK: - Layout + overlays
@@ -672,6 +666,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 serverPort: AppSettings.serverPortFixed
             )
             uploader = ServerUploader(config: serverConfig)
+            captureQueueUploader = uploader
             recordingWorkflow.updateUploader(uploader)
             transportCoordinator.updateConnection(
                 serverConfig: serverConfig,
@@ -689,6 +684,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 reconnect: true
             )
         }
+        captureQueueCameraRole = latest.cameraRole
         recordingWorkflow.updateCameraRole(latest.cameraRole)
         syncInlineControlsFromSettings()
     }
@@ -735,7 +731,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    static func stateText(_ state: AppState) -> String {
+    nonisolated static func stateText(_ state: AppState) -> String {
         switch state {
         case .standby: return "STANDBY"
         case .timeSyncWaiting: return "TIME_SYNC"
@@ -761,26 +757,21 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let timestampS = CMTimeGetSeconds(ts)
         if timestampS.isNaN || timestampS.isInfinite { return }
 
-        updateFpsEstimate()
-
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-        latestImageWidth = width
-        latestImageHeight = height
-
-        frameIndex += 1
+        let frameSample = frameProcessingState.recordFrame(width: width, height: height)
 
         // Locked snapshot of state, pending-bootstrap, and the session id
         // frozen at arm time. The rest of this method only touches `snap`.
-        let snap = stateController.snapshot()
+        let snap = frameStateBox.snapshot()
 
         // Rate-limited debug heartbeat so Xcode console can confirm frames
         // are actually flowing and which state the capture thread sees.
         // Log the first 3 frames (catches "session started but zero frames"
         // bugs) then once every 240 frames (~1 s at tracking fps, ~4 s at
         // idle) for steady monitoring.
-        if frameIndex <= 3 || frameIndex % 240 == 0 {
-            log.info("camera frame idx=\(self.frameIndex) state=\(Self.stateText(snap.state), privacy: .public) pendingBootstrap=\(snap.pendingBootstrap) sid=\(snap.sessionId ?? "nil", privacy: .public)")
+        if frameSample.frameIndex <= 3 || frameSample.frameIndex % 240 == 0 {
+            log.info("camera frame idx=\(frameSample.frameIndex) state=\(Self.stateText(snap.state), privacy: .public) pendingBootstrap=\(snap.pendingBootstrap) sid=\(snap.sessionId ?? "nil", privacy: .public)")
         }
 
         // Push a preview JPEG only when requested and not doing anything
@@ -788,13 +779,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // frame for ClipRecorder; `.timeSyncWaiting` is mic-centric and
         // the preview encode would compete for CPU. Outside those two
         // states the capture queue is otherwise idle.
-        if self.transportCoordinator.isPreviewRequested
+        if captureQueueTransportCoordinator.isPreviewRequested
             && snap.state != .recording
             && snap.state != .timeSyncWaiting {
-            self.transportCoordinator.pushPreviewFrame(pixelBuffer)
+            captureQueueTransportCoordinator.pushPreviewFrame(pixelBuffer)
         }
-        if self.transportCoordinator.consumeCalibrationFrameCaptureRequest(whileIn: snap.state) {
-            self.uploadCalibrationFrame(pixelBuffer)
+        if captureQueueTransportCoordinator.consumeCalibrationFrameCaptureRequest(whileIn: snap.state) {
+            uploadCalibrationFrame(pixelBuffer)
         }
 
         // Only the `.recording` state cares about samples.
@@ -802,15 +793,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         // PR61: all modes write a local MOV so any on-device result can be
         // generated later from the finalized file instead of the live callback.
-        if stateController.consumePendingBootstrap() {
-            if !recordingWorkflow.bootstrapClipRecorder(width: width, height: height, sessionId: snap.sessionId) {
+        if frameStateBox.consumePendingBootstrap() {
+            if !captureQueueRecordingWorkflow.bootstrapClipRecorder(width: frameSample.width, height: frameSample.height, sessionId: snap.sessionId) {
                 DispatchQueue.main.async {
                     self.exitRecordingToStandby()
                 }
                 return
             }
         }
-        recordingWorkflow.appendSample(sampleBuffer)
+        captureQueueRecordingWorkflow.appendSample(sampleBuffer)
 
         // Detection fans out over a bounded concurrent pool. Live WS
         // streaming consumes the same FramePayloads as the local fallback.
@@ -819,14 +810,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // Bootstrap the PitchRecorder on the first sample. The payload's
         // `video_start_pts_s` always comes from this sample's session-clock PTS.
         if let sid = snap.sessionId, !sid.isEmpty {
-            recordingWorkflow.startRecorderIfNeeded(sessionId: sid, timestampS: timestampS)
+            captureQueueRecordingWorkflow.startRecorderIfNeeded(sessionId: sid, timestampS: timestampS)
         } else {
-            log.error("camera recording started without session_id cam=\(self.settings.cameraRole, privacy: .public)")
+            log.error("camera recording started without session_id cam=\(self.captureQueueCameraRole, privacy: .public)")
             return
         }
     }
 
-    private func dispatchDetection(pixelBuffer: CVPixelBuffer, timestampS: TimeInterval) {
+    nonisolated private func dispatchDetection(pixelBuffer: CVPixelBuffer, timestampS: TimeInterval) {
         _ = detectionPool.enqueue(pixelBuffer: pixelBuffer, timestampS: timestampS)
     }
 
@@ -835,7 +826,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         detectionFramesBuffer.append(frame)
         detectionStateLock.unlock()
 
-        transportCoordinator.dispatchLiveFrame(frame)
+        captureQueueTransportCoordinator.dispatchLiveFrame(frame)
     }
 
     /// Bump the detection generation, clear the buffer, reset the throttle.
@@ -857,16 +848,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let out = detectionFramesBuffer
         detectionFramesBuffer.removeAll()
         return out
-    }
-
-    private func updateFpsEstimate() {
-        framesSinceLastFpsTick += 1
-        let now = CACurrentMediaTime()
-        let elapsed = now - lastFrameTimestampForFps
-        guard elapsed >= 1.0 else { return }
-        fpsEstimate = Double(framesSinceLastFpsTick) / elapsed
-        framesSinceLastFpsTick = 0
-        lastFrameTimestampForFps = now
     }
 
 }

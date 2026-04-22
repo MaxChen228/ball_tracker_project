@@ -4,12 +4,13 @@ import os
 final class CameraStateController {
     typealias AppState = CameraViewController.AppState
 
-    private let frameStateBox = FrameStateBox()
+    private let frameStateBox: FrameStateBox
     private let onStateChanged: () -> Void
 
     private(set) var currentState: AppState = .standby
 
-    init(onStateChanged: @escaping () -> Void) {
+    init(frameStateBox: FrameStateBox, onStateChanged: @escaping () -> Void) {
+        self.frameStateBox = frameStateBox
         self.onStateChanged = onStateChanged
     }
 

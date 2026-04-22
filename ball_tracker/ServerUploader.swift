@@ -12,7 +12,7 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "netwo
 ///     - `video`:   H.264/MOV clip of the cycle (required — server-side ball
 ///                  detection is the sole data path; no detection runs on
 ///                  the phone any more)
-final class ServerUploader {
+final class ServerUploader: @unchecked Sendable {
     enum DetectionPath: String, Codable, CaseIterable {
         case live = "live"
         case iosPost = "ios_post"
