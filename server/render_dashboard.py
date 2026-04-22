@@ -369,18 +369,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .preview-panel::after {{ top: 50%; left: calc(50% - 8px);
                           width: 16px; height: 1px; transform: translateY(-0.5px); }}
 .preview-panel.off::before, .preview-panel.off::after {{ display: none; }}
-/* Minimal marker-count chip. Top-left of the preview panel so it
-   doesn't cover the plate where the operator is framing. Only shown
-   when preview is on and the chip has data. */
-.marker-chip {{ position: absolute; top: 6px; left: 6px; z-index: 2;
-                 padding: 2px 6px; border-radius: 3px;
-                 font: 500 10px/1 var(--mono); letter-spacing: 0.08em;
-                 background: rgba(0, 0, 0, 0.55); color: #eaeaea;
-                 pointer-events: none; }}
-.marker-chip.ok {{ color: #7dffc0; }}
-.marker-chip.warn {{ color: #ffcf7a; }}
-.marker-chip.bad {{ color: #ff9a9a; }}
-.preview-panel.off .marker-chip {{ display: none; }}
 /* Virtual camera: 2D canvas showing the plate pentagon + principal-point
    cross reprojected through this camera's own K·[R|t]·P. Same idea as
    the viewer's bottom-row virt canvas — if the reprojected outline
@@ -1269,6 +1257,33 @@ _JS_TEMPLATE_RAW = r"""
     return `<span class="chip idle">offline</span>`;
   }
 
+  function autoCalLabel(autoRun, autoLast, online) {
+    if (autoRun) {
+      return autoRun.summary || autoRun.status || 'running';
+    }
+    if (autoLast) {
+      if (autoLast.status === 'completed') {
+        const reproj = autoLast.result && autoLast.result.reprojection_px != null
+          ? (' · ' + Number(autoLast.result.reprojection_px).toFixed(1) + 'px')
+          : '';
+        return `${autoLast.summary || 'Applied'}${reproj}`;
+      }
+      return autoLast.summary || autoLast.status || 'failed';
+    }
+    return online ? 'idle' : 'offline';
+  }
+
+  function autoCalButtonLabel(autoRun) {
+    if (!autoRun) return 'Run auto-cal';
+    switch (autoRun.status) {
+      case 'searching': return 'Capturing…';
+      case 'tracking': return 'Tracking…';
+      case 'stabilizing': return 'Stabilizing…';
+      case 'solving': return 'Solving…';
+      default: return 'Auto-cal…';
+    }
+  }
+
   function renderDevices(state) {
     if (!devicesBox) return;
     const devByCam = new Map((state.devices || []).map(d => [d.camera_id, d]));
@@ -1303,11 +1318,7 @@ _JS_TEMPLATE_RAW = r"""
       const syncLabel = !online ? 'offline' : (pending ? 'pending…' : (timeSynced ? 'synced' : 'not synced'));
       const calLabel = (isCal && lastTs) ? ('last ' + hhmm(lastTs))
                      : (!online ? 'offline' : (isCal ? 'calibrated' : 'pending'));
-      const autoLabel = autoRun
-        ? `${autoRun.status} · ${autoRun.stable_frames || 0} stable`
-        : (autoLast
-          ? `${autoLast.status}${autoLast.result && autoLast.result.reprojection_px != null ? ' · ' + Number(autoLast.result.reprojection_px).toFixed(1) + 'px' : ''}`
-          : (online ? 'idle' : 'offline'));
+      const autoLabel = autoCalLabel(autoRun, autoLast, online);
       const previewDisabled = previewBusy || !online;
       const autoCalDisabled = !!autoRun || !online;
       const previewBtn = (`<button type="button" class="btn small preview-btn${previewOn ? ' active' : ''}" ` +
@@ -1315,7 +1326,7 @@ _JS_TEMPLATE_RAW = r"""
         `${previewDisabled ? 'disabled' : ''}>` +
         `${previewBusy ? (previewOn ? 'PREVIEW ON…' : 'PREVIEW…') : (previewOn ? 'PREVIEW ON' : 'PREVIEW')}</button>`);
       const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}" ${autoCalDisabled ? 'disabled' : ''}>` +
-        `${autoRun ? 'Auto-cal…' : 'Run auto-cal'}</button>`;
+        `${autoCalButtonLabel(autoRun)}</button>`;
       // Always render the panel so the row height stays stable; off
       // state shows a black placeholder. When on, the tickPreviewImages
       // loop (see below) cache-busts the <img src>.
@@ -1326,7 +1337,6 @@ _JS_TEMPLATE_RAW = r"""
         ? ('/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now())
         : '';
       const previewPanel = `<div class="preview-panel${previewOn ? '' : ' off'}" data-preview-panel="${esc(cam)}">` +
-        `<div class="marker-chip" data-marker-chip="${esc(cam)}">– markers</div>` +
         `<img data-preview-img="${esc(cam)}" src="${initialSrc}" alt="preview ${esc(cam)}">` +
         `<svg class="plate-overlay" data-preview-overlay="${esc(cam)}" aria-hidden="true"><polygon></polygon></svg>` +
         `<div class="placeholder">${previewOn ? '…' : 'Preview off'}</div>` +
@@ -1934,7 +1944,7 @@ _JS_TEMPLATE_RAW = r"""
   // Live-preview toggle. Server is authoritative — click POSTs the
   // intent, the next /status tick reconciles. Previously we awaited
   // tickStatus inline which, under connection-pool saturation (preview
-  // img poll + marker_count poll + status poll + SSE), would hang the
+  // img poll + status poll + SSE), would hang the
   // finally block and leave the cam in pendingPreviewMutations — then
   // every subsequent click hit the `pendingPreviewMutations.has(cam)`
   // early-return and felt "stuck". Now: fire-and-forget. 4 s watchdog
@@ -2015,29 +2025,6 @@ _JS_TEMPLATE_RAW = r"""
   }
   setInterval(tickPreviewImages, 200);
 
-  // Marker count chip. Polls each ACTIVE preview camera at ~1 Hz and
-  // paints a minimal "N markers" chip over the real-preview panel. The
-  // server endpoint runs aruco on the latest buffered JPEG — no extra
-  // iPhone traffic. Colour-codes so operator can tell at a glance
-  // whether auto-cal has anything to work with: ≥4 ok, 1-3 warn, 0 bad.
-  async function tickMarkerChips() {
-    const cams = Object.keys(currentPreviewRequested || {});
-    for (const cam of cams) {
-      const chip = document.querySelector(`[data-marker-chip="${CSS.escape(cam)}"]`);
-      if (!chip) continue;
-      try {
-        const r = await fetch('/camera/' + encodeURIComponent(cam) + '/marker_count', { cache: 'no-store' });
-        if (!r.ok) continue;
-        const body = await r.json();
-        const count = Number(body.count || 0);
-        chip.textContent = `${count} marker${count === 1 ? '' : 's'}`;
-        chip.classList.remove('ok', 'warn', 'bad');
-        chip.classList.add(count >= 4 ? 'ok' : (count > 0 ? 'warn' : 'bad'));
-      } catch (_) { /* next tick retries */ }
-    }
-  }
-  setInterval(tickMarkerChips, 1000);
-
   // Per-camera mini 3D pose canvas — renders beside each preview panel.
   // Reuses `basePlot` (from /calibration/state) by keeping traces with
   // meta.camera_id == this cam PLUS shared world traces (no meta/camera_id).
@@ -2077,10 +2064,11 @@ _JS_TEMPLATE_RAW = r"""
     redrawAllPreviewPlateOverlays();
   });
 
-  // Prime all three immediately, then stagger polling so the UI stays
+  // Prime both immediately, then stagger polling so the UI stays
   // current without hammering the server. Status carries arming state
   // --- CALIBRATION card (Phase 5) -------------------------------------
-  // Click "Auto calibrate" → POST /calibration/auto/<cam>. Optimistic:
+  // Click "Auto calibrate" → POST /calibration/auto/start/<cam>.
+  // Optimistic:
   // button disables while in flight; toast on failure.
   document.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-auto-cal]');
