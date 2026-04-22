@@ -1971,6 +1971,24 @@ class State:
                 if pending.expires_at > now
             }
 
+    def pending_sync_command_ids(self) -> dict[str, str]:
+        """Per-cam mapping from cam → the actual legacy-sync intent id,
+        for WS push to iOS. The public `pending_sync_commands()` returns
+        the literal "start" as its value because it feeds a dashboard
+        chip that doesn't need the id — but the WS push MUST send the
+        real `_LegacyTimeSyncIntent.id` so iOS can echo it back in its
+        heartbeat's `time_sync_id`. Earlier the WS push re-used the
+        dashboard-chip map and accidentally shipped "start" as the id,
+        which then appeared verbatim on the dashboard as
+        `sync_id start`."""
+        now = self._time_fn()
+        with self._lock:
+            return {
+                cam: pending.id
+                for cam, pending in self._sync_command_pending.items()
+                if pending.expires_at > now
+            }
+
     def _session_is_trashed_locked(self, session_id: str) -> bool:
         return session_id in self._trashed_sessions
 
@@ -2247,9 +2265,15 @@ class State:
                     "received_so_far": sorted(run.reports.keys()),
                 },
             ))
+            # Nullable on aborted reports (phone heard its own band but
+            # not the other's, or timed out before either) — can't format
+            # None with %f, so render them as strings first.
+            fmt_ts = lambda v: "None" if v is None else f"{float(v):.6f}"
             logger.info(
-                "sync report received id=%s role=%s t_self=%.6f t_from_other=%.6f",
-                run.id, report.role, report.t_self_s, report.t_from_other_s,
+                "sync report received id=%s role=%s t_self=%s t_from_other=%s aborted=%s",
+                run.id, report.role,
+                fmt_ts(report.t_self_s), fmt_ts(report.t_from_other_s),
+                bool(report.aborted),
             )
             if not run.complete:
                 return run, None, None
@@ -3500,10 +3524,10 @@ async def sync_trigger(request: Request) -> Any:
     # Push the sync_command over WS too so phones on the live transport
     # don't have to wait for the next periodic heartbeat tick to pick it up.
     # The pending flag still exists as the authoritative one-shot drain path.
-    pending = state.pending_sync_commands()
+    pending_ids = state.pending_sync_command_ids()
     ws_messages = {
         cam: {"type": "sync_command", "command": "start", "sync_command_id": sid}
-        for cam, sid in pending.items()
+        for cam, sid in pending_ids.items()
         if cam in dispatched
     }
     if ws_messages:
@@ -4183,43 +4207,6 @@ def camera_preview_mjpeg(camera_id: str) -> Response:
         media_type=f"multipart/x-mixed-replace; boundary={boundary}",
         headers={"Cache-Control": "no-store, max-age=0"},
     )
-
-
-@app.get("/camera/{camera_id}/marker_count")
-def camera_marker_count(camera_id: str) -> dict[str, Any]:
-    """Return `{count, plate_ids, extended_ids}` for whatever markers are
-    visible in the latest buffered preview JPEG.
-
-    Legacy/debug helper only: auto-calibration does NOT use preview JPEGs.
-    It requests a separate native-resolution calibration frame from the
-    phone. Returns zeros when there's no preview frame yet.
-    """
-    _validate_camera_id_or_422(camera_id)
-    got = state._preview.latest(camera_id, max_age_s=_PREVIEW_FRAME_MAX_AGE_S)
-    if got is None:
-        return {"count": 0, "plate_ids": [], "extended_ids": []}
-    jpeg_bytes, _ = got
-    try:
-        from calibration_solver import (
-            PLATE_MARKER_WORLD,
-            detect_all_markers_in_dict,
-        )
-        import cv2  # noqa: WPS433
-        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if bgr is None:
-            return {"count": 0, "plate_ids": [], "extended_ids": []}
-        markers = detect_all_markers_in_dict(bgr)
-        plate_ids = sorted(m.id for m in markers if m.id in PLATE_MARKER_WORLD)
-        extended_ids = sorted(m.id for m in markers if m.id not in PLATE_MARKER_WORLD)
-        return {
-            "count": len(markers),
-            "plate_ids": plate_ids,
-            "extended_ids": extended_ids,
-        }
-    except Exception as e:  # noqa: BLE001
-        logger.debug("marker_count failed camera=%s: %s", camera_id, e)
-        return {"count": 0, "plate_ids": [], "extended_ids": []}
 
 
 @app.post("/camera/{camera_id}/preview_request")
