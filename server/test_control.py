@@ -829,11 +829,13 @@ def test_setup_page_renders_all_config_surfaces():
     # `/setup` is now geometry-only.
     assert 'id="devices-body"' in body
     assert 'href="/markers"' in body
-    assert 'Open markers workspace' in body
     assert 'Camera Position Setup' in body
     assert 'href="/sync"' in body
     assert 'data-preview-overlay="A"' in body
     assert 'data-preview-overlay="B"' in body
+    assert 'data-preview-cam="A"' in body
+    assert 'data-preview-cam="B"' in body
+    assert 'Preview off' in body
 
 
 def test_sync_page_renders_time_sync_and_tuning_surfaces():

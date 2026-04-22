@@ -2053,6 +2053,19 @@ def test_preview_request_flag_expires_after_ttl(tmp_path, monkeypatch):
     assert main.state._preview.requested_map() == {}
 
 
+def test_preview_frame_expires_after_age_limit(tmp_path, monkeypatch):
+    clock = [1000.0]
+    def fake_time() -> float:
+        return clock[0]
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
+    main.state._preview.request("A", enabled=True)
+    jpeg = _minimal_jpeg()
+    assert main.state._preview.push("A", jpeg, ts=clock[0]) is True
+    assert main.state._preview.latest("A", max_age_s=main._PREVIEW_FRAME_MAX_AGE_S) == (jpeg, clock[0])
+    clock[0] += main._PREVIEW_FRAME_MAX_AGE_S + 0.1
+    assert main.state._preview.latest("A", max_age_s=main._PREVIEW_FRAME_MAX_AGE_S) is None
+
+
 def test_preview_oversize_rejected_413():
     client = TestClient(app)
     client.post("/camera/A/preview_request", json={"enabled": True})

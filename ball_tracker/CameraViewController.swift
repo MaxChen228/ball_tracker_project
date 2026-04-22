@@ -2456,11 +2456,27 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 extension CameraViewController: ServerWebSocketDelegate {
 
     func webSocketDidConnect(_ connection: ServerWebSocketConnection) {
-        healthMonitor.recordConnectionSuccess(status: "WS_OPEN")
+        // Transport open is not proof the server is actually reachable.
+        // URLSession lets `resume()` succeed before the WS handshake (or
+        // a first server payload) completes, which caused false-green
+        // "server connected" HUD states after the backend had already
+        // died. Reachability is promoted only on real inbound traffic in
+        // `didReceive`.
     }
 
     func webSocketDidDisconnect(_ connection: ServerWebSocketConnection, reason: String?) {
         healthMonitor.recordConnectionDrop()
+        // Preview is a separate HTTP path, but the operator treats it as
+        // part of the same "server/control plane is alive" story. If the
+        // WS control channel drops, stop latched preview pushes so the
+        // dashboard can't keep showing live frames for a camera it marks
+        // offline. A later `settings` payload will re-enable it after a
+        // real reconnect.
+        previewRequestedByServer = false
+        previewUploader?.reset()
+        if state == .standby {
+            stopCapture()
+        }
     }
 
     func webSocket(_ connection: ServerWebSocketConnection, didReceive message: [String: Any]) {

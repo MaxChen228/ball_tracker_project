@@ -125,10 +125,6 @@ final class ServerWebSocketConnection {
         scheduleLivenessWatchdog()
         if let hello = initialHello { _send(hello) }
         _receiveNext(task: newTask)
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.delegate?.webSocketDidConnect(self)
-        }
     }
 
     private func _disconnect(scheduleReconnect: Bool) {

@@ -10,6 +10,7 @@ LIVE_COMPARE_CSS = """
   border: 1px solid var(--border-l);
   border-radius: calc(var(--r) + 2px);
   overflow: hidden;
+  aspect-ratio: 16 / 9;
 }
 .preview-panel {
   background: #120F0D;
@@ -22,11 +23,17 @@ LIVE_COMPARE_CSS = """
 .preview-panel .preview-overlay {
   display: block;
   width: 100%;
-  aspect-ratio: 16 / 9;
+  height: 100%;
 }
 .preview-panel img {
+  position: absolute;
+  inset: 0;
   object-fit: cover;
   background: #120F0D;
+}
+.virt-cell canvas {
+  position: absolute;
+  inset: 0;
 }
 .preview-panel .preview-overlay {
   position: absolute;
@@ -66,6 +73,7 @@ LIVE_COMPARE_CSS = """
 .virt-cell .placeholder {
   position: absolute;
   inset: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: center;
