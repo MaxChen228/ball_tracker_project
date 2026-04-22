@@ -44,7 +44,6 @@ _SYNC_CSS = """
   color: var(--ink); margin: 0;
 }
 .page-copy { color: var(--ink-light); max-width: 720px; }
-.workflow-links { display: flex; gap: var(--s-2); flex-wrap: wrap; }
 .setup-section-title {
   font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
   text-transform: uppercase; color: var(--sub);
@@ -73,13 +72,6 @@ _SYNC_CSS = """
   display: inline-block; width: 10px; height: 2px; margin-right: 6px;
   vertical-align: middle;
 }
-.markers-link-row {
-  margin-top: var(--s-3); display: flex; align-items: center; justify-content: space-between;
-  gap: var(--s-3); flex-wrap: wrap; padding-top: var(--s-3); border-top: 1px solid var(--border-l);
-}
-.markers-link-copy {
-  max-width: 640px; color: var(--ink-light);
-}
 .main-sync .telemetry-panel {
   position: static;
   left: auto;
@@ -91,6 +83,9 @@ _SYNC_CSS = """
 }
 .main-sync .telemetry-body {
   max-height: 360px;
+}
+.main-sync .camera-compare .preview-panel .placeholder {
+  display: none;
 }
 .tuning-status {
   min-height: 18px;
@@ -650,26 +645,12 @@ def render_setup_html(
         '<div class="page-kicker">Calibration workflow</div>'
         '<h1 class="page-title">Camera Position Setup</h1>'
         '</div>'
-        '<div class="workflow-links">'
-        '<a class="btn-link secondary" href="/sync">Open sync</a>'
-        '<a class="btn-link secondary" href="/markers">Open markers</a>'
-        '</div>'
         '</section>'
         # DEVICES · CALIBRATION
         '<div class="setup-section-title">Devices &middot; Calibration</div>'
         '<div class="card">'
         '<h2 class="card-title">Devices &middot; Calibration</h2>'
-        f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested)}</div>'
-        '<div class="markers-link-row">'
-        '<a class="btn-link secondary" href="/markers">Open markers workspace</a>'
-        '</div>'
-        "</div>"
-        '<div class="card">'
-        '<h2 class="card-title">Next Step</h2>'
-        '<div class="workflow-links">'
-        '<a class="btn-link" href="/sync">Go to sync</a>'
-        '<a class="btn-link secondary" href="/">Back to dashboard</a>'
-        '</div>'
+        f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested, compare_mode="always_on")}</div>'
         "</div>"
         "</main>"
         f"<script>{_DASHBOARD_JS_TEMPLATE}</script>"
@@ -714,11 +695,6 @@ def render_sync_html(
         '<div class="page-hero-copy">'
         '<div class="page-kicker">Audio workflow</div>'
         '<h1 class="page-title">Time Sync</h1>'
-        '<div class="page-copy">Choose the fast single-listener chirp when you need a quick re-sync, or run the full mutual sync when both devices should resolve timing together. Runtime tuning lives here because it directly affects sync and live transport behaviour.</div>'
-        '</div>'
-        '<div class="workflow-links">'
-        '<a class="btn-link secondary" href="/setup">Back to setup</a>'
-        '<a class="btn-link secondary" href="/">Back to dashboard</a>'
         '</div>'
         '</section>'
         '<div class="setup-section-title">Time Sync</div>'
