@@ -21,6 +21,7 @@ from render_compare import (
     render_live_compare_camera,
 )
 from render_dashboard_client import _JS_TEMPLATE, _JS_TEMPLATE_RAW, _resolve_js_template
+from render_dashboard_html import render_dashboard_html as _render_dashboard_html
 from render_scene import _build_figure
 from render_shared import (
     _CSS as _SHARED_CSS,
@@ -1423,64 +1424,21 @@ def render_events_index_html(
     )
     scene_div = fig.to_html(include_plotlyjs=False, full_html=False, div_id="scene-root")
 
-    return (
-        "<!DOCTYPE html>"
-        "<html lang=\"en\"><head>"
-        "<meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        "<title>ball_tracker</title>"
-        "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">"
-        "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
-        "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
-        "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
-        f"<style>{_CSS}</style>"
-        "</head><body data-page=\"dashboard\">"
-        f'{_render_app_nav("dashboard", devices, session, calibrations, sync, sync_cooldown_remaining_s)}'
-        '<div class="layout">'
-        '<aside class="sidebar">'
-        '<div class="card">'
-        '<h2 class="card-title">Active Session</h2>'
-        f'<div id="active-body">{_render_active_session_body(live_session)}</div>'
-        "</div>"
-        '<div class="card">'
-        '<h2 class="card-title">Session</h2>'
-        f'<div id="session-body">{_render_session_body(session, capture_mode, default_paths, devices, calibrations)}</div>'
-        "</div>"
-        '<div class="card">'
-        '<div class="events-toolbar">'
-        '<h2 class="card-title" style="margin:0;border-bottom:0;padding:0;">Events</h2>'
-        '<div class="events-filters">'
-        '<button type="button" class="events-filter active" data-events-bucket="active">Active</button>'
-        f'<button type="button" class="events-filter" data-events-bucket="trash">Trash {trash_count}</button>'
-        '</div>'
-        '</div>'
-        f'<div id="events-body">{_render_events_body(events)}</div>'
-        "</div>"
-        "</aside>"
-        '<section class="canvas">'
-        '<div id="degraded-banner" class="degraded-banner" role="alert" style="display:none">'
-        '  <span class="degraded-icon">⚠</span>'
-        '  <span data-degraded-body>Live stream degraded.</span>'
-        '</div>'
-        '<div class="canvas-hint">Drag to rotate</div>'
-        '<div class="canvas-mode-toggle" role="radiogroup" aria-label="Canvas mode">'
-        '  <button type="button" data-canvas-mode="inspect" class="active">INSPECT</button>'
-        '  <button type="button" data-canvas-mode="replay">REPLAY</button>'
-        '</div>'
-        f"{scene_div}"
-        '<div class="playback-bar" id="playback-bar">'
-        '  <button type="button" class="playpause" id="playpause">▶</button>'
-        '  <input type="range" id="scrub" min="0" max="1000" step="1" value="0">'
-        '  <span class="time" id="time-readout">0.00 / 0.00 s</span>'
-        '  <span class="speed" role="radiogroup" aria-label="Playback speed">'
-        '    <button type="button" data-speed="0.25">0.25×</button>'
-        '    <button type="button" data-speed="0.5">0.5×</button>'
-        '    <button type="button" data-speed="1" class="active">1×</button>'
-        '    <button type="button" data-speed="2">2×</button>'
-        '  </span>'
-        '</div>'
-        "</section>"
-        "</div>"
-        f"<script>{_JS_TEMPLATE}</script>"
-        "</body></html>"
+    nav_html = _render_app_nav(
+        "dashboard", devices, session, calibrations, sync, sync_cooldown_remaining_s
+    )
+    active_html = _render_active_session_body(live_session)
+    session_html = _render_session_body(
+        session, capture_mode, default_paths, devices, calibrations
+    )
+    events_html = _render_events_body(events)
+    return _render_dashboard_html(
+        css=_CSS,
+        nav_html=nav_html,
+        active_html=active_html,
+        session_html=session_html,
+        events_html=events_html,
+        scene_div=scene_div,
+        dashboard_js=_JS_TEMPLATE,
+        trash_count=trash_count,
     )
