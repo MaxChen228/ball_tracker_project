@@ -24,18 +24,7 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "camer
 ///   "last contact" tick timer.
 /// - `PayloadUploadQueue` owns the cached-pitch upload worker.
 final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
-    enum AppState {
-        case standby
-        case timeSyncWaiting
-        case mutualSyncing
-        case recording
-        case uploading
-    }
-
-    private struct SyncAnchor {
-        let syncId: String
-        let anchorTimestampS: Double
-    }
+    typealias AppState = CameraAppState
 
     // Adaptive capture rate. Idle / time-sync runs at 60 fps to keep the
     // sensor + ISP cool and save battery; `.recording` switches to 240 fps
@@ -72,13 +61,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // `AVCaptureSession`, so sync works regardless of capture state
     // (parked / standby-fps / tracking-fps). `syncDetector` holds the
     // matched-filter state; buffers flow in via `syncAudio`'s input tap.
-    private var syncDetector: AudioSyncDetector?
-    private var syncAudio: MutualSyncAudio?
-    private var pendingSyncId: String?
-    private var syncSelfPTS: Double?
-    private var syncFromOtherPTS: Double?
-    private var syncWatchdog: DispatchWorkItem?
-
     // State + frame index. `state` is read/written on main; `captureOutput`
     // (frame queue, up to 240 Hz) reads it via `frameStateBox.snapshot()` so
     // it never observes a partially-updated AppState while `applyRemoteDisarm`
@@ -100,6 +82,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var serverConfig: ServerUploader.ServerConfig!
     private var healthMonitor: ServerHealthMonitor!
     private var uploadQueue: PayloadUploadQueue!
+    private var recordingCoordinator: CameraRecordingCoordinator!
+    private var timeSyncCoordinator: CameraTimeSyncCoordinator!
+    private var commandRouter: CameraCommandRouter!
 
     // UI state.
     private var lastUploadStatusText: String = ""
@@ -176,14 +161,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // chirp peak from the mic matched filter. Stamped onto outgoing
     // payloads as `sync_anchor_timestamp_s`. Nil until the user completes
     // a 時間校正; server rejects unpaired sessions whose anchor is nil.
-    private var lastSyncAnchor: SyncAnchor?
-    private var pendingTimeSyncId: String?
-    private var timeSyncClaimGeneration: Int = 0
-    private var lastSyncAnchorTimestampS: Double? { lastSyncAnchor?.anchorTimestampS }
-    private var lastSyncId: String? { lastSyncAnchor?.syncId }
-
-    // Time-sync timeout task so we can cancel if the user aborts early.
-    private var timeSyncTimeoutWork: DispatchWorkItem?
+    private var lastSyncAnchorTimestampS: Double? { timeSyncCoordinator?.lastSyncAnchorTimestampS }
+    private var lastSyncId: String? { timeSyncCoordinator?.lastSyncId }
 
     // UI containers. Layout is a Ready card (left-centered, standby only)
     // plus the existing state chip (top-left) + REC indicator (top-right).
@@ -207,8 +186,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// means "never heard from the server yet" — the first settings payload
     /// triggers the initial apply regardless of whether the server
     /// value happens to equal the local Settings bootstrap default.
-    private var lastServerChirpThreshold: Double?
-    private var lastServerHeartbeatInterval: Double?
     private var lastServerTrackingExposureCapMode: ServerUploader.TrackingExposureCapMode?
     /// Currently-applied capture image height. Initialised from
     /// SettingsViewController.captureHeightFixed (1080). Server pushes a
@@ -338,11 +315,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             guard let self else { return }
             let finishingClip = self.clipRecorder
             self.clipRecorder = nil
-            if payload.sync_id != nil {
-                self.lastSyncAnchor = nil
-                self.healthMonitor?.updateTimeSyncId(nil)
-                DispatchQueue.main.async { self.updateUIForState() }
-            }
+            self.timeSyncCoordinator.consumeSyncAnchorAfterCycleIfNeeded(syncId: payload.sync_id)
             log.info("camera cycle complete session=\(payload.session_id, privacy: .public) cam=\(payload.camera_id, privacy: .public) has_clip=\(finishingClip != nil)")
             // End-of-recording feedback — haptic + system sound so the
             // operator knows the cycle finished without looking down.
@@ -357,13 +330,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             // Upload shape is now just session-level metadata + frames.
             if let finishingClip {
                 finishingClip.finish { [weak self] videoURL in
-                    self?.handleFinishedClip(enriched: payload, videoURL: videoURL)
+                    self?.recordingCoordinator.handleFinishedClip(enriched: payload, videoURL: videoURL)
                 }
             } else {
                 // Degenerate path: clip bootstrap failed before any MOV
                 // existed. `handleFinishedClip` falls back to the advisory
                 // live-detection buffer so the cycle isn't silently lost.
-                self.handleFinishedClip(enriched: payload, videoURL: nil)
+                self.recordingCoordinator.handleFinishedClip(enriched: payload, videoURL: nil)
             }
         }
 
@@ -394,12 +367,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             baseIntervalS: 1.0
         )
         wireHealthMonitorCallbacks()
+        timeSyncCoordinator = makeTimeSyncCoordinator()
+        recordingCoordinator = makeRecordingCoordinator()
 
         setupUI()
         setupPreviewAndCapture()
         setupAudioCapture()
         setupDisplayLink()
         healthMonitor.start()
+        commandRouter = makeCommandRouter()
         connectWebSocket()
         // frameDispatcher needs the ws connection (set up inside connectWebSocket())
         if let wsConn = ws {
@@ -446,10 +422,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         disconnectWebSocket()
         displayLink?.isPaused = true
         if state == .timeSyncWaiting {
-            cancelTimeSync()
+            timeSyncCoordinator.cancelTimeSync()
         }
         if state == .mutualSyncing {
-            abortMutualSync(reason: "view dismissed")
+            timeSyncCoordinator.abortMutualSync(reason: "view dismissed")
         }
     }
 
@@ -468,356 +444,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // MARK: - Recording controls
 
-    /// Dashboard arm landed — spin up the capture session at 240 fps and
-    /// move to `.recording`. Session was parked (stopped) in standby to keep
-    /// the phone cool, so this is both a start *and* an fps swap. ClipRecorder
-    /// is *not* created here; we defer that to the first captureOutput so we
-    /// can use the real pixel-buffer dimensions instead of the
-    /// Settings-declared 1920×1080. The PitchRecorder is also started from
-    /// captureOutput, once the first appended sample's session-clock PTS is
-    /// known.
     func enterRecordingMode() {
-        guard state == .standby else { return }
-        // Snapshot the server-minted session id at arm time and freeze it
-        // into the frame-state box. `self.currentSessionId` may flip during
-        // the ~300-500 ms fps-switch window, so the captureOutput path
-        // reads this snapshot rather than the live property.
-        let snapshotSessionId = currentSessionId
-        log.info("camera entering recording session=\(snapshotSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
-        if lastSyncAnchorTimestampS == nil {
-            warningLabel.text = "尚未時間校正，將無法三角化"
-            warningLabel.textColor = DesignTokens.Colors.ink
-            warningLabel.isHidden = false
-            log.warning("arm without time sync anchor — server will skip triangulation")
-        } else {
-            warningLabel.isHidden = true
-        }
-        startCapture(at: trackingFps)
-        recorder.reset()
-        resetBallDetectionState()
-        state = .recording
-        frameStateBox.update(state: .recording, pendingBootstrap: true, sessionId: snapshotSessionId)
-        updateUIForState()
-        // Acknowledge arm with a light tap; pre-warm the next two haptics
-        // so their first fire isn't lazy-initialised.
-        armHaptic.impactOccurred()
-        startRecHaptic.prepare()
-        endRecHaptic.prepare()
+        recordingCoordinator.enterRecordingMode()
     }
 
-    /// Return to `.standby` after a cycle was flushed (or the recording
-    /// never produced a frame between arm and disarm). Clears any live
-    /// clip writer on the processing queue so we can't race with an
-    /// in-flight `append` from captureOutput. The upload queue is NOT
-    /// touched here — a pitch just enqueued by `persistCompletedCycle`
-    /// needs to keep marching even after we've flipped back to standby,
-    /// and the queue lifecycle is now owned by `viewDidLoad` instead of
-    /// the sync-mode enter/exit boundaries.
     func exitRecordingToStandby() {
-        log.info("camera exit recording → standby session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public) state=\(Self.stateText(self.state), privacy: .public)")
-        state = .standby
-        frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
-        recorder.reset()
-        // Bump the detection generation so any closure still running on
-        // detectionQueue discards its result; also clears the buffer of
-        // anything that landed before this point.
-        resetBallDetectionState()
-        processingQueue.async { [weak self] in
-            self?.clipRecorder?.cancel()
-            self?.clipRecorder = nil
-        }
-        warningLabel.isHidden = true
-        // Drop fps back to idle so the sensor stops running at 240. If the
-        // dashboard isn't watching this cam's preview, park the session
-        // entirely to save power.
-        if previewRequestedByServer {
-            switchCaptureFps(standbyFps)
-        } else {
-            stopCapture()
-        }
-        updateUIForState()
-    }
-
-    /// Cycle-complete router. PR61 makes the finalized local MOV the
-    /// authority for any on-device result:
-    ///   - `cameraOnly` → raw MOV upload only; server remains authoritative.
-    ///   - `onDevice` → persist the MOV locally, run post-pass analysis,
-    ///     upload frames-only once analysis completes.
-    ///   - `dual` → upload the raw MOV immediately AND enqueue a late
-    ///     post-pass sidecar upload carrying `frames_on_device`.
-    ///
-    /// Live detection is drained here only as a degraded fallback when clip
-    /// writing failed and no MOV exists to analyze.
-    private func handleFinishedClip(
-        enriched: ServerUploader.PitchPayload,
-        videoURL: URL?
-    ) {
-        let advisoryFrames = drainDetectedFrames()
-        let paths = currentSessionPaths
-        log.info("cycle complete session=\(enriched.session_id, privacy: .public) paths=\(paths.map(\.rawValue).sorted().joined(separator: ","), privacy: .public) advisory_frames=\(advisoryFrames.count) ball_frames=\(advisoryFrames.filter { $0.ball_detected }.count) has_video=\(videoURL != nil)")
-        let payload = enriched.withPaths(Array(paths))
-
-        guard let videoURL else {
-            handleFallbackCycleWithoutVideo(
-                enriched: payload,
-                advisoryFrames: advisoryFrames,
-                paths: paths
-            )
-            return
-        }
-
-        if paths.contains(.serverPost) {
-            handleCameraOnlyCycle(enriched: payload, videoURL: videoURL)
-        }
-        if paths.contains(.iosPost) {
-            let uploadMode: AnalysisJobStore.Job.UploadMode = paths.contains(.serverPost) ? .dualSidecar : .onDevicePrimary
-            let analysisVideoURL = paths.contains(.serverPost) ? duplicateVideoForAnalysis(from: videoURL) : videoURL
-            if let analysisVideoURL {
-                persistAnalysisJob(
-                    payload: payload,
-                    videoURL: analysisVideoURL,
-                    uploadMode: uploadMode
-                )
-            } else {
-                log.error("camera failed to prepare clip for iOS post-pass session=\(payload.session_id, privacy: .public)")
-            }
-        }
-        if paths.contains(.live) {
-            frameDispatcher?.dispatchCycleEnd(sessionId: payload.session_id, reason: "disarmed")
-        }
-        if !paths.contains(.serverPost) && !paths.contains(.iosPost) {
-            // Live-only fallback still persists metadata so the cycle
-            // remains recoverable if the WS stream degraded mid-flight.
-            persistCompletedCycle(payload, videoURL: videoURL)
-        }
-    }
-
-    private func handleFallbackCycleWithoutVideo(
-        enriched: ServerUploader.PitchPayload,
-        advisoryFrames: [ServerUploader.FramePayload],
-        paths: Set<ServerUploader.DetectionPath>
-    ) {
-        if paths.contains(.serverPost) {
-            persistCompletedCycle(enriched, videoURL: nil)
-        } else if paths.contains(.iosPost) {
-            persistCompletedCycle(enriched.withFrames(advisoryFrames), videoURL: nil)
-        } else {
-            persistCompletedCycle(enriched.withFrames(advisoryFrames), videoURL: nil)
-        }
-    }
-
-    /// Mode-one / dual: ship the full recorded MOV as-is. Server runs
-    /// authoritative detection on the received clip.
-    private func handleCameraOnlyCycle(
-        enriched: ServerUploader.PitchPayload,
-        videoURL: URL?
-    ) {
-        persistCompletedCycle(enriched, videoURL: videoURL)
-    }
-
-    private func persistCompletedCycle(
-        _ payload: ServerUploader.PitchPayload,
-        videoURL: URL?
-    ) {
-        do {
-            let fileURL = try payloadStore.save(payload, videoURL: videoURL)
-            DispatchQueue.main.async {
-                self.lastUploadStatusText = "暫存完成 · 等待上傳"
-                self.uploadQueue.enqueue(fileURL)
-                // Every cycle-complete returns to standby. Dashboard re-arm
-                // happens via the next heartbeat.
-                self.returnToStandbyAfterCycle = false
-                self.exitRecordingToStandby()
-            }
-        } catch {
-            log.error("camera cycle persist failed session=\(payload.session_id, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            // Even if the JSON save failed, drop any orphan tmp video.
-            if let videoURL {
-                try? FileManager.default.removeItem(at: videoURL)
-            }
-            DispatchQueue.main.async {
-                self.lastUploadStatusText = "暫存失敗 · \(error.localizedDescription)"
-                self.returnToStandbyAfterCycle = false
-                self.exitRecordingToStandby()
-            }
-        }
-    }
-
-    private func persistAnalysisJob(
-        payload: ServerUploader.PitchPayload,
-        videoURL: URL,
-        uploadMode: AnalysisJobStore.Job.UploadMode
-    ) {
-        let job = AnalysisJobStore.Job(uploadMode: uploadMode, pitch: payload)
-        do {
-            let fileURL = try analysisStore.save(job, videoURL: videoURL)
-            DispatchQueue.main.async {
-                self.lastUploadStatusText = "暫存完成 · 等待錄後分析"
-                self.analysisQueue.enqueue(fileURL)
-                self.returnToStandbyAfterCycle = false
-                self.exitRecordingToStandby()
-            }
-        } catch {
-            log.error("camera analysis persist failed session=\(payload.session_id, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            try? FileManager.default.removeItem(at: videoURL)
-            DispatchQueue.main.async {
-                self.lastUploadStatusText = "錄後分析暫存失敗 · \(error.localizedDescription)"
-                self.returnToStandbyAfterCycle = false
-                self.exitRecordingToStandby()
-            }
-        }
-    }
-
-    private func duplicateVideoForAnalysis(from sourceURL: URL) -> URL? {
-        let ext = sourceURL.pathExtension.isEmpty ? "mov" : sourceURL.pathExtension
-        let dest = FileManager.default.temporaryDirectory
-            .appendingPathComponent("analysis_\(UUID().uuidString).\(ext)")
-        do {
-            try FileManager.default.copyItem(at: sourceURL, to: dest)
-            return dest
-        } catch {
-            log.error("camera analysis clip copy failed src=\(sourceURL.lastPathComponent, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
-            return nil
-        }
+        recordingCoordinator.exitRecordingToStandby()
     }
 
     // MARK: - Time calibration (chirp anchor)
 
     @objc private func onTapTimeCalibration() {
-        if state == .timeSyncWaiting {
-            cancelTimeSync()
-        } else if state == .standby {
-            startTimeSync()
-        }
-        updateUIForState()
-    }
-
-    private func startTimeSync(syncId: String? = nil) {
-        if let syncId {
-            beginTimeSync(syncId: syncId)
-            return
-        }
-        timeSyncClaimGeneration &+= 1
-        let generation = timeSyncClaimGeneration
-        warningLabel.text = "向伺服器請求時間校正識別碼…"
-        warningLabel.isHidden = false
-        lastUploadStatusText = "時間校正中 · 取得 sync id"
-        uploader.claimTimeSyncIntent { [weak self] result in
-            guard let self else { return }
-            DispatchQueue.main.async {
-                guard generation == self.timeSyncClaimGeneration else { return }
-                guard self.state == .standby else { return }
-                switch result {
-                case .success(let response):
-                    self.beginTimeSync(syncId: response.sync_id)
-                case .failure(let error):
-                    log.error("time-sync claim failed cam=\(self.settings.cameraRole, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
-                    self.pendingTimeSyncId = nil
-                    self.warningLabel.text = "無法取得同步識別碼：檢查伺服器連線"
-                    self.warningLabel.textColor = DesignTokens.Colors.destructive
-                    self.warningLabel.isHidden = false
-                    self.lastUploadStatusText = "時間校正失敗 · sync id"
-                    self.updateUIForState()
-                }
-            }
-        }
-    }
-
-    private func beginTimeSync(syncId: String) {
-        pendingTimeSyncId = syncId
-        guard let detector = chirpDetector else {
-            // Mic permission still pending or denied — try once more.
-            setupAudioCapture()
-            warningLabel.text = "正在啟動麥克風…"
-            warningLabel.isHidden = false
-            return
-        }
-        // Session is parked while in standby. Spin it up at the idle fps so
-        // the mic starts delivering samples to the chirp detector. 60 fps of
-        // video is a free byproduct — cheaper than carving the audio input
-        // out to its own session, and the time-sync window is bounded at 15 s.
-        startCapture(at: standbyFps)
-        detector.reset()
-        detector.onChirpDetected = { [weak self] event in
-            guard let self else { return }
-            DispatchQueue.main.async {
-                self.completeTimeSync(event)
-            }
-        }
-        state = .timeSyncWaiting
-        frameStateBox.update(state: .timeSyncWaiting, pendingBootstrap: false, sessionId: nil)
-        warningLabel.text = "等待同步音頻觸發中… (把兩機並排，第三裝置播 chirp)"
-        warningLabel.textColor = DesignTokens.Colors.ink
-        warningLabel.isHidden = false
-        lastUploadStatusText = "時間校正中 · 等待聲波"
-
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.state == .timeSyncWaiting else { return }
-            self.cancelTimeSync(reason: "timeout")
-        }
-        timeSyncTimeoutWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
-    }
-
-    private func cancelTimeSync(reason: String = "cancelled") {
-        log.info("camera cancel time-sync reason=\(reason, privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
-        timeSyncClaimGeneration &+= 1
-        timeSyncTimeoutWork?.cancel()
-        timeSyncTimeoutWork = nil
-        chirpDetector?.onChirpDetected = nil
-        latestChirpSnapshot = nil
-        pendingTimeSyncId = nil
-        state = .standby
-        frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
-        // Already at standbyFps — leave the session running for preview.
-        lastUploadStatusText = "時間校正 · \(Self.localizedCancelReason(reason))"
-
-        if reason == "timeout" {
-            log.warning("camera time-sync timeout cam=\(self.settings.cameraRole, privacy: .public)")
-            // Flash a red banner for 3 s so the operator notices the miss;
-            // the HUD's warning label is otherwise yellow for the "waiting"
-            // state and hiding it immediately on timeout made it easy to
-            // miss that the chirp never arrived.
-            let originalBg = warningLabel.backgroundColor
-            let originalFg = warningLabel.textColor
-            warningLabel.backgroundColor = DesignTokens.Colors.destructive
-            warningLabel.textColor = DesignTokens.Colors.cardBackground
-            warningLabel.text = "時間校正逾時：確認 chirp 音訊與麥克風"
-            warningLabel.isHidden = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                guard let self else { return }
-                self.warningLabel.isHidden = true
-                self.warningLabel.backgroundColor = originalBg
-                self.warningLabel.textColor = originalFg
-            }
-        } else {
-            warningLabel.isHidden = true
-        }
-        updateUIForState()
-    }
-
-    private func completeTimeSync(_ event: AudioChirpDetector.ChirpEvent) {
-        guard state == .timeSyncWaiting else { return }
-        guard let syncId = pendingTimeSyncId else {
-            log.error("camera complete time-sync without sync_id cam=\(self.settings.cameraRole, privacy: .public)")
-            cancelTimeSync(reason: "missing_sync_id")
-            return
-        }
-        log.info("camera complete time-sync anchor_frame=\(event.anchorFrameIndex) anchor_ts=\(event.anchorTimestampS) sync_id=\(syncId, privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
-        timeSyncTimeoutWork?.cancel()
-        timeSyncTimeoutWork = nil
-        chirpDetector?.onChirpDetected = nil
-        pendingTimeSyncId = nil
-        lastSyncAnchor = SyncAnchor(syncId: syncId, anchorTimestampS: event.anchorTimestampS)
-        // Surface the freshly-acquired anchor to the dashboard via the
-        // next heartbeat so the sidebar's "time sync" dot flips green.
-        healthMonitor?.updateTimeSyncId(syncId)
-        latestChirpSnapshot = nil
-        state = .standby
-        frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
-        warningLabel.isHidden = true
-        lastUploadStatusText = "時間校正完成"
-        updateUIForState()
+        timeSyncCoordinator.onTapTimeCalibration()
     }
 
     // MARK: - Capture setup
@@ -1465,6 +1103,141 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         ws?.send(obj)
     }
 
+    private func makeRecordingCoordinator() -> CameraRecordingCoordinator {
+        CameraRecordingCoordinator(
+            standbyFps: standbyFps,
+            trackingFps: trackingFps,
+            dependencies: .init(
+                cameraRole: { [unowned self] in self.settings.cameraRole },
+                getState: { [unowned self] in self.state },
+                setState: { [weak self] in self?.state = $0 },
+                updateFrameState: { [weak self] state, pendingBootstrap, sessionId in
+                    self?.frameStateBox.update(state: state, pendingBootstrap: pendingBootstrap, sessionId: sessionId)
+                },
+                currentSessionId: { [weak self] in self?.currentSessionId },
+                lastSyncAnchorTimestampS: { [weak self] in self?.lastSyncAnchorTimestampS },
+                currentSessionPaths: { [weak self] in self?.currentSessionPaths ?? [] },
+                previewRequestedByServer: { [weak self] in self?.previewRequestedByServer ?? false },
+                resetRecorder: { [weak self] in self?.recorder.reset() },
+                resetBallDetectionState: { [weak self] in self?.resetBallDetectionState() },
+                cancelClipRecorderAsync: { [weak self] in
+                    self?.processingQueue.async {
+                        self?.clipRecorder?.cancel()
+                        self?.clipRecorder = nil
+                    }
+                },
+                cancelClipRecorderNow: { [weak self] in
+                    self?.clipRecorder?.cancel()
+                    self?.clipRecorder = nil
+                },
+                clipRecorderExists: { [weak self] in self?.clipRecorder != nil },
+                recorderIsActive: { [weak self] in self?.recorder.isActive ?? false },
+                forceFinishRecording: { [weak self] in self?.recorder.forceFinishIfRecording() },
+                runOnProcessingQueue: { [weak self] work in self?.processingQueue.async(execute: work) },
+                startCapture: { [weak self] in self?.startCapture(at: $0) },
+                stopCapture: { [weak self] in self?.stopCapture() },
+                switchCaptureFps: { [weak self] in self?.switchCaptureFps($0) },
+                updateUIForState: { [weak self] in self?.updateUIForState() },
+                setWarning: { [weak self] text, color, hidden in
+                    self?.warningLabel.text = text
+                    if let color {
+                        self?.warningLabel.textColor = color
+                    }
+                    self?.warningLabel.isHidden = hidden
+                },
+                setLastUploadStatusText: { [weak self] in self?.lastUploadStatusText = $0 },
+                setReturnToStandbyAfterCycle: { [weak self] in self?.returnToStandbyAfterCycle = $0 },
+                armFeedback: { [weak self] in self?.armHaptic.impactOccurred() },
+                prepareRecordingFeedback: { [weak self] in
+                    self?.startRecHaptic.prepare()
+                    self?.endRecHaptic.prepare()
+                },
+                drainDetectedFrames: { [weak self] in self?.drainDetectedFrames() ?? [] },
+                dispatchCycleEnd: { [weak self] sessionId, reason in
+                    self?.frameDispatcher?.dispatchCycleEnd(sessionId: sessionId, reason: reason)
+                },
+                payloadStore: payloadStore,
+                uploadQueue: uploadQueue,
+                analysisStore: analysisStore,
+                analysisQueue: analysisQueue
+            )
+        )
+    }
+
+    private func makeTimeSyncCoordinator() -> CameraTimeSyncCoordinator {
+        CameraTimeSyncCoordinator(
+            dependencies: .init(
+                cameraRole: { [unowned self] in self.settings.cameraRole },
+                getState: { [unowned self] in self.state },
+                setState: { [weak self] in self?.state = $0 },
+                updateFrameState: { [weak self] state, pendingBootstrap, sessionId in
+                    self?.frameStateBox.update(state: state, pendingBootstrap: pendingBootstrap, sessionId: sessionId)
+                },
+                updateUIForState: { [weak self] in self?.updateUIForState() },
+                startCapture: { [weak self] in self?.startCapture(at: $0) },
+                setupAudioCapture: { [weak self] in self?.setupAudioCapture() },
+                chirpDetector: { [weak self] in self?.chirpDetector },
+                setLatestChirpSnapshot: { [weak self] in self?.latestChirpSnapshot = $0 },
+                setWarning: { [weak self] text, color, hidden in
+                    self?.warningLabel.text = text
+                    if let color {
+                        self?.warningLabel.textColor = color
+                    }
+                    self?.warningLabel.isHidden = hidden
+                },
+                setLastUploadStatusText: { [weak self] in self?.lastUploadStatusText = $0 },
+                uploader: uploader,
+                healthMonitor: healthMonitor,
+                standbyFps: standbyFps
+            )
+        )
+    }
+
+    private func makeCommandRouter() -> CameraCommandRouter {
+        CameraCommandRouter(
+            dependencies: .init(
+                cameraRole: { [unowned self] in self.settings.cameraRole },
+                getState: { [unowned self] in self.state },
+                healthMonitor: healthMonitor,
+                setCurrentSessionId: { [weak self] in self?.currentSessionId = $0 },
+                setCurrentSessionPaths: { [weak self] in self?.currentSessionPaths = $0 },
+                getCurrentSessionPaths: { [weak self] in self?.currentSessionPaths ?? [] },
+                currentCaptureHeight: { [weak self] in self?.currentCaptureHeight ?? SettingsViewController.captureHeightFixed },
+                updateModeLabel: { [weak self] in self?.modeLabel.text = $0 },
+                handleTrackingExposureCap: { [weak self] in self?.handlePushedTrackingExposureCap($0) },
+                startTimeSync: { [weak self] in self?.timeSyncCoordinator.startTimeSync(syncId: $0) },
+                applyMutualSync: { [weak self] in self?.timeSyncCoordinator.applyMutualSync(syncId: $0) },
+                applyRemoteArm: { [weak self] in self?.recordingCoordinator.applyRemoteArm() },
+                applyRemoteDisarm: { [weak self] in
+                    self?.recordingCoordinator.applyRemoteDisarm(
+                        cancelTimeSync: { reason in self?.timeSyncCoordinator.cancelTimeSync(reason: reason) },
+                        abortMutualSync: { reason in self?.timeSyncCoordinator.abortMutualSync(reason: reason) }
+                    )
+                },
+                applyServerCaptureHeight: { [weak self] in self?.applyServerCaptureHeight($0) },
+                chirpThresholdDidPush: { [weak self] threshold in
+                    self?.chirpDetector?.setThreshold(Float(threshold))
+                    log.info("chirp threshold hot-applied from server: \(threshold)")
+                },
+                heartbeatIntervalDidPush: { [weak self] interval in
+                    self?.healthMonitor.updateBaseInterval(interval)
+                    log.info("heartbeat interval hot-applied: \(interval)s")
+                },
+                isPreviewRequested: { [weak self] in self?.previewRequestedByServer ?? false },
+                setPreviewRequested: { [weak self] in self?.previewRequestedByServer = $0 },
+                ensurePreviewUploader: { [weak self] in
+                    guard let self, self.previewUploader == nil else { return }
+                    self.previewUploader = PreviewUploader(uploader: self.uploader, cameraId: self.settings.cameraRole)
+                },
+                resetPreviewUploader: { [weak self] in self?.previewUploader?.reset() },
+                startCaptureAtStandby: { [weak self] in self?.startCapture(at: self?.standbyFps ?? 60) },
+                stopCapture: { [weak self] in self?.stopCapture() },
+                isCalibrationFrameCaptureArmed: { [weak self] in self?.calibrationFrameCaptureArmed ?? false },
+                setCalibrationFrameCaptureArmed: { [weak self] in self?.calibrationFrameCaptureArmed = $0 }
+            )
+        )
+    }
+
     private func handlePushedTrackingExposureCap(_ modeStr: String) {
         let exposureMode = ServerUploader.TrackingExposureCapMode(rawValue: modeStr) ?? .frameDuration
         if self.lastServerTrackingExposureCapMode != exposureMode {
@@ -1584,313 +1357,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case .invalidResponse:
             return "no response"
         }
-    }
-
-
-
-    private func applyRemoteArm() {
-        log.info("camera received arm command state=\(Self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
-        switch state {
-        case .standby:
-            enterRecordingMode()
-        case .timeSyncWaiting, .mutualSyncing, .recording, .uploading:
-            // Active state — arm is a no-op. `.timeSyncWaiting` finishes
-            // on its own and returns to standby; next heartbeat re-sends
-            // the arm command and this branch flips us into recording.
-            // Server's session ↔ sync precondition makes the
-            // `.mutualSyncing` path impossible in practice.
-            break
-        }
-    }
-
-    private func applyRemoteDisarm() {
-        log.info("camera received disarm command state=\(Self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
-        switch state {
-        case .standby:
-            break
-        case .timeSyncWaiting:
-            cancelTimeSync(reason: "disarmed")
-        case .mutualSyncing:
-            abortMutualSync(reason: "disarmed")
-        case .uploading:
-            // Upload flow runs its own course; state transitions back to
-            // standby via persistCompletedCycle once the queue accepts.
-            break
-        case .recording:
-            returnToStandbyAfterCycle = true
-            processingQueue.async { [weak self] in
-                guard let self else { return }
-                let active = self.recorder.isActive
-                log.info("camera disarm while recording: recorder_active=\(active) clip_exists=\(self.clipRecorder != nil)")
-                if active {
-                    // Normal path: flush whatever frames the clip contains;
-                    // onCycleComplete drives persist + standby transition.
-                    self.recorder.forceFinishIfRecording()
-                } else {
-                    // Disarm arrived before the first frame reached us
-                    // (happens if stop is pressed in the ~300 ms fps
-                    // switch window). Tear down cleanly on main.
-                    log.warning("camera disarm before first frame: no payload produced — frames never reached captureOutput or clip.append failed")
-                    self.clipRecorder?.cancel()
-                    self.clipRecorder = nil
-                    DispatchQueue.main.async {
-                        self.returnToStandbyAfterCycle = false
-                        self.exitRecordingToStandby()
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: - Mutual chirp sync
-
-    /// Enter mutual-sync mode. Both phones receive this command (distinct
-    /// `syncId` per run); each emits its own band's chirp, listens for
-    /// both bands, and POSTs the resulting 4 timestamps to the server.
-    /// `.mutualSyncing` can only be entered from `.standby` — arriving in
-    /// any other state is a server/client race we ignore (server guards
-    /// against sync ↔ session overlap, so this is a defense-in-depth log).
-    private func applyMutualSync(syncId: String) {
-        guard state == .standby else {
-            log.warning("sync_run ignored state=\(Self.stateText(self.state), privacy: .public) sync_id=\(syncId, privacy: .public)")
-            uploader.postSyncLog(event: "ignored", detail: [
-                "reason": .string("not_standby"),
-                "state": .string(Self.stateText(state)),
-                "sync_id": .string(syncId),
-            ])
-            return
-        }
-        log.info("camera entering mutual-sync sync_id=\(syncId, privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
-        uploader.postSyncLog(event: "enter", detail: [
-            "sync_id": .string(syncId),
-            "role": .string(settings.cameraRole),
-        ])
-        pendingSyncId = syncId
-        syncSelfPTS = nil
-        syncFromOtherPTS = nil
-        startMutualSync()
-    }
-
-    private func startMutualSync() {
-        let role = settings.cameraRole
-        guard role == "A" || role == "B" else {
-            log.error("sync_run rejected unknown role=\(role, privacy: .public)")
-            uploader.postSyncLog(event: "reject", detail: [
-                "reason": .string("unknown_role"),
-                "role": .string(role),
-            ])
-            pendingSyncId = nil
-            return
-        }
-
-        // Mutual sync runs on a dedicated `AVAudioEngine` owned by
-        // `MutualSyncAudio` — completely decoupled from `AVCaptureSession`.
-        // The capture state (parked / standby-fps / tracking-fps) is
-        // irrelevant; we do NOT call startCapture here. This is the whole
-        // point of the dedicated-engine refactor: engine.start is ~hundreds
-        // of ms vs. the 14-23 s cold-boot the capture session used to
-        // impose when the capture session was parked in idle.
-
-        let detector = AudioSyncDetector()
-        detector.onDetection = { [weak self] event in
-            guard let self else { return }
-            DispatchQueue.main.async { self.onSyncDetection(event) }
-        }
-        syncDetector = detector
-
-        let audio = MutualSyncAudio(detector: detector)
-        syncAudio = audio
-        uploader.postSyncLog(event: "detector_installed", detail: [
-            "role": .string(role),
-        ])
-
-        state = .mutualSyncing
-        frameStateBox.update(state: .mutualSyncing, pendingBootstrap: false, sessionId: nil)
-        warningLabel.text = "互相時間校正中… (\(role))"
-        warningLabel.isHidden = false
-        lastUploadStatusText = "Mutual sync · emitting"
-        updateUIForState()
-
-        let roleCaptured = role
-        audio.beginSync(emittedRole: roleCaptured) { [weak self] in
-            self?.uploader.postSyncLog(event: "emit", detail: [
-                "role": .string(roleCaptured),
-            ])
-        }
-
-        // Watchdog: server also has an 8 s timeout; set ours to 6 s so we
-        // clean up + log before the server gives up, and the next heartbeat
-        // already shows the cleared sync context.
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.state == .mutualSyncing else { return }
-            self.abortMutualSync(reason: "timeout")
-        }
-        syncWatchdog = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: work)
-    }
-
-    private func onSyncDetection(_ event: AudioSyncDetector.DetectionEvent) {
-        guard state == .mutualSyncing else { return }
-        let ownRole = settings.cameraRole
-        let isSelfHear = event.band.rawValue == ownRole
-        uploader.postSyncLog(event: "band_fired", detail: [
-            "band": .string(event.band.rawValue),
-            "is_self": .bool(isSelfHear),
-            "peak": .double(Double(event.peakNorm)),
-            "center_s": .double(event.centerPTS),
-        ])
-        if isSelfHear {
-            // Already recorded? Keep the first (earliest) peak — any
-            // subsequent hit within the cooldown is discarded by the
-            // detector, but defense-in-depth here too.
-            if syncSelfPTS == nil {
-                syncSelfPTS = event.centerPTS
-                log.info("sync self-hear band=\(event.band.rawValue, privacy: .public) center_s=\(event.centerPTS, privacy: .public) peak=\(event.peakNorm, privacy: .public)")
-            }
-        } else {
-            if syncFromOtherPTS == nil {
-                syncFromOtherPTS = event.centerPTS
-                log.info("sync cross-hear band=\(event.band.rawValue, privacy: .public) center_s=\(event.centerPTS, privacy: .public) peak=\(event.peakNorm, privacy: .public)")
-            }
-        }
-        if let tSelf = syncSelfPTS, let tOther = syncFromOtherPTS {
-            completeMutualSync(tSelf: tSelf, tFromOther: tOther)
-        }
-    }
-
-    private func completeMutualSync(tSelf: Double, tFromOther: Double) {
-        guard let syncId = pendingSyncId else {
-            log.error("sync complete without pending sync_id — ignoring")
-            return
-        }
-        log.info("sync complete sync_id=\(syncId, privacy: .public) t_self=\(tSelf, privacy: .public) t_from_other=\(tFromOther, privacy: .public)")
-        uploader.postSyncLog(event: "complete", detail: [
-            "sync_id": .string(syncId),
-            "t_self_s": .double(tSelf),
-            "t_from_other_s": .double(tFromOther),
-        ])
-        syncWatchdog?.cancel()
-        syncWatchdog = nil
-
-        let role = settings.cameraRole
-        // Drain the detector's rolling matched-filter traces so the server
-        // can render the `/sync` debug plot. Empty arrays if this run
-        // never populated them (shouldn't happen in normal flow, but old
-        // detectors / aborted runs could land here).
-        let traces: (self_: [AudioSyncDetector.TraceSample], other: [AudioSyncDetector.TraceSample])
-        if let detector = syncDetector {
-            traces = detector.drainTraces(role: role)
-        } else {
-            traces = ([], [])
-        }
-        let traceSelfPayload = traces.self_.map {
-            ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
-        }
-        let traceOtherPayload = traces.other.map {
-            ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
-        }
-        let report = ServerUploader.SyncReportPayload(
-            camera_id: role,
-            sync_id: syncId,
-            role: role,
-            t_self_s: tSelf,
-            t_from_other_s: tFromOther,
-            emitted_band: role,
-            trace_self: traceSelfPayload.isEmpty ? nil : traceSelfPayload,
-            trace_other: traceOtherPayload.isEmpty ? nil : traceOtherPayload,
-            aborted: false,
-            abort_reason: nil
-        )
-        // Fire-and-forget; server publishes the result via /status →
-        // last_sync, so this controller doesn't need to branch on success.
-        uploader.postSyncReport(report) { [weak self] result in
-            switch result {
-            case .success:
-                DispatchQueue.main.async {
-                    self?.lastUploadStatusText = "Mutual sync · uploaded"
-                    self?.updateUIForState()
-                }
-            case .failure(let error):
-                log.error("sync report upload failed: \(error.localizedDescription, privacy: .public)")
-                DispatchQueue.main.async {
-                    self?.lastUploadStatusText = "Mutual sync · upload failed"
-                    self?.updateUIForState()
-                }
-            }
-        }
-
-        teardownMutualSync(status: "Mutual sync · done")
-    }
-
-    private func abortMutualSync(reason: String) {
-        log.warning("sync aborted reason=\(reason, privacy: .public) sync_id=\(self.pendingSyncId ?? "nil", privacy: .public)")
-        uploader.postSyncLog(event: "abort", detail: [
-            "reason": .string(reason),
-            "sync_id": .string(pendingSyncId ?? ""),
-            "have_self": .bool(syncSelfPTS != nil),
-            "have_other": .bool(syncFromOtherPTS != nil),
-        ])
-        // Ship the failure report: whatever partial timestamps we got plus
-        // the full matched-filter trace so the server can see how close
-        // we came (sub-threshold peaks, noise floor, which band fired).
-        // Without this, aborted runs left the server with no diagnostic
-        // data — every failure looked identical in logs.
-        if let syncId = pendingSyncId {
-            let role = settings.cameraRole
-            let traceSelf: [ServerUploader.TraceSamplePayload]
-            let traceOther: [ServerUploader.TraceSamplePayload]
-            if let detector = syncDetector {
-                let traces = detector.drainTraces(role: role)
-                traceSelf = traces.self_.map {
-                    ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
-                }
-                traceOther = traces.other.map {
-                    ServerUploader.TraceSamplePayload(t: $0.t, peak: $0.peak, psr: $0.psr)
-                }
-            } else {
-                traceSelf = []
-                traceOther = []
-            }
-            let report = ServerUploader.SyncReportPayload(
-                camera_id: role,
-                sync_id: syncId,
-                role: role,
-                t_self_s: syncSelfPTS,
-                t_from_other_s: syncFromOtherPTS,
-                emitted_band: role,
-                trace_self: traceSelf.isEmpty ? nil : traceSelf,
-                trace_other: traceOther.isEmpty ? nil : traceOther,
-                aborted: true,
-                abort_reason: reason
-            )
-            uploader.postSyncReport(report) { result in
-                if case .failure(let err) = result {
-                    log.error("abort report upload failed: \(err.localizedDescription, privacy: .public)")
-                }
-            }
-        }
-        syncWatchdog?.cancel()
-        syncWatchdog = nil
-        teardownMutualSync(status: "Mutual sync · \(reason)")
-    }
-
-    /// Common cleanup from both success and timeout paths. Tears down the
-    /// mutual-sync audio engine (releases the AVAudioSession) and returns
-    /// to `.standby`. Does NOT touch the capture session — mutual sync
-    /// never owned it, so there's nothing for us to restore.
-    private func teardownMutualSync(status: String) {
-        syncDetector?.onDetection = nil
-        syncDetector = nil
-        syncAudio?.endSync()
-        syncAudio = nil
-        pendingSyncId = nil
-        syncSelfPTS = nil
-        syncFromOtherPTS = nil
-        state = .standby
-        frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
-        warningLabel.isHidden = true
-        lastUploadStatusText = status
-        updateUIForState()
     }
 
     /// Force an immediate heartbeat probe, resetting backoff. Exposed for
@@ -2167,17 +1633,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    /// Translate the internal `cancelTimeSync(reason:)` tag into user copy.
-    private static func localizedCancelReason(_ reason: String) -> String {
-        switch reason {
-        case "timeout": return "逾時"
-        case "cancelled": return "已取消"
-        case "disarmed": return "已取消（dashboard 停止）"
-        case "missing_sync_id": return "缺少 sync id"
-        default: return reason
-        }
-    }
-
     // MARK: - State visuals
 
     private func applyStateVisuals() {
@@ -2448,164 +1903,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 extension CameraViewController: ServerWebSocketDelegate {
 
     func webSocketDidConnect(_ connection: ServerWebSocketConnection) {
-        healthMonitor.recordConnectionSuccess(status: "WS_OPEN")
+        commandRouter.didConnect()
     }
 
     func webSocketDidDisconnect(_ connection: ServerWebSocketConnection, reason: String?) {
-        healthMonitor.recordConnectionDrop()
+        commandRouter.didDisconnect()
     }
 
     func webSocket(_ connection: ServerWebSocketConnection, didReceive message: [String: Any]) {
-        guard let type = message["type"] as? String else { return }
-
-        healthMonitor.recordConnectionSuccess(
-            status: type == "arm" ? "ARMED (\(message["sid"] as? String ?? "-"))" : "IDLE"
-        )
-
-        switch type {
-        case "sync_run":
-            if let sid = message["sync_id"] as? String {
-                DispatchQueue.main.async { self.applyMutualSync(syncId: sid) }
-            }
-        case "sync_command":
-            if let cmd = message["command"] as? String, cmd == "start" {
-                DispatchQueue.main.async {
-                    if self.state == .standby {
-                        if let syncId = message["sync_command_id"] as? String {
-                            self.startTimeSync(syncId: syncId)
-                        }
-                        self.updateUIForState()
-                    }
-                }
-            }
-        case "arm":
-            if let sid = message["sid"] as? String { currentSessionId = sid }
-            if let raw = message["paths"] as? [String] {
-                let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
-                if !parsed.isEmpty { currentSessionPaths = parsed }
-            }
-            if let capStr = message["tracking_exposure_cap"] as? String {
-                self.handlePushedTrackingExposureCap(capStr)
-            }
-            DispatchQueue.main.async {
-                self.modeLabel.text = "MODE · \(self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ").uppercased())"
-                self.applyRemoteArm()
-            }
-        case "disarm":
-            DispatchQueue.main.async { self.applyRemoteDisarm() }
-        case "calibration_updated":
-            // A sibling camera's calibration just changed server-side. iOS no
-            // longer owns the calibration state (Phase 1 decoupling — the
-            // server is authoritative), but a fresh poll against the server's
-            // status endpoint surfaces any knock-on setup change on the HUD
-            // without waiting for the next 5s tick.
-            let changedCam = (message["cam"] as? String) ?? "?"
-            log.info("ws calibration update cam=\(changedCam, privacy: .public) local=\(self.settings.cameraRole, privacy: .public)")
-            DispatchQueue.main.async { self.healthMonitor.probeNow() }
-        case "settings":
-            if let raw = message["paths"] as? [String] {
-                let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
-                if !parsed.isEmpty { currentSessionPaths = parsed }
-            }
-            if let threshold = message["chirp_detect_threshold"] as? Double,
-               self.lastServerChirpThreshold != threshold {
-                self.lastServerChirpThreshold = threshold
-                DispatchQueue.main.async {
-                    self.chirpDetector?.setThreshold(Float(threshold))
-                    log.info("chirp threshold hot-applied from server: \(threshold)")
-                }
-            }
-            if let interval = message["heartbeat_interval_s"] as? Double,
-               self.lastServerHeartbeatInterval != interval {
-                self.lastServerHeartbeatInterval = interval
-                DispatchQueue.main.async {
-                    self.healthMonitor.updateBaseInterval(interval)
-                    log.info("heartbeat interval hot-applied: \(interval)s")
-                }
-            }
-            if let capStr = message["tracking_exposure_cap"] as? String {
-                self.handlePushedTrackingExposureCap(capStr)
-            }
-            if let pushedH = message["capture_height_px"] as? Int, pushedH != self.currentCaptureHeight {
-                DispatchQueue.main.async {
-                    guard self.state == .standby else { return }
-                    self.applyServerCaptureHeight(pushedH)
-                }
-            }
-            let pushedPrev = message["preview_requested"] as? Bool ?? false
-            if self.previewRequestedByServer != pushedPrev {
-                self.previewRequestedByServer = pushedPrev
-                if pushedPrev {
-                    if self.previewUploader == nil {
-                        self.previewUploader = PreviewUploader(uploader: self.uploader, cameraId: self.settings.cameraRole)
-                    }
-                    if self.state == .standby { self.startCapture(at: self.standbyFps) }
-                } else {
-                    self.previewUploader?.reset()
-                    if self.state == .standby { self.stopCapture() }
-                }
-            }
-            let calFrame = message["calibration_frame_requested"] as? Bool ?? false
-            if calFrame, !self.calibrationFrameCaptureArmed, self.state != .recording {
-                self.calibrationFrameCaptureArmed = true
-                if self.state == .standby && !self.previewRequestedByServer {
-                    self.startCapture(at: self.standbyFps)
-                }
-            }
-            DispatchQueue.main.async {
-                let pathLabel = self.currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ")
-                self.modeLabel.text = "MODE · \(pathLabel.uppercased())"
-            }
-        default:
-            break
-        }
-    }
-}
-
-/// Lock-protected mirror of the three fields `captureOutput` reads across
-/// queues (`state`, `pendingRecordingBootstrap`, `pendingSessionId`). Main
-/// thread is the sole writer — `applyRemoteArm` / `applyRemoteDisarm` /
-/// `enterRecordingMode` / `exitRecordingToStandby` push every transition;
-/// the frame queue takes one locked snapshot per delivered sample so a
-/// 240 Hz read can never observe a partially-mutated state struct.
-final class FrameStateBox {
-    struct Snapshot {
-        let state: CameraViewController.AppState
-        let pendingBootstrap: Bool
-        let sessionId: String?
-    }
-
-    private var lock = os_unfair_lock_s()
-    private var _state: CameraViewController.AppState = .standby
-    private var _pendingBootstrap: Bool = false
-    private var _sessionId: String?
-
-    func snapshot() -> Snapshot {
-        os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
-        return Snapshot(
-            state: _state,
-            pendingBootstrap: _pendingBootstrap,
-            sessionId: _sessionId
-        )
-    }
-
-    func update(state: CameraViewController.AppState, pendingBootstrap: Bool, sessionId: String?) {
-        os_unfair_lock_lock(&lock)
-        _state = state
-        _pendingBootstrap = pendingBootstrap
-        _sessionId = sessionId
-        os_unfair_lock_unlock(&lock)
-    }
-
-    /// Edge-trigger helper for the frame queue: clears the bootstrap flag
-    /// once the writer is up. Returns the previous value so the caller can
-    /// branch on whether *this* sample owned the bootstrap.
-    func consumePendingBootstrap() -> Bool {
-        os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
-        let prev = _pendingBootstrap
-        _pendingBootstrap = false
-        return prev
+        commandRouter.handle(message: message)
     }
 }
