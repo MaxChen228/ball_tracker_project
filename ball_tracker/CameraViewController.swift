@@ -92,11 +92,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var lastFrameTimestampForFps: CFTimeInterval = CACurrentMediaTime()
     private var framesSinceLastFpsTick: Int = 0
     private var fpsEstimate: Double = 0
-    private var displayLink: CADisplayLink?
 
     // Last observed capture dimensions — used only for FPS debug and the
-    // capture-dim change log. Phase 6: no longer mirrored to UserDefaults;
-    // the server owns all calibration state now.
+    // capture-dim change log.
     private var latestImageWidth: Int = 0
     private var latestImageHeight: Int = 0
 
@@ -111,9 +109,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// back-to-back runs (same command string, different run) still fire.
     /// Only state *transitions* cause local actions so repeated replies
     /// during an active command don't re-trigger handlers.
-    /// Reserved for future branching in the cycle-complete path (e.g. a
-    /// re-arm that wants to skip the standby flash). Always true today
-    /// because `.recording` always returns to `.standby` now.
     private var returnToStandbyAfterCycle: Bool = false
     /// Server-minted pairing key for the currently armed session. Read
     /// off WS arm/settings traffic; tagged onto every recording that starts
@@ -127,9 +122,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var analysisQueue: AnalysisUploadQueue!
 
     // Per-cycle H.264 clip writer, created on entry to .recording and
-    // finalised when the cycle ends. Phase-1 raw-video experiment: the clip
-    // travels alongside the JSON payload so server-side detection can be
-    // iterated against a canonical source of truth.
+    // finalised when the cycle ends.
     private var clipRecorder: ClipRecorder?
     private let captureTelemetryLock = NSLock()
     private var appliedCaptureWidthPx: Int = 1920
@@ -140,10 +133,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var appliedFormatIsVideoBinned: Bool?
     private var appliedMaxExposureS: Double?
 
-    // Live detection is advisory only. PR61 moves authoritative on-device
-    // results to a post-recording analysis pass over the finalized MOV; this
-    // queue stays useful for HUD/debug and as a degraded fallback if clip
-    // writing fails.
+    // Live detection is advisory only. It still feeds WS streaming and the
+    // local fallback path if clip writing fails.
     private let detectionPool = ConcurrentDetectionPool(maxConcurrency: 3)
     /// Streams per-frame detection results over WebSocket when the live path
     /// is active. Created lazily (after settings are available).
@@ -162,26 +153,21 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var serverTimeSyncId: String?
 
     // UI containers. Preview stays full-screen; a small overlay panel exposes
-    // the only remaining local controls: role, link, and preview status.
+    // role, link, and preview status.
     private let topStatusChip = StatusChip()
     private let controlPanel = UIView()
     private let roleControl = UISegmentedControl(items: ["A", "B"])
     private let connectionLabel = UILabel()
     private let previewLabel = UILabel()
-    /// Last-known capture mode from the server. Starts at cameraOnly so a
-    /// network-unreachable launch degrades to the pre-split behaviour. Step 2
-    /// reads this at cycle-complete to decide whether to upload the MOV or
-    /// just the detection JSON.
+    /// Last-known capture mode from the server. Defaults to camera-only so a
+    /// network-unreachable launch still records and uploads video.
     private var currentCaptureMode: ServerUploader.CaptureMode = .cameraOnly
     private var currentSessionPaths: Set<ServerUploader.DetectionPath> = [.serverPost]
     /// WebSocket transport. Lazily initialized so the base URL (built from
     /// settings) is read after `viewDidLoad` where UserDefaults are stable.
     private var ws: ServerWebSocketConnection?
     /// Cache of the server-pushed runtime tunables so the WS settings
-    /// callback can skip hot-apply when the value hasn't changed. `nil`
-    /// means "never heard from the server yet" — the first settings payload
-    /// triggers the initial apply regardless of whether the server
-    /// value happens to equal the local Settings bootstrap default.
+    /// callback can skip hot-apply when the value hasn't changed.
     private var lastServerChirpThreshold: Double?
     private var lastServerMutualThreshold: Double?
     private var lastServerHeartbeatInterval: Double?
@@ -204,12 +190,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    // Phase 4a live preview. `previewRequestedByServer` mirrors the
-    // WS settings flag for THIS camera; `previewUploader` lazily
-    // constructs on first push. When the flag flips true→false we reset
-    // the uploader so a stale in-flight POST doesn't land after toggle-off.
-    // Phase 6: capture session is always live at standbyFps when idle, so
-    // pixel buffers are guaranteed to be flowing whenever preview is asked.
+    // `previewRequestedByServer` mirrors the WS settings flag for this camera.
+    // When it flips true→false we reset the uploader so a stale in-flight POST
+    // does not land after toggle-off.
     private var previewRequestedByServer: Bool = false
     private var previewUploader: PreviewUploader?
     /// One-shot latch for the server's `calibration_frame_requested` flag.
@@ -298,19 +281,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 AudioServicesPlaySystemSound(self.endRecSoundID)
                 self.endRecHaptic.notificationOccurred(.success)
             }
-            // Phase 1 of the iOS decoupling refactor: intrinsics /
-            // homography / image dims no longer ride along on the pitch
-            // payload — server reads them from its calibration DB
-            // (seeded by CalibrationViewController's POST /calibration).
-            // Upload shape is now just session-level metadata + frames.
             if let finishingClip {
                 finishingClip.finish { [weak self] videoURL in
                     self?.handleFinishedClip(enriched: payload, videoURL: videoURL)
                 }
             } else {
                 // Degenerate path: clip bootstrap failed before any MOV
-                // existed. `handleFinishedClip` falls back to the advisory
-                // live-detection buffer so the cycle isn't silently lost.
+                // existed. Fall back to the advisory live-detection buffer
+                // so the cycle is not silently lost.
                 self.handleFinishedClip(enriched: payload, videoURL: nil)
             }
         }
@@ -326,12 +304,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         analysisQueue = AnalysisUploadQueue(store: analysisStore, uploader: uploader)
         wireUploadQueueCallbacks()
         wireAnalysisQueueCallbacks()
-        // Rehydrate whatever payloads are sitting in Documents from a
-        // previous run (or a prior cycle that hit a transient network
-        // error) and kick the worker. Done at viewDidLoad so the queue
-        // lifecycle is decoupled from session arm/disarm — cached pitches
-        // upload as soon as the server is reachable, not "next time the
-        // operator arms a session".
+        // Rehydrate cached payloads on launch so failed uploads resume as
+        // soon as the server is reachable.
         try? uploadQueue.reloadPending()
         uploadQueue.processNextIfNeeded()
         try? analysisStore.ensureDirectory()
@@ -348,7 +322,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         setupUI()
         setupPreviewAndCapture()
         setupAudioCapture()
-        setupDisplayLink()
         healthMonitor.start()
         connectWebSocket()
         // frameDispatcher needs the ws connection (set up inside connectWebSocket())
@@ -371,19 +344,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Capture session is gated on the dashboard `preview_requested` flag
-        // (Phase 7 power gate) — stays parked until heartbeat says preview
-        // is on, so idle phones don't burn camera/mic for nothing.
+        // Capture stays parked until the dashboard asks for preview.
         healthMonitor.start()
         connectWebSocket()
-        displayLink?.isPaused = false
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         healthMonitor.stop()
         disconnectWebSocket()
-        displayLink?.isPaused = true
         if state == .timeSyncWaiting {
             syncCoordinator.cancelTimeSync()
         }
@@ -393,28 +362,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     deinit {
-        // CADisplayLink holds a strong reference to its target — without an
-        // explicit invalidate the controller can't deallocate, and the
-        // selector keeps firing on main. Pausing in viewWillDisappear is
-        // not enough; the link must be invalidated for the retain cycle to
-        // break. ServerHealthMonitor.stop() is belt-and-braces —
-        // viewWillDisappear already calls it, but cover the "deinit without
-        // viewWillDisappear" edge case too.
-        displayLink?.invalidate()
-        displayLink = nil
         healthMonitor?.stop()
     }
 
     // MARK: - Recording controls
 
     /// Dashboard arm landed — spin up the capture session at 240 fps and
-    /// move to `.recording`. Session was parked (stopped) in standby to keep
-    /// the phone cool, so this is both a start *and* an fps swap. ClipRecorder
-    /// is *not* created here; we defer that to the first captureOutput so we
-    /// can use the real pixel-buffer dimensions instead of the
-    /// Settings-declared 1920×1080. The PitchRecorder is also started from
-    /// captureOutput, once the first appended sample's session-clock PTS is
-    /// known.
+    /// move to `.recording`. ClipRecorder is created from the first delivered
+    /// frame so the writer uses the real pixel-buffer dimensions.
     func enterRecordingMode() {
         guard state == .standby else { return }
         // Snapshot the server-minted session id at arm time and freeze it
@@ -880,19 +835,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    /// Swap the active capture format to a new frame rate at the current
-    /// fixed resolution. Used for the idle↔tracking FPS transition
-    /// (`standbyFps` ↔ `trackingFps`) triggered by enter/exit of sync mode,
-    /// and by the resolution-change path in `applyUpdatedSettings`. The
-    /// format swap requires `stopRunning → activeFormat = X → startRunning`,
-    /// which blocks the session for ~300-500 ms — deliberately called only
-    /// at moments with no time-critical frame work in flight (entering
-    /// sync while the user is placing the ball, or exiting back to idle).
     /// Swap the capture format to a new fps on the session queue. Blocks
     /// `~300-500 ms` inside `stopRunning → activeFormat = X → startRunning`
-    /// — *MUST* run off-main so the HUD / ReadyCard refresh and pending UI
-    /// gestures aren't stalled. All callers are fire-and-forget (no caller
-    /// needs the new fps to have applied synchronously).
+    /// and must stay off-main so UI work is not stalled.
     /// Apply a dashboard-pushed capture resolution. Only reachable via the
     /// heartbeat handler, which guards to `.standby` — rebuilding the
     /// capture session mid-recording would lose the clip. Updates
@@ -1181,8 +1126,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         session.addOutput(output)
 
-        // Phase 3: dashboard pushes chirp_threshold via WS settings;
-        // 0.18 is the bootstrap default used before the first payload lands.
+        // 0.18 is the local default until the server pushes a threshold.
         let detector = AudioChirpDetector(threshold: 0.18)
         output.setSampleBufferDelegate(detector, queue: detector.deliveryQueue)
         session.commitConfiguration()
@@ -1201,20 +1145,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // layout pass so rotation / safe-area changes stay in sync.
         stateBorderLayer.frame = view.bounds
         stateBorderLayer.path = UIBezierPath(rect: view.bounds).cgPath
-    }
-
-    private func setupDisplayLink() {
-        let link = CADisplayLink(target: self, selector: #selector(handleDisplayTick))
-        link.add(to: .main, forMode: .common)
-        displayLink = link
-    }
-
-    @objc private func handleDisplayTick() {
-        updateChirpDebugOverlay()
-    }
-
-    private func updateChirpDebugOverlay() {
-        guard state == .timeSyncWaiting, chirpDetector != nil else { return }
     }
 
     // MARK: - Server health + upload queue wiring
@@ -1386,7 +1316,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func applyPushedMutualSyncThreshold(_ threshold: Double) {
-        // iOS no longer runs the mutual-sync matched filter; cache only.
         if lastServerMutualThreshold != threshold {
             lastServerMutualThreshold = threshold
         }
@@ -1420,10 +1349,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 "time_sync_id": timeSyncId as Any,
                 "sync_anchor_timestamp_s": self.syncCoordinator.lastSyncAnchorTimestampS as Any,
             ]
-            // Live quick-chirp telemetry for the /sync debug dashboard.
-            // Only attached while the detector is actively listening
-            // (state == .timeSyncWaiting) — outside that window the
-            // detector is torn down, so the values would be stale.
+            // Include quick-chirp telemetry only while the detector is
+            // actively listening.
             if self.state == .timeSyncWaiting, let s = self.chirpDetector?.lastSnapshot {
                 payload["sync_telemetry"] = [
                     "mode": "quick_chirp",
@@ -1567,12 +1494,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    /// Force an immediate heartbeat probe, resetting backoff. Exposed for
-    /// Re-diffs UserDefaults and reconfigures
-    /// anything settings-driven. Phase 6: Settings is bootstrap-only
-    /// (IP / role), so the only knobs here are the server endpoint
-    /// and the camera role. Chirp threshold + heartbeat interval come from
-    /// the dashboard via WS settings (Phase 3).
+    /// Re-read persisted settings and refresh the endpoint / role wiring.
     private func applyUpdatedSettings() {
         let latest = AppSettingsStore.load()
         let serverChanged = latest.serverIP != settings.serverIP
@@ -1838,11 +1760,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         frameIndex += 1
 
-        // Locked snapshot of state, pending-bootstrap, and the
-        // session id frozen at arm time. Read once per sample; the
-        // rest of this method only touches `snap`, never `self.state`
-        // / `self.currentSessionId` directly, so a 240 Hz sample can't
-        // race a main-thread mutation mid-method.
+        // Locked snapshot of state, pending-bootstrap, and the session id
+        // frozen at arm time. The rest of this method only touches `snap`.
         let snap = frameStateBox.snapshot()
 
         // Rate-limited debug heartbeat so Xcode console can confirm frames
@@ -1854,23 +1773,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             log.info("camera frame idx=\(self.frameIndex) state=\(Self.stateText(snap.state), privacy: .public) pendingBootstrap=\(snap.pendingBootstrap) sid=\(snap.sessionId ?? "nil", privacy: .public)")
         }
 
-        // Phase 4a: push a preview JPEG to the server when requested AND
-        // we're not doing anything time-critical. `.recording` owns every
+        // Push a preview JPEG only when requested and not doing anything
+        // time-critical. `.recording` owns every
         // frame for ClipRecorder; `.timeSyncWaiting` is mic-centric and
         // the preview encode would compete for CPU. Outside those two
-        // states the capture queue is otherwise idle on idle frames,
-        // which makes this the cheapest place to hook in.
+        // states the capture queue is otherwise idle.
         if self.previewRequestedByServer
             && snap.state != .recording
             && snap.state != .timeSyncWaiting {
             self.previewUploader?.pushFrame(pixelBuffer)
         }
-        // Phase 7: one-shot native-resolution calibration frame. The
-        // heartbeat arms the latch; the next captured sample gets
-        // encoded at full (uncropped, un-downsampled) resolution and
-        // POSTed to /camera/{id}/calibration_frame. Drain the latch
-        // synchronously so a slow POST can't double-fire if the next
-        // heartbeat flips the flag back on.
+        // One-shot native-resolution calibration frame. Drain the latch
+        // synchronously so a slow POST cannot double-fire.
         if self.calibrationFrameCaptureArmed
             && snap.state != .recording
             && snap.state != .timeSyncWaiting {
@@ -1898,16 +1812,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         clipRecorder?.append(sampleBuffer: sampleBuffer)
 
-        // Detection now fans out over a bounded concurrent pool. Live WS
-        // streaming consumes the same FramePayloads as post-pass fallback.
+        // Detection fans out over a bounded concurrent pool. Live WS
+        // streaming consumes the same FramePayloads as the local fallback.
         dispatchDetection(pixelBuffer: pixelBuffer, timestampS: timestampS)
 
-        // Bootstrap the PitchRecorder on the first sample regardless of
-        // mode. In mode-one this fires on the same sample clipRecorder
-        // just consumed, so the payload's `video_start_pts_s` still
-        // matches `clip.firstSamplePTS` (both are this sample's PTS).
-        // In mode-two there's no clip — we lean on the captured sample's
-        // session-clock PTS directly.
+        // Bootstrap the PitchRecorder on the first sample. The payload's
+        // `video_start_pts_s` always comes from this sample's session-clock PTS.
         if !recorder.isActive {
             guard let sid = snap.sessionId, !sid.isEmpty else {
                 log.error("camera recording started without session_id cam=\(self.settings.cameraRole, privacy: .public)")
@@ -1948,8 +1858,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     /// Take ownership of the accumulated per-frame detection results for
-    /// this recording cycle. Used by the cycle-complete path (mode-one
-    /// uses it as a trim oracle; mode-two ships it to the server).
+    /// this recording cycle.
     func drainDetectedFrames() -> [ServerUploader.FramePayload] {
         detectionStateLock.lock()
         defer { detectionStateLock.unlock() }
@@ -1965,8 +1874,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             try cr.prepare(width: width, height: height)
             clipRecorder = cr
         } catch {
-            // Clip writing is a Phase-1 experiment — if AVAssetWriter rejects
-            // the configuration we degrade to JSON-only and keep recording.
+            // If AVAssetWriter rejects the configuration we degrade to
+            // JSON-only and keep recording.
             log.error("camera clip recorder prepare failed error=\(error.localizedDescription, privacy: .public)")
             clipRecorder = nil
         }
@@ -1980,7 +1889,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         fpsEstimate = Double(framesSinceLastFpsTick) / elapsed
         framesSinceLastFpsTick = 0
         lastFrameTimestampForFps = now
-        // Fan-out to the Diagnostics screen (Settings → Diagnostics).
     }
 
 }
@@ -2007,12 +1915,8 @@ extension CameraViewController: ServerWebSocketDelegate {
     }
 }
 
-/// Lock-protected mirror of the three fields `captureOutput` reads across
-/// queues (`state`, `pendingRecordingBootstrap`, `pendingSessionId`). Main
-/// thread is the sole writer — `applyRemoteArm` / `applyRemoteDisarm` /
-/// `enterRecordingMode` / `exitRecordingToStandby` push every transition;
-/// the frame queue takes one locked snapshot per delivered sample so a
-/// 240 Hz read can never observe a partially-mutated state struct.
+/// Lock-protected mirror of the fields `captureOutput` reads across
+/// queues (`state`, `pendingRecordingBootstrap`, `pendingSessionId`).
 final class FrameStateBox {
     struct Snapshot {
         let state: CameraViewController.AppState
