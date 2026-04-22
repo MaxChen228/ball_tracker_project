@@ -65,7 +65,6 @@ import secrets
 import socket
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
@@ -135,6 +134,13 @@ from sync_solver import compute_mutual_sync
 from cleanup_old_sessions import cleanup_expired_sessions
 from live_pairing import LivePairingSession
 from sse import SSEHub
+from state_support import (
+    AutoCalibrationRun as _AutoCalibrationRun,
+    LegacyTimeSyncIntent as _LegacyTimeSyncIntent,
+    new_session_id as _new_session_id,
+    new_sync_id as _new_sync_id,
+    validate_calibration_snapshot as _validate_calibration_snapshot,
+)
 from ws import DeviceSocketManager
 from markers_routes import build_markers_router
 from misc_routes import build_misc_router
@@ -222,109 +228,10 @@ _MAX_PITCH_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 # now live in schemas.py — imported above for back-compat re-export.
 
 
-def _new_session_id() -> str:
-    # 8 hex chars ≈ 4 bytes of entropy — plenty for a personal-LAN tool
-    # where sessions are seconds apart, not microseconds.
-    return "s_" + secrets.token_hex(4)
-
-
-def _new_sync_id() -> str:
-    # Distinct `sy_` prefix so log lines immediately differentiate a
-    # mutual-sync run id from a pitch session id at a glance.
-    return "sy_" + secrets.token_hex(4)
-
-
-def _validate_calibration_snapshot(snap: CalibrationSnapshot) -> None:
-    """Gatekeep CalibrationSnapshot writes: K, H, and dims must all be in
-    the same pixel coordinate system. An optical centre outside the image,
-    non-positive focal lengths, or wildly asymmetric fx/fy all indicate
-    the snapshot was built from mismatched sources and would produce
-    nonsense extrinsics downstream. Raise ValueError on the way in rather
-    than debugging bad poses on the way out."""
-    w, h = snap.image_width_px, snap.image_height_px
-    if w <= 0 or h <= 0:
-        raise ValueError(f"invalid image dims {w}x{h}")
-    k = snap.intrinsics
-    if k.fx <= 0 or k.fz <= 0:
-        raise ValueError(f"non-positive focal length fx={k.fx} fy={k.fz}")
-    # fx and fy should be within a factor of ~2 for any real lens + square
-    # pixels. Bigger asymmetry almost always signals a unit-system bug.
-    if max(k.fx, k.fz) / min(k.fx, k.fz) > 2.0:
-        raise ValueError(f"fx/fy ratio out of bounds: fx={k.fx} fy={k.fz}")
-    # Optical centre must be inside the image. We allow a small outside
-    # margin (5% of dimension) because lens off-axis shifts happen, but
-    # more than that is almost certainly a dims-mismatch bug.
-    if not (-0.05 * w <= k.cx <= 1.05 * w):
-        raise ValueError(
-            f"cx={k.cx} outside image width {w} — K likely from a "
-            f"different resolution than image_dims claim"
-        )
-    if not (-0.05 * h <= k.cy <= 1.05 * h):
-        raise ValueError(
-            f"cy={k.cy} outside image height {h} — K likely from a "
-            f"different resolution than image_dims claim"
-        )
-    # Homography must be invertible (h33 normalized ≈ 1).
-    H_flat = snap.homography
-    if len(H_flat) != 9 or abs(H_flat[8]) < 1e-9:
-        raise ValueError(f"degenerate homography: h33={H_flat[8] if len(H_flat) == 9 else 'wrong length'}")
-
-
 # Calibration-frame buffer TTL. One-shot: iOS pushes a full-resolution
 # JPEG on request, server consumes it, flag auto-clears. 10 s is plenty
 # for capture→encode→POST round-trip even on a busy LAN.
 _CALIBRATION_FRAME_TTL_S = 10.0
-
-
-@dataclass
-class _LegacyTimeSyncIntent:
-    id: str
-    started_at: float
-    expires_at: float
-
-
-@dataclass
-class _AutoCalibrationRun:
-    id: str
-    camera_id: str
-    status: str
-    started_at: float
-    updated_at: float
-    frames_seen: int = 0
-    good_frames: int = 0
-    stable_frames: int = 0
-    markers_visible: int = 0
-    solver: str | None = None
-    reprojection_px: float | None = None
-    position_jitter_cm: float | None = None
-    angle_jitter_deg: float | None = None
-    applied: bool = False
-    summary: str | None = None
-    detail: str | None = None
-    detected_ids: list[int] | None = None
-    result: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "camera_id": self.camera_id,
-            "status": self.status,
-            "started_at": self.started_at,
-            "updated_at": self.updated_at,
-            "frames_seen": self.frames_seen,
-            "good_frames": self.good_frames,
-            "stable_frames": self.stable_frames,
-            "markers_visible": self.markers_visible,
-            "solver": self.solver,
-            "reprojection_px": self.reprojection_px,
-            "position_jitter_cm": self.position_jitter_cm,
-            "angle_jitter_deg": self.angle_jitter_deg,
-            "applied": self.applied,
-            "summary": self.summary,
-            "detail": self.detail,
-            "detected_ids": list(self.detected_ids or []),
-            "result": dict(self.result or {}),
-        }
 
 
 class State:
@@ -2392,4 +2299,3 @@ app.include_router(
         get_state=lambda: state,
     )
 )
-
