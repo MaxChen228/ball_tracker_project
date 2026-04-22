@@ -1319,9 +1319,15 @@ _JS_TEMPLATE_RAW = r"""
       // Always render the panel so the row height stays stable; off
       // state shows a black placeholder. When on, the tickPreviewImages
       // loop (see below) cache-busts the <img src>.
+      // Only hit the preview endpoint when actually watching — otherwise
+      // the browser eagerly fetches the <img> src on every render and
+      // spams 404s for cams with preview off.
+      const initialSrc = previewOn
+        ? ('/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now())
+        : '';
       const previewPanel = `<div class="preview-panel${previewOn ? '' : ' off'}" data-preview-panel="${esc(cam)}">` +
         `<div class="marker-chip" data-marker-chip="${esc(cam)}">– markers</div>` +
-        `<img data-preview-img="${esc(cam)}" src="${'/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now()}" alt="preview ${esc(cam)}">` +
+        `<img data-preview-img="${esc(cam)}" src="${initialSrc}" alt="preview ${esc(cam)}">` +
         `<svg class="plate-overlay" data-preview-overlay="${esc(cam)}" aria-hidden="true"><polygon></polygon></svg>` +
         `<div class="placeholder">${previewOn ? '…' : 'Preview off'}</div>` +
         `</div>`;
