@@ -27,7 +27,7 @@ from schemas import SYNC_TRACE_MIN_PSR, SYNC_TRACE_THRESHOLD
 _SYNC_CSS = """
 .main-sync {
   max-width: 1100px; margin: 0 auto;
-  padding: calc(var(--nav-h) + var(--s-5)) var(--s-4) var(--s-5) var(--s-4);
+  padding: calc(var(--nav-offset) + var(--s-5)) var(--s-4) var(--s-5) var(--s-4);
   display: flex; flex-direction: column; gap: var(--s-3);
 }
 .page-hero {
@@ -292,19 +292,57 @@ _JS_TEMPLATE = r"""
     const armed = !!(s && s.armed);
     const online = (state.devices || []).length;
     const cal = (state.calibrations || []).length;
-    const countCls = n => (n >= 2 ? 'full' : 'partial');
+    const synced = (state.devices || []).filter(d => d && d.time_synced).length;
+    const expected = 2;
     const cooldown = Number(state.sync_cooldown_remaining_s || 0);
-    const syncLabel = state.sync ? 'syncing'
-                                 : (cooldown > 0 ? 'cooldown' : 'idle');
-    const syncCls = state.sync ? 'armed'
-                              : (cooldown > 0 ? 'partial' : 'idle');
+    let badgeCls = 'ready';
+    let badge = 'Ready';
+    let headline = 'ready to arm';
+    let context = 'all prerequisites satisfied';
+    if (armed) {
+      badgeCls = 'recording';
+      badge = 'Recording';
+      headline = esc(s.id || '—');
+      context = 'session active';
+    } else if (state.sync) {
+      badgeCls = 'syncing';
+      badge = 'Sync';
+      headline = 'sync in progress';
+      context = 'complete on /sync';
+    } else if (online < expected) {
+      badgeCls = 'blocked';
+      badge = 'Blocked';
+      headline = 'bring both devices online';
+      context = `${online}/${expected} devices available`;
+    } else if (cal < expected) {
+      badgeCls = 'blocked';
+      badge = 'Blocked';
+      headline = 'finish calibration';
+      context = `${cal}/${expected} cameras calibrated`;
+    } else if (synced < expected) {
+      badgeCls = 'blocked';
+      badge = 'Blocked';
+      headline = 'run time sync';
+      context = `${synced}/${expected} cameras synced`;
+    } else if (cooldown > 0) {
+      badgeCls = 'cooldown';
+      badge = 'Cooldown';
+      headline = 'sync settling';
+      context = `${cooldown.toFixed(0)}s remaining`;
+    }
+    const check = (label, value, ok) =>
+      `<span class="status-check ${ok ? 'ok' : 'warn'}"><span class="k">${label}</span><span class="v">${value}</span></span>`;
     navStatus.innerHTML = `
-      <span class="pair"><span class="label">Devices</span><span class="val ${countCls(online)}">${online}/2</span></span>
-      <span class="pair"><span class="label">Calibrated</span><span class="val ${countCls(cal)}">${cal}/2</span></span>
-      <span class="pair"><span class="label">Session</span>` +
-      (armed ? `<span class="val armed">${esc(s.id || '—')}</span>`
-             : `<span class="val idle">idle</span>`) + `</span>` +
-      `<span class="pair"><span class="label">Sync</span><span class="val ${syncCls}">${syncLabel}</span></span>`;
+      <div class="status-main">
+        <span class="status-badge ${badgeCls}">${badge}</span>
+        <span class="status-headline">${headline}</span>
+        <span class="status-context">${context}</span>
+      </div>
+      <div class="status-checks">
+        ${check('Devices', `${online}/${expected}`, online >= expected)}
+        ${check('Cal', `${cal}/${expected}`, cal >= expected)}
+        ${check('Sync', `${synced}/${expected}`, synced >= expected)}
+      </div>`;
   }
 
   // --- Trace plot ----------------------------------------------------------

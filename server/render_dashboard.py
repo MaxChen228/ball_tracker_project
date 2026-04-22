@@ -61,6 +61,7 @@ _CSS = f"""
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: "Noto Sans TC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --nav-h: 82px;
+  --nav-offset: var(--nav-h);
   --sidebar-w: 440px;
   /* Unified 8px-grid spacing + single border-radius. Use var(--r)
      everywhere; the old 4/12/2 mix collapses to one rhythm. */
@@ -78,7 +79,8 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
         background: rgba(252, 251, 250, 0.96); backdrop-filter: blur(10px);
         border-bottom: 1px solid var(--border-base); padding: 12px 24px 10px 24px;
         z-index: 20; display: flex; flex-direction: column; gap: 8px; }}
-.nav-main {{ display: flex; align-items: center; justify-content: space-between; gap: 24px; }}
+.nav-main {{ display: grid; grid-template-columns: minmax(0, 1fr) auto;
+             align-items: start; gap: 12px 24px; }}
 .nav-brand-block {{ display: flex; align-items: center; gap: 18px; min-width: 0; }}
 .nav .brand {{ font-family: var(--mono); font-weight: 700; font-size: 14px;
                letter-spacing: 0.16em; color: var(--ink); text-decoration: none;
@@ -98,20 +100,37 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
             text-transform: uppercase; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease; }}
 .nav-tab:hover {{ border-color: var(--ink); color: var(--ink); background: var(--surface-hover); }}
 .nav-tab.active {{ background: var(--ink); border-color: var(--ink); color: var(--surface); }}
-.nav-status-row {{ display: flex; justify-content: flex-end; min-height: 16px; }}
-.nav .status-line {{ font-family: var(--mono); font-size: 11px;
-                     letter-spacing: 0.08em; text-transform: uppercase; color: var(--sub);
-                     display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }}
-.nav .status-line .pair {{ display: flex; gap: 6px; align-items: center; }}
-.nav .status-line .label {{ color: var(--sub); }}
-.nav .status-line .val {{ color: var(--ink); font-weight: 500; }}
-.nav .status-line .val.armed {{ color: var(--passed); }}
-.nav .status-line .val.idle {{ color: var(--sub); }}
-.nav .status-line .val.partial {{ color: var(--warn); }}
-.nav .status-line .val.full    {{ color: var(--passed); }}
+.nav-status-row {{ display: flex; justify-content: flex-end; }}
+.nav .status-line {{ display: flex; flex-direction: column; align-items: flex-end;
+                     gap: 6px; min-width: min(560px, 100%); }}
+.nav .status-main {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+                     font-family: var(--mono); text-transform: uppercase; }}
+.nav .status-badge {{ display: inline-flex; align-items: center; padding: 3px 8px;
+                      border: 1px solid var(--border-base); border-radius: var(--r);
+                      font-size: 10px; letter-spacing: 0.12em; color: var(--sub); }}
+.nav .status-badge.ready, .nav .status-badge.recording {{
+  color: var(--passed); border-color: var(--passed); background: var(--passed-bg);
+}}
+.nav .status-badge.blocked, .nav .status-badge.cooldown {{
+  color: var(--warn); border-color: var(--warn); background: var(--warn-bg);
+}}
+.nav .status-badge.syncing {{
+  color: var(--ink); border-color: var(--ink); background: rgba(42,37,32,.04);
+}}
+.nav .status-headline {{ font-size: 12px; letter-spacing: 0.12em; color: var(--ink); }}
+.nav .status-context {{ font-size: 10px; letter-spacing: 0.08em; color: var(--sub); }}
+.nav .status-checks {{ display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }}
+.nav .status-check {{ display: inline-flex; align-items: center; gap: 6px;
+                      padding: 2px 8px; border: 1px solid var(--border-base);
+                      border-radius: var(--r); font-family: var(--mono); font-size: 10px;
+                      letter-spacing: 0.08em; text-transform: uppercase; color: var(--sub); }}
+.nav .status-check.ok {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
+.nav .status-check.warn {{ color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }}
+.nav .status-check .k {{ opacity: 0.8; }}
+.nav .status-check .v {{ color: currentColor; font-weight: 600; }}
 
 /* --- Main layout: sidebar + canvas --- */
-.layout {{ display: flex; height: 100vh; padding-top: var(--nav-h); }}
+.layout {{ display: flex; min-height: 100vh; padding-top: var(--nav-offset); }}
 .sidebar {{ width: var(--sidebar-w); flex-shrink: 0; overflow-y: auto;
             background: var(--surface); border-right: 1px solid var(--border-base);
             padding: var(--s-5) var(--s-4); z-index: 10;
@@ -642,9 +661,11 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                         text-transform: uppercase; }}
 @media (max-width: 1100px) {{
   .nav {{ padding-left: 16px; padding-right: 16px; }}
-  .nav-main {{ flex-direction: column; align-items: stretch; }}
+  .nav-main {{ grid-template-columns: 1fr; }}
   .nav-tabs {{ justify-content: flex-start; }}
   .nav-status-row {{ justify-content: flex-start; }}
+  .nav .status-line {{ align-items: flex-start; min-width: 0; }}
+  .nav .status-checks {{ justify-content: flex-start; }}
 }}
 """
 
@@ -666,6 +687,21 @@ def _resolve_js_template() -> str:
 _JS_TEMPLATE_RAW = r"""
 (function () {
   console.info('[ball_tracker] dashboard JS boot', { build: 'preview-refactor-v2' });
+  const navEl = document.querySelector('.nav');
+  const rootStyle = document.documentElement && document.documentElement.style;
+  function syncNavOffset() {
+    if (!navEl || !rootStyle) return;
+    const h = Math.ceil(navEl.getBoundingClientRect().height || 0);
+    if (h > 0) rootStyle.setProperty('--nav-offset', `${h}px`);
+  }
+  syncNavOffset();
+  if (typeof ResizeObserver !== 'undefined' && navEl) {
+    const navObserver = new ResizeObserver(() => syncNavOffset());
+    navObserver.observe(navEl);
+  } else {
+    window.addEventListener('resize', syncNavOffset, { passive: true });
+  }
+
   const EXPECTED = ['A', 'B'];
   const pageMode = document.body?.dataset.page || '';
   const setupCompareMode = pageMode === 'setup';
@@ -1667,31 +1703,57 @@ _JS_TEMPLATE_RAW = r"""
     if (navStatus) {
       const online = (state.devices || []).length;
       const cal = (state.calibrations || []).length;
-      const countCls = n => (n >= 2 ? 'full' : 'partial');
+      const synced = (state.devices || []).filter(d => d && d.time_synced).length;
+      const expected = 2;
       const cooldown = Number(state.sync_cooldown_remaining_s || 0);
-      const syncLabel = state.sync ? 'syncing'
-                                   : (cooldown > 0 ? 'cooldown' : 'idle');
-      const syncCls = state.sync ? 'armed'
-                                : (cooldown > 0 ? 'partial' : 'idle');
-      const live = state.live_session || {};
-      const frameCounts = live.frame_counts || {};
-      const liveRate = `${Number(frameCounts.A || 0)}/${Number(frameCounts.B || 0)} frames`;
-      const ws = state.ws_devices || {};
-      const wsA = ws.A && ws.A.connected ? '●' : '○';
-      const wsB = ws.B && ws.B.connected ? '●' : '○';
-      const rttVals = [ws.A && ws.A.last_latency_ms, ws.B && ws.B.last_latency_ms].filter(v => v != null).map(Number);
-      const rtt = rttVals.length ? `${(rttVals.reduce((a, b) => a + b, 0) / rttVals.length).toFixed(0)}ms` : '—';
+      let badgeCls = 'ready';
+      let badge = 'Ready';
+      let headline = 'ready to arm';
+      let context = 'all prerequisites satisfied';
+      if (armed) {
+        badgeCls = 'recording';
+        badge = 'Recording';
+        headline = esc(s.id || '—');
+        context = 'session active';
+      } else if (state.sync) {
+        badgeCls = 'syncing';
+        badge = 'Sync';
+        headline = 'sync in progress';
+        context = 'complete on /sync';
+      } else if (online < expected) {
+        badgeCls = 'blocked';
+        badge = 'Blocked';
+        headline = 'bring both devices online';
+        context = `${online}/${expected} devices available`;
+      } else if (cal < expected) {
+        badgeCls = 'blocked';
+        badge = 'Blocked';
+        headline = 'finish calibration';
+        context = `${cal}/${expected} cameras calibrated`;
+      } else if (synced < expected) {
+        badgeCls = 'blocked';
+        badge = 'Blocked';
+        headline = 'run time sync';
+        context = `${synced}/${expected} cameras synced`;
+      } else if (cooldown > 0) {
+        badgeCls = 'cooldown';
+        badge = 'Cooldown';
+        headline = 'sync settling';
+        context = `${cooldown.toFixed(0)}s remaining`;
+      }
+      const check = (label, value, ok) =>
+        `<span class="status-check ${ok ? 'ok' : 'warn'}"><span class="k">${label}</span><span class="v">${value}</span></span>`;
       const navHtml = `
-        <span class="pair"><span class="label">Devices</span><span class="val ${countCls(online)}">${online}/2</span></span>
-        <span class="pair"><span class="label">Calibrated</span><span class="val ${countCls(cal)}">${cal}/2</span></span>
-        <span class="pair"><span class="label">Session</span>` +
-        (armed
-          ? `<span class="val armed">${esc(s.id || '—')}</span>`
-          : `<span class="val idle">idle</span>`) +
-        `</span>` +
-        `<span class="pair"><span class="label">Stream</span><span class="val ${armed ? 'armed' : 'idle'}">${wsA}${wsB} ${liveRate}</span></span>` +
-        `<span class="pair"><span class="label">RTT</span><span class="val ${rttVals.length ? 'full' : 'idle'}">${rtt}</span></span>` +
-        `<span class="pair"><span class="label">Sync</span><span class="val ${syncCls}">${syncLabel}</span></span>`;
+        <div class="status-main">
+          <span class="status-badge ${badgeCls}">${badge}</span>
+          <span class="status-headline">${headline}</span>
+          <span class="status-context">${context}</span>
+        </div>
+        <div class="status-checks">
+          ${check('Devices', `${online}/${expected}`, online >= expected)}
+          ${check('Cal', `${cal}/${expected}`, cal >= expected)}
+          ${check('Sync', `${synced}/${expected}`, synced >= expected)}
+        </div>`;
       navStatus.innerHTML = navHtml;
     }
   }
@@ -3097,26 +3159,70 @@ def _render_nav_status(
     sync_cooldown_remaining_s: float = 0.0,
 ) -> str:
     armed = session is not None and session.get("armed")
-    session_html = (
-        f'<span class="val armed">{html.escape(session.get("id", "—"))}</span>'
-        if armed
-        else '<span class="val idle">idle</span>'
-    )
-    def _count_cls(n: int) -> str:
-        return "full" if n >= 2 else "partial"
-    dev_cls = _count_cls(len(devices))
-    cal_cls = _count_cls(len(calibrations))
-    if sync is not None:
-        sync_label, sync_cls = "syncing", "armed"
+    online = len(devices)
+    calibrated = len(calibrations)
+    synced = sum(1 for d in devices if d.get("time_synced"))
+    expected = 2
+
+    if armed:
+        badge_cls = "recording"
+        badge = "Recording"
+        headline = html.escape(session.get("id", "—"))
+        context = "session active"
+    elif sync is not None:
+        badge_cls = "syncing"
+        badge = "Sync"
+        headline = "sync in progress"
+        context = "complete on /sync"
+    elif online < expected:
+        badge_cls = "blocked"
+        badge = "Blocked"
+        headline = "bring both devices online"
+        context = f"{online}/{expected} devices available"
+    elif calibrated < expected:
+        badge_cls = "blocked"
+        badge = "Blocked"
+        headline = "finish calibration"
+        context = f"{calibrated}/{expected} cameras calibrated"
+    elif synced < expected:
+        badge_cls = "blocked"
+        badge = "Blocked"
+        headline = "run time sync"
+        context = f"{synced}/{expected} cameras synced"
     elif sync_cooldown_remaining_s > 0.0:
-        sync_label, sync_cls = "cooldown", "partial"
+        badge_cls = "cooldown"
+        badge = "Cooldown"
+        headline = "sync settling"
+        context = f"{sync_cooldown_remaining_s:.0f}s remaining"
     else:
-        sync_label, sync_cls = "idle", "idle"
+        badge_cls = "ready"
+        badge = "Ready"
+        headline = "ready to arm"
+        context = "all prerequisites satisfied"
+
+    def _check_row(label: str, value: str, ok: bool) -> str:
+        cls = "ok" if ok else "warn"
+        return (
+            f'<span class="status-check {cls}">'
+            f'<span class="k">{html.escape(label)}</span>'
+            f'<span class="v">{html.escape(value)}</span>'
+            f"</span>"
+        )
+
+    checks = "".join(
+        [
+            _check_row("Devices", f"{online}/{expected}", online >= expected),
+            _check_row("Cal", f"{calibrated}/{expected}", calibrated >= expected),
+            _check_row("Sync", f"{synced}/{expected}", synced >= expected),
+        ]
+    )
     return (
-        f'<span class="pair"><span class="label">Devices</span><span class="val {dev_cls}">{len(devices)}/2</span></span>'
-        f'<span class="pair"><span class="label">Calibrated</span><span class="val {cal_cls}">{len(calibrations)}/2</span></span>'
-        f'<span class="pair"><span class="label">Session</span>{session_html}</span>'
-        f'<span class="pair"><span class="label">Sync</span><span class="val {sync_cls}">{sync_label}</span></span>'
+        '<div class="status-main">'
+        f'<span class="status-badge {badge_cls}">{html.escape(badge)}</span>'
+        f'<span class="status-headline">{headline}</span>'
+        f'<span class="status-context">{html.escape(context)}</span>'
+        "</div>"
+        f'<div class="status-checks">{checks}</div>'
     )
 
 
@@ -3199,12 +3305,12 @@ def _render_chirp_threshold_body(
         f'<input type="range" name="threshold" min="0.02" max="0.60" step="0.01" '
         f'value="{q}" '
         'oninput="document.getElementById(\'tuning-chirp-num\').value=this.value" '
-        'onchange="this.form.submit()">'
+        'onchange="this.form.requestSubmit()">'
         f'<input type="number" id="tuning-chirp-num" name="threshold" '
         f'min="0.02" max="0.60" step="0.01" value="{q}" '
         'form="tuning-chirp-form" '
         'oninput="this.form.querySelector(\'input[type=range]\').value=this.value" '
-        'onchange="this.form.submit()">'
+        'onchange="this.form.requestSubmit()">'
         '</form>'
         '<form class="tuning-row" method="POST" '
         'action="/settings/mutual_sync_threshold" id="tuning-mutual-form">'
@@ -3212,12 +3318,12 @@ def _render_chirp_threshold_body(
         f'<input type="range" name="threshold" min="0.02" max="0.60" step="0.01" '
         f'value="{m}" '
         'oninput="document.getElementById(\'tuning-mutual-num\').value=this.value" '
-        'onchange="this.form.submit()">'
+        'onchange="this.form.requestSubmit()">'
         f'<input type="number" id="tuning-mutual-num" name="threshold" '
         f'min="0.02" max="0.60" step="0.01" value="{m}" '
         'form="tuning-mutual-form" '
         'oninput="this.form.querySelector(\'input[type=range]\').value=this.value" '
-        'onchange="this.form.submit()">'
+        'onchange="this.form.requestSubmit()">'
         '</form>'
     )
 
@@ -3241,12 +3347,12 @@ def _render_tuning_body(
         f'<input type="range" name="interval_s" min="1" max="10" step="0.5" '
         f'value="{ivl}" '
         'oninput="document.getElementById(\'tuning-hb-num\').value=this.value" '
-        'onchange="this.form.submit()">'
+        'onchange="this.form.requestSubmit()">'
         f'<input type="number" id="tuning-hb-num" name="interval_s" '
         f'min="1" max="10" step="0.5" value="{ivl}" '
         'form="tuning-hb-form" '
         'oninput="this.form.querySelector(\'input[type=range]\').value=this.value" '
-        'onchange="this.form.submit()">'
+        'onchange="this.form.requestSubmit()">'
         '<span class="tuning-unit">s</span>'
         '</form>'
         # Tracking exposure-cap row. Server-owned policy; iOS hot-applies

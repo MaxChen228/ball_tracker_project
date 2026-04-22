@@ -2885,9 +2885,13 @@ def _build_status_response() -> dict[str, Any]:
     now = state._time_fn()
     ws_snapshot = device_ws.snapshot()
     devices = _build_device_status_rows(now=now, ws_snapshot=ws_snapshot)
+    calibrations = sorted(state.calibrations().keys())
     return {
         **summary,
         "devices": devices,
+        # Lightweight calibration presence snapshot for header/readiness UI.
+        # The richer scene payload still lives on /calibration/state.
+        "calibrations": calibrations,
         "session": session.to_dict() if session is not None else None,
         "commands": state.commands_for_devices(),
         # Global dashboard mode choice. iPhones show this on the HUD in idle
