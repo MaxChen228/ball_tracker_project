@@ -118,7 +118,17 @@ _SYNC_CSS = """
 .qct-row .bar .fill.warn { background: var(--failed); }
 .qct-row .bar .thr-mark { position: absolute; top: -2px; bottom: -2px;
                           width: 2px; background: var(--failed); }
+.qct-row .bar .peak-mark { position: absolute; top: -3px; bottom: -3px;
+                           width: 2px; background: var(--passed); opacity: 0.7; }
 .qct-row .value { text-align: right; font-variant-numeric: tabular-nums; }
+.qct-row .value .peak { color: var(--passed); font-size: 10px;
+                        margin-left: 4px; opacity: 0.85; }
+.qct-head .age { margin-left: 8px; padding: 1px 6px; font-size: 10px;
+                 border: 1px solid var(--border); color: var(--sub); }
+.qct-head .age.live { color: var(--passed); border-color: var(--passed); }
+.qct-head .age.stale { color: var(--sub); border-style: dashed; }
+.qct-cam.stale .qct-row .fill { opacity: 0.5; }
+.qct-cam.stale { opacity: 0.92; }
 """
 
 
@@ -447,7 +457,10 @@ _JS_TEMPLATE = r"""
       host.innerHTML = '<div class="trace-empty">No phone listening.</div>';
       return;
     }
-    function bar(valueRaw, maxVal, threshold, warnAt) {
+    // Bars now carry an optional `peakFrac` to render a second marker at
+    // the highest value observed during the current attempt, so the
+    // operator can read the peak even after the phone stops reporting.
+    function bar(valueRaw, maxVal, threshold, warnAt, peakRaw) {
       const value = Number(valueRaw || 0);
       const pct = Math.min(100, Math.max(0, (value / maxVal) * 100));
       const warn = warnAt != null && value >= warnAt;
@@ -457,14 +470,29 @@ _JS_TEMPLATE = r"""
       const thrMark = thrPct != null
         ? `<div class="thr-mark" style="left:${thrPct.toFixed(1)}%"></div>`
         : '';
-      return `<div class="bar"><div class="fill${warn ? ' warn' : ''}" style="width:${pct.toFixed(1)}%"></div>${thrMark}</div>`;
+      const peakNum = peakRaw == null ? null : Number(peakRaw);
+      const peakMark = (peakNum != null && peakNum > value)
+        ? `<div class="peak-mark" style="left:${Math.min(100, Math.max(0, (peakNum / maxVal) * 100)).toFixed(1)}%"></div>`
+        : '';
+      return `<div class="bar"><div class="fill${warn ? ' warn' : ''}" style="width:${pct.toFixed(1)}%"></div>${thrMark}${peakMark}</div>`;
     }
-    function row(label, value, bars, fmt) {
-      const v = typeof value === 'number' ? (fmt || ((x) => x.toFixed(3)))(value) : '—';
-      return `<div class="qct-row"><span class="label">${label}</span>${bars}<span class="value">${v}</span></div>`;
+    function row(label, value, peak, bars) {
+      const vFmt = (x) => (typeof x === 'number' ? x.toFixed(3) : '—');
+      const extra = (typeof peak === 'number' && peak > (value || 0))
+        ? ` <span class="peak">peak ${vFmt(peak)}</span>`
+        : '';
+      return `<div class="qct-row"><span class="label">${label}</span>${bars}<span class="value">${vFmt(value)}${extra}</span></div>`;
+    }
+    function ageTag(age) {
+      if (age == null) return '';
+      if (age < 2) return '<span class="age live">live</span>';
+      if (age < 10) return `<span class="age">${age.toFixed(0)}s ago</span>`;
+      return `<span class="age stale">stale ${age.toFixed(0)}s</span>`;
     }
     const parts = cams.map(cam => {
       const t = telem[cam] || {};
+      const age = Number(t.age_s || 0);
+      const isStale = age >= 2;
       const peak = Number(t.input_peak || 0);
       const clipping = peak >= 0.98;
       const clipClass = clipping ? 'warn' : (peak >= 0.7 ? '' : 'ok');
@@ -474,15 +502,15 @@ _JS_TEMPLATE = r"""
       const down = Number(t.down_peak || 0);
       const upFloor = Number(t.cfar_up_floor || 0);
       const downFloor = Number(t.cfar_down_floor || 0);
-      return `<div class="qct-cam">
-        <div class="qct-head"><span>Cam ${cam} · ${t.armed ? 'armed' : 'cooldown'}${t.pending_up ? ' · pending up' : ''}</span>
+      return `<div class="qct-cam${isStale ? ' stale' : ''}">
+        <div class="qct-head"><span>Cam ${cam} · ${t.armed ? 'armed' : 'cooldown'}${t.pending_up ? ' · pending up' : ''} ${ageTag(age)}</span>
           <span class="clip-chip ${clipClass}">${clipText}</span></div>
-        ${row('input rms', t.input_rms, bar(t.input_rms, 0.5, null, null))}
-        ${row('input peak', t.input_peak, bar(t.input_peak, 1.0, null, 0.98))}
-        ${row('up peak', up, bar(up, 1.0, thr, null))}
-        ${row('down peak', down, bar(down, 1.0, thr, null))}
-        ${row('cfar up', upFloor, bar(upFloor, 0.2, null, null))}
-        ${row('cfar dn', downFloor, bar(downFloor, 0.2, null, null))}
+        ${row('input rms', t.input_rms, t.peak_input_rms, bar(t.input_rms, 0.5, null, null, t.peak_input_rms))}
+        ${row('input peak', t.input_peak, t.peak_input_peak, bar(t.input_peak, 1.0, null, 0.98, t.peak_input_peak))}
+        ${row('up peak', up, t.peak_up_peak, bar(up, 1.0, thr, null, t.peak_up_peak))}
+        ${row('down peak', down, t.peak_down_peak, bar(down, 1.0, thr, null, t.peak_down_peak))}
+        ${row('cfar up', upFloor, null, bar(upFloor, 0.2, null, null, null))}
+        ${row('cfar dn', downFloor, null, bar(downFloor, 0.2, null, null, null))}
       </div>`;
     });
     host.innerHTML = parts.join('');

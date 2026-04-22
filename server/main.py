@@ -1092,7 +1092,7 @@ class State:
                 status="searching",
                 started_at=now,
                 updated_at=now,
-                summary="Waiting for enough stable frames",
+                summary="Requesting full-res frame",
             )
             self._auto_cal_runs[camera_id] = run
             return _AutoCalibrationRun(**run.to_dict())
@@ -1241,35 +1241,73 @@ class State:
                 del self._devices[oldest]
 
     def record_sync_telemetry(self, camera_id: str, telem: dict[str, Any]) -> None:
-        """Stash the latest quick-chirp live telemetry for a cam. Dashboard
-        /sync polls this to paint the input-level meter + live matched-
-        filter peaks while the operator tunes speaker volume / mic
-        distance. Purely observational — no decisions flow from it."""
+        """Stash the latest quick-chirp live telemetry for a cam AND roll
+        a per-cam peak-observed window so the operator can read maxima
+        achieved during a Quick chirp attempt even AFTER the phone stops
+        listening. `reset_sync_telemetry_peaks` clears the window at the
+        start of each /sync/trigger so the numbers reflect this attempt,
+        not all-time."""
+        now = self._time_fn()
         with self._lock:
+            prior = self._sync_telemetry.get(camera_id, {})
+
+            def roll_max(key: str) -> float | None:
+                new_raw = telem.get(key)
+                try:
+                    new_v = None if new_raw is None else float(new_raw)
+                except (TypeError, ValueError):
+                    new_v = None
+                old_raw = prior.get(f"peak_{key}")
+                try:
+                    old_v = None if old_raw is None else float(old_raw)
+                except (TypeError, ValueError):
+                    old_v = None
+                if new_v is None:
+                    return old_v
+                if old_v is None:
+                    return new_v
+                return max(old_v, new_v)
+
+            rolled = {
+                f"peak_{k}": roll_max(k)
+                for k in ("input_rms", "input_peak", "up_peak", "down_peak")
+            }
             self._sync_telemetry[camera_id] = {
-                "ts": self._time_fn(),
+                "ts": now,
                 **{k: telem.get(k) for k in (
                     "mode", "armed", "input_rms", "input_peak",
                     "up_peak", "down_peak", "cfar_up_floor",
                     "cfar_down_floor", "threshold", "pending_up",
                 )},
+                **rolled,
             }
 
+    def reset_sync_telemetry_peaks(self, camera_ids: list[str] | None = None) -> None:
+        """Zero the rolling peak columns for the named cams (or every cam
+        currently in the registry). Called at the start of each
+        /sync/trigger so the operator sees peaks for THIS attempt only."""
+        with self._lock:
+            targets = camera_ids if camera_ids is not None else list(self._sync_telemetry.keys())
+            for cam in targets:
+                rec = self._sync_telemetry.get(cam)
+                if rec is None:
+                    continue
+                for k in ("input_rms", "input_peak", "up_peak", "down_peak"):
+                    rec.pop(f"peak_{k}", None)
+
     def sync_telemetry_snapshot(self) -> dict[str, dict[str, Any]]:
-        """Latest per-cam telemetry; entries older than 5 s lazily swept
-        so the dashboard doesn't paint a frozen meter for a cam that
-        stopped listening."""
+        """Per-cam telemetry. No staleness sweep — the operator wants to
+        read the last observed values AFTER the phone stops listening
+        for post-hoc analysis. `age_s` is attached so the UI can decorate
+        stale entries (fade / "last seen N s ago") without inventing a
+        client clock."""
         now = self._time_fn()
         with self._lock:
             out: dict[str, dict[str, Any]] = {}
-            stale: list[str] = []
             for cam, rec in self._sync_telemetry.items():
-                if now - rec.get("ts", 0.0) > 5.0:
-                    stale.append(cam)
-                    continue
-                out[cam] = dict(rec)
-            for cam in stale:
-                self._sync_telemetry.pop(cam, None)
+                r = dict(rec)
+                r["age_s"] = max(0.0, now - float(rec.get("ts", now)))
+                out[cam] = r
         return out
 
     def mark_device_offline(self, camera_id: str) -> None:
@@ -3372,6 +3410,9 @@ async def sync_trigger(request: Request) -> Any:
             ]
 
     dispatched = state.trigger_sync_command(camera_ids)
+    # Fresh attempt → fresh peak window on the telemetry card so the
+    # operator isn't looking at maxima from a previous try.
+    state.reset_sync_telemetry_peaks(dispatched if dispatched else None)
     # Push the sync_command over WS too so phones on the live transport
     # don't have to wait for the next periodic heartbeat tick to pick it up.
     # The pending flag still exists as the authoritative one-shot drain path.
@@ -4115,11 +4156,12 @@ def camera_preview_mjpeg(camera_id: str) -> Response:
 @app.get("/camera/{camera_id}/marker_count")
 def camera_marker_count(camera_id: str) -> dict[str, Any]:
     """Return `{count, plate_ids, extended_ids}` for whatever markers are
-    visible in the latest buffered preview JPEG. Used by the dashboard to
-    paint a minimal count chip over each preview panel so the operator
-    knows whether auto-cal has anything to work with BEFORE pressing the
-    button. Returns zeros when there's no frame yet — still a valid
-    answer (the panel just paints "0 markers")."""
+    visible in the latest buffered preview JPEG.
+
+    Legacy/debug helper only: auto-calibration does NOT use preview JPEGs.
+    It requests a separate native-resolution calibration frame from the
+    phone. Returns zeros when there's no preview frame yet.
+    """
     _validate_camera_id_or_422(camera_id)
     got = state._preview.latest(camera_id, max_age_s=_PREVIEW_FRAME_MAX_AGE_S)
     if got is None:
@@ -4939,7 +4981,7 @@ async def _run_auto_calibration(
         state.update_auto_cal_run(
             camera_id,
             status="searching",
-            summary="Searching for known markers",
+            summary="Requesting full-res frame",
         )
 
     while frames_seen < max_frames and _asyncio.get_event_loop().time() < burst_deadline:
@@ -4981,7 +5023,7 @@ async def _run_auto_calibration(
                     status="searching",
                     frames_seen=frames_seen,
                     markers_visible=0,
-                    summary="Searching for known markers",
+                    summary="Searching full-res frames for known markers",
                 )
             if consecutive_empty_frames >= 2:
                 raise HTTPException(
@@ -5007,7 +5049,7 @@ async def _run_auto_calibration(
                     status="tracking",
                     frames_seen=frames_seen,
                     markers_visible=markers_visible,
-                    summary="Tracking markers; need more stable geometry",
+                    summary="Tracking markers in full-res frames",
                     detected_ids=sorted(m.id for m in detected),
                 )
             continue
@@ -5067,9 +5109,9 @@ async def _run_auto_calibration(
                 position_jitter_cm=pos_jitter_cm,
                 angle_jitter_deg=ang_jitter_deg,
                 summary=(
-                    f"Holding steady · {stable_frames} stable frame(s)"
+                    f"Hold camera steady · {stable_frames}/4 stable"
                     if good_frames > 0
-                    else "Tracking markers; waiting for stability"
+                    else "Tracking markers in full-res frames"
                 ),
                 detected_ids=sorted(m.id for m in detected),
             )
@@ -5082,7 +5124,7 @@ async def _run_auto_calibration(
             detail=(
                 f"camera {camera_id!r} did not deliver a calibration "
                 "frame within 6 s — check the phone is online, awake, "
-                "preview is enabled, and running the current build"
+                "and running the current build"
             ),
         )
 
@@ -5094,7 +5136,7 @@ async def _run_auto_calibration(
         state.update_auto_cal_run(
             camera_id,
             status="solving",
-            summary="Solving camera pose from stabilized observations",
+            summary="Solving pose from full-res frame burst",
         )
     result, solver, pnp_detected_ids = _solve_auto_cal_solution(
         aggregated,
@@ -5233,7 +5275,7 @@ async def calibration_auto_start(
                 camera_id,
                 status="completed",
                 applied=True,
-                summary="Verified and applied",
+                summary="Applied",
                 detail=(
                     f"frames={auto['frames_seen']} stable={auto['stable_frames']} "
                     f"reproj={auto['reprojection_px']:.2f}px"
@@ -5256,7 +5298,7 @@ async def calibration_auto_start(
                 camera_id,
                 status="failed",
                 applied=False,
-                summary="Auto-cal failed",
+                summary="Failed",
                 detail=str(e.detail),
             )
         except Exception as e:  # noqa: BLE001
@@ -5265,7 +5307,7 @@ async def calibration_auto_start(
                 camera_id,
                 status="failed",
                 applied=False,
-                summary="Auto-cal failed",
+                summary="Failed",
                 detail=f"{type(e).__name__}: {e}",
             )
 
