@@ -1926,11 +1926,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             uploader = ServerUploader(config: serverConfig)
             uploadQueue.updateUploader(uploader)
             analysisQueue.updateUploader(uploader)
+            previewUploader?.updateUploader(uploader)
             disconnectWebSocket()
             connectWebSocket()
             healthMonitor.probeNow()
         }
         if cameraRoleChanged {
+            previewUploader = nil
             disconnectWebSocket()
             connectWebSocket()
         }

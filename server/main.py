@@ -2600,6 +2600,53 @@ device_ws = DeviceSocketManager()
 sse_hub = SSEHub()
 
 
+def _build_device_status_rows(
+    *,
+    now: float | None = None,
+    ws_snapshot: dict[str, DeviceSocketSnapshot] | None = None,
+) -> list[dict[str, Any]]:
+    now = state._time_fn() if now is None else now
+    ws_snapshot = device_ws.snapshot() if ws_snapshot is None else ws_snapshot
+    fresh_devices = {d.camera_id: d for d in state.online_devices()}
+    device_ids = set(fresh_devices) | {
+        cam for cam, snap in ws_snapshot.items()
+        if snap.connected
+    }
+    devices: list[dict[str, Any]] = []
+    for cam in sorted(device_ids):
+        d = fresh_devices.get(cam) or state.device_snapshot(cam)
+        ws = ws_snapshot.get(cam)
+        devices.append(
+            {
+                "camera_id": cam,
+                "last_seen_at": (
+                    d.last_seen_at
+                    if d is not None
+                    else (ws.last_seen_at if ws is not None else None)
+                ),
+                "time_synced": (
+                    bool(d is not None)
+                    and d.time_synced
+                    and d.time_sync_id is not None
+                    and d.time_sync_at is not None
+                    and now - d.time_sync_at <= _TIME_SYNC_MAX_AGE_S
+                ),
+                "time_sync_id": (d.time_sync_id if d is not None else None),
+                "time_sync_age_s": (
+                    None
+                    if d is None or d.time_sync_at is None
+                    else float(now - d.time_sync_at)
+                ),
+                "sync_anchor_timestamp_s": (
+                    d.sync_anchor_timestamp_s if d is not None else None
+                ),
+                "ws_connected": (ws.connected if ws is not None else False),
+                "ws_latency_ms": (ws.last_latency_ms if ws is not None else None),
+            }
+        )
+    return devices
+
+
 def _build_status_response() -> dict[str, Any]:
     """Shared shape for GET /status and dashboard-facing snapshots. Anything
     an iPhone needs to decide whether to arm / disarm is in here — the
@@ -2610,36 +2657,10 @@ def _build_status_response() -> dict[str, Any]:
     last_sync = state.last_sync_result()
     now = state._time_fn()
     ws_snapshot = device_ws.snapshot()
+    devices = _build_device_status_rows(now=now, ws_snapshot=ws_snapshot)
     return {
         **summary,
-        "devices": [
-            {
-                "camera_id": d.camera_id,
-                "last_seen_at": d.last_seen_at,
-                "time_synced": (
-                    d.time_synced
-                    and d.time_sync_id is not None
-                    and d.time_sync_at is not None
-                    and now - d.time_sync_at <= _TIME_SYNC_MAX_AGE_S
-                ),
-                "time_sync_id": d.time_sync_id,
-                "time_sync_age_s": (
-                    None if d.time_sync_at is None else float(now - d.time_sync_at)
-                ),
-                "sync_anchor_timestamp_s": d.sync_anchor_timestamp_s,
-                "ws_connected": (
-                    ws_snapshot.get(d.camera_id).connected
-                    if ws_snapshot.get(d.camera_id) is not None
-                    else False
-                ),
-                "ws_latency_ms": (
-                    ws_snapshot.get(d.camera_id).last_latency_ms
-                    if ws_snapshot.get(d.camera_id) is not None
-                    else None
-                ),
-            }
-            for d in state.online_devices()
-        ],
+        "devices": devices,
         "session": session.to_dict() if session is not None else None,
         "commands": state.commands_for_devices(),
         # Global dashboard mode choice. iPhones show this on the HUD in idle
@@ -5264,14 +5285,7 @@ def events_index() -> HTMLResponse:
         render_events_index_html(
             events=state.events(),
             trash_count=state.trash_count(),
-            devices=[
-                {
-                    "camera_id": d.camera_id,
-                    "last_seen_at": d.last_seen_at,
-                    "time_synced": d.time_synced,
-                }
-                for d in state.online_devices()
-            ],
+            devices=_build_device_status_rows(),
             session=session.to_dict() if session is not None else None,
             calibrations=sorted(state.calibrations().keys()),
             capture_mode=state.current_mode().value,
@@ -5305,14 +5319,7 @@ def sync_page() -> HTMLResponse:
     last_sync = state.last_sync_result()
     return HTMLResponse(
         render_sync_html(
-            devices=[
-                {
-                    "camera_id": d.camera_id,
-                    "last_seen_at": d.last_seen_at,
-                    "time_synced": d.time_synced,
-                }
-                for d in state.online_devices()
-            ],
+            devices=_build_device_status_rows(),
             session=session.to_dict() if session is not None else None,
             calibrations=sorted(state.calibrations().keys()),
             sync=sync_run.to_dict() if sync_run is not None else None,
@@ -5334,14 +5341,7 @@ def setup_page() -> HTMLResponse:
     session = state.session_snapshot()
     return HTMLResponse(
         render_setup_html(
-            devices=[
-                {
-                    "camera_id": d.camera_id,
-                    "last_seen_at": d.last_seen_at,
-                    "time_synced": d.time_synced,
-                }
-                for d in state.online_devices()
-            ],
+            devices=_build_device_status_rows(),
             session=session.to_dict() if session is not None else None,
             calibrations=sorted(state.calibrations().keys()),
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
