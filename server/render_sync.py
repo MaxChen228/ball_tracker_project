@@ -146,6 +146,14 @@ _SYNC_CSS = """
 .pcs-meta { font-family: var(--mono); font-size: 10px; color: var(--sub);
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pcs-meta .sync-id { color: var(--ink); font-weight: 500; }
+.pcs-meta .sid-chip { font-family: var(--mono); color: var(--ink);
+                      background: var(--panel-alt, rgba(0,0,0,0.04));
+                      padding: 1px 4px; border-radius: 3px;
+                      letter-spacing: 0.08em; cursor: help; }
+.pcs-meta .pair-ok { margin-left: 6px; padding: 1px 5px;
+                     font-size: 9px; color: var(--passed);
+                     border: 1px solid var(--passed);
+                     text-transform: uppercase; letter-spacing: 0.10em; }
 """
 
 
@@ -544,6 +552,13 @@ _JS_TEMPLATE = r"""
     } catch (e) { /* silent */ }
   }
 
+  // Short, operator-useful slice of a full `sy_xxxxxxxx` id — the
+  // important property at a glance is "do both cams share the SAME
+  // id?". Full hex is noise; last 6 chars keep the signal.
+  function shortSyncId(sid) {
+    if (!sid) return '';
+    return sid.length > 8 ? sid.slice(-6) : sid.replace(/^sy_/, '');
+  }
   function renderPerCamSync(state) {
     const host = document.getElementById('per-cam-sync');
     if (!host) return;
@@ -552,6 +567,13 @@ _JS_TEMPLATE = r"""
     const run = state.sync || null;
     const expected = ['A', 'B'];
     const byId = new Map(devs.map(d => [d.camera_id, d]));
+    // Check whether both cams ended up with the same id — the
+    // operator cares about pair agreement, not absolute value.
+    const syncedIds = expected
+      .map(cam => byId.get(cam))
+      .filter(d => d && d.time_synced && d.time_sync_id)
+      .map(d => d.time_sync_id);
+    const bothPaired = syncedIds.length === 2 && syncedIds[0] === syncedIds[1];
     const cards = expected.map(cam => {
       const d = byId.get(cam);
       const online = !!d;
@@ -568,8 +590,12 @@ _JS_TEMPLATE = r"""
       const sid = d && d.time_sync_id;
       const ageS = d && typeof d.time_sync_age_s === 'number' ? d.time_sync_age_s : null;
       const ageTxt = ageS != null ? ` · ${ageS.toFixed(0)}s ago` : '';
+      const idChip = (synced && sid)
+        ? `<span class="sid-chip" title="${esc(sid)}">·${esc(shortSyncId(sid))}</span>`
+        : '';
+      const pairBadge = (synced && bothPaired) ? ' <span class="pair-ok">paired</span>' : '';
       const meta = synced
-        ? `<div class="pcs-meta">sync_id <span class="sync-id">${esc(sid || '—')}</span>${ageTxt}</div>`
+        ? `<div class="pcs-meta">${idChip}${ageTxt}${pairBadge}</div>`
         : isListening
           ? `<div class="pcs-meta">waiting for chirp…</div>`
           : online
@@ -675,6 +701,7 @@ _JS_TEMPLATE = r"""
     }
     const tuningActions = [
       '/settings/chirp_threshold',
+      '/settings/mutual_sync_threshold',
       '/settings/heartbeat_interval',
       '/settings/tracking_exposure_cap',
       '/settings/capture_height',

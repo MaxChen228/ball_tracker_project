@@ -1363,7 +1363,10 @@ _JS_TEMPLATE_RAW = r"""
                         : timeSynced ? 'synced'
                         : 'waiting';
       const syncId = deviceRecord && deviceRecord.time_sync_id;
-      const syncIdTxt = (timeSynced && syncId) ? `<span class="sync-id-chip">${esc(syncId)}</span>` : '';
+      const shortSid = syncId ? (syncId.length > 8 ? syncId.slice(-6) : syncId.replace(/^sy_/, '')) : '';
+      const syncIdTxt = (timeSynced && syncId)
+        ? `<span class="sync-id-chip" title="${esc(syncId)}">·${esc(shortSid)}</span>`
+        : '';
       return `
         <div class="device">
           <div class="device-head">
@@ -1763,6 +1766,7 @@ _JS_TEMPLATE_RAW = r"""
   let currentPreviewRequested = {};
   let currentSyncCommands = {};
   let currentCalibrationLastTs = {};
+  let currentAutoCalibration = { active: {}, last: {} };
   let currentEventsBucket = 'active';
   const pendingPreviewMutations = new Set();
 
@@ -1788,6 +1792,7 @@ _JS_TEMPLATE_RAW = r"""
       preview_pending: [...(state.preview_pending || [])].sort(),
       last_ts: state.calibration_last_ts || {},
       sync_pending: Object.keys(state.sync_commands || {}).sort(),
+      auto_calibration: state.auto_calibration || { active: {}, last: {} },
     });
     if (key === _lastDevKey) return;
     _lastDevKey = key;
@@ -1839,12 +1844,14 @@ _JS_TEMPLATE_RAW = r"""
       currentCaptureMode = s.capture_mode || 'camera_only';
       currentPreviewRequested = s.preview_requested || {};
       currentSyncCommands = s.sync_commands || {};
+      currentAutoCalibration = s.auto_calibration || { active: {}, last: {} };
       renderDevices({
         devices: s.devices || [],
         calibrations: currentCalibrations || [],
         preview_requested: currentPreviewRequested,
         sync_commands: currentSyncCommands,
         calibration_last_ts: currentCalibrationLastTs || {},
+        auto_calibration: currentAutoCalibration,
       });
       renderSession(s);
       // Telemetry: record per-cam WS latency sampled from /status.
@@ -1884,6 +1891,7 @@ _JS_TEMPLATE_RAW = r"""
         preview_requested: currentPreviewRequested,
         sync_commands: currentSyncCommands,
         calibration_last_ts: currentCalibrationLastTs,
+        auto_calibration: currentAutoCalibration,
       });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
       // Update per-camera virt reprojection metadata from scene.cameras
@@ -1989,6 +1997,7 @@ _JS_TEMPLATE_RAW = r"""
         preview_pending: [...pendingPreviewMutations],
         sync_commands: currentSyncCommands,
         calibration_last_ts: currentCalibrationLastTs || {},
+        auto_calibration: currentAutoCalibration,
       });
     }
     const clearPending = () => {
@@ -2002,6 +2011,7 @@ _JS_TEMPLATE_RAW = r"""
           preview_pending: [...pendingPreviewMutations],
           sync_commands: currentSyncCommands,
           calibration_last_ts: currentCalibrationLastTs || {},
+          auto_calibration: currentAutoCalibration,
         });
       }
     };
