@@ -62,6 +62,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var statusPresenter: CameraStatusPresenter!
     private var recordingWorkflow: CameraRecordingWorkflow!
     private var transportCoordinator: CameraTransportCoordinator!
+    private var overlayView: CameraMonitorOverlayView!
 
     // UI state.
     private var lastUploadStatusText: String = ""
@@ -115,28 +116,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // UI containers. Preview stays full-screen; a small overlay panel exposes
     // role, link, and preview status.
-    private let topStatusChip = StatusChip()
-    private let controlPanel = UIView()
-    private let roleControl = UISegmentedControl(items: ["A", "B"])
-    private let connectionLabel = UILabel()
-    private let previewLabel = UILabel()
     /// Last-known capture mode from the server. Defaults to camera-only so a
     /// network-unreachable launch still records and uploads video.
     private var currentCaptureMode: ServerUploader.CaptureMode = .cameraOnly
     private var currentSessionPaths: Set<ServerUploader.DetectionPath> = [.serverPost]
-    private let warningLabel = UILabel()
-
-    // Full-screen colored border that reflects AppState. Stroke width +
-    // tint change per state; pulses opacity in WAITING states so the
-    // operator can see the mode change from across the field.
-    private let stateBorderLayer = CAShapeLayer()
-
-    // Top-right "● REC 2.3s" indicator, shown only during .recording.
-    private let recIndicator = UIView()
-    private let recDotView = UIView()
-    private let recTimerLabel = UILabel()
-    private var recTimer: Timer?
-    private var recStartTime: CFTimeInterval = 0
 
     // Haptic feedback generators. Kept as properties so prepare() is
     // honored (trigger latency drops from ~100 ms to <20 ms).
@@ -162,6 +145,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        overlayView = CameraMonitorOverlayView()
 
         detectionPool.onFrame = { [weak self] frame in
             self?.handleDetectedFrame(frame)
@@ -455,10 +439,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         captureRuntime.updatePreviewFrame(in: view.bounds)
-        // Border path follows the root view bounds; regenerated on every
-        // layout pass so rotation / safe-area changes stay in sync.
-        stateBorderLayer.frame = view.bounds
-        stateBorderLayer.path = UIBezierPath(rect: view.bounds).cgPath
+        overlayView.updateBorderPath(for: view.bounds)
     }
 
     // MARK: - Server health + upload queue wiring
@@ -713,164 +694,33 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func setupUI() {
-        topStatusChip.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(topStatusChip)
-
-        setupControlPanel()
-
-        warningLabel.font = DesignTokens.Fonts.sans(size: 18, weight: .bold)
-        warningLabel.textColor = DesignTokens.Colors.ink
-        warningLabel.backgroundColor = DesignTokens.Colors.warning.withAlphaComponent(0.85)
-        warningLabel.layer.cornerRadius = DesignTokens.CornerRadius.chip
-        warningLabel.layer.masksToBounds = true
-        warningLabel.textAlignment = .center
-        warningLabel.numberOfLines = 0
-        warningLabel.translatesAutoresizingMaskIntoConstraints = false
-        warningLabel.isHidden = true
-        view.addSubview(warningLabel)
-
-        NSLayoutConstraint.activate([
-            topStatusChip.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: DesignTokens.Spacing.m),
-            topStatusChip.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.m),
-
-            controlPanel.topAnchor.constraint(equalTo: topStatusChip.bottomAnchor, constant: DesignTokens.Spacing.s),
-            controlPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.m),
-            controlPanel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -DesignTokens.Spacing.xl),
-
-            warningLabel.topAnchor.constraint(equalTo: controlPanel.bottomAnchor, constant: DesignTokens.Spacing.s),
-            warningLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),
-            warningLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DesignTokens.Spacing.l),
-        ])
-
-        setupStateBorder()
-        setupRecIndicator()
+        overlayView.install(in: view)
+        overlayView.onRoleChanged = { [weak self] in
+            self?.roleControlChanged()
+        }
         statusPresenter = CameraStatusPresenter(
-            topStatusChip: topStatusChip,
-            warningLabel: warningLabel,
-            connectionLabel: connectionLabel,
-            previewLabel: previewLabel,
-            stateBorderLayer: stateBorderLayer
+            topStatusChip: overlayView.topStatusChip,
+            warningLabel: overlayView.warningLabel,
+            connectionLabel: overlayView.connectionLabel,
+            previewLabel: overlayView.previewLabel,
+            stateBorderLayer: overlayView.stateBorderLayer
         )
         syncInlineControlsFromSettings()
     }
 
-    private func setupControlPanel() {
-        controlPanel.translatesAutoresizingMaskIntoConstraints = false
-        controlPanel.backgroundColor = DesignTokens.Colors.hudSurface
-        controlPanel.layer.cornerRadius = DesignTokens.CornerRadius.card
-        controlPanel.layer.borderWidth = 1
-        controlPanel.layer.borderColor = DesignTokens.Colors.cardBorder.cgColor
-        view.addSubview(controlPanel)
-
-        let roleLabel = makePanelLabel("ROLE")
-
-        roleControl.translatesAutoresizingMaskIntoConstraints = false
-        roleControl.selectedSegmentTintColor = DesignTokens.Colors.accent
-        roleControl.setTitleTextAttributes([.foregroundColor: DesignTokens.Colors.ink], for: .normal)
-        roleControl.setTitleTextAttributes([.foregroundColor: DesignTokens.Colors.cardBackground], for: .selected)
-        roleControl.addTarget(self, action: #selector(roleControlChanged), for: .valueChanged)
-
-        connectionLabel.font = DesignTokens.Fonts.mono(size: 12, weight: .medium)
-        connectionLabel.textColor = DesignTokens.Colors.ink
-
-        previewLabel.font = DesignTokens.Fonts.mono(size: 12, weight: .medium)
-        previewLabel.textColor = DesignTokens.Colors.sub
-
-        let roleRow = UIStackView(arrangedSubviews: [roleLabel, roleControl])
-        roleRow.axis = .horizontal
-        roleRow.alignment = .center
-        roleRow.spacing = DesignTokens.Spacing.s
-
-        let statusRow = UIStackView(arrangedSubviews: [connectionLabel, previewLabel])
-        statusRow.axis = .vertical
-        statusRow.alignment = .leading
-        statusRow.spacing = DesignTokens.Spacing.xs
-
-        let root = UIStackView(arrangedSubviews: [roleRow, statusRow])
-        root.axis = .vertical
-        root.spacing = DesignTokens.Spacing.s
-        root.translatesAutoresizingMaskIntoConstraints = false
-        controlPanel.addSubview(root)
-
-        NSLayoutConstraint.activate([
-            roleLabel.widthAnchor.constraint(equalToConstant: 52),
-            roleControl.widthAnchor.constraint(equalToConstant: 120),
-
-            root.topAnchor.constraint(equalTo: controlPanel.topAnchor, constant: DesignTokens.Spacing.m),
-            root.leadingAnchor.constraint(equalTo: controlPanel.leadingAnchor, constant: DesignTokens.Spacing.m),
-            root.trailingAnchor.constraint(equalTo: controlPanel.trailingAnchor, constant: -DesignTokens.Spacing.m),
-            root.bottomAnchor.constraint(equalTo: controlPanel.bottomAnchor, constant: -DesignTokens.Spacing.m),
-        ])
-    }
-
-    private func makePanelLabel(_ text: String) -> UILabel {
-        let label = UILabel()
-        label.font = DesignTokens.Fonts.mono(size: 12, weight: .bold)
-        label.textColor = DesignTokens.Colors.sub
-        label.text = text
-        return label
-    }
-
     private func syncInlineControlsFromSettings() {
-        roleControl.selectedSegmentIndex = settings.cameraRole == "B" ? 1 : 0
+        overlayView.syncRole(cameraRole: settings.cameraRole)
     }
 
-    @objc private func roleControlChanged() {
+    private func roleControlChanged() {
         let updated = AppSettings(
             serverIP: settings.serverIP,
-            cameraRole: roleControl.selectedSegmentIndex == 1 ? "B" : "A"
+            cameraRole: overlayView.selectedCameraRole
         )
         AppSettingsStore.save(updated)
         hideBanner()
         applyUpdatedSettings()
         updateUIForState()
-    }
-
-    private func setupStateBorder() {
-        stateBorderLayer.fillColor = UIColor.clear.cgColor
-        stateBorderLayer.strokeColor = UIColor.clear.cgColor
-        stateBorderLayer.lineWidth = 0
-        // Sit above the preview layer (index 0) but below the HUD views.
-        // Border is decorative — never intercept touches (CAShapeLayer
-        // doesn't by default, belt and braces).
-        view.layer.addSublayer(stateBorderLayer)
-    }
-
-    private func setupRecIndicator() {
-        recIndicator.translatesAutoresizingMaskIntoConstraints = false
-        recIndicator.backgroundColor = DesignTokens.Colors.hudSurface
-        recIndicator.layer.cornerRadius = 14
-        recIndicator.layer.borderColor = DesignTokens.Colors.destructive.cgColor
-        recIndicator.layer.borderWidth = 1
-        recIndicator.isHidden = true
-
-        recDotView.backgroundColor = DesignTokens.Colors.destructive
-        recDotView.layer.cornerRadius = 7
-        recDotView.translatesAutoresizingMaskIntoConstraints = false
-
-        recTimerLabel.text = "REC 0.0s"
-        recTimerLabel.textColor = DesignTokens.Colors.ink
-        recTimerLabel.font = DesignTokens.Fonts.mono(size: 16, weight: .bold)
-        recTimerLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        recIndicator.addSubview(recDotView)
-        recIndicator.addSubview(recTimerLabel)
-        view.addSubview(recIndicator)
-
-        NSLayoutConstraint.activate([
-            recIndicator.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            recIndicator.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            recIndicator.heightAnchor.constraint(equalToConstant: 32),
-
-            recDotView.leadingAnchor.constraint(equalTo: recIndicator.leadingAnchor, constant: 10),
-            recDotView.centerYAnchor.constraint(equalTo: recIndicator.centerYAnchor),
-            recDotView.widthAnchor.constraint(equalToConstant: 14),
-            recDotView.heightAnchor.constraint(equalToConstant: 14),
-
-            recTimerLabel.leadingAnchor.constraint(equalTo: recDotView.trailingAnchor, constant: 8),
-            recTimerLabel.trailingAnchor.constraint(equalTo: recIndicator.trailingAnchor, constant: -12),
-            recTimerLabel.centerYAnchor.constraint(equalTo: recIndicator.centerYAnchor),
-        ])
     }
 
     private func updateUIForState() {
@@ -881,14 +731,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             connectionText: connectionText,
             previewText: "PREVIEW · \(previewState)"
         ) { [weak self] isRecording in
-            guard let self else { return }
-            if isRecording {
-                self.recIndicator.isHidden = false
-                self.startRecTimer()
-            } else {
-                self.recIndicator.isHidden = true
-                self.stopRecTimer()
-            }
+            self?.overlayView.setRecordingActive(isRecording)
         }
     }
 
@@ -901,27 +744,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case .uploading: return "UPLOADING"
         }
     }
-
-    private func startRecTimer() {
-        recStartTime = CACurrentMediaTime()
-        recTimerLabel.text = "REC 0.0s"
-        recDotView.alpha = 1.0
-        recTimer?.invalidate()
-        recTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let elapsed = CACurrentMediaTime() - self.recStartTime
-            self.recTimerLabel.text = String(format: "REC %.1fs", elapsed)
-            // 2 Hz blink so the operator can read the dot from distance.
-            self.recDotView.alpha = (Int(elapsed * 2) % 2 == 0) ? 1.0 : 0.25
-        }
-    }
-
-    private func stopRecTimer() {
-        recTimer?.invalidate()
-        recTimer = nil
-        recDotView.alpha = 1.0
-    }
-
 
     // MARK: - Video frame processing
 
