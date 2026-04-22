@@ -82,7 +82,7 @@ final class AudioSyncDetector {
     private let bandBF0: Double
     private let bandBF1: Double
     private let chirpDurationS: Double
-    private let threshold: Float
+    private var threshold: Float
     private let minPSR: Float
     private let perBandCooldownS: Double
 
@@ -158,6 +158,18 @@ final class AudioSyncDetector {
             if !self.ring.isEmpty {
                 self.ring = [Float](repeating: 0, count: self.ringLen)
             }
+        }
+    }
+
+    /// Hot-apply a new matched-filter threshold. Mirrors the legacy
+    /// AudioChirpDetector's `setThreshold(_:)` so the dashboard slider's
+    /// pushed value reaches this detector too (previously mutual sync
+    /// ignored the dashboard threshold and always used 0.18, forcing the
+    /// operator to compile-time-edit the default to run a quieter rig).
+    /// Thread-safe — writes happen on `deliveryQueue`.
+    func setThreshold(_ value: Float) {
+        deliveryQueue.async { [weak self] in
+            self?.threshold = max(0.01, value)
         }
     }
 

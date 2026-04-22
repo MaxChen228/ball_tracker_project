@@ -1693,7 +1693,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // of ms vs. the 14-23 s cold-boot the capture session used to
         // impose when the capture session was parked in idle.
 
-        let detector = AudioSyncDetector()
+        // Seed threshold from the most-recent server push; falls back to
+        // the detector's internal default if no setting message has
+        // arrived yet. Previously AudioSyncDetector() always used the
+        // compile-time 0.18 — dashboard slider was silently ignored for
+        // mutual sync, forcing rebuilds to unlock quieter rigs.
+        let seedThreshold = Float(lastServerChirpThreshold ?? 0.18)
+        let detector = AudioSyncDetector(threshold: seedThreshold)
         detector.onDetection = { [weak self] event in
             guard let self else { return }
             DispatchQueue.main.async { self.onSyncDetection(event) }
@@ -2514,6 +2520,10 @@ extension CameraViewController: ServerWebSocketDelegate {
                 self.lastServerChirpThreshold = threshold
                 DispatchQueue.main.async {
                     self.chirpDetector?.setThreshold(Float(threshold))
+                    // Mutual-sync detector now honours the same slider —
+                    // was hardcoded 0.18 before, meaning long-distance
+                    // rigs couldn't lower the gate without a rebuild.
+                    self.syncDetector?.setThreshold(Float(threshold))
                     log.info("chirp threshold hot-applied from server: \(threshold)")
                 }
             }
