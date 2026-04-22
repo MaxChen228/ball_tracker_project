@@ -2614,6 +2614,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ball_tracker server", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _no_cache_html(request: Request, call_next):
+    """Force browsers to always refetch HTML — the dashboard ships its
+    JS inline, so a cached HTML doc means stale JS. Plain reload (not
+    Cmd-Shift-R) was serving disk-cached HTML with an older IIFE that
+    still ran the retired tickPreviewRefresh keep-alive loop, which
+    fought the new single-source-of-truth preview flow."""
+    response = await call_next(request)
+    ctype = response.headers.get("content-type", "")
+    if ctype.startswith("text/html"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
 state = State()
 device_ws = DeviceSocketManager()
 sse_hub = SSEHub()
