@@ -2800,6 +2800,14 @@ async def stream() -> StreamingResponse:
 async def ws_device(camera_id: str, websocket: WebSocket) -> None:
     _validate_camera_id_or_422(camera_id)
     await device_ws.connect(camera_id, websocket)
+    # Freshen `Device.last_seen_at` immediately on connect so `/status`
+    # sees the cam as online without waiting for the first `hello` to
+    # arrive. Otherwise we age out on disconnect, broadcast
+    # `device_status online=true` at connect, the dashboard kicks
+    # tickStatus — but state.online_devices() still excludes the cam
+    # because its last_seen_at is old, so the panel races back to
+    # offline for up to one hello cadence.
+    state.heartbeat(camera_id)
     try:
         await device_ws.send(camera_id, _settings_message_for(camera_id))
         session = state.current_session()
