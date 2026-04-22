@@ -2096,6 +2096,31 @@ def test_status_surfaces_preview_requested_map():
     assert hb_json_b["preview_requested"] is True
 
 
+def test_status_includes_ws_connected_device_even_without_fresh_heartbeat(tmp_path, monkeypatch):
+    clock = [1000.0]
+    def fake_time() -> float:
+        return clock[0]
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
+    client = TestClient(app)
+    with client.websocket_connect("/ws/device/A") as ws:
+        clock[0] += 10.0
+        got = client.get("/status").json()["devices"]
+        assert [d["camera_id"] for d in got] == ["A"]
+        assert got[0]["ws_connected"] is True
+
+
+def test_setup_ssr_uses_same_time_sync_rule_as_status(tmp_path, monkeypatch):
+    clock = [1000.0]
+    def fake_time() -> float:
+        return clock[0]
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
+    main.state.heartbeat("A", time_synced=True, time_sync_id="sync_1", sync_anchor_timestamp_s=1.23)
+    clock[0] += main._TIME_SYNC_MAX_AGE_S + 1.0
+    client = TestClient(app)
+    body = client.get("/setup").text.lower()
+    assert "time sync &middot; synced" not in body
+
+
 # =======================================================================
 # Phase 5: dashboard auto-calibration + extended markers
 # =======================================================================

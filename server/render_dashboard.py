@@ -1248,6 +1248,7 @@ _JS_TEMPLATE = r"""
     const calibrated = new Set(state.calibrations || []);
     const syncPending = state.sync_commands || {};
     const previewReq = state.preview_requested || {};
+    const previewPending = new Set(state.preview_pending || []);
     const calLastTs = state.calibration_last_ts || {};
     const autoCalActive = (state.auto_calibration && state.auto_calibration.active) || {};
     const autoCalLast = (state.auto_calibration && state.auto_calibration.last) || {};
@@ -1263,6 +1264,7 @@ _JS_TEMPLATE = r"""
       const pending = !!syncPending[cam];
       const isCal = calibrated.has(cam);
       const previewOn = !!previewReq[cam];
+      const previewBusy = previewPending.has(cam);
       const lastTs = calLastTs[cam];
       const autoRun = autoCalActive[cam] || null;
       const autoLast = autoCalLast[cam] || null;
@@ -1280,8 +1282,9 @@ _JS_TEMPLATE = r"""
           ? `${autoLast.status}${autoLast.result && autoLast.result.reprojection_px != null ? ' · ' + Number(autoLast.result.reprojection_px).toFixed(1) + 'px' : ''}`
           : (online ? 'idle' : 'offline'));
       const previewBtn = (`<button type="button" class="btn small preview-btn${previewOn ? ' active' : ''}" ` +
-        `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}">` +
-        `${previewOn ? 'PREVIEW ON' : 'PREVIEW'}</button>`);
+        `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}" ` +
+        `${previewBusy ? 'disabled' : ''}>` +
+        `${previewBusy ? (previewOn ? 'PREVIEW ON…' : 'PREVIEW…') : (previewOn ? 'PREVIEW ON' : 'PREVIEW')}</button>`);
       const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}" ${autoRun ? 'disabled' : ''}>` +
         `${autoRun ? 'Auto-cal…' : 'Run auto-cal'}</button>`;
       // Always render the panel so the row height stays stable; off
@@ -1550,7 +1553,7 @@ _JS_TEMPLATE = r"""
     renderActiveSession(currentLiveSession);
 
     // Mirror live state into the shared app-header status strip.
-    if (navStatus && document.body.dataset.page !== 'setup') {
+    if (navStatus) {
       const online = (state.devices || []).length;
       const cal = (state.calibrations || []).length;
       const countCls = n => (n >= 2 ? 'full' : 'partial');
@@ -1693,8 +1696,10 @@ _JS_TEMPLATE = r"""
   let currentCalibrations = null;
   let currentCaptureMode = 'camera_only';
   let currentPreviewRequested = {};
+  let currentSyncCommands = {};
   let currentCalibrationLastTs = {};
   let currentEventsBucket = 'active';
+  const pendingPreviewMutations = new Set();
 
   // Keys used to skip re-renders when nothing changed. We compare serialised
   // state data rather than innerHTML strings because the browser re-serialises
@@ -1707,9 +1712,15 @@ _JS_TEMPLATE = r"""
   const _origRenderDevices = renderDevices;
   renderDevices = function(state) {
     const key = JSON.stringify({
-      devices: (state.devices || []).map(d => ({ id: d.camera_id, ts: d.time_synced })),
+      devices: (state.devices || []).map(d => ({
+        id: d.camera_id,
+        ts: d.time_synced,
+        seen: d.last_seen_at,
+        ws: d.ws_connected,
+      })),
       calibrations: (state.calibrations || []).slice().sort(),
       preview: state.preview_requested || {},
+      preview_pending: [...(state.preview_pending || [])].sort(),
       last_ts: state.calibration_last_ts || {},
       sync_pending: Object.keys(state.sync_commands || {}).sort(),
     });
@@ -1762,11 +1773,12 @@ _JS_TEMPLATE = r"""
       currentSession = s.session || null;
       currentCaptureMode = s.capture_mode || 'camera_only';
       currentPreviewRequested = s.preview_requested || {};
+      currentSyncCommands = s.sync_commands || {};
       renderDevices({
         devices: s.devices || [],
         calibrations: currentCalibrations || [],
         preview_requested: currentPreviewRequested,
-        sync_commands: s.sync_commands || {},
+        sync_commands: currentSyncCommands,
         calibration_last_ts: currentCalibrationLastTs || {},
       });
       renderSession(s);
@@ -1805,7 +1817,7 @@ _JS_TEMPLATE = r"""
         devices: currentDevices || [],
         calibrations: currentCalibrations,
         preview_requested: currentPreviewRequested,
-        sync_commands: {},
+        sync_commands: currentSyncCommands,
         calibration_last_ts: currentCalibrationLastTs,
       });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
@@ -1883,38 +1895,55 @@ _JS_TEMPLATE = r"""
     // (Mutual-sync kickoff is handled on /sync now.)
   });
 
-  // Live-preview toggle (Phase 4a). Click flips the server-side flag;
-  // optimistic update paints immediately so there's no round-trip stall.
-  const previewOn = new Set();
+  // Live-preview toggle (Phase 4a). Server is authoritative: the client
+  // only disables the button while the POST is in flight, then re-hydrates
+  // from `/status` immediately after the server acknowledges.
   document.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-preview-cam]');
     if (!btn) return;
     const cam = btn.dataset.previewCam;
+    if (!cam || pendingPreviewMutations.has(cam)) return;
     const enabled = btn.dataset.previewEnabled !== '1';
-    if (enabled) previewOn.add(cam); else previewOn.delete(cam);
     _lastDevKey = null;
-    const merged = Object.fromEntries([...previewOn].map(c => [c, true]));
-    currentPreviewRequested = merged;
-    renderDevices({
-      devices: currentDevices || [],
-      calibrations: currentCalibrations || [],
-      preview_requested: merged,
-      sync_commands: {},
-      calibration_last_ts: currentCalibrationLastTs || {},
-    });
+    pendingPreviewMutations.add(cam);
+    if (currentDevices !== null || currentCalibrations !== null) {
+      renderDevices({
+        devices: currentDevices || [],
+        calibrations: currentCalibrations || [],
+        preview_requested: currentPreviewRequested,
+        preview_pending: [...pendingPreviewMutations],
+        sync_commands: currentSyncCommands,
+        calibration_last_ts: currentCalibrationLastTs || {},
+      });
+    }
     try {
       await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
       });
+      await tickStatus();
     } catch (_) { /* next tick surfaces failure via /status */ }
+    finally {
+      pendingPreviewMutations.delete(cam);
+      _lastDevKey = null;
+      if (currentDevices !== null || currentCalibrations !== null) {
+        renderDevices({
+          devices: currentDevices || [],
+          calibrations: currentCalibrations || [],
+          preview_requested: currentPreviewRequested,
+          preview_pending: [...pendingPreviewMutations],
+          sync_commands: currentSyncCommands,
+          calibration_last_ts: currentCalibrationLastTs || {},
+        });
+      }
+    }
   });
 
   // Keep server-side TTL alive. Server flag lapses in 5 s; 2 s refresh
   // absorbs one missed tick.
   async function tickPreviewRefresh() {
-    for (const cam of previewOn) {
+    for (const cam of Object.keys(currentPreviewRequested || {})) {
       try {
         await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
           method: 'POST',
