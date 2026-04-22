@@ -669,8 +669,6 @@ def sync_page() -> HTMLResponse:
             sync=sync_run.to_dict() if sync_run is not None else None,
             last_sync=last_sync.model_dump() if last_sync is not None else None,
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
-            chirp_detect_threshold=state.chirp_detect_threshold(),
-            mutual_sync_threshold=state.mutual_sync_threshold(),
             sync_params={
                 "emit_a_at_s": state.sync_params().emit_a_at_s,
                 "emit_b_at_s": state.sync_params().emit_b_at_s,
