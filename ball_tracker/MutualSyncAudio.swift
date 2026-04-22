@@ -46,15 +46,13 @@ final class MutualSyncAudio {
         let wavData: Data
         let sampleRate: Double
         let audioStartPtsS: Double
-        /// Host-clock time at which `player.play()` was invoked for
-        /// this run's chirp. Optional — only populated on the
-        /// success path; nil if emission failed or was never scheduled.
-        /// Server cross-checks this against its detected self-chirp
-        /// center to diagnose "did we actually emit when we thought?".
-        let emissionPtsS: Double?
+        /// Host-clock times at which each `player.play()` was invoked.
+        /// One entry per scheduled emission (matches `emitAtS` count).
+        /// Server cross-checks these against detected self-chirp centers.
+        let emissionPtsS: [Double]
     }
 
-    private let emissionDelayS: TimeInterval
+    private let emitAtS: [Double]       // emission offsets relative to engine start
     private let recordingDurationS: TimeInterval
     private let chirpDurationS: Double
     private let bandAF0: Double
@@ -74,11 +72,17 @@ final class MutualSyncAudio {
     private var recordedSamples: [Float] = []
     private var recordingSampleRate: Double = 0
     private var recordingFirstPTS: Double?
-    private var emissionPTS: Double?
+    private var emissionPTSList: [Double] = []
     private var completionFired = false
 
+    /// - Parameters:
+    ///   - emitAtS: Emission offsets (seconds from engine-start) for each burst.
+    ///             Defaults to a single emission at 0.3 s (legacy behaviour).
+    ///             Server pushes this per-camera in the WS sync_run message.
+    ///   - recordingDurationS: Total mic recording window. Must exceed the last
+    ///             emission offset + chirp duration + max propagation time.
     init(
-        emissionDelayS: TimeInterval = 0.3,
+        emitAtS: [Double] = [0.3],
         recordingDurationS: TimeInterval = 3.0,
         chirpDurationS: Double = 0.1,
         bandAF0: Double = 2000.0,
@@ -86,7 +90,7 @@ final class MutualSyncAudio {
         bandBF0: Double = 5000.0,
         bandBF1: Double = 7000.0
     ) {
-        self.emissionDelayS = emissionDelayS
+        self.emitAtS = emitAtS.isEmpty ? [0.3] : emitAtS
         self.recordingDurationS = recordingDurationS
         self.chirpDurationS = chirpDurationS
         self.bandAF0 = bandAF0
@@ -118,7 +122,7 @@ final class MutualSyncAudio {
             running = true
             recordedSamples.removeAll(keepingCapacity: true)
             recordingFirstPTS = nil
-            emissionPTS = nil
+            emissionPTSList.removeAll()
             completionFired = false
         }
 
@@ -187,24 +191,28 @@ final class MutualSyncAudio {
             return
         }
 
-        // Emission is deliberately delayed so the input tap has a handful
-        // of buffers in the ring before the self-hear lands.
-        DispatchQueue.main.asyncAfter(deadline: .now() + emissionDelayS) { [weak self] in
-            guard let self else { return }
-            guard let player = self.player, let engine = self.engine, engine.isRunning else {
-                onEmitted?()
-                return
+        // Schedule each burst chirp at the server-specified offsets.
+        // A handful of buffers accumulate before the first emission so
+        // the tap is live when the self-hear arrives.
+        let emitOffsets = self.emitAtS
+        for (idx, offset) in emitOffsets.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + offset) { [weak self] in
+                guard let self else { return }
+                guard let player = self.player, let engine = self.engine, engine.isRunning else {
+                    if idx == emitOffsets.count - 1 { onEmitted?() }
+                    return
+                }
+                guard let buf = self.makeChirpBuffer(role: emittedRole,
+                    format: engine.mainMixerNode.outputFormat(forBus: 0)) else { return }
+                player.scheduleBuffer(buf, at: nil, options: [], completionHandler: nil)
+                if !player.isPlaying { player.play() }
+                let hostCMTime = CMClockGetTime(CMClockGetHostTimeClock())
+                self.stateQueue.async {
+                    self.emissionPTSList.append(CMTimeGetSeconds(hostCMTime))
+                }
+                log.info("mutual-sync chirp emitted idx=\(idx) offset_s=\(offset, privacy: .public) role=\(emittedRole, privacy: .public)")
+                if idx == emitOffsets.count - 1 { onEmitted?() }
             }
-            player.scheduleBuffer(chirpBuffer, at: nil, options: [], completionHandler: nil)
-            if !player.isPlaying { player.play() }
-            // Record emission time on the same host clock as the tap
-            // timestamps so the server can sanity-check "did we emit
-            // roughly when we said we would?" against the detected
-            // self-chirp center.
-            let hostCMTime = CMClockGetTime(CMClockGetHostTimeClock())
-            self.stateQueue.async { self.emissionPTS = CMTimeGetSeconds(hostCMTime) }
-            log.info("mutual-sync chirp emitted role=\(emittedRole, privacy: .public) duration_s=\(self.chirpDurationS, privacy: .public)")
-            onEmitted?()
         }
 
         // Arm the recording-complete watchdog. Fires `recordingDurationS`
@@ -321,7 +329,7 @@ final class MutualSyncAudio {
                 wavData: wav,
                 sampleRate: recordingSampleRate,
                 audioStartPtsS: firstPTS,
-                emissionPtsS: emissionPTS
+                emissionPtsS: emissionPTSList
             )
             running = false
         }

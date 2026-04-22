@@ -17,8 +17,9 @@ import pipeline
 def _reset_main_state(tmp_path, monkeypatch):
     """Replace `main.state` with a fresh per-test State rooted at tmp_path.
 
-    Keeps test ordering-safe: no pitch, result, or clip file leaks across
-    tests, and no interference with the developer's real `server/data/`."""
+    Route modules in routes/* use `from main import state` inside function
+    bodies (late import), so they always read the current `main.state`
+    value — no extra patching needed."""
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     yield
 

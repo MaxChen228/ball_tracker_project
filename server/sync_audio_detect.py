@@ -90,92 +90,142 @@ def _build_reference(rate: int, f0: float, f1: float) -> np.ndarray:
     return chirp.astype(np.float32)
 
 
+def _compute_norm_correlation(
+    audio: np.ndarray,
+    reference: np.ndarray,
+) -> tuple[np.ndarray, int] | None:
+    """Compute normalized matched-filter over full recording. Returns
+    (norm array, ref_len) or None if audio is too short."""
+    n = len(audio)
+    ref_len = len(reference)
+    if n < ref_len:
+        return None
+    audio64 = audio.astype(np.float64)
+    cumsq = np.concatenate(([0.0], np.cumsum(audio64 * audio64)))
+    n_lags = n - ref_len + 1
+    window_energy = cumsq[ref_len:] - cumsq[:n_lags]
+    window_energy = np.maximum(window_energy, 1e-12)
+    dot = np.correlate(audio64, reference.astype(np.float64), mode="valid")
+    norm = np.minimum(np.abs(dot) / np.sqrt(window_energy), 1.0).astype(np.float32)
+    return norm, ref_len
+
+
+def _refine_peak(norm: np.ndarray, best_idx: int) -> float:
+    """Parabolic sub-sample refinement. Returns fractional offset in [-1,1]."""
+    if 0 < best_idx < len(norm) - 1:
+        left = float(norm[best_idx - 1])
+        right = float(norm[best_idx + 1])
+        best = float(norm[best_idx])
+        denom = left - 2.0 * best + right
+        frac = 0.5 * (left - right) / denom if denom != 0.0 else 0.0
+        return frac if -1.0 < frac < 1.0 else 0.0
+    return 0.0
+
+
+def _psr_in_window(norm: np.ndarray, best_idx: int, ref_len: int) -> float:
+    exclusion = ref_len // 2
+    mask = np.ones(len(norm), dtype=bool)
+    mask[max(0, best_idx - exclusion):min(len(norm), best_idx + exclusion + 1)] = False
+    second = float(norm[mask].max()) if mask.any() else 0.0
+    best = float(norm[best_idx])
+    return (best / second) if second > 0.0 else 0.0
+
+
 def detect_band(
     audio: np.ndarray,
     sample_rate: int,
     reference: np.ndarray,
     audio_start_pts_s: float,
 ) -> BandDetection:
-    """Matched-filter correlation of `audio` against `reference` over all
-    valid lags. Returns the best normalized peak, its PSR, and a hopped
-    trace for the debug plot.
-
-    Normalization: `|dot(window, ref)| / sqrt(window_energy)` where
-    `ref` has unit energy. Cauchy-Schwarz bounds the result in [0, 1].
-
-    Parabolic sub-sample refinement on the normalized peaks (not raw
-    dot products) prevents a local energy ramp from skewing the
-    reconstructed center PTS — same refinement the iOS detector did."""
-    n = len(audio)
-    ref_len = len(reference)
-    if n < ref_len:
-        return BandDetection(
-            center_pts_s=audio_start_pts_s, peak_norm=0.0, psr=0.0, trace=[]
-        )
-
-    # Exact per-window energy via cumulative sum of squares — one alloc,
-    # O(1) lookup per lag, no rolling-update drift.
-    audio64 = audio.astype(np.float64)
-    cumsq = np.concatenate(([0.0], np.cumsum(audio64 * audio64)))
-    n_lags = n - ref_len + 1
-    window_energy = cumsq[ref_len:] - cumsq[:n_lags]
-    window_energy = np.maximum(window_energy, 1e-12)
-
-    # `np.correlate` with mode='valid' computes exactly the sliding dot
-    # product we want: output[k] = sum_i audio[k+i] * reference[i].
-    dot = np.correlate(audio.astype(np.float64), reference.astype(np.float64), mode="valid")
-    norm = np.abs(dot) / np.sqrt(window_energy)
-    # Clamp to [0, 1] as a belt-and-braces guard against numerical
-    # overshoot (shouldn't happen given unit-energy reference but cheap
-    # to enforce).
-    norm = np.minimum(norm, 1.0).astype(np.float32)
+    """Global matched-filter search (single best peak). Used as fallback
+    when no expected emission times are available."""
+    result = _compute_norm_correlation(audio, reference)
+    if result is None:
+        return BandDetection(center_pts_s=audio_start_pts_s, peak_norm=0.0, psr=0.0, trace=[])
+    norm, ref_len = result
 
     best_idx = int(np.argmax(norm))
     best_norm = float(norm[best_idx])
+    frac = _refine_peak(norm, best_idx)
+    psr = _psr_in_window(norm, best_idx, ref_len)
+    center_pts_s = audio_start_pts_s + (best_idx + ref_len / 2.0 + frac) / sample_rate
 
-    # Parabolic sub-sample refinement on normalized peaks.
-    if 0 < best_idx < len(norm) - 1:
-        left = float(norm[best_idx - 1])
-        right = float(norm[best_idx + 1])
-        denom = left - 2.0 * best_norm + right
-        frac = 0.5 * (left - right) / denom if denom != 0.0 else 0.0
-        if not (-1.0 < frac < 1.0):
-            frac = 0.0
-    else:
-        frac = 0.0
-
-    # PSR: best / max outside ±ref_len/2 exclusion. Guard against the
-    # exclusion zone swallowing the whole correlation (tiny recordings).
-    exclusion = ref_len // 2
-    mask = np.ones(len(norm), dtype=bool)
-    lo = max(0, best_idx - exclusion)
-    hi = min(len(norm), best_idx + exclusion + 1)
-    mask[lo:hi] = False
-    second_norm = float(norm[mask].max()) if mask.any() else 0.0
-    psr = (best_norm / second_norm) if second_norm > 0.0 else 0.0
-
-    # Chirp center (in fractional samples): lag + refLen/2 + parabolic
-    # refinement. This lands on the middle of the 100 ms sweep.
-    center_frac_samples = best_idx + (ref_len / 2.0) + frac
-    center_pts_s = audio_start_pts_s + (center_frac_samples / sample_rate)
-
-    # Hopped trace: emit (t, peak_at_hop, local_psr) at ~30 Hz so the
-    # existing /sync Plotly plot can render the noise floor + spike
-    # without changing its frontend.
     trace: list[SyncTraceSample] = []
     hop = max(1, int(round(sample_rate * _TRACE_HOP_S)))
     for t_idx in range(0, len(norm), hop):
-        trace.append(SyncTraceSample(
-            t=float(t_idx) / float(sample_rate),
-            peak=float(norm[t_idx]),
-            psr=0.0,
-        ))
+        trace.append(SyncTraceSample(t=float(t_idx) / float(sample_rate), peak=float(norm[t_idx]), psr=0.0))
 
+    return BandDetection(center_pts_s=center_pts_s, peak_norm=best_norm, psr=float(psr), trace=trace)
+
+
+def detect_band_windowed(
+    audio: np.ndarray,
+    sample_rate: int,
+    reference: np.ndarray,
+    audio_start_pts_s: float,
+    emit_at_s: list[float],
+    search_window_s: float = 0.3,
+) -> list[BandDetection]:
+    """Windowed multi-peak search: for each expected emission time, search
+    ±search_window_s and return the best peak in that window.
+
+    Returns one BandDetection per expected emission (same length as
+    emit_at_s). A window that misses (audio too short, peak too weak)
+    still returns a BandDetection with peak_norm=0.
+
+    Caller takes median of the center_pts_s values across the N results
+    to get a single robust timestamp for each band."""
+    result = _compute_norm_correlation(audio, reference)
+    if result is None:
+        return [BandDetection(center_pts_s=audio_start_pts_s, peak_norm=0.0, psr=0.0, trace=[])
+                for _ in emit_at_s]
+    norm, ref_len = result
+    n_lags = len(norm)
+    out: list[BandDetection] = []
+
+    for expected_t in emit_at_s:
+        # expected_t is relative to audio_start (recording start).
+        # chirp center sample = expected_t * sr
+        # lag = center - ref_len/2
+        expected_lag = expected_t * sample_rate - ref_len / 2.0
+        win = int(search_window_s * sample_rate)
+        lo = max(0, int(expected_lag) - win)
+        hi = min(n_lags, int(expected_lag) + win + 1)
+        if lo >= hi:
+            out.append(BandDetection(center_pts_s=audio_start_pts_s + expected_t,
+                                     peak_norm=0.0, psr=0.0, trace=[]))
+            continue
+        local_best = int(np.argmax(norm[lo:hi]))
+        abs_idx = lo + local_best
+        best_norm = float(norm[abs_idx])
+        frac = _refine_peak(norm, abs_idx)
+        # PSR within the search window (not global)
+        w_norm = norm[lo:hi]
+        excl = ref_len // 2
+        mask = np.ones(len(w_norm), dtype=bool)
+        mask[max(0, local_best - excl):min(len(w_norm), local_best + excl + 1)] = False
+        second = float(w_norm[mask].max()) if mask.any() else 0.0
+        psr = (best_norm / second) if second > 0.0 else 0.0
+        center_pts_s = audio_start_pts_s + (abs_idx + ref_len / 2.0 + frac) / sample_rate
+        out.append(BandDetection(center_pts_s=center_pts_s, peak_norm=best_norm, psr=float(psr), trace=[]))
+
+    return out
+
+
+def _median_band_detection(detections: list[BandDetection]) -> BandDetection:
+    """Combine N per-burst detections → single BandDetection with median
+    center PTS and mean peak/PSR. Provides the trace from the last entry
+    (empty from windowed detection) for API compat."""
+    if not detections:
+        raise ValueError("empty detections list")
+    centers = [d.center_pts_s for d in detections]
+    peaks = [d.peak_norm for d in detections]
+    psrs = [d.psr for d in detections]
     return BandDetection(
-        center_pts_s=center_pts_s,
-        peak_norm=best_norm,
-        psr=float(psr),
-        trace=trace,
+        center_pts_s=float(np.median(centers)),
+        peak_norm=float(np.mean(peaks)),
+        psr=float(np.mean(psrs)),
+        trace=detections[-1].trace,
     )
 
 
@@ -185,6 +235,9 @@ def detect_sync_report(
     camera_id: str,
     role: str,
     audio_start_pts_s: float,
+    emit_at_s_self: list[float] | None = None,
+    emit_at_s_other: list[float] | None = None,
+    search_window_s: float = 0.3,
     expected_sample_rate: int | None = None,
 ) -> tuple[SyncReport, dict[str, float]]:
     """Turn one cam's uploaded WAV + metadata into a `SyncReport` ready
@@ -207,35 +260,38 @@ def detect_sync_report(
         raise ValueError(f"role must be 'A' or 'B', got {role!r}")
 
     audio, sample_rate = load_wav_mono_float(wav_bytes)
-    if expected_sample_rate is not None and sample_rate != expected_sample_rate:
-        # Not fatal — iOS may deliver 44.1k on older hardware — but the
-        # caller's metadata should agree with the WAV header.
-        pass
 
     ref_a = _build_reference(sample_rate, SYNC_BAND_A_F0, SYNC_BAND_A_F1)
     ref_b = _build_reference(sample_rate, SYNC_BAND_B_F0, SYNC_BAND_B_F1)
 
-    det_a = detect_band(audio, sample_rate, ref_a, audio_start_pts_s)
-    det_b = detect_band(audio, sample_rate, ref_b, audio_start_pts_s)
-
-    if role == "A":
-        t_self_s = det_a.center_pts_s
-        t_from_other_s = det_b.center_pts_s
-        trace_self = det_a.trace
-        trace_other = det_b.trace
-        peak_self = det_a.peak_norm
-        peak_other = det_b.peak_norm
-        psr_self = det_a.psr
-        psr_other = det_b.psr
+    # Windowed burst detection when server provides expected emission times;
+    # fall back to global search for backward compat (no emit_at_s provided).
+    if emit_at_s_self and emit_at_s_other:
+        ref_self = ref_a if role == "A" else ref_b
+        ref_other = ref_b if role == "A" else ref_a
+        dets_self = detect_band_windowed(audio, sample_rate, ref_self,
+                                         audio_start_pts_s, emit_at_s_self, search_window_s)
+        dets_other = detect_band_windowed(audio, sample_rate, ref_other,
+                                          audio_start_pts_s, emit_at_s_other, search_window_s)
+        det_self = _median_band_detection(dets_self)
+        det_other = _median_band_detection(dets_other)
+        n_burst = len(emit_at_s_self)
     else:
-        t_self_s = det_b.center_pts_s
-        t_from_other_s = det_a.center_pts_s
-        trace_self = det_b.trace
-        trace_other = det_a.trace
-        peak_self = det_b.peak_norm
-        peak_other = det_a.peak_norm
-        psr_self = det_b.psr
-        psr_other = det_a.psr
+        # Legacy global search
+        det_a = detect_band(audio, sample_rate, ref_a, audio_start_pts_s)
+        det_b = detect_band(audio, sample_rate, ref_b, audio_start_pts_s)
+        det_self = det_a if role == "A" else det_b
+        det_other = det_b if role == "A" else det_a
+        n_burst = 1
+
+    t_self_s = det_self.center_pts_s
+    t_from_other_s = det_other.center_pts_s
+    trace_self = det_self.trace
+    trace_other = det_other.trace
+    peak_self = det_self.peak_norm
+    peak_other = det_other.peak_norm
+    psr_self = det_self.psr
+    psr_other = det_other.psr
 
     report = SyncReport(
         camera_id=camera_id,
@@ -256,6 +312,8 @@ def detect_sync_report(
         "peak_other": float(peak_other),
         "psr_self": float(psr_self),
         "psr_other": float(psr_other),
+        "n_burst": n_burst,
+        "windowed": emit_at_s_self is not None and emit_at_s_other is not None,
     }
     return report, debug
 
