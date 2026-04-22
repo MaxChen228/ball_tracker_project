@@ -208,6 +208,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// triggers the initial apply regardless of whether the server
     /// value happens to equal the local Settings bootstrap default.
     private var lastServerChirpThreshold: Double?
+    private var lastServerMutualThreshold: Double?
     private var lastServerHeartbeatInterval: Double?
     private var lastServerTrackingExposureCapMode: ServerUploader.TrackingExposureCapMode?
     /// Currently-applied capture image height. Initialised from
@@ -1717,7 +1718,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // arrived yet. Previously AudioSyncDetector() always used the
         // compile-time 0.18 — dashboard slider was silently ignored for
         // mutual sync, forcing rebuilds to unlock quieter rigs.
-        let seedThreshold = Float(lastServerChirpThreshold ?? 0.18)
+        let seedThreshold = Float(lastServerMutualThreshold ?? 0.10)
         let detector = AudioSyncDetector(threshold: seedThreshold)
         detector.onDetection = { [weak self] event in
             guard let self else { return }
@@ -2556,12 +2557,22 @@ extension CameraViewController: ServerWebSocketDelegate {
                self.lastServerChirpThreshold != threshold {
                 self.lastServerChirpThreshold = threshold
                 DispatchQueue.main.async {
+                    // Quick-chirp path only. Mutual-sync now has its
+                    // own slider so tuning one doesn't clobber the
+                    // other — the two modalities see very different
+                    // peak magnitudes and shared gate made long-range
+                    // mutual impossible without letting quick-chirp
+                    // slip into false positives.
                     self.chirpDetector?.setThreshold(Float(threshold))
-                    // Mutual-sync detector now honours the same slider —
-                    // was hardcoded 0.18 before, meaning long-distance
-                    // rigs couldn't lower the gate without a rebuild.
-                    self.syncDetector?.setThreshold(Float(threshold))
-                    log.info("chirp threshold hot-applied from server: \(threshold)")
+                    log.info("quick-chirp threshold hot-applied from server: \(threshold)")
+                }
+            }
+            if let mThreshold = message["mutual_sync_threshold"] as? Double,
+               self.lastServerMutualThreshold != mThreshold {
+                self.lastServerMutualThreshold = mThreshold
+                DispatchQueue.main.async {
+                    self.syncDetector?.setThreshold(Float(mThreshold))
+                    log.info("mutual-sync threshold hot-applied from server: \(mThreshold)")
                 }
             }
             if let interval = message["heartbeat_interval_s"] as? Double,

@@ -384,7 +384,14 @@ class State:
         # Runtime tunables pushed from the dashboard, hot-applied on the
         # iPhone via WS `settings` messages. Persisted so a server restart
         # doesn't silently drop the operator's last-chosen values.
+        # Two independent thresholds — quick-chirp (third-device up+down
+        # sweep, typically strong signal 0.2-0.9 on a clean recording)
+        # vs mutual-sync (two-phone cross-detection; the far phone's
+        # chirp can land much quieter, 0.06-0.3 in practice). Sharing
+        # one gate forced operators to tune for the weaker modality and
+        # lose false-positive margin on the stronger one.
         self._chirp_detect_threshold: float = 0.18
+        self._mutual_sync_threshold: float = 0.10
         self._heartbeat_interval_s: float = 1.0
         self._tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
         # Capture resolution (image height in px) pushed to iOS via WS settings.
@@ -1282,6 +1289,12 @@ class State:
                 **rolled,
             }
 
+    def clear_last_sync_result(self) -> None:
+        """Drop the latched `last_sync_result` so a fresh listen window
+        doesn't render stale ABORTED text in the Sync Control card."""
+        with self._lock:
+            self._last_sync_result = None
+
     def reset_sync_telemetry_peaks(self, camera_ids: list[str] | None = None) -> None:
         """Zero the rolling peak columns for the named cams (or every cam
         currently in the registry). Called at the start of each
@@ -1491,6 +1504,9 @@ class State:
         thr = obj.get("chirp_detect_threshold")
         if isinstance(thr, (int, float)) and self._CHIRP_THRESHOLD_MIN <= thr <= self._CHIRP_THRESHOLD_MAX:
             self._chirp_detect_threshold = float(thr)
+        mthr = obj.get("mutual_sync_threshold")
+        if isinstance(mthr, (int, float)) and self._CHIRP_THRESHOLD_MIN <= mthr <= self._CHIRP_THRESHOLD_MAX:
+            self._mutual_sync_threshold = float(mthr)
         ivl = obj.get("heartbeat_interval_s")
         if isinstance(ivl, (int, float)) and self._HEARTBEAT_INTERVAL_MIN <= ivl <= self._HEARTBEAT_INTERVAL_MAX:
             self._heartbeat_interval_s = float(ivl)
@@ -1532,6 +1548,7 @@ class State:
         payload = json.dumps(
             {
                 "chirp_detect_threshold": self._chirp_detect_threshold,
+                "mutual_sync_threshold": self._mutual_sync_threshold,
                 "heartbeat_interval_s": self._heartbeat_interval_s,
                 "capture_height_px": self._capture_height_px,
                 "tracking_exposure_cap": self._tracking_exposure_cap.value,
@@ -1572,6 +1589,24 @@ class State:
             )
         with self._lock:
             self._chirp_detect_threshold = v
+            self._persist_runtime_settings_locked()
+            return v
+
+    def mutual_sync_threshold(self) -> float:
+        with self._lock:
+            return self._mutual_sync_threshold
+
+    def set_mutual_sync_threshold(self, value: float) -> float:
+        if not isinstance(value, (int, float)):
+            raise ValueError("threshold must be numeric")
+        v = float(value)
+        if not (self._CHIRP_THRESHOLD_MIN <= v <= self._CHIRP_THRESHOLD_MAX):
+            raise ValueError(
+                f"threshold {v} out of range "
+                f"[{self._CHIRP_THRESHOLD_MIN}, {self._CHIRP_THRESHOLD_MAX}]"
+            )
+        with self._lock:
+            self._mutual_sync_threshold = v
             self._persist_runtime_settings_locked()
             return v
 
@@ -1724,7 +1759,8 @@ class State:
         )
         # Fire post-mortem on the newly-merged streams so the sync log
         # has a self-contained quantitative line per late-arriving abort.
-        thr = self._chirp_detect_threshold
+        # Mutual-sync uses its own threshold; quick-chirp's is independent.
+        thr = self._mutual_sync_threshold
         if report.role == "A":
             self._log_trace_post_mortem_locked(
                 report.sync_id, "A.self", report.trace_self, thr)
@@ -2133,6 +2169,11 @@ class State:
                 return None, reject_reason
             run = SyncRun(id=_new_sync_id(), started_at=now)
             self._current_sync = run
+            # Fresh listen window → drop prior run's result so the "Last"
+            # chip doesn't show stale ABORTED / timing from a previous
+            # attempt. Telemetry peaks reset independently via
+            # `reset_sync_telemetry_peaks`.
+            self._last_sync_result = None
             self._sync_log.append(SyncLogEntry(
                 ts=now, source="server", event="start",
                 detail={"id": run.id, "online": online_ids},
@@ -2794,6 +2835,7 @@ def _build_status_response() -> dict[str, Any]:
         # changes from WS settings messages (matched-filter threshold into
         # AudioChirpDetector; cadence into ServerHealthMonitor).
         "chirp_detect_threshold": state.chirp_detect_threshold(),
+        "mutual_sync_threshold": state.mutual_sync_threshold(),
         "heartbeat_interval_s": state.heartbeat_interval_s(),
         "tracking_exposure_cap": state.tracking_exposure_cap().value,
         # Capture resolution (image height px) pushed to iOS. Phone rebuilds
@@ -2837,6 +2879,7 @@ def _settings_message_for(camera_id: str) -> dict[str, Any]:
         "camera_id": camera_id,
         "paths": status.get("default_paths", []),
         "chirp_detect_threshold": status.get("chirp_detect_threshold"),
+        "mutual_sync_threshold": status.get("mutual_sync_threshold"),
         "heartbeat_interval_s": status.get("heartbeat_interval_s"),
         "tracking_exposure_cap": status.get("tracking_exposure_cap"),
         "capture_height_px": status.get("capture_height_px"),
@@ -3171,6 +3214,41 @@ async def settings_chirp_threshold(request: Request):
     return {"ok": True, "value": applied}
 
 
+@app.post("/settings/mutual_sync_threshold")
+async def settings_mutual_sync_threshold(request: Request):
+    """Set the mutual-sync (two-phone cross-detection) matched-filter
+    threshold. Independent from quick-chirp — the two modalities see
+    very different peak magnitudes so tuning one shouldn't clobber the
+    other."""
+    threshold: float | None = None
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json()
+        try:
+            threshold = float(body.get("threshold"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="missing or invalid 'threshold'")
+    else:
+        form = await request.form()
+        raw = form.get("threshold")
+        if raw is None:
+            raise HTTPException(status_code=400, detail="missing 'threshold'")
+        try:
+            threshold = float(raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid 'threshold'")
+    try:
+        applied = state.set_mutual_sync_threshold(threshold)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await device_ws.broadcast(
+        {cmd.camera_id: _settings_message_for(cmd.camera_id) for cmd in state.online_devices()}
+    )
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "value": applied}
+
+
 @app.post("/settings/heartbeat_interval")
 async def settings_heartbeat_interval(request: Request):
     """Set the iPhone heartbeat base cadence (seconds). Accepts JSON
@@ -3304,6 +3382,9 @@ async def sync_start(request: Request) -> dict[str, Any]:
             detail={"ok": False, "error": reason},
         )
     assert run is not None  # reason is None → run is always set
+    # Fresh listening window → reset per-cam peak maxima so the
+    # telemetry card reads peaks for THIS attempt only.
+    state.reset_sync_telemetry_peaks(None)
     # WS-only live transport: phones get the sync_run signal here. Without
     # this push iOS never knows the run started — the HTTP /heartbeat
     # retirement (a66d5db) removed the `commands` channel and this push
@@ -3411,8 +3492,11 @@ async def sync_trigger(request: Request) -> Any:
 
     dispatched = state.trigger_sync_command(camera_ids)
     # Fresh attempt → fresh peak window on the telemetry card so the
-    # operator isn't looking at maxima from a previous try.
+    # operator isn't looking at maxima from a previous try. Also drop
+    # the latched mutual-sync "Last" chip so a quick-chirp kickoff
+    # doesn't inherit stale ABORTED text from the other modality.
     state.reset_sync_telemetry_peaks(dispatched if dispatched else None)
+    state.clear_last_sync_result()
     # Push the sync_command over WS too so phones on the live transport
     # don't have to wait for the next periodic heartbeat tick to pick it up.
     # The pending flag still exists as the authoritative one-shot drain path.
@@ -4018,14 +4102,8 @@ async def camera_preview_frame(camera_id: str, request: Request) -> dict[str, An
 
 
 @app.get("/camera/{camera_id}/preview")
-def camera_preview_latest(camera_id: str, annotate: int = 0) -> Response:
+def camera_preview_latest(camera_id: str) -> Response:
     """Return the most recently pushed JPEG as an `image/jpeg` response.
-
-    `annotate=1` runs cv2.aruco on the buffered JPEG and draws a green box
-    + ID label on every detected DICT_4X4_50 marker (IDs 0-5 green,
-    extended markers blue). Slower per-request (~20-40 ms on a 480p frame)
-    but invaluable for debugging "is server seeing marker N?" questions
-    without spinning up a separate debug tool.
 
     404 when the buffer has no frame for this camera (either preview was
     never requested, the phone hasn't started pushing yet, or the TTL
@@ -4036,8 +4114,6 @@ def camera_preview_latest(camera_id: str, annotate: int = 0) -> Response:
     if got is None:
         raise HTTPException(status_code=404, detail="no preview frame")
     jpeg_bytes, _ = got
-    if annotate:
-        jpeg_bytes = _annotate_preview_jpeg(jpeg_bytes)
     return Response(
         content=jpeg_bytes,
         media_type="image/jpeg",
@@ -4048,50 +4124,6 @@ def camera_preview_latest(camera_id: str, annotate: int = 0) -> Response:
             "Pragma": "no-cache",
         },
     )
-
-
-def _annotate_preview_jpeg(jpeg_bytes: bytes) -> bytes:
-    """Decode → detect ArUco markers → draw box + ID → re-encode. Used by
-    `/camera/{id}/preview?annotate=1`. Green for plate landmarks (IDs 0-5),
-    blue for extended markers (IDs 6+). Falls back to returning the raw
-    bytes if anything goes sideways so the dashboard never sees a 500."""
-    import cv2  # noqa: WPS433
-    try:
-        from calibration_solver import (
-            PLATE_MARKER_WORLD,
-            detect_all_markers_in_dict,
-        )
-        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if bgr is None:
-            return jpeg_bytes
-        for m in detect_all_markers_in_dict(bgr):
-            is_plate = m.id in PLATE_MARKER_WORLD
-            colour = (60, 200, 60) if is_plate else (230, 160, 60)  # BGR
-            pts = m.corners.astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(bgr, [pts], isClosed=True, color=colour, thickness=3)
-            cx, cy = m.corners.mean(axis=0)
-            label = f"ID {m.id}"
-            # Drop a filled background behind the text so it stays readable
-            # over busy marker patterns.
-            (tw, th), _base = cv2.getTextSize(
-                label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2,
-            )
-            tx, ty = int(cx) - tw // 2, int(cy) + th // 2
-            cv2.rectangle(
-                bgr,
-                (tx - 4, ty - th - 4), (tx + tw + 4, ty + 6),
-                colour, -1,
-            )
-            cv2.putText(
-                bgr, label, (tx, ty),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA,
-            )
-        ok, encoded = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        return bytes(encoded.tobytes()) if ok else jpeg_bytes
-    except Exception as e:  # noqa: BLE001
-        logger.debug("annotate_preview failed: %s", e)
-        return jpeg_bytes
 
 
 @app.get("/camera/{camera_id}/preview.mjpeg")
@@ -5510,6 +5542,7 @@ def sync_page() -> HTMLResponse:
             last_sync=last_sync.model_dump() if last_sync is not None else None,
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
             chirp_detect_threshold=state.chirp_detect_threshold(),
+            mutual_sync_threshold=state.mutual_sync_threshold(),
             heartbeat_interval_s=state.heartbeat_interval_s(),
             capture_height_px=state.capture_height_px(),
             tracking_exposure_cap=state.tracking_exposure_cap().value,
