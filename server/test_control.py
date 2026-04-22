@@ -893,6 +893,18 @@ def test_dashboard_no_longer_renders_telemetry_overlay():
     assert 'id="telemetry-body"' not in body
 
 
+def test_settings_message_includes_server_authoritative_sync_status():
+    main.state.heartbeat(
+        "A",
+        time_synced=True,
+        time_sync_id="sy_deadbeef",
+        sync_anchor_timestamp_s=12.34,
+    )
+    msg = main._settings_message_for("A")
+    assert msg["device_time_synced"] is True
+    assert msg["device_time_sync_id"] == "sy_deadbeef"
+
+
 def test_setup_page_no_longer_renders_preview_marker_count_chip():
     client = TestClient(app)
     r = client.get("/setup")

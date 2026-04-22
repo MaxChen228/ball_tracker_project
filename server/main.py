@@ -2951,6 +2951,10 @@ def _build_status_response() -> dict[str, Any]:
 
 def _settings_message_for(camera_id: str) -> dict[str, Any]:
     status = _build_status_response()
+    device_status = next(
+        (d for d in status.get("devices", []) if d.get("camera_id") == camera_id),
+        {},
+    )
     return {
         "type": "settings",
         "camera_id": camera_id,
@@ -2962,6 +2966,8 @@ def _settings_message_for(camera_id: str) -> dict[str, Any]:
         "capture_height_px": status.get("capture_height_px"),
         "preview_requested": status.get("preview_requested", {}).get(camera_id, False),
         "calibration_frame_requested": status.get("calibration_frame_requested", {}).get(camera_id, False),
+        "device_time_synced": device_status.get("time_synced", False),
+        "device_time_sync_id": device_status.get("time_sync_id"),
     }
 
 
@@ -3039,21 +3045,25 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
             mtype = msg.get("type")
             if mtype == "hello":
                 device_ws.note_seen(camera_id)
+                reported_sync_id = msg.get("time_sync_id")
+                reported_anchor = msg.get("sync_anchor_timestamp_s")
                 state.heartbeat(
                     camera_id,
-                    time_synced=bool(msg.get("time_synced", False)),
-                    time_sync_id=msg.get("time_sync_id"),
-                    sync_anchor_timestamp_s=msg.get("sync_anchor_timestamp_s"),
+                    time_synced=(reported_sync_id is not None and reported_anchor is not None),
+                    time_sync_id=reported_sync_id,
+                    sync_anchor_timestamp_s=reported_anchor,
                 )
                 await device_ws.send(camera_id, _settings_message_for(camera_id))
                 continue
             if mtype == "heartbeat":
                 device_ws.note_seen(camera_id)
+                reported_sync_id = msg.get("time_sync_id")
+                reported_anchor = msg.get("sync_anchor_timestamp_s")
                 state.heartbeat(
                     camera_id,
-                    time_synced=bool(msg.get("time_synced", False)),
-                    time_sync_id=msg.get("time_sync_id"),
-                    sync_anchor_timestamp_s=msg.get("sync_anchor_timestamp_s"),
+                    time_synced=(reported_sync_id is not None and reported_anchor is not None),
+                    time_sync_id=reported_sync_id,
+                    sync_anchor_timestamp_s=reported_anchor,
                 )
                 telem = msg.get("sync_telemetry")
                 if isinstance(telem, dict):
@@ -3505,6 +3515,28 @@ async def sync_report(report: SyncReport) -> dict[str, Any]:
     elif run_after is not None:
         resp["run"] = run_after.to_dict()
     return resp
+
+
+@app.get("/sync/debug_export")
+def sync_debug_export() -> Response:
+    """Returns a compact plain-text report of the last sync attempt,
+    designed to be copied and pasted to an AI (Claude Code) for diagnosis.
+    Includes trace peak metrics, telemetry, log tail, and auto-analysis."""
+    from sync_analysis import build_debug_report
+
+    last = state.last_sync_result()
+    logs = state.sync_logs(limit=60)
+    telem = state.sync_telemetry_snapshot()
+    devices = _build_device_status_rows()
+    report = build_debug_report(
+        last_sync=last.model_dump() if last is not None else None,
+        telemetry=telem,
+        logs=[e.model_dump() for e in logs],
+        mutual_threshold=state.mutual_sync_threshold(),
+        chirp_threshold=state.chirp_detect_threshold(),
+        devices=devices,
+    )
+    return Response(content=report, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/sync/state")
