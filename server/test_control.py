@@ -821,6 +821,15 @@ def test_dashboard_renders_live_session_and_detection_path_controls():
     assert 'value="server_post"' in body
 
 
+def test_setup_page_wires_auto_calibration_status_into_device_renders():
+    client = TestClient(app)
+    r = client.get("/setup")
+    assert r.status_code == 200
+    body = r.text
+    assert "currentAutoCalibration = s.auto_calibration || { active: {}, last: {} };" in body
+    assert "auto_calibration: currentAutoCalibration" in body
+
+
 def test_setup_page_renders_all_config_surfaces():
     client = TestClient(app)
     r = client.get("/setup")
