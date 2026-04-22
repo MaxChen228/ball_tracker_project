@@ -212,10 +212,13 @@ app = FastAPI(title="ball_tracker server", lifespan=lifespan)
 from routes import markers as _markers_routes
 from routes import settings as _settings_routes
 from routes import camera as _camera_routes
+from routes import sessions as _sessions_routes
 app.include_router(_markers_routes.router)
 app.include_router(_settings_routes.router)
 app.include_router(_camera_routes.router)
+app.include_router(_sessions_routes.router)
 from routes.camera import _validate_camera_id_or_422
+from routes.sessions import _SESSION_ID_RE
 
 
 @app.middleware("http")
@@ -581,102 +584,6 @@ def _wants_html(request: Request) -> bool:
     return "text/html" in request.headers.get("accept", "").lower()
 
 
-@app.post("/sessions/arm")
-async def sessions_arm(
-    request: Request,
-    max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S,
-):
-    """Begin an armed session. HTML-form callers (dashboard buttons) get a
-    303 redirect back to /. Machine callers get the session JSON."""
-    requested_paths: set[DetectionPath] | None = None
-    ctype = request.headers.get("content-type", "").lower()
-    if "application/json" in ctype:
-        body = await request.json()
-        raw_paths = body.get("paths")
-        if isinstance(raw_paths, list):
-            requested_paths = state._normalize_paths(raw_paths)
-    session = state.arm_session(max_duration_s=max_duration_s, paths=requested_paths)
-    await device_ws.broadcast(
-        {
-            cam.camera_id: _arm_message_for(session)
-            for cam in state.online_devices()
-        }
-    )
-    await sse_hub.broadcast(
-        "session_armed",
-        {
-            "sid": session.id,
-            "paths": sorted(p.value for p in session.paths),
-            "armed_at": session.started_at,
-        },
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "session": session.to_dict()}
-
-
-@app.post("/sessions/stop")
-async def sessions_stop(request: Request):
-    """End the armed session (operator Stop). Returns 409 to API callers
-    when nothing was armed; HTML callers always get a 303 redirect back
-    to the dashboard so the button never looks broken."""
-    ended = state.stop_session()
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    if ended is None:
-        raise HTTPException(status_code=409, detail="no armed session")
-    await device_ws.broadcast(
-        {
-            cam.camera_id: _disarm_message_for(ended)
-            for cam in state.online_devices()
-        }
-    )
-    await sse_hub.broadcast(
-        "session_ended",
-        {
-            "sid": ended.id,
-            "paths_completed": sorted(state.results.get(ended.id, SessionResult(session_id=ended.id, camera_a_received=False, camera_b_received=False)).paths_completed),
-        },
-    )
-    return {"ok": True, "session": ended.to_dict()}
-
-
-@app.post("/sessions/set_mode")
-async def sessions_set_mode(
-    request: Request,
-    mode: str = Form(...),
-):
-    """Dashboard mode picker target. Records the global capture mode which
-    the next `arm_session()` will snapshot. HTML form callers (dashboard
-    radio buttons) get a 303 back to /; JSON API callers get the applied
-    mode echoed so they can confirm the write."""
-    try:
-        applied = CaptureMode(mode)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"invalid mode {mode!r}; expected one of: {[m.value for m in CaptureMode]}",
-        )
-    state.set_mode(applied)
-    await device_ws.broadcast(
-        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "capture_mode": applied.value}
-@app.post("/sessions/clear")
-async def sessions_clear(request: Request):
-    """Drop the last-ended session pointer so the dashboard card returns
-    to blank. HTML callers get a 303 back to /; JSON callers get 409 when
-    nothing was there to clear (idle with no previous session)."""
-    cleared = state.clear_last_ended_session()
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    if not cleared:
-        raise HTTPException(status_code=409, detail="nothing to clear")
-    return {"ok": True}
-
-
 # HTTP status codes used by the /sync/start conflict mapping. One integer
 # per reason keeps the handler legible without a bespoke error type.
 _SYNC_START_STATUS_FOR_REASON: dict[str, int] = {
@@ -1033,103 +940,6 @@ async def sync_log_post(body: SyncLogBody) -> dict[str, Any]:
         source=body.camera_id, event=body.event, detail=body.detail
     )
     return {"ok": True}
-
-
-# Matches the `Session.id` schema regex — keeps the path parameter from
-# accepting anything that could traverse out of the data dir via glob().
-_SESSION_ID_RE = re.compile(r"^s_[0-9a-f]{4,32}$")
-
-
-@app.post("/sessions/{session_id}/delete")
-async def sessions_delete(request: Request, session_id: str):
-    """Remove a past session's pitches, results, and videos from memory
-    and disk. HTML callers (dashboard ✕ button) always get a 303 back to
-    the dashboard so the list visibly shrinks. JSON callers get 404 for
-    unknown sessions and 409 when the session is still armed."""
-    if not _SESSION_ID_RE.match(session_id):
-        if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
-        raise HTTPException(status_code=422, detail="invalid session_id")
-    try:
-        removed = state.delete_session(session_id)
-    except RuntimeError as e:
-        if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
-        raise HTTPException(status_code=409, detail=str(e))
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    if not removed:
-        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
-    return {"ok": True, "session_id": session_id}
-
-
-@app.post("/sessions/{session_id}/trash")
-async def sessions_trash(request: Request, session_id: str):
-    if not _SESSION_ID_RE.match(session_id):
-        if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
-        raise HTTPException(status_code=422, detail="invalid session_id")
-    try:
-        moved = state.trash_session(session_id)
-    except RuntimeError as e:
-        if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
-        raise HTTPException(status_code=409, detail=str(e))
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    if not moved:
-        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
-    return {"ok": True, "session_id": session_id}
-
-
-@app.post("/sessions/{session_id}/restore")
-async def sessions_restore(request: Request, session_id: str):
-    if not _SESSION_ID_RE.match(session_id):
-        if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
-        raise HTTPException(status_code=422, detail="invalid session_id")
-    restored = state.restore_session(session_id)
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    if not restored:
-        raise HTTPException(status_code=404, detail=f"session {session_id} not in trash")
-    return {"ok": True, "session_id": session_id}
-
-
-@app.post("/sessions/{session_id}/cancel_processing")
-async def sessions_cancel_processing(request: Request, session_id: str):
-    if not _SESSION_ID_RE.match(session_id):
-        if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
-        raise HTTPException(status_code=422, detail="invalid session_id")
-    canceled = state.cancel_processing(session_id)
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    if not canceled:
-        raise HTTPException(status_code=409, detail="no cancelable processing")
-    return {"ok": True, "session_id": session_id}
-
-
-@app.post("/sessions/{session_id}/resume_processing")
-async def sessions_resume_processing(request: Request, session_id: str):
-    if not _SESSION_ID_RE.match(session_id):
-        if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
-        raise HTTPException(status_code=422, detail="invalid session_id")
-    queued = state.resume_processing(session_id)
-    if not queued:
-        if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
-        raise HTTPException(status_code=409, detail="no resumable processing")
-    for clip_path, pitch in queued:
-        asyncio.create_task(_run_server_detection(clip_path, pitch))
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {
-        "ok": True,
-        "session_id": session_id,
-        "queued": len(queued),
-    }
 
 
 def _summarize_result(result: SessionResult) -> dict[str, Any]:
