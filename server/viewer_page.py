@@ -1,0 +1,1175 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json as _json
+
+from reconstruct import Scene
+from render_compare import (
+    DRAW_PLATE_OVERLAY_JS,
+    DRAW_VIRTUAL_BASE_JS,
+    PLATE_WORLD_JS,
+    PROJECTION_JS,
+)
+from render_scene_theme import (
+    _ACCENT,
+    _BG,
+    _BORDER_BASE,
+    _BORDER_L,
+    _CAMERA_COLORS,
+    _CAMERA_COLORS_ON_DEVICE,
+    _CONTRA,
+    _DEV,
+    _DUAL,
+    _FALLBACK_CAMERA_COLOR,
+    _FALLBACK_CAMERA_COLOR_ON_DEVICE,
+    _INK,
+    _OK,
+    _PENDING,
+    _SUB,
+    _SURFACE,
+)
+from viewer_fragments import (
+    health_banner_html,
+    video_cell_html,
+    virtual_cell_html,
+)
+
+
+@dataclass(frozen=True)
+class ViewerPageContext:
+    scene_json: str
+    layout_json: str
+    static_traces_json: str
+    camera_colors_json: str
+    camera_colors_on_device_json: str
+    fallback_color_json: str
+    fallback_color_on_device_json: str
+    accent_color_json: str
+    videos_json: str
+    has_triangulated: bool
+    scene_flex: str
+    videos_flex: str
+    layout_mode: str
+    health_html: str
+    video_cells_html: str
+    virtual_cells_html: str
+
+
+def build_viewer_page_context(
+    scene: Scene,
+    videos: list[tuple[str, str, float, float, dict[str, list]]],
+    health: dict,
+    *,
+    build_figure,
+) -> ViewerPageContext:
+    fig = build_figure(scene)
+    fig_json = _json.loads(fig.to_json())
+    layout_json = _json.dumps(fig_json.get("layout", {}))
+    static_traces = [
+        t for t in fig_json.get("data", [])
+        if not (t.get("meta") or {}).get("trace_kind")
+    ]
+    has_triangulated = bool(scene.triangulated or scene.triangulated_on_device)
+    scene_flex = "3 1 0" if has_triangulated else "2 1 0"
+    videos_flex = "2 1 0" if has_triangulated else "3 1 0"
+
+    videos_by_cam = {cam: (url, off) for cam, url, off, _fps, _fr in videos if url}
+    other_cam = {"A": "B", "B": "A"}
+    cams_by_id = {c.camera_id: c for c in scene.cameras}
+    video_cells = "".join(
+        video_cell_html(
+            cam,
+            videos_by_cam.get(cam),
+            never_coming=(
+                cam not in videos_by_cam
+                and other_cam[cam] in videos_by_cam
+                and not health["cameras"][cam]["received"]
+            ),
+            image_width_px=(cams_by_id[cam].image_width_px if cam in cams_by_id else None),
+            image_height_px=(cams_by_id[cam].image_height_px if cam in cams_by_id else None),
+            cx=(cams_by_id[cam].cx if cam in cams_by_id else None),
+            cy=(cams_by_id[cam].cy if cam in cams_by_id else None),
+        )
+        for cam in ("A", "B")
+    )
+    virt_cells = "".join(
+        virtual_cell_html(
+            cam,
+            pose_available=(cam in cams_by_id),
+            image_width_px=(cams_by_id[cam].image_width_px if cam in cams_by_id else None),
+            image_height_px=(cams_by_id[cam].image_height_px if cam in cams_by_id else None),
+        )
+        for cam in ("A", "B")
+    )
+
+    cam_a_received = health["cameras"]["A"]["received"]
+    cam_b_received = health["cameras"]["B"]["received"]
+    if cam_a_received and cam_b_received:
+        layout_mode = "paired"
+    elif cam_a_received or cam_b_received:
+        layout_mode = "single-cam"
+    else:
+        layout_mode = "empty"
+
+    return ViewerPageContext(
+        scene_json=_json.dumps(scene.to_dict()),
+        layout_json=layout_json,
+        static_traces_json=_json.dumps(static_traces),
+        camera_colors_json=_json.dumps(_CAMERA_COLORS),
+        camera_colors_on_device_json=_json.dumps(_CAMERA_COLORS_ON_DEVICE),
+        fallback_color_json=_json.dumps(_FALLBACK_CAMERA_COLOR),
+        fallback_color_on_device_json=_json.dumps(_FALLBACK_CAMERA_COLOR_ON_DEVICE),
+        accent_color_json=_json.dumps(_ACCENT),
+        videos_json=_json.dumps(
+            [
+                {
+                    "camera_id": cam,
+                    "url": url,
+                    "t_rel_offset_s": off,
+                    "fps": fps,
+                    "frames": frames,
+                }
+                for (cam, url, off, fps, frames) in videos
+            ]
+        ),
+        has_triangulated=has_triangulated,
+        scene_flex=scene_flex,
+        videos_flex=videos_flex,
+        layout_mode=layout_mode,
+        health_html=health_banner_html(health),
+        video_cells_html=video_cells,
+        virtual_cells_html=virt_cells,
+    )
+
+
+def render_viewer_html(
+    scene: Scene,
+    videos: list[tuple[str, str, float, float, dict[str, list]]],
+    health: dict,
+    *,
+    build_figure,
+) -> str:
+    ctx = build_viewer_page_context(
+        scene,
+        videos,
+        health,
+        build_figure=build_figure,
+    )
+    return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><title>Session {scene.session_id}</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+{_viewer_css(ctx.scene_flex, ctx.videos_flex)}
+</style>
+</head><body>
+<div class="viewer">
+  <div class="nav">
+    <span class="brand"><span class="dot"></span>BALL_TRACKER</span>
+    <a class="back" href="/">&larr; dashboard</a>
+  </div>
+  {ctx.health_html}
+  <div class="work" data-mode="{ctx.layout_mode}">
+    <div class="scene-col">
+      <div id="scene"></div>
+      <div class="scene-toolbar" role="toolbar" aria-label="Scene controls">
+        <button id="scene-reset" class="reset" type="button" title="Reset 3D view">&#x21BA;</button>
+        <div class="divider" aria-hidden="true"></div>
+        <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
+        <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
+      </div>
+    </div>
+    <div class="videos-col">{ctx.video_cells_html}{ctx.virtual_cells_html}</div>
+  </div>
+  <div class="timeline">
+    <div class="tl-row">
+      <div class="scrubber-wrap">
+        <div class="strip-legend" aria-hidden="true">
+          <span>detection:</span>
+          <span><span class="sw" style="background:var(--contra);border-color:var(--contra);"></span>A detected</span>
+          <span><span class="sw" style="background:var(--dual);border-color:var(--dual);"></span>B detected</span>
+          <span><span class="sw" style="background:rgba(122,117,108,0.35);"></span>missed</span>
+          <span><span class="sw" style="background:rgba(232,228,219,0.6);"></span>no frame</span>
+          <span><span class="sw" style="background:var(--accent);border-color:var(--accent);"></span>chirp anchor</span>
+          <span class="layer-toggles" id="layer-toggles" aria-label="Layer visibility">
+            <span class="layer-label">show:</span>
+            <span class="layer-group" data-layer="traj">
+              <span class="layer-name">Traj</span>
+              <button type="button" class="layer-pill" data-layer="traj" data-src="server" aria-pressed="true">svr</button>
+              <button type="button" class="layer-pill" data-layer="traj" data-src="on_device" aria-pressed="true">iOS</button>
+            </span>
+            <span class="layer-group" data-layer="camA">
+              <span class="layer-name"><span class="swatch" data-cam="A"></span>Rays A</span>
+              <button type="button" class="layer-pill" data-layer="camA" data-src="server" aria-pressed="true">svr</button>
+              <button type="button" class="layer-pill" data-layer="camA" data-src="on_device" aria-pressed="true">iOS</button>
+            </span>
+            <span class="layer-group" data-layer="camB">
+              <span class="layer-name"><span class="swatch" data-cam="B"></span>Rays B</span>
+              <button type="button" class="layer-pill" data-layer="camB" data-src="server" aria-pressed="true">svr</button>
+              <button type="button" class="layer-pill" data-layer="camB" data-src="on_device" aria-pressed="true">iOS</button>
+            </span>
+          </span>
+        </div>
+        <div class="strip-row strip-row-scrubber">
+          <span class="strip-label" aria-hidden="true"></span>
+          <input id="scrubber" class="strip-canvas" type="range" min="0" max="1" value="0" step="1" />
+        </div>
+        <div class="strip-row" id="strip-row-server"
+             title="Server detection runs on H.264-decoded BGR (post-encode). Quantization erases small/distant balls — expect a narrower detection window than ON-DEV.">
+          <span class="strip-label">SERVER</span>
+          <canvas id="detection-canvas" class="strip-canvas" height="18" aria-hidden="true"></canvas>
+        </div>
+        <div class="strip-row" id="strip-row-on-device" hidden
+             title="On-device detection runs on raw BGRA (pre-encode). Closer to ground truth — wider detection window than SERVER in dual mode.">
+          <span class="strip-label">ON-DEV</span>
+          <canvas id="detection-canvas-on-device" class="strip-canvas" height="18" aria-hidden="true"></canvas>
+        </div>
+        <div class="strip-note" id="strip-note-dual" hidden>
+          兩條 stream 共享同一 chirp anchor — 色塊起止差異反映 H.264 壓縮損失（SERVER 解碼後丟失小球訊號），不是時間錯位。
+        </div>
+      </div>
+      <span id="frame-label" class="frame-label">
+        frame <input id="frame-input" type="number" min="0" max="0" value="0" step="1" title="Type a frame index to jump" /> / <span id="frame-total">0</span>
+        <span class="sub" id="frame-sub">t=0.000s</span>
+      </span>
+    </div>
+    <div class="tl-row">
+      <div class="transport" role="group" aria-label="transport">
+        <button id="step-first" type="button" title="First frame (Home)">&#x23ee;</button>
+        <button id="step-back" type="button" title="Prev frame (,)">&#x23ea;</button>
+        <button id="play-btn" class="play-btn" type="button" title="Play/pause (Space)">Play</button>
+        <button id="step-fwd" type="button" title="Next frame (.)">&#x23e9;</button>
+        <button id="step-last" type="button" title="Last frame (End)">&#x23ed;</button>
+      </div>
+      <div class="speed-group" id="speed-group" role="group" aria-label="playback speed">
+        <button data-rate="0.1" type="button">0.1&times;</button>
+        <button data-rate="0.25" type="button">0.25&times;</button>
+        <button data-rate="0.5" type="button">0.5&times;</button>
+        <button data-rate="1" class="active" type="button">1&times;</button>
+        <button data-rate="2" type="button">2&times;</button>
+      </div>
+      <button id="hint-btn" class="hint-btn" type="button" title="Keyboard shortcuts (?)" aria-haspopup="dialog">?</button>
+    </div>
+    <div id="hint-overlay" class="hint-overlay" role="dialog" aria-label="Keyboard shortcuts">
+      <h4>Keyboard shortcuts</h4>
+      <table><tbody>
+        <tr><td>Space</td><td>Play / pause</td></tr>
+        <tr><td>, &nbsp;.</td><td>Prev / next frame</td></tr>
+        <tr><td>Shift+, &nbsp;.</td><td>&plusmn;10 frames</td></tr>
+        <tr><td>&larr; &nbsp;&rarr;</td><td>&plusmn;0.5 second</td></tr>
+        <tr><td>Home / End</td><td>First / last frame</td></tr>
+        <tr><td>D &nbsp;F</td><td>Prev / next ball-detected frame</td></tr>
+        <tr><td>1 &ndash; 5</td><td>Speed presets</td></tr>
+        <tr><td>?</td><td>Toggle this help</td></tr>
+        <tr><td>Esc</td><td>Close</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</div>
+<script id="viewer-data" type="application/json">{{
+  "scene": {ctx.scene_json},
+  "layout": {ctx.layout_json},
+  "static_traces": {ctx.static_traces_json},
+  "camera_colors": {ctx.camera_colors_json},
+  "camera_colors_on_device": {ctx.camera_colors_on_device_json},
+  "fallback_color": {ctx.fallback_color_json},
+  "fallback_color_on_device": {ctx.fallback_color_on_device_json},
+  "accent_color": {ctx.accent_color_json},
+  "videos": {ctx.videos_json},
+  "has_triangulated": {str(ctx.has_triangulated).lower()}
+}}</script>
+<script>
+{_viewer_js()}
+</script>
+</body></html>"""
+
+
+def _viewer_css(scene_flex: str, videos_flex: str) -> str:
+    return f"""
+  :root {{
+    --bg: {_BG}; --surface: {_SURFACE}; --surface-hover: #F3F0EA;
+    --ink: {_INK}; --sub: {_SUB};
+    --ink-light: #5A544C;
+    --border-base: {_BORDER_BASE}; --border-l: {_BORDER_L};
+    --contra: {_CONTRA}; --dual: {_DUAL}; --dev: {_DEV}; --accent: {_ACCENT};
+    --ok: {_OK}; --pending: {_PENDING};
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: "Noto Sans TC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px;
+    --r: 3px;
+  }}
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin:0; padding:0; height:100%; overflow:hidden;
+    background:var(--bg); color:var(--ink); font-family:var(--sans);
+    font-weight:300; line-height:1.6; -webkit-font-smoothing:antialiased; }}
+  .viewer {{ display:grid; grid-template-rows:52px auto minmax(0, 1fr) auto;
+    height:100vh; min-height:0; overflow:hidden; }}
+  .nav {{ height:52px; flex:0 0 52px; background:var(--surface);
+    border-bottom:1px solid var(--border-base); display:flex;
+    align-items:center; padding:0 var(--s-5); gap:var(--s-4); }}
+  .nav .brand {{ font-family:var(--mono); font-weight:700; font-size:14px;
+    letter-spacing:0.16em; color:var(--ink); }}
+  .nav .brand .dot {{ display:inline-block; width:7px; height:7px;
+    background:var(--ink); margin-right:var(--s-2); vertical-align:middle; }}
+  .nav .back {{ margin-left:auto; font-family:var(--mono); font-size:11px;
+    letter-spacing:0.12em; text-transform:uppercase; color:var(--sub);
+    text-decoration:none; }}
+  .nav .back:hover {{ color:var(--ink); }}
+  .health {{ flex:0 0 auto; background:var(--surface);
+    border-bottom:1px solid var(--border-base);
+    padding:var(--s-3) var(--s-5);
+    display:flex; flex-direction:column; gap:var(--s-2); }}
+  .health-row {{ display:grid; grid-template-columns:1fr 1fr;
+    gap:var(--s-3); align-items:stretch; }}
+  .cam-stack {{ display:flex; flex-direction:column; gap:var(--s-2); }}
+  .hero-card {{ border:1px solid var(--border-base); border-radius:var(--r);
+    padding:var(--s-2) var(--s-4); background:var(--bg); display:flex;
+    flex-direction:column; justify-content:center; gap:var(--s-1); }}
+  .hero-card.ok {{ background:var(--surface); border-color:var(--accent); }}
+  .hero-title {{ font-family:var(--mono); font-size:10px;
+    letter-spacing:0.12em; text-transform:uppercase; color:var(--sub); }}
+  .hero-tri {{ font-family:var(--mono);
+    font-size:clamp(30px, 3.2vh, 40px); font-weight:500;
+    line-height:1; color:var(--accent); letter-spacing:0.02em; }}
+  .hero-tri.zero {{ color:var(--sub); }}
+  .hero-note {{ font-family:var(--mono); font-size:11px;
+    letter-spacing:0.04em; color:var(--sub); }}
+  .hero-sub {{ font-family:var(--mono); font-size:11px;
+    letter-spacing:0.04em; color:var(--sub); margin-top:var(--s-1);
+    border-top:1px solid var(--border-l); padding-top:6px; }}
+  .cam-card {{ border:1px solid var(--border-base); border-radius:var(--r);
+    padding:6px 10px; background:var(--bg);
+    display:flex; flex-direction:column; gap:var(--s-1); }}
+  .cam-card.received {{ background:var(--surface); }}
+  .cam-card.missing {{ opacity:0.85; flex-direction:row;
+    align-items:center; gap:10px; }}
+  .cam-head {{ display:flex; align-items:center; gap:10px;
+    flex-wrap:wrap; }}
+  .cam-badge {{ font-family:var(--mono); font-weight:600; font-size:11px;
+    letter-spacing:0.18em; padding:2px 8px; border:1px solid;
+    border-radius:var(--r); }}
+  .cam-badge.A {{ color:var(--contra); border-color:var(--contra); }}
+  .cam-badge.B {{ color:var(--dual); border-color:var(--dual); }}
+  .cam-state {{ font-family:var(--mono); font-size:11px;
+    letter-spacing:0.08em; text-transform:uppercase; }}
+  .cam-state.ok {{ color:var(--ok); }}
+  .cam-state.fail {{ color:var(--dev); }}
+  .cam-note {{ font-family:var(--mono); font-size:11px; color:var(--sub);
+    letter-spacing:0.02em; }}
+  .cam-checks {{ display:inline-flex; flex-wrap:wrap; gap:4px 12px;
+    margin-left:auto; }}
+  .check {{ font-family:var(--mono); font-size:11px;
+    letter-spacing:0.04em; color:var(--sub);
+    display:inline-flex; align-items:center; gap:6px; }}
+  .check .mark {{ font-weight:700; width:12px; display:inline-block;
+    text-align:center; }}
+  .check.pass {{ color:var(--ink); }}
+  .check.pass .mark {{ color:var(--ok); }}
+  .check.fail .mark {{ color:var(--dev); }}
+  .cam-rate {{ display:flex; align-items:center; gap:10px; }}
+  .cam-stats {{ font-family:var(--mono); font-size:12px; color:var(--ink);
+    letter-spacing:0.02em; white-space:nowrap; }}
+  .cam-stats .n {{ font-weight:500; }}
+  .cam-stats .of {{ color:var(--sub); }}
+  .rate-bar {{ flex:1 1 auto; min-width:60px; height:4px;
+    background:var(--border-l); border-radius:var(--r); overflow:hidden;
+    display:inline-block; }}
+  .rate-fill {{ display:block; height:100%; transition:width .3s; }}
+  .rate-fill.ok {{ background:var(--ok); }}
+  .rate-fill.pending {{ background:var(--pending); }}
+  .rate-fill.fail {{ background:var(--dev); }}
+  .rate-empty {{ font-family:var(--mono); font-size:12px;
+    color:var(--sub); flex:1; }}
+  .fail-strip {{ font-family:var(--mono); font-size:12px;
+    letter-spacing:0.02em; padding:var(--s-2) var(--s-3); border-radius:var(--r);
+    border:1px solid var(--dev); color:var(--dev);
+    background:rgba(192, 57, 43, 0.06); display:flex;
+    align-items:center; gap:var(--s-2); }}
+  .fail-strip .icon {{ font-weight:700; }}
+  .work {{ flex:1 1 auto; display:flex; min-height:0;
+    border-bottom:1px solid var(--border-base); }}
+  .scene-col {{ flex:{scene_flex}; min-width:380px; position:relative;
+    border-right:1px solid var(--border-base); background:var(--bg); }}
+  #scene {{ position:absolute; inset:0; }}
+  .videos-col {{ flex:{videos_flex}; min-width:420px; display:grid;
+    grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:1px;
+    background:var(--border-base); }}
+  .work[data-mode="single-cam"] .scene-col {{ flex:7 1 0; }}
+  .work[data-mode="single-cam"] .videos-col {{ flex:3 1 0; min-width:320px; }}
+  .vid-cell {{ background:var(--surface); padding:var(--s-2) var(--s-3);
+    display:flex; flex-direction:column; gap:var(--s-1); min-height:0;
+    min-width:0; }}
+  .vid-cell.collapsed {{ padding:var(--s-2) var(--s-3);
+    flex-direction:row; align-items:center; gap:var(--s-2); }}
+  .virt-cell {{ background:var(--surface); padding:var(--s-2) var(--s-3);
+    display:flex; flex-direction:column; gap:var(--s-1); min-height:0;
+    min-width:0; position:relative; }}
+  .virt-frame {{ flex:1 1 auto; min-height:0; width:100%; max-width:100%;
+    align-self:center; background:#1A1714;
+    border:1px solid var(--border-base); border-radius:var(--r);
+    overflow:hidden; cursor:default; position:relative; }}
+  .virt-frame canvas {{ display:block; width:100%; height:100%; }}
+  .virt-frame.empty {{ display:flex; align-items:center; justify-content:center;
+    color:var(--sub); font-family:var(--mono); font-size:11px; letter-spacing:0.12em;
+    text-transform:uppercase; border-style:dashed; background:var(--bg); }}
+  .vid-label.virt {{ color:var(--sub); border-color:var(--border-base); }}
+  .vid-head {{ display:flex; align-items:center; gap:var(--s-2); }}
+  .vid-label {{ font-family:var(--mono); font-size:10px; font-weight:600;
+    letter-spacing:0.18em; border:1px solid; padding:2px 8px; border-radius:var(--r); }}
+  .vid-hint {{ font-family:var(--mono); font-size:10px; letter-spacing:0.06em;
+    color:var(--sub); text-transform:uppercase; }}
+  .vid-frame {{ flex:1 1 auto; min-height:0; display:flex; align-items:center;
+    justify-content:center; background:#000; border-radius:var(--r); overflow:hidden;
+    position:relative; width:100%; max-width:100%; align-self:center; }}
+  .vid-frame video {{ width:100%; height:100%; object-fit:contain; display:block; }}
+  .plate-overlay-real {{ position:absolute; inset:0; width:100%; height:100%;
+    pointer-events:none; z-index:1; }}
+  .plate-overlay-real polygon {{ fill:none; stroke:rgba(217,59,59,0.92);
+    stroke-width:1.8; stroke-dasharray:8 5; stroke-linejoin:round; }}
+  .pp-cross {{ position:absolute; width:14px; height:14px;
+    transform:translate(-50%, -50%); pointer-events:none; z-index:2; }}
+  .pp-cross::before, .pp-cross::after {{ content:""; position:absolute;
+    background:rgba(255,255,255,0.7); box-shadow:0 0 2px rgba(0,0,0,0.85); }}
+  .pp-cross::before {{ left:0; right:0; top:50%; height:1px; transform:translateY(-0.5px); }}
+  .pp-cross::after {{ top:0; bottom:0; left:50%; width:1px; transform:translateX(-0.5px); }}
+  .vid-frame.empty {{ background:var(--bg); border:1px dashed var(--border-base);
+    color:var(--sub); font-family:var(--mono); font-size:11px;
+    letter-spacing:0.12em; text-transform:uppercase; border-radius:var(--r); }}
+  .timeline {{ flex:0 0 auto; background:var(--surface); display:flex;
+    flex-direction:column; gap:var(--s-2); padding:var(--s-2) var(--s-5);
+    font-family:var(--mono); font-size:12px; color:var(--sub); position:relative; }}
+  .tl-row {{ display:flex; align-items:center; gap:10px; }}
+  .scrubber-wrap {{ flex:1 1 auto; display:flex; flex-direction:column;
+    gap:3px; min-width:0; }}
+  .scrubber-wrap input[type=range] {{ width:100%; accent-color:var(--ink); height:16px; margin:0; }}
+  .scrubber-wrap canvas {{ display:block; width:100%; height:18px; border:1px solid var(--border-base);
+    border-radius:var(--r); background:var(--bg); image-rendering:pixelated; }}
+  .strip-row {{ display:flex; align-items:center; gap:6px; }}
+  .strip-row .strip-label {{ font-family:var(--mono); font-size:9px; letter-spacing:0.1em;
+    color:var(--sub); min-width:46px; text-align:right; flex:0 0 46px; }}
+  .strip-row .strip-canvas {{ flex:1 1 auto; min-width:0; }}
+  .strip-row[hidden] {{ display:none; }}
+  .strip-row.is-reference {{ opacity:0.6; }}
+  .strip-row.is-reference .strip-label::after {{ content:" · REF"; color:var(--sub); font-weight:400; }}
+  .strip-note {{ font-size:9px; color:var(--sub); letter-spacing:0.04em; font-style:italic;
+    padding:2px 0 0 52px; line-height:1.35; }}
+  .strip-legend {{ font-size:10px; color:var(--sub); letter-spacing:0.06em; display:flex;
+    gap:10px; align-items:center; flex-wrap:wrap; text-transform:uppercase; }}
+  .strip-legend .sw {{ display:inline-block; width:10px; height:10px; vertical-align:middle;
+    margin-right:4px; border:1px solid var(--border-base); }}
+  .layer-toggles {{ margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }}
+  .layer-toggles .layer-label {{ color:var(--sub); letter-spacing:0.08em; font-size:10px; }}
+  .layer-toggles .layer-group {{ display:inline-flex; align-items:center; gap:4px; padding:2px 4px 2px 6px;
+    border:1px solid var(--border-base); border-radius:var(--r); }}
+  .layer-toggles .layer-group[data-src-scope="on_device_only"] {{ display:none; }}
+  .layer-toggles .layer-name {{ font-size:10px; letter-spacing:0.08em; color:var(--ink); text-transform:uppercase;
+    padding-right:2px; display:inline-flex; align-items:center; gap:4px; }}
+  .layer-toggles .layer-name .swatch {{ width:8px; height:8px; display:inline-block; border:1px solid rgba(0,0,0,0.12); }}
+  .layer-toggles .layer-pill {{ font:inherit; font-size:9px; letter-spacing:0.06em; padding:1px 6px;
+    background:transparent; color:var(--sub); border:1px solid var(--border-base); border-radius:2px;
+    cursor:pointer; text-transform:uppercase; transition:background 0.12s, color 0.12s, border-color 0.12s; }}
+  .layer-toggles .layer-pill[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); border-color:var(--ink); }}
+  .layer-toggles .layer-pill:hover {{ border-color:var(--ink); }}
+  .layer-toggles .layer-pill[hidden] {{ display:none; }}
+  .tl-row .frame-label {{ min-width:300px; text-align:right; color:var(--ink); font-weight:500; font-size:10px;
+    letter-spacing:0.02em; white-space:nowrap; font-variant-numeric:tabular-nums;
+    display:inline-flex; align-items:center; justify-content:flex-end; gap:4px; }}
+  .tl-row .frame-label .sub {{ color:var(--sub); font-weight:400; }}
+  .tl-row .frame-label .det {{ color:var(--contra); font-weight:500; }}
+  .tl-row .frame-label .det.no {{ color:var(--sub); }}
+  #frame-input {{ width:58px; font:inherit; font-size:10px; background:var(--bg);
+    border:1px solid var(--border-base); color:var(--ink); padding:1px 4px; text-align:center;
+    font-variant-numeric:tabular-nums; border-radius:var(--r); }}
+  #frame-input:focus {{ outline:none; border-color:var(--ink); }}
+  #frame-input::-webkit-inner-spin-button,
+  #frame-input::-webkit-outer-spin-button {{ opacity:0.4; }}
+  .timeline button {{ padding:5px 12px; font:inherit; font-size:11px; letter-spacing:0.08em;
+    text-transform:uppercase; border:1px solid var(--border-base); background:var(--bg); color:var(--ink);
+    border-radius:var(--r); cursor:pointer; min-width:42px;
+    transition:border-color 0.15s, background 0.15s, color 0.15s; }}
+  .timeline button:hover {{ border-color:var(--ink); }}
+  .timeline button:disabled {{ opacity:0.4; cursor:not-allowed; }}
+  .timeline .transport {{ display:inline-flex; align-items:center; gap:0; padding:2px;
+    background:var(--bg); border:1px solid var(--border-base); border-radius:999px; }}
+  .timeline .transport button {{ border:none; background:transparent; width:28px; height:28px;
+    min-width:28px; padding:0; font-size:13px; color:var(--ink-light); border-radius:50%;
+    display:inline-flex; align-items:center; justify-content:center; letter-spacing:0; }}
+  .timeline .transport .play-btn {{ min-width:64px; width:auto; height:30px; padding:0 14px;
+    background:var(--ink); color:var(--surface); font-weight:500; font-size:11px; letter-spacing:0.10em;
+    text-transform:uppercase; border-radius:999px; margin:0 4px; }}
+  .speed-group {{ display:inline-flex; border:1px solid var(--border-base); border-radius:var(--r);
+    overflow:hidden; background:var(--surface); height:30px; }}
+  .speed-group button {{ border:none; background:transparent; color:var(--sub); padding:0 12px;
+    min-width:auto; border-radius:0; font-size:10px; letter-spacing:0.06em; height:100%;
+    border-right:1px solid var(--border-l); font-variant-numeric:tabular-nums; }}
+  .speed-group button:last-child {{ border-right:none; }}
+  .speed-group button.active {{ background:var(--ink); color:var(--surface); font-weight:500; }}
+  .scene-col .scene-toolbar {{ position:absolute; top:var(--s-2); right:var(--s-2); z-index:5;
+    display:inline-flex; align-items:stretch; border:1px solid var(--border-base);
+    border-radius:var(--r); overflow:hidden; background:var(--surface); }}
+  .scene-col .scene-toolbar button {{ padding:5px 12px; border:none; background:transparent; color:var(--sub);
+    cursor:pointer; min-width:auto; border-radius:0; font:inherit; font-size:11px; letter-spacing:0.1em;
+    text-transform:uppercase; font-weight:400; line-height:1; }}
+  .scene-col .scene-toolbar button.active {{ background:var(--ink); color:var(--surface); font-weight:500; }}
+  .scene-col .scene-toolbar .reset {{ font-size:14px; padding:4px 12px; }}
+  .scene-col .scene-toolbar .divider {{ width:1px; background:var(--border-base); align-self:stretch; }}
+  .hint-btn {{ font:inherit; font-size:12px; padding:0; width:26px; height:26px; border:1px solid var(--border-base);
+    background:var(--surface); color:var(--sub); border-radius:50%; cursor:pointer; margin-left:auto;
+    min-width:auto; font-weight:600; letter-spacing:0; display:inline-flex; align-items:center; justify-content:center; }}
+  .hint-overlay {{ position:absolute; bottom:60px; right:var(--s-5); background:var(--surface);
+    border:1px solid var(--border-base); padding:var(--s-3) var(--s-4); font:inherit; font-size:11px;
+    color:var(--ink); display:none; z-index:10; border-radius:var(--r); min-width:240px; }}
+  .hint-overlay.open {{ display:block; }}
+  .hint-overlay h4 {{ margin:0 0 8px; font-family:var(--mono); font-size:10px; letter-spacing:0.18em;
+    text-transform:uppercase; color:var(--sub); font-weight:600; }}
+  .hint-overlay table {{ border-collapse:collapse; width:100%; }}
+  .hint-overlay td {{ padding:2px 8px; vertical-align:top; }}
+  .hint-overlay td:first-child {{ color:var(--sub); font-family:var(--mono); white-space:nowrap; }}
+  @media (max-height: 980px) {{
+    .health {{ padding:var(--s-2) var(--s-5); gap:6px; }}
+    .health-row {{ gap:10px; }}
+    .cam-stack {{ gap:6px; }}
+    .hero-card {{ padding:6px 10px; }}
+    .hero-tri {{ font-size:28px; }}
+    .hero-note, .hero-sub, .cam-note, .cam-state, .check, .cam-stats {{
+      font-size:10px;
+    }}
+    .timeline {{ gap:6px; padding:6px var(--s-5); }}
+    .scrubber-wrap canvas {{ height:16px; }}
+    .strip-row .strip-label {{ min-width:42px; flex-basis:42px; }}
+    .strip-note {{ padding-left:48px; }}
+    .scene-col .scene-toolbar {{ top:6px; right:6px; }}
+  }}
+"""
+
+
+def _viewer_js() -> str:
+    return f"""
+(() => {{
+  const DATA = JSON.parse(document.getElementById("viewer-data").textContent);
+  const SCENE = DATA.scene;
+  const STATIC = DATA.static_traces || [];
+  const LAYOUT = DATA.layout;
+  const CAM_COLOR = DATA.camera_colors || {{}};
+  const CAM_COLOR_OD = DATA.camera_colors_on_device || {{}};
+  const FALLBACK = DATA.fallback_color;
+  const FALLBACK_OD = DATA.fallback_color_on_device || FALLBACK;
+  const ACCENT = DATA.accent_color;
+  function colorForCamSource(cam, source) {{
+    return source === "on_device"
+      ? (CAM_COLOR_OD[cam] || FALLBACK_OD)
+      : (CAM_COLOR[cam] || FALLBACK);
+  }}
+  const VIDEO_META = DATA.videos || [];
+  const HAS_TRIANGULATED = DATA.has_triangulated;
+  const sceneDiv = document.getElementById("scene");
+  const playBtn = document.getElementById("play-btn");
+  const scrubber = document.getElementById("scrubber");
+  const frameInput = document.getElementById("frame-input");
+  const frameTotal = document.getElementById("frame-total");
+  const frameSub = document.getElementById("frame-sub");
+  const modeAll = document.getElementById("mode-all");
+  const modePlayback = document.getElementById("mode-playback");
+  const stepFirstBtn = document.getElementById("step-first");
+  const stepBackBtn = document.getElementById("step-back");
+  const stepFwdBtn = document.getElementById("step-fwd");
+  const stepLastBtn = document.getElementById("step-last");
+  const speedGroup = document.getElementById("speed-group");
+  const sceneResetBtn = document.getElementById("scene-reset");
+  const hintBtn = document.getElementById("hint-btn");
+  const hintOverlay = document.getElementById("hint-overlay");
+  const DEFAULT_CAMERA = (LAYOUT && LAYOUT.scene && LAYOUT.scene.camera)
+    ? JSON.parse(JSON.stringify(LAYOUT.scene.camera))
+    : {{eye: {{x: 1.5, y: 1.5, z: 1.0}}, up: {{x: 0, y: 0, z: 1}}, center: {{x: 0, y: 0.2, z: 0.3}}}};
+  const vids = Array.from(document.querySelectorAll("video[data-cam]"));
+  const offsetByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.t_rel_offset_s]));
+  const fpsByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.fps]));
+  function pickMasterVideo() {{
+    if (!vids.length) return null;
+    let master = vids[0];
+    let masterCount = -1;
+    for (const v of vids) {{
+      const n = (framesByCam[v.dataset.cam]?.t_rel_s || []).length;
+      if (n > masterCount) {{ master = v; masterCount = n; }}
+    }}
+    return master;
+  }}
+  const framesByCam = {{}};
+  const framesByCamOnDevice = {{}};
+  for (const v of VIDEO_META) {{
+    const f = v.frames || {{ t_rel_s: [], detected: [] }};
+    framesByCam[v.camera_id] = {{ t_rel_s: f.t_rel_s || [], detected: f.detected || [], px: f.px || [], py: f.py || [] }};
+    const od = (f.on_device) || {{ t_rel_s: [], detected: [] }};
+    framesByCamOnDevice[v.camera_id] = {{ t_rel_s: od.t_rel_s || [], detected: od.detected || [], px: od.px || [], py: od.py || [] }};
+  }}
+  const camsWithFrames = Object.keys(framesByCam).filter(c => (framesByCam[c].t_rel_s || []).length);
+  const camsWithFramesOnDevice = Object.keys(framesByCamOnDevice).filter(c => (framesByCamOnDevice[c].t_rel_s || []).length);
+  const HAS_ON_DEVICE = camsWithFramesOnDevice.length > 0;
+  const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility";
+  const layerVisibility = {{ traj: {{ server: true, on_device: HAS_ON_DEVICE }}, camA: {{ server: true, on_device: HAS_ON_DEVICE }}, camB: {{ server: true, on_device: HAS_ON_DEVICE }} }};
+  try {{
+    const saved = JSON.parse(localStorage.getItem(LAYER_VIS_KEY) || "null");
+    if (saved && typeof saved === "object") {{
+      for (const k of ["traj", "camA", "camB"]) {{
+        if (saved[k]) {{
+          if (typeof saved[k].server === "boolean") layerVisibility[k].server = saved[k].server;
+          if (typeof saved[k].on_device === "boolean") layerVisibility[k].on_device = saved[k].on_device && HAS_ON_DEVICE;
+        }}
+      }}
+    }}
+  }} catch {{}}
+  function persistLayerVisibility() {{
+    try {{ localStorage.setItem(LAYER_VIS_KEY, JSON.stringify(layerVisibility)); }} catch {{}}
+  }}
+  function isLayerVisible(layer, src) {{
+    return !!(layerVisibility[layer] && layerVisibility[layer][src]);
+  }}
+  const MASTER_FPS = Math.max(60, ...Object.values(fpsByCam).filter(f => isFinite(f) && f > 0));
+  const QUANT = 10000;
+  const timeMap = new Map();
+  for (const cam of camsWithFrames) {{
+    for (const t of framesByCam[cam].t_rel_s) {{
+      const q = Math.round(t * QUANT);
+      if (!timeMap.has(q)) timeMap.set(q, t);
+    }}
+  }}
+  for (const cam of camsWithFramesOnDevice) {{
+    for (const t of framesByCamOnDevice[cam].t_rel_s) {{
+      const q = Math.round(t * QUANT);
+      if (!timeMap.has(q)) timeMap.set(q, t);
+    }}
+  }}
+  if (timeMap.size === 0) {{
+    for (const r of SCENE.rays || []) timeMap.set(Math.round(r.t_rel_s * QUANT), r.t_rel_s);
+    for (const p of SCENE.triangulated || []) timeMap.set(Math.round(p.t_rel_s * QUANT), p.t_rel_s);
+    for (const p of SCENE.triangulated_on_device || []) timeMap.set(Math.round(p.t_rel_s * QUANT), p.t_rel_s);
+  }}
+  const unionTimes = Array.from(timeMap.values()).sort((a, b) => a - b);
+  if (unionTimes.length === 0) {{ unionTimes.push(0); unionTimes.push(0.05); }}
+  const TOTAL_FRAMES = unionTimes.length;
+  let tMin = unionTimes[0];
+  let tMax = unionTimes[TOTAL_FRAMES - 1];
+  function buildCamIndexFor(frameMap, cam) {{
+    const f = frameMap[cam];
+    const ts = f.t_rel_s, det = f.detected;
+    const out = new Array(TOTAL_FRAMES).fill(null);
+    if (!ts.length) return out;
+    const tol = 0.010;
+    let j = 0;
+    for (let i = 0; i < TOTAL_FRAMES; ++i) {{
+      const t = unionTimes[i];
+      if (t < ts[0] - tol || t > ts[ts.length - 1] + tol) continue;
+      while (j + 1 < ts.length && Math.abs(ts[j + 1] - t) <= Math.abs(ts[j] - t)) j++;
+      out[i] = {{ idx: j, t: ts[j], detected: !!det[j] }};
+    }}
+    return out;
+  }}
+  const camAtFrame = {{}};
+  const camAtFrameOnDevice = {{}};
+  for (const cam of camsWithFrames) camAtFrame[cam] = buildCamIndexFor(framesByCam, cam);
+  for (const cam of camsWithFramesOnDevice) camAtFrameOnDevice[cam] = buildCamIndexFor(framesByCamOnDevice, cam);
+  let mode = "all";
+  let currentFrame = 0;
+  let currentT = tMin;
+  let rvfcEnabled = false;
+  let seekRafPending = false;
+  let sceneDrawRaf = null;
+  let virtualDrawRaf = null;
+  let isScrubbing = false;
+  let suppressVideoFeedbackUntilMs = 0;
+  const masterVideo = pickMasterVideo();
+  const HARD_SYNC_THRESHOLD_S = 0.040;
+  const SOFT_SYNC_THRESHOLD_S = 0.008;
+  const MAX_RATE_NUDGE = 0.12;
+  scrubber.max = String(TOTAL_FRAMES - 1);
+  scrubber.step = "1";
+  frameInput.max = String(TOTAL_FRAMES - 1);
+  frameTotal.textContent = String(TOTAL_FRAMES - 1);
+  function ballDetectedRaysUpTo(rays, t) {{
+    const xs = [], ys = [], zs = [];
+    for (const r of rays) {{
+      if (r.t_rel_s > t) continue;
+      xs.push(r.origin[0], r.endpoint[0], null);
+      ys.push(r.origin[1], r.endpoint[1], null);
+      zs.push(r.origin[2], r.endpoint[2], null);
+    }}
+    return {{xs, ys, zs}};
+  }}
+  function buildDynamicTraces(cutoff) {{
+    const out = [];
+    const raysByKey = {{}};
+    for (const r of (SCENE.rays || [])) {{
+      const src = r.source || "server";
+      const camKey = `cam${{r.camera_id}}`;
+      if (!isLayerVisible(camKey, src)) continue;
+      const key = `${{r.camera_id}}|${{src}}`;
+      (raysByKey[key] = raysByKey[key] || []).push(r);
+    }}
+    for (const [key, rays] of Object.entries(raysByKey)) {{
+      const [cam, src] = key.split("|");
+      const color = colorForCamSource(cam, src);
+      const {{xs, ys, zs}} = ballDetectedRaysUpTo(rays, cutoff);
+      if (!xs.length) continue;
+      out.push({{ type: "scatter3d", x: xs, y: ys, z: zs, mode: "lines",
+        line: {{color: color, width: 2, dash: src === "on_device" ? "dot" : "solid"}},
+        opacity: 0.35, name: `Rays ${{cam}} (${{src === "on_device" ? "iOS" : "server"}}, ${{Math.floor(xs.length / 3)}})`,
+        hoverinfo: "skip", showlegend: false }});
+    }}
+    for (const [cam, trace] of Object.entries(SCENE.ground_traces || {{}})) {{
+      if (!isLayerVisible(`cam${{cam}}`, "server")) continue;
+      const filtered = trace.filter(p => p.t_rel_s <= cutoff);
+      if (!filtered.length) continue;
+      const color = colorForCamSource(cam, "server");
+      out.push({{ type: "scatter3d", x: filtered.map(p => p.x), y: filtered.map(p => p.y), z: filtered.map(p => p.z),
+        mode: "lines+markers", line: {{color: color, width: 3, dash: HAS_TRIANGULATED ? "dash" : "solid"}},
+        marker: {{size: 3, color: color}}, opacity: HAS_TRIANGULATED ? 0.45 : 0.7,
+        name: `Ground trace ${{cam}} (server, ${{filtered.length}} pts)`, showlegend: false }});
+    }}
+    for (const [cam, trace] of Object.entries(SCENE.ground_traces_on_device || {{}})) {{
+      if (!isLayerVisible(`cam${{cam}}`, "on_device")) continue;
+      const filtered = trace.filter(p => p.t_rel_s <= cutoff);
+      if (!filtered.length) continue;
+      const color = colorForCamSource(cam, "on_device");
+      out.push({{ type: "scatter3d", x: filtered.map(p => p.x), y: filtered.map(p => p.y), z: filtered.map(p => p.z),
+        mode: "lines+markers", line: {{color: color, width: 3, dash: "dot"}},
+        marker: {{size: 3, color: color, symbol: "circle-open"}}, opacity: 0.7,
+        name: `Ground trace ${{cam}} (iOS, ${{filtered.length}} pts)`, showlegend: false }});
+    }}
+    if (isLayerVisible("traj", "server")) {{
+      const triPts = (SCENE.triangulated || []).filter(p => p.t_rel_s <= cutoff);
+      if (triPts.length) {{
+        const t0 = triPts[0].t_rel_s;
+        const ts = triPts.map(p => p.t_rel_s - t0);
+        out.push({{ type: "scatter3d", x: triPts.map(p => p.x), y: triPts.map(p => p.y), z: triPts.map(p => p.z),
+          mode: "lines+markers", line: {{color: ACCENT, width: 4}},
+          marker: {{size: 4, color: ts, colorscale: "Cividis", showscale: true,
+            colorbar: {{ title: {{text: "flight t (s)", font: {{size: 10}}}}, thickness: 10, len: 0.45, x: 1.02, y: 0.5, tickfont: {{size: 9}} }}}},
+          name: `3D trajectory (server, ${{triPts.length}} pts)` }});
+      }}
+    }}
+    if (isLayerVisible("traj", "on_device")) {{
+      const triPts = (SCENE.triangulated_on_device || []).filter(p => p.t_rel_s <= cutoff);
+      if (triPts.length) {{
+        out.push({{ type: "scatter3d", x: triPts.map(p => p.x), y: triPts.map(p => p.y), z: triPts.map(p => p.z),
+          mode: "lines+markers", line: {{color: ACCENT, width: 3, dash: "dot"}},
+          marker: {{size: 4, color: ACCENT, symbol: "circle-open"}}, opacity: 0.85,
+          name: `3D trajectory (iOS, ${{triPts.length}} pts)` }});
+      }}
+    }}
+    return out;
+  }}
+  {PLATE_WORLD_JS}
+  {PROJECTION_JS}
+  {DRAW_VIRTUAL_BASE_JS}
+  {DRAW_PLATE_OVERLAY_JS}
+  const VIRT_CANVASES = [];
+  const REAL_OVERLAYS = [];
+  for (const c of (SCENE.cameras || [])) {{
+    if (c.fx == null || c.R_wc == null || c.t_wc == null || c.image_width_px == null || c.image_height_px == null) continue;
+    const canvas = document.getElementById(`virt-canvas-${{c.camera_id}}`);
+    if (!canvas) continue;
+    VIRT_CANVASES.push({{cam: c.camera_id, canvas, meta: c}});
+    const overlay = document.getElementById(`real-plate-overlay-${{c.camera_id}}`);
+    if (overlay) REAL_OVERLAYS.push({{cam: c.camera_id, overlay, meta: c}});
+  }}
+  function drawVirtCanvas(entry) {{
+    const {{canvas, meta}} = entry;
+    const base = drawVirtualBase(canvas, meta, {{ plateStroke: "rgba(219, 214, 205, 0.55)", plateFill: "rgba(219, 214, 205, 0.08)", plateLineWidth: 1, plateDash: [4, 3] }});
+    if (!base) return;
+    const {{ctx, sx, sy}} = base;
+    function drawCurrentDetection(framesForThisCam, opts) {{
+      if (!framesForThisCam) return;
+      const ts = framesForThisCam.t_rel_s || [];
+      const det = framesForThisCam.detected || [];
+      const pxArr = framesForThisCam.px || [];
+      const pyArr = framesForThisCam.py || [];
+      if (!ts.length) return;
+      let lo = 0, hi = ts.length - 1;
+      while (lo + 1 < hi) {{
+        const mid = (lo + hi) >> 1;
+        if (ts[mid] <= currentT) lo = mid; else hi = mid;
+      }}
+      const iLo = Math.abs(ts[lo] - currentT) <= Math.abs(ts[hi] - currentT) ? lo : hi;
+      const tol = 0.020;
+      if (Math.abs(ts[iLo] - currentT) > tol || !det[iLo]) return;
+      const px = pxArr[iLo], py = pyArr[iLo];
+      if (px == null || py == null) return;
+      const x = px * sx, y = py * sy;
+      ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+      ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = opts.color;
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+    }}
+    const cam = meta.camera_id;
+    const camLayer = `cam${{cam}}`;
+    if (isLayerVisible(camLayer, "server")) {{ drawCurrentDetection(framesByCam[cam], {{color: ACCENT}}); }}
+    if (isLayerVisible(camLayer, "on_device")) {{ drawCurrentDetection(framesByCamOnDevice[cam], {{color: "rgb(175, 210, 255)"}}); }}
+    ctx.restore();
+  }}
+  function drawVirtuals() {{ for (const entry of VIRT_CANVASES) drawVirtCanvas(entry); }}
+  function drawRealPlateOverlays() {{ for (const entry of REAL_OVERLAYS) redrawPlateOverlay(entry.overlay, entry.meta); }}
+  function drawScene() {{
+    const cutoff = mode === "all" ? Infinity : currentT;
+    Plotly.react(sceneDiv, [...STATIC, ...buildDynamicTraces(cutoff)], LAYOUT, {{displayModeBar: false, responsive: true}});
+    drawVirtuals();
+    drawRealPlateOverlays();
+  }}
+  function scheduleSceneDraw() {{
+    if (sceneDrawRaf !== null) return;
+    sceneDrawRaf = requestAnimationFrame(() => {{ sceneDrawRaf = null; drawScene(); }});
+  }}
+  function scheduleVirtualDraw() {{
+    if (virtualDrawRaf !== null) return;
+    virtualDrawRaf = requestAnimationFrame(() => {{ virtualDrawRaf = null; drawVirtuals(); }});
+  }}
+  window.addEventListener("resize", () => {{ drawVirtuals(); drawRealPlateOverlays(); }});
+  function markManualSeekWindow(ms = 180) {{
+    suppressVideoFeedbackUntilMs = Math.max(suppressVideoFeedbackUntilMs, performance.now() + ms);
+  }}
+  function shouldIgnoreVideoFeedback() {{ return isScrubbing || performance.now() < suppressVideoFeedbackUntilMs; }}
+  function beginTimelineInteraction() {{ pauseAllPlayback(); markManualSeekWindow(); updatePlayBtnLabel(); }}
+  function resetVideoPlaybackRates() {{ for (const v of vids) if (Math.abs(v.playbackRate - currentRate) > 0.001) v.playbackRate = currentRate; }}
+  function syncFollowerVideosToMaster(masterT) {{
+    if (!masterVideo || !isFinite(masterT)) return;
+    for (const v of vids) {{
+      if (v === masterVideo) continue;
+      const off = offsetByCam[v.dataset.cam] ?? 0;
+      const want = Math.max(0, masterT - off);
+      if (!isFinite(v.currentTime)) continue;
+      const drift = v.currentTime - want;
+      if (Math.abs(drift) >= HARD_SYNC_THRESHOLD_S) {{
+        try {{ v.currentTime = want; }} catch {{}}
+        if (Math.abs(v.playbackRate - currentRate) > 0.001) v.playbackRate = currentRate;
+        continue;
+      }}
+      if (v.paused || Math.abs(drift) <= SOFT_SYNC_THRESHOLD_S) {{
+        if (Math.abs(v.playbackRate - currentRate) > 0.001) v.playbackRate = currentRate;
+        continue;
+      }}
+      const correction = Math.max(-MAX_RATE_NUDGE, Math.min(MAX_RATE_NUDGE, -drift * 6.0));
+      const targetRate = Math.max(0.1, currentRate * (1 + correction));
+      if (Math.abs(v.playbackRate - targetRate) > 0.001) v.playbackRate = targetRate;
+    }}
+  }}
+  let seekTargetT = tMin;
+  function syncVideosToT(t) {{
+    if (!isFinite(t)) return;
+    seekTargetT = t;
+    markManualSeekWindow();
+    if (seekRafPending) return;
+    seekRafPending = true;
+    requestAnimationFrame(() => {{
+      seekRafPending = false;
+      const tt = seekTargetT;
+      for (const v of vids) {{
+        const off = offsetByCam[v.dataset.cam] ?? 0;
+        const want = Math.max(0, tt - off);
+        if (Math.abs((v.currentTime || 0) - want) < 1e-4) continue;
+        try {{ v.currentTime = want; }} catch {{}}
+      }}
+      resetVideoPlaybackRates();
+    }});
+  }}
+  function readMasterTFromVideo() {{
+    if (masterVideo && !isNaN(masterVideo.currentTime)) return masterVideo.currentTime + (offsetByCam[masterVideo.dataset.cam] ?? 0);
+    for (const v of vids) if (!isNaN(v.currentTime)) return v.currentTime + (offsetByCam[v.dataset.cam] ?? 0);
+    return currentT;
+  }}
+  function frameIndexForT(t) {{
+    let lo = 0, hi = TOTAL_FRAMES - 1;
+    if (t <= unionTimes[lo]) return lo;
+    if (t >= unionTimes[hi]) return hi;
+    while (lo + 1 < hi) {{
+      const mid = (lo + hi) >> 1;
+      if (unionTimes[mid] <= t) lo = mid; else hi = mid;
+    }}
+    return (t - unionTimes[lo]) <= (unionTimes[hi] - t) ? lo : hi;
+  }}
+  function renderFrameLabel() {{
+    const v = String(currentFrame);
+    if (document.activeElement !== frameInput && frameInput.value !== v) frameInput.value = v;
+    const tRel = currentT - tMin;
+    const parts = [];
+    for (const cam of camsWithFrames) {{
+      const entry = camAtFrame[cam][currentFrame];
+      if (entry === null) parts.push(`<span class="sub">${{cam}}:—</span>`);
+      else {{
+        const cls = entry.detected ? "det" : "det no";
+        const mark = entry.detected ? "✓" : "·";
+        parts.push(`<span class="sub">${{cam}}:${{entry.idx}}</span><span class="${{cls}}">${{mark}}</span>`);
+      }}
+    }}
+    if (HAS_ON_DEVICE) {{
+      const odParts = [];
+      for (const cam of camsWithFramesOnDevice) {{
+        const entry = camAtFrameOnDevice[cam][currentFrame];
+        if (entry === null) continue;
+        const cls = entry.detected ? "det" : "det no";
+        const mark = entry.detected ? "✓" : "·";
+        odParts.push(`<span class="sub">${{cam}}:${{entry.idx}}</span><span class="${{cls}}">${{mark}}</span>`);
+      }}
+      if (odParts.length) parts.push(`<span class="sub">(iOS</span> ${{odParts.join(" ")}}<span class="sub">)</span>`);
+    }}
+    parts.push(`<span class="sub">t=${{tRel.toFixed(3)}}s</span>`);
+    frameSub.innerHTML = parts.join(" ");
+  }}
+  function setFrame(f, {{ seekVideos = true }} = {{}}) {{
+    currentFrame = Math.max(0, Math.min(TOTAL_FRAMES - 1, f | 0));
+    currentT = unionTimes[currentFrame];
+    scrubber.value = String(currentFrame);
+    renderFrameLabel();
+    renderDetectionStrip();
+    if (seekVideos) syncVideosToT(currentT);
+    if (mode === "playback") scheduleSceneDraw();
+    if (mode !== "playback") scheduleVirtualDraw();
+  }}
+  let virtualRAF = null;
+  let virtualLastPerfMs = 0;
+  let virtualTime = 0;
+  function virtualPlaying() {{ return virtualRAF !== null; }}
+  function startVirtualClock() {{
+    if (virtualRAF !== null) return;
+    virtualLastPerfMs = performance.now();
+    virtualTime = currentT;
+    const tick = (now) => {{
+      virtualRAF = requestAnimationFrame(tick);
+      const dt = (now - virtualLastPerfMs) / 1000 * currentRate;
+      virtualLastPerfMs = now;
+      virtualTime += dt;
+      if (virtualTime >= unionTimes[TOTAL_FRAMES - 1]) {{
+        setFrame(TOTAL_FRAMES - 1);
+        stopVirtualClock();
+        updatePlayBtnLabel();
+        return;
+      }}
+      setFrame(frameIndexForT(virtualTime));
+    }};
+    virtualRAF = requestAnimationFrame(tick);
+  }}
+  function stopVirtualClock() {{ if (virtualRAF !== null) {{ cancelAnimationFrame(virtualRAF); virtualRAF = null; }} }}
+  function pauseAllPlayback() {{ vids.forEach(v => v.pause()); resetVideoPlaybackRates(); stopVirtualClock(); }}
+  function stepFrames(delta) {{ beginTimelineInteraction(); setFrame(currentFrame + delta); }}
+  function jumpDetection(dir) {{
+    let i = currentFrame + dir;
+    while (i >= 0 && i < TOTAL_FRAMES) {{
+      for (const cam of camsWithFrames) {{
+        const e = camAtFrame[cam][i];
+        if (e && e.detected) {{ beginTimelineInteraction(); setFrame(i); return; }}
+      }}
+      i += dir;
+    }}
+  }}
+  function onVideoTimeUpdate() {{
+    if (rvfcEnabled || seekRafPending || shouldIgnoreVideoFeedback()) return;
+    requestAnimationFrame(() => {{
+      if (shouldIgnoreVideoFeedback()) return;
+      setFrame(frameIndexForT(readMasterTFromVideo()), {{ seekVideos: false }});
+    }});
+  }}
+  playBtn.addEventListener("click", () => {{
+    if (vids.length > 0) {{
+      const anyPaused = vids.some(v => v.paused);
+      if (anyPaused) {{
+        syncFollowerVideosToMaster(readMasterTFromVideo());
+        resetVideoPlaybackRates();
+        vids.forEach(v => {{ try {{ v.play(); }} catch {{}} }});
+      }} else vids.forEach(v => v.pause());
+      return;
+    }}
+    if (virtualPlaying()) stopVirtualClock(); else startVirtualClock();
+    updatePlayBtnLabel();
+  }});
+  function updatePlayBtnLabel() {{ playBtn.textContent = vids.length > 0 ? (vids.every(v => v.paused) ? "Play" : "Pause") : (virtualPlaying() ? "Pause" : "Play"); }}
+  const hasRVFC = typeof HTMLVideoElement !== "undefined" && "requestVideoFrameCallback" in HTMLVideoElement.prototype;
+  function driveWithRVFC() {{
+    if (!masterVideo) return;
+    rvfcEnabled = true;
+    const master = masterVideo;
+    const off = offsetByCam[master.dataset.cam] ?? 0;
+    const onFrame = (_now, metadata) => {{
+      if (shouldIgnoreVideoFeedback()) {{ master.requestVideoFrameCallback(onFrame); return; }}
+      const mediaT = (metadata && typeof metadata.mediaTime === "number") ? metadata.mediaTime : master.currentTime;
+      const t = mediaT + off;
+      syncFollowerVideosToMaster(t);
+      setFrame(frameIndexForT(t), {{ seekVideos: false }});
+      master.requestVideoFrameCallback(onFrame);
+    }};
+    master.requestVideoFrameCallback(onFrame);
+  }}
+  vids.forEach(v => {{ v.addEventListener("play", updatePlayBtnLabel); v.addEventListener("pause", updatePlayBtnLabel); v.addEventListener("timeupdate", onVideoTimeUpdate); v.addEventListener("seeked", onVideoTimeUpdate); }});
+  if (hasRVFC) driveWithRVFC();
+  scrubber.addEventListener("pointerdown", () => {{ isScrubbing = true; beginTimelineInteraction(); }});
+  const endScrub = () => {{ if (!isScrubbing) return; isScrubbing = false; markManualSeekWindow(120); }};
+  scrubber.addEventListener("pointerup", endScrub);
+  scrubber.addEventListener("pointercancel", endScrub);
+  scrubber.addEventListener("blur", endScrub);
+  window.addEventListener("pointerup", endScrub);
+  scrubber.addEventListener("input", () => {{ beginTimelineInteraction(); setFrame(Number(scrubber.value)); }});
+  scrubber.addEventListener("keydown", (ev) => {{
+    switch (ev.key) {{
+      case "ArrowLeft": ev.preventDefault(); stepFrames(-1); break;
+      case "ArrowRight": ev.preventDefault(); stepFrames(+1); break;
+      case "Home": ev.preventDefault(); beginTimelineInteraction(); setFrame(0); break;
+      case "End": ev.preventDefault(); beginTimelineInteraction(); setFrame(TOTAL_FRAMES - 1); break;
+      case "PageUp": ev.preventDefault(); stepFrames(-10); break;
+      case "PageDown": ev.preventDefault(); stepFrames(+10); break;
+    }}
+  }});
+  frameInput.addEventListener("change", () => {{
+    const f = Number(frameInput.value);
+    if (!isFinite(f)) {{ frameInput.value = String(currentFrame); return; }}
+    beginTimelineInteraction();
+    setFrame(f);
+  }});
+  frameInput.addEventListener("keydown", (ev) => {{ if (ev.key === "Enter") {{ ev.preventDefault(); frameInput.blur(); }} }});
+  stepFirstBtn.addEventListener("click", () => stepFrames(-TOTAL_FRAMES));
+  stepLastBtn.addEventListener("click", () => stepFrames(+TOTAL_FRAMES));
+  stepBackBtn.addEventListener("click", () => stepFrames(-1));
+  stepFwdBtn.addEventListener("click", () => stepFrames(+1));
+  let currentRate = 1.0;
+  speedGroup.addEventListener("click", (ev) => {{
+    const btn = ev.target.closest("button[data-rate]");
+    if (!btn) return;
+    const r = parseFloat(btn.dataset.rate);
+    if (!isFinite(r) || r <= 0) return;
+    currentRate = r;
+    resetVideoPlaybackRates();
+    for (const b of speedGroup.querySelectorAll("button")) b.classList.toggle("active", b === btn);
+  }});
+  window.addEventListener("keydown", (ev) => {{
+    if (ev.key === "Escape") {{
+      if (hintOverlay.classList.contains("open")) {{ ev.preventDefault(); setHintOpen(false); }}
+      return;
+    }}
+    const tag = (ev.target && ev.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea") return;
+    switch (ev.key) {{
+      case " ": ev.preventDefault(); playBtn.click(); break;
+      case ",": ev.preventDefault(); stepFrames(ev.shiftKey ? -10 : -1); break;
+      case ".": ev.preventDefault(); stepFrames(ev.shiftKey ? +10 : +1); break;
+      case "ArrowLeft": ev.preventDefault(); stepFrames(-Math.round(0.5 * MASTER_FPS)); break;
+      case "ArrowRight": ev.preventDefault(); stepFrames(+Math.round(0.5 * MASTER_FPS)); break;
+      case "Home": ev.preventDefault(); stepFrames(-TOTAL_FRAMES); break;
+      case "End": ev.preventDefault(); stepFrames(+TOTAL_FRAMES); break;
+      case "d": case "D": ev.preventDefault(); jumpDetection(-1); break;
+      case "f": case "F": ev.preventDefault(); jumpDetection(+1); break;
+      case "?": ev.preventDefault(); setHintOpen(!hintOverlay.classList.contains("open")); break;
+      case "1": case "2": case "3": case "4": case "5": {{
+        const idx = Number(ev.key) - 1;
+        const buttons = speedGroup.querySelectorAll("button[data-rate]");
+        if (buttons[idx]) {{ ev.preventDefault(); buttons[idx].click(); }}
+        break;
+      }}
+    }}
+  }});
+  function setMode(next) {{ mode = next; modeAll.classList.toggle("active", next === "all"); modePlayback.classList.toggle("active", next === "playback"); scheduleSceneDraw(); }}
+  modeAll.addEventListener("click", () => setMode("all"));
+  modePlayback.addEventListener("click", () => setMode("playback"));
+  sceneResetBtn.addEventListener("click", () => {{ Plotly.relayout(sceneDiv, {{ "scene.camera": DEFAULT_CAMERA }}); }});
+  sceneDiv.addEventListener("wheel", (e) => {{
+    if (!sceneDiv._fullLayout || !sceneDiv._fullLayout.scene) return;
+    const cam = sceneDiv._fullLayout.scene.camera;
+    if (!cam || !cam.eye) return;
+    e.preventDefault();
+    const mag = Math.min(0.5, Math.sqrt(Math.abs(e.deltaY)) * 0.04);
+    const factor = e.deltaY > 0 ? (1 + mag) : (1 - mag);
+    Plotly.relayout(sceneDiv, {{ "scene.camera.eye": {{ x: cam.eye.x * factor, y: cam.eye.y * factor, z: cam.eye.z * factor }} }});
+  }}, {{ passive: false }});
+  function setHintOpen(open) {{ hintOverlay.classList.toggle("open", open); hintBtn.classList.toggle("open", open); hintBtn.setAttribute("aria-expanded", open ? "true" : "false"); }}
+  hintBtn.addEventListener("click", () => {{ setHintOpen(!hintOverlay.classList.contains("open")); }});
+  const detectionCanvas = document.getElementById("detection-canvas");
+  const detectionCanvasOnDevice = document.getElementById("detection-canvas-on-device");
+  const stripRowOnDevice = document.getElementById("strip-row-on-device");
+  const layerToggles = document.getElementById("layer-toggles");
+  const STRIP_MUTED = "rgba(122, 117, 108, 0.35)";
+  const STRIP_EMPTY = "rgba(232, 228, 219, 0.6)";
+  const STRIP_HEAD = "#2A2520";
+  const STRIP_CHIRP = "rgba(230, 179, 0, 0.65)";
+  if (HAS_ON_DEVICE) {{
+    stripRowOnDevice.hidden = false;
+    document.getElementById("strip-row-server").classList.add("is-reference");
+    document.getElementById("strip-note-dual").hidden = false;
+  }}
+  function paintLayerPills() {{
+    const pills = layerToggles.querySelectorAll(".layer-pill");
+    for (const pill of pills) {{
+      const layer = pill.dataset.layer;
+      const src = pill.dataset.src;
+      if (src === "on_device" && !HAS_ON_DEVICE) {{ pill.hidden = true; continue; }}
+      pill.setAttribute("aria-pressed", isLayerVisible(layer, src) ? "true" : "false");
+    }}
+    for (const sw of layerToggles.querySelectorAll(".layer-name .swatch")) sw.style.background = colorForCamSource(sw.dataset.cam, "server");
+  }}
+  paintLayerPills();
+  layerToggles.addEventListener("click", (e) => {{
+    const pill = e.target.closest(".layer-pill");
+    if (!pill) return;
+    const layer = pill.dataset.layer;
+    const src = pill.dataset.src;
+    const wouldBeOff = {{ ...layerVisibility[layer] }};
+    wouldBeOff[src] = !wouldBeOff[src];
+    const anyLeft = Object.values(layerVisibility).some(group =>
+      Object.entries(group).some(([k, v]) => (group === layerVisibility[layer] ? wouldBeOff[k] : v) && (k !== "on_device" || HAS_ON_DEVICE))
+    );
+    if (!anyLeft) return;
+    layerVisibility[layer][src] = !layerVisibility[layer][src];
+    persistLayerVisibility();
+    paintLayerPills();
+    drawScene();
+  }});
+  function resizeOneCanvas(canvas) {{
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight || 18;
+    const dpr = window.devicePixelRatio || 1;
+    const pxW = Math.max(1, Math.floor(cssW * dpr));
+    const pxH = Math.max(1, Math.floor(cssH * dpr));
+    if (canvas.width !== pxW || canvas.height !== pxH) {{ canvas.width = pxW; canvas.height = pxH; }}
+  }}
+  function drawStripInto(canvas, cams, strips, source) {{
+    const W = canvas.width, H = canvas.height;
+    if (!W || !H) return;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, W, H);
+    const rows = Math.max(1, cams.length);
+    const rowH = Math.floor(H / rows);
+    for (let ci = 0; ci < cams.length; ++ci) {{
+      const cam = cams[ci];
+      const strip = strips[cam];
+      const color = colorForCamSource(cam, source);
+      const y = ci * rowH;
+      ctx.fillStyle = STRIP_EMPTY;
+      ctx.fillRect(0, y, W, rowH);
+      if (!strip) continue;
+      for (let x = 0; x < W; ++x) {{
+        const i = TOTAL_FRAMES <= 1 ? 0 : Math.min(TOTAL_FRAMES - 1, Math.round(x * (TOTAL_FRAMES - 1) / (W - 1)));
+        const e = strip[i];
+        if (e === null || e === undefined) continue;
+        ctx.fillStyle = e.detected ? color : STRIP_MUTED;
+        ctx.fillRect(x, y, 1, rowH);
+      }}
+    }}
+    if (tMin <= 0 && tMax >= 0 && tMax > tMin) {{
+      const xChirp = Math.round((-tMin) * (W - 1) / (tMax - tMin));
+      ctx.fillStyle = STRIP_CHIRP;
+      ctx.fillRect(Math.max(0, xChirp - 1), 0, 2, H);
+    }}
+    const xHead = TOTAL_FRAMES <= 1 ? 0 : Math.round(currentFrame * (W - 1) / (TOTAL_FRAMES - 1));
+    ctx.fillStyle = STRIP_HEAD;
+    ctx.fillRect(Math.max(0, xHead - 1), 0, 2, H);
+  }}
+  function renderDetectionStrip() {{
+    drawStripInto(detectionCanvas, camsWithFrames, camAtFrame, "server");
+    if (HAS_ON_DEVICE) drawStripInto(detectionCanvasOnDevice, camsWithFramesOnDevice, camAtFrameOnDevice, "on_device");
+  }}
+  function resizeDetectionCanvas() {{
+    resizeOneCanvas(detectionCanvas);
+    if (HAS_ON_DEVICE) resizeOneCanvas(detectionCanvasOnDevice);
+    renderDetectionStrip();
+  }}
+  window.addEventListener("resize", resizeDetectionCanvas);
+  setFrame(0, {{ seekVideos: true }});
+  scheduleSceneDraw();
+  updatePlayBtnLabel();
+  requestAnimationFrame(resizeDetectionCanvas);
+}})();
+"""

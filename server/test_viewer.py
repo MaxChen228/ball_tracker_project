@@ -12,10 +12,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+import render_scene
 import schemas
 from conftest import sid
 from main import app
 from reconstruct import Scene, build_scene
+from viewer_fragments import failure_strip_html
+from viewer_page import build_viewer_page_context
 
 
 # ---- Scene setup: reuse the same two-camera rig as test_server.py ---------
@@ -546,6 +549,55 @@ def test_viewer_embeds_scene_data_and_mode_toggle():
     assert '"ground_traces"' in body
     assert 'id="mode-all"' in body
     assert 'id="mode-playback"' in body
+
+
+def test_viewer_page_context_computes_single_cam_layout_and_video_cells():
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(730)
+    scene = build_scene(
+        session_id,
+        {"A": _pitch("A", 730, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))},
+        triangulated=None,
+    )
+    health = {
+        "session_id": session_id,
+        "cameras": {
+            "A": {"received": True, "calibrated": True, "time_synced": True, "n_frames": 1, "n_detected": 1},
+            "B": {"received": False, "calibrated": False, "time_synced": False, "n_frames": 0, "n_detected": 0},
+        },
+        "triangulated_count": 0,
+        "triangulated_count_on_device": 0,
+        "error": None,
+        "duration_s": 0.0,
+        "received_at": None,
+        "mode": "camera_only",
+    }
+    videos = [
+        ("A", "/videos/session_x_A.mov", 0.0, 240.0, {"t_rel_s": [0.0], "detected": [True]}),
+    ]
+
+    ctx = build_viewer_page_context(scene, videos, health, build_figure=render_scene._build_figure)
+
+    assert ctx.layout_mode == "single-cam"
+    assert 'data-cam="A"' in ctx.video_cells_html
+    assert "no calibration" in ctx.virtual_cells_html  # B has no pose
+    assert ctx.scene_flex == "2 1 0"
+
+
+def test_failure_strip_html_prefers_earliest_blocking_reason():
+    health = {
+        "cameras": {
+            "A": {"received": False, "calibrated": False, "time_synced": False, "n_detected": 0},
+            "B": {"received": True, "calibrated": False, "time_synced": False, "n_detected": 0},
+        },
+        "triangulated_count": 0,
+        "error": "camera A missing calibration",
+    }
+
+    html = failure_strip_html(health)
+
+    assert "Cam A never uploaded" in html
+    assert "server error:" not in html
 
 
 def test_viewer_ships_interactive_diagnostic_widgets():
