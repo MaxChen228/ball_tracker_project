@@ -13,7 +13,7 @@ final class CameraCommandRouter {
         let setCurrentSessionPaths: (Set<ServerUploader.DetectionPath>) -> Void
         let refreshModeLabel: () -> Void
         let startTimeSync: (String) -> Void
-        let applyMutualSync: (String) -> Void
+        let applyMutualSync: (String, [Double], Double) -> Void
         let applyRemoteArm: () -> Void
         let applyRemoteDisarm: () -> Void
         let updateTimeSyncServerState: (Bool, String?) -> Void
@@ -58,7 +58,11 @@ final class CameraCommandRouter {
         switch type {
         case "sync_run":
             if let sid = message["sync_id"] as? String {
-                DispatchQueue.main.async { self.deps.applyMutualSync(sid) }
+                let emitAtS = (message["emit_at_s"] as? [Double]) ?? [0.3]
+                let recordDurationS = (message["record_duration_s"] as? Double) ?? 3.0
+                DispatchQueue.main.async {
+                    self.deps.applyMutualSync(sid, emitAtS: emitAtS, recordDurationS: recordDurationS)
+                }
             }
         case "sync_command":
             if let cmd = message["command"] as? String, cmd == "start" {

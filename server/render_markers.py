@@ -12,7 +12,7 @@ from render_compare import (
     PROJECTION_JS,
     render_live_compare_camera,
 )
-from render_dashboard import _CSS, _render_app_nav
+from render_shared import _CSS, _render_app_nav
 
 
 _MARKERS_CSS = """

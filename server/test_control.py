@@ -855,12 +855,10 @@ def test_sync_page_renders_time_sync_and_tuning_surfaces():
     assert 'id="sync-body"' in body
     assert 'id="sync-trace"' in body
     assert 'id="sync-log"' in body
-    assert 'id="tuning-body"' in body
     assert 'id="tuning-status"' in body
-    assert 'id="tuning-chirp-form"' in body
-    assert 'id="tuning-hb-form"' in body
-    assert 'id="telemetry-panel"' in body
-    assert 'id="telemetry-body"' in body
+    assert 'id="burst-params-body"' in body
+    assert 'id="per-cam-sync"' in body
+    assert 'action="/settings/sync_params"' in body
     assert 'action="/sync/trigger"' in body
     assert 'action="/sync/start"' in body
 
