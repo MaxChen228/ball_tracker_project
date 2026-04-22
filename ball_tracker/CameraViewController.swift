@@ -85,6 +85,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var uploadQueue: PayloadUploadQueue!
     private var commandRouter: CameraCommandRouter!
     private var syncCoordinator: CameraSyncCoordinator!
+    private var statusPresenter: CameraStatusPresenter!
 
     // UI state.
     private var lastUploadStatusText: String = ""
@@ -235,16 +236,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var recTimer: Timer?
     private var recStartTime: CFTimeInterval = 0
 
-    // Last state whose visuals (border stroke, pulse animation, REC timer)
-    // were applied. `updateUIForState` fires on every heartbeat tick and
-    // upload-queue callback — if we re-ran `applyStateVisuals` each time
-    // the REC timer would reset to 0.0 s and the pulse animation would be
-    // torn down and re-added every beat. Gating on this sentinel means
-    // transition-side-effects run exactly once per state change, while
-    // pure label/colour updates (Server / FPS / Upload / Last) still
-    // refresh every call.
-    private var lastRenderedState: AppState?
-
     // Haptic feedback generators. Kept as properties so prepare() is
     // honored (trigger latency drops from ~100 ms to <20 ms).
     private let armHaptic = UIImpactFeedbackGenerator(style: .light)
@@ -286,7 +277,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 // upload will still go but the server will skip triangulation,
                 // and the operator needs to keep seeing why.
                 if self.serverTimeSyncConfirmed {
-                    self.warningLabel.isHidden = true
+                    self.hideBanner()
                 }
                 // Start-of-recording feedback: short tone + a medium
                 // haptic so the operator registers the transition even
@@ -436,12 +427,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let snapshotSessionId = currentSessionId
         log.info("camera entering recording session=\(snapshotSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         if !serverTimeSyncConfirmed {
-            warningLabel.text = "尚未時間校正，將無法三角化"
-            warningLabel.textColor = DesignTokens.Colors.ink
-            warningLabel.isHidden = false
+            showErrorBanner("尚未時間校正，將無法三角化")
             log.warning("arm without server-confirmed time sync — server will skip triangulation")
         } else {
-            warningLabel.isHidden = true
+            hideBanner()
         }
         startCapture(at: trackingFps)
         recorder.reset()
@@ -477,7 +466,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.clipRecorder?.cancel()
             self?.clipRecorder = nil
         }
-        warningLabel.isHidden = true
+        hideBanner()
         // Drop the sensor back to whatever standby currently requires.
         reconcileStandbyCaptureState()
         updateUIForState()
@@ -941,8 +930,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             } catch {
                 log.error("camera resolution swap failed target=\(width)x\(newHeight) error=\(error.localizedDescription, privacy: .public)")
                 DispatchQueue.main.async {
-                    self.warningLabel.text = "解析度切換失敗 (\(newHeight)p 不支援)"
-                    self.warningLabel.isHidden = false
+                    self.showErrorBanner("解析度切換失敗 (\(newHeight)p 不支援)")
                 }
             }
         }
@@ -1016,8 +1004,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             } catch {
                 log.error("camera fps switch failed target=\(targetFps) error=\(error.localizedDescription, privacy: .public)")
                 DispatchQueue.main.async {
-                    self.warningLabel.text = "FPS 切換失敗 (\(Int(targetFps))fps 不支援)"
-                    self.warningLabel.isHidden = false
+                    self.showErrorBanner("FPS 切換失敗 (\(Int(targetFps))fps 不支援)")
                 }
             }
         }
@@ -1053,8 +1040,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             } catch {
                 log.error("camera capture start failed error=\(error.localizedDescription, privacy: .public)")
                 DispatchQueue.main.async {
-                    self.warningLabel.text = "相機啟動失敗 (\(Int(targetFps))fps)"
-                    self.warningLabel.isHidden = false
+                    self.showErrorBanner("相機啟動失敗 (\(Int(targetFps))fps)")
                 }
             }
         }
@@ -1095,8 +1081,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         } catch {
             log.error("camera fps switch failed target=\(targetFps) error=\(error.localizedDescription, privacy: .public)")
             DispatchQueue.main.async {
-                self.warningLabel.text = "FPS 切換失敗 (\(Int(targetFps))fps 不支援)"
-                self.warningLabel.isHidden = false
+                self.showErrorBanner("FPS 切換失敗 (\(Int(targetFps))fps 不支援)")
             }
         }
     }
@@ -1383,8 +1368,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func refreshModeLabel() {
-        let previewState = previewRequestedByServer ? "REMOTE ON" : (session.isRunning ? "LOCAL ACTIVE" : "OFF")
-        previewLabel.text = "PREVIEW · \(previewState)"
+        updateUIForState()
     }
 
     private func updateServerTimeSyncState(confirmed: Bool, syncId: String?) {
@@ -1516,16 +1500,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func showErrorBanner(_ text: String) {
-        warningLabel.backgroundColor = DesignTokens.Colors.destructive
-        warningLabel.textColor = DesignTokens.Colors.cardBackground
-        warningLabel.text = text
-        warningLabel.isHidden = false
+        statusPresenter.showErrorBanner(text)
     }
 
     private func hideBanner() {
-        warningLabel.backgroundColor = DesignTokens.Colors.warning.withAlphaComponent(0.85)
-        warningLabel.textColor = DesignTokens.Colors.ink
-        warningLabel.isHidden = true
+        statusPresenter.hideBanner()
     }
 
     private func flashErrorBanner(_ text: String, duration: TimeInterval) {
@@ -1658,6 +1637,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         setupStateBorder()
         setupRecIndicator()
+        statusPresenter = CameraStatusPresenter(
+            topStatusChip: topStatusChip,
+            warningLabel: warningLabel,
+            connectionLabel: connectionLabel,
+            previewLabel: previewLabel,
+            stateBorderLayer: stateBorderLayer
+        )
         syncInlineControlsFromSettings()
     }
 
@@ -1751,8 +1737,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         view.endEditing(true)
         let serverIP = serverIPField.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !serverIP.isEmpty else {
-            warningLabel.text = "Server IP 不可為空"
-            warningLabel.isHidden = false
+            showErrorBanner("Server IP 不可為空")
             return
         }
         let updated = AppSettings(
@@ -1760,7 +1745,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             cameraRole: roleControl.selectedSegmentIndex == 1 ? "B" : "A"
         )
         AppSettingsStore.save(updated)
-        warningLabel.isHidden = true
+        hideBanner()
         applyUpdatedSettings()
         updateUIForState()
     }
@@ -1813,17 +1798,21 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func updateUIForState() {
-        connectionLabel.text = "LINK · \((healthMonitor?.statusText ?? "offline").uppercased())"
+        let connectionText = "LINK · \((healthMonitor?.statusText ?? "offline").uppercased())"
         let previewState = previewRequestedByServer ? "REMOTE ON" : (session.isRunning ? "LOCAL ACTIVE" : "OFF")
-        previewLabel.text = "PREVIEW · \(previewState)"
-
-        // State-transition-only side effects: re-running applyStateVisuals
-        // on every tick resets the REC timer and rebuilds the pulse
-        // animation, so edge-trigger it here. Label / colour refresh above
-        // stays level-triggered.
-        if lastRenderedState != state {
-            applyStateVisuals()
-            lastRenderedState = state
+        statusPresenter.render(
+            state: state,
+            connectionText: connectionText,
+            previewText: "PREVIEW · \(previewState)"
+        ) { [weak self] isRecording in
+            guard let self else { return }
+            if isRecording {
+                self.recIndicator.isHidden = false
+                self.startRecTimer()
+            } else {
+                self.recIndicator.isHidden = true
+                self.stopRecTimer()
+            }
         }
     }
 
@@ -1834,77 +1823,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case .mutualSyncing: return "MUTUAL_SYNC"
         case .recording: return "RECORDING"
         case .uploading: return "UPLOADING"
-        }
-    }
-
-    // MARK: - State visuals
-
-    private func applyStateVisuals() {
-        let cfg = stateVisualConfig(for: state)
-
-        // Border
-        stateBorderLayer.strokeColor = cfg.borderColor.cgColor
-        stateBorderLayer.lineWidth = cfg.borderWidth
-        stateBorderLayer.removeAnimation(forKey: "pulse")
-        if cfg.pulse {
-            let anim = CABasicAnimation(keyPath: "opacity")
-            anim.fromValue = 0.35
-            anim.toValue = 1.0
-            anim.duration = 0.85
-            anim.autoreverses = true
-            anim.repeatCount = .infinity
-            stateBorderLayer.add(anim, forKey: "pulse")
-        } else {
-            stateBorderLayer.opacity = 1.0
-        }
-
-        topStatusChip.text = cfg.chipText
-        topStatusChip.setStyle(cfg.chipStyle)
-
-        if state == .recording {
-            recIndicator.isHidden = false
-            startRecTimer()
-        } else {
-            recIndicator.isHidden = true
-            stopRecTimer()
-        }
-    }
-
-    private struct StateVisualConfig {
-        let borderColor: UIColor
-        let borderWidth: CGFloat
-        let pulse: Bool
-        let chipText: String
-        let chipStyle: StatusChip.Style
-    }
-
-    private func stateVisualConfig(for s: AppState) -> StateVisualConfig {
-        switch s {
-        case .standby:
-            return .init(
-                borderColor: DesignTokens.Colors.cardBorder, borderWidth: 2, pulse: false,
-                chipText: "待機", chipStyle: .neutral
-            )
-        case .timeSyncWaiting:
-            return .init(
-                borderColor: DesignTokens.Colors.accent, borderWidth: 8, pulse: true,
-                chipText: "時間校正中", chipStyle: .pending
-            )
-        case .mutualSyncing:
-            return .init(
-                borderColor: DesignTokens.Colors.accent, borderWidth: 8, pulse: true,
-                chipText: "互相同步中", chipStyle: .pending
-            )
-        case .recording:
-            return .init(
-                borderColor: DesignTokens.Colors.destructive, borderWidth: 14, pulse: false,
-                chipText: "● 錄影中", chipStyle: .fail
-            )
-        case .uploading:
-            return .init(
-                borderColor: DesignTokens.Colors.warning, borderWidth: 6, pulse: false,
-                chipText: "上傳中", chipStyle: .pending
-            )
         }
     }
 
