@@ -151,6 +151,7 @@ from results_routes import (
     build_results_router,
     build_viewer_health as _build_viewer_health,
 )
+from calibration_routes import build_calibration_router
 
 logger = logging.getLogger("ball_tracker")
 
@@ -2352,6 +2353,13 @@ app.include_router(
     )
 )
 app.include_router(
+    build_calibration_router(
+        get_state=lambda: state,
+        get_device_ws=lambda: device_ws,
+        get_sse_hub=lambda: sse_hub,
+    )
+)
+app.include_router(
     build_pitch_router(
         get_state=lambda: state,
         get_max_pitch_upload_bytes=lambda: _MAX_PITCH_UPLOAD_BYTES,
@@ -2380,96 +2388,6 @@ def chirp_wav() -> Response:
 # ---------------------------------------------------------------------------
 # Live preview (Phase 4a)
 # ---------------------------------------------------------------------------
-
-@app.post("/calibration")
-async def post_calibration(snapshot: CalibrationSnapshot) -> dict[str, Any]:
-    """iPhone pushes its freshly-solved calibration (intrinsics + homography)
-    so the dashboard canvas can show where the camera is positioned in world
-    space, even before the first pitch is ever recorded. Idempotent overwrite:
-    each camera only keeps its latest snapshot."""
-    state.set_calibration(snapshot)
-    # Notify dashboards (SSE) and any other connected phones (WS) that the
-    # calibration for this camera changed. Dashboard can repaint the canvas
-    # without its 5s polling tick; the other phone can refresh its stored
-    # extrinsics if it cares about cross-cam pose consistency.
-    await sse_hub.broadcast(
-        "calibration_changed",
-        {
-            "cam": snapshot.camera_id,
-            "image_width_px": snapshot.image_width_px,
-            "image_height_px": snapshot.image_height_px,
-        },
-    )
-    await device_ws.broadcast(
-        {
-            cam: {"type": "calibration_updated", "cam": snapshot.camera_id}
-            for cam in state.known_camera_ids()
-            if cam != snapshot.camera_id
-        }
-    )
-    return {
-        "ok": True,
-        "camera_id": snapshot.camera_id,
-        "image_width_px": snapshot.image_width_px,
-        "image_height_px": snapshot.image_height_px,
-    }
-
-
-@app.get("/calibration/state")
-def calibration_state() -> dict[str, Any]:
-    """Dashboard polls this to repaint the canvas whenever a new calibration
-    lands. Returns both the raw scene (so callers can rebuild custom views)
-    and a ready-to-`Plotly.react` figure spec — the dashboard uses the
-    latter so the trace/layout construction stays centralised server-side
-    and the browser only speaks figure JSON."""
-    from reconstruct import build_calibration_scene
-    from render_scene import _build_figure
-
-    cals = state.calibrations()
-    scene = build_calibration_scene(cals)
-    # `fig.to_plotly_json()` can leak numpy arrays into the payload; the
-    # JSON round-trip guarantees everything is native-Python and FastAPI
-    # can serialise it without reaching for a custom encoder.
-    fig = _build_figure(scene)
-    # Mirror render_events_index_html's dashboard-specific layout overrides
-    # so the 5 s tick can't undo them: drop the duplicate title, fill the
-    # panel, and pin a fixed rig-scale bbox so a single 3m-distant camera
-    # can't shrink the 0.5 m plate via aspectmode="data" autoscaling.
-    fig.update_layout(
-        title=None, margin=dict(l=0, r=0, t=8, b=0),
-        scene_xaxis_range=[-6.0, 6.0],
-        scene_yaxis_range=[-6.0, 6.0],
-        scene_zaxis_range=[-0.2, 3.5],
-        scene_aspectmode="manual",
-        scene_aspectratio=dict(x=1.0, y=1.0, z=0.45),
-        # Match the value used by render_events_index_html SSR so the tick
-        # never flips uirevision and Plotly keeps the user's camera/orbit.
-        scene_uirevision="dashboard-canvas",
-    )
-    fig_json = json.loads(fig.to_json())
-    def _cal_mtime(cam_id: str) -> float | None:
-        p = state._calibration_path(cam_id)
-        try:
-            return p.stat().st_mtime
-        except OSError:
-            return None
-    return {
-        "calibrations": [
-            {
-                "camera_id": cam_id,
-                "image_width_px": snap.image_width_px,
-                "image_height_px": snap.image_height_px,
-                "last_ts": _cal_mtime(cam_id),
-            }
-            for cam_id, snap in sorted(cals.items())
-        ],
-        "scene": scene.to_dict(),
-        "plot": {
-            "data": fig_json.get("data", []),
-            "layout": fig_json.get("layout", {}),
-        },
-    }
-
 
 async def _await_calibration_frame(camera_id: str, *, timeout_s: float = 2.0) -> bytes:
     import asyncio as _asyncio  # noqa: WPS433
