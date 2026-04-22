@@ -62,9 +62,7 @@ import logging
 import os
 import re
 import secrets
-import socket
 import time
-from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
@@ -131,7 +129,7 @@ from calibration_solver import (
 )
 from triangulate import build_K, camera_center_world, recover_extrinsics, triangulate_rays, undistorted_ray_cam
 from sync_solver import compute_mutual_sync
-from cleanup_old_sessions import cleanup_expired_sessions
+from app_bootstrap import build_lifespan
 from live_pairing import LivePairingSession
 from sse import SSEHub
 from state_constants import (
@@ -2128,45 +2126,13 @@ class State:
                     path.unlink(missing_ok=True)
                 for path in self._video_dir.glob("cycle_*"):
                     path.unlink(missing_ok=True)
-
-
-def _lan_ip() -> str:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except Exception:
-        return "127.0.0.1"
-    finally:
-        s.close()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-    ip = _lan_ip()
-    logger.info("LAN IP: %s  →  set iPhone Settings → Server IP = %s, Port = 8765", ip, ip)
-    # $BALL_TRACKER_CLEANUP_DAYS=0 disables startup cleanup; otherwise sessions
-    # whose youngest file is older than N days are purged here.
-    cleanup_days = int(os.environ.get("BALL_TRACKER_CLEANUP_DAYS", "30"))
-    if cleanup_days > 0:
-        sessions, files, bytes_removed = cleanup_expired_sessions(
-            state.data_dir, days=cleanup_days, dry_run=False
-        )
-        logger.info(
-            "cleanup: removed %d sessions / %d files / %d bytes older than %d days from %s",
-            sessions, files, bytes_removed, cleanup_days, state.data_dir,
-        )
-    yield
-
-
-app = FastAPI(title="ball_tracker server", lifespan=lifespan)
 state = State()
 device_ws = DeviceSocketManager()
 sse_hub = SSEHub()
+app = FastAPI(
+    title="ball_tracker server",
+    lifespan=build_lifespan(state=state, logger=logger),
+)
 app.include_router(
     build_control_router(
         get_state=lambda: state,
