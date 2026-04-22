@@ -671,9 +671,12 @@ def sync_page() -> HTMLResponse:
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
             chirp_detect_threshold=state.chirp_detect_threshold(),
             mutual_sync_threshold=state.mutual_sync_threshold(),
-            heartbeat_interval_s=state.heartbeat_interval_s(),
-            capture_height_px=state.capture_height_px(),
-            tracking_exposure_cap=state.tracking_exposure_cap().value,
+            sync_params={
+                "emit_a_at_s": state.sync_params().emit_a_at_s,
+                "emit_b_at_s": state.sync_params().emit_b_at_s,
+                "record_duration_s": state.sync_params().record_duration_s,
+                "search_window_s": state.sync_params().search_window_s,
+            },
         )
     )
 

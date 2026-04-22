@@ -15,7 +15,6 @@ from render_dashboard import (
     _render_app_nav,
     _render_chirp_threshold_body,
     _render_device_rows,
-    _render_tuning_body,
 )
 from schemas import SYNC_TRACE_MIN_PSR, SYNC_TRACE_THRESHOLD
 
@@ -514,76 +513,7 @@ _JS_TEMPLATE = r"""
       }
       // Trace plot
       renderTrace(body.last_sync || null);
-      // Quick-chirp live telemetry
-      renderQuickChirpTelemetry(body.telemetry || {});
     } catch (e) { /* silent */ }
-  }
-
-  function renderQuickChirpTelemetry(telem) {
-    const host = document.getElementById('quick-chirp-telemetry');
-    if (!host) return;
-    const cams = Object.keys(telem).sort();
-    if (!cams.length) {
-      host.innerHTML = '<div class="trace-empty">No phone listening.</div>';
-      return;
-    }
-    // Bars now carry an optional `peakFrac` to render a second marker at
-    // the highest value observed during the current attempt, so the
-    // operator can read the peak even after the phone stops reporting.
-    function bar(valueRaw, maxVal, threshold, warnAt, peakRaw) {
-      const value = Number(valueRaw || 0);
-      const pct = Math.min(100, Math.max(0, (value / maxVal) * 100));
-      const warn = warnAt != null && value >= warnAt;
-      const thrPct = threshold != null
-        ? Math.min(100, Math.max(0, (threshold / maxVal) * 100))
-        : null;
-      const thrMark = thrPct != null
-        ? `<div class="thr-mark" style="left:${thrPct.toFixed(1)}%"></div>`
-        : '';
-      const peakNum = peakRaw == null ? null : Number(peakRaw);
-      const peakMark = (peakNum != null && peakNum > value)
-        ? `<div class="peak-mark" style="left:${Math.min(100, Math.max(0, (peakNum / maxVal) * 100)).toFixed(1)}%"></div>`
-        : '';
-      return `<div class="bar"><div class="fill${warn ? ' warn' : ''}" style="width:${pct.toFixed(1)}%"></div>${thrMark}${peakMark}</div>`;
-    }
-    function row(label, value, peak, bars) {
-      const vFmt = (x) => (typeof x === 'number' ? x.toFixed(3) : '—');
-      const extra = (typeof peak === 'number' && peak > (value || 0))
-        ? ` <span class="peak">peak ${vFmt(peak)}</span>`
-        : '';
-      return `<div class="qct-row"><span class="label">${label}</span>${bars}<span class="value">${vFmt(value)}${extra}</span></div>`;
-    }
-    function ageTag(age) {
-      if (age == null) return '';
-      if (age < 2) return '<span class="age live">live</span>';
-      if (age < 10) return `<span class="age">${age.toFixed(0)}s ago</span>`;
-      return `<span class="age stale">stale ${age.toFixed(0)}s</span>`;
-    }
-    const parts = cams.map(cam => {
-      const t = telem[cam] || {};
-      const age = Number(t.age_s || 0);
-      const isStale = age >= 2;
-      const peak = Number(t.input_peak || 0);
-      const clipping = peak >= 0.98;
-      const clipClass = clipping ? 'warn' : (peak >= 0.7 ? '' : 'ok');
-      const clipText = clipping ? 'CLIPPING' : (peak >= 0.7 ? 'hot' : 'headroom ok');
-      const thr = Number(t.threshold || 0);
-      const up = Number(t.up_peak || 0);
-      const down = Number(t.down_peak || 0);
-      const upFloor = Number(t.cfar_up_floor || 0);
-      const downFloor = Number(t.cfar_down_floor || 0);
-      return `<div class="qct-cam${isStale ? ' stale' : ''}">
-        <div class="qct-head"><span>Cam ${cam} · ${t.armed ? 'armed' : 'cooldown'}${t.pending_up ? ' · pending up' : ''} ${ageTag(age)}</span>
-          <span class="clip-chip ${clipClass}">${clipText}</span></div>
-        ${row('input rms', t.input_rms, t.peak_input_rms, bar(t.input_rms, 0.5, null, null, t.peak_input_rms))}
-        ${row('input peak', t.input_peak, t.peak_input_peak, bar(t.input_peak, 1.0, null, 0.98, t.peak_input_peak))}
-        ${row('up peak', up, t.peak_up_peak, bar(up, 1.0, thr, null, t.peak_up_peak))}
-        ${row('down peak', down, t.peak_down_peak, bar(down, 1.0, thr, null, t.peak_down_peak))}
-        ${row('cfar up', upFloor, null, bar(upFloor, 0.2, null, null, null))}
-        ${row('cfar dn', downFloor, null, bar(downFloor, 0.2, null, null, null))}
-      </div>`;
-    });
-    host.innerHTML = parts.join('');
   }
 
   async function tickSyncStatus() {
@@ -744,48 +674,87 @@ _JS_TEMPLATE = r"""
     const tuningActions = [
       '/settings/chirp_threshold',
       '/settings/mutual_sync_threshold',
-      '/settings/heartbeat_interval',
-      '/settings/tracking_exposure_cap',
-      '/settings/capture_height',
     ];
     if (tuningActions.some(path => form.action.endsWith(path))) {
       e.preventDefault();
       const btn = form.querySelector('button');
-      const field = form.querySelector('input[name="threshold"], input[name="interval_s"], input[name="mode"], input[name="height"]');
+      const field = form.querySelector('input[name="threshold"]');
       if (btn instanceof HTMLButtonElement) btn.disabled = true;
       if (field instanceof HTMLInputElement) field.disabled = true;
-      setTuningStatus('Applying runtime tuning…', '');
+      setTuningStatus('Applying…', '');
       try {
         const resp = await fetch(form.action, { method: 'POST', body: new FormData(form) });
         if (!resp.ok) {
           let reason = 'update failed';
-          try {
-            const body = await resp.json();
-            reason = body.detail || reason;
-          } catch (_) {}
-          setTuningStatus('Runtime tuning rejected: ' + reason, 'error');
+          try { const b = await resp.json(); reason = b.detail || reason; } catch (_) {}
+          setTuningStatus('Rejected: ' + reason, 'error');
           return;
         }
-        setTuningStatus('Runtime tuning applied.', 'ok');
-        setTimeout(() => {
-          if (tuningStatus && tuningStatus.textContent === 'Runtime tuning applied.') {
-            setTuningStatus('', '');
-          }
-        }, 1500);
-        tickSyncStatus();
+        setTuningStatus('Applied.', 'ok');
+        setTimeout(() => { if (tuningStatus && tuningStatus.textContent === 'Applied.') setTuningStatus('', ''); }, 1500);
       } catch (_) {
-        setTuningStatus('Runtime tuning update failed.', 'error');
+        setTuningStatus('Update failed.', 'error');
       } finally {
         if (btn instanceof HTMLButtonElement) btn.disabled = false;
         if (field instanceof HTMLInputElement) field.disabled = false;
       }
     }
+    if (form.action && form.action.endsWith('/settings/sync_params')) {
+      e.preventDefault();
+      const btn = form.querySelector('button[type="submit"]');
+      if (btn) btn.disabled = true;
+      setTuningStatus('Applying burst params…', '');
+      try {
+        const parseArr = (s) => s.split(',').map(x => parseFloat(x.trim())).filter(n => !isNaN(n));
+        const body = {
+          emit_a_at_s: parseArr(form.querySelector('[name="emit_a_at_s"]')?.value || ''),
+          emit_b_at_s: parseArr(form.querySelector('[name="emit_b_at_s"]')?.value || ''),
+          record_duration_s: parseFloat(form.querySelector('[name="record_duration_s"]')?.value || '4'),
+          search_window_s: parseFloat(form.querySelector('[name="search_window_s"]')?.value || '0.3'),
+        };
+        const resp = await fetch('/settings/sync_params', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+          let reason = 'update failed';
+          try { const b = await resp.json(); reason = b.detail || reason; } catch (_) {}
+          setTuningStatus('Rejected: ' + reason, 'error');
+          return;
+        }
+        setTuningStatus('Burst params applied.', 'ok');
+        setTimeout(() => { if (tuningStatus && tuningStatus.textContent === 'Burst params applied.') setTuningStatus('', ''); }, 1500);
+      } catch (_) {
+        setTuningStatus('Update failed.', 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
   });
+
+  async function tickSyncParams() {
+    try {
+      const r = await fetch('/sync/params', { cache: 'no-store' });
+      if (!r.ok) return;
+      const p = await r.json();
+      const fA = document.getElementById('sp-emit-a');
+      const fB = document.getElementById('sp-emit-b');
+      const fD = document.getElementById('sp-duration');
+      const fW = document.getElementById('sp-window');
+      if (fA && document.activeElement !== fA) fA.value = (p.emit_a_at_s || []).join(', ');
+      if (fB && document.activeElement !== fB) fB.value = (p.emit_b_at_s || []).join(', ');
+      if (fD && document.activeElement !== fD) fD.value = p.record_duration_s ?? 4.0;
+      if (fW && document.activeElement !== fW) fW.value = p.search_window_s ?? 0.3;
+    } catch (_) {}
+  }
 
   tickSyncStatus();
   tickSyncState();
+  tickSyncParams();
   setInterval(tickSyncStatus, 1000);
   setInterval(tickSyncState, 2000);
+  setInterval(tickSyncParams, 5000);
 })();
 """
 
@@ -866,6 +835,42 @@ def _render_sync_body(
     )
 
 
+def _render_burst_params_body(sync_params: dict[str, Any] | None) -> str:
+    """Editable burst params card body. Values hydrated by JS tickSyncParams."""
+    p = sync_params or {}
+    emit_a = ", ".join(str(v) for v in p.get("emit_a_at_s", [0.3, 0.5, 0.7]))
+    emit_b = ", ".join(str(v) for v in p.get("emit_b_at_s", [1.8, 2.0, 2.2]))
+    dur = p.get("record_duration_s", 4.0)
+    win = p.get("search_window_s", 0.3)
+    return (
+        '<form class="inline" action="/settings/sync_params" method="POST">'
+        '<div class="tuning-row">'
+        '<label class="tuning-label" for="sp-emit-a">A emit (s)</label>'
+        f'<input id="sp-emit-a" name="emit_a_at_s" class="tuning-input" value="{html.escape(emit_a)}" '
+        'title="Comma-separated offsets (s from recording start) at which Cam A emits its chirp burst">'
+        '</div>'
+        '<div class="tuning-row">'
+        '<label class="tuning-label" for="sp-emit-b">B emit (s)</label>'
+        f'<input id="sp-emit-b" name="emit_b_at_s" class="tuning-input" value="{html.escape(emit_b)}" '
+        'title="Comma-separated offsets for Cam B — must not overlap A\'s window">'
+        '</div>'
+        '<div class="tuning-row">'
+        '<label class="tuning-label" for="sp-duration">Record (s)</label>'
+        f'<input id="sp-duration" name="record_duration_s" class="tuning-input" type="number" '
+        f'min="1" max="30" step="0.5" value="{dur}" title="Total recording window; must exceed last emission + chirp + propagation">'
+        '</div>'
+        '<div class="tuning-row">'
+        '<label class="tuning-label" for="sp-window">Search window (s)</label>'
+        f'<input id="sp-window" name="search_window_s" class="tuning-input" type="number" '
+        f'min="0.05" max="2.0" step="0.05" value="{win}" title="±seconds the server searches around each expected emission for a peak">'
+        '</div>'
+        '<div class="tuning-row">'
+        '<button class="btn secondary" type="submit">Apply</button>'
+        '</div>'
+        '</form>'
+    )
+
+
 def _render_sync_legend() -> str:
     return (
         '<div class="trace-legend">'
@@ -933,9 +938,7 @@ def render_sync_html(
     sync_cooldown_remaining_s: float = 0.0,
     chirp_detect_threshold: float = 0.18,
     mutual_sync_threshold: float = 0.10,
-    heartbeat_interval_s: float = 1.0,
-    capture_height_px: int = 1080,
-    tracking_exposure_cap: str = "frame_duration",
+    sync_params: dict[str, Any] | None = None,
 ) -> str:
     devices = devices or []
     calibrations = calibrations or []
@@ -958,56 +961,36 @@ def render_sync_html(
         "</head><body data-page=\"sync\">"
         f'{_render_app_nav("sync", devices, session, calibrations, sync, sync_cooldown_remaining_s)}'
         '<main class="main-sync">'
-        '<section class="card page-hero">'
-        '<div class="page-hero-copy">'
-        '<div class="page-kicker">Audio workflow</div>'
-        '<h1 class="page-title">Time Sync</h1>'
-        '</div>'
-        '</section>'
         '<div class="setup-section-title">Per-device sync state</div>'
         '<div class="card">'
         '<h2 class="card-title">Device sync</h2>'
         '<div id="per-cam-sync" class="per-cam-sync"><div class="trace-empty">Waiting for device status…</div></div>'
         '</div>'
-        '<div class="setup-section-title">Time Sync</div>'
+        '<div class="setup-section-title">Sync Control</div>'
         '<div class="card">'
         '<h2 class="card-title">Sync Control</h2>'
         f'<div id="sync-body">{_render_sync_body(sync, last_sync, devices, session, sync_cooldown_remaining_s)}</div>'
         f'{_render_chirp_threshold_body(chirp_detect_threshold, mutual_sync_threshold)}'
         "</div>"
+        '<div class="setup-section-title">Burst Params</div>'
+        '<div class="card">'
+        '<h2 class="card-title">Burst Params</h2>'
+        '<div class="card-subtitle">A and B emit staggered bursts. Server pushes these to iOS in each sync_run — no rebuild needed.</div>'
+        '<div id="tuning-status" class="tuning-status"></div>'
+        f'<div id="burst-params-body">{_render_burst_params_body(sync_params)}</div>'
+        "</div>"
+        '<div class="setup-section-title">Matched-filter trace</div>'
         '<div class="card">'
         '<h2 class="card-title">Matched-filter trace</h2>'
         '<div id="sync-trace"><div class="trace-empty">No sync run yet.</div></div>'
         f'{_render_sync_legend()}'
-        "</div>"
-        '<div class="card">'
-        '<h2 class="card-title">Quick-chirp telemetry &middot; live</h2>'
-        '<div class="card-subtitle">While a phone is in 時間校正 listening state, its mic level + matched-filter peaks appear here. Use to tune speaker volume: input_peak &ge; 0.98 means ADC is clipping and will hurt correlation.</div>'
-        '<div id="quick-chirp-telemetry" class="quick-chirp-telemetry"><div class="trace-empty">No phone listening.</div></div>'
-        "</div>"
-        '<div class="card">'
-        '<h2 class="card-title">Log</h2>'
-        '<div class="sync-log-head">'
-        '<span class="sync-log-label">Diagnostic events &middot; server + A + B</span>'
-        '<button type="button" class="btn secondary small" id="sync-ai-debug-copy" title="Fetch /sync/debug_export — compact AI-readable report with auto-diagnosis. Paste to Claude Code.">Copy AI Debug</button>'
-        '<button type="button" class="btn secondary small" id="sync-log-copy">Copy Log</button>'
-        '<button type="button" class="btn secondary small" id="sync-log-clear">Clear view</button>'
+        '<div class="sync-log-head" style="margin-top: var(--s-3)">'
+        '<span class="sync-log-label">Event log</span>'
+        '<button type="button" class="btn secondary small" id="sync-ai-debug-copy" title="Fetch /sync/debug_export and copy to clipboard">Export debug</button>'
+        '<button type="button" class="btn secondary small" id="sync-log-copy">Copy log</button>'
+        '<button type="button" class="btn secondary small" id="sync-log-clear">Clear</button>'
         '</div>'
         '<pre class="sync-log" id="sync-log"></pre>'
-        "</div>"
-        '<div class="setup-section-title">Runtime &middot; Tuning</div>'
-        '<div class="card">'
-        '<h2 class="card-title">Runtime &middot; Tuning</h2>'
-        '<div id="tuning-status" class="tuning-status"></div>'
-        f'<div id="tuning-body">{_render_tuning_body(heartbeat_interval_s, tracking_exposure_cap, capture_height_px)}</div>'
-        "</div>"
-        '<div class="setup-section-title">Diagnostics</div>'
-        '<div class="card">'
-        '<h2 class="card-title">Telemetry</h2>'
-        '<details id="telemetry-panel" class="telemetry-panel">'
-        '  <summary>Open diagnostics</summary>'
-        '  <div id="telemetry-body" class="telemetry-body"></div>'
-        '</details>'
         "</div>"
         "</main>"
         f"<script>{_DASHBOARD_JS_TEMPLATE}</script>"
