@@ -1348,6 +1348,32 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             lastUploadStatusText = "麥克風啟動失敗 · \(error.localizedDescription)"
             return
         }
+
+        // Force a flat-response mic path. iOS defaults for AVCaptureSession
+        // audio enable voice preprocessing (AGC, beamforming, AEC) which
+        // aggressively attenuates anything not shaped like human speech —
+        // our 2–8 kHz chirp sweep looks exactly like "noise" to that
+        // pipeline and gets crushed to near-silence (field observation:
+        // inp_peak < 0.03 with a chirp that a human hears at full volume).
+        // `.measurement` mode disables all of it; `.playAndRecord` matches
+        // what MutualSyncAudio already uses so the two sync paths don't
+        // fight each other over category ownership. Must set
+        // `automaticallyConfiguresApplicationAudioSession = false` or the
+        // capture session will stomp our category on `startRunning`.
+        session.automaticallyConfiguresApplicationAudioSession = false
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(
+                .playAndRecord,
+                mode: .measurement,
+                options: [.defaultToSpeaker, .allowBluetoothA2DP]
+            )
+            try audioSession.setActive(true, options: [])
+            log.info("camera AVAudioSession set to .measurement for flat mic response")
+        } catch {
+            log.error("camera AVAudioSession config failed error=\(error.localizedDescription, privacy: .public)")
+        }
+
         session.beginConfiguration()
         guard session.canAddInput(input) else {
             session.commitConfiguration()
