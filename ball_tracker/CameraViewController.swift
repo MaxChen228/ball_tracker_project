@@ -658,9 +658,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         timeSyncClaimGeneration &+= 1
         let generation = timeSyncClaimGeneration
-        warningLabel.text = "向伺服器請求時間校正識別碼…"
-        warningLabel.isHidden = false
-        lastUploadStatusText = "時間校正中 · 取得 sync id"
         uploader.claimTimeSyncIntent { [weak self] result in
             guard let self else { return }
             DispatchQueue.main.async {
@@ -687,8 +684,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         guard let detector = chirpDetector else {
             // Mic permission still pending or denied — try once more.
             setupAudioCapture()
-            warningLabel.text = "正在啟動麥克風…"
-            warningLabel.isHidden = false
             return
         }
         // Session is parked while in standby. Spin it up at the idle fps so
@@ -705,10 +700,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         state = .timeSyncWaiting
         frameStateBox.update(state: .timeSyncWaiting, pendingBootstrap: false, sessionId: nil)
-        warningLabel.text = "等待同步音頻觸發中… (把兩機並排，第三裝置播 chirp)"
-        warningLabel.textColor = DesignTokens.Colors.ink
-        warningLabel.isHidden = false
-        lastUploadStatusText = "時間校正中 · 等待聲波"
 
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.state == .timeSyncWaiting else { return }
@@ -1510,9 +1501,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func refreshModeLabel() {
-        let pathLabel = currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ")
         let previewState = previewRequestedByServer ? "REMOTE ON" : (session.isRunning ? "LOCAL ACTIVE" : "OFF")
-        previewLabel.text = "PREVIEW · \(previewState) · \(pathLabel.uppercased())"
+        previewLabel.text = "PREVIEW · \(previewState)"
     }
 
     private func updateServerTimeSyncState(confirmed: Bool, syncId: String?) {
@@ -1586,9 +1576,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 ]
             }
             self.sendWebSocketJSON(payload)
-        }
-        healthMonitor.onLastContactTick = { [weak self] date in
-            self?.updateLastContactLabel(from: date)
         }
     }
 
@@ -1750,8 +1737,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
         state = .mutualSyncing
         frameStateBox.update(state: .mutualSyncing, pendingBootstrap: false, sessionId: nil)
-        warningLabel.text = "互相時間校正中… (\(role))"
-        warningLabel.isHidden = false
         lastUploadStatusText = "Mutual sync · recording"
         updateUIForState()
 
@@ -1900,10 +1885,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         recorder?.setCameraId(latest.cameraRole)
         syncInlineControlsFromSettings()
-    }
-
-    private func updateLastContactLabel(from date: Date?) {
-        _ = date
     }
 
     private func setupUI() {
@@ -2094,12 +2075,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func updateUIForState() {
         connectionLabel.text = "LINK · \((healthMonitor?.statusText ?? "offline").uppercased())"
-        if !lastUploadStatusText.isEmpty, lastUploadStatusText != "Idle" {
-            connectionLabel.text = "\(connectionLabel.text ?? "") · \(lastUploadStatusText.uppercased())"
-        }
         let previewState = previewRequestedByServer ? "REMOTE ON" : (session.isRunning ? "LOCAL ACTIVE" : "OFF")
-        let pathLabel = currentSessionPaths.map(\.displayLabel).sorted().joined(separator: " + ")
-        previewLabel.text = "PREVIEW · \(previewState) · \(pathLabel.uppercased())"
+        previewLabel.text = "PREVIEW · \(previewState)"
 
         // State-transition-only side effects: re-running applyStateVisuals
         // on every tick resets the REC timer and rebuilds the pulse

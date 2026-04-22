@@ -929,11 +929,9 @@ final class ServerUploader {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // `camera_id` is not available on this struct directly — caller
         // supplies it via a global that ServerUploader doesn't own, so
-        // we accept the role out of band by reading UserDefaults here.
-        // Single source of truth (SettingsViewController) keeps the role
-        // stable; if it's empty we still send so server can log "unknown"
-        // rather than swallow the event.
-        let cameraId = UserDefaults.standard.string(forKey: "camera_role") ?? ""
+        // Sync logs still need a camera id even though they are emitted
+        // outside the normal pitch payload path.
+        let cameraId = AppSettingsStore.load().cameraRole
         let body: [String: Any] = [
             "camera_id": cameraId,
             "event": event,
