@@ -146,6 +146,7 @@ from control_routes import (
 )
 from device_ws_routes import build_device_ws_router
 from sync_routes import build_sync_router
+from preview_routes import _validate_camera_id_or_422, build_preview_router
 
 logger = logging.getLogger("ball_tracker")
 
@@ -2334,6 +2335,14 @@ app.include_router(
     )
 )
 app.include_router(
+    build_preview_router(
+        get_state=lambda: state,
+        get_device_ws=lambda: device_ws,
+        preview_request_ttl_s=_PREVIEW_REQUEST_TTL_S,
+        time_sync_max_age_s=_TIME_SYNC_MAX_AGE_S,
+    )
+)
+app.include_router(
     build_pitch_router(
         get_state=lambda: state,
         get_max_pitch_upload_bytes=lambda: _MAX_PITCH_UPLOAD_BYTES,
@@ -2390,273 +2399,6 @@ def chirp_wav() -> Response:
 # ---------------------------------------------------------------------------
 # Live preview (Phase 4a)
 # ---------------------------------------------------------------------------
-
-# Camera-id pattern mirrors the one on PitchPayload / ws_device route. Path
-# params don't go through Pydantic so we validate here to avoid storing a
-# preview keyed by an arbitrary client-chosen string.
-_CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
-
-
-def _validate_camera_id_or_422(camera_id: str) -> None:
-    if not _CAMERA_ID_RE.match(camera_id):
-        raise HTTPException(status_code=422, detail="invalid camera_id")
-
-
-@app.post("/camera/{camera_id}/calibration_frame")
-async def camera_calibration_frame(camera_id: str, request: Request) -> dict[str, Any]:
-    """iPhone pushes ONE full-resolution JPEG (native capture res, e.g.
-    1920×1080) here in response to `calibration_frame_requested: true`
-    on its last WS settings payload. Server stashes it so the next
-    `/calibration/auto/{camera_id}` call consumes it — running ArUco at
-    native resolution gives 4x the corner-precision of a 480p preview
-    frame and keeps the derived intrinsics in the same pixel coord
-    system as the MOVs triangulation will consume later. Eliminates the
-    preview-vs-capture dims-mismatch class of bugs at the source.
-
-    Accepts raw `image/jpeg` body or multipart with `file` field. 8 MB
-    cap (native 1080p @ q=0.9 is ~500 KB; 8 MB leaves room for ChArUco
-    board captures from iPhone main cam if we ever support that).
-    """
-    _validate_camera_id_or_422(camera_id)
-    if not state.is_calibration_frame_requested(camera_id):
-        raise HTTPException(
-            status_code=409,
-            detail="calibration frame not requested for this camera",
-        )
-    content_type = request.headers.get("content-type", "").lower()
-    if content_type.startswith("multipart/"):
-        form = await request.form()
-        file_field = form.get("file")
-        if file_field is None or not hasattr(file_field, "read"):
-            raise HTTPException(status_code=422, detail="missing `file` part")
-        body = await file_field.read()
-    else:
-        body = await request.body()
-    if not body:
-        raise HTTPException(status_code=422, detail="empty body")
-    if len(body) > 8 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="calibration frame too large")
-    state.store_calibration_frame(camera_id, bytes(body))
-    return {"ok": True, "bytes": len(body)}
-
-
-@app.post("/camera/{camera_id}/preview_frame")
-async def camera_preview_frame(camera_id: str, request: Request) -> dict[str, Any]:
-    """iPhone pushes one JPEG frame here while the dashboard is watching.
-
-    Accepts either raw `image/jpeg` body or multipart with a `file` field.
-    Rejected (409) when the dashboard hasn't requested preview for this
-    camera — phones shouldn't waste bandwidth on frames nobody sees.
-    Oversize frames (> 2 MB) get 413.
-    """
-    _validate_camera_id_or_422(camera_id)
-    if not state._preview.is_requested(camera_id):
-        raise HTTPException(status_code=409, detail="preview not requested")
-    content_type = request.headers.get("content-type", "").lower()
-    if content_type.startswith("multipart/"):
-        form = await request.form()
-        file_field = form.get("file")
-        if file_field is None or not hasattr(file_field, "read"):
-            raise HTTPException(status_code=422, detail="missing `file` part")
-        body = await file_field.read()
-    else:
-        body = await request.body()
-    if not body:
-        raise HTTPException(status_code=422, detail="empty body")
-    ok = state._preview.push(camera_id, bytes(body), ts=time.time())
-    if not ok:
-        raise HTTPException(status_code=413, detail="preview frame too large")
-    return {"ok": True, "bytes": len(body)}
-
-
-@app.get("/camera/{camera_id}/preview")
-def camera_preview_latest(camera_id: str, annotate: int = 0) -> Response:
-    """Return the most recently pushed JPEG as an `image/jpeg` response.
-
-    `annotate=1` runs cv2.aruco on the buffered JPEG and draws a green box
-    + ID label on every detected DICT_4X4_50 marker (IDs 0-5 green,
-    extended markers blue). Slower per-request (~20-40 ms on a 480p frame)
-    but invaluable for debugging "is server seeing marker N?" questions
-    without spinning up a separate debug tool.
-
-    404 when the buffer has no frame for this camera (either preview was
-    never requested, the phone hasn't started pushing yet, or the TTL
-    lapsed and the buffer was swept).
-    """
-    _validate_camera_id_or_422(camera_id)
-    got = state._preview.latest(camera_id)
-    if got is None:
-        raise HTTPException(status_code=404, detail="no preview frame")
-    jpeg_bytes, _ = got
-    if annotate:
-        jpeg_bytes = _annotate_preview_jpeg(jpeg_bytes)
-    return Response(
-        content=jpeg_bytes,
-        media_type="image/jpeg",
-        headers={
-            # Each preview fetch must hit the buffer; intermediate caches
-            # would defeat the "latest frame" semantics.
-            "Cache-Control": "no-store, max-age=0",
-            "Pragma": "no-cache",
-        },
-    )
-
-
-def _annotate_preview_jpeg(jpeg_bytes: bytes) -> bytes:
-    """Decode → detect ArUco markers → draw box + ID → re-encode. Used by
-    `/camera/{id}/preview?annotate=1`. Green for plate landmarks (IDs 0-5),
-    blue for extended markers (IDs 6+). Falls back to returning the raw
-    bytes if anything goes sideways so the dashboard never sees a 500."""
-    import cv2  # noqa: WPS433
-    try:
-        from calibration_solver import (
-            PLATE_MARKER_WORLD,
-            detect_all_markers_in_dict,
-        )
-        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if bgr is None:
-            return jpeg_bytes
-        for m in detect_all_markers_in_dict(bgr):
-            is_plate = m.id in PLATE_MARKER_WORLD
-            colour = (60, 200, 60) if is_plate else (230, 160, 60)  # BGR
-            pts = m.corners.astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(bgr, [pts], isClosed=True, color=colour, thickness=3)
-            cx, cy = m.corners.mean(axis=0)
-            label = f"ID {m.id}"
-            # Drop a filled background behind the text so it stays readable
-            # over busy marker patterns.
-            (tw, th), _base = cv2.getTextSize(
-                label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2,
-            )
-            tx, ty = int(cx) - tw // 2, int(cy) + th // 2
-            cv2.rectangle(
-                bgr,
-                (tx - 4, ty - th - 4), (tx + tw + 4, ty + 6),
-                colour, -1,
-            )
-            cv2.putText(
-                bgr, label, (tx, ty),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA,
-            )
-        ok, encoded = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        return bytes(encoded.tobytes()) if ok else jpeg_bytes
-    except Exception as e:  # noqa: BLE001
-        logger.debug("annotate_preview failed: %s", e)
-        return jpeg_bytes
-
-
-@app.get("/camera/{camera_id}/preview.mjpeg")
-def camera_preview_mjpeg(camera_id: str) -> Response:
-    """Multipart/x-mixed-replace MJPEG stream.
-
-    Polls the buffer at ~10 fps. Re-hits `is_requested()` each tick so
-    the generator exits when the dashboard's TTL lapses — no dangling
-    iterator keeps the phone pushing after the viewer closes. Client
-    disconnect (browser closes the `<img>`) surfaces as a GeneratorExit
-    out of the `yield` and we bail cleanly.
-    """
-    _validate_camera_id_or_422(camera_id)
-    boundary = "ballpreviewframe"
-
-    def stream():
-        last_ts: float | None = None
-        # Dashboard TTL is 5 s; no-frame waits beyond that indicate the
-        # viewer gave up. The is_requested() lazy-sweep path also terminates
-        # the stream when its TTL lapses.
-        idle_deadline: float | None = None
-        tick_s = 1.0 / 10.0
-        try:
-            while True:
-                if not state._preview.is_requested(camera_id):
-                    break
-                got = state._preview.latest(camera_id)
-                now = time.time()
-                if got is not None:
-                    jpeg_bytes, ts = got
-                    if ts != last_ts:
-                        last_ts = ts
-                        idle_deadline = None
-                        header = (
-                            f"--{boundary}\r\n"
-                            f"Content-Type: image/jpeg\r\n"
-                            f"Content-Length: {len(jpeg_bytes)}\r\n\r\n"
-                        ).encode()
-                        yield header + jpeg_bytes + b"\r\n"
-                    else:
-                        # No new frame this tick — keep stream alive.
-                        if idle_deadline is None:
-                            idle_deadline = now + _PREVIEW_REQUEST_TTL_S * 2
-                        elif now > idle_deadline:
-                            break
-                else:
-                    if idle_deadline is None:
-                        idle_deadline = now + _PREVIEW_REQUEST_TTL_S * 2
-                    elif now > idle_deadline:
-                        break
-                time.sleep(tick_s)
-        except GeneratorExit:
-            return
-
-    return Response(
-        stream(),
-        media_type=f"multipart/x-mixed-replace; boundary={boundary}",
-        headers={"Cache-Control": "no-store, max-age=0"},
-    )
-
-
-@app.post("/camera/{camera_id}/preview_request")
-async def camera_preview_request(
-    camera_id: str,
-    request: Request,
-    enabled: str | None = Form(default=None),
-) -> Response:
-    """Dashboard toggle. Refreshes the per-camera TTL when enabled=true;
-    clears the flag + cached frame on enabled=false.
-
-    Accepts both form submission (legacy `<form>` fallback) and JSON
-    `{enabled: bool}` so the dashboard JS can POST without a hidden form.
-    Form callers get a 303 back to `/`; JSON callers get `{ok, enabled}`.
-    """
-    _validate_camera_id_or_422(camera_id)
-    # Coerce value from either form or JSON body. An empty/absent field
-    # means "toggle on" (defensive — the dashboard always sends explicit).
-    raw: Any = enabled
-    if raw is None:
-        # Try JSON body. Empty / non-JSON bodies fall through to default False.
-        try:
-            body = await request.json()
-            if isinstance(body, dict):
-                raw = body.get("enabled")
-        except Exception:
-            raw = None
-    # Normalise to bool. "false"/"0"/"" → False; anything else truthy → True.
-    if isinstance(raw, bool):
-        flag = raw
-    elif isinstance(raw, str):
-        flag = raw.strip().lower() not in ("", "false", "0", "off", "no")
-    elif raw is None:
-        flag = True
-    else:
-        flag = bool(raw)
-    state._preview.request(camera_id, enabled=flag)
-    await device_ws.send(
-        camera_id,
-        settings_message_for(
-            camera_id=camera_id,
-            state=state,
-            device_ws=device_ws,
-            time_sync_max_age_s=_TIME_SYNC_MAX_AGE_S,
-        ),
-    )
-    if wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    import json as _stdjson
-    return Response(
-        _stdjson.dumps({"ok": True, "enabled": flag}),
-        media_type="application/json",
-    )
-
 
 @app.get("/results/latest")
 def results_latest() -> SessionResult:
