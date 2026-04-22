@@ -531,17 +531,23 @@ _JS_TEMPLATE = r"""
   document.addEventListener('submit', async (e) => {
     const form = e.target;
     if (!(form instanceof HTMLFormElement)) return;
-    if (form.action && form.action.endsWith('/sync/start')) {
+    if (form.action && (form.action.endsWith('/sync/start') || form.action.endsWith('/sync/trigger'))) {
+      // Both kick-off paths: intercept so the 303 → / redirect the server
+      // sends to HTML form callers doesn't yank us off the debug page.
       e.preventDefault();
       const btn = form.querySelector('button');
       if (btn) btn.disabled = true;
+      const isQuick = form.action.endsWith('/sync/trigger');
       try {
-        const resp = await fetch('/sync/start', { method: 'POST' });
+        const resp = await fetch(form.action, {
+          method: 'POST',
+          headers: { 'Accept': 'application/json' },
+        });
         if (!resp.ok) {
-          let reason = 'sync failed';
+          let reason = isQuick ? 'quick chirp failed' : 'sync failed';
           try {
             const body = await resp.json();
-            reason = (body.detail && body.detail.error) || reason;
+            reason = (body.detail && body.detail.error) || body.detail || reason;
           } catch (_) {}
           const hint = document.createElement('div');
           hint.className = 'meta';
@@ -550,6 +556,8 @@ _JS_TEMPLATE = r"""
           syncBox.appendChild(hint);
           setTimeout(() => hint.remove(), 3000);
         }
+        tickSyncStatus();
+        tickSyncState();
       } catch (_) {}
       finally {
         if (btn) btn.disabled = false;
