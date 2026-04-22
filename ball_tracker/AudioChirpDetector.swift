@@ -61,6 +61,18 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         let lastDownPeak: Float
         let lastPSR: Float
         let pendingUp: Bool
+        // Live telemetry for the /sync debug dashboard. All four carry
+        // the value observed on the most recent matched-filter scan —
+        // `inputPeak` tells the operator whether the mic is clipping
+        // (≥ ~0.98 means ADC saturation, which distorts the chirp
+        // spectrum and actively hurts correlation), `inputRMS` is the
+        // level the chirp is competing with, and the CFAR floors are
+        // what the fire gate is comparing against. Default 0 when no
+        // scan has run yet so iOS-side unit tests don't need fixtures.
+        let inputRMS: Float
+        let inputPeak: Float
+        let cfarUpFloor: Float
+        let cfarDownFloor: Float
     }
 
     /// Install with `AVCaptureAudioDataOutput.setSampleBufferDelegate(_:queue:)`.
@@ -175,7 +187,8 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
             triggered: false,
             lastDownPeak: 0,
             lastPSR: 0,
-            pendingUp: false
+            pendingUp: false,
+            inputRMS: 0, inputPeak: 0, cfarUpFloor: 0, cfarDownFloor: 0
         )
         super.init()
         rebuildForSampleRate(sampleRate)
@@ -221,7 +234,8 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
             triggered: false,
             lastDownPeak: 0,
             lastPSR: 0,
-            pendingUp: false
+            pendingUp: false,
+            inputRMS: 0, inputPeak: 0, cfarUpFloor: 0, cfarDownFloor: 0
         )
     }
 
@@ -296,7 +310,8 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
                 triggered: false,
                 lastDownPeak: 0,
                 lastPSR: 0,
-                pendingUp: false
+                pendingUp: false,
+                inputRMS: 0, inputPeak: 0, cfarUpFloor: 0, cfarDownFloor: 0
             )
         }
     }
@@ -379,7 +394,11 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
                 triggered: false,
                 lastDownPeak: lastSnapshot.lastDownPeak,
                 lastPSR: lastSnapshot.lastPSR,
-                pendingUp: pendingUp != nil
+                pendingUp: pendingUp != nil,
+                inputRMS: lastSnapshot.inputRMS,
+                inputPeak: lastSnapshot.inputPeak,
+                cfarUpFloor: cfarUp.estimate,
+                cfarDownFloor: cfarDown.estimate
             )
             return
         }
@@ -440,10 +459,23 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
                 triggered: false,
                 lastDownPeak: lastSnapshot.lastDownPeak,
                 lastPSR: lastSnapshot.lastPSR,
-                pendingUp: pendingUp != nil
+                pendingUp: pendingUp != nil,
+                inputRMS: lastSnapshot.inputRMS,
+                inputPeak: lastSnapshot.inputPeak,
+                cfarUpFloor: cfarUp.estimate,
+                cfarDownFloor: cfarDown.estimate
             )
             return
         }
+
+        // Live input-level metrics over the full ring window. Ops uses
+        // inputPeak to catch ADC clipping (≥ 0.98 → mic is saturated,
+        // chirp spectrum distorts, correlation drops despite higher SPL).
+        // RMS is the actual ambient the chirp is competing with.
+        var inputPeakAbs: Float = 0
+        vDSP_maxmgv(linear, 1, &inputPeakAbs, vDSP_Length(ringLen))
+        var inputRMS: Float = 0
+        vDSP_rmsqv(linear, 1, &inputRMS, vDSP_Length(ringLen))
 
         let upResult = correlate(
             linear: linear, cumsq: cumsq,
@@ -559,7 +591,11 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
             triggered: triggered,
             lastDownPeak: downResult.bestNorm,
             lastPSR: min(upPSR, downPSR),
-            pendingUp: pendingUp != nil
+            pendingUp: pendingUp != nil,
+            inputRMS: inputRMS,
+            inputPeak: inputPeakAbs,
+            cfarUpFloor: cfarUp.estimate,
+            cfarDownFloor: cfarDown.estimate
         )
     }
 

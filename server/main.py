@@ -397,6 +397,10 @@ class State:
         # with a 5 s TTL. Shares the State-level `_time_fn` so clock-drift
         # tests apply here too without a parallel shim.
         self._preview = PreviewBuffer(time_fn=time_fn)
+        # Per-cam live quick-chirp telemetry (input RMS, peak, matched-
+        # filter peaks, CFAR floors). Populated by WS heartbeat messages
+        # when the phone is in .timeSyncWaiting; drained by /sync page.
+        self._sync_telemetry: dict[str, dict[str, Any]] = {}
         # One-shot high-resolution calibration frame per camera. Separate
         # buffer from preview (preview is 480p, advisory; calibration
         # frames are native capture res, accuracy-critical). `_cal_frames`
@@ -1235,6 +1239,38 @@ class State:
                     key=lambda kv: kv[1].last_seen_at,
                 )[0]
                 del self._devices[oldest]
+
+    def record_sync_telemetry(self, camera_id: str, telem: dict[str, Any]) -> None:
+        """Stash the latest quick-chirp live telemetry for a cam. Dashboard
+        /sync polls this to paint the input-level meter + live matched-
+        filter peaks while the operator tunes speaker volume / mic
+        distance. Purely observational — no decisions flow from it."""
+        with self._lock:
+            self._sync_telemetry[camera_id] = {
+                "ts": self._time_fn(),
+                **{k: telem.get(k) for k in (
+                    "mode", "armed", "input_rms", "input_peak",
+                    "up_peak", "down_peak", "cfar_up_floor",
+                    "cfar_down_floor", "threshold", "pending_up",
+                )},
+            }
+
+    def sync_telemetry_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Latest per-cam telemetry; entries older than 5 s lazily swept
+        so the dashboard doesn't paint a frozen meter for a cam that
+        stopped listening."""
+        now = self._time_fn()
+        with self._lock:
+            out: dict[str, dict[str, Any]] = {}
+            stale: list[str] = []
+            for cam, rec in self._sync_telemetry.items():
+                if now - rec.get("ts", 0.0) > 5.0:
+                    stale.append(cam)
+                    continue
+                out[cam] = dict(rec)
+            for cam in stale:
+                self._sync_telemetry.pop(cam, None)
+        return out
 
     def mark_device_offline(self, camera_id: str) -> None:
         """Age out `last_seen_at` so the device shows offline on the very
@@ -2861,6 +2897,9 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                     time_sync_id=msg.get("time_sync_id"),
                     sync_anchor_timestamp_s=msg.get("sync_anchor_timestamp_s"),
                 )
+                telem = msg.get("sync_telemetry")
+                if isinstance(telem, dict):
+                    state.record_sync_telemetry(camera_id, telem)
                 continue
             if mtype == "frame":
                 device_ws.note_seen(camera_id)
@@ -3280,6 +3319,7 @@ def sync_state(log_limit: int = 200) -> dict[str, Any]:
         "last_sync": last.model_dump() if last is not None else None,
         "cooldown_remaining_s": state.sync_cooldown_remaining_s(),
         "logs": [entry.model_dump() for entry in logs],
+        "telemetry": state.sync_telemetry_snapshot(),
     }
 
 

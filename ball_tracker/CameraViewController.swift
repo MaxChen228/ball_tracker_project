@@ -1512,14 +1512,33 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
         healthMonitor.sendWSHeartbeat = { [weak self] timeSynced, timeSyncId in
             guard let self else { return }
-            self.sendWebSocketJSON([
+            var payload: [String: Any] = [
                 "type": "heartbeat",
                 "cam": self.settings.cameraRole,
                 "t_session_s": CACurrentMediaTime(),
                 "time_synced": timeSynced,
                 "time_sync_id": timeSyncId as Any,
                 "sync_anchor_timestamp_s": self.lastSyncAnchorTimestampS as Any,
-            ])
+            ]
+            // Live quick-chirp telemetry for the /sync debug dashboard.
+            // Only attached while the detector is actively listening
+            // (state == .timeSyncWaiting) — outside that window the
+            // detector is torn down, so the values would be stale.
+            if self.state == .timeSyncWaiting, let s = self.chirpDetector?.lastSnapshot {
+                payload["sync_telemetry"] = [
+                    "mode": "quick_chirp",
+                    "armed": s.armed,
+                    "input_rms": s.inputRMS,
+                    "input_peak": s.inputPeak,
+                    "up_peak": s.lastPeak,
+                    "down_peak": s.lastDownPeak,
+                    "cfar_up_floor": s.cfarUpFloor,
+                    "cfar_down_floor": s.cfarDownFloor,
+                    "threshold": s.threshold,
+                    "pending_up": s.pendingUp,
+                ]
+            }
+            self.sendWebSocketJSON(payload)
         }
         healthMonitor.onLastContactTick = { [weak self] date in
             self?.updateLastContactLabel(from: date)
