@@ -58,10 +58,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var uploader: ServerUploader!
     private var serverConfig: ServerUploader.ServerConfig!
     private var healthMonitor: ServerHealthMonitor!
-    private var commandRouter: CameraCommandRouter!
     private var syncCoordinator: CameraSyncCoordinator!
     private var statusPresenter: CameraStatusPresenter!
     private var recordingWorkflow: CameraRecordingWorkflow!
+    private var transportCoordinator: CameraTransportCoordinator!
 
     // UI state.
     private var lastUploadStatusText: String = ""
@@ -100,9 +100,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // Live detection is advisory only. It still feeds WS streaming and the
     // local fallback path if clip writing fails.
     private let detectionPool = ConcurrentDetectionPool(maxConcurrency: 3)
-    /// Streams per-frame detection results over WebSocket when the live path
-    /// is active. Created lazily (after settings are available).
-    private var frameDispatcher: LiveFrameDispatcher?
     private let detectionStateLock = NSLock()
     /// Accumulated per-frame detection results for the current cycle.
     /// Drained at cycle-complete and either discarded (mode-one) or
@@ -127,28 +124,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// network-unreachable launch still records and uploads video.
     private var currentCaptureMode: ServerUploader.CaptureMode = .cameraOnly
     private var currentSessionPaths: Set<ServerUploader.DetectionPath> = [.serverPost]
-    /// WebSocket transport. Lazily initialized so the base URL (built from
-    /// settings) is read after `viewDidLoad` where UserDefaults are stable.
-    private var ws: ServerWebSocketConnection?
-    /// Cache of the server-pushed runtime tunables so the WS settings
-    /// callback can skip hot-apply when the value hasn't changed.
-    private var lastServerChirpThreshold: Double?
-    private var lastServerMutualThreshold: Double?
-    private var lastServerHeartbeatInterval: Double?
-    private var lastServerTrackingExposureCapMode: ServerUploader.TrackingExposureCapMode?
-
-    // `previewRequestedByServer` mirrors the WS settings flag for this camera.
-    // When it flips true→false we reset the uploader so a stale in-flight POST
-    // does not land after toggle-off.
-    private var previewRequestedByServer: Bool = false
-    private var previewUploader: PreviewUploader?
-    /// One-shot latch for the server's `calibration_frame_requested` flag.
-    /// When true, the next `captureOutput` sample will be encoded at
-    /// native resolution (NO downsample) and POSTed to
-    /// `/camera/{id}/calibration_frame`. Cleared after upload regardless
-    /// of success — the server-side flag drains the moment ANY request
-    /// arrives, so retrying from the same heartbeat would just double-POST.
-    private var calibrationFrameCaptureArmed: Bool = false
     private let warningLabel = UILabel()
 
     // Full-screen colored border that reflects AppState. Stroke width +
@@ -218,7 +193,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 drainDetectedFrames: { [weak self] in self?.drainDetectedFrames() ?? [] },
                 clearRecoveredAnchor: { [weak self] in self?.syncCoordinator.clearRecoveredAnchor() },
                 dispatchLiveCycleEnd: { [weak self] sessionId, reason in
-                    self?.frameDispatcher?.dispatchCycleEnd(sessionId: sessionId, reason: reason)
+                    self?.transportCoordinator?.dispatchLiveCycleEnd(sessionId: sessionId, reason: reason)
                 },
                 showErrorBanner: { [weak self] text in self?.showErrorBanner(text) },
                 hideBanner: { [weak self] in self?.hideBanner() },
@@ -287,9 +262,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         healthMonitor = ServerHealthMonitor(
             baseIntervalS: 1.0
         )
-        wireHealthMonitorCallbacks()
+        wireHealthMonitorStatusCallbacks()
         syncCoordinator = buildSyncCoordinator()
-        commandRouter = buildCommandRouter()
+        transportCoordinator = buildTransportCoordinator()
 
         setupUI()
         captureRuntime.configureCaptureGraph(
@@ -300,16 +275,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         )
         captureRuntime.requestAudioCaptureAccess(cameraRole: settings.cameraRole)
         healthMonitor.start()
-        connectWebSocket()
-        // frameDispatcher needs the ws connection (set up inside connectWebSocket())
-        if let wsConn = ws {
-            frameDispatcher = LiveFrameDispatcher(
-                connection: wsConn,
-                cameraId: settings.cameraRole,
-                currentSessionId: { [weak self] in self?.currentSessionId },
-                currentPaths: { [weak self] in self?.currentSessionPaths ?? [] }
-            )
-        }
+        transportCoordinator.connect()
         updateUIForState()
     }
 
@@ -323,13 +289,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         super.viewDidAppear(animated)
         // Capture stays parked until the dashboard asks for preview.
         healthMonitor.start()
-        connectWebSocket()
+        transportCoordinator.connect()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         healthMonitor.stop()
-        disconnectWebSocket()
+        transportCoordinator.disconnect()
         if state == .timeSyncWaiting {
             syncCoordinator.cancelTimeSync()
         }
@@ -470,8 +436,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func reconcileStandbyCaptureState() {
         captureRuntime.reconcileStandbyCaptureState(
-            previewRequested: previewRequestedByServer,
-            calibrationFrameCaptureArmed: calibrationFrameCaptureArmed
+            previewRequested: transportCoordinator.isPreviewRequested,
+            calibrationFrameCaptureArmed: transportCoordinator.hasPendingCalibrationFrameCaptureRequest
         )
     }
 
@@ -496,52 +462,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     // MARK: - Server health + upload queue wiring
-
-    private func webSocketURL() -> URL? {
-        guard
-            let host = serverConfig.serverIP.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed),
-            !host.isEmpty
-        else { return nil }
-        var comps = URLComponents()
-        comps.scheme = "ws"
-        comps.host = host
-        comps.port = Int(serverConfig.serverPort)
-        // path is built inside ServerWebSocketConnection; just build the base URL here
-        return comps.url
-    }
-
-    private func connectWebSocket() {
-        guard let baseURL = webSocketURL() else { return }
-        if ws == nil {
-            let conn = ServerWebSocketConnection(baseURL: baseURL, cameraId: settings.cameraRole)
-            conn.delegate = self
-            ws = conn
-        }
-        ws?.connect(initialHello: [
-            "type": "hello",
-            "cam": settings.cameraRole,
-            "session_id": currentSessionId as Any,
-            "time_sync_id": syncCoordinator.lastSyncId as Any,
-            "sync_anchor_timestamp_s": syncCoordinator.lastSyncAnchorTimestampS as Any,
-        ])
-    }
-
-    private func disconnectWebSocket() {
-        ws?.disconnect()
-        ws = nil
-    }
-
-    private func sendWebSocketJSON(_ obj: [String: Any]) {
-        ws?.send(obj)
-    }
-
-    private func handlePushedTrackingExposureCap(_ modeStr: String) {
-        let exposureMode = ServerUploader.TrackingExposureCapMode(rawValue: modeStr) ?? .frameDuration
-        if self.lastServerTrackingExposureCapMode != exposureMode {
-            self.lastServerTrackingExposureCapMode = exposureMode
-            captureRuntime.applyTrackingExposureCap(modeStr, targetFps: currentTargetFps())
-        }
-    }
 
     private func buildSyncCoordinator() -> CameraSyncCoordinator {
         CameraSyncCoordinator(
@@ -571,16 +491,23 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         )
     }
 
-    private func buildCommandRouter() -> CameraCommandRouter {
-        CameraCommandRouter(
+    private func buildTransportCoordinator() -> CameraTransportCoordinator {
+        CameraTransportCoordinator(
+            healthMonitor: healthMonitor,
+            uploader: uploader,
+            serverConfig: serverConfig,
+            cameraRole: settings.cameraRole,
             dependencies: .init(
                 getState: { [weak self] in self?.state ?? .standby },
-                getCameraRole: { [weak self] in self?.settings.cameraRole ?? "?" },
-                healthMonitor: healthMonitor,
+                getCurrentSessionId: { [weak self] in self?.currentSessionId },
                 getCurrentSessionPaths: { [weak self] in self?.currentSessionPaths ?? [] },
                 setCurrentSessionId: { [weak self] in self?.currentSessionId = $0 },
                 setCurrentSessionPaths: { [weak self] in self?.currentSessionPaths = $0 },
-                refreshModeLabel: { [weak self] in self?.refreshModeLabel() },
+                getCurrentTargetFps: { [weak self] in self?.currentTargetFps() ?? 60 },
+                getCurrentCaptureHeight: { [weak self] in self?.captureRuntime.currentCaptureHeight ?? AppSettings.captureHeightFixed },
+                getSyncId: { [weak self] in self?.syncCoordinator.lastSyncId },
+                getSyncAnchorTimestampS: { [weak self] in self?.syncCoordinator.lastSyncAnchorTimestampS },
+                getChirpSnapshot: { [weak self] in self?.captureRuntime.chirpSnapshot() },
                 startTimeSync: { [weak self] syncId in self?.syncCoordinator.startTimeSync(syncId: syncId) },
                 applyMutualSync: { [weak self] syncId in self?.syncCoordinator.applyMutualSync(syncId: syncId) },
                 applyRemoteArm: { [weak self] in self?.applyRemoteArm() },
@@ -588,28 +515,22 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 updateTimeSyncServerState: { [weak self] confirmed, syncId in
                     self?.updateServerTimeSyncState(confirmed: confirmed, syncId: syncId)
                 },
-                chirpThresholdDidPush: { [weak self] threshold in
-                    self?.applyPushedChirpThreshold(threshold)
+                applyChirpThreshold: { [weak self] threshold in
+                    self?.captureRuntime.setChirpThreshold(threshold)
                 },
-                mutualSyncThresholdDidPush: { [weak self] threshold in
+                applyMutualSyncThreshold: { [weak self] threshold in
                     self?.applyPushedMutualSyncThreshold(threshold)
                 },
-                heartbeatIntervalDidPush: { [weak self] interval in
-                    self?.applyPushedHeartbeatInterval(interval)
+                applyHeartbeatInterval: { [weak self] interval in
+                    self?.healthMonitor.updateBaseInterval(interval)
                 },
-                handleTrackingExposureCap: { [weak self] cap in
-                    self?.handlePushedTrackingExposureCap(cap)
+                applyTrackingExposureCap: { [weak self] cap, fps in
+                    self?.captureRuntime.applyTrackingExposureCap(cap, targetFps: fps)
                 },
-                currentCaptureHeight: { [weak self] in self?.captureRuntime.currentCaptureHeight ?? AppSettings.captureHeightFixed },
                 applyServerCaptureHeight: { [weak self] height in self?.applyServerCaptureHeight(height) },
-                isPreviewRequested: { [weak self] in self?.previewRequestedByServer ?? false },
-                setPreviewRequested: { [weak self] in self?.previewRequestedByServer = $0 },
-                ensurePreviewUploader: { [weak self] in self?.ensurePreviewUploader() },
-                resetPreviewUploader: { [weak self] in self?.previewUploader?.reset() },
                 startStandbyCapture: { [weak self] in self?.startCapture(at: self?.standbyFps ?? 60) },
                 stopCapture: { [weak self] in self?.stopCapture() },
-                isCalibrationFrameCaptureArmed: { [weak self] in self?.calibrationFrameCaptureArmed ?? false },
-                setCalibrationFrameCaptureArmed: { [weak self] in self?.calibrationFrameCaptureArmed = $0 }
+                refreshModeLabel: { [weak self] in self?.refreshModeLabel() }
             )
         )
     }
@@ -626,66 +547,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    private func applyPushedChirpThreshold(_ threshold: Double) {
-        guard lastServerChirpThreshold != threshold else { return }
-        lastServerChirpThreshold = threshold
-        DispatchQueue.main.async {
-            self.captureRuntime.setChirpThreshold(threshold)
-            log.info("quick-chirp threshold hot-applied from server: \(threshold)")
-        }
-    }
-
     private func applyPushedMutualSyncThreshold(_ threshold: Double) {
-        if lastServerMutualThreshold != threshold {
-            lastServerMutualThreshold = threshold
-        }
+        _ = threshold
     }
 
-    private func applyPushedHeartbeatInterval(_ interval: Double) {
-        guard lastServerHeartbeatInterval != interval else { return }
-        lastServerHeartbeatInterval = interval
-        DispatchQueue.main.async {
-            self.healthMonitor.updateBaseInterval(interval)
-            log.info("heartbeat interval hot-applied: \(interval)s")
-        }
-    }
-
-    private func ensurePreviewUploader() {
-        if previewUploader == nil {
-            previewUploader = PreviewUploader(uploader: uploader, cameraId: settings.cameraRole)
-        }
-    }
-
-    private func wireHealthMonitorCallbacks() {
+    private func wireHealthMonitorStatusCallbacks() {
         healthMonitor.onStatusChanged = { [weak self] _, _ in
             self?.updateUIForState()
-        }
-        healthMonitor.sendWSHeartbeat = { [weak self] timeSyncId in
-            guard let self else { return }
-            var payload: [String: Any] = [
-                "type": "heartbeat",
-                "cam": self.settings.cameraRole,
-                "t_session_s": CACurrentMediaTime(),
-                "time_sync_id": timeSyncId as Any,
-                "sync_anchor_timestamp_s": self.syncCoordinator.lastSyncAnchorTimestampS as Any,
-            ]
-            // Include quick-chirp telemetry only while the detector is
-            // actively listening.
-            if self.state == .timeSyncWaiting, let s = self.captureRuntime.chirpSnapshot() {
-                payload["sync_telemetry"] = [
-                    "mode": "quick_chirp",
-                    "armed": s.armed,
-                    "input_rms": s.inputRMS,
-                    "input_peak": s.inputPeak,
-                    "up_peak": s.lastPeak,
-                    "down_peak": s.lastDownPeak,
-                    "cfar_up_floor": s.cfarUpFloor,
-                    "cfar_down_floor": s.cfarDownFloor,
-                    "threshold": s.threshold,
-                    "pending_up": s.pendingUp,
-                ]
-            }
-            self.sendWebSocketJSON(payload)
         }
     }
 
@@ -824,15 +692,21 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             )
             uploader = ServerUploader(config: serverConfig)
             recordingWorkflow.updateUploader(uploader)
-            previewUploader?.updateUploader(uploader)
-            disconnectWebSocket()
-            connectWebSocket()
+            transportCoordinator.updateConnection(
+                serverConfig: serverConfig,
+                uploader: uploader,
+                cameraRole: latest.cameraRole,
+                reconnect: true
+            )
             healthMonitor.probeNow()
         }
         if cameraRoleChanged {
-            previewUploader = nil
-            disconnectWebSocket()
-            connectWebSocket()
+            transportCoordinator.updateConnection(
+                serverConfig: serverConfig,
+                uploader: uploader,
+                cameraRole: latest.cameraRole,
+                reconnect: true
+            )
         }
         recordingWorkflow.updateCameraRole(latest.cameraRole)
         syncInlineControlsFromSettings()
@@ -1001,7 +875,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func updateUIForState() {
         let connectionText = "LINK · \((healthMonitor?.statusText ?? "offline").uppercased())"
-        let previewState = previewRequestedByServer ? "REMOTE ON" : (captureRuntime.isSessionRunning ? "LOCAL ACTIVE" : "OFF")
+        let previewState = transportCoordinator.isPreviewRequested ? "REMOTE ON" : (captureRuntime.isSessionRunning ? "LOCAL ACTIVE" : "OFF")
         statusPresenter.render(
             state: state,
             connectionText: connectionText,
@@ -1092,17 +966,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // frame for ClipRecorder; `.timeSyncWaiting` is mic-centric and
         // the preview encode would compete for CPU. Outside those two
         // states the capture queue is otherwise idle.
-        if self.previewRequestedByServer
+        if self.transportCoordinator.isPreviewRequested
             && snap.state != .recording
             && snap.state != .timeSyncWaiting {
-            self.previewUploader?.pushFrame(pixelBuffer)
+            self.transportCoordinator.pushPreviewFrame(pixelBuffer)
         }
-        // One-shot native-resolution calibration frame. Drain the latch
-        // synchronously so a slow POST cannot double-fire.
-        if self.calibrationFrameCaptureArmed
-            && snap.state != .recording
-            && snap.state != .timeSyncWaiting {
-            self.calibrationFrameCaptureArmed = false
+        if self.transportCoordinator.consumeCalibrationFrameCaptureRequest(whileIn: snap.state) {
             self.uploadCalibrationFrame(pixelBuffer)
         }
 
@@ -1144,7 +1013,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         detectionFramesBuffer.append(frame)
         detectionStateLock.unlock()
 
-        frameDispatcher?.dispatchFrame(frame)
+        transportCoordinator.dispatchLiveFrame(frame)
     }
 
     /// Bump the detection generation, clear the buffer, reset the throttle.
@@ -1178,26 +1047,4 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         lastFrameTimestampForFps = now
     }
 
-}
-
-// MARK: - ServerWebSocketDelegate
-
-extension CameraViewController: ServerWebSocketDelegate {
-
-    func webSocketDidConnect(_ connection: ServerWebSocketConnection) {
-        // Transport open is not proof the server is actually reachable.
-        // URLSession lets `resume()` succeed before the WS handshake (or
-        // a first server payload) completes, which caused false-green
-        // "server connected" HUD states after the backend had already
-        // died. Reachability is promoted only on real inbound traffic in
-        // `didReceive`.
-    }
-
-    func webSocketDidDisconnect(_ connection: ServerWebSocketConnection, reason: String?) {
-        commandRouter.didDisconnect()
-    }
-
-    func webSocket(_ connection: ServerWebSocketConnection, didReceive message: [String: Any]) {
-        commandRouter.handle(message: message)
-    }
 }
