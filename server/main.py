@@ -2671,6 +2671,15 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
         session = state.current_session()
         if session is not None and session.armed:
             await device_ws.send(camera_id, _arm_message_for(session))
+        # If a mutual-sync run is active when a phone (re)connects, push
+        # the sync_run signal so it can join late instead of sitting idle
+        # until the run times out.
+        active_sync = state.current_sync()
+        if active_sync is not None and camera_id not in active_sync.reports:
+            await device_ws.send(
+                camera_id,
+                {"type": "sync_run", "sync_id": active_sync.id},
+            )
         await sse_hub.broadcast(
             "device_status",
             {"cam": camera_id, "online": True, "ws_connected": True},
@@ -3042,9 +3051,10 @@ _SYNC_START_STATUS_FOR_REASON: dict[str, int] = {
 
 @app.post("/sync/start")
 async def sync_start(request: Request) -> dict[str, Any]:
-    """Begin a mutual chirp sync run. Both online phones receive
-    `commands[cam] == "sync_run"` on their next heartbeat and enter the
-    mutual-sync flow. Returns 409 with a `reason` field on conflict."""
+    """Begin a mutual chirp sync run. Pushes `{type: "sync_run", sync_id}`
+    over WS to both online phones; iOS `applyMutualSync` enters the
+    mutual-sync flow on receipt. Returns 409 with a `reason` field on
+    conflict."""
     run, reason = state.start_sync()
     if reason is not None:
         status_code = _SYNC_START_STATUS_FOR_REASON.get(reason, 409)
@@ -3053,6 +3063,17 @@ async def sync_start(request: Request) -> dict[str, Any]:
             detail={"ok": False, "error": reason},
         )
     assert run is not None  # reason is None → run is always set
+    # WS-only live transport: phones get the sync_run signal here. Without
+    # this push iOS never knows the run started — the HTTP /heartbeat
+    # retirement (a66d5db) removed the `commands` channel and this push
+    # was missed. CameraViewController's WS handler routes type=sync_run
+    # → applyMutualSync(syncId:) → beginMutualSync.
+    await device_ws.broadcast(
+        {
+            cam.camera_id: {"type": "sync_run", "sync_id": run.id}
+            for cam in state.online_devices()
+        }
+    )
     return {"ok": True, "sync": run.to_dict()}
 
 
