@@ -632,6 +632,22 @@ _JS_TEMPLATE = r"""
         sel.removeAllRanges();
         sel.addRange(range);
       }
+    } else if (t.id === 'sync-ai-debug-copy') {
+      const orig = t.textContent;
+      t.textContent = 'Fetching…';
+      t.disabled = true;
+      try {
+        const r = await fetch('/sync/debug_export', { cache: 'no-store' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const text = await r.text();
+        await navigator.clipboard.writeText(text);
+        t.textContent = 'Copied!';
+        setTimeout(() => { t.textContent = orig; t.disabled = false; }, 1800);
+      } catch (err) {
+        t.textContent = 'Error';
+        t.disabled = false;
+        setTimeout(() => { t.textContent = orig; }, 2000);
+      }
     } else if (t.id === 'sync-log-clear') {
       _syncLogClearedAtTs = Date.now() / 1000;
       const logEl = document.getElementById('sync-log');
@@ -949,7 +965,8 @@ def render_sync_html(
         '<h2 class="card-title">Log</h2>'
         '<div class="sync-log-head">'
         '<span class="sync-log-label">Diagnostic events &middot; server + A + B</span>'
-        '<button type="button" class="btn secondary small" id="sync-log-copy">Copy</button>'
+        '<button type="button" class="btn secondary small" id="sync-ai-debug-copy" title="Fetch /sync/debug_export — compact AI-readable report with auto-diagnosis. Paste to Claude Code.">Copy AI Debug</button>'
+        '<button type="button" class="btn secondary small" id="sync-log-copy">Copy Log</button>'
         '<button type="button" class="btn secondary small" id="sync-log-clear">Clear view</button>'
         '</div>'
         '<pre class="sync-log" id="sync-log"></pre>'

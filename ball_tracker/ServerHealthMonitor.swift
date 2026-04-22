@@ -34,7 +34,9 @@ final class ServerHealthMonitor {
 
     /// Triggered when the monitor timer ticks. The caller (VC) should
     /// serialize this into `{"type": "heartbeat", ...}` and send via WS.
-    var sendWSHeartbeat: ((_ timeSynced: Bool, _ timeSyncId: String?) -> Void)?
+    /// Server derives sync state from the raw fields; iOS no longer
+    /// sends its own boolean verdict.
+    var sendWSHeartbeat: ((_ timeSyncId: String?) -> Void)?
 
     init(baseIntervalS: TimeInterval) {
         self.baseIntervalS = baseIntervalS
@@ -79,7 +81,7 @@ final class ServerHealthMonitor {
 
     /// Send a tick to the closure and reschedule.
     func probeNow() {
-        sendWSHeartbeat?(timeSyncId != nil, timeSyncId)
+        sendWSHeartbeat?(timeSyncId)
         scheduleNext(after: baseIntervalS)
     }
     private func invalidatePollTimer() {

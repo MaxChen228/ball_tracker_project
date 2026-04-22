@@ -181,6 +181,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var timeSyncClaimGeneration: Int = 0
     private var lastSyncAnchorTimestampS: Double? { lastSyncAnchor?.anchorTimestampS }
     private var lastSyncId: String? { lastSyncAnchor?.syncId }
+    private var serverTimeSyncConfirmed: Bool = false
+    private var serverTimeSyncId: String?
 
     // Time-sync timeout task so we can cancel if the user aborts early.
     private var timeSyncTimeoutWork: DispatchWorkItem?
@@ -325,7 +327,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 // Keep the "尚未時間校正" warning up while recording — the
                 // upload will still go but the server will skip triangulation,
                 // and the operator needs to keep seeing why.
-                if self.lastSyncAnchorTimestampS != nil {
+                if self.serverTimeSyncConfirmed {
                     self.warningLabel.isHidden = true
                 }
                 // Start-of-recording feedback: short tone + a medium
@@ -485,11 +487,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // reads this snapshot rather than the live property.
         let snapshotSessionId = currentSessionId
         log.info("camera entering recording session=\(snapshotSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
-        if lastSyncAnchorTimestampS == nil {
+        if !serverTimeSyncConfirmed {
             warningLabel.text = "尚未時間校正，將無法三角化"
             warningLabel.textColor = DesignTokens.Colors.ink
             warningLabel.isHidden = false
-            log.warning("arm without time sync anchor — server will skip triangulation")
+            log.warning("arm without server-confirmed time sync — server will skip triangulation")
         } else {
             warningLabel.isHidden = true
         }
@@ -528,14 +530,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.clipRecorder = nil
         }
         warningLabel.isHidden = true
-        // Drop fps back to idle so the sensor stops running at 240. If the
-        // dashboard isn't watching this cam's preview, park the session
-        // entirely to save power.
-        if previewRequestedByServer {
-            switchCaptureFps(standbyFps)
-        } else {
-            stopCapture()
-        }
+        // Drop the sensor back to whatever standby currently requires.
+        reconcileStandbyCaptureState()
         updateUIForState()
     }
 
@@ -770,7 +766,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         pendingTimeSyncId = nil
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
-        // Already at standbyFps — leave the session running for preview.
+        reconcileStandbyCaptureState()
         lastUploadStatusText = "時間校正 · \(Self.localizedCancelReason(reason))"
 
         if reason == "timeout" {
@@ -816,6 +812,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         latestChirpSnapshot = nil
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
+        reconcileStandbyCaptureState()
         warningLabel.isHidden = true
         lastUploadStatusText = "時間校正完成"
         updateUIForState()
@@ -1255,6 +1252,19 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
+    /// Reconcile camera hardware to the current standby owner. Transient
+    /// flows (time sync, mutual sync, recording) can legitimately defer
+    /// preview on/off decisions until they end; when we return to
+    /// `.standby`, resolve that deferred intent in one place so the iOS
+    /// capture session never drifts away from dashboard preview state.
+    private func reconcileStandbyCaptureState() {
+        if previewRequestedByServer || calibrationFrameCaptureArmed {
+            startCapture(at: standbyFps)
+        } else {
+            stopCapture()
+        }
+    }
+
     /// Inner of `switchCaptureFps` (same body, no dispatch) for callers that
     /// already ran themselves onto `sessionQueue`. Keeps the stop → apply
     /// → start sequence atomic inside one queue task.
@@ -1451,7 +1461,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             "type": "hello",
             "cam": settings.cameraRole,
             "session_id": currentSessionId as Any,
-            "time_synced": lastSyncAnchorTimestampS != nil,
             "time_sync_id": lastSyncId as Any,
             "sync_anchor_timestamp_s": lastSyncAnchorTimestampS as Any,
         ])
@@ -1511,13 +1520,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             DiagnosticsData.shared.update(serverStatusText: text)
             self?.updateUIForState()
         }
-        healthMonitor.sendWSHeartbeat = { [weak self] timeSynced, timeSyncId in
+        healthMonitor.sendWSHeartbeat = { [weak self] timeSyncId in
             guard let self else { return }
             var payload: [String: Any] = [
                 "type": "heartbeat",
                 "cam": self.settings.cameraRole,
                 "t_session_s": CACurrentMediaTime(),
-                "time_synced": timeSynced,
                 "time_sync_id": timeSyncId as Any,
                 "sync_anchor_timestamp_s": self.lastSyncAnchorTimestampS as Any,
             ]
@@ -1903,9 +1911,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     /// Common cleanup from both success and timeout paths. Tears down the
-    /// mutual-sync audio engine (releases the AVAudioSession) and returns
-    /// to `.standby`. Does NOT touch the capture session — mutual sync
-    /// never owned it, so there's nothing for us to restore.
+    /// mutual-sync audio engine (releases the AVAudioSession), returns to
+    /// `.standby`, then reconciles capture ownership back to preview /
+    /// calibration-frame / parked standby.
     private func teardownMutualSync(status: String) {
         syncDetector?.onDetection = nil
         syncDetector = nil
@@ -1916,6 +1924,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         syncFromOtherPTS = nil
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
+        reconcileStandbyCaptureState()
         warningLabel.isHidden = true
         lastUploadStatusText = status
         updateUIForState()
@@ -2067,7 +2076,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// 位置校正 gate was dropped (calibration is dashboard-owned, iOS has no
     /// way to know the server-side state).
     private func updateReadyCard() {
-        let timeSyncOK = lastSyncAnchorTimestampS != nil
+        let timeSyncOK = serverTimeSyncConfirmed
         let serverOK = healthMonitor?.isReachable ?? false
 
         let hint: String
@@ -2080,9 +2089,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
 
         let timeSyncGate = ReadyCard.Gate(
-            state: timeSyncOK ? .pass : (state == .timeSyncWaiting ? .pending : .fail),
+            state: timeSyncOK ? .pass : .fail,
             label: "時間校正",
-            action: (timeSyncOK || state == .timeSyncWaiting) ? nil : "請從 dashboard 校時",
+            action: timeSyncOK ? nil : "以 dashboard 為準",
             onTap: nil
         )
         let serverGate = ReadyCard.Gate(
@@ -2549,6 +2558,13 @@ extension CameraViewController: ServerWebSocketDelegate {
             log.info("ws calibration update cam=\(changedCam, privacy: .public) local=\(self.settings.cameraRole, privacy: .public)")
             DispatchQueue.main.async { self.healthMonitor.probeNow() }
         case "settings":
+            let pushedTimeSync = message["device_time_synced"] as? Bool ?? false
+            let pushedTimeSyncId = message["device_time_sync_id"] as? String
+            if self.serverTimeSyncConfirmed != pushedTimeSync || self.serverTimeSyncId != pushedTimeSyncId {
+                self.serverTimeSyncConfirmed = pushedTimeSync
+                self.serverTimeSyncId = pushedTimeSyncId
+                DispatchQueue.main.async { self.updateUIForState() }
+            }
             if let raw = message["paths"] as? [String] {
                 let parsed = Set(raw.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
                 if !parsed.isEmpty { currentSessionPaths = parsed }
