@@ -538,6 +538,11 @@ _JS_TEMPLATE = r"""
       const btn = form.querySelector('button');
       if (btn) btn.disabled = true;
       const isQuick = form.action.endsWith('/sync/trigger');
+      // Pre-build the Audio element INSIDE the click handler so the
+      // browser's autoplay policy counts this as a user gesture. If we
+      // did `new Audio().play()` inside setTimeout later, Safari/Chrome
+      // would reject the call as non-gesture and the chirp wouldn't play.
+      const chirpAudio = isQuick ? new Audio('/chirp.wav') : null;
       try {
         const resp = await fetch(form.action, {
           method: 'POST',
@@ -555,6 +560,22 @@ _JS_TEMPLATE = r"""
           hint.textContent = 'Error: ' + reason;
           syncBox.appendChild(hint);
           setTimeout(() => hint.remove(), 3000);
+        } else if (chirpAudio) {
+          // Give iOS a moment to receive the WS sync_command and spin up
+          // the mic detector before we start the waveform. 500 ms is safe
+          // across LAN + iOS capture-session reconfiguration latency; the
+          // chirp WAV has 500 ms leading silence of its own too, so the
+          // effective detection window is 1 s of slack before the sweep.
+          setTimeout(() => {
+            chirpAudio.play().catch((err) => {
+              const hint = document.createElement('div');
+              hint.className = 'meta';
+              hint.style.color = 'var(--failed)';
+              hint.textContent = 'Browser blocked autoplay: ' + (err.message || err);
+              syncBox.appendChild(hint);
+              setTimeout(() => hint.remove(), 4000);
+            });
+          }, 500);
         }
         tickSyncStatus();
         tickSyncState();
