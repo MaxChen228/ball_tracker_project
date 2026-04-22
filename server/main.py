@@ -55,7 +55,6 @@ counter. iPhones are dumb capture clients — they do not allocate pairing
 identifiers.
 """
 from __future__ import annotations
-from __future__ import annotations
 
 import asyncio
 import json
