@@ -21,6 +21,12 @@ from render_compare import (
     render_live_compare_camera,
 )
 from render_scene import _build_figure
+from render_shared import (
+    _CSS as _SHARED_CSS,
+    _render_app_nav as _shared_render_app_nav,
+    _render_nav_status as _shared_render_nav_status,
+    _render_primary_nav as _shared_render_primary_nav,
+)
 from schemas import Device, Session
 
 
@@ -3285,6 +3291,14 @@ def _render_app_nav(
         '</div>'
         '</nav>'
     )
+
+
+# Shared-shell façade: keep the historical render_dashboard imports stable
+# while routing callers to the extracted shared module.
+_CSS = _SHARED_CSS
+_render_nav_status = _shared_render_nav_status
+_render_primary_nav = _shared_render_primary_nav
+_render_app_nav = _shared_render_app_nav
 
 
 def _render_chirp_threshold_body(
