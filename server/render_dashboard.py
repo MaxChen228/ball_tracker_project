@@ -1920,7 +1920,6 @@ _JS_TEMPLATE = r"""
     const cam = btn.dataset.previewCam;
     if (!cam || pendingPreviewMutations.has(cam)) return;
     const enabled = btn.dataset.previewEnabled !== '1';
-    markPreviewOwned(cam, enabled);
     _lastDevKey = null;
     pendingPreviewMutations.add(cam);
     if (currentDevices !== null || currentCalibrations !== null) {
@@ -1957,57 +1956,10 @@ _JS_TEMPLATE = r"""
     }
   });
 
-  // Preview ownership is per-tab (sessionStorage), NOT server-persistent.
-  // Without this, reloading the page inherits whatever flag was last held
-  // by the prior tab session + keeps extending its TTL, so preview can
-  // never be "off by default after reload". Here we: (a) only refresh
-  // TTLs that THIS tab explicitly turned on, and (b) on first load, actively
-  // clear any server-side flag the tab doesn't own so the iPhone stops
-  // its capture without the 5 s TTL wait.
-  const PREVIEW_OWNED_KEY = 'ball_tracker.preview_owned';
-  function ownedPreviewCams() {
-    try { return new Set(JSON.parse(sessionStorage.getItem(PREVIEW_OWNED_KEY) || '[]')); }
-    catch { return new Set(); }
-  }
-  function persistOwnedPreviewCams(s) {
-    try { sessionStorage.setItem(PREVIEW_OWNED_KEY, JSON.stringify([...s])); } catch {}
-  }
-  function markPreviewOwned(cam, on) {
-    const s = ownedPreviewCams();
-    if (on) s.add(cam); else s.delete(cam);
-    persistOwnedPreviewCams(s);
-  }
-  async function resetUnownedPreviewsOnce() {
-    // Runs after the first tickStatus populates currentPreviewRequested.
-    const owned = ownedPreviewCams();
-    const toClear = Object.keys(currentPreviewRequested || {}).filter(c => !owned.has(c));
-    for (const cam of toClear) {
-      try {
-        await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: false }),
-        });
-      } catch (_) {}
-    }
-    if (toClear.length) await tickStatus();
-  }
-  // Keep server-side TTL alive. Server flag lapses in 5 s; 2 s refresh
-  // absorbs one missed tick. Only refresh cams THIS tab owns.
-  async function tickPreviewRefresh() {
-    const owned = ownedPreviewCams();
-    for (const cam of Object.keys(currentPreviewRequested || {})) {
-      if (!owned.has(cam)) continue;
-      try {
-        await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: true }),
-        });
-      } catch (_) { /* swallow; next tick retries */ }
-    }
-  }
-  setInterval(tickPreviewRefresh, 2000);
+  // Preview is a simple server-owned flag: click flips it, server pushes
+  // the new state to the phone over WS, WS drop flips it back to false.
+  // No client-side keep-alive or TTL refresh — those created race
+  // conditions where toggle-off was silently re-armed by a stale beat.
 
   // Preview image polling. MJPEG streaming via <img> is flaky across
   // browsers (Chrome silently aborts when the server's first multipart
@@ -2529,7 +2481,7 @@ _JS_TEMPLATE = r"""
 
   // (1 s) and is the only high-frequency tick.
   initLiveStream();
-  tickStatus().then(resetUnownedPreviewsOnce);
+  tickStatus();
   tickCalibration();
   tickEvents();
   tickExtendedMarkers();
