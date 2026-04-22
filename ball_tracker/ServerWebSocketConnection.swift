@@ -37,10 +37,27 @@ final class ServerWebSocketConnection {
     private var task: URLSessionWebSocketTask?
     private var reconnectWork: DispatchWorkItem?
     private var pingWork: DispatchWorkItem?
+    private var livenessWork: DispatchWorkItem?
+    /// Last time we saw ANY inbound activity (message OR ping pong). The
+    /// liveness watchdog drops the connection when this drifts past
+    /// `livenessTimeout`, so a server killed mid-connection surfaces in
+    /// the UI within seconds instead of waiting for OS-level TCP timeout
+    /// (which can take minutes).
+    private var lastInboundAt: Date = Date()
 
     // Backoff: 1 → 2 → 4 → 8 → 16 → 30 s cap
     private static let backoffCap: TimeInterval = 30
-    private static let pingInterval: TimeInterval = 25
+    /// Send a ping every N seconds so the server-killed case surfaces fast.
+    /// 25 s was way too slow — a dead server looked alive for the entire
+    /// gap. 5 s gives the watchdog enough samples to catch the drop within
+    /// `livenessTimeout`.
+    private static let pingInterval: TimeInterval = 5
+    /// Watchdog cadence + threshold. Check every 3 s; if the last inbound
+    /// activity is older than 12 s (≈ 2 missed pings + slack), drop and
+    /// reconnect. Tuned to feel "instant" on the iOS HUD while leaving
+    /// room for real LAN jitter.
+    private static let livenessWatchdogInterval: TimeInterval = 3
+    private static let livenessTimeout: TimeInterval = 12
 
     // MARK: Init
 
@@ -103,7 +120,9 @@ final class ServerWebSocketConnection {
         newTask.resume()
         state = .connected
         reconnectAttempt = 0
+        lastInboundAt = Date()
         schedulePing()
+        scheduleLivenessWatchdog()
         if let hello = initialHello { _send(hello) }
         _receiveNext(task: newTask)
         DispatchQueue.main.async { [weak self] in
@@ -118,6 +137,8 @@ final class ServerWebSocketConnection {
         reconnectWork = nil
         pingWork?.cancel()
         pingWork = nil
+        livenessWork?.cancel()
+        livenessWork = nil
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         state = scheduleReconnect ? .reconnecting : .disconnected
@@ -155,6 +176,7 @@ final class ServerWebSocketConnection {
                 case .failure(let error):
                     self._handleDropped(reason: error.localizedDescription)
                 case .success(let msg):
+                    self.lastInboundAt = Date()
                     let text: String?
                     switch msg {
                     case .string(let s): text = s
@@ -215,12 +237,54 @@ final class ServerWebSocketConnection {
             guard let self else { return }
             self.wsQueue.async {
                 guard self.state == .connected, let t = self.task else { return }
-                t.sendPing { _ in }
+                // Capture task identity so a stale completion (after a
+                // reconnect) can't mark the WRONG connection as dropped.
+                t.sendPing { [weak self] error in
+                    guard let self else { return }
+                    self.wsQueue.async {
+                        guard t === self.task else { return }
+                        if let error {
+                            self._handleDropped(reason: "ping failed: \(error.localizedDescription)")
+                            return
+                        }
+                        // Successful pong = liveness signal.
+                        self.lastInboundAt = Date()
+                    }
+                }
                 self.schedulePing()
             }
         }
         pingWork = work
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.pingInterval, execute: work)
+    }
+
+    /// Liveness watchdog: independent of ping completions, since URLSession
+    /// can let a sendPing closure hang indefinitely when the underlying
+    /// TCP connection silently dies (no FIN, no RST). We track the last
+    /// inbound message / pong timestamp; if it drifts past `livenessTimeout`
+    /// we force a drop + reconnect. This is what makes "kill the server →
+    /// iOS HUD goes red within 12 s" actually work.
+    private func scheduleLivenessWatchdog() {
+        dispatchPrecondition(condition: .onQueue(wsQueue))
+        livenessWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.wsQueue.async {
+                guard self.state == .connected else { return }
+                let elapsed = Date().timeIntervalSince(self.lastInboundAt)
+                if elapsed > Self.livenessTimeout {
+                    self._handleDropped(
+                        reason: "no activity for \(Int(elapsed))s — server unreachable"
+                    )
+                    return
+                }
+                self.scheduleLivenessWatchdog()
+            }
+        }
+        livenessWork = work
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + Self.livenessWatchdogInterval, execute: work
+        )
     }
 
     private func resolvedURL() -> URL {
