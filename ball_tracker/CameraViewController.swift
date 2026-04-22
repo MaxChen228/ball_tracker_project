@@ -103,7 +103,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // UI state.
     private var lastUploadStatusText: String = ""
-    private var lastResultText: String = ""
     private var lastFrameTimestampForFps: CFTimeInterval = CACurrentMediaTime()
     private var framesSinceLastFpsTick: Int = 0
     private var fpsEstimate: Double = 0
@@ -114,9 +113,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // the server owns all calibration state now.
     private var latestImageWidth: Int = 0
     private var latestImageHeight: Int = 0
-
-    // Chirp detector snapshot for the HUD — written on audio queue.
-    private var latestChirpSnapshot: AudioChirpDetector.Snapshot?
 
     // The `.recording`-was-just-entered bootstrap flag and the snapshot of
     // `currentSessionId` taken at arm time both live in `frameStateBox`;
@@ -193,7 +189,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let topStatusChip = StatusChip()
     private let controlPanel = UIView()
     private let serverIPField = UITextField()
-    private let serverPortField = UITextField()
     private let roleControl = UISegmentedControl(items: ["A", "B"])
     private let applySettingsButton = UIButton(type: .system)
     private let connectionLabel = UILabel()
@@ -303,7 +298,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
 
         settings = AppSettingsStore.load()
-        serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: settings.serverPort)
+        serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: AppSettings.serverPortFixed)
 
         recorder = PitchRecorder()
         recorder.setCameraId(settings.cameraRole)
@@ -656,15 +651,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // MARK: - Time calibration (chirp anchor)
 
-    @objc private func onTapTimeCalibration() {
-        if state == .timeSyncWaiting {
-            cancelTimeSync()
-        } else if state == .standby {
-            startTimeSync()
-        }
-        updateUIForState()
-    }
-
     private func startTimeSync(syncId: String? = nil) {
         if let syncId {
             beginTimeSync(syncId: syncId)
@@ -738,7 +724,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         timeSyncTimeoutWork?.cancel()
         timeSyncTimeoutWork = nil
         chirpDetector?.onChirpDetected = nil
-        latestChirpSnapshot = nil
         pendingTimeSyncId = nil
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
@@ -785,7 +770,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // Surface the freshly-acquired anchor to the dashboard via the
         // next heartbeat so the sidebar's "time sync" dot flips green.
         healthMonitor?.updateTimeSyncId(syncId)
-        latestChirpSnapshot = nil
         state = .standby
         frameStateBox.update(state: .standby, pendingBootstrap: false, sessionId: nil)
         reconcileStandbyCaptureState()
@@ -1400,8 +1384,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func updateChirpDebugOverlay() {
-        guard state == .timeSyncWaiting, let detector = chirpDetector else { return }
-        latestChirpSnapshot = detector.lastSnapshot
+        guard state == .timeSyncWaiting, chirpDetector != nil else { return }
     }
 
     // MARK: - Server health + upload queue wiring
@@ -1614,10 +1597,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.lastUploadStatusText = text
             self?.updateUIForState()
         }
-        uploadQueue.onLastResultChanged = { [weak self] text in
-            guard let self else { return }
-            self.lastResultText = text
-            self.updateUIForState()
+        uploadQueue.onLastResultChanged = { [weak self] _ in
+            self?.updateUIForState()
         }
         uploadQueue.onUploadingChanged = { [weak self] _ in
             self?.updateUIForState()
@@ -1627,7 +1608,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             let basename = fileURL.deletingPathExtension().lastPathComponent
             let detail = Self.describeUploadError(error)
             log.error("camera payload dropped file=\(basename, privacy: .public) reason=\(detail, privacy: .public)")
-            self.lastResultText = "上傳失敗已丟棄: \(basename) — \(detail)"
             self.updateUIForState()
         }
     }
@@ -1637,10 +1617,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.lastUploadStatusText = text
             self?.updateUIForState()
         }
-        analysisQueue.onLastResultChanged = { [weak self] text in
-            guard let self else { return }
-            self.lastResultText = text
-            self.updateUIForState()
+        analysisQueue.onLastResultChanged = { [weak self] _ in
+            self?.updateUIForState()
         }
     }
 
@@ -1890,27 +1868,23 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     /// Force an immediate heartbeat probe, resetting backoff. Exposed for
-    /// the Settings → Diagnostics "Test connection" action (formerly a
-    /// HUD button on the main screen).
-    func testServerConnection() {
-        healthMonitor.probeNow()
-    }
-
-    /// Settings-dismiss callback. Re-diffs UserDefaults and reconfigures
+    /// Re-diffs UserDefaults and reconfigures
     /// anything settings-driven. Phase 6: Settings is bootstrap-only
-    /// (IP / port / role), so the only knobs here are the server endpoint
+    /// (IP / role), so the only knobs here are the server endpoint
     /// and the camera role. Chirp threshold + heartbeat interval come from
     /// the dashboard via WS settings (Phase 3).
     private func applyUpdatedSettings() {
         let latest = AppSettingsStore.load()
         let serverChanged = latest.serverIP != settings.serverIP
-            || latest.serverPort != settings.serverPort
         let cameraRoleChanged = latest.cameraRole != settings.cameraRole
 
         settings = latest
 
         if serverChanged {
-            serverConfig = ServerUploader.ServerConfig(serverIP: latest.serverIP, serverPort: latest.serverPort)
+            serverConfig = ServerUploader.ServerConfig(
+                serverIP: latest.serverIP,
+                serverPort: AppSettings.serverPortFixed
+            )
             uploader = ServerUploader(config: serverConfig)
             uploadQueue.updateUploader(uploader)
             analysisQueue.updateUploader(uploader)
@@ -1987,12 +1961,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         serverIPField.placeholder = "192.168.1.100"
         serverIPField.font = DesignTokens.Fonts.mono(size: 14, weight: .medium)
 
-        serverPortField.translatesAutoresizingMaskIntoConstraints = false
-        serverPortField.borderStyle = .roundedRect
-        serverPortField.keyboardType = .numberPad
-        serverPortField.placeholder = "8765"
-        serverPortField.font = DesignTokens.Fonts.mono(size: 14, weight: .medium)
-
         roleControl.translatesAutoresizingMaskIntoConstraints = false
         roleControl.selectedSegmentTintColor = DesignTokens.Colors.accent
         roleControl.setTitleTextAttributes([.foregroundColor: DesignTokens.Colors.ink], for: .normal)
@@ -2011,7 +1979,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         previewLabel.font = DesignTokens.Fonts.mono(size: 12, weight: .medium)
         previewLabel.textColor = DesignTokens.Colors.sub
 
-        let serverRow = UIStackView(arrangedSubviews: [serverLabel, serverIPField, serverPortField])
+        let serverRow = UIStackView(arrangedSubviews: [serverLabel, serverIPField])
         serverRow.axis = .horizontal
         serverRow.alignment = .center
         serverRow.spacing = DesignTokens.Spacing.s
@@ -2036,7 +2004,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             serverLabel.widthAnchor.constraint(equalToConstant: 52),
             roleLabel.widthAnchor.constraint(equalToConstant: 52),
             serverIPField.widthAnchor.constraint(equalToConstant: 156),
-            serverPortField.widthAnchor.constraint(equalToConstant: 76),
             roleControl.widthAnchor.constraint(equalToConstant: 120),
             applySettingsButton.widthAnchor.constraint(equalToConstant: 84),
 
@@ -2057,7 +2024,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func syncInlineControlsFromSettings() {
         serverIPField.text = settings.serverIP
-        serverPortField.text = "\(settings.serverPort)"
         roleControl.selectedSegmentIndex = settings.cameraRole == "B" ? 1 : 0
     }
 
@@ -2069,17 +2035,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             warningLabel.isHidden = false
             return
         }
-        guard let portText = serverPortField.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let serverPort = Int(portText),
-              (1...65535).contains(serverPort) else {
-            warningLabel.text = "Port 必須是 1-65535"
-            warningLabel.isHidden = false
-            return
-        }
-
         let updated = AppSettings(
             serverIP: serverIP,
-            serverPort: serverPort,
             cameraRole: roleControl.selectedSegmentIndex == 1 ? "B" : "A"
         )
         AppSettingsStore.save(updated)
