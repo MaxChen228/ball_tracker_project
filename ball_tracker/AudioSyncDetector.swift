@@ -408,14 +408,30 @@ final class AudioSyncDetector {
         let count = lagHi - lagLo + 1
         var normValues = [Float](repeating: 0, count: count)
 
+        // Effective silence floor: if the windowed signal's energy is
+        // below this, the ring is essentially zeros (mic not producing
+        // samples, or denormals from an un-initialised path). The
+        // previous 1e-12 floor was low enough that `abs(dot) / sqrt(1e-12)`
+        // could explode to peaks of 1000+ on pure numerical noise —
+        // producing "I heard something huge" false positives that then
+        // got reported as real detections. Matched filter's bestNorm is
+        // bounded by 1.0 for unit-energy reference; anything above that
+        // is pathology.
+        let silenceFloor: Float = 1e-6
         linear.withUnsafeBufferPointer { buf in
             guard let base = buf.baseAddress else { return }
             for idx in 0..<count {
                 let lag = lagLo + idx
+                let rawEnergy = cumsq[lag + refLen] - cumsq[lag]
+                if rawEnergy < silenceFloor {
+                    normValues[idx] = 0
+                    continue
+                }
                 var dot: Float = 0
                 vDSP_dotpr(base + lag, 1, reference, 1, &dot, vDSP_Length(refLen))
-                let energy = max(cumsq[lag + refLen] - cumsq[lag], 1e-12)
-                normValues[idx] = abs(dot) / sqrt(energy)
+                // Mathematical ceiling is 1.0 (Cauchy-Schwarz). Clamp as a
+                // belt-and-braces guard against numerical overshoot.
+                normValues[idx] = min(1.0, abs(dot) / sqrt(rawEnergy))
             }
         }
 
