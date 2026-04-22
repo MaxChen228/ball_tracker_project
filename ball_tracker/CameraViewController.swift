@@ -92,7 +92,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let frameStateBox = FrameStateBox()
 
     // Collaborators.
-    private var settings: SettingsViewController.Settings!
+    private var settings: AppSettings!
     private var trackingExposureCapMode: ServerUploader.TrackingExposureCapMode = .frameDuration
     private var recorder: PitchRecorder!
     private var uploader: ServerUploader!
@@ -217,10 +217,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var lastServerHeartbeatInterval: Double?
     private var lastServerTrackingExposureCapMode: ServerUploader.TrackingExposureCapMode?
     /// Currently-applied capture image height. Initialised from
-    /// SettingsViewController.captureHeightFixed (1080). Server pushes a
+    /// `AppSettings.captureHeightFixed` (1080). Server pushes a
     /// value via WS settings; when it differs, rebuild the capture session
     /// — but only while in .standby so an armed clip isn't disrupted.
-    private var currentCaptureHeight: Int = SettingsViewController.captureHeightFixed
+    private var currentCaptureHeight: Int = AppSettings.captureHeightFixed
     /// Paired 16:9 width for `currentCaptureHeight`. Used by every
     /// `configureCaptureFormat` call site so fps swaps preserve the
     /// active resolution (no snap-back to 1080p after server pushes 720).
@@ -230,7 +230,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         switch h {
         case 720:  return 1280
         case 1080: return 1920
-        default:   return SettingsViewController.captureWidthFixed
+        default:   return AppSettings.captureWidthFixed
         }
     }
 
@@ -302,16 +302,14 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self?.handleDetectedFrame(frame)
         }
 
-        settings = SettingsViewController.loadFromUserDefaults()
+        settings = AppSettingsStore.load()
         serverConfig = ServerUploader.ServerConfig(serverIP: settings.serverIP, serverPort: settings.serverPort)
-        DiagnosticsData.shared.update(trackingExposureCapLabel: trackingExposureCapMode.label)
 
         recorder = PitchRecorder()
         recorder.setCameraId(settings.cameraRole)
         recorder.onRecordingStarted = { [weak self] idx in
             DispatchQueue.main.async {
                 guard let self else { return }
-                DiagnosticsData.shared.update(localRecordingIndex: .some(idx))
                 // Keep the "尚未時間校正" warning up while recording — the
                 // upload will still go but the server will skip triangulation,
                 // and the operator needs to keep seeing why.
@@ -1451,7 +1449,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         if self.lastServerTrackingExposureCapMode != exposureMode {
             self.lastServerTrackingExposureCapMode = exposureMode
             self.trackingExposureCapMode = exposureMode
-            DiagnosticsData.shared.update(trackingExposureCapLabel: exposureMode.label)
             if let device = self.currentCaptureDevice {
                 self.sessionQueue.async { [weak self] in
                     guard let self else { return }
@@ -1515,7 +1512,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 handleTrackingExposureCap: { [weak self] cap in
                     self?.handlePushedTrackingExposureCap(cap)
                 },
-                currentCaptureHeight: { [weak self] in self?.currentCaptureHeight ?? SettingsViewController.captureHeightFixed },
+                currentCaptureHeight: { [weak self] in self?.currentCaptureHeight ?? AppSettings.captureHeightFixed },
                 applyServerCaptureHeight: { [weak self] height in self?.applyServerCaptureHeight(height) },
                 isPreviewRequested: { [weak self] in self?.previewRequestedByServer ?? false },
                 setPreviewRequested: { [weak self] in self?.previewRequestedByServer = $0 },
@@ -1575,8 +1572,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func wireHealthMonitorCallbacks() {
-        healthMonitor.onStatusChanged = { [weak self] text, _ in
-            DiagnosticsData.shared.update(serverStatusText: text)
+        healthMonitor.onStatusChanged = { [weak self] _, _ in
             self?.updateUIForState()
         }
         healthMonitor.sendWSHeartbeat = { [weak self] timeSyncId in
@@ -1906,7 +1902,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// and the camera role. Chirp threshold + heartbeat interval come from
     /// the dashboard via WS settings (Phase 3).
     private func applyUpdatedSettings() {
-        let latest = SettingsViewController.loadFromUserDefaults()
+        let latest = AppSettingsStore.load()
         let serverChanged = latest.serverIP != settings.serverIP
             || latest.serverPort != settings.serverPort
         let cameraRoleChanged = latest.cameraRole != settings.cameraRole
@@ -1932,12 +1928,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         syncInlineControlsFromSettings()
     }
 
-    /// Forward the heartbeat monitor's tick to the shared Diagnostics
-    /// singleton so Settings → Diagnostics can render it. The main HUD
-    /// itself no longer shows "last contact" — Ready card's server row
-    /// answers the operator's "am I online?" question on its own.
     private func updateLastContactLabel(from date: Date?) {
-        DiagnosticsData.shared.update(lastContactAt: date)
+        _ = date
     }
 
     private func setupUI() {
@@ -2085,12 +2077,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             return
         }
 
-        let updated = SettingsViewController.Settings(
+        let updated = AppSettings(
             serverIP: serverIP,
             serverPort: serverPort,
             cameraRole: roleControl.selectedSegmentIndex == 1 ? "B" : "A"
         )
-        SettingsViewController.saveToUserDefaults(updated)
+        AppSettingsStore.save(updated)
         warningLabel.isHidden = true
         applyUpdatedSettings()
         updateUIForState()
@@ -2443,7 +2435,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         framesSinceLastFpsTick = 0
         lastFrameTimestampForFps = now
         // Fan-out to the Diagnostics screen (Settings → Diagnostics).
-        DiagnosticsData.shared.update(fpsEstimate: fpsEstimate)
     }
 
 }
