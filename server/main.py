@@ -137,6 +137,7 @@ from live_pairing import LivePairingSession
 from sse import SSEHub
 from ws import DeviceSocketManager
 from markers_routes import build_markers_router
+from pages_routes import build_pages_router
 from pitch_routes import build_pitch_router
 from control_routes import (
     arm_message_for,
@@ -2380,6 +2381,11 @@ app.include_router(
         get_state=lambda: state,
     )
 )
+app.include_router(
+    build_pages_router(
+        get_state=lambda: state,
+    )
+)
 
 
 @app.get("/chirp.wav")
@@ -2403,106 +2409,6 @@ def chirp_wav() -> Response:
 # ---------------------------------------------------------------------------
 # Live preview (Phase 4a)
 # ---------------------------------------------------------------------------
-@app.get("/", response_class=HTMLResponse)
-def events_index() -> HTMLResponse:
-    from render_dashboard import render_events_index_html
-
-    session = state.session_snapshot()
-    sync_run = state.current_sync()
-    return HTMLResponse(
-        render_events_index_html(
-            events=state.events(),
-            devices=[
-                {
-                    "camera_id": d.camera_id,
-                    "last_seen_at": d.last_seen_at,
-                    "time_synced": d.time_synced,
-                }
-                for d in state.online_devices()
-            ],
-            session=session.to_dict() if session is not None else None,
-            calibrations=sorted(state.calibrations().keys()),
-            capture_mode=state.current_mode().value,
-            default_paths=sorted(p.value for p in state.default_paths()),
-            live_session=state.live_session_summary(),
-            sync=sync_run.to_dict() if sync_run is not None else None,
-            sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
-            chirp_detect_threshold=state.chirp_detect_threshold(),
-            heartbeat_interval_s=state.heartbeat_interval_s(),
-            tracking_exposure_cap=state.tracking_exposure_cap().value,
-            capture_height_px=state.capture_height_px(),
-            calibration_last_ts={
-                cam: p.stat().st_mtime
-                for cam in state.calibrations().keys()
-                for p in [state._calibration_path(cam)]
-                if p.exists()
-            },
-            preview_requested=state._preview.requested_map(),
-        )
-    )
-
-
-@app.get("/sync", response_class=HTMLResponse)
-def sync_page() -> HTMLResponse:
-    """Dedicated time-sync surface. Keeps chirp workflows and runtime
-    tuning separate from geometric camera calibration."""
-    from render_sync import render_sync_html
-
-    session = state.session_snapshot()
-    sync_run = state.current_sync()
-    last_sync = state.last_sync_result()
-    return HTMLResponse(
-        render_sync_html(
-            devices=[
-                {
-                    "camera_id": d.camera_id,
-                    "last_seen_at": d.last_seen_at,
-                    "time_synced": d.time_synced,
-                }
-                for d in state.online_devices()
-            ],
-            session=session.to_dict() if session is not None else None,
-            calibrations=sorted(state.calibrations().keys()),
-            sync=sync_run.to_dict() if sync_run is not None else None,
-            last_sync=last_sync.model_dump() if last_sync is not None else None,
-            sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
-            chirp_detect_threshold=state.chirp_detect_threshold(),
-            heartbeat_interval_s=state.heartbeat_interval_s(),
-            capture_height_px=state.capture_height_px(),
-            tracking_exposure_cap=state.tracking_exposure_cap().value,
-        )
-    )
-
-
-@app.get("/setup", response_class=HTMLResponse)
-def setup_page() -> HTMLResponse:
-    """Calibration surface for device positioning and reprojection checks."""
-    from render_sync import render_setup_html
-
-    session = state.session_snapshot()
-    return HTMLResponse(
-        render_setup_html(
-            devices=[
-                {
-                    "camera_id": d.camera_id,
-                    "last_seen_at": d.last_seen_at,
-                    "time_synced": d.time_synced,
-                }
-                for d in state.online_devices()
-            ],
-            session=session.to_dict() if session is not None else None,
-            calibrations=sorted(state.calibrations().keys()),
-            sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
-            calibration_last_ts={
-                cam: p.stat().st_mtime
-                for cam in state.calibrations().keys()
-                for p in [state._calibration_path(cam)]
-                if p.exists()
-            },
-            markers_count=len(state._marker_registry.all_records()),
-            preview_requested=state._preview.requested_map(),
-        )
-    )
 @app.post("/reset")
 def reset(purge: bool = False) -> dict[str, bool]:
     state.reset(purge_disk=purge)
