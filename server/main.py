@@ -123,7 +123,11 @@ from fitting import fit_trajectory
 from pipeline import ProcessingCanceled, annotate_video, detect_pitch
 from video import probe_dims
 from chirp import chirp_wav_bytes
-from preview import PreviewBuffer, REQUEST_TTL_S as _PREVIEW_REQUEST_TTL_S
+from preview import (
+    FRAME_MAX_AGE_S as _PREVIEW_FRAME_MAX_AGE_S,
+    PreviewBuffer,
+    REQUEST_TTL_S as _PREVIEW_REQUEST_TTL_S,
+)
 from marker_registry import MarkerRegistryDB
 from calibration_solver import (
     PLATE_MARKER_WORLD,
@@ -3876,7 +3880,7 @@ def camera_preview_latest(camera_id: str, annotate: int = 0) -> Response:
     lapsed and the buffer was swept).
     """
     _validate_camera_id_or_422(camera_id)
-    got = state._preview.latest(camera_id)
+    got = state._preview.latest(camera_id, max_age_s=_PREVIEW_FRAME_MAX_AGE_S)
     if got is None:
         raise HTTPException(status_code=404, detail="no preview frame")
     jpeg_bytes, _ = got
@@ -3962,7 +3966,7 @@ def camera_preview_mjpeg(camera_id: str) -> Response:
             while True:
                 if not state._preview.is_requested(camera_id):
                     break
-                got = state._preview.latest(camera_id)
+                got = state._preview.latest(camera_id, max_age_s=_PREVIEW_FRAME_MAX_AGE_S)
                 now = time.time()
                 if got is not None:
                     jpeg_bytes, ts = got

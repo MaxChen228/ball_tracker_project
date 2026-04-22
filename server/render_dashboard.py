@@ -354,7 +354,8 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .camera-compare-grid {{ display: grid; grid-template-columns: 1fr; gap: 8px; }}
 .compare-title {{ margin: 0; font-family: var(--mono); font-size: 11px;
                   letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink); }}
-.preview-panel.off img {{ display: none; }}
+.preview-panel.off img {{ opacity: 0; }}
+.preview-panel.off .preview-overlay {{ opacity: 0; }}
 .preview-panel.off .placeholder {{ color: rgba(255, 255, 255, 0.6); }}
 /* Crosshair at geometric centre of the real preview — reference mark
    for the operator to visually align against the virt canvas's
@@ -1261,7 +1262,7 @@ _JS_TEMPLATE = r"""
       const timeSynced = !!(deviceRecord && deviceRecord.time_synced);
       const pending = !!syncPending[cam];
       const isCal = calibrated.has(cam);
-      const previewOn = setupCompareMode || !!previewReq[cam];
+      const previewOn = !!previewReq[cam];
       const lastTs = calLastTs[cam];
       const autoRun = autoCalActive[cam] || null;
       const autoLast = autoCalLast[cam] || null;
@@ -1278,7 +1279,7 @@ _JS_TEMPLATE = r"""
         : (autoLast
           ? `${autoLast.status}${autoLast.result && autoLast.result.reprojection_px != null ? ' · ' + Number(autoLast.result.reprojection_px).toFixed(1) + 'px' : ''}`
           : (online ? 'idle' : 'offline'));
-      const previewBtn = setupCompareMode ? '' : (`<button type="button" class="btn small preview-btn${previewOn ? ' active' : ''}" ` +
+      const previewBtn = (`<button type="button" class="btn small preview-btn${previewOn ? ' active' : ''}" ` +
         `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}">` +
         `${previewOn ? 'PREVIEW ON' : 'PREVIEW'}</button>`);
       const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}" ${autoRun ? 'disabled' : ''}>` +
@@ -1289,7 +1290,7 @@ _JS_TEMPLATE = r"""
       const previewPanel = `<div class="preview-panel${previewOn ? '' : ' off'}" data-preview-panel="${esc(cam)}">` +
         `<img data-preview-img="${esc(cam)}" src="${'/camera/' + encodeURIComponent(cam) + '/preview?annotate=1&t=' + Date.now()}" alt="preview ${esc(cam)}">` +
         `<svg class="plate-overlay" data-preview-overlay="${esc(cam)}" aria-hidden="true"><polygon></polygon></svg>` +
-        `<div class="placeholder">${setupCompareMode ? '' : (previewOn ? '…' : 'Preview off')}</div>` +
+        `<div class="placeholder">${previewOn ? '…' : 'Preview off'}</div>` +
         `</div>`;
       const virtCell = `<div class="virt-cell" data-virt-cell="${esc(cam)}">` +
         `<canvas data-virt-canvas="${esc(cam)}"></canvas>` +
@@ -1913,20 +1914,6 @@ _JS_TEMPLATE = r"""
   // Keep server-side TTL alive. Server flag lapses in 5 s; 2 s refresh
   // absorbs one missed tick.
   async function tickPreviewRefresh() {
-    if (setupCompareMode) {
-      for (const img of document.querySelectorAll('img[data-preview-img]')) {
-        const cam = img.dataset.previewImg;
-        if (!cam) continue;
-        try {
-          await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: true }),
-          });
-        } catch (_) { /* swallow; next tick retries */ }
-      }
-      return;
-    }
     for (const cam of previewOn) {
       try {
         await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
@@ -1952,7 +1939,7 @@ _JS_TEMPLATE = r"""
       const cam = img.dataset.previewImg;
       if (!cam) continue;
       const panel = img.closest('.preview-panel');
-      if (!panel || (!setupCompareMode && panel.classList.contains('off'))) continue;
+      if (!panel || panel.classList.contains('off')) continue;
       img.src = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + t;
       img.style.opacity = 1;
     }

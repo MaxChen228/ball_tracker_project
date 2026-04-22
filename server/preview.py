@@ -37,6 +37,11 @@ _MAX_JPEG_BYTES = 2 * 1024 * 1024
 # 5 s absorbs one missed tick without flapping.
 REQUEST_TTL_S = 5.0
 
+# Preview is expected to refresh at ~10 fps while active. If the newest
+# buffered frame is older than this, treat it as stale and hide it rather
+# than painting a misleading frozen image for an offline camera.
+FRAME_MAX_AGE_S = 3.0
+
 
 class PreviewBuffer:
     """Per-camera "latest JPEG + request flag" store.
@@ -66,11 +71,25 @@ class PreviewBuffer:
             self._frames[camera_id] = (jpeg_bytes, ts)
         return True
 
-    def latest(self, camera_id: str) -> tuple[bytes, float] | None:
+    def latest(
+        self,
+        camera_id: str,
+        max_age_s: float | None = None,
+    ) -> tuple[bytes, float] | None:
         """Return (jpeg_bytes, ts) for the most recent frame, or None
-        when nothing has been pushed yet."""
+        when nothing has been pushed yet. When `max_age_s` is provided,
+        stale frames are lazily swept so frozen preview doesn't survive
+        a dead device / disconnected control channel."""
         with self._lock:
-            return self._frames.get(camera_id)
+            got = self._frames.get(camera_id)
+            if got is None:
+                return None
+            if max_age_s is not None:
+                _, ts = got
+                if self._time_fn() - ts > max_age_s:
+                    self._frames.pop(camera_id, None)
+                    return None
+            return got
 
     def clear(self, camera_id: str) -> None:
         """Drop the cached frame for one camera. Used when its request
