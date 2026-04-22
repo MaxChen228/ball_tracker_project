@@ -1475,6 +1475,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 self.sessionQueue.async { [weak self] in
                     guard let self else { return }
                     do {
+                        try device.lockForConfiguration()
+                        defer { device.unlockForConfiguration() }
                         let appliedMaxExposureS = try self.applyExposureConfiguration(
                             device,
                             format: device.activeFormat,
