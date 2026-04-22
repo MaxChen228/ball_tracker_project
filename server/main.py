@@ -134,6 +134,20 @@ from sync_solver import compute_mutual_sync
 from cleanup_old_sessions import cleanup_expired_sessions
 from live_pairing import LivePairingSession
 from sse import SSEHub
+from state_constants import (
+    CALIBRATION_FRAME_TTL_S as _CALIBRATION_FRAME_TTL_S,
+    DEFAULT_DATA_DIR as _DEFAULT_DATA_DIR,
+    DEVICE_GC_AFTER_S as _DEVICE_GC_AFTER_S,
+    DEVICE_REGISTRY_CAP as _DEVICE_REGISTRY_CAP,
+    DEVICE_STALE_S as _DEVICE_STALE_S,
+    DISARM_ECHO_S as _DISARM_ECHO_S,
+    MAX_PITCH_UPLOAD_BYTES as _MAX_PITCH_UPLOAD_BYTES,
+    SYNC_COMMAND_TTL_S as _SYNC_COMMAND_TTL_S,
+    SYNC_COOLDOWN_S as _SYNC_COOLDOWN_S,
+    SYNC_TIMEOUT_S as _SYNC_TIMEOUT_S,
+    TIME_SYNC_INTENT_WINDOW_S as _TIME_SYNC_INTENT_WINDOW_S,
+    TIME_SYNC_MAX_AGE_S as _TIME_SYNC_MAX_AGE_S,
+)
 from state_support import (
     AutoCalibrationRun as _AutoCalibrationRun,
     LegacyTimeSyncIntent as _LegacyTimeSyncIntent,
@@ -165,73 +179,6 @@ from auto_calibration import build_auto_calibration_router
 
 logger = logging.getLogger("ball_tracker")
 
-
-_DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
-
-# Seconds a heartbeat remains fresh. A phone beating at 1 Hz drops off the
-# "online" list after missing ~3 beats — conservative enough to tolerate a
-# stalled wifi roam without flapping.
-_DEVICE_STALE_S = 3.0
-
-# Entries in `_devices` older than this get pruned on every heartbeat write.
-# Legitimate phones beat at 1 Hz so anything beyond 60 s is not coming back;
-# pruning on write is what keeps a malformed/spoofed client from ballooning
-# the registry forever without needing a background task.
-_DEVICE_GC_AFTER_S = 60.0
-
-# Hard cap on `_devices` size. Even with GC-on-write, a burst of distinct
-# camera_ids within the GC window could push memory up. Cap at 64 — more
-# than enough for any plausible rig (we run 2-phone stereo) while still
-# bounding adversarial input.
-_DEVICE_REGISTRY_CAP = 64
-
-# When a session ends, server keeps advertising `disarm` on /status for a
-# brief window so the phone that didn't fire the cycle still gets the signal
-# on its next poll. Long enough to cover any sensible poll cadence.
-_DISARM_ECHO_S = 5.0
-
-# Maximum wall time a mutual-sync run may stay active waiting for both
-# phones to post their matched-filter reports. If one side fails to hear
-# the peer (weak speaker, noise floor), the run is dropped and the
-# dashboard surfaces "Sync timed out".
-_SYNC_TIMEOUT_S = 8.0
-
-# After a mutual sync solves (or times out), block subsequent /sync/start
-# for this long. Prevents rapid-fire retries thrashing the phones through
-# the state transition and gives the operator time to read the result.
-_SYNC_COOLDOWN_S = 10.0
-
-# Time-sync (single-listener chirp) command TTL. When the dashboard's
-# CALIBRATE TIME button fires, each target camera gets a pending
-# `sync_command: "start"` flag. A camera consumes it on its next
-# heartbeat (one-shot), or the flag self-expires after this many
-# seconds so a stale command doesn't fire if the operator gave up.
-_SYNC_COMMAND_TTL_S = 10.0
-
-# Legacy third-device chirp sync ids stay shareable for one listening
-# window so two phones that begin 時間校正 a few seconds apart can still
-# claim the same run id.
-_TIME_SYNC_INTENT_WINDOW_S = 20.0
-
-# Maximum server-observed age of a legacy chirp sync before it no longer
-# counts as "ready" for a fresh arm.
-_TIME_SYNC_MAX_AGE_S = 30.0
-
-# Hard cap on `/pitch` video upload size. A 5 s cycle at 4K / 240 fps sits
-# comfortably under this; anything beyond is almost certainly a misbehaving
-# client or a denial-of-service attempt. FastAPI buffers the full multipart
-# body in memory before the handler runs, so without this cap a single
-# oversized request can OOM the process.
-_MAX_PITCH_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
-
-# Session auto-timeout (`_DEFAULT_SESSION_TIMEOUT_S`), Device, and Session
-# now live in schemas.py — imported above for back-compat re-export.
-
-
-# Calibration-frame buffer TTL. One-shot: iOS pushes a full-resolution
-# JPEG on request, server consumes it, flag auto-clears. 10 s is plenty
-# for capture→encode→POST round-trip even on a busy LAN.
-_CALIBRATION_FRAME_TTL_S = 10.0
 
 
 class State:
