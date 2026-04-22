@@ -123,6 +123,7 @@ from fitting import fit_trajectory
 from pipeline import ProcessingCanceled, annotate_video, detect_pitch
 from video import probe_dims
 from chirp import chirp_wav_bytes
+import sync_audio_detect
 from preview import (
     FRAME_MAX_AGE_S as _PREVIEW_FRAME_MAX_AGE_S,
     PreviewBuffer,
@@ -3490,6 +3491,128 @@ async def sync_start(request: Request) -> dict[str, Any]:
         }
     )
     return {"ok": True, "sync": run.to_dict()}
+
+
+@app.post("/sync/audio_upload")
+async def sync_audio_upload(
+    payload: str = Form(...),
+    audio: UploadFile = File(...),
+) -> dict[str, Any]:
+    """Phase A mutual-sync path: iOS uploads the raw PCM it recorded
+    during the listen window, server runs matched-filter detection and
+    feeds the resulting `SyncReport` into the same state machine the
+    legacy `/sync/report` endpoint drives.
+
+    Multipart shape:
+      - `payload` (Form, JSON): {
+            sync_id, camera_id, role ("A"|"B"),
+            audio_start_pts_s (float, host-clock seconds of first sample),
+            sample_rate (int, informational — WAV header is authoritative),
+            emission_pts_s (float, optional, this phone's own chirp schedule
+              time — kept for debug cross-check only)
+        }
+      - `audio` (File, audio/wav): mono 16-bit PCM WAV of the listening
+        window (typically 3 s @ 48 kHz → ~288 KB).
+
+    Side effects:
+      - Persists the WAV to `data/sync_audio/<sync_id>_<cam>.wav`
+        (never cleaned — small footprint, priceless for offline debug).
+      - Delegates pairing / solving to `state.record_sync_report`; the
+        second upload triggers the solver exactly as `/sync/report` did.
+    """
+    try:
+        meta = json.loads(payload)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=422, detail=f"payload JSON parse: {e}") from e
+
+    required = ("sync_id", "camera_id", "role", "audio_start_pts_s")
+    missing = [k for k in required if meta.get(k) is None]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"payload missing required keys: {missing}",
+        )
+    sync_id = str(meta["sync_id"])
+    camera_id = str(meta["camera_id"])
+    role = str(meta["role"])
+    if role not in ("A", "B"):
+        raise HTTPException(
+            status_code=422, detail=f"role must be 'A' or 'B', got {role!r}"
+        )
+    try:
+        audio_start_pts_s = float(meta["audio_start_pts_s"])
+    except (TypeError, ValueError) as e:
+        raise HTTPException(
+            status_code=422, detail=f"audio_start_pts_s not a float: {e}"
+        ) from e
+    emission_pts_s = meta.get("emission_pts_s")
+
+    wav_bytes = await audio.read()
+    if not wav_bytes:
+        raise HTTPException(status_code=422, detail="audio part empty")
+
+    # Persist first — even if detection crashes, we keep the raw bytes
+    # for offline iteration. `data/sync_audio/` is the accumulating
+    # failure library that makes Phase B algorithm work possible.
+    audio_dir = state.data_dir / "sync_audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = audio_dir / f"{sync_id}_{camera_id}.wav"
+    wav_path.write_bytes(wav_bytes)
+
+    try:
+        report, debug = sync_audio_detect.detect_sync_report(
+            wav_bytes=wav_bytes,
+            sync_id=sync_id,
+            camera_id=camera_id,
+            role=role,
+            audio_start_pts_s=audio_start_pts_s,
+        )
+    except Exception as e:
+        logger.exception("sync_audio_upload detection failed cam=%s", camera_id)
+        raise HTTPException(
+            status_code=500, detail=f"detection failed: {e}"
+        ) from e
+
+    logger.info(
+        "sync_audio_upload cam=%s role=%s duration_s=%.3f "
+        "peak_self=%.4f peak_other=%.4f psr_self=%.2f psr_other=%.2f "
+        "t_self=%.6f t_other=%.6f",
+        camera_id, role, debug["duration_s"],
+        debug["peak_self"], debug["peak_other"],
+        debug["psr_self"], debug["psr_other"],
+        report.t_self_s or 0.0, report.t_from_other_s or 0.0,
+    )
+
+    run_after, result, reason = state.record_sync_report(report)
+    if reason == "no_sync":
+        raise HTTPException(
+            status_code=409,
+            detail={"ok": False, "error": "no_sync"},
+        )
+    if reason == "stale_sync_id":
+        raise HTTPException(
+            status_code=409,
+            detail={"ok": False, "error": "stale_sync_id"},
+        )
+    resp: dict[str, Any] = {
+        "ok": True,
+        "solved": result is not None,
+        "detection": {
+            "peak_self": debug["peak_self"],
+            "peak_other": debug["peak_other"],
+            "psr_self": debug["psr_self"],
+            "psr_other": debug["psr_other"],
+            "duration_s": debug["duration_s"],
+            "sample_rate": debug["sample_rate"],
+            "emission_pts_s": emission_pts_s,
+            "wav_path": str(wav_path.relative_to(state.data_dir)),
+        },
+    }
+    if result is not None:
+        resp["result"] = result.model_dump()
+    elif run_after is not None:
+        resp["run"] = run_after.to_dict()
+    return resp
 
 
 @app.post("/sync/report")
