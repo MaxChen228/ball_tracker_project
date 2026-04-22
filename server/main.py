@@ -171,6 +171,13 @@ _DISARM_ECHO_S = 5.0
 # dashboard surfaces "Sync timed out".
 _SYNC_TIMEOUT_S = 8.0
 
+# Window after a sync ends (solved OR aborted) during which late aborted
+# reports can still merge traces into the run's SyncResult. The side that
+# never heard both bands typically POSTs its abort report right around
+# the server-side timeout, and without this grace window the trace data
+# (our main post-mortem signal) gets silently dropped as "no_sync".
+_SYNC_LATE_REPORT_GRACE_S = 5.0
+
 # After a mutual sync solves (or times out), block subsequent /sync/start
 # for this long. Prevents rapid-fire retries thrashing the phones through
 # the state transition and gives the operator time to read the result.
@@ -1563,6 +1570,75 @@ class State:
             self._current_sync = None
             self._sync_cooldown_until = now + _SYNC_COOLDOWN_S
 
+    def _merge_late_abort_report_locked(
+        self, report: SyncReport, now: float,
+    ) -> None:
+        """Merge a post-timeout abort report's traces into the already-
+        latched `_last_sync_result`. Keeps the run's diagnostic picture
+        intact even when one phone's abort POST races the server-side
+        timeout. Logs a post-mortem line for the merged streams so the
+        sync log still carries the quantitative context. Caller must
+        hold `self._lock`."""
+        result = self._last_sync_result
+        if result is None:
+            return
+        updates: dict[str, Any] = {}
+        reasons = dict(result.abort_reasons)
+        if report.abort_reason:
+            reasons[report.role] = report.abort_reason
+        else:
+            reasons.setdefault(report.role, "aborted_late")
+        updates["abort_reasons"] = reasons
+        updates["aborted"] = True
+        if report.role == "A":
+            if report.trace_self is not None:
+                updates["trace_a_self"] = report.trace_self
+            if report.trace_other is not None:
+                updates["trace_a_other"] = report.trace_other
+            if report.t_self_s is not None:
+                updates["t_a_self_s"] = report.t_self_s
+            if report.t_from_other_s is not None:
+                updates["t_a_from_b_s"] = report.t_from_other_s
+        else:
+            if report.trace_self is not None:
+                updates["trace_b_self"] = report.trace_self
+            if report.trace_other is not None:
+                updates["trace_b_other"] = report.trace_other
+            if report.t_self_s is not None:
+                updates["t_b_self_s"] = report.t_self_s
+            if report.t_from_other_s is not None:
+                updates["t_b_from_a_s"] = report.t_from_other_s
+        self._last_sync_result = result.model_copy(update=updates)
+        self._sync_log.append(SyncLogEntry(
+            ts=now, source="server", event="report_late_merged",
+            detail={
+                "id": report.sync_id,
+                "role": report.role,
+                "reason": report.abort_reason,
+                "had_traces": {
+                    "self": report.trace_self is not None,
+                    "other": report.trace_other is not None,
+                },
+            },
+        ))
+        logger.info(
+            "sync report_late_merged id=%s role=%s reason=%s",
+            report.sync_id, report.role, report.abort_reason,
+        )
+        # Fire post-mortem on the newly-merged streams so the sync log
+        # has a self-contained quantitative line per late-arriving abort.
+        thr = self._chirp_detect_threshold
+        if report.role == "A":
+            self._log_trace_post_mortem_locked(
+                report.sync_id, "A.self", report.trace_self, thr)
+            self._log_trace_post_mortem_locked(
+                report.sync_id, "A.other", report.trace_other, thr)
+        else:
+            self._log_trace_post_mortem_locked(
+                report.sync_id, "B.self", report.trace_self, thr)
+            self._log_trace_post_mortem_locked(
+                report.sync_id, "B.other", report.trace_other, thr)
+
     def _log_trace_post_mortem_locked(
         self, run_id: str, label: str,
         trace: list | None, threshold: float,
@@ -1986,6 +2062,19 @@ class State:
             self._check_sync_timeout_locked(now)
             run = self._current_sync
             if run is None:
+                # Late abort reports arrive right after the server-side
+                # timeout fired and cleared `_current_sync`. Without this
+                # grace path we lose the trace data from the side that
+                # never produced a full report (typically the failed cam),
+                # which is exactly the diagnostic we need most.
+                if (
+                    report.aborted
+                    and self._last_sync_result is not None
+                    and self._last_sync_result.id == report.sync_id
+                    and now - self._last_sync_result.solved_at <= _SYNC_LATE_REPORT_GRACE_S
+                ):
+                    self._merge_late_abort_report_locked(report, now)
+                    return None, None, None
                 self._sync_log.append(SyncLogEntry(
                     ts=now, source="server", event="report_no_sync",
                     detail={"role": report.role, "sync_id": report.sync_id},
