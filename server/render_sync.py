@@ -225,12 +225,22 @@ _JS_TEMPLATE = r"""
     const btn = `<form class="inline" method="POST" action="/sync/start" id="sync-form">
         <button class="btn" type="submit" ${disabled ? 'disabled' : ''}${title}>Run mutual sync</button>
       </form>`;
+    // Quick chirp is a separate, legacy single-listener path — third
+    // device plays the up+down chirp and whichever phone hears it
+    // anchors its clock. Only gated on armed session; independent of
+    // the mutual-sync run state.
+    const quickDisabled = sessionArmed;
+    const quickTitle = sessionArmed ? ' title="Stop the armed session first"' : '';
+    const quickBtn = `<form class="inline" method="POST" action="/sync/trigger" id="sync-trigger-form">
+        <button class="btn secondary" type="submit" ${quickDisabled ? 'disabled' : ''}${quickTitle}>Quick chirp</button>
+      </form>`;
 
     syncBox.innerHTML = `
       <div class="session-head">${chip}</div>
       ${statusLine}
       ${lastLine}
-      <div class="session-actions">${btn}</div>`;
+      <div class="card-subtitle">Methods</div>
+      <div class="session-actions">${quickBtn}${btn}</div>`;
   }
 
   // --- Nav chip mirror (syncing / cooldown) --------------------------------
