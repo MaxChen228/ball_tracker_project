@@ -40,35 +40,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private let standbyFps: Double = 60
     private let trackingFps: Double = 240
 
-    // Session + outputs.
-    private let session = AVCaptureSession()
-    private var previewLayer: AVCaptureVideoPreviewLayer?
-    private let videoOutput = AVCaptureVideoDataOutput()
     // `.userInitiated` QoS is required for 240 fps frame delivery. With default
     // QoS the queue can be throttled by the scheduler which amplifies any
     // detection stalls into dropped-frame cascades (AVCaptureVideoDataOutput
     // has `alwaysDiscardsLateVideoFrames = true`).
     private let processingQueue = DispatchQueue(label: "camera.frame.queue", qos: .userInitiated)
-    // Dedicated queue for `session.startRunning / stopRunning / activeFormat`
-    // lifecycle ops. Apple's Thread Performance Checker warns when these hit
-    // the main thread — startRunning on a 240 fps format can block for
-    // 300-500 ms, stalling the run loop and causing visible HUD stutter +
-    // deferred frame delivery cascades. Keep this separate from the frame
-    // queue so a format swap can't interleave with sample-buffer delivery.
-    private let sessionQueue = DispatchQueue(label: "camera.session.queue", qos: .userInitiated)
-
-    // Audio chirp sync. Mic input is always installed once granted so the
-    // chirp detector can run as soon as the user taps 時間校正.
-    private var audioInput: AVCaptureDeviceInput?
-    private var audioOutput: AVCaptureAudioDataOutput?
-    private var chirpDetector: AudioChirpDetector?
+    private var captureRuntime: CameraCaptureRuntime!
     // State + frame index. `state` is read/written on main; `captureOutput`
     // (frame queue, up to 240 Hz) reads it via `frameStateBox.snapshot()` so
     // it never observes a partially-updated AppState while `applyRemoteDisarm`
     // mutates it on main. `frameIndex` is touched only on the frame queue.
     private var state: AppState = .standby
     private var frameIndex: Int = 0
-    private var horizontalFovRadians: Double = 1.0
 
     // Lock-protected mirror of the three fields `captureOutput` reads
     // across queues. Main thread is the sole writer; the frame queue
@@ -77,7 +60,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // Collaborators.
     private var settings: AppSettings!
-    private var trackingExposureCapMode: ServerUploader.TrackingExposureCapMode = .frameDuration
     private var recorder: PitchRecorder!
     private var uploader: ServerUploader!
     private var serverConfig: ServerUploader.ServerConfig!
@@ -172,23 +154,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var lastServerMutualThreshold: Double?
     private var lastServerHeartbeatInterval: Double?
     private var lastServerTrackingExposureCapMode: ServerUploader.TrackingExposureCapMode?
-    /// Currently-applied capture image height. Initialised from
-    /// `AppSettings.captureHeightFixed` (1080). Server pushes a
-    /// value via WS settings; when it differs, rebuild the capture session
-    /// — but only while in .standby so an armed clip isn't disrupted.
-    private var currentCaptureHeight: Int = AppSettings.captureHeightFixed
-    /// Paired 16:9 width for `currentCaptureHeight`. Used by every
-    /// `configureCaptureFormat` call site so fps swaps preserve the
-    /// active resolution (no snap-back to 1080p after server pushes 720).
-    private var currentCaptureWidth: Int { captureWidthForHeight(currentCaptureHeight) }
-
-    private func captureWidthForHeight(_ h: Int) -> Int {
-        switch h {
-        case 720:  return 1280
-        case 1080: return 1920
-        default:   return AppSettings.captureWidthFixed
-        }
-    }
 
     // `previewRequestedByServer` mirrors the WS settings flag for this camera.
     // When it flips true→false we reset the uploader so a stale in-flight POST
@@ -299,6 +264,31 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             lastUploadStatusText = "暫存初始化失敗 · \(error.localizedDescription)"
         }
 
+        captureRuntime = CameraCaptureRuntime(
+            standbyFps: standbyFps,
+            trackingFps: trackingFps,
+            initialCaptureHeight: AppSettings.captureHeightFixed,
+            trackingExposureCapMode: .frameDuration,
+            onTelemetryUpdated: { [weak self] telemetry in
+                self?.setAppliedCaptureTelemetry(
+                    widthPx: telemetry.widthPx,
+                    heightPx: telemetry.heightPx,
+                    appliedFps: telemetry.appliedFps,
+                    formatFovDeg: telemetry.formatFovDeg,
+                    formatIndex: telemetry.formatIndex,
+                    isVideoBinned: telemetry.isVideoBinned,
+                    appliedMaxExposureS: telemetry.appliedMaxExposureS
+                )
+            },
+            onErrorBanner: { [weak self] text in
+                self?.showErrorBanner(text)
+            },
+            onStatusText: { [weak self] text in
+                self?.lastUploadStatusText = text
+                self?.updateUIForState()
+            }
+        )
+
         uploader = ServerUploader(config: serverConfig)
         uploadQueue = PayloadUploadQueue(store: payloadStore, uploader: uploader)
         analysisQueue = AnalysisUploadQueue(store: analysisStore, uploader: uploader)
@@ -320,8 +310,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         commandRouter = buildCommandRouter()
 
         setupUI()
-        setupPreviewAndCapture()
-        setupAudioCapture()
+        captureRuntime.configureCaptureGraph(
+            in: view,
+            bounds: view.bounds,
+            videoDelegate: self,
+            processingQueue: processingQueue
+        )
+        captureRuntime.requestAudioCaptureAccess(cameraRole: settings.cameraRole)
         healthMonitor.start()
         connectWebSocket()
         // frameDispatcher needs the ws connection (set up inside connectWebSocket())
@@ -567,221 +562,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    // MARK: - Capture setup
-
-    private func setupPreviewAndCapture() {
-        session.beginConfiguration()
-
-        if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
-            dumpAvailableFormats(for: device)
-            do {
-                try configureCaptureFormat(
-                    device,
-                    targetWidth: self.currentCaptureWidth,
-                    targetHeight: self.currentCaptureHeight,
-                    targetFps: standbyFps
-                )
-
-                let input = try AVCaptureDeviceInput(device: device)
-                if session.canAddInput(input) {
-                    session.addInput(input)
-                }
-            } catch {
-                log.error("camera capture format configuration failed error=\(error.localizedDescription, privacy: .public)")
-                // TODO: surface error to UI
-            }
-        }
-
-        videoOutput.setSampleBufferDelegate(self, queue: processingQueue)
-        videoOutput.alwaysDiscardsLateVideoFrames = true
-        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-        if session.canAddOutput(videoOutput) {
-            session.addOutput(videoOutput)
-        }
-
-        session.commitConfiguration()
-
-        let preview = AVCaptureVideoPreviewLayer(session: session)
-        // With tracking locked to 16:9 @ 240 fps, show the exact recorded
-        // frame instead of cropping it to fill the phone's taller display.
-        preview.videoGravity = .resizeAspect
-        preview.frame = previewFrame(in: view.bounds)
-        // App is locked to landscape (Info.plist). Pin the preview connection
-        // to sensor-native angle 0 so the on-screen image matches the raw
-        // CVPixelBuffer orientation ArUco calibration consumes; a stale
-        // 90° rotation here was why "holding phone landscape" still rendered
-        // a portrait-oriented preview.
-        if let connection = preview.connection, connection.isVideoRotationAngleSupported(0) {
-            connection.videoRotationAngle = 0
-        }
-        // Preview starts hidden — session isn't running yet, and when we
-        // later stopCapture() AVCaptureVideoPreviewLayer keeps its last
-        // frame around, so toggling isHidden is what actually gives us
-        // black in standby (view.backgroundColor is .black).
-        preview.isHidden = true
-        view.layer.insertSublayer(preview, at: 0)
-        previewLayer = preview
-    }
-
-    private func previewFrame(in bounds: CGRect) -> CGRect {
-        let aspect = CGSize(width: currentCaptureWidth, height: currentCaptureHeight)
-        return AVMakeRect(aspectRatio: aspect, insideRect: bounds).integral
-    }
-
-    private func dumpAvailableFormats(for device: AVCaptureDevice) {
-        log.info("camera format dump begin device=\(device.localizedName, privacy: .public) uniqueID=\(device.uniqueID, privacy: .public)")
-        for (index, format) in device.formats.enumerated() {
-            let desc = format.formatDescription
-            let dims = CMVideoFormatDescriptionGetDimensions(desc)
-            let width = Int(dims.width)
-            let height = Int(dims.height)
-            let aspect = String(format: "%.4f", Double(width) / Double(height))
-            let fpsRanges = format.videoSupportedFrameRateRanges.map { range in
-                String(format: "%.0f-%.0f", range.minFrameRate, range.maxFrameRate)
-            }.joined(separator: ",")
-            let supports120 = format.videoSupportedFrameRateRanges.contains { range in
-                range.minFrameRate <= 120 && range.maxFrameRate >= 120
-            }
-            let supports240 = format.videoSupportedFrameRateRanges.contains { range in
-                range.minFrameRate <= 240 && range.maxFrameRate >= 240
-            }
-            let mediaSubType = CMFormatDescriptionGetMediaSubType(desc)
-            let isBinned = format.isVideoBinned
-            let fov = format.videoFieldOfView
-            let fovText = String(format: "%.3f", fov)
-            let subTypeText = String(format: "%08X", mediaSubType)
-            log.info(
-                "camera format[\(index)] \(width)x\(height) aspect=\(aspect, privacy: .public) fps_ranges=[\(fpsRanges, privacy: .public)] supports120=\(supports120, privacy: .public) supports240=\(supports240, privacy: .public) fov_deg=\(fovText, privacy: .public) binned=\(isBinned, privacy: .public) subtype=\(subTypeText, privacy: .public)"
-            )
-        }
-        log.info("camera format dump end count=\(device.formats.count)")
-    }
-
-    enum CaptureFormatError: LocalizedError {
-        case noMatchingFormat(width: Int, height: Int, fps: Double)
-
-        var errorDescription: String? {
-            switch self {
-            case .noMatchingFormat(let w, let h, let fps):
-                return "No AVCaptureDevice.Format matches \(w)×\(h) @ \(Int(fps)) fps"
-            }
-        }
-    }
-
-    private func configureCaptureFormat(
-        _ device: AVCaptureDevice,
-        targetWidth: Int,
-        targetHeight: Int,
-        targetFps: Double
-    ) throws {
-        var candidates: [(index: Int, format: AVCaptureDevice.Format, maxFrameRate: Double)] = []
-        for (index, format) in device.formats.enumerated() {
-            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            let w = Int(dims.width)
-            let h = Int(dims.height)
-            let matchesRes = (w == targetWidth && h == targetHeight) || (w == targetHeight && h == targetWidth)
-            let matchingRanges = format.videoSupportedFrameRateRanges.filter { range in
-                range.minFrameRate <= targetFps && range.maxFrameRate >= targetFps
-            }
-            if matchesRes, let bestRange = matchingRanges.max(by: { $0.maxFrameRate < $1.maxFrameRate }) {
-                candidates.append((index: index, format: format, maxFrameRate: bestRange.maxFrameRate))
-            }
-        }
-        let selectedCandidate = candidates.max { lhs, rhs in
-            let lhsFov = lhs.format.videoFieldOfView
-            let rhsFov = rhs.format.videoFieldOfView
-            if lhsFov != rhsFov {
-                return lhsFov < rhsFov
-            }
-            if lhs.maxFrameRate != rhs.maxFrameRate {
-                return lhs.maxFrameRate < rhs.maxFrameRate
-            }
-            return lhs.index > rhs.index
-        }
-        let selected = selectedCandidate?.format
-        guard let selected else {
-            // Dump every (w×h @ fps_range) the device offers so Console.app
-            // shows exactly why the search missed — usually either the target
-            // resolution is not supported at all on this device, or it is
-            // supported but not at the requested fps.
-            for (i, format) in device.formats.enumerated() {
-                let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-                let ranges = format.videoSupportedFrameRateRanges
-                    .map { "\($0.minFrameRate)-\($0.maxFrameRate)" }
-                    .joined(separator: ",")
-                log.error("camera format[\(i)] \(dims.width)x\(dims.height) fps_ranges=[\(ranges, privacy: .public)]")
-            }
-            log.error("camera no matching format target=\(targetWidth)x\(targetHeight)@\(targetFps)fps device=\(device.localizedName, privacy: .public) uniqueID=\(device.uniqueID, privacy: .public)")
-            throw CaptureFormatError.noMatchingFormat(width: targetWidth, height: targetHeight, fps: targetFps)
-        }
-
-        try device.lockForConfiguration()
-        defer { device.unlockForConfiguration() }
-
-        device.activeFormat = selected
-        if let selectedCandidate {
-            let selectedDims = CMVideoFormatDescriptionGetDimensions(selected.formatDescription)
-            log.info(
-                "camera format selected idx=\(selectedCandidate.index) \(selectedDims.width)x\(selectedDims.height) target_fps=\(targetFps) fov_deg=\(String(format: "%.3f", selected.videoFieldOfView), privacy: .public) max_fps=\(selectedCandidate.maxFrameRate, privacy: .public) binned=\(selected.isVideoBinned, privacy: .public)"
-            )
-        }
-        let frameDuration = CMTime(value: 1, timescale: Int32(targetFps))
-        device.activeVideoMinFrameDuration = frameDuration
-        device.activeVideoMaxFrameDuration = frameDuration
-        let appliedMaxExposureS = try applyExposureConfiguration(device, format: selected, targetFps: targetFps)
-
-        horizontalFovRadians = Double(device.activeFormat.videoFieldOfView) * Double.pi / 180.0
-        let applied = device.activeVideoMinFrameDuration
-        let appliedFps = applied.value > 0
-            ? Double(applied.timescale) / Double(applied.value)
-            : targetFps
-        let selectedDims = CMVideoFormatDescriptionGetDimensions(selected.formatDescription)
-        setAppliedCaptureTelemetry(
-            widthPx: Int(selectedDims.width),
-            heightPx: Int(selectedDims.height),
-            appliedFps: appliedFps,
-            formatFovDeg: Double(selected.videoFieldOfView),
-            formatIndex: selectedCandidate?.index,
-            isVideoBinned: selected.isVideoBinned,
-            appliedMaxExposureS: appliedMaxExposureS
-        )
-    }
-
-    private func applyExposureConfiguration(
-        _ device: AVCaptureDevice,
-        format: AVCaptureDevice.Format,
-        targetFps: Double
-    ) throws -> Double? {
-        let frameDuration = CMTime(value: 1, timescale: Int32(targetFps))
-        // Cap the AE exposure time to the target frame duration. Without this,
-        // iOS lengthens individual exposures in low light to brighten the
-        // image, which drags the effective capture rate down (a room that
-        // wants 70 ms exposures drops a "240 fps" session to ~14 fps). Capped
-        // AE keeps the sensor locked to the target rate and compensates with
-        // ISO — noisier in dim rooms, but frame rate holds.
-        let lo = format.minExposureDuration
-        let hi = format.maxExposureDuration
-        let requestedCap = requestedExposureCapDuration(targetFps: targetFps) ?? frameDuration
-        let capped: CMTime
-        if CMTimeCompare(requestedCap, lo) < 0 {
-            capped = lo
-        } else if CMTimeCompare(requestedCap, hi) > 0 {
-            capped = hi
-        } else {
-            capped = requestedCap
-        }
-        device.activeMaxExposureDuration = capped
-        device.exposureMode = .continuousAutoExposure
-        let cappedExposureS = CMTimeGetSeconds(capped)
-        let exposureCapText = cappedExposureS > 0
-            ? String(format: "1/%.0f", 1.0 / cappedExposureS)
-            : "n/a"
-        log.info(
-            "camera exposure configured target_fps=\(targetFps) mode=\(self.trackingExposureCapMode.rawValue, privacy: .public) max_exposure=\(exposureCapText, privacy: .public) iso_range=[\(format.minISO, privacy: .public),\(format.maxISO, privacy: .public)] current_iso=\(device.iso, privacy: .public)"
-        )
-        return cappedExposureS.isFinite ? cappedExposureS : nil
-    }
-
     private func setAppliedCaptureTelemetry(
         widthPx: Int,
         heightPx: Int,
@@ -805,25 +585,21 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private func currentCaptureTelemetry(targetFps: Double) -> ServerUploader.CaptureTelemetry {
         captureTelemetryLock.lock()
         defer { captureTelemetryLock.unlock() }
-        return ServerUploader.CaptureTelemetry(
-            width_px: latestImageWidth > 0 ? latestImageWidth : appliedCaptureWidthPx,
-            height_px: latestImageHeight > 0 ? latestImageHeight : appliedCaptureHeightPx,
-            target_fps: targetFps,
-            applied_fps: appliedCaptureFps,
-            format_fov_deg: appliedFormatFovDeg,
-            format_index: appliedFormatIndex,
-            is_video_binned: appliedFormatIsVideoBinned,
-            tracking_exposure_cap: trackingExposureCapMode.rawValue,
-            applied_max_exposure_s: appliedMaxExposureS
+        let appliedTelemetry = CameraCaptureRuntime.AppliedTelemetry(
+            widthPx: appliedCaptureWidthPx,
+            heightPx: appliedCaptureHeightPx,
+            appliedFps: appliedCaptureFps,
+            formatFovDeg: appliedFormatFovDeg,
+            formatIndex: appliedFormatIndex,
+            isVideoBinned: appliedFormatIsVideoBinned,
+            appliedMaxExposureS: appliedMaxExposureS
         )
-    }
-
-    private func requestedExposureCapDuration(targetFps: Double) -> CMTime? {
-        guard abs(targetFps - trackingFps) < 0.5,
-              let seconds = trackingExposureCapMode.maxExposureSeconds else {
-            return nil
-        }
-        return CMTime(seconds: seconds, preferredTimescale: 1_000_000)
+        return captureRuntime.currentCaptureTelemetry(
+            latestImageWidth: latestImageWidth,
+            latestImageHeight: latestImageHeight,
+            targetFps: targetFps,
+            appliedTelemetry: appliedTelemetry
+        )
     }
 
     private func currentTargetFps() -> Double {
@@ -835,47 +611,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    /// Swap the capture format to a new fps on the session queue. Blocks
-    /// `~300-500 ms` inside `stopRunning → activeFormat = X → startRunning`
-    /// and must stay off-main so UI work is not stalled.
-    /// Apply a dashboard-pushed capture resolution. Only reachable via the
-    /// heartbeat handler, which guards to `.standby` — rebuilding the
-    /// capture session mid-recording would lose the clip. Updates
-    /// `currentCaptureHeight` and reconfigures the live session.
     private func applyServerCaptureHeight(_ newHeight: Int) {
-        guard let device = currentCaptureDevice else { return }
-        // 16:9 standard widths for the allowed heights.
-        let width: Int
-        switch newHeight {
-        case 720:  width = 1280
-        case 1080: width = 1920
-        default:
-            log.warning("ignore unsupported capture_height \(newHeight)")
-            return
-        }
-        currentCaptureHeight = newHeight
-        previewLayer?.frame = previewFrame(in: view.bounds)
-        previewLayer?.isHidden = false
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            let wasRunning = self.session.isRunning
-            if wasRunning { self.session.stopRunning() }
-            defer { if wasRunning { self.session.startRunning() } }
-            do {
-                try self.configureCaptureFormat(
-                    device,
-                    targetWidth: width,
-                    targetHeight: newHeight,
-                    targetFps: self.standbyFps
-                )
-                log.info("camera resolution swapped to \(width)x\(newHeight) from server push")
-            } catch {
-                log.error("camera resolution swap failed target=\(width)x\(newHeight) error=\(error.localizedDescription, privacy: .public)")
-                DispatchQueue.main.async {
-                    self.showErrorBanner("解析度切換失敗 (\(newHeight)p 不支援)")
-                }
-            }
-        }
+        captureRuntime.applyServerCaptureHeight(newHeight, bounds: view.bounds)
     }
 
     /// Encode the given pixel buffer at its NATIVE resolution (no
@@ -916,231 +653,31 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         }
     }
 
-    private func switchCaptureFps(_ targetFps: Double) {
-        guard let device = currentCaptureDevice else { return }
-        // Surface the preview synchronously on main so there's no window
-        // where the layer is hidden while the sessionQueue hop is pending.
-        previewLayer?.isHidden = false
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            let wasRunning = self.session.isRunning
-            if wasRunning { self.session.stopRunning() }
-            defer { if wasRunning { self.session.startRunning() } }
-            do {
-                try self.configureCaptureFormat(
-                    device,
-                    targetWidth: self.currentCaptureWidth,
-                    targetHeight: self.currentCaptureHeight,
-                    targetFps: targetFps
-                )
-                // Read back the actually-applied rate so an operator can
-                // tell from logs whether the sensor is honouring our
-                // request. Field of view can differ across same-resolution
-                // formats, so log it per switch to catch accidental
-                // selection of a narrower crop path.
-                let applied = device.activeVideoMinFrameDuration
-                let appliedFps = applied.value > 0
-                    ? Double(applied.timescale) / Double(applied.value)
-                    : 0
-                log.info("camera fps switched target=\(targetFps) applied=\(appliedFps) fov_rad=\(self.horizontalFovRadians)")
-            } catch {
-                log.error("camera fps switch failed target=\(targetFps) error=\(error.localizedDescription, privacy: .public)")
-                DispatchQueue.main.async {
-                    self.showErrorBanner("FPS 切換失敗 (\(Int(targetFps))fps 不支援)")
-                }
-            }
-        }
-    }
-
-    /// Spin the capture session up at `targetFps`. Used when leaving the
-    /// parked standby state — either for an armed recording (`trackingFps`)
-    /// or a manual 時間校正 window (`standbyFps`). If the session is already
-    /// running, delegates to `switchCaptureFps` so the fps swap still
-    /// happens. Safe to call from any state; no-op if no capture device.
-    /// Lifecycle ops run on `sessionQueue` so the caller (main thread)
-    /// doesn't block on `startRunning`.
     private func startCapture(at targetFps: Double) {
-        guard let device = currentCaptureDevice else { return }
-        previewLayer?.isHidden = false
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            if self.session.isRunning {
-                // Already running — delegate to fps swap, directly on this
-                // queue (we're already on sessionQueue; no dispatch needed).
-                self.reconfigureActiveSession(device: device, targetFps: targetFps)
-                return
-            }
-            do {
-                try self.configureCaptureFormat(
-                    device,
-                    targetWidth: self.currentCaptureWidth,
-                    targetHeight: self.currentCaptureHeight,
-                    targetFps: targetFps
-                )
-                self.session.startRunning()
-                log.info("camera capture started fps=\(targetFps)")
-            } catch {
-                log.error("camera capture start failed error=\(error.localizedDescription, privacy: .public)")
-                DispatchQueue.main.async {
-                    self.showErrorBanner("相機啟動失敗 (\(Int(targetFps))fps)")
-                }
-            }
-        }
+        captureRuntime.startCapture(targetFps: targetFps)
     }
 
-    /// Reconcile camera hardware to the current standby owner. Transient
-    /// flows (time sync, mutual sync, recording) can legitimately defer
-    /// preview on/off decisions until they end; when we return to
-    /// `.standby`, resolve that deferred intent in one place so the iOS
-    /// capture session never drifts away from dashboard preview state.
     private func reconcileStandbyCaptureState() {
-        if previewRequestedByServer || calibrationFrameCaptureArmed {
-            startCapture(at: standbyFps)
-        } else {
-            stopCapture()
-        }
+        captureRuntime.reconcileStandbyCaptureState(
+            previewRequested: previewRequestedByServer,
+            calibrationFrameCaptureArmed: calibrationFrameCaptureArmed
+        )
     }
 
-    /// Inner of `switchCaptureFps` (same body, no dispatch) for callers that
-    /// already ran themselves onto `sessionQueue`. Keeps the stop → apply
-    /// → start sequence atomic inside one queue task.
-    private func reconfigureActiveSession(device: AVCaptureDevice, targetFps: Double) {
-        let wasRunning = session.isRunning
-        if wasRunning { session.stopRunning() }
-        defer { if wasRunning { session.startRunning() } }
-        do {
-            try configureCaptureFormat(
-                device,
-                targetWidth: self.currentCaptureWidth,
-                targetHeight: self.currentCaptureHeight,
-                targetFps: targetFps
-            )
-            let applied = device.activeVideoMinFrameDuration
-            let appliedFps = applied.value > 0
-                ? Double(applied.timescale) / Double(applied.value)
-                : 0
-            log.info("camera fps switched target=\(targetFps) applied=\(appliedFps) fov_rad=\(self.horizontalFovRadians)")
-        } catch {
-            log.error("camera fps switch failed target=\(targetFps) error=\(error.localizedDescription, privacy: .public)")
-            DispatchQueue.main.async {
-                self.showErrorBanner("FPS 切換失敗 (\(Int(targetFps))fps 不支援)")
-            }
-        }
-    }
-
-    /// Park the capture session. Camera + mic hardware go idle so the phone
-    /// doesn't heat up under a long idle preview — only heartbeat keeps
-    /// running in standby. Safe to call when already stopped. The fps HUD
-    /// reset stays on main (UI state); the hardware stop is off-main so we
-    /// don't hit the `startRunning/stopRunning on main thread` perf check.
     private func stopCapture() {
-        // Hide immediately on main so the last rendered frame doesn't linger
-        // while the sessionQueue hop runs stopRunning — the preview layer
-        // keeps its last frame until a new sample arrives, which looks
-        // identical to a still-live preview.
-        previewLayer?.isHidden = true
-        fpsEstimate = 0
-        framesSinceLastFpsTick = 0
-        lastFrameTimestampForFps = CACurrentMediaTime()
-        sessionQueue.async { [weak self] in
+        captureRuntime.stopCapture { [weak self] in
             guard let self else { return }
-            guard self.session.isRunning else { return }
-            self.session.stopRunning()
-            log.info("camera capture stopped")
+            self.fpsEstimate = 0
+            self.framesSinceLastFpsTick = 0
+            self.lastFrameTimestampForFps = CACurrentMediaTime()
         }
-    }
-
-    private var currentCaptureDevice: AVCaptureDevice? {
-        (session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
-            .first(where: { $0.device.hasMediaType(.video) }))?.device
-    }
-
-    // MARK: - Audio (chirp) capture
-
-    private func setupAudioCapture() {
-        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-            guard let self else { return }
-            DispatchQueue.main.async {
-                if granted {
-                    self.configureAudioCapture()
-                } else {
-                    log.error("camera mic permission denied cam=\(self.settings.cameraRole, privacy: .public)")
-                    self.lastUploadStatusText = "麥克風未授權 · 無法時間校正"
-                    self.updateUIForState()
-                }
-            }
-        }
-    }
-
-    private func configureAudioCapture() {
-        guard chirpDetector == nil else { return }
-        guard let mic = AVCaptureDevice.default(for: .audio) else { return }
-        let input: AVCaptureDeviceInput
-        do {
-            input = try AVCaptureDeviceInput(device: mic)
-        } catch {
-            log.error("camera mic input init failed error=\(error.localizedDescription, privacy: .public)")
-            lastUploadStatusText = "麥克風啟動失敗 · \(error.localizedDescription)"
-            return
-        }
-
-        // Force a flat-response mic path. iOS defaults for AVCaptureSession
-        // audio enable voice preprocessing (AGC, beamforming, AEC) which
-        // aggressively attenuates anything not shaped like human speech —
-        // our 2–8 kHz chirp sweep looks exactly like "noise" to that
-        // pipeline and gets crushed to near-silence (field observation:
-        // inp_peak < 0.03 with a chirp that a human hears at full volume).
-        // `.measurement` mode disables all of it; `.playAndRecord` matches
-        // what MutualSyncAudio already uses so the two sync paths don't
-        // fight each other over category ownership. Must set
-        // `automaticallyConfiguresApplicationAudioSession = false` or the
-        // capture session will stomp our category on `startRunning`.
-        session.automaticallyConfiguresApplicationAudioSession = false
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(
-                .playAndRecord,
-                mode: .measurement,
-                options: [.defaultToSpeaker, .allowBluetoothA2DP]
-            )
-            try audioSession.setActive(true, options: [])
-            log.info("camera AVAudioSession set to .measurement for flat mic response")
-        } catch {
-            log.error("camera AVAudioSession config failed error=\(error.localizedDescription, privacy: .public)")
-        }
-
-        session.beginConfiguration()
-        guard session.canAddInput(input) else {
-            session.commitConfiguration()
-            log.error("camera session rejected audio input cam=\(self.settings.cameraRole, privacy: .public)")
-            lastUploadStatusText = "擷取階段拒絕麥克風"
-            return
-        }
-        session.addInput(input)
-
-        let output = AVCaptureAudioDataOutput()
-        guard session.canAddOutput(output) else {
-            session.removeInput(input)
-            session.commitConfiguration()
-            return
-        }
-        session.addOutput(output)
-
-        // 0.18 is the local default until the server pushes a threshold.
-        let detector = AudioChirpDetector(threshold: 0.18)
-        output.setSampleBufferDelegate(detector, queue: detector.deliveryQueue)
-        session.commitConfiguration()
-
-        audioInput = input
-        audioOutput = output
-        chirpDetector = detector
     }
 
     // MARK: - Layout + overlays
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        previewLayer?.frame = previewFrame(in: view.bounds)
+        captureRuntime.updatePreviewFrame(in: view.bounds)
         // Border path follows the root view bounds; regenerated on every
         // layout pass so rotation / safe-area changes stay in sync.
         stateBorderLayer.frame = view.bounds
@@ -1191,38 +728,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         let exposureMode = ServerUploader.TrackingExposureCapMode(rawValue: modeStr) ?? .frameDuration
         if self.lastServerTrackingExposureCapMode != exposureMode {
             self.lastServerTrackingExposureCapMode = exposureMode
-            self.trackingExposureCapMode = exposureMode
-            if let device = self.currentCaptureDevice {
-                self.sessionQueue.async { [weak self] in
-                    guard let self else { return }
-                    do {
-                        try device.lockForConfiguration()
-                        defer { device.unlockForConfiguration() }
-                        let appliedMaxExposureS = try self.applyExposureConfiguration(
-                            device,
-                            format: device.activeFormat,
-                            targetFps: self.currentTargetFps()
-                        )
-                        let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
-                        let applied = device.activeVideoMinFrameDuration
-                        let appliedFps = applied.value > 0
-                            ? Double(applied.timescale) / Double(applied.value)
-                            : self.currentTargetFps()
-                        self.setAppliedCaptureTelemetry(
-                            widthPx: Int(dims.width),
-                            heightPx: Int(dims.height),
-                            appliedFps: appliedFps,
-                            formatFovDeg: Double(device.activeFormat.videoFieldOfView),
-                            formatIndex: self.appliedFormatIndex,
-                            isVideoBinned: device.activeFormat.isVideoBinned,
-                            appliedMaxExposureS: appliedMaxExposureS
-                        )
-                        log.info("tracking exposure cap hot-applied from server: \(exposureMode.rawValue, privacy: .public)")
-                    } catch {
-                        log.error("tracking exposure cap apply failed mode=\(exposureMode.rawValue, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-                    }
-                }
-            }
+            captureRuntime.applyTrackingExposureCap(modeStr, targetFps: currentTargetFps())
         }
     }
 
@@ -1234,8 +740,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 standbyFps: standbyFps,
                 uploader: { [weak self] in self!.uploader },
                 healthMonitor: { [weak self] in self?.healthMonitor },
-                chirpDetector: { [weak self] in self?.chirpDetector },
-                setupAudioCapture: { [weak self] in self?.setupAudioCapture() },
+                chirpDetector: { [weak self] in self?.captureRuntime.chirpDetector },
+                setupAudioCapture: { [weak self] in
+                    guard let self else { return }
+                    self.captureRuntime.requestAudioCaptureAccess(cameraRole: self.settings.cameraRole)
+                },
                 startCapture: { [weak self] fps in self?.startCapture(at: fps) },
                 reconcileStandbyCaptureState: { [weak self] in self?.reconcileStandbyCaptureState() },
                 transitionState: { [weak self] newState in self?.transitionSyncState(to: newState) },
@@ -1280,7 +789,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 handleTrackingExposureCap: { [weak self] cap in
                     self?.handlePushedTrackingExposureCap(cap)
                 },
-                currentCaptureHeight: { [weak self] in self?.currentCaptureHeight ?? AppSettings.captureHeightFixed },
+                currentCaptureHeight: { [weak self] in self?.captureRuntime.currentCaptureHeight ?? AppSettings.captureHeightFixed },
                 applyServerCaptureHeight: { [weak self] height in self?.applyServerCaptureHeight(height) },
                 isPreviewRequested: { [weak self] in self?.previewRequestedByServer ?? false },
                 setPreviewRequested: { [weak self] in self?.previewRequestedByServer = $0 },
@@ -1310,7 +819,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         guard lastServerChirpThreshold != threshold else { return }
         lastServerChirpThreshold = threshold
         DispatchQueue.main.async {
-            self.chirpDetector?.setThreshold(Float(threshold))
+            self.captureRuntime.setChirpThreshold(threshold)
             log.info("quick-chirp threshold hot-applied from server: \(threshold)")
         }
     }
@@ -1351,7 +860,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             ]
             // Include quick-chirp telemetry only while the detector is
             // actively listening.
-            if self.state == .timeSyncWaiting, let s = self.chirpDetector?.lastSnapshot {
+            if self.state == .timeSyncWaiting, let s = self.captureRuntime.chirpSnapshot() {
                 payload["sync_telemetry"] = [
                     "mode": "quick_chirp",
                     "armed": s.armed,
@@ -1687,7 +1196,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func updateUIForState() {
         let connectionText = "LINK · \((healthMonitor?.statusText ?? "offline").uppercased())"
-        let previewState = previewRequestedByServer ? "REMOTE ON" : (session.isRunning ? "LOCAL ACTIVE" : "OFF")
+        let previewState = previewRequestedByServer ? "REMOTE ON" : (captureRuntime.isSessionRunning ? "LOCAL ACTIVE" : "OFF")
         statusPresenter.render(
             state: state,
             connectionText: connectionText,
