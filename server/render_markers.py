@@ -18,7 +18,7 @@ from render_dashboard import _CSS, _render_app_nav
 _MARKERS_CSS = """
 .main-markers {
   max-width: 1500px; margin: 0 auto;
-  padding: calc(var(--nav-h) + var(--s-4)) var(--s-4) var(--s-5) var(--s-4);
+  padding: calc(var(--nav-offset) + var(--s-4)) var(--s-4) var(--s-5) var(--s-4);
   display: flex; flex-direction: column; gap: var(--s-3);
 }
 .markers-hero {
@@ -193,6 +193,25 @@ _MARKERS_CSS = """
   #markers-plot { height: 480px; }
   .hero-title { font-size: 22px; }
 }
+"""
+
+_NAV_RESIZE_JS = """
+(function () {
+  const navEl = document.querySelector('.nav');
+  const rootStyle = document.documentElement && document.documentElement.style;
+  function syncNavOffset() {
+    if (!navEl || !rootStyle) return;
+    const h = Math.ceil(navEl.getBoundingClientRect().height || 0);
+    if (h > 0) rootStyle.setProperty('--nav-offset', `${h}px`);
+  }
+  syncNavOffset();
+  if (typeof ResizeObserver !== 'undefined' && navEl) {
+    const navObserver = new ResizeObserver(() => syncNavOffset());
+    navObserver.observe(navEl);
+  } else {
+    window.addEventListener('resize', syncNavOffset, { passive: true });
+  }
+})();
 """
 
 
@@ -934,6 +953,7 @@ def render_markers_html(
         '</div>'
         '</section>'
         '</main>'
+        f"<script>{_NAV_RESIZE_JS}</script>"
         f"<script>{_MARKERS_JS.replace('__INITIAL_STATE__', initial_state)}</script>"
         "</body></html>"
     )
