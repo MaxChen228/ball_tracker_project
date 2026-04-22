@@ -98,6 +98,27 @@ _SYNC_CSS = """
 }
 .tuning-status.ok { color: var(--passed); }
 .tuning-status.error { color: var(--failed); }
+.quick-chirp-telemetry { display: grid; gap: var(--s-3); }
+.qct-cam { border: 1px solid var(--border); padding: var(--s-3); }
+.qct-head { display: flex; align-items: center; justify-content: space-between;
+            font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em;
+            text-transform: uppercase; margin-bottom: var(--s-2); }
+.qct-head .clip-chip { padding: 2px 8px; border: 1px solid var(--border);
+                       font-size: 10px; color: var(--sub); }
+.qct-head .clip-chip.warn { color: var(--failed); border-color: var(--failed); }
+.qct-head .clip-chip.ok { color: var(--passed); border-color: var(--passed); }
+.qct-row { display: grid; grid-template-columns: 100px 1fr 80px;
+           align-items: center; gap: var(--s-2); margin-bottom: var(--s-1);
+           font-family: var(--mono); font-size: 11px; }
+.qct-row .label { color: var(--sub); letter-spacing: 0.08em;
+                  text-transform: uppercase; }
+.qct-row .bar { position: relative; height: 10px; background: var(--border); }
+.qct-row .bar .fill { position: absolute; left: 0; top: 0; bottom: 0;
+                      background: var(--ink); }
+.qct-row .bar .fill.warn { background: var(--failed); }
+.qct-row .bar .thr-mark { position: absolute; top: -2px; bottom: -2px;
+                          width: 2px; background: var(--failed); }
+.qct-row .value { text-align: right; font-variant-numeric: tabular-nums; }
 """
 
 
@@ -403,7 +424,58 @@ _JS_TEMPLATE = r"""
       }
       // Trace plot
       renderTrace(body.last_sync || null);
+      // Quick-chirp live telemetry
+      renderQuickChirpTelemetry(body.telemetry || {});
     } catch (e) { /* silent */ }
+  }
+
+  function renderQuickChirpTelemetry(telem) {
+    const host = document.getElementById('quick-chirp-telemetry');
+    if (!host) return;
+    const cams = Object.keys(telem).sort();
+    if (!cams.length) {
+      host.innerHTML = '<div class="trace-empty">No phone listening.</div>';
+      return;
+    }
+    function bar(valueRaw, maxVal, threshold, warnAt) {
+      const value = Number(valueRaw || 0);
+      const pct = Math.min(100, Math.max(0, (value / maxVal) * 100));
+      const warn = warnAt != null && value >= warnAt;
+      const thrPct = threshold != null
+        ? Math.min(100, Math.max(0, (threshold / maxVal) * 100))
+        : null;
+      const thrMark = thrPct != null
+        ? `<div class="thr-mark" style="left:${thrPct.toFixed(1)}%"></div>`
+        : '';
+      return `<div class="bar"><div class="fill${warn ? ' warn' : ''}" style="width:${pct.toFixed(1)}%"></div>${thrMark}</div>`;
+    }
+    function row(label, value, bars, fmt) {
+      const v = typeof value === 'number' ? (fmt || ((x) => x.toFixed(3)))(value) : '—';
+      return `<div class="qct-row"><span class="label">${label}</span>${bars}<span class="value">${v}</span></div>`;
+    }
+    const parts = cams.map(cam => {
+      const t = telem[cam] || {};
+      const peak = Number(t.input_peak || 0);
+      const clipping = peak >= 0.98;
+      const clipClass = clipping ? 'warn' : (peak >= 0.7 ? '' : 'ok');
+      const clipText = clipping ? 'CLIPPING' : (peak >= 0.7 ? 'hot' : 'headroom ok');
+      const thr = Number(t.threshold || 0);
+      const up = Number(t.up_peak || 0);
+      const down = Number(t.down_peak || 0);
+      const upFloor = Number(t.cfar_up_floor || 0);
+      const downFloor = Number(t.cfar_down_floor || 0);
+      return `<div class="qct-cam">
+        <div class="qct-head"><span>Cam ${cam} · ${t.armed ? 'armed' : 'cooldown'}${t.pending_up ? ' · pending up' : ''}</span>
+          <span class="clip-chip ${clipClass}">${clipText}</span></div>
+        ${row('input rms', t.input_rms, bar(t.input_rms, 0.5, null, null))}
+        ${row('input peak', t.input_peak, bar(t.input_peak, 1.0, null, 0.98))}
+        ${row('up peak', up, bar(up, 1.0, thr, null))}
+        ${row('down peak', down, bar(down, 1.0, thr, null))}
+        ${row('cfar up', upFloor, bar(upFloor, 0.2, null, null))}
+        ${row('cfar dn', downFloor, bar(downFloor, 0.2, null, null))}
+      </div>`;
+    });
+    host.innerHTML = parts.join('');
   }
 
   async function tickSyncStatus() {
@@ -707,6 +779,11 @@ def render_sync_html(
         '<h2 class="card-title">Matched-filter trace</h2>'
         '<div id="sync-trace"><div class="trace-empty">No sync run yet.</div></div>'
         f'{_render_sync_legend()}'
+        "</div>"
+        '<div class="card">'
+        '<h2 class="card-title">Quick-chirp telemetry &middot; live</h2>'
+        '<div class="card-subtitle">While a phone is in 時間校正 listening state, its mic level + matched-filter peaks appear here. Use to tune speaker volume: input_peak &ge; 0.98 means ADC is clipping and will hurt correlation.</div>'
+        '<div id="quick-chirp-telemetry" class="quick-chirp-telemetry"><div class="trace-empty">No phone listening.</div></div>'
         "</div>"
         '<div class="card">'
         '<h2 class="card-title">Log</h2>'
