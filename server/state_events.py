@@ -1,0 +1,259 @@
+"""Dashboard /events row builder.
+
+One row per `session_id`, collapsing A/B uploads into a single entry with
+per-pipeline frame counts, path status pills, triangulation summary, and
+processing state. The data is derived (not stored), so this module is
+pure read — it never mutates `State`.
+
+Lock discipline: `_snapshot_sessions_locked` gathers everything that
+depends on in-memory state in one lock acquisition, then all downstream
+work (disk `stat()`, trash lookup, processing summary) runs outside the
+lock so the dashboard's 5 s tick can't stall /pitch handlers.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from schemas import CaptureTelemetryPayload, DetectionPath, SessionResult
+
+if TYPE_CHECKING:
+    from state import State
+
+
+# Each pipeline (live / ios_post / server_post) maps to one of the three
+# PitchPayload frame buckets. Keep the mapping in one table so the events
+# loop can't drift out of sync with schemas.DetectionPath.
+_PATH_TO_FRAMES_ATTR: tuple[tuple[str, str], ...] = (
+    (DetectionPath.live.value, "frames_live"),
+    (DetectionPath.ios_post.value, "frames_on_device"),
+    (DetectionPath.server_post.value, "frames"),
+)
+
+
+def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, Any]]:
+    """Summary row per session for the events panel — one entry per
+    session_id, collapsing A/B uploads into a single event.
+
+    `received_at` is derived from the pitch file's mtime so we don't have to
+    extend the Pydantic payload with server-side timestamps. Disk `stat()`
+    happens AFTER releasing the state lock so the dashboard's 5 s tick can't
+    block heartbeats / /pitch handlers that need to mutate the state map.
+    """
+    snapshots = _snapshot_sessions_locked(state)
+
+    events: list[dict[str, Any]] = []
+    for sid, cams_present, n_ball_frames_by_path, has_any_on_device_frames, cam_capture_telemetry, result in snapshots:
+        trashed = state._session_is_trashed(sid)
+        if bucket == "active" and trashed:
+            continue
+        if bucket == "trash" and not trashed:
+            continue
+
+        latest_mtime = _latest_pitch_mtime(state, cams_present, sid)
+        authority_points = result.triangulated if result is not None else []
+        n_triangulated = len(authority_points) if result is not None else 0
+        n_triangulated_on_device = len(result.points_on_device) if result is not None else 0
+        error = result.error if result is not None else None
+        error_on_device = result.error_on_device if result is not None else None
+
+        status = _status_label(cams_present, n_triangulated, error)
+        peak_z, mean_res, duration = _point_cloud_summary(authority_points)
+        mode = _legacy_mode_label(state, sid, has_any_on_device_frames)
+        path_status = _path_status_pills(result, n_ball_frames_by_path)
+        processing_state, processing_resumable = state.session_processing_summary(sid)
+
+        events.append(
+            {
+                "session_id": sid,
+                "cameras": cams_present,
+                "status": status,
+                "mode": mode,
+                "received_at": latest_mtime,
+                # Three independent counts, one per pipeline. The legacy flat
+                # names are kept as aliases so older consumers (tests,
+                # external scripts) don't break — new code should read
+                # `n_ball_frames_by_path`.
+                "n_ball_frames_by_path": n_ball_frames_by_path,
+                "n_ball_frames": n_ball_frames_by_path[DetectionPath.server_post.value],
+                "n_ball_frames_on_device": n_ball_frames_by_path[DetectionPath.ios_post.value],
+                "n_triangulated": n_triangulated,
+                "n_triangulated_on_device": n_triangulated_on_device,
+                "peak_z_m": peak_z,
+                "mean_residual_m": mean_res,
+                "duration_s": duration,
+                "capture_telemetry": {
+                    cam: (tele.model_dump(mode="json") if tele is not None else None)
+                    for cam, tele in cam_capture_telemetry.items()
+                },
+                "error": error,
+                "error_on_device": error_on_device,
+                "path_status": path_status,
+                "trashed": trashed,
+                "processing_state": processing_state,
+                "processing_resumable": processing_resumable,
+            }
+        )
+
+    # Latest events first — session ids carry 4 bytes of random hex so we
+    # sort by `received_at` (fallback to id) to surface the most recently
+    # uploaded session at the top.
+    events.sort(
+        key=lambda e: (e["received_at"] or 0, e["session_id"]),
+        reverse=True,
+    )
+    return events
+
+
+def _snapshot_sessions_locked(
+    state: "State",
+) -> list[
+    tuple[
+        str,
+        list[str],
+        dict[str, dict[str, int]],
+        bool,
+        dict[str, CaptureTelemetryPayload | None],
+        SessionResult | None,
+    ]
+]:
+    """Grab everything we need from in-memory state under one lock acquisition.
+
+    Every subsequent step (file stats, summary derivation) runs outside the
+    lock so the 5 s dashboard tick can't stall /pitch handlers that mutate
+    the pitches/results maps.
+    """
+    with state._lock:
+        sessions = sorted({sid for _, sid in state.pitches.keys()})
+        snapshots: list[
+            tuple[
+                str,
+                list[str],
+                dict[str, dict[str, int]],
+                bool,
+                dict[str, CaptureTelemetryPayload | None],
+                SessionResult | None,
+            ]
+        ] = []
+        for sid in sessions:
+            cams_present = sorted(cam for (cam, s) in state.pitches.keys() if s == sid)
+            # n_ball_frames_by_path[path][cam] = detected-frame count. Every
+            # path gets a populated inner dict even when the count is zero so
+            # the dashboard renders three independent columns without having
+            # to guess which keys exist.
+            n_ball_frames_by_path: dict[str, dict[str, int]] = {
+                path: {} for path, _ in _PATH_TO_FRAMES_ATTR
+            }
+            for cam in cams_present:
+                pitch = state.pitches[(cam, sid)]
+                for path, attr in _PATH_TO_FRAMES_ATTR:
+                    frames = getattr(pitch, attr, ()) or ()
+                    n_ball_frames_by_path[path][cam] = sum(
+                        1 for f in frames if f.ball_detected
+                    )
+            # Any pitch for this session carrying non-empty frames_on_device
+            # implies the session armed in dual mode. Computed inside the lock
+            # so the mode-inference step outside doesn't need to re-read
+            # state.pitches.
+            has_any_on_device_frames = any(
+                bool(state.pitches[(cam, sid)].frames_on_device)
+                for cam in cams_present
+            )
+            cam_capture_telemetry = {
+                cam: state.pitches[(cam, sid)].capture_telemetry
+                for cam in cams_present
+            }
+            snapshots.append(
+                (
+                    sid,
+                    cams_present,
+                    n_ball_frames_by_path,
+                    has_any_on_device_frames,
+                    cam_capture_telemetry,
+                    state.results.get(sid),
+                )
+            )
+    return snapshots
+
+
+def _latest_pitch_mtime(state: "State", cams_present: list[str], sid: str) -> float | None:
+    latest: float | None = None
+    for cam in cams_present:
+        try:
+            mtime = state._pitch_path(cam, sid).stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if latest is None or mtime > latest:
+            latest = mtime
+    return latest
+
+
+def _status_label(cams_present: list[str], n_triangulated: int, error: str | None) -> str:
+    if error:
+        return "error"
+    if len(cams_present) >= 2 and n_triangulated > 0:
+        return "paired"
+    if len(cams_present) >= 2:
+        return "paired_no_points"
+    return "partial"
+
+
+def _point_cloud_summary(
+    authority_points: list,
+) -> tuple[float | None, float | None, float | None]:
+    if not authority_points:
+        return None, None, None
+    zs = [p.z_m for p in authority_points]
+    peak_z = float(max(zs))
+    mean_res = float(
+        sum(p.residual_m for p in authority_points) / len(authority_points)
+    )
+    ts = [p.t_rel_s for p in authority_points]
+    duration = float(ts[-1] - ts[0])
+    return peak_z, mean_res, duration
+
+
+def _legacy_mode_label(state: "State", sid: str, has_any_on_device_frames: bool) -> str:
+    has_any_video = any(state._video_dir.glob(f"session_{sid}_*"))
+    if has_any_video and has_any_on_device_frames:
+        return "dual"
+    if has_any_video:
+        return "camera_only"
+    return "on_device"
+
+
+def _path_status_pills(
+    result: SessionResult | None,
+    n_ball_frames_by_path: dict[str, dict[str, int]],
+) -> dict[str, str]:
+    """Per-pipeline health pill. Resolves in this order (strongest wins):
+
+    1. "done" if result.paths_completed includes it (triangulated on a
+       paired session, or explicit mono-session finalization),
+    2. "done" if any camera produced ≥1 detected frame on that pipeline —
+       live-only single-camera runs ship no triangulation but still count
+       as "that pipeline executed", which is what the user wants to see in
+       the events list,
+    3. "error" if abort_reasons has an entry for this pipeline,
+    4. "-" (never ran / empty).
+    """
+
+    def pill(path_value: str, abort_prefix: str | None = None) -> str:
+        if result is not None and path_value in result.paths_completed:
+            return "done"
+        if any(c > 0 for c in n_ball_frames_by_path.get(path_value, {}).values()):
+            return "done"
+        if result is not None:
+            if path_value in result.abort_reasons:
+                return "error"
+            if abort_prefix is not None and any(
+                key.startswith(abort_prefix) for key in result.abort_reasons
+            ):
+                return "error"
+        return "-"
+
+    return {
+        DetectionPath.live.value: pill(DetectionPath.live.value, "live:"),
+        DetectionPath.ios_post.value: pill(DetectionPath.ios_post.value),
+        DetectionPath.server_post.value: pill(DetectionPath.server_post.value),
+    }
