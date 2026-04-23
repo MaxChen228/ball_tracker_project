@@ -28,7 +28,9 @@
   let currentDefaultPaths = ['server_post'];
   let currentLiveSession = null;
   const livePointStore = new Map();   // sid -> [{x,y,z,t_rel_s}]
+  const liveRayStore = new Map();     // sid -> Map(cam -> [{origin,endpoint,t_rel_s,frame_index}])
   let lastEndedLiveSid = null;        // For ghost-preview on the next arm
+  let liveRayPaintPending = false;
   // Per-cam WS connection state from SSE device_status events. Keyed by
   // camera id; value shape: {connected: bool, since_ms: number}. The
   // degraded banner fires when an armed session has any cam that's been
@@ -65,7 +67,7 @@
       return new Set(raw ? JSON.parse(raw) : []);
     } catch { return new Set(); }
   })();
-  const trajCache = new Map();       // sid -> {points_on_device, fit_on_device}
+  const trajCache = new Map();       // sid -> {points_on_device}
   let basePlot = null;               // last /calibration/state .plot payload
 
   function persistTrajSelection() {
@@ -87,33 +89,38 @@
       const r = await fetch(`/results/${encodeURIComponent(sid)}`, { cache: 'no-store' });
       if (!r.ok) return null;
       const data = await r.json();
-      // Dashboard displays on-device (mode-two) only. Server (mode-one) data
-      // is forensic-only — it's still in the SessionResult payload but
-      // intentionally ignored here.
       const entry = {
-        points_on_device: data.points_on_device || [],
-        fit_on_device: data.fit_on_device || null,
+        points_on_device: (data.points_on_device || []).slice().sort((a, b) => a.t_rel_s - b.t_rel_s),
       };
       trajCache.set(sid, entry);
       return entry;
     } catch { return null; }
   }
 
-  function evalQuadratic(coeffs, t) {
-    return coeffs[0] * t * t + coeffs[1] * t + coeffs[2];
+  function trajectoryBounds(points) {
+    if (!points || points.length < 2) return null;
+    return { t0: points[0].t_rel_s, t1: points[points.length - 1].t_rel_s };
   }
 
-  function densifyFit(fit, n) {
-    const t0 = fit.t_min_s;
-    const t1 = (fit.plate_t_s !== null && fit.plate_t_s !== undefined) ? fit.plate_t_s : fit.t_max_s;
-    const xs = new Array(n), ys = new Array(n), zs = new Array(n);
-    for (let i = 0; i < n; ++i) {
-      const t = t0 + (t1 - t0) * (i / (n - 1));
-      xs[i] = evalQuadratic(fit.coeffs_x, t);
-      ys[i] = evalQuadratic(fit.coeffs_y, t);
-      zs[i] = evalQuadratic(fit.coeffs_z, t);
+  function sampleTrajectory(points, t) {
+    if (!points || !points.length) return null;
+    if (points.length === 1) return points[0];
+    if (t <= points[0].t_rel_s) return points[0];
+    if (t >= points[points.length - 1].t_rel_s) return points[points.length - 1];
+    for (let i = 1; i < points.length; ++i) {
+      const a = points[i - 1];
+      const b = points[i];
+      if (t > b.t_rel_s) continue;
+      const span = Math.max(1e-6, b.t_rel_s - a.t_rel_s);
+      const alpha = (t - a.t_rel_s) / span;
+      return {
+        x_m: a.x_m + (b.x_m - a.x_m) * alpha,
+        y_m: a.y_m + (b.y_m - a.y_m) * alpha,
+        z_m: a.z_m + (b.z_m - a.z_m) * alpha,
+        t_rel_s: t,
+      };
     }
-    return { xs, ys, zs };
+    return points[points.length - 1];
   }
 
   // --- Canvas mode + playback state ---------------------------------------
@@ -145,17 +152,18 @@
     return arr.length ? arr[arr.length - 1] : null;
   }
 
-  function activeFitDuration() {
+  function activeReplayDuration() {
     const sid = activeReplaySid();
     if (!sid) return 0;
     const r = trajCache.get(sid);
-    if (!r || !r.fit_on_device) return 0;
-    return r.fit_on_device.t_max_s - r.fit_on_device.t_min_s;
+    const bounds = r ? trajectoryBounds(r.points_on_device || []) : null;
+    if (!bounds) return 0;
+    return bounds.t1 - bounds.t0;
   }
 
   function updateTimeReadout() {
     if (!timeReadout || !scrubSlider) return;
-    const dur = activeFitDuration();
+    const dur = activeReplayDuration();
     const now = dur * playheadFrac;
     timeReadout.textContent = `${now.toFixed(2)} / ${dur.toFixed(2)} s`;
     scrubSlider.value = Math.round(playheadFrac * 1000);
@@ -182,52 +190,7 @@
   }
 
   function inspectTracesFor(sid, result, color) {
-    // Inspect mode: dense fitted quadratic + inlier dots + outlier X markers.
-    // Lets operator judge RANSAC decisions at a glance and spot sessions
-    // where the fit chose the wrong cluster.
-    const fit = result.fit_on_device;
     const raw = result.points_on_device || [];
-    if (fit) {
-      const { xs, ys, zs } = densifyFit(fit, 64);
-      const inlierSet = new Set(fit.inlier_indices);
-      const inliers = raw.filter((_, i) => inlierSet.has(i));
-      const outliers = raw.filter((_, i) => !inlierSet.has(i));
-      const traces = [{
-        type: 'scatter3d',
-        mode: 'lines',
-        x: xs, y: ys, z: zs,
-        line: { color, width: 5 },
-        name: `${sid} · fit`,
-        hovertemplate: `${sid}<br>rms=${fit.rms_m.toFixed(3)}m<extra></extra>`,
-        showlegend: true,
-      }, {
-        type: 'scatter3d',
-        mode: 'markers',
-        x: inliers.map(p => p.x_m),
-        y: inliers.map(p => p.y_m),
-        z: inliers.map(p => p.z_m),
-        marker: { color, size: 3, opacity: 0.55 },
-        name: `${sid} · inliers`,
-        hovertemplate: `${sid}<br>t=%{customdata:.3f}s<br>x=%{x:.2f} y=%{y:.2f} z=%{z:.2f}<extra></extra>`,
-        customdata: inliers.map(p => p.t_rel_s),
-        showlegend: false,
-      }];
-      if (outliers.length) {
-        traces.push({
-          type: 'scatter3d',
-          mode: 'markers',
-          x: outliers.map(p => p.x_m),
-          y: outliers.map(p => p.y_m),
-          z: outliers.map(p => p.z_m),
-          marker: { color: '#C03A2B', size: 5, symbol: 'x', opacity: 0.9 },
-          name: `${sid} · outliers`,
-          hovertemplate: `${sid} OUTLIER<br>t=%{customdata:.3f}s<extra></extra>`,
-          customdata: outliers.map(p => p.t_rel_s),
-          showlegend: false,
-        });
-      }
-      return traces;
-    }
     if (!raw.length) return [];
     return [{
       type: 'scatter3d',
@@ -237,48 +200,42 @@
       z: raw.map(p => p.z_m),
       line: { color, width: 3, dash: 'dot' },
       marker: { color, size: 2, opacity: 0.6 },
-      name: `${sid} · raw`,
-      hovertemplate: `${sid} (unfit)<br>t=%{customdata:.3f}s<extra></extra>`,
+      name: `${sid} · path`,
+      hovertemplate: `${sid}<br>t=%{customdata:.3f}s<br>x=%{x:.2f} y=%{y:.2f} z=%{z:.2f}<extra></extra>`,
       customdata: raw.map(p => p.t_rel_s),
       showlegend: true,
     }];
   }
 
   function replayTracesFor(sid, result, color) {
-    // Replay mode: clean trajectory line + animated ball sphere + short
-    // motion trail. Inlier/outlier markers are suppressed — those are an
-    // inspect-mode concern, not a broadcast/demo concern.
-    const fit = result.fit_on_device;
-    if (!fit) return [];
-    const { xs, ys, zs } = densifyFit(fit, 80);
-    const tActive = fit.t_min_s + playheadFrac * (fit.t_max_s - fit.t_min_s);
-    const bx = evalQuadratic(fit.coeffs_x, tActive);
-    const by = evalQuadratic(fit.coeffs_y, tActive);
-    const bz = evalQuadratic(fit.coeffs_z, tActive);
-    // Short fading trail: 12 samples behind the ball, ~0.1 s worth.
-    const trailN = 12;
-    const trailDt = 0.01;
-    const trailX = [], trailY = [], trailZ = [];
-    for (let i = trailN; i >= 1; --i) {
-      const tt = tActive - i * trailDt;
-      if (tt < fit.t_min_s) continue;
-      trailX.push(evalQuadratic(fit.coeffs_x, tt));
-      trailY.push(evalQuadratic(fit.coeffs_y, tt));
-      trailZ.push(evalQuadratic(fit.coeffs_z, tt));
+    const raw = result.points_on_device || [];
+    const bounds = trajectoryBounds(raw);
+    if (!bounds) return inspectTracesFor(sid, result, color);
+    const tActive = bounds.t0 + playheadFrac * (bounds.t1 - bounds.t0);
+    const ball = sampleTrajectory(raw, tActive);
+    if (!ball) return [];
+    const trailWindowS = 0.12;
+    const trailPts = raw.filter(p => p.t_rel_s >= (tActive - trailWindowS) && p.t_rel_s <= tActive);
+    if (!trailPts.length || trailPts[trailPts.length - 1].t_rel_s < tActive) {
+      trailPts.push(ball);
     }
     return [
       {
         type: 'scatter3d', mode: 'lines',
-        x: xs, y: ys, z: zs,
+        x: raw.map(p => p.x_m),
+        y: raw.map(p => p.y_m),
+        z: raw.map(p => p.z_m),
         line: { color, width: 4 },
         name: `${sid} · path`,
-        hovertemplate: `${sid}<br>rms=${fit.rms_m.toFixed(3)}m<extra></extra>`,
+        hovertemplate: `${sid}<extra></extra>`,
         showlegend: true,
         opacity: 0.45,
       },
       {
         type: 'scatter3d', mode: 'lines',
-        x: trailX, y: trailY, z: trailZ,
+        x: trailPts.map(p => p.x_m),
+        y: trailPts.map(p => p.y_m),
+        z: trailPts.map(p => p.z_m),
         line: { color, width: 6 },
         name: `${sid} · trail`,
         hoverinfo: 'skip',
@@ -287,14 +244,14 @@
       },
       {
         type: 'scatter3d', mode: 'markers',
-        x: [bx], y: [by], z: [bz],
+        x: [ball.x_m], y: [ball.y_m], z: [ball.z_m],
         marker: {
           color: '#D9A441', size: 9, symbol: 'circle',
           line: { color: '#4A3E24', width: 1.5 },
         },
         name: `${sid} · ball`,
         hovertemplate: `${sid}<br>t=%{customdata:.3f}s<br>(x,y,z)=(%{x:.2f}, %{y:.2f}, %{z:.2f})<extra></extra>`,
-        customdata: [tActive - fit.t_min_s],
+        customdata: [tActive - bounds.t0],
         showlegend: false,
       },
     ];
@@ -339,6 +296,30 @@
     }
     if (!currentLiveSession || !currentLiveSession.session_id) return traces;
     const sid = currentLiveSession.session_id;
+    const rayByCam = liveRayStore.get(sid);
+    if (rayByCam) {
+      const colors = { A: 'rgba(74,107,140,0.34)', B: 'rgba(211,84,0,0.34)' };
+      for (const [cam, rays] of rayByCam.entries()) {
+        if (!rays.length) continue;
+        const xs = [], ys = [], zs = [];
+        for (const r of rays) {
+          xs.push(r.origin[0], r.endpoint[0], null);
+          ys.push(r.origin[1], r.endpoint[1], null);
+          zs.push(r.origin[2], r.endpoint[2], null);
+        }
+        traces.push({
+          type: 'scatter3d',
+          mode: 'lines',
+          x: xs,
+          y: ys,
+          z: zs,
+          line: { color: colors[cam] || 'rgba(42,37,32,0.28)', width: 2 },
+          name: `${sid} · live rays ${cam}`,
+          hoverinfo: 'skip',
+          showlegend: true,
+        });
+      }
+    }
     const pts = livePointStore.get(sid) || [];
     if (!pts.length) return traces;
     traces.push({
@@ -359,6 +340,26 @@
       showlegend: true,
     });
     return traces;
+  }
+
+  function pushLiveRay(sid, cam, ray) {
+    let byCam = liveRayStore.get(sid);
+    if (!byCam) {
+      byCam = new Map();
+      liveRayStore.set(sid, byCam);
+    }
+    const arr = byCam.get(cam) || [];
+    arr.push(ray);
+    byCam.set(cam, arr);
+  }
+
+  function scheduleLiveRayRepaint() {
+    if (liveRayPaintPending) return;
+    liveRayPaintPending = true;
+    requestAnimationFrame(() => {
+      liveRayPaintPending = false;
+      repaintCanvas();
+    });
   }
 
   // Layout is effectively static across the dashboard's lifetime (axes,
@@ -504,8 +505,8 @@
     const sid = cb.dataset.trajSid;
     // Single-select preview: clicking one row always replaces the
     // selection (clicking again on the same row deselects). Multi-select
-    // was confusing when replays had different durations + made the fit
-    // outlier inspector busy when several sessions overlapped in space.
+    // was confusing when replays had different durations and made the
+    // canvas too busy when several sessions overlapped in space.
     if (cb.checked) {
       selectedTrajIds.clear();
       selectedTrajIds.add(sid);
@@ -583,7 +584,7 @@
   function animationTick(ts) {
     if (!isPlaying) return;
     if (lastFrameTs !== null) {
-      const dur = activeFitDuration();
+      const dur = activeReplayDuration();
       if (dur > 0) {
         const dt = (ts - lastFrameTs) / 1000.0;
         playheadFrac += (dt * playbackSpeed) / dur;
@@ -604,7 +605,7 @@
     if (isPlaying) requestAnimationFrame(animationTick);
   }
   if (playpauseBtn) playpauseBtn.addEventListener('click', () => {
-    if (activeFitDuration() <= 0) return;  // nothing to play
+    if (activeReplayDuration() <= 0) return;  // nothing to play
     setPlaying(!isPlaying);
   });
   if (scrubSlider) scrubSlider.addEventListener('input', () => {
@@ -832,7 +833,7 @@
   function renderActiveSession(liveSession) {
     if (!activeBox) return;
     if (!liveSession || !liveSession.session_id) {
-      activeBox.innerHTML = `<div class="active-empty">No active live stream.</div>`;
+      activeBox.innerHTML = `<div class="active-empty">No active session.</div>`;
       return;
     }
     const sid = esc(liveSession.session_id);
@@ -868,20 +869,15 @@
     const completed = new Set(liveSession.paths_completed || []);
     const postPassRow = (path, label) => {
       if (!pathsOn.has(path)) return '';
-      const state = completed.has(path) ? 'done' : (armed ? 'pending' : 'running');
+      const state = completed.has(path) ? 'done' : (armed ? 'pending' : 'stopped');
       return `<span class="postpass-chip ${state}">${esc(label)}: ${state}</span>`;
     };
     const postPassChips = [
       postPassRow('ios_post', 'iOS'),
       postPassRow('server_post', 'srv'),
     ].filter(Boolean).join('');
-    activeBox.innerHTML = `
-      <div class="active-head">
-        <span class="chip armed ${armed ? 'pulse' : ''}">${armed ? '●REC' : 'ended'}</span>
-        <span class="session-id">${sid}</span>
-        <span class="elapsed" data-elapsed>${fmtElapsed(elapsedMs)}</span>
-      </div>
-      <div class="path-chip-row">${chips}</div>
+    const liveEnabled = pathsOn.has('live');
+    const liveRows = liveEnabled ? `
       <div class="cam-row" data-cam="A">
         <canvas class="spark" data-spark="A"></canvas>
         <span class="k">A</span>
@@ -898,7 +894,16 @@
         <span class="k">Live pairs</span>
         <span class="v">${Number(liveSession.point_count || 0)} pts</span>
         <span class="vsub">last ${lastPtTxt} · ${depthTxt}</span>
+      </div>` : `
+      <div class="active-empty">Live stream disabled for this session.</div>`;
+    activeBox.innerHTML = `
+      <div class="active-head">
+        <span class="chip armed ${armed ? 'pulse' : ''}">${armed ? '●REC' : 'ended'}</span>
+        <span class="session-id">${sid}</span>
+        <span class="elapsed" data-elapsed>${fmtElapsed(elapsedMs)}</span>
       </div>
+      <div class="path-chip-row">${chips}</div>
+      ${liveRows}
       ${postPassChips ? `<div class="postpass-row">${postPassChips}</div>` : ''}
       <div class="active-actions">
         <button type="button" class="btn-reset" data-reset-trail>Reset trail</button>
@@ -914,6 +919,7 @@
       resetBtn.addEventListener('click', () => {
         if (!currentLiveSession) return;
         livePointStore.set(currentLiveSession.session_id, []);
+        liveRayStore.set(currentLiveSession.session_id, new Map());
         currentLiveSession.point_count = 0;
         currentLiveSession.point_depths = [];
         currentLiveSession.last_point_at_ms = null;
@@ -975,10 +981,45 @@
     return `<span class="sync-led ${cls}" title="${esc(tip)}">${esc(cam)}</span>`;
   }
 
+  function armReadiness(state) {
+    if (state && state.arm_readiness) return state.arm_readiness;
+    const devices = (state && state.devices) || [];
+    const calibrations = new Set((state && state.calibrations) || []);
+    const online = devices.map(d => String(d.camera_id)).filter(Boolean);
+    const synced = new Set(devices.filter(d => d && d.time_synced).map(d => String(d.camera_id)));
+    const usable = online.filter(cam => calibrations.has(cam)).sort();
+    const uncalibrated = online.filter(cam => !calibrations.has(cam)).sort();
+    const blockers = [];
+    const warnings = [];
+    if (!online.length) {
+      blockers.push('no camera online');
+    } else if (uncalibrated.length) {
+      uncalibrated.forEach(cam => blockers.push(`${cam} not calibrated`));
+    } else if (usable.length >= 2) {
+      usable.forEach(cam => { if (!synced.has(cam)) blockers.push(`${cam} not time-synced`); });
+    } else {
+      warnings.push(`single-camera session (${usable[0]}); no triangulation`);
+    }
+    return {
+      ready: blockers.length === 0,
+      blockers,
+      warnings,
+      online_cameras: online.sort(),
+      calibrated_online_cameras: usable,
+      synced_calibrated_online_cameras: usable.filter(cam => synced.has(cam)),
+      requires_time_sync: usable.length >= 2,
+      mode: usable.length >= 2 ? 'stereo' : (usable.length ? 'single_camera' : 'blocked'),
+    };
+  }
+
   function renderSession(state) {
     if (!sessionBox) { /* nav-only render still executes below */ }
     const s = state.session;
     const armed = !!(s && s.armed);
+    const readiness = armReadiness(state);
+    const canArm = !!(readiness && readiness.ready);
+    const blockers = (readiness && readiness.blockers) || [];
+    const warnings = (readiness && readiness.warnings) || [];
     currentDefaultPaths = state.default_paths || currentDefaultPaths || ['server_post'];
     currentLiveSession = state.live_session || currentLiveSession;
     const chip = armed ? `<span class="chip armed">armed</span>` : `<span class="chip idle">idle</span>`;
@@ -988,17 +1029,23 @@
            <button class="btn" type="submit">Clear</button>
          </form>`
       : '';
+    const gateRow = (!armed && blockers.length)
+      ? `<div class="arm-gate"><span class="gate-label">Need:</span> ${esc(blockers.join(', '))}</div>`
+      : ((!armed && warnings.length)
+        ? `<div class="arm-gate"><span class="gate-label">Mode:</span> ${esc(warnings.join(', '))}</div>`
+        : '');
     const sessHtml = `
       <div class="session-head">${chip}${sid}</div>
       <div class="session-actions">
         <form class="inline" method="POST" action="/sessions/arm">
-          <button class="btn" type="submit" ${armed ? 'disabled' : ''}>Arm session</button>
+          <button class="btn" type="submit" ${armed || !canArm ? 'disabled' : ''}>Arm session</button>
         </form>
         <form class="inline" method="POST" action="/sessions/stop">
           <button class="btn danger" type="submit" ${armed ? '' : 'disabled'}>Stop</button>
         </form>
         ${clearBtn}
       </div>
+      ${gateRow}
       <div class="card-subtitle">Time Sync</div>
       <div class="session-actions">
         <form class="inline" method="POST" action="/sync/trigger">
@@ -1014,14 +1061,15 @@
     // Mirror live state into the shared app-header status strip.
     if (navStatus) {
       const online = (state.devices || []).length;
-      const cal = (state.calibrations || []).length;
-      const synced = (state.devices || []).filter(d => d && d.time_synced).length;
-      const expected = 2;
+      const usable = (readiness.calibrated_online_cameras || []).length;
+      const syncedUsable = (readiness.synced_calibrated_online_cameras || []).length;
       const cooldown = Number(state.sync_cooldown_remaining_s || 0);
       let badgeCls = 'ready';
       let badge = 'Ready';
       let headline = 'ready to arm';
-      let context = 'all prerequisites satisfied';
+      let context = readiness.mode === 'single_camera'
+        ? 'single-camera rays only'
+        : 'all stereo prerequisites satisfied';
       if (armed) {
         badgeCls = 'recording';
         badge = 'Recording';
@@ -1032,21 +1080,11 @@
         badge = 'Sync';
         headline = 'sync in progress';
         context = 'complete on /sync';
-      } else if (online < expected) {
+      } else if (!canArm) {
         badgeCls = 'blocked';
         badge = 'Blocked';
-        headline = 'bring both devices online';
-        context = `${online}/${expected} devices available`;
-      } else if (cal < expected) {
-        badgeCls = 'blocked';
-        badge = 'Blocked';
-        headline = 'finish calibration';
-        context = `${cal}/${expected} cameras calibrated`;
-      } else if (synced < expected) {
-        badgeCls = 'blocked';
-        badge = 'Blocked';
-        headline = 'run time sync';
-        context = `${synced}/${expected} cameras synced`;
+        headline = blockers[0] || 'not ready';
+        context = blockers.slice(1).join(', ') || 'check camera readiness';
       } else if (cooldown > 0) {
         badgeCls = 'cooldown';
         badge = 'Cooldown';
@@ -1062,9 +1100,9 @@
           <span class="status-context">${context}</span>
         </div>
         <div class="status-checks">
-          ${check('Devices', `${online}/${expected}`, online >= expected)}
-          ${check('Cal', `${cal}/${expected}`, cal >= expected)}
-          ${check('Sync', `${synced}/${expected}`, synced >= expected)}
+          ${check('Devices', `${online}`, online >= 1)}
+          ${check('Cal', `${usable}`, usable >= 1)}
+          ${check('Sync', readiness.requires_time_sync ? `${syncedUsable}/${usable}` : 'single', !readiness.requires_time_sync || syncedUsable >= usable)}
         </div>`;
       navStatus.innerHTML = navHtml;
     }
@@ -1088,25 +1126,13 @@
     evHtml = events.map(e => {
       const sid = esc(e.session_id);
       const stat = (e.status || '').replace(/_/g, ' ');
-      const speedKmh = e.speed_mps != null ? (e.speed_mps * 3.6).toFixed(1) : null;
-      const duration = fmtNum(e.fit_duration_s != null ? e.fit_duration_s : e.duration_s, 2);
-      const rms = fmtNum(e.rms_m, 3);
-      const plateX = e.plate_xz_m ? e.plate_xz_m[0].toFixed(2) : null;
-      const plateZ = e.plate_xz_m ? e.plate_xz_m[1].toFixed(2) : null;
+      const duration = fmtNum(e.duration_s, 2);
+      const peakZ = e.peak_z_m != null ? e.peak_z_m.toFixed(2) : null;
+      const triangulated = Number(e.n_triangulated_on_device || e.n_triangulated || 0);
       const pathStatus = e.path_status || {};
       const pathChips = [['live', 'L'], ['ios_post', 'I'], ['server_post', 'S']]
         .map(([path, label]) => `<span class="path-chip${pathStatus[path] === 'done' ? ' on' : ''}">${label}</span>`)
         .join('');
-      // Quality chip from fit RMS: <10mm excellent, <30mm good, <80mm fair, else poor.
-      // Sessions without a fit get a neutral `no-fit` chip — they still list
-      // (the operator may want to forensic them) but signal loudly.
-      let qualityClass = 'no-fit', qualityLabel = 'no fit';
-      if (e.rms_m != null) {
-        if (e.rms_m < 0.010)      { qualityClass = 'excellent'; qualityLabel = 'excellent'; }
-        else if (e.rms_m < 0.030) { qualityClass = 'good';      qualityLabel = 'good'; }
-        else if (e.rms_m < 0.080) { qualityClass = 'fair';      qualityLabel = 'fair'; }
-        else                      { qualityClass = 'poor';      qualityLabel = 'poor'; }
-      }
       const confirmMsg = `刪除 session ${e.session_id}？此動作無法復原。`;
       const trashMsg = `移動 session ${e.session_id} 到垃圾桶？`;
       // Trajectory overlay toggle: only sessions with on-device points qualify.
@@ -1121,13 +1147,11 @@
              <span class="swatch" style="background:${color}"></span>
            </label>`
         : `<span class="traj-toggle-placeholder" aria-hidden="true"></span>`;
-      const metricsRow = e.has_fit ? `
-          <div class="event-stats">
-            ${speedKmh != null ? `<span><span class="k">Speed</span><span class="v">${speedKmh} km/h</span></span>` : ''}
-            ${plateX != null ? `<span><span class="k">Plate (x,z)</span><span class="v">${plateX}, ${plateZ} m</span></span>` : ''}
-            <span><span class="k">Dur</span><span class="v">${duration} s</span></span>
-            <span><span class="k">RMS</span><span class="v">${rms} m</span></span>
-          </div>` : '';
+      const metrics = [];
+      if (triangulated > 0) metrics.push(`<span><span class="k">Pts</span><span class="v">${triangulated}</span></span>`);
+      if (e.duration_s != null) metrics.push(`<span><span class="k">Dur</span><span class="v">${duration} s</span></span>`);
+      if (peakZ != null) metrics.push(`<span><span class="k">Peak Z</span><span class="v">${peakZ} m</span></span>`);
+      const metricsRow = metrics.length ? `<div class="event-stats">${metrics.join('')}</div>` : '';
       const processingState = e.processing_state ? `<span class="chip ${esc(e.processing_state)}">${esc(e.processing_state)}</span>` : '';
       const processingAction = e.processing_state === 'queued' || e.processing_state === 'processing'
         ? `<form class="event-action-form" method="POST" action="/sessions/${sid}/cancel_processing">
@@ -1161,7 +1185,6 @@
             <div class="event-top">
               <span class="sid">${sid}</span>
               <span class="event-paths">${pathChips}</span>
-              <span class="quality chip ${qualityClass}" title="fit RMS quality">${qualityLabel}</span>
               ${processingState}
               <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
             </div>
@@ -1663,6 +1686,7 @@
           armed_at_ms: Date.now(),
         };
         livePointStore.set(data.sid, []);
+        liveRayStore.set(data.sid, new Map());
         liveTraceIdx = -1;
         // Ghost trail is deliberately preserved across arm — it'll stay
         // rendered until a real point for the new session lands, at which
@@ -1693,6 +1717,22 @@
         done.add(data.path);
         currentLiveSession.paths_completed = [...done];
         renderActiveSession(currentLiveSession);
+      } catch (_) {}
+    });
+    es.addEventListener('ray', (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        const sid = data.sid;
+        const cam = data.cam || '?';
+        if (!currentLiveSession || currentLiveSession.session_id !== sid) return;
+        if (!Array.isArray(data.origin) || !Array.isArray(data.endpoint)) return;
+        pushLiveRay(sid, cam, {
+          origin: data.origin.map(Number),
+          endpoint: data.endpoint.map(Number),
+          t_rel_s: Number(data.t_rel_s || 0),
+          frame_index: Number(data.frame_index || 0),
+        });
+        scheduleLiveRayRepaint();
       } catch (_) {}
     });
     es.addEventListener('calibration_changed', () => {

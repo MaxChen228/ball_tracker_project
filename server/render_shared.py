@@ -151,12 +151,36 @@ def _render_nav_status(
     calibrations: list[str],
     sync: dict[str, Any] | None = None,
     sync_cooldown_remaining_s: float = 0.0,
+    arm_readiness: dict[str, Any] | None = None,
 ) -> str:
     armed = session is not None and session.get("armed")
     online = len(devices)
-    calibrated = len(calibrations)
-    synced = sum(1 for d in devices if d.get("time_synced"))
-    expected = 2
+    cal_set = set(calibrations)
+    usable = sorted(str(d.get("camera_id")) for d in devices if d.get("camera_id") in cal_set)
+    uncalibrated = sorted(str(d.get("camera_id")) for d in devices if d.get("camera_id") and d.get("camera_id") not in cal_set)
+    synced_usable = sorted(
+        str(d.get("camera_id"))
+        for d in devices
+        if d.get("camera_id") in cal_set and d.get("time_synced")
+    )
+    if arm_readiness is None:
+        blockers: list[str] = []
+        if not online:
+            blockers.append("no camera online")
+        elif uncalibrated:
+            blockers.extend(f"{cam} not calibrated" for cam in uncalibrated)
+        elif len(usable) >= 2:
+            blockers.extend(f"{cam} not time-synced" for cam in usable if cam not in synced_usable)
+        mode = "stereo" if len(usable) >= 2 else ("single_camera" if usable else "blocked")
+        requires_time_sync = len(usable) >= 2
+        ready = not blockers
+    else:
+        blockers = [str(v) for v in (arm_readiness.get("blockers") or [])]
+        mode = str(arm_readiness.get("mode") or "blocked")
+        requires_time_sync = bool(arm_readiness.get("requires_time_sync"))
+        ready = bool(arm_readiness.get("ready"))
+        usable = [str(v) for v in (arm_readiness.get("calibrated_online_cameras") or usable)]
+        synced_usable = [str(v) for v in (arm_readiness.get("synced_calibrated_online_cameras") or synced_usable)]
 
     if armed:
         badge_cls = "recording"
@@ -168,21 +192,11 @@ def _render_nav_status(
         badge = "Sync"
         headline = "sync in progress"
         context = "complete on /sync"
-    elif online < expected:
+    elif not ready:
         badge_cls = "blocked"
         badge = "Blocked"
-        headline = "bring both devices online"
-        context = f"{online}/{expected} devices available"
-    elif calibrated < expected:
-        badge_cls = "blocked"
-        badge = "Blocked"
-        headline = "finish calibration"
-        context = f"{calibrated}/{expected} cameras calibrated"
-    elif synced < expected:
-        badge_cls = "blocked"
-        badge = "Blocked"
-        headline = "run time sync"
-        context = f"{synced}/{expected} cameras synced"
+        headline = blockers[0] if blockers else "not ready"
+        context = ", ".join(blockers[1:]) if len(blockers) > 1 else "check camera readiness"
     elif sync_cooldown_remaining_s > 0.0:
         badge_cls = "cooldown"
         badge = "Cooldown"
@@ -192,7 +206,7 @@ def _render_nav_status(
         badge_cls = "ready"
         badge = "Ready"
         headline = "ready to arm"
-        context = "all prerequisites satisfied"
+        context = "single-camera rays only" if mode == "single_camera" else "all stereo prerequisites satisfied"
 
     def _check_row(label: str, value: str, ok: bool) -> str:
         cls = "ok" if ok else "warn"
@@ -205,9 +219,13 @@ def _render_nav_status(
 
     checks = "".join(
         [
-            _check_row("Devices", f"{online}/{expected}", online >= expected),
-            _check_row("Cal", f"{calibrated}/{expected}", calibrated >= expected),
-            _check_row("Sync", f"{synced}/{expected}", synced >= expected),
+            _check_row("Devices", f"{online}", online >= 1),
+            _check_row("Cal", f"{len(usable)}", len(usable) >= 1),
+            _check_row(
+                "Sync",
+                f"{len(synced_usable)}/{len(usable)}" if requires_time_sync else "single",
+                (not requires_time_sync) or len(synced_usable) >= len(usable),
+            ),
         ]
     )
     return (
@@ -248,6 +266,7 @@ def _render_app_nav(
     calibrations: list[str],
     sync: dict[str, Any] | None = None,
     sync_cooldown_remaining_s: float = 0.0,
+    arm_readiness: dict[str, Any] | None = None,
 ) -> str:
     kicker, title = _PAGE_META.get(active_page, _PAGE_META["dashboard"])
     return (
@@ -263,7 +282,7 @@ def _render_app_nav(
         f'<div class="nav-tabs">{_render_primary_nav(active_page)}</div>'
         '</div>'
         '<div class="nav-status-row">'
-        f'<div class="status-line" id="nav-status">{_render_nav_status(devices, session, calibrations, sync, sync_cooldown_remaining_s)}</div>'
+        f'<div class="status-line" id="nav-status">{_render_nav_status(devices, session, calibrations, sync, sync_cooldown_remaining_s, arm_readiness)}</div>'
         '</div>'
         '</nav>'
     )

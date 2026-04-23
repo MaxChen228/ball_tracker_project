@@ -34,11 +34,11 @@ from schemas import (
     mode_for_paths,
 )
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
-from fitting import fit_trajectory
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
 from sync_solver import compute_mutual_sync
 from live_pairing import LivePairingSession
+from reconstruct import Ray, ray_for_frame
 from state_runtime import RuntimeSettingsStore, SyncParams
 from state_calibration import (
     AutoCalibrationRun as _AutoCalibrationRun,
@@ -620,16 +620,6 @@ class State:
         elif result.triangulated_by_path.get(DetectionPath.live.value):
             result.points_on_device = list(result.triangulated_by_path[DetectionPath.live.value])
 
-        if result.points:
-            try:
-                result.fit = fit_trajectory(result.points)
-            except Exception:
-                result.fit = None
-        if result.points_on_device:
-            try:
-                result.fit_on_device = fit_trajectory(result.points_on_device)
-            except Exception:
-                result.fit_on_device = None
         if not result.triangulated and result.error is None and (a is not None or b is not None):
             if result.abort_reasons:
                 result.aborted = True
@@ -692,6 +682,38 @@ class State:
 
         created = live.ingest(camera_id, frame, triangulate_live)
         return created, dict(live.frame_counts)
+
+    def live_ray_for_frame(
+        self,
+        camera_id: str,
+        session_id: str,
+        frame: FramePayload,
+    ) -> Ray | None:
+        """Project one live detection into world space for dashboard rays.
+
+        Stereo live points still require A/B pairing and a shared time anchor.
+        A monocular ray only needs that camera's calibration; if the phone has
+        no sync anchor, use the frame index as an approximate relative clock so
+        hover/color values stay small and readable.
+        """
+        with self._lock:
+            cal = self._calibration_store.get(camera_id)
+            dev = self._device_registry.get(camera_id)
+        if cal is None:
+            return None
+        anchor = (
+            dev.sync_anchor_timestamp_s
+            if dev is not None and dev.sync_anchor_timestamp_s is not None
+            else frame.timestamp_s - (float(frame.frame_index) / 240.0)
+        )
+        return ray_for_frame(
+            camera_id=camera_id,
+            frame=frame,
+            intrinsics=cal.intrinsics,
+            homography=list(cal.homography),
+            anchor_timestamp_s=anchor,
+            source="live",
+        )
 
     def mark_live_path_ended(self, camera_id: str, session_id: str, reason: str | None = None) -> None:
         with self._lock:
@@ -905,6 +927,8 @@ class State:
             return None
         with self._lock:
             live = self._live_pairings.get(session.id)
+            result = self.results.get(session.id)
+        paths_completed = sorted(result.paths_completed) if result is not None else []
         if live is None:
             return {
                 "session_id": session.id,
@@ -912,6 +936,7 @@ class State:
                 "paths": sorted(p.value for p in session.paths),
                 "frame_counts": {},
                 "point_count": 0,
+                "paths_completed": paths_completed,
                 "abort_reasons": {},
             }
         return {
@@ -920,6 +945,7 @@ class State:
             "paths": sorted(p.value for p in session.paths),
             "frame_counts": dict(live.frame_counts),
             "point_count": len(live.triangulated),
+            "paths_completed": paths_completed,
             "completed_cameras": sorted(live.completed_cameras),
             "abort_reasons": dict(live.abort_reasons),
         }
@@ -1645,8 +1671,6 @@ class State:
                 continue
             if DetectionPath.server_post not in self._paths_for_pitch(pitch):
                 continue
-            if pitch.sync_anchor_timestamp_s is None:
-                continue
             if pitch.frames_server_post:
                 continue
             clip_path = self._find_video_for_session_camera(session_id, cam)
@@ -2101,26 +2125,6 @@ class State:
                 ts = [p.t_rel_s for p in authority_points]
                 duration = float(ts[-1] - ts[0])
 
-            # Dashboard-LIVE view summary: derived exclusively from the
-            # on-device fit (mode-two is authoritative for the LIVE panel;
-            # mode-one is forensic). Release-point velocity is the
-            # derivative of the quadratic evaluated at release_t_s.
-            speed_mps: float | None = None
-            plate_xz_m: list[float] | None = None
-            rms_m: float | None = None
-            fit_duration_s: float | None = None
-            fod = result.fit_on_device if result is not None else None
-            if fod is not None:
-                rms_m = float(fod.rms_m)
-                fit_duration_s = float(fod.t_max_s - fod.t_min_s)
-                t_rel = fod.release_t_s
-                vx = 2.0 * fod.coeffs_x[0] * t_rel + fod.coeffs_x[1]
-                vy = 2.0 * fod.coeffs_y[0] * t_rel + fod.coeffs_y[1]
-                vz = 2.0 * fod.coeffs_z[0] * t_rel + fod.coeffs_z[1]
-                speed_mps = float((vx * vx + vy * vy + vz * vz) ** 0.5)
-                if fod.plate_xyz_m is not None:
-                    plate_xz_m = [float(fod.plate_xyz_m[0]), float(fod.plate_xyz_m[2])]
-
             # Infer the legacy mode label for compatibility. The richer UI
             # should prefer `path_status`.
             has_any_video = any(
@@ -2172,14 +2176,6 @@ class State:
                     "trashed": trashed,
                     "processing_state": processing_state,
                     "processing_resumable": processing_resumable,
-                    # Fit-derived summary (LIVE dashboard). All None when
-                    # fit_on_device is missing — frontend hides the row in
-                    # that case.
-                    "rms_m": rms_m,
-                    "speed_mps": speed_mps,
-                    "plate_xz_m": plate_xz_m,
-                    "fit_duration_s": fit_duration_s,
-                    "has_fit": fod is not None,
                 }
             )
         # Latest events first — session ids carry 4 bytes of random hex

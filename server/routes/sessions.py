@@ -19,7 +19,7 @@ async def sessions_arm(
     request: Request,
     max_duration_s: float = _DEFAULT_SESSION_TIMEOUT_S,
 ):
-    from main import state, device_ws, sse_hub, _arm_message_for, _wants_html
+    from main import state, device_ws, sse_hub, _arm_message_for, _arm_readiness, _wants_html
     requested_paths: set[DetectionPath] | None = None
     ctype = request.headers.get("content-type", "").lower()
     if "application/json" in ctype:
@@ -27,6 +27,17 @@ async def sessions_arm(
         raw_paths = body.get("paths")
         if isinstance(raw_paths, list):
             requested_paths = state._normalize_paths(raw_paths)
+    readiness = _arm_readiness()
+    if not readiness.get("ready"):
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "not_ready_to_arm",
+                "blockers": readiness.get("blockers", []),
+            },
+        )
     session = state.arm_session(max_duration_s=max_duration_s, paths=requested_paths)
     await device_ws.broadcast(
         {cam.camera_id: _arm_message_for(session) for cam in state.online_devices()}
