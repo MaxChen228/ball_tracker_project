@@ -440,24 +440,28 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .virt-cell {{ background:var(--surface); padding:var(--s-2) var(--s-3);
     display:flex; flex-direction:column; gap:var(--s-1); min-height:0;
     min-width:0; position:relative; }}
-  .virt-frame {{ flex:1 1 auto; min-height:0; width:100%; max-width:100%;
-    align-self:center; background:#1A1714;
-    border:1px solid var(--border-base); border-radius:var(--r);
-    overflow:hidden; cursor:default; position:relative; }}
-  .virt-frame canvas {{ display:block; width:100%; height:100%; }}
+  .virt-frame {{ flex:1 1 auto; min-height:0; min-width:0; width:100%; max-width:100%;
+    position:relative; overflow:hidden; background:transparent; }}
+  .virt-media {{ position:absolute; inset:0; margin:auto;
+    max-width:100%; max-height:100%; background:#1A1714;
+    border:1px solid var(--border-base); border-radius:var(--r); overflow:hidden; }}
+  .virt-media canvas {{ display:block; width:100%; height:100%; }}
   .virt-frame.empty {{ display:flex; align-items:center; justify-content:center;
     color:var(--sub); font-family:var(--mono); font-size:11px; letter-spacing:0.12em;
-    text-transform:uppercase; border-style:dashed; background:var(--bg); }}
+    text-transform:uppercase; background:var(--bg);
+    border:1px dashed var(--border-base); border-radius:var(--r); }}
   .vid-label.virt {{ color:var(--sub); border-color:var(--border-base); }}
   .vid-head {{ display:flex; align-items:center; gap:var(--s-2); }}
   .vid-label {{ font-family:var(--mono); font-size:10px; font-weight:600;
     letter-spacing:0.18em; border:1px solid; padding:2px 8px; border-radius:var(--r); }}
   .vid-hint {{ font-family:var(--mono); font-size:10px; letter-spacing:0.06em;
     color:var(--sub); text-transform:uppercase; }}
-  .vid-frame {{ flex:1 1 auto; min-height:0; display:flex; align-items:center;
-    justify-content:center; background:#000; border-radius:var(--r); overflow:hidden;
-    position:relative; width:100%; max-width:100%; align-self:center; }}
-  .vid-frame video {{ width:100%; height:100%; object-fit:contain; display:block; }}
+  .vid-frame {{ flex:1 1 auto; min-height:0; min-width:0; width:100%; max-width:100%;
+    position:relative; overflow:hidden; background:transparent; }}
+  .vid-media {{ position:absolute; inset:0; margin:auto;
+    max-width:100%; max-height:100%; background:#000;
+    border-radius:var(--r); overflow:hidden; }}
+  .vid-media video {{ display:block; width:100%; height:100%; object-fit:cover; }}
   .plate-overlay-real {{ position:absolute; inset:0; width:100%; height:100%;
     pointer-events:none; z-index:1; }}
   .plate-overlay-real polygon {{ fill:none; stroke:rgba(217,59,59,0.92);
@@ -529,14 +533,20 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     transition:border-color 0.15s, background 0.15s, color 0.15s; }}
   .timeline button:hover {{ border-color:var(--ink); }}
   .timeline button:disabled {{ opacity:0.4; cursor:not-allowed; }}
-  .timeline .transport {{ display:inline-flex; align-items:center; gap:0; padding:2px;
-    background:var(--bg); border:1px solid var(--border-base); border-radius:999px; }}
-  .timeline .transport button {{ border:none; background:transparent; width:28px; height:28px;
-    min-width:28px; padding:0; font-size:13px; color:var(--ink-light); border-radius:50%;
-    display:inline-flex; align-items:center; justify-content:center; letter-spacing:0; }}
-  .timeline .transport .play-btn {{ min-width:64px; width:auto; height:30px; padding:0 14px;
-    background:var(--ink); color:var(--surface); font-weight:500; font-size:11px; letter-spacing:0.10em;
-    text-transform:uppercase; border-radius:999px; margin:0 4px; }}
+  .timeline .transport {{ display:inline-flex; align-items:stretch; gap:0; padding:0;
+    background:var(--surface); border:1px solid var(--border-base); border-radius:var(--r);
+    overflow:hidden; height:30px; }}
+  .timeline .transport button {{ border:none; border-left:1px solid var(--border-base);
+    background:transparent; width:32px; height:100%; min-width:32px; padding:0;
+    font-size:12px; color:var(--sub); border-radius:0;
+    display:inline-flex; align-items:center; justify-content:center; letter-spacing:0;
+    transition:background 0.12s, color 0.12s; }}
+  .timeline .transport button:first-child {{ border-left:none; }}
+  .timeline .transport button:hover:not(:disabled) {{ background:var(--surface-hover); color:var(--ink); }}
+  .timeline .transport .play-btn {{ min-width:72px; width:auto; height:100%; padding:0 16px;
+    background:var(--ink); color:var(--surface); font-weight:500; font-size:10px;
+    letter-spacing:0.12em; text-transform:uppercase; border-radius:0; margin:0; }}
+  .timeline .transport .play-btn:hover:not(:disabled) {{ background:var(--ink-light); color:var(--surface); }}
   .speed-group {{ display:inline-flex; border:1px solid var(--border-base); border-radius:var(--r);
     overflow:hidden; background:var(--surface); height:30px; }}
   .speed-group button {{ border:none; background:transparent; color:var(--sub); padding:0 12px;
@@ -608,15 +618,23 @@ def _viewer_js() -> str:
     if (source === "live") return "live";
     return "server_post";
   }}
+  // Per-path hue (source = colour), A/B shade within each hue (camera =
+  // lightness). Replaces the earlier solid/dash/dot distinction — users
+  // read hue faster than dash patterns in a dense 3D scene.
+  const PATH_COLORS = {{
+    live:        {{ A: "#B8451F", B: "#E08B5F" }},
+    ios_post:    {{ A: "#3D7B5F", B: "#7DA892" }},
+    server_post: {{ A: "#4A6B8C", B: "#89A5BD" }},
+  }};
   function colorForCamPath(cam, path) {{
+    const bucket = PATH_COLORS[path];
+    if (bucket && bucket[cam]) return bucket[cam];
     if (path === "ios_post") return CAM_COLOR_OD[cam] || FALLBACK_OD;
-    // live + server_post share the per-camera family; they are distinguished
-    // visually by line dash (see buildDynamicTraces) and by their own pill.
     return CAM_COLOR[cam] || FALLBACK;
   }}
-  const PATH_DASH = {{ live: "dash", ios_post: "dot", server_post: "solid" }};
-  const PATH_OPACITY = {{ live: 0.55, ios_post: 0.7, server_post: 0.45 }};
-  const PATH_MARKER_SYMBOL = {{ live: "diamond-open", ios_post: "circle-open", server_post: "circle" }};
+  const PATH_DASH = {{ live: "solid", ios_post: "solid", server_post: "solid" }};
+  const PATH_OPACITY = {{ live: 0.55, ios_post: 0.7, server_post: 0.55 }};
+  const PATH_MARKER_SYMBOL = {{ live: "circle", ios_post: "circle", server_post: "circle" }};
   const SCENE_THEME = DATA.scene_theme || {{
     cam_axis_len_m: 0.25, cam_fwd_len_m: 0.5,
     axis_color_right: "#C0392B", axis_color_up: "rgba(42, 37, 32, 0.4)",
