@@ -2101,17 +2101,27 @@ def test_status_surfaces_preview_requested_map():
     assert hb_json_b["preview_requested"] is True
 
 
-def test_status_includes_ws_connected_device_even_without_fresh_heartbeat(tmp_path, monkeypatch):
+def test_ws_connected_device_visible_within_stale_window_then_drops(tmp_path, monkeypatch):
+    # connect calls state.heartbeat() immediately → device appears for up to
+    # _DEVICE_STALE_S seconds even without further messages. After that it
+    # disappears from the list (no WS-connected fallback — that was removed to
+    # fix the ghost-device bug when a phone switches role A→B).
     clock = [1000.0]
     def fake_time() -> float:
         return clock[0]
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
     client = TestClient(app)
     with client.websocket_connect("/ws/device/A") as ws:
-        clock[0] += 10.0
+        # Within stale window — device should appear
+        clock[0] += 1.0
         got = client.get("/status").json()["devices"]
         assert [d["camera_id"] for d in got] == ["A"]
         assert got[0]["ws_connected"] is True
+
+        # Past stale window with no heartbeat — device disappears
+        clock[0] += 10.0
+        got = client.get("/status").json()["devices"]
+        assert [d["camera_id"] for d in got] == []
 
 
 def test_setup_ssr_uses_same_time_sync_rule_as_status(tmp_path, monkeypatch):

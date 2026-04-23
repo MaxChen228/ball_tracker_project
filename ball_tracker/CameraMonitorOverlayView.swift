@@ -1,67 +1,117 @@
 import UIKit
 
+/// Full-width top bar overlay.
+/// Row 1: [A][B]  ·  ● STATUS  ·  [狀態chip]
+/// Row 2: 192.168.50.xxx  (tappable, never truncated)
 final class CameraMonitorOverlayView {
+
+    // MARK: - Public views (referenced by CameraStatusPresenter)
+
     let topStatusChip = StatusChip()
-    let controlPanel = UIView()
-    let roleControl = UISegmentedControl(items: ["A", "B"])
+    /// Text is set by CameraStatusPresenter; LED + truncated prefix stripped here.
     let connectionLabel = UILabel()
+    /// Kept for API compatibility; hidden — preview state is implicit.
     let previewLabel = UILabel()
     let warningLabel = UILabel()
     let stateBorderLayer = CAShapeLayer()
     let recIndicator = UIView()
 
+    // MARK: - Callbacks
+
+    var onRoleChanged: (() -> Void)?
+    var onIPTapped: (() -> Void)?
+
+    // MARK: - Private
+
+    private let topBar = UIView()
+    private let roleButtonA = _RoleButton(title: "A")
+    private let roleButtonB = _RoleButton(title: "B")
+    private let ipValueLabel = UILabel()
+    private let linkLED = UIView()
+    private let statusTextLabel = UILabel()  // mirrors connectionLabel text
     private let recDotView = UIView()
     private let recTimerLabel = UILabel()
     private var recTimer: Timer?
     private var recStartTime: CFTimeInterval = 0
+    private var _selectedRole: String = "A"
 
-    var onRoleChanged: (() -> Void)?
+    // MARK: - Install
 
     func install(in view: UIView) {
+        // ── Top bar container ────────────────────────────────────────────
+        topBar.translatesAutoresizingMaskIntoConstraints = false
+        topBar.backgroundColor = DesignTokens.Colors.hudSurface
+        view.addSubview(topBar)
+
+        let bottomBorder = UIView()
+        bottomBorder.translatesAutoresizingMaskIntoConstraints = false
+        bottomBorder.backgroundColor = DesignTokens.Colors.cardBorder
+        topBar.addSubview(bottomBorder)
+
+        // ── Row 1: role  ·  LED+status  ·  chip ─────────────────────────
+        [roleButtonA, roleButtonB].forEach {
+            $0.addTarget(self, action: #selector(handleRoleButton(_:)), for: .touchUpInside)
+        }
+        let roleStack = UIStackView(arrangedSubviews: [roleButtonA, roleButtonB])
+        roleStack.axis = .horizontal
+        roleStack.spacing = 4
+        roleStack.alignment = .center
+
+        // LED
+        linkLED.translatesAutoresizingMaskIntoConstraints = false
+        linkLED.layer.cornerRadius = 5
+        linkLED.backgroundColor = DesignTokens.Colors.destructive
+        NSLayoutConstraint.activate([
+            linkLED.widthAnchor.constraint(equalToConstant: 10),
+            linkLED.heightAnchor.constraint(equalToConstant: 10),
+        ])
+
+        // Status text — strips the "LINK · " prefix set by presenter
+        statusTextLabel.font = DesignTokens.Fonts.mono(size: 13, weight: .medium)
+        statusTextLabel.textColor = DesignTokens.Colors.ink
+
+        let ledGroup = UIStackView(arrangedSubviews: [linkLED, statusTextLabel])
+        ledGroup.axis = .horizontal
+        ledGroup.spacing = 6
+        ledGroup.alignment = .center
+
         topStatusChip.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(topStatusChip)
 
-        controlPanel.translatesAutoresizingMaskIntoConstraints = false
-        controlPanel.backgroundColor = DesignTokens.Colors.hudSurface
-        controlPanel.layer.cornerRadius = DesignTokens.CornerRadius.card
-        controlPanel.layer.borderWidth = 1
-        controlPanel.layer.borderColor = DesignTokens.Colors.cardBorder.cgColor
-        view.addSubview(controlPanel)
+        let row1 = UIStackView(arrangedSubviews: [
+            roleStack,
+            UIView(),   // flexible spacer
+            ledGroup,
+            topStatusChip,
+        ])
+        row1.axis = .horizontal
+        row1.alignment = .center
+        row1.spacing = 12
 
-        let roleLabel = makePanelLabel("ROLE")
+        // ── Row 2: IP (full width, tappable) ────────────────────────────
+        ipValueLabel.font = DesignTokens.Fonts.mono(size: 12, weight: .regular)
+        ipValueLabel.textColor = DesignTokens.Colors.sub
+        ipValueLabel.text = "—"
+        ipValueLabel.numberOfLines = 1
+        ipValueLabel.lineBreakMode = .byClipping
 
-        roleControl.translatesAutoresizingMaskIntoConstraints = false
-        roleControl.selectedSegmentTintColor = DesignTokens.Colors.accent
-        roleControl.setTitleTextAttributes([.foregroundColor: DesignTokens.Colors.ink], for: .normal)
-        roleControl.setTitleTextAttributes([.foregroundColor: DesignTokens.Colors.cardBackground], for: .selected)
-        roleControl.addTarget(self, action: #selector(handleRoleChanged), for: .valueChanged)
+        let row2 = UIStackView(arrangedSubviews: [ipValueLabel])
+        row2.axis = .horizontal
+        let ipTap = UITapGestureRecognizer(target: self, action: #selector(handleIPTapped))
+        row2.addGestureRecognizer(ipTap)
+        row2.isUserInteractionEnabled = true
 
-        connectionLabel.font = DesignTokens.Fonts.mono(size: 12, weight: .medium)
-        connectionLabel.textColor = DesignTokens.Colors.ink
+        // ── Root vertical stack ──────────────────────────────────────────
+        let rootStack = UIStackView(arrangedSubviews: [row1, row2])
+        rootStack.axis = .vertical
+        rootStack.spacing = 4
+        rootStack.translatesAutoresizingMaskIntoConstraints = false
+        topBar.addSubview(rootStack)
 
-        previewLabel.font = DesignTokens.Fonts.mono(size: 12, weight: .medium)
-        previewLabel.textColor = DesignTokens.Colors.sub
-
-        let roleRow = UIStackView(arrangedSubviews: [roleLabel, roleControl])
-        roleRow.axis = .horizontal
-        roleRow.alignment = .center
-        roleRow.spacing = DesignTokens.Spacing.s
-
-        let statusRow = UIStackView(arrangedSubviews: [connectionLabel, previewLabel])
-        statusRow.axis = .vertical
-        statusRow.alignment = .leading
-        statusRow.spacing = DesignTokens.Spacing.xs
-
-        let root = UIStackView(arrangedSubviews: [roleRow, statusRow])
-        root.axis = .vertical
-        root.spacing = DesignTokens.Spacing.s
-        root.translatesAutoresizingMaskIntoConstraints = false
-        controlPanel.addSubview(root)
-
-        warningLabel.font = DesignTokens.Fonts.sans(size: 18, weight: .bold)
+        // ── Warning banner ───────────────────────────────────────────────
+        warningLabel.font = DesignTokens.Fonts.mono(size: 12, weight: .medium)
         warningLabel.textColor = DesignTokens.Colors.ink
-        warningLabel.backgroundColor = DesignTokens.Colors.warning.withAlphaComponent(0.85)
-        warningLabel.layer.cornerRadius = DesignTokens.CornerRadius.chip
+        warningLabel.backgroundColor = DesignTokens.Colors.warning.withAlphaComponent(0.92)
+        warningLabel.layer.cornerRadius = DesignTokens.CornerRadius.chipSmall
         warningLabel.layer.masksToBounds = true
         warningLabel.textAlignment = .center
         warningLabel.numberOfLines = 0
@@ -69,82 +119,95 @@ final class CameraMonitorOverlayView {
         warningLabel.isHidden = true
         view.addSubview(warningLabel)
 
+        // ── State border ─────────────────────────────────────────────────
         stateBorderLayer.fillColor = UIColor.clear.cgColor
         stateBorderLayer.strokeColor = UIColor.clear.cgColor
         stateBorderLayer.lineWidth = 0
         view.layer.addSublayer(stateBorderLayer)
 
+        // ── Rec indicator ────────────────────────────────────────────────
         recIndicator.translatesAutoresizingMaskIntoConstraints = false
-        recIndicator.backgroundColor = DesignTokens.Colors.hudSurface
-        recIndicator.layer.cornerRadius = 14
-        recIndicator.layer.borderColor = DesignTokens.Colors.destructive.cgColor
-        recIndicator.layer.borderWidth = 1
         recIndicator.isHidden = true
-
         recDotView.backgroundColor = DesignTokens.Colors.destructive
-        recDotView.layer.cornerRadius = 7
+        recDotView.layer.cornerRadius = 5
         recDotView.translatesAutoresizingMaskIntoConstraints = false
-
         recTimerLabel.text = "REC 0.0s"
-        recTimerLabel.textColor = DesignTokens.Colors.ink
-        recTimerLabel.font = DesignTokens.Fonts.mono(size: 16, weight: .bold)
+        recTimerLabel.textColor = DesignTokens.Colors.destructive
+        recTimerLabel.font = DesignTokens.Fonts.mono(size: 13, weight: .medium)
         recTimerLabel.translatesAutoresizingMaskIntoConstraints = false
-
         recIndicator.addSubview(recDotView)
         recIndicator.addSubview(recTimerLabel)
         view.addSubview(recIndicator)
 
+        // ── Constraints ──────────────────────────────────────────────────
+        let hPad: CGFloat = DesignTokens.Spacing.l
+        let vPad: CGFloat = DesignTokens.Spacing.s
+
         NSLayoutConstraint.activate([
-            topStatusChip.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: DesignTokens.Spacing.m),
-            topStatusChip.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.m),
+            topBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            topBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            topBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
 
-            controlPanel.topAnchor.constraint(equalTo: topStatusChip.bottomAnchor, constant: DesignTokens.Spacing.s),
-            controlPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.m),
-            controlPanel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -DesignTokens.Spacing.xl),
+            bottomBorder.leadingAnchor.constraint(equalTo: topBar.leadingAnchor),
+            bottomBorder.trailingAnchor.constraint(equalTo: topBar.trailingAnchor),
+            bottomBorder.bottomAnchor.constraint(equalTo: topBar.bottomAnchor),
+            bottomBorder.heightAnchor.constraint(equalToConstant: 1),
 
-            roleLabel.widthAnchor.constraint(equalToConstant: 52),
-            roleControl.widthAnchor.constraint(equalToConstant: 120),
+            rootStack.topAnchor.constraint(equalTo: topBar.topAnchor, constant: vPad),
+            rootStack.leadingAnchor.constraint(equalTo: topBar.leadingAnchor, constant: hPad),
+            rootStack.trailingAnchor.constraint(equalTo: topBar.trailingAnchor, constant: -hPad),
+            rootStack.bottomAnchor.constraint(equalTo: topBar.bottomAnchor, constant: -vPad),
 
-            root.topAnchor.constraint(equalTo: controlPanel.topAnchor, constant: DesignTokens.Spacing.m),
-            root.leadingAnchor.constraint(equalTo: controlPanel.leadingAnchor, constant: DesignTokens.Spacing.m),
-            root.trailingAnchor.constraint(equalTo: controlPanel.trailingAnchor, constant: -DesignTokens.Spacing.m),
-            root.bottomAnchor.constraint(equalTo: controlPanel.bottomAnchor, constant: -DesignTokens.Spacing.m),
+            warningLabel.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: DesignTokens.Spacing.s),
+            warningLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: hPad),
+            warningLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -hPad),
 
-            warningLabel.topAnchor.constraint(equalTo: controlPanel.bottomAnchor, constant: DesignTokens.Spacing.s),
-            warningLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: DesignTokens.Spacing.l),
-            warningLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -DesignTokens.Spacing.l),
+            recIndicator.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: DesignTokens.Spacing.s),
+            recIndicator.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -hPad),
 
-            recIndicator.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            recIndicator.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            recIndicator.heightAnchor.constraint(equalToConstant: 32),
-
-            recDotView.leadingAnchor.constraint(equalTo: recIndicator.leadingAnchor, constant: 10),
+            recDotView.leadingAnchor.constraint(equalTo: recIndicator.leadingAnchor),
             recDotView.centerYAnchor.constraint(equalTo: recIndicator.centerYAnchor),
-            recDotView.widthAnchor.constraint(equalToConstant: 14),
-            recDotView.heightAnchor.constraint(equalToConstant: 14),
+            recDotView.widthAnchor.constraint(equalToConstant: 10),
+            recDotView.heightAnchor.constraint(equalToConstant: 10),
 
-            recTimerLabel.leadingAnchor.constraint(equalTo: recDotView.trailingAnchor, constant: 8),
-            recTimerLabel.trailingAnchor.constraint(equalTo: recIndicator.trailingAnchor, constant: -12),
-            recTimerLabel.centerYAnchor.constraint(equalTo: recIndicator.centerYAnchor),
+            recTimerLabel.leadingAnchor.constraint(equalTo: recDotView.trailingAnchor, constant: 6),
+            recTimerLabel.trailingAnchor.constraint(equalTo: recIndicator.trailingAnchor),
+            recTimerLabel.topAnchor.constraint(equalTo: recIndicator.topAnchor),
+            recTimerLabel.bottomAnchor.constraint(equalTo: recIndicator.bottomAnchor),
         ])
+
+        // previewLabel hidden — kept for presenter API compat
+        previewLabel.isHidden = true
+        // connectionLabel hidden — we mirror its text to statusTextLabel
+        connectionLabel.isHidden = true
     }
+
+    // MARK: - Public API
 
     func syncRole(cameraRole: String) {
-        roleControl.selectedSegmentIndex = cameraRole == "B" ? 1 : 0
+        _selectedRole = cameraRole
+        roleButtonA.isSelected = (cameraRole == "A")
+        roleButtonB.isSelected = (cameraRole == "B")
     }
 
-    var selectedCameraRole: String {
-        roleControl.selectedSegmentIndex == 1 ? "B" : "A"
+    var selectedCameraRole: String { _selectedRole }
+
+    func syncIP(_ ip: String) {
+        ipValueLabel.text = ip
     }
 
-    func setRecordingActive(_ isActive: Bool) {
-        if isActive {
-            recIndicator.isHidden = false
-            startRecTimer()
-        } else {
-            recIndicator.isHidden = true
-            stopRecTimer()
-        }
+    func syncStatus(_ text: String) {
+        // Strip "LINK · " prefix if present — only the state word shown next to LED
+        let display = text.hasPrefix("LINK · ") ? String(text.dropFirst(7)) : text
+        statusTextLabel.text = display
+    }
+
+    func syncConnection(reachable: Bool) {
+        linkLED.backgroundColor = reachable ? DesignTokens.Colors.success : DesignTokens.Colors.destructive
+        linkLED.layer.shadowColor = reachable ? DesignTokens.Colors.success.cgColor : UIColor.clear.cgColor
+        linkLED.layer.shadowRadius = reachable ? 4 : 0
+        linkLED.layer.shadowOpacity = reachable ? 0.8 : 0
+        linkLED.layer.shadowOffset = .zero
     }
 
     func updateBorderPath(for bounds: CGRect) {
@@ -152,35 +215,71 @@ final class CameraMonitorOverlayView {
         stateBorderLayer.path = UIBezierPath(rect: bounds).cgPath
     }
 
-    private func startRecTimer() {
+    func setRecordingActive(_ isActive: Bool) {
+        if isActive { recIndicator.isHidden = false; _startRecTimer() }
+        else         { recIndicator.isHidden = true;  _stopRecTimer()  }
+    }
+
+    // MARK: - Private
+
+    @objc private func handleRoleButton(_ sender: _RoleButton) {
+        syncRole(cameraRole: sender === roleButtonA ? "A" : "B")
+        onRoleChanged?()
+    }
+
+    @objc private func handleIPTapped() { onIPTapped?() }
+
+    private func _startRecTimer() {
         recStartTime = CACurrentMediaTime()
-        recTimerLabel.text = "REC 0.0s"
-        recDotView.alpha = 1.0
         recTimer?.invalidate()
         recTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self else { return }
-            let elapsed = CACurrentMediaTime() - self.recStartTime
-            self.recTimerLabel.text = String(format: "REC %.1fs", elapsed)
-            self.recDotView.alpha = (Int(elapsed * 2) % 2 == 0) ? 1.0 : 0.25
+            let e = CACurrentMediaTime() - self.recStartTime
+            self.recTimerLabel.text = String(format: "REC %.1fs", e)
+            self.recDotView.alpha = (Int(e * 2) % 2 == 0) ? 1.0 : 0.3
         }
     }
 
-    private func stopRecTimer() {
+    private func _stopRecTimer() {
         recTimer?.invalidate()
         recTimer = nil
         recDotView.alpha = 1.0
     }
+}
 
-    @objc
-    private func handleRoleChanged() {
-        onRoleChanged?()
+// MARK: - Role button
+
+private final class _RoleButton: UIControl {
+    override var isSelected: Bool  { didSet { _refresh() } }
+    override var isHighlighted: Bool { didSet { alpha = isHighlighted ? 0.55 : 1.0 } }
+
+    private let label = UILabel()
+
+    init(title: String) {
+        super.init(frame: .zero)
+        label.text = title
+        label.font = DesignTokens.Fonts.mono(size: 14, weight: .medium)
+        label.textAlignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        layer.cornerRadius = DesignTokens.CornerRadius.chipSmall
+        layer.borderWidth = 1
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            widthAnchor.constraint(equalToConstant: 34),
+            heightAnchor.constraint(equalToConstant: 26),
+        ])
+        _refresh()
     }
 
-    private func makePanelLabel(_ text: String) -> UILabel {
-        let label = UILabel()
-        label.font = DesignTokens.Fonts.mono(size: 12, weight: .bold)
-        label.textColor = DesignTokens.Colors.sub
-        label.text = text
-        return label
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func _refresh() {
+        backgroundColor = isSelected ? DesignTokens.Colors.accent : .clear
+        layer.borderColor = isSelected
+            ? DesignTokens.Colors.accent.cgColor
+            : DesignTokens.Colors.cardBorder.cgColor
+        label.textColor = isSelected ? DesignTokens.Colors.cardBackground : DesignTokens.Colors.sub
     }
 }

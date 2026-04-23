@@ -698,6 +698,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         overlayView.onRoleChanged = { [weak self] in
             self?.roleControlChanged()
         }
+        overlayView.onIPTapped = { [weak self] in
+            self?.showIPEditAlert()
+        }
         statusPresenter = CameraStatusPresenter(
             topStatusChip: overlayView.topStatusChip,
             warningLabel: overlayView.warningLabel,
@@ -710,6 +713,25 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func syncInlineControlsFromSettings() {
         overlayView.syncRole(cameraRole: settings.cameraRole)
+        overlayView.syncIP(settings.serverIP)
+    }
+
+    private func showIPEditAlert() {
+        let alert = UIAlertController(title: "Server IP", message: nil, preferredStyle: .alert)
+        alert.addTextField { [weak self] tf in
+            tf.text = self?.settings.serverIP
+            tf.keyboardType = .numbersAndPunctuation
+            tf.placeholder = "192.168.x.x"
+            tf.clearButtonMode = .whileEditing
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
+            guard let self, let ip = alert.textFields?.first?.text, !ip.isEmpty else { return }
+            let updated = AppSettings(serverIP: ip, cameraRole: self.settings.cameraRole)
+            AppSettingsStore.save(updated)
+            self.applyUpdatedSettings()
+        })
+        present(alert, animated: true)
     }
 
     private func roleControlChanged() {
@@ -724,8 +746,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func updateUIForState() {
+        let reachable = healthMonitor?.isReachable ?? false
         let connectionText = "LINK · \((healthMonitor?.statusText ?? "offline").uppercased())"
         let previewState = transportCoordinator.isPreviewRequested ? "REMOTE ON" : (captureRuntime.isSessionRunning ? "LOCAL ACTIVE" : "OFF")
+        overlayView.syncConnection(reachable: reachable)
+        overlayView.syncStatus(connectionText)
         statusPresenter.render(
             state: state,
             connectionText: connectionText,

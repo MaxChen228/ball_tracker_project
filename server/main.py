@@ -262,10 +262,13 @@ def _build_device_status_rows(
     ws_snapshot = device_ws.snapshot() if ws_snapshot is None else ws_snapshot
     fresh_devices = {d.camera_id: d for d in state.online_devices()}
     expected = state.expected_sync_id_snapshot()
-    device_ids = set(fresh_devices) | {
-        cam for cam, snap in ws_snapshot.items()
-        if snap.connected
-    }
+    # Use heartbeat-based presence only. `state.heartbeat()` is called
+    # immediately on WS connect (line 468), so a new device appears here
+    # without needing the WS-connected fallback. The fallback caused a
+    # ghost-device bug: when a phone switches role A→B, the old A WS stays
+    # in _sockets until its async handler reaches `finally`, so for that
+    # brief window both A and B appeared online.
+    device_ids = set(fresh_devices)
     devices: list[dict[str, Any]] = []
     for cam in sorted(device_ids):
         d = fresh_devices.get(cam) or state.device_snapshot(cam)
