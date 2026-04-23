@@ -248,6 +248,17 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .sidebar .paths-stack {{ gap: 10px; margin-top: 12px; }}
 .sidebar .path-option {{ padding: 6px 8px; }}
 .sidebar .paths-actions {{ margin-top: 10px; }}
+.hsv-form {{ display: flex; flex-direction: column; gap: var(--s-3); }}
+.hsv-presets {{ display: flex; gap: var(--s-2); flex-wrap: wrap; }}
+.hsv-grid {{ display: flex; flex-direction: column; gap: var(--s-2); }}
+.hsv-row {{ display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: var(--s-2); align-items: start; }}
+.hsv-label {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub); padding-top: 8px; }}
+.hsv-pair {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-2); }}
+.hsv-pair label {{ display: grid; grid-template-columns: 30px minmax(0, 1fr) 56px; gap: 6px; align-items: center; }}
+.hsv-pair label span {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; color: var(--sub); text-transform: uppercase; }}
+.hsv-pair input[type="range"] {{ width: 100%; margin: 0; accent-color: var(--ink); }}
+.hsv-num {{ width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--border-base); border-radius: var(--r); background: var(--surface); color: var(--ink); font-family: var(--mono); font-size: 11px; }}
+.hsv-actions {{ display: flex; justify-content: flex-end; }}
 .active-head {{ display:flex; align-items:center; gap:var(--s-2); margin-bottom:var(--s-2); }}
 .active-grid {{ display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:var(--s-2); margin-top:var(--s-3); }}
 .active-grid span {{ display:flex; flex-direction:column; gap:2px; padding:6px 8px;

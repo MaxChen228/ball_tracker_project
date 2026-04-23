@@ -272,6 +272,7 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             detect_pitch,
             clip_path,
             pitch.video_start_pts_s,
+            hsv_range=state.hsv_range(),
             should_cancel=lambda: state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id),
         )
     except ProcessingCanceled:

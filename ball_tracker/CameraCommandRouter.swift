@@ -20,6 +20,7 @@ final class CameraCommandRouter {
         let chirpThresholdDidPush: (Double) -> Void
         let mutualSyncThresholdDidPush: (Double) -> Void
         let heartbeatIntervalDidPush: (Double) -> Void
+        let hsvRangeDidPush: (ServerUploader.HSVRangePayload) -> Void
         let handleTrackingExposureCap: (String) -> Void
         let currentCaptureHeight: () -> Int
         let applyServerCaptureHeight: (Int) -> Void
@@ -105,6 +106,24 @@ final class CameraCommandRouter {
             }
             if let interval = message["heartbeat_interval_s"] as? Double {
                 deps.heartbeatIntervalDidPush(interval)
+            }
+            if let hsv = message["hsv_range"] as? [String: Any],
+               let hMin = hsv["h_min"] as? Int,
+               let hMax = hsv["h_max"] as? Int,
+               let sMin = hsv["s_min"] as? Int,
+               let sMax = hsv["s_max"] as? Int,
+               let vMin = hsv["v_min"] as? Int,
+               let vMax = hsv["v_max"] as? Int {
+                deps.hsvRangeDidPush(
+                    ServerUploader.HSVRangePayload(
+                        h_min: hMin,
+                        h_max: hMax,
+                        s_min: sMin,
+                        s_max: sMax,
+                        v_min: vMin,
+                        v_max: vMax
+                    )
+                )
             }
             if let capStr = message["tracking_exposure_cap"] as? String {
                 deps.handleTrackingExposureCap(capStr)

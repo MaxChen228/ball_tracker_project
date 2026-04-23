@@ -1962,6 +1962,69 @@ def test_chirp_threshold_rejects_out_of_range(tmp_path, monkeypatch):
         main.state.set_chirp_detect_threshold(2.0)
 
 
+def test_detection_hsv_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+
+    r = client.get("/status")
+    assert r.json()["hsv_range"] == {
+        "h_min": 25,
+        "h_max": 55,
+        "s_min": 90,
+        "s_max": 255,
+        "v_min": 90,
+        "v_max": 255,
+    }
+
+    r = client.post(
+        "/detection/hsv",
+        json={"h_min": 100, "h_max": 130, "s_min": 140, "s_max": 255, "v_min": 40, "v_max": 255},
+    )
+    assert r.status_code == 200
+    assert r.json()["hsv_range"] == {
+        "h_min": 100,
+        "h_max": 130,
+        "s_min": 140,
+        "s_max": 255,
+        "v_min": 40,
+        "v_max": 255,
+    }
+
+    assert client.get("/status").json()["hsv_range"] == r.json()["hsv_range"]
+    ws_json = _fetch_ws_settings(client, "A")
+    assert ws_json["hsv_range"] == r.json()["hsv_range"]
+
+    r = client.post(
+        "/detection/hsv",
+        data={"h_min": "25", "h_max": "55", "s_min": "90", "s_max": "255", "v_min": "90", "v_max": "255"},
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    persisted = _json.loads((tmp_path / "hsv_range.json").read_text())
+    assert persisted == {
+        "h_min": 25,
+        "h_max": 55,
+        "s_min": 90,
+        "s_max": 255,
+        "v_min": 90,
+        "v_max": 255,
+    }
+
+
+def test_detection_hsv_rejects_invalid_values(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+    r = client.post(
+        "/detection/hsv",
+        json={"h_min": -1, "h_max": 55, "s_min": 90, "s_max": 255, "v_min": 90, "v_max": 255},
+    )
+    assert r.status_code == 400
+    assert "out of range" in r.json()["detail"]
+
+
 def test_heartbeat_interval_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))

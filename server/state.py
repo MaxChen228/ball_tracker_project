@@ -33,6 +33,7 @@ from schemas import (
     _DEFAULT_PATHS,
     mode_for_paths,
 )
+from detection import HSVRange
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
@@ -159,6 +160,7 @@ class State:
         self._result_dir = data_dir / "results"
         self._video_dir = data_dir / "videos"
         self._calibration_dir = data_dir / "calibrations"
+        self._hsv_path = data_dir / "hsv_range.json"
         self._session_meta_path = data_dir / "session_meta.json"
         self._pitch_dir.mkdir(parents=True, exist_ok=True)
         self._result_dir.mkdir(parents=True, exist_ok=True)
@@ -186,6 +188,7 @@ class State:
             self._calibration_dir,
             atomic_write=self._atomic_write,
         )
+        self._hsv_range = self._load_hsv_range_from_disk()
         # Mutual chirp sync: at most one run active at a time. Both phones
         # must be online and no session may be armed when a run starts.
         # `_last_sync_result` survives across runs so the dashboard + the
@@ -348,6 +351,38 @@ class State:
             indent=2,
         )
         self._atomic_write(self._session_meta_path, payload)
+
+    def _load_hsv_range_from_disk(self) -> HSVRange:
+        path = self._hsv_path
+        if not path.exists():
+            return HSVRange.default()
+        try:
+            obj = json.loads(path.read_text())
+            return HSVRange(
+                h_min=int(obj["h_min"]),
+                h_max=int(obj["h_max"]),
+                s_min=int(obj["s_min"]),
+                s_max=int(obj["s_max"]),
+                v_min=int(obj["v_min"]),
+                v_max=int(obj["v_max"]),
+            )
+        except Exception as e:
+            logger.warning("skip corrupt hsv_range %s: %s", path, e)
+            return HSVRange.default()
+
+    def _persist_hsv_range_locked(self) -> None:
+        payload = json.dumps(
+            {
+                "h_min": self._hsv_range.h_min,
+                "h_max": self._hsv_range.h_max,
+                "s_min": self._hsv_range.s_min,
+                "s_max": self._hsv_range.s_max,
+                "v_min": self._hsv_range.v_min,
+                "v_max": self._hsv_range.v_max,
+            },
+            indent=2,
+        )
+        self._atomic_write(self._hsv_path, payload)
 
     def _calibration_path(self, camera_id: str) -> Path:
         return self._calibration_store.path(camera_id)
@@ -1194,6 +1229,16 @@ class State:
     def default_paths(self) -> set[DetectionPath]:
         with self._lock:
             return set(self._runtime_settings.default_paths)
+
+    def hsv_range(self) -> HSVRange:
+        with self._lock:
+            return self._hsv_range
+
+    def set_hsv_range(self, hsv_range: HSVRange) -> HSVRange:
+        with self._lock:
+            self._hsv_range = hsv_range
+            self._persist_hsv_range_locked()
+            return self._hsv_range
 
     def set_mode(self, mode: CaptureMode) -> CaptureMode:
         """Record the dashboard's mode choice. Only affects sessions armed

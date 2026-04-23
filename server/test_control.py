@@ -864,6 +864,21 @@ def test_dashboard_renders_live_session_and_detection_path_controls():
     assert 'value="server_post"' in body
 
 
+def test_dashboard_renders_hsv_controls():
+    client = TestClient(app)
+    body = client.get("/").text
+    assert 'id="hsv-body"' in body
+    assert 'action="/detection/hsv"' in body
+    assert 'data-hsv-preset="tennis"' in body
+    assert 'data-hsv-preset="baseball"' in body
+    assert 'name="h_min"' in body
+    assert 'name="h_max"' in body
+    assert 'name="s_min"' in body
+    assert 'name="s_max"' in body
+    assert 'name="v_min"' in body
+    assert 'name="v_max"' in body
+
+
 def _seed_minimal_calibration(camera_id: str) -> None:
     main.state.set_calibration(
         main.CalibrationSnapshot(

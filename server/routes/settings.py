@@ -5,9 +5,48 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
+from detection import HSVRange
 from schemas import TrackingExposureCapMode
 
 router = APIRouter()
+
+_HSV_PRESETS = {
+    "tennis": HSVRange.default(),
+    "baseball": HSVRange(h_min=100, h_max=130, s_min=140, s_max=255, v_min=40, v_max=255),
+}
+
+
+def _validated_hsv_range(values: dict[str, object]) -> HSVRange:
+    def _int_field(name: str, upper: int) -> int:
+        raw = values.get(name)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"missing or invalid '{name}'")
+        if not (0 <= value <= upper):
+            raise HTTPException(status_code=400, detail=f"'{name}' out of range [0, {upper}]")
+        return value
+
+    h_min = _int_field("h_min", 179)
+    h_max = _int_field("h_max", 179)
+    s_min = _int_field("s_min", 255)
+    s_max = _int_field("s_max", 255)
+    v_min = _int_field("v_min", 255)
+    v_max = _int_field("v_max", 255)
+    if h_min > h_max:
+        raise HTTPException(status_code=400, detail="'h_min' must be <= 'h_max'")
+    if s_min > s_max:
+        raise HTTPException(status_code=400, detail="'s_min' must be <= 's_max'")
+    if v_min > v_max:
+        raise HTTPException(status_code=400, detail="'v_min' must be <= 'v_max'")
+    return HSVRange(
+        h_min=h_min,
+        h_max=h_max,
+        s_min=s_min,
+        s_max=s_max,
+        v_min=v_min,
+        v_max=v_max,
+    )
 
 
 @router.post("/detection/paths")
@@ -35,6 +74,40 @@ async def detection_paths(request: Request):
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "paths": sorted(p.value for p in applied)}
+
+
+@router.post("/detection/hsv")
+async def detection_hsv(request: Request):
+    from main import state, device_ws, _settings_message_for, _wants_html
+
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json()
+        preset = body.get("preset")
+        if isinstance(preset, str) and preset in _HSV_PRESETS and not any(
+            key in body for key in ("h_min", "h_max", "s_min", "s_max", "v_min", "v_max")
+        ):
+            hsv = _HSV_PRESETS[preset]
+        else:
+            hsv = _validated_hsv_range(body)
+    else:
+        form = await request.form()
+        preset = form.get("preset")
+        if isinstance(preset, str) and preset in _HSV_PRESETS and not any(
+            form.get(key) is not None for key in ("h_min", "h_max", "s_min", "s_max", "v_min", "v_max")
+        ):
+            hsv = _HSV_PRESETS[preset]
+        else:
+            hsv = _validated_hsv_range({key: form.get(key) for key in ("h_min", "h_max", "s_min", "s_max", "v_min", "v_max")})
+
+    applied = state.set_hsv_range(hsv)
+    await device_ws.broadcast(
+        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
+    )
+    payload = {"ok": True, "hsv_range": applied.__dict__}
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return payload
 
 
 @router.post("/settings/chirp_threshold")

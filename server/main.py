@@ -390,6 +390,7 @@ def _build_status_response() -> dict[str, Any]:
         # can't drift from under them).
         "capture_mode": state.current_mode().value,
         "default_paths": sorted(p.value for p in state.default_paths()),
+        "hsv_range": state.hsv_range().__dict__,
         # Mutual-sync context. `sync.id` is the sole dedupe key the phone
         # uses to decide whether a fresh `sync_run` command has arrived
         # vs. a repeat of an in-flight run. `last_sync` lets the dashboard
@@ -452,6 +453,7 @@ def _settings_message_for(camera_id: str) -> dict[str, Any]:
         "type": "settings",
         "camera_id": camera_id,
         "paths": status.get("default_paths", []),
+        "hsv_range": status.get("hsv_range"),
         "chirp_detect_threshold": status.get("chirp_detect_threshold"),
         "mutual_sync_threshold": status.get("mutual_sync_threshold"),
         "heartbeat_interval_s": status.get("heartbeat_interval_s"),
@@ -706,6 +708,7 @@ def events_index() -> HTMLResponse:
             arm_readiness=_arm_readiness(devices, calibrations),
             capture_mode=state.current_mode().value,
             default_paths=sorted(p.value for p in state.default_paths()),
+            hsv_range=state.hsv_range().__dict__,
             live_session=state.live_session_summary(),
             sync=sync_run.to_dict() if sync_run is not None else None,
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),

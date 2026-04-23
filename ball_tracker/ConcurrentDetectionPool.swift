@@ -12,6 +12,7 @@ final class ConcurrentDetectionPool {
     private let detectionQueue: DispatchQueue
     private let detectionSemaphore: DispatchSemaphore
     private let stateLock = NSLock()
+    private var hsvRange: ServerUploader.HSVRangePayload = .tennis
 
     private var currentGeneration: Int = 0
     private var callIndex: Int = 0
@@ -38,11 +39,12 @@ final class ConcurrentDetectionPool {
         stateLock.lock()
         let gen = currentGeneration
         let index = callIndex
+        let hsvRange = self.hsvRange
         callIndex += 1
         stateLock.unlock()
 
         let retainedPixelBuffer = Unmanaged.passRetained(pixelBuffer)
-        detectionQueue.async { [weak self] in
+        detectionQueue.async(execute: { [weak self] in
             let pb = retainedPixelBuffer.takeUnretainedValue()
             guard let self else {
                 retainedPixelBuffer.release()
@@ -53,7 +55,15 @@ final class ConcurrentDetectionPool {
                 self.detectionSemaphore.signal()
             }
 
-            let detection = BTBallDetector.detect(in: pb)
+            let detection = BTBallDetector.detect(
+                in: pb,
+                hMin: Int32(hsvRange.h_min),
+                hMax: Int32(hsvRange.h_max),
+                sMin: Int32(hsvRange.s_min),
+                sMax: Int32(hsvRange.s_max),
+                vMin: Int32(hsvRange.v_min),
+                vMax: Int32(hsvRange.v_max)
+            )
             let frame = ServerUploader.FramePayload(
                 frame_index: index,
                 timestamp_s: timestampS,
@@ -69,7 +79,7 @@ final class ConcurrentDetectionPool {
             if stillCurrent {
                 self.onFrame?(frame)
             }
-        }
+        })
         return true
     }
 
@@ -83,6 +93,12 @@ final class ConcurrentDetectionPool {
     func reset() {
         stateLock.lock()
         droppedFrameCount = 0
+        stateLock.unlock()
+    }
+
+    func updateHSVRange(_ hsvRange: ServerUploader.HSVRangePayload) {
+        stateLock.lock()
+        self.hsvRange = hsvRange
         stateLock.unlock()
     }
 }

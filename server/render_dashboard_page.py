@@ -7,7 +7,7 @@ from reconstruct import build_calibration_scene
 from render_dashboard_client import _JS_TEMPLATE
 from render_dashboard_events import _render_events_body
 from render_dashboard_html import render_dashboard_html as _render_dashboard_html
-from render_dashboard_session import _render_active_session_body, _render_session_body
+from render_dashboard_session import _render_active_session_body, _render_hsv_body, _render_session_body
 from render_dashboard_style import _CSS
 from render_scene import _build_figure
 from render_shared import _render_app_nav
@@ -22,6 +22,7 @@ def render_events_index_html(
     arm_readiness: dict[str, Any] | None = None,
     capture_mode: str = "camera_only",
     default_paths: list[str] | None = None,
+    hsv_range: dict[str, int] | None = None,
     live_session: dict[str, Any] | None = None,
     sync: dict[str, Any] | None = None,
     sync_cooldown_remaining_s: float = 0.0,
@@ -68,12 +69,14 @@ def render_events_index_html(
     session_html = _render_session_body(
         session, capture_mode, default_paths, devices, calibrations, arm_readiness
     )
+    hsv_html = _render_hsv_body(hsv_range)
     events_html = _render_events_body(events)
     return _render_dashboard_html(
         css=_CSS,
         nav_html=nav_html,
         active_html=active_html,
         session_html=session_html,
+        hsv_html=hsv_html,
         events_html=events_html,
         scene_div=scene_div,
         dashboard_js=_JS_TEMPLATE,
