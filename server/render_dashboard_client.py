@@ -55,7 +55,6 @@ _JS_TEMPLATE_RAW = r"""
   const livePointStore = new Map();   // sid -> [{x,y,z,t_rel_s}]
   const liveRayStore = new Map();     // sid -> Map(cam -> [{origin,endpoint,t_rel_s,frame_index}])
   let lastEndedLiveSid = null;        // For ghost-preview on the next arm
-  const MAX_LIVE_RAYS_PER_CAM = 48;
   let liveRayPaintPending = false;
   // Per-cam WS connection state from SSE device_status events. Keyed by
   // camera id; value shape: {connected: bool, since_ms: number}. The
@@ -421,7 +420,6 @@ _JS_TEMPLATE_RAW = r"""
     }
     const arr = byCam.get(cam) || [];
     arr.push(ray);
-    while (arr.length > MAX_LIVE_RAYS_PER_CAM) arr.shift();
     byCam.set(cam, arr);
   }
 
