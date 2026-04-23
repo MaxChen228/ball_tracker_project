@@ -8,10 +8,9 @@ from render_dashboard_client import _JS_TEMPLATE as _DASHBOARD_JS_TEMPLATE
 from render_dashboard_devices import _render_device_rows
 from render_dashboard_style import _CSS
 from render_shared import _render_app_nav
-from render_sync import _render_sync_body, _render_sync_legend, _render_burst_params_body
+from render_sync import _render_sync_body, _render_burst_params_body
 from render_sync_client import _JS_TEMPLATE
 from render_sync_style import _SYNC_CSS
-from schemas import SYNC_TRACE_MIN_PSR, SYNC_TRACE_THRESHOLD
 
 
 def render_setup_html(
@@ -68,11 +67,7 @@ def render_sync_html(
 ) -> str:
     devices = devices or []
     calibrations = calibrations or []
-    sync_js = (
-        _JS_TEMPLATE
-        .replace("__THRESHOLD__", repr(float(SYNC_TRACE_THRESHOLD)))
-        .replace("__MIN_PSR__", repr(float(SYNC_TRACE_MIN_PSR)))
-    )
+    sync_js = _JS_TEMPLATE
     return (
         "<!DOCTYPE html>"
         "<html lang=\"en\"><head>"
@@ -102,11 +97,9 @@ def render_sync_html(
         f'<div id="burst-params-body">{_render_burst_params_body(sync_params)}</div>'
         "</div>"
         '<div class="card">'
-        '<h2 class="card-title">Matched-filter trace</h2>'
-        '<div id="sync-trace"><div class="trace-empty">No sync run yet.</div></div>'
-        f'{_render_sync_legend()}'
-        '<div class="sync-log-head" style="margin-top: var(--s-3)">'
-        '<span class="sync-log-label">Event log</span>'
+        '<h2 class="card-title">Event log</h2>'
+        '<p style="font-size:12px;color:var(--sub);margin:0 0 var(--s-3) 0;">Copy report bundles the full mutual-sync debug export (math breakdown + anomaly flags + recent log tail) for paste-to-AI diagnosis.</p>'
+        '<div class="sync-log-head">'
         '<button type="button" class="btn secondary small" id="sync-report-copy" title="Fetch /sync/debug_export + event log, copy combined report to clipboard">Copy report</button>'
         '<button type="button" class="btn secondary small" id="sync-log-clear">Clear</button>'
         '</div>'

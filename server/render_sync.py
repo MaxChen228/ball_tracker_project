@@ -14,7 +14,6 @@ from render_dashboard_devices import _render_device_rows
 from render_shared import _CSS, _render_app_nav
 from render_sync_style import _SYNC_CSS
 from render_sync_client import _JS_TEMPLATE
-from schemas import SYNC_TRACE_MIN_PSR, SYNC_TRACE_THRESHOLD
 
 
 def _render_sync_body(
@@ -126,18 +125,6 @@ def _render_burst_params_body(sync_params: dict[str, Any] | None) -> str:
         '<button class="btn secondary" type="submit">Apply</button>'
         '</div>'
         '</form>'
-    )
-
-
-def _render_sync_legend() -> str:
-    return (
-        '<div class="trace-legend">'
-        '<span><span class="swatch" style="background:#C0392B"></span>A · self</span>'
-        '<span><span class="swatch" style="background:#4A6B8C"></span>A · other</span>'
-        '<span><span class="swatch" style="background:#D35400"></span>B · self</span>'
-        '<span><span class="swatch" style="background:#E6B300"></span>B · other</span>'
-        f'<span><span class="swatch" style="background:#A7372A"></span>threshold {SYNC_TRACE_THRESHOLD:.2f} (min PSR {SYNC_TRACE_MIN_PSR:.1f})</span>'
-        '</div>'
     )
 
 

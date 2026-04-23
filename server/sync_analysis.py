@@ -3,13 +3,15 @@ text report designed to be pasted to an AI for diagnosis.
 
 The report covers:
 - Last sync result status (success / aborted / none)
-- Per-stream trace peak metrics vs threshold
+- Mutual-sync MATH BREAKDOWN: raw scalars → α, β → δ (clock offset) + d (distance)
+- Sanity flags (impossible distance, α+β vs expected 2d, lopsided reports)
 - Quick-chirp telemetry peaks (input level, matched-filter peaks, noise floor)
-- Trimmed sync log tail (last 30 entries)
+- Trimmed sync log tail
 - Automated diagnosis with specific remediation suggestions
 
-Format is plain text, ~50 lines, machine-readable by an LLM without
-needing screenshots or Plotly visualizations.
+Format is plain text designed to be pasted verbatim to an LLM. No
+screenshots, no plots — just dense labelled data so the AI can read it
+in one pass.
 """
 from __future__ import annotations
 
@@ -17,39 +19,12 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-_STREAMS = [
-    ("A.self", "trace_a_self"),
-    ("A.other", "trace_a_other"),
-    ("B.self", "trace_b_self"),
-    ("B.other", "trace_b_other"),
-]
+SPEED_OF_SOUND_MS = 343.0  # m/s at ~20 °C
 
 
 def _fmt_ts(ts: float) -> str:
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
     return dt.strftime("%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
-
-
-def _trace_stats(
-    trace: list[dict[str, Any]] | None,
-) -> dict[str, Any] | None:
-    if not trace:
-        return None
-    peaks = [float(s.get("peak", 0)) for s in trace]
-    times = [float(s.get("t", 0)) for s in trace]
-    psrs = [float(s.get("psr", 0)) for s in trace]
-    best_idx = max(range(len(peaks)), key=lambda i: peaks[i])
-    sorted_peaks = sorted(peaks, reverse=True)
-    p90 = sorted_peaks[max(0, len(sorted_peaks) // 10)]
-    noise_median = sorted(peaks)[len(peaks) // 2]
-    return {
-        "best": peaks[best_idx],
-        "t_best": times[best_idx],
-        "best_psr": psrs[best_idx],
-        "p90": p90,
-        "noise_median": noise_median,
-        "n": len(trace),
-    }
 
 
 def _snip(v: Any) -> str:
@@ -67,18 +42,73 @@ def _suggest_threshold(best_peak: float, current_thr: float, cfar: float) -> str
     """Return a threshold suggestion string, or empty string if not appropriate.
 
     Rules:
-    - Never suggest a value >= current threshold (that contradicts "lower it").
-    - Require SNR >= 3 before suggesting threshold reduction (below that, the
-      problem is signal level, not threshold, and lowering risks false triggers).
-    - Suggested value = max(best * 0.70, cfar * 2.5) clamped below current_thr.
+    - Never suggest a value >= current threshold.
+    - Require SNR >= 3 before suggesting threshold reduction.
+    - Suggested = max(best * 0.70, cfar * 2.5) clamped below current_thr.
     """
     snr = best_peak / cfar if cfar > 0 else float("inf")
     if snr < 3.0:
-        return ""  # signal too weak — recommend volume, not threshold
+        return ""
     candidate = max(best_peak * 0.70, cfar * 2.5)
     if candidate >= current_thr:
-        return ""  # candidate is not actually lower — pointless suggestion
+        return ""
     return f"{candidate:.3f}"
+
+
+def _mutual_math(last_sync: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract per-role mic timestamps + derive mutual-sync math.
+
+    Returns None if any required scalar is missing.
+
+    Math:
+      α = t_from_other_A − t_self_A       (A-clock, A heard B vs A emitted)
+      β = t_from_other_B − t_self_B       (B-clock, B heard A vs B emitted)
+      δ = ((t_self_A − t_from_other_B) + (t_from_other_A − t_self_B)) / 2
+          clock offset, A − B (positive → A's clock ahead of B's)
+      d = ((t_from_other_A − t_self_B) − (t_self_A − t_from_other_B)) / 2
+          one-way propagation time between A and B (s)
+      distance = SPEED_OF_SOUND_MS × d    (m)
+
+    The report-side check is: |α + β − 2d| should be ~0 (redundant
+    derivation of the same d from within-clock deltas). A large value
+    means the server picked the wrong bursts for α or β.
+    """
+    def _f(key: str) -> float | None:
+        v = last_sync.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    t_self_a = _f("t_a_self_s")
+    t_other_a = _f("t_a_from_b_s")
+    t_self_b = _f("t_b_self_s")
+    t_other_b = _f("t_b_from_a_s")
+    if None in (t_self_a, t_other_a, t_self_b, t_other_b):
+        return None
+
+    alpha = t_other_a - t_self_a
+    beta = t_other_b - t_self_b
+    delta = ((t_self_a - t_other_b) + (t_other_a - t_self_b)) / 2.0
+    d_prop = ((t_other_a - t_self_b) - (t_self_a - t_other_b)) / 2.0
+    distance = SPEED_OF_SOUND_MS * d_prop
+    within_sum = alpha + beta  # should ≈ 2 × d_prop
+    within_diff = alpha - beta  # 2 × (emit-B-wall − emit-A-wall); burst separation
+    consistency_err_s = within_sum - 2.0 * d_prop
+    return {
+        "t_self_a": t_self_a,
+        "t_other_a": t_other_a,
+        "t_self_b": t_self_b,
+        "t_other_b": t_other_b,
+        "alpha": alpha,
+        "beta": beta,
+        "delta": delta,
+        "d_prop": d_prop,
+        "distance": distance,
+        "within_sum": within_sum,
+        "within_diff": within_diff,
+        "consistency_err_s": consistency_err_s,
+    }
 
 
 def build_debug_report(
@@ -92,7 +122,6 @@ def build_debug_report(
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     L: list[str] = [f"SYNC DEBUG EXPORT  {now_str}"]
 
-    # Helper: consistent float extraction
     def _fp(d: dict, key: str) -> float:
         v = d.get(key)
         try:
@@ -100,7 +129,6 @@ def build_debug_report(
         except (TypeError, ValueError):
             return 0.0
 
-    # Build per-cam device sync state lookup
     dev_by_cam: dict[str, dict[str, Any]] = {
         d["camera_id"]: d for d in (devices or [])
     }
@@ -119,14 +147,11 @@ def build_debug_report(
         return f"  Cam {cam}: {verdict}  id={sync_id}  age={age_str}{anchor_str}"
 
     if last_sync is None:
-        # Quick chirp path: no SyncResult is ever created.
-        # Mutual sync timeout would produce a SyncResult; None means quick chirp
-        # (or no attempt yet).
+        # Quick chirp path (no SyncResult) or no attempt yet.
         L.append("STATUS: no SyncResult (Quick Chirp path, or no attempt yet)")
         L.append(f"thresholds: mutual={mutual_threshold:.4f}  chirp={chirp_threshold:.4f}")
         L.append("")
 
-        # --- Device sync state (most important: did phone actually fire?) ---
         L.append("DEVICE SYNC STATE (authoritative — did phone register anchor?):")
         if not dev_by_cam:
             L.append("  (no devices in registry)")
@@ -135,7 +160,6 @@ def build_debug_report(
                 L.append(_dev_sync_line(cam))
         L.append("")
 
-        # --- Quick-chirp telemetry ---
         L.append(f"QUICK CHIRP TELEMETRY (vs chirp threshold={chirp_threshold:.4f}):")
         if not telemetry:
             L.append("  (empty — phones likely did not receive sync_command over WS)")
@@ -160,7 +184,6 @@ def build_debug_report(
                 )
         L.append("")
 
-        # --- Log tail ---
         L.append("LOG (last 20 entries):")
         for entry in logs[-20:]:
             ts = entry.get("ts", 0)
@@ -171,12 +194,7 @@ def build_debug_report(
             L.append(f"  [{_fmt_ts(ts)}] {source} {event} {detail_str}")
         L.append("")
 
-        # --- Quick-chirp diagnosis ---
-        # AUTHORITATIVE: device sync state determines success/failure.
-        # Telemetry peaks are secondary — they explain HOW it happened or WHY it failed,
-        # but they can be from a different attempt than the one that produced the sync state.
         L.append("DIAGNOSIS (Quick Chirp):")
-
         all_cams = sorted(set(list(dev_by_cam.keys()) + list(telemetry.keys())))
         if not all_cams:
             L.append("  [ERROR] No devices and no telemetry — phones did not receive sync_command")
@@ -202,28 +220,22 @@ def build_debug_report(
             cfar = _fp(t, "cfar_up_floor")
             snr = best / cfar if cfar > 0 else float("inf")
             margin = best / chirp_threshold if chirp_threshold > 0 else float("inf")
-
-            # Device state is authoritative
             actually_synced = d.get("time_synced", False) if d else False
 
             if actually_synced:
                 if age > 10 or best < chirp_threshold:
-                    # Telemetry is from a different/stale attempt — don't confuse with failure
                     L.append(f"  [OK]    Cam {cam}: SYNCED (telemetry age={age:.0f}s is from different attempt, ignore peaks)")
                 else:
                     L.append(f"  [OK]    Cam {cam}: SYNCED  peak={best:.4f} margin={margin:.2f}x")
                 continue
 
-            # Not synced — diagnose why using telemetry
             if not t or age > 15:
                 L.append(f"  [ERROR] Cam {cam}: NOT SYNCED, no fresh telemetry (age={age:.0f}s)")
                 L.append(f"          → Phone may not have received sync_command, or already back in standby")
                 continue
 
-            # cfar-normalized SNR is more reliable than absolute threshold alone
             cfar_snr_ok = snr > 1.5 if cfar > 0 else True
             abs_ok = best >= chirp_threshold
-
             if abs_ok and cfar_snr_ok:
                 L.append(f"  [WARN]  Cam {cam}: NOT SYNCED despite peak={best:.4f} margin={margin:.2f}x SNR={snr:.1f}x")
                 L.append(f"          → Peak crossed threshold but iOS did not register anchor")
@@ -245,11 +257,11 @@ def build_debug_report(
 
         return "\n".join(L)
 
+    # --- Mutual sync path ---
     run_id = last_sync.get("id", "?")
     L.append(f"run_id: {run_id}")
     L.append("")
 
-    # --- Status ---
     if last_sync.get("aborted"):
         reasons = last_sync.get("abort_reasons") or {}
         r_str = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items()))
@@ -257,36 +269,39 @@ def build_debug_report(
     elif last_sync.get("delta_s") is not None:
         delta_ms = float(last_sync["delta_s"]) * 1000.0
         dist = float(last_sync.get("distance_m") or 0.0)
-        L.append(f"STATUS: SUCCESS  Δ={delta_ms:+.3f} ms  D={dist:.3f} m")
+        L.append(f"STATUS: SOLVED  Δ={delta_ms:+.3f} ms  D={dist:.3f} m")
     else:
         L.append("STATUS: UNKNOWN")
-
-    L.append(
-        f"thresholds: mutual={mutual_threshold:.4f}  chirp={chirp_threshold:.4f}"
-    )
+    L.append(f"thresholds: mutual={mutual_threshold:.4f}  chirp={chirp_threshold:.4f}")
     L.append("")
 
-    # --- Trace peaks ---
-    L.append(f"TRACE PEAKS (mutual threshold={mutual_threshold:.4f}):")
-    stream_results: list[tuple[str, dict | None]] = []
-    for label, key in _STREAMS:
-        raw = last_sync.get(key)
-        stats = _trace_stats(raw)
-        stream_results.append((label, stats))
-        if stats is None:
-            L.append(f"  {label:<8}  NO TRACE DATA")
-            continue
-        best = stats["best"]
-        margin = best / mutual_threshold if mutual_threshold > 0 else float("inf")
-        verdict = "PASS" if best >= mutual_threshold else ("FAIL[close]" if margin >= 0.8 else "FAIL")
-        L.append(
-            f"  {label:<8}  best={best:.4f} @t={stats['t_best']:.3f}s"
-            f"  margin={margin:.2f}x  psr={stats['best_psr']:.2f}"
-            f"  noise_med={stats['noise_median']:.4f}  n={stats['n']}  {verdict}"
-        )
+    # --- Mutual sync math breakdown ---
+    math_data = _mutual_math(last_sync)
+    if math_data is None:
+        L.append("MUTUAL-SYNC MATH:")
+        L.append("  (missing one or more scalar timestamps — check that both A and B uploaded report_received")
+        L.append("   with t_self_s + t_from_other_s populated)")
+    else:
+        L.append("MUTUAL-SYNC MATH (from per-role scalar timestamps):")
+        L.append(f"  A:  t_self={math_data['t_self_a']:.6f}  t_from_other={math_data['t_other_a']:.6f}")
+        L.append(f"  B:  t_self={math_data['t_self_b']:.6f}  t_from_other={math_data['t_other_b']:.6f}")
+        L.append("")
+        L.append(f"  α = t_other_A − t_self_A = {math_data['alpha']:+.6f} s   (within A's clock)")
+        L.append(f"  β = t_other_B − t_self_B = {math_data['beta']:+.6f} s   (within B's clock)")
+        L.append(f"  α − β                    = {math_data['within_diff']:+.6f} s   ≈ 2 × burst_separation")
+        L.append(f"  α + β                    = {math_data['within_sum']:+.6f} s   ≈ 2 × d (propagation)")
+        L.append("")
+        L.append(f"  δ (clock offset A−B) = ((t_self_A − t_other_B) + (t_other_A − t_self_B)) / 2")
+        L.append(f"                       = {math_data['delta']:+.6f} s")
+        L.append(f"  d (one-way prop.)    = ((t_other_A − t_self_B) − (t_self_A − t_other_B)) / 2")
+        L.append(f"                       = {math_data['d_prop']:+.6f} s")
+        L.append(f"  distance             = 343 m/s × d = {math_data['distance']:+.3f} m")
+        L.append("")
+        L.append(f"  consistency check: (α + β) − 2d = {math_data['consistency_err_s']:+.6f} s")
+        L.append(f"                    (0 = same d derived both within-clock and cross-clock; mismatch = wrong bursts matched)")
     L.append("")
 
-    # --- Device sync state (mutual sync result IS the sync state, but show for completeness) ---
+    # --- Device sync state ---
     if dev_by_cam:
         L.append("DEVICE SYNC STATE:")
         for cam in sorted(dev_by_cam):
@@ -328,47 +343,9 @@ def build_debug_report(
         L.append(f"  [{_fmt_ts(ts)}] {source} {event} {detail_str}")
     L.append("")
 
-    # --- Diagnosis ---
+    # --- Anomaly flags + diagnosis ---
     L.append("DIAGNOSIS:")
-    issues: list[str] = []
-    fail_streams: list[tuple[str, dict]] = []
-    pass_streams: list[tuple[str, dict]] = []
-    no_data_streams: list[str] = []
-
-    for label, stats in stream_results:
-        if stats is None:
-            no_data_streams.append(label)
-        elif stats["best"] < mutual_threshold:
-            fail_streams.append((label, stats))
-        else:
-            pass_streams.append((label, stats))
-
-    if no_data_streams:
-        issues.append(
-            f"[ERROR] No trace data for: {', '.join(no_data_streams)}"
-            " — WS sync_run not received by phone?"
-        )
-    if fail_streams:
-        if len(fail_streams) == 4:
-            best_of_fail = max(fail_streams, key=lambda x: x[1]["best"])
-            issues.append(
-                f"[ERROR] All 4 bands below threshold={mutual_threshold:.4f}"
-                f" (best was {best_of_fail[0]}={best_of_fail[1]['best']:.4f},"
-                f" margin={best_of_fail[1]['best']/mutual_threshold:.2f}x)"
-            )
-        else:
-            for label, stats in fail_streams:
-                margin = stats["best"] / mutual_threshold
-                issues.append(
-                    f"[ERROR] {label}: peak={stats['best']:.4f}"
-                    f" margin={margin:.2f}x < 1.0 (threshold={mutual_threshold:.4f})"
-                )
-    if pass_streams:
-        for label, stats in pass_streams:
-            margin = stats["best"] / mutual_threshold
-            issues.append(
-                f"[OK]    {label}: peak={stats['best']:.4f} margin={margin:.2f}x  PASS"
-            )
+    flags: list[str] = []
 
     # Clipping
     clipping_cams = []
@@ -381,11 +358,10 @@ def build_debug_report(
         max_inp_peak = max(max_inp_peak, peak)
         if peak >= 0.98:
             clipping_cams.append(cam)
-
     if clipping_cams:
-        issues.append(f"[WARN]  ADC clipping on cam(s) {', '.join(clipping_cams)} — reduce speaker volume")
+        flags.append(f"[WARN]  ADC clipping on cam(s) {', '.join(clipping_cams)} — reduce speaker volume first")
     elif telemetry:
-        issues.append(f"[OK]    No ADC clipping (max inp_peak={max_inp_peak:.3f})")
+        flags.append(f"[OK]    No ADC clipping (max inp_peak={max_inp_peak:.3f})")
 
     # Noise floor
     cfar_vals = []
@@ -399,73 +375,87 @@ def build_debug_report(
     if cfar_vals:
         mean_cfar = sum(cfar_vals) / len(cfar_vals)
         if mean_cfar > 0.05:
-            issues.append(f"[WARN]  High noise floor: cfar_up avg={mean_cfar:.4f} — ambient noise?")
+            flags.append(f"[WARN]  High noise floor: cfar_up avg={mean_cfar:.4f} — ambient noise?")
         else:
-            issues.append(f"[OK]    Noise floor OK: cfar_up avg={mean_cfar:.4f}")
+            flags.append(f"[OK]    Noise floor OK: cfar_up avg={mean_cfar:.4f}")
 
-    # Delta sanity
-    if last_sync.get("delta_s") is not None:
-        delta_ms = abs(float(last_sync["delta_s"])) * 1000.0
-        dist = float(last_sync.get("distance_m") or 0.0)
-        if delta_ms > 10:
-            issues.append(f"[WARN]  |Δ|={delta_ms:.2f}ms is large (>10ms) — re-sync recommended")
-        else:
-            issues.append(f"[OK]    |Δ|={delta_ms:.2f}ms  D={dist:.3f}m — plausible")
-
-    for issue in issues:
-        L.append(f"  {issue}")
-
-    # Root cause + recommendations
-    L.append("")
-    if last_sync.get("delta_s") is not None:
-        L.append("  Root cause: N/A — sync succeeded.")
-    elif no_data_streams and len(no_data_streams) == 4:
-        L.append("  Root cause: Phones did not start listening (WS message lost or iOS build too old).")
-        L.append("  Recommendations:")
-        L.append("    1. Check both phones are online (green in Devices card)")
-        L.append("    2. Check WS connection — restart server if stale")
-        L.append("    3. Ensure iOS build supports mutual sync (trace_self/trace_other fields)")
-    elif fail_streams:
-        all_stats = [s for _, s in fail_streams]
-        best_peak = max(s["best"] for s in all_stats)
-        # Use cfar noise floor from telemetry (real ambient noise) for SNR
-        mean_cfar_telem = sum(cfar_vals) / len(cfar_vals) if cfar_vals else None
-        noise_ref = (sum(cfar_vals) / len(cfar_vals)) if cfar_vals else None
-        if noise_ref and noise_ref > 0:
-            snr = best_peak / noise_ref
-        else:
-            noise_med = max(s["noise_median"] for s in all_stats)
-            snr = best_peak / noise_med if noise_med > 0 else float("inf")
-            noise_ref = noise_med or 0.001
-        L.append(
-            f"  Root cause: Audio level too low or threshold too high"
-            f" (best peak={best_peak:.4f}, SNR~{snr:.1f}x cfar noise floor)."
-        )
-        L.append("  Recommendations:")
-        sug = _suggest_threshold(best_peak, mutual_threshold, noise_ref)
-        if sug:
-            L.append(
-                f"    1. Lower mutual_sync_threshold: {mutual_threshold:.4f} → {sug}"
-                f"       (Runtime Tuning card on /sync page)"
+    # Math-derived anomalies (only if solved, math available)
+    if math_data is not None and last_sync.get("delta_s") is not None:
+        distance = math_data["distance"]
+        consistency = math_data["consistency_err_s"]
+        # Physical sanity: two hand-held phones on the same rig are within ~10 m.
+        if abs(distance) > 30.0:
+            flags.append(
+                f"[FAIL]  |distance|={abs(distance):.1f} m is physically impossible for two phones on the same rig"
             )
-            L.append(f"    2. OR move phones' speaker closer / increase volume")
-        else:
-            L.append(f"    1. SNR too low ({snr:.1f}x) — lowering threshold risks false triggers")
-            L.append(f"    1. Move speaker closer to both phones / increase volume")
-        if clipping_cams:
-            L.append(f"    ⚠ ADC clipping on {', '.join(clipping_cams)} — reduce speaker volume first")
-        if snr < 5:
-            L.append(f"    note: Very low SNR — quiet environment helps")
-    else:
+            flags.append(
+                f"        → one of (t_from_other_A, t_from_other_B) matched the WRONG chirp burst"
+            )
+            flags.append(
+                f"        → Likely causes: emit_band label swap in iOS MutualSyncAudio, server band-filter picked wrong peak,"
+            )
+            flags.append(
+                f"        → missed burst and server latched onto an echo/noise peak."
+            )
+        elif distance < -1.0:
+            flags.append(
+                f"[FAIL]  distance={distance:.3f} m < 0 — physically impossible"
+            )
+            flags.append(
+                f"        → wrong burst picked on at least one side (see above hints)"
+            )
+        elif abs(distance) <= 15.0:
+            flags.append(f"[OK]    distance={distance:.3f} m is plausible for two co-located phones")
+
+        # Consistency check: |(α+β) - 2d| should be ~0 (machine-precision)
+        if abs(consistency) > 0.001:
+            flags.append(
+                f"[WARN]  math consistency error {consistency*1000:+.3f} ms — scalar timestamps may be from mismatched bursts"
+            )
+
+        # Delta sanity: huge |δ| is normal (CLOCK_MONOTONIC boots are arbitrary); flag only if distance is otherwise fine.
+        delta_ms_abs = abs(float(last_sync["delta_s"])) * 1000.0
+        if delta_ms_abs > 10_000_000:  # > 10000 s
+            flags.append(
+                f"[INFO]  |δ|={delta_ms_abs/1000:.0f} s — phones' CLOCK_MONOTONIC boots far apart (expected, not a bug)"
+            )
+
+    # Aborts
+    if last_sync.get("aborted"):
         abort_reasons = last_sync.get("abort_reasons") or {}
         timeout_cams = [k for k, v in abort_reasons.items() if "timeout" in str(v)]
         if timeout_cams:
-            L.append(f"  Root cause: Phones {', '.join(timeout_cams)} timed out (both bands must fire within 8s).")
-            L.append("  Recommendations:")
-            L.append("    1. Check trace peaks above — likely one band barely failed threshold")
-            L.append("    2. Lower mutual_sync_threshold if peaks are close to current value")
-            L.append("    3. Ensure speaker is audible to both phones simultaneously")
+            flags.append(f"[FAIL]  timeout on cam(s) {', '.join(timeout_cams)} — did not report within listen window")
+        missing_cams = [k for k, v in abort_reasons.items() if "not_received" in str(v) or "missing" in str(v)]
+        if missing_cams:
+            flags.append(f"[FAIL]  no report_received from cam(s) {', '.join(missing_cams)}")
+
+    for f in flags:
+        L.append(f"  {f}")
+
+    # Root-cause verdict
+    L.append("")
+    if last_sync.get("delta_s") is not None and math_data is not None:
+        distance = math_data["distance"]
+        if abs(distance) > 30.0 or distance < -1.0:
+            L.append("  ROOT CAUSE: mutual-sync SOLVED mathematically but distance is impossible")
+            L.append("              — the scalar inputs are self-consistent (see α, β, δ, d above)")
+            L.append("              — but at least one side matched the wrong chirp")
+            L.append("  NEXT STEPS:")
+            L.append("    1. Check the LOG for emitted_band values on both report_received lines —")
+            L.append("       if A reports emitted_band=A but the peak it reports is actually in B's band, that's the bug.")
+            L.append("    2. Compare burst-emit times to sync_params.emit_a_at_s / emit_b_at_s — is the server")
+            L.append("       searching the right window for each band?")
+            L.append("    3. Download the per-run WAVs via /sync/audio/<run_id>_[AB].wav and inspect offline.")
         else:
-            L.append("  Root cause: Unknown — check log entries above for abort_reason detail.")
+            L.append("  ROOT CAUSE: solved plausibly; no action needed unless |Δ| drifts between runs.")
+    elif last_sync.get("aborted"):
+        L.append("  ROOT CAUSE: attempt aborted before both reports arrived.")
+        L.append("  NEXT STEPS:")
+        L.append("    1. Check LOG tail for the last report_received — which cam never reported?")
+        L.append("    2. If telemetry for that cam shows low peaks → chirp not heard (volume / distance).")
+        L.append("    3. If telemetry looks fine → iOS PSR gate rejected; lower mutual_sync_threshold or try again.")
+    else:
+        L.append("  ROOT CAUSE: unknown — inspect LOG entries above for abort_reason / missing fields.")
 
     return "\n".join(L)

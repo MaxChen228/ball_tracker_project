@@ -935,8 +935,8 @@ def test_sync_page_renders_time_sync_and_tuning_surfaces():
     assert r.status_code == 200
     body = r.text
     assert 'id="sync-body"' in body
-    assert 'id="sync-trace"' in body
     assert 'id="sync-log"' in body
+    assert 'id="sync-report-copy"' in body
     assert 'id="tuning-status"' in body
     assert 'id="burst-params-body"' in body
     assert 'id="per-cam-sync"' in body

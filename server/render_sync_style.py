@@ -31,32 +31,15 @@ _SYNC_CSS = """
   margin: var(--s-4) 0 calc(-1 * var(--s-2)) var(--s-1);
 }
 .setup-section-title:first-child { margin-top: 0; }
-#sync-trace {
-  width: 100%; height: 400px;
-  background: var(--surface-hover);
-  border: 1px solid var(--border-l);
-  border-radius: var(--r);
-}
 .wav-link {
   color: var(--ink); text-decoration: underline; text-decoration-style: dotted;
   text-underline-offset: 2px; font-family: var(--mono); font-size: 11px;
 }
 .wav-link:hover { color: var(--accent); }
 .trace-empty {
-  height: 400px; display: flex; align-items: center; justify-content: center;
+  padding: var(--s-3) var(--s-2);
   font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em;
   text-transform: uppercase; color: var(--sub);
-  background: var(--surface-hover); border: 1px solid var(--border-l);
-  border-radius: var(--r);
-}
-.trace-legend {
-  margin-top: var(--s-2); display: flex; flex-wrap: wrap; gap: var(--s-3);
-  font-family: var(--mono); font-size: 10px; letter-spacing: 0.10em;
-  text-transform: uppercase; color: var(--sub);
-}
-.trace-legend .swatch {
-  display: inline-block; width: 10px; height: 2px; margin-right: 6px;
-  vertical-align: middle;
 }
 .main-sync .telemetry-panel {
   position: static;
