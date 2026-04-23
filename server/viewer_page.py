@@ -396,9 +396,17 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .check.fail .mark {{ color:var(--dev); }}
   .cam-rate {{ display:flex; align-items:center; gap:10px; }}
   .cam-stats {{ font-family:var(--mono); font-size:12px; color:var(--ink);
-    letter-spacing:0.02em; white-space:nowrap; }}
+    letter-spacing:0.02em; white-space:nowrap; display:inline-flex; gap:8px; align-items:center; }}
   .cam-stats .n {{ font-weight:500; }}
   .cam-stats .of {{ color:var(--sub); }}
+  .path-stat {{ display:inline-flex; align-items:baseline; gap:3px;
+    font-family:var(--mono); font-size:11px; letter-spacing:0.02em;
+    padding:1px 5px; border:1px solid var(--border-l); border-radius:var(--r); }}
+  .path-stat .lbl {{ font-size:9px; letter-spacing:0.12em; color:var(--sub);
+    text-transform:uppercase; }}
+  .path-stat .val {{ font-variant-numeric:tabular-nums; color:var(--ink); }}
+  .path-stat.off {{ opacity:0.45; }}
+  .path-stat.off .val {{ color:var(--sub); }}
   .rate-bar {{ flex:1 1 auto; min-width:60px; height:4px;
     background:var(--border-l); border-radius:var(--r); overflow:hidden;
     display:inline-block; }}

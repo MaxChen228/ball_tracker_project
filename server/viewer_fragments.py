@@ -199,13 +199,35 @@ def cam_card_html(cam_id: str, cam: dict) -> str:
         for (label, ok, tip) in checks
     )
 
-    n_det = cam["n_detected"]
-    n_frames = cam["n_frames"]
-    telemetry = cam.get("capture_telemetry") or {}
-    stats_html = (
-        f'<span class="n">{n_det}</span>'
-        f'<span class="of"> detected / {n_frames} frames</span>'
+    counts = cam.get("counts_by_path") or {}
+    _PATHS = (
+        ("live", "L", "iOS live stream (on-device detection, streamed over WS)"),
+        ("ios_post", "P", "iOS post-pass (on-device detection, full clip)"),
+        ("server_post", "S", "server post (PyAV decode + server-side detection)"),
     )
+    path_chips: list[str] = []
+    for key, abbr, tip in _PATHS:
+        c = counts.get(key) or {"total": 0, "detected": 0}
+        total = c.get("total", 0)
+        det = c.get("detected", 0)
+        klass = "on" if total > 0 else "off"
+        ratio_txt = f"{det}/{total}" if total > 0 else "—"
+        path_chips.append(
+            f'<span class="path-stat {klass}" title="{tip}">'
+            f'<span class="lbl">{abbr}</span>'
+            f'<span class="val">{ratio_txt}</span></span>'
+        )
+    # rate-bar denominator: prefer server_post, then ios_post, then live.
+    # server_post stays the canonical reference for dual-cam triangulation
+    # sessions; single-pipeline sessions fall back to whatever they have.
+    n_det, n_frames = 0, 0
+    for key in ("server_post", "ios_post", "live"):
+        c = counts.get(key) or {}
+        if c.get("total", 0) > 0:
+            n_det, n_frames = c["detected"], c["total"]
+            break
+    telemetry = cam.get("capture_telemetry") or {}
+    stats_html = "".join(path_chips)
     telemetry_html = ""
     if telemetry:
         dims = (
@@ -280,7 +302,11 @@ def failure_strip_html(health: dict) -> str:
         if server_err:
             reasons.append(f"server error: {server_err}")
         elif tri_n == 0 and all(cams[c]["received"] for c in ("A", "B")):
-            no_detect = [c for c in ("A", "B") if cams[c]["n_detected"] == 0]
+            def _any_detected_across_paths(cam: dict) -> bool:
+                counts = cam.get("counts_by_path") or {}
+                return any((counts.get(k) or {}).get("detected", 0) > 0
+                           for k in ("live", "ios_post", "server_post"))
+            no_detect = [c for c in ("A", "B") if not _any_detected_across_paths(cams[c])]
             if no_detect:
                 reasons.append(
                     f"{' + '.join('Cam ' + c for c in no_detect)} detected no ball "

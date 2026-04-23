@@ -59,6 +59,11 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
     pitches = state.pitches_for_session(session_id)
     result = state.get(session_id)
     cams: dict[str, dict[str, Any]] = {}
+    _EMPTY_COUNTS = {
+        "live": {"total": 0, "detected": 0},
+        "ios_post": {"total": 0, "detected": 0},
+        "server_post": {"total": 0, "detected": 0},
+    }
     for cam_id in ("A", "B"):
         p = pitches.get(cam_id)
         if p is None:
@@ -66,17 +71,36 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
                 "received": False,
                 "calibrated": False,
                 "time_synced": False,
+                "counts_by_path": {k: dict(v) for k, v in _EMPTY_COUNTS.items()},
                 "n_frames": 0,
                 "n_detected": 0,
                 "capture_telemetry": None,
             }
         else:
+            counts = {
+                "live": {
+                    "total": len(p.frames_live or []),
+                    "detected": sum(1 for f in (p.frames_live or []) if f.ball_detected),
+                },
+                "ios_post": {
+                    "total": len(p.frames_on_device or []),
+                    "detected": sum(1 for f in (p.frames_on_device or []) if f.ball_detected),
+                },
+                "server_post": {
+                    "total": len(p.frames),
+                    "detected": sum(1 for f in p.frames if f.ball_detected),
+                },
+            }
             cams[cam_id] = {
                 "received": True,
                 "calibrated": p.intrinsics is not None and p.homography is not None,
                 "time_synced": p.sync_anchor_timestamp_s is not None,
-                "n_frames": len(p.frames),
-                "n_detected": sum(1 for f in p.frames if f.ball_detected),
+                "counts_by_path": counts,
+                # Preserved for legacy consumers (failure_strip rate calc,
+                # /events, tests). Mirrors server_post which is still the
+                # canonical "did the upload decode + detect" signal.
+                "n_frames": counts["server_post"]["total"],
+                "n_detected": counts["server_post"]["detected"],
                 "capture_telemetry": (
                     p.capture_telemetry.model_dump(mode="json")
                     if p.capture_telemetry is not None else None
@@ -87,12 +111,17 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         ts = [p.t_rel_s for p in result.points]
         duration_s = float(max(ts) - min(ts))
     else:
+        # Live-only / ios_post-only sessions have empty p.frames; fall back
+        # to whichever pipeline actually carried frames so the header still
+        # shows a real duration.
         per_pitch_spans: list[float] = []
         for p in pitches.values():
-            if not p.frames:
+            frame_lists = [p.frames, p.frames_on_device or [], p.frames_live or []]
+            frames = next((fs for fs in frame_lists if fs), None)
+            if not frames:
                 continue
             anchor = p.sync_anchor_timestamp_s if p.sync_anchor_timestamp_s is not None else p.video_start_pts_s
-            rels = [f.timestamp_s - anchor for f in p.frames]
+            rels = [f.timestamp_s - anchor for f in frames]
             per_pitch_spans.append(max(rels) - min(rels))
         if per_pitch_spans:
             duration_s = float(max(per_pitch_spans))
@@ -151,11 +180,15 @@ def _videos_for_session(
             best[cam] = name
 
     def _stream(frames, rel_anchor) -> dict[str, list]:
+        # iOS live WS stream can arrive out-of-order (packet reordering);
+        # sort by timestamp so the viewer's O(n) walk of t_rel_s stays
+        # monotonic — the strip's frame lookup assumes ascending ts.
+        ordered = sorted(frames, key=lambda f: f.timestamp_s)
         return {
-            "t_rel_s": [float(f.timestamp_s - rel_anchor) for f in frames],
-            "detected": [bool(f.ball_detected) for f in frames],
-            "px": [float(f.px) if f.px is not None else None for f in frames],
-            "py": [float(f.py) if f.py is not None else None for f in frames],
+            "t_rel_s": [float(f.timestamp_s - rel_anchor) for f in ordered],
+            "detected": [bool(f.ball_detected) for f in ordered],
+            "px": [float(f.px) if f.px is not None else None for f in ordered],
+            "py": [float(f.py) if f.py is not None else None for f in ordered],
         }
 
     out: list[tuple[str, str, float, float, dict[str, list]]] = []
