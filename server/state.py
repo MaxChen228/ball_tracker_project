@@ -1468,6 +1468,13 @@ class State:
             return self._processing.trash_count()
 
     def _session_server_post_candidates(self, session_id: str) -> list[tuple[str, PitchPayload, Path]]:
+        """Pitches in this session eligible for server-post detection.
+
+        Eligibility is just "MOV on disk + server_post not yet run +
+        session not trashed". The pitch's original `paths` tag is NOT
+        consulted — server_post is an on-demand analysis, available to
+        any session that happens to have a MOV (which is every session
+        now that iOS records unconditionally)."""
         with self._lock:
             pitches = [
                 (cam, pitch)
@@ -1477,8 +1484,6 @@ class State:
         candidates: list[tuple[str, PitchPayload, Path]] = []
         for cam, pitch in pitches:
             if self._session_is_trashed(session_id):
-                continue
-            if DetectionPath.server_post not in self._paths_for_pitch(pitch):
                 continue
             if pitch.frames_server_post:
                 continue

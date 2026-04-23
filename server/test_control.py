@@ -435,26 +435,16 @@ def test_status_includes_capture_mode():
 # and on the WS settings message on connect.
 
 
-def test_set_mode_endpoint_rejects_invalid_value():
-    client = TestClient(app)
-    r = client.post(
-        "/sessions/set_mode",
-        data={"mode": "lightning_fast"},
-        headers={"Accept": "application/json"},
-    )
-    assert r.status_code == 400
-
-
-def test_set_mode_endpoint_html_form_redirects():
+def test_set_mode_endpoint_removed():
+    """The legacy /sessions/set_mode toggle was retired — CaptureMode has
+    only one value and the dashboard no longer surfaces a picker."""
     client = TestClient(app)
     r = client.post(
         "/sessions/set_mode",
         data={"mode": "camera_only"},
-        headers={"Accept": "text/html"},
-        follow_redirects=False,
+        headers={"Accept": "application/json"},
     )
-    assert r.status_code == 303
-    assert r.headers["location"] == "/"
+    assert r.status_code == 404
 
 
 def test_default_tracking_exposure_cap_is_frame_duration(tmp_path):
@@ -779,7 +769,6 @@ def test_dashboard_renders_control_panel():
     # `/` is operational-only now: Session + Events + 3D canvas. Devices,
     # calibration, extended markers, and tuning all live on /setup.
     assert "BALL_TRACKER" in body
-    assert "Session Monitor" in body
     assert 'action="/sessions/arm"' in body
     assert 'action="/sessions/stop"' in body
     assert "/sessions/cancel" not in body
@@ -790,16 +779,18 @@ def test_dashboard_renders_control_panel():
     assert 'href="/markers"' in body
 
 
-def test_dashboard_renders_live_session_and_detection_path_controls():
+def test_dashboard_no_longer_renders_detection_path_picker():
+    """Detection Paths picker was removed — live is always on, server_post
+    is now an on-demand action on the events list. The Session Monitor
+    card was also retired; during streaming the operator only watches
+    the 3D canvas on the right."""
     client = TestClient(app)
     r = client.get("/")
     assert r.status_code == 200
     body = r.text
-    assert 'id="active-body"' in body
-    assert 'action="/detection/paths"' in body
-    assert 'name="paths"' in body
-    assert 'value="live"' in body
-    assert 'value="server_post"' in body
+    assert 'id="active-body"' not in body
+    assert 'action="/detection/paths"' not in body
+    assert 'id="paths-form"' not in body
 
 
 def test_dashboard_renders_hsv_controls():
@@ -874,28 +865,6 @@ def test_sessions_arm_blocks_online_uncalibrated_peer():
     assert arm.json()["detail"]["blockers"] == ["B not calibrated"]
 
 
-def test_dashboard_labels_stopped_postpass_session_without_live_frames():
-    client = TestClient(app)
-    main.state.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
-    main.state.heartbeat("B", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
-    _seed_minimal_calibration("A")
-    _seed_minimal_calibration("B")
-    arm = client.post(
-        "/sessions/arm",
-        json={"paths": ["server_post"]},
-        headers={"Accept": "application/json"},
-    )
-    assert arm.status_code == 200
-    stop = client.post("/sessions/stop", headers={"Accept": "application/json"})
-    assert stop.status_code == 200
-
-    body = client.get("/").text
-    assert "Session Monitor" in body
-    assert "Live stream disabled for this session." in body
-    assert "srv: stopped" in body
-    assert "srv: running" not in body
-
-
 def test_state_marks_single_camera_server_post_path_completed(tmp_path):
     s = main.State(data_dir=tmp_path)
     pitch = _minimal_pitch("A", session_id=sid(90))
@@ -909,32 +878,6 @@ def test_state_marks_single_camera_server_post_path_completed(tmp_path):
 
     assert result.frame_counts_by_path["server_post"] == {"A": 1}
     assert "server_post" in result.paths_completed
-
-
-def test_dashboard_labels_done_for_single_camera_server_post_session():
-    client = TestClient(app)
-    main.state.heartbeat("A")
-    _seed_minimal_calibration("A")
-    arm = client.post(
-        "/sessions/arm",
-        json={"paths": ["server_post"]},
-        headers={"Accept": "application/json"},
-    )
-    assert arm.status_code == 200
-    session_id = arm.json()["session"]["id"]
-    stop = client.post("/sessions/stop", headers={"Accept": "application/json"})
-    assert stop.status_code == 200
-
-    pitch = _minimal_pitch("A", session_id=session_id)
-    pitch.paths = [main.DetectionPath.server_post.value]
-    pitch.frames = []
-    pitch.frames_server_post = [
-        main.FramePayload(frame_index=0, timestamp_s=0.0, px=100.0, py=100.0, ball_detected=True),
-    ]
-    main.state.record(pitch)
-
-    body = client.get("/").text
-    assert "srv: done" in body
 
 
 def test_record_merges_live_frames_into_single_camera_pitch(tmp_path):

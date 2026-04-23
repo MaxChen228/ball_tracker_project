@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import re
-from typing import Any
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from schemas import CaptureMode, DetectionPath, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
+from schemas import DetectionPath, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
 
 router = APIRouter()
 
@@ -78,28 +76,6 @@ async def sessions_stop(request: Request):
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "session": ended.to_dict()}
-
-
-@router.post("/sessions/set_mode")
-async def sessions_set_mode(
-    request: Request,
-    mode: str = Form(...),
-):
-    from main import state, device_ws, _settings_message_for, _wants_html
-    try:
-        applied = CaptureMode(mode)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"invalid mode {mode!r}; expected one of: {[m.value for m in CaptureMode]}",
-        )
-    state.set_mode(applied)
-    await device_ws.broadcast(
-        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "capture_mode": applied.value}
 
 
 @router.post("/sessions/clear")
@@ -184,7 +160,32 @@ async def sessions_cancel_processing(request: Request, session_id: str):
 
 
 @router.post("/sessions/{session_id}/resume_processing")
-async def sessions_resume_processing(request: Request, session_id: str):
+async def sessions_resume_processing(
+    request: Request,
+    session_id: str,
+    background_tasks: BackgroundTasks,
+):
+    return await _enqueue_server_post(request, session_id, background_tasks)
+
+
+@router.post("/sessions/{session_id}/run_server_post")
+async def sessions_run_server_post(
+    request: Request,
+    session_id: str,
+    background_tasks: BackgroundTasks,
+):
+    """Operator-triggered: run server-side HSV detection against every
+    camera's archived MOV for this session. Replaces the old "arm with
+    server_post checked" auto-flow now that MOVs are always recorded and
+    the detection cost is paid only when the operator asks for it."""
+    return await _enqueue_server_post(request, session_id, background_tasks)
+
+
+async def _enqueue_server_post(
+    request: Request,
+    session_id: str,
+    background_tasks: BackgroundTasks,
+):
     from main import state, _wants_html, _run_server_detection
     if not _SESSION_ID_RE.match(session_id):
         if _wants_html(request):
@@ -196,7 +197,7 @@ async def sessions_resume_processing(request: Request, session_id: str):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
     for clip_path, pitch in queued:
-        asyncio.create_task(_run_server_detection(clip_path, pitch))
+        background_tasks.add_task(_run_server_detection, clip_path, pitch)
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "session_id": session_id, "queued": len(queued)}
