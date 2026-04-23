@@ -327,7 +327,16 @@ def build_scene(
         )
 
         dist = intr.distortion
-        anchor = pitch.sync_anchor_timestamp_s or 0.0
+        # Match routes/viewer.py::_videos_for_session fallback: when the
+        # session has no chirp anchor, anchor-relative == video-PTS-
+        # relative so rays + frames live on the same clock as the player
+        # scrubber. Using `0.0` here produced rays tagged with absolute
+        # PTS (~14681s) while frames + videos were already normalised to
+        # [0, ~5s], which broke playback sync.
+        if pitch.sync_anchor_timestamp_s is not None:
+            anchor = float(pitch.sync_anchor_timestamp_s)
+        else:
+            anchor = float(pitch.video_start_pts_s)
         viz_length = max(5.0, 2.0 * float(np.linalg.norm(C)))
 
         server_rays, server_trace = _rays_and_trace_for_source(
