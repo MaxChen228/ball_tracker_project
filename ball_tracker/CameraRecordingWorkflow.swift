@@ -157,12 +157,11 @@ final class CameraRecordingWorkflow {
     private func handleCycleComplete(_ payload: ServerUploader.PitchPayload) {
         let finishingClip = clipRecorder
         clipRecorder = nil
-        if payload.sync_id != nil {
-            dependencies.clearRecoveredAnchor()
-            DispatchQueue.main.async {
-                self.dependencies.refreshUI()
-            }
-        }
+        // Do NOT clear the recovered anchor here. Quick Chirp's anchor is
+        // the two phones' clock-offset — it's a property of the clocks
+        // themselves, stable across recordings. Re-calibrating every
+        // pitch was legacy one-shot behavior that forced the operator
+        // to re-run Quick Chirp before every session.
         recordingLog.info("camera cycle complete session=\(payload.session_id, privacy: .public) cam=\(payload.camera_id, privacy: .public) has_clip=\(finishingClip != nil)")
         DispatchQueue.main.async {
             self.onCycleCompleted?()
