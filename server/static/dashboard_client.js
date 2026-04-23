@@ -667,6 +667,22 @@
     return `<span class="chip idle">offline</span>`;
   }
 
+  // Mirrors server-side _render_battery_chip: hidden when device is offline
+  // or hasn't reported battery yet.
+  function batteryChip(device, online) {
+    if (!online || !device) return '';
+    const level = device.battery_level;
+    if (typeof level !== 'number' || level < 0 || level > 1) return '';
+    const pct = Math.max(0, Math.min(100, Math.round(level * 100)));
+    const state = device.battery_state || 'unknown';
+    let cls, icon;
+    if (state === 'charging' || state === 'full') { cls = 'charging'; icon = '⚡'; }
+    else if (pct <= 15) { cls = 'low';  icon = '▁'; }
+    else if (pct <= 35) { cls = 'mid';  icon = '▃'; }
+    else                 { cls = 'ok';   icon = '▅'; }
+    return `<span class="chip battery ${cls}" title="battery · ${esc(state)}">${icon} ${pct}%</span>`;
+  }
+
   function autoCalLabel(autoRun, autoLast, online) {
     if (autoRun) {
       return autoRun.summary || autoRun.status || 'running';
@@ -779,7 +795,7 @@
               <span class="item ${calDot}"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>
               <span class="item ${autoDot}" title="${esc(autoLabel)}"><span class="dot ${autoDot}"></span>auto-cal · ${esc(autoLabel)}</span>
             </div>
-            <div class="chip-col">${statusChip(cam, online, isCal)}</div>
+            <div class="chip-col">${batteryChip(deviceRecord, online)}${statusChip(cam, online, isCal)}</div>
           </div>
           <div class="device-actions">${previewBtn}${autoCalBtn}</div>
           ${previewPanel}
@@ -1138,6 +1154,10 @@
         ts: d.time_synced,
         seen: d.last_seen_at,
         ws: d.ws_connected,
+        // Round battery to 5% buckets so tiny-wobble heartbeats don't
+        // repaint the whole devices card every second.
+        batt: (typeof d.battery_level === 'number') ? Math.round(d.battery_level * 20) : null,
+        bstate: d.battery_state || null,
       })),
       calibrations: (state.calibrations || []).slice().sort(),
       preview: state.preview_requested || {},

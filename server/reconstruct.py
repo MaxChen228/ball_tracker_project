@@ -95,6 +95,13 @@ class Ray:
     # so operators can see where the two streams disagree while tuning
     # constants.
     source: str = "server"
+    # Chain-filter verdict for the frame this ray came from. "kept" / None
+    # render normally; "rejected_flicker" / "rejected_jump" are drawn in
+    # ghost mode (dim + colored) so the viewer can show what was filtered
+    # without losing the info. None means the filter never ran (shouldn't
+    # happen once state.py annotates on load, but the viewer treats it as
+    # "kept" for backward compatibility).
+    filter_status: str | None = None
 
 
 @dataclass
@@ -214,6 +221,7 @@ def _rays_and_trace_for_source(
             )
             endpoint = C + viz_len * d_world
         t_rel = float(f.timestamp_s - anchor)
+        status = getattr(f, "filter_status", None)
         rays.append(
             Ray(
                 camera_id=cam_id,
@@ -222,6 +230,7 @@ def _rays_and_trace_for_source(
                 origin=C.tolist(),
                 endpoint=endpoint.tolist(),
                 source=source,
+                filter_status=status,
             )
         )
         if ground_within_radius:
@@ -231,6 +240,7 @@ def _rays_and_trace_for_source(
                     "x": float(ground[0]),
                     "y": float(ground[1]),
                     "z": float(ground[2]),
+                    "filter_status": status,
                 }
             )
     trace.sort(key=lambda p: p["t_rel_s"])

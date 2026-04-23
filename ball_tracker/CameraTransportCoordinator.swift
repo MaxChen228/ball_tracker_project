@@ -1,6 +1,7 @@
 import CoreVideo
 import Foundation
 import QuartzCore
+import UIKit
 import os
 
 private let transportLog = Logger(subsystem: "com.Max0228.ball-tracker", category: "camera.transport")
@@ -162,6 +163,10 @@ final class CameraTransportCoordinator: NSObject {
     }
 
     private func wireHealthMonitorHeartbeat() {
+        // Enable battery monitoring so UIDevice.batteryLevel returns real
+        // readings (defaults to -1 with monitoring off). Idempotent; safe to
+        // call every time the coordinator wires up.
+        UIDevice.current.isBatteryMonitoringEnabled = true
         healthMonitor.sendWSHeartbeat = { [weak self] timeSyncId in
             guard let self else { return }
             var payload: [String: Any] = [
@@ -171,6 +176,18 @@ final class CameraTransportCoordinator: NSObject {
                 "time_sync_id": timeSyncId as Any,
                 "sync_anchor_timestamp_s": self.dependencies.getSyncAnchorTimestampS() as Any,
             ]
+            let device = UIDevice.current
+            let level = device.batteryLevel
+            if level >= 0 {
+                payload["battery_level"] = Double(level)
+            }
+            switch device.batteryState {
+            case .unknown:   payload["battery_state"] = "unknown"
+            case .unplugged: payload["battery_state"] = "unplugged"
+            case .charging:  payload["battery_state"] = "charging"
+            case .full:      payload["battery_state"] = "full"
+            @unknown default: break
+            }
             if self.dependencies.getState() == .timeSyncWaiting,
                let s = self.dependencies.getChirpSnapshot() {
                 payload["sync_telemetry"] = [

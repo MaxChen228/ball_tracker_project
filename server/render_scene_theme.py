@@ -15,6 +15,14 @@ _ACCENT = "#E6B300"
 _OK = "#3D7B5F"
 _PENDING = "#D49A1F"
 
+# Chain-filter ghost-mode colors. Rejected detections stay drawn but in
+# these distinct hues so operators can see what the filter removed and
+# decide if thresholds are right. Opacity is applied at render time.
+_GHOST_FLICKER = "#F59E0B"  # amber — "appeared & disappeared" 1-2 frame noise
+_GHOST_JUMP = "#EF4444"     # red   — "ray direction jumped" past max_jump_px
+_GHOST_OPACITY = 0.25
+_GHOST_LINE_WIDTH = 1.5
+
 _CAMERA_COLORS = {
     "A": _CONTRA,
     "B": _DUAL,

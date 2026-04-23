@@ -13,6 +13,35 @@ def _fmt_hhmm(ts: float | None) -> str:
     return _dt.datetime.fromtimestamp(ts).strftime("%H:%M")
 
 
+def _render_battery_chip(
+    level: float | None, state_: str | None, online: bool
+) -> str:
+    """Battery pill next to the online/offline chip. Renders nothing when
+    the phone isn't connected (per spec: "if connected") or when the
+    device hasn't reported battery yet."""
+    if not online or level is None:
+        return ""
+    pct = int(round(float(level) * 100))
+    pct = max(0, min(100, pct))
+    if state_ == "charging" or state_ == "full":
+        icon = "⚡"
+        cls = "charging"
+    elif pct <= 15:
+        icon = "▁"
+        cls = "low"
+    elif pct <= 35:
+        icon = "▃"
+        cls = "mid"
+    else:
+        icon = "▅"
+        cls = "ok"
+    title_state = html.escape(state_ or "unknown")
+    return (
+        f'<span class="chip battery {cls}" title="battery · {title_state}">'
+        f'{icon} {pct}%</span>'
+    )
+
+
 def _render_device_rows(
     devices: list[dict[str, object]],
     calibrations: list[str],
@@ -69,6 +98,13 @@ def _render_device_rows(
         )
         sync_led_cls = "offline" if not online else ("synced" if time_synced else "waiting")
         auto_dot = "warn" if online else "bad"
+        battery_level = dev.get("battery_level") if dev else None
+        battery_state = dev.get("battery_state") if dev else None
+        battery_chip = _render_battery_chip(
+            float(battery_level) if isinstance(battery_level, (int, float)) else None,
+            str(battery_state) if isinstance(battery_state, str) else None,
+            online,
+        )
         return (
             f'<div class="device">'
             f'<div class="device-head">'
@@ -79,7 +115,7 @@ def _render_device_rows(
             f'<span class="item {cal_dot}"><span class="dot {cal_dot}"></span>pose · {cal_label}</span>'
             f'<span class="item {auto_dot}"><span class="dot {auto_dot}"></span>auto-cal · {"idle" if online else "offline"}</span>'
             f'</div>'
-            f'<div class="chip-col"><span class="chip {chip_cls}">{chip_label}</span></div>'
+            f'<div class="chip-col">{battery_chip}<span class="chip {chip_cls}">{chip_label}</span></div>'
             f'</div>'
             f'<div class="device-actions">{preview_btn}{auto_cal_btn}</div>'
             f"{compare_block}"

@@ -31,6 +31,7 @@ from schemas import (
     _DEFAULT_PATHS,
     mode_for_paths,
 )
+from chain_filter import annotate as chain_filter_annotate
 from detection import HSVRange
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
@@ -313,6 +314,12 @@ class State:
             except Exception as e:
                 logger.warning("skip corrupt pitch file %s: %s", path.name, e)
                 continue
+            # Annotate pre-filter-era pitches (filter_status=None everywhere)
+            # so the viewer can render ghost-mode on historical sessions
+            # without a reprocess_sessions run.
+            chain_filter_annotate(pitch.frames_live)
+            chain_filter_annotate(pitch.frames_server_post)
+            chain_filter_annotate(pitch.frames)
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
 
         seen_sessions = {sid for _, sid in self.pitches.keys()}
@@ -526,6 +533,7 @@ class State:
             return self.get(session_id)
         merged = existing.model_copy(deep=True)
         merged.frames_live = list(live_frames)
+        chain_filter_annotate(merged.frames_live)
         return self.record(merged)
 
     def _atomic_write(self, path: Path, payload: str) -> None:
@@ -577,6 +585,12 @@ class State:
                     merged.frames = list(existing.frames)
             if not merged.frames_live and live_frames:
                 merged.frames_live = list(live_frames)
+            # Annotate whichever buckets we just touched. Safe to re-run:
+            # annotate sorts + rewrites filter_status from scratch each time,
+            # so late-arriving frames get a fresh verdict alongside the old.
+            chain_filter_annotate(merged.frames_live)
+            chain_filter_annotate(merged.frames_server_post)
+            chain_filter_annotate(merged.frames)
             pitch = merged
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
             # Drive the session state machine forward — any upload arriving
@@ -794,6 +808,8 @@ class State:
         time_synced: bool = False,
         time_sync_id: str | None = None,
         sync_anchor_timestamp_s: float | None = None,
+        battery_level: float | None = None,
+        battery_state: str | None = None,
     ) -> None:
         """Record one liveness ping. Overwrites the previous entry for this
         camera so `last_seen_at`, `time_synced`, and the currently-held
@@ -807,6 +823,8 @@ class State:
                 time_synced=time_synced,
                 time_sync_id=time_sync_id,
                 sync_anchor_timestamp_s=sync_anchor_timestamp_s,
+                battery_level=battery_level,
+                battery_state=battery_state,
             )
 
     def record_sync_telemetry(self, camera_id: str, telem: dict[str, Any]) -> None:

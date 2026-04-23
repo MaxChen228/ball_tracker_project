@@ -309,6 +309,8 @@ def _build_device_status_rows(
                 ),
                 "ws_connected": (ws.connected if ws is not None else False),
                 "ws_latency_ms": (ws.last_latency_ms if ws is not None else None),
+                "battery_level": (d.battery_level if d is not None else None),
+                "battery_state": (d.battery_state if d is not None else None),
             }
         )
     return devices
@@ -482,6 +484,32 @@ def _disarm_message_for(session: Session) -> dict[str, Any]:
     }
 
 
+_BATTERY_STATES = {"unknown", "unplugged", "charging", "full"}
+
+
+def _parse_battery(msg: dict[str, Any]) -> tuple[float | None, str | None]:
+    """Extract battery_level (0..1) and battery_state from a WS payload.
+
+    iOS UIDevice.batteryLevel returns -1 when monitoring is off; treat that
+    as None so the UI shows "no data" instead of 0%. Anything out of [0, 1]
+    is also discarded. Unknown state strings collapse to None — don't want
+    to render surprise labels.
+    """
+    raw_level = msg.get("battery_level")
+    level: float | None = None
+    if isinstance(raw_level, (int, float)):
+        lvl = float(raw_level)
+        if 0.0 <= lvl <= 1.0:
+            level = lvl
+    raw_state = msg.get("battery_state")
+    state_: str | None = None
+    if isinstance(raw_state, str):
+        s = raw_state.lower()
+        if s in _BATTERY_STATES:
+            state_ = s
+    return level, state_
+
+
 @app.get("/status")
 def status() -> dict[str, Any]:
     return _build_status_response()
@@ -544,11 +572,14 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 device_ws.note_seen(camera_id)
                 reported_sync_id = msg.get("time_sync_id")
                 reported_anchor = msg.get("sync_anchor_timestamp_s")
+                battery_level, battery_state = _parse_battery(msg)
                 state.heartbeat(
                     camera_id,
                     time_synced=(reported_sync_id is not None and reported_anchor is not None),
                     time_sync_id=reported_sync_id,
                     sync_anchor_timestamp_s=reported_anchor,
+                    battery_level=battery_level,
+                    battery_state=battery_state,
                 )
                 await device_ws.send(camera_id, _settings_message_for(camera_id))
                 continue
@@ -556,11 +587,14 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 device_ws.note_seen(camera_id)
                 reported_sync_id = msg.get("time_sync_id")
                 reported_anchor = msg.get("sync_anchor_timestamp_s")
+                battery_level, battery_state = _parse_battery(msg)
                 state.heartbeat(
                     camera_id,
                     time_synced=(reported_sync_id is not None and reported_anchor is not None),
                     time_sync_id=reported_sync_id,
                     sync_anchor_timestamp_s=reported_anchor,
+                    battery_level=battery_level,
+                    battery_state=battery_state,
                 )
                 telem = msg.get("sync_telemetry")
                 if isinstance(telem, dict):
