@@ -51,6 +51,7 @@ from state_calibration import (
     CALIBRATION_FRAME_TTL_S as _CALIBRATION_FRAME_TTL_S,
     validate_calibration_snapshot as _validate_calibration_snapshot,
 )
+from state_devices import DeviceRegistry
 
 logger = logging.getLogger("ball_tracker")
 
@@ -167,7 +168,15 @@ class State:
         self._calibration_dir.mkdir(parents=True, exist_ok=True)
         # Dashboard-control state. All in-memory — devices re-heartbeat on
         # connection, sessions don't survive restart.
-        self._devices: dict[str, Device] = {}
+        self._device_registry = DeviceRegistry(
+            time_fn=time_fn,
+            stale_after_s=_DEVICE_STALE_S,
+            gc_after_s=_DEVICE_GC_AFTER_S,
+            cap=_DEVICE_REGISTRY_CAP,
+        )
+        # Back-compat for tests and old diagnostics that inspected the raw
+        # registry; all writes go through DeviceRegistry.
+        self._devices = self._device_registry.devices
         self._current_session: Session | None = None
         self._last_ended_session: Session | None = None
         # Per-camera calibration snapshots. Written by POST /calibration,
@@ -640,8 +649,8 @@ class State:
             live = self._live_pairings.setdefault(session_id, LivePairingSession(session_id))
             cal_a = self._calibration_store.get("A")
             cal_b = self._calibration_store.get("B")
-            dev_a = self._devices.get("A")
-            dev_b = self._devices.get("B")
+            dev_a = self._device_registry.get("A")
+            dev_b = self._device_registry.get("B")
             session_obj = None
             for candidate in (self._current_session, self._last_ended_session):
                 if candidate is not None and candidate.id == session_id:
@@ -969,34 +978,13 @@ class State:
         entry older than `_DEVICE_GC_AFTER_S` and enforces a hard size cap
         (evicts the oldest by `last_seen_at`) so a misbehaving client can't
         grow the registry without bound."""
-        now = self._time_fn()
         with self._lock:
-            self._devices[camera_id] = Device(
-                camera_id=camera_id,
-                last_seen_at=now,
+            self._device_registry.heartbeat(
+                camera_id,
                 time_synced=time_synced,
-                time_sync_id=(time_sync_id if time_synced else None),
-                time_sync_at=(now if time_synced and time_sync_id is not None else None),
-                sync_anchor_timestamp_s=(
-                    float(sync_anchor_timestamp_s)
-                    if time_synced and sync_anchor_timestamp_s is not None
-                    else None
-                ),
+                time_sync_id=time_sync_id,
+                sync_anchor_timestamp_s=sync_anchor_timestamp_s,
             )
-            # GC stale entries first — cheap and keeps the cap hit rare.
-            stale = [
-                cam for cam, dev in self._devices.items()
-                if now - dev.last_seen_at > _DEVICE_GC_AFTER_S
-            ]
-            for cam in stale:
-                del self._devices[cam]
-            # Hard cap: if GC didn't bring us under, drop oldest.
-            while len(self._devices) > _DEVICE_REGISTRY_CAP:
-                oldest = min(
-                    self._devices.items(),
-                    key=lambda kv: kv[1].last_seen_at,
-                )[0]
-                del self._devices[oldest]
 
     def record_sync_telemetry(self, camera_id: str, telem: dict[str, Any]) -> None:
         """Stash the latest quick-chirp live telemetry for a cam AND roll
@@ -1082,23 +1070,10 @@ class State:
         backgrounded), so the 3 s grace that a dropped heartbeat would
         earn is no longer appropriate."""
         with self._lock:
-            dev = self._devices.get(camera_id)
-            if dev is None:
-                return
-            self._devices[camera_id] = Device(
-                camera_id=dev.camera_id,
-                last_seen_at=self._time_fn() - _DEVICE_STALE_S - 0.1,
-                time_synced=dev.time_synced,
-                time_sync_id=dev.time_sync_id,
-                time_sync_at=dev.time_sync_at,
-                sync_anchor_timestamp_s=dev.sync_anchor_timestamp_s,
-            )
+            self._device_registry.mark_offline(camera_id)
 
     def _common_time_sync_id_locked(self, now: float) -> str | None:
-        fresh = [
-            d for d in self._devices.values()
-            if now - d.last_seen_at <= _DEVICE_STALE_S
-        ]
+        fresh = self._device_registry.online()
         if len(fresh) < 2:
             return None
         sync_ids: set[str] = set()
@@ -1121,14 +1096,8 @@ class State:
         """Snapshot of devices whose last heartbeat is within
         `stale_after_s` of now. Returned sorted by camera_id for
         deterministic rendering."""
-        now = self._time_fn()
         with self._lock:
-            fresh = [
-                d for d in self._devices.values()
-                if now - d.last_seen_at <= stale_after_s
-            ]
-        fresh.sort(key=lambda d: d.camera_id)
-        return fresh
+            return self._device_registry.online(stale_after_s)
 
     def known_camera_ids(self) -> list[str]:
         """All camera ids that have ever heartbeated this run — used by WS
@@ -1136,21 +1105,11 @@ class State:
         liveness (e.g. calibration updates, which the other cam might care
         about even if its heartbeat lapsed briefly)."""
         with self._lock:
-            return list(self._devices.keys())
+            return self._device_registry.known_camera_ids()
 
     def device_snapshot(self, camera_id: str) -> Device | None:
         with self._lock:
-            dev = self._devices.get(camera_id)
-            if dev is None:
-                return None
-            return Device(
-                camera_id=dev.camera_id,
-                last_seen_at=dev.last_seen_at,
-                time_synced=dev.time_synced,
-                time_sync_id=dev.time_sync_id,
-                time_sync_at=dev.time_sync_at,
-                sync_anchor_timestamp_s=dev.sync_anchor_timestamp_s,
-            )
+            return self._device_registry.snapshot(camera_id)
 
     def _check_session_timeout_locked(self, now: float) -> None:
         """If the current session has exceeded its max_duration_s, transition
@@ -2346,7 +2305,7 @@ class State:
         with self._lock:
             self.pitches.clear()
             self.results.clear()
-            self._devices.clear()
+            self._device_registry.clear()
             self._current_session = None
             self._last_ended_session = None
             self._trashed_sessions.clear()
