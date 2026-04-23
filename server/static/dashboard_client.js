@@ -675,7 +675,11 @@
           : '';
         return `${autoLast.summary || 'Applied'}${reproj}`;
       }
-      return autoLast.summary || autoLast.status || 'failed';
+      // Failed / cancelled: surface the server-side `detail` inline so
+      // the operator sees *why* without having to pull server logs.
+      const base = autoLast.summary || autoLast.status || 'failed';
+      const det = autoLast.detail ? ` — ${autoLast.detail}` : '';
+      return `${base}${det}`;
     }
     return online ? 'idle' : 'offline';
   }
@@ -770,7 +774,7 @@
             <div class="sub">
               <span class="item ${syncDot}"><span class="dot ${syncDot}"></span>time sync · ${esc(syncLabel)}${syncIdTxt}</span>
               <span class="item ${calDot}"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>
-              <span class="item ${autoDot}"><span class="dot ${autoDot}"></span>auto-cal · ${esc(autoLabel)}</span>
+              <span class="item ${autoDot}" title="${esc(autoLabel)}"><span class="dot ${autoDot}"></span>auto-cal · ${esc(autoLabel)}</span>
             </div>
             <div class="chip-col">${statusChip(cam, online, isCal)}</div>
           </div>

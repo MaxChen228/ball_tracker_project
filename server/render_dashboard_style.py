@@ -180,9 +180,11 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
                 margin-top: var(--s-1); }}
 .device .sub .item {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
                       text-transform: uppercase; color: var(--sub);
-                      display: flex; align-items: center; gap: var(--s-2);
+                      display: flex; align-items: flex-start; gap: var(--s-2);
                       padding: 3px 8px; border-radius: var(--r);
-                      white-space: nowrap; }}
+                      white-space: normal; word-break: break-word;
+                      line-height: 1.35; }}
+.device .sub .item .dot {{ margin-top: 4px; }}
 .device .sub .item.ok {{ background: rgba(56, 142, 60, 0.06);
                          color: var(--ink); }}
 .device .sub .item.warn {{ background: rgba(230, 145, 40, 0.14);
