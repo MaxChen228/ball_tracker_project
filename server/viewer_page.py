@@ -15,14 +15,17 @@ from render_scene_theme import (
     _BG,
     _BORDER_BASE,
     _BORDER_L,
+    _CAMERA_AXIS_LEN_M,
     _CAMERA_COLORS,
     _CAMERA_COLORS_ON_DEVICE,
+    _CAMERA_FORWARD_ARROW_M,
     _CONTRA,
     _DEV,
     _DUAL,
     _FALLBACK_CAMERA_COLOR,
     _FALLBACK_CAMERA_COLOR_ON_DEVICE,
     _INK,
+    _INK_40,
     _OK,
     _PENDING,
     _SUB,
@@ -45,6 +48,11 @@ class ViewerPageContext:
     fallback_color_json: str
     fallback_color_on_device_json: str
     accent_color_json: str
+    # Camera diamond + axis geometry is rendered dynamically from JS (see
+    # `camMarkerTracesFor` in the viewer) so it follows the per-pipeline
+    # pills. These constants mirror render_scene_theme so the dashboard's
+    # static figure and the viewer's dynamic figure agree on sizes/colors.
+    scene_theme_json: str
     videos_json: str
     has_triangulated: bool
     scene_flex: str
@@ -120,6 +128,14 @@ def build_viewer_page_context(
         fallback_color_json=_json.dumps(_FALLBACK_CAMERA_COLOR),
         fallback_color_on_device_json=_json.dumps(_FALLBACK_CAMERA_COLOR_ON_DEVICE),
         accent_color_json=_json.dumps(_ACCENT),
+        scene_theme_json=_json.dumps(
+            {
+                "cam_axis_len_m": _CAMERA_AXIS_LEN_M,
+                "cam_fwd_len_m": _CAMERA_FORWARD_ARROW_M,
+                "axis_color_right": _DEV,
+                "axis_color_up": _INK_40,
+            }
+        ),
         videos_json=_json.dumps(
             [
                 {
@@ -283,6 +299,7 @@ def render_viewer_html(
   "fallback_color": {ctx.fallback_color_json},
   "fallback_color_on_device": {ctx.fallback_color_on_device_json},
   "accent_color": {ctx.accent_color_json},
+  "scene_theme": {ctx.scene_theme_json},
   "videos": {ctx.videos_json},
   "has_triangulated": {str(ctx.has_triangulated).lower()}
 }}</script>
@@ -583,6 +600,10 @@ def _viewer_js() -> str:
   const PATH_DASH = {{ live: "dash", ios_post: "dot", server_post: "solid" }};
   const PATH_OPACITY = {{ live: 0.55, ios_post: 0.7, server_post: 0.45 }};
   const PATH_MARKER_SYMBOL = {{ live: "diamond-open", ios_post: "circle-open", server_post: "circle" }};
+  const SCENE_THEME = DATA.scene_theme || {{
+    cam_axis_len_m: 0.25, cam_fwd_len_m: 0.5,
+    axis_color_right: "#C0392B", axis_color_up: "rgba(42, 37, 32, 0.4)",
+  }};
   const VIDEO_META = DATA.videos || [];
   const HAS_TRIANGULATED = DATA.has_triangulated;
   const sceneDiv = document.getElementById("scene");
@@ -772,8 +793,54 @@ def _viewer_js() -> str:
     }}
     return {{xs, ys, zs}};
   }}
+  // Camera diamond + 3-axis triad is data the user should be able to hide
+  // in lock-step with that camera's ray pills. When every path for a given
+  // camera is off, the camera itself disappears too — no orphaned diamonds.
+  // Emitted BEFORE rays so Plotly's autoscale sees the camera centre up
+  // front and the initial viewport always frames the rig rather than just
+  // the plate.
+  function camMarkerTracesFor(c) {{
+    const color = CAM_COLOR[c.camera_id] || FALLBACK;
+    const [cx, cy, cz] = c.center_world;
+    const mkLine = (axis, axisColor, length) => ({{
+      type: "scatter3d",
+      x: [cx, cx + length * axis[0]],
+      y: [cy, cy + length * axis[1]],
+      z: [cz, cz + length * axis[2]],
+      mode: "lines",
+      line: {{color: axisColor, width: 4}},
+      hoverinfo: "skip",
+      showlegend: false,
+    }});
+    return [
+      {{
+        type: "scatter3d",
+        x: [cx], y: [cy], z: [cz],
+        mode: "markers+text",
+        marker: {{size: 8, color: color, symbol: "diamond"}},
+        text: [`Cam ${{c.camera_id}}`],
+        textposition: "top center",
+        textfont: {{family: "JetBrains Mono, monospace", size: 11, color: "#2A2520"}},
+        showlegend: false,
+        hovertemplate: `Camera ${{c.camera_id}}<br>x=%{{x:.2f}} m<br>y=%{{y:.2f}} m<br>z=%{{z:.2f}} m<extra></extra>`,
+      }},
+      mkLine(c.axis_forward_world, color, SCENE_THEME.cam_fwd_len_m),
+      mkLine(c.axis_right_world, SCENE_THEME.axis_color_right, SCENE_THEME.cam_axis_len_m),
+      mkLine(c.axis_up_world, SCENE_THEME.axis_color_up, SCENE_THEME.cam_axis_len_m),
+    ];
+  }}
+  function cameraIsAnyPathVisible(camera_id) {{
+    const group = layerVisibility[`cam${{camera_id}}`];
+    if (!group) return false;
+    return PATHS.some(p => group[p] && HAS_PATH[p]);
+  }}
   function buildDynamicTraces(cutoff) {{
     const out = [];
+    // --- cameras (diamond + axis triad), gated on the per-cam pipeline pills ---
+    for (const c of (SCENE.cameras || [])) {{
+      if (!cameraIsAnyPathVisible(c.camera_id)) continue;
+      for (const t of camMarkerTracesFor(c)) out.push(t);
+    }}
     // --- rays: one trace per (camera × path), each with its own visibility ---
     const raysByKey = {{}};
     for (const r of (SCENE.rays || [])) {{
