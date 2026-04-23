@@ -57,6 +57,9 @@ class ViewerPageContext:
     health_html: str
     video_cells_html: str
     virtual_cells_html: str
+    session_id: str
+    server_post_ran: bool
+    can_run_server: bool
 
 
 def build_viewer_page_context(
@@ -118,6 +121,17 @@ def build_viewer_page_context(
     else:
         layout_mode = "empty"
 
+    # Server-post status: has it run on any received camera? Uploaded MOV
+    # is the prereq for running it, and the viewer has a MOV iff `mode ==
+    # "camera_only"` (set by the health builder when a video is on disk).
+    def _server_post_count(cam_key: str) -> int:
+        cam = health["cameras"].get(cam_key) or {}
+        counts = (cam.get("counts_by_path") or {}).get("server_post") or {}
+        return int(counts.get("total") or 0)
+
+    server_post_ran = any(_server_post_count(c) > 0 for c in ("A", "B"))
+    can_run_server = health.get("mode") == "camera_only" and not server_post_ran
+
     return ViewerPageContext(
         scene_json=_json.dumps(scene.to_dict()),
         layout_json=layout_json,
@@ -152,6 +166,9 @@ def build_viewer_page_context(
         health_html=health_banner_html(health),
         video_cells_html=video_cells,
         virtual_cells_html=virt_cells,
+        session_id=scene.session_id,
+        server_post_ran=server_post_ran,
+        can_run_server=can_run_server,
     )
 
 
@@ -168,6 +185,16 @@ def render_viewer_html(
         health,
         build_figure=build_figure,
     )
+    if ctx.can_run_server:
+        action_html = (
+            f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post">'
+            f'<button class="action" type="submit">Run server detection</button>'
+            f'</form>'
+        )
+    elif ctx.server_post_ran:
+        action_html = '<span class="action-chip">server done</span>'
+    else:
+        action_html = ""
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><title>Session {scene.session_id}</title>
@@ -179,6 +206,8 @@ def render_viewer_html(
 <div class="viewer">
   <div class="nav">
     <span class="brand"><span class="dot"></span>BALL_TRACKER</span>
+    <span class="nav-spacer"></span>
+    {action_html}
     <a class="back" href="/">&larr; dashboard</a>
   </div>
   {ctx.health_html}
@@ -326,10 +355,25 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     letter-spacing:0.16em; color:var(--ink); }}
   .nav .brand .dot {{ display:inline-block; width:7px; height:7px;
     background:var(--ink); margin-right:var(--s-2); vertical-align:middle; }}
-  .nav .back {{ margin-left:auto; font-family:var(--mono); font-size:11px;
+  .nav .nav-spacer {{ flex:1 1 auto; }}
+  .nav .back {{ font-family:var(--mono); font-size:11px;
     letter-spacing:0.12em; text-transform:uppercase; color:var(--sub);
     text-decoration:none; }}
   .nav .back:hover {{ color:var(--ink); }}
+  .nav form {{ margin:0; }}
+  .nav .action {{ font-family:var(--mono); font-size:10px;
+    letter-spacing:0.10em; text-transform:uppercase; color:var(--ink);
+    background:var(--surface); border:1px solid var(--border-base);
+    border-radius:var(--r); padding:5px 10px; cursor:pointer;
+    transition:border-color 0.15s, color 0.15s, background 0.15s; }}
+  .nav .action:hover {{ border-color:var(--passed); color:var(--passed);
+    background:var(--surface); }}
+  .nav .action:disabled {{ opacity:0.55; cursor:not-allowed;
+    color:var(--sub); }}
+  .nav .action-chip {{ font-family:var(--mono); font-size:10px;
+    letter-spacing:0.10em; text-transform:uppercase; color:var(--passed);
+    border:1px solid var(--passed); background:var(--passed-bg);
+    padding:3px 8px; border-radius:var(--r); }}
   .health {{ flex:0 0 auto; background:var(--surface);
     border-bottom:1px solid var(--border-base);
     padding:var(--s-3) var(--s-5);
