@@ -42,27 +42,12 @@ from marker_registry import MarkerRegistryDB
 from triangulate import recover_extrinsics
 from sync_solver import compute_mutual_sync
 from live_pairing import LivePairingSession
+from state_runtime import RuntimeSettingsStore, SyncParams
 
 logger = logging.getLogger("ball_tracker")
 
 _DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
 
-
-@dataclass
-class SyncParams:
-    """Server-owned burst parameters for one mutual-sync run.
-    Pushed per-camera in the WS sync_run message so iOS never needs a
-    rebuild to adjust timing, burst count, or recording duration.
-
-    A emits during emit_a_at_s; B emits during emit_b_at_s. Staggered
-    (non-overlapping) windows eliminate self-interference without needing
-    disjoint frequency bands, though dual-band is still used as an extra
-    disambiguation layer. search_window_s controls the ±window the server's
-    windowed detector searches around each expected emission time."""
-    emit_a_at_s: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.7])
-    emit_b_at_s: list[float] = field(default_factory=lambda: [1.8, 2.0, 2.2])
-    record_duration_s: float = 4.0
-    search_window_s: float = 0.3
 
 # Seconds a heartbeat remains fresh. A phone beating at 1 Hz drops off the
 # "online" list after missing ~3 beats — conservative enough to tolerate a
@@ -263,14 +248,6 @@ class State:
         self._devices: dict[str, Device] = {}
         self._current_session: Session | None = None
         self._last_ended_session: Session | None = None
-        # Global capture-mode toggle. Dashboard flips this; every subsequent
-        # arm_session() snapshots the current value into the session. Default
-        # `camera_only` preserves the pre-mode-split behaviour for anyone
-        # upgrading a running server without touching the dashboard.
-        self._current_mode: CaptureMode = CaptureMode.camera_only
-        # New authority: orthogonal detection path set snapshotted onto each
-        # session. Kept in sync with `_current_mode` for backward-compat.
-        self._default_paths: set[DetectionPath] = set(_DEFAULT_PATHS)
         # Per-camera calibration snapshots. Written by POST /calibration,
         # read by the dashboard canvas so the 3D preview shows where each
         # phone "thinks it is" relative to the plate, independent of any
@@ -316,16 +293,10 @@ class State:
         # chirp can land much quieter, 0.06-0.3 in practice). Sharing
         # one gate forced operators to tune for the weaker modality and
         # lose false-positive margin on the stronger one.
-        self._chirp_detect_threshold: float = 0.18
-        self._mutual_sync_threshold: float = 0.10
-        self._heartbeat_interval_s: float = 1.0
-        self._sync_params: SyncParams = SyncParams()
-        self._tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
-        # Capture resolution (image height in px) pushed to iOS via WS settings.
-        # Allowed set is {720, 1080}. Default 1080p — always works.
-        self._capture_height_px: int = 1080
-        self._runtime_settings_path = data_dir / "runtime_settings.json"
-        self._load_runtime_settings_from_disk()
+        self._runtime_settings = RuntimeSettingsStore(
+            data_dir / "runtime_settings.json",
+            atomic_write=self._atomic_write,
+        )
         # Live-preview buffer (Phase 4a). Keeps one latest JPEG per camera
         # in memory, gated by a per-camera "dashboard is watching" flag
         # with a 5 s TTL. Shares the State-level `_time_fn` so clock-drift
@@ -550,7 +521,7 @@ class State:
             for session in (self._current_session, self._last_ended_session):
                 if session is not None and session.id == pitch.session_id:
                     return set(session.paths)
-            return set(self._default_paths)
+            return set(self._runtime_settings.default_paths)
 
     def _get_path_frames(self, pitch: PitchPayload, path: DetectionPath) -> list[FramePayload]:
         if path == DetectionPath.live:
@@ -1373,14 +1344,14 @@ class State:
             self._check_session_timeout_locked(now)
             if self._current_session is not None:
                 return self._current_session
-            chosen_paths = set(paths or self._default_paths or _DEFAULT_PATHS)
+            chosen_paths = set(paths or self._runtime_settings.default_paths or _DEFAULT_PATHS)
             session = Session(
                 id=_new_session_id(),
                 started_at=now,
                 max_duration_s=max_duration_s,
                 paths=chosen_paths,
                 mode=mode_for_paths(chosen_paths),
-                tracking_exposure_cap=self._tracking_exposure_cap,
+                tracking_exposure_cap=self._runtime_settings.tracking_exposure_cap,
                 sync_id=self._common_time_sync_id_locked(now),
             )
             self._live_pairings[session.id] = LivePairingSession(session.id)
@@ -1393,196 +1364,69 @@ class State:
         iPhones read this from WS settings messages to render the HUD mode
         chip even while idle."""
         with self._lock:
-            return mode_for_paths(self._default_paths)
+            return mode_for_paths(self._runtime_settings.default_paths)
 
     def default_paths(self) -> set[DetectionPath]:
         with self._lock:
-            return set(self._default_paths)
+            return set(self._runtime_settings.default_paths)
 
     def set_mode(self, mode: CaptureMode) -> CaptureMode:
         """Record the dashboard's mode choice. Only affects sessions armed
         after this call — in-flight sessions keep their snapshot mode."""
         with self._lock:
-            self._current_mode = mode
-            self._default_paths = paths_for_mode(mode)
-            self._persist_runtime_settings_locked()
-            return mode
+            return self._runtime_settings.set_mode(mode)
 
     def set_default_paths(self, paths: set[DetectionPath]) -> set[DetectionPath]:
-        if not paths:
-            raise ValueError("at least one detection path must be enabled")
         with self._lock:
-            self._default_paths = set(paths)
-            self._current_mode = mode_for_paths(self._default_paths)
-            self._persist_runtime_settings_locked()
-            return set(self._default_paths)
-
-    # ---- Runtime tunables (chirp detection threshold + WS heartbeat cadence) --
-    #
-    # Both are pushed from the dashboard, surface in WS settings messages,
-    # and are hot-applied by iOS. Persisted together to a single JSON file
-    # so a restart doesn't drop the operator's choice. iOS Settings UI still
-    # holds a local bootstrap default but the server push wins on first
-    # successful WS settings round-trip.
-
-    _CHIRP_THRESHOLD_MIN = 0.01
-    _CHIRP_THRESHOLD_MAX = 1.0
-    _HEARTBEAT_INTERVAL_MIN = 1.0
-    _HEARTBEAT_INTERVAL_MAX = 60.0
-
-    def _load_runtime_settings_from_disk(self) -> None:
-        path = self._runtime_settings_path
-        if not path.exists():
-            return
-        try:
-            obj = json.loads(path.read_text())
-        except Exception as e:
-            logger.warning("skip corrupt runtime_settings %s: %s", path, e)
-            return
-        thr = obj.get("chirp_detect_threshold")
-        if isinstance(thr, (int, float)) and self._CHIRP_THRESHOLD_MIN <= thr <= self._CHIRP_THRESHOLD_MAX:
-            self._chirp_detect_threshold = float(thr)
-        mthr = obj.get("mutual_sync_threshold")
-        if isinstance(mthr, (int, float)) and self._CHIRP_THRESHOLD_MIN <= mthr <= self._CHIRP_THRESHOLD_MAX:
-            self._mutual_sync_threshold = float(mthr)
-        ivl = obj.get("heartbeat_interval_s")
-        if isinstance(ivl, (int, float)) and self._HEARTBEAT_INTERVAL_MIN <= ivl <= self._HEARTBEAT_INTERVAL_MAX:
-            self._heartbeat_interval_s = float(ivl)
-        ch = obj.get("capture_height_px")
-        if isinstance(ch, int) and ch in self._ALLOWED_CAPTURE_HEIGHTS:
-            self._capture_height_px = ch
-        tec = obj.get("tracking_exposure_cap")
-        if isinstance(tec, str):
-            try:
-                self._tracking_exposure_cap = TrackingExposureCapMode(tec)
-            except ValueError:
-                pass
-        paths = obj.get("default_paths")
-        if isinstance(paths, list):
-            parsed: set[DetectionPath] = set()
-            for item in paths:
-                if not isinstance(item, str):
-                    continue
-                try:
-                    parsed.add(DetectionPath(item))
-                except ValueError:
-                    continue
-            if parsed:
-                self._default_paths = parsed
-                self._current_mode = mode_for_paths(parsed)
-        logger.info(
-            "restored runtime_settings: chirp=%.3f interval_s=%.2f capture_h=%d tracking_exposure=%s paths=%s",
-            self._chirp_detect_threshold,
-            self._heartbeat_interval_s,
-            self._capture_height_px,
-            self._tracking_exposure_cap.value,
-            sorted(p.value for p in self._default_paths),
-        )
-
-    _ALLOWED_CAPTURE_HEIGHTS = (720, 1080)
-
-    def _persist_runtime_settings_locked(self) -> None:
-        """Caller must hold `self._lock`. Atomic write."""
-        payload = json.dumps(
-            {
-                "chirp_detect_threshold": self._chirp_detect_threshold,
-                "mutual_sync_threshold": self._mutual_sync_threshold,
-                "heartbeat_interval_s": self._heartbeat_interval_s,
-                "capture_height_px": self._capture_height_px,
-                "tracking_exposure_cap": self._tracking_exposure_cap.value,
-                "default_paths": sorted(p.value for p in self._default_paths),
-            },
-            indent=2,
-        )
-        self._atomic_write(self._runtime_settings_path, payload)
+            return self._runtime_settings.set_default_paths(paths)
 
     def capture_height_px(self) -> int:
         with self._lock:
-            return self._capture_height_px
+            return self._runtime_settings.capture_height_px
 
     def set_capture_height_px(self, value: int) -> int:
-        if not isinstance(value, int):
-            raise ValueError("capture_height must be an int")
-        if value not in self._ALLOWED_CAPTURE_HEIGHTS:
-            raise ValueError(
-                f"capture_height {value} not in {self._ALLOWED_CAPTURE_HEIGHTS}"
-            )
         with self._lock:
-            self._capture_height_px = value
-            self._persist_runtime_settings_locked()
-            return value
+            return self._runtime_settings.set_capture_height_px(value)
 
     def chirp_detect_threshold(self) -> float:
         with self._lock:
-            return self._chirp_detect_threshold
+            return self._runtime_settings.chirp_detect_threshold
 
     def set_chirp_detect_threshold(self, value: float) -> float:
-        if not isinstance(value, (int, float)):
-            raise ValueError("threshold must be numeric")
-        v = float(value)
-        if not (self._CHIRP_THRESHOLD_MIN <= v <= self._CHIRP_THRESHOLD_MAX):
-            raise ValueError(
-                f"threshold {v} out of range "
-                f"[{self._CHIRP_THRESHOLD_MIN}, {self._CHIRP_THRESHOLD_MAX}]"
-            )
         with self._lock:
-            self._chirp_detect_threshold = v
-            self._persist_runtime_settings_locked()
-            return v
+            return self._runtime_settings.set_chirp_detect_threshold(value)
 
     def mutual_sync_threshold(self) -> float:
         with self._lock:
-            return self._mutual_sync_threshold
+            return self._runtime_settings.mutual_sync_threshold
 
     def set_mutual_sync_threshold(self, value: float) -> float:
-        if not isinstance(value, (int, float)):
-            raise ValueError("threshold must be numeric")
-        v = float(value)
-        if not (self._CHIRP_THRESHOLD_MIN <= v <= self._CHIRP_THRESHOLD_MAX):
-            raise ValueError(
-                f"threshold {v} out of range "
-                f"[{self._CHIRP_THRESHOLD_MIN}, {self._CHIRP_THRESHOLD_MAX}]"
-            )
         with self._lock:
-            self._mutual_sync_threshold = v
-            self._persist_runtime_settings_locked()
-            return v
+            return self._runtime_settings.set_mutual_sync_threshold(value)
 
     def sync_params(self) -> SyncParams:
         with self._lock:
-            return self._sync_params
+            return self._runtime_settings.sync_params
 
     def set_sync_params(self, params: SyncParams) -> None:
         with self._lock:
-            self._sync_params = params
+            self._runtime_settings.sync_params = params
 
     def heartbeat_interval_s(self) -> float:
         with self._lock:
-            return self._heartbeat_interval_s
+            return self._runtime_settings.heartbeat_interval_s
 
     def set_heartbeat_interval_s(self, value: float) -> float:
-        if not isinstance(value, (int, float)):
-            raise ValueError("interval must be numeric")
-        v = float(value)
-        if not (self._HEARTBEAT_INTERVAL_MIN <= v <= self._HEARTBEAT_INTERVAL_MAX):
-            raise ValueError(
-                f"interval {v} out of range "
-                f"[{self._HEARTBEAT_INTERVAL_MIN}, {self._HEARTBEAT_INTERVAL_MAX}]"
-            )
         with self._lock:
-            self._heartbeat_interval_s = v
-            self._persist_runtime_settings_locked()
-            return v
+            return self._runtime_settings.set_heartbeat_interval_s(value)
 
     def tracking_exposure_cap(self) -> TrackingExposureCapMode:
         with self._lock:
-            return self._tracking_exposure_cap
+            return self._runtime_settings.tracking_exposure_cap
 
     def set_tracking_exposure_cap(self, mode: TrackingExposureCapMode) -> TrackingExposureCapMode:
         with self._lock:
-            self._tracking_exposure_cap = mode
-            self._persist_runtime_settings_locked()
-            return mode
+            return self._runtime_settings.set_tracking_exposure_cap(mode)
 
     def stop_session(self) -> Session | None:
         """End the current armed session (operator pressed Stop on the
@@ -1706,7 +1550,7 @@ class State:
         # Fire post-mortem on the newly-merged streams so the sync log
         # has a self-contained quantitative line per late-arriving abort.
         # Mutual-sync uses its own threshold; quick-chirp's is independent.
-        thr = self._mutual_sync_threshold
+        thr = self._runtime_settings.mutual_sync_threshold
         if report.role == "A":
             self._log_trace_post_mortem_locked(
                 report.sync_id, "A.self", report.trace_self, thr)
@@ -1784,7 +1628,7 @@ class State:
         # Post-mortem per stream: logs best peak, noise floor, and the
         # margin to threshold so I can read the log and learn why this
         # run failed (too far? wrong band? speaker silent?).
-        thr = self._chirp_detect_threshold
+        thr = self._runtime_settings.chirp_detect_threshold
         self._log_trace_post_mortem_locked(
             run.id, "A.self",  rep_a.trace_self if rep_a else None, thr)
         self._log_trace_post_mortem_locked(
