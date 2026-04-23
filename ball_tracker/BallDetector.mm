@@ -27,9 +27,6 @@ static const int kMaxAreaPx = 150000;
 static const double kMinAspect = 0.75;
 static const double kMinFill = 0.60;
 
-// _BG_SUBTRACTOR_WARMUP_FRAMES in server/pipeline.py. 125 ms @ 240 fps.
-static const int kWarmupFrames = 30;
-
 // Private initialiser for BTBallDetection — the .h only exposes read-only
 // properties, but the detector needs to construct instances from C++.
 @interface BTBallDetection ()
@@ -160,85 +157,6 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
 
     BTBallDetection *detection = detectBallCore(
         bgra, hMin, hMax, sMin, sMax, vMin, vMax, nullptr
-    );
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-    return detection;
-}
-
-@end
-
-// MARK: - BTDetectionSession (stateful MOG2)
-
-@implementation BTDetectionSession {
-    cv::Ptr<cv::BackgroundSubtractorMOG2> _subtractor;
-    cv::Mat _closeKernel;
-    NSInteger _frameIndex;
-    int _hMin;
-    int _hMax;
-    int _sMin;
-    int _sMax;
-    int _vMin;
-    int _vMax;
-}
-
-- (instancetype)init {
-    return [self initWithHMin:kDefaultHMin hMax:kDefaultHMax
-                         sMin:kDefaultSMin sMax:kDefaultSMax
-                         vMin:kDefaultVMin vMax:kDefaultVMax];
-}
-
-- (instancetype)initWithHMin:(int)hMin hMax:(int)hMax
-                        sMin:(int)sMin sMax:(int)sMax
-                        vMin:(int)vMin vMax:(int)vMax {
-    self = [super init];
-    if (self) {
-        // detectShadows=False, matches server/pipeline.py:73.
-        _subtractor = cv::createBackgroundSubtractorMOG2(500, 16.0, false);
-        _closeKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-        _frameIndex = 0;
-        _hMin = hMin;
-        _hMax = hMax;
-        _sMin = sMin;
-        _sMax = sMax;
-        _vMin = vMin;
-        _vMax = vMax;
-    }
-    return self;
-}
-
-- (NSInteger)warmupFrames { return kWarmupFrames; }
-- (NSInteger)frameIndex { return _frameIndex; }
-
-- (nullable BTBallDetection *)applyPixelBuffer:(CVPixelBufferRef)pixelBuffer {
-    cv::Mat bgra;
-    if (!mapBGRAPixelBuffer(pixelBuffer, bgra)) { return nil; }
-
-    // MOG2.apply() in server/pipeline.py feeds the BGR (not BGRA) frame.
-    // Doing BGRA→BGR up front keeps byte-parity with the server.
-    cv::Mat bgr;
-    cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);
-    cv::Mat fgMaskRaw;
-    _subtractor->apply(bgr, fgMaskRaw);
-
-    _frameIndex += 1;
-
-    // Warmup frames still feed the subtractor (model keeps building), but
-    // we don't emit detections while the model is unreliable — matches
-    // pipeline.py:80's `centroid = None` branch.
-    if (_frameIndex <= kWarmupFrames) {
-        CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-        return nil;
-    }
-
-    cv::Mat fgMask;
-    cv::morphologyEx(fgMaskRaw, fgMask, cv::MORPH_CLOSE, _closeKernel);
-
-    BTBallDetection *detection = detectBallCore(
-        bgra,
-        _hMin, _hMax,
-        _sMin, _sMax,
-        _vMin, _vMax,
-        &fgMask
     );
     CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
     return detection;

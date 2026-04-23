@@ -89,7 +89,6 @@ final class PitchRecorder {
             local_recording_index: localRecordingIndex,
             paths: nil,
             frames: [],
-            frames_on_device: [],
             capture_telemetry: captureTelemetry
         )
         onCycleComplete?(payload)

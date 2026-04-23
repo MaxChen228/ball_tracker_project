@@ -29,10 +29,8 @@ final class CameraRecordingWorkflow {
     private let trackingFps: Double
     private let processingQueue: DispatchQueue
     private let payloadStore = PitchPayloadStore()
-    private let analysisStore = AnalysisJobStore()
     private let recorder = PitchRecorder()
     private(set) var payloadUploadQueue: PayloadUploadQueue
-    private(set) var analysisUploadQueue: AnalysisUploadQueue
     private var clipRecorder: ClipRecorder?
 
     var onRecordingStarted: ((Int) -> Void)?
@@ -48,7 +46,6 @@ final class CameraRecordingWorkflow {
         self.trackingFps = trackingFps
         self.processingQueue = processingQueue
         self.payloadUploadQueue = PayloadUploadQueue(store: payloadStore, uploader: uploader)
-        self.analysisUploadQueue = AnalysisUploadQueue(store: analysisStore, uploader: uploader)
 
         recorder.setCameraId(dependencies.getCameraRole())
         recorder.onRecordingStarted = { [weak self] idx in
@@ -61,19 +58,15 @@ final class CameraRecordingWorkflow {
 
     func ensurePersistenceDirectories() throws {
         try payloadStore.ensureDirectory()
-        try analysisStore.ensureDirectory()
     }
 
     func reloadPendingQueues() {
         try? payloadUploadQueue.reloadPending()
         payloadUploadQueue.processNextIfNeeded()
-        try? analysisUploadQueue.reloadPending()
-        analysisUploadQueue.processNextIfNeeded()
     }
 
     func updateUploader(_ uploader: ServerUploader) {
         payloadUploadQueue.updateUploader(uploader)
-        analysisUploadQueue.updateUploader(uploader)
     }
 
     func updateCameraRole(_ cameraRole: String) {
@@ -192,58 +185,16 @@ final class CameraRecordingWorkflow {
         recordingLog.info("cycle complete session=\(enriched.session_id, privacy: .public) paths=\(paths.map(\.rawValue).sorted().joined(separator: ","), privacy: .public) advisory_frames=\(advisoryFrames.count) ball_frames=\(advisoryFrames.filter { $0.ball_detected }.count) has_video=\(videoURL != nil)")
         let payload = enriched.withPaths(Array(paths))
 
-        guard let videoURL else {
-            handleFallbackCycleWithoutVideo(
-                enriched: payload,
-                advisoryFrames: advisoryFrames,
-                paths: paths
-            )
-            return
-        }
-
-        let analysisVideoURL: URL?
-        if paths.contains(.iosPost) {
-            analysisVideoURL = paths.contains(.serverPost)
-                ? duplicateVideoForAnalysis(from: videoURL)
-                : videoURL
-        } else {
-            analysisVideoURL = nil
-        }
-
-        if paths.contains(.serverPost) {
-            persistCompletedCycle(payload, videoURL: videoURL)
-        }
-        if paths.contains(.iosPost) {
-            let uploadMode: AnalysisJobStore.Job.UploadMode = paths.contains(.serverPost)
-                ? .dualSidecar
-                : .onDevicePrimary
-            if let analysisVideoURL {
-                persistAnalysisJob(
-                    payload: payload,
-                    videoURL: analysisVideoURL,
-                    uploadMode: uploadMode
-                )
-            } else {
-                recordingLog.error("camera failed to prepare clip for iOS post-pass session=\(payload.session_id, privacy: .public)")
-            }
-        }
         if paths.contains(.live) {
             dependencies.dispatchLiveCycleEnd(payload.session_id, "disarmed")
         }
-        if !paths.contains(.serverPost) && !paths.contains(.iosPost) {
-            persistCompletedCycle(payload, videoURL: videoURL)
-        }
-    }
 
-    private func handleFallbackCycleWithoutVideo(
-        enriched: ServerUploader.PitchPayload,
-        advisoryFrames: [ServerUploader.FramePayload],
-        paths: Set<ServerUploader.DetectionPath>
-    ) {
-        if paths.contains(.serverPost) {
-            persistCompletedCycle(enriched, videoURL: nil)
+        if videoURL != nil || paths.contains(.serverPost) {
+            persistCompletedCycle(payload, videoURL: videoURL)
         } else {
-            persistCompletedCycle(enriched.withFrames(advisoryFrames), videoURL: nil)
+            // No MOV and server_post is not selected — persist the payload
+            // with the live advisory frames so the session still has a record.
+            persistCompletedCycle(payload.withFrames(advisoryFrames), videoURL: nil)
         }
     }
 
@@ -270,39 +221,4 @@ final class CameraRecordingWorkflow {
         }
     }
 
-    private func persistAnalysisJob(
-        payload: ServerUploader.PitchPayload,
-        videoURL: URL,
-        uploadMode: AnalysisJobStore.Job.UploadMode
-    ) {
-        let job = AnalysisJobStore.Job(uploadMode: uploadMode, pitch: payload)
-        do {
-            let fileURL = try analysisStore.save(job, videoURL: videoURL)
-            DispatchQueue.main.async {
-                self.dependencies.setStatusText("暫存完成 · 等待錄後分析")
-                self.analysisUploadQueue.enqueue(fileURL)
-                self.exitRecordingToStandby(currentSessionId: payload.session_id, currentState: .recording)
-            }
-        } catch {
-            recordingLog.error("camera analysis persist failed session=\(payload.session_id, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            try? FileManager.default.removeItem(at: videoURL)
-            DispatchQueue.main.async {
-                self.dependencies.setStatusText("錄後分析暫存失敗 · \(error.localizedDescription)")
-                self.exitRecordingToStandby(currentSessionId: payload.session_id, currentState: .recording)
-            }
-        }
-    }
-
-    private func duplicateVideoForAnalysis(from sourceURL: URL) -> URL? {
-        let ext = sourceURL.pathExtension.isEmpty ? "mov" : sourceURL.pathExtension
-        let dest = FileManager.default.temporaryDirectory
-            .appendingPathComponent("analysis_\(UUID().uuidString).\(ext)")
-        do {
-            try FileManager.default.copyItem(at: sourceURL, to: dest)
-            return dest
-        } catch {
-            recordingLog.error("camera analysis clip copy failed src=\(sourceURL.lastPathComponent, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
-            return nil
-        }
-    }
 }
