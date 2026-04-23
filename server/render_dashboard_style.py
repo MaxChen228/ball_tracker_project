@@ -524,16 +524,18 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .traj-toggle-placeholder {{ flex: 0 0 auto;
                              width: calc(13px + 10px + var(--s-2) + 8px); }}
 /* Head row packs identity + pipeline chips + status chips on one line.
-   .event-spacer absorbs slack so the status chips hug the right edge. */
+   .event-spacer absorbs slack so the status chips hug the right edge.
+   sid is flex:0 (fixed-width monospace) — never truncated; path/status
+   chips pack tight but don't compete for its space. */
 .event-head {{ display: flex; align-items: center; gap: 6px;
                min-width: 0; flex-wrap: nowrap; }}
-.event-head .sid {{ font-family: var(--mono); font-size: 11px; font-weight: 500;
-                    color: var(--ink); letter-spacing: 0.04em;
-                    overflow: hidden; text-overflow: ellipsis; }}
-.event-head .event-spacer {{ flex: 1 1 auto; }}
-.event-head .path-chip {{ font-size: 10px; padding: 1px 6px;
+.event-head .sid {{ flex: 0 0 auto; font-family: var(--mono); font-size: 11px;
+                    font-weight: 500; color: var(--ink);
+                    letter-spacing: 0.04em; white-space: nowrap; }}
+.event-head .event-spacer {{ flex: 1 1 auto; min-width: var(--s-2); }}
+.event-head .path-chip {{ flex: 0 0 auto; font-size: 10px; padding: 1px 6px;
                           letter-spacing: 0.04em; }}
-.event-head .chip {{ font-size: 9px; padding: 1px 6px;
+.event-head .chip {{ flex: 0 0 auto; font-size: 9px; padding: 1px 6px;
                      letter-spacing: 0.08em; }}
 .event-meta {{ font-family: var(--mono); font-size: 10px;
                color: var(--sub); letter-spacing: 0.02em;

@@ -90,6 +90,14 @@ class SessionProcessingState:
         completed: bool,
         has_candidates: bool,
     ) -> tuple[str | None, bool]:
+        """Processing chip state for a single session.
+
+        Post-redesign, server-post detection is opt-in per-session: we
+        only show a chip when the operator has actually done something
+        (queued/processing/canceled). A session sitting with a MOV but no
+        triggered job is the *default* state and shows nothing — the "Run
+        srv" action button is the affordance.
+        """
         job_states = [
             self.server_post_jobs.get(key)
             for key in pending_keys
@@ -97,7 +105,7 @@ class SessionProcessingState:
         ]
         if any(state == "processing" for state in job_states):
             return "processing", True
-        if any(state == "queued" for state in job_states) or (pending_keys and not job_states):
+        if any(state == "queued" for state in job_states):
             return "queued", True
         if any(state == "canceled" for state in job_states):
             return "canceled", bool(pending_keys)
