@@ -9,6 +9,7 @@ def render_dashboard_html(
     active_html: str,
     session_html: str,
     hsv_html: str,
+    tuning_html: str,
     events_html: str,
     scene_div: str,
     dashboard_js: str,
@@ -40,6 +41,10 @@ def render_dashboard_html(
         '<div class="card">'
         '<h2 class="card-title">Detection HSV</h2>'
         f'<div id="hsv-body">{hsv_html}</div>'
+        "</div>"
+        '<div class="card">'
+        '<h2 class="card-title">Capture Tuning</h2>'
+        f'<div id="tuning-body">{tuning_html}</div>'
         "</div>"
         '<div class="card">'
         '<div class="events-toolbar">'

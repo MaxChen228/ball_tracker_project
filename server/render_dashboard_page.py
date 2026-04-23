@@ -11,6 +11,7 @@ from render_dashboard_session import _render_active_session_body, _render_hsv_bo
 from render_dashboard_style import _CSS
 from render_scene import _build_figure
 from render_shared import _render_app_nav
+from render_tuning import _render_tuning_body
 
 
 def render_events_index_html(
@@ -36,9 +37,6 @@ def render_events_index_html(
 ) -> str:
     """Render the dashboard page shell and initial SSR partials."""
     del chirp_detect_threshold
-    del heartbeat_interval_s
-    del tracking_exposure_cap
-    del capture_height_px
     del calibration_last_ts
     del extended_markers
     del preview_requested
@@ -70,6 +68,11 @@ def render_events_index_html(
         session, capture_mode, default_paths, devices, calibrations, arm_readiness
     )
     hsv_html = _render_hsv_body(hsv_range)
+    tuning_html = _render_tuning_body(
+        heartbeat_interval_s=heartbeat_interval_s,
+        tracking_exposure_cap=tracking_exposure_cap,
+        capture_height_px=capture_height_px,
+    )
     events_html = _render_events_body(events)
     return _render_dashboard_html(
         css=_CSS,
@@ -77,6 +80,7 @@ def render_events_index_html(
         active_html=active_html,
         session_html=session_html,
         hsv_html=hsv_html,
+        tuning_html=tuning_html,
         events_html=events_html,
         scene_div=scene_div,
         dashboard_js=_JS_TEMPLATE,
