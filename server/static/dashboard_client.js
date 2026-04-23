@@ -1584,7 +1584,24 @@
       auto_cal: { active, last },
       server_status: serverStatus,
     };
-    const text = JSON.stringify(payload, null, 2);
+    const evSource = (last && Array.isArray(last.events)) ? last.events
+                     : (active && Array.isArray(active.events)) ? active.events
+                     : [];
+    const evLines = evSource.map(ev => {
+      const t = (typeof ev.t === 'number') ? ev.t.toFixed(3).padStart(7) : '   ?   ';
+      const lv = (ev.level || 'info').padEnd(5);
+      const data = ev.data ? ' ' + JSON.stringify(ev.data) : '';
+      return `[${t}s ${lv}] ${ev.msg}${data}`;
+    });
+    const header = [
+      `# auto-cal log · camera=${cam} · collected ${new Date().toISOString()}`,
+      last ? `# run_id=${last.id} status=${last.status} summary=${last.summary || ''} detail=${last.detail || ''}` : '# no last run',
+      `# ${evSource.length} event(s):`,
+      ...evLines,
+      '',
+      '# --- full JSON payload ---',
+    ].join('\n');
+    const text = header + '\n' + JSON.stringify(payload, null, 2);
     let ok = false;
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {

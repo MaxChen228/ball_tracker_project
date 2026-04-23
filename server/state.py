@@ -734,6 +734,19 @@ class State:
         with self._lock:
             return self._auto_cal_runs.status()
 
+    def append_auto_cal_event(
+        self,
+        camera_id: str,
+        message: str,
+        *,
+        level: str = "info",
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock:
+            self._auto_cal_runs.append_event(
+                camera_id, message, level=level, data=data
+            )
+
     def live_session_summary(self) -> dict[str, Any] | None:
         session = self.session_snapshot()
         if session is None:

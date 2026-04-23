@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -162,6 +162,7 @@ class AutoCalibrationRun:
     detail: str | None = None
     detected_ids: list[int] | None = None
     result: dict[str, Any] | None = None
+    events: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -183,6 +184,7 @@ class AutoCalibrationRun:
             "detail": self.detail,
             "detected_ids": list(self.detected_ids or []),
             "result": dict(self.result or {}),
+            "events": [dict(ev) for ev in (self.events or [])],
         }
 
 
@@ -221,6 +223,28 @@ class AutoCalibrationRunStore:
         run.updated_at = now
         return AutoCalibrationRun(**run.to_dict())
 
+    def append_event(
+        self,
+        camera_id: str,
+        message: str,
+        *,
+        level: str = "info",
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        now = self._time_fn()
+        run = self._active.get(camera_id)
+        if run is None:
+            return
+        ev: dict[str, Any] = {
+            "t": round(now - run.started_at, 3),
+            "level": level,
+            "msg": message,
+        }
+        if data:
+            ev["data"] = data
+        run.events.append(ev)
+        run.updated_at = now
+
     def finish(
         self,
         camera_id: str,
@@ -244,6 +268,12 @@ class AutoCalibrationRunStore:
             run.detail = detail
         if applied is not None:
             run.applied = applied
+        run.events.append({
+            "t": round(now - run.started_at, 3),
+            "level": "error" if status == "failed" else "info",
+            "msg": f"finish status={status}",
+            "data": {"detail": detail, "summary": summary, "applied": applied},
+        })
         snap = AutoCalibrationRun(**run.to_dict())
         self._last[camera_id] = snap
         if status in {"completed", "failed"}:
