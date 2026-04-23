@@ -1088,52 +1088,21 @@
     renderActiveSession(currentLiveSession);
 
     // Mirror live state into the shared app-header status strip.
+    // Three chips only — devices / cal / sync — matching
+    // render_shared.py::_render_nav_status. The editorial badge +
+    // headline were redundant with the per-device rows downstream.
     if (navStatus) {
       const online = (state.devices || []).length;
       const usable = (readiness.calibrated_online_cameras || []).length;
       const syncedUsable = (readiness.synced_calibrated_online_cameras || []).length;
-      const cooldown = Number(state.sync_cooldown_remaining_s || 0);
-      let badgeCls = 'ready';
-      let badge = 'Ready';
-      let headline = 'ready to arm';
-      let context = readiness.mode === 'single_camera'
-        ? 'single-camera rays only'
-        : 'all stereo prerequisites satisfied';
-      if (armed) {
-        badgeCls = 'recording';
-        badge = 'Recording';
-        headline = esc(s.id || '—');
-        context = 'session active';
-      } else if (state.sync) {
-        badgeCls = 'syncing';
-        badge = 'Sync';
-        headline = 'sync in progress';
-        context = 'complete on /sync';
-      } else if (!canArm) {
-        badgeCls = 'blocked';
-        badge = 'Blocked';
-        headline = blockers[0] || 'not ready';
-        context = blockers.slice(1).join(', ') || 'check camera readiness';
-      } else if (cooldown > 0) {
-        badgeCls = 'cooldown';
-        badge = 'Cooldown';
-        headline = 'sync settling';
-        context = `${cooldown.toFixed(0)}s remaining`;
-      }
       const check = (label, value, ok) =>
         `<span class="status-check ${ok ? 'ok' : 'warn'}"><span class="k">${label}</span><span class="v">${value}</span></span>`;
-      const navHtml = `
-        <div class="status-main">
-          <span class="status-badge ${badgeCls}">${badge}</span>
-          <span class="status-headline">${headline}</span>
-          <span class="status-context">${context}</span>
-        </div>
+      navStatus.innerHTML = `
         <div class="status-checks">
           ${check('Devices', `${online}`, online >= 1)}
           ${check('Cal', `${usable}`, usable >= 1)}
           ${check('Sync', readiness.requires_time_sync ? `${syncedUsable}/${usable}` : 'single', !readiness.requires_time_sync || syncedUsable >= usable)}
         </div>`;
-      navStatus.innerHTML = navHtml;
     }
   }
 
