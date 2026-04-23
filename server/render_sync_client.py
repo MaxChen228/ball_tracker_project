@@ -124,59 +124,18 @@ _JS_TEMPLATE = r"""
       <div class="session-actions">${btn}</div>`;
   }
 
-  // --- Nav chip mirror (syncing / cooldown) --------------------------------
+  // --- Nav chip mirror --------------------------------------------------
+  // Three chips only (devices / cal / sync), matching
+  // render_shared.py::_render_nav_status. No editorial headline.
   function renderNav(state) {
     if (!navStatus) return;
-    const s = state.session;
-    const armed = !!(s && s.armed);
     const online = (state.devices || []).length;
     const cal = (state.calibrations || []).length;
     const synced = (state.devices || []).filter(d => d && d.time_synced).length;
     const expected = 2;
-    const cooldown = Number(state.sync_cooldown_remaining_s || 0);
-    let badgeCls = 'ready';
-    let badge = 'Ready';
-    let headline = 'ready to arm';
-    let context = 'all prerequisites satisfied';
-    if (armed) {
-      badgeCls = 'recording';
-      badge = 'Recording';
-      headline = esc(s.id || '—');
-      context = 'session active';
-    } else if (state.sync) {
-      badgeCls = 'syncing';
-      badge = 'Sync';
-      headline = 'sync in progress';
-      context = 'complete on /sync';
-    } else if (online < expected) {
-      badgeCls = 'blocked';
-      badge = 'Blocked';
-      headline = 'bring both devices online';
-      context = `${online}/${expected} devices available`;
-    } else if (cal < expected) {
-      badgeCls = 'blocked';
-      badge = 'Blocked';
-      headline = 'finish calibration';
-      context = `${cal}/${expected} cameras calibrated`;
-    } else if (synced < expected) {
-      badgeCls = 'blocked';
-      badge = 'Blocked';
-      headline = 'run time sync';
-      context = `${synced}/${expected} cameras synced`;
-    } else if (cooldown > 0) {
-      badgeCls = 'cooldown';
-      badge = 'Cooldown';
-      headline = 'sync settling';
-      context = `${cooldown.toFixed(0)}s remaining`;
-    }
     const check = (label, value, ok) =>
       `<span class="status-check ${ok ? 'ok' : 'warn'}"><span class="k">${label}</span><span class="v">${value}</span></span>`;
     navStatus.innerHTML = `
-      <div class="status-main">
-        <span class="status-badge ${badgeCls}">${badge}</span>
-        <span class="status-headline">${headline}</span>
-        <span class="status-context">${context}</span>
-      </div>
       <div class="status-checks">
         ${check('Devices', `${online}/${expected}`, online >= expected)}
         ${check('Cal', `${cal}/${expected}`, cal >= expected)}
