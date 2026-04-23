@@ -514,6 +514,52 @@ class State:
             if reason and reason != "disarmed":
                 live.mark_aborted(camera_id, reason)
 
+    def _drop_live_pairing_if_persisted_locked(self, session_id: str) -> bool:
+        """Drop `_live_pairings[session_id]` when the live path has fully
+        drained — both cams have reported cycle_end AND each cam's live
+        detections have been persisted onto its pitch JSON (i.e. the
+        `frames_live` buckets on both pitches match the live buffer).
+        Returns True when the entry was dropped.
+
+        Idempotent — safe to invoke repeatedly; the method only removes
+        an entry when the twin-persisted precondition is met, so a later
+        call after a successful drop is a no-op. Caller must hold
+        `self._lock`.
+
+        Scope: this only covers the normal end-of-session pairing flow.
+        `delete_session` / `reset` / `cancel_session` have their own
+        explicit pops because those paths discard data rather than drain
+        it, and must not be gated on persistence."""
+        live = self._live_pairings.get(session_id)
+        if live is None:
+            return False
+        if not {"A", "B"}.issubset(live.completed_cameras):
+            return False
+        pa = self.pitches.get(("A", session_id))
+        pb = self.pitches.get(("B", session_id))
+        if pa is None or pb is None:
+            return False
+        # Sanity — ensure each cam's live detections already made it onto
+        # the pitch. We only need to confirm the frame counts landed, not
+        # do a byte-for-byte compare; the pitch-JSON write that happened
+        # inside `persist_live_frames` is the authoritative archive.
+        a_count = live.frame_counts.get("A", 0)
+        b_count = live.frame_counts.get("B", 0)
+        if a_count and len(pa.frames_live) < a_count:
+            return False
+        if b_count and len(pb.frames_live) < b_count:
+            return False
+        self._live_pairings.pop(session_id, None)
+        return True
+
+    def _drop_live_pairing(self, session_id: str) -> None:
+        """Unconditionally pop a `LivePairingSession` from `_live_pairings`
+        if present. Idempotent — callers may invoke this from multiple
+        lifecycle hooks (cancel, delete, reset) without having to
+        remember whether a prior hook already fired."""
+        with self._lock:
+            self._live_pairings.pop(session_id, None)
+
     def persist_live_frames(self, camera_id: str, session_id: str) -> SessionResult | None:
         with self._lock:
             existing = self.pitches.get((camera_id, session_id))
@@ -602,6 +648,13 @@ class State:
         # --- Critical section 2: publish the result into the in-memory map. ---
         with self._lock:
             self.results[pitch.session_id] = result
+            # Once both cams' pitches carry their live frames and both
+            # cams have reported cycle_end, the rolling `_live_pairings`
+            # entry is dead weight — its contents are fully archived on
+            # the pitch JSONs and replayable from disk. Drop it so a
+            # long-running server doesn't accumulate one bounded-but-
+            # nonzero session entry per pairing forever.
+            self._drop_live_pairing_if_persisted_locked(pitch.session_id)
         return result
 
     def summary(self) -> dict[str, Any]:
@@ -936,7 +989,14 @@ class State:
 
     def _check_session_timeout_locked(self, now: float) -> None:
         """If the current session has exceeded its max_duration_s, transition
-        it to ended. Assumes the caller holds `self._lock`."""
+        it to ended. Assumes the caller holds `self._lock`.
+
+        Live pairing buffers are NOT dropped here — a cam that has been
+        streaming frames up to the timeout still needs its buffered
+        detections to flow through `persist_live_frames` once the WS
+        `cycle_end` arrives. The bounded-deque design in `LivePairingSession`
+        means the entry is size-capped either way; `mark_live_path_ended`
+        or `delete_session` will drop the `_live_pairings` entry for real."""
         s = self._current_session
         if s is None or s.ended_at is not None:
             return
@@ -1860,6 +1920,10 @@ class State:
                 self.pitches.pop(key, None)
             self.results.pop(session_id, None)
             self._processing.remove_session(session_id)
+            # Also drop the rolling live buffer — if the session hadn't
+            # yet had both cams emit cycle_end, `_live_pairings` would
+            # otherwise leak its bounded-but-nonzero footprint forever.
+            self._live_pairings.pop(session_id, None)
             if (
                 self._last_ended_session is not None
                 and self._last_ended_session.id == session_id
@@ -1896,6 +1960,7 @@ class State:
             self._current_session = None
             self._last_ended_session = None
             self._processing.clear()
+            self._live_pairings.clear()
             self._persist_session_meta_locked()
             if purge_disk:
                 for path in self._pitch_dir.glob("session_*.json*"):
