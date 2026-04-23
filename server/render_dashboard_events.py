@@ -18,8 +18,7 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
         stat_label = status.replace("_", " ")
         mode_val = e.get("mode")
         capture_mode = (
-            "on-device" if mode_val == "on_device"
-            else "dual" if mode_val == "dual"
+            "live-only" if mode_val == "live_only"
             else "camera-only"
         )
         # Each pipeline gets an independent chip showing: state (on/err/-)
@@ -29,10 +28,9 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
         # e.g. "error" even when the count is 0.
         path_status = e.get("path_status") or {}
         path_counts = e.get("n_ball_frames_by_path") or {}
-        path_chip_specs = (("live", "L"), ("ios_post", "I"), ("server_post", "S"))
+        path_chip_specs = (("live", "L"), ("server_post", "S"))
         path_chip_titles = {
             "live": "Live — iOS real-time detection (WS streamed)",
-            "ios_post": "POST — iOS on-device post-pass payload",
             "server_post": "SVR — server-side detection on decoded MOV",
         }
         def _path_chip(path: str, label: str) -> str:

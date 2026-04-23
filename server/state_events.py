@@ -21,12 +21,11 @@ if TYPE_CHECKING:
     from state import State
 
 
-# Each pipeline (live / ios_post / server_post) maps to one of the three
-# PitchPayload frame buckets. Keep the mapping in one table so the events
-# loop can't drift out of sync with schemas.DetectionPath.
+# Each pipeline (live / server_post) maps to one of the PitchPayload frame
+# buckets. Keep the mapping in one table so the events loop can't drift
+# out of sync with schemas.DetectionPath.
 _PATH_TO_FRAMES_ATTR: tuple[tuple[str, str], ...] = (
     (DetectionPath.live.value, "frames_live"),
-    (DetectionPath.ios_post.value, "frames_on_device"),
     (DetectionPath.server_post.value, "frames"),
 )
 
@@ -43,7 +42,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
     snapshots = _snapshot_sessions_locked(state)
 
     events: list[dict[str, Any]] = []
-    for sid, cams_present, n_ball_frames_by_path, has_any_on_device_frames, cam_capture_telemetry, result in snapshots:
+    for sid, cams_present, n_ball_frames_by_path, cam_capture_telemetry, result in snapshots:
         trashed = state._session_is_trashed(sid)
         if bucket == "active" and trashed:
             continue
@@ -53,13 +52,11 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
         latest_mtime = _latest_pitch_mtime(state, cams_present, sid)
         authority_points = result.triangulated if result is not None else []
         n_triangulated = len(authority_points) if result is not None else 0
-        n_triangulated_on_device = len(result.points_on_device) if result is not None else 0
         error = result.error if result is not None else None
-        error_on_device = result.error_on_device if result is not None else None
 
         status = _status_label(cams_present, n_triangulated, error)
         peak_z, mean_res, duration = _point_cloud_summary(authority_points)
-        mode = _legacy_mode_label(state, sid, has_any_on_device_frames)
+        mode = _legacy_mode_label(state, sid)
         path_status = _path_status_pills(result, n_ball_frames_by_path)
         processing_state, processing_resumable = state.session_processing_summary(sid)
 
@@ -70,15 +67,11 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                 "status": status,
                 "mode": mode,
                 "received_at": latest_mtime,
-                # Three independent counts, one per pipeline. The legacy flat
-                # names are kept as aliases so older consumers (tests,
-                # external scripts) don't break — new code should read
-                # `n_ball_frames_by_path`.
+                # Per-pipeline counts (live / server_post). Legacy flat name
+                # kept for older consumers.
                 "n_ball_frames_by_path": n_ball_frames_by_path,
                 "n_ball_frames": n_ball_frames_by_path[DetectionPath.server_post.value],
-                "n_ball_frames_on_device": n_ball_frames_by_path[DetectionPath.ios_post.value],
                 "n_triangulated": n_triangulated,
-                "n_triangulated_on_device": n_triangulated_on_device,
                 "peak_z_m": peak_z,
                 "mean_residual_m": mean_res,
                 "duration_s": duration,
@@ -87,7 +80,6 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                     for cam, tele in cam_capture_telemetry.items()
                 },
                 "error": error,
-                "error_on_device": error_on_device,
                 "path_status": path_status,
                 "trashed": trashed,
                 "processing_state": processing_state,
@@ -112,7 +104,6 @@ def _snapshot_sessions_locked(
         str,
         list[str],
         dict[str, dict[str, int]],
-        bool,
         dict[str, CaptureTelemetryPayload | None],
         SessionResult | None,
     ]
@@ -130,17 +121,12 @@ def _snapshot_sessions_locked(
                 str,
                 list[str],
                 dict[str, dict[str, int]],
-                bool,
                 dict[str, CaptureTelemetryPayload | None],
                 SessionResult | None,
             ]
         ] = []
         for sid in sessions:
             cams_present = sorted(cam for (cam, s) in state.pitches.keys() if s == sid)
-            # n_ball_frames_by_path[path][cam] = detected-frame count. Every
-            # path gets a populated inner dict even when the count is zero so
-            # the dashboard renders three independent columns without having
-            # to guess which keys exist.
             n_ball_frames_by_path: dict[str, dict[str, int]] = {
                 path: {} for path, _ in _PATH_TO_FRAMES_ATTR
             }
@@ -151,14 +137,6 @@ def _snapshot_sessions_locked(
                     n_ball_frames_by_path[path][cam] = sum(
                         1 for f in frames if f.ball_detected
                     )
-            # Any pitch for this session carrying non-empty frames_on_device
-            # implies the session armed in dual mode. Computed inside the lock
-            # so the mode-inference step outside doesn't need to re-read
-            # state.pitches.
-            has_any_on_device_frames = any(
-                bool(state.pitches[(cam, sid)].frames_on_device)
-                for cam in cams_present
-            )
             cam_capture_telemetry = {
                 cam: state.pitches[(cam, sid)].capture_telemetry
                 for cam in cams_present
@@ -168,7 +146,6 @@ def _snapshot_sessions_locked(
                     sid,
                     cams_present,
                     n_ball_frames_by_path,
-                    has_any_on_device_frames,
                     cam_capture_telemetry,
                     state.results.get(sid),
                 )
@@ -213,13 +190,11 @@ def _point_cloud_summary(
     return peak_z, mean_res, duration
 
 
-def _legacy_mode_label(state: "State", sid: str, has_any_on_device_frames: bool) -> str:
+def _legacy_mode_label(state: "State", sid: str) -> str:
     has_any_video = any(state._video_dir.glob(f"session_{sid}_*"))
-    if has_any_video and has_any_on_device_frames:
-        return "dual"
     if has_any_video:
         return "camera_only"
-    return "on_device"
+    return "live_only"
 
 
 def _path_status_pills(
@@ -254,6 +229,5 @@ def _path_status_pills(
 
     return {
         DetectionPath.live.value: pill(DetectionPath.live.value, "live:"),
-        DetectionPath.ios_post.value: pill(DetectionPath.ios_post.value),
         DetectionPath.server_post.value: pill(DetectionPath.server_post.value),
     }

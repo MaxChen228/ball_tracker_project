@@ -283,7 +283,6 @@ final class PayloadUploadQueueTests: XCTestCase {
             local_recording_index: 0,
             paths: nil,
             frames: [],
-            frames_on_device: [],
             capture_telemetry: nil
         )
     }

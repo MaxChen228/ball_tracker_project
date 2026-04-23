@@ -18,7 +18,6 @@ from schemas import (
     DetectionPath,
     Device,
     FramePayload,
-    PitchAnalysisPayload,
     PitchPayload,
     Session,
     SessionResult,
@@ -308,7 +307,7 @@ class State:
         for path in sorted(self._pitch_dir.glob("session_*.json")):
             try:
                 obj = json.loads(path.read_text())
-                if "frames" in obj and "frames_server_post" not in obj and not obj.get("frames_on_device"):
+                if "frames" in obj and "frames_server_post" not in obj:
                     obj["frames_server_post"] = obj.get("frames", [])
                 pitch = PitchPayload.model_validate(obj)
             except Exception as e:
@@ -572,12 +571,8 @@ class State:
             if existing is not None:
                 if not merged.frames_live and existing.frames_live:
                     merged.frames_live = list(existing.frames_live)
-                if not merged.frames_ios_post and existing.frames_ios_post:
-                    merged.frames_ios_post = list(existing.frames_ios_post)
                 if not merged.frames_server_post and existing.frames_server_post:
                     merged.frames_server_post = list(existing.frames_server_post)
-                if not merged.frames_on_device and existing.frames_on_device:
-                    merged.frames_on_device = list(existing.frames_on_device)
                 if not merged.frames and existing.frames:
                     merged.frames = list(existing.frames)
             if not merged.frames_live and live_frames:
@@ -608,28 +603,6 @@ class State:
         with self._lock:
             self.results[pitch.session_id] = result
         return result
-
-    def attach_on_device_analysis(
-        self,
-        analysis: PitchAnalysisPayload,
-    ) -> SessionResult:
-        """Merge a late-arriving on-device post-pass into an existing pitch.
-
-        The base pitch must already exist (raw MOV upload in `camera_only` /
-        `dual`, or an earlier frames-only `/pitch` in `on_device`). We overwrite
-        `frames_on_device` wholesale because each upload is an authoritative
-        rerun over the finalized local MOV, not an incremental append."""
-        with self._lock:
-            existing = self.pitches.get((analysis.camera_id, analysis.session_id))
-        if existing is None:
-            raise KeyError((analysis.camera_id, analysis.session_id))
-
-        merged = existing.model_copy(deep=True)
-        merged.frames_ios_post = list(analysis.frames_on_device)
-        merged.frames_on_device = list(analysis.frames_on_device)
-        if analysis.capture_telemetry is not None:
-            merged.capture_telemetry = analysis.capture_telemetry
-        return self.record(merged)
 
     def summary(self) -> dict[str, Any]:
         with self._lock:

@@ -50,8 +50,7 @@ def _scene_for_session(session_id: str):
         )
     result = state.get(session_id)
     triangulated = result.points if result is not None else []
-    triangulated_on_device = result.points_on_device if result is not None else []
-    return build_scene(session_id, scaled_pitches, triangulated, triangulated_on_device=triangulated_on_device)
+    return build_scene(session_id, scaled_pitches, triangulated)
 
 
 def _build_viewer_health(session_id: str) -> dict[str, Any]:
@@ -61,7 +60,6 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
     cams: dict[str, dict[str, Any]] = {}
     _EMPTY_COUNTS = {
         "live": {"total": 0, "detected": 0},
-        "ios_post": {"total": 0, "detected": 0},
         "server_post": {"total": 0, "detected": 0},
     }
     for cam_id in ("A", "B"):
@@ -81,10 +79,6 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
                 "live": {
                     "total": len(p.frames_live or []),
                     "detected": sum(1 for f in (p.frames_live or []) if f.ball_detected),
-                },
-                "ios_post": {
-                    "total": len(p.frames_on_device or []),
-                    "detected": sum(1 for f in (p.frames_on_device or []) if f.ball_detected),
                 },
                 "server_post": {
                     "total": len(p.frames),
@@ -111,12 +105,12 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         ts = [p.t_rel_s for p in result.points]
         duration_s = float(max(ts) - min(ts))
     else:
-        # Live-only / ios_post-only sessions have empty p.frames; fall back
-        # to whichever pipeline actually carried frames so the header still
-        # shows a real duration.
+        # Live-only sessions have empty p.frames; fall back to whichever
+        # pipeline actually carried frames so the header still shows a
+        # real duration.
         per_pitch_spans: list[float] = []
         for p in pitches.values():
-            frame_lists = [p.frames, p.frames_on_device or [], p.frames_live or []]
+            frame_lists = [p.frames, p.frames_live or []]
             frames = next((fs for fs in frame_lists if fs), None)
             if not frames:
                 continue
@@ -134,18 +128,14 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         if latest_mtime is None or mtime > latest_mtime:
             latest_mtime = mtime
     has_any_video = any(state.video_dir.glob(f"session_{session_id}_*"))
-    has_any_on_device_frames = any(bool(p.frames_on_device) for p in pitches.values())
-    if has_any_video and has_any_on_device_frames:
-        mode = "dual"
-    elif has_any_video:
+    if has_any_video:
         mode = "camera_only"
     else:
-        mode = "on_device"
+        mode = "live_only"
     return {
         "session_id": session_id,
         "cameras": cams,
         "triangulated_count": len(result.points) if result is not None else 0,
-        "triangulated_count_on_device": (len(result.points_on_device) if result is not None else 0),
         "error": result.error if result is not None else None,
         "duration_s": duration_s,
         "received_at": latest_mtime,
@@ -156,13 +146,13 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
 def _videos_for_session(
     session_id: str,
 ) -> list[tuple[str, str, float, float, dict[str, list]]]:
-    """One row per camera; `frames_info` carries **three independent detection
-    streams** keyed by DetectionPath: `live` (iOS real-time), `ios_post` (iOS
-    post-pass after session close), `server_post` (server-side decode +
-    detection on the uploaded MOV). Each stream has its own t_rel / detected /
-    px / py arrays and its own visibility toggle in the viewer — no fallback,
-    no merging. An absent stream is the empty-arrays shape so the JS side
-    can treat all three uniformly."""
+    """One row per camera; `frames_info` carries **two independent detection
+    streams** keyed by DetectionPath: `live` (iOS real-time) and
+    `server_post` (server-side decode + detection on the uploaded MOV).
+    Each stream has its own t_rel / detected / px / py arrays and its own
+    visibility toggle in the viewer — no fallback, no merging. An absent
+    stream is the empty-arrays shape so the JS side can treat both
+    uniformly."""
     from main import state
     prefix = f"session_{session_id}_"
     pitches = state.pitches_for_session(session_id)
@@ -196,7 +186,6 @@ def _videos_for_session(
         set(best)
         | {c for c, p in pitches.items() if p.frames}
         | {c for c, p in pitches.items() if p.frames_live}
-        | {c for c, p in pitches.items() if p.frames_on_device}
     )
     for cam in all_cams:
         name = best.get(cam)
@@ -214,14 +203,12 @@ def _videos_for_session(
             )
             frames_info = {
                 "live": _stream(pitch.frames_live, rel_anchor),
-                "ios_post": _stream(pitch.frames_on_device, rel_anchor),
                 "server_post": _stream(pitch.frames, rel_anchor),
             }
         else:
             empty = {"t_rel_s": [], "detected": [], "px": [], "py": []}
             frames_info = {
                 "live": dict(empty),
-                "ios_post": dict(empty),
                 "server_post": dict(empty),
             }
         url = f"/videos/{name}" if name else None
