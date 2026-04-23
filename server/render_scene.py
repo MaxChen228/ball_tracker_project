@@ -13,6 +13,10 @@ from render_scene_theme import (
     _CONTRA,
     _DEV,
     _FALLBACK_CAMERA_COLOR,
+    _GHOST_FLICKER,
+    _GHOST_JUMP,
+    _GHOST_LINE_WIDTH,
+    _GHOST_OPACITY,
     _GROUND_HALF_EXTENT_M,
     _INK,
     _INK_40,
@@ -22,6 +26,14 @@ from render_scene_theme import (
     _SURFACE,
     _WORLD_AXIS_LEN_M,
 )
+
+
+# filter_status → (display color, display name suffix, opacity, line width, meta tag).
+# Kept items use the per-camera color; rejected items use semantic ghost colors.
+_GHOST_STYLES = {
+    "rejected_flicker": (_GHOST_FLICKER, "flicker", _GHOST_OPACITY, _GHOST_LINE_WIDTH, "flicker"),
+    "rejected_jump":    (_GHOST_JUMP,    "jump",    _GHOST_OPACITY, _GHOST_LINE_WIDTH, "jump"),
+}
 
 
 def render_scene_html(scene: Scene) -> str:
@@ -164,12 +176,25 @@ def _build_figure(scene: Scene):
                 )
             )
 
-    rays_by_cam: dict[str, list] = {}
+    # Split rays by (camera_id, filter_status) so kept detections render in
+    # the camera color and rejected ones render in the ghost palette. Each
+    # bucket becomes its own Plotly trace so the legend lets operators toggle
+    # categories individually, and the "Hide rejected" updatemenu hides all
+    # rejected buckets at once.
+    rays_by_key: dict[tuple[str, str | None], list] = {}
     for r in scene.rays:
-        rays_by_cam.setdefault(r.camera_id, []).append(r)
+        status = getattr(r, "filter_status", None)
+        rays_by_key.setdefault((r.camera_id, status), []).append(r)
 
-    for cam_id, rays in rays_by_cam.items():
-        color = _CAMERA_COLORS.get(cam_id, _FALLBACK_CAMERA_COLOR)
+    rejected_trace_indices: list[int] = []
+    # Stable order: kept first (per cam), then rejected categories.
+    def _status_key(k: tuple[str, str | None]) -> tuple[str, int]:
+        _, st = k
+        order = {None: 0, "kept": 0, "rejected_flicker": 1, "rejected_jump": 2}
+        return (k[0], order.get(st, 9))
+
+    for (cam_id, status) in sorted(rays_by_key.keys(), key=_status_key):
+        rays = rays_by_key[(cam_id, status)]
         xs: list[float | None] = []
         ys: list[float | None] = []
         zs: list[float | None] = []
@@ -177,53 +202,85 @@ def _build_figure(scene: Scene):
             xs.extend([r.origin[0], r.endpoint[0], None])
             ys.extend([r.origin[1], r.endpoint[1], None])
             zs.extend([r.origin[2], r.endpoint[2], None])
+        if status in _GHOST_STYLES:
+            color, suffix, opacity, width, tag = _GHOST_STYLES[status]
+            name = f"Rays {cam_id} · {suffix} ({len(rays)})"
+        else:
+            color = _CAMERA_COLORS.get(cam_id, _FALLBACK_CAMERA_COLOR)
+            opacity = 0.35
+            width = 2
+            tag = "kept"
+            name = f"Rays {cam_id} ({len(rays)})"
         traces.append(
             go.Scatter3d(
                 x=xs,
                 y=ys,
                 z=zs,
                 mode="lines",
-                line=dict(color=color, width=2),
-                opacity=0.35,
-                name=f"Rays {cam_id} ({len(rays)})",
+                line=dict(color=color, width=width),
+                opacity=opacity,
+                name=name,
                 hoverinfo="skip",
-                meta=dict(trace_kind="ray", camera_id=cam_id),
+                meta=dict(trace_kind="ray", camera_id=cam_id, filter_status=tag),
             )
         )
+        if tag in ("flicker", "jump"):
+            rejected_trace_indices.append(len(traces) - 1)
 
+    # Same split for ground traces.
+    gt_by_key: dict[tuple[str, str | None], list] = {}
     for cam_id, trace in scene.ground_traces.items():
-        if not trace:
+        for p in trace:
+            status = p.get("filter_status")
+            gt_by_key.setdefault((cam_id, status), []).append(p)
+
+    dashed = bool(scene.triangulated)
+    for (cam_id, status) in sorted(gt_by_key.keys(), key=_status_key):
+        pts = gt_by_key[(cam_id, status)]
+        if not pts:
             continue
-        color = _CAMERA_COLORS.get(cam_id, _FALLBACK_CAMERA_COLOR)
-        xs = [p["x"] for p in trace]
-        ys = [p["y"] for p in trace]
-        zs = [p["z"] for p in trace]
-        ts = [p["t_rel_s"] for p in trace]
-        dashed = bool(scene.triangulated)
-        traces.append(
-            go.Scatter3d(
-                x=xs,
-                y=ys,
-                z=zs,
-                mode="lines+markers",
-                line=dict(
-                    color=color,
-                    width=3,
-                    dash="dash" if dashed else "solid",
-                ),
-                marker=dict(size=3, color=color),
-                opacity=0.7 if not dashed else 0.45,
-                name=f"Ground trace {cam_id} ({len(trace)} pts)",
-                hovertemplate=(
-                    f"Cam {cam_id} ground"
-                    "<br>t=%{customdata:.3f}s"
-                    "<br>x=%{x:.2f} m"
-                    "<br>y=%{y:.2f} m<extra></extra>"
-                ),
-                customdata=ts,
-                meta=dict(trace_kind="ground_trace", camera_id=cam_id),
-            )
+        pts = sorted(pts, key=lambda p: p["t_rel_s"])
+        xs = [p["x"] for p in pts]
+        ys = [p["y"] for p in pts]
+        zs = [p["z"] for p in pts]
+        ts = [p["t_rel_s"] for p in pts]
+        if status in _GHOST_STYLES:
+            color, suffix, opacity, _width, tag = _GHOST_STYLES[status]
+            name = f"Ground {cam_id} · {suffix} ({len(pts)} pts)"
+            marker_size = 2
+            # Ghost ground-trace: connecting a line through rejected points
+            # would imply motion continuity that the rejection argues against.
+            # Draw as scatter dots only.
+            mode = "markers"
+            line_kw = None
+        else:
+            color = _CAMERA_COLORS.get(cam_id, _FALLBACK_CAMERA_COLOR)
+            opacity = 0.7 if not dashed else 0.45
+            name = f"Ground trace {cam_id} ({len(pts)} pts)"
+            marker_size = 3
+            mode = "lines+markers"
+            line_kw = dict(color=color, width=3, dash="dash" if dashed else "solid")
+            tag = "kept"
+        kw = dict(
+            x=xs, y=ys, z=zs,
+            mode=mode,
+            marker=dict(size=marker_size, color=color),
+            opacity=opacity,
+            name=name,
+            hovertemplate=(
+                f"Cam {cam_id} ground"
+                "<br>t=%{customdata:.3f}s"
+                "<br>x=%{x:.2f} m"
+                "<br>y=%{y:.2f} m<extra></extra>"
+            ),
+            customdata=ts,
+            meta=dict(trace_kind="ground_trace", camera_id=cam_id, filter_status=tag),
         )
+        if line_kw is not None:
+            kw["line"] = line_kw
+        traces.append(go.Scatter3d(**kw))
+        if tag in ("flicker", "jump"):
+            rejected_trace_indices.append(len(traces) - 1)
 
     if scene.triangulated:
         ts = [p["t_rel_s"] for p in scene.triangulated]
@@ -280,6 +337,20 @@ def _build_figure(scene: Scene):
     if triag_parts:
         subtitle += " · " + " + ".join(triag_parts) + " 3D"
 
+    # Chain-filter counts inline in the subtitle so tuning is visible at a
+    # glance (no need to eyeball the legend).
+    filter_counts = {"kept": 0, "rejected_flicker": 0, "rejected_jump": 0}
+    for r in scene.rays:
+        st = getattr(r, "filter_status", None) or "kept"
+        if st in filter_counts:
+            filter_counts[st] += 1
+    if filter_counts["rejected_flicker"] or filter_counts["rejected_jump"]:
+        subtitle += (
+            f" · filter kept {filter_counts['kept']} /"
+            f" flicker {filter_counts['rejected_flicker']} /"
+            f" jump {filter_counts['rejected_jump']}"
+        )
+
     axis_font = dict(family="JetBrains Mono, monospace", size=11, color=_INK)
     axis_style = dict(
         backgroundcolor=_BG,
@@ -293,12 +364,43 @@ def _build_figure(scene: Scene):
         return dict(title=dict(text=title_text, font=axis_font), **axis_style)
 
     fig = go.Figure(data=traces)
+    # Button (top-right) that collapses every rejected trace to legend-only at
+    # once. Second click brings them back. Only rendered when something is
+    # actually rejected — no point showing a disabled button otherwise.
+    updatemenus = []
+    if rejected_trace_indices:
+        n_traces = len(traces)
+        hide_visible: list[object] = [True] * n_traces
+        for i in rejected_trace_indices:
+            hide_visible[i] = "legendonly"
+        show_visible: list[object] = [True] * n_traces
+        updatemenus.append(dict(
+            type="buttons",
+            direction="left",
+            showactive=True,
+            x=1.0,
+            xanchor="right",
+            y=1.08,
+            yanchor="bottom",
+            bgcolor=_SURFACE,
+            bordercolor=_BORDER_BASE,
+            borderwidth=1,
+            font=dict(family="JetBrains Mono, monospace", size=10, color=_INK),
+            pad=dict(l=6, r=6, t=2, b=2),
+            buttons=[dict(
+                label="Hide rejected",
+                method="restyle",
+                args=[{"visible": hide_visible}],
+                args2=[{"visible": show_visible}],
+            )],
+        ))
     fig.update_layout(
         title=dict(
             text=f"Session {scene.session_id}  —  {subtitle}",
             font=dict(family="JetBrains Mono, monospace", size=13, color=_INK),
             x=0.02,
         ),
+        updatemenus=updatemenus,
         paper_bgcolor=_BG,
         plot_bgcolor=_BG,
         scene=dict(

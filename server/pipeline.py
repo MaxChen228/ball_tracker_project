@@ -21,6 +21,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from chain_filter import annotate as chain_filter_annotate
 from detection import HSVRange, detect_ball
 from schemas import FramePayload
 from video import iter_frames
@@ -122,6 +123,7 @@ def detect_pitch(
                 )
             )
     ball_frames = sum(1 for f in out if f.ball_detected)
+    chain_filter_annotate(out)
     logger.info(
         "detection video=%s frames=%d ball=%d hsv=h[%d-%d]s[%d-%d]v[%d-%d] bg_sub=%s",
         video_path.name, len(out), ball_frames,

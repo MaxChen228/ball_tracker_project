@@ -29,8 +29,15 @@ class DeviceRegistry:
         time_synced: bool = False,
         time_sync_id: str | None = None,
         sync_anchor_timestamp_s: float | None = None,
+        battery_level: float | None = None,
+        battery_state: str | None = None,
     ) -> None:
         now = self._time_fn()
+        # Preserve last-known battery if this particular heartbeat omits it
+        # (keeps the UI stable across stray packets) but update when present.
+        prev = self.devices.get(camera_id)
+        resolved_level = battery_level if battery_level is not None else (prev.battery_level if prev else None)
+        resolved_state = battery_state if battery_state is not None else (prev.battery_state if prev else None)
         self.devices[camera_id] = Device(
             camera_id=camera_id,
             last_seen_at=now,
@@ -42,6 +49,8 @@ class DeviceRegistry:
                 if time_synced and sync_anchor_timestamp_s is not None
                 else None
             ),
+            battery_level=resolved_level,
+            battery_state=resolved_state,
         )
         stale = [
             cam for cam, dev in self.devices.items()
@@ -67,6 +76,8 @@ class DeviceRegistry:
             time_sync_id=dev.time_sync_id,
             time_sync_at=dev.time_sync_at,
             sync_anchor_timestamp_s=dev.sync_anchor_timestamp_s,
+            battery_level=dev.battery_level,
+            battery_state=dev.battery_state,
         )
 
     def online(self, stale_after_s: float | None = None) -> list[Device]:
@@ -93,6 +104,8 @@ class DeviceRegistry:
             time_sync_id=dev.time_sync_id,
             time_sync_at=dev.time_sync_at,
             sync_anchor_timestamp_s=dev.sync_anchor_timestamp_s,
+            battery_level=dev.battery_level,
+            battery_state=dev.battery_state,
         )
 
     def values(self) -> list[Device]:

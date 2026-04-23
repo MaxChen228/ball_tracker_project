@@ -161,7 +161,14 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .device-head .sync-led.listening {{ background: var(--warn); }}
 .device-head .sync-led.offline {{ background: var(--border); opacity: 0.45; }}
 .device-head .id {{ grid-column: 2; grid-row: 1; }}
-.device-head .chip-col {{ grid-column: 4; grid-row: 1; justify-self: end; }}
+.device-head .chip-col {{ grid-column: 4; grid-row: 1; justify-self: end;
+                          display: flex; flex-direction: row; gap: var(--s-2);
+                          align-items: center; }}
+.chip.battery {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; }}
+.chip.battery.ok {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
+.chip.battery.mid {{ color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }}
+.chip.battery.low {{ color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }}
+.chip.battery.charging {{ color: var(--accent); border-color: var(--accent); background: transparent; }}
 .device-head .sub {{ grid-column: 1 / -1; grid-row: 2; }}
 .sync-id-chip {{ margin-left: 6px; padding: 1px 5px; font-family: var(--mono);
                  font-size: 9px; border: 1px solid var(--border);
