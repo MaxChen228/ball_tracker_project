@@ -20,9 +20,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// HSV range (yellow-green h[25,55] s[90,255] v[90,255]), same area bounds
 /// ([20, 150000] px²), same shape gate (aspect ≥ 0.75, fill ≥ 0.60).
 ///
-/// `BTBallDetector` is the stateless per-frame path (no background model).
-/// For the mode-two pipeline use `BTDetectionSession` which owns the MOG2
-/// background subtractor and warmup counter — matching `pipeline.detect_pitch`.
+/// `BTBallDetector` is the stateless per-frame path (no background model),
+/// used by the live detection pipeline (`ConcurrentDetectionPool`).
 @interface BTBallDetector : NSObject
 
 /// Run detection with the default HSV range.
@@ -35,40 +34,6 @@ NS_ASSUME_NONNULL_BEGIN
                                              hMin:(int)hMin hMax:(int)hMax
                                              sMin:(int)sMin sMax:(int)sMax
                                              vMin:(int)vMin vMax:(int)vMax;
-
-@end
-
-/// Stateful mirror of `server/pipeline.detect_pitch`'s MOG2 + detection loop.
-///
-/// One session = one recording cycle. Owns a `cv::BackgroundSubtractorMOG2`
-/// (detectShadows=False) built up across successive frames and a warmup
-/// counter — `applyPixelBuffer:` returns nil for the first 30 frames while
-/// the per-pixel Gaussian model stabilises, then HSV mask AND fg_mask AND
-/// morphological CLOSE gate into the usual area + shape filter.
-///
-/// Threading: not thread-safe. Create one session per recording cycle and
-/// drive it from a single detection queue.
-@interface BTDetectionSession : NSObject
-
-/// New session with the default HSV range + 30 frame warmup.
-- (instancetype)init;
-
-/// New session with a caller-supplied HSV range + 30 frame warmup.
-- (instancetype)initWithHMin:(int)hMin hMax:(int)hMax
-                        sMin:(int)sMin sMax:(int)sMax
-                        vMin:(int)vMin vMax:(int)vMax;
-
-/// `frameIndex` < warmupFrames means the MOG2 background model isn't yet
-/// reliable. `applyPixelBuffer:` during warmup still accumulates into the
-/// model but returns nil so callers can gate "valid detection" logic.
-@property (nonatomic, readonly) NSInteger warmupFrames;
-@property (nonatomic, readonly) NSInteger frameIndex;
-
-/// Feed one frame into the MOG2 model and (post-warmup) run detection
-/// on the combined HSV-AND-fg_mask blob mask. Returns the largest blob
-/// passing the area + shape gate, or nil if none / still warming up.
-- (nullable BTBallDetection *)applyPixelBuffer:(CVPixelBufferRef)pixelBuffer
-    NS_SWIFT_NAME(apply(_:));
 
 @end
 
