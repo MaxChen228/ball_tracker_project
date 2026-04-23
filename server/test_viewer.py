@@ -539,7 +539,9 @@ def test_viewer_health_banner_rate_bar_colour_tiers():
     body = client.get(f"/viewer/{session_id}").text
     # 1/20 = 5% → pending tier (amber). Boundary is `< 0.30`.
     assert "rate-fill pending" in body
-    assert "1</span>" in body and "20 frames" in body
+    # Stats now surface per-pipeline chips. server_post chip reads "1/20".
+    assert 'class="path-stat on"' in body
+    assert ">S</span><span class=\"val\">1/20<" in body
 
 
 def test_viewer_health_banner_flags_missing_time_sync():
