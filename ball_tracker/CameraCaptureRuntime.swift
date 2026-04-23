@@ -20,7 +20,13 @@ final class CameraCaptureRuntime {
     private let trackingFps: Double
     private let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
+    private let photoOutput = AVCapturePhotoOutput()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue", qos: .userInitiated)
+    // AVFoundation does not retain AVCapturePhotoCaptureDelegate past the
+    // capturePhoto call — we key by photoSettings uniqueID so a burst of
+    // parallel calibration shots (unlikely but possible) wouldn't collide.
+    private var pendingPhotoDelegates: [Int64: PhotoCaptureDelegate] = [:]
+    private let photoDelegateLock = NSLock()
 
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var audioInput: AVCaptureDeviceInput?
@@ -87,6 +93,21 @@ final class CameraCaptureRuntime {
         videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
         if session.canAddOutput(videoOutput) {
             session.addOutput(videoOutput)
+        }
+        if session.canAddOutput(photoOutput) {
+            session.addOutput(photoOutput)
+            // iOS 16+: opt into native-sensor still dims (12 MP for the 1x
+            // wide on iPhone 14+). If the current video activeFormat caps
+            // the photo sub-resolution lower (unusual but possible), we
+            // just get whatever the format advertises — still a big step
+            // up from the 1080p preview-buffer JPEG path.
+            if #available(iOS 16.0, *),
+               let dev = (session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
+                          .first { $0.device.hasMediaType(.video) })?.device,
+               let maxDims = dev.activeFormat.supportedMaxPhotoDimensions.last {
+                photoOutput.maxPhotoDimensions = maxDims
+                captureLog.info("photo output max dims \(maxDims.width)x\(maxDims.height)")
+            }
         }
 
         session.commitConfiguration()
@@ -507,5 +528,83 @@ final class CameraCaptureRuntime {
         audioInput = input
         audioOutput = output
         chirpDetector = detector
+    }
+
+    // MARK: - High-res still capture (calibration frames)
+
+    /// Snap one native-resolution JPEG via `AVCapturePhotoOutput`. Used by
+    /// auto-calibration: a 12 MP still (~4032×3024 on iPhone 14+ 1x wide)
+    /// gives the server-side ArUco detector ~3x the pixel footprint of the
+    /// 1080p preview buffer the calibration path used to upload, which was
+    /// dropping markers at the 30 px edge of the DICT_4X4_50 detection
+    /// threshold. Completion fires on the session queue with the JPEG data
+    /// plus the ISP-resolved pixel dims; nil data means the capture failed.
+    /// Requires the session to already be running (caller is expected to
+    /// `startStandbyCapture()` before invoking this).
+    func captureHighResStill(
+        completion: @escaping (Data?, CGSize) -> Void
+    ) {
+        sessionQueue.async { [weak self] in
+            guard let self = self else {
+                completion(nil, .zero)
+                return
+            }
+            guard self.session.isRunning else {
+                captureLog.warning("high-res still: session not running")
+                completion(nil, .zero)
+                return
+            }
+            let settings = AVCapturePhotoSettings(format: [
+                AVVideoCodecKey: AVVideoCodecType.jpeg
+            ])
+            if #available(iOS 16.0, *) {
+                settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
+            }
+            let uniqueID = settings.uniqueID
+            let delegate = PhotoCaptureDelegate { [weak self] data, size in
+                self?.photoDelegateLock.withLock {
+                    _ = self?.pendingPhotoDelegates.removeValue(forKey: uniqueID)
+                }
+                completion(data, size)
+            }
+            self.photoDelegateLock.withLock {
+                self.pendingPhotoDelegates[uniqueID] = delegate
+            }
+            self.photoOutput.capturePhoto(with: settings, delegate: delegate)
+        }
+    }
+}
+
+// MARK: - AVCapturePhotoCaptureDelegate wrapper
+
+private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+    private let onDone: (Data?, CGSize) -> Void
+    init(onDone: @escaping (Data?, CGSize) -> Void) {
+        self.onDone = onDone
+    }
+    func photoOutput(_ output: AVCapturePhotoOutput,
+                     didFinishProcessingPhoto photo: AVCapturePhoto,
+                     error: Error?) {
+        if let error = error {
+            captureLog.error("high-res still failed err=\(error.localizedDescription, privacy: .public)")
+            onDone(nil, .zero)
+            return
+        }
+        guard let data = photo.fileDataRepresentation() else {
+            onDone(nil, .zero)
+            return
+        }
+        let dims = photo.resolvedSettings.photoDimensions
+        let size = CGSize(width: CGFloat(dims.width), height: CGFloat(dims.height))
+        captureLog.info("high-res still ok \(Int(size.width))x\(Int(size.height)) bytes=\(data.count)")
+        onDone(data, size)
+    }
+}
+
+private extension NSLock {
+    func withLock<T>(_ body: () -> T) -> T {
+        lock()
+        defer { unlock() }
+        return body()
     }
 }

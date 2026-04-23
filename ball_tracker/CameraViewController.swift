@@ -51,6 +51,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     nonisolated(unsafe) private var captureQueueUploader: ServerUploader!
     nonisolated(unsafe) private var captureQueueRecordingWorkflow: CameraRecordingWorkflow!
     nonisolated(unsafe) private var captureQueueTransportCoordinator: CameraTransportCoordinator!
+    nonisolated(unsafe) private var captureQueueRuntime: CameraCaptureRuntime!
     private var captureRuntime: CameraCaptureRuntime!
     private var stateController: CameraStateController!
     private var state: AppState { stateController.currentState }
@@ -256,6 +257,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         captureRuntime.requestAudioCaptureAccess(cameraRole: settings.cameraRole)
         captureQueueCameraRole = settings.cameraRole
         captureQueueUploader = uploader
+        captureQueueRuntime = captureRuntime
         healthMonitor.start()
         transportCoordinator.connect()
         updateUIForState()
@@ -377,30 +379,22 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     /// Encode the given pixel buffer at its NATIVE resolution (no
     /// downsample, no scale) as a high-quality JPEG and POST it to the
-    /// server's calibration-frame endpoint. Runs on the capture queue so
-    /// as not to block the main thread; hop off-queue for the HTTP call
-    /// so the capture queue doesn't stall on network latency.
-    nonisolated private func uploadCalibrationFrame(_ pixelBuffer: CVPixelBuffer) {
-        let w = CVPixelBufferGetWidth(pixelBuffer)
-        let h = CVPixelBufferGetHeight(pixelBuffer)
+    /// Fire a native-resolution JPEG capture via `AVCapturePhotoOutput` and
+    /// POST it to the server's calibration-frame endpoint. The phone used
+    /// to encode the 1080p preview pixel buffer for this; 12 MP stills via
+    /// photo output give the server-side ArUco detector ~3x the marker
+    /// pixel footprint, so markers that used to drop off near the
+    /// DICT_4X4_50 detection threshold at 30 px now clear it comfortably.
+    nonisolated private func uploadCalibrationFrame() {
         let cam = captureQueueCameraRole
-        guard let uploader = captureQueueUploader else { return }
-        // CIImage is retain-counted + thread-safe; constructing here on
-        // the capture queue is fine. The encode itself we hop onto a
-        // utility queue so the next sample isn't delayed.
-        let ci = CIImage(cvPixelBuffer: pixelBuffer)
-        DispatchQueue.global(qos: .userInitiated).async {
-            let ctx = CIContext(options: [.useSoftwareRenderer: false])
-            guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
-                  let jpeg = ctx.jpegRepresentation(
-                      of: ci, colorSpace: cs,
-                      options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.9]
-                  )
-            else {
-                log.warning("calibration frame: native-res JPEG encode failed")
+        guard let uploader = captureQueueUploader,
+              let runtime = captureQueueRuntime else { return }
+        runtime.captureHighResStill { jpeg, size in
+            guard let jpeg = jpeg else {
+                log.error("calibration frame: high-res capture failed cam=\(cam, privacy: .public)")
                 return
             }
-            log.info("calibration frame: encoded \(w)x\(h) bytes=\(jpeg.count)")
+            log.info("calibration frame: \(Int(size.width))x\(Int(size.height)) bytes=\(jpeg.count)")
             let path = "/camera/\(cam)/calibration_frame"
             uploader.postRawJPEG(path: path, jpeg: jpeg) { result in
                 switch result {
@@ -812,7 +806,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             captureQueueTransportCoordinator.pushPreviewFrame(pixelBuffer)
         }
         if captureQueueTransportCoordinator.consumeCalibrationFrameCaptureRequest(whileIn: snap.state) {
-            uploadCalibrationFrame(pixelBuffer)
+            uploadCalibrationFrame()
         }
 
         // Only the `.recording` state cares about samples.
