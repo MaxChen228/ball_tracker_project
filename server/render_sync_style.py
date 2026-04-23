@@ -86,9 +86,13 @@ _SYNC_CSS = """
   font-family: var(--mono); font-size: 10px;
   letter-spacing: 0.12em; text-transform: uppercase;
 }
-.devices-grid { display: flex; flex-direction: column; gap: var(--s-3); }
-.device { padding: var(--s-2) 0; }
-.device + .device { border-top: 1px solid var(--border-l); margin-top: var(--s-3); padding-top: var(--s-3); }
+.devices-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+                 gap: var(--s-3); }
+.device { padding: var(--s-2); border: 1px solid var(--border-l);
+          border-radius: var(--r); background: var(--surface); }
+@media (max-width: 900px) {
+  .devices-grid { grid-template-columns: 1fr; }
+}
 .device-head { display: grid; grid-template-columns: 14px 28px 1fr auto;
                align-items: center; gap: var(--s-2); }
 .device-head .sync-led { grid-column: 1; grid-row: 1;

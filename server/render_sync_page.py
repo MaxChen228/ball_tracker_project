@@ -46,7 +46,6 @@ def render_setup_html(
         '<h1 class="page-title">Camera Position Setup</h1>'
         '</div>'
         '</section>'
-        '<div class="setup-section-title">Devices &middot; Calibration</div>'
         '<div class="card">'
         '<h2 class="card-title">Devices &middot; Calibration</h2>'
         f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested, compare_mode="toggle")}</div>'
