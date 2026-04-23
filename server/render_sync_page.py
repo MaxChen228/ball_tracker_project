@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from render_compare import LIVE_COMPARE_CSS
 from render_dashboard_client import _JS_TEMPLATE as _DASHBOARD_JS_TEMPLATE
 from render_dashboard_devices import _render_device_rows
-from render_shared import _CSS, _render_app_nav
+from render_dashboard_style import _CSS
+from render_shared import _render_app_nav
 from render_sync import _render_sync_body, _render_sync_legend, _render_burst_params_body
 from render_sync_client import _JS_TEMPLATE
 from render_sync_style import _SYNC_CSS
@@ -35,7 +37,7 @@ def render_setup_html(
         "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
         "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
         "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
-        f"<style>{_CSS}{_SYNC_CSS}</style>"
+        f"<style>{_CSS}{_SYNC_CSS}{LIVE_COMPARE_CSS}</style>"
         "</head><body data-page=\"setup\">"
         f'{_render_app_nav("setup", devices, session, calibrations, None, sync_cooldown_remaining_s)}'
         '<main class="main-sync">'
@@ -45,7 +47,6 @@ def render_setup_html(
         '<h1 class="page-title">Camera Position Setup</h1>'
         '</div>'
         '</section>'
-        '<div class="setup-section-title">Devices &middot; Calibration</div>'
         '<div class="card">'
         '<h2 class="card-title">Devices &middot; Calibration</h2>'
         f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested, compare_mode="toggle")}</div>'
@@ -86,24 +87,20 @@ def render_sync_html(
         "</head><body data-page=\"sync\">"
         f'{_render_app_nav("sync", devices, session, calibrations, sync, sync_cooldown_remaining_s)}'
         '<main class="main-sync">'
-        '<div class="setup-section-title">Per-device sync state</div>'
         '<div class="card">'
         '<h2 class="card-title">Device sync</h2>'
         '<div id="per-cam-sync" class="per-cam-sync"><div class="trace-empty">Waiting for device status…</div></div>'
         '</div>'
-        '<div class="setup-section-title">Sync Control</div>'
         '<div class="card">'
         '<h2 class="card-title">Sync Control</h2>'
         f'<div id="sync-body">{_render_sync_body(sync, last_sync, devices, session, sync_cooldown_remaining_s)}</div>'
         "</div>"
-        '<div class="setup-section-title">Burst Params</div>'
         '<div class="card">'
         '<h2 class="card-title">Burst Params</h2>'
-        '<div class="card-subtitle">A and B emit staggered bursts. Server pushes these to iOS in each sync_run — no rebuild needed.</div>'
+        '<p style="font-size:12px;color:var(--sub);margin:0 0 var(--s-3) 0;">A and B emit staggered bursts. Server pushes these to iOS in each sync_run — no rebuild needed.</p>'
         '<div id="tuning-status" class="tuning-status"></div>'
         f'<div id="burst-params-body">{_render_burst_params_body(sync_params)}</div>'
         "</div>"
-        '<div class="setup-section-title">Matched-filter trace</div>'
         '<div class="card">'
         '<h2 class="card-title">Matched-filter trace</h2>'
         '<div id="sync-trace"><div class="trace-empty">No sync run yet.</div></div>'

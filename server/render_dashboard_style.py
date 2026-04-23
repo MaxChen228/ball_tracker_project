@@ -110,7 +110,8 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .nav .status-check .v {{ color: currentColor; font-weight: 600; }}
 
 /* --- Main layout: sidebar + canvas --- */
-.layout {{ display: flex; min-height: 100vh; padding-top: var(--nav-offset); }}
+.layout {{ display: flex; height: 100vh; padding-top: var(--nav-offset);
+           box-sizing: border-box; overflow: hidden; }}
 .sidebar {{ width: var(--sidebar-w); flex-shrink: 0; overflow-y: auto;
             background: var(--surface); border-right: 1px solid var(--border-base);
             padding: var(--s-5) var(--s-4); z-index: 10;

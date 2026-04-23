@@ -375,9 +375,7 @@ def _build_status_response() -> dict[str, Any]:
         # `calibration_frame_requested` scalar and uploads one
         # full-resolution JPEG.
         "calibration_frame_requested": {
-            cam: True
-            for cam in state._cal_frame_requested.keys()
-            if state.is_calibration_frame_requested(cam)
+            cam: True for cam in state.requested_calibration_frame_ids()
         },
         "auto_calibration": state.auto_cal_status(),
         "live_session": state.live_session_summary(),
