@@ -569,97 +569,26 @@ final class CameraCaptureRuntime {
             let settings = AVCapturePhotoSettings(format: [
                 AVVideoCodecKey: AVVideoCodecType.jpeg
             ])
-
-            // The selected video activeFormat (1920×1080 on both iPhone and
-            // iPad on this rig) advertises at most 1080p in
-            // supportedMaxPhotoDimensions — the 12 MP sensor output lives on
-            // a photo-only format (e.g. 4032×3024 @ 1-30 fps) that the video
-            // pipeline never picks. Without swapping there, auto-cal JPEGs
-            // come back at 1080p and DICT_4X4_50 markers at the frame edge
-            // fall under the detection threshold. We temporarily switch
-            // activeFormat to the largest-still format, capture, then
-            // restore original format + frameDuration inside the delegate
-            // callback so the video stream resumes at the prior state.
-            var restore: (() -> Void)? = nil
+            // Pull max dims from the CURRENT activeFormat. This caps us at
+            // 1080p on most video-oriented activeFormats, but a full
+            // 12 MP format swap mid-session reliably breaks the video
+            // pipeline and the photo delegate silently never fires — we
+            // reverted that path. Best-effort higher-than-video if the
+            // selected format happens to advertise a bigger still.
             if #available(iOS 16.0, *),
                let dev = (self.session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
-                          .first { $0.device.hasMediaType(.video) })?.device {
-                let bestFormat = dev.formats.max(by: { a, b in
-                    let amax = a.supportedMaxPhotoDimensions
-                        .max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) })
-                    let bmax = b.supportedMaxPhotoDimensions
-                        .max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) })
-                    let aArea = Int64(amax?.width ?? 0) * Int64(amax?.height ?? 0)
-                    let bArea = Int64(bmax?.width ?? 0) * Int64(bmax?.height ?? 0)
-                    return aArea < bArea
-                })
-                if let best = bestFormat,
-                   let maxDims = best.supportedMaxPhotoDimensions
-                        .max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }) {
-                    if best !== dev.activeFormat {
-                        // Swapping activeFormat on a running session while
-                        // videoOutput is attached breaks the session (the
-                        // 32BGRA delegate can't keep up with 4032x3024
-                        // frames — the photo delegate never fires). Wrap
-                        // the swap in beginConfiguration/commitConfiguration
-                        // AND detach the video delegate for the photo
-                        // window; restore both on completion.
-                        let originalFormat = dev.activeFormat
-                        let originalMin = dev.activeVideoMinFrameDuration
-                        let originalMax = dev.activeVideoMaxFrameDuration
-                        let savedVideoDelegate = self.videoOutput.sampleBufferDelegate
-                        let savedVideoQueue = self.videoOutput.sampleBufferCallbackQueue
-                        self.videoOutput.setSampleBufferDelegate(nil, queue: nil)
-                        self.session.beginConfiguration()
-                        var swapped = false
-                        do {
-                            try dev.lockForConfiguration()
-                            dev.activeFormat = best
-                            dev.unlockForConfiguration()
-                            swapped = true
-                            captureLog.info("high-res still swapped activeFormat to \(maxDims.width)x\(maxDims.height) for photo")
-                        } catch {
-                            captureLog.error("high-res still format swap failed: \(error.localizedDescription, privacy: .public)")
-                        }
-                        self.session.commitConfiguration()
-                        if swapped {
-                            restore = { [weak self] in
-                                guard let self = self else { return }
-                                self.sessionQueue.async {
-                                    self.session.beginConfiguration()
-                                    do {
-                                        try dev.lockForConfiguration()
-                                        dev.activeFormat = originalFormat
-                                        dev.activeVideoMinFrameDuration = originalMin
-                                        dev.activeVideoMaxFrameDuration = originalMax
-                                        dev.unlockForConfiguration()
-                                        captureLog.info("high-res still restored video activeFormat")
-                                    } catch {
-                                        captureLog.error("high-res still restore failed: \(error.localizedDescription, privacy: .public)")
-                                    }
-                                    self.session.commitConfiguration()
-                                    if let d = savedVideoDelegate, let q = savedVideoQueue {
-                                        self.videoOutput.setSampleBufferDelegate(d, queue: q)
-                                    }
-                                }
-                            }
-                        } else {
-                            if let d = savedVideoDelegate, let q = savedVideoQueue {
-                                self.videoOutput.setSampleBufferDelegate(d, queue: q)
-                            }
-                        }
-                    }
-                    self.photoOutput.maxPhotoDimensions = maxDims
-                    settings.maxPhotoDimensions = maxDims
-                    captureLog.info("high-res still request max dims \(maxDims.width)x\(maxDims.height)")
-                }
+                          .first { $0.device.hasMediaType(.video) })?.device,
+               let maxDims = dev.activeFormat.supportedMaxPhotoDimensions
+                    .max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }) {
+                self.photoOutput.maxPhotoDimensions = maxDims
+                settings.maxPhotoDimensions = maxDims
+                captureLog.info("high-res still request max dims \(maxDims.width)x\(maxDims.height)")
             }
             let uniqueID = settings.uniqueID
             let delegate = PhotoCaptureDelegate { [weak self] data, size in
                 self?.photoDelegateLock.withLock {
                     _ = self?.pendingPhotoDelegates.removeValue(forKey: uniqueID)
                 }
-                restore?()
                 completion(data, size)
             }
             self.photoDelegateLock.withLock {
