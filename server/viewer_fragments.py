@@ -204,15 +204,22 @@ def cam_card_html(cam_id: str, cam: dict) -> str:
     )
     path_chips: list[str] = []
     for key, abbr, tip in _PATHS:
-        c = counts.get(key) or {"total": 0, "detected": 0}
+        c = counts.get(key) or {"total": 0, "detected": 0, "fps": None}
         total = c.get("total", 0)
         det = c.get("detected", 0)
+        fps = c.get("fps")
         klass = "on" if total > 0 else "off"
         ratio_txt = f"{det}/{total}" if total > 0 else "—"
+        fps_txt = (
+            f'<span class="fps" title="effective fps = frames / duration">'
+            f"{fps:.0f} fps</span>"
+            if isinstance(fps, (int, float)) else ""
+        )
         path_chips.append(
             f'<span class="path-stat {klass}" title="{tip}">'
             f'<span class="lbl">{abbr}</span>'
-            f'<span class="val">{ratio_txt}</span></span>'
+            f'<span class="val">{ratio_txt}</span>'
+            f"{fps_txt}</span>"
         )
     # rate-bar denominator: prefer server_post, then live. server_post
     # stays the canonical reference for dual-cam triangulation sessions.

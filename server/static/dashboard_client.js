@@ -25,7 +25,10 @@
   const sessionBox = document.getElementById('session-body');
   const eventsBox = document.getElementById('events-body');
   const navStatus = document.getElementById('nav-status');
-  let currentDefaultPaths = ['server_post'];
+  // server's default_paths now always contains just "live" (server_post
+  // is triggered post-hoc per session). Kept as a fallback for the rare
+  // bootstrap before /status returns.
+  let currentDefaultPaths = ['live'];
   let currentLiveSession = null;
   const livePointStore = new Map();   // sid -> [{x,y,z,t_rel_s}]
   const liveRayStore = new Map();     // sid -> Map(cam -> [{origin,endpoint,t_rel_s,frame_index}])
@@ -664,6 +667,22 @@
     return `<span class="chip idle">offline</span>`;
   }
 
+  // Mirrors server-side _render_battery_chip: hidden when device is offline
+  // or hasn't reported battery yet.
+  function batteryChip(device, online) {
+    if (!online || !device) return '';
+    const level = device.battery_level;
+    if (typeof level !== 'number' || level < 0 || level > 1) return '';
+    const pct = Math.max(0, Math.min(100, Math.round(level * 100)));
+    const state = device.battery_state || 'unknown';
+    let cls, icon;
+    if (state === 'charging' || state === 'full') { cls = 'charging'; icon = '⚡'; }
+    else if (pct <= 15) { cls = 'low';  icon = '▁'; }
+    else if (pct <= 35) { cls = 'mid';  icon = '▃'; }
+    else                 { cls = 'ok';   icon = '▅'; }
+    return `<span class="chip battery ${cls}" title="battery · ${esc(state)}">${icon} ${pct}%</span>`;
+  }
+
   function autoCalLabel(autoRun, autoLast, online) {
     if (autoRun) {
       return autoRun.summary || autoRun.status || 'running';
@@ -776,7 +795,7 @@
               <span class="item ${calDot}"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>
               <span class="item ${autoDot}" title="${esc(autoLabel)}"><span class="dot ${autoDot}"></span>auto-cal · ${esc(autoLabel)}</span>
             </div>
-            <div class="chip-col">${statusChip(cam, online, isCal)}</div>
+            <div class="chip-col">${batteryChip(deviceRecord, online)}${statusChip(cam, online, isCal)}</div>
           </div>
           <div class="device-actions">${previewBtn}${autoCalBtn}</div>
           ${previewPanel}
@@ -860,128 +879,14 @@
     return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${ds}`;
   }
 
-  function renderActiveSession(liveSession) {
-    if (!activeBox) return;
-    if (!liveSession || !liveSession.session_id) {
-      activeBox.innerHTML = `<div class="active-empty">No active session.</div>`;
-      return;
-    }
-    const sid = esc(liveSession.session_id);
-    const frameCounts = liveSession.frame_counts || {};
-    const fps = liveSession.frame_fps || {};
-    const armed = liveSession.armed !== false;
-    const chips = (liveSession.paths || []).map(path =>
-      `<span class="path-chip on">${esc((PATH_LABELS[path] || [path])[0])}</span>`
-    ).join('') || `<span class="path-chip">none</span>`;
-    const elapsedMs = liveSession.armed_at_ms
-      ? (armed ? Date.now() : (liveSession.ended_at_ms || Date.now())) - liveSession.armed_at_ms
-      : 0;
-    // Last-point-age flips red after 200ms of silence during an armed
-    // session — operator signal that triangulation has stalled (lost
-    // sync, ball left frame, or a stream is dropping frames).
-    const lastPtMs = liveSession.last_point_at_ms
-      ? Date.now() - liveSession.last_point_at_ms
-      : null;
-    const lastPtClass = (armed && lastPtMs !== null && lastPtMs > 200) ? 'stale' : '';
-    const lastPtTxt = lastPtMs === null
-      ? '—'
-      : (lastPtMs < 1000 ? `${lastPtMs}ms ago` : `${(lastPtMs/1000).toFixed(1)}s ago`);
-    const depths = liveSession.point_depths || [];
-    let depthTxt = '—';
-    if (depths.length) {
-      const mean = depths.reduce((a,b)=>a+b,0) / depths.length;
-      const variance = depths.reduce((a,b)=>a+(b-mean)*(b-mean),0) / depths.length;
-      const std = Math.sqrt(variance);
-      depthTxt = `${mean.toFixed(2)}m ± ${std.toFixed(2)}`;
-    }
-    // Post-pass rows: which paths are part of the session and their status
-    const pathsOn = new Set(liveSession.paths || []);
-    const completed = new Set(liveSession.paths_completed || []);
-    const postPassRow = (path, label) => {
-      if (!pathsOn.has(path)) return '';
-      const state = completed.has(path) ? 'done' : (armed ? 'pending' : 'stopped');
-      return `<span class="postpass-chip ${state}">${esc(label)}: ${state}</span>`;
-    };
-    const postPassChips = [
-      postPassRow('server_post', 'srv'),
-    ].filter(Boolean).join('');
-    const liveEnabled = pathsOn.has('live');
-    const liveRows = liveEnabled ? `
-      <div class="cam-row" data-cam="A">
-        <canvas class="spark" data-spark="A"></canvas>
-        <span class="k">A</span>
-        <span class="v">${(fps.A || 0).toFixed(0)} fps</span>
-        <span class="vsub">${Number(frameCounts.A || 0)} frames</span>
-      </div>
-      <div class="cam-row" data-cam="B">
-        <canvas class="spark" data-spark="B"></canvas>
-        <span class="k">B</span>
-        <span class="v">${(fps.B || 0).toFixed(0)} fps</span>
-        <span class="vsub">${Number(frameCounts.B || 0)} frames</span>
-      </div>
-      <div class="live-pairs ${lastPtClass}">
-        <span class="k">Live pairs</span>
-        <span class="v">${Number(liveSession.point_count || 0)} pts</span>
-        <span class="vsub">last ${lastPtTxt} · ${depthTxt}</span>
-      </div>` : `
-      <div class="active-empty">Live stream disabled for this session.</div>`;
-    activeBox.innerHTML = `
-      <div class="active-head">
-        <span class="chip armed ${armed ? 'pulse' : ''}">${armed ? '●REC' : 'ended'}</span>
-        <span class="session-id">${sid}</span>
-        <span class="elapsed" data-elapsed>${fmtElapsed(elapsedMs)}</span>
-      </div>
-      <div class="path-chip-row">${chips}</div>
-      ${liveRows}
-      ${postPassChips ? `<div class="postpass-row">${postPassChips}</div>` : ''}
-      <div class="active-actions">
-        <button type="button" class="btn-reset" data-reset-trail>Reset trail</button>
-      </div>`;
-    // Redraw sparklines after DOM replacement (canvas clears on innerHTML).
-    ['A','B'].forEach(cam => {
-      const canvas = activeBox.querySelector(`[data-spark="${cam}"]`);
-      const samples = ((liveSession.frame_samples || {})[cam]) || [];
-      drawSparkline(canvas, samples);
-    });
-    const resetBtn = activeBox.querySelector('[data-reset-trail]');
-    if (resetBtn) {
-      resetBtn.addEventListener('click', () => {
-        if (!currentLiveSession) return;
-        livePointStore.set(currentLiveSession.session_id, []);
-        liveRayStore.set(currentLiveSession.session_id, new Map());
-        currentLiveSession.point_count = 0;
-        currentLiveSession.point_depths = [];
-        currentLiveSession.last_point_at_ms = null;
-        liveTraceIdx = -1;
-        renderActiveSession(currentLiveSession);
-        repaintCanvas();
-      });
-    }
-  }
-
-  function renderDetectionPaths(session) {
-    const armed = !!(session && session.armed);
-    const active = new Set(armed ? (session.paths || currentDefaultPaths || []) : (currentDefaultPaths || []));
-    if (armed) {
-      const chips = [...active].map(path =>
-        `<span class="path-chip on">${esc((PATH_LABELS[path] || [path])[0])}</span>`
-      ).join('') || `<span class="path-chip">none</span>`;
-      return `<div class="path-lock"><span class="mode-label">Paths</span><div class="path-chip-row">${chips}</div></div>`;
-    }
-    const options = ['live', 'server_post'].map(path => {
-      const [title, sub] = PATH_LABELS[path] || [path, ''];
-      return `<label class="path-option">
-          <input type="checkbox" name="paths" value="${path}" ${active.has(path) ? 'checked' : ''}>
-          <span class="copy">
-            <span class="title">${esc(title)}</span>
-            <span class="sub">${esc(sub)}</span>
-          </span>
-        </label>`;
-    }).join('');
-    return `<form method="POST" action="/detection/paths" id="paths-form">
-      <div class="paths-stack">${options}</div>
-      <div class="paths-actions"><button class="btn" type="submit">Apply</button></div>
-    </form>`;
+  // Dashboard Session Monitor card was removed — the operator's only
+  // during-stream concern is the live 3D canvas. fps/frame telemetry
+  // still gets tracked on `currentLiveSession` (frame_samples +
+  // frame_fps) via pushFrameSample so post-session consumers (e.g. the
+  // viewer page, telemetry panel) have the data. This stub keeps the
+  // legacy call sites from erroring.
+  function renderActiveSession(_liveSession) {
+    return;
   }
 
   // Per-cam sync indicator shown next to Quick chirp. States:
@@ -1049,7 +954,7 @@
     const canArm = !!(readiness && readiness.ready);
     const blockers = (readiness && readiness.blockers) || [];
     const warnings = (readiness && readiness.warnings) || [];
-    currentDefaultPaths = state.default_paths || currentDefaultPaths || ['server_post'];
+    currentDefaultPaths = state.default_paths || currentDefaultPaths || ['live'];
     currentLiveSession = state.live_session || currentLiveSession;
     const chip = armed ? `<span class="chip armed">armed</span>` : `<span class="chip idle">idle</span>`;
     const sid = s && s.id ? `<span class="session-id">${esc(s.id)}</span>` : '';
@@ -1082,58 +987,26 @@
         </form>
         ${renderSyncLed(state, 'A')}
         ${renderSyncLed(state, 'B')}
-      </div>
-      ${renderDetectionPaths(s)}`;
+      </div>`;
     if (sessionBox) sessionBox.innerHTML = sessHtml;
     renderActiveSession(currentLiveSession);
 
     // Mirror live state into the shared app-header status strip.
+    // Three chips only — devices / cal / sync — matching
+    // render_shared.py::_render_nav_status. The editorial badge +
+    // headline were redundant with the per-device rows downstream.
     if (navStatus) {
       const online = (state.devices || []).length;
       const usable = (readiness.calibrated_online_cameras || []).length;
       const syncedUsable = (readiness.synced_calibrated_online_cameras || []).length;
-      const cooldown = Number(state.sync_cooldown_remaining_s || 0);
-      let badgeCls = 'ready';
-      let badge = 'Ready';
-      let headline = 'ready to arm';
-      let context = readiness.mode === 'single_camera'
-        ? 'single-camera rays only'
-        : 'all stereo prerequisites satisfied';
-      if (armed) {
-        badgeCls = 'recording';
-        badge = 'Recording';
-        headline = esc(s.id || '—');
-        context = 'session active';
-      } else if (state.sync) {
-        badgeCls = 'syncing';
-        badge = 'Sync';
-        headline = 'sync in progress';
-        context = 'complete on /sync';
-      } else if (!canArm) {
-        badgeCls = 'blocked';
-        badge = 'Blocked';
-        headline = blockers[0] || 'not ready';
-        context = blockers.slice(1).join(', ') || 'check camera readiness';
-      } else if (cooldown > 0) {
-        badgeCls = 'cooldown';
-        badge = 'Cooldown';
-        headline = 'sync settling';
-        context = `${cooldown.toFixed(0)}s remaining`;
-      }
       const check = (label, value, ok) =>
         `<span class="status-check ${ok ? 'ok' : 'warn'}"><span class="k">${label}</span><span class="v">${value}</span></span>`;
-      const navHtml = `
-        <div class="status-main">
-          <span class="status-badge ${badgeCls}">${badge}</span>
-          <span class="status-headline">${headline}</span>
-          <span class="status-context">${context}</span>
-        </div>
+      navStatus.innerHTML = `
         <div class="status-checks">
           ${check('Devices', `${online}`, online >= 1)}
           ${check('Cal', `${usable}`, usable >= 1)}
           ${check('Sync', readiness.requires_time_sync ? `${syncedUsable}/${usable}` : 'single', !readiness.requires_time_sync || syncedUsable >= usable)}
         </div>`;
-      navStatus.innerHTML = navHtml;
     }
   }
 
@@ -1155,13 +1028,9 @@
     evHtml = events.map(e => {
       const sid = esc(e.session_id);
       const stat = (e.status || '').replace(/_/g, ' ');
-      const duration = fmtNum(e.duration_s, 2);
-      const peakZ = e.peak_z_m != null ? e.peak_z_m.toFixed(2) : null;
       const triangulated = Number(e.n_triangulated || 0);
-      // Two pipelines, two fully-independent chips. State (on/err/-)
-      // comes from path_status, frame count from n_ball_frames_by_path.
-      // Keep this in lock-step with render_dashboard_events._path_chip so
-      // SSR and JS refresh paint the same DOM.
+      // Two pipelines, two independent chips. State (on/err/-) from
+      // path_status; count from n_ball_frames_by_path.
       const pathStatus = e.path_status || {};
       const pathCounts = e.n_ball_frames_by_path || {};
       const pathTitles = {
@@ -1183,7 +1052,7 @@
       const confirmMsg = `刪除 session ${e.session_id}？此動作無法復原。`;
       const trashMsg = `移動 session ${e.session_id} 到垃圾桶？`;
       // Trajectory overlay toggle: only sessions with triangulated points qualify.
-      const hasTraj = (e.n_triangulated || 0) > 0;
+      const hasTraj = triangulated > 0;
       const color = hasTraj ? trajColorFor(e.session_id) : '';
       const checked = selectedTrajIds.has(e.session_id) ? 'checked' : '';
       const toggle = hasTraj
@@ -1192,19 +1061,24 @@
              <span class="swatch" style="background:${color}"></span>
            </label>`
         : `<span class="traj-toggle-placeholder" aria-hidden="true"></span>`;
-      const metrics = [];
-      if (triangulated > 0) metrics.push(`<span><span class="k">Pts</span><span class="v">${triangulated}</span></span>`);
-      if (e.duration_s != null) metrics.push(`<span><span class="k">Dur</span><span class="v">${duration} s</span></span>`);
-      if (peakZ != null) metrics.push(`<span><span class="k">Peak Z</span><span class="v">${peakZ} m</span></span>`);
-      const metricsRow = metrics.length ? `<div class="event-stats">${metrics.join('')}</div>` : '';
+      const metaBits = [];
+      if (triangulated > 0) metaBits.push(`<span class="k">pts</span><span class="v">${triangulated}</span>`);
+      if (e.duration_s != null) metaBits.push(`<span class="k">dur</span><span class="v">${Number(e.duration_s).toFixed(2)}s</span>`);
+      if (e.peak_z_m != null) metaBits.push(`<span class="k">z</span><span class="v">${Number(e.peak_z_m).toFixed(2)}m</span>`);
+      const metaHtml = metaBits.length ? `<div class="event-meta">${metaBits.join('')}</div>` : '';
       const processingState = e.processing_state ? `<span class="chip ${esc(e.processing_state)}">${esc(e.processing_state)}</span>` : '';
+      const serverStatus = (e.path_status || {}).server_post || '-';
+      const showRunServer = currentEventsBucket !== 'trash'
+        && serverStatus !== 'done'
+        && e.processing_state !== 'queued'
+        && e.processing_state !== 'processing';
       const processingAction = e.processing_state === 'queued' || e.processing_state === 'processing'
         ? `<form class="event-action-form" method="POST" action="/sessions/${sid}/cancel_processing">
-             <button class="event-action warn" type="submit">Cancel Proc</button>
+             <button class="event-action warn" type="submit">Cancel</button>
            </form>`
-        : (e.processing_state === 'canceled' && e.processing_resumable)
-          ? `<form class="event-action-form" method="POST" action="/sessions/${sid}/resume_processing">
-               <button class="event-action ok" type="submit">Resume</button>
+        : showRunServer
+          ? `<form class="event-action-form" method="POST" action="/sessions/${sid}/run_server_post">
+               <button class="event-action ok" type="submit">Run srv</button>
              </form>`
           : '';
       const lifecycleAction = currentEventsBucket === 'trash'
@@ -1223,19 +1097,27 @@
                   onsubmit="return confirm(${JSON.stringify(trashMsg)});">
               <button class="event-action dev" type="submit">Trash</button>
             </form>`;
+      // Only surface real signal: path chips already encode per-
+      // pipeline completion, so `partial`/`paired`/`paired_no_points`
+      // are noise. `error` is the only result-status chip worth
+      // showing; processing states (queued/processing/...) stay.
+      const statusChipHtml = (e.status === 'error')
+        ? `<span class="chip ${esc(e.status || '')}">${esc(stat)}</span>`
+        : '';
       return `
         <div class="event-item">
           ${toggle}
           <a class="event-row" href="/viewer/${sid}">
-            <div class="event-top">
+            <div class="event-head">
               <span class="sid">${sid}</span>
-              <span class="event-top-spacer"></span>
-              ${processingState}
-              <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
+              ${pathChips}
             </div>
-            <div class="event-paths-row">${pathChips}</div>
-            ${metricsRow}
+            ${metaHtml}
           </a>
+          <div class="event-status">
+            ${processingState}
+            ${statusChipHtml}
+          </div>
           <div class="event-actions">
             ${processingAction}
             ${lifecycleAction}
@@ -1272,6 +1154,10 @@
         ts: d.time_synced,
         seen: d.last_seen_at,
         ws: d.ws_connected,
+        // Round battery to 5% buckets so tiny-wobble heartbeats don't
+        // repaint the whole devices card every second.
+        batt: (typeof d.battery_level === 'number') ? Math.round(d.battery_level * 20) : null,
+        bstate: d.battery_state || null,
       })),
       calibrations: (state.calibrations || []).slice().sort(),
       preview: state.preview_requested || {},
@@ -1310,7 +1196,9 @@
   const _origRenderEvents = renderEvents;
   renderEvents = function(events) {
     const key = JSON.stringify((events || []).map(e => ({
-      id: e.session_id, status: e.status, n: e.n_triangulated, p: e.processing_state,
+      id: e.session_id, status: e.status, n: e.n_triangulated,
+      p: e.processing_state,
+      srv: (e.path_status || {}).server_post || '-',
     })));
     if (key === _lastEvKey) return;
     _lastEvKey = key;
@@ -1431,9 +1319,13 @@
   // intercept. `currentCaptureMode` is still tracked above purely so
   // partial renderers that still read `state.capture_mode` stay happy —
   // it's a pass-through from /status and the user never mutates it.
+  //
+  // Event-row actions intercept: fetch + single events-tick refresh so
+  // the button state never bounces back to the previous value between
+  // the POST and the next tickEvents round-trip.
   document.addEventListener('submit', async (e) => {
     const form = e.target;
-    if (form.action && /\/sessions\/[^/]+\/(trash|restore|delete|cancel_processing|resume_processing)$/.test(form.action)) {
+    if (form.action && /\/sessions\/[^/]+\/(trash|restore|delete|cancel_processing|resume_processing|run_server_post)$/.test(form.action)) {
       e.preventDefault();
       try {
         await fetch(form.action, { method: 'POST', body: new FormData(form), headers: { 'Accept': 'application/json' } });

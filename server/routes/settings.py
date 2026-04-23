@@ -49,33 +49,6 @@ def _validated_hsv_range(values: dict[str, object]) -> HSVRange:
     )
 
 
-@router.post("/detection/paths")
-async def detection_paths(request: Request):
-    from main import state, device_ws, _settings_message_for, _wants_html
-    ctype = request.headers.get("content-type", "").lower()
-    raw_paths: list[str] | None = None
-    if "application/json" in ctype:
-        body = await request.json()
-        if isinstance(body.get("paths"), list):
-            raw_paths = body["paths"]
-    else:
-        form = await request.form()
-        raw_paths = [str(v) for v in form.getlist("paths")]
-    paths = state._normalize_paths(raw_paths or [])
-    if not paths:
-        raise HTTPException(status_code=400, detail="at least one detection path is required")
-    try:
-        applied = state.set_default_paths(paths)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    await device_ws.broadcast(
-        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "paths": sorted(p.value for p in applied)}
-
-
 @router.post("/detection/hsv")
 async def detection_hsv(request: Request):
     from main import state, device_ws, _settings_message_for, _wants_html

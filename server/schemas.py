@@ -23,7 +23,7 @@ class DetectionPath(str, Enum):
     server_post = "server_post"
 
 
-_DEFAULT_PATHS = frozenset({DetectionPath.server_post})
+_DEFAULT_PATHS = frozenset({DetectionPath.live})
 
 
 class TrackingExposureCapMode(str, Enum):
@@ -71,6 +71,12 @@ class FramePayload(BaseModel):
     px: float | None = None
     py: float | None = None
     ball_detected: bool
+    # Post-detection chain filter verdict. None = not yet scored (raw
+    # upload / live frame pre-finalization). "kept" survives all gates;
+    # "rejected_flicker" = chain was too short (min_run_len); "rejected_jump"
+    # = chain broke because the ray direction jumped past max_jump_px. Set
+    # only on frames where ball_detected is True — non-detections stay None.
+    filter_status: Literal["kept", "rejected_flicker", "rejected_jump"] | None = None
 
 
 class CaptureTelemetryPayload(BaseModel):
@@ -436,6 +442,12 @@ class Device:
     time_sync_id: str | None = None
     time_sync_at: float | None = None
     sync_anchor_timestamp_s: float | None = None
+    # Battery level 0..1 reported by UIDevice.batteryLevel; None when the
+    # phone hasn't reported it yet or reports -1 (monitoring disabled).
+    battery_level: float | None = None
+    # UIDevice.batteryState as lowercase string: "unknown" | "unplugged"
+    # | "charging" | "full". None when not reported.
+    battery_state: str | None = None
 
 
 @dataclass

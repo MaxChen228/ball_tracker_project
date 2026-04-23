@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import ValidationError
 
 from pipeline import ProcessingCanceled, annotate_video
@@ -131,7 +131,6 @@ def _summarize_result(result: SessionResult) -> dict[str, Any]:
 @router.post("/pitch")
 async def pitch(
     request: Request,
-    background_tasks: BackgroundTasks,
     payload: str = Form(...),
     video: UploadFile | None = File(None),
 ) -> dict[str, Any]:
@@ -142,9 +141,12 @@ async def pitch(
         metadata including the legacy chirp `sync_id` provenance tag.
 
     Optional:
-      - `video` — H.264 MOV/MP4 of the cycle. Required when the session
-        paths include `server_post`; server decodes and runs HSV detection.
-        Omitted for live-only sessions.
+      - `video` — H.264 MOV/MP4 of the cycle. iOS records + uploads
+        unconditionally post-PR61, so this is populated for every
+        real-device upload. The server just archives it; server-side
+        HSV detection runs only when the operator hits
+        `POST /sessions/{sid}/run_server_post`. Test uploads that ship
+        only `frames` (no MOV) stay accepted.
 
     A missing time-sync anchor only prevents stereo pairing/triangulation;
     monocular detections are still kept so the viewer can render rays.
@@ -205,7 +207,6 @@ async def pitch(
 
     clip_info: dict[str, Any] | None = None
     clip_path: Path | None = None
-    detection_pending = False
 
     if has_video:
         data = await video.read()
@@ -240,13 +241,7 @@ async def pitch(
         # Upload carries video only — server-side detection runs in the
         # background and overwrites `frames_server_post` on re-record.
         payload_obj.frames_server_post = []
-        if DetectionPath.server_post in payload_paths:
-            detection_pending = True
     result = await asyncio.to_thread(state.record, payload_obj)
-
-    if detection_pending and clip_path is not None:
-        state.mark_server_post_queued(payload_obj.session_id, payload_obj.camera_id)
-        background_tasks.add_task(_run_server_detection, clip_path, payload_obj)
 
     ball_frames = sum(
         1
@@ -263,14 +258,16 @@ async def pitch(
         f"{clip_info['bytes']}B" if clip_info else "none",
         len(payload_obj.frames_server_post or payload_obj.frames_live),
         ball_frames,
-        "server-pending" if detection_pending else ("live" if payload_obj.frames_live else "skipped"),
+        "live" if payload_obj.frames_live else "skipped",
         len(result.points),
         f" err={result.error}" if result.error else "",
         payload_obj.paths,
     )
     response: dict[str, Any] = {"ok": True, **_summarize_result(result)}
     response["clip"] = clip_info
-    response["detection_pending"] = detection_pending
+    # Retained for wire-compat with older iOS builds; server no longer
+    # auto-triggers server-post detection on upload. Always False.
+    response["detection_pending"] = False
     return response
 
 

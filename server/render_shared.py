@@ -87,22 +87,6 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .nav-status-row {{ display: flex; justify-content: flex-end; }}
 .nav .status-line {{ display: flex; flex-direction: column; align-items: flex-end;
                      gap: 6px; min-width: min(560px, 100%); }}
-.nav .status-main {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-                     font-family: var(--mono); text-transform: uppercase; }}
-.nav .status-badge {{ display: inline-flex; align-items: center; padding: 3px 8px;
-                      border: 1px solid var(--border-base); border-radius: var(--r);
-                      font-size: 10px; letter-spacing: 0.12em; color: var(--sub); }}
-.nav .status-badge.ready, .nav .status-badge.recording {{
-  color: var(--passed); border-color: var(--passed); background: var(--passed-bg);
-}}
-.nav .status-badge.blocked, .nav .status-badge.cooldown {{
-  color: var(--warn); border-color: var(--warn); background: var(--warn-bg);
-}}
-.nav .status-badge.syncing {{
-  color: var(--ink); border-color: var(--ink); background: rgba(42,37,32,.04);
-}}
-.nav .status-headline {{ font-size: 12px; letter-spacing: 0.12em; color: var(--ink); }}
-.nav .status-context {{ font-size: 10px; letter-spacing: 0.08em; color: var(--sub); }}
 .nav .status-checks {{ display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }}
 .nav .status-check {{ display: inline-flex; align-items: center; gap: 6px;
                       padding: 2px 8px; border: 1px solid var(--border-base);
@@ -153,60 +137,26 @@ def _render_nav_status(
     sync_cooldown_remaining_s: float = 0.0,
     arm_readiness: dict[str, Any] | None = None,
 ) -> str:
-    armed = session is not None and session.get("armed")
+    """Top-right status strip. Three chips, one per prerequisite: how many
+    cameras are online, how many of those have calibration on file, and
+    how many of those calibrated-online cameras are chirp-synced. No
+    editorial headline / badge / context copy — the chips already say
+    everything the operator needs to decide whether Arm is meaningful."""
+    del session, sync, sync_cooldown_remaining_s
     online = len(devices)
     cal_set = set(calibrations)
     usable = sorted(str(d.get("camera_id")) for d in devices if d.get("camera_id") in cal_set)
-    uncalibrated = sorted(str(d.get("camera_id")) for d in devices if d.get("camera_id") and d.get("camera_id") not in cal_set)
     synced_usable = sorted(
         str(d.get("camera_id"))
         for d in devices
         if d.get("camera_id") in cal_set and d.get("time_synced")
     )
-    if arm_readiness is None:
-        blockers: list[str] = []
-        if not online:
-            blockers.append("no camera online")
-        elif uncalibrated:
-            blockers.extend(f"{cam} not calibrated" for cam in uncalibrated)
-        elif len(usable) >= 2:
-            blockers.extend(f"{cam} not time-synced" for cam in usable if cam not in synced_usable)
-        mode = "stereo" if len(usable) >= 2 else ("single_camera" if usable else "blocked")
-        requires_time_sync = len(usable) >= 2
-        ready = not blockers
-    else:
-        blockers = [str(v) for v in (arm_readiness.get("blockers") or [])]
-        mode = str(arm_readiness.get("mode") or "blocked")
-        requires_time_sync = bool(arm_readiness.get("requires_time_sync"))
-        ready = bool(arm_readiness.get("ready"))
+    if arm_readiness is not None:
         usable = [str(v) for v in (arm_readiness.get("calibrated_online_cameras") or usable)]
-        synced_usable = [str(v) for v in (arm_readiness.get("synced_calibrated_online_cameras") or synced_usable)]
-
-    if armed:
-        badge_cls = "recording"
-        badge = "Recording"
-        headline = html.escape(session.get("id", "—"))
-        context = "session active"
-    elif sync is not None:
-        badge_cls = "syncing"
-        badge = "Sync"
-        headline = "sync in progress"
-        context = "complete on /sync"
-    elif not ready:
-        badge_cls = "blocked"
-        badge = "Blocked"
-        headline = blockers[0] if blockers else "not ready"
-        context = ", ".join(blockers[1:]) if len(blockers) > 1 else "check camera readiness"
-    elif sync_cooldown_remaining_s > 0.0:
-        badge_cls = "cooldown"
-        badge = "Cooldown"
-        headline = "sync settling"
-        context = f"{sync_cooldown_remaining_s:.0f}s remaining"
-    else:
-        badge_cls = "ready"
-        badge = "Ready"
-        headline = "ready to arm"
-        context = "single-camera rays only" if mode == "single_camera" else "all stereo prerequisites satisfied"
+        synced_usable = [
+            str(v) for v in (arm_readiness.get("synced_calibrated_online_cameras") or synced_usable)
+        ]
+    requires_time_sync = len(usable) >= 2
 
     def _check_row(label: str, value: str, ok: bool) -> str:
         cls = "ok" if ok else "warn"
@@ -228,14 +178,7 @@ def _render_nav_status(
             ),
         ]
     )
-    return (
-        '<div class="status-main">'
-        f'<span class="status-badge {badge_cls}">{html.escape(badge)}</span>'
-        f'<span class="status-headline">{headline}</span>'
-        f'<span class="status-context">{html.escape(context)}</span>'
-        "</div>"
-        f'<div class="status-checks">{checks}</div>'
-    )
+    return f'<div class="status-checks">{checks}</div>'
 
 
 _PAGE_META: dict[str, tuple[str, str]] = {

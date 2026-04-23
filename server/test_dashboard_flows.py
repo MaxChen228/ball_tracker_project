@@ -36,22 +36,24 @@ def _post_calibration(client: TestClient, camera_id: str, K: np.ndarray, H: np.n
 
 
 def test_dashboard_drives_mode_one_end_to_end(tmp_path):
-    """End-to-end camera-only integration: arm with server_post path →
-    each phone POSTs a MOV → server detects + triangulates → events
-    + viewer show the camera-only tag + the MOV is accessible."""
+    """Symmetric integration: arm → each phone POSTs a MOV → operator hits
+    Run server on the events row → detection + triangulation → events +
+    viewer show the camera-only tag + MOV accessible."""
     K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
     P_true = np.array([0.1, 0.3, 1.0])
     client = TestClient(app)
 
-    # 1. Arm.
+    # 1. Arm (no mode toggle — CaptureMode has only camera_only).
     _seed_ready_stereo(client, K, H_a, H_b)
     arm = client.post(
         "/sessions/arm", headers={"Accept": "application/json"}
     ).json()
     session_id = arm["session"]["id"]
-    assert "server_post" in arm["session"]["paths"]
+    # Arm defaults to live-only now; server_post is on-demand via
+    # /sessions/{sid}/run_server_post.
+    assert arm["session"]["paths"] == ["live"]
 
-    # 3. Both phones upload a MOV with a ball at the projected pixel.
+    # 2. Both phones upload a MOV with a ball at the projected pixel.
     mov_a = _encode_single_ball_mov(
         tmp_path, K, R_a, t_a, P_true, filename="e2e_a.mov"
     )
@@ -64,11 +66,22 @@ def test_dashboard_drives_mode_one_end_to_end(tmp_path):
     r_b = _post_pitch(client, _base_payload("B", session_id, K, H_b), mov_b)
     assert r_b.status_code == 200, r_b.text
     assert r_b.json()["paired"] is True
-    # Server detection runs post-response as a BackgroundTask; query the
-    # canonical result after TestClient drains background tasks.
+    # Server-post no longer auto-runs. Until the operator asks for it, the
+    # session has zero triangulated points from the server pipeline.
+    assert r_b.json()["detection_pending"] is False
+    assert client.get(f"/results/{session_id}").json()["points"] == []
+
+    # 3. Operator hits Run server on the events row.
+    run = client.post(
+        f"/sessions/{session_id}/run_server_post",
+        headers={"Accept": "application/json"},
+    )
+    assert run.status_code == 200, run.text
+    assert run.json()["queued"] == 2
+    # Background jobs finish during the TestClient drain that follows.
     assert len(client.get(f"/results/{session_id}").json()["points"]) >= 1
 
-    # 4. Events tags it as camera_only.
+    # 4. Events tags it as camera_only (MOV on disk).
     events = client.get("/events").json()
     matched = [e for e in events if e["session_id"] == session_id]
     assert matched, events

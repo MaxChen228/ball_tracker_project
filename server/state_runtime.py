@@ -47,6 +47,9 @@ class RuntimeSettingsStore:
     ) -> None:
         self._path = path
         self._atomic_write = atomic_write
+        # Live is always on at arm time. server_post is triggered
+        # post-hoc per session via /sessions/{sid}/run_server_post —
+        # no longer a knob the operator flips at arm time.
         self.default_paths: set[DetectionPath] = set(_DEFAULT_PATHS)
         self.chirp_detect_threshold: float = 0.18
         self.mutual_sync_threshold: float = 0.10

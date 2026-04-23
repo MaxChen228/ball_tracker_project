@@ -161,7 +161,14 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .device-head .sync-led.listening {{ background: var(--warn); }}
 .device-head .sync-led.offline {{ background: var(--border); opacity: 0.45; }}
 .device-head .id {{ grid-column: 2; grid-row: 1; }}
-.device-head .chip-col {{ grid-column: 4; grid-row: 1; justify-self: end; }}
+.device-head .chip-col {{ grid-column: 4; grid-row: 1; justify-self: end;
+                          display: flex; flex-direction: row; gap: var(--s-2);
+                          align-items: center; }}
+.chip.battery {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; }}
+.chip.battery.ok {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
+.chip.battery.mid {{ color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }}
+.chip.battery.low {{ color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }}
+.chip.battery.charging {{ color: var(--accent); border-color: var(--accent); background: transparent; }}
 .device-head .sub {{ grid-column: 1 / -1; grid-row: 2; }}
 .sync-id-chip {{ margin-left: 6px; padding: 1px 5px; font-family: var(--mono);
                  font-size: 9px; border: 1px solid var(--border);
@@ -494,22 +501,25 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
               max-height: 240px; overflow-y: auto;
               white-space: pre; word-break: normal; }}
 
-/* --- Events list — dense, hover-highlighted rows inspired by kg admin
-   tables. Row-level hover wash replaces the former negative-margin hack. */
+/* --- Events list — compact single-line-per-event layout. Everything
+   identity/status/actions lives on one row; metrics optional second
+   line. No more action-button column that bloated row height. */
 .events-empty {{ color: var(--sub); font-size: 12px; padding: var(--s-3) 0;
                  font-style: italic; font-family: var(--mono); }}
-.event-item {{ display: flex; align-items: flex-start;
+.event-item {{ display: flex; align-items: center; gap: var(--s-1);
+               padding: 6px 0;
                border-top: 1px solid var(--border-l);
                transition: background 0.12s ease; }}
 .event-item:first-child {{ border-top: 0; }}
 .event-item:hover {{ background: var(--surface-hover); }}
-.event-row {{ flex: 1; min-width: 0; display: block; text-decoration: none;
-              color: inherit; padding: var(--s-2) var(--s-2); }}
-/* Trajectory overlay toggle — only visible on sessions with 3D pts. The
-   coloured dot mirrors the trace tint Plotly uses in the canvas so the
-   operator can match checkbox → line without guessing. Clicking the
-   checkbox does NOT navigate (it's outside the <a class="event-row">). */
-.traj-toggle {{ flex: 0 0 auto; padding: var(--s-2) 0 0 var(--s-2);
+.event-row {{ flex: 1 1 auto; min-width: 0; display: flex;
+              flex-direction: column; gap: 2px;
+              text-decoration: none; color: inherit;
+              padding: 2px var(--s-1); }}
+/* Trajectory overlay toggle — coloured dot mirrors the trace tint Plotly
+   uses in the canvas so the operator can match checkbox → line. The
+   checkbox is OUTSIDE the <a>, so clicking it doesn't navigate. */
+.traj-toggle {{ flex: 0 0 auto; padding: 0 0 0 var(--s-2);
                 display: flex; align-items: center; gap: 4px;
                 cursor: pointer; user-select: none; }}
 .traj-toggle input[type=checkbox] {{ accent-color: var(--ink);
@@ -520,34 +530,31 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                          display: inline-block; }}
 .traj-toggle-placeholder {{ flex: 0 0 auto;
                              width: calc(13px + 10px + var(--s-2) + 8px); }}
-/* Event row is now laid out as three horizontal bands so single-row
-   sessions and dual-row (with processing chip) sessions align: .event-top
-   owns identity + status, .event-paths-row owns the three pipeline chips,
-   .event-stats owns metrics. Nothing wraps between bands — no more
-   flex-wrap surprises depending on chip count. */
-.event-top {{ display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-1); }}
-.event-top .sid {{ font-family: var(--mono); font-size: 12px; font-weight: 500;
-                   color: var(--ink); letter-spacing: 0.04em; }}
-.event-top .capmode {{ font-family: var(--mono); font-size: 10px;
-                        letter-spacing: 0.10em; text-transform: uppercase;
-                        color: var(--sub); }}
-.event-top .capmode::before {{ content: "· "; opacity: 0.5; }}
-.event-top .event-top-spacer {{ flex: 1 1 auto; }}
-.event-paths-row {{ display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: var(--s-1); }}
-.event-paths-row .path-chip {{ font-size: 10px; padding: 2px 7px; letter-spacing: 0.04em; }}
-.event-stats {{ display: grid; grid-template-columns: repeat(3, 1fr);
-                gap: var(--s-1) var(--s-3);
-                font-family: var(--mono); font-size: 11px; color: var(--ink-light); }}
-.event-stats .k {{ color: var(--sub); letter-spacing: 0.10em; text-transform: uppercase;
-                   font-size: 9px; display: block; margin-bottom: 1px; }}
-.event-stats .v {{ font-variant-numeric: tabular-nums; color: var(--ink); }}
-.event-delete-form {{ flex: 0 0 auto; margin: var(--s-2) var(--s-1) 0 0; }}
-.event-delete {{ background: transparent; border: 1px solid var(--border-base);
-                 color: var(--sub); font-family: var(--mono); font-size: 13px;
-                 line-height: 1; padding: 2px 8px 3px; border-radius: var(--r);
-                 cursor: pointer; transition: border-color 0.15s, color 0.15s, background 0.15s; }}
-.event-delete:hover {{ border-color: var(--dev); color: var(--dev);
-                       background: var(--surface); }}
+/* Head row: sid + path chips on one line. Everything flex:0 (fixed
+   intrinsic width); status chip + actions live as sibling flex cells
+   of .event-item so nothing competes for sid's or L/S's width. */
+.event-head {{ display: flex; align-items: center; gap: 6px;
+               min-width: 0; flex-wrap: nowrap; }}
+.event-head .sid {{ flex: 0 0 auto; font-family: var(--mono); font-size: 11px;
+                    font-weight: 500; color: var(--ink);
+                    letter-spacing: 0.04em; white-space: nowrap; }}
+.event-head .path-chip {{ flex: 0 0 auto; font-size: 10px; padding: 1px 6px;
+                          letter-spacing: 0.04em; }}
+.event-status {{ flex: 0 0 auto; display: flex; align-items: center;
+                 gap: 4px; justify-content: flex-end; }}
+.event-status:empty {{ display: none; }}
+.event-status .chip {{ font-size: 9px; padding: 1px 6px;
+                       letter-spacing: 0.08em; }}
+.event-meta {{ font-family: var(--mono); font-size: 10px;
+               color: var(--sub); letter-spacing: 0.02em;
+               white-space: nowrap; overflow: hidden;
+               text-overflow: ellipsis;
+               font-variant-numeric: tabular-nums; }}
+.event-meta .k {{ color: var(--sub); opacity: 0.7; margin-right: 2px;
+                  text-transform: uppercase; font-size: 9px;
+                  letter-spacing: 0.08em; }}
+.event-meta .v {{ color: var(--ink); margin-right: var(--s-2); }}
+.event-meta .v:last-child {{ margin-right: 0; }}
 .events-toolbar {{ display:flex; align-items:center; justify-content:space-between;
                    gap:var(--s-2); margin-bottom:var(--s-2); }}
 .events-filters {{ display:flex; gap:6px; }}
@@ -556,13 +563,15 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                   letter-spacing:0.10em; text-transform:uppercase;
                   padding:4px 8px; border-radius:var(--r); cursor:pointer; }}
 .events-filter.active {{ background:var(--ink); color:var(--surface); border-color:var(--ink); }}
-.event-actions {{ display:flex; flex-direction:column; gap:6px; margin:var(--s-2) var(--s-1) 0 0; }}
+.event-actions {{ display:flex; flex-direction:row; align-items:center;
+                  gap:4px; margin: 0 var(--s-1) 0 0; flex: 0 0 auto; }}
 .event-action-form {{ margin:0; }}
 .event-action {{ background:transparent; border:1px solid var(--border-base);
-                 color:var(--sub); font-family:var(--mono); font-size:10px;
+                 color:var(--sub); font-family:var(--mono); font-size:9px;
                  letter-spacing:0.08em; text-transform:uppercase;
-                 line-height:1; padding:5px 8px; border-radius:var(--r);
-                 cursor:pointer; transition:border-color 0.15s,color 0.15s,background 0.15s; }}
+                 line-height:1; padding:4px 7px; border-radius:var(--r);
+                 cursor:pointer; white-space: nowrap;
+                 transition:border-color 0.15s,color 0.15s,background 0.15s; }}
 .event-action.warn:hover {{ border-color:var(--warn); color:var(--warn); background:var(--surface); }}
 .event-action.dev:hover {{ border-color:var(--dev); color:var(--dev); background:var(--surface); }}
 .event-action.ok:hover {{ border-color:var(--passed); color:var(--passed); background:var(--surface); }}
