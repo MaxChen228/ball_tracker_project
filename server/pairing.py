@@ -222,11 +222,10 @@ def _frame_items(p: PitchPayload, *, source: str = "server"):
     """Ball-bearing frames as `(t_rel, θx, θz, px, py)`, sorted by
     anchor-relative time. `t_rel = timestamp_s − sync_anchor_timestamp_s`.
 
-    `source` picks the detection stream: `"server"` (default) reads
-    `p.frames` — the authoritative server-side detection result —
-    `"on_device"` reads `p.frames_on_device` which carries the iOS-end
-    result when the session was armed in `dual` mode."""
-    frames = p.frames_on_device if source == "on_device" else p.frames
+    `source` is kept as a parameter for API compatibility; only `"server"`
+    is supported now — it reads `p.frames` (the authoritative server-side
+    or live detection result projected onto `frames` by the caller)."""
+    frames = p.frames
     anchor = p.sync_anchor_timestamp_s
     out = [
         (f.timestamp_s - anchor, f.theta_x_rad, f.theta_z_rad, f.px, f.py)
