@@ -114,6 +114,17 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
                 f'<button class="event-action ok" type="submit">Run srv</button>'
                 f"</form>"
             )
+        # Only surface status chips that carry real signal. The path
+        # chips already encode "was each pipeline completed?" via their
+        # count + on/off/err state, so `partial` / `paired` /
+        # `paired_no_points` are visual noise that just ate sidebar
+        # width. `error` is the only result-status chip worth showing;
+        # processing-state chips (queued/processing/canceled/completed)
+        # are actionable and stay.
+        status_chip_html = (
+            f'<span class="chip {status}">{stat_label}</span>'
+            if status == "error" else ""
+        )
         parts.append(
             f'<div class="event-item">'
             f"{toggle_html}"
@@ -121,12 +132,10 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f'<div class="event-head">'
             f'<span class="sid">{sid}</span>'
             f"{path_html}"
-            f'<span class="event-spacer"></span>'
-            f"{processing_chip}"
-            f'<span class="chip {status}">{stat_label}</span>'
             f"</div>"
             f"{meta_html}"
             f"</a>"
+            f'<div class="event-status">{processing_chip}{status_chip_html}</div>'
             f'<div class="event-actions">{processing_html}{lifecycle_html}</div>'
             f"</div>"
         )

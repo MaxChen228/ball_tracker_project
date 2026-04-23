@@ -1081,6 +1081,13 @@
                   onsubmit="return confirm(${JSON.stringify(trashMsg)});">
               <button class="event-action dev" type="submit">Trash</button>
             </form>`;
+      // Only surface real signal: path chips already encode per-
+      // pipeline completion, so `partial`/`paired`/`paired_no_points`
+      // are noise. `error` is the only result-status chip worth
+      // showing; processing states (queued/processing/...) stay.
+      const statusChipHtml = (e.status === 'error')
+        ? `<span class="chip ${esc(e.status || '')}">${esc(stat)}</span>`
+        : '';
       return `
         <div class="event-item">
           ${toggle}
@@ -1088,12 +1095,13 @@
             <div class="event-head">
               <span class="sid">${sid}</span>
               ${pathChips}
-              <span class="event-spacer"></span>
-              ${processingState}
-              <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
             </div>
             ${metaHtml}
           </a>
+          <div class="event-status">
+            ${processingState}
+            ${statusChipHtml}
+          </div>
           <div class="event-actions">
             ${processingAction}
             ${lifecycleAction}
