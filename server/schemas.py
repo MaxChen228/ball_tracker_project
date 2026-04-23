@@ -233,32 +233,6 @@ class TriangulatedPoint(BaseModel):
     residual_m: float
 
 
-class TrajectoryFit(BaseModel):
-    """RANSAC-fitted 3D quadratic `p(t) = ½·a·t² + v₀·t + p₀` over the
-    triangulated points. Each axis is stored highest-degree-first (numpy's
-    convention): `coeffs_x[0]` is the quadratic term, `coeffs_x[2]` is the
-    constant. Index arrays reference positions in the source `points`
-    list so the viewer can cross-reference raw points to fit labels.
-
-    `release_*` captures the earliest inlier position on the fitted curve.
-    `plate_*` is the fit evaluated at Y = 0 (the plate plane in world
-    frame); None when no real-valued crossing exists in the observed
-    window + 0.5 s slack."""
-    coeffs_x: list[float] = Field(..., min_length=3, max_length=3)
-    coeffs_y: list[float] = Field(..., min_length=3, max_length=3)
-    coeffs_z: list[float] = Field(..., min_length=3, max_length=3)
-    t_min_s: float
-    t_max_s: float
-    inlier_indices: list[int]
-    outlier_indices: list[int]
-    rms_m: float
-    threshold_m: float
-    release_xyz_m: list[float] = Field(..., min_length=3, max_length=3)
-    release_t_s: float
-    plate_xyz_m: list[float] | None = None
-    plate_t_s: float | None = None
-
-
 class SessionResult(BaseModel):
     """One armed-session's triangulation result. Replaces the old
     `CycleResult` now that "cycle" is a per-device recording-window concept
@@ -268,12 +242,7 @@ class SessionResult(BaseModel):
     (server detection) stream that existing code keys off, `points_on_device`
     is the iOS-end stream when the session armed in `dual` mode. Mono-mode
     sessions (camera_only / on_device) leave `points_on_device` empty and
-    `points` is the single authoritative result.
-
-    `fit` / `fit_on_device` are the RANSAC quadratic fits applied to the
-    respective point clouds. LIVE + REPLAY UIs render the fit; raw points
-    are only shown in FORENSIC. Optional so restored results from older
-    server builds (pre-fit) keep loading without migration."""
+    `points` is the single authoritative result."""
     session_id: str
     camera_a_received: bool
     camera_b_received: bool
@@ -288,8 +257,6 @@ class SessionResult(BaseModel):
     error: str | None = None
     points_on_device: list[TriangulatedPoint] = []
     error_on_device: str | None = None
-    fit: TrajectoryFit | None = None
-    fit_on_device: TrajectoryFit | None = None
 
 
 
