@@ -960,6 +960,94 @@ def test_dashboard_labels_stopped_postpass_session_without_live_frames():
     assert "srv: running" not in body
 
 
+def test_state_marks_single_camera_server_post_path_completed(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    pitch = _minimal_pitch("A", session_id=sid(90))
+    pitch.paths = [main.DetectionPath.ios_post.value, main.DetectionPath.server_post.value]
+    pitch.frames = []
+    pitch.frames_server_post = [
+        main.FramePayload(frame_index=0, timestamp_s=0.0, px=100.0, py=100.0, ball_detected=True),
+    ]
+
+    result = s.record(pitch)
+
+    assert result.frame_counts_by_path["server_post"] == {"A": 1}
+    assert "server_post" in result.paths_completed
+    assert "ios_post" not in result.paths_completed
+
+
+def test_state_marks_single_camera_ios_post_path_completed(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    pitch = _minimal_pitch("A", session_id=sid(91))
+    pitch.paths = [main.DetectionPath.ios_post.value]
+    pitch.frames = []
+    base = s.record(pitch)
+    assert base.paths_completed == set()
+
+    result = s.attach_on_device_analysis(
+        main.PitchAnalysisPayload(
+            camera_id="A",
+            session_id=sid(91),
+            frames_on_device=[
+                main.FramePayload(frame_index=0, timestamp_s=0.0, px=100.0, py=100.0, ball_detected=True),
+            ],
+        )
+    )
+
+    assert result.frame_counts_by_path["ios_post"] == {"A": 1}
+    assert "ios_post" in result.paths_completed
+
+
+def test_dashboard_labels_done_for_single_camera_server_post_session():
+    client = TestClient(app)
+    main.state.heartbeat("A")
+    _seed_minimal_calibration("A")
+    arm = client.post(
+        "/sessions/arm",
+        json={"paths": ["ios_post", "server_post"]},
+        headers={"Accept": "application/json"},
+    )
+    assert arm.status_code == 200
+    session_id = arm.json()["session"]["id"]
+    stop = client.post("/sessions/stop", headers={"Accept": "application/json"})
+    assert stop.status_code == 200
+
+    pitch = _minimal_pitch("A", session_id=session_id)
+    pitch.paths = [main.DetectionPath.ios_post.value, main.DetectionPath.server_post.value]
+    pitch.frames = []
+    pitch.frames_server_post = [
+        main.FramePayload(frame_index=0, timestamp_s=0.0, px=100.0, py=100.0, ball_detected=True),
+    ]
+    main.state.record(pitch)
+
+    body = client.get("/").text
+    assert "iOS: stopped" in body
+    assert "srv: done" in body
+
+
+def test_record_merges_live_frames_into_single_camera_pitch(tmp_path):
+    s = main.State(data_dir=tmp_path)
+    live_frame = main.FramePayload(
+        frame_index=3,
+        timestamp_s=0.125,
+        px=123.0,
+        py=456.0,
+        ball_detected=True,
+    )
+    s.ingest_live_frame("A", sid(92), live_frame)
+    s.mark_live_path_ended("A", sid(92), "disarmed")
+
+    pitch = _minimal_pitch("A", session_id=sid(92))
+    pitch.paths = [main.DetectionPath.live.value]
+    pitch.frames = []
+
+    s.record(pitch)
+    stored = s.pitches_for_session(sid(92))["A"]
+    assert len(stored.frames_live) == 1
+    assert stored.frames_live[0].frame_index == 3
+    assert stored.frames_live[0].px == 123.0
+
+
 def test_setup_page_wires_auto_calibration_status_into_device_renders():
     client = TestClient(app)
     r = client.get("/setup")

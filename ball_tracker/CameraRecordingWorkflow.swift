@@ -201,12 +201,22 @@ final class CameraRecordingWorkflow {
             return
         }
 
+        let analysisVideoURL: URL?
+        if paths.contains(.iosPost) {
+            analysisVideoURL = paths.contains(.serverPost)
+                ? duplicateVideoForAnalysis(from: videoURL)
+                : videoURL
+        } else {
+            analysisVideoURL = nil
+        }
+
         if paths.contains(.serverPost) {
             persistCompletedCycle(payload, videoURL: videoURL)
         }
         if paths.contains(.iosPost) {
-            let uploadMode: AnalysisJobStore.Job.UploadMode = paths.contains(.serverPost) ? .dualSidecar : .onDevicePrimary
-            let analysisVideoURL = paths.contains(.serverPost) ? duplicateVideoForAnalysis(from: videoURL) : videoURL
+            let uploadMode: AnalysisJobStore.Job.UploadMode = paths.contains(.serverPost)
+                ? .dualSidecar
+                : .onDevicePrimary
             if let analysisVideoURL {
                 persistAnalysisJob(
                     payload: payload,

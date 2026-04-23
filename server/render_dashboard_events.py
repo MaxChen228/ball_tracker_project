@@ -22,11 +22,38 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             else "dual" if mode_val == "dual"
             else "camera-only"
         )
+        # Each pipeline gets an independent chip showing: state (on/err/-)
+        # + detected-frame count summed across A/B. "L 67" reads quickly as
+        # "live produced 67 detections"; "S —" means server pipeline never
+        # ran. Status and count come from separate sources so we can show
+        # e.g. "error" even when the count is 0.
         path_status = e.get("path_status") or {}
-        path_html = "".join(
-            f'<span class="path-chip{" on" if path_status.get(path) == "done" else ""}">{label}</span>'
-            for path, label in (("live", "L"), ("ios_post", "I"), ("server_post", "S"))
-        )
+        path_counts = e.get("n_ball_frames_by_path") or {}
+        path_chip_specs = (("live", "L"), ("ios_post", "I"), ("server_post", "S"))
+        path_chip_titles = {
+            "live": "Live — iOS real-time detection (WS streamed)",
+            "ios_post": "POST — iOS on-device post-pass payload",
+            "server_post": "SVR — server-side detection on decoded MOV",
+        }
+        def _path_chip(path: str, label: str) -> str:
+            status = path_status.get(path, "-")
+            counts = path_counts.get(path) or {}
+            total = sum(int(v) for v in counts.values())
+            if status == "done":
+                cls = " on"
+            elif status == "error":
+                cls = " err"
+            else:
+                cls = ""
+            count_html = f'<span class="pc">{total}</span>' if total > 0 else ""
+            title = path_chip_titles.get(path, path)
+            if counts:
+                title += " · " + ", ".join(f"{c}:{n}" for c, n in sorted(counts.items()))
+            return (
+                f'<span class="path-chip{cls}" title="{html.escape(title)}">'
+                f"{label}{count_html}</span>"
+            )
+        path_html = "".join(_path_chip(p, l) for p, l in path_chip_specs)
         mean = "—" if e.get("mean_residual_m") is None else format(e["mean_residual_m"], ".4f")
         peak_z = "—" if e.get("peak_z_m") is None else format(e["peak_z_m"], ".2f")
         duration = "—" if e.get("duration_s") is None else format(e["duration_s"], ".2f")

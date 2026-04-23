@@ -20,6 +20,9 @@ class LivePairingSession:
     buffers: dict[str, deque[FramePayload]] = field(
         default_factory=lambda: {"A": deque(), "B": deque()}
     )
+    frames_by_cam: dict[str, list[FramePayload]] = field(
+        default_factory=lambda: {"A": [], "B": []}
+    )
     frame_counts: dict[str, int] = field(
         default_factory=lambda: {"A": 0, "B": 0}
     )
@@ -36,6 +39,7 @@ class LivePairingSession:
     ) -> list[TriangulatedPoint]:
         buf = self.buffers.setdefault(cam, deque())
         buf.append(frame)
+        self.frames_by_cam.setdefault(cam, []).append(frame)
         while len(buf) > self.max_frames_per_cam:
             buf.popleft()
         self.frame_counts[cam] = self.frame_counts.get(cam, 0) + 1
@@ -73,3 +77,5 @@ class LivePairingSession:
     def mark_aborted(self, cam: str, reason: str) -> None:
         self.abort_reasons[cam] = reason
 
+    def frames_for_camera(self, cam: str) -> list[FramePayload]:
+        return list(self.frames_by_cam.get(cam, []))

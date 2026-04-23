@@ -502,6 +502,12 @@ class State:
             clone.frames = self._get_path_frames(pitch, DetectionPath.server_post)
         return clone
 
+    def _live_frames_for_camera_locked(self, session_id: str, camera_id: str) -> list[FramePayload]:
+        live = self._live_pairings.get(session_id)
+        if live is None:
+            return []
+        return live.frames_for_camera(camera_id)
+
     def _session_sync_id_locked(self, session_id: str) -> str | None:
         for session in (self._current_session, self._last_ended_session):
             if session is not None and session.id == session_id:
@@ -598,17 +604,21 @@ class State:
                 result.error = sync_error
                 result.error_on_device = sync_error
 
-        if sync_error is None and a is not None and b is not None:
-            for path in sorted(candidate_paths, key=lambda p: p.value):
-                if path == DetectionPath.live:
-                    continue
-                frames_a = self._get_path_frames(a, path)
-                frames_b = self._get_path_frames(b, path)
-                if frames_a or frames_b:
-                    result.frame_counts_by_path[path.value] = {
-                        "A": len(frames_a),
-                        "B": len(frames_b),
-                    }
+        mono_session = (a is None) != (b is None)
+        for path in sorted(candidate_paths, key=lambda p: p.value):
+            if path == DetectionPath.live:
+                continue
+            frames_a = self._get_path_frames(a, path) if a is not None else []
+            frames_b = self._get_path_frames(b, path) if b is not None else []
+            frame_counts: dict[str, int] = {}
+            if a is not None and frames_a:
+                frame_counts["A"] = len(frames_a)
+            if b is not None and frames_b:
+                frame_counts["B"] = len(frames_b)
+            if frame_counts:
+                result.frame_counts_by_path[path.value] = frame_counts
+
+            if sync_error is None and a is not None and b is not None:
                 if not frames_a or not frames_b:
                     continue
                 try:
@@ -621,6 +631,11 @@ class State:
                     result.abort_reasons[path.value] = f"{type(exc).__name__}: {exc}"
                     continue
                 result.triangulated_by_path[path.value] = pts
+                result.paths_completed.add(path.value)
+            elif mono_session and frame_counts:
+                # Single-camera sessions cannot triangulate, but once the path
+                # has finalized frames on the sole uploaded camera it should be
+                # surfaced as completed instead of lingering in "stopped".
                 result.paths_completed.add(path.value)
 
         authority: list[TriangulatedPoint] = []
@@ -757,6 +772,18 @@ class State:
             if reason and reason != "disarmed":
                 live.mark_aborted(camera_id, reason)
 
+    def persist_live_frames(self, camera_id: str, session_id: str) -> SessionResult | None:
+        with self._lock:
+            existing = self.pitches.get((camera_id, session_id))
+            live_frames = self._live_frames_for_camera_locked(session_id, camera_id)
+        if existing is None or not live_frames:
+            return None
+        if existing.frames_live == live_frames:
+            return self.get(session_id)
+        merged = existing.model_copy(deep=True)
+        merged.frames_live = list(live_frames)
+        return self.record(merged)
+
     def _atomic_write(self, path: Path, payload: str) -> None:
         # Unique tmp filename per call so concurrent writers targeting the
         # same `path` (e.g. two simultaneous /pitch POSTs producing the same
@@ -792,6 +819,23 @@ class State:
         # Grab the pair snapshot here so triangulation below runs against a
         # consistent view without re-entering the lock.
         with self._lock:
+            existing = self.pitches.get((pitch.camera_id, pitch.session_id))
+            live_frames = self._live_frames_for_camera_locked(pitch.session_id, pitch.camera_id)
+            merged = pitch.model_copy(deep=True)
+            if existing is not None:
+                if not merged.frames_live and existing.frames_live:
+                    merged.frames_live = list(existing.frames_live)
+                if not merged.frames_ios_post and existing.frames_ios_post:
+                    merged.frames_ios_post = list(existing.frames_ios_post)
+                if not merged.frames_server_post and existing.frames_server_post:
+                    merged.frames_server_post = list(existing.frames_server_post)
+                if not merged.frames_on_device and existing.frames_on_device:
+                    merged.frames_on_device = list(existing.frames_on_device)
+                if not merged.frames and existing.frames:
+                    merged.frames = list(existing.frames)
+            if not merged.frames_live and live_frames:
+                merged.frames_live = list(live_frames)
+            pitch = merged
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
             # Drive the session state machine forward — any upload arriving
             # while armed disarms the session (one-shot pattern). The other
@@ -2077,29 +2121,39 @@ class State:
                 tuple[
                     str,
                     list[str],
-                    dict[str, int],
-                    dict[str, int],
+                    dict[str, dict[str, int]],
                     bool,
                     dict[str, CaptureTelemetryPayload | None],
                     SessionResult | None,
                 ]
             ] = []
+            # Each pipeline (live / ios_post / server_post) maps to one of
+            # the three PitchPayload frame buckets. Keep the mapping in one
+            # table so the for-loop below can't drift out of sync with
+            # schemas.DetectionPath.
+            _PATH_TO_FRAMES_ATTR = (
+                (DetectionPath.live.value, "frames_live"),
+                (DetectionPath.ios_post.value, "frames_on_device"),
+                (DetectionPath.server_post.value, "frames"),
+            )
             for sid in sessions:
                 cams_present = sorted(
                     cam for (cam, s) in self.pitches.keys() if s == sid
                 )
-                cam_frame_counts = {
-                    cam: sum(
-                        1 for f in self.pitches[(cam, sid)].frames if f.ball_detected
-                    )
-                    for cam in cams_present
+                # n_ball_frames_by_path[path][cam] = detected-frame count.
+                # Every path gets a populated inner dict even when the count
+                # is zero, so the dashboard can render three independent
+                # columns without having to guess which keys exist.
+                n_ball_frames_by_path: dict[str, dict[str, int]] = {
+                    path: {} for path, _ in _PATH_TO_FRAMES_ATTR
                 }
-                cam_frame_counts_on_device = {
-                    cam: sum(
-                        1 for f in self.pitches[(cam, sid)].frames_on_device if f.ball_detected
-                    )
-                    for cam in cams_present
-                }
+                for cam in cams_present:
+                    pitch = self.pitches[(cam, sid)]
+                    for path, attr in _PATH_TO_FRAMES_ATTR:
+                        frames = getattr(pitch, attr, ()) or ()
+                        n_ball_frames_by_path[path][cam] = sum(
+                            1 for f in frames if f.ball_detected
+                        )
                 # Any pitch for this session carrying non-empty frames_on_device
                 # implies the session armed in dual mode (on-device uploads
                 # always omit the MOV; dual adds frames_on_device on top of
@@ -2117,8 +2171,7 @@ class State:
                     (
                         sid,
                         cams_present,
-                        cam_frame_counts,
-                        cam_frame_counts_on_device,
+                        n_ball_frames_by_path,
                         has_any_on_device_frames,
                         cam_capture_telemetry,
                         self.results.get(sid),
@@ -2127,7 +2180,7 @@ class State:
 
         # --- Outside the lock: file stats + summary derivation.
         events: list[dict[str, Any]] = []
-        for sid, cams_present, cam_frame_counts, cam_frame_counts_on_device, has_any_on_device_frames, cam_capture_telemetry, result in snapshots:
+        for sid, cams_present, n_ball_frames_by_path, has_any_on_device_frames, cam_capture_telemetry, result in snapshots:
             trashed = self._session_is_trashed(sid)
             if bucket == "active" and trashed:
                 continue
@@ -2181,19 +2234,34 @@ class State:
                 mode = "camera_only"
             else:
                 mode = "on_device"
+            # path_status is the dashboard's per-pipeline health pill. It
+            # resolves in this order (strongest signal wins):
+            #   1. "done" if result.paths_completed includes it (triangulated
+            #      on a paired session, or explicit mono-session finalization),
+            #   2. "done" if any camera produced ≥1 detected frame on that
+            #      pipeline — live-only single-camera runs ship no triangulation
+            #      but still count as "that pipeline executed", which is what
+            #      the user wants to see in the events list,
+            #   3. "error" if abort_reasons has an entry for this pipeline,
+            #   4. "-" (never ran / empty).
+            def _path_status(path_value: str, abort_prefix: str | None = None) -> str:
+                if result is not None and path_value in result.paths_completed:
+                    return "done"
+                if any(c > 0 for c in n_ball_frames_by_path.get(path_value, {}).values()):
+                    return "done"
+                if result is not None:
+                    if path_value in result.abort_reasons:
+                        return "error"
+                    if abort_prefix is not None and any(
+                        key.startswith(abort_prefix) for key in result.abort_reasons
+                    ):
+                        return "error"
+                return "-"
+
             path_status = {
-                DetectionPath.live.value: (
-                    "done" if result is not None and DetectionPath.live.value in result.paths_completed
-                    else ("error" if result is not None and any(key.startswith("live:") for key in result.abort_reasons) else "-")
-                ),
-                DetectionPath.ios_post.value: (
-                    "done" if result is not None and DetectionPath.ios_post.value in result.paths_completed
-                    else ("error" if result is not None and DetectionPath.ios_post.value in result.abort_reasons else "-")
-                ),
-                DetectionPath.server_post.value: (
-                    "done" if result is not None and DetectionPath.server_post.value in result.paths_completed
-                    else ("error" if result is not None and DetectionPath.server_post.value in result.abort_reasons else "-")
-                ),
+                DetectionPath.live.value: _path_status(DetectionPath.live.value, "live:"),
+                DetectionPath.ios_post.value: _path_status(DetectionPath.ios_post.value),
+                DetectionPath.server_post.value: _path_status(DetectionPath.server_post.value),
             }
             processing_state, processing_resumable = self.session_processing_summary(sid)
 
@@ -2204,8 +2272,13 @@ class State:
                     "status": status,
                     "mode": mode,
                     "received_at": latest_mtime,
-                    "n_ball_frames": cam_frame_counts,
-                    "n_ball_frames_on_device": cam_frame_counts_on_device,
+                    # Three independent counts, one per pipeline. The
+                    # legacy flat names are kept as aliases so older
+                    # consumers (tests, external scripts) don't break —
+                    # new code should read `n_ball_frames_by_path`.
+                    "n_ball_frames_by_path": n_ball_frames_by_path,
+                    "n_ball_frames": n_ball_frames_by_path[DetectionPath.server_post.value],
+                    "n_ball_frames_on_device": n_ball_frames_by_path[DetectionPath.ios_post.value],
                     "n_triangulated": n_triangulated,
                     "n_triangulated_on_device": n_triangulated_on_device,
                     "peak_z_m": peak_z,

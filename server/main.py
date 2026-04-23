@@ -635,8 +635,12 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 reason = msg.get("reason")
                 if session_id:
                     await asyncio.to_thread(state.mark_live_path_ended, camera_id, session_id, reason)
-                    result = await asyncio.to_thread(state._rebuild_result_for_session, session_id)
-                    await asyncio.to_thread(state.store_result, result)
+                    persisted = await asyncio.to_thread(state.persist_live_frames, camera_id, session_id)
+                    if persisted is not None:
+                        result = persisted
+                    else:
+                        result = await asyncio.to_thread(state._rebuild_result_for_session, session_id)
+                        await asyncio.to_thread(state.store_result, result)
                     await sse_hub.broadcast(
                         "path_completed",
                         {
