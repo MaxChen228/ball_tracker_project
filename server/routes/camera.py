@@ -36,7 +36,7 @@ async def camera_calibration_frame(camera_id: str, request: Request) -> dict[str
         body = await request.body()
     if not body:
         raise HTTPException(status_code=422, detail="empty body")
-    if len(body) > 8 * 1024 * 1024:
+    if len(body) > 16 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="calibration frame too large")
     state.store_calibration_frame(camera_id, bytes(body))
     return {"ok": True, "bytes": len(body)}
