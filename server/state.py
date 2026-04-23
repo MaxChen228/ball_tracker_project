@@ -7,7 +7,7 @@ import re
 import secrets
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
@@ -29,40 +29,32 @@ from schemas import (
     SyncRun,
     TrackingExposureCapMode,
     TriangulatedPoint,
-    _DEFAULT_TRACKING_EXPOSURE_CAP_MODE,
     _DEFAULT_SESSION_TIMEOUT_S,
     _DEFAULT_PATHS,
     mode_for_paths,
-    paths_for_mode,
 )
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from fitting import fit_trajectory
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
-from triangulate import recover_extrinsics
 from sync_solver import compute_mutual_sync
 from live_pairing import LivePairingSession
+from state_runtime import RuntimeSettingsStore, SyncParams
+from state_calibration import (
+    AutoCalibrationRun as _AutoCalibrationRun,
+    AutoCalibrationRunStore,
+    CalibrationFrameBuffer,
+    CalibrationStore,
+    CALIBRATION_FRAME_TTL_S as _CALIBRATION_FRAME_TTL_S,
+    validate_calibration_snapshot as _validate_calibration_snapshot,
+)
+from state_devices import DeviceRegistry
+from state_processing import SessionProcessingState
 
 logger = logging.getLogger("ball_tracker")
 
 _DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
 
-
-@dataclass
-class SyncParams:
-    """Server-owned burst parameters for one mutual-sync run.
-    Pushed per-camera in the WS sync_run message so iOS never needs a
-    rebuild to adjust timing, burst count, or recording duration.
-
-    A emits during emit_a_at_s; B emits during emit_b_at_s. Staggered
-    (non-overlapping) windows eliminate self-interference without needing
-    disjoint frequency bands, though dual-band is still used as an extra
-    disambiguation layer. search_window_s controls the ±window the server's
-    windowed detector searches around each expected emission time."""
-    emit_a_at_s: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.7])
-    emit_b_at_s: list[float] = field(default_factory=lambda: [1.8, 2.0, 2.2])
-    record_duration_s: float = 4.0
-    search_window_s: float = 0.3
 
 # Seconds a heartbeat remains fresh. A phone beating at 1 Hz drops off the
 # "online" list after missing ~3 beats — conservative enough to tolerate a
@@ -143,97 +135,11 @@ def _new_sync_id() -> str:
     return "sy_" + secrets.token_hex(4)
 
 
-def _validate_calibration_snapshot(snap: CalibrationSnapshot) -> None:
-    """Gatekeep CalibrationSnapshot writes: K, H, and dims must all be in
-    the same pixel coordinate system. An optical centre outside the image,
-    non-positive focal lengths, or wildly asymmetric fx/fy all indicate
-    the snapshot was built from mismatched sources and would produce
-    nonsense extrinsics downstream. Raise ValueError on the way in rather
-    than debugging bad poses on the way out."""
-    w, h = snap.image_width_px, snap.image_height_px
-    if w <= 0 or h <= 0:
-        raise ValueError(f"invalid image dims {w}x{h}")
-    k = snap.intrinsics
-    if k.fx <= 0 or k.fz <= 0:
-        raise ValueError(f"non-positive focal length fx={k.fx} fy={k.fz}")
-    # fx and fy should be within a factor of ~2 for any real lens + square
-    # pixels. Bigger asymmetry almost always signals a unit-system bug.
-    if max(k.fx, k.fz) / min(k.fx, k.fz) > 2.0:
-        raise ValueError(f"fx/fy ratio out of bounds: fx={k.fx} fy={k.fz}")
-    # Optical centre must be inside the image. We allow a small outside
-    # margin (5% of dimension) because lens off-axis shifts happen, but
-    # more than that is almost certainly a dims-mismatch bug.
-    if not (-0.05 * w <= k.cx <= 1.05 * w):
-        raise ValueError(
-            f"cx={k.cx} outside image width {w} — K likely from a "
-            f"different resolution than image_dims claim"
-        )
-    if not (-0.05 * h <= k.cy <= 1.05 * h):
-        raise ValueError(
-            f"cy={k.cy} outside image height {h} — K likely from a "
-            f"different resolution than image_dims claim"
-        )
-    # Homography must be invertible (h33 normalized ≈ 1).
-    H_flat = snap.homography
-    if len(H_flat) != 9 or abs(H_flat[8]) < 1e-9:
-        raise ValueError(f"degenerate homography: h33={H_flat[8] if len(H_flat) == 9 else 'wrong length'}")
-
-
-# Calibration-frame buffer TTL. One-shot: iOS pushes a full-resolution
-# JPEG on request, server consumes it, flag auto-clears. 10 s is plenty
-# for capture→encode→POST round-trip even on a busy LAN.
-_CALIBRATION_FRAME_TTL_S = 10.0
-
-
 @dataclass
 class _LegacyTimeSyncIntent:
     id: str
     started_at: float
     expires_at: float
-
-
-@dataclass
-class _AutoCalibrationRun:
-    id: str
-    camera_id: str
-    status: str
-    started_at: float
-    updated_at: float
-    frames_seen: int = 0
-    good_frames: int = 0
-    stable_frames: int = 0
-    markers_visible: int = 0
-    solver: str | None = None
-    reprojection_px: float | None = None
-    position_jitter_cm: float | None = None
-    angle_jitter_deg: float | None = None
-    applied: bool = False
-    summary: str | None = None
-    detail: str | None = None
-    detected_ids: list[int] | None = None
-    result: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "camera_id": self.camera_id,
-            "status": self.status,
-            "started_at": self.started_at,
-            "updated_at": self.updated_at,
-            "frames_seen": self.frames_seen,
-            "good_frames": self.good_frames,
-            "stable_frames": self.stable_frames,
-            "markers_visible": self.markers_visible,
-            "solver": self.solver,
-            "reprojection_px": self.reprojection_px,
-            "position_jitter_cm": self.position_jitter_cm,
-            "angle_jitter_deg": self.angle_jitter_deg,
-            "applied": self.applied,
-            "summary": self.summary,
-            "detail": self.detail,
-            "detected_ids": list(self.detected_ids or []),
-            "result": dict(self.result or {}),
-        }
 
 
 class State:
@@ -260,23 +166,26 @@ class State:
         self._calibration_dir.mkdir(parents=True, exist_ok=True)
         # Dashboard-control state. All in-memory — devices re-heartbeat on
         # connection, sessions don't survive restart.
-        self._devices: dict[str, Device] = {}
+        self._device_registry = DeviceRegistry(
+            time_fn=time_fn,
+            stale_after_s=_DEVICE_STALE_S,
+            gc_after_s=_DEVICE_GC_AFTER_S,
+            cap=_DEVICE_REGISTRY_CAP,
+        )
+        # Back-compat for tests and old diagnostics that inspected the raw
+        # registry; all writes go through DeviceRegistry.
+        self._devices = self._device_registry.devices
         self._current_session: Session | None = None
         self._last_ended_session: Session | None = None
-        # Global capture-mode toggle. Dashboard flips this; every subsequent
-        # arm_session() snapshots the current value into the session. Default
-        # `camera_only` preserves the pre-mode-split behaviour for anyone
-        # upgrading a running server without touching the dashboard.
-        self._current_mode: CaptureMode = CaptureMode.camera_only
-        # New authority: orthogonal detection path set snapshotted onto each
-        # session. Kept in sync with `_current_mode` for backward-compat.
-        self._default_paths: set[DetectionPath] = set(_DEFAULT_PATHS)
         # Per-camera calibration snapshots. Written by POST /calibration,
         # read by the dashboard canvas so the 3D preview shows where each
         # phone "thinks it is" relative to the plate, independent of any
         # session. Persisted as one JSON per camera so a server restart
         # keeps whatever calibrations were live.
-        self._calibrations: dict[str, CalibrationSnapshot] = {}
+        self._calibration_store = CalibrationStore(
+            self._calibration_dir,
+            atomic_write=self._atomic_write,
+        )
         # Mutual chirp sync: at most one run active at a time. Both phones
         # must be online and no session may be armed when a run starts.
         # `_last_sync_result` survives across runs so the dashboard + the
@@ -316,16 +225,10 @@ class State:
         # chirp can land much quieter, 0.06-0.3 in practice). Sharing
         # one gate forced operators to tune for the weaker modality and
         # lose false-positive margin on the stronger one.
-        self._chirp_detect_threshold: float = 0.18
-        self._mutual_sync_threshold: float = 0.10
-        self._heartbeat_interval_s: float = 1.0
-        self._sync_params: SyncParams = SyncParams()
-        self._tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
-        # Capture resolution (image height in px) pushed to iOS via WS settings.
-        # Allowed set is {720, 1080}. Default 1080p — always works.
-        self._capture_height_px: int = 1080
-        self._runtime_settings_path = data_dir / "runtime_settings.json"
-        self._load_runtime_settings_from_disk()
+        self._runtime_settings = RuntimeSettingsStore(
+            data_dir / "runtime_settings.json",
+            atomic_write=self._atomic_write,
+        )
         # Live-preview buffer (Phase 4a). Keeps one latest JPEG per camera
         # in memory, gated by a per-camera "dashboard is watching" flag
         # with a 5 s TTL. Shares the State-level `_time_fn` so clock-drift
@@ -340,8 +243,7 @@ class State:
         # frames are native capture res, accuracy-critical). `_cal_frames`
         # holds (jpeg_bytes, ts) keyed by camera_id; `_cal_frame_requested`
         # flags pending requests that iOS drains on its next captureOutput.
-        self._cal_frames: dict[str, tuple[bytes, float]] = {}
-        self._cal_frame_requested: dict[str, float] = {}  # cam_id → expiry ts
+        self._calibration_frames = CalibrationFrameBuffer(time_fn=time_fn)
         # Operator-managed marker registry. Stores 3D world coords plus a
         # "on plate plane" flag so the current planar auto-calibration path
         # can keep consuming only the eligible subset.
@@ -349,20 +251,16 @@ class State:
         # Per-camera auto-calibration run state. Long-running server-side
         # observation window updates this so `/setup` can show
         # searching/stabilizing/solving/verified instead of a blind spinner.
-        self._auto_cal_runs: dict[str, _AutoCalibrationRun] = {}
-        self._auto_cal_last: dict[str, _AutoCalibrationRun] = {}
+        self._auto_cal_runs = AutoCalibrationRunStore(time_fn=time_fn)
         # Live streaming state keyed by session id.
         self._live_pairings: dict[str, LivePairingSession] = {}
         # Session-level trash + processing-control metadata. Trash is
         # persisted; processing state is in-memory orchestration around
         # server-side post-processing jobs.
-        self._trashed_sessions: dict[str, float] = {}
-        self._server_post_jobs: dict[tuple[str, str], str] = {}
-        self._server_post_active_tasks: set[tuple[str, str]] = set()
+        self._processing = SessionProcessingState()
         # Calibrations first — _load_from_disk re-triangulates every cached
         # pitch, and triangulation needs the calibration snapshot to decide
         # the intrinsic-scale factor (MOV dims vs. calibration dims).
-        self._load_calibrations_from_disk()
         self._load_session_meta_from_disk()
         self._load_from_disk()
 
@@ -438,50 +336,21 @@ class State:
             return
         trashed = obj.get("trashed_sessions")
         if isinstance(trashed, dict):
+            parsed: dict[str, float] = {}
             for sid, ts in trashed.items():
                 if isinstance(sid, str) and isinstance(ts, (int, float)):
-                    self._trashed_sessions[sid] = float(ts)
+                    parsed[sid] = float(ts)
+            self._processing.load_trashed(parsed)
 
     def _persist_session_meta_locked(self) -> None:
         payload = json.dumps(
-            {"trashed_sessions": self._trashed_sessions},
+            {"trashed_sessions": self._processing.trashed_sessions},
             indent=2,
         )
         self._atomic_write(self._session_meta_path, payload)
 
     def _calibration_path(self, camera_id: str) -> Path:
-        return self._calibration_dir / f"{camera_id}.json"
-
-    def _load_calibrations_from_disk(self) -> None:
-        for path in sorted(self._calibration_dir.glob("*.json")):
-            try:
-                obj = json.loads(path.read_text())
-                snap = CalibrationSnapshot.model_validate(obj)
-            except Exception as e:
-                logger.warning("skip corrupt calibration file %s: %s", path.name, e)
-                continue
-            # Also screen via the same K/H/dims consistency rules the
-            # write path enforces — old snapshots from earlier buggy
-            # write paths may have K in one pixel scale and dims in
-            # another, which would poison every downstream solve. Drop
-            # them on load with a loud warning so `auto-cal` takes the
-            # "no prior" path and rebuilds cleanly.
-            try:
-                _validate_calibration_snapshot(snap)
-            except ValueError as e:
-                logger.warning(
-                    "skip inconsistent calibration %s: %s — "
-                    "delete the file and re-run Auto Calibrate",
-                    path.name, e,
-                )
-                continue
-            self._calibrations[snap.camera_id] = snap
-        if self._calibrations:
-            logger.info(
-                "restored %d camera calibration(s) from %s",
-                len(self._calibrations),
-                self._calibration_dir,
-            )
+        return self._calibration_store.path(camera_id)
 
     def set_calibration(self, snapshot: CalibrationSnapshot) -> None:
         """Record (or overwrite) one camera's calibration and persist it
@@ -491,15 +360,12 @@ class State:
         mixed 1080p intrinsics with 480p homography which silently produced
         garbage extrinsics downstream. Catching it at the boundary saves
         hours of "why is Cam A at Z=0.66m" debugging."""
-        _validate_calibration_snapshot(snapshot)
-        payload = snapshot.model_dump_json(indent=2)
         with self._lock:
-            self._calibrations[snapshot.camera_id] = snapshot
-            self._atomic_write(self._calibration_path(snapshot.camera_id), payload)
+            self._calibration_store.set(snapshot)
 
     def calibrations(self) -> dict[str, CalibrationSnapshot]:
         with self._lock:
-            return dict(self._calibrations)
+            return self._calibration_store.snapshot()
 
     def _triangulate_pair(
         self, a: PitchPayload, b: PitchPayload, *, source: str = "server",
@@ -516,8 +382,8 @@ class State:
         mode calls this twice per session to keep the two point clouds
         separate."""
         with self._lock:
-            cal_a = self._calibrations.get(a.camera_id)
-            cal_b = self._calibrations.get(b.camera_id)
+            cal_a = self._calibration_store.get(a.camera_id)
+            cal_b = self._calibration_store.get(b.camera_id)
         a_scaled = scale_pitch_to_video_dims(
             a,
             (cal_a.image_width_px, cal_a.image_height_px) if cal_a else None,
@@ -550,7 +416,7 @@ class State:
             for session in (self._current_session, self._last_ended_session):
                 if session is not None and session.id == pitch.session_id:
                     return set(session.paths)
-            return set(self._default_paths)
+            return set(self._runtime_settings.default_paths)
 
     def _get_path_frames(self, pitch: PitchPayload, path: DetectionPath) -> list[FramePayload]:
         if path == DetectionPath.live:
@@ -779,10 +645,10 @@ class State:
     ) -> tuple[list[TriangulatedPoint], dict[str, int]]:
         with self._lock:
             live = self._live_pairings.setdefault(session_id, LivePairingSession(session_id))
-            cal_a = self._calibrations.get("A")
-            cal_b = self._calibrations.get("B")
-            dev_a = self._devices.get("A")
-            dev_b = self._devices.get("B")
+            cal_a = self._calibration_store.get("A")
+            cal_b = self._calibration_store.get("B")
+            dev_a = self._device_registry.get("A")
+            dev_b = self._device_registry.get("B")
             session_obj = None
             for candidate in (self._current_session, self._last_ended_session):
                 if candidate is not None and candidate.id == session_id:
@@ -975,73 +841,39 @@ class State:
     def request_calibration_frame(self, camera_id: str) -> None:
         """Flag a camera to send one full-res JPEG on its next captureOutput.
         Idempotent — re-POST refreshes the TTL."""
-        now = self._time_fn()
         with self._lock:
-            self._cal_frame_requested[camera_id] = now + _CALIBRATION_FRAME_TTL_S
+            self._calibration_frames.request(camera_id)
 
     def is_calibration_frame_requested(self, camera_id: str) -> bool:
         """True if the flag is pending and within TTL. Lazy-sweeps stale."""
-        now = self._time_fn()
         with self._lock:
-            exp = self._cal_frame_requested.get(camera_id)
-            if exp is None:
-                return False
-            if now >= exp:
-                self._cal_frame_requested.pop(camera_id, None)
-                return False
-            return True
+            return self._calibration_frames.is_requested(camera_id)
+
+    def requested_calibration_frame_ids(self) -> list[str]:
+        with self._lock:
+            return self._calibration_frames.requested_ids()
 
     def store_calibration_frame(self, camera_id: str, jpeg_bytes: bytes) -> None:
         """Phone pushed a calibration frame; stash it and clear the flag."""
-        now = self._time_fn()
         with self._lock:
-            self._cal_frames[camera_id] = (jpeg_bytes, now)
-            self._cal_frame_requested.pop(camera_id, None)
+            self._calibration_frames.store(camera_id, jpeg_bytes)
 
     def consume_calibration_frame(
         self, camera_id: str, max_age_s: float = _CALIBRATION_FRAME_TTL_S,
     ) -> tuple[bytes, float] | None:
         """Atomic pop-if-fresh. Returns None if no frame cached or stale."""
-        now = self._time_fn()
         with self._lock:
-            got = self._cal_frames.pop(camera_id, None)
-            if got is None:
-                return None
-            _, ts = got
-            if now - ts > max_age_s:
-                return None
-            return got
+            return self._calibration_frames.consume(camera_id, max_age_s=max_age_s)
 
     # --- Auto-calibration runs -------------------------------------------
 
     def start_auto_cal_run(self, camera_id: str) -> _AutoCalibrationRun:
-        now = self._time_fn()
         with self._lock:
-            current = self._auto_cal_runs.get(camera_id)
-            if current is not None and current.status not in {"completed", "failed"}:
-                raise ValueError(f"auto calibration already running for camera {camera_id}")
-            run = _AutoCalibrationRun(
-                id=f"acr_{secrets.token_hex(4)}",
-                camera_id=camera_id,
-                status="searching",
-                started_at=now,
-                updated_at=now,
-                summary="Requesting full-res frame",
-            )
-            self._auto_cal_runs[camera_id] = run
-            return _AutoCalibrationRun(**run.to_dict())
+            return self._auto_cal_runs.start(camera_id)
 
     def update_auto_cal_run(self, camera_id: str, **updates: Any) -> _AutoCalibrationRun | None:
-        now = self._time_fn()
         with self._lock:
-            run = self._auto_cal_runs.get(camera_id)
-            if run is None:
-                return None
-            for key, value in updates.items():
-                if hasattr(run, key):
-                    setattr(run, key, value)
-            run.updated_at = now
-            return _AutoCalibrationRun(**run.to_dict())
+            return self._auto_cal_runs.update(camera_id, **updates)
 
     def finish_auto_cal_run(
         self,
@@ -1053,31 +885,19 @@ class State:
         detail: str | None = None,
         applied: bool | None = None,
     ) -> _AutoCalibrationRun | None:
-        now = self._time_fn()
         with self._lock:
-            run = self._auto_cal_runs.get(camera_id)
-            if run is None:
-                return None
-            run.status = status
-            run.updated_at = now
-            run.result = result
-            if summary is not None:
-                run.summary = summary
-            if detail is not None:
-                run.detail = detail
-            if applied is not None:
-                run.applied = applied
-            snap = _AutoCalibrationRun(**run.to_dict())
-            self._auto_cal_last[camera_id] = snap
-            if status in {"completed", "failed"}:
-                self._auto_cal_runs.pop(camera_id, None)
-            return snap
+            return self._auto_cal_runs.finish(
+                camera_id,
+                status=status,
+                result=result,
+                summary=summary,
+                detail=detail,
+                applied=applied,
+            )
 
     def auto_cal_status(self) -> dict[str, Any]:
         with self._lock:
-            active = {cam: run.to_dict() for cam, run in self._auto_cal_runs.items()}
-            last = {cam: run.to_dict() for cam, run in self._auto_cal_last.items()}
-            return {"active": active, "last": last}
+            return self._auto_cal_runs.status()
 
     def live_session_summary(self) -> dict[str, Any] | None:
         session = self.session_snapshot()
@@ -1156,34 +976,13 @@ class State:
         entry older than `_DEVICE_GC_AFTER_S` and enforces a hard size cap
         (evicts the oldest by `last_seen_at`) so a misbehaving client can't
         grow the registry without bound."""
-        now = self._time_fn()
         with self._lock:
-            self._devices[camera_id] = Device(
-                camera_id=camera_id,
-                last_seen_at=now,
+            self._device_registry.heartbeat(
+                camera_id,
                 time_synced=time_synced,
-                time_sync_id=(time_sync_id if time_synced else None),
-                time_sync_at=(now if time_synced and time_sync_id is not None else None),
-                sync_anchor_timestamp_s=(
-                    float(sync_anchor_timestamp_s)
-                    if time_synced and sync_anchor_timestamp_s is not None
-                    else None
-                ),
+                time_sync_id=time_sync_id,
+                sync_anchor_timestamp_s=sync_anchor_timestamp_s,
             )
-            # GC stale entries first — cheap and keeps the cap hit rare.
-            stale = [
-                cam for cam, dev in self._devices.items()
-                if now - dev.last_seen_at > _DEVICE_GC_AFTER_S
-            ]
-            for cam in stale:
-                del self._devices[cam]
-            # Hard cap: if GC didn't bring us under, drop oldest.
-            while len(self._devices) > _DEVICE_REGISTRY_CAP:
-                oldest = min(
-                    self._devices.items(),
-                    key=lambda kv: kv[1].last_seen_at,
-                )[0]
-                del self._devices[oldest]
 
     def record_sync_telemetry(self, camera_id: str, telem: dict[str, Any]) -> None:
         """Stash the latest quick-chirp live telemetry for a cam AND roll
@@ -1269,23 +1068,10 @@ class State:
         backgrounded), so the 3 s grace that a dropped heartbeat would
         earn is no longer appropriate."""
         with self._lock:
-            dev = self._devices.get(camera_id)
-            if dev is None:
-                return
-            self._devices[camera_id] = Device(
-                camera_id=dev.camera_id,
-                last_seen_at=self._time_fn() - _DEVICE_STALE_S - 0.1,
-                time_synced=dev.time_synced,
-                time_sync_id=dev.time_sync_id,
-                time_sync_at=dev.time_sync_at,
-                sync_anchor_timestamp_s=dev.sync_anchor_timestamp_s,
-            )
+            self._device_registry.mark_offline(camera_id)
 
     def _common_time_sync_id_locked(self, now: float) -> str | None:
-        fresh = [
-            d for d in self._devices.values()
-            if now - d.last_seen_at <= _DEVICE_STALE_S
-        ]
+        fresh = self._device_registry.online()
         if len(fresh) < 2:
             return None
         sync_ids: set[str] = set()
@@ -1308,14 +1094,8 @@ class State:
         """Snapshot of devices whose last heartbeat is within
         `stale_after_s` of now. Returned sorted by camera_id for
         deterministic rendering."""
-        now = self._time_fn()
         with self._lock:
-            fresh = [
-                d for d in self._devices.values()
-                if now - d.last_seen_at <= stale_after_s
-            ]
-        fresh.sort(key=lambda d: d.camera_id)
-        return fresh
+            return self._device_registry.online(stale_after_s)
 
     def known_camera_ids(self) -> list[str]:
         """All camera ids that have ever heartbeated this run — used by WS
@@ -1323,21 +1103,11 @@ class State:
         liveness (e.g. calibration updates, which the other cam might care
         about even if its heartbeat lapsed briefly)."""
         with self._lock:
-            return list(self._devices.keys())
+            return self._device_registry.known_camera_ids()
 
     def device_snapshot(self, camera_id: str) -> Device | None:
         with self._lock:
-            dev = self._devices.get(camera_id)
-            if dev is None:
-                return None
-            return Device(
-                camera_id=dev.camera_id,
-                last_seen_at=dev.last_seen_at,
-                time_synced=dev.time_synced,
-                time_sync_id=dev.time_sync_id,
-                time_sync_at=dev.time_sync_at,
-                sync_anchor_timestamp_s=dev.sync_anchor_timestamp_s,
-            )
+            return self._device_registry.snapshot(camera_id)
 
     def _check_session_timeout_locked(self, now: float) -> None:
         """If the current session has exceeded its max_duration_s, transition
@@ -1373,14 +1143,14 @@ class State:
             self._check_session_timeout_locked(now)
             if self._current_session is not None:
                 return self._current_session
-            chosen_paths = set(paths or self._default_paths or _DEFAULT_PATHS)
+            chosen_paths = set(paths or self._runtime_settings.default_paths or _DEFAULT_PATHS)
             session = Session(
                 id=_new_session_id(),
                 started_at=now,
                 max_duration_s=max_duration_s,
                 paths=chosen_paths,
                 mode=mode_for_paths(chosen_paths),
-                tracking_exposure_cap=self._tracking_exposure_cap,
+                tracking_exposure_cap=self._runtime_settings.tracking_exposure_cap,
                 sync_id=self._common_time_sync_id_locked(now),
             )
             self._live_pairings[session.id] = LivePairingSession(session.id)
@@ -1393,196 +1163,69 @@ class State:
         iPhones read this from WS settings messages to render the HUD mode
         chip even while idle."""
         with self._lock:
-            return mode_for_paths(self._default_paths)
+            return mode_for_paths(self._runtime_settings.default_paths)
 
     def default_paths(self) -> set[DetectionPath]:
         with self._lock:
-            return set(self._default_paths)
+            return set(self._runtime_settings.default_paths)
 
     def set_mode(self, mode: CaptureMode) -> CaptureMode:
         """Record the dashboard's mode choice. Only affects sessions armed
         after this call — in-flight sessions keep their snapshot mode."""
         with self._lock:
-            self._current_mode = mode
-            self._default_paths = paths_for_mode(mode)
-            self._persist_runtime_settings_locked()
-            return mode
+            return self._runtime_settings.set_mode(mode)
 
     def set_default_paths(self, paths: set[DetectionPath]) -> set[DetectionPath]:
-        if not paths:
-            raise ValueError("at least one detection path must be enabled")
         with self._lock:
-            self._default_paths = set(paths)
-            self._current_mode = mode_for_paths(self._default_paths)
-            self._persist_runtime_settings_locked()
-            return set(self._default_paths)
-
-    # ---- Runtime tunables (chirp detection threshold + WS heartbeat cadence) --
-    #
-    # Both are pushed from the dashboard, surface in WS settings messages,
-    # and are hot-applied by iOS. Persisted together to a single JSON file
-    # so a restart doesn't drop the operator's choice. iOS Settings UI still
-    # holds a local bootstrap default but the server push wins on first
-    # successful WS settings round-trip.
-
-    _CHIRP_THRESHOLD_MIN = 0.01
-    _CHIRP_THRESHOLD_MAX = 1.0
-    _HEARTBEAT_INTERVAL_MIN = 1.0
-    _HEARTBEAT_INTERVAL_MAX = 60.0
-
-    def _load_runtime_settings_from_disk(self) -> None:
-        path = self._runtime_settings_path
-        if not path.exists():
-            return
-        try:
-            obj = json.loads(path.read_text())
-        except Exception as e:
-            logger.warning("skip corrupt runtime_settings %s: %s", path, e)
-            return
-        thr = obj.get("chirp_detect_threshold")
-        if isinstance(thr, (int, float)) and self._CHIRP_THRESHOLD_MIN <= thr <= self._CHIRP_THRESHOLD_MAX:
-            self._chirp_detect_threshold = float(thr)
-        mthr = obj.get("mutual_sync_threshold")
-        if isinstance(mthr, (int, float)) and self._CHIRP_THRESHOLD_MIN <= mthr <= self._CHIRP_THRESHOLD_MAX:
-            self._mutual_sync_threshold = float(mthr)
-        ivl = obj.get("heartbeat_interval_s")
-        if isinstance(ivl, (int, float)) and self._HEARTBEAT_INTERVAL_MIN <= ivl <= self._HEARTBEAT_INTERVAL_MAX:
-            self._heartbeat_interval_s = float(ivl)
-        ch = obj.get("capture_height_px")
-        if isinstance(ch, int) and ch in self._ALLOWED_CAPTURE_HEIGHTS:
-            self._capture_height_px = ch
-        tec = obj.get("tracking_exposure_cap")
-        if isinstance(tec, str):
-            try:
-                self._tracking_exposure_cap = TrackingExposureCapMode(tec)
-            except ValueError:
-                pass
-        paths = obj.get("default_paths")
-        if isinstance(paths, list):
-            parsed: set[DetectionPath] = set()
-            for item in paths:
-                if not isinstance(item, str):
-                    continue
-                try:
-                    parsed.add(DetectionPath(item))
-                except ValueError:
-                    continue
-            if parsed:
-                self._default_paths = parsed
-                self._current_mode = mode_for_paths(parsed)
-        logger.info(
-            "restored runtime_settings: chirp=%.3f interval_s=%.2f capture_h=%d tracking_exposure=%s paths=%s",
-            self._chirp_detect_threshold,
-            self._heartbeat_interval_s,
-            self._capture_height_px,
-            self._tracking_exposure_cap.value,
-            sorted(p.value for p in self._default_paths),
-        )
-
-    _ALLOWED_CAPTURE_HEIGHTS = (720, 1080)
-
-    def _persist_runtime_settings_locked(self) -> None:
-        """Caller must hold `self._lock`. Atomic write."""
-        payload = json.dumps(
-            {
-                "chirp_detect_threshold": self._chirp_detect_threshold,
-                "mutual_sync_threshold": self._mutual_sync_threshold,
-                "heartbeat_interval_s": self._heartbeat_interval_s,
-                "capture_height_px": self._capture_height_px,
-                "tracking_exposure_cap": self._tracking_exposure_cap.value,
-                "default_paths": sorted(p.value for p in self._default_paths),
-            },
-            indent=2,
-        )
-        self._atomic_write(self._runtime_settings_path, payload)
+            return self._runtime_settings.set_default_paths(paths)
 
     def capture_height_px(self) -> int:
         with self._lock:
-            return self._capture_height_px
+            return self._runtime_settings.capture_height_px
 
     def set_capture_height_px(self, value: int) -> int:
-        if not isinstance(value, int):
-            raise ValueError("capture_height must be an int")
-        if value not in self._ALLOWED_CAPTURE_HEIGHTS:
-            raise ValueError(
-                f"capture_height {value} not in {self._ALLOWED_CAPTURE_HEIGHTS}"
-            )
         with self._lock:
-            self._capture_height_px = value
-            self._persist_runtime_settings_locked()
-            return value
+            return self._runtime_settings.set_capture_height_px(value)
 
     def chirp_detect_threshold(self) -> float:
         with self._lock:
-            return self._chirp_detect_threshold
+            return self._runtime_settings.chirp_detect_threshold
 
     def set_chirp_detect_threshold(self, value: float) -> float:
-        if not isinstance(value, (int, float)):
-            raise ValueError("threshold must be numeric")
-        v = float(value)
-        if not (self._CHIRP_THRESHOLD_MIN <= v <= self._CHIRP_THRESHOLD_MAX):
-            raise ValueError(
-                f"threshold {v} out of range "
-                f"[{self._CHIRP_THRESHOLD_MIN}, {self._CHIRP_THRESHOLD_MAX}]"
-            )
         with self._lock:
-            self._chirp_detect_threshold = v
-            self._persist_runtime_settings_locked()
-            return v
+            return self._runtime_settings.set_chirp_detect_threshold(value)
 
     def mutual_sync_threshold(self) -> float:
         with self._lock:
-            return self._mutual_sync_threshold
+            return self._runtime_settings.mutual_sync_threshold
 
     def set_mutual_sync_threshold(self, value: float) -> float:
-        if not isinstance(value, (int, float)):
-            raise ValueError("threshold must be numeric")
-        v = float(value)
-        if not (self._CHIRP_THRESHOLD_MIN <= v <= self._CHIRP_THRESHOLD_MAX):
-            raise ValueError(
-                f"threshold {v} out of range "
-                f"[{self._CHIRP_THRESHOLD_MIN}, {self._CHIRP_THRESHOLD_MAX}]"
-            )
         with self._lock:
-            self._mutual_sync_threshold = v
-            self._persist_runtime_settings_locked()
-            return v
+            return self._runtime_settings.set_mutual_sync_threshold(value)
 
     def sync_params(self) -> SyncParams:
         with self._lock:
-            return self._sync_params
+            return self._runtime_settings.sync_params
 
     def set_sync_params(self, params: SyncParams) -> None:
         with self._lock:
-            self._sync_params = params
+            self._runtime_settings.sync_params = params
 
     def heartbeat_interval_s(self) -> float:
         with self._lock:
-            return self._heartbeat_interval_s
+            return self._runtime_settings.heartbeat_interval_s
 
     def set_heartbeat_interval_s(self, value: float) -> float:
-        if not isinstance(value, (int, float)):
-            raise ValueError("interval must be numeric")
-        v = float(value)
-        if not (self._HEARTBEAT_INTERVAL_MIN <= v <= self._HEARTBEAT_INTERVAL_MAX):
-            raise ValueError(
-                f"interval {v} out of range "
-                f"[{self._HEARTBEAT_INTERVAL_MIN}, {self._HEARTBEAT_INTERVAL_MAX}]"
-            )
         with self._lock:
-            self._heartbeat_interval_s = v
-            self._persist_runtime_settings_locked()
-            return v
+            return self._runtime_settings.set_heartbeat_interval_s(value)
 
     def tracking_exposure_cap(self) -> TrackingExposureCapMode:
         with self._lock:
-            return self._tracking_exposure_cap
+            return self._runtime_settings.tracking_exposure_cap
 
     def set_tracking_exposure_cap(self, mode: TrackingExposureCapMode) -> TrackingExposureCapMode:
         with self._lock:
-            self._tracking_exposure_cap = mode
-            self._persist_runtime_settings_locked()
-            return mode
+            return self._runtime_settings.set_tracking_exposure_cap(mode)
 
     def stop_session(self) -> Session | None:
         """End the current armed session (operator pressed Stop on the
@@ -1706,7 +1349,7 @@ class State:
         # Fire post-mortem on the newly-merged streams so the sync log
         # has a self-contained quantitative line per late-arriving abort.
         # Mutual-sync uses its own threshold; quick-chirp's is independent.
-        thr = self._mutual_sync_threshold
+        thr = self._runtime_settings.mutual_sync_threshold
         if report.role == "A":
             self._log_trace_post_mortem_locked(
                 report.sync_id, "A.self", report.trace_self, thr)
@@ -1784,7 +1427,7 @@ class State:
         # Post-mortem per stream: logs best peak, noise floor, and the
         # margin to threshold so I can read the log and learn why this
         # run failed (too far? wrong band? speaker silent?).
-        thr = self._chirp_detect_threshold
+        thr = self._runtime_settings.chirp_detect_threshold
         self._log_trace_post_mortem_locked(
             run.id, "A.self",  rep_a.trace_self if rep_a else None, thr)
         self._log_trace_post_mortem_locked(
@@ -1957,7 +1600,7 @@ class State:
             }
 
     def _session_is_trashed_locked(self, session_id: str) -> bool:
-        return session_id in self._trashed_sessions
+        return self._processing.is_trashed(session_id)
 
     def trash_session(self, session_id: str) -> bool:
         now = self._time_fn()
@@ -1974,25 +1617,20 @@ class State:
             known = any(sid == session_id for _, sid in self.pitches) or session_id in self.results
             if not known:
                 return False
-            self._trashed_sessions[session_id] = now
-            for key, status in list(self._server_post_jobs.items()):
-                sid, _cam = key
-                if sid == session_id and status in {"queued", "processing"}:
-                    self._server_post_jobs[key] = "canceled"
+            self._processing.trash(session_id, at=now)
             self._persist_session_meta_locked()
             return True
 
     def restore_session(self, session_id: str) -> bool:
         with self._lock:
-            if session_id not in self._trashed_sessions:
+            if not self._processing.restore(session_id):
                 return False
-            self._trashed_sessions.pop(session_id, None)
             self._persist_session_meta_locked()
             return True
 
     def trash_count(self) -> int:
         with self._lock:
-            return len(self._trashed_sessions)
+            return self._processing.trash_count()
 
     def _session_server_post_candidates(self, session_id: str) -> list[tuple[str, PitchPayload, Path]]:
         with self._lock:
@@ -2033,89 +1671,51 @@ class State:
 
     def mark_server_post_queued(self, session_id: str, camera_id: str) -> None:
         with self._lock:
-            if self._session_is_trashed_locked(session_id):
-                return
-            key = (camera_id, session_id)
-            if key in self._server_post_active_tasks:
-                return
-            if self._server_post_jobs.get(key) == "processing":
-                return
-            self._server_post_jobs[key] = "queued"
+            self._processing.mark_queued((camera_id, session_id))
 
     def start_server_post_job(self, session_id: str, camera_id: str) -> bool:
         with self._lock:
-            if self._session_is_trashed_locked(session_id):
-                return False
-            key = (camera_id, session_id)
-            status = self._server_post_jobs.get(key)
-            if status == "canceled":
-                return False
-            self._server_post_jobs[key] = "processing"
-            self._server_post_active_tasks.add(key)
-            return True
+            return self._processing.start_job((camera_id, session_id))
 
     def should_cancel_server_post_job(self, session_id: str, camera_id: str) -> bool:
         with self._lock:
-            key = (camera_id, session_id)
-            return (
-                self._session_is_trashed_locked(session_id)
-                or self._server_post_jobs.get(key) == "canceled"
-            )
+            return self._processing.should_cancel((camera_id, session_id))
 
     def finish_server_post_job(self, session_id: str, camera_id: str, *, canceled: bool) -> None:
         with self._lock:
-            key = (camera_id, session_id)
-            self._server_post_active_tasks.discard(key)
-            if canceled:
-                self._server_post_jobs[key] = "canceled"
-            else:
-                self._server_post_jobs.pop(key, None)
+            self._processing.finish_job((camera_id, session_id), canceled=canceled)
 
     def cancel_processing(self, session_id: str) -> bool:
-        changed = False
-        for cam, _pitch, _clip in self._session_server_post_candidates(session_id):
-            key = (cam, session_id)
-            with self._lock:
-                if self._server_post_jobs.get(key) != "canceled":
-                    self._server_post_jobs[key] = "canceled"
-                    changed = True
-        return changed
+        keys = [(cam, session_id) for cam, _pitch, _clip in self._session_server_post_candidates(session_id)]
+        with self._lock:
+            return self._processing.cancel(keys)
 
     def resume_processing(self, session_id: str) -> list[tuple[Path, PitchPayload]]:
-        queued: list[tuple[Path, PitchPayload]] = []
-        for cam, pitch, clip_path in self._session_server_post_candidates(session_id):
-            key = (cam, session_id)
-            with self._lock:
-                if key in self._server_post_active_tasks:
-                    continue
-                self._server_post_jobs[key] = "queued"
-            queued.append((clip_path, pitch.model_copy(deep=True)))
-        return queued
+        candidates = self._session_server_post_candidates(session_id)
+        by_key = {
+            (cam, session_id): (clip_path, pitch)
+            for cam, pitch, clip_path in candidates
+        }
+        with self._lock:
+            queued_keys = self._processing.resume(by_key.keys())
+        return [
+            (by_key[key][0], by_key[key][1].model_copy(deep=True))
+            for key in queued_keys
+        ]
 
     def session_processing_summary(self, session_id: str) -> tuple[str | None, bool]:
         candidates = self._session_server_post_candidates(session_id)
         pending_keys = {(cam, session_id) for cam, _pitch, _clip in candidates}
         with self._lock:
-            job_states = [
-                self._server_post_jobs.get(key)
-                for key in pending_keys
-                if self._server_post_jobs.get(key) is not None
-            ]
-        if any(state == "processing" for state in job_states):
-            return "processing", True
-        if any(state == "queued" for state in job_states) or (pending_keys and not job_states):
-            return "queued", True
-        if any(state == "canceled" for state in job_states):
-            return "canceled", bool(pending_keys)
-        if not candidates:
-            with self._lock:
-                completed = any(
-                    sid == session_id and bool(pitch.frames_server_post)
-                    for (cam, sid), pitch in self.pitches.items()
-                )
-            if completed:
-                return "completed", False
-        return None, False
+            completed = any(
+                sid == session_id and bool(pitch.frames_server_post)
+                for (_cam, sid), pitch in self.pitches.items()
+            )
+            return self._processing.summary(
+                pending_keys=pending_keys,
+                completed=completed,
+                has_candidates=bool(candidates),
+            )
 
     def start_sync(self) -> tuple[SyncRun | None, str | None]:
         """Begin a mutual-sync run. Returns `(run, None)` on success or
@@ -2623,16 +2223,12 @@ class State:
             for key in keys_to_drop:
                 self.pitches.pop(key, None)
             self.results.pop(session_id, None)
-            self._trashed_sessions.pop(session_id, None)
+            self._processing.remove_session(session_id)
             if (
                 self._last_ended_session is not None
                 and self._last_ended_session.id == session_id
             ):
                 self._last_ended_session = None
-            for key in list(self._server_post_jobs.keys()):
-                if key[1] == session_id:
-                    self._server_post_jobs.pop(key, None)
-                    self._server_post_active_tasks.discard(key)
             self._persist_session_meta_locked()
 
         # Disk cleanup outside the lock — same pattern record() uses.
@@ -2660,12 +2256,10 @@ class State:
         with self._lock:
             self.pitches.clear()
             self.results.clear()
-            self._devices.clear()
+            self._device_registry.clear()
             self._current_session = None
             self._last_ended_session = None
-            self._trashed_sessions.clear()
-            self._server_post_jobs.clear()
-            self._server_post_active_tasks.clear()
+            self._processing.clear()
             self._persist_session_meta_locked()
             if purge_disk:
                 for path in self._pitch_dir.glob("session_*.json*"):
