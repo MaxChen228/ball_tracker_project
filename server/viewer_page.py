@@ -78,8 +78,11 @@ def build_viewer_page_context(
         if not (t.get("meta") or {}).get("trace_kind")
     ]
     has_triangulated = bool(scene.triangulated or scene.triangulated_on_device)
-    scene_flex = "3 1 0" if has_triangulated else "2 1 0"
-    videos_flex = "2 1 0" if has_triangulated else "3 1 0"
+    # Default split is 50/50 so both halves read equally; operators who
+    # want more scene or more camera grid drag the #col-resizer (persisted
+    # to localStorage).
+    scene_flex = "1 1 0"
+    videos_flex = "1 1 0"
 
     videos_by_cam = {cam: (url, off) for cam, url, off, _fps, _fr in videos if url}
     other_cam = {"A": "B", "B": "A"}
@@ -431,8 +434,7 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .videos-col {{ flex:{videos_flex}; min-width:320px; display:grid;
     grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:1px;
     background:var(--border-base); }}
-  .work[data-mode="single-cam"] .scene-col {{ flex:7 1 0; }}
-  .work[data-mode="single-cam"] .videos-col {{ flex:3 1 0; min-width:280px; }}
+  .work[data-mode="single-cam"] .videos-col {{ min-width:280px; }}
   .col-resizer {{ flex:0 0 6px; cursor:col-resize; position:relative;
     background:var(--border-base);
     transition:background 0.12s; user-select:none; touch-action:none; }}
@@ -812,6 +814,13 @@ def _viewer_js() -> str:
   const TOTAL_FRAMES = unionTimes.length;
   let tMin = unionTimes[0];
   let tMax = unionTimes[TOTAL_FRAMES - 1];
+  // Window used to pick "current" rays in playback mode. We want the
+  // near-frame match so the 3D view shows an instantaneous ray pair, not
+  // a cumulative fan. 0.75 of the nominal inter-frame gap gives a bit of
+  // slack for A/B jitter without pulling in neighbouring frames.
+  const PLAYBACK_RAY_TOL = TOTAL_FRAMES > 1
+    ? Math.max(0.004, (tMax - tMin) / (TOTAL_FRAMES - 1) * 0.75)
+    : 0.010;
   function buildCamIndexFor(frameMap, cam) {{
     const f = frameMap[cam];
     const ts = f.t_rel_s, det = f.detected;
@@ -863,6 +872,22 @@ def _viewer_js() -> str:
     }}
     return {{xs, ys, zs}};
   }}
+  // Playback: pick the single ray closest to currentT (within tol) rather
+  // than the cumulative fan. Keeps the scene readable as an instantaneous
+  // snapshot tied to the bottom player.
+  function raysAtT(rays, t, tol) {{
+    let best = null, bestDt = Infinity;
+    for (const r of rays) {{
+      const dt = Math.abs(r.t_rel_s - t);
+      if (dt <= tol && dt < bestDt) {{ best = r; bestDt = dt; }}
+    }}
+    if (!best) return {{xs: [], ys: [], zs: []}};
+    return {{
+      xs: [best.origin[0], best.endpoint[0], null],
+      ys: [best.origin[1], best.endpoint[1], null],
+      zs: [best.origin[2], best.endpoint[2], null],
+    }};
+  }}
   // Camera diamond + 3-axis triad is data the user should be able to hide
   // in lock-step with that camera's ray pills. When every path for a given
   // camera is off, the camera itself disappears too — no orphaned diamonds.
@@ -904,7 +929,7 @@ def _viewer_js() -> str:
     if (!group) return false;
     return PATHS.some(p => group[p] && HAS_PATH[p]);
   }}
-  function buildDynamicTraces(cutoff) {{
+  function buildDynamicTraces(cutoff, playback) {{
     const out = [];
     // --- cameras (diamond + axis triad), gated on the per-cam pipeline pills ---
     for (const c of (SCENE.cameras || [])) {{
@@ -923,11 +948,13 @@ def _viewer_js() -> str:
     for (const [key, rays] of Object.entries(raysByKey)) {{
       const [cam, path] = key.split("|");
       const color = colorForCamPath(cam, path);
-      const {{xs, ys, zs}} = ballDetectedRaysUpTo(rays, cutoff);
+      const {{xs, ys, zs}} = playback
+        ? raysAtT(rays, currentT, PLAYBACK_RAY_TOL)
+        : ballDetectedRaysUpTo(rays, cutoff);
       if (!xs.length) continue;
       out.push({{ type: "scatter3d", x: xs, y: ys, z: zs, mode: "lines",
-        line: {{color: color, width: 2, dash: PATH_DASH[path]}},
-        opacity: PATH_OPACITY[path],
+        line: {{color: color, width: playback ? 3 : 2, dash: PATH_DASH[path]}},
+        opacity: playback ? 0.95 : PATH_OPACITY[path],
         name: `Rays ${{cam}} (${{PATH_LABEL[path]}}, ${{Math.floor(xs.length / 3)}})`,
         hoverinfo: "skip", showlegend: false }});
     }}
@@ -967,6 +994,13 @@ def _viewer_js() -> str:
           marker: {{size: 4, color: ts, colorscale: "Cividis", showscale: true,
             colorbar: {{ title: {{text: "flight t (s)", font: {{size: 10}}}}, thickness: 10, len: 0.45, x: 1.02, y: 0.5, tickfont: {{size: 9}} }}}},
           name: `3D trajectory (svr, ${{triPts.length}} pts)` }});
+        if (playback) {{
+          const head = triPts[triPts.length - 1];
+          out.push({{ type: "scatter3d", x: [head.x], y: [head.y], z: [head.z],
+            mode: "markers", marker: {{size: 9, color: ACCENT, symbol: "circle",
+              line: {{color: "#2A2520", width: 1}}}},
+            hoverinfo: "skip", showlegend: false }});
+        }}
       }}
     }}
     if (isLayerVisible("traj", "ios_post")) {{
@@ -976,6 +1010,13 @@ def _viewer_js() -> str:
           mode: "lines+markers", line: {{color: ACCENT, width: 3, dash: "dot"}},
           marker: {{size: 4, color: ACCENT, symbol: "circle-open"}}, opacity: 0.85,
           name: `3D trajectory (post, ${{triPts.length}} pts)` }});
+        if (playback) {{
+          const head = triPts[triPts.length - 1];
+          out.push({{ type: "scatter3d", x: [head.x], y: [head.y], z: [head.z],
+            mode: "markers", marker: {{size: 9, color: ACCENT, symbol: "circle-open",
+              line: {{color: ACCENT, width: 2}}}},
+            hoverinfo: "skip", showlegend: false }});
+        }}
       }}
     }}
     return out;
@@ -1046,8 +1087,9 @@ def _viewer_js() -> str:
   function drawVirtuals() {{ for (const entry of VIRT_CANVASES) drawVirtCanvas(entry); }}
   function drawRealPlateOverlays() {{ for (const entry of REAL_OVERLAYS) redrawPlateOverlay(entry.overlay, entry.meta); }}
   function drawScene() {{
-    const cutoff = mode === "all" ? Infinity : currentT;
-    Plotly.react(sceneDiv, [...STATIC, ...buildDynamicTraces(cutoff)], LAYOUT, {{displayModeBar: false, responsive: true}});
+    const playback = mode !== "all";
+    const cutoff = playback ? currentT : Infinity;
+    Plotly.react(sceneDiv, [...STATIC, ...buildDynamicTraces(cutoff, playback)], LAYOUT, {{displayModeBar: false, responsive: true}});
     drawVirtuals();
     drawRealPlateOverlays();
   }}

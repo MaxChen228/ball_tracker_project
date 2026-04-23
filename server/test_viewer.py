@@ -607,7 +607,8 @@ def test_viewer_page_context_computes_single_cam_layout_and_video_cells():
     assert ctx.layout_mode == "single-cam"
     assert 'data-cam="A"' in ctx.video_cells_html
     assert "no calibration" in ctx.virtual_cells_html  # B has no pose
-    assert ctx.scene_flex == "2 1 0"
+    assert ctx.scene_flex == "1 1 0"
+    assert ctx.videos_flex == "1 1 0"
 
 
 def test_failure_strip_html_prefers_earliest_blocking_reason():
