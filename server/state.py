@@ -14,7 +14,6 @@ from typing import Any, Callable
 
 from schemas import (
     CalibrationSnapshot,
-    CaptureTelemetryPayload,
     CaptureMode,
     DetectionPath,
     Device,
@@ -34,7 +33,6 @@ from schemas import (
     mode_for_paths,
 )
 from detection import HSVRange
-from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
 from sync_solver import compute_mutual_sync
@@ -50,7 +48,9 @@ from state_calibration import (
     validate_calibration_snapshot as _validate_calibration_snapshot,
 )
 from state_devices import DeviceRegistry
+from state_events import build_events
 from state_processing import SessionProcessingState
+import session_results
 
 logger = logging.getLogger("ball_tracker")
 
@@ -402,280 +402,23 @@ class State:
         with self._lock:
             return self._calibration_store.snapshot()
 
-    def _triangulate_pair(
-        self, a: PitchPayload, b: PitchPayload, *, source: str = "server",
-    ) -> list[TriangulatedPoint]:
-        """Scale each pitch's intrinsics + homography to its MOV's actual
-        pixel grid (using the cached calibration snapshot as the reference
-        resolution) and then triangulate. When no snapshot is cached for a
-        camera the scale factor falls back to 1.0 and the pitch is passed
-        through unchanged — the legacy behaviour for pre-resolution-picker
-        builds that always recorded at the calibration resolution.
-
-        `source` picks the detection stream (`"server"` default reads
-        `pitch.frames`; `"on_device"` reads `pitch.frames_on_device`). Dual
-        mode calls this twice per session to keep the two point clouds
-        separate."""
-        with self._lock:
-            cal_a = self._calibration_store.get(a.camera_id)
-            cal_b = self._calibration_store.get(b.camera_id)
-        a_scaled = scale_pitch_to_video_dims(
-            a,
-            (cal_a.image_width_px, cal_a.image_height_px) if cal_a else None,
-        )
-        b_scaled = scale_pitch_to_video_dims(
-            b,
-            (cal_b.image_width_px, cal_b.image_height_px) if cal_b else None,
-        )
-        return triangulate_cycle(a_scaled, b_scaled, source=source)
+    # The following three wrappers are kept because external callers
+    # (main.py, routes/sessions.py, routes/settings.py, routes/pitch.py)
+    # reach for them via `state._foo`. The module-level implementations
+    # live in session_results / detection_paths; call those directly from
+    # new code.
 
     @staticmethod
     def _normalize_paths(
         raw_paths: list[str] | set[DetectionPath] | None,
     ) -> set[DetectionPath]:
-        if raw_paths is None:
-            return set()
-        parsed: set[DetectionPath] = set()
-        for item in raw_paths:
-            try:
-                parsed.add(item if isinstance(item, DetectionPath) else DetectionPath(str(item)))
-            except ValueError:
-                continue
-        return parsed
+        return session_results.normalize_paths(raw_paths)
 
     def _paths_for_pitch(self, pitch: PitchPayload) -> set[DetectionPath]:
-        explicit = self._normalize_paths(pitch.paths)
-        if explicit:
-            return explicit
-        with self._lock:
-            for session in (self._current_session, self._last_ended_session):
-                if session is not None and session.id == pitch.session_id:
-                    return set(session.paths)
-            return set(self._runtime_settings.default_paths)
-
-    def _get_path_frames(self, pitch: PitchPayload, path: DetectionPath) -> list[FramePayload]:
-        if path == DetectionPath.live:
-            return list(pitch.frames_live)
-        if path == DetectionPath.ios_post:
-            if pitch.frames_ios_post:
-                return list(pitch.frames_ios_post)
-            if pitch.frames_on_device:
-                return list(pitch.frames_on_device)
-            if DetectionPath.server_post not in self._paths_for_pitch(pitch) and pitch.frames:
-                return list(pitch.frames)
-            return []
-        if pitch.frames_server_post:
-            return list(pitch.frames_server_post)
-        if pitch.frames and (pitch.frames_on_device or DetectionPath.ios_post not in self._paths_for_pitch(pitch)):
-            return list(pitch.frames)
-        return []
-
-    @staticmethod
-    def _has_on_device_frames(pitch: PitchPayload) -> bool:
-        """Dual-mode detection: if any pitch carries `frames_on_device`,
-        the session was armed dual and we owe the caller a second
-        triangulation pass over the iOS detection stream."""
-        return bool(pitch and pitch.frames_on_device)
-
-    @staticmethod
-    def _has_server_frames(pitch: PitchPayload) -> bool:
-        """True once the server-side MOV detection has populated
-        `pitch.frames`. Used to gate `_triangulate_pair(source="server")`
-        so the early-surface path (record runs before detection finishes,
-        with `frames=[]`) doesn't flag a spurious error — it just leaves
-        `result.points=[]` until the background detect task updates the
-        pitch and we re-record."""
-        return bool(pitch and pitch.frames)
-
-    def _pitch_with_path_frames(
-        self,
-        pitch: PitchPayload,
-        path: DetectionPath,
-    ) -> PitchPayload:
-        clone = pitch.model_copy(deep=True)
-        clone.frames_on_device = []
-        if path == DetectionPath.live:
-            clone.frames = list(pitch.frames_live)
-        elif path == DetectionPath.ios_post:
-            clone.frames = self._get_path_frames(pitch, DetectionPath.ios_post)
-        else:
-            clone.frames = self._get_path_frames(pitch, DetectionPath.server_post)
-        return clone
-
-    def _live_frames_for_camera_locked(self, session_id: str, camera_id: str) -> list[FramePayload]:
-        live = self._live_pairings.get(session_id)
-        if live is None:
-            return []
-        return live.frames_for_camera(camera_id)
-
-    def _session_sync_id_locked(self, session_id: str) -> str | None:
-        for session in (self._current_session, self._last_ended_session):
-            if session is not None and session.id == session_id:
-                return session.sync_id
-        return None
-
-    def _validate_pair_sync(self, a: PitchPayload, b: PitchPayload) -> str | None:
-        """Return a stable error string when the paired payloads do not
-        belong to the same legacy chirp sync run."""
-        if a.sync_anchor_timestamp_s is None or b.sync_anchor_timestamp_s is None:
-            return "no time sync"
-        with self._lock:
-            expected_sync_id = self._session_sync_id_locked(a.session_id)
-        if a.sync_id is None and b.sync_id is None:
-            # Backward-compat: historical sessions recorded before sync_id
-            # existed still carry valid anchor-relative timing, so keep
-            # loading them unless this armed session explicitly expected a
-            # shared sync id snapshot.
-            return "sync id missing" if expected_sync_id is not None else None
-        if a.sync_id is None or b.sync_id is None:
-            return "sync id missing"
-        if a.sync_id != b.sync_id:
-            return "sync id mismatch"
-        if expected_sync_id is not None and a.sync_id != expected_sync_id:
-            return "sync id mismatch for armed session"
-        return None
-
-    def _empty_result_for_session(
-        self,
-        session_id: str,
-        *,
-        camera_a_received: bool,
-        camera_b_received: bool,
-    ) -> SessionResult:
-        return SessionResult(
-            session_id=session_id,
-            camera_a_received=camera_a_received,
-            camera_b_received=camera_b_received,
-            solved_at=self._time_fn(),
-        )
+        return session_results.paths_for_pitch(self, pitch)
 
     def _rebuild_result_for_session(self, session_id: str) -> SessionResult:
-        with self._lock:
-            a = self.pitches.get(("A", session_id))
-            b = self.pitches.get(("B", session_id))
-            live = self._live_pairings.get(session_id)
-            current = self._current_session if self._current_session and self._current_session.id == session_id else None
-            ended = self._last_ended_session if self._last_ended_session and self._last_ended_session.id == session_id else None
-            session_obj = current or ended
-
-        result = self._empty_result_for_session(
-            session_id,
-            camera_a_received=a is not None,
-            camera_b_received=b is not None,
-        )
-
-        candidate_paths: set[DetectionPath] = set()
-        if session_obj is not None:
-            candidate_paths |= set(session_obj.paths)
-        for pitch in (a, b):
-            if pitch is not None:
-                candidate_paths |= self._paths_for_pitch(pitch)
-                # Auto-include paths when frames are actually present, even if
-                # neither the session nor the pitch explicitly listed them —
-                # /pitch_analysis can attach iOS frames post-hoc into a session
-                # that was armed server_post-only, and we still owe the caller
-                # a triangulation over those frames.
-                if pitch.frames_ios_post or pitch.frames_on_device:
-                    candidate_paths.add(DetectionPath.ios_post)
-                # Only auto-include server_post when the bucket is populated.
-                # Legacy `pitch.frames` alone is ambiguous — in on_device-only
-                # sessions it should map to ios_post, not resurrect server_post.
-                if pitch.frames_server_post:
-                    candidate_paths.add(DetectionPath.server_post)
-        if live is not None and live.frame_counts:
-            candidate_paths.add(DetectionPath.live)
-        if not candidate_paths:
-            candidate_paths = set(_DEFAULT_PATHS)
-
-        if live is not None:
-            result.frame_counts_by_path[DetectionPath.live.value] = {
-                cam: int(count) for cam, count in live.frame_counts.items() if count
-            }
-            if live.triangulated:
-                result.triangulated_by_path[DetectionPath.live.value] = list(live.triangulated)
-                result.paths_completed.add(DetectionPath.live.value)
-            if live.abort_reasons:
-                result.abort_reasons.update({f"live:{cam}": why for cam, why in live.abort_reasons.items()})
-
-        sync_error = None
-        if a is not None and b is not None:
-            sync_error = self._validate_pair_sync(a, b)
-            if sync_error is not None:
-                result.error = sync_error
-                result.error_on_device = sync_error
-
-        mono_session = (a is None) != (b is None)
-        for path in sorted(candidate_paths, key=lambda p: p.value):
-            if path == DetectionPath.live:
-                continue
-            frames_a = self._get_path_frames(a, path) if a is not None else []
-            frames_b = self._get_path_frames(b, path) if b is not None else []
-            frame_counts: dict[str, int] = {}
-            if a is not None and frames_a:
-                frame_counts["A"] = len(frames_a)
-            if b is not None and frames_b:
-                frame_counts["B"] = len(frames_b)
-            if frame_counts:
-                result.frame_counts_by_path[path.value] = frame_counts
-
-            if sync_error is None and a is not None and b is not None:
-                if not frames_a or not frames_b:
-                    continue
-                try:
-                    pts = self._triangulate_pair(
-                        self._pitch_with_path_frames(a, path),
-                        self._pitch_with_path_frames(b, path),
-                        source="server",
-                    )
-                except Exception as exc:
-                    result.abort_reasons[path.value] = f"{type(exc).__name__}: {exc}"
-                    continue
-                result.triangulated_by_path[path.value] = pts
-                result.paths_completed.add(path.value)
-            elif mono_session and frame_counts:
-                # Single-camera sessions cannot triangulate, but once the path
-                # has finalized frames on the sole uploaded camera it should be
-                # surfaced as completed instead of lingering in "stopped".
-                result.paths_completed.add(path.value)
-
-        authority: list[TriangulatedPoint] = []
-        for path in (
-            DetectionPath.ios_post.value,
-            DetectionPath.server_post.value,
-            DetectionPath.live.value,
-        ):
-            pts = result.triangulated_by_path.get(path)
-            if pts:
-                authority = pts
-                break
-        result.triangulated = authority
-        # Legacy `points` semantics: in dual-like sessions (server_post is in
-        # the candidate set) keep it strictly on the server stream so iOS
-        # post-pass doesn't leak across the points/points_on_device boundary.
-        # In mono-like sessions (on_device-only, live-only, etc) collapse to
-        # whichever path actually produced data — older consumers (viewer,
-        # /events) expect `points` to hold the session's single result when
-        # no dual split is in play.
-        if DetectionPath.server_post in candidate_paths:
-            legacy_points = result.triangulated_by_path.get(DetectionPath.server_post.value, [])
-        else:
-            legacy_points = (
-                result.triangulated_by_path.get(DetectionPath.ios_post.value)
-                or result.triangulated_by_path.get(DetectionPath.live.value)
-                or []
-            )
-        result.points = list(legacy_points)
-        if result.triangulated_by_path.get(DetectionPath.ios_post.value):
-            result.points_on_device = list(result.triangulated_by_path[DetectionPath.ios_post.value])
-        elif result.triangulated_by_path.get(DetectionPath.live.value):
-            result.points_on_device = list(result.triangulated_by_path[DetectionPath.live.value])
-
-        if not result.triangulated and result.error is None and (a is not None or b is not None):
-            if result.abort_reasons:
-                result.aborted = True
-            elif a is not None and b is not None:
-                result.error = "no detection completed"
-        return result
+        return session_results.rebuild_result_for_session(self, session_id)
 
     def ingest_live_frame(
         self,
@@ -727,7 +470,7 @@ class State:
                 image_width_px=cal_b.image_width_px,
                 image_height_px=cal_b.image_height_px,
             )
-            pts = self._triangulate_pair(pa, pb, source="server")
+            pts = session_results.triangulate_pair(self, pa, pb, source="server")
             return pts[0] if pts else None
 
         created = live.ingest(camera_id, frame, triangulate_live)
@@ -775,7 +518,9 @@ class State:
     def persist_live_frames(self, camera_id: str, session_id: str) -> SessionResult | None:
         with self._lock:
             existing = self.pitches.get((camera_id, session_id))
-            live_frames = self._live_frames_for_camera_locked(session_id, camera_id)
+            live_frames = session_results.live_frames_for_camera_locked(
+                self, session_id, camera_id,
+            )
         if existing is None or not live_frames:
             return None
         if existing.frames_live == live_frames:
@@ -820,7 +565,9 @@ class State:
         # consistent view without re-entering the lock.
         with self._lock:
             existing = self.pitches.get((pitch.camera_id, pitch.session_id))
-            live_frames = self._live_frames_for_camera_locked(pitch.session_id, pitch.camera_id)
+            live_frames = session_results.live_frames_for_camera_locked(
+                self, pitch.session_id, pitch.camera_id,
+            )
             merged = pitch.model_copy(deep=True)
             if existing is not None:
                 if not merged.frames_live and existing.frames_live:
@@ -2105,205 +1852,7 @@ class State:
         return cmds
 
     def events(self, *, bucket: str = "active") -> list[dict[str, Any]]:
-        """Summary row per session for the events panel — one entry per
-        session_id, collapsing A/B uploads into a single event.
-
-        `received_at` is derived from the pitch file's mtime so we don't
-        have to extend the Pydantic payload with server-side timestamps.
-        Disk `stat()` happens AFTER releasing `self._lock` so the
-        dashboard's 5 s tick can't block heartbeats / /pitch handlers
-        that need to mutate the state map.
-        """
-        # --- Critical section: snapshot only the in-memory data we need.
-        with self._lock:
-            sessions = sorted({sid for _, sid in self.pitches.keys()})
-            snapshots: list[
-                tuple[
-                    str,
-                    list[str],
-                    dict[str, dict[str, int]],
-                    bool,
-                    dict[str, CaptureTelemetryPayload | None],
-                    SessionResult | None,
-                ]
-            ] = []
-            # Each pipeline (live / ios_post / server_post) maps to one of
-            # the three PitchPayload frame buckets. Keep the mapping in one
-            # table so the for-loop below can't drift out of sync with
-            # schemas.DetectionPath.
-            _PATH_TO_FRAMES_ATTR = (
-                (DetectionPath.live.value, "frames_live"),
-                (DetectionPath.ios_post.value, "frames_on_device"),
-                (DetectionPath.server_post.value, "frames"),
-            )
-            for sid in sessions:
-                cams_present = sorted(
-                    cam for (cam, s) in self.pitches.keys() if s == sid
-                )
-                # n_ball_frames_by_path[path][cam] = detected-frame count.
-                # Every path gets a populated inner dict even when the count
-                # is zero, so the dashboard can render three independent
-                # columns without having to guess which keys exist.
-                n_ball_frames_by_path: dict[str, dict[str, int]] = {
-                    path: {} for path, _ in _PATH_TO_FRAMES_ATTR
-                }
-                for cam in cams_present:
-                    pitch = self.pitches[(cam, sid)]
-                    for path, attr in _PATH_TO_FRAMES_ATTR:
-                        frames = getattr(pitch, attr, ()) or ()
-                        n_ball_frames_by_path[path][cam] = sum(
-                            1 for f in frames if f.ball_detected
-                        )
-                # Any pitch for this session carrying non-empty frames_on_device
-                # implies the session armed in dual mode (on-device uploads
-                # always omit the MOV; dual adds frames_on_device on top of
-                # the MOV). Computed inside the lock so the mode-inference
-                # step outside doesn't need to re-read self.pitches.
-                has_any_on_device_frames = any(
-                    bool(self.pitches[(cam, sid)].frames_on_device)
-                    for cam in cams_present
-                )
-                cam_capture_telemetry = {
-                    cam: self.pitches[(cam, sid)].capture_telemetry
-                    for cam in cams_present
-                }
-                snapshots.append(
-                    (
-                        sid,
-                        cams_present,
-                        n_ball_frames_by_path,
-                        has_any_on_device_frames,
-                        cam_capture_telemetry,
-                        self.results.get(sid),
-                    )
-                )
-
-        # --- Outside the lock: file stats + summary derivation.
-        events: list[dict[str, Any]] = []
-        for sid, cams_present, n_ball_frames_by_path, has_any_on_device_frames, cam_capture_telemetry, result in snapshots:
-            trashed = self._session_is_trashed(sid)
-            if bucket == "active" and trashed:
-                continue
-            if bucket == "trash" and not trashed:
-                continue
-            latest_mtime: float | None = None
-            for cam in cams_present:
-                try:
-                    mtime = self._pitch_path(cam, sid).stat().st_mtime
-                except FileNotFoundError:
-                    continue
-                if latest_mtime is None or mtime > latest_mtime:
-                    latest_mtime = mtime
-
-            authority_points = result.triangulated if result is not None else []
-            n_triangulated = len(authority_points) if result is not None else 0
-            n_triangulated_on_device = len(result.points_on_device) if result is not None else 0
-            error = result.error if result is not None else None
-            error_on_device = result.error_on_device if result is not None else None
-
-            if error:
-                status = "error"
-            elif len(cams_present) >= 2 and n_triangulated > 0:
-                status = "paired"
-            elif len(cams_present) >= 2:
-                status = "paired_no_points"
-            else:
-                status = "partial"
-
-            peak_z: float | None = None
-            mean_res: float | None = None
-            duration: float | None = None
-            if authority_points:
-                zs = [p.z_m for p in authority_points]
-                peak_z = float(max(zs))
-                mean_res = float(
-                    sum(p.residual_m for p in authority_points)
-                    / len(authority_points)
-                )
-                ts = [p.t_rel_s for p in authority_points]
-                duration = float(ts[-1] - ts[0])
-
-            # Infer the legacy mode label for compatibility. The richer UI
-            # should prefer `path_status`.
-            has_any_video = any(
-                self._video_dir.glob(f"session_{sid}_*")
-            )
-            if has_any_video and has_any_on_device_frames:
-                mode = "dual"
-            elif has_any_video:
-                mode = "camera_only"
-            else:
-                mode = "on_device"
-            # path_status is the dashboard's per-pipeline health pill. It
-            # resolves in this order (strongest signal wins):
-            #   1. "done" if result.paths_completed includes it (triangulated
-            #      on a paired session, or explicit mono-session finalization),
-            #   2. "done" if any camera produced ≥1 detected frame on that
-            #      pipeline — live-only single-camera runs ship no triangulation
-            #      but still count as "that pipeline executed", which is what
-            #      the user wants to see in the events list,
-            #   3. "error" if abort_reasons has an entry for this pipeline,
-            #   4. "-" (never ran / empty).
-            def _path_status(path_value: str, abort_prefix: str | None = None) -> str:
-                if result is not None and path_value in result.paths_completed:
-                    return "done"
-                if any(c > 0 for c in n_ball_frames_by_path.get(path_value, {}).values()):
-                    return "done"
-                if result is not None:
-                    if path_value in result.abort_reasons:
-                        return "error"
-                    if abort_prefix is not None and any(
-                        key.startswith(abort_prefix) for key in result.abort_reasons
-                    ):
-                        return "error"
-                return "-"
-
-            path_status = {
-                DetectionPath.live.value: _path_status(DetectionPath.live.value, "live:"),
-                DetectionPath.ios_post.value: _path_status(DetectionPath.ios_post.value),
-                DetectionPath.server_post.value: _path_status(DetectionPath.server_post.value),
-            }
-            processing_state, processing_resumable = self.session_processing_summary(sid)
-
-            events.append(
-                {
-                    "session_id": sid,
-                    "cameras": cams_present,
-                    "status": status,
-                    "mode": mode,
-                    "received_at": latest_mtime,
-                    # Three independent counts, one per pipeline. The
-                    # legacy flat names are kept as aliases so older
-                    # consumers (tests, external scripts) don't break —
-                    # new code should read `n_ball_frames_by_path`.
-                    "n_ball_frames_by_path": n_ball_frames_by_path,
-                    "n_ball_frames": n_ball_frames_by_path[DetectionPath.server_post.value],
-                    "n_ball_frames_on_device": n_ball_frames_by_path[DetectionPath.ios_post.value],
-                    "n_triangulated": n_triangulated,
-                    "n_triangulated_on_device": n_triangulated_on_device,
-                    "peak_z_m": peak_z,
-                    "mean_residual_m": mean_res,
-                    "duration_s": duration,
-                    "capture_telemetry": {
-                        cam: (tele.model_dump(mode="json") if tele is not None else None)
-                        for cam, tele in cam_capture_telemetry.items()
-                    },
-                    "error": error,
-                    "error_on_device": error_on_device,
-                    "path_status": path_status,
-                    "trashed": trashed,
-                    "processing_state": processing_state,
-                    "processing_resumable": processing_resumable,
-                }
-            )
-        # Latest events first — session ids carry 4 bytes of random hex
-        # so we sort by `received_at` (fallback to id) to surface the
-        # most recently uploaded session at the top.
-        events.sort(
-            key=lambda e: (e["received_at"] or 0, e["session_id"]),
-            reverse=True,
-        )
-        return events
+        return build_events(self, bucket=bucket)
 
     def delete_session(self, session_id: str) -> bool:
         """Remove a single session's in-memory + on-disk artefacts.
