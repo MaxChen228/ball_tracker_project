@@ -424,31 +424,6 @@ def test_default_mode_is_camera_only(tmp_path):
     assert s.current_mode().value == "camera_only"
 
 
-def test_set_mode_changes_current_mode(tmp_path):
-    from schemas import CaptureMode
-    s = main.State(data_dir=tmp_path)
-    s.set_mode(CaptureMode.on_device)
-    assert s.current_mode() == CaptureMode.on_device
-
-
-def test_arm_session_snapshots_current_mode(tmp_path):
-    from schemas import CaptureMode
-    s = main.State(data_dir=tmp_path)
-    s.set_mode(CaptureMode.on_device)
-    session = s.arm_session()
-    assert session.mode == CaptureMode.on_device
-
-
-def test_mode_change_after_arm_does_not_affect_armed_session(tmp_path):
-    from schemas import CaptureMode
-    s = main.State(data_dir=tmp_path)
-    session = s.arm_session()
-    # Dashboard operator flips the toggle mid-session.
-    s.set_mode(CaptureMode.on_device)
-    assert session.mode == CaptureMode.camera_only  # snapshot frozen
-    assert s.current_mode() == CaptureMode.on_device  # global flipped for next arm
-
-
 def test_status_includes_capture_mode():
     client = TestClient(app)
     status = client.get("/status").json()
@@ -458,20 +433,6 @@ def test_status_includes_capture_mode():
 # test_heartbeat_reply_includes_capture_mode deleted — /heartbeat is
 # retired. capture_mode surfaces on /status (test_status_includes_capture_mode)
 # and on the WS settings message on connect.
-
-
-def test_set_mode_endpoint_persists_on_device_choice():
-    client = TestClient(app)
-    r = client.post(
-        "/sessions/set_mode",
-        data={"mode": "on_device"},
-        headers={"Accept": "application/json"},
-    )
-    assert r.status_code == 200
-    assert r.json()["capture_mode"] == "on_device"
-    # Round-trips via status.
-    status = client.get("/status").json()
-    assert status["capture_mode"] == "on_device"
 
 
 def test_set_mode_endpoint_rejects_invalid_value():
@@ -488,20 +449,12 @@ def test_set_mode_endpoint_html_form_redirects():
     client = TestClient(app)
     r = client.post(
         "/sessions/set_mode",
-        data={"mode": "on_device"},
+        data={"mode": "camera_only"},
         headers={"Accept": "text/html"},
         follow_redirects=False,
     )
     assert r.status_code == 303
     assert r.headers["location"] == "/"
-
-
-def test_session_to_dict_includes_mode(tmp_path):
-    from schemas import CaptureMode
-    s = main.State(data_dir=tmp_path)
-    s.set_mode(CaptureMode.on_device)
-    session = s.arm_session()
-    assert session.to_dict()["mode"] == "on_device"
 
 
 def test_default_tracking_exposure_cap_is_frame_duration(tmp_path):
@@ -547,20 +500,6 @@ def test_events_tags_mode_one_when_video_on_disk(tmp_path):
     match = [e for e in events if e["session_id"] == sid(700)]
     assert match, events
     assert match[0]["mode"] == "camera_only"
-
-
-def test_events_tags_mode_two_when_no_video_on_disk(tmp_path):
-    """Mode-two session: no MOV lands on disk, so events should report
-    `on_device` so the dashboard chip distinguishes it from mode-one."""
-    s = main.State(data_dir=tmp_path)
-    pitch = _minimal_pitch("A", session_id=sid(701))
-    s.record(pitch)
-    # No video file created — mode-two.
-
-    events = s.events()
-    match = [e for e in events if e["session_id"] == sid(701)]
-    assert match, events
-    assert match[0]["mode"] == "on_device"
 
 
 def test_delete_session_removes_memory_and_disk_artefacts(tmp_path):
@@ -860,7 +799,6 @@ def test_dashboard_renders_live_session_and_detection_path_controls():
     assert 'action="/detection/paths"' in body
     assert 'name="paths"' in body
     assert 'value="live"' in body
-    assert 'value="ios_post"' in body
     assert 'value="server_post"' in body
 
 
@@ -944,7 +882,7 @@ def test_dashboard_labels_stopped_postpass_session_without_live_frames():
     _seed_minimal_calibration("B")
     arm = client.post(
         "/sessions/arm",
-        json={"paths": ["ios_post", "server_post"]},
+        json={"paths": ["server_post"]},
         headers={"Accept": "application/json"},
     )
     assert arm.status_code == 200
@@ -954,16 +892,14 @@ def test_dashboard_labels_stopped_postpass_session_without_live_frames():
     body = client.get("/").text
     assert "Session Monitor" in body
     assert "Live stream disabled for this session." in body
-    assert "iOS: stopped" in body
     assert "srv: stopped" in body
-    assert "iOS: running" not in body
     assert "srv: running" not in body
 
 
 def test_state_marks_single_camera_server_post_path_completed(tmp_path):
     s = main.State(data_dir=tmp_path)
     pitch = _minimal_pitch("A", session_id=sid(90))
-    pitch.paths = [main.DetectionPath.ios_post.value, main.DetectionPath.server_post.value]
+    pitch.paths = [main.DetectionPath.server_post.value]
     pitch.frames = []
     pitch.frames_server_post = [
         main.FramePayload(frame_index=0, timestamp_s=0.0, px=100.0, py=100.0, ball_detected=True),
@@ -973,29 +909,6 @@ def test_state_marks_single_camera_server_post_path_completed(tmp_path):
 
     assert result.frame_counts_by_path["server_post"] == {"A": 1}
     assert "server_post" in result.paths_completed
-    assert "ios_post" not in result.paths_completed
-
-
-def test_state_marks_single_camera_ios_post_path_completed(tmp_path):
-    s = main.State(data_dir=tmp_path)
-    pitch = _minimal_pitch("A", session_id=sid(91))
-    pitch.paths = [main.DetectionPath.ios_post.value]
-    pitch.frames = []
-    base = s.record(pitch)
-    assert base.paths_completed == set()
-
-    result = s.attach_on_device_analysis(
-        main.PitchAnalysisPayload(
-            camera_id="A",
-            session_id=sid(91),
-            frames_on_device=[
-                main.FramePayload(frame_index=0, timestamp_s=0.0, px=100.0, py=100.0, ball_detected=True),
-            ],
-        )
-    )
-
-    assert result.frame_counts_by_path["ios_post"] == {"A": 1}
-    assert "ios_post" in result.paths_completed
 
 
 def test_dashboard_labels_done_for_single_camera_server_post_session():
@@ -1004,7 +917,7 @@ def test_dashboard_labels_done_for_single_camera_server_post_session():
     _seed_minimal_calibration("A")
     arm = client.post(
         "/sessions/arm",
-        json={"paths": ["ios_post", "server_post"]},
+        json={"paths": ["server_post"]},
         headers={"Accept": "application/json"},
     )
     assert arm.status_code == 200
@@ -1013,7 +926,7 @@ def test_dashboard_labels_done_for_single_camera_server_post_session():
     assert stop.status_code == 200
 
     pitch = _minimal_pitch("A", session_id=session_id)
-    pitch.paths = [main.DetectionPath.ios_post.value, main.DetectionPath.server_post.value]
+    pitch.paths = [main.DetectionPath.server_post.value]
     pitch.frames = []
     pitch.frames_server_post = [
         main.FramePayload(frame_index=0, timestamp_s=0.0, px=100.0, py=100.0, ball_detected=True),
@@ -1021,7 +934,6 @@ def test_dashboard_labels_done_for_single_camera_server_post_session():
     main.state.record(pitch)
 
     body = client.get("/").text
-    assert "iOS: stopped" in body
     assert "srv: done" in body
 
 
