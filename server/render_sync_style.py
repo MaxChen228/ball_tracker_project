@@ -84,6 +84,24 @@ _SYNC_CSS = """
 }
 .tuning-status.ok { color: var(--passed); }
 .tuning-status.error { color: var(--failed); }
+.tuning-row { display: flex; align-items: center; gap: var(--s-2);
+              margin-top: var(--s-3); flex-wrap: nowrap; }
+.tuning-row:first-child { margin-top: var(--s-2); }
+.tuning-label { font-family: var(--mono); font-size: 10px;
+                letter-spacing: 0.12em; text-transform: uppercase;
+                color: var(--sub); min-width: 120px; }
+.tuning-input { font-family: var(--mono); font-size: 11px;
+                padding: 4px 8px; border: 1px solid var(--border-base);
+                border-radius: var(--r); background: var(--surface);
+                color: var(--ink); flex: 1; min-width: 0; }
+.tuning-input:focus { outline: none; border-color: var(--ink); }
+.tuning-row input[type="number"] { width: 80px; flex: none;
+                                   font-family: var(--mono); font-size: 11px;
+                                   padding: 4px 6px;
+                                   border: 1px solid var(--border-base);
+                                   border-radius: var(--r);
+                                   background: var(--surface); color: var(--ink); }
+.tuning-row input[type="number"]:focus { outline: none; border-color: var(--ink); }
 .quick-chirp-telemetry { display: grid; gap: var(--s-3); }
 .qct-cam { border: 1px solid var(--border); padding: var(--s-3); }
 .qct-head { display: flex; align-items: center; justify-content: space-between;
