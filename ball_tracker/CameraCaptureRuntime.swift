@@ -597,17 +597,36 @@ final class CameraCaptureRuntime {
                    let maxDims = best.supportedMaxPhotoDimensions
                         .max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }) {
                     if best !== dev.activeFormat {
+                        // Swapping activeFormat on a running session while
+                        // videoOutput is attached breaks the session (the
+                        // 32BGRA delegate can't keep up with 4032x3024
+                        // frames — the photo delegate never fires). Wrap
+                        // the swap in beginConfiguration/commitConfiguration
+                        // AND detach the video delegate for the photo
+                        // window; restore both on completion.
                         let originalFormat = dev.activeFormat
                         let originalMin = dev.activeVideoMinFrameDuration
                         let originalMax = dev.activeVideoMaxFrameDuration
+                        let savedVideoDelegate = self.videoOutput.sampleBufferDelegate
+                        let savedVideoQueue = self.videoOutput.sampleBufferCallbackQueue
+                        self.videoOutput.setSampleBufferDelegate(nil, queue: nil)
+                        self.session.beginConfiguration()
+                        var swapped = false
                         do {
                             try dev.lockForConfiguration()
                             dev.activeFormat = best
                             dev.unlockForConfiguration()
+                            swapped = true
                             captureLog.info("high-res still swapped activeFormat to \(maxDims.width)x\(maxDims.height) for photo")
+                        } catch {
+                            captureLog.error("high-res still format swap failed: \(error.localizedDescription, privacy: .public)")
+                        }
+                        self.session.commitConfiguration()
+                        if swapped {
                             restore = { [weak self] in
                                 guard let self = self else { return }
                                 self.sessionQueue.async {
+                                    self.session.beginConfiguration()
                                     do {
                                         try dev.lockForConfiguration()
                                         dev.activeFormat = originalFormat
@@ -618,10 +637,16 @@ final class CameraCaptureRuntime {
                                     } catch {
                                         captureLog.error("high-res still restore failed: \(error.localizedDescription, privacy: .public)")
                                     }
+                                    self.session.commitConfiguration()
+                                    if let d = savedVideoDelegate, let q = savedVideoQueue {
+                                        self.videoOutput.setSampleBufferDelegate(d, queue: q)
+                                    }
                                 }
                             }
-                        } catch {
-                            captureLog.error("high-res still format swap failed: \(error.localizedDescription, privacy: .public)")
+                        } else {
+                            if let d = savedVideoDelegate, let q = savedVideoQueue {
+                                self.videoOutput.setSampleBufferDelegate(d, queue: q)
+                            }
                         }
                     }
                     self.photoOutput.maxPhotoDimensions = maxDims
