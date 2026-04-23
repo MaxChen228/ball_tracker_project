@@ -4,7 +4,7 @@ Single-phone scope: each phone's homography → camera pose; every
 ball-detected frame becomes a ray (origin = camera center, direction =
 normalized ray in world frame). Upward-pointing rays are kept — a ball
 mid-flight above camera height is geometrically valid, and monocular
-outlier rejection is deferred to the dual-camera trajectory-fit step.
+outlier rejection is deferred to the dual-camera triangulation path.
 The ray's visual endpoint is clamped to the plate plane (Z=0) when the
 direction crosses it at positive t, otherwise extended along the ray a
 scene-scale length so upward rays still render.
@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 # Maximum render distance from the camera (for rays / ground trace points)
 # or from the world origin (for triangulated points). Anything beyond this
 # is dropped from the scene entirely. Near-horizontal rays otherwise hit
-# the plate plane tens of metres out, which blows up the Plotly auto-fit
+# the plate plane tens of metres out, which blows up the Plotly auto-range
 # axis and makes the near-field trajectory unreadable.
 _MAX_RENDER_DIST_M = 10.0
 
@@ -242,6 +242,41 @@ def _rays_and_trace_for_source(
             )
     trace.sort(key=lambda p: p["t_rel_s"])
     return rays, trace
+
+
+def ray_for_frame(
+    *,
+    camera_id: str,
+    frame: Any,
+    intrinsics: Any,
+    homography: list[float],
+    anchor_timestamp_s: float,
+    source: str = "live",
+) -> Ray | None:
+    """Build one renderable world ray for a calibrated camera frame.
+
+    This is the single-frame version of `_rays_and_trace_for_source`, used by
+    the dashboard live stream before any pitch JSON exists on disk.
+    """
+    if not frame.ball_detected:
+        return None
+    K = build_K(intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy)
+    H = np.array(homography, dtype=float).reshape(3, 3)
+    R_wc, t_wc = recover_extrinsics(K, H)
+    C = camera_center_world(R_wc, t_wc)
+    viz_length = max(5.0, 2.0 * float(np.linalg.norm(C)))
+    rays, _trace = _rays_and_trace_for_source(
+        [frame],
+        K=K,
+        R_wc=R_wc,
+        C=C,
+        dist=intrinsics.distortion,
+        anchor=anchor_timestamp_s,
+        cam_id=camera_id,
+        source=source,
+        viz_length=viz_length,
+    )
+    return rays[0] if rays else None
 
 
 def build_scene(

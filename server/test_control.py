@@ -295,8 +295,10 @@ def test_status_surfaces_session_and_commands_during_arm():
     # HTTP endpoint is gone; WS carries the live-path equivalent). /status
     # still derives `commands` from the device registry + session state,
     # so the dashboard path is unchanged.
-    main.state.heartbeat("A")
-    main.state.heartbeat("B")
+    main.state.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+    main.state.heartbeat("B", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+    _seed_minimal_calibration("A")
+    _seed_minimal_calibration("B")
 
     assert client.post("/sessions/arm", headers={"Accept": "application/json"}).status_code == 200
 
@@ -308,6 +310,8 @@ def test_status_surfaces_session_and_commands_during_arm():
 
 def test_sessions_arm_stop_json_api():
     client = TestClient(app)
+    main.state.heartbeat("A")
+    _seed_minimal_calibration("A")
     r = client.post(
         "/sessions/arm",
         headers={"Accept": "application/json"},
@@ -331,6 +335,8 @@ def test_sessions_stop_returns_409_when_nothing_armed():
 def test_sessions_arm_html_form_redirects_to_dashboard():
     """Browser form submission should redirect, not dump JSON on the page."""
     client = TestClient(app)
+    main.state.heartbeat("A")
+    _seed_minimal_calibration("A")
     r = client.post(
         "/sessions/arm",
         headers={"Accept": "text/html,application/xhtml+xml"},
@@ -391,8 +397,10 @@ def test_pitch_upload_keeps_session_armed_until_stop():
     on already-ended sessions; this test covers the rare in-flight
     case and asserts the session stays armed."""
     client = TestClient(app)
-    main.state.heartbeat("A")
-    main.state.heartbeat("B")
+    main.state.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+    main.state.heartbeat("B", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+    _seed_minimal_calibration("A")
+    _seed_minimal_calibration("B")
     arm_reply = client.post(
         "/sessions/arm", headers={"Accept": "application/json"}
     ).json()
@@ -783,6 +791,7 @@ def test_sessions_delete_json_returns_404_for_unknown():
 def test_sessions_delete_json_returns_409_when_armed():
     client = TestClient(app)
     main.state.heartbeat("A")
+    _seed_minimal_calibration("A")
     armed = client.post(
         "/sessions/arm", headers={"Accept": "application/json"}
     ).json()["session"]
@@ -831,7 +840,7 @@ def test_dashboard_renders_control_panel():
     # `/` is operational-only now: Session + Events + 3D canvas. Devices,
     # calibration, extended markers, and tuning all live on /setup.
     assert "BALL_TRACKER" in body
-    assert "Live Stream" in body
+    assert "Session Monitor" in body
     assert 'action="/sessions/arm"' in body
     assert 'action="/sessions/stop"' in body
     assert "/sessions/cancel" not in body
@@ -853,6 +862,87 @@ def test_dashboard_renders_live_session_and_detection_path_controls():
     assert 'value="live"' in body
     assert 'value="ios_post"' in body
     assert 'value="server_post"' in body
+
+
+def _seed_minimal_calibration(camera_id: str) -> None:
+    main.state.set_calibration(
+        main.CalibrationSnapshot(
+            camera_id=camera_id,
+            intrinsics=main.IntrinsicsPayload(fx=1000.0, fz=1000.0, cx=500.0, cy=500.0),
+            homography=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            image_width_px=1000,
+            image_height_px=1000,
+        )
+    )
+
+
+def test_dashboard_allows_single_calibrated_camera_without_time_sync():
+    client = TestClient(app)
+    main.state.heartbeat("A")
+    _seed_minimal_calibration("A")
+
+    body = client.get("/").text
+    assert "single-camera session (A); no triangulation" in body
+    assert '<button class="btn" type="submit" title="single-camera session (A); no triangulation">Arm session</button>' in body
+
+    arm = client.post("/sessions/arm", headers={"Accept": "application/json"})
+    assert arm.status_code == 200
+    assert arm.json()["session"]["id"].startswith("s_")
+
+
+def test_sessions_arm_blocks_two_calibrated_cameras_without_time_sync():
+    client = TestClient(app)
+    main.state.heartbeat("A")
+    main.state.heartbeat("B")
+    _seed_minimal_calibration("A")
+    _seed_minimal_calibration("B")
+
+    body = client.get("/").text
+    assert "A not time-synced" in body
+    assert "B not time-synced" in body
+    assert "disabled" in body
+
+    arm = client.post("/sessions/arm", headers={"Accept": "application/json"})
+    assert arm.status_code == 409
+    assert arm.json()["detail"]["error"] == "not_ready_to_arm"
+
+
+def test_sessions_arm_blocks_online_uncalibrated_peer():
+    client = TestClient(app)
+    main.state.heartbeat("A")
+    main.state.heartbeat("B")
+    _seed_minimal_calibration("A")
+
+    body = client.get("/").text
+    assert "B not calibrated" in body
+
+    arm = client.post("/sessions/arm", headers={"Accept": "application/json"})
+    assert arm.status_code == 409
+    assert arm.json()["detail"]["blockers"] == ["B not calibrated"]
+
+
+def test_dashboard_labels_stopped_postpass_session_without_live_frames():
+    client = TestClient(app)
+    main.state.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+    main.state.heartbeat("B", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+    _seed_minimal_calibration("A")
+    _seed_minimal_calibration("B")
+    arm = client.post(
+        "/sessions/arm",
+        json={"paths": ["ios_post", "server_post"]},
+        headers={"Accept": "application/json"},
+    )
+    assert arm.status_code == 200
+    stop = client.post("/sessions/stop", headers={"Accept": "application/json"})
+    assert stop.status_code == 200
+
+    body = client.get("/").text
+    assert "Session Monitor" in body
+    assert "Live stream disabled for this session." in body
+    assert "iOS: stopped" in body
+    assert "srv: stopped" in body
+    assert "iOS: running" not in body
+    assert "srv: running" not in body
 
 
 def test_setup_page_wires_auto_calibration_status_into_device_renders():
@@ -1007,7 +1097,8 @@ def test_sync_start_requires_two_devices():
 
 def test_sync_start_conflicts_with_armed_session():
     client = TestClient(app)
-    _heartbeat_both(client)
+    main.state.heartbeat("A")
+    _seed_minimal_calibration("A")
     client.post("/sessions/arm", headers={"Accept": "application/json"})
 
     r = client.post("/sync/start")

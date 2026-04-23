@@ -29,7 +29,7 @@ def render_dashboard_html(
         '<div class="layout">'
         '<aside class="sidebar">'
         '<div class="card">'
-        '<h2 class="card-title">Live Stream</h2>'
+        '<h2 class="card-title">Session Monitor</h2>'
         f'<div id="active-body">{active_html}</div>'
         "</div>"
         '<div class="card">'
