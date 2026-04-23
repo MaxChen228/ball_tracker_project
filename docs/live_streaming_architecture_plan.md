@@ -1,8 +1,8 @@
 # Live Streaming Architecture — 完整重構計劃
 
-> **Status**: Plan (pre-implementation)
+> **Status**: Partially landed — core `live` path is in production (WS frame streaming via `live_pairing.py`, `state.ingest_live_frame`, iOS `LiveFrameDispatcher`, viewer 三管道獨立 UI). Remaining items in this doc (dashboard live trajectory overlay, latency budget auditing, full SSE broadcast) are not yet shipped.
 > **Author**: Max0228 + Claude
-> **Date**: 2026-04-21
+> **Date**: 2026-04-21 (status updated 2026-04-23)
 > **Scope**: iOS ↔ server ↔ dashboard 的偵測 / 配對 / 即時顯示管線重構
 > **Target**: 丟球瞬間到 dashboard 看到軌跡點延遲 < 50 ms/point
 
