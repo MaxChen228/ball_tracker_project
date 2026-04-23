@@ -296,6 +296,7 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .postpass-chip.done {{ color:var(--passed); border-color:var(--passed); background:var(--passed-bg); }}
 .postpass-chip.pending {{ color:var(--sub); }}
 .postpass-chip.running {{ color:var(--ink); border-color:var(--ink); }}
+.postpass-chip.stopped {{ color:var(--sub); border-style:dashed; }}
 .active-actions {{ display:flex; gap:var(--s-2); margin-top:var(--s-3); }}
 .active-actions .btn-stop {{ padding:4px 12px; font:inherit; font-size:11px;
                               background:var(--failed); color:white; border:none;
@@ -649,4 +650,3 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
   .nav .status-checks {{ justify-content: flex-start; }}
 }}
 """
-

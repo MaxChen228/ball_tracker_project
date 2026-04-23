@@ -89,9 +89,10 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
     else:
         per_pitch_spans: list[float] = []
         for p in pitches.values():
-            if p.sync_anchor_timestamp_s is None or not p.frames:
+            if not p.frames:
                 continue
-            rels = [f.timestamp_s - p.sync_anchor_timestamp_s for f in p.frames]
+            anchor = p.sync_anchor_timestamp_s if p.sync_anchor_timestamp_s is not None else p.video_start_pts_s
+            rels = [f.timestamp_s - anchor for f in p.frames]
             per_pitch_spans.append(max(rels) - min(rels))
         if per_pitch_spans:
             duration_s = float(max(per_pitch_spans))
@@ -156,12 +157,13 @@ def _videos_for_session(
             offset = float(pitch.video_start_pts_s - pitch.sync_anchor_timestamp_s)
         fps = float(pitch.video_fps) if (pitch is not None and pitch.video_fps is not None) else 240.0
         anchor = pitch.sync_anchor_timestamp_s if pitch is not None else None
-        if pitch is not None and anchor is not None:
-            t_rel = [float(f.timestamp_s - anchor) for f in pitch.frames]
+        if pitch is not None and (pitch.frames or pitch.frames_on_device):
+            rel_anchor = anchor if anchor is not None else pitch.video_start_pts_s
             detected = [bool(f.ball_detected) for f in pitch.frames]
             px = [float(f.px) if f.px is not None else None for f in pitch.frames]
             py = [float(f.py) if f.py is not None else None for f in pitch.frames]
-            t_rel_od = [float(f.timestamp_s - anchor) for f in pitch.frames_on_device]
+            t_rel = [float(f.timestamp_s - rel_anchor) for f in pitch.frames]
+            t_rel_od = [float(f.timestamp_s - rel_anchor) for f in pitch.frames_on_device]
             detected_od = [bool(f.ball_detected) for f in pitch.frames_on_device]
             px_od = [float(f.px) if f.px is not None else None for f in pitch.frames_on_device]
             py_od = [float(f.py) if f.py is not None else None for f in pitch.frames_on_device]
