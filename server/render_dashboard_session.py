@@ -35,101 +35,6 @@ _HSV_PRESETS = {
 }
 
 
-def _render_detection_paths_body(
-    default_paths: list[str] | None,
-    session: dict[str, object] | None = None,
-) -> str:
-    armed = bool(session and session.get("armed"))
-    active = set(default_paths or ["server_post"])
-    if armed:
-        active = set(session.get("paths") or active)
-        chips = "".join(
-            f'<span class="path-chip on">{html.escape(_PATH_LABELS.get(path, (path, ""))[0])}</span>'
-            for path in ("live", "server_post")
-            if path in active
-        ) or '<span class="path-chip">none</span>'
-        return (
-            '<div class="path-lock">'
-            '<span class="mode-label">Paths</span>'
-            f'<div class="path-chip-row">{chips}</div>'
-            "</div>"
-        )
-
-    rows: list[str] = []
-    for path in ("live", "server_post"):
-        title, subtitle = _PATH_LABELS.get(path, (path, ""))
-        checked = " checked" if path in active else ""
-        rows.append(
-            '<label class="path-option">'
-            f'<input type="checkbox" name="paths" value="{path}"{checked}>'
-            '<span class="copy">'
-            f'<span class="title">{html.escape(title)}</span>'
-            f'<span class="sub">{html.escape(subtitle)}</span>'
-            "</span>"
-            "</label>"
-        )
-    return (
-        '<form method="POST" action="/detection/paths" id="paths-form">'
-        '<div class="paths-stack">'
-        f'{"".join(rows)}'
-        '</div>'
-        '<div class="paths-actions">'
-        '<button class="btn" type="submit">Apply</button>'
-        '</div>'
-        '</form>'
-    )
-
-
-def _render_active_session_body(live_session: dict[str, object] | None) -> str:
-    if not live_session:
-        return '<div class="active-empty">No active session.</div>'
-    sid = html.escape(str(live_session.get("session_id", "—")))
-    frame_counts = live_session.get("frame_counts") or {}
-    paths = live_session.get("paths") or []
-    paths_on = set(str(p) for p in paths)
-    paths_completed = set(str(p) for p in (live_session.get("paths_completed") or []))
-    armed = bool(live_session.get("armed", True))
-    path_chips = "".join(
-        f'<span class="path-chip on">{html.escape(_PATH_LABELS.get(path, (path, ""))[0])}</span>'
-        for path in paths
-    ) or '<span class="path-chip">none</span>'
-    point_count = int(live_session.get("point_count") or 0)
-    a_frames = int(frame_counts.get("A") or 0)
-    b_frames = int(frame_counts.get("B") or 0)
-    if "live" in paths_on:
-        live_body = (
-            '<div class="active-grid">'
-            f'<span><span class="k">A frames</span><span class="v">{a_frames}</span></span>'
-            f'<span><span class="k">B frames</span><span class="v">{b_frames}</span></span>'
-            f'<span><span class="k">Live 3D pts</span><span class="v">{point_count}</span></span>'
-            '</div>'
-        )
-    else:
-        live_body = '<div class="active-empty">Live stream disabled for this session.</div>'
-    postpass_chips = []
-    for path, label in (("server_post", "srv"),):
-        if path not in paths_on:
-            continue
-        state = "done" if path in paths_completed else ("pending" if armed else "stopped")
-        postpass_chips.append(
-            f'<span class="postpass-chip {state}">{html.escape(label)}: {state}</span>'
-        )
-    postpass_html = (
-        f'<div class="postpass-row">{"".join(postpass_chips)}</div>'
-        if postpass_chips
-        else ""
-    )
-    return (
-        '<div class="active-head">'
-        f'<span class="chip armed">{"●REC" if armed else "ended"}</span>'
-        f'<span class="session-id">{sid}</span>'
-        '</div>'
-        f'<div class="path-chip-row">{path_chips}</div>'
-        f'{live_body}'
-        f'{postpass_html}'
-    )
-
-
 def _render_hsv_body(hsv_range: dict[str, object] | None) -> str:
     current = {
         "h_min": 25,
@@ -185,7 +90,6 @@ def _render_hsv_body(hsv_range: dict[str, object] | None) -> str:
 def _render_session_body(
     session: dict[str, object] | None,
     capture_mode: str = "camera_only",
-    default_paths: list[str] | None = None,
     devices: list[dict[str, object]] | None = None,
     calibrations: list[str] | None = None,
     arm_readiness: dict[str, object] | None = None,
@@ -282,5 +186,4 @@ def _render_session_body(
         f"{gate_row}"
         '<div class="card-subtitle">Time Sync</div>'
         f'<div class="session-actions">{sync_trigger_btn}{sync_leds}</div>'
-        f"{_render_detection_paths_body(default_paths, session)}"
     )

@@ -26,8 +26,8 @@ from _test_helpers import (
 
 def test_post_pitch_with_video_triangulates_server_side(tmp_path):
     """End-to-end: paint a blue circle at the projected pixel of a known
-    3D point on both cameras' MOVs, POST them, verify the server-detected
-    centroid triangulates to ≤ 1 px of the true 3D location."""
+    3D point on both cameras' MOVs, POST them, operator triggers Run
+    server on the session, verify triangulation ≤ 1 px of truth."""
     K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
     P_true = np.array([0.1, 0.3, 1.0])
     session_id = sid(7)
@@ -49,11 +49,14 @@ def test_post_pitch_with_video_triangulates_server_side(tmp_path):
     assert r2.status_code == 200, r2.text
     body2 = r2.json()
     assert body2["paired"] is True
-    # Server detection runs as a BackgroundTask (post-response), so the
-    # per-request triangulated_points reflects only what was available
-    # when the response was composed. The authoritative count comes from
-    # /results/{sid}, queried below once background detection finished.
-    assert body2["detection_pending"] is True
+    # Server-post no longer auto-runs on upload.
+    assert body2["detection_pending"] is False
+    assert body2["triangulated_points"] == 0
+
+    # Operator triggers server-post detection on the events row.
+    run = client.post(f"/sessions/{session_id}/run_server_post")
+    assert run.status_code == 200, run.text
+    assert run.json()["queued"] == 2
 
     # The server detected pixel can be sub-pixel off from ground truth
     # due to connected-components centroid quantisation, so allow a small
@@ -237,8 +240,9 @@ def test_post_pitch_anchorless_single_camera_keeps_rays(tmp_path):
 
 
 def test_pitch_writes_annotated_clip_alongside_raw(tmp_path):
-    """After /pitch, server has BOTH the raw MOV and a `_annotated` sibling
-    that re-encodes the clip with a circle drawn on every detected frame."""
+    """After /pitch + operator-triggered Run server, server has BOTH the
+    raw MOV and a `_annotated` sibling that re-encodes the clip with a
+    circle drawn on every detected frame."""
     K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
     P_true = np.array([0.1, 0.3, 1.0])
     session_id = sid(540)
@@ -248,6 +252,10 @@ def test_pitch_writes_annotated_clip_alongside_raw(tmp_path):
     client = TestClient(app)
     r = _post_pitch(client, _base_payload("A", session_id, K, H_a), mov)
     assert r.status_code == 200, r.text
+
+    # Annotation only happens as part of the server-post detection job.
+    run = client.post(f"/sessions/{session_id}/run_server_post")
+    assert run.status_code == 200, run.text
 
     raw = main.state.video_dir / f"session_{session_id}_A.mov"
     annotated = main.state.video_dir / f"session_{session_id}_A_annotated.mov"
@@ -324,7 +332,9 @@ def test_nonzero_distortion_recovers_true_point_via_mov(tmp_path):
     assert r1.status_code == 200, r1.text
     r2 = _post_pitch(client, body_b, mov_b)
     assert r2.status_code == 200, r2.text
-    # Background-detect path: poll the result endpoint for the final count.
+    # Operator-triggered server-post detection drives triangulation.
+    run = client.post(f"/sessions/{session_id}/run_server_post")
+    assert run.status_code == 200, run.text
     result_points = client.get(f"/results/{session_id}").json()["points"]
     assert len(result_points) >= 1
 

@@ -33,11 +33,11 @@ class DetectionPath(str, Enum):
     server_post = "server_post"
 
 
-_DEFAULT_PATHS = frozenset({DetectionPath.server_post})
+_DEFAULT_PATHS = frozenset({DetectionPath.live})
 
 
 _MODE_TO_PATHS: dict[CaptureMode, frozenset[DetectionPath]] = {
-    CaptureMode.camera_only: frozenset({DetectionPath.server_post}),
+    CaptureMode.camera_only: frozenset({DetectionPath.live}),
 }
 
 

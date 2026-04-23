@@ -57,10 +57,19 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
     from main import state
     pitches = state.pitches_for_session(session_id)
     result = state.get(session_id)
+    def _effective_fps(frames) -> float | None:
+        if not frames or len(frames) < 2:
+            return None
+        ts = [f.timestamp_s for f in frames]
+        span = max(ts) - min(ts)
+        if span <= 0:
+            return None
+        return (len(frames) - 1) / span
+
     cams: dict[str, dict[str, Any]] = {}
     _EMPTY_COUNTS = {
-        "live": {"total": 0, "detected": 0},
-        "server_post": {"total": 0, "detected": 0},
+        "live": {"total": 0, "detected": 0, "fps": None},
+        "server_post": {"total": 0, "detected": 0, "fps": None},
     }
     for cam_id in ("A", "B"):
         p = pitches.get(cam_id)
@@ -79,10 +88,12 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
                 "live": {
                     "total": len(p.frames_live or []),
                     "detected": sum(1 for f in (p.frames_live or []) if f.ball_detected),
+                    "fps": _effective_fps(p.frames_live or []),
                 },
                 "server_post": {
                     "total": len(p.frames),
                     "detected": sum(1 for f in p.frames if f.ball_detected),
+                    "fps": _effective_fps(p.frames),
                 },
             }
             cams[cam_id] = {

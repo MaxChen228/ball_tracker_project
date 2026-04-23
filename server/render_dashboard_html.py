@@ -6,7 +6,6 @@ def render_dashboard_html(
     *,
     css: str,
     nav_html: str,
-    active_html: str,
     session_html: str,
     hsv_html: str,
     tuning_html: str,
@@ -30,10 +29,6 @@ def render_dashboard_html(
         f"{nav_html}"
         '<div class="layout">'
         '<aside class="sidebar">'
-        '<div class="card">'
-        '<h2 class="card-title">Session Monitor</h2>'
-        f'<div id="active-body">{active_html}</div>'
-        "</div>"
         '<div class="card">'
         '<h2 class="card-title">Session</h2>'
         f'<div id="session-body">{session_html}</div>'

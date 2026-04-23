@@ -392,6 +392,9 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .path-stat .lbl {{ font-size:9px; letter-spacing:0.12em; color:var(--sub);
     text-transform:uppercase; }}
   .path-stat .val {{ font-variant-numeric:tabular-nums; color:var(--ink); }}
+  .path-stat .fps {{ font-variant-numeric:tabular-nums; color:var(--sub);
+    font-size:10px; border-left:1px solid var(--border-l); padding-left:4px;
+    margin-left:2px; }}
   .path-stat.off {{ opacity:0.45; }}
   .path-stat.off .val {{ color:var(--sub); }}
   .rate-bar {{ flex:1 1 auto; min-width:60px; height:4px;

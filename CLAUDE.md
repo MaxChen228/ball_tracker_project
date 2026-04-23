@@ -8,12 +8,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Two-iPhone stereo tracker for a yellow-green tennis ball (the default HSV range; `tennis` / `baseball` presets + custom range available from the dashboard's DETECTION · HSV card). Each phone runs the iOS app in role `A` or `B`, aimed at home plate. Both phones share time by jointly detecting an **audio chirp** (played from a third device) as a common sync anchor. The server pairs A/B frames within an 8 ms window of anchor-relative time and triangulates 3D positions via ray-midpoint.
 
-### Two detection paths (run in parallel, selected per-arm)
+### Two detection paths (live always on, server_post on-demand)
 
-Every armed session snapshots a set of `DetectionPath`s onto `Session.paths` — any combination of `live`, `server_post` — so a dashboard flip mid-cycle can't disturb a running session. The legacy `CaptureMode` enum still ships `camera_only` as a preset vocabulary for older iOS clients, but the authoritative flag is the `paths` set; `schemas.paths_for_mode` / `mode_for_paths` bridge the two.
+Every armed session runs the `live` path unconditionally and archives the MOV for every camera — `Session.paths` snapshots `{live}` at arm time; `server_post` is triggered post-hoc on whichever session the operator cares about via the events-row **Run server** button. The legacy `CaptureMode` enum still ships `camera_only` as a preset vocabulary for older iOS clients; `schemas.paths_for_mode` / `mode_for_paths` bridge the two but only one preset exists.
 
-- **`live`** — iOS runs HSV + MOG2 + shape-gate per-frame on raw BGRA and streams each `{type: "frame", ...}` over `/ws/device/{cam}`. `live_pairing.py` buffers A/B arrivals and triangulates incrementally; viewer / dashboard see points before the session has ended. No MOV.
-- **`server_post`** — iOS records H.264 MOV; server PyAV-decodes and runs its own HSV + MOG2 + shape-gate. The MOV is the archival record and what `reprocess_sessions.py` re-runs against future HSV tweaks. 20-60 MB per camera, 8-20 s post-cycle.
+- **`live`** (always on) — iOS runs HSV + MOG2 + shape-gate per-frame on raw BGRA and streams each `{type: "frame", ...}` over `/ws/device/{cam}`. `live_pairing.py` buffers A/B arrivals and triangulates incrementally; viewer / dashboard see points before the session has ended.
+- **`server_post`** (on-demand) — iOS *always* records an H.264 MOV (PR61 made this unconditional; `CameraViewController.captureOutput` bootstraps `ClipRecorder` on first sample regardless of the arm message's `paths`). The MOV is uploaded to `data/videos/session_{sid}_{cam}.mov` via `POST /pitch`. Server-side HSV detection only runs when the operator hits `POST /sessions/{sid}/run_server_post` from the events list (or the CLI `reprocess_sessions.py --session s_xxxx`). 20–60 MB per camera on disk; 8–20 s detection cost paid on-demand.
 
 The `ios_post` path (iOS re-decoded MOV locally, uploaded via `/pitch_analysis`) was removed — `live` fully subsumes it with lower latency and no tmp MOV churn.
 

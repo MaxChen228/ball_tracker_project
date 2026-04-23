@@ -7,8 +7,6 @@ from render_dashboard_events import _render_events_body
 from render_dashboard_page import render_events_index_html
 from render_dashboard_session import (
     _PATH_LABELS,
-    _render_active_session_body,
-    _render_detection_paths_body,
     _render_session_body,
 )
 from render_dashboard_style import _CSS
@@ -20,10 +18,8 @@ __all__ = [
     "_JS_TEMPLATE",
     "_JS_TEMPLATE_RAW",
     "_PATH_LABELS",
-    "_render_active_session_body",
     "_render_app_nav",
     "_render_chirp_threshold_body",
-    "_render_detection_paths_body",
     "_render_device_rows",
     "_render_events_body",
     "_render_extended_markers_body",
