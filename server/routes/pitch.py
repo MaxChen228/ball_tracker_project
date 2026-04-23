@@ -40,11 +40,11 @@ def _estimate_video_duration_s(pitch: PitchPayload) -> float | None:
 
     Uses `frames_live` length / `video_fps` first (most likely to be
     populated because the live path streams throughout recording), then
-    falls back to `frames` / `frames_server_post` against the same fps."""
+    falls back to `frames_server_post` against the same fps."""
     fps = pitch.video_fps
     if not fps or fps <= 0:
         return None
-    for candidate in (pitch.frames_live, pitch.frames_server_post, pitch.frames):
+    for candidate in (pitch.frames_live, pitch.frames_server_post):
         if candidate:
             return float(len(candidate)) / float(fps)
     return None
@@ -193,8 +193,7 @@ async def pitch(
     payload_obj.paths = sorted(p.value for p in payload_paths)
     has_video = video is not None and (video.filename or video.size)
     has_frames = (
-        bool(payload_obj.frames)
-        or bool(payload_obj.frames_live)
+        bool(payload_obj.frames_live)
         or bool(payload_obj.frames_server_post)
     )
     if not has_video and not has_frames:
@@ -238,7 +237,8 @@ async def pitch(
                 payload_obj.image_width_px = mw
                 payload_obj.image_height_px = mh
 
-        payload_obj.frames = []
+        # Upload carries video only — server-side detection runs in the
+        # background and overwrites `frames_server_post` on re-record.
         payload_obj.frames_server_post = []
         if DetectionPath.server_post in payload_paths:
             detection_pending = True
@@ -253,7 +253,6 @@ async def pitch(
         for f in (
             payload_obj.frames_server_post
             or payload_obj.frames_live
-            or payload_obj.frames
         )
         if f.ball_detected
     )
@@ -262,7 +261,7 @@ async def pitch(
         payload_obj.camera_id,
         payload_obj.session_id,
         f"{clip_info['bytes']}B" if clip_info else "none",
-        len(payload_obj.frames_server_post or payload_obj.frames_live or payload_obj.frames),
+        len(payload_obj.frames_server_post or payload_obj.frames_live),
         ball_frames,
         "server-pending" if detection_pending else ("live" if payload_obj.frames_live else "skipped"),
         len(result.points),
@@ -373,7 +372,6 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             _finish(canceled=True)
             return
 
-        pitch.frames = frames
         pitch.frames_server_post = frames
         try:
             await asyncio.to_thread(state.record, pitch)

@@ -1,9 +1,11 @@
 """Frame-bucket and detection-path selection helpers.
 
 Every pitch carries two parallel frame buckets (`frames_live`,
-`frames_server_post`/`frames`). These helpers decide, for any given
-`(pitch, path)` pair, which bucket is the authoritative source and how to
-project the pitch onto a single path for triangulation.
+`frames_server_post`). These helpers decide, for any given `(pitch, path)`
+pair, which bucket is the authoritative source and how to project the
+pitch onto a single path for triangulation. The legacy flat `frames` field
+is gone; `frames_server_post` alone holds server-side detections (with a
+wire-compat alias on input).
 
 The pure helpers (`normalize_paths`, `has_server_frames`) depend on nothing
 and are safe to call anywhere. The state-dependent helpers
@@ -37,12 +39,13 @@ def normalize_paths(
 
 
 def has_server_frames(pitch: PitchPayload) -> bool:
-    """True once the server-side MOV detection has populated `pitch.frames`.
-    Used to gate `triangulate_pair(source="server")` so the early-surface
-    path (record runs before detection finishes, with `frames=[]`) doesn't
-    flag a spurious error — it just leaves `result.points=[]` until the
-    background detect task updates the pitch and we re-record."""
-    return bool(pitch and pitch.frames)
+    """True once the server-side MOV detection has populated
+    `pitch.frames_server_post`. Used to gate `triangulate_pair(source="server")`
+    so the early-surface path (record runs before detection finishes, with
+    `frames_server_post=[]`) doesn't flag a spurious error — it just leaves
+    `result.points=[]` until the background detect task updates the pitch
+    and we re-record."""
+    return bool(pitch and pitch.frames_server_post)
 
 
 def paths_for_pitch(state: "State", pitch: PitchPayload) -> set[DetectionPath]:
@@ -61,11 +64,7 @@ def get_path_frames(
 ) -> list[FramePayload]:
     if path == DetectionPath.live:
         return list(pitch.frames_live)
-    if pitch.frames_server_post:
-        return list(pitch.frames_server_post)
-    if pitch.frames:
-        return list(pitch.frames)
-    return []
+    return list(pitch.frames_server_post)
 
 
 def pitch_with_path_frames(
@@ -73,9 +72,14 @@ def pitch_with_path_frames(
     pitch: PitchPayload,
     path: DetectionPath,
 ) -> PitchPayload:
+    """Return a deep-copy pitch whose `frames_server_post` is the projection
+    of the requested path's frames. `pairing.triangulate_cycle` always reads
+    `frames_server_post`, so callers use this to run triangulation against
+    whichever detection stream they care about without touching the
+    authoritative pitch record."""
     clone = pitch.model_copy(deep=True)
     if path == DetectionPath.live:
-        clone.frames = list(pitch.frames_live)
+        clone.frames_server_post = list(pitch.frames_live)
     else:
-        clone.frames = get_path_frames(state, pitch, DetectionPath.server_post)
+        clone.frames_server_post = get_path_frames(state, pitch, DetectionPath.server_post)
     return clone

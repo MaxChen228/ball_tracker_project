@@ -81,8 +81,8 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
                     "detected": sum(1 for f in (p.frames_live or []) if f.ball_detected),
                 },
                 "server_post": {
-                    "total": len(p.frames),
-                    "detected": sum(1 for f in p.frames if f.ball_detected),
+                    "total": len(p.frames_server_post),
+                    "detected": sum(1 for f in p.frames_server_post if f.ball_detected),
                 },
             }
             cams[cam_id] = {
@@ -105,12 +105,12 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         ts = [p.t_rel_s for p in result.points]
         duration_s = float(max(ts) - min(ts))
     else:
-        # Live-only sessions have empty p.frames; fall back to whichever
-        # pipeline actually carried frames so the header still shows a
-        # real duration.
+        # Live-only sessions have empty `p.frames_server_post`; fall back to
+        # whichever pipeline actually carried frames so the header still
+        # shows a real duration.
         per_pitch_spans: list[float] = []
         for p in pitches.values():
-            frame_lists = [p.frames, p.frames_live or []]
+            frame_lists = [p.frames_server_post, p.frames_live or []]
             frames = next((fs for fs in frame_lists if fs), None)
             if not frames:
                 continue
@@ -184,7 +184,7 @@ def _videos_for_session(
     out: list[tuple[str, str, float, float, dict[str, list]]] = []
     all_cams = sorted(
         set(best)
-        | {c for c, p in pitches.items() if p.frames}
+        | {c for c, p in pitches.items() if p.frames_server_post}
         | {c for c, p in pitches.items() if p.frames_live}
     )
     for cam in all_cams:
@@ -203,7 +203,7 @@ def _videos_for_session(
             )
             frames_info = {
                 "live": _stream(pitch.frames_live, rel_anchor),
-                "server_post": _stream(pitch.frames, rel_anchor),
+                "server_post": _stream(pitch.frames_server_post, rel_anchor),
             }
         else:
             empty = {"t_rel_s": [], "detected": [], "px": [], "py": []}

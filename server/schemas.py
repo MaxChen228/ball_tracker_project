@@ -13,17 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
-
-
-class CaptureMode(str, Enum):
-    """Legacy preset vocabulary. Only `camera_only` remains; newer code
-    should read `Session.paths` directly.
-    """
-    camera_only = "camera_only"
-
-
-_DEFAULT_CAPTURE_MODE = CaptureMode.camera_only
+from pydantic import AliasChoices, BaseModel, Field, model_serializer
 
 
 class DetectionPath(str, Enum):
@@ -34,22 +24,6 @@ class DetectionPath(str, Enum):
 
 
 _DEFAULT_PATHS = frozenset({DetectionPath.server_post})
-
-
-_MODE_TO_PATHS: dict[CaptureMode, frozenset[DetectionPath]] = {
-    CaptureMode.camera_only: frozenset({DetectionPath.server_post}),
-}
-
-
-def paths_for_mode(mode: CaptureMode) -> set[DetectionPath]:
-    return set(_MODE_TO_PATHS.get(mode, _DEFAULT_PATHS))
-
-
-def mode_for_paths(paths: set[DetectionPath] | frozenset[DetectionPath]) -> CaptureMode:
-    """Best-effort legacy preset representing `paths`. Only `camera_only`
-    exists now — the authoritative detail lives in `paths` itself."""
-
-    return CaptureMode.camera_only
 
 
 class TrackingExposureCapMode(str, Enum):
@@ -124,10 +98,18 @@ class CaptureTelemetryPayload(BaseModel):
 
 
 class PitchPayload(BaseModel):
-    """Wire + in-memory shape. The iPhone posts the wire subset (no `frames`);
-    server detection populates `frames` before triangulation and re-saves
-    the enriched record to disk, so reloads across restarts skip re-
-    detection."""
+    """Wire + in-memory shape. The iPhone posts the wire subset (no frames);
+    server detection populates `frames_server_post` from the decoded MOV
+    before triangulation and re-saves the enriched record to disk, so reloads
+    across restarts skip re-detection.
+
+    Legacy note: pre-split stored JSONs and `recalibrate_from_sessions.py` read
+    the flat key `frames`. `frames_server_post` accepts it via
+    `AliasChoices` on input; the custom `model_serializer` emits BOTH
+    `frames_server_post` and `frames` on output so downstream tooling
+    (`recalibrate_from_sessions.py`, `routes/viewer.py` JS payloads) stays
+    working. The dual-emit is a wire-compat wart — drop `frames` from the
+    serializer once every consumer moves to `frames_server_post`."""
     # Constrained so we can safely interpolate into filenames (clips,
     # pitch json). Matches the iOS-side values ("A" / "B") with slack for
     # future role additions but blocks path-traversal attempts.
@@ -167,21 +149,35 @@ class PitchPayload(BaseModel):
     # purely for operator debugging.
     local_recording_index: int | None = None
     # Snapshot of the session's requested detection paths. Optional so
-    # older clients that only know `mode` keep validating.
+    # older clients that omitted it keep validating. Legacy `capture_mode`
+    # / `mode` fields on incoming JSON are silently ignored (Pydantic
+    # default `extra="ignore"` applies).
     paths: list[str] | None = None
-    # Server-side synthesised per-frame data (populated after detection).
-    # Server fills this from the uploaded MOV before triangulation.
-    frames: list[FramePayload] = Field(default_factory=list)
     # Live-streamed frame detections captured over WebSocket during the
     # active session. Persisted for forensics / future viewer switching.
     frames_live: list[FramePayload] = Field(default_factory=list)
     # Finalized server-side post-pass results decoded from the uploaded MOV.
-    frames_server_post: list[FramePayload] = Field(default_factory=list)
+    # Accepts legacy JSON input under the flat key `frames` via AliasChoices.
+    frames_server_post: list[FramePayload] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("frames_server_post", "frames"),
+    )
     intrinsics: IntrinsicsPayload | None = None
     homography: list[float] | None = None
     image_width_px: int | None = None
     image_height_px: int | None = None
     capture_telemetry: CaptureTelemetryPayload | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_with_legacy_frames(self, handler):
+        # Emit `frames` alongside `frames_server_post` so legacy readers
+        # (recalibrate_from_sessions.py, any downstream JS that still keys
+        # on `frames`) keep working. TODO: drop once every consumer has
+        # migrated to `frames_server_post`.
+        data = handler(self)
+        if "frames_server_post" in data and "frames" not in data:
+            data["frames"] = data["frames_server_post"]
+        return data
 
 
 class TriangulatedPoint(BaseModel):
@@ -457,16 +453,11 @@ class Session:
     # the current one. Dashboard reads this to render "session s_abc →
     # A, B".
     uploads_received: list[str] = field(default_factory=list)
-    # Snapshot of the dashboard's path-set at arm time. New code should read
-    # this. The legacy `mode` field below is derived from the same choice so
-    # pre-path clients still see a familiar preset string.
+    # Snapshot of the dashboard's path-set at arm time. This is the
+    # authoritative capture selection — the legacy `CaptureMode` enum is gone.
     paths: set[DetectionPath] = field(default_factory=lambda: set(_DEFAULT_PATHS))
-    # Snapshot of the dashboard's `capture_mode` at arm time. Once armed
-    # the session's mode is immutable — a late dashboard toggle only
-    # affects the next session.
-    mode: CaptureMode = _DEFAULT_CAPTURE_MODE
     # Snapshot of the dashboard's tracking exposure-cap policy at arm time.
-    # Once armed this is frozen for the whole session, matching `mode`.
+    # Once armed this is frozen for the whole session.
     tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
     # Shared legacy chirp sync id observed across the online rig when this
     # session armed. Nil means the rig was not in a provably common synced
@@ -479,7 +470,6 @@ class Session:
         return self.ended_at is None
 
     def to_dict(self) -> dict[str, Any]:
-        mode = mode_for_paths(self.paths)
         return {
             "id": self.id,
             "armed": self.armed,
@@ -487,7 +477,6 @@ class Session:
             "ended_at": self.ended_at,
             "max_duration_s": self.max_duration_s,
             "uploads_received": list(self.uploads_received),
-            "mode": mode.value,
             "paths": sorted(p.value for p in self.paths),
             "tracking_exposure_cap": self.tracking_exposure_cap.value,
             "sync_id": self.sync_id,

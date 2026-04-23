@@ -416,45 +416,103 @@ def test_pitch_upload_keeps_session_armed_until_stop():
     assert set(status["session"]["uploads_received"]) == {"A"}
 
 
-# --- Capture mode (mode-one / mode-two dashboard toggle) -------------------
+# --- Capture mode (legacy) -------------------------------------------------
+# CaptureMode enum was retired; /status keeps shipping the degenerate
+# "camera_only" literal so older dashboard JS / iOS builds don't 500 on the
+# missing key. Authoritative capture selection now flows through
+# `default_paths` / `session.paths`.
 
 
-def test_default_mode_is_camera_only(tmp_path):
-    s = main.State(data_dir=tmp_path)
-    assert s.current_mode().value == "camera_only"
-
-
-def test_status_includes_capture_mode():
+def test_status_includes_legacy_capture_mode_literal():
     client = TestClient(app)
     status = client.get("/status").json()
     assert status["capture_mode"] == "camera_only"
 
 
-# test_heartbeat_reply_includes_capture_mode deleted — /heartbeat is
-# retired. capture_mode surfaces on /status (test_status_includes_capture_mode)
-# and on the WS settings message on connect.
+def test_pitch_payload_ignores_legacy_capture_mode():
+    """Older iOS payloads still shipped `capture_mode` on the JSON. Pydantic's
+    default `extra="ignore"` must silently drop it so stored pitch JSONs from
+    past builds keep loading without raising ValidationError."""
+    from schemas import PitchPayload
+    legacy = {
+        "camera_id": "A",
+        "session_id": "s_deadbeef",
+        "video_start_pts_s": 0.0,
+        "video_fps": 240.0,
+        "capture_mode": "camera_only",
+        "mode": "camera_only",
+    }
+    pitch = PitchPayload.model_validate(legacy)
+    assert pitch.camera_id == "A"
+    assert pitch.session_id == "s_deadbeef"
+    assert not hasattr(pitch, "capture_mode")
+    assert not hasattr(pitch, "mode")
 
 
-def test_set_mode_endpoint_rejects_invalid_value():
-    client = TestClient(app)
-    r = client.post(
-        "/sessions/set_mode",
-        data={"mode": "lightning_fast"},
-        headers={"Accept": "application/json"},
-    )
-    assert r.status_code == 400
+def test_pitch_payload_accepts_legacy_frames_field():
+    """Pre-split stored JSONs carry the flat `frames` key. The AliasChoices on
+    `frames_server_post` must route legacy input through without manual
+    pre-processing, otherwise reloads after the schema rename would silently
+    drop the authoritative server-side detection bucket."""
+    from schemas import PitchPayload, FramePayload
+    legacy = {
+        "camera_id": "A",
+        "session_id": "s_deadbeef",
+        "video_start_pts_s": 0.0,
+        "video_fps": 240.0,
+        "frames": [
+            {
+                "frame_index": 0,
+                "timestamp_s": 0.0,
+                "px": 100.0,
+                "py": 200.0,
+                "ball_detected": True,
+            }
+        ],
+    }
+    pitch = PitchPayload.model_validate(legacy)
+    assert len(pitch.frames_server_post) == 1
+    f = pitch.frames_server_post[0]
+    assert isinstance(f, FramePayload)
+    assert f.px == 100.0
+    assert f.ball_detected is True
 
 
-def test_set_mode_endpoint_html_form_redirects():
-    client = TestClient(app)
-    r = client.post(
-        "/sessions/set_mode",
-        data={"mode": "camera_only"},
-        headers={"Accept": "text/html"},
-        follow_redirects=False,
-    )
-    assert r.status_code == 303
-    assert r.headers["location"] == "/"
+def test_load_from_disk_handles_legacy_json(tmp_path):
+    """A pre-split JSON on disk may carry both `capture_mode` and the flat
+    `frames` key. State._load_from_disk must ingest it without raising and
+    produce a modern pitch record with frames routed into
+    `frames_server_post` (the capture_mode key is silently ignored)."""
+    pitch_dir = tmp_path / "pitches"
+    pitch_dir.mkdir(exist_ok=True)
+    legacy = {
+        "camera_id": "A",
+        "session_id": "s_deadbeef",
+        "sync_anchor_timestamp_s": 0.0,
+        "video_start_pts_s": 0.0,
+        "video_fps": 240.0,
+        "capture_mode": "camera_only",
+        "mode": "camera_only",
+        "frames": [
+            {
+                "frame_index": 0,
+                "timestamp_s": 0.0,
+                "px": 100.0,
+                "py": 200.0,
+                "ball_detected": True,
+            }
+        ],
+    }
+    (pitch_dir / "session_s_deadbeef_A.json").write_text(_json.dumps(legacy))
+
+    s = main.State(data_dir=tmp_path)
+    stored = s.pitches_for_session("s_deadbeef")
+    assert "A" in stored
+    p = stored["A"]
+    assert len(p.frames_server_post) == 1
+    assert p.frames_server_post[0].px == 100.0
+    assert not hasattr(p, "capture_mode")
+    assert not hasattr(p, "mode")
 
 
 def test_default_tracking_exposure_cap_is_frame_duration(tmp_path):
@@ -635,7 +693,6 @@ def test_trash_session_hides_from_active_events_and_restore_brings_it_back(tmp_p
 def test_cancel_and_resume_processing_summary(tmp_path):
     s = main.State(data_dir=tmp_path)
     pitch = _minimal_pitch("A", session_id=sid(7)).model_copy(deep=True)
-    pitch.frames = []
     pitch.frames_server_post = []
     pitch.paths = [main.DetectionPath.server_post.value]
     s.record(pitch)
@@ -695,7 +752,6 @@ def test_sessions_trash_and_restore_json_api():
 def test_sessions_cancel_and_resume_processing_json_api(tmp_path):
     client = TestClient(app)
     pitch = _minimal_pitch("A", session_id=sid(34)).model_copy(deep=True)
-    pitch.frames = []
     pitch.frames_server_post = []
     pitch.paths = [main.DetectionPath.server_post.value]
     main.state.record(pitch)
@@ -900,7 +956,6 @@ def test_state_marks_single_camera_server_post_path_completed(tmp_path):
     s = main.State(data_dir=tmp_path)
     pitch = _minimal_pitch("A", session_id=sid(90))
     pitch.paths = [main.DetectionPath.server_post.value]
-    pitch.frames = []
     pitch.frames_server_post = [
         main.FramePayload(frame_index=0, timestamp_s=0.0, px=100.0, py=100.0, ball_detected=True),
     ]
@@ -927,7 +982,6 @@ def test_dashboard_labels_done_for_single_camera_server_post_session():
 
     pitch = _minimal_pitch("A", session_id=session_id)
     pitch.paths = [main.DetectionPath.server_post.value]
-    pitch.frames = []
     pitch.frames_server_post = [
         main.FramePayload(frame_index=0, timestamp_s=0.0, px=100.0, py=100.0, ball_detected=True),
     ]
@@ -951,7 +1005,7 @@ def test_record_merges_live_frames_into_single_camera_pitch(tmp_path):
 
     pitch = _minimal_pitch("A", session_id=sid(92))
     pitch.paths = [main.DetectionPath.live.value]
-    pitch.frames = []
+    pitch.frames_server_post = []
 
     s.record(pitch)
     stored = s.pitches_for_session(sid(92))["A"]

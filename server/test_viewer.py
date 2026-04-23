@@ -156,7 +156,7 @@ def test_build_scene_includes_persisted_live_rays():
     P = np.array([0.0, 0.2, 0.4])
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([]))
     u, v = _project_pixels(K, R_a, t_a, P)
-    pitch.frames = []
+    pitch.frames_server_post = []
     pitch.frames_live = [
         schemas.FramePayload(
             frame_index=7,
@@ -915,7 +915,7 @@ def test_events_path_status_marks_live_done_on_frame_existence_not_triangulation
         for i in range(2)
     ]
     # Stitch frames_live on top while keeping the rest of the payload valid.
-    enriched = base.model_copy(update={"frames_live": live_frames, "frames": []})
+    enriched = base.model_copy(update={"frames_live": live_frames, "frames_server_post": []})
     main.state.record(enriched)
 
     client = TestClient(app)

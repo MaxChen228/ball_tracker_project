@@ -1425,24 +1425,14 @@
     } catch (e) { /* silent */ }
   }
 
-  // Mode toggle: intercept form submit via fetch + optimistic update so
-  // the button state never bounces back to the previous value between the
-  // POST and the next tickStatus round-trip.
+  // `/sessions/set_mode` handler intentionally removed: the CaptureMode
+  // enum was retired and the route no longer exists server-side. The
+  // dashboard no longer renders a mode form, so there's nothing to
+  // intercept. `currentCaptureMode` is still tracked above purely so
+  // partial renderers that still read `state.capture_mode` stay happy —
+  // it's a pass-through from /status and the user never mutates it.
   document.addEventListener('submit', async (e) => {
     const form = e.target;
-    if (form.action && form.action.endsWith('/sessions/set_mode')) {
-      e.preventDefault();
-      const mode = (form.querySelector('input[name="mode"]') || {}).value;
-      if (!mode) return;
-      currentCaptureMode = mode;
-      // Invalidate key so the next renderSession call repaints.
-      _lastSessKey = null;
-      renderSession({ devices: currentDevices || [], session: currentSession,
-                      calibrations: currentCalibrations || [], capture_mode: currentCaptureMode });
-      try { await fetch('/sessions/set_mode', { method: 'POST', body: new FormData(form) }); }
-      catch (_) {}
-      return;
-    }
     if (form.action && /\/sessions\/[^/]+\/(trash|restore|delete|cancel_processing|resume_processing)$/.test(form.action)) {
       e.preventDefault();
       try {

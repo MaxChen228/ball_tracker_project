@@ -52,7 +52,7 @@ def triangulate_pair(
     at the calibration resolution.
 
     `source` picks the detection stream (`"server"` default reads
-    `pitch.frames`)."""
+    `pitch.frames_server_post`)."""
     with state._lock:
         cal_a = state._calibration_store.get(a.camera_id)
         cal_b = state._calibration_store.get(b.camera_id)
@@ -158,7 +158,7 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             # Auto-include server_post when the bucket is populated so
             # reprocessing can flow through even without an explicit paths
             # snapshot on the pitch JSON.
-            if pitch.frames_server_post or pitch.frames:
+            if pitch.frames_server_post:
                 candidate_paths.add(DetectionPath.server_post)
     if live is not None and live.frame_counts:
         candidate_paths.add(DetectionPath.live)

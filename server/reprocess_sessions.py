@@ -109,7 +109,7 @@ def rerun_detection(pitch_path: Path, hsv: HSVRange, dry_run: bool) -> PitchPayl
     if video is None:
         logger.warning("  skip %s/%s — no MOV", pitch.session_id, pitch.camera_id)
         return None
-    old_hits = sum(1 for f in pitch.frames if f.px is not None)
+    old_hits = sum(1 for f in pitch.frames_server_post if f.px is not None)
     frames = detect_pitch(
         video_path=video,
         video_start_pts_s=pitch.video_start_pts_s,
@@ -120,7 +120,7 @@ def rerun_detection(pitch_path: Path, hsv: HSVRange, dry_run: bool) -> PitchPayl
         "  %s/%s  frames=%d  hits %d → %d",
         pitch.session_id, pitch.camera_id, len(frames), old_hits, new_hits,
     )
-    pitch.frames = frames
+    pitch.frames_server_post = frames
     if not dry_run:
         atomic_write(pitch_path, pitch.model_dump_json())
     return pitch
@@ -151,7 +151,7 @@ def triangulate_session(
         dims = (cal.image_width_px, cal.image_height_px) if cal else None
         return scale_pitch_to_video_dims(p, dims)
 
-    if a.frames and b.frames:
+    if a.frames_server_post and b.frames_server_post:
         try:
             result.points = triangulate_cycle(scale(a), scale(b), source="server")
         except Exception as e:

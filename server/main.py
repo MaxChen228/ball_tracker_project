@@ -90,7 +90,6 @@ from pydantic import ValidationError
 from schemas import (
     CalibrationSnapshot,
     CaptureTelemetryPayload,
-    CaptureMode,
     DetectionPath,
     Device,
     FramePayload,
@@ -112,8 +111,6 @@ from schemas import (
     _DEFAULT_TRACKING_EXPOSURE_CAP_MODE,
     _DEFAULT_SESSION_TIMEOUT_S,
     _DEFAULT_PATHS,
-    mode_for_paths,
-    paths_for_mode,
 )
 from collections import deque
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
@@ -383,11 +380,11 @@ def _build_status_response() -> dict[str, Any]:
         "arm_readiness": arm_readiness,
         "session": session.to_dict() if session is not None else None,
         "commands": state.commands_for_devices(),
-        # Global dashboard mode choice. iPhones show this on the HUD in idle
-        # and fall back to it when there's no armed session; during an armed
-        # session they read session.mode instead (it's the snapshot that
-        # can't drift from under them).
-        "capture_mode": state.current_mode().value,
+        # Legacy carry-over: `capture_mode` degenerated to a single value
+        # once the CaptureMode enum was retired. Kept in the /status shape
+        # so older dashboard JS + iOS builds that still read it don't 500.
+        # Authoritative capture selection lives on `default_paths` / session.paths.
+        "capture_mode": "camera_only",
         "default_paths": sorted(p.value for p in state.default_paths()),
         "hsv_range": state.hsv_range().__dict__,
         # Mutual-sync context. `sync.id` is the sole dedupe key the phone
@@ -709,7 +706,7 @@ def events_index() -> HTMLResponse:
             session=session.to_dict() if session is not None else None,
             calibrations=calibrations,
             arm_readiness=_arm_readiness(devices, calibrations),
-            capture_mode=state.current_mode().value,
+            capture_mode="camera_only",
             default_paths=sorted(p.value for p in state.default_paths()),
             hsv_range=state.hsv_range().__dict__,
             live_session=state.live_session_summary(),

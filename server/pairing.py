@@ -223,9 +223,10 @@ def _frame_items(p: PitchPayload, *, source: str = "server"):
     anchor-relative time. `t_rel = timestamp_s − sync_anchor_timestamp_s`.
 
     `source` is kept as a parameter for API compatibility; only `"server"`
-    is supported now — it reads `p.frames` (the authoritative server-side
-    or live detection result projected onto `frames` by the caller)."""
-    frames = p.frames
+    is supported now — it reads `p.frames_server_post` (the authoritative
+    server-side or live detection result projected onto `frames_server_post`
+    by the caller via `detection_paths.pitch_with_path_frames`)."""
+    frames = p.frames_server_post
     anchor = p.sync_anchor_timestamp_s
     out = [
         (f.timestamp_s - anchor, f.theta_x_rad, f.theta_z_rad, f.px, f.py)

@@ -4,10 +4,6 @@ from __future__ import annotations
 import html
 
 
-_MODE_LABELS = {
-    "camera_only": "Camera-only",
-}
-
 _PATH_LABELS = {
     "live": ("Live stream", "iOS → WS"),
     "server_post": ("Server post-pass", "PyAV + OpenCV"),

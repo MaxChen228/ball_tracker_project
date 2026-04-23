@@ -7,13 +7,10 @@ from pathlib import Path
 from typing import Callable
 
 from schemas import (
-    CaptureMode,
     DetectionPath,
     TrackingExposureCapMode,
     _DEFAULT_PATHS,
     _DEFAULT_TRACKING_EXPOSURE_CAP_MODE,
-    mode_for_paths,
-    paths_for_mode,
 )
 
 logger = logging.getLogger("ball_tracker")
@@ -50,7 +47,6 @@ class RuntimeSettingsStore:
     ) -> None:
         self._path = path
         self._atomic_write = atomic_write
-        self.current_mode: CaptureMode = CaptureMode.camera_only
         self.default_paths: set[DetectionPath] = set(_DEFAULT_PATHS)
         self.chirp_detect_threshold: float = 0.18
         self.mutual_sync_threshold: float = 0.10
@@ -98,7 +94,6 @@ class RuntimeSettingsStore:
                     continue
             if parsed:
                 self.default_paths = parsed
-                self.current_mode = mode_for_paths(parsed)
         logger.info(
             "restored runtime_settings: chirp=%.3f interval_s=%.2f capture_h=%d tracking_exposure=%s paths=%s",
             self.chirp_detect_threshold,
@@ -122,17 +117,10 @@ class RuntimeSettingsStore:
         )
         self._atomic_write(self._path, payload)
 
-    def set_mode(self, mode: CaptureMode) -> CaptureMode:
-        self.current_mode = mode
-        self.default_paths = paths_for_mode(mode)
-        self.persist()
-        return mode
-
     def set_default_paths(self, paths: set[DetectionPath]) -> set[DetectionPath]:
         if not paths:
             raise ValueError("at least one detection path must be enabled")
         self.default_paths = set(paths)
-        self.current_mode = mode_for_paths(self.default_paths)
         self.persist()
         return set(self.default_paths)
 

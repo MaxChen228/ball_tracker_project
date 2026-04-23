@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from schemas import CaptureMode, DetectionPath, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
+from schemas import DetectionPath, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
 
 router = APIRouter()
 
@@ -78,28 +78,6 @@ async def sessions_stop(request: Request):
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "session": ended.to_dict()}
-
-
-@router.post("/sessions/set_mode")
-async def sessions_set_mode(
-    request: Request,
-    mode: str = Form(...),
-):
-    from main import state, device_ws, _settings_message_for, _wants_html
-    try:
-        applied = CaptureMode(mode)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"invalid mode {mode!r}; expected one of: {[m.value for m in CaptureMode]}",
-        )
-    state.set_mode(applied)
-    await device_ws.broadcast(
-        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "capture_mode": applied.value}
 
 
 @router.post("/sessions/clear")

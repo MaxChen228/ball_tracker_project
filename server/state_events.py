@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 # out of sync with schemas.DetectionPath.
 _PATH_TO_FRAMES_ATTR: tuple[tuple[str, str], ...] = (
     (DetectionPath.live.value, "frames_live"),
-    (DetectionPath.server_post.value, "frames"),
+    (DetectionPath.server_post.value, "frames_server_post"),
 )
 
 

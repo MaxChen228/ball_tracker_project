@@ -14,7 +14,6 @@ from typing import Any, Callable
 
 from schemas import (
     CalibrationSnapshot,
-    CaptureMode,
     DetectionPath,
     Device,
     FramePayload,
@@ -29,7 +28,6 @@ from schemas import (
     TriangulatedPoint,
     _DEFAULT_SESSION_TIMEOUT_S,
     _DEFAULT_PATHS,
-    mode_for_paths,
 )
 from detection import HSVRange
 from preview import PreviewBuffer
@@ -307,8 +305,8 @@ class State:
         for path in sorted(self._pitch_dir.glob("session_*.json")):
             try:
                 obj = json.loads(path.read_text())
-                if "frames" in obj and "frames_server_post" not in obj:
-                    obj["frames_server_post"] = obj.get("frames", [])
+                # Legacy `frames` key maps to `frames_server_post` via the
+                # PitchPayload AliasChoices; no manual pre-processing needed.
                 pitch = PitchPayload.model_validate(obj)
             except Exception as e:
                 logger.warning("skip corrupt pitch file %s: %s", path.name, e)
@@ -619,8 +617,6 @@ class State:
                     merged.frames_live = list(existing.frames_live)
                 if not merged.frames_server_post and existing.frames_server_post:
                     merged.frames_server_post = list(existing.frames_server_post)
-                if not merged.frames and existing.frames:
-                    merged.frames = list(existing.frames)
             if not merged.frames_live and live_frames:
                 merged.frames_live = list(live_frames)
             pitch = merged
@@ -1021,7 +1017,7 @@ class State:
     ) -> Session:
         """Begin a new armed session. If one is already armed, return it
         unchanged (idempotent so dashboard double-clicks don't double-arm).
-        Snapshots the current global `capture_mode` so a late dashboard
+        Snapshots the current default detection paths so a late dashboard
         toggle can't disturb the in-flight recording."""
         now = self._time_fn()
         with self._lock:
@@ -1034,7 +1030,6 @@ class State:
                 started_at=now,
                 max_duration_s=max_duration_s,
                 paths=chosen_paths,
-                mode=mode_for_paths(chosen_paths),
                 tracking_exposure_cap=self._runtime_settings.tracking_exposure_cap,
                 sync_id=self._common_time_sync_id_locked(now),
             )
@@ -1042,13 +1037,6 @@ class State:
             self._current_session = session
             self._current_time_sync_intent = None
             return session
-
-    def current_mode(self) -> CaptureMode:
-        """Dashboard-selected capture mode (global, not session-scoped).
-        iPhones read this from WS settings messages to render the HUD mode
-        chip even while idle."""
-        with self._lock:
-            return mode_for_paths(self._runtime_settings.default_paths)
 
     def default_paths(self) -> set[DetectionPath]:
         with self._lock:
@@ -1063,12 +1051,6 @@ class State:
             self._hsv_range = hsv_range
             self._persist_hsv_range_locked()
             return self._hsv_range
-
-    def set_mode(self, mode: CaptureMode) -> CaptureMode:
-        """Record the dashboard's mode choice. Only affects sessions armed
-        after this call — in-flight sessions keep their snapshot mode."""
-        with self._lock:
-            return self._runtime_settings.set_mode(mode)
 
     def set_default_paths(self, paths: set[DetectionPath]) -> set[DetectionPath]:
         with self._lock:

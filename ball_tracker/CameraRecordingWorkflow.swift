@@ -8,7 +8,6 @@ final class CameraRecordingWorkflow {
     struct Dependencies {
         let getCameraRole: () -> String
         let getCurrentSessionPaths: () -> Set<ServerUploader.DetectionPath>
-        let getCurrentCaptureMode: () -> ServerUploader.CaptureMode
         let getSyncId: () -> String?
         let getSyncAnchorTimestampS: () -> Double?
         let currentCaptureTelemetry: (Double) -> ServerUploader.CaptureTelemetry
@@ -144,7 +143,8 @@ final class CameraRecordingWorkflow {
 
     func startRecorderIfNeeded(sessionId: String, timestampS: TimeInterval) {
         guard !recorder.isActive else { return }
-        recordingLog.info("camera first frame, starting recorder session=\(sessionId, privacy: .public) mode=\(self.dependencies.getCurrentCaptureMode().rawValue, privacy: .public) video_start_pts=\(timestampS) anchor=\(self.dependencies.getSyncAnchorTimestampS() ?? .nan)")
+        let pathsLabel = self.dependencies.getCurrentSessionPaths().map { $0.rawValue }.sorted().joined(separator: ",")
+        recordingLog.info("camera first frame, starting recorder session=\(sessionId, privacy: .public) paths=\(pathsLabel, privacy: .public) video_start_pts=\(timestampS) anchor=\(self.dependencies.getSyncAnchorTimestampS() ?? .nan)")
         recorder.startRecording(
             sessionId: sessionId,
             syncId: dependencies.getSyncId(),

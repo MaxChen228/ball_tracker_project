@@ -36,29 +36,20 @@ def _post_calibration(client: TestClient, camera_id: str, K: np.ndarray, H: np.n
 
 
 def test_dashboard_drives_mode_one_end_to_end(tmp_path):
-    """Symmetric mode-one integration: dashboard picks camera_only → arm
-    → each phone POSTs a MOV → server detects + triangulates → events
+    """End-to-end camera-only integration: arm with server_post path →
+    each phone POSTs a MOV → server detects + triangulates → events
     + viewer show the camera-only tag + the MOV is accessible."""
     K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
     P_true = np.array([0.1, 0.3, 1.0])
     client = TestClient(app)
 
-    # 1. Dashboard locks mode to camera_only (default, but exercise the
-    #    explicit toggle path).
-    r = client.post(
-        "/sessions/set_mode",
-        data={"mode": "camera_only"},
-        headers={"Accept": "application/json"},
-    )
-    assert r.status_code == 200
-
-    # 2. Arm.
+    # 1. Arm.
     _seed_ready_stereo(client, K, H_a, H_b)
     arm = client.post(
         "/sessions/arm", headers={"Accept": "application/json"}
     ).json()
     session_id = arm["session"]["id"]
-    assert arm["session"]["mode"] == "camera_only"
+    assert "server_post" in arm["session"]["paths"]
 
     # 3. Both phones upload a MOV with a ball at the projected pixel.
     mov_a = _encode_single_ball_mov(
