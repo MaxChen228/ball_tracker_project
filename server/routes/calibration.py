@@ -335,16 +335,23 @@ def _derive_auto_cal_intrinsics(
         prior_w = prior.image_width_px
         prior_h = prior.image_height_px
         if prior_w > 0 and prior_h > 0:
-            sx = w_img / prior_w
-            sy = h_img / prior_h
-            intrinsics = IntrinsicsPayload(
-                fx=prior.intrinsics.fx * sx,
-                fz=prior.intrinsics.fz * sy,
-                cx=prior.intrinsics.cx * sx,
-                cy=prior.intrinsics.cy * sy,
-                distortion=prior.intrinsics.distortion,
-            )
-            return intrinsics, prior
+            prior_ar = prior_w / prior_h
+            new_ar = w_img / h_img
+            # iPhone stills (4:3) and video (16:9) come from different
+            # sensor crops — scaling fx/fz independently on axis-ratio
+            # mismatch produces a bogus fx/fy ratio. Only reuse prior
+            # intrinsics when the aspect ratio matches within 2%.
+            if abs(prior_ar - new_ar) / prior_ar < 0.02:
+                sx = w_img / prior_w
+                sy = h_img / prior_h
+                intrinsics = IntrinsicsPayload(
+                    fx=prior.intrinsics.fx * sx,
+                    fz=prior.intrinsics.fz * sy,
+                    cx=prior.intrinsics.cx * sx,
+                    cy=prior.intrinsics.cy * sy,
+                    distortion=prior.intrinsics.distortion,
+                )
+                return intrinsics, prior
         prior = None
     h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else 1.1345
     fx, fy, cx, cy = derive_fov_intrinsics(w_img, h_img, h_fov_rad)

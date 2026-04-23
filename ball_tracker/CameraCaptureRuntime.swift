@@ -104,7 +104,8 @@ final class CameraCaptureRuntime {
             if #available(iOS 16.0, *),
                let dev = (session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
                           .first { $0.device.hasMediaType(.video) })?.device,
-               let maxDims = dev.activeFormat.supportedMaxPhotoDimensions.last {
+               let maxDims = dev.activeFormat.supportedMaxPhotoDimensions
+                    .max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }) {
                 photoOutput.maxPhotoDimensions = maxDims
                 captureLog.info("photo output max dims \(maxDims.width)x\(maxDims.height)")
             }
@@ -554,11 +555,32 @@ final class CameraCaptureRuntime {
                 completion(nil, .zero)
                 return
             }
+            // Pin the photo connection to landscape-right (0°) so the JPEG's
+            // raw pixels match the video pipeline's orientation. Without this
+            // AVCapturePhotoOutput bakes whatever the current device rotation
+            // is, and the server's ArUco→homography solve ends up in a
+            // rotated pixel frame → correct marker detection but wrong
+            // decomposed pose.
+            if let conn = self.photoOutput.connection(with: .video) {
+                if conn.isVideoRotationAngleSupported(0) {
+                    conn.videoRotationAngle = 0
+                }
+            }
             let settings = AVCapturePhotoSettings(format: [
                 AVVideoCodecKey: AVVideoCodecType.jpeg
             ])
-            if #available(iOS 16.0, *) {
-                settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
+            // Pull the max dims from the CURRENT activeFormat, not the
+            // cached photoOutput.maxPhotoDimensions (which was baked at
+            // session configure time and may not match after fps swaps
+            // between standby and recording).
+            if #available(iOS 16.0, *),
+               let dev = (self.session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
+                          .first { $0.device.hasMediaType(.video) })?.device,
+               let maxDims = dev.activeFormat.supportedMaxPhotoDimensions
+                    .max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }) {
+                self.photoOutput.maxPhotoDimensions = maxDims
+                settings.maxPhotoDimensions = maxDims
+                captureLog.info("high-res still request max dims \(maxDims.width)x\(maxDims.height)")
             }
             let uniqueID = settings.uniqueID
             let delegate = PhotoCaptureDelegate { [weak self] data, size in

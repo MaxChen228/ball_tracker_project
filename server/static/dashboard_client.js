@@ -757,6 +757,9 @@
         `${previewBusy ? (previewOn ? 'PREVIEW ON…' : 'PREVIEW…') : (previewOn ? 'PREVIEW ON' : 'PREVIEW')}</button>`);
       const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}" ${autoCalDisabled ? 'disabled' : ''}>` +
         `${autoCalButtonLabel(autoRun)}</button>`;
+      const autoLogBtn = (autoLast && autoLast.status === 'failed')
+        ? `<button type="button" class="btn small secondary" data-auto-cal-log="${esc(cam)}" title="Copy full auto-cal log to clipboard for debugging">Copy log</button>`
+        : '';
       // Always render the panel so the row height stays stable; off
       // state shows a black placeholder. When on, the tickPreviewImages
       // loop (see below) cache-busts the <img src>.
@@ -797,7 +800,7 @@
             </div>
             <div class="chip-col">${batteryChip(deviceRecord, online)}${statusChip(cam, online, isCal)}</div>
           </div>
-          <div class="device-actions">${previewBtn}${autoCalBtn}</div>
+          <div class="device-actions">${previewBtn}${autoCalBtn}${autoLogBtn}</div>
           ${previewPanel}
           ${virtCell}
         </div>`;
@@ -1513,6 +1516,93 @@
     } finally {
       btn.disabled = false;
       btn.textContent = originalLabel;
+    }
+  });
+
+  // Copy a full auto-cal failure log to the clipboard. Surfaces the
+  // active + last-run dump plus a /status snapshot so the operator can
+  // paste the whole context into an AI / bug report without digging
+  // through server logs.
+  function autoCalLogCopyFallback(text) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    const panel = document.createElement('div');
+    panel.style.cssText = 'background:var(--surface,#fff);padding:16px;border:1px solid var(--border,#ccc);border-radius:6px;max-width:80vw;max-height:80vh;display:flex;flex-direction:column;gap:8px;';
+    const hdr = document.createElement('div');
+    hdr.style.cssText = 'font-family:var(--mono,monospace);font-size:11px;color:var(--sub,#555);letter-spacing:0.08em;text-transform:uppercase;';
+    hdr.textContent = 'Auto-copy blocked — press ⌘C / Ctrl+C then Esc';
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.readOnly = true;
+    ta.style.cssText = 'flex:1;min-width:60vw;min-height:60vh;font-family:var(--mono,monospace);font-size:11px;padding:8px;';
+    panel.appendChild(hdr);
+    panel.appendChild(ta);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    ta.focus();
+    ta.select();
+    const close = () => { document.body.removeChild(overlay); document.removeEventListener('keydown', onKey); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  }
+
+  function copyPlainTextSync(text) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (_) { return false; }
+  }
+
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-auto-cal-log]');
+    if (!btn) return;
+    const cam = btn.dataset.autoCalLog;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Copying…';
+    const active = (currentAutoCalibration && currentAutoCalibration.active || {})[cam] || null;
+    const last   = (currentAutoCalibration && currentAutoCalibration.last   || {})[cam] || null;
+    let serverStatus = null;
+    try {
+      const r = await fetch('/status', { cache: 'no-store' });
+      if (r.ok) serverStatus = await r.json();
+    } catch (_) {}
+    const payload = {
+      collected_at: new Date().toISOString(),
+      camera_id: cam,
+      page_url: window.location.href,
+      user_agent: navigator.userAgent,
+      auto_cal: { active, last },
+      server_status: serverStatus,
+    };
+    const text = JSON.stringify(payload, null, 2);
+    let ok = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      } else {
+        ok = copyPlainTextSync(text);
+      }
+    } catch (_) {
+      ok = copyPlainTextSync(text);
+    }
+    if (ok) {
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1800);
+    } else {
+      autoCalLogCopyFallback(text);
+      btn.textContent = 'Manual copy';
+      setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2600);
     }
   });
 
