@@ -737,6 +737,36 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
         assert meta.get("trace_kind") != "camera_axis", "camera axis trace leaked into STATIC"
 
 
+def test_viewer_has_path_is_per_camera_not_global():
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(723)
+    _record_pitch(_pitch("A", 723, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert "const HAS_PATH_PER_CAM = {}" in body
+    assert "function hasPathForLayer" in body
+    assert "hasPathForLayer(layer, path)" in body
+    assert "HAS_PATH_PER_CAM.A.live" in body
+    assert "HAS_PATH_PER_CAM.B.live" in body
+
+
+def test_viewer_strip_reserves_dual_ab_subtracks_per_pipeline():
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(722)
+    _record_pitch(_pitch("A", 722, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    assert 'const STRIP_CAMS = ["A", "B"]' in body
+    assert "drawStripInto(STRIP_ROWS[path].canvas, camAtFrameByPath[path], path)" in body
+    for canvas_id in ("detection-canvas-live", "detection-canvas-ios-post", "detection-canvas-server-post"):
+        assert f'id="{canvas_id}" class="strip-canvas" height="28"' in body
+    assert body.count('<span class="strip-sublabels"') == 3
+
+
 def test_viewer_locks_layout_to_viewport_without_page_scroll():
     """The viewer should fit in a single viewport: body scrolling is
     disabled and the root container owns a fixed 100vh layout."""

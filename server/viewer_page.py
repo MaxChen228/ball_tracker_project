@@ -236,17 +236,20 @@ def render_viewer_html(
         <div class="strip-row" id="strip-row-live" hidden
              title="LIVE — iOS on-device detection streamed over WS while the session was armed. Runs on raw BGRA frames pre-encode; earliest signal available.">
           <span class="strip-label">LIVE</span>
-          <canvas id="detection-canvas-live" class="strip-canvas" height="18" aria-hidden="true"></canvas>
+          <span class="strip-sublabels" aria-hidden="true"><span>A</span><span>B</span></span>
+          <canvas id="detection-canvas-live" class="strip-canvas" height="28" aria-hidden="true"></canvas>
         </div>
         <div class="strip-row" id="strip-row-ios-post" hidden
              title="POST — iOS on-device detection uploaded as the post-session payload. Same pipeline as LIVE but captured from the full frame buffer, not a live window.">
           <span class="strip-label">POST</span>
-          <canvas id="detection-canvas-ios-post" class="strip-canvas" height="18" aria-hidden="true"></canvas>
+          <span class="strip-sublabels" aria-hidden="true"><span>A</span><span>B</span></span>
+          <canvas id="detection-canvas-ios-post" class="strip-canvas" height="28" aria-hidden="true"></canvas>
         </div>
         <div class="strip-row" id="strip-row-server-post" hidden
              title="SVR — server-side detection on the H.264-decoded MOV. Independent from the iOS paths; H.264 quantization typically costs a few frames at detection edges.">
           <span class="strip-label">SVR</span>
-          <canvas id="detection-canvas-server-post" class="strip-canvas" height="18" aria-hidden="true"></canvas>
+          <span class="strip-sublabels" aria-hidden="true"><span>A</span><span>B</span></span>
+          <canvas id="detection-canvas-server-post" class="strip-canvas" height="28" aria-hidden="true"></canvas>
         </div>
         <div class="strip-note" id="strip-note-multi" hidden>
           三條 detection pipeline 獨立：LIVE / POST 兩條都是 iOS 端在 raw BGRA 上跑；SVR 是 server 解碼後在 BGR 上跑。共用同一 chirp anchor，色塊差異 = pipeline 差異、不是時間錯位。
@@ -469,9 +472,13 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .scrubber-wrap input[type=range] {{ width:100%; accent-color:var(--ink); height:16px; margin:0; }}
   .scrubber-wrap canvas {{ display:block; width:100%; height:18px; border:1px solid var(--border-base);
     border-radius:var(--r); background:var(--bg); image-rendering:pixelated; }}
+  .scrubber-wrap .strip-row canvas.strip-canvas {{ height:28px; }}
   .strip-row {{ display:flex; align-items:center; gap:6px; }}
   .strip-row .strip-label {{ font-family:var(--mono); font-size:9px; letter-spacing:0.1em;
     color:var(--sub); min-width:46px; text-align:right; flex:0 0 46px; }}
+  .strip-row .strip-sublabels {{ display:flex; flex-direction:column; justify-content:space-around;
+    font-family:var(--mono); font-size:8px; letter-spacing:0.05em; color:var(--sub);
+    height:28px; line-height:1; flex:0 0 auto; padding:0 2px 0 0; text-align:right; }}
   .strip-row .strip-canvas {{ flex:1 1 auto; min-width:0; }}
   .strip-row[hidden] {{ display:none; }}
   .strip-row.is-reference {{ opacity:0.6; }}
@@ -561,7 +568,9 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     }}
     .timeline {{ gap:6px; padding:6px var(--s-5); }}
     .scrubber-wrap canvas {{ height:16px; }}
+    .scrubber-wrap .strip-row canvas.strip-canvas {{ height:24px; }}
     .strip-row .strip-label {{ min-width:42px; flex-basis:42px; }}
+    .strip-row .strip-sublabels {{ height:24px; font-size:7px; }}
     .strip-note {{ padding-left:48px; }}
     .scene-col .scene-toolbar {{ top:6px; right:6px; }}
   }}
@@ -678,11 +687,33 @@ def _viewer_js() -> str:
       || Object.keys(SCENE.ground_traces || {{}}).length > 0
       || (SCENE.triangulated || []).length > 0,
   }};
+  // Per-cam applicability: single-camera sessions must not light up the
+  // other cam's pills as dead buttons. Falls back to HAS_PATH for any cam
+  // we don't enumerate here.
+  const HAS_PATH_PER_CAM = {{}};
+  for (const cam of ["A", "B"]) {{
+    const raySrc = (p) => (SCENE.rays || []).some(r => r.camera_id === cam && sourceToPath(r.source || "server") === p);
+    HAS_PATH_PER_CAM[cam] = {{
+      live: camsWithFramesByPath.live.includes(cam) || raySrc("live"),
+      ios_post: camsWithFramesByPath.ios_post.includes(cam)
+        || !!(SCENE.ground_traces_on_device && SCENE.ground_traces_on_device[cam])
+        || raySrc("ios_post"),
+      server_post: camsWithFramesByPath.server_post.includes(cam)
+        || !!(SCENE.ground_traces && SCENE.ground_traces[cam])
+        || raySrc("server_post"),
+    }};
+  }}
   const HAS_TRAJ_PATH = {{
     live: false,  // live is per-camera only; no triangulation
     ios_post: (SCENE.triangulated_on_device || []).length > 0,
     server_post: (SCENE.triangulated || []).length > 0,
   }};
+  function hasPathForLayer(layer, path) {{
+    if (layer === "traj") return HAS_TRAJ_PATH[path];
+    const cam = layer.startsWith("cam") ? layer.slice(3) : null;
+    if (cam && HAS_PATH_PER_CAM[cam]) return HAS_PATH_PER_CAM[cam][path];
+    return HAS_PATH[path];
+  }}
   // Key is bumped from _layer_visibility → _layer_visibility_v2 because the
   // schema changed: old {{server, on_device}} flat is not migrate-able
   // without losing the new `live` axis. Users get the default (all paths on
@@ -690,8 +721,8 @@ def _viewer_js() -> str:
   const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility_v2";
   const layerVisibility = {{
     traj: {{ live: false, ios_post: HAS_TRAJ_PATH.ios_post, server_post: HAS_TRAJ_PATH.server_post }},
-    camA: {{ live: HAS_PATH.live, ios_post: HAS_PATH.ios_post, server_post: HAS_PATH.server_post }},
-    camB: {{ live: HAS_PATH.live, ios_post: HAS_PATH.ios_post, server_post: HAS_PATH.server_post }},
+    camA: {{ live: HAS_PATH_PER_CAM.A.live, ios_post: HAS_PATH_PER_CAM.A.ios_post, server_post: HAS_PATH_PER_CAM.A.server_post }},
+    camB: {{ live: HAS_PATH_PER_CAM.B.live, ios_post: HAS_PATH_PER_CAM.B.ios_post, server_post: HAS_PATH_PER_CAM.B.server_post }},
   }};
   try {{
     const saved = JSON.parse(localStorage.getItem(LAYER_VIS_KEY) || "null");
@@ -703,7 +734,7 @@ def _viewer_js() -> str:
               // Respect the saved choice BUT clamp to what's applicable for
               // this session. A stale "traj.live=true" from an old localStorage
               // entry must not resurrect a non-existent toggle.
-              const applicable = k === "traj" ? HAS_TRAJ_PATH[path] : HAS_PATH[path];
+              const applicable = hasPathForLayer(k, path);
               layerVisibility[k][path] = saved[k][path] && applicable;
             }}
           }}
@@ -1275,7 +1306,7 @@ def _viewer_js() -> str:
     for (const pill of pills) {{
       const layer = pill.dataset.layer;
       const path = pill.dataset.path;
-      const applicable = layer === "traj" ? HAS_TRAJ_PATH[path] : HAS_PATH[path];
+      const applicable = hasPathForLayer(layer, path);
       if (!applicable) {{
         pill.hidden = true;
         pill.setAttribute("aria-pressed", "false");
@@ -1318,32 +1349,33 @@ def _viewer_js() -> str:
   }});
   function resizeOneCanvas(canvas) {{
     const cssW = canvas.clientWidth;
-    const cssH = canvas.clientHeight || 18;
+    const cssH = canvas.clientHeight || 28;
     const dpr = window.devicePixelRatio || 1;
     const pxW = Math.max(1, Math.floor(cssW * dpr));
     const pxH = Math.max(1, Math.floor(cssH * dpr));
     if (canvas.width !== pxW || canvas.height !== pxH) {{ canvas.width = pxW; canvas.height = pxH; }}
   }}
-  function drawStripInto(canvas, cams, strips, path) {{
+  // Every strip reserves one sub-track per cam, even when that cam has no
+  // data on this pipeline — the empty row is load-bearing for single-camera
+  // sessions (e.g. live-only A-only) so the operator can see "B is silent"
+  // instead of misreading a full-width A track as both cams.
+  const STRIP_CAMS = ["A", "B"];
+  function drawStripInto(canvas, strips, path) {{
     const W = canvas.width, H = canvas.height;
     if (!W || !H) return;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, W, H);
-    const rows = Math.max(1, cams.length);
+    const rows = STRIP_CAMS.length;
     const rowH = Math.floor(H / rows);
-    for (let ci = 0; ci < cams.length; ++ci) {{
-      const cam = cams[ci];
+    for (let ci = 0; ci < rows; ++ci) {{
+      const cam = STRIP_CAMS[ci];
       const strip = strips[cam];
-      const color = colorForCamPath(cam, path);
       const y = ci * rowH;
       ctx.fillStyle = STRIP_EMPTY;
       ctx.fillRect(0, y, W, rowH);
       if (!strip) continue;
-      // Fade the whole row when this camera's pipeline is toggled off. Keeps
-      // the strip informative (still shows raw coverage) while telegraphing
-      // that the 3D scene is ignoring it.
       const muted = !isLayerVisible(`cam${{cam}}`, path);
-      const detColor = muted ? STRIP_MUTED : color;
+      const detColor = muted ? STRIP_MUTED : colorForCamPath(cam, path);
       for (let x = 0; x < W; ++x) {{
         const i = TOTAL_FRAMES <= 1 ? 0 : Math.min(TOTAL_FRAMES - 1, Math.round(x * (TOTAL_FRAMES - 1) / (W - 1)));
         const e = strip[i];
@@ -1364,7 +1396,7 @@ def _viewer_js() -> str:
   function renderDetectionStrip() {{
     for (const path of PATHS) {{
       if (!HAS_PATH[path]) continue;
-      drawStripInto(STRIP_ROWS[path].canvas, camsWithFramesByPath[path], camAtFrameByPath[path], path);
+      drawStripInto(STRIP_ROWS[path].canvas, camAtFrameByPath[path], path);
     }}
   }}
   function resizeDetectionCanvas() {{
