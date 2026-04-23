@@ -195,6 +195,7 @@ def render_viewer_html(
         <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
       </div>
     </div>
+    <div class="col-resizer" id="col-resizer" role="separator" aria-orientation="vertical" aria-label="Resize 3D scene vs cameras" tabindex="0" title="Drag to resize"></div>
     <div class="videos-col">{ctx.video_cells_html}{ctx.virtual_cells_html}</div>
   </div>
   <div class="timeline">
@@ -424,14 +425,26 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .fail-strip .icon {{ font-weight:700; }}
   .work {{ flex:1 1 auto; display:flex; min-height:0;
     border-bottom:1px solid var(--border-base); }}
-  .scene-col {{ flex:{scene_flex}; min-width:380px; position:relative;
-    border-right:1px solid var(--border-base); background:var(--bg); }}
+  .scene-col {{ flex:{scene_flex}; min-width:280px; position:relative;
+    background:var(--bg); }}
   #scene {{ position:absolute; inset:0; }}
-  .videos-col {{ flex:{videos_flex}; min-width:420px; display:grid;
+  .videos-col {{ flex:{videos_flex}; min-width:320px; display:grid;
     grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:1px;
     background:var(--border-base); }}
   .work[data-mode="single-cam"] .scene-col {{ flex:7 1 0; }}
-  .work[data-mode="single-cam"] .videos-col {{ flex:3 1 0; min-width:320px; }}
+  .work[data-mode="single-cam"] .videos-col {{ flex:3 1 0; min-width:280px; }}
+  .col-resizer {{ flex:0 0 6px; cursor:col-resize; position:relative;
+    background:var(--border-base);
+    transition:background 0.12s; user-select:none; touch-action:none; }}
+  .col-resizer::before {{ content:""; position:absolute; left:2px; right:2px;
+    top:50%; height:28px; transform:translateY(-50%);
+    border-left:1px solid var(--sub); border-right:1px solid var(--sub);
+    opacity:0.45; transition:opacity 0.12s; }}
+  .col-resizer:hover, .col-resizer.dragging {{ background:var(--ink); }}
+  .col-resizer:hover::before, .col-resizer.dragging::before {{ opacity:0; }}
+  .col-resizer:focus-visible {{ outline:2px solid var(--ink); outline-offset:-2px; }}
+  body.col-resizing {{ cursor:col-resize; user-select:none; }}
+  body.col-resizing * {{ cursor:col-resize !important; }}
   .vid-cell {{ background:var(--surface); padding:var(--s-2) var(--s-3);
     display:flex; flex-direction:column; gap:var(--s-1); min-height:0;
     min-width:0; }}
@@ -1292,6 +1305,71 @@ def _viewer_js() -> str:
   modeAll.addEventListener("click", () => setMode("all"));
   modePlayback.addEventListener("click", () => setMode("playback"));
   sceneResetBtn.addEventListener("click", () => {{ Plotly.relayout(sceneDiv, {{ "scene.camera": DEFAULT_CAMERA }}); }});
+  // Draggable divider between the 3D scene and the 2x2 camera panels.
+  // Persists the chosen split so reload keeps the operator's layout.
+  (() => {{
+    const resizer = document.getElementById("col-resizer");
+    if (!resizer) return;
+    const work = resizer.parentElement;
+    const sceneCol = work.querySelector(".scene-col");
+    const videosCol = work.querySelector(".videos-col");
+    const STORE_KEY = "viewer:col-split-frac";
+    function applyFrac(frac) {{
+      const clamped = Math.max(0.15, Math.min(0.85, frac));
+      sceneCol.style.flex = `${{clamped}} 1 0`;
+      videosCol.style.flex = `${{1 - clamped}} 1 0`;
+      try {{ Plotly.Plots.resize(sceneDiv); }} catch (_) {{}}
+    }}
+    try {{
+      const saved = parseFloat(localStorage.getItem(STORE_KEY));
+      if (Number.isFinite(saved)) applyFrac(saved);
+    }} catch (_) {{}}
+    let dragging = false;
+    function onMove(e) {{
+      if (!dragging) return;
+      const rect = work.getBoundingClientRect();
+      const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+      const frac = x / rect.width;
+      applyFrac(frac);
+    }}
+    function onUp() {{
+      if (!dragging) return;
+      dragging = false;
+      resizer.classList.remove("dragging");
+      document.body.classList.remove("col-resizing");
+      const basis = parseFloat(sceneCol.style.flex);
+      if (Number.isFinite(basis)) {{
+        try {{ localStorage.setItem(STORE_KEY, String(basis)); }} catch (_) {{}}
+      }}
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    }}
+    resizer.addEventListener("pointerdown", (e) => {{
+      e.preventDefault();
+      dragging = true;
+      resizer.classList.add("dragging");
+      document.body.classList.add("col-resizing");
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    }});
+    resizer.addEventListener("dblclick", () => {{
+      try {{ localStorage.removeItem(STORE_KEY); }} catch (_) {{}}
+      sceneCol.style.flex = "";
+      videosCol.style.flex = "";
+      try {{ Plotly.Plots.resize(sceneDiv); }} catch (_) {{}}
+    }});
+    resizer.addEventListener("keydown", (e) => {{
+      const rect = work.getBoundingClientRect();
+      const current = parseFloat(sceneCol.style.flex);
+      const frac = Number.isFinite(current) ? current / (current + (parseFloat(videosCol.style.flex) || 1)) : 0.55;
+      const step = e.shiftKey ? 0.08 : 0.02;
+      if (e.key === "ArrowLeft") {{ e.preventDefault(); applyFrac(frac - step); }}
+      else if (e.key === "ArrowRight") {{ e.preventDefault(); applyFrac(frac + step); }}
+    }});
+    window.addEventListener("resize", () => {{ try {{ Plotly.Plots.resize(sceneDiv); }} catch (_) {{}} }});
+  }})();
   sceneDiv.addEventListener("wheel", (e) => {{
     if (!sceneDiv._fullLayout || !sceneDiv._fullLayout.scene) return;
     const cam = sceneDiv._fullLayout.scene.camera;
@@ -1362,11 +1440,6 @@ def _viewer_js() -> str:
     // redundant with hiding the group and confusing as a click result.
     const group = layerVisibility[layer];
     if (!group) return;
-    const turningOff = group[path];
-    if (turningOff) {{
-      const otherOn = PATHS.some(p => p !== path && group[p]);
-      if (!otherOn) return;
-    }}
     group[path] = !group[path];
     persistLayerVisibility();
     paintLayerPills();
