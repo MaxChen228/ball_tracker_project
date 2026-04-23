@@ -37,9 +37,9 @@ def video_cell_html(
     else:
         url, _ = entry
         if image_width_px and image_height_px:
-            frame_style = f' style="aspect-ratio:{image_width_px}/{image_height_px}"'
+            media_style = f' style="aspect-ratio:{image_width_px}/{image_height_px}"'
         else:
-            frame_style = ""
+            media_style = ""
         pp_html = ""
         if (
             cx is not None
@@ -54,12 +54,14 @@ def video_cell_html(
                 f'style="left:{pct_x:.3f}%;top:{pct_y:.3f}%"></div>'
             )
         body = (
-            f'<div class="vid-frame"{frame_style}>'
+            f'<div class="vid-frame">'
+            f'<div class="vid-media"{media_style}>'
             f'<video data-cam="{cam}" preload="auto" playsinline muted '
             f'src="{url}"></video>'
             f'<svg class="plate-overlay-real" id="real-plate-overlay-{cam}" '
             f'aria-hidden="true"><polygon></polygon></svg>'
             f"{pp_html}"
+            f"</div>"
             f"</div>"
         )
         hint = "synced to chirp"
@@ -90,8 +92,10 @@ def virtual_cell_html(
         h = image_height_px or 3
         aspect_style = f'style="aspect-ratio:{w}/{h}"'
         body = (
-            f'<div class="virt-frame" {aspect_style} id="virt-frame-{cam}">'
+            f'<div class="virt-frame">'
+            f'<div class="virt-media" {aspect_style} id="virt-frame-{cam}">'
             f'<canvas id="virt-canvas-{cam}"></canvas>'
+            f"</div>"
             f"</div>"
         )
     hint_title = (
