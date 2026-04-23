@@ -151,6 +151,30 @@ def test_build_scene_ray_endpoint_hits_ground_when_direction_is_downward():
     assert scene.ground_traces["A"][0]["z"] == pytest.approx(0.0, abs=1e-6)
 
 
+def test_build_scene_includes_persisted_live_rays():
+    K, (R_a, t_a, _C_a, H_a), _ = _make_rig()
+    P = np.array([0.0, 0.2, 0.4])
+    pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([]))
+    u, v = _project_pixels(K, R_a, t_a, P)
+    pitch.frames = []
+    pitch.frames_live = [
+        schemas.FramePayload(
+            frame_index=7,
+            timestamp_s=7.0 / 240.0,
+            px=u,
+            py=v,
+            ball_detected=True,
+        )
+    ]
+
+    scene = build_scene(sid(1), {"A": pitch}, triangulated=None)
+
+    assert len(scene.rays) == 1
+    assert scene.rays[0].source == "live"
+    assert "A" in scene.ground_traces_live
+    assert len(scene.ground_traces_live["A"]) == 1
+
+
 def test_build_scene_keeps_upward_rays_without_ground_trace():
     """Rays with world-frame direction Z >= 0 (pointing up or parallel to
     the plate) are geometrically valid — a ball mid-flight above camera
@@ -641,8 +665,14 @@ def test_viewer_virtual_detection_follows_per_camera_ray_toggle():
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
     assert 'const camLayer = `cam${cam}`;' in body
-    assert 'if (isLayerVisible(camLayer, "server")) {' in body
-    assert 'if (isLayerVisible(camLayer, "on_device")) {' in body
+    # The VIRT dot iterates PATHS and calls isLayerVisible per pipeline
+    # (live / ios_post / server_post), so these three names must appear
+    # verbatim in the generated JS — that is the only proof we ship that
+    # each pipeline is checked on its own.
+    assert '"live"' in body
+    assert '"ios_post"' in body
+    assert '"server_post"' in body
+    assert 'for (const path of PATH_ORDER)' in body
 
 
 def test_viewer_locks_layout_to_viewport_without_page_scroll():
