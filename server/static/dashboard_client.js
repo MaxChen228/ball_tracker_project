@@ -1230,10 +1230,11 @@
           <a class="event-row" href="/viewer/${sid}">
             <div class="event-top">
               <span class="sid">${sid}</span>
-              <span class="event-paths">${pathChips}</span>
+              <span class="event-top-spacer"></span>
               ${processingState}
               <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
             </div>
+            <div class="event-paths-row">${pathChips}</div>
             ${metricsRow}
           </a>
           <div class="event-actions">

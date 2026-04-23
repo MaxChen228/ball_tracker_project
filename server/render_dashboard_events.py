@@ -122,10 +122,11 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f'<div class="event-top">'
             f'<span class="sid">{sid}</span>'
             f'<span class="capmode">{capture_mode}</span>'
-            f'<span class="event-paths">{path_html}</span>'
+            f'<span class="event-top-spacer"></span>'
             f"{processing_chip}"
             f'<span class="chip {status}">{stat_label}</span>'
             f"</div>"
+            f'<div class="event-paths-row">{path_html}</div>'
             f"{stats_html}"
             f"</a>"
             f'<div class="event-actions">{processing_html}{lifecycle_html}</div>'
