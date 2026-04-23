@@ -195,18 +195,21 @@ def render_viewer_html(
             <span class="layer-label">show:</span>
             <span class="layer-group" data-layer="traj">
               <span class="layer-name">Traj</span>
-              <button type="button" class="layer-pill" data-layer="traj" data-src="server" aria-pressed="true">svr</button>
-              <button type="button" class="layer-pill" data-layer="traj" data-src="on_device" aria-pressed="true">iOS</button>
+              <button type="button" class="layer-pill" data-layer="traj" data-path="live" aria-pressed="false" disabled title="live stream carries no triangulation">live</button>
+              <button type="button" class="layer-pill" data-layer="traj" data-path="ios_post" aria-pressed="true">post</button>
+              <button type="button" class="layer-pill" data-layer="traj" data-path="server_post" aria-pressed="true">svr</button>
             </span>
             <span class="layer-group" data-layer="camA">
               <span class="layer-name"><span class="swatch" data-cam="A"></span>Rays A</span>
-              <button type="button" class="layer-pill" data-layer="camA" data-src="server" aria-pressed="true">svr</button>
-              <button type="button" class="layer-pill" data-layer="camA" data-src="on_device" aria-pressed="true">iOS</button>
+              <button type="button" class="layer-pill" data-layer="camA" data-path="live" aria-pressed="true">live</button>
+              <button type="button" class="layer-pill" data-layer="camA" data-path="ios_post" aria-pressed="true">post</button>
+              <button type="button" class="layer-pill" data-layer="camA" data-path="server_post" aria-pressed="true">svr</button>
             </span>
             <span class="layer-group" data-layer="camB">
               <span class="layer-name"><span class="swatch" data-cam="B"></span>Rays B</span>
-              <button type="button" class="layer-pill" data-layer="camB" data-src="server" aria-pressed="true">svr</button>
-              <button type="button" class="layer-pill" data-layer="camB" data-src="on_device" aria-pressed="true">iOS</button>
+              <button type="button" class="layer-pill" data-layer="camB" data-path="live" aria-pressed="true">live</button>
+              <button type="button" class="layer-pill" data-layer="camB" data-path="ios_post" aria-pressed="true">post</button>
+              <button type="button" class="layer-pill" data-layer="camB" data-path="server_post" aria-pressed="true">svr</button>
             </span>
           </span>
         </div>
@@ -214,18 +217,23 @@ def render_viewer_html(
           <span class="strip-label" aria-hidden="true"></span>
           <input id="scrubber" class="strip-canvas" type="range" min="0" max="1" value="0" step="1" />
         </div>
-        <div class="strip-row" id="strip-row-server"
-             title="Server detection runs on H.264-decoded BGR (post-encode). Quantization erases small/distant balls — expect a narrower detection window than ON-DEV.">
-          <span class="strip-label">SERVER</span>
-          <canvas id="detection-canvas" class="strip-canvas" height="18" aria-hidden="true"></canvas>
+        <div class="strip-row" id="strip-row-live" hidden
+             title="LIVE — iOS on-device detection streamed over WS while the session was armed. Runs on raw BGRA frames pre-encode; earliest signal available.">
+          <span class="strip-label">LIVE</span>
+          <canvas id="detection-canvas-live" class="strip-canvas" height="18" aria-hidden="true"></canvas>
         </div>
-        <div class="strip-row" id="strip-row-on-device" hidden
-             title="On-device detection runs on raw BGRA (pre-encode). Closer to ground truth — wider detection window than SERVER in dual mode.">
-          <span class="strip-label">ON-DEV</span>
-          <canvas id="detection-canvas-on-device" class="strip-canvas" height="18" aria-hidden="true"></canvas>
+        <div class="strip-row" id="strip-row-ios-post" hidden
+             title="POST — iOS on-device detection uploaded as the post-session payload. Same pipeline as LIVE but captured from the full frame buffer, not a live window.">
+          <span class="strip-label">POST</span>
+          <canvas id="detection-canvas-ios-post" class="strip-canvas" height="18" aria-hidden="true"></canvas>
         </div>
-        <div class="strip-note" id="strip-note-dual" hidden>
-          兩條 stream 共享同一 chirp anchor — 色塊起止差異反映 H.264 壓縮損失（SERVER 解碼後丟失小球訊號），不是時間錯位。
+        <div class="strip-row" id="strip-row-server-post" hidden
+             title="SVR — server-side detection on the H.264-decoded MOV. Independent from the iOS paths; H.264 quantization typically costs a few frames at detection edges.">
+          <span class="strip-label">SVR</span>
+          <canvas id="detection-canvas-server-post" class="strip-canvas" height="18" aria-hidden="true"></canvas>
+        </div>
+        <div class="strip-note" id="strip-note-multi" hidden>
+          三條 detection pipeline 獨立：LIVE / POST 兩條都是 iOS 端在 raw BGRA 上跑；SVR 是 server 解碼後在 BGR 上跑。共用同一 chirp anchor，色塊差異 = pipeline 差異、不是時間錯位。
         </div>
       </div>
       <span id="frame-label" class="frame-label">
@@ -555,11 +563,26 @@ def _viewer_js() -> str:
   const FALLBACK = DATA.fallback_color;
   const FALLBACK_OD = DATA.fallback_color_on_device || FALLBACK;
   const ACCENT = DATA.accent_color;
-  function colorForCamSource(cam, source) {{
-    return source === "on_device"
-      ? (CAM_COLOR_OD[cam] || FALLBACK_OD)
-      : (CAM_COLOR[cam] || FALLBACK);
+  // Three fully-independent detection pipelines. Their string IDs match
+  // server/schemas.py::DetectionPath so we never have to translate.
+  const PATHS = ["live", "ios_post", "server_post"];
+  const PATH_LABEL = {{ live: "live", ios_post: "post", server_post: "svr" }};
+  // reconstruct.py still tags rays with the older source strings; map here
+  // once so the rest of the JS speaks in DetectionPath IDs exclusively.
+  function sourceToPath(source) {{
+    if (source === "on_device") return "ios_post";
+    if (source === "live") return "live";
+    return "server_post";
   }}
+  function colorForCamPath(cam, path) {{
+    if (path === "ios_post") return CAM_COLOR_OD[cam] || FALLBACK_OD;
+    // live + server_post share the per-camera family; they are distinguished
+    // visually by line dash (see buildDynamicTraces) and by their own pill.
+    return CAM_COLOR[cam] || FALLBACK;
+  }}
+  const PATH_DASH = {{ live: "dash", ios_post: "dot", server_post: "solid" }};
+  const PATH_OPACITY = {{ live: 0.55, ios_post: 0.7, server_post: 0.45 }};
+  const PATH_MARKER_SYMBOL = {{ live: "diamond-open", ios_post: "circle-open", server_post: "circle" }};
   const VIDEO_META = DATA.videos || [];
   const HAS_TRIANGULATED = DATA.has_triangulated;
   const sceneDiv = document.getElementById("scene");
@@ -589,31 +612,80 @@ def _viewer_js() -> str:
     let master = vids[0];
     let masterCount = -1;
     for (const v of vids) {{
-      const n = (framesByCam[v.dataset.cam]?.t_rel_s || []).length;
+      // Prefer the video whose own camera has the richest *any-path* detection
+      // history — that's the one we want RVFC to drive the scrubber off.
+      let n = 0;
+      for (const path of PATHS) {{
+        n += (framesByPath[path][v.dataset.cam]?.t_rel_s || []).length;
+      }}
       if (n > masterCount) {{ master = v; masterCount = n; }}
     }}
     return master;
   }}
-  const framesByCam = {{}};
-  const framesByCamOnDevice = {{}};
+  // framesByPath[path][cam] = {{t_rel_s, detected, px, py}}. Three entries
+  // always present (even if empty) so the rest of the JS can iterate PATHS
+  // without null checks.
+  const framesByPath = {{ live: {{}}, ios_post: {{}}, server_post: {{}} }};
   for (const v of VIDEO_META) {{
-    const f = v.frames || {{ t_rel_s: [], detected: [] }};
-    framesByCam[v.camera_id] = {{ t_rel_s: f.t_rel_s || [], detected: f.detected || [], px: f.px || [], py: f.py || [] }};
-    const od = (f.on_device) || {{ t_rel_s: [], detected: [] }};
-    framesByCamOnDevice[v.camera_id] = {{ t_rel_s: od.t_rel_s || [], detected: od.detected || [], px: od.px || [], py: od.py || [] }};
+    const f = v.frames || {{}};
+    for (const path of PATHS) {{
+      const stream = f[path] || {{ t_rel_s: [], detected: [], px: [], py: [] }};
+      framesByPath[path][v.camera_id] = {{
+        t_rel_s: stream.t_rel_s || [],
+        detected: stream.detected || [],
+        px: stream.px || [],
+        py: stream.py || [],
+      }};
+    }}
   }}
-  const camsWithFrames = Object.keys(framesByCam).filter(c => (framesByCam[c].t_rel_s || []).length);
-  const camsWithFramesOnDevice = Object.keys(framesByCamOnDevice).filter(c => (framesByCamOnDevice[c].t_rel_s || []).length);
-  const HAS_ON_DEVICE = camsWithFramesOnDevice.length > 0;
-  const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility";
-  const layerVisibility = {{ traj: {{ server: true, on_device: HAS_ON_DEVICE }}, camA: {{ server: true, on_device: HAS_ON_DEVICE }}, camB: {{ server: true, on_device: HAS_ON_DEVICE }} }};
+  const camsWithFramesByPath = {{}};
+  for (const path of PATHS) {{
+    camsWithFramesByPath[path] = Object.keys(framesByPath[path])
+      .filter(c => (framesByPath[path][c].t_rel_s || []).length)
+      .sort();
+  }}
+  // Did any camera produce rays / points / frames on this pipeline? Used to
+  // hide inapplicable pills (so a live-only session doesn't show dead SVR /
+  // POST toggles).
+  const HAS_PATH = {{
+    live: camsWithFramesByPath.live.length > 0
+      || (SCENE.rays || []).some(r => sourceToPath(r.source || "server") === "live"),
+    ios_post: camsWithFramesByPath.ios_post.length > 0
+      || Object.keys(SCENE.ground_traces_on_device || {{}}).length > 0
+      || (SCENE.triangulated_on_device || []).length > 0,
+    server_post: camsWithFramesByPath.server_post.length > 0
+      || Object.keys(SCENE.ground_traces || {{}}).length > 0
+      || (SCENE.triangulated || []).length > 0,
+  }};
+  const HAS_TRAJ_PATH = {{
+    live: false,  // live is per-camera only; no triangulation
+    ios_post: (SCENE.triangulated_on_device || []).length > 0,
+    server_post: (SCENE.triangulated || []).length > 0,
+  }};
+  // Key is bumped from _layer_visibility → _layer_visibility_v2 because the
+  // schema changed: old {{server, on_device}} flat is not migrate-able
+  // without losing the new `live` axis. Users get the default (all paths on
+  // for pipelines that have data) on first post-upgrade load.
+  const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility_v2";
+  const layerVisibility = {{
+    traj: {{ live: false, ios_post: HAS_TRAJ_PATH.ios_post, server_post: HAS_TRAJ_PATH.server_post }},
+    camA: {{ live: HAS_PATH.live, ios_post: HAS_PATH.ios_post, server_post: HAS_PATH.server_post }},
+    camB: {{ live: HAS_PATH.live, ios_post: HAS_PATH.ios_post, server_post: HAS_PATH.server_post }},
+  }};
   try {{
     const saved = JSON.parse(localStorage.getItem(LAYER_VIS_KEY) || "null");
     if (saved && typeof saved === "object") {{
       for (const k of ["traj", "camA", "camB"]) {{
         if (saved[k]) {{
-          if (typeof saved[k].server === "boolean") layerVisibility[k].server = saved[k].server;
-          if (typeof saved[k].on_device === "boolean") layerVisibility[k].on_device = saved[k].on_device && HAS_ON_DEVICE;
+          for (const path of PATHS) {{
+            if (typeof saved[k][path] === "boolean") {{
+              // Respect the saved choice BUT clamp to what's applicable for
+              // this session. A stale "traj.live=true" from an old localStorage
+              // entry must not resurrect a non-existent toggle.
+              const applicable = k === "traj" ? HAS_TRAJ_PATH[path] : HAS_PATH[path];
+              layerVisibility[k][path] = saved[k][path] && applicable;
+            }}
+          }}
         }}
       }}
     }}
@@ -621,22 +693,22 @@ def _viewer_js() -> str:
   function persistLayerVisibility() {{
     try {{ localStorage.setItem(LAYER_VIS_KEY, JSON.stringify(layerVisibility)); }} catch {{}}
   }}
-  function isLayerVisible(layer, src) {{
-    return !!(layerVisibility[layer] && layerVisibility[layer][src]);
+  function isLayerVisible(layer, path) {{
+    return !!(layerVisibility[layer] && layerVisibility[layer][path]);
   }}
+  // Flat cams-present views used by the frame scrubber / label renderer —
+  // we scrub across the UNION of all three streams so the timeline reflects
+  // everything the session captured.
+  const HAS_ON_DEVICE = HAS_PATH.ios_post;
   const MASTER_FPS = Math.max(60, ...Object.values(fpsByCam).filter(f => isFinite(f) && f > 0));
   const QUANT = 10000;
   const timeMap = new Map();
-  for (const cam of camsWithFrames) {{
-    for (const t of framesByCam[cam].t_rel_s) {{
-      const q = Math.round(t * QUANT);
-      if (!timeMap.has(q)) timeMap.set(q, t);
-    }}
-  }}
-  for (const cam of camsWithFramesOnDevice) {{
-    for (const t of framesByCamOnDevice[cam].t_rel_s) {{
-      const q = Math.round(t * QUANT);
-      if (!timeMap.has(q)) timeMap.set(q, t);
+  for (const path of PATHS) {{
+    for (const cam of camsWithFramesByPath[path]) {{
+      for (const t of framesByPath[path][cam].t_rel_s) {{
+        const q = Math.round(t * QUANT);
+        if (!timeMap.has(q)) timeMap.set(q, t);
+      }}
     }}
   }}
   if (timeMap.size === 0) {{
@@ -664,10 +736,15 @@ def _viewer_js() -> str:
     }}
     return out;
   }}
-  const camAtFrame = {{}};
-  const camAtFrameOnDevice = {{}};
-  for (const cam of camsWithFrames) camAtFrame[cam] = buildCamIndexFor(framesByCam, cam);
-  for (const cam of camsWithFramesOnDevice) camAtFrameOnDevice[cam] = buildCamIndexFor(framesByCamOnDevice, cam);
+  // One (cam → frameIndex → {{idx, t, detected}}) table per pipeline.
+  // Three fully-independent tables so a missed detection in SVR does not
+  // suppress LIVE's head-indicator, etc.
+  const camAtFrameByPath = {{ live: {{}}, ios_post: {{}}, server_post: {{}} }};
+  for (const path of PATHS) {{
+    for (const cam of camsWithFramesByPath[path]) {{
+      camAtFrameByPath[path][cam] = buildCamIndexFor(framesByPath[path], cam);
+    }}
+  }}
   let mode = "all";
   let currentFrame = 0;
   let currentT = tMin;
@@ -697,45 +774,53 @@ def _viewer_js() -> str:
   }}
   function buildDynamicTraces(cutoff) {{
     const out = [];
+    // --- rays: one trace per (camera × path), each with its own visibility ---
     const raysByKey = {{}};
     for (const r of (SCENE.rays || [])) {{
-      const src = r.source || "server";
+      const path = sourceToPath(r.source || "server");
       const camKey = `cam${{r.camera_id}}`;
-      if (!isLayerVisible(camKey, src)) continue;
-      const key = `${{r.camera_id}}|${{src}}`;
+      if (!isLayerVisible(camKey, path)) continue;
+      const key = `${{r.camera_id}}|${{path}}`;
       (raysByKey[key] = raysByKey[key] || []).push(r);
     }}
     for (const [key, rays] of Object.entries(raysByKey)) {{
-      const [cam, src] = key.split("|");
-      const color = colorForCamSource(cam, src);
+      const [cam, path] = key.split("|");
+      const color = colorForCamPath(cam, path);
       const {{xs, ys, zs}} = ballDetectedRaysUpTo(rays, cutoff);
       if (!xs.length) continue;
       out.push({{ type: "scatter3d", x: xs, y: ys, z: zs, mode: "lines",
-        line: {{color: color, width: 2, dash: src === "on_device" ? "dot" : "solid"}},
-        opacity: 0.35, name: `Rays ${{cam}} (${{src === "on_device" ? "iOS" : "server"}}, ${{Math.floor(xs.length / 3)}})`,
+        line: {{color: color, width: 2, dash: PATH_DASH[path]}},
+        opacity: PATH_OPACITY[path],
+        name: `Rays ${{cam}} (${{PATH_LABEL[path]}}, ${{Math.floor(xs.length / 3)}})`,
         hoverinfo: "skip", showlegend: false }});
     }}
-    for (const [cam, trace] of Object.entries(SCENE.ground_traces || {{}})) {{
-      if (!isLayerVisible(`cam${{cam}}`, "server")) continue;
-      const filtered = trace.filter(p => p.t_rel_s <= cutoff);
-      if (!filtered.length) continue;
-      const color = colorForCamSource(cam, "server");
-      out.push({{ type: "scatter3d", x: filtered.map(p => p.x), y: filtered.map(p => p.y), z: filtered.map(p => p.z),
-        mode: "lines+markers", line: {{color: color, width: 3, dash: HAS_TRIANGULATED ? "dash" : "solid"}},
-        marker: {{size: 3, color: color}}, opacity: HAS_TRIANGULATED ? 0.45 : 0.7,
-        name: `Ground trace ${{cam}} (server, ${{filtered.length}} pts)`, showlegend: false }});
+    // --- ground traces: each scene bucket → exactly one path ---
+    const GROUND_BUCKETS = [
+      {{ path: "server_post", traces: SCENE.ground_traces || {{}} }},
+      {{ path: "ios_post", traces: SCENE.ground_traces_on_device || {{}} }},
+      {{ path: "live", traces: SCENE.ground_traces_live || {{}} }},
+    ];
+    for (const {{path, traces}} of GROUND_BUCKETS) {{
+      for (const [cam, trace] of Object.entries(traces)) {{
+        if (!isLayerVisible(`cam${{cam}}`, path)) continue;
+        const filtered = trace.filter(p => p.t_rel_s <= cutoff);
+        if (!filtered.length) continue;
+        const color = colorForCamPath(cam, path);
+        // When ANY triangulation path has produced 3D points, de-emphasise
+        // ground traces so the trajectory reads as the primary result.
+        const dimmed = HAS_TRIANGULATED;
+        out.push({{ type: "scatter3d",
+          x: filtered.map(p => p.x), y: filtered.map(p => p.y), z: filtered.map(p => p.z),
+          mode: "lines+markers",
+          line: {{color: color, width: path === "live" ? 2 : 3, dash: PATH_DASH[path]}},
+          marker: {{size: 3, color: color, symbol: PATH_MARKER_SYMBOL[path]}},
+          opacity: dimmed ? 0.40 : PATH_OPACITY[path],
+          name: `Ground trace ${{cam}} (${{PATH_LABEL[path]}}, ${{filtered.length}} pts)`,
+          showlegend: false }});
+      }}
     }}
-    for (const [cam, trace] of Object.entries(SCENE.ground_traces_on_device || {{}})) {{
-      if (!isLayerVisible(`cam${{cam}}`, "on_device")) continue;
-      const filtered = trace.filter(p => p.t_rel_s <= cutoff);
-      if (!filtered.length) continue;
-      const color = colorForCamSource(cam, "on_device");
-      out.push({{ type: "scatter3d", x: filtered.map(p => p.x), y: filtered.map(p => p.y), z: filtered.map(p => p.z),
-        mode: "lines+markers", line: {{color: color, width: 3, dash: "dot"}},
-        marker: {{size: 3, color: color, symbol: "circle-open"}}, opacity: 0.7,
-        name: `Ground trace ${{cam}} (iOS, ${{filtered.length}} pts)`, showlegend: false }});
-    }}
-    if (isLayerVisible("traj", "server")) {{
+    // --- 3D trajectories: server_post and ios_post each trigger their own ---
+    if (isLayerVisible("traj", "server_post")) {{
       const triPts = (SCENE.triangulated || []).filter(p => p.t_rel_s <= cutoff);
       if (triPts.length) {{
         const t0 = triPts[0].t_rel_s;
@@ -744,16 +829,16 @@ def _viewer_js() -> str:
           mode: "lines+markers", line: {{color: ACCENT, width: 4}},
           marker: {{size: 4, color: ts, colorscale: "Cividis", showscale: true,
             colorbar: {{ title: {{text: "flight t (s)", font: {{size: 10}}}}, thickness: 10, len: 0.45, x: 1.02, y: 0.5, tickfont: {{size: 9}} }}}},
-          name: `3D trajectory (server, ${{triPts.length}} pts)` }});
+          name: `3D trajectory (svr, ${{triPts.length}} pts)` }});
       }}
     }}
-    if (isLayerVisible("traj", "on_device")) {{
+    if (isLayerVisible("traj", "ios_post")) {{
       const triPts = (SCENE.triangulated_on_device || []).filter(p => p.t_rel_s <= cutoff);
       if (triPts.length) {{
         out.push({{ type: "scatter3d", x: triPts.map(p => p.x), y: triPts.map(p => p.y), z: triPts.map(p => p.z),
           mode: "lines+markers", line: {{color: ACCENT, width: 3, dash: "dot"}},
           marker: {{size: 4, color: ACCENT, symbol: "circle-open"}}, opacity: 0.85,
-          name: `3D trajectory (iOS, ${{triPts.length}} pts)` }});
+          name: `3D trajectory (post, ${{triPts.length}} pts)` }});
       }}
     }}
     return out;
@@ -802,8 +887,23 @@ def _viewer_js() -> str:
     }}
     const cam = meta.camera_id;
     const camLayer = `cam${{cam}}`;
-    if (isLayerVisible(camLayer, "server")) {{ drawCurrentDetection(framesByCam[cam], {{color: ACCENT}}); }}
-    if (isLayerVisible(camLayer, "on_device")) {{ drawCurrentDetection(framesByCamOnDevice[cam], {{color: "rgb(175, 210, 255)"}}); }}
+    // Draw the per-path detection dot independently. If the session only has
+    // `live` data (camera_only + no chirp flow + no server post-pass), only
+    // the LIVE dot should appear; same symmetry for the other two paths.
+    // Drawing order: deepest → highlighted, so svr/post (more definitive)
+    // sits on top of live.
+    const DOT_COLOR = {{
+      live: colorForCamPath(cam, "live"),
+      ios_post: "rgb(175, 210, 255)",
+      server_post: ACCENT,
+    }};
+    const PATH_ORDER = ["live", "ios_post", "server_post"];
+    for (const path of PATH_ORDER) {{
+      if (!isLayerVisible(camLayer, path)) continue;
+      const frames = framesByPath[path][cam];
+      if (!frames || !(frames.t_rel_s || []).length) continue;
+      drawCurrentDetection(frames, {{color: DOT_COLOR[path]}});
+    }}
     ctx.restore();
   }}
   function drawVirtuals() {{ for (const entry of VIRT_CANVASES) drawVirtCanvas(entry); }}
@@ -890,28 +990,23 @@ def _viewer_js() -> str:
     if (document.activeElement !== frameInput && frameInput.value !== v) frameInput.value = v;
     const tRel = currentT - tMin;
     const parts = [];
-    for (const cam of camsWithFrames) {{
-      const entry = camAtFrame[cam][currentFrame];
-      if (entry === null) parts.push(`<span class="sub">${{cam}}:—</span>`);
-      else {{
+    // Emit one (cam:idx ✓/·) pair per active path. Wrapped in a label so the
+    // operator can tell at a glance which pipeline contributed the mark.
+    for (const path of PATHS) {{
+      const cams = camsWithFramesByPath[path];
+      if (!cams.length) continue;
+      const inner = [];
+      for (const cam of cams) {{
+        const entry = camAtFrameByPath[path][cam][currentFrame];
+        if (entry === null) {{ inner.push(`<span class="sub">${{cam}}:—</span>`); continue; }}
         const cls = entry.detected ? "det" : "det no";
         const mark = entry.detected ? "✓" : "·";
-        parts.push(`<span class="sub">${{cam}}:${{entry.idx}}</span><span class="${{cls}}">${{mark}}</span>`);
+        inner.push(`<span class="sub">${{cam}}:${{entry.idx}}</span><span class="${{cls}}">${{mark}}</span>`);
       }}
-    }}
-    if (HAS_ON_DEVICE) {{
-      const odParts = [];
-      for (const cam of camsWithFramesOnDevice) {{
-        const entry = camAtFrameOnDevice[cam][currentFrame];
-        if (entry === null) continue;
-        const cls = entry.detected ? "det" : "det no";
-        const mark = entry.detected ? "✓" : "·";
-        odParts.push(`<span class="sub">${{cam}}:${{entry.idx}}</span><span class="${{cls}}">${{mark}}</span>`);
-      }}
-      if (odParts.length) parts.push(`<span class="sub">(iOS</span> ${{odParts.join(" ")}}<span class="sub">)</span>`);
+      parts.push(`<span class="sub">${{PATH_LABEL[path]}}</span> ${{inner.join(" ")}}`);
     }}
     parts.push(`<span class="sub">t=${{tRel.toFixed(3)}}s</span>`);
-    frameSub.innerHTML = parts.join(" ");
+    frameSub.innerHTML = parts.join(" · ");
   }}
   function setFrame(f, {{ seekVideos = true }} = {{}}) {{
     currentFrame = Math.max(0, Math.min(TOTAL_FRAMES - 1, f | 0));
@@ -950,11 +1045,18 @@ def _viewer_js() -> str:
   function pauseAllPlayback() {{ vids.forEach(v => v.pause()); resetVideoPlaybackRates(); stopVirtualClock(); }}
   function stepFrames(delta) {{ beginTimelineInteraction(); setFrame(currentFrame + delta); }}
   function jumpDetection(dir) {{
+    // Step to the next frame where *any* currently-visible pipeline reports
+    // a detection. Respecting the pills means the hotkey follows what the
+    // operator is actually looking at: hide LIVE and D/F will skip through
+    // svr+post only.
     let i = currentFrame + dir;
     while (i >= 0 && i < TOTAL_FRAMES) {{
-      for (const cam of camsWithFrames) {{
-        const e = camAtFrame[cam][i];
-        if (e && e.detected) {{ beginTimelineInteraction(); setFrame(i); return; }}
+      for (const path of PATHS) {{
+        for (const cam of camsWithFramesByPath[path]) {{
+          if (!isLayerVisible(`cam${{cam}}`, path)) continue;
+          const e = camAtFrameByPath[path][cam][i];
+          if (e && e.detected) {{ beginTimelineInteraction(); setFrame(i); return; }}
+        }}
       }}
       i += dir;
     }}
@@ -1077,45 +1179,75 @@ def _viewer_js() -> str:
   }}, {{ passive: false }});
   function setHintOpen(open) {{ hintOverlay.classList.toggle("open", open); hintBtn.classList.toggle("open", open); hintBtn.setAttribute("aria-expanded", open ? "true" : "false"); }}
   hintBtn.addEventListener("click", () => {{ setHintOpen(!hintOverlay.classList.contains("open")); }});
-  const detectionCanvas = document.getElementById("detection-canvas");
-  const detectionCanvasOnDevice = document.getElementById("detection-canvas-on-device");
-  const stripRowOnDevice = document.getElementById("strip-row-on-device");
+  // One strip-row per pipeline, each hidden until we have data for it. Row
+  // id / canvas id pairs are static so the CSS and the JS agree without a
+  // parallel config dict.
+  const STRIP_ROWS = {{
+    live: {{ row: document.getElementById("strip-row-live"), canvas: document.getElementById("detection-canvas-live") }},
+    ios_post: {{ row: document.getElementById("strip-row-ios-post"), canvas: document.getElementById("detection-canvas-ios-post") }},
+    server_post: {{ row: document.getElementById("strip-row-server-post"), canvas: document.getElementById("detection-canvas-server-post") }},
+  }};
   const layerToggles = document.getElementById("layer-toggles");
   const STRIP_MUTED = "rgba(122, 117, 108, 0.35)";
   const STRIP_EMPTY = "rgba(232, 228, 219, 0.6)";
   const STRIP_HEAD = "#2A2520";
   const STRIP_CHIRP = "rgba(230, 179, 0, 0.65)";
-  if (HAS_ON_DEVICE) {{
-    stripRowOnDevice.hidden = false;
-    document.getElementById("strip-row-server").classList.add("is-reference");
-    document.getElementById("strip-note-dual").hidden = false;
+  let visibleStripCount = 0;
+  for (const path of PATHS) {{
+    if (HAS_PATH[path]) {{
+      STRIP_ROWS[path].row.hidden = false;
+      visibleStripCount += 1;
+    }}
   }}
+  // Surface the multi-pipeline disclaimer only when at least two strips are
+  // on screen — otherwise the note is noise.
+  const multiNote = document.getElementById("strip-note-multi");
+  if (multiNote) multiNote.hidden = visibleStripCount < 2;
   function paintLayerPills() {{
     const pills = layerToggles.querySelectorAll(".layer-pill");
     for (const pill of pills) {{
       const layer = pill.dataset.layer;
-      const src = pill.dataset.src;
-      if (src === "on_device" && !HAS_ON_DEVICE) {{ pill.hidden = true; continue; }}
-      pill.setAttribute("aria-pressed", isLayerVisible(layer, src) ? "true" : "false");
+      const path = pill.dataset.path;
+      const applicable = layer === "traj" ? HAS_TRAJ_PATH[path] : HAS_PATH[path];
+      if (!applicable) {{
+        pill.hidden = true;
+        pill.setAttribute("aria-pressed", "false");
+        continue;
+      }}
+      pill.hidden = false;
+      pill.setAttribute("aria-pressed", isLayerVisible(layer, path) ? "true" : "false");
     }}
-    for (const sw of layerToggles.querySelectorAll(".layer-name .swatch")) sw.style.background = colorForCamSource(sw.dataset.cam, "server");
+    for (const sw of layerToggles.querySelectorAll(".layer-name .swatch")) {{
+      sw.style.background = colorForCamPath(sw.dataset.cam, "server_post");
+    }}
+    // If every pill in a group is hidden, fold the group too — otherwise you
+    // get a dangling "Traj" label with nothing under it.
+    for (const group of layerToggles.querySelectorAll(".layer-group")) {{
+      const anyPill = group.querySelector(".layer-pill:not([hidden])");
+      group.hidden = !anyPill;
+    }}
   }}
   paintLayerPills();
   layerToggles.addEventListener("click", (e) => {{
     const pill = e.target.closest(".layer-pill");
-    if (!pill) return;
+    if (!pill || pill.hidden || pill.disabled) return;
     const layer = pill.dataset.layer;
-    const src = pill.dataset.src;
-    const wouldBeOff = {{ ...layerVisibility[layer] }};
-    wouldBeOff[src] = !wouldBeOff[src];
-    const anyLeft = Object.values(layerVisibility).some(group =>
-      Object.entries(group).some(([k, v]) => (group === layerVisibility[layer] ? wouldBeOff[k] : v) && (k !== "on_device" || HAS_ON_DEVICE))
-    );
-    if (!anyLeft) return;
-    layerVisibility[layer][src] = !layerVisibility[layer][src];
+    const path = pill.dataset.path;
+    // Refuse to turn off the last visible pipeline *within a cam group* —
+    // an all-off group would just remove that camera entirely, which is
+    // redundant with hiding the group and confusing as a click result.
+    const group = layerVisibility[layer];
+    if (!group) return;
+    const turningOff = group[path];
+    if (turningOff) {{
+      const otherOn = PATHS.some(p => p !== path && group[p]);
+      if (!otherOn) return;
+    }}
+    group[path] = !group[path];
     persistLayerVisibility();
     paintLayerPills();
     drawScene();
+    renderDetectionStrip();
   }});
   function resizeOneCanvas(canvas) {{
     const cssW = canvas.clientWidth;
@@ -1125,7 +1257,7 @@ def _viewer_js() -> str:
     const pxH = Math.max(1, Math.floor(cssH * dpr));
     if (canvas.width !== pxW || canvas.height !== pxH) {{ canvas.width = pxW; canvas.height = pxH; }}
   }}
-  function drawStripInto(canvas, cams, strips, source) {{
+  function drawStripInto(canvas, cams, strips, path) {{
     const W = canvas.width, H = canvas.height;
     if (!W || !H) return;
     const ctx = canvas.getContext("2d");
@@ -1135,16 +1267,21 @@ def _viewer_js() -> str:
     for (let ci = 0; ci < cams.length; ++ci) {{
       const cam = cams[ci];
       const strip = strips[cam];
-      const color = colorForCamSource(cam, source);
+      const color = colorForCamPath(cam, path);
       const y = ci * rowH;
       ctx.fillStyle = STRIP_EMPTY;
       ctx.fillRect(0, y, W, rowH);
       if (!strip) continue;
+      // Fade the whole row when this camera's pipeline is toggled off. Keeps
+      // the strip informative (still shows raw coverage) while telegraphing
+      // that the 3D scene is ignoring it.
+      const muted = !isLayerVisible(`cam${{cam}}`, path);
+      const detColor = muted ? STRIP_MUTED : color;
       for (let x = 0; x < W; ++x) {{
         const i = TOTAL_FRAMES <= 1 ? 0 : Math.min(TOTAL_FRAMES - 1, Math.round(x * (TOTAL_FRAMES - 1) / (W - 1)));
         const e = strip[i];
         if (e === null || e === undefined) continue;
-        ctx.fillStyle = e.detected ? color : STRIP_MUTED;
+        ctx.fillStyle = e.detected ? detColor : STRIP_MUTED;
         ctx.fillRect(x, y, 1, rowH);
       }}
     }}
@@ -1158,12 +1295,16 @@ def _viewer_js() -> str:
     ctx.fillRect(Math.max(0, xHead - 1), 0, 2, H);
   }}
   function renderDetectionStrip() {{
-    drawStripInto(detectionCanvas, camsWithFrames, camAtFrame, "server");
-    if (HAS_ON_DEVICE) drawStripInto(detectionCanvasOnDevice, camsWithFramesOnDevice, camAtFrameOnDevice, "on_device");
+    for (const path of PATHS) {{
+      if (!HAS_PATH[path]) continue;
+      drawStripInto(STRIP_ROWS[path].canvas, camsWithFramesByPath[path], camAtFrameByPath[path], path);
+    }}
   }}
   function resizeDetectionCanvas() {{
-    resizeOneCanvas(detectionCanvas);
-    if (HAS_ON_DEVICE) resizeOneCanvas(detectionCanvasOnDevice);
+    for (const path of PATHS) {{
+      if (!HAS_PATH[path]) continue;
+      resizeOneCanvas(STRIP_ROWS[path].canvas);
+    }}
     renderDetectionStrip();
   }}
   window.addEventListener("resize", resizeDetectionCanvas);

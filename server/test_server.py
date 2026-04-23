@@ -817,11 +817,19 @@ def test_dashboard_drives_dual_mode_end_to_end(tmp_path):
     assert "on_device" in sources_seen
     assert scene["triangulated_on_device"], "scene missing on-device points"
 
-    # 7. Viewer HTML includes the dual strip + per-layer visibility matrix.
+    # 7. Viewer HTML includes the per-pipeline strips + independent visibility
+    # matrix. The three pipelines render each to their own canvas, and each
+    # pill carries data-path=<DetectionPath> — if any of those go missing
+    # the three-way separation collapses back into the old svr/on_device
+    # alias and the user can't toggle pipelines independently.
     viewer_html = client.get(f"/viewer/{session_id}").text
-    assert "detection-canvas-on-device" in viewer_html
+    assert "detection-canvas-live" in viewer_html
+    assert "detection-canvas-ios-post" in viewer_html
+    assert "detection-canvas-server-post" in viewer_html
     assert 'data-layer="traj"' in viewer_html
-    assert 'data-src="on_device"' in viewer_html
+    assert 'data-path="live"' in viewer_html
+    assert 'data-path="ios_post"' in viewer_html
+    assert 'data-path="server_post"' in viewer_html
     # Hero banner must surface `mode dual`, not regress to camera-only —
     # previously the viewer only checked MOV presence and ignored
     # frames_on_device, so dual sessions mis-labelled as camera-only.

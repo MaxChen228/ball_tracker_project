@@ -260,11 +260,32 @@ def _build_figure(scene: Scene):
             )
         )
 
-    n_rays = len(scene.rays)
     n_cams = len(scene.cameras)
-    subtitle = f"{n_cams} cam · {n_rays} rays"
+    # Break the ray count out by DetectionPath so the viewer title mirrors
+    # the three independent pills. "live" / "post" / "svr" map 1-to-1 to
+    # live / ios_post / server_post on the backend. The reconstruct.py
+    # source tag uses the older strings ("on_device", "server"), hence the
+    # translation below.
+    ray_counts = {"live": 0, "ios_post": 0, "server_post": 0}
+    for r in scene.rays:
+        src = getattr(r, "source", None) or "server"
+        if src == "on_device":
+            ray_counts["ios_post"] += 1
+        elif src == "live":
+            ray_counts["live"] += 1
+        else:
+            ray_counts["server_post"] += 1
+    path_label = [("live", "live"), ("ios_post", "post"), ("server_post", "svr")]
+    ray_parts = [f"{ray_counts[p]} {lbl}" for p, lbl in path_label if ray_counts[p]]
+    ray_str = " / ".join(ray_parts) if ray_parts else f"{len(scene.rays)} rays"
+    subtitle = f"{n_cams} cam · {ray_str}"
+    triag_parts = []
     if scene.triangulated:
-        subtitle += f" · {len(scene.triangulated)} 3D pts"
+        triag_parts.append(f"{len(scene.triangulated)} svr")
+    if scene.triangulated_on_device:
+        triag_parts.append(f"{len(scene.triangulated_on_device)} post")
+    if triag_parts:
+        subtitle += " · " + " + ".join(triag_parts) + " 3D"
 
     axis_font = dict(family="JetBrains Mono, monospace", size=11, color=_INK)
     axis_style = dict(

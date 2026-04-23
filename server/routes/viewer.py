@@ -127,6 +127,13 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
 def _videos_for_session(
     session_id: str,
 ) -> list[tuple[str, str, float, float, dict[str, list]]]:
+    """One row per camera; `frames_info` carries **three independent detection
+    streams** keyed by DetectionPath: `live` (iOS real-time), `ios_post` (iOS
+    post-pass after session close), `server_post` (server-side decode +
+    detection on the uploaded MOV). Each stream has its own t_rel / detected /
+    px / py arrays and its own visibility toggle in the viewer — no fallback,
+    no merging. An absent stream is the empty-arrays shape so the JS side
+    can treat all three uniformly."""
     from main import state
     prefix = f"session_{session_id}_"
     pitches = state.pitches_for_session(session_id)
@@ -142,11 +149,21 @@ def _videos_for_session(
             cam = cam[: -len("_annotated")]
         if cam not in best or (is_annotated and "_annotated" not in best[cam]):
             best[cam] = name
+
+    def _stream(frames, rel_anchor) -> dict[str, list]:
+        return {
+            "t_rel_s": [float(f.timestamp_s - rel_anchor) for f in frames],
+            "detected": [bool(f.ball_detected) for f in frames],
+            "px": [float(f.px) if f.px is not None else None for f in frames],
+            "py": [float(f.py) if f.py is not None else None for f in frames],
+        }
+
     out: list[tuple[str, str, float, float, dict[str, list]]] = []
     all_cams = sorted(
         set(best)
-        | {c for c in pitches if pitches[c].frames}
-        | {c for c in pitches if pitches[c].frames_on_device}
+        | {c for c, p in pitches.items() if p.frames}
+        | {c for c, p in pitches.items() if p.frames_live}
+        | {c for c, p in pitches.items() if p.frames_on_device}
     )
     for cam in all_cams:
         name = best.get(cam)
@@ -156,30 +173,24 @@ def _videos_for_session(
         else:
             offset = float(pitch.video_start_pts_s - pitch.sync_anchor_timestamp_s)
         fps = float(pitch.video_fps) if (pitch is not None and pitch.video_fps is not None) else 240.0
-        anchor = pitch.sync_anchor_timestamp_s if pitch is not None else None
-        if pitch is not None and (pitch.frames or pitch.frames_on_device):
-            rel_anchor = anchor if anchor is not None else pitch.video_start_pts_s
-            detected = [bool(f.ball_detected) for f in pitch.frames]
-            px = [float(f.px) if f.px is not None else None for f in pitch.frames]
-            py = [float(f.py) if f.py is not None else None for f in pitch.frames]
-            t_rel = [float(f.timestamp_s - rel_anchor) for f in pitch.frames]
-            t_rel_od = [float(f.timestamp_s - rel_anchor) for f in pitch.frames_on_device]
-            detected_od = [bool(f.ball_detected) for f in pitch.frames_on_device]
-            px_od = [float(f.px) if f.px is not None else None for f in pitch.frames_on_device]
-            py_od = [float(f.py) if f.py is not None else None for f in pitch.frames_on_device]
+        if pitch is not None:
+            rel_anchor = (
+                pitch.sync_anchor_timestamp_s
+                if pitch.sync_anchor_timestamp_s is not None
+                else pitch.video_start_pts_s
+            )
+            frames_info = {
+                "live": _stream(pitch.frames_live, rel_anchor),
+                "ios_post": _stream(pitch.frames_on_device, rel_anchor),
+                "server_post": _stream(pitch.frames, rel_anchor),
+            }
         else:
-            t_rel = detected = px = py = []
-            t_rel_od = detected_od = px_od = py_od = []
-        frames_info = {
-            "t_rel_s": t_rel,
-            "detected": detected,
-            "px": px,
-            "py": py,
-            "on_device": {
-                "t_rel_s": t_rel_od, "detected": detected_od,
-                "px": px_od, "py": py_od,
-            },
-        }
+            empty = {"t_rel_s": [], "detected": [], "px": [], "py": []}
+            frames_info = {
+                "live": dict(empty),
+                "ios_post": dict(empty),
+                "server_post": dict(empty),
+            }
         url = f"/videos/{name}" if name else None
         out.append((cam, url, offset, fps, frames_info))
     return out
