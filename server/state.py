@@ -43,6 +43,14 @@ from triangulate import recover_extrinsics
 from sync_solver import compute_mutual_sync
 from live_pairing import LivePairingSession
 from state_runtime import RuntimeSettingsStore, SyncParams
+from state_calibration import (
+    AutoCalibrationRun as _AutoCalibrationRun,
+    AutoCalibrationRunStore,
+    CalibrationFrameBuffer,
+    CalibrationStore,
+    CALIBRATION_FRAME_TTL_S as _CALIBRATION_FRAME_TTL_S,
+    validate_calibration_snapshot as _validate_calibration_snapshot,
+)
 
 logger = logging.getLogger("ball_tracker")
 
@@ -128,97 +136,11 @@ def _new_sync_id() -> str:
     return "sy_" + secrets.token_hex(4)
 
 
-def _validate_calibration_snapshot(snap: CalibrationSnapshot) -> None:
-    """Gatekeep CalibrationSnapshot writes: K, H, and dims must all be in
-    the same pixel coordinate system. An optical centre outside the image,
-    non-positive focal lengths, or wildly asymmetric fx/fy all indicate
-    the snapshot was built from mismatched sources and would produce
-    nonsense extrinsics downstream. Raise ValueError on the way in rather
-    than debugging bad poses on the way out."""
-    w, h = snap.image_width_px, snap.image_height_px
-    if w <= 0 or h <= 0:
-        raise ValueError(f"invalid image dims {w}x{h}")
-    k = snap.intrinsics
-    if k.fx <= 0 or k.fz <= 0:
-        raise ValueError(f"non-positive focal length fx={k.fx} fy={k.fz}")
-    # fx and fy should be within a factor of ~2 for any real lens + square
-    # pixels. Bigger asymmetry almost always signals a unit-system bug.
-    if max(k.fx, k.fz) / min(k.fx, k.fz) > 2.0:
-        raise ValueError(f"fx/fy ratio out of bounds: fx={k.fx} fy={k.fz}")
-    # Optical centre must be inside the image. We allow a small outside
-    # margin (5% of dimension) because lens off-axis shifts happen, but
-    # more than that is almost certainly a dims-mismatch bug.
-    if not (-0.05 * w <= k.cx <= 1.05 * w):
-        raise ValueError(
-            f"cx={k.cx} outside image width {w} — K likely from a "
-            f"different resolution than image_dims claim"
-        )
-    if not (-0.05 * h <= k.cy <= 1.05 * h):
-        raise ValueError(
-            f"cy={k.cy} outside image height {h} — K likely from a "
-            f"different resolution than image_dims claim"
-        )
-    # Homography must be invertible (h33 normalized ≈ 1).
-    H_flat = snap.homography
-    if len(H_flat) != 9 or abs(H_flat[8]) < 1e-9:
-        raise ValueError(f"degenerate homography: h33={H_flat[8] if len(H_flat) == 9 else 'wrong length'}")
-
-
-# Calibration-frame buffer TTL. One-shot: iOS pushes a full-resolution
-# JPEG on request, server consumes it, flag auto-clears. 10 s is plenty
-# for capture→encode→POST round-trip even on a busy LAN.
-_CALIBRATION_FRAME_TTL_S = 10.0
-
-
 @dataclass
 class _LegacyTimeSyncIntent:
     id: str
     started_at: float
     expires_at: float
-
-
-@dataclass
-class _AutoCalibrationRun:
-    id: str
-    camera_id: str
-    status: str
-    started_at: float
-    updated_at: float
-    frames_seen: int = 0
-    good_frames: int = 0
-    stable_frames: int = 0
-    markers_visible: int = 0
-    solver: str | None = None
-    reprojection_px: float | None = None
-    position_jitter_cm: float | None = None
-    angle_jitter_deg: float | None = None
-    applied: bool = False
-    summary: str | None = None
-    detail: str | None = None
-    detected_ids: list[int] | None = None
-    result: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "camera_id": self.camera_id,
-            "status": self.status,
-            "started_at": self.started_at,
-            "updated_at": self.updated_at,
-            "frames_seen": self.frames_seen,
-            "good_frames": self.good_frames,
-            "stable_frames": self.stable_frames,
-            "markers_visible": self.markers_visible,
-            "solver": self.solver,
-            "reprojection_px": self.reprojection_px,
-            "position_jitter_cm": self.position_jitter_cm,
-            "angle_jitter_deg": self.angle_jitter_deg,
-            "applied": self.applied,
-            "summary": self.summary,
-            "detail": self.detail,
-            "detected_ids": list(self.detected_ids or []),
-            "result": dict(self.result or {}),
-        }
 
 
 class State:
@@ -253,7 +175,10 @@ class State:
         # phone "thinks it is" relative to the plate, independent of any
         # session. Persisted as one JSON per camera so a server restart
         # keeps whatever calibrations were live.
-        self._calibrations: dict[str, CalibrationSnapshot] = {}
+        self._calibration_store = CalibrationStore(
+            self._calibration_dir,
+            atomic_write=self._atomic_write,
+        )
         # Mutual chirp sync: at most one run active at a time. Both phones
         # must be online and no session may be armed when a run starts.
         # `_last_sync_result` survives across runs so the dashboard + the
@@ -311,8 +236,7 @@ class State:
         # frames are native capture res, accuracy-critical). `_cal_frames`
         # holds (jpeg_bytes, ts) keyed by camera_id; `_cal_frame_requested`
         # flags pending requests that iOS drains on its next captureOutput.
-        self._cal_frames: dict[str, tuple[bytes, float]] = {}
-        self._cal_frame_requested: dict[str, float] = {}  # cam_id → expiry ts
+        self._calibration_frames = CalibrationFrameBuffer(time_fn=time_fn)
         # Operator-managed marker registry. Stores 3D world coords plus a
         # "on plate plane" flag so the current planar auto-calibration path
         # can keep consuming only the eligible subset.
@@ -320,8 +244,7 @@ class State:
         # Per-camera auto-calibration run state. Long-running server-side
         # observation window updates this so `/setup` can show
         # searching/stabilizing/solving/verified instead of a blind spinner.
-        self._auto_cal_runs: dict[str, _AutoCalibrationRun] = {}
-        self._auto_cal_last: dict[str, _AutoCalibrationRun] = {}
+        self._auto_cal_runs = AutoCalibrationRunStore(time_fn=time_fn)
         # Live streaming state keyed by session id.
         self._live_pairings: dict[str, LivePairingSession] = {}
         # Session-level trash + processing-control metadata. Trash is
@@ -333,7 +256,6 @@ class State:
         # Calibrations first — _load_from_disk re-triangulates every cached
         # pitch, and triangulation needs the calibration snapshot to decide
         # the intrinsic-scale factor (MOV dims vs. calibration dims).
-        self._load_calibrations_from_disk()
         self._load_session_meta_from_disk()
         self._load_from_disk()
 
@@ -421,38 +343,7 @@ class State:
         self._atomic_write(self._session_meta_path, payload)
 
     def _calibration_path(self, camera_id: str) -> Path:
-        return self._calibration_dir / f"{camera_id}.json"
-
-    def _load_calibrations_from_disk(self) -> None:
-        for path in sorted(self._calibration_dir.glob("*.json")):
-            try:
-                obj = json.loads(path.read_text())
-                snap = CalibrationSnapshot.model_validate(obj)
-            except Exception as e:
-                logger.warning("skip corrupt calibration file %s: %s", path.name, e)
-                continue
-            # Also screen via the same K/H/dims consistency rules the
-            # write path enforces — old snapshots from earlier buggy
-            # write paths may have K in one pixel scale and dims in
-            # another, which would poison every downstream solve. Drop
-            # them on load with a loud warning so `auto-cal` takes the
-            # "no prior" path and rebuilds cleanly.
-            try:
-                _validate_calibration_snapshot(snap)
-            except ValueError as e:
-                logger.warning(
-                    "skip inconsistent calibration %s: %s — "
-                    "delete the file and re-run Auto Calibrate",
-                    path.name, e,
-                )
-                continue
-            self._calibrations[snap.camera_id] = snap
-        if self._calibrations:
-            logger.info(
-                "restored %d camera calibration(s) from %s",
-                len(self._calibrations),
-                self._calibration_dir,
-            )
+        return self._calibration_store.path(camera_id)
 
     def set_calibration(self, snapshot: CalibrationSnapshot) -> None:
         """Record (or overwrite) one camera's calibration and persist it
@@ -462,15 +353,12 @@ class State:
         mixed 1080p intrinsics with 480p homography which silently produced
         garbage extrinsics downstream. Catching it at the boundary saves
         hours of "why is Cam A at Z=0.66m" debugging."""
-        _validate_calibration_snapshot(snapshot)
-        payload = snapshot.model_dump_json(indent=2)
         with self._lock:
-            self._calibrations[snapshot.camera_id] = snapshot
-            self._atomic_write(self._calibration_path(snapshot.camera_id), payload)
+            self._calibration_store.set(snapshot)
 
     def calibrations(self) -> dict[str, CalibrationSnapshot]:
         with self._lock:
-            return dict(self._calibrations)
+            return self._calibration_store.snapshot()
 
     def _triangulate_pair(
         self, a: PitchPayload, b: PitchPayload, *, source: str = "server",
@@ -487,8 +375,8 @@ class State:
         mode calls this twice per session to keep the two point clouds
         separate."""
         with self._lock:
-            cal_a = self._calibrations.get(a.camera_id)
-            cal_b = self._calibrations.get(b.camera_id)
+            cal_a = self._calibration_store.get(a.camera_id)
+            cal_b = self._calibration_store.get(b.camera_id)
         a_scaled = scale_pitch_to_video_dims(
             a,
             (cal_a.image_width_px, cal_a.image_height_px) if cal_a else None,
@@ -750,8 +638,8 @@ class State:
     ) -> tuple[list[TriangulatedPoint], dict[str, int]]:
         with self._lock:
             live = self._live_pairings.setdefault(session_id, LivePairingSession(session_id))
-            cal_a = self._calibrations.get("A")
-            cal_b = self._calibrations.get("B")
+            cal_a = self._calibration_store.get("A")
+            cal_b = self._calibration_store.get("B")
             dev_a = self._devices.get("A")
             dev_b = self._devices.get("B")
             session_obj = None
@@ -946,73 +834,39 @@ class State:
     def request_calibration_frame(self, camera_id: str) -> None:
         """Flag a camera to send one full-res JPEG on its next captureOutput.
         Idempotent — re-POST refreshes the TTL."""
-        now = self._time_fn()
         with self._lock:
-            self._cal_frame_requested[camera_id] = now + _CALIBRATION_FRAME_TTL_S
+            self._calibration_frames.request(camera_id)
 
     def is_calibration_frame_requested(self, camera_id: str) -> bool:
         """True if the flag is pending and within TTL. Lazy-sweeps stale."""
-        now = self._time_fn()
         with self._lock:
-            exp = self._cal_frame_requested.get(camera_id)
-            if exp is None:
-                return False
-            if now >= exp:
-                self._cal_frame_requested.pop(camera_id, None)
-                return False
-            return True
+            return self._calibration_frames.is_requested(camera_id)
+
+    def requested_calibration_frame_ids(self) -> list[str]:
+        with self._lock:
+            return self._calibration_frames.requested_ids()
 
     def store_calibration_frame(self, camera_id: str, jpeg_bytes: bytes) -> None:
         """Phone pushed a calibration frame; stash it and clear the flag."""
-        now = self._time_fn()
         with self._lock:
-            self._cal_frames[camera_id] = (jpeg_bytes, now)
-            self._cal_frame_requested.pop(camera_id, None)
+            self._calibration_frames.store(camera_id, jpeg_bytes)
 
     def consume_calibration_frame(
         self, camera_id: str, max_age_s: float = _CALIBRATION_FRAME_TTL_S,
     ) -> tuple[bytes, float] | None:
         """Atomic pop-if-fresh. Returns None if no frame cached or stale."""
-        now = self._time_fn()
         with self._lock:
-            got = self._cal_frames.pop(camera_id, None)
-            if got is None:
-                return None
-            _, ts = got
-            if now - ts > max_age_s:
-                return None
-            return got
+            return self._calibration_frames.consume(camera_id, max_age_s=max_age_s)
 
     # --- Auto-calibration runs -------------------------------------------
 
     def start_auto_cal_run(self, camera_id: str) -> _AutoCalibrationRun:
-        now = self._time_fn()
         with self._lock:
-            current = self._auto_cal_runs.get(camera_id)
-            if current is not None and current.status not in {"completed", "failed"}:
-                raise ValueError(f"auto calibration already running for camera {camera_id}")
-            run = _AutoCalibrationRun(
-                id=f"acr_{secrets.token_hex(4)}",
-                camera_id=camera_id,
-                status="searching",
-                started_at=now,
-                updated_at=now,
-                summary="Requesting full-res frame",
-            )
-            self._auto_cal_runs[camera_id] = run
-            return _AutoCalibrationRun(**run.to_dict())
+            return self._auto_cal_runs.start(camera_id)
 
     def update_auto_cal_run(self, camera_id: str, **updates: Any) -> _AutoCalibrationRun | None:
-        now = self._time_fn()
         with self._lock:
-            run = self._auto_cal_runs.get(camera_id)
-            if run is None:
-                return None
-            for key, value in updates.items():
-                if hasattr(run, key):
-                    setattr(run, key, value)
-            run.updated_at = now
-            return _AutoCalibrationRun(**run.to_dict())
+            return self._auto_cal_runs.update(camera_id, **updates)
 
     def finish_auto_cal_run(
         self,
@@ -1024,31 +878,19 @@ class State:
         detail: str | None = None,
         applied: bool | None = None,
     ) -> _AutoCalibrationRun | None:
-        now = self._time_fn()
         with self._lock:
-            run = self._auto_cal_runs.get(camera_id)
-            if run is None:
-                return None
-            run.status = status
-            run.updated_at = now
-            run.result = result
-            if summary is not None:
-                run.summary = summary
-            if detail is not None:
-                run.detail = detail
-            if applied is not None:
-                run.applied = applied
-            snap = _AutoCalibrationRun(**run.to_dict())
-            self._auto_cal_last[camera_id] = snap
-            if status in {"completed", "failed"}:
-                self._auto_cal_runs.pop(camera_id, None)
-            return snap
+            return self._auto_cal_runs.finish(
+                camera_id,
+                status=status,
+                result=result,
+                summary=summary,
+                detail=detail,
+                applied=applied,
+            )
 
     def auto_cal_status(self) -> dict[str, Any]:
         with self._lock:
-            active = {cam: run.to_dict() for cam, run in self._auto_cal_runs.items()}
-            last = {cam: run.to_dict() for cam, run in self._auto_cal_last.items()}
-            return {"active": active, "last": last}
+            return self._auto_cal_runs.status()
 
     def live_session_summary(self) -> dict[str, Any] | None:
         session = self.session_snapshot()
