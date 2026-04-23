@@ -518,19 +518,21 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                          display: inline-block; }}
 .traj-toggle-placeholder {{ flex: 0 0 auto;
                              width: calc(13px + 10px + var(--s-2) + 8px); }}
-.event-top {{ display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-1);
-              flex-wrap: wrap; }}
+/* Event row is now laid out as three horizontal bands so single-row
+   sessions and dual-row (with processing chip) sessions align: .event-top
+   owns identity + status, .event-paths-row owns the three pipeline chips,
+   .event-stats owns metrics. Nothing wraps between bands — no more
+   flex-wrap surprises depending on chip count. */
+.event-top {{ display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-1); }}
 .event-top .sid {{ font-family: var(--mono); font-size: 12px; font-weight: 500;
-                   color: var(--ink); letter-spacing: 0.04em; margin-right: var(--s-1); }}
-/* Capture-mode annotation next to sid — metadata, not a state badge, so
-   it's rendered as subdued inline text instead of a chip. Avoids the
-   prior double-"DUAL" collision with the cam-identity chip. */
+                   color: var(--ink); letter-spacing: 0.04em; }}
 .event-top .capmode {{ font-family: var(--mono); font-size: 10px;
                         letter-spacing: 0.10em; text-transform: uppercase;
                         color: var(--sub); }}
 .event-top .capmode::before {{ content: "· "; opacity: 0.5; }}
-.event-top .event-paths {{ display:flex; gap:4px; flex-wrap:wrap; margin-left:auto; }}
-.event-top .event-paths .path-chip {{ font-size:9px; padding:1px 5px; }}
+.event-top .event-top-spacer {{ flex: 1 1 auto; }}
+.event-paths-row {{ display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: var(--s-1); }}
+.event-paths-row .path-chip {{ font-size: 10px; padding: 2px 7px; letter-spacing: 0.04em; }}
 .event-stats {{ display: grid; grid-template-columns: repeat(3, 1fr);
                 gap: var(--s-1) var(--s-3);
                 font-family: var(--mono); font-size: 11px; color: var(--ink-light); }}
