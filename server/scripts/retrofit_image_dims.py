@@ -161,18 +161,10 @@ def retrofit(data_dir: Path, session_filter: str | None, dry_run: bool) -> int:
             except Exception as e:
                 result.error = f"{type(e).__name__}: {e}"
                 log.warning("  server triangulation failed: %s", e)
-        if a_scaled.frames_on_device and b_scaled.frames_on_device:
-            try:
-                result.points_on_device = triangulate_cycle(a_scaled, b_scaled, source="on_device")
-            except Exception as e:
-                result.error_on_device = f"{type(e).__name__}: {e}"
-                log.warning("  on_device triangulation failed: %s", e)
         log.info(
-            "  re-triangulated: server=%d points%s on_device=%d points%s",
+            "  re-triangulated: server=%d points%s",
             len(result.points),
             f" err={result.error}" if result.error else "",
-            len(result.points_on_device),
-            f" err={result.error_on_device}" if result.error_on_device else "",
         )
         if not dry_run:
             _atomic_write(results_dir / f"session_{session_id}.json",

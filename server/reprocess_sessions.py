@@ -156,11 +156,6 @@ def triangulate_session(
             result.points = triangulate_cycle(scale(a), scale(b), source="server")
         except Exception as e:
             result.error = f"{type(e).__name__}: {e}"
-    if a.frames_on_device and b.frames_on_device:
-        try:
-            result.points_on_device = triangulate_cycle(scale(a), scale(b), source="on_device")
-        except Exception as e:
-            result.error_on_device = f"{type(e).__name__}: {e}"
 
     n = len(result.points)
     logger.info(

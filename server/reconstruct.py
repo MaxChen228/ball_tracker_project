@@ -90,10 +90,10 @@ class Ray:
     origin: list[float]
     endpoint: list[float]
     # Detection stream this ray was traced from. "server" = server-side
-    # HSV+MOG2 pipeline (authoritative path that existing viewers rely on);
-    # "on_device" = iPhone-end detection uploaded alongside the MOV in dual
-    # mode. Viewer overlays both with different colors so operators can see
-    # where the two detectors disagree while tuning constants.
+    # HSV+MOG2 pipeline; "live" = iPhone-end detection streamed over WS
+    # during the active session. Viewer overlays them with different colors
+    # so operators can see where the two streams disagree while tuning
+    # constants.
     source: str = "server"
 
 
@@ -110,12 +110,6 @@ class Scene:
     # "assume the ball is on the ground"). Keyed by camera_id so multi-
     # camera scenes still draw one trace per phone.
     ground_traces: dict[str, list[dict[str, float]]] = field(default_factory=dict)
-    # Dual-mode parallel outputs from the iOS-end detection stream. Empty
-    # for camera_only / on_device sessions; populated for dual sessions so
-    # the viewer can overlay both point clouds. Structure mirrors the
-    # server-side fields above.
-    triangulated_on_device: list[dict[str, float]] = field(default_factory=list)
-    ground_traces_on_device: dict[str, list[dict[str, float]]] = field(default_factory=dict)
     ground_traces_live: dict[str, list[dict[str, float]]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -126,10 +120,6 @@ class Scene:
             "triangulated": list(self.triangulated),
             "ground_traces": {
                 cam: list(trace) for cam, trace in self.ground_traces.items()
-            },
-            "triangulated_on_device": list(self.triangulated_on_device),
-            "ground_traces_on_device": {
-                cam: list(trace) for cam, trace in self.ground_traces_on_device.items()
             },
             "ground_traces_live": {
                 cam: list(trace) for cam, trace in self.ground_traces_live.items()
@@ -193,10 +183,9 @@ def _rays_and_trace_for_source(
     dist: list[float] | None, anchor: float, cam_id: str, source: str,
     viz_length: float,
 ) -> tuple[list[Ray], list[dict[str, float]]]:
-    """Per-source ray + ground-trace builder. Factored out so dual mode
-    can run the same projection math twice — once over `pitch.frames`
-    (source="server") and once over `pitch.frames_on_device`
-    (source="on_device") — without duplicating the per-frame loop."""
+    """Per-source ray + ground-trace builder. Factored out so the live
+    and server_post streams can each run the same projection math over
+    their own frame list without duplicating the per-frame loop."""
     rays: list[Ray] = []
     trace: list[dict[str, float]] = []
     for f in frames:
@@ -287,7 +276,6 @@ def build_scene(
     session_id: str,
     pitches: dict[str, "PitchPayload"],
     triangulated: list["TriangulatedPoint"] | None = None,
-    triangulated_on_device: list["TriangulatedPoint"] | None = None,
 ) -> Scene:
     """Construct a renderable `Scene` for one session.
 
@@ -296,14 +284,11 @@ def build_scene(
                are silently skipped — they show up as no camera + no rays
                in the viewer, which is itself the diagnostic signal.
     `triangulated`: SessionResult.points (server source).
-    `triangulated_on_device`: SessionResult.points_on_device (iOS source,
-               dual mode only; None / empty on mono-mode sessions).
 
     Rays and ground traces are emitted per detection source — server
     frames produce `scene.rays[source="server"]` + `scene.ground_traces`,
-    on-device frames (when present) produce `scene.rays[source="on_device"]`
-    + `scene.ground_traces_on_device`. Cameras are emitted once regardless
-    of source count.
+    live frames produce `scene.rays[source="live"]` + `scene.ground_traces_live`.
+    Cameras are emitted once regardless of source count.
     """
     scene = Scene(session_id=session_id)
 
@@ -362,15 +347,6 @@ def build_scene(
             if live_trace:
                 scene.ground_traces_live[cam_id] = live_trace
 
-        if pitch.frames_on_device:
-            device_rays, device_trace = _rays_and_trace_for_source(
-                pitch.frames_on_device, K=K, R_wc=R_wc, C=C, dist=dist, anchor=anchor,
-                cam_id=cam_id, source="on_device", viz_length=viz_length,
-            )
-            scene.rays.extend(device_rays)
-            if device_trace:
-                scene.ground_traces_on_device[cam_id] = device_trace
-
     def _pts_to_dicts(pts):
         return [
             {
@@ -386,8 +362,6 @@ def build_scene(
 
     if triangulated:
         scene.triangulated = _pts_to_dicts(triangulated)
-    if triangulated_on_device:
-        scene.triangulated_on_device = _pts_to_dicts(triangulated_on_device)
 
     return scene
 
