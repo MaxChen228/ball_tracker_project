@@ -114,6 +114,7 @@ final class CameraTransportCoordinator: NSObject {
         previewUploader?.updateUploader(uploader)
         if roleChanged {
             previewUploader = nil
+            calibrationFrameCaptureArmed = false
         }
 
         if endpointChanged || roleChanged {
@@ -278,6 +279,12 @@ extension CameraTransportCoordinator: ServerWebSocketDelegate {
     func webSocketDidConnect(_ connection: ServerWebSocketConnection) {}
 
     func webSocketDidDisconnect(_ connection: ServerWebSocketConnection, reason: String?) {
+        // Guard against stale callbacks: when role changes we nil `ws` and
+        // immediately create a new connection. The old connection's close
+        // notification arrives async — ignore it so it can't reset state
+        // (previewRequested, previewUploader) that the new connection has
+        // already configured.
+        guard connection === ws else { return }
         commandRouter.didDisconnect()
     }
 
