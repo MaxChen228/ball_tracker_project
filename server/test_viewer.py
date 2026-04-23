@@ -675,6 +675,68 @@ def test_viewer_virtual_detection_follows_per_camera_ray_toggle():
     assert 'for (const path of PATH_ORDER)' in body
 
 
+def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
+    """Camera diamond + axis triad must be emitted by the dynamic builder
+    (so hiding every pipeline for Cam A also hides Cam A's marker), never
+    baked into STATIC. If it went back into STATIC the marker would ignore
+    pill state and also fail to extend the autoscale bounding box — which
+    was how the viewer ended up framed on just the plate, missing the
+    rays fanning out from a camera 1.7 m overhead."""
+    from viewer_page import build_viewer_page_context
+    import render_scene
+    from reconstruct import Scene, CameraView
+
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(721)
+    _record_pitch(_pitch("A", 721, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    # Generator + gate both live in the JS blob.
+    assert "function camMarkerTracesFor" in body
+    assert "function cameraIsAnyPathVisible" in body
+    assert "for (const t of camMarkerTracesFor(c)) out.push(t)" in body
+    # Scene theme constants flow through DATA, not hard-coded.
+    assert '"scene_theme"' in body
+    assert "SCENE_THEME.cam_fwd_len_m" in body
+
+    # STATIC must NOT carry a camera trace — that would double-draw the
+    # diamond (once static, once dynamic) and pin camera visibility to
+    # always-on regardless of the pills.
+    from viewer_page import build_viewer_page_context
+    scene = Scene(session_id=session_id)
+    scene.cameras.append(
+        CameraView(
+            camera_id="A",
+            center_world=[0.0, 0.0, 1.0],
+            axis_forward_world=[0.0, 1.0, 0.0],
+            axis_right_world=[1.0, 0.0, 0.0],
+            axis_up_world=[0.0, 0.0, 1.0],
+            fx=1000.0, fy=1000.0, cx=960.0, cy=540.0,
+            distortion=None, R_wc=[1, 0, 0, 0, 1, 0, 0, 0, 1],
+            t_wc=[0.0, 0.0, 0.0], image_width_px=1920, image_height_px=1080,
+        )
+    )
+    health = {
+        "cameras": {
+            "A": {"received": True, "calibrated": True, "time_synced": False,
+                  "n_frames": 0, "n_detected": 0, "capture_telemetry": None},
+            "B": {"received": False, "calibrated": False, "time_synced": False,
+                  "n_frames": 0, "n_detected": 0, "capture_telemetry": None},
+        },
+        "session_id": session_id, "triangulated_count": 0, "triangulated_count_on_device": 0,
+        "error": None, "duration_s": None, "received_at": None, "mode": "camera_only",
+    }
+    ctx = build_viewer_page_context(scene, [], health, build_figure=render_scene._build_figure)
+    import json as _json
+    static_list = _json.loads(ctx.static_traces_json)
+    for trace in static_list:
+        meta = trace.get("meta") or {}
+        assert meta.get("trace_kind") != "camera", "camera trace leaked into STATIC"
+        assert meta.get("trace_kind") != "camera_axis", "camera axis trace leaked into STATIC"
+
+
 def test_viewer_locks_layout_to_viewport_without_page_scroll():
     """The viewer should fit in a single viewport: body scrolling is
     disabled and the root container owns a fixed 100vh layout."""
