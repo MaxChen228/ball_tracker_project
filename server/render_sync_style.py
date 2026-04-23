@@ -73,6 +73,50 @@ _SYNC_CSS = """
 .main-sync .camera-compare .preview-panel .placeholder {
   display: none;
 }
+.camera-compare {
+  display: flex; flex-direction: column; gap: 12px;
+}
+.camera-compare-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;
+}
+.compare-cell-label {
+  position: absolute; left: 12px; top: 12px; z-index: 3;
+  padding: 4px 8px; border: 1px solid rgba(255,255,255,0.2);
+  background: rgba(0,0,0,0.55); color: rgba(255,255,255,0.85);
+  font-family: var(--mono); font-size: 10px;
+  letter-spacing: 0.12em; text-transform: uppercase;
+}
+.devices-grid { display: flex; flex-direction: column; gap: var(--s-3); }
+.device { padding: var(--s-2) 0; }
+.device + .device { border-top: 1px solid var(--border-l); margin-top: var(--s-3); padding-top: var(--s-3); }
+.device-head { display: grid; grid-template-columns: 14px 28px 1fr auto;
+               align-items: center; gap: var(--s-2); }
+.device-head .sync-led { grid-column: 1; grid-row: 1;
+                         width: 10px; height: 10px; border-radius: 50%;
+                         background: var(--border-base); }
+.device-head .sync-led.synced { background: var(--passed);
+                                box-shadow: 0 0 6px rgba(125,255,192,0.5); }
+.device-head .sync-led.waiting { background: var(--border-base); }
+.device-head .sync-led.listening { background: var(--warn); }
+.device-head .sync-led.offline { background: var(--border-base); opacity: 0.45; }
+.device-head .id { grid-column: 2; grid-row: 1;
+                   font-family: var(--mono); font-size: 14px; font-weight: 600;
+                   color: var(--ink); }
+.device-head .chip-col { grid-column: 4; grid-row: 1; justify-self: end; }
+.device-head .sub { grid-column: 1 / -1; grid-row: 2;
+                    display: flex; flex-direction: column; gap: 3px;
+                    margin-top: var(--s-1); }
+.device .sub .item { font-family: var(--mono); font-size: 11px;
+                     letter-spacing: 0.08em; color: var(--sub); }
+.device .sub .item .dot { display: inline-block; width: 6px; height: 6px;
+                          border-radius: 50%; margin-right: 6px;
+                          background: var(--border-base); vertical-align: middle; }
+.device .sub .item.ok .dot { background: var(--passed); }
+.device .sub .item.warn .dot { background: var(--warn); }
+.device .sub .item.bad .dot { background: var(--failed); }
+.device-actions { display: flex; gap: var(--s-2); margin-top: var(--s-2);
+                  margin-bottom: var(--s-2); flex-wrap: wrap; }
+.preview-btn.active { background: var(--ink); color: var(--surface); }
 .tuning-status {
   min-height: 18px;
   margin-bottom: var(--s-2);
