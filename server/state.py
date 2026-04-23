@@ -7,7 +7,7 @@ import re
 import secrets
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
@@ -29,17 +29,14 @@ from schemas import (
     SyncRun,
     TrackingExposureCapMode,
     TriangulatedPoint,
-    _DEFAULT_TRACKING_EXPOSURE_CAP_MODE,
     _DEFAULT_SESSION_TIMEOUT_S,
     _DEFAULT_PATHS,
     mode_for_paths,
-    paths_for_mode,
 )
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from fitting import fit_trajectory
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
-from triangulate import recover_extrinsics
 from sync_solver import compute_mutual_sync
 from live_pairing import LivePairingSession
 from state_runtime import RuntimeSettingsStore, SyncParams
