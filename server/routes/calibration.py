@@ -472,22 +472,60 @@ async def _run_auto_calibration(
             status="searching",
             summary="Requesting full-res frame",
         )
+        online_ids = sorted(d.camera_id for d in state.online_devices())
+        state.append_auto_cal_event(
+            camera_id,
+            "burst start",
+            data={
+                "h_fov_deg": h_fov_deg,
+                "max_frames": max_frames,
+                "deadline_s": 6.0,
+                "online_devices": online_ids,
+                "target_online": camera_id in online_ids,
+            },
+        )
 
     while frames_seen < max_frames and asyncio.get_event_loop().time() < burst_deadline:
         state.request_calibration_frame(camera_id)
         await device_ws.send(camera_id, _settings_message_for(camera_id))
+        if track_run:
+            state.append_auto_cal_event(
+                camera_id, "requested frame", data={"frames_seen": frames_seen},
+            )
         got: tuple[bytes, float] | None = None
+        poll_start = asyncio.get_event_loop().time()
         for _ in range(20):
             got = state.consume_calibration_frame(camera_id)
             if got is not None:
                 break
             await asyncio.sleep(0.1)
         if got is None:
+            if track_run:
+                state.append_auto_cal_event(
+                    camera_id,
+                    "no frame arrived within 2s poll",
+                    level="warn",
+                    data={
+                        "poll_s": round(asyncio.get_event_loop().time() - poll_start, 2),
+                        "time_left_s": round(burst_deadline - asyncio.get_event_loop().time(), 2),
+                    },
+                )
             break
         jpeg_bytes, _ts = got
+        if track_run:
+            state.append_auto_cal_event(
+                camera_id,
+                "frame received",
+                data={"bytes": len(jpeg_bytes), "poll_s": round(asyncio.get_event_loop().time() - poll_start, 2)},
+            )
         arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
         bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if bgr is None:
+            if track_run:
+                state.append_auto_cal_event(
+                    camera_id, "jpeg decode failed", level="warn",
+                    data={"bytes": len(jpeg_bytes)},
+                )
             continue
         if first_shape is None:
             first_shape = bgr.shape[:2]
@@ -497,6 +535,17 @@ async def _run_auto_calibration(
                 h_img=first_shape[0],
                 h_fov_deg=h_fov_deg,
             )
+            if track_run:
+                state.append_auto_cal_event(
+                    camera_id,
+                    "intrinsics derived",
+                    data={
+                        "w": first_shape[1], "h": first_shape[0],
+                        "fx": round(intrinsics.fx, 2), "fy": round(intrinsics.fz, 2),
+                        "cx": round(intrinsics.cx, 2), "cy": round(intrinsics.cy, 2),
+                        "reused_prior": prior is not None,
+                    },
+                )
         assert intrinsics is not None
         h_img, w_img = bgr.shape[:2]
         detected = [
@@ -504,6 +553,17 @@ async def _run_auto_calibration(
             if (m.id in PLATE_MARKER_WORLD or state._marker_registry.get(m.id) is not None)
         ]
         frames_seen += 1
+        if track_run:
+            all_detected = detect_all_markers_in_dict(bgr)
+            state.append_auto_cal_event(
+                camera_id,
+                "markers detected",
+                data={
+                    "known_ids": sorted(m.id for m in detected),
+                    "all_ids": sorted(m.id for m in all_detected),
+                    "frame_shape": [int(bgr.shape[1]), int(bgr.shape[0])],
+                },
+            )
         if not detected:
             consecutive_empty_frames += 1
             if track_run:
@@ -540,6 +600,12 @@ async def _run_auto_calibration(
                     markers_visible=markers_visible,
                     summary="Tracking markers in full-res frames",
                     detected_ids=sorted(m.id for m in detected),
+                )
+                state.append_auto_cal_event(
+                    camera_id,
+                    "solver produced no solution this frame",
+                    level="warn",
+                    data={"solver": solver, "markers_visible": markers_visible},
                 )
             continue
         reproj_px = _reprojection_error_px(
@@ -603,6 +669,19 @@ async def _run_auto_calibration(
                     else "Tracking markers in full-res frames"
                 ),
                 detected_ids=sorted(m.id for m in detected),
+            )
+        if track_run:
+            state.append_auto_cal_event(
+                camera_id,
+                "frame evaluated",
+                data={
+                    "solver": solver,
+                    "reproj_px": None if reproj_px is None else round(reproj_px, 2),
+                    "pos_jitter_cm": None if pos_jitter_cm is None else round(pos_jitter_cm, 2),
+                    "ang_jitter_deg": None if ang_jitter_deg is None else round(ang_jitter_deg, 3),
+                    "good_frames": good_frames,
+                    "stable_frames": stable_frames,
+                },
             )
         if stable_frames >= 4 and good_frames >= 4:
             break
