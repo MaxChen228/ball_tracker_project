@@ -48,9 +48,9 @@ async def sessions_arm(
 async def sessions_stop(request: Request):
     from main import state, device_ws, sse_hub, _disarm_message_for, _wants_html
     ended = state.stop_session()
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
     if ended is None:
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no armed session")
     await device_ws.broadcast(
         {cam.camera_id: _disarm_message_for(ended) for cam in state.online_devices()}
@@ -64,6 +64,8 @@ async def sessions_stop(request: Request):
             ),
         },
     )
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
     return {"ok": True, "session": ended.to_dict()}
 
 

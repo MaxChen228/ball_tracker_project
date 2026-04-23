@@ -352,6 +352,38 @@ def test_sessions_stop_html_form_redirects_even_if_not_armed():
     assert r.status_code == 303
 
 
+def test_sessions_stop_html_form_broadcasts_disarm_before_redirect(monkeypatch):
+    client = TestClient(app)
+    main.state.heartbeat("A")
+    session = main.state.arm_session()
+    broadcasts: list[dict[str, dict[str, object]]] = []
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class _CaptureDeviceWS:
+        async def broadcast(self, message_by_camera: dict[str, dict[str, object]]) -> None:
+            broadcasts.append(message_by_camera)
+
+        def snapshot(self) -> dict[str, object]:
+            return {}
+
+    class _CaptureHub:
+        async def broadcast(self, event: str, data: dict[str, object]) -> None:
+            events.append((event, data))
+
+    monkeypatch.setattr(main, "device_ws", _CaptureDeviceWS())
+    monkeypatch.setattr(main, "sse_hub", _CaptureHub())
+
+    r = client.post(
+        "/sessions/stop",
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+
+    assert r.status_code == 303
+    assert broadcasts == [{"A": {"type": "disarm", "sid": session.id}}]
+    assert events and events[0][0] == "session_ended"
+
+
 def test_pitch_upload_keeps_session_armed_until_stop():
     """Post-pivot, an upload does NOT end the session — only an
     explicit Stop (or the server-side timeout) does. The phone only
@@ -799,8 +831,10 @@ def test_dashboard_renders_control_panel():
     # `/` is operational-only now: Session + Events + 3D canvas. Devices,
     # calibration, extended markers, and tuning all live on /setup.
     assert "BALL_TRACKER" in body
+    assert "Live Stream" in body
     assert 'action="/sessions/arm"' in body
     assert 'action="/sessions/stop"' in body
+    assert "/sessions/cancel" not in body
     assert 'id="session-body"' in body
     assert 'id="events-body"' in body
     assert 'id="scene-root"' in body
