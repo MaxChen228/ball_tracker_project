@@ -421,18 +421,6 @@ def test_viewer_endpoint_without_clips_still_renders():
     assert "<video" not in body
 
 
-def test_viewer_banner_tags_on_device_when_no_video_on_disk():
-    """Mode-two session has no MOV on disk — hero banner sub-line should
-    surface `mode on-device` so the operator knows the 3D came from
-    iPhone-side detection, not server re-detection."""
-    K, (R_a, t_a, _, H_a), _ = _make_rig()
-    session_id = sid(706)
-    _record_pitch(_pitch("A", 706, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
-    client = TestClient(app)
-    body = client.get(f"/viewer/{session_id}").text
-    assert "mode on-device" in body
-
-
 def test_viewer_banner_tags_camera_only_when_video_on_disk(tmp_path):
     """Mode-one session: any MOV under data/videos/ flips the banner's
     sub-line to `mode camera-only`."""
@@ -592,8 +580,7 @@ def test_viewer_page_context_computes_single_cam_layout_and_video_cells():
             "B": {"received": False, "calibrated": False, "time_synced": False, "n_frames": 0, "n_detected": 0},
         },
         "triangulated_count": 0,
-        "triangulated_count_on_device": 0,
-        "error": None,
+                "error": None,
         "duration_s": 0.0,
         "received_at": None,
         "mode": "camera_only",
@@ -669,11 +656,10 @@ def test_viewer_virtual_detection_follows_per_camera_ray_toggle():
     body = client.get(f"/viewer/{session_id}").text
     assert 'const camLayer = `cam${cam}`;' in body
     # The VIRT dot iterates PATHS and calls isLayerVisible per pipeline
-    # (live / ios_post / server_post), so these three names must appear
+    # (live / server_post), so these two names must appear
     # verbatim in the generated JS — that is the only proof we ship that
     # each pipeline is checked on its own.
     assert '"live"' in body
-    assert '"ios_post"' in body
     assert '"server_post"' in body
     assert 'for (const path of PATH_ORDER)' in body
 
@@ -728,8 +714,7 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
             "B": {"received": False, "calibrated": False, "time_synced": False,
                   "n_frames": 0, "n_detected": 0, "capture_telemetry": None},
         },
-        "session_id": session_id, "triangulated_count": 0, "triangulated_count_on_device": 0,
-        "error": None, "duration_s": None, "received_at": None, "mode": "camera_only",
+        "session_id": session_id, "triangulated_count": 0,         "error": None, "duration_s": None, "received_at": None, "mode": "camera_only",
     }
     ctx = build_viewer_page_context(scene, [], health, build_figure=render_scene._build_figure)
     import json as _json
@@ -765,9 +750,9 @@ def test_viewer_strip_reserves_dual_ab_subtracks_per_pipeline():
     body = client.get(f"/viewer/{session_id}").text
     assert 'const STRIP_CAMS = ["A", "B"]' in body
     assert "drawStripInto(STRIP_ROWS[path].canvas, camAtFrameByPath[path], path)" in body
-    for canvas_id in ("detection-canvas-live", "detection-canvas-ios-post", "detection-canvas-server-post"):
+    for canvas_id in ("detection-canvas-live", "detection-canvas-server-post"):
         assert f'id="{canvas_id}" class="strip-canvas" height="28"' in body
-    assert body.count('<span class="strip-sublabels"') == 3
+    assert body.count('<span class="strip-sublabels"') == 2
 
 
 def test_viewer_locks_layout_to_viewport_without_page_scroll():
@@ -886,21 +871,18 @@ def test_events_endpoint_lists_sessions_latest_first():
     evt_810 = next(e for e in events if e["session_id"] == sid(810))
     assert evt_810["cameras"] == ["A", "B"]
     assert evt_810["status"] in ("paired", "paired_no_points")
-    # n_ball_frames_by_path is the canonical shape: three pipelines, each
-    # with its own per-camera count. Legacy n_ball_frames /
-    # n_ball_frames_on_device alias onto server_post / ios_post for
-    # backwards compat but new code should read the _by_path dict.
+    # n_ball_frames_by_path is the canonical shape: two pipelines, each
+    # with its own per-camera count.
     assert evt_810["n_ball_frames_by_path"] == {
         "live": {"A": 0, "B": 0},
-        "ios_post": {"A": 0, "B": 0},
         "server_post": {"A": 1, "B": 1},
     }
     assert evt_810["n_ball_frames"] == {"A": 1, "B": 1}
     assert evt_810["n_triangulated"] == 1
-    # server_post ran and produced detections → "done"; live/ios_post
+    # server_post ran and produced detections → "done"; live
     # never ran on this fixture → "-".
     assert evt_810["path_status"] == {
-        "live": "-", "ios_post": "-", "server_post": "done",
+        "live": "-", "server_post": "done",
     }
 
     evt_800 = next(e for e in events if e["session_id"] == sid(800))
