@@ -853,12 +853,75 @@ def test_events_endpoint_lists_sessions_latest_first():
     evt_810 = next(e for e in events if e["session_id"] == sid(810))
     assert evt_810["cameras"] == ["A", "B"]
     assert evt_810["status"] in ("paired", "paired_no_points")
+    # n_ball_frames_by_path is the canonical shape: three pipelines, each
+    # with its own per-camera count. Legacy n_ball_frames /
+    # n_ball_frames_on_device alias onto server_post / ios_post for
+    # backwards compat but new code should read the _by_path dict.
+    assert evt_810["n_ball_frames_by_path"] == {
+        "live": {"A": 0, "B": 0},
+        "ios_post": {"A": 0, "B": 0},
+        "server_post": {"A": 1, "B": 1},
+    }
     assert evt_810["n_ball_frames"] == {"A": 1, "B": 1}
     assert evt_810["n_triangulated"] == 1
+    # server_post ran and produced detections → "done"; live/ios_post
+    # never ran on this fixture → "-".
+    assert evt_810["path_status"] == {
+        "live": "-", "ios_post": "-", "server_post": "done",
+    }
 
     evt_800 = next(e for e in events if e["session_id"] == sid(800))
     assert evt_800["cameras"] == ["A"]
     assert evt_800["status"] == "partial"
+
+
+def test_events_path_status_marks_live_done_on_frame_existence_not_triangulation():
+    """A live-only mono-camera session never triangulates (single camera,
+    no chirp anchor), so SessionResult.paths_completed does NOT include
+    'live'. The dashboard should still surface the live pipeline as
+    "done" because frames were captured and the operator can see detected
+    frames in the viewer — previously this showed "-" and made live-only
+    work look like a silent failure."""
+    import main
+    from schemas import PitchPayload, FramePayload, IntrinsicsPayload
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(815)
+    # Build a pitch whose frames_live carries two detected frames and no
+    # paired camera, so triangulation cannot happen but the pipeline did
+    # produce usable output.
+    base = _pitch("A", 815, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
+    live_frames = [
+        FramePayload(
+            frame_index=i,
+            timestamp_s=float(i) * 0.008,
+            px=100.0 + i, py=200.0 + i,
+            ball_detected=True,
+        )
+        for i in range(2)
+    ]
+    # Stitch frames_live on top while keeping the rest of the payload valid.
+    enriched = base.model_copy(update={"frames_live": live_frames, "frames": []})
+    main.state.record(enriched)
+
+    client = TestClient(app)
+    events = client.get("/events").json()
+    evt = next(e for e in events if e["session_id"] == session_id)
+    assert evt["n_ball_frames_by_path"]["live"] == {"A": 2}
+    assert evt["path_status"]["live"] == "done"
+    assert evt["path_status"]["server_post"] == "-"
+
+    # Dashboard HTML must render the per-pipeline chip with the frame count
+    # suffix. Without the suffix the operator can't tell three-pipeline
+    # sessions apart at a glance — they all show the same "L I S".
+    html_body = client.get("/").text
+    block_start = html_body.find(session_id)
+    assert block_start >= 0
+    # Scan forward from the session id to the event's trailing action form
+    # so we only match chips inside THIS event's row.
+    block_end = html_body.find("event-actions", block_start)
+    chip_block = html_body[block_start:block_end]
+    assert 'class="path-chip on"' in chip_block
+    assert '<span class="pc">2</span>' in chip_block
 
 
 def test_index_endpoint_lists_events_with_viewer_links():

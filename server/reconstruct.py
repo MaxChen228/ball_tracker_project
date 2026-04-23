@@ -116,6 +116,7 @@ class Scene:
     # server-side fields above.
     triangulated_on_device: list[dict[str, float]] = field(default_factory=list)
     ground_traces_on_device: dict[str, list[dict[str, float]]] = field(default_factory=dict)
+    ground_traces_live: dict[str, list[dict[str, float]]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -129,6 +130,9 @@ class Scene:
             "triangulated_on_device": list(self.triangulated_on_device),
             "ground_traces_on_device": {
                 cam: list(trace) for cam, trace in self.ground_traces_on_device.items()
+            },
+            "ground_traces_live": {
+                cam: list(trace) for cam, trace in self.ground_traces_live.items()
             },
         }
 
@@ -348,6 +352,15 @@ def build_scene(
         scene.rays.extend(server_rays)
         if server_trace:
             scene.ground_traces[cam_id] = server_trace
+
+        if pitch.frames_live:
+            live_rays, live_trace = _rays_and_trace_for_source(
+                pitch.frames_live, K=K, R_wc=R_wc, C=C, dist=dist, anchor=anchor,
+                cam_id=cam_id, source="live", viz_length=viz_length,
+            )
+            scene.rays.extend(live_rays)
+            if live_trace:
+                scene.ground_traces_live[cam_id] = live_trace
 
         if pitch.frames_on_device:
             device_rays, device_trace = _rays_and_trace_for_source(

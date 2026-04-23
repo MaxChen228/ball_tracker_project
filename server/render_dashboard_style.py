@@ -328,6 +328,12 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
               border-radius:var(--r); font-family:var(--mono); font-size:10px;
               letter-spacing:0.08em; text-transform:uppercase; color:var(--sub); }}
 .path-chip.on {{ color:var(--passed); border-color:var(--passed); background:var(--passed-bg); }}
+.path-chip.err {{ color:var(--dev); border-color:var(--dev); background:rgba(192, 57, 43, 0.08); }}
+/* Frame count suffix inside a chip: dimmer than the label so the eye still
+   parses it as "L 67" (pipeline + number) rather than two equal tokens. */
+.path-chip .pc {{ margin-left:4px; padding-left:4px; border-left:1px solid currentColor;
+                   font-size:9px; letter-spacing:0; opacity:0.75;
+                   font-variant-numeric:tabular-nums; text-transform:none; }}
 /* Segmented control: the three mode buttons share one outer border and
    collapse their individual borders/radius so the eye reads them as a
    single exclusive choice, not three separate CTAs. */

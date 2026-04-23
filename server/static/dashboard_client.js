@@ -1156,9 +1156,28 @@
       const duration = fmtNum(e.duration_s, 2);
       const peakZ = e.peak_z_m != null ? e.peak_z_m.toFixed(2) : null;
       const triangulated = Number(e.n_triangulated_on_device || e.n_triangulated || 0);
+      // Three pipelines, three fully-independent chips. State (on/err/-)
+      // comes from path_status, frame count from n_ball_frames_by_path.
+      // Keep this in lock-step with render_dashboard_events._path_chip so
+      // SSR and JS refresh paint the same DOM.
       const pathStatus = e.path_status || {};
+      const pathCounts = e.n_ball_frames_by_path || {};
+      const pathTitles = {
+        live: 'Live — iOS real-time detection (WS streamed)',
+        ios_post: 'POST — iOS on-device post-pass payload',
+        server_post: 'SVR — server-side detection on decoded MOV',
+      };
       const pathChips = [['live', 'L'], ['ios_post', 'I'], ['server_post', 'S']]
-        .map(([path, label]) => `<span class="path-chip${pathStatus[path] === 'done' ? ' on' : ''}">${label}</span>`)
+        .map(([path, label]) => {
+          const status = pathStatus[path] || '-';
+          const counts = pathCounts[path] || {};
+          const total = Object.values(counts).reduce((a, v) => a + Number(v || 0), 0);
+          const cls = status === 'done' ? ' on' : status === 'error' ? ' err' : '';
+          const countHtml = total > 0 ? `<span class="pc">${total}</span>` : '';
+          const detail = Object.keys(counts).sort().map(c => `${c}:${counts[c]}`).join(', ');
+          const title = detail ? `${pathTitles[path]} · ${detail}` : pathTitles[path];
+          return `<span class="path-chip${cls}" title="${esc(title)}">${label}${countHtml}</span>`;
+        })
         .join('');
       const confirmMsg = `刪除 session ${e.session_id}？此動作無法復原。`;
       const trashMsg = `移動 session ${e.session_id} 到垃圾桶？`;
