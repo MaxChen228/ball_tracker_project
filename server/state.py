@@ -33,7 +33,7 @@ from detection import HSVRange
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
 from sync_solver import compute_mutual_sync
-from live_pairing import LivePairingSession
+from live_pairing import _LIVE_FRAMES_ARCHIVE_CAP, LivePairingSession
 from reconstruct import Ray, ray_for_frame
 from state_runtime import RuntimeSettingsStore, SyncParams
 from state_calibration import (
@@ -541,11 +541,21 @@ class State:
         # the pitch. We only need to confirm the frame counts landed, not
         # do a byte-for-byte compare; the pitch-JSON write that happened
         # inside `persist_live_frames` is the authoritative archive.
+        # `frame_counts` is a monotonically increasing running total across
+        # the WS stream; `pa.frames_live` is projected from the per-cam
+        # deque in `LivePairingSession`, which is `maxlen`-capped at
+        # `_LIVE_FRAMES_ARCHIVE_CAP`. For a cam that has ever streamed
+        # more frames than the cap, a raw `len(pa.frames_live) < count`
+        # check is permanently True and the eviction never fires — the
+        # M3 leak fix was defeated. Clamp the expectation to the cap so
+        # a saturated deque still counts as "all archived".
         a_count = live.frame_counts.get("A", 0)
         b_count = live.frame_counts.get("B", 0)
-        if a_count and len(pa.frames_live) < a_count:
+        expected_a = min(a_count, _LIVE_FRAMES_ARCHIVE_CAP)
+        expected_b = min(b_count, _LIVE_FRAMES_ARCHIVE_CAP)
+        if expected_a and len(pa.frames_live) < expected_a:
             return False
-        if b_count and len(pb.frames_live) < b_count:
+        if expected_b and len(pb.frames_live) < expected_b:
             return False
         self._live_pairings.pop(session_id, None)
         return True
@@ -1559,6 +1569,23 @@ class State:
     def finish_server_post_job(self, session_id: str, camera_id: str, *, canceled: bool) -> None:
         with self._lock:
             self._processing.finish_job((camera_id, session_id), canceled=canceled)
+
+    def request_server_post_cancel(self, session_id: str, camera_id: str) -> bool:
+        """Cooperatively ask a single in-flight server-post job to bail out.
+
+        Unlike `cancel_processing(session_id)` — which scans every cam
+        candidate for the session — this targets one `(camera_id,
+        session_id)` job. The running thread picks the flag up on its
+        next per-frame `should_cancel` check inside `detect_pitch`; this
+        is NOT a thread-level interrupt, so PyAV's C-layer decode can
+        still burn one more frame boundary before it notices.
+
+        Intended caller: `routes/pitch._run_server_detection`'s
+        `asyncio.wait_for` TimeoutError branch, so a wedged decode stops
+        taking CPU + RAM instead of running to completion under a
+        task that FastAPI has already given up on."""
+        with self._lock:
+            return self._processing.cancel([(camera_id, session_id)])
 
     def record_server_post_abort(
         self, session_id: str, camera_id: str, reason: str,

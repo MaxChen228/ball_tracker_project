@@ -335,6 +335,13 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:
+            # Flip the per-job `should_cancel` flag BEFORE we finish,
+            # so the PyAV decode thread (which we don't own and can't
+            # interrupt) sees it on its next per-frame check inside
+            # `detect_pitch` and bails out cooperatively. Without this
+            # the thread keeps spinning until the MOV runs out even
+            # though FastAPI has already given up on awaiting it.
+            state.request_server_post_cancel(pitch.session_id, pitch.camera_id)
             reason = f"detect_pitch timeout after {timeout_s:.1f}s"
             await _record_server_post_failure(
                 pitch.session_id, pitch.camera_id, reason,
@@ -343,7 +350,7 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
                 "background detect_pitch timed out session=%s cam=%s timeout=%.1fs",
                 pitch.session_id, pitch.camera_id, timeout_s,
             )
-            _finish(canceled=False)
+            _finish(canceled=True)
             return
         except ProcessingCanceled:
             logger.info(

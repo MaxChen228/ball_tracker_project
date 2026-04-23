@@ -6,8 +6,15 @@
 
 // ---------------------------------------------------------------------------
 // Constants — kept in lock-step with server/detection.py + server/pipeline.py.
-// Any change here MUST also land on the Python side; the whole point of the
-// on-device pipeline is byte-for-byte equivalence with the server.
+// Any change to the HSV range, area bounds, or shape-gate thresholds below
+// MUST also land on the Python side: this file's responsibility is keeping
+// those *constants* byte-for-byte identical across the two implementations.
+//
+// This is NOT a claim of pipeline-level equivalence — the iOS live path is
+// stateless HSV + CC + shape-gate, while `server/pipeline.py` additionally
+// runs an MOG2 warmup that suppresses the opening frames. See the header
+// comment in `BallDetector.h` for the full asymmetry note; do not duplicate
+// that discussion here.
 // ---------------------------------------------------------------------------
 
 // HSVRange.default() in server/detection.py.

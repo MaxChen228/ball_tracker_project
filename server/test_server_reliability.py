@@ -357,3 +357,177 @@ def test_run_server_detection_happy_path_broadcasts_no_failure(
     updated = state.results[session_id]
     assert updated.aborted is False
     assert "server_post" not in updated.abort_reasons
+
+
+# ----------------------------------------------------------------------------
+# B-2 review fix — drop-if-persisted uses the archive cap, not raw counts
+# ----------------------------------------------------------------------------
+
+
+def test_drop_live_pairing_uses_clamped_frame_counts(tmp_path):
+    """`_drop_live_pairing_if_persisted_locked` compares the pitch's
+    `frames_live` length against the live buffer's running frame count.
+    Once a cam streams past `_LIVE_FRAMES_ARCHIVE_CAP` frames the live
+    buffer saturates (deque `maxlen`) while the count keeps growing, so
+    the naive comparison `len(pa.frames_live) < frame_counts[cam]` is
+    permanently True and the entry never evicts. The fix clamps the
+    expectation to the cap; this test reproduces the post-saturation
+    condition and asserts eviction still fires."""
+    state = State(data_dir=tmp_path)
+    session_id = sid(60)
+
+    _feed_live_frame(state, "A", session_id, 0)
+    _feed_live_frame(state, "B", session_id, 0)
+
+    live = state._live_pairings[session_id]
+    live.mark_completed("A")
+    live.mark_completed("B")
+    # Simulate each cam having streamed FAR past the deque cap.
+    live.frame_counts["A"] = _LIVE_FRAMES_ARCHIVE_CAP + 7_500
+    live.frame_counts["B"] = _LIVE_FRAMES_ARCHIVE_CAP + 12_000
+
+    # Seed each cam's pitch with exactly `_LIVE_FRAMES_ARCHIVE_CAP`
+    # frames_live entries — i.e. every frame the deque still remembers
+    # has been persisted. The pre-fix code would still refuse to drop
+    # because the raw count exceeds the slice.
+    def _frames(n: int) -> list[FramePayload]:
+        return [
+            FramePayload(
+                frame_index=i, timestamp_s=float(i) / 240.0, ball_detected=False,
+            )
+            for i in range(n)
+        ]
+
+    state.pitches[("A", session_id)] = PitchPayload(
+        camera_id="A",
+        session_id=session_id,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        frames_live=_frames(_LIVE_FRAMES_ARCHIVE_CAP),
+    )
+    state.pitches[("B", session_id)] = PitchPayload(
+        camera_id="B",
+        session_id=session_id,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        frames_live=_frames(_LIVE_FRAMES_ARCHIVE_CAP),
+    )
+
+    with state._lock:
+        dropped = state._drop_live_pairing_if_persisted_locked(session_id)
+
+    assert dropped is True
+    assert session_id not in state._live_pairings
+
+
+def test_drop_live_pairing_still_waits_for_partial_persist(tmp_path):
+    """Regression guard on the clamp: if the pitch's `frames_live` is
+    strictly smaller than the saturated deque (i.e. some frames are
+    still buffered in memory and haven't made it onto the pitch JSON),
+    eviction must NOT fire — otherwise we'd drop an unflushed buffer."""
+    state = State(data_dir=tmp_path)
+    session_id = sid(61)
+
+    _feed_live_frame(state, "A", session_id, 0)
+    _feed_live_frame(state, "B", session_id, 0)
+
+    live = state._live_pairings[session_id]
+    live.mark_completed("A")
+    live.mark_completed("B")
+    live.frame_counts["A"] = _LIVE_FRAMES_ARCHIVE_CAP + 5_000
+    live.frame_counts["B"] = _LIVE_FRAMES_ARCHIVE_CAP + 5_000
+
+    def _frames(n: int) -> list[FramePayload]:
+        return [
+            FramePayload(
+                frame_index=i, timestamp_s=float(i) / 240.0, ball_detected=False,
+            )
+            for i in range(n)
+        ]
+
+    # A has persisted the full clamped cap; B only half. B should block
+    # the drop, even though `len < raw_count` would always be True.
+    state.pitches[("A", session_id)] = PitchPayload(
+        camera_id="A",
+        session_id=session_id,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        frames_live=_frames(_LIVE_FRAMES_ARCHIVE_CAP),
+    )
+    state.pitches[("B", session_id)] = PitchPayload(
+        camera_id="B",
+        session_id=session_id,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        frames_live=_frames(_LIVE_FRAMES_ARCHIVE_CAP // 2),
+    )
+
+    with state._lock:
+        dropped = state._drop_live_pairing_if_persisted_locked(session_id)
+
+    assert dropped is False
+    assert session_id in state._live_pairings
+
+
+# ----------------------------------------------------------------------------
+# B-3 review fix — timeout branch flips cooperative should_cancel
+# ----------------------------------------------------------------------------
+
+
+def test_run_server_detection_timeout_requests_cancel(tmp_path, monkeypatch):
+    """The timeout branch must call `state.request_server_post_cancel`
+    so the running `detect_pitch` thread sees `should_cancel` = True on
+    its next per-frame check and bails out. Without this call the PyAV
+    decode keeps burning CPU + RAM even though FastAPI has given up on
+    awaiting the task.
+
+    We capture the cancel call by wrapping the real method with a spy
+    and simulate a wedged detect via `time.sleep`."""
+    state = State(data_dir=tmp_path)
+    monkeypatch.setattr(main, "state", state)
+
+    session_id = sid(62)
+
+    cancel_calls: list[tuple[str, str]] = []
+    original_cancel = state.request_server_post_cancel
+
+    def _spy_cancel(sid_arg: str, cam_arg: str) -> bool:
+        cancel_calls.append((sid_arg, cam_arg))
+        return original_cancel(sid_arg, cam_arg)
+
+    monkeypatch.setattr(state, "request_server_post_cancel", _spy_cancel)
+
+    def wedged(*args, **kwargs):
+        import time
+        time.sleep(1.5)
+        return []
+
+    monkeypatch.setattr(main, "detect_pitch", wedged)
+    # Force the computed timeout to 0.1 s regardless of clip length by
+    # stubbing the timeout helper outright — safer than fighting the
+    # `max(floor, 2*duration)` formula with floor tweaks.
+    monkeypatch.setattr(pitch_routes, "_server_post_timeout_s", lambda _p: 0.1)
+
+    pitch = _sample_pitch(session_id)
+    state.results[session_id] = SessionResult(
+        session_id=session_id,
+        camera_a_received=True,
+        camera_b_received=False,
+    )
+    state.mark_server_post_queued(session_id, pitch.camera_id)
+
+    clip_path = tmp_path / "fake.mov"
+    clip_path.write_bytes(b"")
+
+    asyncio.run(
+        asyncio.wait_for(
+            pitch_routes._run_server_detection(clip_path, pitch),
+            timeout=5.0,
+        )
+    )
+
+    # Cooperative cancel must have fired exactly once, and for this job.
+    assert (session_id, pitch.camera_id) in cancel_calls
+    # The underlying processing flag must be flipped so a subsequent
+    # `should_cancel` check wins.
+    assert state.should_cancel_server_post_job(session_id, pitch.camera_id) is True
