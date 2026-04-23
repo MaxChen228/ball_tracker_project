@@ -53,7 +53,10 @@ _JS_TEMPLATE_RAW = r"""
   let currentDefaultPaths = ['server_post'];
   let currentLiveSession = null;
   const livePointStore = new Map();   // sid -> [{x,y,z,t_rel_s}]
+  const liveRayStore = new Map();     // sid -> Map(cam -> [{origin,endpoint,t_rel_s,frame_index}])
   let lastEndedLiveSid = null;        // For ghost-preview on the next arm
+  const MAX_LIVE_RAYS_PER_CAM = 48;
+  let liveRayPaintPending = false;
   // Per-cam WS connection state from SSE device_status events. Keyed by
   // camera id; value shape: {connected: bool, since_ms: number}. The
   // degraded banner fires when an armed session has any cam that's been
@@ -364,6 +367,30 @@ _JS_TEMPLATE_RAW = r"""
     }
     if (!currentLiveSession || !currentLiveSession.session_id) return traces;
     const sid = currentLiveSession.session_id;
+    const rayByCam = liveRayStore.get(sid);
+    if (rayByCam) {
+      const colors = { A: 'rgba(74,107,140,0.34)', B: 'rgba(211,84,0,0.34)' };
+      for (const [cam, rays] of rayByCam.entries()) {
+        if (!rays.length) continue;
+        const xs = [], ys = [], zs = [];
+        for (const r of rays) {
+          xs.push(r.origin[0], r.endpoint[0], null);
+          ys.push(r.origin[1], r.endpoint[1], null);
+          zs.push(r.origin[2], r.endpoint[2], null);
+        }
+        traces.push({
+          type: 'scatter3d',
+          mode: 'lines',
+          x: xs,
+          y: ys,
+          z: zs,
+          line: { color: colors[cam] || 'rgba(42,37,32,0.28)', width: 2 },
+          name: `${sid} · live rays ${cam}`,
+          hoverinfo: 'skip',
+          showlegend: true,
+        });
+      }
+    }
     const pts = livePointStore.get(sid) || [];
     if (!pts.length) return traces;
     traces.push({
@@ -384,6 +411,27 @@ _JS_TEMPLATE_RAW = r"""
       showlegend: true,
     });
     return traces;
+  }
+
+  function pushLiveRay(sid, cam, ray) {
+    let byCam = liveRayStore.get(sid);
+    if (!byCam) {
+      byCam = new Map();
+      liveRayStore.set(sid, byCam);
+    }
+    const arr = byCam.get(cam) || [];
+    arr.push(ray);
+    while (arr.length > MAX_LIVE_RAYS_PER_CAM) arr.shift();
+    byCam.set(cam, arr);
+  }
+
+  function scheduleLiveRayRepaint() {
+    if (liveRayPaintPending) return;
+    liveRayPaintPending = true;
+    requestAnimationFrame(() => {
+      liveRayPaintPending = false;
+      repaintCanvas();
+    });
   }
 
   // Layout is effectively static across the dashboard's lifetime (axes,
@@ -943,6 +991,7 @@ _JS_TEMPLATE_RAW = r"""
       resetBtn.addEventListener('click', () => {
         if (!currentLiveSession) return;
         livePointStore.set(currentLiveSession.session_id, []);
+        liveRayStore.set(currentLiveSession.session_id, new Map());
         currentLiveSession.point_count = 0;
         currentLiveSession.point_depths = [];
         currentLiveSession.last_point_at_ms = null;
@@ -1724,6 +1773,7 @@ _JS_TEMPLATE_RAW = r"""
           armed_at_ms: Date.now(),
         };
         livePointStore.set(data.sid, []);
+        liveRayStore.set(data.sid, new Map());
         liveTraceIdx = -1;
         // Ghost trail is deliberately preserved across arm — it'll stay
         // rendered until a real point for the new session lands, at which
@@ -1754,6 +1804,22 @@ _JS_TEMPLATE_RAW = r"""
         done.add(data.path);
         currentLiveSession.paths_completed = [...done];
         renderActiveSession(currentLiveSession);
+      } catch (_) {}
+    });
+    es.addEventListener('ray', (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        const sid = data.sid;
+        const cam = data.cam || '?';
+        if (!currentLiveSession || currentLiveSession.session_id !== sid) return;
+        if (!Array.isArray(data.origin) || !Array.isArray(data.endpoint)) return;
+        pushLiveRay(sid, cam, {
+          origin: data.origin.map(Number),
+          endpoint: data.endpoint.map(Number),
+          t_rel_s: Number(data.t_rel_s || 0),
+          frame_index: Number(data.frame_index || 0),
+        });
+        scheduleLiveRayRepaint();
       } catch (_) {}
     });
     es.addEventListener('calibration_changed', () => {
