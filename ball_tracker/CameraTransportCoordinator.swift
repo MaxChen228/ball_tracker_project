@@ -169,12 +169,18 @@ final class CameraTransportCoordinator: NSObject {
         UIDevice.current.isBatteryMonitoringEnabled = true
         healthMonitor.sendWSHeartbeat = { [weak self] timeSyncId in
             guard let self else { return }
+            let anchorTs = self.dependencies.getSyncAnchorTimestampS()
+            // DIAG: surface every heartbeat's sync state so we can tell
+            // from Console.app logs whether the iOS side is "forgetting"
+            // the anchor across state transitions. Will be removed once
+            // the Quick-Chirp persistence bug is fully pinned.
+            transportLog.info("heartbeat cam=\(self.cameraRole, privacy: .public) time_sync_id=\(timeSyncId ?? "nil", privacy: .public) anchor_ts=\(anchorTs ?? .nan)")
             var payload: [String: Any] = [
                 "type": "heartbeat",
                 "cam": self.cameraRole,
                 "t_session_s": CACurrentMediaTime(),
                 "time_sync_id": timeSyncId as Any,
-                "sync_anchor_timestamp_s": self.dependencies.getSyncAnchorTimestampS() as Any,
+                "sync_anchor_timestamp_s": anchorTs as Any,
             ]
             let device = UIDevice.current
             let level = device.batteryLevel
