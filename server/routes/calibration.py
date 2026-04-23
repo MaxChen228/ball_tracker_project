@@ -783,6 +783,15 @@ async def calibration_auto_start(
                 },
             )
         except HTTPException as e:
+            # HTTPException is the expected "graceful" failure channel
+            # (markers not visible, frames missing, marker coverage too
+            # thin). Without this warning the only record of *why* auto-
+            # cal failed lived in the in-memory run status — gone on the
+            # next restart and invisible in the server log.
+            logger.warning(
+                "auto calibration failed camera=%s status=%d: %s",
+                camera_id, e.status_code, e.detail,
+            )
             state.finish_auto_cal_run(
                 camera_id,
                 status="failed",
