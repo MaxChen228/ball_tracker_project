@@ -94,7 +94,7 @@
       return new Set(raw ? JSON.parse(raw) : []);
     } catch { return new Set(); }
   })();
-  const trajCache = new Map();       // sid -> {points_on_device}
+  const trajCache = new Map();       // sid -> {points}
   let basePlot = null;               // last /calibration/state .plot payload
 
   function persistTrajSelection() {
@@ -117,7 +117,7 @@
       if (!r.ok) return null;
       const data = await r.json();
       const entry = {
-        points_on_device: (data.points_on_device || []).slice().sort((a, b) => a.t_rel_s - b.t_rel_s),
+        points: (data.points || []).slice().sort((a, b) => a.t_rel_s - b.t_rel_s),
       };
       trajCache.set(sid, entry);
       return entry;
@@ -183,7 +183,7 @@
     const sid = activeReplaySid();
     if (!sid) return 0;
     const r = trajCache.get(sid);
-    const bounds = r ? trajectoryBounds(r.points_on_device || []) : null;
+    const bounds = r ? trajectoryBounds(r.points || []) : null;
     if (!bounds) return 0;
     return bounds.t1 - bounds.t0;
   }
@@ -217,7 +217,7 @@
   }
 
   function inspectTracesFor(sid, result, color) {
-    const raw = result.points_on_device || [];
+    const raw = result.points || [];
     if (!raw.length) return [];
     return [{
       type: 'scatter3d',
@@ -235,7 +235,7 @@
   }
 
   function replayTracesFor(sid, result, color) {
-    const raw = result.points_on_device || [];
+    const raw = result.points || [];
     const bounds = trajectoryBounds(raw);
     if (!bounds) return inspectTracesFor(sid, result, color);
     const tActive = bounds.t0 + playheadFrac * (bounds.t1 - bounds.t0);
@@ -795,10 +795,9 @@
     if (typeof redrawAllPreviewPlateOverlays === 'function') redrawAllPreviewPlateOverlays();
   }
 
-  const MODE_LABELS = { camera_only: 'Camera-only', on_device: 'On-device', dual: 'Dual' };
+  const MODE_LABELS = { camera_only: 'Camera-only' };
   const PATH_LABELS = {
     live: ['Live stream', 'iOS → WS'],
-    ios_post: ['iOS post-pass', 'on-device analyzer'],
     server_post: ['Server post-pass', 'PyAV + OpenCV'],
   };
 
@@ -904,7 +903,6 @@
       return `<span class="postpass-chip ${state}">${esc(label)}: ${state}</span>`;
     };
     const postPassChips = [
-      postPassRow('ios_post', 'iOS'),
       postPassRow('server_post', 'srv'),
     ].filter(Boolean).join('');
     const liveEnabled = pathsOn.has('live');
@@ -970,7 +968,7 @@
       ).join('') || `<span class="path-chip">none</span>`;
       return `<div class="path-lock"><span class="mode-label">Paths</span><div class="path-chip-row">${chips}</div></div>`;
     }
-    const options = ['live', 'ios_post', 'server_post'].map(path => {
+    const options = ['live', 'server_post'].map(path => {
       const [title, sub] = PATH_LABELS[path] || [path, ''];
       return `<label class="path-option">
           <input type="checkbox" name="paths" value="${path}" ${active.has(path) ? 'checked' : ''}>
@@ -1159,8 +1157,8 @@
       const stat = (e.status || '').replace(/_/g, ' ');
       const duration = fmtNum(e.duration_s, 2);
       const peakZ = e.peak_z_m != null ? e.peak_z_m.toFixed(2) : null;
-      const triangulated = Number(e.n_triangulated_on_device || e.n_triangulated || 0);
-      // Three pipelines, three fully-independent chips. State (on/err/-)
+      const triangulated = Number(e.n_triangulated || 0);
+      // Two pipelines, two fully-independent chips. State (on/err/-)
       // comes from path_status, frame count from n_ball_frames_by_path.
       // Keep this in lock-step with render_dashboard_events._path_chip so
       // SSR and JS refresh paint the same DOM.
@@ -1168,10 +1166,9 @@
       const pathCounts = e.n_ball_frames_by_path || {};
       const pathTitles = {
         live: 'Live — iOS real-time detection (WS streamed)',
-        ios_post: 'POST — iOS on-device post-pass payload',
         server_post: 'SVR — server-side detection on decoded MOV',
       };
-      const pathChips = [['live', 'L'], ['ios_post', 'I'], ['server_post', 'S']]
+      const pathChips = [['live', 'L'], ['server_post', 'S']]
         .map(([path, label]) => {
           const status = pathStatus[path] || '-';
           const counts = pathCounts[path] || {};
@@ -1185,10 +1182,8 @@
         .join('');
       const confirmMsg = `刪除 session ${e.session_id}？此動作無法復原。`;
       const trashMsg = `移動 session ${e.session_id} 到垃圾桶？`;
-      // Trajectory overlay toggle: only sessions with on-device points qualify.
-      // Mode-one (camera_only) sessions are intentionally not overlayable on
-      // the LIVE dashboard — use the forensic viewer for those.
-      const hasTraj = (e.n_triangulated_on_device || 0) > 0;
+      // Trajectory overlay toggle: only sessions with triangulated points qualify.
+      const hasTraj = (e.n_triangulated || 0) > 0;
       const color = hasTraj ? trajColorFor(e.session_id) : '';
       const checked = selectedTrajIds.has(e.session_id) ? 'checked' : '';
       const toggle = hasTraj
@@ -1966,7 +1961,6 @@
       cells.push({
         sid: ev.session_id,
         live: paths.has('live'),
-        ios: paths.has('ios_post'),
         srv: paths.has('server_post'),
       });
     }
