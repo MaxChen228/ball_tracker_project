@@ -92,7 +92,7 @@ _JS_TEMPLATE_RAW = r"""
       return new Set(raw ? JSON.parse(raw) : []);
     } catch { return new Set(); }
   })();
-  const trajCache = new Map();       // sid -> {points_on_device, fit_on_device}
+  const trajCache = new Map();       // sid -> {points_on_device}
   let basePlot = null;               // last /calibration/state .plot payload
 
   function persistTrajSelection() {
@@ -114,33 +114,38 @@ _JS_TEMPLATE_RAW = r"""
       const r = await fetch(`/results/${encodeURIComponent(sid)}`, { cache: 'no-store' });
       if (!r.ok) return null;
       const data = await r.json();
-      // Dashboard displays on-device (mode-two) only. Server (mode-one) data
-      // is forensic-only — it's still in the SessionResult payload but
-      // intentionally ignored here.
       const entry = {
-        points_on_device: data.points_on_device || [],
-        fit_on_device: data.fit_on_device || null,
+        points_on_device: (data.points_on_device || []).slice().sort((a, b) => a.t_rel_s - b.t_rel_s),
       };
       trajCache.set(sid, entry);
       return entry;
     } catch { return null; }
   }
 
-  function evalQuadratic(coeffs, t) {
-    return coeffs[0] * t * t + coeffs[1] * t + coeffs[2];
+  function trajectoryBounds(points) {
+    if (!points || points.length < 2) return null;
+    return { t0: points[0].t_rel_s, t1: points[points.length - 1].t_rel_s };
   }
 
-  function densifyFit(fit, n) {
-    const t0 = fit.t_min_s;
-    const t1 = (fit.plate_t_s !== null && fit.plate_t_s !== undefined) ? fit.plate_t_s : fit.t_max_s;
-    const xs = new Array(n), ys = new Array(n), zs = new Array(n);
-    for (let i = 0; i < n; ++i) {
-      const t = t0 + (t1 - t0) * (i / (n - 1));
-      xs[i] = evalQuadratic(fit.coeffs_x, t);
-      ys[i] = evalQuadratic(fit.coeffs_y, t);
-      zs[i] = evalQuadratic(fit.coeffs_z, t);
+  function sampleTrajectory(points, t) {
+    if (!points || !points.length) return null;
+    if (points.length === 1) return points[0];
+    if (t <= points[0].t_rel_s) return points[0];
+    if (t >= points[points.length - 1].t_rel_s) return points[points.length - 1];
+    for (let i = 1; i < points.length; ++i) {
+      const a = points[i - 1];
+      const b = points[i];
+      if (t > b.t_rel_s) continue;
+      const span = Math.max(1e-6, b.t_rel_s - a.t_rel_s);
+      const alpha = (t - a.t_rel_s) / span;
+      return {
+        x_m: a.x_m + (b.x_m - a.x_m) * alpha,
+        y_m: a.y_m + (b.y_m - a.y_m) * alpha,
+        z_m: a.z_m + (b.z_m - a.z_m) * alpha,
+        t_rel_s: t,
+      };
     }
-    return { xs, ys, zs };
+    return points[points.length - 1];
   }
 
   // --- Canvas mode + playback state ---------------------------------------
@@ -172,17 +177,18 @@ _JS_TEMPLATE_RAW = r"""
     return arr.length ? arr[arr.length - 1] : null;
   }
 
-  function activeFitDuration() {
+  function activeReplayDuration() {
     const sid = activeReplaySid();
     if (!sid) return 0;
     const r = trajCache.get(sid);
-    if (!r || !r.fit_on_device) return 0;
-    return r.fit_on_device.t_max_s - r.fit_on_device.t_min_s;
+    const bounds = r ? trajectoryBounds(r.points_on_device || []) : null;
+    if (!bounds) return 0;
+    return bounds.t1 - bounds.t0;
   }
 
   function updateTimeReadout() {
     if (!timeReadout || !scrubSlider) return;
-    const dur = activeFitDuration();
+    const dur = activeReplayDuration();
     const now = dur * playheadFrac;
     timeReadout.textContent = `${now.toFixed(2)} / ${dur.toFixed(2)} s`;
     scrubSlider.value = Math.round(playheadFrac * 1000);
@@ -209,52 +215,7 @@ _JS_TEMPLATE_RAW = r"""
   }
 
   function inspectTracesFor(sid, result, color) {
-    // Inspect mode: dense fitted quadratic + inlier dots + outlier X markers.
-    // Lets operator judge RANSAC decisions at a glance and spot sessions
-    // where the fit chose the wrong cluster.
-    const fit = result.fit_on_device;
     const raw = result.points_on_device || [];
-    if (fit) {
-      const { xs, ys, zs } = densifyFit(fit, 64);
-      const inlierSet = new Set(fit.inlier_indices);
-      const inliers = raw.filter((_, i) => inlierSet.has(i));
-      const outliers = raw.filter((_, i) => !inlierSet.has(i));
-      const traces = [{
-        type: 'scatter3d',
-        mode: 'lines',
-        x: xs, y: ys, z: zs,
-        line: { color, width: 5 },
-        name: `${sid} · fit`,
-        hovertemplate: `${sid}<br>rms=${fit.rms_m.toFixed(3)}m<extra></extra>`,
-        showlegend: true,
-      }, {
-        type: 'scatter3d',
-        mode: 'markers',
-        x: inliers.map(p => p.x_m),
-        y: inliers.map(p => p.y_m),
-        z: inliers.map(p => p.z_m),
-        marker: { color, size: 3, opacity: 0.55 },
-        name: `${sid} · inliers`,
-        hovertemplate: `${sid}<br>t=%{customdata:.3f}s<br>x=%{x:.2f} y=%{y:.2f} z=%{z:.2f}<extra></extra>`,
-        customdata: inliers.map(p => p.t_rel_s),
-        showlegend: false,
-      }];
-      if (outliers.length) {
-        traces.push({
-          type: 'scatter3d',
-          mode: 'markers',
-          x: outliers.map(p => p.x_m),
-          y: outliers.map(p => p.y_m),
-          z: outliers.map(p => p.z_m),
-          marker: { color: '#C03A2B', size: 5, symbol: 'x', opacity: 0.9 },
-          name: `${sid} · outliers`,
-          hovertemplate: `${sid} OUTLIER<br>t=%{customdata:.3f}s<extra></extra>`,
-          customdata: outliers.map(p => p.t_rel_s),
-          showlegend: false,
-        });
-      }
-      return traces;
-    }
     if (!raw.length) return [];
     return [{
       type: 'scatter3d',
@@ -264,48 +225,42 @@ _JS_TEMPLATE_RAW = r"""
       z: raw.map(p => p.z_m),
       line: { color, width: 3, dash: 'dot' },
       marker: { color, size: 2, opacity: 0.6 },
-      name: `${sid} · raw`,
-      hovertemplate: `${sid} (unfit)<br>t=%{customdata:.3f}s<extra></extra>`,
+      name: `${sid} · path`,
+      hovertemplate: `${sid}<br>t=%{customdata:.3f}s<br>x=%{x:.2f} y=%{y:.2f} z=%{z:.2f}<extra></extra>`,
       customdata: raw.map(p => p.t_rel_s),
       showlegend: true,
     }];
   }
 
   function replayTracesFor(sid, result, color) {
-    // Replay mode: clean trajectory line + animated ball sphere + short
-    // motion trail. Inlier/outlier markers are suppressed — those are an
-    // inspect-mode concern, not a broadcast/demo concern.
-    const fit = result.fit_on_device;
-    if (!fit) return [];
-    const { xs, ys, zs } = densifyFit(fit, 80);
-    const tActive = fit.t_min_s + playheadFrac * (fit.t_max_s - fit.t_min_s);
-    const bx = evalQuadratic(fit.coeffs_x, tActive);
-    const by = evalQuadratic(fit.coeffs_y, tActive);
-    const bz = evalQuadratic(fit.coeffs_z, tActive);
-    // Short fading trail: 12 samples behind the ball, ~0.1 s worth.
-    const trailN = 12;
-    const trailDt = 0.01;
-    const trailX = [], trailY = [], trailZ = [];
-    for (let i = trailN; i >= 1; --i) {
-      const tt = tActive - i * trailDt;
-      if (tt < fit.t_min_s) continue;
-      trailX.push(evalQuadratic(fit.coeffs_x, tt));
-      trailY.push(evalQuadratic(fit.coeffs_y, tt));
-      trailZ.push(evalQuadratic(fit.coeffs_z, tt));
+    const raw = result.points_on_device || [];
+    const bounds = trajectoryBounds(raw);
+    if (!bounds) return inspectTracesFor(sid, result, color);
+    const tActive = bounds.t0 + playheadFrac * (bounds.t1 - bounds.t0);
+    const ball = sampleTrajectory(raw, tActive);
+    if (!ball) return [];
+    const trailWindowS = 0.12;
+    const trailPts = raw.filter(p => p.t_rel_s >= (tActive - trailWindowS) && p.t_rel_s <= tActive);
+    if (!trailPts.length || trailPts[trailPts.length - 1].t_rel_s < tActive) {
+      trailPts.push(ball);
     }
     return [
       {
         type: 'scatter3d', mode: 'lines',
-        x: xs, y: ys, z: zs,
+        x: raw.map(p => p.x_m),
+        y: raw.map(p => p.y_m),
+        z: raw.map(p => p.z_m),
         line: { color, width: 4 },
         name: `${sid} · path`,
-        hovertemplate: `${sid}<br>rms=${fit.rms_m.toFixed(3)}m<extra></extra>`,
+        hovertemplate: `${sid}<extra></extra>`,
         showlegend: true,
         opacity: 0.45,
       },
       {
         type: 'scatter3d', mode: 'lines',
-        x: trailX, y: trailY, z: trailZ,
+        x: trailPts.map(p => p.x_m),
+        y: trailPts.map(p => p.y_m),
+        z: trailPts.map(p => p.z_m),
         line: { color, width: 6 },
         name: `${sid} · trail`,
         hoverinfo: 'skip',
@@ -314,14 +269,14 @@ _JS_TEMPLATE_RAW = r"""
       },
       {
         type: 'scatter3d', mode: 'markers',
-        x: [bx], y: [by], z: [bz],
+        x: [ball.x_m], y: [ball.y_m], z: [ball.z_m],
         marker: {
           color: '#D9A441', size: 9, symbol: 'circle',
           line: { color: '#4A3E24', width: 1.5 },
         },
         name: `${sid} · ball`,
         hovertemplate: `${sid}<br>t=%{customdata:.3f}s<br>(x,y,z)=(%{x:.2f}, %{y:.2f}, %{z:.2f})<extra></extra>`,
-        customdata: [tActive - fit.t_min_s],
+        customdata: [tActive - bounds.t0],
         showlegend: false,
       },
     ];
@@ -575,8 +530,8 @@ _JS_TEMPLATE_RAW = r"""
     const sid = cb.dataset.trajSid;
     // Single-select preview: clicking one row always replaces the
     // selection (clicking again on the same row deselects). Multi-select
-    // was confusing when replays had different durations + made the fit
-    // outlier inspector busy when several sessions overlapped in space.
+    // was confusing when replays had different durations and made the
+    // canvas too busy when several sessions overlapped in space.
     if (cb.checked) {
       selectedTrajIds.clear();
       selectedTrajIds.add(sid);
@@ -654,7 +609,7 @@ _JS_TEMPLATE_RAW = r"""
   function animationTick(ts) {
     if (!isPlaying) return;
     if (lastFrameTs !== null) {
-      const dur = activeFitDuration();
+      const dur = activeReplayDuration();
       if (dur > 0) {
         const dt = (ts - lastFrameTs) / 1000.0;
         playheadFrac += (dt * playbackSpeed) / dur;
@@ -675,7 +630,7 @@ _JS_TEMPLATE_RAW = r"""
     if (isPlaying) requestAnimationFrame(animationTick);
   }
   if (playpauseBtn) playpauseBtn.addEventListener('click', () => {
-    if (activeFitDuration() <= 0) return;  // nothing to play
+    if (activeReplayDuration() <= 0) return;  // nothing to play
     setPlaying(!isPlaying);
   });
   if (scrubSlider) scrubSlider.addEventListener('input', () => {
@@ -1196,25 +1151,13 @@ _JS_TEMPLATE_RAW = r"""
     evHtml = events.map(e => {
       const sid = esc(e.session_id);
       const stat = (e.status || '').replace(/_/g, ' ');
-      const speedKmh = e.speed_mps != null ? (e.speed_mps * 3.6).toFixed(1) : null;
-      const duration = fmtNum(e.fit_duration_s != null ? e.fit_duration_s : e.duration_s, 2);
-      const rms = fmtNum(e.rms_m, 3);
-      const plateX = e.plate_xz_m ? e.plate_xz_m[0].toFixed(2) : null;
-      const plateZ = e.plate_xz_m ? e.plate_xz_m[1].toFixed(2) : null;
+      const duration = fmtNum(e.duration_s, 2);
+      const peakZ = e.peak_z_m != null ? e.peak_z_m.toFixed(2) : null;
+      const triangulated = Number(e.n_triangulated_on_device || e.n_triangulated || 0);
       const pathStatus = e.path_status || {};
       const pathChips = [['live', 'L'], ['ios_post', 'I'], ['server_post', 'S']]
         .map(([path, label]) => `<span class="path-chip${pathStatus[path] === 'done' ? ' on' : ''}">${label}</span>`)
         .join('');
-      // Quality chip from fit RMS: <10mm excellent, <30mm good, <80mm fair, else poor.
-      // Sessions without a fit get a neutral `no-fit` chip — they still list
-      // (the operator may want to forensic them) but signal loudly.
-      let qualityClass = 'no-fit', qualityLabel = 'no fit';
-      if (e.rms_m != null) {
-        if (e.rms_m < 0.010)      { qualityClass = 'excellent'; qualityLabel = 'excellent'; }
-        else if (e.rms_m < 0.030) { qualityClass = 'good';      qualityLabel = 'good'; }
-        else if (e.rms_m < 0.080) { qualityClass = 'fair';      qualityLabel = 'fair'; }
-        else                      { qualityClass = 'poor';      qualityLabel = 'poor'; }
-      }
       const confirmMsg = `刪除 session ${e.session_id}？此動作無法復原。`;
       const trashMsg = `移動 session ${e.session_id} 到垃圾桶？`;
       // Trajectory overlay toggle: only sessions with on-device points qualify.
@@ -1229,13 +1172,11 @@ _JS_TEMPLATE_RAW = r"""
              <span class="swatch" style="background:${color}"></span>
            </label>`
         : `<span class="traj-toggle-placeholder" aria-hidden="true"></span>`;
-      const metricsRow = e.has_fit ? `
-          <div class="event-stats">
-            ${speedKmh != null ? `<span><span class="k">Speed</span><span class="v">${speedKmh} km/h</span></span>` : ''}
-            ${plateX != null ? `<span><span class="k">Plate (x,z)</span><span class="v">${plateX}, ${plateZ} m</span></span>` : ''}
-            <span><span class="k">Dur</span><span class="v">${duration} s</span></span>
-            <span><span class="k">RMS</span><span class="v">${rms} m</span></span>
-          </div>` : '';
+      const metrics = [];
+      if (triangulated > 0) metrics.push(`<span><span class="k">Pts</span><span class="v">${triangulated}</span></span>`);
+      if (e.duration_s != null) metrics.push(`<span><span class="k">Dur</span><span class="v">${duration} s</span></span>`);
+      if (peakZ != null) metrics.push(`<span><span class="k">Peak Z</span><span class="v">${peakZ} m</span></span>`);
+      const metricsRow = metrics.length ? `<div class="event-stats">${metrics.join('')}</div>` : '';
       const processingState = e.processing_state ? `<span class="chip ${esc(e.processing_state)}">${esc(e.processing_state)}</span>` : '';
       const processingAction = e.processing_state === 'queued' || e.processing_state === 'processing'
         ? `<form class="event-action-form" method="POST" action="/sessions/${sid}/cancel_processing">
@@ -1269,7 +1210,6 @@ _JS_TEMPLATE_RAW = r"""
             <div class="event-top">
               <span class="sid">${sid}</span>
               <span class="event-paths">${pathChips}</span>
-              <span class="quality chip ${qualityClass}" title="fit RMS quality">${qualityLabel}</span>
               ${processingState}
               <span class="chip ${esc(e.status || '')}">${esc(stat)}</span>
             </div>

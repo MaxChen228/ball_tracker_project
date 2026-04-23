@@ -118,7 +118,6 @@ from schemas import (
 )
 from collections import deque
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
-from fitting import fit_trajectory
 from pipeline import ProcessingCanceled, annotate_video, detect_pitch
 from video import probe_dims
 from chirp import chirp_wav_bytes
