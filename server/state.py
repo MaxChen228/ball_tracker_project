@@ -1578,6 +1578,45 @@ class State:
         with self._lock:
             self._processing.finish_job((camera_id, session_id), canceled=canceled)
 
+    def record_server_post_abort(
+        self, session_id: str, camera_id: str, reason: str,
+    ) -> SessionResult | None:
+        """Persist a server-side post-processing failure so the dashboard
+        can render it as a red pill on `/events`. Writes `reason` into
+        `SessionResult.abort_reasons[server_post]` (keyed by pipeline, not
+        by cam, because the events view pills at pipeline granularity)
+        and re-persists the result JSON. Returns the updated result, or
+        None if no result record exists yet (e.g. the pitch JSON was
+        already deleted).
+
+        Idempotent — calling twice with the same reason produces the
+        same on-disk state. A second call with a different reason
+        replaces the first; `_run_server_detection`'s lifecycle is
+        one-shot per (session, cam) so the collision case is only
+        possible via operator resume, in which case the fresher reason
+        is the useful one."""
+        with self._lock:
+            result = self.results.get(session_id)
+            if result is None:
+                return None
+            reasons = dict(result.abort_reasons)
+            reasons[DetectionPath.server_post.value] = reason
+            # Also key by camera so diagnostics can see which cam failed
+            # when only one side errored. State_events collapses the
+            # cam-keyed entries into the same pipeline pill via the
+            # `server_post:` prefix check in `_path_status_pills`, so the
+            # extra detail doesn't produce spurious pills.
+            reasons[f"{DetectionPath.server_post.value}:{camera_id}"] = reason
+            updated = result.model_copy(
+                update={
+                    "abort_reasons": reasons,
+                    "aborted": True,
+                }
+            )
+            self.results[session_id] = updated
+        self._atomic_write(self._result_path(session_id), updated.model_dump_json())
+        return updated
+
     def cancel_processing(self, session_id: str) -> bool:
         keys = [(cam, session_id) for cam, _pitch, _clip in self._session_server_post_candidates(session_id)]
         with self._lock:
