@@ -16,12 +16,33 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 /// Obj-C++ OpenCV wrapper for HSV-threshold + connectedComponentsWithStats
-/// ball detection. Kept lock-step with `server/detection.py`: same default
-/// HSV range (yellow-green h[25,55] s[90,255] v[90,255]), same area bounds
+/// ball detection.
+///
+/// Shared-constants contract with the server: same default HSV range
+/// (yellow-green h[25,55] s[90,255] v[90,255]), same area bounds
 /// ([20, 150000] px²), same shape gate (aspect ≥ 0.75, fill ≥ 0.60).
 ///
-/// `BTBallDetector` is the stateless per-frame path (no background model),
-/// used by the live detection pipeline (`ConcurrentDetectionPool`).
+/// IMPORTANT — the two pipelines are NOT byte-for-byte equivalent:
+///   - iOS (`BTBallDetector`): stateless per-frame HSV + connected-components
+///     + shape-gate only. No temporal smoothing, no background subtraction.
+///   - Server (`server/pipeline.py`): runs the same HSV + CC + shape-gate,
+///     BUT by default also runs an OpenCV MOG2 background subtractor with a
+///     30-frame warmup window (≈125 ms at 240 fps) during which detection
+///     is FORCED to return `None`.
+///
+/// Consequence: for the first ~125 ms of each take the `live` path (iOS)
+/// may produce detections while the `server_post` path (server re-decode)
+/// cannot. This is a known, deliberate asymmetry introduced to suppress
+/// static-background false positives on the archival path — not a bug and
+/// not something to "fix" by silently tuning one side.
+///
+/// TODO: if strict symmetry is ever required, either (a) add a matching
+/// MOG2 warmup to `ConcurrentDetectionPool` so the live path swallows the
+/// same opening frames, or (b) flip the server's MOG2 default off. Both
+/// are product decisions, not detector-local tweaks.
+///
+/// `BTBallDetector` is the stateless per-frame path, used by the live
+/// detection pipeline (`ConcurrentDetectionPool`).
 @interface BTBallDetector : NSObject
 
 /// Run detection with the default HSV range.

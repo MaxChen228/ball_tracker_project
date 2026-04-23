@@ -115,6 +115,12 @@ class CaptureTelemetryPayload(BaseModel):
     is_video_binned: bool | None = None
     tracking_exposure_cap: TrackingExposureCapMode | None = None
     applied_max_exposure_s: float | None = None
+    # Number of `CMSampleBuffer`s the ClipRecorder had to drop because the
+    # H.264 writer input returned `isReadyForMoreMediaData == false`. Non-zero
+    # means the encoder couldn't keep up with 240 fps capture and the on-disk
+    # MOV is missing samples the phone actually saw. Optional so payloads
+    # produced before this field existed still validate.
+    dropped_frame_count: int | None = None
 
 
 class PitchPayload(BaseModel):
@@ -130,6 +136,12 @@ class PitchPayload(BaseModel):
     # is the sole pairing key for A/B uploads — iPhones no longer generate
     # their own counters. Pattern matches `_new_session_id()`; also safe to
     # interpolate into filenames.
+    #
+    # Mint width today is 8 hex chars (`_new_session_id` uses
+    # `secrets.token_hex(4)`); the 4-32 range is forward-compat slack so a
+    # future widening / narrowing of the mint width doesn't require a wire
+    # schema bump. The iOS-side `ServerUploader.PitchPayload` doc comment
+    # is the canonical mirror — keep both in sync.
     session_id: str = Field(..., pattern=r"^s_[0-9a-f]{4,32}$")
     # Shared sync-run identifier for the legacy third-device chirp flow.
     # When present, both A and B MUST match for the session to be

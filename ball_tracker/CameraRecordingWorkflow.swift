@@ -169,11 +169,55 @@ final class CameraRecordingWorkflow {
         }
         if let finishingClip {
             finishingClip.finish { [weak self] videoURL in
-                self?.handleFinishedClip(enriched: payload, videoURL: videoURL)
+                // `droppedFrameCount` only stabilises after finish — fold it
+                // into the telemetry so the uploaded payload carries the
+                // real encoder-pressure number (not the stale zero from
+                // first-frame stamping).
+                let dropped = finishingClip.droppedFrameCount
+                let enriched = Self.payloadWithDroppedFrameCount(payload, dropped: dropped)
+                self?.handleFinishedClip(enriched: enriched, videoURL: videoURL)
             }
         } else {
             handleFinishedClip(enriched: payload, videoURL: nil)
         }
+    }
+
+    /// Clone `payload` with `capture_telemetry.dropped_frame_count = dropped`.
+    /// Falls back to a minimal telemetry record when the payload has none,
+    /// so operators still see dropped counts on legacy code paths.
+    private static func payloadWithDroppedFrameCount(
+        _ payload: ServerUploader.PitchPayload,
+        dropped: Int
+    ) -> ServerUploader.PitchPayload {
+        let telemetry: ServerUploader.CaptureTelemetry
+        if let existing = payload.capture_telemetry {
+            telemetry = ServerUploader.CaptureTelemetry(
+                width_px: existing.width_px,
+                height_px: existing.height_px,
+                target_fps: existing.target_fps,
+                applied_fps: existing.applied_fps,
+                format_fov_deg: existing.format_fov_deg,
+                format_index: existing.format_index,
+                is_video_binned: existing.is_video_binned,
+                tracking_exposure_cap: existing.tracking_exposure_cap,
+                applied_max_exposure_s: existing.applied_max_exposure_s,
+                dropped_frame_count: dropped
+            )
+        } else {
+            telemetry = ServerUploader.CaptureTelemetry(
+                width_px: 0,
+                height_px: 0,
+                target_fps: 0,
+                applied_fps: nil,
+                format_fov_deg: nil,
+                format_index: nil,
+                is_video_binned: nil,
+                tracking_exposure_cap: nil,
+                applied_max_exposure_s: nil,
+                dropped_frame_count: dropped
+            )
+        }
+        return payload.withCaptureTelemetry(telemetry)
     }
 
     private func handleFinishedClip(

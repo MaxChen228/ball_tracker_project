@@ -60,13 +60,49 @@ final class ServerUploader: @unchecked Sendable {
         let is_video_binned: Bool?
         let tracking_exposure_cap: String?
         let applied_max_exposure_s: Double?
+        /// Number of `CMSampleBuffer`s the ClipRecorder had to drop because
+        /// `AVAssetWriterInput.isReadyForMoreMediaData` was false when they
+        /// arrived. Recorded for operator visibility — a non-zero value
+        /// means the H.264 encoder couldn't keep up with 240 fps capture
+        /// and the on-disk MOV is missing samples the phone actually saw.
+        /// Optional because it's populated at clip finish time; payloads
+        /// replayed before that timing is recorded carry nil. Default `nil`
+        /// so the synthesised memberwise init remains callable from sites
+        /// that pre-date this field (e.g. the stamp-at-first-frame path).
+        let dropped_frame_count: Int?
+
+        init(
+            width_px: Int,
+            height_px: Int,
+            target_fps: Double,
+            applied_fps: Double?,
+            format_fov_deg: Double?,
+            format_index: Int?,
+            is_video_binned: Bool?,
+            tracking_exposure_cap: String?,
+            applied_max_exposure_s: Double?,
+            dropped_frame_count: Int? = nil
+        ) {
+            self.width_px = width_px
+            self.height_px = height_px
+            self.target_fps = target_fps
+            self.applied_fps = applied_fps
+            self.format_fov_deg = format_fov_deg
+            self.format_index = format_index
+            self.is_video_binned = is_video_binned
+            self.tracking_exposure_cap = tracking_exposure_cap
+            self.applied_max_exposure_s = applied_max_exposure_s
+            self.dropped_frame_count = dropped_frame_count
+        }
     }
 
     struct PitchPayload: Codable {
         let camera_id: String
         /// Server-minted pairing key from `POST /sessions/arm`. A/B pairs
         /// by this alone — iPhones no longer mint any pairing identifier.
-        /// Pattern: `s_` + 4–16 hex chars (matches the server regex).
+        /// Pattern: `s_` + 4–32 hex chars (server currently mints 8 via
+        /// `secrets.token_hex(4)`; the 32-char upper bound is forward-compat
+        /// slack in the `server/schemas.py` regex).
         let session_id: String
         /// Shared legacy chirp sync-run id. Both phones must stamp the
         /// same id onto their recovered chirp anchor; a mismatch means the
@@ -130,6 +166,24 @@ final class ServerUploader: @unchecked Sendable {
                 paths: newPaths.map(\.rawValue),
                 frames: frames,
                 capture_telemetry: capture_telemetry
+            )
+        }
+
+        /// Return a copy of this payload with `capture_telemetry` replaced —
+        /// used to fold in end-of-cycle numbers (e.g. ClipRecorder's
+        /// `droppedFrameCount`) that aren't known when the recorder first
+        /// stamps the telemetry at first-frame time.
+        func withCaptureTelemetry(_ telemetry: CaptureTelemetry?) -> PitchPayload {
+            PitchPayload(
+                camera_id: camera_id,
+                session_id: session_id,
+                sync_id: sync_id,
+                sync_anchor_timestamp_s: sync_anchor_timestamp_s,
+                video_start_pts_s: video_start_pts_s,
+                local_recording_index: local_recording_index,
+                paths: paths,
+                frames: frames,
+                capture_telemetry: telemetry
             )
         }
     }
