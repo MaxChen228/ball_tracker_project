@@ -99,7 +99,6 @@ from schemas import (
     MarkerDraft,
     MarkerRecord,
     MarkerUpdateRequest,
-    PitchAnalysisPayload,
     PitchPayload,
     Session,
     SessionResult,

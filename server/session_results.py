@@ -1,10 +1,9 @@
 """Session result builder and triangulation coordinator.
 
 `rebuild_result_for_session` is the authoritative constructor for
-`SessionResult` — events / viewer / pitch_analysis all read it. It combines
-per-pipeline frame counts, triangulation output (live, ios_post,
-server_post), sync validation, and legacy `points` / `points_on_device`
-semantics into one immutable-ish snapshot.
+`SessionResult` — events / viewer all read it. It combines per-pipeline
+frame counts, triangulation output (live, server_post), sync validation,
+and legacy `points` semantics into one immutable-ish snapshot.
 
 Lock discipline: `State._lock` is a `threading.Lock` (non-reentrant). The
 two-phase pattern here — snapshot pitches / live / session under the lock,
@@ -53,8 +52,7 @@ def triangulate_pair(
     at the calibration resolution.
 
     `source` picks the detection stream (`"server"` default reads
-    `pitch.frames`; `"on_device"` reads `pitch.frames_on_device`). Dual mode
-    calls this twice per session to keep the two point clouds separate."""
+    `pitch.frames`)."""
     with state._lock:
         cal_a = state._calibration_store.get(a.camera_id)
         cal_b = state._calibration_store.get(b.camera_id)
@@ -157,17 +155,10 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
     for pitch in (a, b):
         if pitch is not None:
             candidate_paths |= paths_for_pitch(state, pitch)
-            # Auto-include paths when frames are actually present, even if
-            # neither the session nor the pitch explicitly listed them —
-            # /pitch_analysis can attach iOS frames post-hoc into a session
-            # that was armed server_post-only, and we still owe the caller
-            # a triangulation over those frames.
-            if pitch.frames_ios_post or pitch.frames_on_device:
-                candidate_paths.add(DetectionPath.ios_post)
-            # Only auto-include server_post when the bucket is populated.
-            # Legacy `pitch.frames` alone is ambiguous — in on_device-only
-            # sessions it should map to ios_post, not resurrect server_post.
-            if pitch.frames_server_post:
+            # Auto-include server_post when the bucket is populated so
+            # reprocessing can flow through even without an explicit paths
+            # snapshot on the pitch JSON.
+            if pitch.frames_server_post or pitch.frames:
                 candidate_paths.add(DetectionPath.server_post)
     if live is not None and live.frame_counts:
         candidate_paths.add(DetectionPath.live)
@@ -191,7 +182,6 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         sync_error = validate_pair_sync(state, a, b)
         if sync_error is not None:
             result.error = sync_error
-            result.error_on_device = sync_error
 
     mono_session = (a is None) != (b is None)
     for path in sorted(candidate_paths, key=lambda p: p.value):
@@ -230,7 +220,6 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
 
     authority: list[TriangulatedPoint] = []
     for path in (
-        DetectionPath.ios_post.value,
         DetectionPath.server_post.value,
         DetectionPath.live.value,
     ):
@@ -239,26 +228,17 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             authority = pts
             break
     result.triangulated = authority
-    # Legacy `points` semantics: in dual-like sessions (server_post is in
-    # the candidate set) keep it strictly on the server stream so iOS
-    # post-pass doesn't leak across the points/points_on_device boundary.
-    # In mono-like sessions (on_device-only, live-only, etc) collapse to
-    # whichever path actually produced data — older consumers (viewer,
-    # /events) expect `points` to hold the session's single result when no
-    # dual split is in play.
+    # Legacy `points` semantics: prefer server_post when present, else
+    # fall back to live. Older consumers (viewer, /events) expect `points`
+    # to hold the session's single result.
     if DetectionPath.server_post in candidate_paths:
         legacy_points = result.triangulated_by_path.get(DetectionPath.server_post.value, [])
     else:
         legacy_points = (
-            result.triangulated_by_path.get(DetectionPath.ios_post.value)
-            or result.triangulated_by_path.get(DetectionPath.live.value)
+            result.triangulated_by_path.get(DetectionPath.live.value)
             or []
         )
     result.points = list(legacy_points)
-    if result.triangulated_by_path.get(DetectionPath.ios_post.value):
-        result.points_on_device = list(result.triangulated_by_path[DetectionPath.ios_post.value])
-    elif result.triangulated_by_path.get(DetectionPath.live.value):
-        result.points_on_device = list(result.triangulated_by_path[DetectionPath.live.value])
 
     if not result.triangulated and result.error is None and (a is not None or b is not None):
         if result.abort_reasons:

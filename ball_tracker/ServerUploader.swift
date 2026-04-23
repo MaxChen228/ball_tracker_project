@@ -26,13 +26,11 @@ final class ServerUploader: @unchecked Sendable {
 
     enum DetectionPath: String, Codable, CaseIterable {
         case live = "live"
-        case iosPost = "ios_post"
         case serverPost = "server_post"
 
         var displayLabel: String {
             switch self {
             case .live: return "Live stream"
-            case .iosPost: return "iOS post-pass"
             case .serverPost: return "Server post-pass"
             }
         }
@@ -88,18 +86,10 @@ final class ServerUploader: @unchecked Sendable {
         let local_recording_index: Int?
         /// Snapshot of the enabled detection paths for this session.
         let paths: [String]?
-        /// Per-frame detection results. Empty in mode-one (`camera_only`):
-        /// the server runs detection on the uploaded MOV. Non-empty in
-        /// mode-two (`on_device`): iPhone ran its own BTDetectionSession
-        /// pipeline and ships the frame list alongside the metadata, no MOV.
-        /// Default [] so the field always encodes to a concrete array.
+        /// Per-frame detection results. Empty on the wire — the server
+        /// runs detection on the uploaded MOV. Default [] so the field
+        /// always encodes to a concrete array.
         let frames: [FramePayload]
-        /// Dual-mode only: parallel iOS-end detection stream carried
-        /// alongside the MOV. Server keeps both streams so the viewer can
-        /// overlay them for HSV / shape-gate tuning. Empty list for
-        /// camera_only / on_device sessions. Default [] keeps the field
-        /// encoded concretely for consistency with `frames`.
-        let frames_on_device: [FramePayload]
         /// Actual capture conditions the phone observed while recording
         /// this take. Server persists this into the session so the web
         /// UI can answer "what format/FOV/exposure did this clip really use?"
@@ -114,9 +104,7 @@ final class ServerUploader: @unchecked Sendable {
         // triangulation, so the wire shape shrinks to just session-level
         // metadata + per-frame detection output.
 
-        /// Return a copy of this payload with `frames` replaced. Used by
-        /// the mode-two cycle-complete path to attach the session's
-        /// BTDetectionSession output before shipping.
+        /// Return a copy of this payload with `frames` replaced.
         func withFrames(_ newFrames: [FramePayload]) -> PitchPayload {
             PitchPayload(
                 camera_id: camera_id,
@@ -127,26 +115,6 @@ final class ServerUploader: @unchecked Sendable {
                 local_recording_index: local_recording_index,
                 paths: paths,
                 frames: newFrames,
-                frames_on_device: frames_on_device,
-                capture_telemetry: capture_telemetry
-            )
-        }
-
-        /// Return a copy of this payload with `frames_on_device` replaced.
-        /// Dual-mode cycle-complete uses this to attach the iOS-end
-        /// BTDetectionSession output while preserving the MOV path's
-        /// (empty) `frames`.
-        func withFramesOnDevice(_ newFramesOnDevice: [FramePayload]) -> PitchPayload {
-            PitchPayload(
-                camera_id: camera_id,
-                session_id: session_id,
-                sync_id: sync_id,
-                sync_anchor_timestamp_s: sync_anchor_timestamp_s,
-                video_start_pts_s: video_start_pts_s,
-                local_recording_index: local_recording_index,
-                paths: paths,
-                frames: frames,
-                frames_on_device: newFramesOnDevice,
                 capture_telemetry: capture_telemetry
             )
         }
@@ -161,26 +129,9 @@ final class ServerUploader: @unchecked Sendable {
                 local_recording_index: local_recording_index,
                 paths: newPaths.map(\.rawValue),
                 frames: frames,
-                frames_on_device: frames_on_device,
                 capture_telemetry: capture_telemetry
             )
         }
-    }
-
-    struct PitchAnalysisPayload: Codable {
-        let camera_id: String
-        let session_id: String
-        let frames_on_device: [FramePayload]
-        let capture_telemetry: CaptureTelemetry?
-    }
-
-    struct PitchAnalysisResponse: Codable {
-        let ok: Bool
-        let session_id: String
-        let camera_id: String
-        let frames_on_device: Int
-        let triangulated_on_device: Int
-        let error_on_device: String?
     }
 
     /// Server `/pitch` response summary. Triangulation fields are optional
@@ -215,14 +166,10 @@ final class ServerUploader: @unchecked Sendable {
     /// directly through HeartbeatResponse without a custom decoder.
     enum CaptureMode: String, Codable {
         case cameraOnly = "camera_only"
-        case onDevice = "on_device"
-        case dual = "dual"
 
         var displayLabel: String {
             switch self {
             case .cameraOnly: return "Camera-only"
-            case .onDevice:   return "On-device"
-            case .dual:       return "Dual"
             }
         }
     }
@@ -428,62 +375,6 @@ final class ServerUploader: @unchecked Sendable {
             }
             task.resume()
         }
-    }
-
-    func uploadPitchAnalysis(
-        _ payload: PitchAnalysisPayload,
-        completion: @escaping (Result<PitchAnalysisResponse, UploadError>) -> Void
-    ) {
-        guard let base = config.baseURL() else {
-            completion(.failure(.network(URLError(.badURL))))
-            return
-        }
-        let url = base.appendingPathComponent("pitch_analysis")
-        let body: Data
-        do {
-            body = try JSONEncoder().encode(payload)
-        } catch {
-            completion(.failure(.decoding(error)))
-            return
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let sid = payload.session_id
-        let cam = payload.camera_id
-        let task = URLSession.shared.uploadTask(with: request, from: body) { data, response, error in
-            if let error = error {
-                let urlError = (error as? URLError) ?? URLError(.unknown)
-                log.error("analysis upload failed session=\(sid, privacy: .public) cam=\(cam, privacy: .public) err=\(urlError.localizedDescription, privacy: .public) code=\(urlError.code.rawValue)")
-                completion(.failure(.network(urlError)))
-                return
-            }
-            guard let http = response as? HTTPURLResponse else {
-                completion(.failure(.invalidResponse))
-                return
-            }
-            if !(200...299).contains(http.statusCode) {
-                if (500...599).contains(http.statusCode) {
-                    completion(.failure(.server(statusCode: http.statusCode, body: data)))
-                } else {
-                    completion(.failure(.client(statusCode: http.statusCode, body: data)))
-                }
-                return
-            }
-            guard let data else {
-                completion(.failure(.decoding(URLError(.cannotDecodeContentData))))
-                return
-            }
-            do {
-                let decoded = try JSONDecoder().decode(PitchAnalysisResponse.self, from: data)
-                log.info("analysis upload ok session=\(sid, privacy: .public) cam=\(cam, privacy: .public) frames=\(decoded.frames_on_device) triangulated=\(decoded.triangulated_on_device)")
-                completion(.success(decoded))
-            } catch {
-                completion(.failure(.decoding(error)))
-            }
-        }
-        task.resume()
     }
 
     /// Serial background queue for streaming-multipart-body assembly so a

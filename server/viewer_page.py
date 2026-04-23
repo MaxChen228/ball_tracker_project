@@ -17,13 +17,11 @@ from render_scene_theme import (
     _BORDER_L,
     _CAMERA_AXIS_LEN_M,
     _CAMERA_COLORS,
-    _CAMERA_COLORS_ON_DEVICE,
     _CAMERA_FORWARD_ARROW_M,
     _CONTRA,
     _DEV,
     _DUAL,
     _FALLBACK_CAMERA_COLOR,
-    _FALLBACK_CAMERA_COLOR_ON_DEVICE,
     _INK,
     _INK_40,
     _OK,
@@ -44,9 +42,7 @@ class ViewerPageContext:
     layout_json: str
     static_traces_json: str
     camera_colors_json: str
-    camera_colors_on_device_json: str
     fallback_color_json: str
-    fallback_color_on_device_json: str
     accent_color_json: str
     # Camera diamond + axis geometry is rendered dynamically from JS (see
     # `camMarkerTracesFor` in the viewer) so it follows the per-pipeline
@@ -77,7 +73,7 @@ def build_viewer_page_context(
         t for t in fig_json.get("data", [])
         if not (t.get("meta") or {}).get("trace_kind")
     ]
-    has_triangulated = bool(scene.triangulated or scene.triangulated_on_device)
+    has_triangulated = bool(scene.triangulated)
     # Default split is 50/50 so both halves read equally; operators who
     # want more scene or more camera grid drag the #col-resizer (persisted
     # to localStorage).
@@ -127,9 +123,7 @@ def build_viewer_page_context(
         layout_json=layout_json,
         static_traces_json=_json.dumps(static_traces),
         camera_colors_json=_json.dumps(_CAMERA_COLORS),
-        camera_colors_on_device_json=_json.dumps(_CAMERA_COLORS_ON_DEVICE),
         fallback_color_json=_json.dumps(_FALLBACK_CAMERA_COLOR),
-        fallback_color_on_device_json=_json.dumps(_FALLBACK_CAMERA_COLOR_ON_DEVICE),
         accent_color_json=_json.dumps(_ACCENT),
         scene_theme_json=_json.dumps(
             {
@@ -216,19 +210,16 @@ def render_viewer_html(
             <span class="layer-group" data-layer="traj">
               <span class="layer-name">Traj</span>
               <button type="button" class="layer-pill" data-layer="traj" data-path="live" aria-pressed="false" disabled title="live stream carries no triangulation">live</button>
-              <button type="button" class="layer-pill" data-layer="traj" data-path="ios_post" aria-pressed="true">post</button>
               <button type="button" class="layer-pill" data-layer="traj" data-path="server_post" aria-pressed="true">svr</button>
             </span>
             <span class="layer-group" data-layer="camA">
               <span class="layer-name"><span class="swatch" data-cam="A"></span>Rays A</span>
               <button type="button" class="layer-pill" data-layer="camA" data-path="live" aria-pressed="true">live</button>
-              <button type="button" class="layer-pill" data-layer="camA" data-path="ios_post" aria-pressed="true">post</button>
               <button type="button" class="layer-pill" data-layer="camA" data-path="server_post" aria-pressed="true">svr</button>
             </span>
             <span class="layer-group" data-layer="camB">
               <span class="layer-name"><span class="swatch" data-cam="B"></span>Rays B</span>
               <button type="button" class="layer-pill" data-layer="camB" data-path="live" aria-pressed="true">live</button>
-              <button type="button" class="layer-pill" data-layer="camB" data-path="ios_post" aria-pressed="true">post</button>
               <button type="button" class="layer-pill" data-layer="camB" data-path="server_post" aria-pressed="true">svr</button>
             </span>
           </span>
@@ -243,12 +234,6 @@ def render_viewer_html(
           <span class="strip-sublabels" aria-hidden="true"><span>A</span><span>B</span></span>
           <canvas id="detection-canvas-live" class="strip-canvas" height="28" aria-hidden="true"></canvas>
         </div>
-        <div class="strip-row" id="strip-row-ios-post" hidden
-             title="POST — iOS on-device detection uploaded as the post-session payload. Same pipeline as LIVE but captured from the full frame buffer, not a live window.">
-          <span class="strip-label">POST</span>
-          <span class="strip-sublabels" aria-hidden="true"><span>A</span><span>B</span></span>
-          <canvas id="detection-canvas-ios-post" class="strip-canvas" height="28" aria-hidden="true"></canvas>
-        </div>
         <div class="strip-row" id="strip-row-server-post" hidden
              title="SVR — server-side detection on the H.264-decoded MOV. Independent from the iOS paths; H.264 quantization typically costs a few frames at detection edges.">
           <span class="strip-label">SVR</span>
@@ -256,7 +241,7 @@ def render_viewer_html(
           <canvas id="detection-canvas-server-post" class="strip-canvas" height="28" aria-hidden="true"></canvas>
         </div>
         <div class="strip-note" id="strip-note-multi" hidden>
-          三條 detection pipeline 獨立：LIVE / POST 兩條都是 iOS 端在 raw BGRA 上跑；SVR 是 server 解碼後在 BGR 上跑。共用同一 chirp anchor，色塊差異 = pipeline 差異、不是時間錯位。
+          兩條 detection pipeline 獨立：LIVE 是 iOS 端在 raw BGRA 上跑；SVR 是 server 解碼後在 BGR 上跑。共用同一 chirp anchor，色塊差異 = pipeline 差異、不是時間錯位。
         </div>
       </div>
       <span id="frame-label" class="frame-label">
@@ -302,9 +287,7 @@ def render_viewer_html(
   "layout": {ctx.layout_json},
   "static_traces": {ctx.static_traces_json},
   "camera_colors": {ctx.camera_colors_json},
-  "camera_colors_on_device": {ctx.camera_colors_on_device_json},
   "fallback_color": {ctx.fallback_color_json},
-  "fallback_color_on_device": {ctx.fallback_color_on_device_json},
   "accent_color": {ctx.accent_color_json},
   "scene_theme": {ctx.scene_theme_json},
   "videos": {ctx.videos_json},
@@ -520,7 +503,6 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .layer-toggles .layer-label {{ color:var(--sub); letter-spacing:0.08em; font-size:10px; }}
   .layer-toggles .layer-group {{ display:inline-flex; align-items:center; gap:4px; padding:2px 4px 2px 6px;
     border:1px solid var(--border-base); border-radius:var(--r); }}
-  .layer-toggles .layer-group[data-src-scope="on_device_only"] {{ display:none; }}
   .layer-toggles .layer-name {{ font-size:10px; letter-spacing:0.08em; color:var(--ink); text-transform:uppercase;
     padding-right:2px; display:inline-flex; align-items:center; gap:4px; }}
   .layer-toggles .layer-name .swatch {{ width:8px; height:8px; display:inline-block; border:1px solid rgba(0,0,0,0.12); }}
@@ -618,18 +600,15 @@ def _viewer_js() -> str:
   const STATIC = DATA.static_traces || [];
   const LAYOUT = DATA.layout;
   const CAM_COLOR = DATA.camera_colors || {{}};
-  const CAM_COLOR_OD = DATA.camera_colors_on_device || {{}};
   const FALLBACK = DATA.fallback_color;
-  const FALLBACK_OD = DATA.fallback_color_on_device || FALLBACK;
   const ACCENT = DATA.accent_color;
-  // Three fully-independent detection pipelines. Their string IDs match
+  // Two detection pipelines. Their string IDs match
   // server/schemas.py::DetectionPath so we never have to translate.
-  const PATHS = ["live", "ios_post", "server_post"];
-  const PATH_LABEL = {{ live: "live", ios_post: "post", server_post: "svr" }};
+  const PATHS = ["live", "server_post"];
+  const PATH_LABEL = {{ live: "live", server_post: "svr" }};
   // reconstruct.py still tags rays with the older source strings; map here
   // once so the rest of the JS speaks in DetectionPath IDs exclusively.
   function sourceToPath(source) {{
-    if (source === "on_device") return "ios_post";
     if (source === "live") return "live";
     return "server_post";
   }}
@@ -638,18 +617,16 @@ def _viewer_js() -> str:
   // read hue faster than dash patterns in a dense 3D scene.
   const PATH_COLORS = {{
     live:        {{ A: "#B8451F", B: "#E08B5F" }},
-    ios_post:    {{ A: "#3D7B5F", B: "#7DA892" }},
     server_post: {{ A: "#4A6B8C", B: "#89A5BD" }},
   }};
   function colorForCamPath(cam, path) {{
     const bucket = PATH_COLORS[path];
     if (bucket && bucket[cam]) return bucket[cam];
-    if (path === "ios_post") return CAM_COLOR_OD[cam] || FALLBACK_OD;
     return CAM_COLOR[cam] || FALLBACK;
   }}
-  const PATH_DASH = {{ live: "solid", ios_post: "solid", server_post: "solid" }};
-  const PATH_OPACITY = {{ live: 0.55, ios_post: 0.7, server_post: 0.55 }};
-  const PATH_MARKER_SYMBOL = {{ live: "circle", ios_post: "circle", server_post: "circle" }};
+  const PATH_DASH = {{ live: "solid", server_post: "solid" }};
+  const PATH_OPACITY = {{ live: 0.55, server_post: 0.55 }};
+  const PATH_MARKER_SYMBOL = {{ live: "circle", server_post: "circle" }};
   const SCENE_THEME = DATA.scene_theme || {{
     cam_axis_len_m: 0.25, cam_fwd_len_m: 0.5,
     axis_color_right: "#C0392B", axis_color_up: "rgba(42, 37, 32, 0.4)",
@@ -696,7 +673,7 @@ def _viewer_js() -> str:
   // framesByPath[path][cam] = {{t_rel_s, detected, px, py}}. Three entries
   // always present (even if empty) so the rest of the JS can iterate PATHS
   // without null checks.
-  const framesByPath = {{ live: {{}}, ios_post: {{}}, server_post: {{}} }};
+  const framesByPath = {{ live: {{}}, server_post: {{}} }};
   for (const v of VIDEO_META) {{
     const f = v.frames || {{}};
     for (const path of PATHS) {{
@@ -721,9 +698,6 @@ def _viewer_js() -> str:
   const HAS_PATH = {{
     live: camsWithFramesByPath.live.length > 0
       || (SCENE.rays || []).some(r => sourceToPath(r.source || "server") === "live"),
-    ios_post: camsWithFramesByPath.ios_post.length > 0
-      || Object.keys(SCENE.ground_traces_on_device || {{}}).length > 0
-      || (SCENE.triangulated_on_device || []).length > 0,
     server_post: camsWithFramesByPath.server_post.length > 0
       || Object.keys(SCENE.ground_traces || {{}}).length > 0
       || (SCENE.triangulated || []).length > 0,
@@ -736,9 +710,6 @@ def _viewer_js() -> str:
     const raySrc = (p) => (SCENE.rays || []).some(r => r.camera_id === cam && sourceToPath(r.source || "server") === p);
     HAS_PATH_PER_CAM[cam] = {{
       live: camsWithFramesByPath.live.includes(cam) || raySrc("live"),
-      ios_post: camsWithFramesByPath.ios_post.includes(cam)
-        || !!(SCENE.ground_traces_on_device && SCENE.ground_traces_on_device[cam])
-        || raySrc("ios_post"),
       server_post: camsWithFramesByPath.server_post.includes(cam)
         || !!(SCENE.ground_traces && SCENE.ground_traces[cam])
         || raySrc("server_post"),
@@ -746,7 +717,6 @@ def _viewer_js() -> str:
   }}
   const HAS_TRAJ_PATH = {{
     live: false,  // live is per-camera only; no triangulation
-    ios_post: (SCENE.triangulated_on_device || []).length > 0,
     server_post: (SCENE.triangulated || []).length > 0,
   }};
   function hasPathForLayer(layer, path) {{
@@ -756,14 +726,14 @@ def _viewer_js() -> str:
     return HAS_PATH[path];
   }}
   // Key is bumped from _layer_visibility → _layer_visibility_v2 because the
-  // schema changed: old {{server, on_device}} flat is not migrate-able
+  // schema changed: old flat shape is not migrate-able
   // without losing the new `live` axis. Users get the default (all paths on
   // for pipelines that have data) on first post-upgrade load.
-  const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility_v2";
+  const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility_v3";
   const layerVisibility = {{
-    traj: {{ live: false, ios_post: HAS_TRAJ_PATH.ios_post, server_post: HAS_TRAJ_PATH.server_post }},
-    camA: {{ live: HAS_PATH_PER_CAM.A.live, ios_post: HAS_PATH_PER_CAM.A.ios_post, server_post: HAS_PATH_PER_CAM.A.server_post }},
-    camB: {{ live: HAS_PATH_PER_CAM.B.live, ios_post: HAS_PATH_PER_CAM.B.ios_post, server_post: HAS_PATH_PER_CAM.B.server_post }},
+    traj: {{ live: false, server_post: HAS_TRAJ_PATH.server_post }},
+    camA: {{ live: HAS_PATH_PER_CAM.A.live, server_post: HAS_PATH_PER_CAM.A.server_post }},
+    camB: {{ live: HAS_PATH_PER_CAM.B.live, server_post: HAS_PATH_PER_CAM.B.server_post }},
   }};
   try {{
     const saved = JSON.parse(localStorage.getItem(LAYER_VIS_KEY) || "null");
@@ -792,7 +762,6 @@ def _viewer_js() -> str:
   // Flat cams-present views used by the frame scrubber / label renderer —
   // we scrub across the UNION of all three streams so the timeline reflects
   // everything the session captured.
-  const HAS_ON_DEVICE = HAS_PATH.ios_post;
   const MASTER_FPS = Math.max(60, ...Object.values(fpsByCam).filter(f => isFinite(f) && f > 0));
   const QUANT = 10000;
   const timeMap = new Map();
@@ -807,7 +776,6 @@ def _viewer_js() -> str:
   if (timeMap.size === 0) {{
     for (const r of SCENE.rays || []) timeMap.set(Math.round(r.t_rel_s * QUANT), r.t_rel_s);
     for (const p of SCENE.triangulated || []) timeMap.set(Math.round(p.t_rel_s * QUANT), p.t_rel_s);
-    for (const p of SCENE.triangulated_on_device || []) timeMap.set(Math.round(p.t_rel_s * QUANT), p.t_rel_s);
   }}
   const unionTimes = Array.from(timeMap.values()).sort((a, b) => a - b);
   if (unionTimes.length === 0) {{ unionTimes.push(0); unionTimes.push(0.05); }}
@@ -839,7 +807,7 @@ def _viewer_js() -> str:
   // One (cam → frameIndex → {{idx, t, detected}}) table per pipeline.
   // Three fully-independent tables so a missed detection in SVR does not
   // suppress LIVE's head-indicator, etc.
-  const camAtFrameByPath = {{ live: {{}}, ios_post: {{}}, server_post: {{}} }};
+  const camAtFrameByPath = {{ live: {{}}, server_post: {{}} }};
   for (const path of PATHS) {{
     for (const cam of camsWithFramesByPath[path]) {{
       camAtFrameByPath[path][cam] = buildCamIndexFor(framesByPath[path], cam);
@@ -961,7 +929,6 @@ def _viewer_js() -> str:
     // --- ground traces: each scene bucket → exactly one path ---
     const GROUND_BUCKETS = [
       {{ path: "server_post", traces: SCENE.ground_traces || {{}} }},
-      {{ path: "ios_post", traces: SCENE.ground_traces_on_device || {{}} }},
       {{ path: "live", traces: SCENE.ground_traces_live || {{}} }},
     ];
     for (const {{path, traces}} of GROUND_BUCKETS) {{
@@ -983,7 +950,7 @@ def _viewer_js() -> str:
           showlegend: false }});
       }}
     }}
-    // --- 3D trajectories: server_post and ios_post each trigger their own ---
+    // --- 3D trajectory: server_post ---
     if (isLayerVisible("traj", "server_post")) {{
       const triPts = (SCENE.triangulated || []).filter(p => p.t_rel_s <= cutoff);
       if (triPts.length) {{
@@ -999,22 +966,6 @@ def _viewer_js() -> str:
           out.push({{ type: "scatter3d", x: [head.x], y: [head.y], z: [head.z],
             mode: "markers", marker: {{size: 9, color: ACCENT, symbol: "circle",
               line: {{color: "#2A2520", width: 1}}}},
-            hoverinfo: "skip", showlegend: false }});
-        }}
-      }}
-    }}
-    if (isLayerVisible("traj", "ios_post")) {{
-      const triPts = (SCENE.triangulated_on_device || []).filter(p => p.t_rel_s <= cutoff);
-      if (triPts.length) {{
-        out.push({{ type: "scatter3d", x: triPts.map(p => p.x), y: triPts.map(p => p.y), z: triPts.map(p => p.z),
-          mode: "lines+markers", line: {{color: ACCENT, width: 3, dash: "dot"}},
-          marker: {{size: 4, color: ACCENT, symbol: "circle-open"}}, opacity: 0.85,
-          name: `3D trajectory (post, ${{triPts.length}} pts)` }});
-        if (playback) {{
-          const head = triPts[triPts.length - 1];
-          out.push({{ type: "scatter3d", x: [head.x], y: [head.y], z: [head.z],
-            mode: "markers", marker: {{size: 9, color: ACCENT, symbol: "circle-open",
-              line: {{color: ACCENT, width: 2}}}},
             hoverinfo: "skip", showlegend: false }});
         }}
       }}
@@ -1072,10 +1023,9 @@ def _viewer_js() -> str:
     // sits on top of live.
     const DOT_COLOR = {{
       live: colorForCamPath(cam, "live"),
-      ios_post: "rgb(175, 210, 255)",
       server_post: ACCENT,
     }};
-    const PATH_ORDER = ["live", "ios_post", "server_post"];
+    const PATH_ORDER = ["live", "server_post"];
     for (const path of PATH_ORDER) {{
       if (!isLayerVisible(camLayer, path)) continue;
       const frames = framesByPath[path][cam];
@@ -1428,7 +1378,6 @@ def _viewer_js() -> str:
   // parallel config dict.
   const STRIP_ROWS = {{
     live: {{ row: document.getElementById("strip-row-live"), canvas: document.getElementById("detection-canvas-live") }},
-    ios_post: {{ row: document.getElementById("strip-row-ios-post"), canvas: document.getElementById("detection-canvas-ios-post") }},
     server_post: {{ row: document.getElementById("strip-row-server-post"), canvas: document.getElementById("detection-canvas-server-post") }},
   }};
   const layerToggles = document.getElementById("layer-toggles");

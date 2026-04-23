@@ -236,7 +236,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         )
 
         wireUploadQueueCallbacks()
-        wireAnalysisQueueCallbacks()
         recordingWorkflow.reloadPendingQueues()
 
         healthMonitor = ServerHealthMonitor(
@@ -537,7 +536,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private func applyPushedHSVRange(_ hsvRange: ServerUploader.HSVRangePayload) {
         currentHSVRange = hsvRange
         detectionPool.updateHSVRange(hsvRange)
-        recordingWorkflow.analysisUploadQueue.updateHSVRange(hsvRange)
     }
 
     private func wireHealthMonitorStatusCallbacks() {
@@ -563,16 +561,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             let detail = Self.describeUploadError(error)
             log.error("camera payload dropped file=\(basename, privacy: .public) reason=\(detail, privacy: .public)")
             self.updateUIForState()
-        }
-    }
-
-    private func wireAnalysisQueueCallbacks() {
-        recordingWorkflow.analysisUploadQueue.onStatusTextChanged = { [weak self] text in
-            self?.lastUploadStatusText = text
-            self?.updateUIForState()
-        }
-        recordingWorkflow.analysisUploadQueue.onLastResultChanged = { [weak self] _ in
-            self?.updateUIForState()
         }
     }
 

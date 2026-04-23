@@ -129,8 +129,7 @@ def hero_meta_subline(health: dict) -> str:
     mode = health.get("mode")
     if mode:
         label = (
-            "on-device" if mode == "on_device"
-            else "dual" if mode == "dual"
+            "live-only" if mode == "live_only"
             else "camera-only"
         )
         parts.append(f"mode {label}")
@@ -139,13 +138,8 @@ def hero_meta_subline(health: dict) -> str:
 
 def health_banner_html(health: dict) -> str:
     tri_n = health.get("triangulated_count", 0)
-    tri_od = health.get("triangulated_count_on_device", 0) or 0
     sub = hero_meta_subline(health)
-    note = (
-        f"points triangulated · server {tri_n} · iOS {tri_od}"
-        if tri_od and health.get("mode") == "dual"
-        else "points triangulated"
-    )
+    note = "points triangulated"
     if tri_n > 0:
         hero_block = (
             f'<div class="hero-card ok">'
@@ -206,7 +200,6 @@ def cam_card_html(cam_id: str, cam: dict) -> str:
     counts = cam.get("counts_by_path") or {}
     _PATHS = (
         ("live", "L", "iOS live stream (on-device detection, streamed over WS)"),
-        ("ios_post", "P", "iOS post-pass (on-device detection, full clip)"),
         ("server_post", "S", "server post (PyAV decode + server-side detection)"),
     )
     path_chips: list[str] = []
@@ -221,11 +214,10 @@ def cam_card_html(cam_id: str, cam: dict) -> str:
             f'<span class="lbl">{abbr}</span>'
             f'<span class="val">{ratio_txt}</span></span>'
         )
-    # rate-bar denominator: prefer server_post, then ios_post, then live.
-    # server_post stays the canonical reference for dual-cam triangulation
-    # sessions; single-pipeline sessions fall back to whatever they have.
+    # rate-bar denominator: prefer server_post, then live. server_post
+    # stays the canonical reference for dual-cam triangulation sessions.
     n_det, n_frames = 0, 0
-    for key in ("server_post", "ios_post", "live"):
+    for key in ("server_post", "live"):
         c = counts.get(key) or {}
         if c.get("total", 0) > 0:
             n_det, n_frames = c["detected"], c["total"]
@@ -309,7 +301,7 @@ def failure_strip_html(health: dict) -> str:
             def _any_detected_across_paths(cam: dict) -> bool:
                 counts = cam.get("counts_by_path") or {}
                 return any((counts.get(k) or {}).get("detected", 0) > 0
-                           for k in ("live", "ios_post", "server_post"))
+                           for k in ("live", "server_post"))
             no_detect = [c for c in ("A", "B") if not _any_detected_across_paths(cams[c])]
             if no_detect:
                 reasons.append(

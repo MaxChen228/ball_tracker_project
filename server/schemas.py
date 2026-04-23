@@ -17,42 +17,19 @@ from pydantic import BaseModel, Field
 
 
 class CaptureMode(str, Enum):
-    """Which side of the split does ball detection on the recording.
-
-    - `camera_only`: iPhone uploads the MOV, server runs detection + triangulation.
-      Bandwidth heavy, but the server sees the raw pixels so the detection
-      pipeline (HSV + shape gate + MOG2) is fully authoritative.
-    - `on_device`: iPhone runs the same detection pipeline locally and uploads
-      only the per-frame results as JSON. Bandwidth is a few KB per session.
-      Triangulation still happens on the server using the uploaded frames.
-    - `dual`: both of the above in one shot — MOV is uploaded AND the
-      iPhone's on-device detection result is attached as `frames_on_device`.
-      Server runs its own detection on the MOV into `frames`, then
-      triangulates each source independently. Used for ground-truth
-      comparison during HSV / shape-gate tuning — viewer overlays the two
-      point clouds so you can see where iOS and server disagree.
-
-    The dashboard toggles the mode; every armed session snapshots the
-    current global mode at arm time so a late dashboard toggle doesn't
-    disturb an in-flight recording.
+    """Legacy preset vocabulary. Only `camera_only` remains; newer code
+    should read `Session.paths` directly.
     """
     camera_only = "camera_only"
-    on_device = "on_device"
-    dual = "dual"
 
 
 _DEFAULT_CAPTURE_MODE = CaptureMode.camera_only
 
 
 class DetectionPath(str, Enum):
-    """Orthogonal detection pipelines that can be enabled together.
-
-    `CaptureMode` stays around as a backwards-compat preset vocabulary for
-    older iOS / dashboard code, but new code should snapshot a set of
-    `DetectionPath`s onto each armed session."""
+    """Orthogonal detection pipelines that can be enabled together."""
 
     live = "live"
-    ios_post = "ios_post"
     server_post = "server_post"
 
 
@@ -61,8 +38,6 @@ _DEFAULT_PATHS = frozenset({DetectionPath.server_post})
 
 _MODE_TO_PATHS: dict[CaptureMode, frozenset[DetectionPath]] = {
     CaptureMode.camera_only: frozenset({DetectionPath.server_post}),
-    CaptureMode.on_device: frozenset({DetectionPath.ios_post}),
-    CaptureMode.dual: frozenset({DetectionPath.ios_post, DetectionPath.server_post}),
 }
 
 
@@ -71,17 +46,9 @@ def paths_for_mode(mode: CaptureMode) -> set[DetectionPath]:
 
 
 def mode_for_paths(paths: set[DetectionPath] | frozenset[DetectionPath]) -> CaptureMode:
-    """Best-effort legacy preset representing `paths`.
+    """Best-effort legacy preset representing `paths`. Only `camera_only`
+    exists now — the authoritative detail lives in `paths` itself."""
 
-    `CaptureMode` cannot express `live`-only or `live+server_post`. We map
-    those to the nearest older preset purely for backward-compat clients; the
-    authoritative detail lives in `paths`."""
-
-    norm = set(paths)
-    if norm == {DetectionPath.ios_post}:
-        return CaptureMode.on_device
-    if norm == {DetectionPath.ios_post, DetectionPath.server_post}:
-        return CaptureMode.dual
     return CaptureMode.camera_only
 
 
@@ -191,37 +158,17 @@ class PitchPayload(BaseModel):
     # older clients that only know `mode` keep validating.
     paths: list[str] | None = None
     # Server-side synthesised per-frame data (populated after detection).
-    # For `camera_only` / `dual` modes the iPhone omits this on the wire and
-    # server detection fills it before triangulation. For `on_device` mode
-    # the iPhone populates it directly and server detection is skipped.
+    # Server fills this from the uploaded MOV before triangulation.
     frames: list[FramePayload] = Field(default_factory=list)
     # Live-streamed frame detections captured over WebSocket during the
     # active session. Persisted for forensics / future viewer switching.
     frames_live: list[FramePayload] = Field(default_factory=list)
-    # Finalized iOS-side post-pass results over the local MOV.
-    frames_ios_post: list[FramePayload] = Field(default_factory=list)
     # Finalized server-side post-pass results decoded from the uploaded MOV.
     frames_server_post: list[FramePayload] = Field(default_factory=list)
-    # Parallel detection stream shipped by the iPhone when the session was
-    # armed in `dual` mode. Lets the server keep both iOS-end and server-end
-    # detection results for side-by-side comparison. Empty list otherwise.
-    frames_on_device: list[FramePayload] = Field(default_factory=list)
     intrinsics: IntrinsicsPayload | None = None
     homography: list[float] | None = None
     image_width_px: int | None = None
     image_height_px: int | None = None
-    capture_telemetry: CaptureTelemetryPayload | None = None
-
-
-class PitchAnalysisPayload(BaseModel):
-    """Late-arriving on-device post-pass analysis keyed to an existing pitch.
-
-    Used by the PR61 analysis plane: the raw MOV (or mode-one payload) lands
-    first, then the iPhone decodes its finalized local MOV and uploads the
-    authoritative on-device frame list later."""
-    camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
-    session_id: str = Field(..., pattern=r"^s_[0-9a-f]{4,32}$")
-    frames_on_device: list[FramePayload] = Field(default_factory=list)
     capture_telemetry: CaptureTelemetryPayload | None = None
 
 
@@ -236,13 +183,7 @@ class TriangulatedPoint(BaseModel):
 class SessionResult(BaseModel):
     """One armed-session's triangulation result. Replaces the old
     `CycleResult` now that "cycle" is a per-device recording-window concept
-    and the pitch unit is server-level "session".
-
-    Dual mode surfaces two parallel point clouds — `points` is the default
-    (server detection) stream that existing code keys off, `points_on_device`
-    is the iOS-end stream when the session armed in `dual` mode. Mono-mode
-    sessions (camera_only / on_device) leave `points_on_device` empty and
-    `points` is the single authoritative result."""
+    and the pitch unit is server-level "session"."""
     session_id: str
     camera_a_received: bool
     camera_b_received: bool
@@ -255,8 +196,6 @@ class SessionResult(BaseModel):
     abort_reasons: dict[str, str] = Field(default_factory=dict)
     points: list[TriangulatedPoint] = []
     error: str | None = None
-    points_on_device: list[TriangulatedPoint] = []
-    error_on_device: str | None = None
 
 
 

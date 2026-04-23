@@ -12,7 +12,6 @@ from pydantic import ValidationError
 from pipeline import ProcessingCanceled, annotate_video
 from schemas import (
     DetectionPath,
-    PitchAnalysisPayload,
     PitchPayload,
     SessionResult,
 )
@@ -52,17 +51,13 @@ async def pitch(
 
     Required form fields:
       - `payload` — JSON-encoded `PitchPayload`. Carries session-level
-        metadata including the legacy chirp `sync_id` provenance tag; in
-        mode-two (`on_device`) also carries the per-frame
-        `frames: [FramePayload]` list produced by the iPhone's own
-        HSV+MOG2 detector.
+        metadata including the legacy chirp `sync_id` provenance tag.
 
     Optional:
-      - `video` — H.264 MOV/MP4 of the cycle. Required in mode-one (server
-        decodes it and runs HSV detection). Omitted in mode-two — server
-        trusts the iPhone's detection output and only pairs + triangulates.
+      - `video` — H.264 MOV/MP4 of the cycle. Required when the session
+        paths include `server_post`; server decodes and runs HSV detection.
+        Omitted for live-only sessions.
 
-    Requests with neither a video nor a non-empty `frames` list return 422.
     A missing time-sync anchor only prevents stereo pairing/triangulation;
     monocular detections are still kept so the viewer can render rays.
     """
@@ -112,15 +107,13 @@ async def pitch(
     has_frames = (
         bool(payload_obj.frames)
         or bool(payload_obj.frames_live)
-        or bool(payload_obj.frames_ios_post)
         or bool(payload_obj.frames_server_post)
-        or bool(payload_obj.frames_on_device)
     )
     if not has_video and not has_frames:
         raise HTTPException(
             status_code=422,
-            detail="must supply either `video` (mode-one / dual) or a "
-                   "non-empty `frames` / `frames_on_device` list in payload",
+            detail="must supply either a `video` attachment or a "
+                   "non-empty frames list in payload",
         )
 
     clip_info: dict[str, Any] | None = None
@@ -161,10 +154,6 @@ async def pitch(
         payload_obj.frames_server_post = []
         if DetectionPath.server_post in payload_paths:
             detection_pending = True
-    else:
-        if payload_obj.frames and not payload_obj.frames_ios_post and DetectionPath.server_post not in payload_paths:
-            payload_obj.frames_ios_post = list(payload_obj.frames)
-
     result = await asyncio.to_thread(state.record, payload_obj)
 
     if detection_pending and clip_path is not None:
@@ -175,80 +164,27 @@ async def pitch(
         1
         for f in (
             payload_obj.frames_server_post
-            or payload_obj.frames_ios_post
             or payload_obj.frames_live
             or payload_obj.frames
         )
         if f.ball_detected
     )
     logger.info(
-        "pitch camera=%s session=%s clip=%s frames=%d ball=%d detected_on=%s triangulated=%d%s%s paths=%s",
+        "pitch camera=%s session=%s clip=%s frames=%d ball=%d detected_on=%s triangulated=%d%s paths=%s",
         payload_obj.camera_id,
         payload_obj.session_id,
         f"{clip_info['bytes']}B" if clip_info else "none",
-        len(payload_obj.frames_server_post or payload_obj.frames_ios_post or payload_obj.frames_live or payload_obj.frames),
+        len(payload_obj.frames_server_post or payload_obj.frames_live or payload_obj.frames),
         ball_frames,
-        "server-pending" if detection_pending else ("device" if payload_obj.frames else "skipped"),
+        "server-pending" if detection_pending else ("live" if payload_obj.frames_live else "skipped"),
         len(result.points),
-        f" on_device={len(result.points_on_device)}" if result.points_on_device else "",
         f" err={result.error}" if result.error else "",
         payload_obj.paths,
     )
-    if result.points_on_device:
-        zs = [p.z_m for p in result.points_on_device]
-        logger.info(
-            "  session %s (on_device) → %d pts, duration %.2fs, peak z = %.2fm",
-            result.session_id,
-            len(result.points_on_device),
-            result.points_on_device[-1].t_rel_s - result.points_on_device[0].t_rel_s,
-            max(zs),
-        )
     response: dict[str, Any] = {"ok": True, **_summarize_result(result)}
     response["clip"] = clip_info
     response["detection_pending"] = detection_pending
     return response
-
-
-@router.post("/pitch_analysis")
-async def pitch_analysis(payload: PitchAnalysisPayload) -> dict[str, Any]:
-    """Attach a late on-device post-pass analysis to an already-recorded pitch.
-
-    This is the PR61 second leg: raw capture arrives first, then iOS decodes
-    its finalized local MOV and uploads the authoritative on-device frame list
-    later. Dashboard/viewer state updates immediately once the merge lands."""
-    import main as _main
-    state = _main.state
-
-    if not payload.frames_on_device:
-        raise HTTPException(
-            status_code=422,
-            detail="frames_on_device must be non-empty",
-        )
-    try:
-        result = await asyncio.to_thread(state.attach_on_device_analysis, payload)
-    except KeyError:
-        raise HTTPException(
-            status_code=409,
-            detail="base pitch not found for analysis upload",
-        )
-
-    logger.info(
-        "pitch_analysis camera=%s session=%s frames=%d detected=%d triangulated_on_device=%d%s",
-        payload.camera_id,
-        payload.session_id,
-        len(payload.frames_on_device),
-        sum(1 for f in payload.frames_on_device if f.ball_detected),
-        len(result.points_on_device),
-        f" err={result.error_on_device}" if result.error_on_device else "",
-    )
-    return {
-        "ok": True,
-        "session_id": payload.session_id,
-        "camera_id": payload.camera_id,
-        "frames_on_device": len(payload.frames_on_device),
-        "triangulated_on_device": len(result.points_on_device),
-        "error_on_device": result.error_on_device,
-    }
 
 
 async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
