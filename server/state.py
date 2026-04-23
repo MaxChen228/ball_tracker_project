@@ -52,6 +52,7 @@ from state_calibration import (
     validate_calibration_snapshot as _validate_calibration_snapshot,
 )
 from state_devices import DeviceRegistry
+from state_processing import SessionProcessingState
 
 logger = logging.getLogger("ball_tracker")
 
@@ -259,9 +260,7 @@ class State:
         # Session-level trash + processing-control metadata. Trash is
         # persisted; processing state is in-memory orchestration around
         # server-side post-processing jobs.
-        self._trashed_sessions: dict[str, float] = {}
-        self._server_post_jobs: dict[tuple[str, str], str] = {}
-        self._server_post_active_tasks: set[tuple[str, str]] = set()
+        self._processing = SessionProcessingState()
         # Calibrations first — _load_from_disk re-triangulates every cached
         # pitch, and triangulation needs the calibration snapshot to decide
         # the intrinsic-scale factor (MOV dims vs. calibration dims).
@@ -340,13 +339,15 @@ class State:
             return
         trashed = obj.get("trashed_sessions")
         if isinstance(trashed, dict):
+            parsed: dict[str, float] = {}
             for sid, ts in trashed.items():
                 if isinstance(sid, str) and isinstance(ts, (int, float)):
-                    self._trashed_sessions[sid] = float(ts)
+                    parsed[sid] = float(ts)
+            self._processing.load_trashed(parsed)
 
     def _persist_session_meta_locked(self) -> None:
         payload = json.dumps(
-            {"trashed_sessions": self._trashed_sessions},
+            {"trashed_sessions": self._processing.trashed_sessions},
             indent=2,
         )
         self._atomic_write(self._session_meta_path, payload)
@@ -1602,7 +1603,7 @@ class State:
             }
 
     def _session_is_trashed_locked(self, session_id: str) -> bool:
-        return session_id in self._trashed_sessions
+        return self._processing.is_trashed(session_id)
 
     def trash_session(self, session_id: str) -> bool:
         now = self._time_fn()
@@ -1619,25 +1620,20 @@ class State:
             known = any(sid == session_id for _, sid in self.pitches) or session_id in self.results
             if not known:
                 return False
-            self._trashed_sessions[session_id] = now
-            for key, status in list(self._server_post_jobs.items()):
-                sid, _cam = key
-                if sid == session_id and status in {"queued", "processing"}:
-                    self._server_post_jobs[key] = "canceled"
+            self._processing.trash(session_id, at=now)
             self._persist_session_meta_locked()
             return True
 
     def restore_session(self, session_id: str) -> bool:
         with self._lock:
-            if session_id not in self._trashed_sessions:
+            if not self._processing.restore(session_id):
                 return False
-            self._trashed_sessions.pop(session_id, None)
             self._persist_session_meta_locked()
             return True
 
     def trash_count(self) -> int:
         with self._lock:
-            return len(self._trashed_sessions)
+            return self._processing.trash_count()
 
     def _session_server_post_candidates(self, session_id: str) -> list[tuple[str, PitchPayload, Path]]:
         with self._lock:
@@ -1678,89 +1674,51 @@ class State:
 
     def mark_server_post_queued(self, session_id: str, camera_id: str) -> None:
         with self._lock:
-            if self._session_is_trashed_locked(session_id):
-                return
-            key = (camera_id, session_id)
-            if key in self._server_post_active_tasks:
-                return
-            if self._server_post_jobs.get(key) == "processing":
-                return
-            self._server_post_jobs[key] = "queued"
+            self._processing.mark_queued((camera_id, session_id))
 
     def start_server_post_job(self, session_id: str, camera_id: str) -> bool:
         with self._lock:
-            if self._session_is_trashed_locked(session_id):
-                return False
-            key = (camera_id, session_id)
-            status = self._server_post_jobs.get(key)
-            if status == "canceled":
-                return False
-            self._server_post_jobs[key] = "processing"
-            self._server_post_active_tasks.add(key)
-            return True
+            return self._processing.start_job((camera_id, session_id))
 
     def should_cancel_server_post_job(self, session_id: str, camera_id: str) -> bool:
         with self._lock:
-            key = (camera_id, session_id)
-            return (
-                self._session_is_trashed_locked(session_id)
-                or self._server_post_jobs.get(key) == "canceled"
-            )
+            return self._processing.should_cancel((camera_id, session_id))
 
     def finish_server_post_job(self, session_id: str, camera_id: str, *, canceled: bool) -> None:
         with self._lock:
-            key = (camera_id, session_id)
-            self._server_post_active_tasks.discard(key)
-            if canceled:
-                self._server_post_jobs[key] = "canceled"
-            else:
-                self._server_post_jobs.pop(key, None)
+            self._processing.finish_job((camera_id, session_id), canceled=canceled)
 
     def cancel_processing(self, session_id: str) -> bool:
-        changed = False
-        for cam, _pitch, _clip in self._session_server_post_candidates(session_id):
-            key = (cam, session_id)
-            with self._lock:
-                if self._server_post_jobs.get(key) != "canceled":
-                    self._server_post_jobs[key] = "canceled"
-                    changed = True
-        return changed
+        keys = [(cam, session_id) for cam, _pitch, _clip in self._session_server_post_candidates(session_id)]
+        with self._lock:
+            return self._processing.cancel(keys)
 
     def resume_processing(self, session_id: str) -> list[tuple[Path, PitchPayload]]:
-        queued: list[tuple[Path, PitchPayload]] = []
-        for cam, pitch, clip_path in self._session_server_post_candidates(session_id):
-            key = (cam, session_id)
-            with self._lock:
-                if key in self._server_post_active_tasks:
-                    continue
-                self._server_post_jobs[key] = "queued"
-            queued.append((clip_path, pitch.model_copy(deep=True)))
-        return queued
+        candidates = self._session_server_post_candidates(session_id)
+        by_key = {
+            (cam, session_id): (clip_path, pitch)
+            for cam, pitch, clip_path in candidates
+        }
+        with self._lock:
+            queued_keys = self._processing.resume(by_key.keys())
+        return [
+            (by_key[key][0], by_key[key][1].model_copy(deep=True))
+            for key in queued_keys
+        ]
 
     def session_processing_summary(self, session_id: str) -> tuple[str | None, bool]:
         candidates = self._session_server_post_candidates(session_id)
         pending_keys = {(cam, session_id) for cam, _pitch, _clip in candidates}
         with self._lock:
-            job_states = [
-                self._server_post_jobs.get(key)
-                for key in pending_keys
-                if self._server_post_jobs.get(key) is not None
-            ]
-        if any(state == "processing" for state in job_states):
-            return "processing", True
-        if any(state == "queued" for state in job_states) or (pending_keys and not job_states):
-            return "queued", True
-        if any(state == "canceled" for state in job_states):
-            return "canceled", bool(pending_keys)
-        if not candidates:
-            with self._lock:
-                completed = any(
-                    sid == session_id and bool(pitch.frames_server_post)
-                    for (cam, sid), pitch in self.pitches.items()
-                )
-            if completed:
-                return "completed", False
-        return None, False
+            completed = any(
+                sid == session_id and bool(pitch.frames_server_post)
+                for (_cam, sid), pitch in self.pitches.items()
+            )
+            return self._processing.summary(
+                pending_keys=pending_keys,
+                completed=completed,
+                has_candidates=bool(candidates),
+            )
 
     def start_sync(self) -> tuple[SyncRun | None, str | None]:
         """Begin a mutual-sync run. Returns `(run, None)` on success or
@@ -2268,16 +2226,12 @@ class State:
             for key in keys_to_drop:
                 self.pitches.pop(key, None)
             self.results.pop(session_id, None)
-            self._trashed_sessions.pop(session_id, None)
+            self._processing.remove_session(session_id)
             if (
                 self._last_ended_session is not None
                 and self._last_ended_session.id == session_id
             ):
                 self._last_ended_session = None
-            for key in list(self._server_post_jobs.keys()):
-                if key[1] == session_id:
-                    self._server_post_jobs.pop(key, None)
-                    self._server_post_active_tasks.discard(key)
             self._persist_session_meta_locked()
 
         # Disk cleanup outside the lock — same pattern record() uses.
@@ -2308,9 +2262,7 @@ class State:
             self._device_registry.clear()
             self._current_session = None
             self._last_ended_session = None
-            self._trashed_sessions.clear()
-            self._server_post_jobs.clear()
-            self._server_post_active_tasks.clear()
+            self._processing.clear()
             self._persist_session_meta_locked()
             if purge_disk:
                 for path in self._pitch_dir.glob("session_*.json*"):
