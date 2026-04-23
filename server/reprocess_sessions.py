@@ -19,7 +19,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from detection import HSVRange
-from fitting import fit_trajectory
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pipeline import detect_pitch
 from schemas import CalibrationSnapshot, PitchPayload, SessionResult
@@ -155,27 +154,21 @@ def triangulate_session(
     if a.frames and b.frames:
         try:
             result.points = triangulate_cycle(scale(a), scale(b), source="server")
-            result.fit = fit_trajectory(result.points)
         except Exception as e:
             result.error = f"{type(e).__name__}: {e}"
     if a.frames_on_device and b.frames_on_device:
         try:
             result.points_on_device = triangulate_cycle(scale(a), scale(b), source="on_device")
-            result.fit_on_device = fit_trajectory(result.points_on_device)
         except Exception as e:
             result.error_on_device = f"{type(e).__name__}: {e}"
 
     n = len(result.points)
-    speed = ""
-    if result.fit and result.fit.release_xyz_m and result.fit.plate_xyz_m:
-        r = result.fit.release_xyz_m
-        p = result.fit.plate_xyz_m
-        dt = result.fit.plate_t_s - result.fit.release_t_s
-        if dt > 0:
-            d = sum((r[i] - p[i]) ** 2 for i in range(3)) ** 0.5
-            speed = f"  release→plate {d / dt * 3.6:.1f} km/h"
-    logger.info("  %s  triangulated %d pts%s%s",
-                sid, n, f"  err={result.error}" if result.error else "", speed)
+    logger.info(
+        "  %s  triangulated %d pts%s",
+        sid,
+        n,
+        f"  err={result.error}" if result.error else "",
+    )
     if not dry_run:
         atomic_write(RESULT_DIR / f"session_{sid}.json", result.model_dump_json())
 

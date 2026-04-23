@@ -218,14 +218,6 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 /* Cam-identity dual chip — retains the B-camera orange tint so per-cam
    rows still read as paired vs single at a glance. */
 .chip.dual {{ color: var(--dual); border-color: var(--dual); background: rgba(211,84,0,0.06); }}
-/* Fit-quality chips — RMS-bucketed from fitting.py. Drives operator trust
-   at a glance: green = ship it, amber = inspect, red = reject / recalibrate. */
-.chip.excellent {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
-.chip.good     {{ color: var(--passed); border-color: var(--passed); background: transparent; }}
-.chip.fair     {{ color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }}
-.chip.poor     {{ color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }}
-.chip.no-fit   {{ color: var(--sub); border-color: var(--border-base); background: transparent; opacity: 0.7; }}
-
 /* --- Session block --- */
 .session-head {{ display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-2); }}
 .session-id {{ font-family: var(--mono); font-size: 13px; color: var(--ink);
