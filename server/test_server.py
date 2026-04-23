@@ -969,9 +969,71 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
     assert ("session_armed", {"sid": session_id, "paths": ["live"], "armed_at": arm.json()["session"]["started_at"]}) in events
     assert any(name == "frame_count" and data["cam"] == "A" and data["count"] == 1 for name, data in events)
     assert any(name == "frame_count" and data["cam"] == "B" and data["count"] == 1 for name, data in events)
+    assert any(name == "ray" and data["sid"] == session_id and data["cam"] == "A" for name, data in events)
+    assert any(name == "ray" and data["sid"] == session_id and data["cam"] == "B" for name, data in events)
     assert any(name == "point" and data["sid"] == session_id and abs(data["x"] - P_true[0]) < 1e-6 for name, data in events)
     assert any(name == "path_completed" and data["sid"] == session_id and data["cam"] == "A" for name, data in events)
     assert any(name == "path_completed" and data["sid"] == session_id and data["point_count"] == 1 for name, data in events)
+
+
+def test_live_websocket_single_camera_emits_ray_without_sync(monkeypatch):
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    P_true = np.array([0.08, 0.34, 0.92])
+    u, v = _project_pixels(K, R_a, t_a, P_true)
+    client = TestClient(app)
+    assert _post_calibration(client, "A", K, H_a).status_code == 200
+
+    events: list[tuple[str, dict]] = []
+
+    def wait_for_event(predicate, timeout_s: float = 2.0) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if any(predicate(name, data) for name, data in events):
+                return True
+            time.sleep(0.01)
+        return any(predicate(name, data) for name, data in events)
+
+    class _CaptureHub:
+        async def broadcast(self, event: str, data: dict) -> None:
+            events.append((event, data))
+
+        async def subscribe(self):
+            if False:
+                yield ""
+
+    monkeypatch.setattr(main, "sse_hub", _CaptureHub())
+    monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
+
+    with client.websocket_connect("/ws/device/A") as ws_a:
+        assert ws_a.receive_json()["type"] == "settings"
+        ws_a.send_json({"type": "hello", "cam": "A"})
+        assert ws_a.receive_json()["type"] == "settings"
+
+        arm = client.post(
+            "/sessions/arm",
+            json={"paths": ["live"]},
+            headers={"Accept": "application/json"},
+        )
+        assert arm.status_code == 200, arm.text
+        session_id = arm.json()["session"]["id"]
+        assert ws_a.receive_json()["type"] == "arm"
+
+        ws_a.send_json({
+            "type": "frame",
+            "sid": session_id,
+            "i": 12,
+            "ts": 100.0,
+            "px": u,
+            "py": v,
+            "detected": True,
+        })
+
+        assert wait_for_event(lambda name, data: name == "ray" and data["sid"] == session_id)
+        ray_events = [data for name, data in events if name == "ray"]
+        assert ray_events[0]["cam"] == "A"
+        assert len(ray_events[0]["origin"]) == 3
+        assert len(ray_events[0]["endpoint"]) == 3
+        assert not any(name == "point" for name, _data in events)
 
 
 def test_dual_mode_on_device_surfaces_before_server_detection(tmp_path, monkeypatch):

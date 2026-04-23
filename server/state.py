@@ -39,6 +39,7 @@ from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
 from sync_solver import compute_mutual_sync
 from live_pairing import LivePairingSession
+from reconstruct import Ray, ray_for_frame
 from state_runtime import RuntimeSettingsStore, SyncParams
 from state_calibration import (
     AutoCalibrationRun as _AutoCalibrationRun,
@@ -692,6 +693,38 @@ class State:
 
         created = live.ingest(camera_id, frame, triangulate_live)
         return created, dict(live.frame_counts)
+
+    def live_ray_for_frame(
+        self,
+        camera_id: str,
+        session_id: str,
+        frame: FramePayload,
+    ) -> Ray | None:
+        """Project one live detection into world space for dashboard rays.
+
+        Stereo live points still require A/B pairing and a shared time anchor.
+        A monocular ray only needs that camera's calibration; if the phone has
+        no sync anchor, use the frame index as an approximate relative clock so
+        hover/color values stay small and readable.
+        """
+        with self._lock:
+            cal = self._calibration_store.get(camera_id)
+            dev = self._device_registry.get(camera_id)
+        if cal is None:
+            return None
+        anchor = (
+            dev.sync_anchor_timestamp_s
+            if dev is not None and dev.sync_anchor_timestamp_s is not None
+            else frame.timestamp_s - (float(frame.frame_index) / 240.0)
+        )
+        return ray_for_frame(
+            camera_id=camera_id,
+            frame=frame,
+            intrinsics=cal.intrinsics,
+            homography=list(cal.homography),
+            anchor_timestamp_s=anchor,
+            source="live",
+        )
 
     def mark_live_path_ended(self, camera_id: str, session_id: str, reason: str | None = None) -> None:
         with self._lock:

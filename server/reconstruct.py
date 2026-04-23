@@ -244,6 +244,41 @@ def _rays_and_trace_for_source(
     return rays, trace
 
 
+def ray_for_frame(
+    *,
+    camera_id: str,
+    frame: Any,
+    intrinsics: Any,
+    homography: list[float],
+    anchor_timestamp_s: float,
+    source: str = "live",
+) -> Ray | None:
+    """Build one renderable world ray for a calibrated camera frame.
+
+    This is the single-frame version of `_rays_and_trace_for_source`, used by
+    the dashboard live stream before any pitch JSON exists on disk.
+    """
+    if not frame.ball_detected:
+        return None
+    K = build_K(intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy)
+    H = np.array(homography, dtype=float).reshape(3, 3)
+    R_wc, t_wc = recover_extrinsics(K, H)
+    C = camera_center_world(R_wc, t_wc)
+    viz_length = max(5.0, 2.0 * float(np.linalg.norm(C)))
+    rays, _trace = _rays_and_trace_for_source(
+        [frame],
+        K=K,
+        R_wc=R_wc,
+        C=C,
+        dist=intrinsics.distortion,
+        anchor=anchor_timestamp_s,
+        cam_id=camera_id,
+        source=source,
+        viz_length=viz_length,
+    )
+    return rays[0] if rays else None
+
+
 def build_scene(
     session_id: str,
     pitches: dict[str, "PitchPayload"],

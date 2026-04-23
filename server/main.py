@@ -584,6 +584,12 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                     session_id,
                     frame,
                 )
+                ray = await asyncio.to_thread(
+                    state.live_ray_for_frame,
+                    camera_id,
+                    session_id,
+                    frame,
+                )
                 await sse_hub.broadcast(
                     "frame_count",
                     {
@@ -593,6 +599,20 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                         "count": counts.get(camera_id, 0),
                     },
                 )
+                if ray is not None:
+                    await sse_hub.broadcast(
+                        "ray",
+                        {
+                            "sid": session_id,
+                            "cam": camera_id,
+                            "path": DetectionPath.live.value,
+                            "frame_index": ray.frame_index,
+                            "t_rel_s": ray.t_rel_s,
+                            "origin": ray.origin,
+                            "endpoint": ray.endpoint,
+                            "source": ray.source,
+                        },
+                    )
                 for point in new_points:
                     await sse_hub.broadcast(
                         "point",
