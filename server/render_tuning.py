@@ -72,7 +72,7 @@ def _render_tuning_body(
         + ''.join(
             '<div class="tuning-row">'
             '<span class="tuning-label">Tracking exp</span>'
-            '<div class="res-segmented" role="radiogroup" aria-label="Tracking exposure cap">'
+            '<div class="mode-segmented" role="radiogroup" aria-label="Tracking exposure cap">'
             + ''.join(
                 f'<form class="inline" method="POST" action="/settings/tracking_exposure_cap">'
                 f'<input type="hidden" name="mode" value="{mode}">'
@@ -92,7 +92,7 @@ def _render_tuning_body(
         + ''.join(
             '<div class="tuning-row">'
             '<span class="tuning-label">Capture</span>'
-            '<div class="res-segmented" role="radiogroup" aria-label="Capture resolution">'
+            '<div class="mode-segmented" role="radiogroup" aria-label="Capture resolution">'
             + ''.join(
                 f'<form class="inline" method="POST" action="/settings/capture_height">'
                 f'<input type="hidden" name="height" value="{h}">'
