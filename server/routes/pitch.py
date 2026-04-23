@@ -21,6 +21,94 @@ router = APIRouter()
 logger = logging.getLogger("ball_tracker")
 
 
+# Server-post detection timeout floor. Below this we always get a chance
+# to fail fast on trivially small / bad clips even if `video_duration_s`
+# can't be estimated. Chosen conservatively — a real 5 s cycle decodes
+# in a few seconds on the dev machine, so 30 s covers ~10x overhead.
+_SERVER_POST_TIMEOUT_FLOOR_S = 30.0
+
+# Upper-bound fallback when no duration estimate is available. Used for
+# the `wait_for` that wraps `detect_pitch` so a wedged PyAV decoder
+# can't hang the background task forever.
+_SERVER_POST_TIMEOUT_FALLBACK_S = 120.0
+
+
+def _estimate_video_duration_s(pitch: PitchPayload) -> float | None:
+    """Best-effort estimate of the MOV's wall duration from the pitch
+    metadata alone. Returns None if we can't make a confident guess —
+    the timeout wrapper will fall back to a flat ceiling in that case.
+
+    Uses `frames_live` length / `video_fps` first (most likely to be
+    populated because the live path streams throughout recording), then
+    falls back to `frames` / `frames_server_post` against the same fps."""
+    fps = pitch.video_fps
+    if not fps or fps <= 0:
+        return None
+    for candidate in (pitch.frames_live, pitch.frames_server_post, pitch.frames):
+        if candidate:
+            return float(len(candidate)) / float(fps)
+    return None
+
+
+def _server_post_timeout_s(pitch: PitchPayload) -> float:
+    """Return the `asyncio.wait_for` timeout to apply to the background
+    detection pipeline. 2× the estimated duration, floored at
+    `_SERVER_POST_TIMEOUT_FLOOR_S`; if we can't estimate, use a flat
+    `_SERVER_POST_TIMEOUT_FALLBACK_S` ceiling."""
+    duration = _estimate_video_duration_s(pitch)
+    if duration is None:
+        return _SERVER_POST_TIMEOUT_FALLBACK_S
+    return max(_SERVER_POST_TIMEOUT_FLOOR_S, 2.0 * duration)
+
+
+async def _broadcast_server_post_failed(
+    session_id: str, camera_id: str, reason: str,
+) -> None:
+    """Fire a best-effort SSE broadcast for dashboards listening on the
+    shared sse_hub. Swallows everything — broadcast is observability-only
+    and must not propagate back into the background task's finally
+    handler and mask the original failure."""
+    try:
+        import main as _main
+        hub = getattr(_main, "sse_hub", None)
+        if hub is None:
+            return
+        await hub.broadcast(
+            "server_post_failed",
+            {
+                "session_id": session_id,
+                "camera_id": camera_id,
+                "reason": reason,
+            },
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug(
+            "broadcast server_post_failed suppressed session=%s cam=%s exc=%s",
+            session_id, camera_id, exc,
+        )
+
+
+async def _record_server_post_failure(
+    session_id: str, camera_id: str, reason: str,
+) -> None:
+    """Persist a visible abort reason on the SessionResult AND broadcast
+    the failure event. Called from the background task's except / timeout
+    branches so the dashboard's events view surfaces a red pill instead
+    of silently logging + moving on."""
+    import main as _main
+    state = _main.state
+    try:
+        await asyncio.to_thread(
+            state.record_server_post_abort, session_id, camera_id, reason
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "record_server_post_abort failed session=%s cam=%s exc=%s",
+            session_id, camera_id, exc,
+        )
+    await _broadcast_server_post_failed(session_id, camera_id, reason)
+
+
 def _summarize_result(result: SessionResult) -> dict[str, Any]:
     paired = result.camera_a_received and result.camera_b_received
     summary: dict[str, Any] = {
@@ -192,7 +280,20 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
     re-record the pitch so `result.points` (and the annotated MP4) land on
     disk. Runs after /pitch has already returned — the dashboard sees the
     session + on-device points immediately, and this task backfills the
-    server-side trace 8-20 s later."""
+    server-side trace 8-20 s later.
+
+    Reliability guarantees:
+
+    - Every failure branch writes an abort reason onto the `SessionResult`
+      via `state.record_server_post_abort` and broadcasts a
+      `server_post_failed` event (see `_record_server_post_failure`) so
+      the dashboard's `/events` pill flips red instead of silently logging.
+    - `detect_pitch` runs under `asyncio.wait_for` — a wedged PyAV decoder
+      can't hang the background task forever; a TimeoutError is treated
+      as an ordinary failure (abort reason + finish_server_post_job).
+    - A try / finally wraps the whole body with a sentinel so the job
+      state can't stay stuck in `queued` even if `finish_server_post_job`
+      itself raises partway through an except branch."""
     import main as _main
     state = _main.state
     detect_pitch = _main.detect_pitch
@@ -203,83 +304,150 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             pitch.session_id, pitch.camera_id,
         )
         return
-    try:
-        frames = await asyncio.to_thread(
-            detect_pitch,
-            clip_path,
-            pitch.video_start_pts_s,
-            hsv_range=state.hsv_range(),
-            should_cancel=lambda: state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id),
-        )
-    except ProcessingCanceled:
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=True)
-        logger.info(
-            "background detection canceled session=%s cam=%s",
-            pitch.session_id, pitch.camera_id,
-        )
-        return
-    except Exception as exc:
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
-        logger.warning(
-            "background detect_pitch failed session=%s cam=%s err=%s",
-            pitch.session_id, pitch.camera_id, exc,
-        )
-        return
 
-    if state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id):
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=True)
-        logger.info(
-            "background detection discarded after cancel session=%s cam=%s",
-            pitch.session_id, pitch.camera_id,
-        )
-        return
-    pitch.frames = frames
-    pitch.frames_server_post = frames
-    try:
-        await asyncio.to_thread(state.record, pitch)
-    except Exception as exc:
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
-        logger.warning(
-            "background re-record failed session=%s cam=%s err=%s",
-            pitch.session_id, pitch.camera_id, exc,
-        )
-        return
+    # Sentinel so a raise inside finish_server_post_job can't leave the
+    # job state stuck. The finally block reads `finished` last and
+    # re-issues `finish_server_post_job(canceled=False)` if no branch
+    # reached it cleanly.
+    finished = False
+    canceled_final = False
 
-    annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
+    def _finish(canceled: bool) -> None:
+        nonlocal finished, canceled_final
+        if finished:
+            return
+        finished = True
+        canceled_final = canceled
+        state.finish_server_post_job(
+            pitch.session_id, pitch.camera_id, canceled=canceled
+        )
+
     try:
-        await asyncio.to_thread(
-            annotate_video,
-            clip_path,
-            annotated_path,
-            frames,
-            should_cancel=lambda: state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id),
-        )
-    except ProcessingCanceled:
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=True)
+        timeout_s = _server_post_timeout_s(pitch)
+        try:
+            frames = await asyncio.wait_for(
+                asyncio.to_thread(
+                    detect_pitch,
+                    clip_path,
+                    pitch.video_start_pts_s,
+                    hsv_range=state.hsv_range(),
+                    should_cancel=lambda: state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id),
+                ),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            reason = f"detect_pitch timeout after {timeout_s:.1f}s"
+            await _record_server_post_failure(
+                pitch.session_id, pitch.camera_id, reason,
+            )
+            logger.warning(
+                "background detect_pitch timed out session=%s cam=%s timeout=%.1fs",
+                pitch.session_id, pitch.camera_id, timeout_s,
+            )
+            _finish(canceled=False)
+            return
+        except ProcessingCanceled:
+            logger.info(
+                "background detection canceled session=%s cam=%s",
+                pitch.session_id, pitch.camera_id,
+            )
+            _finish(canceled=True)
+            return
+        except Exception as exc:
+            reason = f"detect_pitch: {type(exc).__name__}: {exc}"
+            await _record_server_post_failure(
+                pitch.session_id, pitch.camera_id, reason,
+            )
+            logger.warning(
+                "background detect_pitch failed session=%s cam=%s err=%s",
+                pitch.session_id, pitch.camera_id, exc,
+            )
+            _finish(canceled=False)
+            return
+
+        if state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id):
+            logger.info(
+                "background detection discarded after cancel session=%s cam=%s",
+                pitch.session_id, pitch.camera_id,
+            )
+            _finish(canceled=True)
+            return
+
+        pitch.frames = frames
+        pitch.frames_server_post = frames
+        try:
+            await asyncio.to_thread(state.record, pitch)
+        except Exception as exc:
+            reason = f"record: {type(exc).__name__}: {exc}"
+            await _record_server_post_failure(
+                pitch.session_id, pitch.camera_id, reason,
+            )
+            logger.warning(
+                "background re-record failed session=%s cam=%s err=%s",
+                pitch.session_id, pitch.camera_id, exc,
+            )
+            _finish(canceled=False)
+            return
+
+        annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
+        try:
+            await asyncio.to_thread(
+                annotate_video,
+                clip_path,
+                annotated_path,
+                frames,
+                should_cancel=lambda: state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id),
+            )
+        except ProcessingCanceled:
+            logger.info(
+                "background annotation canceled session=%s cam=%s",
+                pitch.session_id, pitch.camera_id,
+            )
+            if annotated_path.exists():
+                try:
+                    annotated_path.unlink()
+                except OSError:
+                    pass
+            _finish(canceled=True)
+            return
+        except Exception as exc:
+            reason = f"annotate_video: {type(exc).__name__}: {exc}"
+            await _record_server_post_failure(
+                pitch.session_id, pitch.camera_id, reason,
+            )
+            logger.warning(
+                "annotate_video failed session=%s cam=%s err=%s",
+                pitch.session_id, pitch.camera_id, exc,
+            )
+            if annotated_path.exists():
+                try:
+                    annotated_path.unlink()
+                except OSError:
+                    pass
+            _finish(canceled=False)
+            return
+
+        ball = sum(1 for f in frames if f.ball_detected)
         logger.info(
-            "background annotation canceled session=%s cam=%s",
-            pitch.session_id, pitch.camera_id,
+            "background detection complete session=%s cam=%s frames=%d ball=%d",
+            pitch.session_id, pitch.camera_id, len(frames), ball,
         )
-        if annotated_path.exists():
+        _finish(canceled=False)
+    finally:
+        # Belt-and-braces — every explicit branch above already calls
+        # `_finish`, so this only matters if a branch raised before
+        # calling it (e.g. `_record_server_post_failure` itself blowing
+        # up during an abort broadcast). Without this, the job status
+        # would stay in "queued" forever, and the dashboard "running"
+        # spinner would lie. `_finish` is idempotent so a redundant call
+        # is harmless.
+        if not finished:
             try:
-                annotated_path.unlink()
-            except OSError:
-                pass
-        return
-    except Exception as exc:
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
-        logger.warning(
-            "annotate_video failed session=%s cam=%s err=%s",
-            pitch.session_id, pitch.camera_id, exc,
-        )
-        if annotated_path.exists():
-            try:
-                annotated_path.unlink()
-            except OSError:
-                pass
-    ball = sum(1 for f in frames if f.ball_detected)
-    logger.info(
-        "background detection complete session=%s cam=%s frames=%d ball=%d",
-        pitch.session_id, pitch.camera_id, len(frames), ball,
-    )
-    state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
+                state.finish_server_post_job(
+                    pitch.session_id, pitch.camera_id, canceled=False,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error(
+                    "finish_server_post_job failed in finally session=%s cam=%s exc=%s",
+                    pitch.session_id, pitch.camera_id, exc,
+                )

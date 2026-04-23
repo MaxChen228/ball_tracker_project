@@ -55,10 +55,18 @@ def iter_frames(
 def probe_dims(video_path: Path) -> tuple[int, int] | None:
     """Return `(width, height)` of the MOV's decoded pixel grid, or None
     if the container can't be opened / has no video stream. Lightweight —
-    opens the container, reads stream metadata, closes; no frame decode."""
+    opens the container, reads stream metadata, closes; no frame decode.
+
+    Only swallows the specific failure modes of "file we genuinely cannot
+    open": `av.FFmpegError` (container parse / demux failure), `OSError`
+    (filesystem / permission / I/O), `ValueError` (PyAV occasionally
+    raises this on a malformed header). Anything else — import errors,
+    bugs in our own call sites, attribute errors — bubbles up so tests
+    and logs can see the real root cause instead of getting a silent
+    `None`."""
     try:
         container = av.open(str(video_path))
-    except Exception as e:
+    except (av.FFmpegError, OSError, ValueError) as e:
         logger.warning("probe_dims failed for %s: %s", video_path, e)
         return None
     try:
