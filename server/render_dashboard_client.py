@@ -926,7 +926,6 @@ _JS_TEMPLATE_RAW = r"""
       </div>
       ${postPassChips ? `<div class="postpass-row">${postPassChips}</div>` : ''}
       <div class="active-actions">
-        ${armed ? `<form method="post" action="/sessions/cancel" style="display:inline"><button type="submit" class="btn-stop">Stop</button></form>` : ''}
         <button type="button" class="btn-reset" data-reset-trail>Reset trail</button>
       </div>`;
     // Redraw sparklines after DOM replacement (canvas clears on innerHTML).
