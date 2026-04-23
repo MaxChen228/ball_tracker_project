@@ -18,7 +18,7 @@ final class CameraTransportCoordinator: NSObject {
         let getSyncAnchorTimestampS: () -> Double?
         let getChirpSnapshot: () -> AudioChirpDetector.Snapshot?
         let startTimeSync: (String) -> Void
-        let applyMutualSync: (String) -> Void
+        let applyMutualSync: (String, [Double], Double) -> Void
         let applyRemoteArm: () -> Void
         let applyRemoteDisarm: () -> Void
         let updateTimeSyncServerState: (Bool, String?) -> Void
@@ -199,7 +199,7 @@ final class CameraTransportCoordinator: NSObject {
                 setCurrentSessionPaths: { [weak self] in self?.dependencies.setCurrentSessionPaths($0) },
                 refreshModeLabel: { [weak self] in self?.dependencies.refreshModeLabel() },
                 startTimeSync: { [weak self] syncId in self?.dependencies.startTimeSync(syncId) },
-                applyMutualSync: { [weak self] syncId in self?.dependencies.applyMutualSync(syncId) },
+                applyMutualSync: { [weak self] syncId, emitAtS, recordDurationS in self?.dependencies.applyMutualSync(syncId, emitAtS, recordDurationS) },
                 applyRemoteArm: { [weak self] in self?.dependencies.applyRemoteArm() },
                 applyRemoteDisarm: { [weak self] in self?.dependencies.applyRemoteDisarm() },
                 updateTimeSyncServerState: { [weak self] confirmed, syncId in

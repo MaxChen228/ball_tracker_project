@@ -61,7 +61,7 @@ final class CameraCommandRouter {
                 let emitAtS = (message["emit_at_s"] as? [Double]) ?? [0.3]
                 let recordDurationS = (message["record_duration_s"] as? Double) ?? 3.0
                 DispatchQueue.main.async {
-                    self.deps.applyMutualSync(sid, emitAtS: emitAtS, recordDurationS: recordDurationS)
+                    self.deps.applyMutualSync(sid, emitAtS, recordDurationS)
                 }
             }
         case "sync_command":
