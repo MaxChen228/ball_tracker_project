@@ -190,6 +190,28 @@ def _base_payload(
     return payload
 
 
+def _post_calibration(client: TestClient, camera_id: str, K: np.ndarray, H: np.ndarray):
+    return client.post(
+        "/calibration",
+        json={
+            "camera_id": camera_id,
+            "intrinsics": {
+                "fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
+            },
+            "homography": H.flatten().tolist(),
+            "image_width_px": 1920,
+            "image_height_px": 1080,
+        },
+    )
+
+
+def _seed_ready_stereo(client: TestClient, K: np.ndarray, H_a: np.ndarray, H_b: np.ndarray) -> None:
+    assert _post_calibration(client, "A", K, H_a).status_code == 200
+    assert _post_calibration(client, "B", K, H_b).status_code == 200
+    main.state.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+    main.state.heartbeat("B", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+
+
 # --------------------------- Unit tests --------------------------------------
 
 
@@ -533,20 +555,34 @@ def test_pitch_upload_rejected_when_no_calibration(tmp_path):
     assert "no calibration on file" in r.text
 
 
-def test_post_pitch_anchorless_sets_error(tmp_path):
-    """Upload with `sync_anchor_timestamp_s=null` is accepted (so the clip
-    still lands on disk for forensics) but the session is flagged
-    `error="no time sync"` and triangulation is skipped."""
+def test_post_pitch_anchorless_single_camera_keeps_rays(tmp_path):
+    """A single camera can upload without a time-sync anchor. The server
+    cannot triangulate, but it must keep detections so the viewer can render
+    monocular rays."""
     K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
     P_true = np.array([0.1, 0.3, 1.0])
-    mov = _encode_single_ball_mov(
-        tmp_path, K, R_a, t_a, P_true, filename="anchorless.mov"
-    )
+    u, v = _project_pixels(K, R_a, t_a, P_true)
     client = TestClient(app)
     body = _base_payload("A", sid(502), K, H_a, anchor_ts=None)
-    r = _post_pitch(client, body, mov)
+    body["paths"] = ["ios_post"]
+    body["frames"] = [
+        {
+            "frame_index": 0,
+            "timestamp_s": body["video_start_pts_s"],
+            "px": u,
+            "py": v,
+            "ball_detected": True,
+        }
+    ]
+    r = _post_pitch(client, body, None)
     assert r.status_code == 200, r.text
-    assert r.json()["error"] == "no time sync"
+    assert r.json()["error"] is None
+    assert r.json()["triangulated_points"] == 0
+
+    scene = client.get(f"/reconstruction/{sid(502)}").json()
+    assert len(scene["cameras"]) == 1
+    assert len(scene["rays"]) == 1
+    assert scene["triangulated"] == []
 
 
 def test_dashboard_drives_mode_two_end_to_end(tmp_path):
@@ -572,6 +608,7 @@ def test_dashboard_drives_mode_two_end_to_end(tmp_path):
     assert r.json()["capture_mode"] == "on_device"
 
     # 2. Arm — session.mode should snapshot the dashboard choice.
+    _seed_ready_stereo(client, K, H_a, H_b)
     arm = client.post(
         "/sessions/arm", headers={"Accept": "application/json"}
     ).json()
@@ -660,6 +697,7 @@ def test_dashboard_drives_mode_one_end_to_end(tmp_path):
     assert r.status_code == 200
 
     # 2. Arm.
+    _seed_ready_stereo(client, K, H_a, H_b)
     arm = client.post(
         "/sessions/arm", headers={"Accept": "application/json"}
     ).json()
@@ -716,6 +754,7 @@ def test_dashboard_drives_dual_mode_end_to_end(tmp_path):
     assert r.json()["capture_mode"] == "dual"
 
     # 2. Arm — session snapshot must be dual.
+    _seed_ready_stereo(client, K, H_a, H_b)
     arm = client.post(
         "/sessions/arm", headers={"Accept": "application/json"}
     ).json()
@@ -961,6 +1000,7 @@ def test_dual_mode_on_device_surfaces_before_server_detection(tmp_path, monkeypa
         data={"mode": "dual"},
         headers={"Accept": "application/json"},
     )
+    _seed_ready_stereo(client, K, H_a, H_b)
     arm = client.post(
         "/sessions/arm", headers={"Accept": "application/json"}
     ).json()

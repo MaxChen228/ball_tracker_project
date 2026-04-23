@@ -316,6 +316,53 @@ def _build_device_status_rows(
     return devices
 
 
+def _arm_readiness(
+    devices: list[dict[str, Any]] | None = None,
+    calibrations: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return the dashboard/API arming gate.
+
+    A single calibrated online camera is a valid monocular session: it can
+    record detections and render viewer rays, but cannot triangulate. Time
+    sync is only required once two calibrated online cameras will participate
+    in the same session.
+    """
+    devices = devices if devices is not None else _build_device_status_rows()
+    calibrations = calibrations if calibrations is not None else sorted(state.calibrations().keys())
+    calibrated = set(calibrations)
+    online = {str(d.get("camera_id")) for d in devices if d.get("camera_id")}
+    synced = {str(d.get("camera_id")) for d in devices if d.get("camera_id") and d.get("time_synced")}
+    usable = sorted(cam for cam in online if cam in calibrated)
+    uncalibrated = sorted(cam for cam in online if cam not in calibrated)
+    blockers: list[str] = []
+    warnings: list[str] = []
+
+    if not online:
+        blockers.append("no camera online")
+    elif uncalibrated:
+        blockers.extend(f"{cam} not calibrated" for cam in uncalibrated)
+    elif len(usable) >= 2:
+        unsynced = [cam for cam in usable if cam not in synced]
+        blockers.extend(f"{cam} not time-synced" for cam in unsynced)
+    else:
+        missing = [cam for cam in ("A", "B") if cam not in usable]
+        if missing:
+            warnings.append(
+                f"single-camera session ({usable[0]}); no triangulation"
+            )
+
+    return {
+        "ready": not blockers,
+        "blockers": blockers,
+        "warnings": warnings,
+        "online_cameras": sorted(online),
+        "calibrated_online_cameras": usable,
+        "synced_calibrated_online_cameras": sorted(cam for cam in usable if cam in synced),
+        "requires_time_sync": len(usable) >= 2,
+        "mode": "stereo" if len(usable) >= 2 else ("single_camera" if usable else "blocked"),
+    }
+
+
 def _build_status_response() -> dict[str, Any]:
     """Shared shape for GET /status and dashboard-facing snapshots. Anything
     an iPhone needs to decide whether to arm / disarm is in here — the
@@ -328,12 +375,14 @@ def _build_status_response() -> dict[str, Any]:
     ws_snapshot = device_ws.snapshot()
     devices = _build_device_status_rows(now=now, ws_snapshot=ws_snapshot)
     calibrations = sorted(state.calibrations().keys())
+    arm_readiness = _arm_readiness(devices, calibrations)
     return {
         **summary,
         "devices": devices,
         # Lightweight calibration presence snapshot for header/readiness UI.
         # The richer scene payload still lives on /calibration/state.
         "calibrations": calibrations,
+        "arm_readiness": arm_readiness,
         "session": session.to_dict() if session is not None else None,
         "commands": state.commands_for_devices(),
         # Global dashboard mode choice. iPhones show this on the HUD in idle
@@ -626,13 +675,16 @@ def events_index() -> HTMLResponse:
 
     session = state.session_snapshot()
     sync_run = state.current_sync()
+    devices = _build_device_status_rows()
+    calibrations = sorted(state.calibrations().keys())
     return HTMLResponse(
         render_events_index_html(
             events=state.events(),
             trash_count=state.trash_count(),
-            devices=_build_device_status_rows(),
+            devices=devices,
             session=session.to_dict() if session is not None else None,
-            calibrations=sorted(state.calibrations().keys()),
+            calibrations=calibrations,
+            arm_readiness=_arm_readiness(devices, calibrations),
             capture_mode=state.current_mode().value,
             default_paths=sorted(p.value for p in state.default_paths()),
             live_session=state.live_session_summary(),

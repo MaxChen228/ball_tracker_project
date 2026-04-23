@@ -905,6 +905,8 @@ class State:
             return None
         with self._lock:
             live = self._live_pairings.get(session.id)
+            result = self.results.get(session.id)
+        paths_completed = sorted(result.paths_completed) if result is not None else []
         if live is None:
             return {
                 "session_id": session.id,
@@ -912,6 +914,7 @@ class State:
                 "paths": sorted(p.value for p in session.paths),
                 "frame_counts": {},
                 "point_count": 0,
+                "paths_completed": paths_completed,
                 "abort_reasons": {},
             }
         return {
@@ -920,6 +923,7 @@ class State:
             "paths": sorted(p.value for p in session.paths),
             "frame_counts": dict(live.frame_counts),
             "point_count": len(live.triangulated),
+            "paths_completed": paths_completed,
             "completed_cameras": sorted(live.completed_cameras),
             "abort_reasons": dict(live.abort_reasons),
         }
@@ -1644,8 +1648,6 @@ class State:
             if self._session_is_trashed(session_id):
                 continue
             if DetectionPath.server_post not in self._paths_for_pitch(pitch):
-                continue
-            if pitch.sync_anchor_timestamp_s is None:
                 continue
             if pitch.frames_server_post:
                 continue

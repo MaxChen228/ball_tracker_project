@@ -62,9 +62,9 @@ async def pitch(
         decodes it and runs HSV detection). Omitted in mode-two — server
         trusts the iPhone's detection output and only pairs + triangulates.
 
-    Requests with neither a video nor a non-empty `frames` list return 422:
-    there's no way to triangulate off nothing. Requests without a time-sync
-    anchor skip detection+triangulation and surface `error="no time sync"`.
+    Requests with neither a video nor a non-empty `frames` list return 422.
+    A missing time-sync anchor only prevents stereo pairing/triangulation;
+    monocular detections are still kept so the viewer can render rays.
     """
     import main as _main
     state = _main.state
@@ -159,23 +159,13 @@ async def pitch(
 
         payload_obj.frames = []
         payload_obj.frames_server_post = []
-        if (
-            payload_obj.sync_anchor_timestamp_s is not None
-            and DetectionPath.server_post in payload_paths
-        ):
+        if DetectionPath.server_post in payload_paths:
             detection_pending = True
     else:
-        if payload_obj.sync_anchor_timestamp_s is None:
-            payload_obj.frames = []
-            payload_obj.frames_ios_post = []
-            payload_obj.frames_live = []
-            payload_obj.frames_server_post = []
-        elif payload_obj.frames and not payload_obj.frames_ios_post and DetectionPath.server_post not in payload_paths:
+        if payload_obj.frames and not payload_obj.frames_ios_post and DetectionPath.server_post not in payload_paths:
             payload_obj.frames_ios_post = list(payload_obj.frames)
 
     result = await asyncio.to_thread(state.record, payload_obj)
-    if payload_obj.sync_anchor_timestamp_s is None and result.error is None:
-        result.error = "no time sync"
 
     if detection_pending and clip_path is not None:
         state.mark_server_post_queued(payload_obj.session_id, payload_obj.camera_id)

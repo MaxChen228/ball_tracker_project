@@ -857,7 +857,7 @@ _JS_TEMPLATE_RAW = r"""
   function renderActiveSession(liveSession) {
     if (!activeBox) return;
     if (!liveSession || !liveSession.session_id) {
-      activeBox.innerHTML = `<div class="active-empty">No active live stream.</div>`;
+      activeBox.innerHTML = `<div class="active-empty">No active session.</div>`;
       return;
     }
     const sid = esc(liveSession.session_id);
@@ -893,20 +893,15 @@ _JS_TEMPLATE_RAW = r"""
     const completed = new Set(liveSession.paths_completed || []);
     const postPassRow = (path, label) => {
       if (!pathsOn.has(path)) return '';
-      const state = completed.has(path) ? 'done' : (armed ? 'pending' : 'running');
+      const state = completed.has(path) ? 'done' : (armed ? 'pending' : 'stopped');
       return `<span class="postpass-chip ${state}">${esc(label)}: ${state}</span>`;
     };
     const postPassChips = [
       postPassRow('ios_post', 'iOS'),
       postPassRow('server_post', 'srv'),
     ].filter(Boolean).join('');
-    activeBox.innerHTML = `
-      <div class="active-head">
-        <span class="chip armed ${armed ? 'pulse' : ''}">${armed ? '●REC' : 'ended'}</span>
-        <span class="session-id">${sid}</span>
-        <span class="elapsed" data-elapsed>${fmtElapsed(elapsedMs)}</span>
-      </div>
-      <div class="path-chip-row">${chips}</div>
+    const liveEnabled = pathsOn.has('live');
+    const liveRows = liveEnabled ? `
       <div class="cam-row" data-cam="A">
         <canvas class="spark" data-spark="A"></canvas>
         <span class="k">A</span>
@@ -923,7 +918,16 @@ _JS_TEMPLATE_RAW = r"""
         <span class="k">Live pairs</span>
         <span class="v">${Number(liveSession.point_count || 0)} pts</span>
         <span class="vsub">last ${lastPtTxt} · ${depthTxt}</span>
+      </div>` : `
+      <div class="active-empty">Live stream disabled for this session.</div>`;
+    activeBox.innerHTML = `
+      <div class="active-head">
+        <span class="chip armed ${armed ? 'pulse' : ''}">${armed ? '●REC' : 'ended'}</span>
+        <span class="session-id">${sid}</span>
+        <span class="elapsed" data-elapsed>${fmtElapsed(elapsedMs)}</span>
       </div>
+      <div class="path-chip-row">${chips}</div>
+      ${liveRows}
       ${postPassChips ? `<div class="postpass-row">${postPassChips}</div>` : ''}
       <div class="active-actions">
         <button type="button" class="btn-reset" data-reset-trail>Reset trail</button>
@@ -1000,10 +1004,45 @@ _JS_TEMPLATE_RAW = r"""
     return `<span class="sync-led ${cls}" title="${esc(tip)}">${esc(cam)}</span>`;
   }
 
+  function armReadiness(state) {
+    if (state && state.arm_readiness) return state.arm_readiness;
+    const devices = (state && state.devices) || [];
+    const calibrations = new Set((state && state.calibrations) || []);
+    const online = devices.map(d => String(d.camera_id)).filter(Boolean);
+    const synced = new Set(devices.filter(d => d && d.time_synced).map(d => String(d.camera_id)));
+    const usable = online.filter(cam => calibrations.has(cam)).sort();
+    const uncalibrated = online.filter(cam => !calibrations.has(cam)).sort();
+    const blockers = [];
+    const warnings = [];
+    if (!online.length) {
+      blockers.push('no camera online');
+    } else if (uncalibrated.length) {
+      uncalibrated.forEach(cam => blockers.push(`${cam} not calibrated`));
+    } else if (usable.length >= 2) {
+      usable.forEach(cam => { if (!synced.has(cam)) blockers.push(`${cam} not time-synced`); });
+    } else {
+      warnings.push(`single-camera session (${usable[0]}); no triangulation`);
+    }
+    return {
+      ready: blockers.length === 0,
+      blockers,
+      warnings,
+      online_cameras: online.sort(),
+      calibrated_online_cameras: usable,
+      synced_calibrated_online_cameras: usable.filter(cam => synced.has(cam)),
+      requires_time_sync: usable.length >= 2,
+      mode: usable.length >= 2 ? 'stereo' : (usable.length ? 'single_camera' : 'blocked'),
+    };
+  }
+
   function renderSession(state) {
     if (!sessionBox) { /* nav-only render still executes below */ }
     const s = state.session;
     const armed = !!(s && s.armed);
+    const readiness = armReadiness(state);
+    const canArm = !!(readiness && readiness.ready);
+    const blockers = (readiness && readiness.blockers) || [];
+    const warnings = (readiness && readiness.warnings) || [];
     currentDefaultPaths = state.default_paths || currentDefaultPaths || ['server_post'];
     currentLiveSession = state.live_session || currentLiveSession;
     const chip = armed ? `<span class="chip armed">armed</span>` : `<span class="chip idle">idle</span>`;
@@ -1013,17 +1052,23 @@ _JS_TEMPLATE_RAW = r"""
            <button class="btn" type="submit">Clear</button>
          </form>`
       : '';
+    const gateRow = (!armed && blockers.length)
+      ? `<div class="arm-gate"><span class="gate-label">Need:</span> ${esc(blockers.join(', '))}</div>`
+      : ((!armed && warnings.length)
+        ? `<div class="arm-gate"><span class="gate-label">Mode:</span> ${esc(warnings.join(', '))}</div>`
+        : '');
     const sessHtml = `
       <div class="session-head">${chip}${sid}</div>
       <div class="session-actions">
         <form class="inline" method="POST" action="/sessions/arm">
-          <button class="btn" type="submit" ${armed ? 'disabled' : ''}>Arm session</button>
+          <button class="btn" type="submit" ${armed || !canArm ? 'disabled' : ''}>Arm session</button>
         </form>
         <form class="inline" method="POST" action="/sessions/stop">
           <button class="btn danger" type="submit" ${armed ? '' : 'disabled'}>Stop</button>
         </form>
         ${clearBtn}
       </div>
+      ${gateRow}
       <div class="card-subtitle">Time Sync</div>
       <div class="session-actions">
         <form class="inline" method="POST" action="/sync/trigger">
@@ -1039,14 +1084,15 @@ _JS_TEMPLATE_RAW = r"""
     // Mirror live state into the shared app-header status strip.
     if (navStatus) {
       const online = (state.devices || []).length;
-      const cal = (state.calibrations || []).length;
-      const synced = (state.devices || []).filter(d => d && d.time_synced).length;
-      const expected = 2;
+      const usable = (readiness.calibrated_online_cameras || []).length;
+      const syncedUsable = (readiness.synced_calibrated_online_cameras || []).length;
       const cooldown = Number(state.sync_cooldown_remaining_s || 0);
       let badgeCls = 'ready';
       let badge = 'Ready';
       let headline = 'ready to arm';
-      let context = 'all prerequisites satisfied';
+      let context = readiness.mode === 'single_camera'
+        ? 'single-camera rays only'
+        : 'all stereo prerequisites satisfied';
       if (armed) {
         badgeCls = 'recording';
         badge = 'Recording';
@@ -1057,21 +1103,11 @@ _JS_TEMPLATE_RAW = r"""
         badge = 'Sync';
         headline = 'sync in progress';
         context = 'complete on /sync';
-      } else if (online < expected) {
+      } else if (!canArm) {
         badgeCls = 'blocked';
         badge = 'Blocked';
-        headline = 'bring both devices online';
-        context = `${online}/${expected} devices available`;
-      } else if (cal < expected) {
-        badgeCls = 'blocked';
-        badge = 'Blocked';
-        headline = 'finish calibration';
-        context = `${cal}/${expected} cameras calibrated`;
-      } else if (synced < expected) {
-        badgeCls = 'blocked';
-        badge = 'Blocked';
-        headline = 'run time sync';
-        context = `${synced}/${expected} cameras synced`;
+        headline = blockers[0] || 'not ready';
+        context = blockers.slice(1).join(', ') || 'check camera readiness';
       } else if (cooldown > 0) {
         badgeCls = 'cooldown';
         badge = 'Cooldown';
@@ -1087,9 +1123,9 @@ _JS_TEMPLATE_RAW = r"""
           <span class="status-context">${context}</span>
         </div>
         <div class="status-checks">
-          ${check('Devices', `${online}/${expected}`, online >= expected)}
-          ${check('Cal', `${cal}/${expected}`, cal >= expected)}
-          ${check('Sync', `${synced}/${expected}`, synced >= expected)}
+          ${check('Devices', `${online}`, online >= 1)}
+          ${check('Cal', `${usable}`, usable >= 1)}
+          ${check('Sync', readiness.requires_time_sync ? `${syncedUsable}/${usable}` : 'single', !readiness.requires_time_sync || syncedUsable >= usable)}
         </div>`;
       navStatus.innerHTML = navHtml;
     }

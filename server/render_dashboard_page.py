@@ -19,6 +19,7 @@ def render_events_index_html(
     devices: list[dict[str, Any]] | None = None,
     session: dict[str, Any] | None = None,
     calibrations: list[str] | None = None,
+    arm_readiness: dict[str, Any] | None = None,
     capture_mode: str = "camera_only",
     default_paths: list[str] | None = None,
     live_session: dict[str, Any] | None = None,
@@ -61,11 +62,11 @@ def render_events_index_html(
     scene_div = fig.to_html(include_plotlyjs=False, full_html=False, div_id="scene-root")
 
     nav_html = _render_app_nav(
-        "dashboard", devices, session, calibrations, sync, sync_cooldown_remaining_s
+        "dashboard", devices, session, calibrations, sync, sync_cooldown_remaining_s, arm_readiness
     )
     active_html = _render_active_session_body(live_session)
     session_html = _render_session_body(
-        session, capture_mode, default_paths, devices, calibrations
+        session, capture_mode, default_paths, devices, calibrations, arm_readiness
     )
     events_html = _render_events_body(events)
     return _render_dashboard_html(
