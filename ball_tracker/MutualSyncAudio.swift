@@ -59,7 +59,14 @@ final class MutualSyncAudio {
     private let bandAF1: Double
     private let bandBF0: Double
     private let bandBF1: Double
-    private let amplitude: Float = 0.7
+    // Hann-windowed chirp peaks at amplitude × 1.0 at the center sample;
+    // anything below ~0.99 is leaving SPL on the table. Previously 0.7
+    // (~3 dB unnecessary headroom) combined with the ~6-10 dB cap that
+    // `.measurement` mode applies to output made max-volume chirps
+    // measurably quiet at 2-3 m. We cannot drop `.measurement` — the mic
+    // side needs AGC / echo-cancel / noise-suppress disabled for clean
+    // matched-filter peaks — so the output fix has to come from here.
+    private let amplitude: Float = 0.95
 
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
@@ -146,6 +153,10 @@ final class MutualSyncAudio {
                 options: [.defaultToSpeaker, .allowBluetoothA2DP]
             )
             try session.setActive(true, options: [])
+            // Surface the system media-volume slider level so we can tell
+            // from logs whether a "quiet chirp" complaint is actual
+            // user-slider-low vs us silently cutting output.
+            log.info("mutual-sync audio session active outputVolume=\(session.outputVolume, privacy: .public)")
 
             engine.attach(player)
             let mixerFormat = engine.mainMixerNode.outputFormat(forBus: 0)

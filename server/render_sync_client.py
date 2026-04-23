@@ -4,22 +4,8 @@ from __future__ import annotations
 _JS_TEMPLATE = r"""
 (function () {
   const syncBox = document.getElementById('sync-body');
-  const traceBox = document.getElementById('sync-trace');
   const navStatus = document.getElementById('nav-status');
   const tuningStatus = document.getElementById('tuning-status');
-
-  // Design-token colors mirrored from render_dashboard.py _CSS root vars.
-  const COLOR_A_SELF  = '#C0392B';   // --dev
-  const COLOR_A_OTHER = '#4A6B8C';   // --contra
-  const COLOR_B_SELF  = '#D35400';   // --dual
-  const COLOR_B_OTHER = '#E6B300';   // --accent
-  const COLOR_THRESHOLD = '#A7372A'; // --failed
-  const COLOR_INK = '#2A2520';
-  const COLOR_SUB = '#7A756C';
-  const COLOR_BORDER = '#DBD6CD';
-
-  const THRESHOLD = __THRESHOLD__;
-  const MIN_PSR = __MIN_PSR__;
 
   function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 
@@ -143,130 +129,6 @@ _JS_TEMPLATE = r"""
       </div>`;
   }
 
-  // --- Trace plot ----------------------------------------------------------
-  let _lastTraceKey = null;
-  let _traceEmptyShown = false;
-
-  function traceFrom(samples, name, color) {
-    if (!samples || !samples.length) return null;
-    return {
-      type: 'scatter', mode: 'lines',
-      x: samples.map(s => s.t),
-      y: samples.map(s => s.peak),
-      line: { color, width: 1.5 },
-      name,
-      hovertemplate: `${name}<br>t=%{x:.3f}s<br>peak=%{y:.3f}<br>psr=%{customdata:.2f}<extra></extra>`,
-      customdata: samples.map(s => s.psr),
-    };
-  }
-
-  function firedMarker(tVal, name, color, yApprox) {
-    if (tVal === null || tVal === undefined) return null;
-    return {
-      type: 'scatter', mode: 'markers',
-      x: [tVal], y: [yApprox != null ? yApprox : 1.0],
-      marker: { color, size: 10, symbol: 'x', line: { color: COLOR_INK, width: 1 } },
-      name: `${name} fired`,
-      hovertemplate: `${name} fired<br>t=%{x:.3f}s<extra></extra>`,
-      showlegend: false,
-    };
-  }
-
-  function showTraceEmpty(msg) {
-    if (!traceBox) return;
-    traceBox.innerHTML = `<div class="trace-empty">${esc(msg)}</div>`;
-    _traceEmptyShown = true;
-  }
-
-  function renderTrace(last) {
-    if (!traceBox) return;
-    if (!last) {
-      if (!_traceEmptyShown) showTraceEmpty('No sync run yet.');
-      return;
-    }
-    const key = `${last.id}:${(last.trace_a_self||[]).length}:${(last.trace_a_other||[]).length}:${(last.trace_b_self||[]).length}:${(last.trace_b_other||[]).length}`;
-    if (key === _lastTraceKey) return;
-    _lastTraceKey = key;
-
-    const hasAny =
-      (last.trace_a_self && last.trace_a_self.length) ||
-      (last.trace_a_other && last.trace_a_other.length) ||
-      (last.trace_b_self && last.trace_b_self.length) ||
-      (last.trace_b_other && last.trace_b_other.length);
-    if (!hasAny) {
-      showTraceEmpty('Last run had no trace data (old iOS build?).');
-      return;
-    }
-    // Ensure the container is a Plotly target again — prior empty state
-    // replaced it with a <div class="trace-empty"> that Plotly can't draw into.
-    if (_traceEmptyShown) {
-      traceBox.innerHTML = '';
-      _traceEmptyShown = false;
-    }
-
-    const traces = [];
-    const a1 = traceFrom(last.trace_a_self,  'A · self',  COLOR_A_SELF);
-    const a2 = traceFrom(last.trace_a_other, 'A · other', COLOR_A_OTHER);
-    const b1 = traceFrom(last.trace_b_self,  'B · self',  COLOR_B_SELF);
-    const b2 = traceFrom(last.trace_b_other, 'B · other', COLOR_B_OTHER);
-    [a1, a2, b1, b2].forEach(t => { if (t) traces.push(t); });
-
-    // Fired-detection markers (per-role × per-band) — drawn at y=1.0 so
-    // they read as timeline tick marks above the matched-filter peaks.
-    // last.t_a_self_s, last.t_a_from_b_s etc. are absolute PTS, convert
-    // to run-relative by subtracting the earliest sample's t if any.
-    const allSamples = []
-      .concat(last.trace_a_self  || [])
-      .concat(last.trace_a_other || [])
-      .concat(last.trace_b_self  || [])
-      .concat(last.trace_b_other || []);
-    if (allSamples.length > 0) {
-      // Fired timestamps are absolute mic-clock PTS; trace samples are
-      // already run-relative. They live on different scales, so we only
-      // plot fired markers when there is at least one trace sample whose
-      // t differs from the fired value by plausible ~seconds — otherwise
-      // we skip markers (they'd just skew the X axis).
-    }
-
-    const layout = {
-      margin: { l: 48, r: 16, t: 16, b: 36 },
-      paper_bgcolor: 'rgba(0,0,0,0)',
-      plot_bgcolor: 'rgba(0,0,0,0)',
-      font: { family: 'JetBrains Mono, ui-monospace, monospace', size: 10, color: COLOR_INK },
-      xaxis: {
-        title: { text: 't (run-relative, s)', font: { size: 10, color: COLOR_SUB } },
-        gridcolor: COLOR_BORDER, zerolinecolor: COLOR_BORDER,
-        tickfont: { color: COLOR_SUB },
-      },
-      yaxis: {
-        title: { text: 'matched-filter peak (norm)', font: { size: 10, color: COLOR_SUB } },
-        range: [0, 1.0],
-        gridcolor: COLOR_BORDER, zerolinecolor: COLOR_BORDER,
-        tickfont: { color: COLOR_SUB },
-      },
-      shapes: [{
-        type: 'line', xref: 'paper', x0: 0, x1: 1,
-        y0: THRESHOLD, y1: THRESHOLD,
-        line: { color: COLOR_THRESHOLD, width: 1.5, dash: 'dash' },
-      }],
-      annotations: [{
-        xref: 'paper', yref: 'y', x: 1.0, y: THRESHOLD,
-        xanchor: 'right', yanchor: 'bottom',
-        text: `threshold ${THRESHOLD.toFixed(2)}`,
-        showarrow: false,
-        font: { color: COLOR_THRESHOLD, size: 9, family: 'JetBrains Mono, monospace' },
-      }],
-      legend: {
-        orientation: 'h', x: 0, y: 1.08, xanchor: 'left',
-        font: { size: 9, color: COLOR_SUB },
-      },
-      showlegend: true,
-    };
-    if (window.Plotly) {
-      Plotly.react(traceBox, traces, layout, { responsive: true, displayModeBar: false });
-    }
-  }
-
   // --- Sync log tick (moved verbatim from render_dashboard.py) -------------
   let _syncLogClearedAtTs = 0;
   function fmtSyncLogEntry(entry) {
@@ -310,8 +172,6 @@ _JS_TEMPLATE = r"""
           }
         }
       }
-      // Trace plot
-      renderTrace(body.last_sync || null);
       // Quick-chirp live telemetry
       renderQuickChirpTelemetry(body.telemetry || {});
     } catch (e) { /* silent */ }
@@ -455,41 +315,109 @@ _JS_TEMPLATE = r"""
     host.innerHTML = cards.join('');
   }
 
+  // Legacy textarea + execCommand path for browsers without Clipboard API.
+  function copyTextSync(text) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '0';
+      ta.style.left = '0';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (err) {
+      console.error('copyTextSync fallback failed', err);
+      return false;
+    }
+  }
+
+  // Show a modal with the text selected, as a last-resort "at least the
+  // user can manually Cmd+C" affordance when both Clipboard API and
+  // execCommand fail (e.g. Safari after `await fetch()` consumes the
+  // user-gesture activation).
+  function showCopyFallback(text, anchorEl) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    const panel = document.createElement('div');
+    panel.style.cssText = 'background:var(--surface);padding:16px;border:1px solid var(--border);border-radius:6px;max-width:80vw;max-height:80vh;display:flex;flex-direction:column;gap:8px;';
+    const hdr = document.createElement('div');
+    hdr.style.cssText = 'font-family:var(--mono);font-size:11px;color:var(--sub);letter-spacing:0.08em;text-transform:uppercase;';
+    hdr.textContent = 'Safari blocked auto-copy — press ⌘C then Esc';
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.readOnly = true;
+    ta.style.cssText = 'flex:1;min-width:60vw;min-height:60vh;font-family:var(--mono);font-size:11px;padding:8px;border:1px solid var(--border-l);';
+    panel.appendChild(hdr);
+    panel.appendChild(ta);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    ta.focus();
+    ta.select();
+    const close = () => { document.body.removeChild(overlay); document.removeEventListener('keydown', onKey); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  }
+
   // Log buttons (Copy / Clear).
   document.addEventListener('click', async (e) => {
     const t = e.target;
     if (!(t instanceof HTMLElement)) return;
-    if (t.id === 'sync-log-copy') {
-      const logEl = document.getElementById('sync-log');
-      if (!logEl) return;
-      const text = logEl.textContent || '';
-      try {
-        await navigator.clipboard.writeText(text);
-        const orig = t.textContent;
-        t.textContent = 'Copied';
-        setTimeout(() => { t.textContent = orig; }, 1200);
-      } catch (_) {
-        const range = document.createRange();
-        range.selectNodeContents(logEl);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-      }
-    } else if (t.id === 'sync-ai-debug-copy') {
+    if (t.id === 'sync-report-copy') {
       const orig = t.textContent;
-      t.textContent = 'Fetching…';
       t.disabled = true;
-      try {
+      t.textContent = 'Copying…';
+      const logEl = document.getElementById('sync-log');
+      const logText = logEl ? (logEl.textContent || '') : '';
+      // Safari-safe async copy: wrap the fetch in a ClipboardItem
+      // promise. navigator.clipboard.write() preserves the user-gesture
+      // activation across the awaited fetch, which writeText() after
+      // `await fetch()` does not.
+      const buildBlob = async () => {
         const r = await fetch('/sync/debug_export', { cache: 'no-store' });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const text = await r.text();
-        await navigator.clipboard.writeText(text);
-        t.textContent = 'Copied!';
-        setTimeout(() => { t.textContent = orig; t.disabled = false; }, 1800);
+        const debugText = await r.text();
+        const combined = `${debugText}\n\n=== EVENT LOG (live) ===\n${logText}`;
+        return new Blob([combined], { type: 'text/plain' });
+      };
+      try {
+        if (typeof ClipboardItem !== 'undefined' && navigator.clipboard && navigator.clipboard.write) {
+          const item = new ClipboardItem({ 'text/plain': buildBlob() });
+          await navigator.clipboard.write([item]);
+          t.textContent = 'Copied!';
+          setTimeout(() => { t.textContent = orig; t.disabled = false; }, 1800);
+          return;
+        }
+        // Older browsers: fetch then sync-copy via textarea trick.
+        const blob = await buildBlob();
+        const text = await blob.text();
+        if (copyTextSync(text)) {
+          t.textContent = 'Copied!';
+          setTimeout(() => { t.textContent = orig; t.disabled = false; }, 1800);
+          return;
+        }
+        throw new Error('clipboard write blocked');
       } catch (err) {
-        t.textContent = 'Error';
+        console.error('sync-report-copy failed', err);
+        // Final fallback: show a modal with the text pre-selected so
+        // the user can ⌘C manually. Fetch the report separately since
+        // the ClipboardItem promise has already rejected.
+        try {
+          const blob = await buildBlob();
+          const text = await blob.text();
+          showCopyFallback(text, t);
+          t.textContent = 'Manual copy';
+        } catch (err2) {
+          t.textContent = `Error: ${err2.message || err2}`;
+        }
         t.disabled = false;
-        setTimeout(() => { t.textContent = orig; }, 2000);
+        setTimeout(() => { t.textContent = orig; }, 4000);
       }
     } else if (t.id === 'sync-log-clear') {
       _syncLogClearedAtTs = Date.now() / 1000;
