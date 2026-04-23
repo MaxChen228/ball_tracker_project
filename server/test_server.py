@@ -819,6 +819,14 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
 
     events: list[tuple[str, dict]] = []
 
+    def wait_for_event(predicate, timeout_s: float = 2.0) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if any(predicate(name, data) for name, data in events):
+                return True
+            time.sleep(0.01)
+        return any(predicate(name, data) for name, data in events)
+
     class _CaptureHub:
         async def broadcast(self, event: str, data: dict) -> None:
             events.append((event, data))
@@ -885,6 +893,11 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
             "py": vb,
             "detected": True,
         })
+        assert wait_for_event(
+            lambda name, data: name == "frame_count"
+            and data["cam"] == "B"
+            and data["count"] == 1
+        )
         ws_a.send_json({
             "type": "cycle_end",
             "cam": "A",
