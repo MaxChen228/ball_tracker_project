@@ -6,13 +6,10 @@ import html
 
 _MODE_LABELS = {
     "camera_only": "Camera-only",
-    "on_device": "On-device",
-    "dual": "Dual",
 }
 
 _PATH_LABELS = {
     "live": ("Live stream", "iOS → WS"),
-    "ios_post": ("iOS post-pass", "on-device analyzer"),
     "server_post": ("Server post-pass", "PyAV + OpenCV"),
 }
 
@@ -48,7 +45,7 @@ def _render_detection_paths_body(
         active = set(session.get("paths") or active)
         chips = "".join(
             f'<span class="path-chip on">{html.escape(_PATH_LABELS.get(path, (path, ""))[0])}</span>'
-            for path in ("live", "ios_post", "server_post")
+            for path in ("live", "server_post")
             if path in active
         ) or '<span class="path-chip">none</span>'
         return (
@@ -59,7 +56,7 @@ def _render_detection_paths_body(
         )
 
     rows: list[str] = []
-    for path in ("live", "ios_post", "server_post"):
+    for path in ("live", "server_post"):
         title, subtitle = _PATH_LABELS.get(path, (path, ""))
         checked = " checked" if path in active else ""
         rows.append(
@@ -110,7 +107,7 @@ def _render_active_session_body(live_session: dict[str, object] | None) -> str:
     else:
         live_body = '<div class="active-empty">Live stream disabled for this session.</div>'
     postpass_chips = []
-    for path, label in (("ios_post", "iOS"), ("server_post", "srv")):
+    for path, label in (("server_post", "srv"),):
         if path not in paths_on:
             continue
         state = "done" if path in paths_completed else ("pending" if armed else "stopped")
