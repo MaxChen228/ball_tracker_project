@@ -12,7 +12,8 @@ final class LocalVideoAnalyzer {
 
     func analyze(
         videoURL: URL,
-        videoStartPtsS: Double
+        videoStartPtsS: Double,
+        hsvRange: ServerUploader.HSVRangePayload = .tennis
     ) throws -> [ServerUploader.FramePayload] {
         let asset = AVAsset(url: videoURL)
         guard let track = asset.tracks(withMediaType: .video).first else {
@@ -35,7 +36,14 @@ final class LocalVideoAnalyzer {
             throw AnalysisError.cannotStartReader
         }
 
-        let detector = BTDetectionSession()
+        let detector = BTDetectionSession(
+            hMin: Int32(hsvRange.h_min),
+            hMax: Int32(hsvRange.h_max),
+            sMin: Int32(hsvRange.s_min),
+            sMax: Int32(hsvRange.s_max),
+            vMin: Int32(hsvRange.v_min),
+            vMax: Int32(hsvRange.v_max)
+        )
         var frames: [ServerUploader.FramePayload] = []
         var frameIndex = 0
         while reader.status == .reading, let sample = output.copyNextSampleBuffer() {

@@ -13,6 +13,17 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "netwo
 ///                  detection is the sole data path; no detection runs on
 ///                  the phone any more)
 final class ServerUploader: @unchecked Sendable {
+    struct HSVRangePayload: Codable, Equatable {
+        let h_min: Int
+        let h_max: Int
+        let s_min: Int
+        let s_max: Int
+        let v_min: Int
+        let v_max: Int
+
+        static let tennis = HSVRangePayload(h_min: 25, h_max: 55, s_min: 90, s_max: 255, v_min: 90, v_max: 255)
+    }
+
     enum DetectionPath: String, Codable, CaseIterable {
         case live = "live"
         case iosPost = "ios_post"
@@ -191,6 +202,7 @@ final class ServerUploader: @unchecked Sendable {
         let sid: String?
         let paths: [String]?
         let max_duration_s: Double?
+        let hsv_range: HSVRangePayload?
         let tracking_exposure_cap: String?
         let chirp_detect_threshold: Double?
         let heartbeat_interval_s: Double?

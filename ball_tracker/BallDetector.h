@@ -53,6 +53,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// New session with the default HSV range + 30 frame warmup.
 - (instancetype)init;
 
+/// New session with a caller-supplied HSV range + 30 frame warmup.
+- (instancetype)initWithHMin:(int)hMin hMax:(int)hMax
+                        sMin:(int)sMin sMax:(int)sMax
+                        vMin:(int)vMin vMax:(int)vMax;
+
 /// `frameIndex` < warmupFrames means the MOG2 background model isn't yet
 /// reliable. `applyPixelBuffer:` during warmup still accumulates into the
 /// model but returns nil so callers can gate "valid detection" logic.

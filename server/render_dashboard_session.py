@@ -16,6 +16,27 @@ _PATH_LABELS = {
     "server_post": ("Server post-pass", "PyAV + OpenCV"),
 }
 
+_HSV_PRESETS = {
+    "tennis": {
+        "label": "Tennis",
+        "h_min": 25,
+        "h_max": 55,
+        "s_min": 90,
+        "s_max": 255,
+        "v_min": 90,
+        "v_max": 255,
+    },
+    "baseball": {
+        "label": "Baseball",
+        "h_min": 100,
+        "h_max": 130,
+        "s_min": 140,
+        "s_max": 255,
+        "v_min": 40,
+        "v_max": 255,
+    },
+}
+
 
 def _render_detection_paths_body(
     default_paths: list[str] | None,
@@ -109,6 +130,58 @@ def _render_active_session_body(live_session: dict[str, object] | None) -> str:
         f'<div class="path-chip-row">{path_chips}</div>'
         f'{live_body}'
         f'{postpass_html}'
+    )
+
+
+def _render_hsv_body(hsv_range: dict[str, object] | None) -> str:
+    current = {
+        "h_min": 25,
+        "h_max": 55,
+        "s_min": 90,
+        "s_max": 255,
+        "v_min": 90,
+        "v_max": 255,
+    }
+    if hsv_range:
+        for key in current:
+            if key in hsv_range:
+                current[key] = int(hsv_range[key])
+
+    def _row(axis: str, upper: int) -> str:
+        lo_key = f"{axis}_min"
+        hi_key = f"{axis}_max"
+        return (
+            '<div class="hsv-row">'
+            f'<div class="hsv-label">{html.escape(axis.upper())}</div>'
+            '<div class="hsv-pair">'
+            f'<label><span>Min</span><input type="range" min="0" max="{upper}" value="{current[lo_key]}" data-hsv-range="{lo_key}"><input class="hsv-num" type="number" name="{lo_key}" min="0" max="{upper}" value="{current[lo_key]}" data-hsv-number="{lo_key}"></label>'
+            f'<label><span>Max</span><input type="range" min="0" max="{upper}" value="{current[hi_key]}" data-hsv-range="{hi_key}"><input class="hsv-num" type="number" name="{hi_key}" min="0" max="{upper}" value="{current[hi_key]}" data-hsv-number="{hi_key}"></label>'
+            '</div>'
+            '</div>'
+        )
+
+    preset_buttons = "".join(
+        f'<button type="button" class="btn small secondary" data-hsv-preset="{name}" '
+        f'data-h-min="{preset["h_min"]}" data-h-max="{preset["h_max"]}" '
+        f'data-s-min="{preset["s_min"]}" data-s-max="{preset["s_max"]}" '
+        f'data-v-min="{preset["v_min"]}" data-v-max="{preset["v_max"]}">'
+        f'{html.escape(str(preset["label"]))}</button>'
+        for name, preset in _HSV_PRESETS.items()
+    )
+    return (
+        '<form method="POST" action="/detection/hsv" id="hsv-form" class="hsv-form">'
+        '<div class="hsv-presets">'
+        f'{preset_buttons}'
+        '</div>'
+        '<div class="hsv-grid">'
+        f'{_row("h", 179)}'
+        f'{_row("s", 255)}'
+        f'{_row("v", 255)}'
+        '</div>'
+        '<div class="hsv-actions">'
+        '<button class="btn" type="submit">Apply HSV</button>'
+        '</div>'
+        '</form>'
     )
 
 

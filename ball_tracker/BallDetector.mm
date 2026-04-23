@@ -173,15 +173,35 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
     cv::Ptr<cv::BackgroundSubtractorMOG2> _subtractor;
     cv::Mat _closeKernel;
     NSInteger _frameIndex;
+    int _hMin;
+    int _hMax;
+    int _sMin;
+    int _sMax;
+    int _vMin;
+    int _vMax;
 }
 
 - (instancetype)init {
+    return [self initWithHMin:kDefaultHMin hMax:kDefaultHMax
+                         sMin:kDefaultSMin sMax:kDefaultSMax
+                         vMin:kDefaultVMin vMax:kDefaultVMax];
+}
+
+- (instancetype)initWithHMin:(int)hMin hMax:(int)hMax
+                        sMin:(int)sMin sMax:(int)sMax
+                        vMin:(int)vMin vMax:(int)vMax {
     self = [super init];
     if (self) {
         // detectShadows=False, matches server/pipeline.py:73.
         _subtractor = cv::createBackgroundSubtractorMOG2(500, 16.0, false);
         _closeKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
         _frameIndex = 0;
+        _hMin = hMin;
+        _hMax = hMax;
+        _sMin = sMin;
+        _sMax = sMax;
+        _vMin = vMin;
+        _vMax = vMax;
     }
     return self;
 }
@@ -215,9 +235,9 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
 
     BTBallDetection *detection = detectBallCore(
         bgra,
-        kDefaultHMin, kDefaultHMax,
-        kDefaultSMin, kDefaultSMax,
-        kDefaultVMin, kDefaultVMax,
+        _hMin, _hMax,
+        _sMin, _sMax,
+        _vMin, _vMax,
         &fgMask
     );
     CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);

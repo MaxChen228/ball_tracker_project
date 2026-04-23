@@ -7,6 +7,8 @@ final class AnalysisUploadQueue {
     private let store: AnalysisJobStore
     private var uploader: ServerUploader
     private let analyzer = LocalVideoAnalyzer()
+    private let stateLock = NSLock()
+    private var hsvRange: ServerUploader.HSVRangePayload = .tennis
     private let workerQueue = DispatchQueue(label: "analysis.upload.queue", qos: .utility)
     private var pendingFiles: [URL] = []
     private(set) var isProcessing: Bool = false
@@ -21,6 +23,12 @@ final class AnalysisUploadQueue {
 
     func updateUploader(_ uploader: ServerUploader) {
         self.uploader = uploader
+    }
+
+    func updateHSVRange(_ hsvRange: ServerUploader.HSVRangePayload) {
+        stateLock.lock()
+        self.hsvRange = hsvRange
+        stateLock.unlock()
     }
 
     func reloadPending() throws {
@@ -60,9 +68,13 @@ final class AnalysisUploadQueue {
 
         let frames: [ServerUploader.FramePayload]
         do {
+            stateLock.lock()
+            let hsvRange = self.hsvRange
+            stateLock.unlock()
             frames = try analyzer.analyze(
                 videoURL: videoURL,
-                videoStartPtsS: job.pitch.video_start_pts_s
+                videoStartPtsS: job.pitch.video_start_pts_s,
+                hsvRange: hsvRange
             )
         } catch {
             log.error("analysis decode failed session=\(job.pitch.session_id, privacy: .public) cam=\(job.pitch.camera_id, privacy: .public) err=\(error.localizedDescription, privacy: .public)")

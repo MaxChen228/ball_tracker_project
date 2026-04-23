@@ -25,6 +25,7 @@ final class CameraTransportCoordinator: NSObject {
         let applyChirpThreshold: (Double) -> Void
         let applyMutualSyncThreshold: (Double) -> Void
         let applyHeartbeatInterval: (Double) -> Void
+        let applyHSVRange: (ServerUploader.HSVRangePayload) -> Void
         let applyTrackingExposureCap: (String, Double) -> Void
         let applyServerCaptureHeight: (Int) -> Void
         let startStandbyCapture: () -> Void
@@ -214,6 +215,9 @@ final class CameraTransportCoordinator: NSObject {
                 },
                 heartbeatIntervalDidPush: { [weak self] interval in
                     self?.applyPushedHeartbeatInterval(interval)
+                },
+                hsvRangeDidPush: { [weak self] hsvRange in
+                    self?.dependencies.applyHSVRange(hsvRange)
                 },
                 handleTrackingExposureCap: { [weak self] cap in
                     guard let self else { return }

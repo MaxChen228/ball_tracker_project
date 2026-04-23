@@ -114,6 +114,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// network-unreachable launch still records and uploads video.
     private var currentCaptureMode: ServerUploader.CaptureMode = .cameraOnly
     private var currentSessionPaths: Set<ServerUploader.DetectionPath> = [.serverPost]
+    private var currentHSVRange: ServerUploader.HSVRangePayload = .tennis
 
     // Haptic feedback generators. Kept as properties so prepare() is
     // honored (trigger latency drops from ~100 ms to <20 ms).
@@ -503,6 +504,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 applyHeartbeatInterval: { [weak self] interval in
                     self?.healthMonitor.updateBaseInterval(interval)
                 },
+                applyHSVRange: { [weak self] hsvRange in
+                    self?.applyPushedHSVRange(hsvRange)
+                },
                 applyTrackingExposureCap: { [weak self] cap, fps in
                     self?.captureRuntime.applyTrackingExposureCap(cap, targetFps: fps)
                 },
@@ -528,6 +532,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     private func applyPushedMutualSyncThreshold(_ threshold: Double) {
         _ = threshold
+    }
+
+    private func applyPushedHSVRange(_ hsvRange: ServerUploader.HSVRangePayload) {
+        currentHSVRange = hsvRange
+        detectionPool.updateHSVRange(hsvRange)
+        recordingWorkflow.analysisUploadQueue.updateHSVRange(hsvRange)
     }
 
     private func wireHealthMonitorStatusCallbacks() {
