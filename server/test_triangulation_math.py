@@ -411,3 +411,291 @@ def test_triangulate_live_pair_matches_triangulate_cycle():
     assert abs(live_pt.y_m - ref_pt.y_m) < 1e-9
     assert abs(live_pt.z_m - ref_pt.z_m) < 1e-9
     assert abs(live_pt.residual_m - ref_pt.residual_m) < 1e-9
+
+
+# ============================================================================
+# Merged from deleted test_triangulate.py (geometry primitives: triangulate_rays
+# near-parallel fallback, recover_extrinsics sign-flip, scale_pitch_to_video_dims,
+# and intrinsics principal-point sanity check).
+# ============================================================================
+
+from pairing import scale_pitch_to_video_dims
+from schemas import IntrinsicsPayload as _IntrinsicsPayload, PitchPayload as _PitchPayload
+
+
+def _tri_look_at(pos: np.ndarray, target: np.ndarray, up: np.ndarray = np.array([0.0, 0.0, 1.0])):
+    """Standalone _look_at for the merged geometry tests (kept local so the
+    merge is source-diff-clean instead of rewiring callers to _test_helpers)."""
+    z_cam = target - pos
+    z_cam /= np.linalg.norm(z_cam)
+    y_cam = -up - np.dot(-up, z_cam) * z_cam
+    y_cam /= np.linalg.norm(y_cam)
+    x_cam = np.cross(y_cam, z_cam)
+    R_cw = np.column_stack([x_cam, y_cam, z_cam])
+    R_wc = R_cw.T
+    t_wc = -R_wc @ pos
+    return R_wc, t_wc
+
+
+def _tri_H_from_pose(K: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    H = K @ np.column_stack([R[:, 0], R[:, 1], t])
+    return H / H[2, 2]
+
+
+# --------------------------- triangulate_rays --------------------------------
+
+
+def test_triangulate_rays_converging_returns_exact_point():
+    P_true = np.array([0.5, 1.2, 1.8])
+    C1 = np.array([2.0, -3.0, 1.0])
+    C2 = np.array([-2.0, -3.0, 1.0])
+    d1 = (P_true - C1) / np.linalg.norm(P_true - C1)
+    d2 = (P_true - C2) / np.linalg.norm(P_true - C2)
+
+    P_rec, gap = triangulate_rays(C1, d1, C2, d2)
+
+    assert P_rec is not None
+    np.testing.assert_allclose(P_rec, P_true, atol=1e-9)
+    assert gap < 1e-9
+
+
+def test_triangulate_rays_parallel_returns_none_inf():
+    C1 = np.array([1.5, 0.0, 1.2])
+    C2 = np.array([-1.5, 0.0, 1.2])
+    d = np.array([0.0, 1.0, 0.0])
+
+    P_rec, gap = triangulate_rays(C1, d, C2, d)
+
+    assert P_rec is None
+    assert gap == float("inf")
+
+
+def test_triangulate_rays_anti_parallel_returns_none_inf():
+    C1 = np.array([0.0, -1.0, 1.0])
+    C2 = np.array([0.0, 1.0, 1.0])
+    d1 = np.array([0.0, 1.0, 0.0])
+    d2 = np.array([0.0, -1.0, 0.0])
+
+    P_rec, gap = triangulate_rays(C1, d1, C2, d2)
+
+    assert P_rec is None
+    assert gap == float("inf")
+
+
+# --------------------------- recover_extrinsics ------------------------------
+
+
+def test_recover_extrinsics_happy_path_round_trip():
+    fx = fy = 1600.0
+    cx, cy = 960.0, 540.0
+    K = build_K(fx, fy, cx, cy)
+    C = np.array([1.8, -2.5, 1.2])
+    target = np.array([0.0, 0.15, 0.0])
+    R, t = _tri_look_at(C, target)
+    H = _tri_H_from_pose(K, R, t)
+
+    R_rec, t_rec = recover_extrinsics(K, H)
+
+    np.testing.assert_allclose(R_rec, R, atol=1e-8)
+    np.testing.assert_allclose(t_rec, t, atol=1e-8)
+    np.testing.assert_allclose(camera_center_world(R_rec, t_rec), C, atol=1e-8)
+
+
+def test_recover_extrinsics_sign_flip_restores_positive_tz():
+    fx = fy = 1600.0
+    cx, cy = 960.0, 540.0
+    K = build_K(fx, fy, cx, cy)
+    C = np.array([1.8, -2.5, 1.2])
+    target = np.array([0.0, 0.15, 0.0])
+    R, t = _tri_look_at(C, target)
+    H = _tri_H_from_pose(K, R, t)
+    H_negated = -H
+
+    R_rec, t_rec = recover_extrinsics(K, H_negated)
+
+    assert t_rec[2] > 0
+    np.testing.assert_allclose(R_rec, R, atol=1e-8)
+    np.testing.assert_allclose(t_rec, t, atol=1e-8)
+
+
+def test_recover_extrinsics_degenerate_small_tz_raises():
+    fx = fy = 1600.0
+    cx, cy = 960.0, 540.0
+    K = build_K(fx, fy, cx, cy)
+    C = np.array([1.0, 1e-7, 2.0])
+    target = np.array([1.0, 1.0 + 1e-7, 2.0])
+    R, t = _tri_look_at(C, target)
+    assert abs(t[2]) < 1e-6
+    H = _tri_H_from_pose(K, R, t)
+
+    with pytest.raises(ValueError, match="degenerate homography"):
+        recover_extrinsics(K, H)
+
+
+def test_recover_extrinsics_threshold_boundary_passes():
+    fx = fy = 1600.0
+    cx, cy = 960.0, 540.0
+    K = build_K(fx, fy, cx, cy)
+    C = np.array([1.0, 1e-4, 2.0])
+    target = np.array([1.0, 1.0 + 1e-4, 2.0])
+    R, t = _tri_look_at(C, target)
+    assert abs(t[2]) > 1e-6
+    H = _tri_H_from_pose(K, R, t)
+
+    R_rec, t_rec = recover_extrinsics(K, H)
+    assert t_rec[2] > 0
+
+
+# --------------------------- scale_pitch_to_video_dims -----------------------
+
+
+def _pitch_at(
+    width: int,
+    height: int,
+    intrinsics,  # IntrinsicsPayload | None
+    homography,  # list[float] | None
+) -> "_PitchPayload":
+    return _PitchPayload(
+        camera_id="A",
+        session_id="s_cafebabe",
+        sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        intrinsics=intrinsics,
+        homography=homography,
+        image_width_px=width,
+        image_height_px=height,
+    )
+
+
+def test_scale_pitch_noop_when_dims_match():
+    intr = _IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=540.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1920, 1080, intr, H)
+
+    out = scale_pitch_to_video_dims(pitch, (1920, 1080))
+
+    assert out is pitch
+
+
+def test_scale_pitch_noop_when_calibration_missing():
+    intr = _IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=540.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, intr, H)
+
+    out = scale_pitch_to_video_dims(pitch, None)
+
+    assert out is pitch
+
+
+def test_scale_pitch_noop_when_intrinsics_missing():
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, None, H)
+
+    out = scale_pitch_to_video_dims(pitch, (1920, 1080))
+
+    assert out is pitch
+
+
+def test_scale_pitch_1080_to_720_scales_intrinsics_proportionally():
+    intr = _IntrinsicsPayload(
+        fx=1600.0, fy=1600.0, cx=960.0, cy=540.0,
+        distortion=[0.1, -0.05, 0.001, -0.002, 0.02],
+    )
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, intr, H)
+
+    out = scale_pitch_to_video_dims(pitch, (1920, 1080))
+
+    sx = 1280 / 1920
+    sy = 720 / 1080
+    assert out.intrinsics is not None
+    assert out.intrinsics.fx == pytest.approx(1600.0 * sx)
+    assert out.intrinsics.fy == pytest.approx(1600.0 * sy)
+    assert out.intrinsics.cx == pytest.approx(960.0 * sx)
+    assert out.intrinsics.cy == pytest.approx(540.0 * sy)
+    assert out.intrinsics.distortion == [0.1, -0.05, 0.001, -0.002, 0.02]
+
+
+def test_scale_pitch_scales_homography_first_two_rows_and_renormalises():
+    intr = _IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=540.0)
+    H_in = [2.0, 0.1, 30.0, 0.2, 3.0, 40.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, intr, H_in)
+
+    out = scale_pitch_to_video_dims(pitch, (1920, 1080))
+
+    assert out.homography is not None
+    H_out = np.array(out.homography).reshape(3, 3)
+    assert H_out[2, 2] == pytest.approx(1.0)
+    sx = sy = 1280 / 1920
+    np.testing.assert_allclose(H_out[0, :], np.array(H_in[0:3]) * sx, atol=1e-12)
+    np.testing.assert_allclose(H_out[1, :], np.array(H_in[3:6]) * sy, atol=1e-12)
+    np.testing.assert_allclose(H_out[2, :], np.array(H_in[6:9]), atol=1e-12)
+
+
+def test_scale_pitch_roundtrip_preserves_projected_pixel():
+    fx = fy = 1600.0
+    cx, cy = 960.0, 540.0
+    intr = _IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy)
+    K = build_K(fx, fy, cx, cy)
+    C = np.array([1.8, -2.5, 1.2])
+    R, t = _tri_look_at(C, np.array([0.0, 0.15, 0.0]))
+    H_true = _tri_H_from_pose(K, R, t)
+    pitch = _pitch_at(1280, 720, intr, H_true.flatten().tolist())
+
+    world = np.array([0.2, 0.3, 1.0])
+    pix_1080 = H_true @ world
+    pix_1080 = pix_1080[:2] / pix_1080[2]
+
+    out = scale_pitch_to_video_dims(pitch, (1920, 1080))
+    assert out.homography is not None
+    H_720 = np.array(out.homography).reshape(3, 3)
+    pix_720 = H_720 @ world
+    pix_720 = pix_720[:2] / pix_720[2]
+
+    sx = 1280 / 1920
+    sy = 720 / 1080
+    np.testing.assert_allclose(pix_720, pix_1080 * np.array([sx, sy]), atol=1e-9)
+
+
+# --------------------------- intrinsics sanity check ------------------------
+
+
+def test_sanity_check_quiet_on_centered_intrinsics(caplog):
+    intr = _IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=540.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1920, 1080, intr, H)
+    with caplog.at_level(logging.WARNING, logger="pairing"):
+        scale_pitch_to_video_dims(pitch, (1920, 1080))
+    assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_sanity_check_warns_when_principal_point_off_center(caplog):
+    intr = _IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=800.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1920, 1080, intr, H)
+    with caplog.at_level(logging.WARNING, logger="pairing"):
+        scale_pitch_to_video_dims(pitch, (1920, 1080))
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "principal-point OFF" in warnings[0].getMessage()
+
+
+def test_sanity_check_runs_after_scaling(caplog):
+    intr = _IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=540.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, intr, H)
+    with caplog.at_level(logging.WARNING, logger="pairing"):
+        scale_pitch_to_video_dims(pitch, (1920, 1080))
+    assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_sanity_check_warns_on_wrong_basis_after_scaling(caplog):
+    intr = _IntrinsicsPayload(fx=3000.0, fy=3000.0, cx=2016.0, cy=1512.0)
+    H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    pitch = _pitch_at(1280, 720, intr, H)
+    with caplog.at_level(logging.WARNING, logger="pairing"):
+        scale_pitch_to_video_dims(pitch, (1920, 1080))
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "principal-point OFF" in warnings[0].getMessage()
