@@ -65,6 +65,7 @@ def detect_pitch(
     *,
     enable_bg_subtraction: bool = True,
     should_cancel: CancelCheck | None = None,
+    expected_radius_px: float | None = None,
 ) -> list[FramePayload]:
     """Decode `video_path`, run HSV + (optional) MOG2 background
     subtraction on every frame, and return one `FramePayload` per decoded
@@ -84,6 +85,19 @@ def detect_pitch(
         if enable_bg_subtraction
         else None
     )
+    # Explicit per-session log so the mode is never ambiguous in field
+    # logs. `no radius prior` means fallback bounds [20, 150_000] px —
+    # not a silent degraded mode, just a different code path.
+    if expected_radius_px is None:
+        logger.info(
+            "detect_pitch video=%s mode=no-radius-prior (area∈[20,150000])",
+            video_path.name,
+        )
+    else:
+        logger.info(
+            "detect_pitch video=%s expected_radius_px=%.1f",
+            video_path.name, expected_radius_px,
+        )
     out: list[FramePayload] = []
     for idx, (absolute_pts_s, bgr) in enumerate(frame_iter(video_path, video_start_pts_s)):
         if should_cancel is not None and should_cancel():
@@ -100,7 +114,11 @@ def detect_pitch(
         if subtractor is not None and idx < _BG_SUBTRACTOR_WARMUP_FRAMES:
             centroid = None  # warm-up → force no-detection
         else:
-            centroid = detect_ball(bgr, hsv, fg_mask=fg_mask)
+            centroid = detect_ball(
+                bgr, hsv,
+                fg_mask=fg_mask,
+                expected_radius_px=expected_radius_px,
+            )
         if centroid is None:
             out.append(
                 FramePayload(
