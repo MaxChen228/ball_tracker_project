@@ -683,6 +683,19 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .canvas-mode-toggle button:hover {{ color: var(--ink); }}
 .canvas-mode-toggle button.active {{ background: var(--ink); color: var(--surface); }}
 
+/* --- Fit filter bar (bottom-right; top-right is Plotly modebar) --- */
+.fit-filter-bar {{ position: absolute; right: var(--s-4); bottom: var(--s-4); z-index: 6;
+                   display: inline-flex; gap: var(--s-2); font-family: var(--mono); font-size: 10px;
+                   letter-spacing: 0.08em; background: var(--surface);
+                   border: 1px solid var(--border-base); border-radius: var(--r);
+                   padding: var(--s-1) var(--s-2); }}
+.fit-filter-bar .ff-cell {{ display: inline-flex; align-items: center; gap: var(--s-2);
+                            padding: 0 var(--s-2); }}
+.fit-filter-bar .ff-cell + .ff-cell {{ border-left: 1px solid var(--border-base); }}
+.fit-filter-bar .ff-name {{ color: var(--ink); text-transform: uppercase; font-weight: 500; }}
+.fit-filter-bar input[type="range"] {{ width: 90px; height: 14px; }}
+.fit-filter-bar .ff-readout {{ color: var(--sub); min-width: 56px; text-align: right; }}
+
 /* --- Replay playback bar (bottom-center, hidden when mode=inspect) --- */
 .playback-bar {{ position: absolute; left: 50%; bottom: var(--s-4); transform: translateX(-50%);
                  z-index: 6; display: none; align-items: center; gap: var(--s-3);

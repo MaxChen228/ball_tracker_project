@@ -219,22 +219,138 @@
     };
   }
 
+    // Fit filter state — mirrors the viewer sliders. Persists per-browser.
+  const DASH_RES_KEY = 'ball_tracker_dash_residual_cm';
+  const DASH_OUT_KEY = 'ball_tracker_dash_outlier_kappa';
+  let dashResidualCapM = 0.20;     // default 20 cm (matches viewer)
+  let dashOutlierKappa = 3.0;      // default κ = 3.0
+  try {
+    const r = parseFloat(localStorage.getItem(DASH_RES_KEY));
+    if (Number.isFinite(r) && r >= 0 && r <= 200) dashResidualCapM = r / 100;
+    else if (localStorage.getItem(DASH_RES_KEY) === 'off') dashResidualCapM = Infinity;
+  } catch {}
+  try {
+    const k = parseFloat(localStorage.getItem(DASH_OUT_KEY));
+    if (Number.isFinite(k) && k >= 1.0 && k < 6.0) dashOutlierKappa = k;
+    else if (localStorage.getItem(DASH_OUT_KEY) === 'off') dashOutlierKappa = Infinity;
+  } catch {}
+
+  // Spatial-isolation outlier filter — mean distance from each point to
+  // its 3 nearest 3D neighbours, reject those > median + κ·1.4826·MAD.
+  // Same logic as viewer's `applyFitResidualFilter`. Robust to LSQ
+  // leverage (one bad point can't masquerade as inlier because we don't
+  // fit first). Pure on `{x_m, y_m, z_m}`; returns the same shape.
+  function spatialIsolationFilterDash(pts, kappa) {
+    if (kappa === undefined) kappa = dashOutlierKappa;
+    if (!Number.isFinite(kappa) || !pts || pts.length < 5) return pts;
+    const K_NN = 3;
+    const isol = pts.map((p, i) => {
+      const ds = [];
+      for (let j = 0; j < pts.length; j++) {
+        if (j === i) continue;
+        const dx = pts[j].x_m - p.x_m, dy = pts[j].y_m - p.y_m, dz = pts[j].z_m - p.z_m;
+        ds.push(Math.sqrt(dx*dx + dy*dy + dz*dz));
+      }
+      ds.sort((a, b) => a - b);
+      const k = Math.min(K_NN, ds.length);
+      let s = 0; for (let m = 0; m < k; m++) s += ds[m];
+      return s / k;
+    });
+    const sorted = isol.slice().sort((a, b) => a - b);
+    const med = sorted[Math.floor(sorted.length / 2)];
+    const absDev = isol.map(d => Math.abs(d - med)).sort((a, b) => a - b);
+    const mad = Math.max(absDev[Math.floor(absDev.length / 2)], 1e-3);
+    const cutoff = med + kappa * 1.4826 * mad;
+    const survivors = pts.filter((_, i) => isol[i] <= cutoff);
+    return survivors.length >= 4 && survivors.length < pts.length ? survivors : pts;
+  }
+
+  // Per-axis ballistic LSQ with gravity pinned. Mirrors viewer's
+  // `ballisticFit` but reads `{x_m, y_m, z_m, t_rel_s}` and returns
+  // `evaluate(t) -> {x_m, y_m, z_m}`.
+  function ballisticFitDash(pts) {
+    if (!pts || pts.length < 4) return null;
+    const G = 9.81;
+    const t0 = pts[0].t_rel_s;
+    function fitAxis(getVal, accelTerm) {
+      let sumT = 0, sumTT = 0, sumP = 0, sumTP = 0;
+      const n = pts.length;
+      for (const p of pts) {
+        const tau = p.t_rel_s - t0;
+        const v = getVal(p) - accelTerm * tau * tau;
+        sumT += tau; sumTT += tau*tau; sumP += v; sumTP += tau*v;
+      }
+      const det = n * sumTT - sumT * sumT;
+      if (Math.abs(det) < 1e-12) return { p0: getVal(pts[0]), v0: 0 };
+      return {
+        p0: (sumP * sumTT - sumT * sumTP) / det,
+        v0: (n * sumTP - sumT * sumP) / det,
+      };
+    }
+    const fx = fitAxis(p => p.x_m, 0);
+    const fy = fitAxis(p => p.y_m, 0);
+    const fz = fitAxis(p => p.z_m, -0.5 * G);
+    function evaluate(t) {
+      const tau = t - t0;
+      return {
+        x_m: fx.p0 + fx.v0 * tau,
+        y_m: fy.p0 + fy.v0 * tau,
+        z_m: fz.p0 + fz.v0 * tau - 0.5 * G * tau * tau,
+      };
+    }
+    return { evaluate, t0, t1: pts[pts.length - 1].t_rel_s };
+  }
+
   function inspectTracesFor(sid, result, color) {
-    const raw = result.points || [];
+    const passResidual = p => !Number.isFinite(p.residual_m)
+      || !Number.isFinite(dashResidualCapM)
+      || p.residual_m <= dashResidualCapM;
+    const raw = (result.points || [])
+      .filter(passResidual)
+      .slice()
+      .sort((a, b) => a.t_rel_s - b.t_rel_s);
     if (!raw.length) return [];
-    return [{
-      type: 'scatter3d',
-      mode: 'lines+markers',
-      x: raw.map(p => p.x_m),
-      y: raw.map(p => p.y_m),
-      z: raw.map(p => p.z_m),
-      line: { color, width: 3, dash: 'dot' },
-      marker: { color, size: 2, opacity: 0.6 },
-      name: `${sid} · path`,
-      hovertemplate: `${sid}<br>t=%{customdata:.3f}s<br>x=%{x:.2f} y=%{y:.2f} z=%{z:.2f}<extra></extra>`,
-      customdata: raw.map(p => p.t_rel_s),
-      showlegend: true,
-    }];
+    const clean = spatialIsolationFilterDash(raw);
+    const fit = ballisticFitDash(clean);
+    if (!fit) {
+      // Too few points to fit — show whatever we have as bare markers,
+      // no connecting line (a line through 1-3 points would be misleading).
+      return [{
+        type: 'scatter3d', mode: 'markers',
+        x: raw.map(p => p.x_m), y: raw.map(p => p.y_m), z: raw.map(p => p.z_m),
+        marker: { color, size: 3, opacity: 0.7 },
+        name: `${sid} · pts (${raw.length})`,
+        hovertemplate: `${sid}<br>t=%{customdata:.3f}s<extra></extra>`,
+        customdata: raw.map(p => p.t_rel_s),
+        showlegend: true,
+      }];
+    }
+    const N = 80;
+    const cx = [], cy = [], cz = [];
+    for (let i = 0; i <= N; i++) {
+      const t = fit.t0 + (fit.t1 - fit.t0) * (i / N);
+      const q = fit.evaluate(t);
+      cx.push(q.x_m); cy.push(q.y_m); cz.push(q.z_m);
+    }
+    const dropped = raw.length - clean.length;
+    return [
+      {
+        type: 'scatter3d', mode: 'lines',
+        x: cx, y: cy, z: cz,
+        line: { color, width: 4 },
+        name: `${sid} · fit (${clean.length}${dropped ? `/${raw.length}` : ''} pts)`,
+        hovertemplate: `${sid} · ballistic fit<br>(x,y,z)=(%{x:.2f}, %{y:.2f}, %{z:.2f})<extra></extra>`,
+        showlegend: true,
+      },
+      {
+        type: 'scatter3d', mode: 'markers',
+        x: clean.map(p => p.x_m), y: clean.map(p => p.y_m), z: clean.map(p => p.z_m),
+        marker: { color, size: 2, opacity: 0.55 },
+        name: `${sid} · samples`,
+        hoverinfo: 'skip',
+        showlegend: false,
+      },
+    ];
   }
 
   function replayTracesFor(sid, result, color) {
@@ -327,7 +443,18 @@
     if (!currentLiveSession || !currentLiveSession.session_id) return traces;
     const sid = currentLiveSession.session_id;
     const rayByCam = liveRayStore.get(sid);
-    if (rayByCam) {
+    // Mode pick: ≥2 cams producing rays → triangulation is happening, the
+    // 3D points are the canonical viz so suppress rays to keep the canvas
+    // clean. <2 cams (only one phone online, peer offline / not yet
+    // streaming) → no triangulation possible, the rays ARE the only thing
+    // to show. Counting cams with non-empty ray arrays (not just `online`)
+    // matches what's actually being rendered.
+    const camsStreaming = rayByCam
+      ? [...rayByCam.entries()].filter(([_, rays]) => rays && rays.length).length
+      : 0;
+    const showRays = camsStreaming < 2;
+    const showPoints = camsStreaming >= 2;
+    if (rayByCam && showRays) {
       const colors = { A: 'rgba(74,107,140,0.34)', B: 'rgba(211,84,0,0.34)' };
       for (const [cam, rays] of rayByCam.entries()) {
         if (!rays.length) continue;
@@ -351,7 +478,7 @@
       }
     }
     const pts = livePointStore.get(sid) || [];
-    if (!pts.length) return traces;
+    if (!pts.length || !showPoints) return traces;
     traces.push({
       type: 'scatter3d',
       mode: 'lines+markers',
@@ -556,6 +683,57 @@
     if (canvasMode === 'replay') updateTimeReadout();
     repaintCanvas();
   });
+
+  // --- Fit filter sliders ---------------------------------------------------
+  const dashResSlider = document.getElementById('dash-residual-slider');
+  const dashResReadout = document.getElementById('dash-residual-readout');
+  const dashOutSlider = document.getElementById('dash-outlier-slider');
+  const dashOutReadout = document.getElementById('dash-outlier-readout');
+  function paintDashResidualReadout() {
+    if (!dashResReadout) return;
+    dashResReadout.textContent = Number.isFinite(dashResidualCapM)
+      ? `≤ ${Math.round(dashResidualCapM * 100)} cm` : 'off';
+  }
+  function paintDashOutlierReadout() {
+    if (!dashOutReadout) return;
+    dashOutReadout.textContent = Number.isFinite(dashOutlierKappa)
+      ? `κ ≤ ${dashOutlierKappa.toFixed(1)}` : 'off';
+  }
+  if (dashResSlider) {
+    dashResSlider.value = Number.isFinite(dashResidualCapM)
+      ? String(Math.round(dashResidualCapM * 100)) : '200';
+    paintDashResidualReadout();
+    dashResSlider.addEventListener('input', () => {
+      const cm = parseFloat(dashResSlider.value);
+      if (!Number.isFinite(cm) || cm >= 200) {
+        dashResidualCapM = Infinity;
+        try { localStorage.setItem(DASH_RES_KEY, 'off'); } catch {}
+      } else {
+        dashResidualCapM = cm / 100;
+        try { localStorage.setItem(DASH_RES_KEY, String(cm)); } catch {}
+      }
+      paintDashResidualReadout();
+      repaintCanvas();
+    });
+  }
+  if (dashOutSlider) {
+    dashOutSlider.value = Number.isFinite(dashOutlierKappa)
+      ? String(Math.round(dashOutlierKappa * 10)) : '60';
+    paintDashOutlierReadout();
+    dashOutSlider.addEventListener('input', () => {
+      const raw = parseFloat(dashOutSlider.value);
+      const k = raw / 10.0;
+      if (!Number.isFinite(k) || k >= 6.0) {
+        dashOutlierKappa = Infinity;
+        try { localStorage.setItem(DASH_OUT_KEY, 'off'); } catch {}
+      } else {
+        dashOutlierKappa = k;
+        try { localStorage.setItem(DASH_OUT_KEY, String(k)); } catch {}
+      }
+      paintDashOutlierReadout();
+      repaintCanvas();
+    });
+  }
 
   // --- Canvas mode toggle: INSPECT vs REPLAY -------------------------------
   function applyCanvasMode(nextMode) {
