@@ -238,7 +238,7 @@ def render_viewer_html(
             <span class="layer-label">show:</span>
             <span class="layer-group" data-layer="traj">
               <span class="layer-name">Traj</span>
-              <button type="button" class="layer-pill" data-layer="traj" data-path="live" aria-pressed="false" disabled title="live stream carries no triangulation">live</button>
+              <button type="button" class="layer-pill" data-layer="traj" data-path="live" aria-pressed="false">live</button>
               <button type="button" class="layer-pill" data-layer="traj" data-path="server_post" aria-pressed="true">svr</button>
             </span>
             <span class="layer-group" data-layer="camA">
