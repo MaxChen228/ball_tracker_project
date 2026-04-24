@@ -36,7 +36,19 @@ class LivePairingSession:
         cam: str,
         frame: FramePayload,
         triangulate_pair: Callable[[str, FramePayload, FramePayload], TriangulatedPoint | None],
+        anchors: dict[str, float | None] | None = None,
     ) -> list[TriangulatedPoint]:
+        """Buffer one frame and pair it against the most recent peer-cam
+        frames within `window_s`.
+
+        `anchors` (optional) — `{cam_id: sync_anchor_timestamp_s}`. When
+        supplied, the cross-cam window check uses anchor-relative time
+        (`frame.timestamp_s − anchors[cam]`) instead of raw `timestamp_s`.
+        Required when each camera reports its own device-local clock (each
+        iPhone's `mach_absolute_time` since boot, so two phones sit tens of
+        thousands of seconds apart). Stored frames keep raw timestamps —
+        only the dt comparison is anchor-shifted, so downstream persistence
+        and triangulation see the original values."""
         buf = self.buffers.setdefault(cam, deque())
         buf.append(frame)
         self.frames_by_cam.setdefault(cam, []).append(frame)
@@ -49,10 +61,17 @@ class LivePairingSession:
         other = _OTHER_CAM.get(cam)
         if other is None:
             return []
+        own_anchor = (anchors or {}).get(cam)
+        peer_anchor = (anchors or {}).get(other)
+        # Drop any anchor offset only when both cams have one — partial
+        # adjustment would be worse than none.
+        adjust = own_anchor is not None and peer_anchor is not None
+        own_t = frame.timestamp_s - own_anchor if adjust else frame.timestamp_s
         candidates = self.buffers.setdefault(other, deque())
         created: list[TriangulatedPoint] = []
         for peer in reversed(candidates):
-            dt = peer.timestamp_s - frame.timestamp_s
+            peer_t = peer.timestamp_s - peer_anchor if adjust else peer.timestamp_s
+            dt = peer_t - own_t
             if dt < -self.window_s:
                 break
             if abs(dt) > self.window_s or not peer.ball_detected:

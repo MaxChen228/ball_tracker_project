@@ -504,6 +504,17 @@ class State:
                     session_obj = candidate
                     break
 
+        # Each iPhone's `frame.timestamp_s` is its own mach-absolute clock
+        # (seconds since device boot), so the two cameras' raw timestamps
+        # can be tens of thousands of seconds apart. Hand each device's
+        # anchor to `LivePairingSession.ingest` so its 8 ms cross-cam
+        # comparison happens on anchor-relative time, while persisted
+        # frames keep raw timestamps for downstream consumers.
+        anchors = {
+            "A": dev_a.sync_anchor_timestamp_s if dev_a is not None else None,
+            "B": dev_b.sync_anchor_timestamp_s if dev_b is not None else None,
+        }
+
         def triangulate_live(cam: str, first: FramePayload, second: FramePayload) -> TriangulatedPoint | None:
             left_frame, right_frame = (first, second) if cam == "A" else (second, first)
             if cal_a is None or cal_b is None or dev_a is None or dev_b is None:
@@ -539,7 +550,7 @@ class State:
             pts = session_results.triangulate_pair(self, pa, pb, source="server")
             return pts[0] if pts else None
 
-        created = live.ingest(camera_id, frame, triangulate_live)
+        created = live.ingest(camera_id, frame, triangulate_live, anchors=anchors)
         return created, dict(live.frame_counts)
 
     def live_ray_for_frame(

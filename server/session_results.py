@@ -160,6 +160,11 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             # snapshot on the pitch JSON.
             if pitch.frames_server_post or pitch.frames:
                 candidate_paths.add(DetectionPath.server_post)
+            # Same for live: persisted `frames_live` (from an old WS
+            # streaming run, or `persist_live_frames`) is enough to drive
+            # the live triangulation path on rebuild even after restart.
+            if pitch.frames_live:
+                candidate_paths.add(DetectionPath.live)
     if live is not None and live.frame_counts:
         candidate_paths.add(DetectionPath.live)
     if not candidate_paths:
@@ -185,7 +190,12 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
 
     mono_session = (a is None) != (b is None)
     for path in sorted(candidate_paths, key=lambda p: p.value):
-        if path == DetectionPath.live:
+        # When the streaming live aggregator already populated this path
+        # above, skip — it's authoritative. Otherwise (rebuild for a session
+        # restored from disk after server restart, or an offline replay),
+        # fall through to the same triangulate_pair flow used by other paths
+        # so persisted `frames_live` can still drive the live trajectory.
+        if path == DetectionPath.live and live is not None:
             continue
         frames_a = get_path_frames(state, a, path) if a is not None else []
         frames_b = get_path_frames(state, b, path) if b is not None else []
