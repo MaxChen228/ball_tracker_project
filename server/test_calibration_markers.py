@@ -203,7 +203,7 @@ def test_calibration_auto_uses_pose_solver_when_3d_markers_available(tmp_path, m
     )
     main.state._marker_registry.upsert(
         main.MarkerRecord(
-            marker_id=7,
+            marker_id=9,
             x_m=-0.40,
             y_m=-0.60,
             z_m=0.15,
@@ -213,7 +213,7 @@ def test_calibration_auto_uses_pose_solver_when_3d_markers_available(tmp_path, m
     )
     main.state._marker_registry.upsert(
         main.MarkerRecord(
-            marker_id=12,
+            marker_id=11,
             x_m=-0.40,
             y_m=-0.40,
             z_m=0.0,
@@ -225,8 +225,8 @@ def test_calibration_auto_uses_pose_solver_when_3d_markers_available(tmp_path, m
     from calibration_solver import PLATE_MARKER_WORLD
     marker_xyz = {mid: (xy[0], xy[1], 0.0) for mid, xy in PLATE_MARKER_WORLD.items()}
     marker_xyz.update({
-        7: (-0.40, -0.60, 0.15),
-        12: (-0.40, -0.40, 0.0),
+        9: (-0.40, -0.60, 0.15),
+        11: (-0.40, -0.40, 0.0),
     })
     bgr_a = _render_aruco_scene_3d(marker_xyz, K=K, R=R_a, t=t_a)
     _seed_calibration_frame("A", _jpeg_encode(bgr_a))
@@ -237,7 +237,7 @@ def test_calibration_auto_uses_pose_solver_when_3d_markers_available(tmp_path, m
     assert body["ok"] is True
     assert body["used_pose_solver"] is True
     assert body["n_3d_markers_used"] >= 1
-    assert 7 in body["detected_ids"]
+    assert 9 in body["detected_ids"]
 
 
 def test_markers_scan_triangulates_dual_camera_candidates(tmp_path, monkeypatch):
@@ -269,8 +269,8 @@ def test_markers_scan_triangulates_dual_camera_candidates(tmp_path, monkeypatch)
     from calibration_solver import PLATE_MARKER_WORLD
     marker_xyz = {mid: (xy[0], xy[1], 0.0) for mid, xy in PLATE_MARKER_WORLD.items()}
     truth_new = {
-        7: (-0.40, -0.60, 0.15),
-        12: (-0.40, -0.40, 0.0),
+        9: (-0.40, -0.60, 0.15),
+        11: (-0.40, -0.40, 0.0),
     }
     marker_xyz.update(truth_new)
     bgr_a = _render_aruco_scene_3d(marker_xyz, K=K, R=R_a, t=t_a)
@@ -283,14 +283,14 @@ def test_markers_scan_triangulates_dual_camera_candidates(tmp_path, monkeypatch)
     body = r.json()
     assert body["ok"] is True
     got = {row["marker_id"]: row for row in body["candidates"]}
-    assert set(got.keys()) == {7, 12}
+    assert set(got.keys()) == {9, 11}
     for mid, (x_m, y_m, z_m) in truth_new.items():
         row = got[mid]
         assert abs(row["x_m"] - x_m) < 0.03
         assert abs(row["y_m"] - y_m) < 0.03
         assert abs(row["z_m"] - z_m) < 0.03
-    assert got[12]["suggest_on_plate_plane"] is True
-    assert got[7]["suggest_on_plate_plane"] is False
+    assert got[11]["suggest_on_plate_plane"] is True
+    assert got[9]["suggest_on_plate_plane"] is False
 
 
 def test_markers_crud_and_persistence(tmp_path, monkeypatch):
@@ -299,14 +299,14 @@ def test_markers_crud_and_persistence(tmp_path, monkeypatch):
 
     state = main.state
     state._marker_registry.upsert(
-        main.MarkerRecord(marker_id=7, x_m=1.0, y_m=2.0, z_m=0.0, on_plate_plane=True)
+        main.MarkerRecord(marker_id=9, x_m=1.0, y_m=2.0, z_m=0.0, on_plate_plane=True)
     )
     state._marker_registry.upsert(
-        main.MarkerRecord(marker_id=8, x_m=-1.0, y_m=0.5, z_m=0.4, on_plate_plane=False)
+        main.MarkerRecord(marker_id=10, x_m=-1.0, y_m=0.5, z_m=0.4, on_plate_plane=False)
     )
     assert client.get("/markers/state").json()["markers"] == [
         {
-            "marker_id": 7,
+            "marker_id": 9,
             "label": None,
             "x_m": 1.0,
             "y_m": 2.0,
@@ -316,7 +316,7 @@ def test_markers_crud_and_persistence(tmp_path, monkeypatch):
             "source_camera_ids": [],
         },
         {
-            "marker_id": 8,
+            "marker_id": 10,
             "label": None,
             "x_m": -1.0,
             "y_m": 0.5,
@@ -327,19 +327,19 @@ def test_markers_crud_and_persistence(tmp_path, monkeypatch):
         },
     ]
     assert client.get("/calibration/markers").json()["markers"] == [
-        {"id": 7, "wx": 1.0, "wy": 2.0},
+        {"id": 9, "wx": 1.0, "wy": 2.0},
     ]
 
     # Persistence: recreate State from the same dir, registry must survive.
     main.state = main.State(data_dir=tmp_path)
     persisted = {rec.marker_id: rec for rec in main.state._marker_registry.all_records()}
-    assert persisted[7].on_plate_plane is True
-    assert persisted[8].z_m == 0.4
+    assert persisted[9].on_plate_plane is True
+    assert persisted[10].z_m == 0.4
 
-    r = client.delete("/markers/7")
+    r = client.delete("/markers/9")
     assert r.status_code == 200
     assert r.json()["ok"] is True
-    assert main.state._marker_registry.get(7) is None
+    assert main.state._marker_registry.get(9) is None
 
     r = client.delete("/markers/99")
     assert r.status_code == 404
@@ -353,7 +353,7 @@ def test_markers_crud_and_persistence(tmp_path, monkeypatch):
 def test_markers_reject_plate_reserved_ids(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     db = main.state._marker_registry
-    for reserved in (0, 1, 2, 3, 4, 5):
+    for reserved in (0, 1, 2, 3, 4, 5, 6, 7, 8):
         with pytest.raises(Exception):
             db.upsert(main.MarkerRecord(marker_id=reserved, x_m=0.0, y_m=0.0, z_m=0.0))
     with pytest.raises(Exception):

@@ -257,7 +257,7 @@ class MarkerRecord(BaseModel):
     for registry / layout / future pose-solving work, but are excluded from
     today's planar auto-cal.
     """
-    marker_id: int = Field(..., ge=6, le=49)
+    marker_id: int = Field(..., ge=9, le=49)
     x_m: float
     y_m: float
     z_m: float
@@ -268,7 +268,7 @@ class MarkerRecord(BaseModel):
 
 
 class MarkerDraft(BaseModel):
-    marker_id: int = Field(..., ge=6, le=49)
+    marker_id: int = Field(..., ge=9, le=49)
     x_m: float
     y_m: float
     z_m: float
