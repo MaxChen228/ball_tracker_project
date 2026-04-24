@@ -46,7 +46,6 @@ final class CameraTransportCoordinator: NSObject {
         let applyRemoteDisarm: () -> Void
         let updateTimeSyncServerState: (Bool, String?) -> Void
         let applyChirpThreshold: (Double) -> Void
-        let applyMutualSyncThreshold: (Double) -> Void
         let applyHeartbeatInterval: (Double) -> Void
         let applyHSVRange: (ServerUploader.HSVRangePayload) -> Void
         let applyTrackingExposureCap: (String, Double) -> Void
@@ -68,7 +67,6 @@ final class CameraTransportCoordinator: NSObject {
     private var commandRouter: CameraCommandRouter!
 
     private var lastServerChirpThreshold: Double?
-    private var lastServerMutualThreshold: Double?
     private var lastServerHeartbeatInterval: Double?
     private var lastServerTrackingExposureCapMode: ServerUploader.TrackingExposureCapMode?
     private var previewRequestedByServer: Bool = false
@@ -259,9 +257,6 @@ final class CameraTransportCoordinator: NSObject {
                 chirpThresholdDidPush: { [weak self] threshold in
                     self?.applyPushedChirpThreshold(threshold)
                 },
-                mutualSyncThresholdDidPush: { [weak self] threshold in
-                    self?.applyPushedMutualSyncThreshold(threshold)
-                },
                 heartbeatIntervalDidPush: { [weak self] interval in
                     self?.applyPushedHeartbeatInterval(interval)
                 },
@@ -303,12 +298,6 @@ final class CameraTransportCoordinator: NSObject {
             self.dependencies.applyChirpThreshold(threshold)
             transportLog.info("quick-chirp threshold hot-applied from server: \(threshold)")
         }
-    }
-
-    private func applyPushedMutualSyncThreshold(_ threshold: Double) {
-        guard lastServerMutualThreshold != threshold else { return }
-        lastServerMutualThreshold = threshold
-        dependencies.applyMutualSyncThreshold(threshold)
     }
 
     private func applyPushedHeartbeatInterval(_ interval: Double) {
