@@ -906,37 +906,52 @@ def _viewer_js() -> str:
     const r = (p && typeof p.residual_m === "number") ? p.residual_m : 0;
     return r <= residualCapM;
   }}
-  // Spatial isolation outlier rejection. **Does NOT fit first** — a single
-  // high-leverage outlier warps LSQ so that the bad point ends up closest
-  // to the warped curve and good cluster points look like outliers
-  // (inversion). Instead: for each point compute mean distance to its k=3
-  // nearest neighbours in 3D; cluster points sit ~ inter-frame spacing
-  // apart (5-20 cm), an isolated outlier sits ≥ 1 m away. Reject any point
-  // whose isolation > median + κ · 1.4826 · MAD (κ = slider value, MAD →
-  // σ-equivalent). MAD is robust to ~50% outliers; the 1e-3 floor stops a
-  // tightly clustered set from collapsing the cutoff to zero.
+  // RANSAC ballistic outlier rejection. Spatial-isolation k-NN failed when
+  // multiple outliers clustered (each outlier becomes the others' nearest
+  // neighbour → looks "non-isolated", inversion bug). RANSAC uses the
+  // strong physical prior of g=9.81 instead: sample 4 random points, fit a
+  // ballistic, count how many of the rest land within `κ · scale` of the
+  // curve, repeat. Outliers can't conspire to land on a parabola of the
+  // right curvature, so the inlier-maximising sample wins. ~150 iters at
+  // p=0.30 outliers gives >99% chance of hitting an all-clean sample.
+  // Scale = median of the smallest 50% of distances (robust to outliers in
+  // the unsampled population, won't collapse to zero on synthetic perfect
+  // points). Slider κ controls inlier band tightness.
   function applyFitResidualFilter(pts) {{
-    if (!Number.isFinite(fitResKappa) || pts.length < 5) return pts;
-    const K_NN = 3;
-    const isol = pts.map((p, i) => {{
-      const ds = [];
-      for (let j = 0; j < pts.length; j++) {{
-        if (j === i) continue;
-        const dx = pts[j].x - p.x, dy = pts[j].y - p.y, dz = pts[j].z - p.z;
-        ds.push(Math.sqrt(dx*dx + dy*dy + dz*dz));
+    if (!Number.isFinite(fitResKappa) || pts.length < 6) return pts;
+    const ITERS = 150;
+    const N = pts.length;
+    let bestIdx = null;
+    let bestScale = Infinity;
+    for (let it = 0; it < ITERS; it++) {{
+      const idx = new Set();
+      while (idx.size < 4) idx.add(Math.floor(Math.random() * N));
+      const sample = [...idx].map(i => pts[i]);
+      sample.sort((a, b) => a.t_rel_s - b.t_rel_s);
+      const fit = ballisticFit(sample);
+      if (!fit) continue;
+      const dists = new Array(N);
+      for (let k = 0; k < N; k++) {{
+        const q = fit.evaluate(pts[k].t_rel_s);
+        const dx = pts[k].x - q.x, dy = pts[k].y - q.y, dz = pts[k].z - q.z;
+        dists[k] = Math.sqrt(dx*dx + dy*dy + dz*dz);
       }}
-      ds.sort((a, b) => a - b);
-      const k = Math.min(K_NN, ds.length);
-      let s = 0; for (let m = 0; m < k; m++) s += ds[m];
-      return s / k;
-    }});
-    const sorted = isol.slice().sort((a, b) => a - b);
-    const med = sorted[Math.floor(sorted.length / 2)];
-    const absDev = isol.map(d => Math.abs(d - med)).sort((a, b) => a - b);
-    const mad = Math.max(absDev[Math.floor(absDev.length / 2)], 1e-3);
-    const cutoffM = med + fitResKappa * 1.4826 * mad;
-    const survivors = pts.filter((_, i) => isol[i] <= cutoffM);
-    return (survivors.length >= 4 && survivors.length < pts.length) ? survivors : pts;
+      const sorted = dists.slice().sort((a, b) => a - b);
+      const scale = Math.max(sorted[Math.max(0, Math.floor(N / 2) - 1)], 0.01);
+      const thresh = fitResKappa * scale;
+      const inliers = [];
+      for (let k = 0; k < N; k++) if (dists[k] <= thresh) inliers.push(k);
+      if (
+        bestIdx === null ||
+        inliers.length > bestIdx.length ||
+        (inliers.length === bestIdx.length && scale < bestScale)
+      ) {{
+        bestIdx = inliers;
+        bestScale = scale;
+      }}
+    }}
+    if (!bestIdx || bestIdx.length < 4 || bestIdx.length === N) return pts;
+    return bestIdx.map(i => pts[i]);
   }}
   // Run both filters on a path's full point list; returns the filtered,
   // time-sorted array. Caller passes cutoff for playback clipping.
