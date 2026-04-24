@@ -96,7 +96,8 @@ def calibrate_camera(cam_id: str, pitches: list[dict]) -> dict:
     homographies = [np.array(p["homography"], dtype=np.float64).reshape(3, 3) for p in pitches]
     # Stored intrinsics from the most recent session (reasonable initial guess).
     intr = pitches[-1]["intrinsics"]
-    K_init = build_K(intr["fx"], intr["fz"], intr["cx"], intr["cy"])
+    # Back-compat: older pitch JSONs stored vertical focal length under "fz".
+    K_init = build_K(intr["fx"], intr.get("fy", intr.get("fz")), intr["cx"], intr["cy"])
     W = pitches[-1]["image_width_px"]
     H_img = pitches[-1]["image_height_px"]
 

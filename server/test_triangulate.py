@@ -207,7 +207,7 @@ def _pitch_at(
 
 
 def test_scale_pitch_noop_when_dims_match():
-    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=540.0)
+    intr = IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=540.0)
     H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
     pitch = _pitch_at(1920, 1080, intr, H)
 
@@ -217,7 +217,7 @@ def test_scale_pitch_noop_when_dims_match():
 
 
 def test_scale_pitch_noop_when_calibration_missing():
-    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=540.0)
+    intr = IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=540.0)
     H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
     pitch = _pitch_at(1280, 720, intr, H)
 
@@ -237,7 +237,7 @@ def test_scale_pitch_noop_when_intrinsics_missing():
 
 def test_scale_pitch_1080_to_720_scales_intrinsics_proportionally():
     intr = IntrinsicsPayload(
-        fx=1600.0, fz=1600.0, cx=960.0, cy=540.0,
+        fx=1600.0, fy=1600.0, cx=960.0, cy=540.0,
         distortion=[0.1, -0.05, 0.001, -0.002, 0.02],
     )
     H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
@@ -249,7 +249,7 @@ def test_scale_pitch_1080_to_720_scales_intrinsics_proportionally():
     sy = 720 / 1080  # 0.6667
     assert out.intrinsics is not None
     assert out.intrinsics.fx == pytest.approx(1600.0 * sx)
-    assert out.intrinsics.fz == pytest.approx(1600.0 * sy)
+    assert out.intrinsics.fy == pytest.approx(1600.0 * sy)
     assert out.intrinsics.cx == pytest.approx(960.0 * sx)
     assert out.intrinsics.cy == pytest.approx(540.0 * sy)
     # Distortion is dimensionless; must be unchanged.
@@ -259,7 +259,7 @@ def test_scale_pitch_1080_to_720_scales_intrinsics_proportionally():
 def test_scale_pitch_scales_homography_first_two_rows_and_renormalises():
     """Scaling by S = diag(sx, sy, 1) must leave the last row (normalised to 1)
     intact after the h33 renormalisation."""
-    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=540.0)
+    intr = IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=540.0)
     H_in = [2.0, 0.1, 30.0, 0.2, 3.0, 40.0, 0.0, 0.0, 1.0]
     pitch = _pitch_at(1280, 720, intr, H_in)
 
@@ -283,7 +283,7 @@ def test_scale_pitch_roundtrip_preserves_projected_pixel():
     down by the same ratio)."""
     fx = fy = 1600.0
     cx, cy = 960.0, 540.0
-    intr = IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy)
+    intr = IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy)
     K = build_K(fx, fy, cx, cy)
     C = np.array([1.8, -2.5, 1.2])
     R, t = _look_at(C, np.array([0.0, 0.15, 0.0]))
@@ -310,7 +310,7 @@ def test_scale_pitch_roundtrip_preserves_projected_pixel():
 
 
 def test_sanity_check_quiet_on_centered_intrinsics(caplog):
-    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=540.0)
+    intr = IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=540.0)
     H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
     pitch = _pitch_at(1920, 1080, intr, H)
     import logging
@@ -323,7 +323,7 @@ def test_sanity_check_quiet_on_centered_intrinsics(caplog):
 def test_sanity_check_warns_when_principal_point_off_center(caplog):
     # cy=800 out of 1080 ⇒ cy/h=0.741 — exactly the footprint of a 4:3→16:9
     # crop basis mismatch.
-    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=800.0)
+    intr = IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=800.0)
     H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
     pitch = _pitch_at(1920, 1080, intr, H)
     import logging
@@ -338,7 +338,7 @@ def test_sanity_check_runs_after_scaling(caplog):
     # Intrinsics baked at 1920×1080 but video actually at 1280×720. After
     # scale_pitch rescales cx/cy proportionally, they should still be near
     # the centre of the new grid — so no warning fires.
-    intr = IntrinsicsPayload(fx=1600.0, fz=1600.0, cx=960.0, cy=540.0)
+    intr = IntrinsicsPayload(fx=1600.0, fy=1600.0, cx=960.0, cy=540.0)
     H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
     pitch = _pitch_at(1280, 720, intr, H)
     import logging
@@ -351,7 +351,7 @@ def test_sanity_check_warns_on_wrong_basis_after_scaling(caplog):
     # Intrinsics baked at 4032×3024 (iPhone photo), metadata lies and
     # claims 1920×1080. Our rescale from 1920→1280 then leaves cx/cy way
     # past the frame — loud warning is exactly the outcome we want.
-    intr = IntrinsicsPayload(fx=3000.0, fz=3000.0, cx=2016.0, cy=1512.0)
+    intr = IntrinsicsPayload(fx=3000.0, fy=3000.0, cx=2016.0, cy=1512.0)
     H = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
     pitch = _pitch_at(1280, 720, intr, H)
     import logging

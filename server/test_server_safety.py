@@ -161,7 +161,7 @@ def test_record_does_not_hold_lock_during_io(tmp_path, monkeypatch):
             )
         ],
         intrinsics=main.IntrinsicsPayload(
-            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+            fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
         homography=H_a.flatten().tolist(),
     )

@@ -82,7 +82,7 @@ def render_events_index_html(
             "source_width_px": r.source_width_px,
             "source_height_px": r.source_height_px,
             "fx": r.intrinsics.fx,
-            "fy": r.intrinsics.fz,
+            "fy": r.intrinsics.fy,
             "rms_reprojection_px": r.rms_reprojection_px,
             "n_images": r.n_images,
             "calibrated_at": r.calibrated_at,

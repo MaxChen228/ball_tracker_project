@@ -21,7 +21,7 @@ _VALID_BODY = {
     "source_height_px": 1080,
     "intrinsics": {
         "fx": 1580.5,
-        "fz": 1581.2,
+        "fy": 1581.2,
         "cx": 960.3,
         "cy": 540.7,
         "distortion": [0.12, -0.25, 0.001, -0.001, 0.08],
@@ -155,7 +155,7 @@ def test_auto_cal_handles_4_3_source_via_center_crop(tmp_path, monkeypatch):
         "source_height_px": 3024,
         "intrinsics": {
             "fx": 2879.46,
-            "fz": 2893.06,
+            "fy": 2893.06,
             "cx": 2019.97,
             "cy": 1505.34,
             "distortion": [0.19, -0.66, -0.002, 0.001, 0.67],

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class CaptureMode(str, Enum):
@@ -73,8 +73,16 @@ _SYNC_ID_PATTERN = r"^sy_[0-9a-f]{4,32}$"
 
 
 class IntrinsicsPayload(BaseModel):
+    # Legacy `fz` was a naming collision — iOS stored the image-vertical
+    # focal length (OpenCV's fy) under a key called "fz". The rename is
+    # mechanical now that iOS no longer echoes intrinsics on uploads. We
+    # still accept the old `fz` wire key when loading historical
+    # calibration JSON or old test fixtures via AliasChoices; population
+    # by name keeps new code using `fy=...` constructors.
+    model_config = ConfigDict(populate_by_name=True)
+
     fx: float
-    fz: float
+    fy: float = Field(..., validation_alias=AliasChoices("fy", "fz"))
     cx: float
     cy: float
     # OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Optional so

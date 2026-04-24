@@ -263,7 +263,7 @@ def ray_for_frame(
     """
     if not frame.ball_detected:
         return None
-    K = build_K(intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy)
+    K = build_K(intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy)
     H = np.array(homography, dtype=float).reshape(3, 3)
     R_wc, t_wc = recover_extrinsics(K, H)
     C = camera_center_world(R_wc, t_wc)
@@ -307,7 +307,7 @@ def build_scene(
         if pitch.intrinsics is None or pitch.homography is None:
             continue
         intr = pitch.intrinsics
-        K = build_K(intr.fx, intr.fz, intr.cx, intr.cy)
+        K = build_K(intr.fx, intr.fy, intr.cx, intr.cy)
         H = np.array(pitch.homography, dtype=float).reshape(3, 3)
         R_wc, t_wc = recover_extrinsics(K, H)
         C = camera_center_world(R_wc, t_wc)
@@ -325,7 +325,7 @@ def build_scene(
                 axis_right_world=(right / np.linalg.norm(right)).tolist(),
                 axis_up_world=(up / np.linalg.norm(up)).tolist(),
                 fx=float(intr.fx),
-                fy=float(intr.fz),
+                fy=float(intr.fy),
                 cx=float(intr.cx),
                 cy=float(intr.cy),
                 distortion=list(intr.distortion) if intr.distortion else None,
@@ -442,7 +442,7 @@ def build_calibration_scene(
                 _camera_view_from_intrinsics_and_homography(
                     camera_id=cam_id,
                     fx=cal.intrinsics.fx,
-                    fy=cal.intrinsics.fz,
+                    fy=cal.intrinsics.fy,
                     cx=cal.intrinsics.cx,
                     cy=cal.intrinsics.cy,
                     homography=cal.homography,

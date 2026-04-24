@@ -86,7 +86,7 @@ def _pitch(cam_id, cycle, K, R, t, H, P_trajectory):
         video_start_pts_s=0.0,
         video_fps=240.0,
         frames=frames,
-        intrinsics=schemas.IntrinsicsPayload(fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
+        intrinsics=schemas.IntrinsicsPayload(fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
         homography=H.flatten().tolist(),
     )
 
@@ -517,7 +517,7 @@ def test_viewer_health_banner_rate_bar_colour_tiers():
         video_fps=240.0,
         frames=frames,
         intrinsics=schemas.IntrinsicsPayload(
-            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+            fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
         homography=H_a.flatten().tolist(),
     )
@@ -806,7 +806,7 @@ def test_viewer_exposes_camera_t_rel_offsets(tmp_path):
             ball_detected=True,
         )],
         intrinsics=schemas.IntrinsicsPayload(
-            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+            fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
         homography=H_a.flatten().tolist(),
     )

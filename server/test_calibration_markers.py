@@ -195,7 +195,7 @@ def test_calibration_auto_uses_pose_solver_when_3d_markers_available(tmp_path, m
     main.state.set_calibration(
         main.CalibrationSnapshot(
             camera_id="A",
-            intrinsics=main.IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy),
+            intrinsics=main.IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy),
             homography=H_a.flatten().tolist(),
             image_width_px=1920,
             image_height_px=1080,
@@ -250,7 +250,7 @@ def test_markers_scan_triangulates_dual_camera_candidates(tmp_path, monkeypatch)
     main.state.set_calibration(
         main.CalibrationSnapshot(
             camera_id="A",
-            intrinsics=main.IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy),
+            intrinsics=main.IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy),
             homography=H_a.flatten().tolist(),
             image_width_px=1920,
             image_height_px=1080,
@@ -259,7 +259,7 @@ def test_markers_scan_triangulates_dual_camera_candidates(tmp_path, monkeypatch)
     main.state.set_calibration(
         main.CalibrationSnapshot(
             camera_id="B",
-            intrinsics=main.IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy),
+            intrinsics=main.IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy),
             homography=H_b.flatten().tolist(),
             image_width_px=1920,
             image_height_px=1080,

@@ -26,7 +26,7 @@ def _post_calibration(client: TestClient, camera_id: str, K: np.ndarray, H: np.n
         json={
             "camera_id": camera_id,
             "intrinsics": {
-                "fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
+                "fx": K[0, 0], "fy": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
             },
             "homography": H.flatten().tolist(),
             "image_width_px": 1920,

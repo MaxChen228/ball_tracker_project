@@ -58,7 +58,7 @@ def _direct_payload_with_frames(
         video_fps=240.0,
         frames=frames,
         intrinsics=main.IntrinsicsPayload(
-            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+            fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
         homography=H.flatten().tolist(),
     )
@@ -201,7 +201,7 @@ def _build_pairing_payloads(
         video_fps=240.0,
         frames=frames(timestamps_a, R_a, t_a),
         intrinsics=main.IntrinsicsPayload(
-            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+            fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
         homography=H_a.flatten().tolist(),
     )
@@ -214,7 +214,7 @@ def _build_pairing_payloads(
         video_fps=240.0,
         frames=frames(timestamps_b, R_b, t_b),
         intrinsics=main.IntrinsicsPayload(
-            fx=K[0, 0], fz=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+            fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
         homography=H_b.flatten().tolist(),
     )
