@@ -510,6 +510,34 @@ def _parse_battery(msg: dict[str, Any]) -> tuple[float | None, str | None]:
     return level, state_
 
 
+# UUID-ish (identifierForVendor format) plus a generous slack for the
+# "unknown-<uuid>" fallback the iOS helper emits when the vendor id is
+# temporarily unavailable. Cap to 64 chars to match the dashboard column
+# budget and protect against a hostile client.
+_DEVICE_ID_MAX_LEN = 64
+_DEVICE_MODEL_MAX_LEN = 32
+
+
+def _parse_device_identity(msg: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Extract `device_id` (identifierForVendor UUID) and `device_model`
+    (sysctl machine id, e.g. `iPhone15,3`) from a WS hello/heartbeat.
+    Length-capped and type-checked — a misbehaving client can't inject
+    arbitrarily long strings into the registry."""
+    raw_id = msg.get("device_id")
+    device_id: str | None = None
+    if isinstance(raw_id, str):
+        trimmed = raw_id.strip()
+        if 0 < len(trimmed) <= _DEVICE_ID_MAX_LEN:
+            device_id = trimmed
+    raw_model = msg.get("device_model")
+    device_model: str | None = None
+    if isinstance(raw_model, str):
+        trimmed_m = raw_model.strip()
+        if 0 < len(trimmed_m) <= _DEVICE_MODEL_MAX_LEN:
+            device_model = trimmed_m
+    return device_id, device_model
+
+
 @app.get("/status")
 def status() -> dict[str, Any]:
     return _build_status_response()
@@ -573,6 +601,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 reported_sync_id = msg.get("time_sync_id")
                 reported_anchor = msg.get("sync_anchor_timestamp_s")
                 battery_level, battery_state = _parse_battery(msg)
+                device_id, device_model = _parse_device_identity(msg)
                 state.heartbeat(
                     camera_id,
                     time_synced=(reported_sync_id is not None and reported_anchor is not None),
@@ -580,6 +609,8 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                     sync_anchor_timestamp_s=reported_anchor,
                     battery_level=battery_level,
                     battery_state=battery_state,
+                    device_id=device_id,
+                    device_model=device_model,
                 )
                 await device_ws.send(camera_id, _settings_message_for(camera_id))
                 continue
@@ -588,6 +619,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 reported_sync_id = msg.get("time_sync_id")
                 reported_anchor = msg.get("sync_anchor_timestamp_s")
                 battery_level, battery_state = _parse_battery(msg)
+                device_id, device_model = _parse_device_identity(msg)
                 state.heartbeat(
                     camera_id,
                     time_synced=(reported_sync_id is not None and reported_anchor is not None),
@@ -595,6 +627,8 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                     sync_anchor_timestamp_s=reported_anchor,
                     battery_level=battery_level,
                     battery_state=battery_state,
+                    device_id=device_id,
+                    device_model=device_model,
                 )
                 telem = msg.get("sync_telemetry")
                 if isinstance(telem, dict):

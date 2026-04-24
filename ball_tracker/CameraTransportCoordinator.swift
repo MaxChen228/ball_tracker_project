@@ -6,6 +6,28 @@ import os
 
 private let transportLog = Logger(subsystem: "com.Max0228.ball-tracker", category: "camera.transport")
 
+/// Stable per-device identity for keying ChArUco intrinsics server-side.
+/// `identifierForVendor` survives app launches on the same device + vendor;
+/// reinstalling the app rotates it, which is acceptable (operator reruns
+/// ChArUco once after reinstall). `model` is the machine identifier from
+/// sysctl (e.g. "iPhone15,3") so the dashboard can show a human-readable
+/// hint alongside the UUID.
+enum DeviceIdentity {
+    static let id: String = UIDevice.current.identifierForVendor?.uuidString
+        ?? "unknown-\(UUID().uuidString)"
+
+    static let model: String = {
+        var sysinfo = utsname()
+        uname(&sysinfo)
+        let raw = withUnsafePointer(to: &sysinfo.machine) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: Int(_SYS_NAMELEN)) {
+                String(cString: $0)
+            }
+        }
+        return raw.isEmpty ? UIDevice.current.model : raw
+    }()
+}
+
 final class CameraTransportCoordinator: NSObject {
     struct Dependencies {
         let getState: () -> CameraViewController.AppState
@@ -88,6 +110,8 @@ final class CameraTransportCoordinator: NSObject {
         ws?.connect(initialHello: [
             "type": "hello",
             "cam": cameraRole,
+            "device_id": DeviceIdentity.id,
+            "device_model": DeviceIdentity.model,
             "session_id": dependencies.getCurrentSessionId() as Any,
             "time_sync_id": dependencies.getSyncId() as Any,
             "sync_anchor_timestamp_s": dependencies.getSyncAnchorTimestampS() as Any,
@@ -178,6 +202,8 @@ final class CameraTransportCoordinator: NSObject {
             var payload: [String: Any] = [
                 "type": "heartbeat",
                 "cam": self.cameraRole,
+                "device_id": DeviceIdentity.id,
+                "device_model": DeviceIdentity.model,
                 "t_session_s": CACurrentMediaTime(),
                 "time_sync_id": timeSyncId as Any,
                 "sync_anchor_timestamp_s": anchorTs as Any,

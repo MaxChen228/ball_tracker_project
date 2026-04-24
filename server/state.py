@@ -823,6 +823,8 @@ class State:
         sync_anchor_timestamp_s: float | None = None,
         battery_level: float | None = None,
         battery_state: str | None = None,
+        device_id: str | None = None,
+        device_model: str | None = None,
     ) -> None:
         """Record one liveness ping. Overwrites the previous entry for this
         camera so `last_seen_at`, `time_synced`, and the currently-held
@@ -838,6 +840,8 @@ class State:
                 sync_anchor_timestamp_s=sync_anchor_timestamp_s,
                 battery_level=battery_level,
                 battery_state=battery_state,
+                device_id=device_id,
+                device_model=device_model,
             )
 
     def record_sync_telemetry(self, camera_id: str, telem: dict[str, Any]) -> None:
@@ -964,6 +968,15 @@ class State:
     def device_snapshot(self, camera_id: str) -> Device | None:
         with self._lock:
             return self._device_registry.snapshot(camera_id)
+
+    def device_id_for(self, camera_id: str) -> str | None:
+        """Current role→hardware mapping. Returns the `identifierForVendor`
+        the phone most recently reported on hello/heartbeat. Used by the
+        ChArUco intrinsics lookup — swapping which phone plays role A vs B
+        must not carry the wrong sensor's K + distortion over."""
+        with self._lock:
+            dev = self._device_registry.get(camera_id)
+            return dev.device_id if dev is not None else None
 
     def _check_session_timeout_locked(self, now: float) -> None:
         """If the current session has exceeded its max_duration_s, transition

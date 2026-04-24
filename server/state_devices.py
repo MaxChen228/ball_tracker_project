@@ -31,13 +31,18 @@ class DeviceRegistry:
         sync_anchor_timestamp_s: float | None = None,
         battery_level: float | None = None,
         battery_state: str | None = None,
+        device_id: str | None = None,
+        device_model: str | None = None,
     ) -> None:
         now = self._time_fn()
-        # Preserve last-known battery if this particular heartbeat omits it
-        # (keeps the UI stable across stray packets) but update when present.
+        # Preserve last-known battery / device identity if this particular
+        # heartbeat omits it (keeps UI stable across stray packets and lets
+        # older clients still register) but update when present.
         prev = self.devices.get(camera_id)
         resolved_level = battery_level if battery_level is not None else (prev.battery_level if prev else None)
         resolved_state = battery_state if battery_state is not None else (prev.battery_state if prev else None)
+        resolved_device_id = device_id if device_id is not None else (prev.device_id if prev else None)
+        resolved_device_model = device_model if device_model is not None else (prev.device_model if prev else None)
         self.devices[camera_id] = Device(
             camera_id=camera_id,
             last_seen_at=now,
@@ -51,6 +56,8 @@ class DeviceRegistry:
             ),
             battery_level=resolved_level,
             battery_state=resolved_state,
+            device_id=resolved_device_id,
+            device_model=resolved_device_model,
         )
         stale = [
             cam for cam, dev in self.devices.items()
@@ -78,6 +85,8 @@ class DeviceRegistry:
             sync_anchor_timestamp_s=dev.sync_anchor_timestamp_s,
             battery_level=dev.battery_level,
             battery_state=dev.battery_state,
+            device_id=dev.device_id,
+            device_model=dev.device_model,
         )
 
     def online(self, stale_after_s: float | None = None) -> list[Device]:
@@ -106,6 +115,8 @@ class DeviceRegistry:
             sync_anchor_timestamp_s=dev.sync_anchor_timestamp_s,
             battery_level=dev.battery_level,
             battery_state=dev.battery_state,
+            device_id=dev.device_id,
+            device_model=dev.device_model,
         )
 
     def values(self) -> list[Device]:
