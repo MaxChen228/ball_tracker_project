@@ -126,6 +126,13 @@ def detect_pitch(
             video_path.name, expected_radius_px,
         )
     out: list[FramePayload] = []
+    # Temporal prior state — equal-velocity straight-line model that
+    # carries the ball's last known (position, velocity). Reset to None
+    # whenever detection fails so we don't extrapolate off a stale point.
+    # No persistence, no Kalman — keep it simple.
+    prev_position: tuple[float, float] | None = None
+    prev_velocity: tuple[float, float] | None = None
+    prev_timestamp_s: float | None = None
     for idx, (absolute_pts_s, bgr) in enumerate(frame_iter(video_path, video_start_pts_s)):
         if should_cancel is not None and should_cancel():
             raise ProcessingCanceled(f"detection canceled for {video_path.name}")
@@ -141,10 +148,17 @@ def detect_pitch(
         if subtractor is not None and idx < _BG_SUBTRACTOR_WARMUP_FRAMES:
             centroid = None  # warm-up → force no-detection
         else:
+            dt = (
+                absolute_pts_s - prev_timestamp_s
+                if prev_timestamp_s is not None else None
+            )
             centroid = detect_ball(
                 bgr, hsv,
                 fg_mask=fg_mask,
                 expected_radius_px=expected_radius_px,
+                prev_position=prev_position,
+                prev_velocity=prev_velocity,
+                dt=dt,
             )
         if centroid is None:
             out.append(
@@ -156,6 +170,11 @@ def detect_pitch(
                     ball_detected=False,
                 )
             )
+            # Temporal prior resets on miss — extrapolating from a stale
+            # point can snap onto clutter on the next frame.
+            prev_position = None
+            prev_velocity = None
+            prev_timestamp_s = None
         else:
             px, py = centroid
             out.append(
@@ -167,6 +186,18 @@ def detect_pitch(
                     ball_detected=True,
                 )
             )
+            # Update velocity from the previous hit if we have one; on
+            # the first hit we only have position — velocity stays None
+            # so next frame's selector falls back to area-only.
+            if prev_position is not None and prev_timestamp_s is not None:
+                dt_seen = absolute_pts_s - prev_timestamp_s
+                if dt_seen > 0:
+                    prev_velocity = (
+                        (px - prev_position[0]) / dt_seen,
+                        (py - prev_position[1]) / dt_seen,
+                    )
+            prev_position = (px, py)
+            prev_timestamp_s = absolute_pts_s
     ball_frames = sum(1 for f in out if f.ball_detected)
     chain_filter_annotate(out)
     logger.info(
