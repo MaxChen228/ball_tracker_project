@@ -13,17 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
-
-
-class CaptureMode(str, Enum):
-    """Legacy preset vocabulary. Only `camera_only` remains; newer code
-    should read `Session.paths` directly.
-    """
-    camera_only = "camera_only"
-
-
-_DEFAULT_CAPTURE_MODE = CaptureMode.camera_only
+from pydantic import BaseModel, Field
 
 
 class DetectionPath(str, Enum):
@@ -34,22 +24,6 @@ class DetectionPath(str, Enum):
 
 
 _DEFAULT_PATHS = frozenset({DetectionPath.live})
-
-
-_MODE_TO_PATHS: dict[CaptureMode, frozenset[DetectionPath]] = {
-    CaptureMode.camera_only: frozenset({DetectionPath.live}),
-}
-
-
-def paths_for_mode(mode: CaptureMode) -> set[DetectionPath]:
-    return set(_MODE_TO_PATHS.get(mode, _DEFAULT_PATHS))
-
-
-def mode_for_paths(paths: set[DetectionPath] | frozenset[DetectionPath]) -> CaptureMode:
-    """Best-effort legacy preset representing `paths`. Only `camera_only`
-    exists now — the authoritative detail lives in `paths` itself."""
-
-    return CaptureMode.camera_only
 
 
 class TrackingExposureCapMode(str, Enum):
@@ -73,16 +47,12 @@ _SYNC_ID_PATTERN = r"^sy_[0-9a-f]{4,32}$"
 
 
 class IntrinsicsPayload(BaseModel):
-    # Legacy `fz` was a naming collision — iOS stored the image-vertical
-    # focal length (OpenCV's fy) under a key called "fz". The rename is
-    # mechanical now that iOS no longer echoes intrinsics on uploads. We
-    # still accept the old `fz` wire key when loading historical
-    # calibration JSON or old test fixtures via AliasChoices; population
-    # by name keeps new code using `fy=...` constructors.
-    model_config = ConfigDict(populate_by_name=True)
-
+    # Legacy `fz` alias was retired after `scripts/migrate_fz_to_fy.py`
+    # rewrote all persisted JSON in place. Any on-disk record still
+    # carrying `fz` would now fail to load — re-run the migration or
+    # re-save via /calibration.
     fx: float
-    fy: float = Field(..., validation_alias=AliasChoices("fy", "fz"))
+    fy: float
     cx: float
     cy: float
     # OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Optional so
@@ -136,6 +106,12 @@ class PitchPayload(BaseModel):
     server detection populates `frames` before triangulation and re-saves
     the enriched record to disk, so reloads across restarts skip re-
     detection."""
+    # Legacy JSON on disk may still carry a `mode` field from the
+    # defunct CaptureMode enum. Pydantic's default extra='ignore' drops
+    # it silently so old records keep loading — we keep the explicit
+    # setting here so a future switch to extra='forbid' doesn't re-break
+    # historical payloads.
+    model_config = {"extra": "ignore"}
     # Constrained so we can safely interpolate into filenames (clips,
     # pitch json). Matches the iOS-side values ("A" / "B") with slack for
     # future role additions but blocks path-traversal attempts.
@@ -168,8 +144,7 @@ class PitchPayload(BaseModel):
     # Optional device-local recording counter. Not used for pairing; kept
     # purely for operator debugging.
     local_recording_index: int | None = None
-    # Snapshot of the session's requested detection paths. Optional so
-    # older clients that only know `mode` keep validating.
+    # Snapshot of the session's requested detection paths.
     paths: list[str] | None = None
     # Server-side synthesised per-frame data (populated after detection).
     # Server fills this from the uploaded MOV before triangulation.
@@ -501,16 +476,10 @@ class Session:
     # the current one. Dashboard reads this to render "session s_abc →
     # A, B".
     uploads_received: list[str] = field(default_factory=list)
-    # Snapshot of the dashboard's path-set at arm time. New code should read
-    # this. The legacy `mode` field below is derived from the same choice so
-    # pre-path clients still see a familiar preset string.
+    # Snapshot of the dashboard's path-set at arm time.
     paths: set[DetectionPath] = field(default_factory=lambda: set(_DEFAULT_PATHS))
-    # Snapshot of the dashboard's `capture_mode` at arm time. Once armed
-    # the session's mode is immutable — a late dashboard toggle only
-    # affects the next session.
-    mode: CaptureMode = _DEFAULT_CAPTURE_MODE
     # Snapshot of the dashboard's tracking exposure-cap policy at arm time.
-    # Once armed this is frozen for the whole session, matching `mode`.
+    # Once armed this is frozen for the whole session.
     tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
     # Shared legacy chirp sync id observed across the online rig when this
     # session armed. Nil means the rig was not in a provably common synced
@@ -523,7 +492,6 @@ class Session:
         return self.ended_at is None
 
     def to_dict(self) -> dict[str, Any]:
-        mode = mode_for_paths(self.paths)
         return {
             "id": self.id,
             "armed": self.armed,
@@ -531,7 +499,9 @@ class Session:
             "ended_at": self.ended_at,
             "max_duration_s": self.max_duration_s,
             "uploads_received": list(self.uploads_received),
-            "mode": mode.value,
+            # Legacy wire-compat: dashboard/events JS still displays a
+            # mode chip. Hard-wire to the only value that ever shipped.
+            "mode": "camera_only",
             "paths": sorted(p.value for p in self.paths),
             "tracking_exposure_cap": self.tracking_exposure_cap.value,
             "sync_id": self.sync_id,
