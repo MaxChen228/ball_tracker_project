@@ -301,37 +301,67 @@
     return bestIdx.map(i => pts[i]);
   }
 
-  // Per-axis ballistic LSQ with gravity pinned. Mirrors viewer's
-  // `ballisticFit` but reads `{x_m, y_m, z_m, t_rel_s}` and returns
-  // `evaluate(t) -> {x_m, y_m, z_m}`.
+  // Per-axis quadratic LSQ — gravity FREE per axis. Mirrors viewer's
+  // `ballisticFit` but reads `{x_m, y_m, z_m, t_rel_s}`. 3 params/axis
+  // solved via 3×3 normal equation; no physical pinning.
+  function _solve3x3Dash(M, b) {
+    const a = M.map((row, i) => [...row, b[i]]);
+    for (let i = 0; i < 3; i++) {
+      let pv = i;
+      for (let k = i + 1; k < 3; k++) if (Math.abs(a[k][i]) > Math.abs(a[pv][i])) pv = k;
+      if (Math.abs(a[pv][i]) < 1e-14) return null;
+      if (pv !== i) { const tmp = a[i]; a[i] = a[pv]; a[pv] = tmp; }
+      for (let k = i + 1; k < 3; k++) {
+        const f = a[k][i] / a[i][i];
+        for (let j = i; j <= 3; j++) a[k][j] -= f * a[i][j];
+      }
+    }
+    const x = new Array(3);
+    for (let i = 2; i >= 0; i--) {
+      let s = a[i][3];
+      for (let j = i + 1; j < 3; j++) s -= a[i][j] * x[j];
+      x[i] = s / a[i][i];
+    }
+    return x;
+  }
   function ballisticFitDash(pts) {
     if (!pts || pts.length < 4) return null;
-    const G = 9.81;
     const t0 = pts[0].t_rel_s;
-    function fitAxis(getVal, accelTerm) {
-      let sumT = 0, sumTT = 0, sumP = 0, sumTP = 0;
-      const n = pts.length;
-      for (const p of pts) {
-        const tau = p.t_rel_s - t0;
-        const v = getVal(p) - accelTerm * tau * tau;
-        sumT += tau; sumTT += tau*tau; sumP += v; sumTP += tau*v;
-      }
-      const det = n * sumTT - sumT * sumT;
-      if (Math.abs(det) < 1e-12) return { p0: getVal(pts[0]), v0: 0 };
-      return {
-        p0: (sumP * sumTT - sumT * sumTP) / det,
-        v0: (n * sumTP - sumT * sumP) / det,
-      };
+    const taus = pts.map(p => p.t_rel_s - t0);
+    const n = pts.length;
+    const sT = [n, 0, 0, 0, 0];     // τ⁰..τ⁴
+    for (const tau of taus) {
+      let p = 1;
+      for (let k = 1; k <= 4; k++) { p *= tau; sT[k] += p; }
     }
-    const fx = fitAxis(p => p.x_m, 0);
-    const fy = fitAxis(p => p.y_m, 0);
-    const fz = fitAxis(p => p.z_m, -0.5 * G);
+    const M = [
+      [sT[0], sT[1], sT[2]],
+      [sT[1], sT[2], sT[3]],
+      [sT[2], sT[3], sT[4]],
+    ];
+    function fitAxis(getVal) {
+      const r = [0, 0, 0];
+      for (let i = 0; i < n; i++) {
+        const v = getVal(pts[i]);
+        r[0] += v;
+        r[1] += taus[i] * v;
+        r[2] += taus[i] * taus[i] * v;
+      }
+      const c = _solve3x3Dash(M, r);
+      if (!c) return null;
+      return { p0: c[0], v0: c[1], a: 2 * c[2] };
+    }
+    const fx = fitAxis(p => p.x_m);
+    const fy = fitAxis(p => p.y_m);
+    const fz = fitAxis(p => p.z_m);
+    if (!fx || !fy || !fz) return null;
     function evaluate(t) {
       const tau = t - t0;
+      const half = 0.5 * tau * tau;
       return {
-        x_m: fx.p0 + fx.v0 * tau,
-        y_m: fy.p0 + fy.v0 * tau,
-        z_m: fz.p0 + fz.v0 * tau - 0.5 * G * tau * tau,
+        x_m: fx.p0 + fx.v0 * tau + fx.a * half,
+        y_m: fy.p0 + fy.v0 * tau + fy.a * half,
+        z_m: fz.p0 + fz.v0 * tau + fz.a * half,
       };
     }
     return { evaluate, t0, t1: pts[pts.length - 1].t_rel_s };
