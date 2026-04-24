@@ -220,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         f"fx={result.fx:.1f}  fy={result.fy:.1f}  cx={result.cx:.1f}  cy={result.cy:.1f}"
     )
     print(f"→ {args.out}")
-    print("Paste fx/fy/cx/cy into iOS Settings → Manual Intrinsics (app uses fz ≡ fy).")
+    print("Paste fx/fy/cx/cy into iOS Settings → Manual Intrinsics.")
     return 0
 
 

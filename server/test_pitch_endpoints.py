@@ -151,7 +151,7 @@ def test_pitch_upload_fills_from_calibration_db(tmp_path):
     cal_body = {
         "camera_id": "A",
         "intrinsics": {
-            "fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
+            "fx": K[0, 0], "fy": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
         },
         "homography": H_a.flatten().tolist(),
         "image_width_px": 1920,

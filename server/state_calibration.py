@@ -20,10 +20,10 @@ def validate_calibration_snapshot(snap: CalibrationSnapshot) -> None:
     if w <= 0 or h <= 0:
         raise ValueError(f"invalid image dims {w}x{h}")
     k = snap.intrinsics
-    if k.fx <= 0 or k.fz <= 0:
-        raise ValueError(f"non-positive focal length fx={k.fx} fy={k.fz}")
-    if max(k.fx, k.fz) / min(k.fx, k.fz) > 2.0:
-        raise ValueError(f"fx/fy ratio out of bounds: fx={k.fx} fy={k.fz}")
+    if k.fx <= 0 or k.fy <= 0:
+        raise ValueError(f"non-positive focal length fx={k.fx} fy={k.fy}")
+    if max(k.fx, k.fy) / min(k.fx, k.fy) > 2.0:
+        raise ValueError(f"fx/fy ratio out of bounds: fx={k.fx} fy={k.fy}")
     if not (-0.05 * w <= k.cx <= 1.05 * w):
         raise ValueError(
             f"cx={k.cx} outside image width {w} — K likely from a "
@@ -159,7 +159,7 @@ def scale_intrinsics_to(
     sy = target_height_px / eff_h
     return IntrinsicsPayload(
         fx=intrinsics.fx * sx,
-        fz=intrinsics.fz * sy,
+        fy=intrinsics.fy * sy,
         cx=eff_cx * sx,
         cy=eff_cy * sy,
         distortion=list(intrinsics.distortion) if intrinsics.distortion else None,

@@ -36,7 +36,7 @@ def _scale_intrinsics(intr: IntrinsicsPayload, sx: float, sy: float) -> Intrinsi
     # distortion coefficients are dimensionless and stay put.
     return IntrinsicsPayload(
         fx=intr.fx * sx,
-        fz=intr.fz * sy,
+        fy=intr.fy * sy,
         cx=intr.cx * sx,
         cy=intr.cy * sy,
         distortion=list(intr.distortion) if intr.distortion is not None else None,
@@ -179,7 +179,7 @@ def _log_intrinsics_sanity(
 
 
 def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):
-    K = build_K(intr.fx, intr.fz, intr.cx, intr.cy)
+    K = build_K(intr.fx, intr.fy, intr.cx, intr.cy)
     H = np.array(H_list, dtype=float).reshape(3, 3)
     R, t = recover_extrinsics(K, H)
     C = camera_center_world(R, t)

@@ -145,8 +145,8 @@ Threshold (default 0.18, tunable from Settings → Sync → Chirp Threshold) is 
 
 - **World frame** (from iPhone calibration): X = plate left/right, Y = plate depth (front→back, pitcher→catcher), Z = plate normal (up). Plate plane is Z=0.
 - **Camera frame** (OpenCV pinhole): X = image right, Y = image down, Z = optical axis.
-- **Naming collision**: iOS persisted `intrinsic_fz` is the image-**vertical** focal length, i.e. OpenCV's `fy`. Server's `build_K(fx, fy, cx, cy)` is invoked with `intr.fz` passed as the `fy` arg. This is intentional — do not "fix" the name on one side without updating the other.
-- **iOS persisted intrinsics** (`UserDefaults`): `intrinsic_fx`, `intrinsic_fz`, `intrinsic_cx`, `intrinsic_cy`, optional `intrinsic_distortion` (5-array). `image_width_px` / `image_height_px` are written by the capture callback when dimensions change.
+- **Intrinsics naming**: server + iOS both use `fy` for the image-vertical focal length. The legacy `fz` field name (a historical collision from early iOS code) has been retired; `IntrinsicsPayload` still accepts `fz` as a read-time alias on `model_validate` so historical `data/calibrations/*.json` and old pitch JSONs still load cleanly. New code writes `fy`.
+- **iOS side**: no longer persists intrinsics — ChArUco intrinsics are server-owned per device id under `data/calibrations/<cam>.json` (Phase 1 decoupling). The `intrinsic_*` UserDefaults keys referenced in older docs no longer exist in this codebase.
 
 ## Payload contract
 
