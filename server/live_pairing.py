@@ -2,12 +2,33 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from schemas import FramePayload, TriangulatedPoint
 
 
 _OTHER_CAM = {"A": "B", "B": "A"}
+
+
+@dataclass
+class CameraPose:
+    """Cached per-camera geometry for the live-triangulation hot path.
+
+    Pre-computed once from the calibration snapshot when the live session
+    first sees a frame from this camera, then reused for every pair —
+    `_camera_pose` does SVD + normalization that we'd otherwise pay per
+    frame (240 Hz × two cams). `dist` is the 5-coefficient OpenCV
+    distortion vector, None on a calibration that didn't ship one."""
+    K: Any  # np.ndarray (3×3)
+    R: Any  # np.ndarray (3×3)
+    C: Any  # np.ndarray (3,)
+    dist: list[float] | None
+    # The calibration snapshot's image dims at cache time, so a later
+    # pitch arriving at a different resolution can detect the mismatch.
+    # For the live path both devices stream from the same intrinsics
+    # cached at armed time, so this is advisory — a mismatch means the
+    # caller should re-scale rather than trust the cached K verbatim.
+    image_wh: tuple[int, int]
 
 
 @dataclass
@@ -30,6 +51,10 @@ class LivePairingSession:
     paired_frame_ids: set[tuple[int, int]] = field(default_factory=set)
     completed_cameras: set[str] = field(default_factory=set)
     abort_reasons: dict[str, str] = field(default_factory=dict)
+    # Per-cam cached geometry. Populated on first ingest per camera by
+    # state.ingest_live_frame; reused across the 8 ms pair loop so the
+    # hot path skips per-frame pitch construction + SVD extrinsics.
+    camera_poses: dict[str, CameraPose] = field(default_factory=dict)
 
     def ingest(
         self,

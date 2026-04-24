@@ -483,40 +483,47 @@ class State:
             "B": dev_b.sync_anchor_timestamp_s if dev_b is not None else None,
         }
 
+        # Populate / refresh the per-cam cached pose on the live session
+        # so triangulate_live can skip the PitchPayload/scale path and go
+        # straight to the ray math. Intrinsics come from the same
+        # snapshot the scale path would have seen, so scale factor is
+        # unity — no loss of accuracy. Done once per cam per session;
+        # re-keyed if the snapshot rotates (dims change).
+        from live_pairing import CameraPose as _CameraPose
+        from pairing import _camera_pose as _build_pose
+
+        for cam, cal in (("A", cal_a), ("B", cal_b)):
+            if cal is None:
+                live.camera_poses.pop(cam, None)
+                continue
+            dims = (cal.image_width_px, cal.image_height_px)
+            existing = live.camera_poses.get(cam)
+            if existing is not None and existing.image_wh == dims:
+                continue
+            K, R, _t, C = _build_pose(cal.intrinsics, list(cal.homography))
+            live.camera_poses[cam] = _CameraPose(
+                K=K, R=R, C=C,
+                dist=cal.intrinsics.distortion,
+                image_wh=dims,
+            )
+
         def triangulate_live(cam: str, first: FramePayload, second: FramePayload) -> TriangulatedPoint | None:
             left_frame, right_frame = (first, second) if cam == "A" else (second, first)
-            if cal_a is None or cal_b is None or dev_a is None or dev_b is None:
+            pose_a = live.camera_poses.get("A")
+            pose_b = live.camera_poses.get("B")
+            if pose_a is None or pose_b is None:
+                return None
+            if dev_a is None or dev_b is None:
                 return None
             if dev_a.sync_anchor_timestamp_s is None or dev_b.sync_anchor_timestamp_s is None:
                 return None
-            pa = PitchPayload(
-                camera_id="A",
-                session_id=session_id,
-                sync_id=session_obj.sync_id if session_obj is not None else dev_a.time_sync_id,
-                sync_anchor_timestamp_s=dev_a.sync_anchor_timestamp_s,
-                video_start_pts_s=left_frame.timestamp_s,
-                paths=[DetectionPath.live.value],
-                frames=[left_frame],
-                intrinsics=cal_a.intrinsics,
-                homography=list(cal_a.homography),
-                image_width_px=cal_a.image_width_px,
-                image_height_px=cal_a.image_height_px,
+            from pairing import triangulate_live_pair
+            return triangulate_live_pair(
+                pose_a, pose_b,
+                left_frame, right_frame,
+                anchor_a=dev_a.sync_anchor_timestamp_s,
+                anchor_b=dev_b.sync_anchor_timestamp_s,
             )
-            pb = PitchPayload(
-                camera_id="B",
-                session_id=session_id,
-                sync_id=session_obj.sync_id if session_obj is not None else dev_b.time_sync_id,
-                sync_anchor_timestamp_s=dev_b.sync_anchor_timestamp_s,
-                video_start_pts_s=right_frame.timestamp_s,
-                paths=[DetectionPath.live.value],
-                frames=[right_frame],
-                intrinsics=cal_b.intrinsics,
-                homography=list(cal_b.homography),
-                image_width_px=cal_b.image_width_px,
-                image_height_px=cal_b.image_height_px,
-            )
-            pts = session_results.triangulate_pair(self, pa, pb, source="server")
-            return pts[0] if pts else None
 
         created = live.ingest(camera_id, frame, triangulate_live, anchors=anchors)
         return created, dict(live.frame_counts)

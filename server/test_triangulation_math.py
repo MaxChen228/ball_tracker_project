@@ -349,3 +349,65 @@ def test_iter_frames_reconstructs_absolute_pts(tmp_path):
         assert b > a
     # Frame 4 is 4/30 s after the start.
     assert ptses[-1] == pytest.approx(start + 4.0 / 30.0, abs=1.0 / 30.0)
+
+
+# --- Live-path cache equivalence --------------------------------------------
+
+def test_triangulate_live_pair_matches_triangulate_cycle():
+    """`triangulate_live_pair` (cached-pose hot path for live) must produce
+    a point numerically identical to `triangulate_cycle`'s single-frame
+    result on the same geometry. Protects against the cache drifting
+    away from the full pipeline."""
+    from schemas import FramePayload, IntrinsicsPayload, PitchPayload
+    from live_pairing import CameraPose
+
+    K, fx, fy, cx, cy, (R_a, t_a, C_a, H_a), (R_b, t_b, C_b, H_b) = _make_scene()
+
+    # Ball somewhere in front of the plate.
+    P_world = np.array([0.1, 0.2, 1.4])
+    ax_pix, ay_pix = _project_pixels(K, R_a, t_a, P_world)
+    bx_pix, by_pix = _project_pixels(K, R_b, t_b, P_world)
+
+    anchor = 100.0
+    fa = FramePayload(
+        frame_index=1, timestamp_s=anchor + 0.001,
+        px=ax_pix, py=ay_pix, ball_detected=True,
+    )
+    fb = FramePayload(
+        frame_index=1, timestamp_s=anchor + 0.001,
+        px=bx_pix, py=by_pix, ball_detected=True,
+    )
+
+    intr = IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy)
+    pa = PitchPayload(
+        camera_id="A", session_id="s_deadbeef",
+        sync_anchor_timestamp_s=anchor, video_start_pts_s=anchor,
+        video_fps=240.0, frames=[fa],
+        intrinsics=intr, homography=H_a.flatten().tolist(),
+        image_width_px=1920, image_height_px=1080,
+    )
+    pb = PitchPayload(
+        camera_id="B", session_id="s_deadbeef",
+        sync_anchor_timestamp_s=anchor, video_start_pts_s=anchor,
+        video_fps=240.0, frames=[fb],
+        intrinsics=intr, homography=H_b.flatten().tolist(),
+        image_width_px=1920, image_height_px=1080,
+    )
+
+    ref = pairing.triangulate_cycle(pa, pb)
+    assert len(ref) == 1
+    ref_pt = ref[0]
+
+    pose_a = CameraPose(K=K, R=R_a, C=C_a, dist=None, image_wh=(1920, 1080))
+    pose_b = CameraPose(K=K, R=R_b, C=C_b, dist=None, image_wh=(1920, 1080))
+    live_pt = pairing.triangulate_live_pair(
+        pose_a, pose_b, fa, fb,
+        anchor_a=anchor, anchor_b=anchor,
+    )
+    assert live_pt is not None
+
+    assert abs(live_pt.t_rel_s - ref_pt.t_rel_s) < 1e-9
+    assert abs(live_pt.x_m - ref_pt.x_m) < 1e-9
+    assert abs(live_pt.y_m - ref_pt.y_m) < 1e-9
+    assert abs(live_pt.z_m - ref_pt.z_m) < 1e-9
+    assert abs(live_pt.residual_m - ref_pt.residual_m) < 1e-9
