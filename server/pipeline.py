@@ -56,6 +56,29 @@ _BG_SUBTRACTOR_WARMUP_FRAMES = 30
 # ball outline into adjacent motion.
 _BG_CLOSE_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 
+# MOG2 tuning: OpenCV defaults (history=500, varThreshold=16) bake a
+# background model over ~2 s @ 240 fps. A ball that sits still mid-
+# windup for half a second gets learned into the background and then
+# disappears from the foreground mask once it starts moving again —
+# false-negatives on the first few frames of flight.
+#
+# history=120 ≈ 0.5 s @ 240 fps — short enough that the model tracks
+# operator movement without baking in a stationary ball, long enough to
+# stabilize against single-frame flicker. varThreshold kept at OpenCV
+# default (16) because lowering it produces more edge noise on the
+# indoor rig's dim background.
+_BG_HISTORY = 120
+_BG_VAR_THRESHOLD = 16
+
+# Explicit low learning rate instead of MOG2's auto-compute
+# (`-1` → 1/min(2*frameCount, history)). auto-compute is ~1/240 early on,
+# fast enough to learn the ball into the background during the windup
+# standstill. 0.0005 ≈ 1/2000 — the model adapts to genuine lighting
+# drift over seconds but stays blind to brief stationary objects like
+# a held ball. This pairs with the shorter `history` above so the
+# two knobs reinforce rather than cancel.
+_BG_LEARNING_RATE = 0.0005
+
 
 def detect_pitch(
     video_path: Path,
@@ -65,6 +88,7 @@ def detect_pitch(
     *,
     enable_bg_subtraction: bool = True,
     should_cancel: CancelCheck | None = None,
+    expected_radius_px: float | None = None,
 ) -> list[FramePayload]:
     """Decode `video_path`, run HSV + (optional) MOG2 background
     subtraction on every frame, and return one `FramePayload` per decoded
@@ -80,17 +104,41 @@ def detect_pitch(
     """
     hsv = hsv_range if hsv_range is not None else HSVRange.from_env()
     subtractor = (
-        cv2.createBackgroundSubtractorMOG2(detectShadows=False)
+        cv2.createBackgroundSubtractorMOG2(
+            history=_BG_HISTORY,
+            varThreshold=_BG_VAR_THRESHOLD,
+            detectShadows=False,
+        )
         if enable_bg_subtraction
         else None
     )
+    # Explicit per-session log so the mode is never ambiguous in field
+    # logs. `no radius prior` means fallback bounds [20, 150_000] px —
+    # not a silent degraded mode, just a different code path.
+    if expected_radius_px is None:
+        logger.info(
+            "detect_pitch video=%s mode=no-radius-prior (area∈[20,150000])",
+            video_path.name,
+        )
+    else:
+        logger.info(
+            "detect_pitch video=%s expected_radius_px=%.1f",
+            video_path.name, expected_radius_px,
+        )
     out: list[FramePayload] = []
+    # Temporal prior state — equal-velocity straight-line model that
+    # carries the ball's last known (position, velocity). Reset to None
+    # whenever detection fails so we don't extrapolate off a stale point.
+    # No persistence, no Kalman — keep it simple.
+    prev_position: tuple[float, float] | None = None
+    prev_velocity: tuple[float, float] | None = None
+    prev_timestamp_s: float | None = None
     for idx, (absolute_pts_s, bgr) in enumerate(frame_iter(video_path, video_start_pts_s)):
         if should_cancel is not None and should_cancel():
             raise ProcessingCanceled(f"detection canceled for {video_path.name}")
         fg_mask = None
         if subtractor is not None:
-            fg_mask_raw = subtractor.apply(bgr)
+            fg_mask_raw = subtractor.apply(bgr, learningRate=_BG_LEARNING_RATE)
             # Skip detection during warm-up; still feed the subtractor so
             # the model keeps building across the whole clip.
             if idx >= _BG_SUBTRACTOR_WARMUP_FRAMES:
@@ -100,7 +148,18 @@ def detect_pitch(
         if subtractor is not None and idx < _BG_SUBTRACTOR_WARMUP_FRAMES:
             centroid = None  # warm-up → force no-detection
         else:
-            centroid = detect_ball(bgr, hsv, fg_mask=fg_mask)
+            dt = (
+                absolute_pts_s - prev_timestamp_s
+                if prev_timestamp_s is not None else None
+            )
+            centroid = detect_ball(
+                bgr, hsv,
+                fg_mask=fg_mask,
+                expected_radius_px=expected_radius_px,
+                prev_position=prev_position,
+                prev_velocity=prev_velocity,
+                dt=dt,
+            )
         if centroid is None:
             out.append(
                 FramePayload(
@@ -111,6 +170,11 @@ def detect_pitch(
                     ball_detected=False,
                 )
             )
+            # Temporal prior resets on miss — extrapolating from a stale
+            # point can snap onto clutter on the next frame.
+            prev_position = None
+            prev_velocity = None
+            prev_timestamp_s = None
         else:
             px, py = centroid
             out.append(
@@ -122,6 +186,18 @@ def detect_pitch(
                     ball_detected=True,
                 )
             )
+            # Update velocity from the previous hit if we have one; on
+            # the first hit we only have position — velocity stays None
+            # so next frame's selector falls back to area-only.
+            if prev_position is not None and prev_timestamp_s is not None:
+                dt_seen = absolute_pts_s - prev_timestamp_s
+                if dt_seen > 0:
+                    prev_velocity = (
+                        (px - prev_position[0]) / dt_seen,
+                        (py - prev_position[1]) / dt_seen,
+                    )
+            prev_position = (px, py)
+            prev_timestamp_s = absolute_pts_s
     ball_frames = sum(1 for f in out if f.ball_detected)
     chain_filter_annotate(out)
     logger.info(
