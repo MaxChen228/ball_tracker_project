@@ -172,7 +172,8 @@ def test_calibration_auto_returns_422_when_too_few_markers(tmp_path, monkeypatch
 
     r = client.post("/calibration/auto/A")
     assert r.status_code == 422, r.text
-    assert "need" in r.json()["detail"].lower()
+    detail = r.json()["detail"].lower()
+    assert "degenerate" in detail or "need" in detail
 
 
 def test_calibration_auto_returns_408_when_no_frame_delivered(tmp_path, monkeypatch):
@@ -182,7 +183,7 @@ def test_calibration_auto_returns_408_when_no_frame_delivered(tmp_path, monkeypa
     client = TestClient(app)
     r = client.post("/calibration/auto/A")
     assert r.status_code == 408, r.text
-    assert "within 6 s" in r.json()["detail"].lower()
+    assert "within 5 s" in r.json()["detail"].lower()
 
 
 def test_calibration_auto_uses_pose_solver_when_3d_markers_available(tmp_path, monkeypatch):

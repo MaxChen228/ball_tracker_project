@@ -628,314 +628,198 @@ async def _run_auto_calibration(
     h_fov_deg: float | None = None,
     track_run: bool = False,
 ) -> dict[str, Any]:
+    """Single-shot auto-calibration.
+
+    Request one full-res JPEG from the phone, detect markers, solve pose,
+    done. The previous multi-frame burst with jitter gates was originally
+    added to make calibration *easier* but ended up making it harder —
+    phone on a tripod has zero jitter by design so the stability check
+    just stalled the loop until the fallback aggregator rescued it.
+
+    The accept / reject decision is now binary: either the solver produced
+    a pose with reproj error below the sanity ceiling, or it didn't.
+    Borderline results (5-15 px reproj) land but the number is surfaced in
+    the run detail so the operator can decide whether to retry.
+    """
     import cv2  # noqa: WPS433
     import main as _main
     state = _main.state
     device_ws = _main.device_ws
     _settings_message_for = _main._settings_message_for
-    from calibration_solver import DetectedMarker
 
-    max_frames = 10
-    burst_deadline = asyncio.get_event_loop().time() + 6.0
-    frames_seen = 0
-    good_frames = 0
-    stable_frames = 0
-    consecutive_empty_frames = 0
-    first_shape: tuple[int, int] | None = None
-    intrinsics: IntrinsicsPayload | None = None
-    prior: CalibrationSnapshot | None = None
-    aggregated_corners: dict[int, list[np.ndarray]] = {}
-    recent_centers: list[np.ndarray] = []
-    recent_forwards: list[np.ndarray] = []
-    recent_errors: list[float] = []
+    frame_timeout_s = 5.0
+    # Hard ceiling — anything worse than this means the solver latched
+    # onto garbage (wrong marker correspondences, degenerate geometry) and
+    # shipping it would poison downstream triangulation silently.
+    reproj_reject_px = 20.0
 
     if track_run:
+        online_ids = sorted(d.camera_id for d in state.online_devices())
         state.update_auto_cal_run(
             camera_id,
             status="searching",
             summary="Requesting full-res frame",
         )
-        online_ids = sorted(d.camera_id for d in state.online_devices())
         state.append_auto_cal_event(
             camera_id,
-            "burst start",
+            "single-shot start",
             data={
                 "h_fov_deg": h_fov_deg,
-                "max_frames": max_frames,
-                "deadline_s": 6.0,
+                "timeout_s": frame_timeout_s,
                 "online_devices": online_ids,
                 "target_online": camera_id in online_ids,
             },
         )
 
-    while frames_seen < max_frames and asyncio.get_event_loop().time() < burst_deadline:
-        state.request_calibration_frame(camera_id)
-        await device_ws.send(camera_id, _settings_message_for(camera_id))
-        if track_run:
-            state.append_auto_cal_event(
-                camera_id, "requested frame", data={"frames_seen": frames_seen},
-            )
-        got: tuple[bytes, float] | None = None
-        poll_start = asyncio.get_event_loop().time()
-        for _ in range(20):
-            got = state.consume_calibration_frame(camera_id)
-            if got is not None:
-                break
-            await asyncio.sleep(0.1)
-        if got is None:
-            if track_run:
-                state.append_auto_cal_event(
-                    camera_id,
-                    "no frame arrived within 2s poll",
-                    level="warn",
-                    data={
-                        "poll_s": round(asyncio.get_event_loop().time() - poll_start, 2),
-                        "time_left_s": round(burst_deadline - asyncio.get_event_loop().time(), 2),
-                    },
-                )
+    state.request_calibration_frame(camera_id)
+    await device_ws.send(camera_id, _settings_message_for(camera_id))
+    poll_start = asyncio.get_event_loop().time()
+    got: tuple[bytes, float] | None = None
+    for _ in range(int(round(frame_timeout_s / 0.1))):
+        got = state.consume_calibration_frame(camera_id)
+        if got is not None:
             break
-        jpeg_bytes, _ts = got
+        await asyncio.sleep(0.1)
+    if got is None:
         if track_run:
             state.append_auto_cal_event(
                 camera_id,
-                "frame received",
-                data={"bytes": len(jpeg_bytes), "poll_s": round(asyncio.get_event_loop().time() - poll_start, 2)},
+                f"no frame arrived within {frame_timeout_s:.0f}s",
+                level="warn",
+                data={"poll_s": round(asyncio.get_event_loop().time() - poll_start, 2)},
             )
-        arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if bgr is None:
-            if track_run:
-                state.append_auto_cal_event(
-                    camera_id, "jpeg decode failed", level="warn",
-                    data={"bytes": len(jpeg_bytes)},
-                )
-            continue
-        if first_shape is None:
-            first_shape = bgr.shape[:2]
-            intrinsics, prior = _derive_auto_cal_intrinsics(
-                camera_id,
-                w_img=first_shape[1],
-                h_img=first_shape[0],
-                h_fov_deg=h_fov_deg,
-            )
-            if track_run:
-                charuco_src = state.device_intrinsics_for_camera(camera_id)
-                state.append_auto_cal_event(
-                    camera_id,
-                    "intrinsics derived",
-                    data={
-                        "w": first_shape[1], "h": first_shape[0],
-                        "fx": round(intrinsics.fx, 2), "fy": round(intrinsics.fz, 2),
-                        "cx": round(intrinsics.cx, 2), "cy": round(intrinsics.cy, 2),
-                        "reused_prior": prior is not None,
-                        "charuco_prior_device_id": (
-                            charuco_src.device_id if charuco_src is not None else None
-                        ),
-                        "distortion_available": intrinsics.distortion is not None,
-                    },
-                )
-        assert intrinsics is not None
-        h_img, w_img = bgr.shape[:2]
-        detected = [
-            m for m in detect_all_markers_in_dict(bgr)
-            if (m.id in PLATE_MARKER_WORLD or state._marker_registry.get(m.id) is not None)
-        ]
-        frames_seen += 1
-        if track_run:
-            all_detected = detect_all_markers_in_dict(bgr)
-            state.append_auto_cal_event(
-                camera_id,
-                "markers detected",
-                data={
-                    "known_ids": sorted(m.id for m in detected),
-                    "all_ids": sorted(m.id for m in all_detected),
-                    "frame_shape": [int(bgr.shape[1]), int(bgr.shape[0])],
-                },
-            )
-        if not detected:
-            consecutive_empty_frames += 1
-            if track_run:
-                state.update_auto_cal_run(
-                    camera_id,
-                    status="searching",
-                    frames_seen=frames_seen,
-                    markers_visible=0,
-                    summary="Searching full-res frames for known markers",
-                )
-            if consecutive_empty_frames >= 2:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"no known markers visible on camera {camera_id!r} "
-                        "after 2 frames — aim the lens at the plate (IDs 0-5) "
-                        "before retrying"
-                    ),
-                )
-            continue
-        consecutive_empty_frames = 0
-        frame_solution, solver, _pnp_ids = _solve_auto_cal_solution(
-            detected,
-            intrinsics=intrinsics,
-            image_size=(w_img, h_img),
-        )
-        markers_visible = len(detected)
-        if frame_solution is None:
-            if track_run:
-                state.update_auto_cal_run(
-                    camera_id,
-                    status="tracking",
-                    frames_seen=frames_seen,
-                    markers_visible=markers_visible,
-                    summary="Tracking markers in full-res frames",
-                    detected_ids=sorted(m.id for m in detected),
-                )
-                state.append_auto_cal_event(
-                    camera_id,
-                    "solver produced no solution this frame",
-                    level="warn",
-                    data={"solver": solver, "markers_visible": markers_visible},
-                )
-            continue
-        reproj_px = _reprojection_error_px(
-            intrinsics, frame_solution.homography_row_major, detected
-        )
-        center, forward = _pose_from_homography(
-            intrinsics, frame_solution.homography_row_major
-        )
-        recent_centers.append(center)
-        recent_forwards.append(forward)
-        if reproj_px is not None:
-            recent_errors.append(reproj_px)
-        if len(recent_centers) > 5:
-            recent_centers.pop(0)
-            recent_forwards.pop(0)
-        if len(recent_errors) > 5:
-            recent_errors.pop(0)
-        pos_jitter_cm = None
-        ang_jitter_deg = None
-        if len(recent_centers) >= 3:
-            pos_jitter_cm = float(
-                np.mean(np.std(np.stack(recent_centers), axis=0)) * 100.0
-            )
-            dots = [
-                float(np.clip(np.dot(recent_forwards[0], v), -1.0, 1.0))
-                for v in recent_forwards[1:]
-            ]
-            if dots:
-                ang_jitter_deg = float(np.degrees(np.mean(np.arccos(dots))))
-        frame_good = (
-            reproj_px is not None
-            and reproj_px <= 3.5
-            and pos_jitter_cm is not None
-            and pos_jitter_cm <= 1.5
-            and ang_jitter_deg is not None
-            and ang_jitter_deg <= 0.8
-        )
-        if frame_good:
-            good_frames += 1
-            stable_frames += 1
-        else:
-            stable_frames = 0
-        if markers_visible >= 4:
-            for m in detected:
-                aggregated_corners.setdefault(m.id, []).append(m.corners)
-        if track_run:
-            state.update_auto_cal_run(
-                camera_id,
-                status="stabilizing" if good_frames > 0 else "tracking",
-                frames_seen=frames_seen,
-                good_frames=good_frames,
-                stable_frames=stable_frames,
-                markers_visible=markers_visible,
-                solver=solver,
-                reprojection_px=reproj_px,
-                position_jitter_cm=pos_jitter_cm,
-                angle_jitter_deg=ang_jitter_deg,
-                summary=(
-                    f"Hold camera steady · {stable_frames}/4 stable"
-                    if good_frames > 0
-                    else "Tracking markers in full-res frames"
-                ),
-                detected_ids=sorted(m.id for m in detected),
-            )
-        if track_run:
-            state.append_auto_cal_event(
-                camera_id,
-                "frame evaluated",
-                data={
-                    "solver": solver,
-                    "reproj_px": None if reproj_px is None else round(reproj_px, 2),
-                    "pos_jitter_cm": None if pos_jitter_cm is None else round(pos_jitter_cm, 2),
-                    "ang_jitter_deg": None if ang_jitter_deg is None else round(ang_jitter_deg, 3),
-                    "good_frames": good_frames,
-                    "stable_frames": stable_frames,
-                },
-            )
-        if stable_frames >= 4 and good_frames >= 4:
-            break
-
-    if frames_seen == 0 or first_shape is None or intrinsics is None:
         raise HTTPException(
             status_code=408,
             detail=(
                 f"camera {camera_id!r} did not deliver a calibration "
-                "frame within 6 s — check the phone is online, awake, "
-                "and running the current build"
+                f"frame within {frame_timeout_s:.0f} s — check the phone "
+                "is online, awake, and running the current build"
+            ),
+        )
+    jpeg_bytes, _ts = got
+    if track_run:
+        state.append_auto_cal_event(
+            camera_id,
+            "frame received",
+            data={
+                "bytes": len(jpeg_bytes),
+                "poll_s": round(asyncio.get_event_loop().time() - poll_start, 2),
+            },
+        )
+    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if bgr is None:
+        if track_run:
+            state.append_auto_cal_event(
+                camera_id, "jpeg decode failed", level="warn",
+                data={"bytes": len(jpeg_bytes)},
+            )
+        raise HTTPException(status_code=422, detail="calibration frame is not a decodable JPEG")
+    h_img, w_img = bgr.shape[:2]
+
+    intrinsics, prior = _derive_auto_cal_intrinsics(
+        camera_id, w_img=w_img, h_img=h_img, h_fov_deg=h_fov_deg,
+    )
+    if track_run:
+        charuco_src = state.device_intrinsics_for_camera(camera_id)
+        state.append_auto_cal_event(
+            camera_id,
+            "intrinsics derived",
+            data={
+                "w": w_img, "h": h_img,
+                "fx": round(intrinsics.fx, 2), "fy": round(intrinsics.fz, 2),
+                "cx": round(intrinsics.cx, 2), "cy": round(intrinsics.cy, 2),
+                "reused_prior": prior is not None,
+                "charuco_prior_device_id": (
+                    charuco_src.device_id if charuco_src is not None else None
+                ),
+                "distortion_available": intrinsics.distortion is not None,
+            },
+        )
+
+    all_detected = detect_all_markers_in_dict(bgr)
+    detected = [
+        m for m in all_detected
+        if (m.id in PLATE_MARKER_WORLD or state._marker_registry.get(m.id) is not None)
+    ]
+    if track_run:
+        state.append_auto_cal_event(
+            camera_id,
+            "markers detected",
+            data={
+                "known_ids": sorted(m.id for m in detected),
+                "all_ids": sorted(m.id for m in all_detected),
+                "frame_shape": [w_img, h_img],
+            },
+        )
+    if not detected:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"no known markers visible on camera {camera_id!r} — "
+                "aim the lens at the plate (IDs 0-5) before retrying"
             ),
         )
 
-    aggregated: list[DetectedMarker] = [
-        DetectedMarker(id=mid, corners=np.mean(np.stack(corner_list), axis=0))
-        for mid, corner_list in aggregated_corners.items()
-    ]
     if track_run:
         state.update_auto_cal_run(
             camera_id,
             status="solving",
-            summary="Solving pose from full-res frame burst",
+            markers_visible=len(detected),
+            detected_ids=sorted(m.id for m in detected),
+            summary="Solving pose from single frame",
         )
     result, solver, pnp_detected_ids = _solve_auto_cal_solution(
-        aggregated,
-        intrinsics=intrinsics,
-        image_size=(first_shape[1], first_shape[0]),
+        detected, intrinsics=intrinsics, image_size=(w_img, h_img),
     )
     if result is None:
-        seen_counts = ", ".join(
-            f"id{mid}×{len(cs)}" for mid, cs in sorted(aggregated_corners.items())
-        )
+        seen_ids = sorted(m.id for m in detected)
         raise HTTPException(
             status_code=422,
             detail=(
-                "need known markers for calibration "
-                f"across {frames_seen} frame(s); got: {seen_counts or '(none)'}"
+                "pose solver failed — detected markers "
+                f"{seen_ids} but geometry is degenerate (colinear or too few)"
             ),
         )
+
     reproj_px = _reprojection_error_px(
-        intrinsics, result.homography_row_major, aggregated
+        intrinsics, result.homography_row_major, detected
     )
+    if reproj_px is not None and reproj_px > reproj_reject_px:
+        if track_run:
+            state.append_auto_cal_event(
+                camera_id, "reproj above ceiling", level="warn",
+                data={"reproj_px": round(reproj_px, 2), "ceiling_px": reproj_reject_px},
+            )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"solver produced implausible pose "
+                f"(reproj {reproj_px:.1f} px > {reproj_reject_px:.0f} px ceiling) — "
+                "retry with a cleaner shot of the plate"
+            ),
+        )
+
     center_new, forward_new = _pose_from_homography(
-        intrinsics, result.homography_row_major
+        intrinsics, result.homography_row_major,
     )
     delta_pos_cm = None
     delta_ang_deg = None
     if prior is not None:
         prior_intrinsics, _ = _derive_auto_cal_intrinsics(
-            camera_id,
-            w_img=first_shape[1],
-            h_img=first_shape[0],
-            h_fov_deg=None,
+            camera_id, w_img=w_img, h_img=h_img, h_fov_deg=None,
         )
         center_old, forward_old = _pose_from_homography(
-            prior_intrinsics, prior.homography
+            prior_intrinsics, prior.homography,
         )
         delta_pos_cm = float(np.linalg.norm(center_new - center_old) * 100.0)
         delta_ang_deg = float(
             np.degrees(np.arccos(np.clip(np.dot(forward_new, forward_old), -1.0, 1.0)))
         )
     return {
-        "frames_seen": frames_seen,
-        "good_frames": good_frames,
-        "stable_frames": stable_frames,
+        "frames_seen": 1,
+        "good_frames": 1,
+        "stable_frames": 1,
         "intrinsics": intrinsics,
         "result": result,
         "solver": solver,
