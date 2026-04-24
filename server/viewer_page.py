@@ -762,9 +762,11 @@ def _viewer_js() -> str:
         || raySrc("server_post"),
     }};
   }}
+  const TRAJ_BY_PATH = SCENE.triangulated_by_path || {{}};
   const HAS_TRAJ_PATH = {{
-    live: false,  // live is per-camera only; no triangulation
-    server_post: (SCENE.triangulated || []).length > 0,
+    live: (TRAJ_BY_PATH.live || []).length > 0,
+    server_post: (TRAJ_BY_PATH.server_post || []).length > 0
+      || (SCENE.triangulated || []).length > 0,
   }};
   function hasPathForLayer(layer, path) {{
     if (layer === "traj") return HAS_TRAJ_PATH[path];
@@ -778,7 +780,7 @@ def _viewer_js() -> str:
   // for pipelines that have data) on first post-upgrade load.
   const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility_v3";
   const layerVisibility = {{
-    traj: {{ live: false, server_post: HAS_TRAJ_PATH.server_post }},
+    traj: {{ live: HAS_TRAJ_PATH.live, server_post: HAS_TRAJ_PATH.server_post }},
     camA: {{ live: HAS_PATH_PER_CAM.A.live, server_post: HAS_PATH_PER_CAM.A.server_post }},
     camB: {{ live: HAS_PATH_PER_CAM.B.live, server_post: HAS_PATH_PER_CAM.B.server_post }},
   }};
@@ -823,6 +825,9 @@ def _viewer_js() -> str:
   if (timeMap.size === 0) {{
     for (const r of SCENE.rays || []) timeMap.set(Math.round(r.t_rel_s * QUANT), r.t_rel_s);
     for (const p of SCENE.triangulated || []) timeMap.set(Math.round(p.t_rel_s * QUANT), p.t_rel_s);
+    for (const path of Object.keys(TRAJ_BY_PATH)) {{
+      for (const p of TRAJ_BY_PATH[path] || []) timeMap.set(Math.round(p.t_rel_s * QUANT), p.t_rel_s);
+    }}
   }}
   const unionTimes = Array.from(timeMap.values()).sort((a, b) => a - b);
   if (unionTimes.length === 0) {{ unionTimes.push(0); unionTimes.push(0.05); }}
@@ -999,7 +1004,9 @@ def _viewer_js() -> str:
     }}
     // --- 3D trajectory: server_post ---
     if (isLayerVisible("traj", "server_post")) {{
-      const triPts = (SCENE.triangulated || []).filter(p => p.t_rel_s <= cutoff);
+      const svrPts = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
+        ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
+      const triPts = svrPts.filter(p => p.t_rel_s <= cutoff);
       if (triPts.length) {{
         const t0 = triPts[0].t_rel_s;
         const ts = triPts.map(p => p.t_rel_s - t0);
@@ -1012,6 +1019,24 @@ def _viewer_js() -> str:
           const head = triPts[triPts.length - 1];
           out.push({{ type: "scatter3d", x: [head.x], y: [head.y], z: [head.z],
             mode: "markers", marker: {{size: 9, color: ACCENT, symbol: "circle",
+              line: {{color: "#2A2520", width: 1}}}},
+            hoverinfo: "skip", showlegend: false }});
+        }}
+      }}
+    }}
+    // --- 3D trajectory: live ---
+    if (isLayerVisible("traj", "live")) {{
+      const livePts = (TRAJ_BY_PATH.live || []).filter(p => p.t_rel_s <= cutoff);
+      if (livePts.length) {{
+        out.push({{ type: "scatter3d", x: livePts.map(p => p.x), y: livePts.map(p => p.y), z: livePts.map(p => p.z),
+          mode: "lines+markers",
+          line: {{color: "#4A6B8C", width: 3, dash: "dot"}},
+          marker: {{size: 3, color: "#4A6B8C", opacity: 0.7}},
+          name: `3D trajectory (live, ${{livePts.length}} pts)` }});
+        if (playback) {{
+          const head = livePts[livePts.length - 1];
+          out.push({{ type: "scatter3d", x: [head.x], y: [head.y], z: [head.z],
+            mode: "markers", marker: {{size: 7, color: "#4A6B8C", symbol: "diamond",
               line: {{color: "#2A2520", width: 1}}}},
             hoverinfo: "skip", showlegend: false }});
         }}

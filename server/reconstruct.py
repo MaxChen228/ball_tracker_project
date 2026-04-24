@@ -110,6 +110,12 @@ class Scene:
     cameras: list[CameraView] = field(default_factory=list)
     rays: list[Ray] = field(default_factory=list)
     triangulated: list[dict[str, float]] = field(default_factory=list)
+    # Per-detection-path triangulated points. `triangulated` above stays as
+    # the legacy "authoritative" list (whichever path priority resolves to)
+    # so existing viewer code keeps working. Per-path lets the UI offer a
+    # toggle between live (iOS HSV streamed over WS) and server_post (server
+    # HSV+MOG2 on uploaded MOV) trajectories.
+    triangulated_by_path: dict[str, list[dict[str, float]]] = field(default_factory=dict)
     # Per-camera ground-plane trace: the (x, y, 0) intersection of every
     # ball-detected ray with the plate plane, ordered by anchor-relative
     # time. This is the single-camera proxy for a trajectory — it's what
@@ -125,6 +131,9 @@ class Scene:
             "cameras": [vars(c) for c in self.cameras],
             "rays": [vars(r) for r in self.rays],
             "triangulated": list(self.triangulated),
+            "triangulated_by_path": {
+                path: list(pts) for path, pts in self.triangulated_by_path.items()
+            },
             "ground_traces": {
                 cam: list(trace) for cam, trace in self.ground_traces.items()
             },
@@ -286,6 +295,7 @@ def build_scene(
     session_id: str,
     pitches: dict[str, "PitchPayload"],
     triangulated: list["TriangulatedPoint"] | None = None,
+    triangulated_by_path: dict[str, list["TriangulatedPoint"]] | None = None,
 ) -> Scene:
     """Construct a renderable `Scene` for one session.
 
@@ -381,6 +391,13 @@ def build_scene(
 
     if triangulated:
         scene.triangulated = _pts_to_dicts(triangulated)
+
+    if triangulated_by_path:
+        scene.triangulated_by_path = {
+            path: _pts_to_dicts(pts)
+            for path, pts in triangulated_by_path.items()
+            if pts
+        }
 
     return scene
 
