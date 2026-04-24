@@ -1,0 +1,45 @@
+// === events bucket + traj toggle handlers ===
+
+  // Delegated change handler — event list re-renders on every tick, so we
+  // can't rebind per-checkbox. Capture click on the wrapping <label> to
+  // prevent the event-row <a> from swallowing the toggle.
+  if (eventsBox) eventsBox.addEventListener('click', (e) => {
+    if (e.target.closest('.traj-toggle')) e.stopPropagation();
+  });
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-events-bucket]');
+    if (!btn) return;
+    e.preventDefault();
+    currentEventsBucket = btn.dataset.eventsBucket === 'trash' ? 'trash' : 'active';
+    document.querySelectorAll('[data-events-bucket]').forEach(node => {
+      node.classList.toggle('active', node.dataset.eventsBucket === currentEventsBucket);
+    });
+    tickEvents();
+  });
+  if (eventsBox) eventsBox.addEventListener('change', (e) => {
+    const cb = e.target.closest('input[data-traj-sid]');
+    if (!cb) return;
+    const sid = cb.dataset.trajSid;
+    // Single-select preview: clicking one row always replaces the
+    // selection (clicking again on the same row deselects). Multi-select
+    // was confusing when replays had different durations and made the
+    // canvas too busy when several sessions overlapped in space.
+    if (cb.checked) {
+      selectedTrajIds.clear();
+      selectedTrajIds.add(sid);
+      // Uncheck every other checkbox in the events list so the DOM
+      // reflects the one-at-a-time invariant without waiting for the
+      // next events tick to re-render.
+      eventsBox.querySelectorAll('input[data-traj-sid]').forEach(other => {
+        if (other !== cb) other.checked = false;
+      });
+      // Reset playhead so the new selection starts from t=0 rather
+      // than wherever the previous pitch was mid-animation.
+      playheadFrac = 0.0;
+    } else {
+      selectedTrajIds.delete(sid);
+    }
+    persistTrajSelection();
+    if (canvasMode === 'replay') updateTimeReadout();
+    repaintCanvas();
+  });

@@ -27,7 +27,10 @@ def _resolve_js_template() -> str:
     return js
 
 
-_JS_TEMPLATE_RAW: str = (_STATIC_DIR / "dashboard_client.js").read_text(encoding="utf-8")
+_JS_TEMPLATE_RAW: str = "\n".join(
+    p.read_text(encoding="utf-8")
+    for p in sorted((_STATIC_DIR / "dashboard").glob("*.js"))
+)
 
 _JS_TEMPLATE = _resolve_js_template()
 
