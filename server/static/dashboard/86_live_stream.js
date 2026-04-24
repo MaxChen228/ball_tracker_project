@@ -45,11 +45,19 @@
     es.addEventListener('path_completed', (evt) => {
       try {
         const data = JSON.parse(evt.data);
-        if (!currentLiveSession || currentLiveSession.session_id !== data.sid) return;
-        const done = new Set(currentLiveSession.paths_completed || []);
-        done.add(data.path);
-        currentLiveSession.paths_completed = [...done];
-        renderActiveSession(currentLiveSession);
+        if (currentLiveSession && currentLiveSession.session_id === data.sid) {
+          const done = new Set(currentLiveSession.paths_completed || []);
+          done.add(data.path);
+          currentLiveSession.paths_completed = [...done];
+          renderActiveSession(currentLiveSession);
+        }
+        // Flip the events row's path chip from live→done without waiting
+        // for the 5 s /events tick. Invalidate the diff-key memo so the
+        // keyed renderer actually sees the new path_status / count.
+        if (typeof tickEvents === 'function') {
+          _lastEvKey = null;
+          tickEvents();
+        }
       } catch (_) {}
     });
     es.addEventListener('ray', (evt) => {
@@ -145,17 +153,89 @@
       try {
         const data = JSON.parse(evt.data);
         if (!data || !data.cam) return;
-        const prev = wsStatus.get(data.cam);
         const connected = !!data.ws_connected;
+        const online = !!data.online;
+        const prev = wsStatus.get(data.cam);
         if (!prev || prev.connected !== connected) {
           wsStatus.set(data.cam, { connected, since_ms: Date.now() });
           if (!connected) recordError('ws_disconnect', `Cam ${data.cam} WebSocket dropped`);
-          // Device came online or went offline — refresh the Devices panel
-          // immediately rather than waiting for the 1 s tickStatus cadence.
-          _lastDevKey = null;
-          tickStatus();
         }
+        // Authoritative: patch currentDevices in place and repaint.
+        // /status polling (now 5 s fallback) no longer needs to be the
+        // source of truth for online/offline transitions.
+        _applyDeviceStatus(data.cam, { online, ws_connected: connected });
         updateDegradedBanner();
       } catch (_) {}
+    });
+    es.addEventListener('device_heartbeat', (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (!data || !data.cam) return;
+        // Patch battery / ws_latency / last_seen / time_sync fields.
+        // Server emits this on every WS heartbeat (default 1 Hz), so
+        // the Devices card's battery + sync LEDs stay fresh without
+        // hitting /status.
+        _applyDeviceStatus(data.cam, {
+          battery_level: data.battery_level,
+          battery_state: data.battery_state,
+          ws_latency_ms: data.ws_latency_ms,
+          last_seen_at: data.last_seen_at,
+          time_synced: !!data.time_synced,
+          time_sync_id: data.time_sync_id || null,
+          ws_connected: true,
+        });
+        // Telemetry sample: same shape tickStatus previously recorded.
+        if (typeof latencySamples === 'object' && typeof data.ws_latency_ms === 'number') {
+          const nowMs = Date.now();
+          const arr = latencySamples[data.cam] = latencySamples[data.cam] || [];
+          arr.push({ t_ms: nowMs, latency: data.ws_latency_ms });
+          while (arr.length && nowMs - arr[0].t_ms > TELEMETRY_WINDOW_MS) arr.shift();
+        }
+      } catch (_) {}
+    });
+  }
+
+  // Merge a partial device patch into currentDevices, re-render Devices
+  // + Session panels, and drop wsStatus entries for offline cams.
+  function _applyDeviceStatus(cam, patch) {
+    const list = currentDevices || [];
+    let found = false;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i] && list[i].camera_id === cam) {
+        list[i] = Object.assign({}, list[i], patch, { camera_id: cam });
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      if (patch.online === false) {
+        // Offline event for an unknown cam — no row to paint.
+        return;
+      }
+      list.push(Object.assign({ camera_id: cam }, patch));
+    }
+    // Drop from currentDevices when explicitly offline (mirror the
+    // /status derivation that only lists online devices).
+    if (patch.online === false) {
+      currentDevices = list.filter(d => d && d.camera_id !== cam);
+    } else {
+      currentDevices = list;
+    }
+    _lastDevKey = null;
+    _lastSessKey = null;
+    _lastNavKey = null;
+    renderDevices({
+      devices: currentDevices,
+      calibrations: currentCalibrations || [],
+      preview_requested: currentPreviewRequested,
+      sync_commands: currentSyncCommands,
+      calibration_last_ts: currentCalibrationLastTs || {},
+      auto_calibration: currentAutoCalibration,
+    });
+    renderSession({
+      devices: currentDevices,
+      session: currentSession,
+      calibrations: currentCalibrations || [],
+      capture_mode: currentCaptureMode,
     });
   }
