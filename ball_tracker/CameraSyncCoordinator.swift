@@ -15,7 +15,7 @@ final class CameraSyncCoordinator {
         let getCameraRole: () -> String
         let standbyFps: Double
         let uploader: () -> ServerUploader
-        let healthMonitor: () -> ServerHealthMonitor?
+        let healthMonitor: () -> HeartbeatScheduler?
         let chirpDetector: () -> AudioChirpDetector?
         let setupAudioCapture: () -> Void
         let startCapture: (Double) -> Void
