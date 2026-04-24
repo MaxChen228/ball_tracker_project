@@ -202,66 +202,60 @@ def cam_card_html(cam_id: str, cam: dict) -> str:
         ("live", "L", "iOS live stream (on-device detection, streamed over WS)"),
         ("server_post", "S", "server post (PyAV decode + server-side detection)"),
     )
+
+    def _rate_bits(total: int, det: int) -> tuple[str, int]:
+        if total == 0:
+            return ("empty", 0)
+        r = det / total
+        klass = "fail" if r < 0.05 else "pending" if r < 0.30 else "ok"
+        pct = max(2, round(r * 100)) if det > 0 else 0
+        return (klass, pct)
+
+    # Default active path: prefer server_post if it has data, else live.
+    active_path = next(
+        (k for k in ("server_post", "live") if (counts.get(k) or {}).get("total", 0) > 0),
+        "server_post",
+    )
     path_chips: list[str] = []
+    init_pct = 0
+    init_klass = "empty"
     for key, abbr, tip in _PATHS:
         c = counts.get(key) or {"total": 0, "detected": 0, "fps": None}
         total = c.get("total", 0)
         det = c.get("detected", 0)
         fps = c.get("fps")
-        klass = "on" if total > 0 else "off"
-        ratio_txt = f"{det}/{total}" if total > 0 else "—"
+        has_data = total > 0
+        klass = "on" if has_data else "off"
+        rate_klass, pct = _rate_bits(total, det)
+        ratio_txt = f"{det}/{total}" if has_data else "—"
         fps_txt = (
             f'<span class="fps" title="effective fps = frames / duration">'
             f"{fps:.0f} fps</span>"
             if isinstance(fps, (int, float)) else ""
         )
+        is_active = has_data and key == active_path
+        if is_active:
+            init_pct = pct
+            init_klass = rate_klass
+            klass += " active"
+        disabled = "" if has_data else "disabled"
         path_chips.append(
-            f'<span class="path-stat {klass}" title="{tip}">'
+            f'<button type="button" class="path-stat {klass}" '
+            f'data-path="{key}" data-pct="{pct}" data-rate-klass="{rate_klass}" '
+            f'aria-pressed="{"true" if is_active else "false"}" '
+            f'title="{tip}" {disabled}>'
             f'<span class="lbl">{abbr}</span>'
             f'<span class="val">{ratio_txt}</span>'
-            f"{fps_txt}</span>"
+            f"{fps_txt}</button>"
         )
-    # rate-bar denominator: prefer server_post, then live. server_post
-    # stays the canonical reference for dual-cam triangulation sessions.
-    n_det, n_frames = 0, 0
-    for key in ("server_post", "live"):
-        c = counts.get(key) or {}
-        if c.get("total", 0) > 0:
-            n_det, n_frames = c["detected"], c["total"]
-            break
-    telemetry = cam.get("capture_telemetry") or {}
     stats_html = "".join(path_chips)
     telemetry_html = ""
-    if telemetry:
-        dims = (
-            f'{telemetry.get("width_px")}×{telemetry.get("height_px")}'
-            if telemetry.get("width_px") and telemetry.get("height_px")
-            else "—"
-        )
-        fps = telemetry.get("applied_fps") or telemetry.get("target_fps")
-        fps_text = f"{fps:.0f} fps" if isinstance(fps, (int, float)) else "—"
-        fov = telemetry.get("format_fov_deg")
-        fov_text = f"{fov:.1f}°" if isinstance(fov, (int, float)) else "—"
-        exposure = telemetry.get("tracking_exposure_cap") or "—"
-        telemetry_html = (
-            f'<div class="cam-note">'
-            f"capture {dims} · {fps_text} · fov {fov_text} · exp {exposure}"
-            f"</div>"
-        )
-    if n_frames == 0:
+    if init_klass == "empty":
         rate_html = '<span class="rate-empty">—</span>'
     else:
-        ratio = n_det / n_frames
-        if ratio < 0.05:
-            rate_class = "fail"
-        elif ratio < 0.30:
-            rate_class = "pending"
-        else:
-            rate_class = "ok"
-        pct = max(2, round(ratio * 100)) if n_det > 0 else 0
         rate_html = (
-            f'<span class="rate-bar"><span class="rate-fill {rate_class}" '
-            f'style="width:{pct}%"></span></span>'
+            f'<span class="rate-bar"><span class="rate-fill {init_klass}" '
+            f'style="width:{init_pct}%"></span></span>'
         )
 
     return (
