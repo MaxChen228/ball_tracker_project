@@ -2022,6 +2022,11 @@ class State:
                 self.pitches.pop(key, None)
             self.results.pop(session_id, None)
             self._processing.remove_session(session_id)
+            self._live_missing_cal.pop(session_id, None)
+            self._live_missing_cal_logged = {
+                key for key in self._live_missing_cal_logged if key[0] != session_id
+            }
+            self._server_post_errors.pop(session_id, None)
             if (
                 self._last_ended_session is not None
                 and self._last_ended_session.id == session_id
@@ -2058,6 +2063,9 @@ class State:
             self._current_session = None
             self._last_ended_session = None
             self._processing.clear()
+            self._live_missing_cal.clear()
+            self._live_missing_cal_logged.clear()
+            self._server_post_errors.clear()
             self._persist_session_meta_locked()
             if purge_disk:
                 for path in self._pitch_dir.glob("session_*.json*"):
