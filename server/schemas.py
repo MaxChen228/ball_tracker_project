@@ -186,6 +186,10 @@ class BallisticSummary(BaseModel):
     rmse_m: float
     t0_s: float
     inlier_indices: list[int] = Field(default_factory=list)
+    # Per-axis [p0, v0, a] packed 3×3 (rows = x, y, z). Persisted so
+    # `ballistic_fit.sample_trajectory` can reconstruct the curve for the
+    # viewer overlay without re-running RANSAC. Shape-validated at read.
+    params: list[list[float]] = Field(default_factory=list)
 
 
 class SessionResult(BaseModel):
