@@ -52,15 +52,11 @@ def _render_shape_gate_body(shape_gate: dict[str, object] | None) -> str:
         val = current[name]
         slider_val = int(round(val * 100))
         return (
-            '<div class="hsv-row">'
-            f'<div class="hsv-label" title="{html.escape(hint)}">{html.escape(label)}</div>'
-            '<div class="hsv-pair">'
-            f'<label><span>Min</span>'
+            '<label class="shape-row" title="' + html.escape(hint) + '">'
+            f'<span class="shape-label">{html.escape(label)}</span>'
             f'<input type="range" min="0" max="100" step="1" value="{slider_val}" data-shape-range="{name}">'
             f'<input class="hsv-num" type="number" step="0.01" min="0" max="1" name="{name}" value="{val:.2f}" data-shape-number="{name}">'
             '</label>'
-            '</div>'
-            '</div>'
         )
 
     return (
