@@ -151,7 +151,7 @@ async def sessions_cancel_processing(request: Request, session_id: str):
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=422, detail="invalid session_id")
-    canceled = state.cancel_processing(session_id)
+    canceled = state._processing.cancel_processing(session_id)
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     if not canceled:
@@ -191,7 +191,7 @@ async def _enqueue_server_post(
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=422, detail="invalid session_id")
-    queued = state.resume_processing(session_id)
+    queued = state._processing.resume_processing(session_id)
     if not queued:
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
