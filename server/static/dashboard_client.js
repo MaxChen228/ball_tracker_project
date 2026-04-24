@@ -258,34 +258,47 @@
     else if (localStorage.getItem(DASH_OUT_KEY) === 'off') dashOutlierKappa = Infinity;
   } catch {}
 
-  // Spatial-isolation outlier filter — mean distance from each point to
-  // its 3 nearest 3D neighbours, reject those > median + κ·1.4826·MAD.
-  // Same logic as viewer's `applyFitResidualFilter`. Robust to LSQ
-  // leverage (one bad point can't masquerade as inlier because we don't
-  // fit first). Pure on `{x_m, y_m, z_m}`; returns the same shape.
+  // RANSAC ballistic outlier rejection (mirrors viewer). Sample 4 random
+  // points, fit, count inliers within κ·scale of curve, repeat. Beats
+  // k-NN spatial isolation when multiple outliers cluster (each becomes
+  // the others' nearest neighbour, k-NN inverts and removes real points
+  // instead). Reads `{x_m, y_m, z_m, t_rel_s}`.
   function spatialIsolationFilterDash(pts, kappa) {
     if (kappa === undefined) kappa = dashOutlierKappa;
-    if (!Number.isFinite(kappa) || !pts || pts.length < 5) return pts;
-    const K_NN = 3;
-    const isol = pts.map((p, i) => {
-      const ds = [];
-      for (let j = 0; j < pts.length; j++) {
-        if (j === i) continue;
-        const dx = pts[j].x_m - p.x_m, dy = pts[j].y_m - p.y_m, dz = pts[j].z_m - p.z_m;
-        ds.push(Math.sqrt(dx*dx + dy*dy + dz*dz));
+    if (!Number.isFinite(kappa) || !pts || pts.length < 6) return pts;
+    const ITERS = 150;
+    const N = pts.length;
+    let bestIdx = null;
+    let bestScale = Infinity;
+    for (let it = 0; it < ITERS; it++) {
+      const idx = new Set();
+      while (idx.size < 4) idx.add(Math.floor(Math.random() * N));
+      const sample = [...idx].map(i => pts[i]);
+      sample.sort((a, b) => a.t_rel_s - b.t_rel_s);
+      const fit = ballisticFitDash(sample);
+      if (!fit) continue;
+      const dists = new Array(N);
+      for (let k = 0; k < N; k++) {
+        const q = fit.evaluate(pts[k].t_rel_s);
+        const dx = pts[k].x_m - q.x_m, dy = pts[k].y_m - q.y_m, dz = pts[k].z_m - q.z_m;
+        dists[k] = Math.sqrt(dx*dx + dy*dy + dz*dz);
       }
-      ds.sort((a, b) => a - b);
-      const k = Math.min(K_NN, ds.length);
-      let s = 0; for (let m = 0; m < k; m++) s += ds[m];
-      return s / k;
-    });
-    const sorted = isol.slice().sort((a, b) => a - b);
-    const med = sorted[Math.floor(sorted.length / 2)];
-    const absDev = isol.map(d => Math.abs(d - med)).sort((a, b) => a - b);
-    const mad = Math.max(absDev[Math.floor(absDev.length / 2)], 1e-3);
-    const cutoff = med + kappa * 1.4826 * mad;
-    const survivors = pts.filter((_, i) => isol[i] <= cutoff);
-    return survivors.length >= 4 && survivors.length < pts.length ? survivors : pts;
+      const sorted = dists.slice().sort((a, b) => a - b);
+      const scale = Math.max(sorted[Math.max(0, Math.floor(N / 2) - 1)], 0.01);
+      const thresh = kappa * scale;
+      const inliers = [];
+      for (let k = 0; k < N; k++) if (dists[k] <= thresh) inliers.push(k);
+      if (
+        bestIdx === null ||
+        inliers.length > bestIdx.length ||
+        (inliers.length === bestIdx.length && scale < bestScale)
+      ) {
+        bestIdx = inliers;
+        bestScale = scale;
+      }
+    }
+    if (!bestIdx || bestIdx.length < 4 || bestIdx.length === N) return pts;
+    return bestIdx.map(i => pts[i]);
   }
 
   // Per-axis ballistic LSQ with gravity pinned. Mirrors viewer's
