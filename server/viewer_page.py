@@ -219,7 +219,10 @@ def render_viewer_html(
         <div class="divider" aria-hidden="true"></div>
         <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
         <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
+        <div class="divider" aria-hidden="true"></div>
+        <button id="fit-toggle" type="button" aria-pressed="false" title="Fit a ballistic trajectory (gravity = 9.81 m/s² pinned) through the filtered points and show launch kinematics.">Fit</button>
       </div>
+      <div id="fit-info" class="fit-info" hidden aria-live="polite"></div>
     </div>
     <div class="col-resizer" id="col-resizer" role="separator" aria-orientation="vertical" aria-label="Resize 3D scene vs cameras" tabindex="0" title="Drag to resize"></div>
     <div class="videos-col">{ctx.video_cells_html}{ctx.virtual_cells_html}</div>
@@ -249,6 +252,11 @@ def render_viewer_html(
               <span class="layer-name">Residual</span>
               <input type="range" id="residual-filter-slider" min="0" max="200" step="1" value="200" style="width:96px;vertical-align:middle;" aria-label="Residual filter threshold (cm)">
               <span id="residual-filter-readout" style="font:inherit;font-size:9px;letter-spacing:0.06em;min-width:48px;display:inline-block;text-align:right;">off</span>
+            </span>
+            <span class="layer-group" data-layer="velocity" id="velocity-filter-group" title="Forward-greedy velocity cap: drop any triangulated point whose inferred speed from the previously kept point exceeds this cap. Survives the residual check but teleports — e.g. a window-reflection peak that briefly aligns with the ball ray — get pruned here.">
+              <span class="layer-name">Velocity</span>
+              <input type="range" id="velocity-filter-slider" min="1" max="60" step="1" value="60" style="width:96px;vertical-align:middle;" aria-label="Velocity cap (m/s)">
+              <span id="velocity-filter-readout" style="font:inherit;font-size:9px;letter-spacing:0.06em;min-width:56px;display:inline-block;text-align:right;">off</span>
             </span>
           </span>
         </div>
@@ -612,8 +620,21 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     cursor:pointer; min-width:auto; border-radius:0; font:inherit; font-size:11px; letter-spacing:0.1em;
     text-transform:uppercase; font-weight:400; line-height:1; }}
   .scene-col .scene-toolbar button.active {{ background:var(--ink); color:var(--surface); font-weight:500; }}
+  .scene-col .scene-toolbar button[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); font-weight:500; }}
   .scene-col .scene-toolbar .reset {{ font-size:14px; padding:4px 12px; }}
   .scene-col .scene-toolbar .divider {{ width:1px; background:var(--border-base); align-self:stretch; }}
+  .scene-col .fit-info {{ position:absolute; top:46px; right:var(--s-3); z-index:4;
+    background:var(--surface); border:1px solid var(--border-base); border-radius:var(--r);
+    padding:8px 12px; font:inherit; font-size:11px; line-height:1.55; color:var(--ink);
+    min-width:220px; max-width:300px; pointer-events:none; }}
+  .scene-col .fit-info[hidden] {{ display:none; }}
+  .scene-col .fit-info .fit-row {{ display:flex; justify-content:space-between; gap:var(--s-3);
+    font-variant-numeric:tabular-nums; }}
+  .scene-col .fit-info .fit-row .k {{ color:var(--sub); letter-spacing:0.04em; }}
+  .scene-col .fit-info .fit-row .v {{ font-weight:500; }}
+  .scene-col .fit-info h4 {{ margin:0 0 6px 0; font:inherit; font-size:10px; letter-spacing:0.1em;
+    text-transform:uppercase; color:var(--sub); font-weight:500; }}
+  .scene-col .fit-info .fit-warn {{ color:#A7372A; font-size:10px; margin-top:6px; }}
   .hint-btn {{ font:inherit; font-size:12px; padding:0; width:26px; height:26px; border:1px solid var(--border-base);
     background:var(--surface); color:var(--sub); border-radius:50%; cursor:pointer; margin-left:auto;
     min-width:auto; font-weight:600; letter-spacing:0; display:inline-flex; align-items:center; justify-content:center; }}
@@ -795,20 +816,57 @@ def _viewer_js() -> str:
     server_post: (TRAJ_BY_PATH.server_post || []).length > 0
       || (SCENE.triangulated || []).length > 0,
   }};
-  // Residual filter — drop triangulated points whose ray-midpoint
-  // residual exceeds this cap (in metres). `Infinity` disables it.
-  // Persisted across reloads so an operator who's tuned 5 cm doesn't
-  // have to redrag every time.
+  // --- Triangulation filters ---
+  // Residual: drop points whose ray-midpoint gap exceeds this cap (m).
+  //   Real ball pairs sit sub-cm; static-target false pairs blow up to m.
+  // Velocity: forward-greedy cap on inferred speed from the previously
+  //   kept point. Catches the corner case where two moving false targets
+  //   happen to triangulate to a low-residual point that's physically
+  //   impossible given the previous kept location.
+  // Both default "off" (Infinity) and persist to localStorage.
   const RESIDUAL_FILTER_KEY = "ball_tracker_viewer_residual_cap_cm";
+  const VELOCITY_FILTER_KEY = "ball_tracker_viewer_velocity_cap_mps";
   let residualCapM = Infinity;
+  let velocityCapMps = Infinity;
+  let fitMode = false;
   try {{
     const saved = parseFloat(localStorage.getItem(RESIDUAL_FILTER_KEY));
     if (Number.isFinite(saved) && saved >= 0 && saved < 200) residualCapM = saved / 100;
+  }} catch (_e) {{ /* ignore */ }}
+  try {{
+    const saved = parseFloat(localStorage.getItem(VELOCITY_FILTER_KEY));
+    if (Number.isFinite(saved) && saved >= 1 && saved < 60) velocityCapMps = saved;
   }} catch (_e) {{ /* ignore */ }}
   function passResidualFilter(p) {{
     if (!Number.isFinite(residualCapM)) return true;
     const r = (p && typeof p.residual_m === "number") ? p.residual_m : 0;
     return r <= residualCapM;
+  }}
+  // Apply the velocity cap AFTER residual — points are assumed already
+  // residual-filtered and sorted by `t_rel_s`. Clamp dt to 0.5 ms so two
+  // near-simultaneous paired points don't blow v → Infinity.
+  function applyVelocityFilter(pts) {{
+    if (!Number.isFinite(velocityCapMps) || !pts.length) return pts;
+    const out = [pts[0]];
+    let last = pts[0];
+    for (let i = 1; i < pts.length; i++) {{
+      const p = pts[i];
+      const dt = Math.max(p.t_rel_s - last.t_rel_s, 0.0005);
+      const dx = p.x - last.x, dy = p.y - last.y, dz = p.z - last.z;
+      const v = Math.sqrt(dx*dx + dy*dy + dz*dz) / dt;
+      if (v <= velocityCapMps) {{ out.push(p); last = p; }}
+    }}
+    return out;
+  }}
+  // Run both filters on a path's full point list; returns the filtered,
+  // time-sorted array. Caller passes cutoff for playback clipping.
+  function filteredTrajectory(rawPts, cutoff) {{
+    if (!rawPts || !rawPts.length) return [];
+    const residualKept = rawPts
+      .filter(p => p.t_rel_s <= cutoff && passResidualFilter(p))
+      .slice()
+      .sort((a, b) => a.t_rel_s - b.t_rel_s);
+    return applyVelocityFilter(residualKept);
   }}
   function hasPathForLayer(layer, path) {{
     if (layer === "traj") return HAS_TRAJ_PATH[path];
@@ -1045,10 +1103,10 @@ def _viewer_js() -> str:
       }}
     }}
     // --- 3D trajectory: server_post ---
-    if (isLayerVisible("traj", "server_post")) {{
+    if (isLayerVisible("traj", "server_post") && !fitMode) {{
       const svrPts = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
         ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
-      const triPts = svrPts.filter(p => p.t_rel_s <= cutoff && passResidualFilter(p));
+      const triPts = filteredTrajectory(svrPts, cutoff);
       if (triPts.length) {{
         out.push({{ type: "scatter3d", x: triPts.map(p => p.x), y: triPts.map(p => p.y), z: triPts.map(p => p.z),
           mode: "lines+markers", line: {{color: ACCENT, width: 4}},
@@ -1064,8 +1122,8 @@ def _viewer_js() -> str:
       }}
     }}
     // --- 3D trajectory: live ---
-    if (isLayerVisible("traj", "live")) {{
-      const livePts = (TRAJ_BY_PATH.live || []).filter(p => p.t_rel_s <= cutoff && passResidualFilter(p));
+    if (isLayerVisible("traj", "live") && !fitMode) {{
+      const livePts = filteredTrajectory(TRAJ_BY_PATH.live || [], cutoff);
       if (livePts.length) {{
         out.push({{ type: "scatter3d", x: livePts.map(p => p.x), y: livePts.map(p => p.y), z: livePts.map(p => p.z),
           mode: "lines+markers",
@@ -1081,7 +1139,167 @@ def _viewer_js() -> str:
         }}
       }}
     }}
+    // --- Fit mode: ballistic LSQ fit with gravity pinned to 9.81 m/s². ---
+    // Pick source: prefer server_post (cleaner detection), fall back to
+    // live. Passes through residual + velocity filters first so the fit
+    // sees only physically plausible points.
+    if (fitMode) {{
+      const svrRaw = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
+        ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
+      const liveRaw = TRAJ_BY_PATH.live || [];
+      const svrPts = filteredTrajectory(svrRaw, Infinity);
+      const livePts = filteredTrajectory(liveRaw, Infinity);
+      const source = svrPts.length >= 4 ? svrPts : (livePts.length >= 4 ? livePts : []);
+      const sourceLabel = source === svrPts ? "server_post" : "live";
+      if (source.length >= 4) {{
+        const fit = ballisticFit(source);
+        const renderPts = source.filter(p => p.t_rel_s <= cutoff);
+        // Sampled smooth curve over the full span (ignores cutoff for
+        // the "All" mode; playback head is still a single marker).
+        const t0 = source[0].t_rel_s;
+        const tN = (playback ? cutoff : source[source.length - 1].t_rel_s);
+        const tEnd = Math.min(source[source.length - 1].t_rel_s, tN);
+        const nCurve = 80;
+        const curveX = [], curveY = [], curveZ = [];
+        for (let i = 0; i <= nCurve; i++) {{
+          const t = t0 + (tEnd - t0) * (i / nCurve);
+          const p = fit.evaluate(t);
+          curveX.push(p.x); curveY.push(p.y); curveZ.push(p.z);
+        }}
+        out.push({{ type: "scatter3d", x: curveX, y: curveY, z: curveZ,
+          mode: "lines", line: {{color: "#A7372A", width: 5}},
+          name: `Ballistic fit (${{sourceLabel}}, ${{source.length}} pts, RMSE ${{(fit.rmse_m*100).toFixed(1)}} cm)` }});
+        // Residual points: plot raw kept points dimmed so user can eyeball
+        // fit quality — a good fit has points hugging the curve tightly.
+        out.push({{ type: "scatter3d",
+          x: renderPts.map(p => p.x), y: renderPts.map(p => p.y), z: renderPts.map(p => p.z),
+          mode: "markers", marker: {{size: 3, color: "#2A2520", opacity: 0.5}},
+          name: `Fit samples (${{renderPts.length}}/${{source.length}})`, showlegend: false }});
+        // Launch velocity vector: arrow at fit origin pointing along v0.
+        const v0 = fit.v0;
+        const origin = fit.evaluate(t0);
+        const arrowLen = Math.min(2.0, Math.max(0.3, fit.speed_mps * 0.05));
+        const vn = Math.max(1e-9, Math.hypot(v0.x, v0.y, v0.z));
+        out.push({{ type: "scatter3d",
+          x: [origin.x, origin.x + v0.x/vn*arrowLen],
+          y: [origin.y, origin.y + v0.y/vn*arrowLen],
+          z: [origin.z, origin.z + v0.z/vn*arrowLen],
+          mode: "lines", line: {{color: "#A7372A", width: 3, dash: "dash"}},
+          hoverinfo: "skip", showlegend: false }});
+        updateFitInfoPanel(fit, source.length, sourceLabel);
+      }} else {{
+        updateFitInfoPanel(null, source.length, sourceLabel);
+      }}
+    }} else {{
+      updateFitInfoPanel(null, 0, null);
+    }}
     return out;
+  }}
+
+  // Per-axis LSQ ballistic fit: p(t) = p0 + v0*(t-t0) + 0.5*a*(t-t0)²
+  // with a pinned to (0, 0, -9.81). Subtracts the gravity term from z and
+  // solves a 2-parameter linear LSQ per axis (p0, v0).
+  function ballisticFit(pts) {{
+    const G = 9.81;
+    const t0 = pts[0].t_rel_s;
+    const out = {{ p0: {{x:0,y:0,z:0}}, v0: {{x:0,y:0,z:0}}, g: G, t0 }};
+    const axes = ["x", "y", "z"];
+    const rmseSq = {{ x: 0, y: 0, z: 0 }};
+    for (const ax of axes) {{
+      // y = p0 + v0*τ  (z axis subtracts 0.5*G*τ² before fitting)
+      let sumT = 0, sumTT = 0, sumP = 0, sumTP = 0;
+      const n = pts.length;
+      for (const p of pts) {{
+        const tau = p.t_rel_s - t0;
+        let val = p[ax];
+        if (ax === "z") val += 0.5 * G * tau * tau; // pin -g, fit the residual as linear
+        sumT  += tau;
+        sumTT += tau * tau;
+        sumP  += val;
+        sumTP += tau * val;
+      }}
+      const det = n * sumTT - sumT * sumT;
+      if (Math.abs(det) < 1e-12) {{ out.p0[ax] = pts[0][ax]; out.v0[ax] = 0; continue; }}
+      const p0 = (sumP * sumTT - sumT * sumTP) / det;
+      const v0 = (n * sumTP - sumT * sumP) / det;
+      out.p0[ax] = p0;
+      out.v0[ax] = v0;
+      // Per-axis RMSE
+      let err2 = 0;
+      for (const p of pts) {{
+        const tau = p.t_rel_s - t0;
+        let pred = p0 + v0 * tau;
+        if (ax === "z") pred -= 0.5 * G * tau * tau;
+        const d = p[ax] - pred;
+        err2 += d * d;
+      }}
+      rmseSq[ax] = err2 / n;
+    }}
+    out.speed_mps = Math.hypot(out.v0.x, out.v0.y, out.v0.z);
+    out.speed_kmph = out.speed_mps * 3.6;
+    // Elevation = angle above horizontal (XY plane). Positive = upward.
+    const horiz = Math.hypot(out.v0.x, out.v0.y);
+    out.elevation_deg = Math.atan2(out.v0.z, horiz) * 180 / Math.PI;
+    // Azimuth = heading in XY plane, measured from +Y (plate depth) axis.
+    out.azimuth_deg = Math.atan2(out.v0.x, out.v0.y) * 180 / Math.PI;
+    out.rmse_m = Math.sqrt(rmseSq.x + rmseSq.y + rmseSq.z);
+    out.rmse_by_axis_m = {{ x: Math.sqrt(rmseSq.x), y: Math.sqrt(rmseSq.y), z: Math.sqrt(rmseSq.z) }};
+    out.flight_time_s = pts[pts.length - 1].t_rel_s - t0;
+    out.evaluate = (t) => {{
+      const tau = t - t0;
+      return {{
+        x: out.p0.x + out.v0.x * tau,
+        y: out.p0.y + out.v0.y * tau,
+        z: out.p0.z + out.v0.z * tau - 0.5 * G * tau * tau,
+      }};
+    }};
+    // Time-to-apex (z peak), apex height
+    if (Math.abs(out.v0.z) > 1e-6 && out.v0.z > 0) {{
+      out.apex_time_s = out.v0.z / G;
+      const apex = out.evaluate(t0 + out.apex_time_s);
+      out.apex_height_m = apex.z;
+    }} else {{
+      out.apex_time_s = 0;
+      out.apex_height_m = out.p0.z;
+    }}
+    return out;
+  }}
+
+  function updateFitInfoPanel(fit, sampleCount, sourceLabel) {{
+    const box = document.getElementById("fit-info");
+    if (!box) return;
+    if (!fitMode) {{ box.hidden = true; return; }}
+    if (!fit) {{
+      box.hidden = false;
+      box.innerHTML = sampleCount
+        ? `<h4>Ballistic fit</h4><div class="fit-warn">Need ≥4 filtered points; have ${{sampleCount}}.</div>`
+        : `<h4>Ballistic fit</h4><div class="fit-warn">No triangulated points pass the current filters.</div>`;
+      return;
+    }}
+    const v = fit.v0;
+    const rows = [
+      ["samples", `${{sampleCount}} (${{sourceLabel}})`],
+      ["flight t", `${{fit.flight_time_s.toFixed(3)}} s`],
+      ["|v₀|", `${{fit.speed_mps.toFixed(1)}} m/s · ${{fit.speed_kmph.toFixed(1)}} km/h`],
+      ["v₀ (x,y,z)", `(${{v.x.toFixed(2)}}, ${{v.y.toFixed(2)}}, ${{v.z.toFixed(2)}})`],
+      ["elevation", `${{fit.elevation_deg.toFixed(1)}}°`],
+      ["azimuth", `${{fit.azimuth_deg.toFixed(1)}}° from +Y`],
+      ["apex z", `${{fit.apex_height_m.toFixed(2)}} m @ t+${{fit.apex_time_s.toFixed(3)}}s`],
+      ["RMSE (fit)", `${{(fit.rmse_m*100).toFixed(1)}} cm`],
+      ["RMSE (z only)", `${{(fit.rmse_by_axis_m.z*100).toFixed(1)}} cm`],
+    ];
+    let html = `<h4>Ballistic fit · g = 9.81 m/s² pinned</h4>`;
+    for (const [k, v] of rows) {{
+      html += `<div class="fit-row"><span class="k">${{k}}</span><span class="v">${{v}}</span></div>`;
+    }}
+    // Sanity warning: if RMSE > 10 cm the ballistic assumption (no drag,
+    // no spin, pure gravity) is probably wrong — or filters still leak
+    // outliers. Tell the user instead of silently fitting garbage.
+    if (fit.rmse_m > 0.10) {{
+      html += `<div class="fit-warn">RMSE ${{(fit.rmse_m*100).toFixed(1)}} cm — drag/spin present OR outliers leaked past filters. Tighten Residual / Velocity and retry.</div>`;
+    }}
+    box.hidden = false;
+    box.innerHTML = html;
   }}
   {PLATE_WORLD_JS}
   {PROJECTION_JS}
@@ -1541,7 +1759,6 @@ def _viewer_js() -> str:
     else residualReadout.textContent = `≤ ${{(residualCapM * 100).toFixed(0)}} cm`;
   }}
   if (residualSlider) {{
-    // Hydrate slider from persisted cap. Slider scale is cm; 200 = "off".
     if (Number.isFinite(residualCapM)) {{
       residualSlider.value = String(Math.min(200, Math.round(residualCapM * 100)));
     }} else {{
@@ -1558,6 +1775,43 @@ def _viewer_js() -> str:
         try {{ localStorage.setItem(RESIDUAL_FILTER_KEY, String(cm)); }} catch (_e) {{}}
       }}
       paintResidualReadout();
+      scheduleSceneDraw();
+    }});
+  }}
+  // --- Velocity filter slider ---
+  const velocitySlider = document.getElementById("velocity-filter-slider");
+  const velocityReadout = document.getElementById("velocity-filter-readout");
+  function paintVelocityReadout() {{
+    if (!velocityReadout) return;
+    if (!Number.isFinite(velocityCapMps)) velocityReadout.textContent = "off";
+    else velocityReadout.textContent = `≤ ${{velocityCapMps.toFixed(0)}} m/s`;
+  }}
+  if (velocitySlider) {{
+    if (Number.isFinite(velocityCapMps)) {{
+      velocitySlider.value = String(Math.min(60, Math.round(velocityCapMps)));
+    }} else {{
+      velocitySlider.value = "60";
+    }}
+    paintVelocityReadout();
+    velocitySlider.addEventListener("input", () => {{
+      const mps = parseFloat(velocitySlider.value);
+      if (!Number.isFinite(mps) || mps >= 60) {{
+        velocityCapMps = Infinity;
+        try {{ localStorage.removeItem(VELOCITY_FILTER_KEY); }} catch (_e) {{}}
+      }} else {{
+        velocityCapMps = mps;
+        try {{ localStorage.setItem(VELOCITY_FILTER_KEY, String(mps)); }} catch (_e) {{}}
+      }}
+      paintVelocityReadout();
+      scheduleSceneDraw();
+    }});
+  }}
+  // --- Fit mode toggle ---
+  const fitToggleBtn = document.getElementById("fit-toggle");
+  if (fitToggleBtn) {{
+    fitToggleBtn.addEventListener("click", () => {{
+      fitMode = !fitMode;
+      fitToggleBtn.setAttribute("aria-pressed", fitMode ? "true" : "false");
       scheduleSceneDraw();
     }});
   }}
