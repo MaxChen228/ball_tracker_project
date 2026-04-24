@@ -495,23 +495,21 @@ def _derive_auto_cal_intrinsics(
 
     if h_fov_deg is None:
         charuco = state.device_intrinsics_for_camera(camera_id)
-        if charuco is not None:
-            src_w = charuco.source_width_px
-            src_h = charuco.source_height_px
-            if src_w > 0 and src_h > 0:
-                src_ar = src_w / src_h
-                new_ar = w_img / h_img
-                if abs(src_ar - new_ar) / src_ar < 0.02:
-                    from state_calibration import scale_intrinsics_to
+        if charuco is not None and charuco.source_width_px > 0 and charuco.source_height_px > 0:
+            # scale_intrinsics_to handles both AR-matching (pure scale) and
+            # AR-mismatch (center crop + scale) cases. The latter is the
+            # normal path when ChArUco was shot on 4:3 stills and auto-cal
+            # runs on 16:9 video-format frames.
+            from state_calibration import scale_intrinsics_to
 
-                    scaled = scale_intrinsics_to(
-                        charuco.intrinsics,
-                        source_width_px=src_w,
-                        source_height_px=src_h,
-                        target_width_px=w_img,
-                        target_height_px=h_img,
-                    )
-                    return scaled, None
+            scaled = scale_intrinsics_to(
+                charuco.intrinsics,
+                source_width_px=charuco.source_width_px,
+                source_height_px=charuco.source_height_px,
+                target_width_px=w_img,
+                target_height_px=h_img,
+            )
+            return scaled, None
 
     prior = state.calibrations().get(camera_id)
     if prior is not None and h_fov_deg is None:
