@@ -196,9 +196,9 @@ def derive_fov_intrinsics(
     `CalibrationShared.persistFovIntrinsicsIfPossible` on iOS so server-
     derived intrinsics match what the phone used to persist.
 
-    Returns `(fx, fy, cx, cy)`. Note the server uses OpenCV naming (`fy`),
-    while iOS persists the same value under the key `intrinsic_fz` — this
-    is the vertical focal length in both cases.
+    Returns `(fx, fy, cx, cy)`. Server + iOS both use `fy` for the
+    vertical focal length now; the legacy `fz` name has been retired
+    everywhere except as a read-time alias for old on-disk JSON.
 
     Caller should use this only when no ChArUco-measured intrinsics are
     on file for the camera; the ChArUco path has ~10x smaller reprojection

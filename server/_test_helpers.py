@@ -148,7 +148,7 @@ def _base_payload(
     distortion: list[float] | None = None,
     capture_telemetry: dict | None = None,
 ) -> dict:
-    intr: dict = {"fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2]}
+    intr: dict = {"fx": K[0, 0], "fy": K[1, 1], "cx": K[0, 2], "cy": K[1, 2]}
     if distortion is not None:
         intr["distortion"] = distortion
     payload = {
@@ -175,7 +175,7 @@ def _seed_ready_stereo(client: TestClient, K: np.ndarray, H_a: np.ndarray, H_b: 
             json={
                 "camera_id": cam,
                 "intrinsics": {
-                    "fx": K[0, 0], "fz": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
+                    "fx": K[0, 0], "fy": K[1, 1], "cx": K[0, 2], "cy": K[1, 2],
                 },
                 "homography": H.flatten().tolist(),
                 "image_width_px": 1920,

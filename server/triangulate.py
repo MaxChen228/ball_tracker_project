@@ -67,7 +67,7 @@ def angle_ray_cam(theta_x: float, theta_z: float) -> np.ndarray:
 
     BallDetector.swift uses:
       theta_x = atan2(u - cx, fx)
-      theta_z = atan2(v - cy, fy)  (the 'fz' in Swift is fy in OpenCV pinhole)
+      theta_z = atan2(v - cy, fy)
     So the direction in camera coords is (tan θx, tan θz, 1) normalized.
     """
     d = np.array([np.tan(theta_x), np.tan(theta_z), 1.0])

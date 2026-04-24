@@ -130,7 +130,7 @@ def list_device_intrinsics() -> dict[str, Any]:
             "source_width_px": rec.source_width_px,
             "source_height_px": rec.source_height_px,
             "fx": rec.intrinsics.fx,
-            "fy": rec.intrinsics.fz,
+            "fy": rec.intrinsics.fy,
             "cx": rec.intrinsics.cx,
             "cy": rec.intrinsics.cy,
             "distortion": rec.intrinsics.distortion,
@@ -181,7 +181,7 @@ async def set_device_intrinsics(device_id: str, request: Request) -> dict[str, A
     state.set_device_intrinsics(rec)
     logger.info(
         "device intrinsics stored device_id=%s model=%s fx=%.1f fy=%.1f rms=%s",
-        rec.device_id, rec.device_model, rec.intrinsics.fx, rec.intrinsics.fz,
+        rec.device_id, rec.device_model, rec.intrinsics.fx, rec.intrinsics.fy,
         rec.rms_reprojection_px,
     )
     return {
@@ -216,15 +216,15 @@ def _validate_intrinsics_payload(rec: DeviceIntrinsics) -> None:
     garbage extrinsics downstream with no obvious failure signal."""
     w, h = rec.source_width_px, rec.source_height_px
     k = rec.intrinsics
-    if k.fx <= 0 or k.fz <= 0:
+    if k.fx <= 0 or k.fy <= 0:
         raise HTTPException(
             status_code=422,
-            detail=f"non-positive focal length fx={k.fx} fy={k.fz}",
+            detail=f"non-positive focal length fx={k.fx} fy={k.fy}",
         )
-    if max(k.fx, k.fz) / min(k.fx, k.fz) > 2.0:
+    if max(k.fx, k.fy) / min(k.fx, k.fy) > 2.0:
         raise HTTPException(
             status_code=422,
-            detail=f"fx/fy ratio out of bounds: fx={k.fx} fy={k.fz}",
+            detail=f"fx/fy ratio out of bounds: fx={k.fx} fy={k.fy}",
         )
     if not (-0.05 * w <= k.cx <= 1.05 * w):
         raise HTTPException(
@@ -289,7 +289,7 @@ def _decode_calibration_jpeg(jpeg_bytes: bytes) -> np.ndarray:
 def _marker_camera_pose(snapshot: CalibrationSnapshot) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     K = build_K(
         snapshot.intrinsics.fx,
-        snapshot.intrinsics.fz,
+        snapshot.intrinsics.fy,
         snapshot.intrinsics.cx,
         snapshot.intrinsics.cy,
     )
@@ -434,7 +434,7 @@ def _solve_pnp_homography(
     )
     if np.linalg.matrix_rank(object_pts - object_pts.mean(axis=0, keepdims=True)) < 3:
         return None
-    K = build_K(intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy).astype(np.float64)
+    K = build_K(intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy).astype(np.float64)
     dist = np.asarray(intrinsics.distortion or [0, 0, 0, 0, 0], dtype=np.float64)
     ok, rvec, tvec, inliers = cv2.solvePnPRansac(
         object_pts,
@@ -519,7 +519,7 @@ def _derive_auto_cal_intrinsics(
             prior_ar = prior_w / prior_h
             new_ar = w_img / h_img
             # iPhone stills (4:3) and video (16:9) come from different
-            # sensor crops — scaling fx/fz independently on axis-ratio
+            # sensor crops — scaling fx/fy independently on axis-ratio
             # mismatch produces a bogus fx/fy ratio. Only reuse prior
             # intrinsics when the aspect ratio matches within 2%.
             if abs(prior_ar - new_ar) / prior_ar < 0.02:
@@ -527,7 +527,7 @@ def _derive_auto_cal_intrinsics(
                 sy = h_img / prior_h
                 intrinsics = IntrinsicsPayload(
                     fx=prior.intrinsics.fx * sx,
-                    fz=prior.intrinsics.fz * sy,
+                    fy=prior.intrinsics.fy * sy,
                     cx=prior.intrinsics.cx * sx,
                     cy=prior.intrinsics.cy * sy,
                     distortion=prior.intrinsics.distortion,
@@ -536,7 +536,7 @@ def _derive_auto_cal_intrinsics(
         prior = None
     h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else 1.1345
     fx, fy, cx, cy = derive_fov_intrinsics(w_img, h_img, h_fov_rad)
-    return IntrinsicsPayload(fx=fx, fz=fy, cx=cx, cy=cy), None
+    return IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy), None
 
 
 def _solve_auto_cal_solution(
@@ -584,7 +584,7 @@ def _pose_from_homography(
     intrinsics: IntrinsicsPayload,
     homography_row_major: list[float],
 ) -> tuple[np.ndarray, np.ndarray]:
-    K = build_K(intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy)
+    K = build_K(intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy)
     H_mat = np.array(homography_row_major, dtype=np.float64).reshape(3, 3)
     R_wc, t_wc = recover_extrinsics(K, H_mat)
     center = camera_center_world(R_wc, t_wc)
@@ -602,7 +602,7 @@ def _reprojection_error_px(
 
     world_xyz = _all_marker_world_xyz()
     K = build_K(
-        intrinsics.fx, intrinsics.fz, intrinsics.cx, intrinsics.cy
+        intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy
     ).astype(np.float64)
     H_mat = np.array(homography_row_major, dtype=np.float64).reshape(3, 3)
     R_wc, t_wc = recover_extrinsics(K, H_mat)
@@ -725,7 +725,7 @@ async def _run_auto_calibration(
             "intrinsics derived",
             data={
                 "w": w_img, "h": h_img,
-                "fx": round(intrinsics.fx, 2), "fy": round(intrinsics.fz, 2),
+                "fx": round(intrinsics.fx, 2), "fy": round(intrinsics.fy, 2),
                 "cx": round(intrinsics.cx, 2), "cy": round(intrinsics.cy, 2),
                 "reused_prior": prior is not None,
                 "charuco_prior_device_id": (

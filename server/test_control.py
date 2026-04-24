@@ -812,7 +812,7 @@ def _seed_minimal_calibration(camera_id: str) -> None:
     main.state.set_calibration(
         main.CalibrationSnapshot(
             camera_id=camera_id,
-            intrinsics=main.IntrinsicsPayload(fx=1000.0, fz=1000.0, cx=500.0, cy=500.0),
+            intrinsics=main.IntrinsicsPayload(fx=1000.0, fy=1000.0, cx=500.0, cy=500.0),
             homography=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             image_width_px=1000,
             image_height_px=1000,
