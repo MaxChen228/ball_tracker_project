@@ -1,5 +1,13 @@
 // === esc + chips + renderDevices ===
 
+  // Per-cam preview render state. Separate from tickPreviewImages'
+  // 200 ms refresh loop: this just suppresses the per-tick cache-bust
+  // on the SSR <img src> so an idle /status tick doesn't force a fresh
+  // /camera/{id}/preview GET every second. Enable/disable flips always
+  // reset the src so the panel reflects the new state immediately.
+  const _previewRenderState = new Map(); // cam -> { on, src, t }
+  const _PREVIEW_REFRESH_MIN_MS = 1000;
+
   function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 
   function statusChip(cam, online, calibrated) {
@@ -107,9 +115,29 @@
       // Only hit the preview endpoint when actually watching — otherwise
       // the browser eagerly fetches the <img> src on every render and
       // spams 404s for cams with preview off.
-      const initialSrc = previewOn
-        ? ('/camera/' + encodeURIComponent(cam) + '/preview?t=' + Date.now())
-        : '';
+      //
+      // Don't cache-bust every renderDevices tick: that made each
+      // /status tick re-fetch the same frame. Carry the previous src
+      // forward unless (a) preview just flipped on/off, or (b) the
+      // last refresh is older than the _PREVIEW_REFRESH_MIN_MS budget.
+      // tickPreviewImages (74_preview_poll.js) still owns the real
+      // refresh cadence.
+      const prevState = _previewRenderState.get(cam);
+      const prevOn = prevState && prevState.on;
+      const nowMs = Date.now();
+      let initialSrc = '';
+      if (previewOn) {
+        if (!prevState || prevOn !== true
+            || !prevState.src
+            || (nowMs - (prevState.t || 0) > _PREVIEW_REFRESH_MIN_MS)) {
+          initialSrc = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + nowMs;
+          _previewRenderState.set(cam, { on: true, src: initialSrc, t: nowMs });
+        } else {
+          initialSrc = prevState.src;
+        }
+      } else {
+        _previewRenderState.set(cam, { on: false, src: '', t: nowMs });
+      }
       const previewPanel = `<div class="preview-panel${previewOn ? '' : ' off'}" data-preview-panel="${esc(cam)}">` +
         `<img data-preview-img="${esc(cam)}" src="${initialSrc}" alt="preview ${esc(cam)}">` +
         `<svg class="plate-overlay" data-preview-overlay="${esc(cam)}" aria-hidden="true"><polygon></polygon></svg>` +
