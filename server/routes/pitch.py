@@ -193,47 +193,45 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
     import main as _main
     state = _main.state
     detect_pitch = _main.detect_pitch
+    proc = state._processing
+    sid = pitch.session_id
+    cam = pitch.camera_id
 
-    if not state.start_server_post_job(pitch.session_id, pitch.camera_id):
+    if not proc.start_server_post_job(sid, cam):
         logger.info(
             "background detection skipped session=%s cam=%s reason=not-runnable",
-            pitch.session_id, pitch.camera_id,
+            sid, cam,
         )
         return
     # New run begins — wipe any stale error from the previous attempt so
     # /events doesn't keep showing a resolved failure.
-    state.clear_server_post_error(pitch.session_id, pitch.camera_id)
+    proc.clear_error(sid, cam)
     try:
         frames = await asyncio.to_thread(
             detect_pitch,
             clip_path,
             pitch.video_start_pts_s,
             hsv_range=state.hsv_range(),
-            should_cancel=lambda: state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id),
+            should_cancel=lambda: proc.should_cancel_server_post_job(sid, cam),
         )
     except ProcessingCanceled:
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=True)
-        logger.info(
-            "background detection canceled session=%s cam=%s",
-            pitch.session_id, pitch.camera_id,
-        )
+        proc.finish_server_post_job(sid, cam, canceled=True)
+        logger.info("background detection canceled session=%s cam=%s", sid, cam)
         return
     except Exception as exc:
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
-        state.record_server_post_error(
-            pitch.session_id, pitch.camera_id, f"detect_pitch: {exc}"
-        )
+        proc.finish_server_post_job(sid, cam, canceled=False)
+        proc.record_error(sid, cam, f"detect_pitch: {exc}")
         logger.warning(
             "background detect_pitch failed session=%s cam=%s err=%s",
-            pitch.session_id, pitch.camera_id, exc,
+            sid, cam, exc,
         )
         return
 
-    if state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id):
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=True)
+    if proc.should_cancel_server_post_job(sid, cam):
+        proc.finish_server_post_job(sid, cam, canceled=True)
         logger.info(
             "background detection discarded after cancel session=%s cam=%s",
-            pitch.session_id, pitch.camera_id,
+            sid, cam,
         )
         return
     pitch.frames = frames
@@ -241,13 +239,11 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
     try:
         await asyncio.to_thread(state.record, pitch)
     except Exception as exc:
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
-        state.record_server_post_error(
-            pitch.session_id, pitch.camera_id, f"record: {exc}"
-        )
+        proc.finish_server_post_job(sid, cam, canceled=False)
+        proc.record_error(sid, cam, f"record: {exc}")
         logger.warning(
             "background re-record failed session=%s cam=%s err=%s",
-            pitch.session_id, pitch.camera_id, exc,
+            sid, cam, exc,
         )
         return
 
@@ -258,14 +254,11 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             clip_path,
             annotated_path,
             frames,
-            should_cancel=lambda: state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id),
+            should_cancel=lambda: proc.should_cancel_server_post_job(sid, cam),
         )
     except ProcessingCanceled:
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=True)
-        logger.info(
-            "background annotation canceled session=%s cam=%s",
-            pitch.session_id, pitch.camera_id,
-        )
+        proc.finish_server_post_job(sid, cam, canceled=True)
+        logger.info("background annotation canceled session=%s cam=%s", sid, cam)
         if annotated_path.exists():
             try:
                 annotated_path.unlink()
@@ -273,13 +266,11 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
                 pass
         return
     except Exception as exc:
-        state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
-        state.record_server_post_error(
-            pitch.session_id, pitch.camera_id, f"annotate: {exc}"
-        )
+        proc.finish_server_post_job(sid, cam, canceled=False)
+        proc.record_error(sid, cam, f"annotate: {exc}")
         logger.warning(
             "annotate_video failed session=%s cam=%s err=%s",
-            pitch.session_id, pitch.camera_id, exc,
+            sid, cam, exc,
         )
         if annotated_path.exists():
             try:
@@ -289,6 +280,6 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
     ball = sum(1 for f in frames if f.ball_detected)
     logger.info(
         "background detection complete session=%s cam=%s frames=%d ball=%d",
-        pitch.session_id, pitch.camera_id, len(frames), ball,
+        sid, cam, len(frames), ball,
     )
-    state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
+    proc.finish_server_post_job(sid, cam, canceled=False)
