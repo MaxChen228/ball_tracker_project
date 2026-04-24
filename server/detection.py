@@ -123,6 +123,9 @@ def detect_ball(
     *,
     fg_mask: np.ndarray | None = None,
     expected_radius_px: float | None = None,
+    prev_position: tuple[float, float] | None = None,
+    prev_velocity: tuple[float, float] | None = None,
+    dt: float | None = None,
 ) -> tuple[float, float] | None:
     """Find the largest HSV-masked blob whose area is within the active
     area bounds AND whose bbox aspect ratio and fill ratio clear the
@@ -162,8 +165,9 @@ def detect_ball(
     if num_labels <= 1:
         return None
 
-    best_idx = -1
-    best_area = -1
+    from candidate_selector import Candidate, select_best_candidate
+
+    survivors: list[Candidate] = []
     for idx in range(1, num_labels):
         area = int(stats[idx, cv2.CC_STAT_AREA])
         if area < min_area or area > max_area:
@@ -178,12 +182,29 @@ def detect_ball(
         fill = area / (w * h)
         if fill < _MIN_FILL:
             continue
-        if area > best_area:
-            best_area = area
-            best_idx = idx
+        cx, cy = centroids[idx]
+        survivors.append(
+            Candidate(cx=float(cx), cy=float(cy), area=area, area_score=0.0)
+        )
 
-    if best_idx < 0:
+    if not survivors:
         return None
-
-    cx, cy = centroids[best_idx]
-    return float(cx), float(cy)
+    max_area_batch = max(c.area for c in survivors)
+    # Finalize area_score now that we know the batch max.
+    scored = [
+        Candidate(
+            cx=c.cx, cy=c.cy, area=c.area,
+            area_score=c.area / max_area_batch if max_area_batch > 0 else 0.0,
+        )
+        for c in survivors
+    ]
+    winner = select_best_candidate(
+        scored,
+        prev_position=prev_position,
+        prev_velocity=prev_velocity,
+        dt=dt,
+        r_px_expected=expected_radius_px,
+    )
+    if winner is None:
+        return None
+    return winner.cx, winner.cy
