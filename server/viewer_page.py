@@ -227,15 +227,9 @@ def render_viewer_html(
   <div class="timeline">
     <div class="tl-row">
       <div class="scrubber-wrap">
-        <div class="strip-legend" aria-hidden="true">
-          <span>detection:</span>
-          <span><span class="sw" style="background:var(--contra);border-color:var(--contra);"></span>A detected</span>
-          <span><span class="sw" style="background:var(--dual);border-color:var(--dual);"></span>B detected</span>
-          <span><span class="sw" style="background:rgba(122,117,108,0.35);"></span>missed</span>
-          <span><span class="sw" style="background:rgba(232,228,219,0.6);"></span>no frame</span>
-          <span><span class="sw" style="background:var(--accent);border-color:var(--accent);"></span>chirp anchor</span>
+        <div class="strip-legend" aria-hidden="true"
+             title="Strip colors: A detected (orange) · B detected (brown) · missed (grey) · no frame (pale) · chirp anchor (accent)">
           <span class="layer-toggles" id="layer-toggles" aria-label="Layer visibility">
-            <span class="layer-label">show:</span>
             <span class="layer-group" data-layer="traj">
               <span class="layer-name">Traj</span>
               <button type="button" class="layer-pill" data-layer="traj" data-path="live" aria-pressed="false">live</button>
@@ -274,13 +268,14 @@ def render_viewer_html(
           <span class="strip-sublabels" aria-hidden="true"><span>A</span><span>B</span></span>
           <canvas id="detection-canvas-server-post" class="strip-canvas" height="28" aria-hidden="true"></canvas>
         </div>
-        <div class="strip-note" id="strip-note-multi" hidden>
-          兩條 detection pipeline 獨立：LIVE 是 iOS 端在 raw BGRA 上跑；SVR 是 server 解碼後在 BGR 上跑。共用同一 chirp anchor，色塊差異 = pipeline 差異、不是時間錯位。
-        </div>
+        <div class="strip-note" id="strip-note-multi" hidden></div>
       </div>
       <span id="frame-label" class="frame-label">
-        frame <input id="frame-input" type="number" min="0" max="0" value="0" step="1" title="Type a frame index to jump" /> / <span id="frame-total">0</span>
-        <span class="sub" id="frame-sub">t=0.000s</span>
+        <span class="primary" id="frame-primary">t=0.000s</span>
+        <span class="sub" id="frame-meta">
+          <input id="frame-input" type="number" min="0" max="0" value="0" step="1" title="Type a frame index to jump" />/<span id="frame-total">0</span>
+        </span>
+        <span class="sub" id="frame-sub"></span>
       </span>
     </div>
     <div class="tl-row">
@@ -437,9 +432,14 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .cam-stats .of {{ color:var(--sub); }}
   .path-stat {{ display:inline-flex; align-items:baseline; gap:3px;
     font-family:var(--mono); font-size:11px; letter-spacing:0.02em;
-    padding:1px 5px; border:1px solid var(--border-l); border-radius:var(--r); }}
+    padding:1px 5px; border:1px solid var(--border-l); border-radius:var(--r);
+    background:transparent; color:inherit; cursor:pointer; }}
+  .path-stat:disabled {{ cursor:not-allowed; }}
+  .path-stat:not(:disabled):hover {{ border-color:var(--ink); }}
+  .path-stat.active {{ border-color:var(--ink); background:var(--surface); }}
   .path-stat .lbl {{ font-size:9px; letter-spacing:0.12em; color:var(--sub);
     text-transform:uppercase; }}
+  .path-stat.active .lbl {{ color:var(--ink); font-weight:600; }}
   .path-stat .val {{ font-variant-numeric:tabular-nums; color:var(--ink); }}
   .path-stat .fps {{ font-variant-numeric:tabular-nums; color:var(--sub);
     font-size:10px; border-left:1px solid var(--border-l); padding-left:4px;
@@ -567,6 +567,8 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .tl-row .frame-label {{ min-width:300px; text-align:right; color:var(--ink); font-weight:500; font-size:10px;
     letter-spacing:0.02em; white-space:nowrap; font-variant-numeric:tabular-nums;
     display:inline-flex; align-items:center; justify-content:flex-end; gap:4px; }}
+  .tl-row .frame-label .primary {{ color:var(--ink); font-weight:600; font-size:13px;
+    font-variant-numeric:tabular-nums; letter-spacing:0.04em; }}
   .tl-row .frame-label .sub {{ color:var(--sub); font-weight:400; }}
   .tl-row .frame-label .det {{ color:var(--contra); font-weight:500; }}
   .tl-row .frame-label .det.no {{ color:var(--sub); }}
@@ -603,7 +605,7 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     border-right:1px solid var(--border-l); font-variant-numeric:tabular-nums; }}
   .speed-group button:last-child {{ border-right:none; }}
   .speed-group button.active {{ background:var(--ink); color:var(--surface); font-weight:500; }}
-  .scene-col .scene-toolbar {{ position:absolute; top:var(--s-2); right:var(--s-2); z-index:5;
+  .scene-col .scene-toolbar {{ position:absolute; top:var(--s-4); right:var(--s-3); z-index:5;
     display:inline-flex; align-items:stretch; border:1px solid var(--border-base);
     border-radius:var(--r); overflow:hidden; background:var(--surface); }}
   .scene-col .scene-toolbar button {{ padding:5px 12px; border:none; background:transparent; color:var(--sub);
@@ -639,7 +641,7 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     .strip-row .strip-label {{ min-width:42px; flex-basis:42px; }}
     .strip-row .strip-sublabels {{ height:24px; font-size:7px; }}
     .strip-note {{ padding-left:48px; }}
-    .scene-col .scene-toolbar {{ top:6px; right:6px; }}
+    .scene-col .scene-toolbar {{ top:10px; right:8px; }}
   }}
 """
 
@@ -647,6 +649,25 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
 def _viewer_js() -> str:
     return f"""
 (() => {{
+  // Per-card L/S pill → drives that card's rate-bar.
+  for (const card of document.querySelectorAll(".cam-card.received")) {{
+    const bar = card.querySelector(".rate-bar");
+    const fill = card.querySelector(".rate-fill");
+    if (!bar || !fill) continue;
+    for (const btn of card.querySelectorAll(".path-stat")) {{
+      btn.addEventListener("click", () => {{
+        if (btn.disabled || btn.getAttribute("aria-pressed") === "true") return;
+        const pct = btn.dataset.pct || "0";
+        const klass = btn.dataset.rateKlass || "ok";
+        for (const sib of card.querySelectorAll(".path-stat")) {{
+          sib.classList.toggle("active", sib === btn);
+          sib.setAttribute("aria-pressed", sib === btn ? "true" : "false");
+        }}
+        fill.className = "rate-fill " + klass;
+        fill.style.width = pct + "%";
+      }});
+    }}
+  }}
   const DATA = JSON.parse(document.getElementById("viewer-data").textContent);
   const SCENE = DATA.scene;
   const STATIC = DATA.static_traces || [];
@@ -691,6 +712,7 @@ def _viewer_js() -> str:
   const frameInput = document.getElementById("frame-input");
   const frameTotal = document.getElementById("frame-total");
   const frameSub = document.getElementById("frame-sub");
+  const framePrimary = document.getElementById("frame-primary");
   const modeAll = document.getElementById("mode-all");
   const modePlayback = document.getElementById("mode-playback");
   const stepFirstBtn = document.getElementById("step-first");
@@ -1028,12 +1050,9 @@ def _viewer_js() -> str:
         ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
       const triPts = svrPts.filter(p => p.t_rel_s <= cutoff && passResidualFilter(p));
       if (triPts.length) {{
-        const t0 = triPts[0].t_rel_s;
-        const ts = triPts.map(p => p.t_rel_s - t0);
         out.push({{ type: "scatter3d", x: triPts.map(p => p.x), y: triPts.map(p => p.y), z: triPts.map(p => p.z),
           mode: "lines+markers", line: {{color: ACCENT, width: 4}},
-          marker: {{size: 4, color: ts, colorscale: "Cividis", showscale: true,
-            colorbar: {{ title: {{text: "flight t (s)", font: {{size: 10}}}}, thickness: 10, len: 0.45, x: 1.02, y: 0.5, tickfont: {{size: 9}} }}}},
+          marker: {{size: 4, color: ACCENT}},
           name: `3D trajectory (svr, ${{triPts.length}} pts)` }});
         if (playback) {{
           const head = triPts[triPts.length - 1];
@@ -1226,7 +1245,7 @@ def _viewer_js() -> str:
       }}
       parts.push(`<span class="sub">${{PATH_LABEL[path]}}</span> ${{inner.join(" ")}}`);
     }}
-    parts.push(`<span class="sub">t=${{tRel.toFixed(3)}}s</span>`);
+    framePrimary.textContent = `t=${{tRel.toFixed(3)}}s`;
     frameSub.innerHTML = parts.join(" · ");
   }}
   function setFrame(f, {{ seekVideos = true }} = {{}}) {{

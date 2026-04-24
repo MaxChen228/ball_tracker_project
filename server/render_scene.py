@@ -283,72 +283,21 @@ def _build_figure(scene: Scene):
             rejected_trace_indices.append(len(traces) - 1)
 
     if scene.triangulated:
-        ts = [p["t_rel_s"] for p in scene.triangulated]
-        xs = [p["x"] for p in scene.triangulated]
-        ys = [p["y"] for p in scene.triangulated]
-        zs = [p["z"] for p in scene.triangulated]
+        pts = scene.triangulated
         traces.append(
             go.Scatter3d(
-                x=xs,
-                y=ys,
-                z=zs,
+                x=[p["x"] for p in pts],
+                y=[p["y"] for p in pts],
+                z=[p["z"] for p in pts],
                 mode="lines+markers",
                 line=dict(color=_ACCENT, width=4),
-                marker=dict(
-                    size=4,
-                    color=ts,
-                    colorscale="Cividis",
-                    showscale=True,
-                    colorbar=dict(
-                        title=dict(text="t (s)", font=dict(color=_INK, size=11)),
-                        tickfont=dict(color=_INK, size=10),
-                        outlinecolor=_BORDER_BASE,
-                        outlinewidth=1,
-                    ),
-                ),
-                name=f"3D trajectory ({len(ts)} pts)",
+                marker=dict(size=4, color=_ACCENT),
+                name=f"3D trajectory ({len(pts)} pts)",
                 hovertemplate=(
-                    "t=%{marker.color:.3f}s"
-                    "<br>x=%{x:.2f} m"
-                    "<br>y=%{y:.2f} m"
-                    "<br>z=%{z:.2f} m<extra></extra>"
+                    "x=%{x:.2f} m<br>y=%{y:.2f} m<br>z=%{z:.2f} m<extra></extra>"
                 ),
                 meta=dict(trace_kind="triangulated"),
             )
-        )
-
-    n_cams = len(scene.cameras)
-    # Break the ray count out by DetectionPath so the viewer title mirrors
-    # the pipeline pills.
-    ray_counts = {"live": 0, "server_post": 0}
-    for r in scene.rays:
-        src = getattr(r, "source", None) or "server"
-        if src == "live":
-            ray_counts["live"] += 1
-        else:
-            ray_counts["server_post"] += 1
-    path_label = [("live", "live"), ("server_post", "svr")]
-    ray_parts = [f"{ray_counts[p]} {lbl}" for p, lbl in path_label if ray_counts[p]]
-    ray_str = " / ".join(ray_parts) if ray_parts else f"{len(scene.rays)} rays"
-    subtitle = f"{n_cams} cam · {ray_str}"
-    triag_parts = []
-    if scene.triangulated:
-        triag_parts.append(f"{len(scene.triangulated)} svr")
-    if triag_parts:
-        subtitle += " · " + " + ".join(triag_parts) + " 3D"
-
-    # Chain-filter counts inline in the subtitle so tuning is visible at a
-    # glance (no need to eyeball the legend).
-    filter_counts = {"kept": 0, "rejected_flicker": 0, "rejected_jump": 0}
-    for r in scene.rays:
-        st = getattr(r, "filter_status", None) or "kept"
-        if st in filter_counts:
-            filter_counts[st] += 1
-    if filter_counts["rejected_flicker"] or filter_counts["rejected_jump"]:
-        subtitle += (
-            f" · filter kept {filter_counts['kept']} /"
-            f" flicker {filter_counts['rejected_flicker']} /"
-            f" jump {filter_counts['rejected_jump']}"
         )
 
     axis_font = dict(family="JetBrains Mono, monospace", size=11, color=_INK)
@@ -395,11 +344,6 @@ def _build_figure(scene: Scene):
             )],
         ))
     fig.update_layout(
-        title=dict(
-            text=f"Session {scene.session_id}  —  {subtitle}",
-            font=dict(family="JetBrains Mono, monospace", size=13, color=_INK),
-            x=0.02,
-        ),
         updatemenus=updatemenus,
         paper_bgcolor=_BG,
         plot_bgcolor=_BG,
@@ -416,7 +360,7 @@ def _build_figure(scene: Scene):
             ),
             uirevision="viewer-scene",
         ),
-        margin=dict(l=0, r=0, t=36, b=0),
+        margin=dict(l=0, r=0, t=8, b=0),
         legend=dict(
             itemsizing="constant",
             bgcolor=_SURFACE,

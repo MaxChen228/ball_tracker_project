@@ -528,7 +528,7 @@ def test_viewer_health_banner_rate_bar_colour_tiers():
     # 1/20 = 5% → pending tier (amber). Boundary is `< 0.30`.
     assert "rate-fill pending" in body
     # Stats now surface per-pipeline chips. server_post chip reads "1/20".
-    assert 'class="path-stat on"' in body
+    assert 'class="path-stat on' in body
     assert ">S</span><span class=\"val\">1/20<" in body
 
 
