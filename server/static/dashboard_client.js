@@ -119,8 +119,16 @@
       const r = await fetch(`/results/${encodeURIComponent(sid)}`, { cache: 'no-store' });
       if (!r.ok) return null;
       const data = await r.json();
+      // Read paths INDEPENDENTLY — `data.points` has a server-side fallback
+      // (server_post → live) baked in which silently swaps sources. Use
+      // `triangulated_by_path` so live and server_post stay strictly siblings.
+      const byPath = data.triangulated_by_path || {};
+      const sortByT = arr => (arr || []).slice().sort((a, b) => a.t_rel_s - b.t_rel_s);
       const entry = {
-        points: (data.points || []).slice().sort((a, b) => a.t_rel_s - b.t_rel_s),
+        pointsByPath: {
+          live: sortByT(byPath.live),
+          server_post: sortByT(byPath.server_post),
+        },
       };
       trajCache.set(sid, entry);
       return entry;
@@ -186,7 +194,7 @@
     const sid = activeReplaySid();
     if (!sid) return 0;
     const r = trajCache.get(sid);
-    const bounds = r ? trajectoryBounds(r.points || []) : null;
+    const bounds = r ? trajectoryBounds(pointsForEntry(r)) : null;
     if (!bounds) return 0;
     return bounds.t1 - bounds.t0;
   }
@@ -222,8 +230,23 @@
     // Fit filter state — mirrors the viewer sliders. Persists per-browser.
   const DASH_RES_KEY = 'ball_tracker_dash_residual_cm';
   const DASH_OUT_KEY = 'ball_tracker_dash_outlier_kappa';
+  const DASH_SRC_KEY = 'ball_tracker_dash_fit_source';
   let dashResidualCapM = 0.20;     // default 20 cm (matches viewer)
   let dashOutlierKappa = 3.0;      // default κ = 3.0
+  // live and server_post are strict siblings, no priority. Default
+  // server_post because it's typically more accurate; user picks
+  // explicitly via the toggle. NEVER fall back across sources.
+  let dashFitSource = 'server_post';
+  try {
+    const s = localStorage.getItem(DASH_SRC_KEY);
+    if (s === 'live' || s === 'server_post') dashFitSource = s;
+  } catch {}
+  // Single chokepoint for source resolution. If the chosen source has no
+  // points, return [] — do NOT silently switch. Caller renders nothing.
+  function pointsForEntry(entry) {
+    if (!entry || !entry.pointsByPath) return [];
+    return entry.pointsByPath[dashFitSource] || [];
+  }
   try {
     const r = parseFloat(localStorage.getItem(DASH_RES_KEY));
     if (Number.isFinite(r) && r >= 0 && r <= 200) dashResidualCapM = r / 100;
@@ -305,7 +328,7 @@
     const passResidual = p => !Number.isFinite(p.residual_m)
       || !Number.isFinite(dashResidualCapM)
       || p.residual_m <= dashResidualCapM;
-    const raw = (result.points || [])
+    const raw = pointsForEntry(result)
       .filter(passResidual)
       .slice()
       .sort((a, b) => a.t_rel_s - b.t_rel_s);
@@ -319,7 +342,7 @@
         type: 'scatter3d', mode: 'markers',
         x: raw.map(p => p.x_m), y: raw.map(p => p.y_m), z: raw.map(p => p.z_m),
         marker: { color, size: 3, opacity: 0.7 },
-        name: `${sid} · pts (${raw.length})`,
+        name: `${sid} · ${dashFitSource} pts (${raw.length})`,
         hovertemplate: `${sid}<br>t=%{customdata:.3f}s<extra></extra>`,
         customdata: raw.map(p => p.t_rel_s),
         showlegend: true,
@@ -338,7 +361,7 @@
         type: 'scatter3d', mode: 'lines',
         x: cx, y: cy, z: cz,
         line: { color, width: 4 },
-        name: `${sid} · fit (${clean.length}${dropped ? `/${raw.length}` : ''} pts)`,
+        name: `${sid} · ${dashFitSource} fit (${clean.length}${dropped ? `/${raw.length}` : ''} pts)`,
         hovertemplate: `${sid} · ballistic fit<br>(x,y,z)=(%{x:.2f}, %{y:.2f}, %{z:.2f})<extra></extra>`,
         showlegend: true,
       },
@@ -354,7 +377,7 @@
   }
 
   function replayTracesFor(sid, result, color) {
-    const raw = result.points || [];
+    const raw = pointsForEntry(result);
     const bounds = trajectoryBounds(raw);
     if (!bounds) return inspectTracesFor(sid, result, color);
     const tActive = bounds.t0 + playheadFrac * (bounds.t1 - bounds.t0);
@@ -683,6 +706,26 @@
     if (canvasMode === 'replay') updateTimeReadout();
     repaintCanvas();
   });
+
+  // --- Fit source pills (svr / live, no fallback) ---------------------------
+  const dashSrcPills = Array.from(document.querySelectorAll('.ff-src-pill'));
+  function paintDashSourcePills() {
+    for (const btn of dashSrcPills) {
+      btn.setAttribute('aria-pressed', btn.dataset.src === dashFitSource ? 'true' : 'false');
+    }
+  }
+  for (const btn of dashSrcPills) {
+    btn.addEventListener('click', () => {
+      const next = btn.dataset.src;
+      if (next !== 'live' && next !== 'server_post') return;
+      if (next === dashFitSource) return;
+      dashFitSource = next;
+      try { localStorage.setItem(DASH_SRC_KEY, dashFitSource); } catch {}
+      paintDashSourcePills();
+      repaintCanvas();
+    });
+  }
+  paintDashSourcePills();
 
   // --- Fit filter sliders ---------------------------------------------------
   const dashResSlider = document.getElementById('dash-residual-slider');
