@@ -58,6 +58,16 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
         peak_z, mean_res, duration = _point_cloud_summary(authority_points)
         mode = _legacy_mode_label(state, sid)
         path_status = _path_status_pills(result, n_ball_frames_by_path)
+        ballistic_speed_mph: float | None = None
+        ballistic_g_fit: float | None = None
+        if result is not None:
+            summary = (
+                result.ballistic_server_post
+                or result.ballistic_live
+            )
+            if summary is not None:
+                ballistic_speed_mph = summary.speed_mph
+                ballistic_g_fit = summary.g_fit
         processing_state, processing_resumable = state._processing.session_summary(sid)
 
         events.append(
@@ -93,6 +103,8 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                 # on the next successful run. Empty dict = no pending
                 # failure. Surfaced as an inline chip on the events row.
                 "server_post_errors": state._processing.errors_for(sid),
+                "ballistic_speed_mph": ballistic_speed_mph,
+                "ballistic_g_fit": ballistic_g_fit,
             }
         )
 
