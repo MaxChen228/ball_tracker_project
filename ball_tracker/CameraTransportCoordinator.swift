@@ -55,7 +55,7 @@ final class CameraTransportCoordinator: NSObject {
         let refreshModeLabel: () -> Void
     }
 
-    private let healthMonitor: ServerHealthMonitor
+    private let healthMonitor: HeartbeatScheduler
     private let dependencies: Dependencies
 
     private var uploader: ServerUploader
@@ -73,7 +73,7 @@ final class CameraTransportCoordinator: NSObject {
     private var calibrationFrameCaptureArmed: Bool = false
 
     init(
-        healthMonitor: ServerHealthMonitor,
+        healthMonitor: HeartbeatScheduler,
         uploader: ServerUploader,
         serverConfig: ServerUploader.ServerConfig,
         cameraRole: String,

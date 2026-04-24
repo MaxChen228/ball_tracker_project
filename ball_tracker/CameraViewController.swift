@@ -20,7 +20,7 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "camer
 /// MOV and does HSV detection + triangulation.
 ///
 /// Heavy side concerns live in dedicated helpers:
-/// - `ServerHealthMonitor` owns the 1 Hz heartbeat, backoff, and
+/// - `HeartbeatScheduler` owns the 1 Hz heartbeat, backoff, and
 ///   "last contact" tick timer.
 /// - `PayloadUploadQueue` owns the cached-pitch upload worker.
 final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -60,7 +60,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var settings: AppSettings!
     private var uploader: ServerUploader!
     private var serverConfig: ServerUploader.ServerConfig!
-    private var healthMonitor: ServerHealthMonitor!
+    private var healthMonitor: HeartbeatScheduler!
     private var syncCoordinator: CameraSyncCoordinator!
     private var statusPresenter: CameraStatusPresenter!
     private var recordingWorkflow: CameraRecordingWorkflow!
@@ -235,7 +235,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         wireUploadQueueCallbacks()
         recordingWorkflow.reloadPendingQueues()
 
-        healthMonitor = ServerHealthMonitor(
+        healthMonitor = HeartbeatScheduler(
             baseIntervalS: 1.0
         )
         wireHealthMonitorStatusCallbacks()

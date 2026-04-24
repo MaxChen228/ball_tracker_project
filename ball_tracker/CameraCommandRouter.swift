@@ -7,7 +7,7 @@ final class CameraCommandRouter {
     struct Dependencies {
         let getState: () -> CameraViewController.AppState
         let getCameraRole: () -> String
-        let healthMonitor: ServerHealthMonitor
+        let healthMonitor: HeartbeatScheduler
         let getCurrentSessionPaths: () -> Set<ServerUploader.DetectionPath>
         let setCurrentSessionId: (String?) -> Void
         let setCurrentSessionPaths: (Set<ServerUploader.DetectionPath>) -> Void

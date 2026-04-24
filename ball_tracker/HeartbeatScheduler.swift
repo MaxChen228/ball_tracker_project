@@ -8,7 +8,7 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "netwo
 ///
 /// Decoupled from UIKit: callers register callbacks for state changes.
 /// Every callback fires on the main queue.
-final class ServerHealthMonitor {
+final class HeartbeatScheduler {
     static let maxBackoffS: TimeInterval = 60
 
     private var baseIntervalS: TimeInterval
