@@ -139,6 +139,7 @@ struct CVScratch {
 static BTBallDetection *_Nullable detectBallCoreScratch(
     const cv::Mat &bgra,
     int hMin, int hMax, int sMin, int sMax, int vMin, int vMax,
+    double aspectMin, double fillMin,
     CVScratch &scratch,
     double offsetX, double offsetY,
     int *_Nullable outBestW, int *_Nullable outBestH
@@ -173,9 +174,9 @@ static BTBallDetection *_Nullable detectBallCoreScratch(
         int h = scratch.stats.at<int>(i, cv::CC_STAT_HEIGHT);
         if (w <= 0 || h <= 0) { continue; }
         double aspect = (double)std::min(w, h) / (double)std::max(w, h);
-        if (aspect < kMinAspect) { continue; }
+        if (aspect < aspectMin) { continue; }
         double fill = (double)area / (double)(w * h);
-        if (fill < kMinFill) { continue; }
+        if (fill < fillMin) { continue; }
         if (area > bestArea) {
             bestArea = area;
             bestLabel = i;
@@ -253,13 +254,28 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
     return [self detectInPixelBuffer:pixelBuffer
                                 hMin:kDefaultHMin hMax:kDefaultHMax
                                 sMin:kDefaultSMin sMax:kDefaultSMax
-                                vMin:kDefaultVMin vMax:kDefaultVMax];
+                                vMin:kDefaultVMin vMax:kDefaultVMax
+                           aspectMin:kMinAspect fillMin:kMinFill];
 }
 
 + (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                              hMin:(int)hMin hMax:(int)hMax
                                              sMin:(int)sMin sMax:(int)sMax
                                              vMin:(int)vMin vMax:(int)vMax
+{
+    return [self detectInPixelBuffer:pixelBuffer
+                                hMin:hMin hMax:hMax
+                                sMin:sMin sMax:sMax
+                                vMin:vMin vMax:vMax
+                           aspectMin:kMinAspect fillMin:kMinFill];
+}
+
++ (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer
+                                             hMin:(int)hMin hMax:(int)hMax
+                                             sMin:(int)sMin sMax:(int)sMax
+                                             vMin:(int)vMin vMax:(int)vMax
+                                        aspectMin:(double)aspectMin
+                                          fillMin:(double)fillMin
 {
     cv::Mat bgra;
     if (!mapBGRAPixelBuffer(pixelBuffer, bgra)) { return nil; }
@@ -274,6 +290,7 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
 #endif
     BTBallDetection *detection = detectBallCoreScratch(
         bgra, hMin, hMax, sMin, sMax, vMin, vMax,
+        aspectMin, fillMin,
         scratch, /*offsetX=*/0, /*offsetY=*/0,
         /*outBestW=*/nullptr, /*outBestH=*/nullptr
 #if BT_DETECTOR_TIMING
@@ -298,6 +315,7 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
 
 @implementation BTStatefulBallDetector {
     int _hMin, _hMax, _sMin, _sMax, _vMin, _vMax;
+    double _aspectMin, _fillMin;
     CVScratch _scratch;
 
     // ROI tracking state
@@ -313,6 +331,7 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
         _hMin = kDefaultHMin; _hMax = kDefaultHMax;
         _sMin = kDefaultSMin; _sMax = kDefaultSMax;
         _vMin = kDefaultVMin; _vMax = kDefaultVMax;
+        _aspectMin = kMinAspect; _fillMin = kMinFill;
         _hasPrev = false;
         _lastHitCenter = cv::Point2f(0, 0);
         _lastHitRadius = 0;
@@ -327,6 +346,11 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
     _hMin = hMin; _hMax = hMax;
     _sMin = sMin; _sMax = sMax;
     _vMin = vMin; _vMax = vMax;
+}
+
+- (void)setAspectMin:(double)aspectMin fillMin:(double)fillMin {
+    _aspectMin = aspectMin;
+    _fillMin = fillMin;
 }
 
 - (void)resetTracking {
@@ -376,6 +400,7 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
             int bestW = 0, bestH = 0;
             BTBallDetection *hit = detectBallCoreScratch(
                 crop, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
+                _aspectMin, _fillMin,
                 _scratch, /*offsetX=*/(double)x0, /*offsetY=*/(double)y0,
                 &bestW, &bestH
 #if BT_DETECTOR_TIMING
@@ -403,6 +428,7 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
     int bestW = 0, bestH = 0;
     BTBallDetection *hit = detectBallCoreScratch(
         bgra, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
+        _aspectMin, _fillMin,
         _scratch, /*offsetX=*/0, /*offsetY=*/0,
         &bestW, &bestH
 #if BT_DETECTOR_TIMING
