@@ -111,9 +111,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // UI containers. Preview stays full-screen; a small overlay panel exposes
     // role, link, and preview status.
-    /// Last-known capture mode from the server. Defaults to camera-only so a
-    /// network-unreachable launch still records and uploads video.
-    private var currentCaptureMode: ServerUploader.CaptureMode = .cameraOnly
     private var currentSessionPaths: Set<ServerUploader.DetectionPath> = [.serverPost]
     private var currentHSVRange: ServerUploader.HSVRangePayload = .tennis
 
@@ -161,7 +158,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             dependencies: .init(
                 getCameraRole: { [weak self] in self?.settings.cameraRole ?? "?" },
                 getCurrentSessionPaths: { [weak self] in self?.currentSessionPaths ?? [] },
-                getCurrentCaptureMode: { [weak self] in self?.currentCaptureMode ?? .cameraOnly },
                 getSyncId: { [weak self] in self?.syncCoordinator.lastSyncId },
                 getSyncAnchorTimestampS: { [weak self] in self?.syncCoordinator.lastSyncAnchorTimestampS },
                 currentCaptureTelemetry: { [weak self] fps in
