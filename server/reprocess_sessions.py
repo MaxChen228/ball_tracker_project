@@ -18,7 +18,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from detection import HSVRange
+from detection import HSVRange, ShapeGate
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pipeline import detect_pitch
 from schemas import CalibrationSnapshot, PitchPayload, SessionResult
@@ -31,6 +31,7 @@ VIDEO_DIR = DATA_DIR / "videos"
 RESULT_DIR = DATA_DIR / "results"
 CAL_DIR = DATA_DIR / "calibrations"
 HSV_PATH = DATA_DIR / "hsv_range.json"
+SHAPE_GATE_PATH = DATA_DIR / "shape_gate.json"
 
 VIDEO_EXTS = (".mov", ".mp4", ".m4v")
 
@@ -50,6 +51,18 @@ def load_hsv() -> HSVRange:
         rng.h_min, rng.h_max, rng.s_min, rng.s_max, rng.v_min, rng.v_max,
     )
     return rng
+
+
+def load_shape_gate() -> ShapeGate:
+    if not SHAPE_GATE_PATH.exists():
+        return ShapeGate.default()
+    obj = json.loads(SHAPE_GATE_PATH.read_text())
+    gate = ShapeGate(
+        aspect_min=float(obj["aspect_min"]),
+        fill_min=float(obj["fill_min"]),
+    )
+    logger.info("shape_gate aspect>=%.2f fill>=%.2f", gate.aspect_min, gate.fill_min)
+    return gate
 
 
 def load_calibrations() -> dict[str, CalibrationSnapshot]:
@@ -103,7 +116,7 @@ def select_pitch_files(args: argparse.Namespace) -> list[Path]:
     return paths
 
 
-def rerun_detection(pitch_path: Path, hsv: HSVRange, dry_run: bool) -> PitchPayload | None:
+def rerun_detection(pitch_path: Path, hsv: HSVRange, shape_gate: ShapeGate, dry_run: bool) -> PitchPayload | None:
     pitch = PitchPayload.model_validate_json(pitch_path.read_text())
     video = find_video(pitch.session_id, pitch.camera_id)
     if video is None:
@@ -131,6 +144,7 @@ def rerun_detection(pitch_path: Path, hsv: HSVRange, dry_run: bool) -> PitchPayl
         video_start_pts_s=pitch.video_start_pts_s,
         hsv_range=hsv,
         expected_radius_px=expected_radius_px,
+        shape_gate=shape_gate,
     )
     new_hits = sum(1 for f in frames if f.px is not None)
     logger.info(
@@ -197,6 +211,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     hsv = load_hsv()
+    shape_gate = load_shape_gate()
     calibrations = load_calibrations()
 
     pitch_paths = select_pitch_files(args)
@@ -208,7 +223,7 @@ def main() -> None:
     by_session: dict[str, dict[str, PitchPayload]] = {}
     for path in pitch_paths:
         logger.info("redetect %s", path.name)
-        pitch = rerun_detection(path, hsv, args.dry_run)
+        pitch = rerun_detection(path, hsv, shape_gate, args.dry_run)
         if pitch is not None:
             by_session.setdefault(pitch.session_id, {})[pitch.camera_id] = pitch
 

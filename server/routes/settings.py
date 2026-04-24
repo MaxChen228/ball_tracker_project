@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from detection import HSVRange
+from detection import HSVRange, ShapeGate
 from schemas import TrackingExposureCapMode
 
 router = APIRouter()
@@ -78,6 +78,49 @@ async def detection_hsv(request: Request):
         {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
     )
     payload = {"ok": True, "hsv_range": applied.__dict__}
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return payload
+
+
+def _validated_shape_gate(values: dict[str, object]) -> ShapeGate:
+    def _float_field(name: str, lo: float, hi: float) -> float:
+        raw = values.get(name)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"missing or invalid '{name}'")
+        if not (lo <= value <= hi):
+            raise HTTPException(status_code=400, detail=f"'{name}' out of range [{lo}, {hi}]")
+        return value
+
+    aspect_min = _float_field("aspect_min", 0.0, 1.0)
+    fill_min = _float_field("fill_min", 0.0, 1.0)
+    return ShapeGate(aspect_min=aspect_min, fill_min=fill_min)
+
+
+@router.post("/detection/shape_gate")
+async def detection_shape_gate(request: Request):
+    """Operator-tunable aspect/fill gates for HSV blob filter.
+
+    Both gates ∈ [0, 1]. Pushed to iOS over WS `settings` so the `live`
+    path applies the same thresholds as `server_post`. Body accepts JSON
+    `{"aspect_min": 0.7, "fill_min": 0.55}` or form fields.
+    """
+    from main import state, device_ws, _settings_message_for, _wants_html
+
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json()
+        gate = _validated_shape_gate(body)
+    else:
+        form = await request.form()
+        gate = _validated_shape_gate({k: form.get(k) for k in ("aspect_min", "fill_min")})
+    applied = state.set_shape_gate(gate)
+    await device_ws.broadcast(
+        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
+    )
+    payload = {"ok": True, "shape_gate": {"aspect_min": applied.aspect_min, "fill_min": applied.fill_min}}
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return payload
