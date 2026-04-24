@@ -17,6 +17,7 @@ from schemas import (
     CaptureMode,
     DetectionPath,
     Device,
+    DeviceIntrinsics,
     FramePayload,
     PitchPayload,
     Session,
@@ -45,6 +46,8 @@ from state_calibration import (
     CalibrationFrameBuffer,
     CalibrationStore,
     CALIBRATION_FRAME_TTL_S as _CALIBRATION_FRAME_TTL_S,
+    DeviceIntrinsicsStore,
+    scale_intrinsics_to,
     validate_calibration_snapshot as _validate_calibration_snapshot,
 )
 from state_devices import DeviceRegistry
@@ -186,6 +189,15 @@ class State:
         # keeps whatever calibrations were live.
         self._calibration_store = CalibrationStore(
             self._calibration_dir,
+            atomic_write=self._atomic_write,
+        )
+        # Per-device ChArUco intrinsics, keyed by identifierForVendor. Read
+        # by auto-cal as the preferred intrinsics source; written by the
+        # dashboard upload endpoint. `data/intrinsics/` lives next to
+        # `data/calibrations/` so operators see them side-by-side.
+        self._device_intrinsics_dir = data_dir / "intrinsics"
+        self._device_intrinsics = DeviceIntrinsicsStore(
+            self._device_intrinsics_dir,
             atomic_write=self._atomic_write,
         )
         self._hsv_range = self._load_hsv_range_from_disk()
@@ -407,6 +419,42 @@ class State:
     def calibrations(self) -> dict[str, CalibrationSnapshot]:
         with self._lock:
             return self._calibration_store.snapshot()
+
+    # -------- Device-keyed ChArUco intrinsics --------------------------
+    # These are DECOUPLED from CalibrationSnapshot on purpose: intrinsics
+    # are a per-sensor hardware property (stable across sessions, rig moves,
+    # A/B swaps) while CalibrationSnapshot.homography is a per-role extrinsic
+    # that changes every time someone bumps the tripod. Storing them
+    # together meant running auto-cal overwrote the good ChArUco K with
+    # whatever FOV-approximation K the auto-cal derived that moment.
+
+    def device_intrinsics(self) -> dict[str, DeviceIntrinsics]:
+        with self._lock:
+            return self._device_intrinsics.snapshot()
+
+    def get_device_intrinsics(self, device_id: str) -> DeviceIntrinsics | None:
+        with self._lock:
+            return self._device_intrinsics.get(device_id)
+
+    def set_device_intrinsics(self, rec: DeviceIntrinsics) -> None:
+        with self._lock:
+            self._device_intrinsics.set(rec)
+
+    def delete_device_intrinsics(self, device_id: str) -> bool:
+        with self._lock:
+            return self._device_intrinsics.delete(device_id)
+
+    def device_intrinsics_for_camera(self, camera_id: str) -> DeviceIntrinsics | None:
+        """Lookup the ChArUco intrinsics currently wired to a role via the
+        role→device_id mapping last heartbeated by that phone. Returns None
+        when either the phone hasn't reported its identifierForVendor yet
+        (pre-WS-upgrade client) or when no ChArUco record exists for that
+        hardware."""
+        with self._lock:
+            dev = self._device_registry.get(camera_id)
+            if dev is None or dev.device_id is None:
+                return None
+            return self._device_intrinsics.get(dev.device_id)
 
     # The following three wrappers are kept because external callers
     # (main.py, routes/sessions.py, routes/settings.py, routes/pitch.py)

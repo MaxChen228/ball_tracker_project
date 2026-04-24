@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from schemas import CalibrationSnapshot
+from schemas import CalibrationSnapshot, DeviceIntrinsics, IntrinsicsPayload
 
 logger = logging.getLogger("ball_tracker")
 
@@ -94,6 +94,100 @@ class CalibrationStore:
 
     def get(self, camera_id: str) -> CalibrationSnapshot | None:
         return self._items.get(camera_id)
+
+
+def scale_intrinsics_to(
+    intrinsics: IntrinsicsPayload,
+    *,
+    source_width_px: int,
+    source_height_px: int,
+    target_width_px: int,
+    target_height_px: int,
+) -> IntrinsicsPayload:
+    """Scale fx/fy/cx/cy from the resolution the intrinsics were solved at
+    to the resolution the current capture frame was delivered at. Distortion
+    coefficients are resolution-independent and carry over verbatim.
+
+    Aspect-ratio mismatch (e.g. 4:3 ChArUco K applied to a 16:9 crop)
+    breaks the cy scaling silently — the cropped region's principal-point
+    offset relative to full-sensor origin no longer matches. Rejected
+    upstream (> 2 % AR delta) by the caller that wires this into auto-cal.
+    """
+    if source_width_px <= 0 or source_height_px <= 0:
+        raise ValueError(f"invalid source dims {source_width_px}x{source_height_px}")
+    if target_width_px <= 0 or target_height_px <= 0:
+        raise ValueError(f"invalid target dims {target_width_px}x{target_height_px}")
+    sx = target_width_px / source_width_px
+    sy = target_height_px / source_height_px
+    return IntrinsicsPayload(
+        fx=intrinsics.fx * sx,
+        fz=intrinsics.fz * sy,
+        cx=intrinsics.cx * sx,
+        cy=intrinsics.cy * sy,
+        distortion=list(intrinsics.distortion) if intrinsics.distortion else None,
+    )
+
+
+class DeviceIntrinsicsStore:
+    """Persistent per-device ChArUco intrinsics keyed by identifierForVendor.
+
+    `data/intrinsics/{device_id}.json` — one file per physical sensor.
+    Auto-cal consults this before falling back to FOV-based approximation
+    so swapping which phone plays role A vs B does not carry the wrong
+    fx / fy / distortion over. Overwrite semantics: `set()` replaces the
+    on-disk record atomically.
+    """
+
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        atomic_write: Callable[[Path, str], None],
+    ) -> None:
+        self._directory = directory
+        self._atomic_write = atomic_write
+        self._items: dict[str, DeviceIntrinsics] = {}
+        self._directory.mkdir(parents=True, exist_ok=True)
+        self.load()
+
+    def path(self, device_id: str) -> Path:
+        return self._directory / f"{device_id}.json"
+
+    def load(self) -> None:
+        for path in sorted(self._directory.glob("*.json")):
+            try:
+                obj = json.loads(path.read_text())
+                rec = DeviceIntrinsics.model_validate(obj)
+            except Exception as e:
+                logger.warning("skip corrupt device-intrinsics file %s: %s", path.name, e)
+                continue
+            self._items[rec.device_id] = rec
+        if self._items:
+            logger.info(
+                "restored %d device intrinsics record(s) from %s",
+                len(self._items), self._directory,
+            )
+
+    def set(self, rec: DeviceIntrinsics) -> None:
+        self._items[rec.device_id] = rec
+        self._atomic_write(self.path(rec.device_id), rec.model_dump_json(indent=2))
+
+    def get(self, device_id: str) -> DeviceIntrinsics | None:
+        return self._items.get(device_id)
+
+    def delete(self, device_id: str) -> bool:
+        existed = self._items.pop(device_id, None) is not None
+        p = self.path(device_id)
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning("delete %s failed: %s", p, e)
+        return existed
+
+    def snapshot(self) -> dict[str, DeviceIntrinsics]:
+        return dict(self._items)
 
 
 class CalibrationFrameBuffer:
