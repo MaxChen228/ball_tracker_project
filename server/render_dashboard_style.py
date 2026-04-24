@@ -695,6 +695,13 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-name {{ color: var(--ink); text-transform: uppercase; font-weight: 500; }}
 .fit-filter-bar input[type="range"] {{ width: 90px; height: 14px; }}
 .fit-filter-bar .ff-readout {{ color: var(--sub); min-width: 56px; text-align: right; }}
+.fit-filter-bar .ff-src-pill {{ font: inherit; font-size: 10px; letter-spacing: 0.08em;
+                                padding: 2px 8px; background: transparent; color: var(--sub);
+                                border: 1px solid var(--border-base); border-radius: 2px;
+                                cursor: pointer; text-transform: lowercase; }}
+.fit-filter-bar .ff-src-pill[aria-pressed="true"] {{ background: var(--ink); color: var(--surface);
+                                                    border-color: var(--ink); }}
+.fit-filter-bar .ff-src-pill[disabled] {{ opacity: 0.35; cursor: not-allowed; }}
 
 /* --- Replay playback bar (bottom-center, hidden when mode=inspect) --- */
 .playback-bar {{ position: absolute; left: 50%; bottom: var(--s-4); transform: translateX(-50%);
