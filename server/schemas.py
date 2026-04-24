@@ -194,6 +194,25 @@ class TriangulatedPoint(BaseModel):
     residual_m: float
 
 
+class BallisticSummary(BaseModel):
+    """Per-path ballistic RANSAC fit summary. Populated by
+    `session_results.rebuild_result_for_session` when a path's
+    triangulated set has >= `min_inliers` points and consensus is
+    reached; otherwise absent (no silent defaults)."""
+
+    release_point_m: tuple[float, float, float]
+    release_velocity_mps: tuple[float, float, float]
+    speed_mps: float
+    speed_mph: float
+    g_fit: float
+    g_mode: str  # "free" | "pinned"
+    n_inliers: int
+    n_total: int
+    rmse_m: float
+    t0_s: float
+    inlier_indices: list[int] = Field(default_factory=list)
+
+
 class SessionResult(BaseModel):
     """One armed-session's triangulation result. Replaces the old
     `CycleResult` now that "cycle" is a per-device recording-window concept
@@ -210,6 +229,12 @@ class SessionResult(BaseModel):
     abort_reasons: dict[str, str] = Field(default_factory=dict)
     points: list[TriangulatedPoint] = []
     error: str | None = None
+    # Per-path ballistic RANSAC fit summaries. Absent when a path has
+    # fewer than min_inliers points or consensus failed — explicit
+    # absence, no defaults.
+    ballistic_by_path: dict[str, BallisticSummary] = Field(default_factory=dict)
+    ballistic_live: BallisticSummary | None = None
+    ballistic_server_post: BallisticSummary | None = None
 
 
 
