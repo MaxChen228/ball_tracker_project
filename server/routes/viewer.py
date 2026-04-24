@@ -51,7 +51,13 @@ def _scene_for_session(session_id: str):
     result = state.get(session_id)
     triangulated = result.points if result is not None else []
     triangulated_by_path = result.triangulated_by_path if result is not None else {}
-    return build_scene(session_id, scaled_pitches, triangulated, triangulated_by_path)
+    return build_scene(
+        session_id,
+        scaled_pitches,
+        triangulated,
+        triangulated_by_path,
+        session_result=result,
+    )
 
 
 def _build_viewer_health(session_id: str) -> dict[str, Any]:

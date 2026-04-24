@@ -254,6 +254,7 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             rmse_m=fit.rmse_m,
             t0_s=fit.t0_s,
             inlier_indices=list(fit.inlier_indices),
+            params=[list(row) for row in fit.params.tolist()],
         )
         result.ballistic_by_path[path_value] = summary
         if path_value == DetectionPath.live.value:
