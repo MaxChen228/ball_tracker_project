@@ -4,6 +4,19 @@ import os
 
 private let recordingLog = Logger(subsystem: "com.Max0228.ball-tracker", category: "camera.recording")
 
+/// Coordinates one armed-session recording lifecycle. Owns:
+///
+/// 1. Session-scoped bookkeeping (server-minted session id, chirp anchor,
+///    first-sample video PTS, capture telemetry) — previously hosted by
+///    the standalone `PitchRecorder` class, inlined here since the phone
+///    is a pure camera post-PR61 and there was nothing left to share.
+/// 2. The `ClipRecorder` AVAssetWriter driving the MOV archive.
+/// 3. The `PitchPayloadStore` on-disk cache + `PayloadUploadQueue`.
+///
+/// Exit path is `forceFinishIfRecording()` (triggered via
+/// `handleRemoteDisarm` on dashboard stop / session timeout); it emits a
+/// `PitchPayload`, waits for the clip to finalise, then persists + enqueues
+/// the upload and returns the VC to standby.
 final class CameraRecordingWorkflow {
     struct Dependencies {
         let getCameraRole: () -> String
@@ -28,12 +41,28 @@ final class CameraRecordingWorkflow {
     private let trackingFps: Double
     private let processingQueue: DispatchQueue
     private let payloadStore = PitchPayloadStore()
-    private let recorder = PitchRecorder()
     private(set) var payloadUploadQueue: PayloadUploadQueue
     private var clipRecorder: ClipRecorder?
 
+    // Per-cycle bookkeeping (formerly PitchRecorder).
+    private var isRecording: Bool = false
+    /// Device-local debug counter. Not a pairing key. Survives across
+    /// recordings within a single app lifetime; not persisted.
+    private var localRecordingIndex: Int = 0
+    private var cameraId: String = "A"
+    private var currentSessionId: String = ""
+    private var currentSyncId: String?
+    private var currentSyncAnchorTimestampS: Double?
+    private var currentVideoStartPtsS: Double = 0.0
+    private var currentCaptureTelemetry: ServerUploader.CaptureTelemetry?
+
     var onRecordingStarted: ((Int) -> Void)?
     var onCycleCompleted: (() -> Void)?
+
+    /// Whether a recording cycle is in flight — i.e. `startRecorderIfNeeded`
+    /// has been called and `forceFinishIfRecording()` has not yet run. Read
+    /// by CameraViewController tests and the remote-disarm handler.
+    var isRecordingActive: Bool { isRecording }
 
     init(
         uploader: ServerUploader,
@@ -46,13 +75,7 @@ final class CameraRecordingWorkflow {
         self.processingQueue = processingQueue
         self.payloadUploadQueue = PayloadUploadQueue(store: payloadStore, uploader: uploader)
 
-        recorder.setCameraId(dependencies.getCameraRole())
-        recorder.onRecordingStarted = { [weak self] idx in
-            self?.onRecordingStarted?(idx)
-        }
-        recorder.onCycleComplete = { [weak self] payload in
-            self?.handleCycleComplete(payload)
-        }
+        self.cameraId = dependencies.getCameraRole()
     }
 
     func ensurePersistenceDirectories() throws {
@@ -69,7 +92,7 @@ final class CameraRecordingWorkflow {
     }
 
     func updateCameraRole(_ cameraRole: String) {
-        recorder.setCameraId(cameraRole)
+        cameraId = cameraRole
     }
 
     func enterRecordingMode(sessionId: String?, serverTimeSyncConfirmed: Bool) {
@@ -81,7 +104,7 @@ final class CameraRecordingWorkflow {
             dependencies.hideBanner()
         }
         dependencies.startCapture(trackingFps)
-        recorder.reset()
+        resetRecordingState()
         dependencies.resetDetectionState()
         dependencies.transitionState(.recording, true, sessionId)
         dependencies.refreshUI()
@@ -90,7 +113,7 @@ final class CameraRecordingWorkflow {
     func exitRecordingToStandby(currentSessionId: String?, currentState: CameraViewController.AppState) {
         recordingLog.info("camera exit recording → standby session=\(currentSessionId ?? "nil", privacy: .public) cam=\(self.dependencies.getCameraRole(), privacy: .public) state=\(CameraViewController.stateText(currentState), privacy: .public)")
         dependencies.transitionState(.standby, false, nil)
-        recorder.reset()
+        resetRecordingState()
         dependencies.resetDetectionState()
         processingQueue.async { [weak self] in
             self?.clipRecorder?.cancel()
@@ -105,10 +128,10 @@ final class CameraRecordingWorkflow {
         recordingLog.info("camera disarm while recording session=\(currentSessionId ?? "nil", privacy: .public) cam=\(self.dependencies.getCameraRole(), privacy: .public)")
         processingQueue.async { [weak self] in
             guard let self else { return }
-            let active = self.recorder.isActive
+            let active = self.isRecording
             recordingLog.info("camera disarm while recording: recorder_active=\(active) clip_exists=\(self.clipRecorder != nil)")
             if active {
-                self.recorder.forceFinishIfRecording()
+                self.forceFinishIfRecording()
             } else {
                 recordingLog.warning("camera disarm before first frame: no payload produced — frames never reached captureOutput or clip.append failed")
                 self.clipRecorder?.cancel()
@@ -141,16 +164,65 @@ final class CameraRecordingWorkflow {
         clipRecorder?.append(sampleBuffer: sampleBuffer)
     }
 
+    /// Begin the bookkeeping side of a recording cycle. `sessionId` MUST be
+    /// the server-minted value; `timestampS` is the session-clock PTS of
+    /// the first appended sample (used by the server to reconstruct
+    /// absolute PTS per decoded frame). Idempotent — a second call while
+    /// already recording is a no-op.
     func startRecorderIfNeeded(sessionId: String, timestampS: TimeInterval) {
-        guard !recorder.isActive else { return }
-        recordingLog.info("camera first frame, starting recorder session=\(sessionId, privacy: .public) mode=camera_only video_start_pts=\(timestampS) anchor=\(self.dependencies.getSyncAnchorTimestampS() ?? .nan)")
-        recorder.startRecording(
-            sessionId: sessionId,
-            syncId: dependencies.getSyncId(),
-            anchorTimestampS: dependencies.getSyncAnchorTimestampS(),
-            videoStartPtsS: timestampS,
-            captureTelemetry: dependencies.currentCaptureTelemetry(trackingFps)
+        guard !isRecording else { return }
+
+        currentSessionId = sessionId
+        currentSyncId = dependencies.getSyncId()
+        currentSyncAnchorTimestampS = dependencies.getSyncAnchorTimestampS()
+        currentVideoStartPtsS = timestampS
+        currentCaptureTelemetry = dependencies.currentCaptureTelemetry(trackingFps)
+        isRecording = true
+        localRecordingIndex += 1
+
+        recordingLog.info("camera first frame, starting recorder session=\(sessionId, privacy: .public) mode=camera_only video_start_pts=\(timestampS) anchor=\(self.currentSyncAnchorTimestampS ?? .nan) idx=\(self.localRecordingIndex) sync_id=\(self.currentSyncId ?? "nil", privacy: .public)")
+        onRecordingStarted?(localRecordingIndex)
+    }
+
+    /// Finish the current cycle. Sole exit path — fired by the dashboard
+    /// stop (disarm command) or a server-side session timeout. Emits the
+    /// payload, finalises the clip, persists, and hands off to the upload
+    /// queue.
+    func forceFinishIfRecording() {
+        guard isRecording else { return }
+        recordingLog.info("recorder force finish session=\(self.currentSessionId, privacy: .public) cam=\(self.cameraId, privacy: .public)")
+        isRecording = false
+
+        let payload = ServerUploader.PitchPayload(
+            camera_id: cameraId,
+            session_id: currentSessionId,
+            sync_id: currentSyncId,
+            sync_anchor_timestamp_s: currentSyncAnchorTimestampS,
+            video_start_pts_s: currentVideoStartPtsS,
+            local_recording_index: localRecordingIndex,
+            paths: nil,
+            frames: [],
+            capture_telemetry: currentCaptureTelemetry
         )
+
+        currentSessionId = ""
+        currentSyncId = nil
+        currentSyncAnchorTimestampS = nil
+        currentVideoStartPtsS = 0.0
+        currentCaptureTelemetry = nil
+
+        handleCycleComplete(payload)
+    }
+
+    /// Clear transient cycle state without touching `localRecordingIndex`
+    /// (which is a run-of-app debug counter by design).
+    private func resetRecordingState() {
+        isRecording = false
+        currentSessionId = ""
+        currentSyncId = nil
+        currentSyncAnchorTimestampS = nil
+        currentVideoStartPtsS = 0.0
+        currentCaptureTelemetry = nil
     }
 
     private func handleCycleComplete(_ payload: ServerUploader.PitchPayload) {
