@@ -300,6 +300,43 @@ def _build_figure(scene: Scene):
             )
         )
 
+    # Ballistic RANSAC fit overlays (one per detection path). Dashed line
+    # to differentiate from the raw triangulated polyline; line-only (no
+    # markers) since the samples are interpolated. Colors are distinct
+    # from the per-camera ray palette + the _ACCENT triangulated line:
+    # server_post → _DEV (red), live → _CONTRA (blue). Legendgroup lets
+    # the viewer toggle both curves together.
+    _BALLISTIC_STYLES = {
+        "server_post": (_DEV, "server"),
+        "live": (_CONTRA, "live"),
+    }
+    for path_value in sorted(scene.ballistic_curves.keys()):
+        curve = scene.ballistic_curves[path_value]
+        if not curve:
+            continue
+        color, suffix = _BALLISTIC_STYLES.get(path_value, (_ACCENT, path_value))
+        xs = [pt[1] for pt in curve]
+        ys = [pt[2] for pt in curve]
+        zs = [pt[3] for pt in curve]
+        ts = [pt[0] for pt in curve]
+        traces.append(
+            go.Scatter3d(
+                x=xs, y=ys, z=zs,
+                mode="lines",
+                line=dict(color=color, width=6, dash="dash"),
+                opacity=0.85,
+                name=f"Ballistic fit · {suffix} ({len(curve)} pts)",
+                legendgroup="ballistic",
+                hovertemplate=(
+                    f"Ballistic {suffix}"
+                    "<br>t=%{customdata:.3f}s"
+                    "<br>x=%{x:.2f} m<br>y=%{y:.2f} m<br>z=%{z:.2f} m<extra></extra>"
+                ),
+                customdata=ts,
+                meta=dict(trace_kind="ballistic_fit", path=path_value),
+            )
+        )
+
     axis_font = dict(family="JetBrains Mono, monospace", size=11, color=_INK)
     axis_style = dict(
         backgroundcolor=_BG,
