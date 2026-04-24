@@ -276,6 +276,11 @@ class State:
         self._live_missing_cal: dict[str, set[str]] = {}
         # Dedupe key for the warn-once-per-cam-session log below.
         self._live_missing_cal_logged: set[tuple[str, str]] = set()
+        # Per-session latest server_post error string, keyed session_id → {cam: err}.
+        # Populated by routes/pitch.py::_run_server_detection when a stage
+        # (detect / re-record / annotate) raises, so /events surfaces the
+        # reason instead of forcing the operator to tail the log.
+        self._server_post_errors: dict[str, dict[str, str]] = {}
         # Session-level trash + processing-control metadata. Trash is
         # persisted; processing state is in-memory orchestration around
         # server-side post-processing jobs.
@@ -1643,6 +1648,26 @@ class State:
     def finish_server_post_job(self, session_id: str, camera_id: str, *, canceled: bool) -> None:
         with self._lock:
             self._processing.finish_job((camera_id, session_id), canceled=canceled)
+
+    def record_server_post_error(self, session_id: str, camera_id: str, message: str) -> None:
+        """Remember a server_post failure reason for display on /events.
+        Last write wins per (session, cam) — a retry that succeeds should
+        call clear_server_post_error for the same key."""
+        with self._lock:
+            self._server_post_errors.setdefault(session_id, {})[camera_id] = message
+
+    def clear_server_post_error(self, session_id: str, camera_id: str) -> None:
+        with self._lock:
+            cams = self._server_post_errors.get(session_id)
+            if cams is None:
+                return
+            cams.pop(camera_id, None)
+            if not cams:
+                self._server_post_errors.pop(session_id, None)
+
+    def server_post_errors_for(self, session_id: str) -> dict[str, str]:
+        with self._lock:
+            return dict(self._server_post_errors.get(session_id, {}))
 
     def cancel_processing(self, session_id: str) -> bool:
         keys = [(cam, session_id) for cam, _pitch, _clip in self._session_server_post_candidates(session_id)]

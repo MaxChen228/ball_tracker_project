@@ -89,6 +89,10 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                 # silent live path instead of tailing the server log.
                 # TODO: pill UI in render_dashboard_events.py.
                 "live_missing_calibration": state.live_missing_calibration_for(sid),
+                # Latest server_post background-task error per cam. Cleared
+                # on the next successful run. Empty dict = no pending
+                # failure. Surfaced as an inline chip on the events row.
+                "server_post_errors": state.server_post_errors_for(sid),
             }
         )
 

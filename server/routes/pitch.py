@@ -200,6 +200,9 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             pitch.session_id, pitch.camera_id,
         )
         return
+    # New run begins — wipe any stale error from the previous attempt so
+    # /events doesn't keep showing a resolved failure.
+    state.clear_server_post_error(pitch.session_id, pitch.camera_id)
     try:
         frames = await asyncio.to_thread(
             detect_pitch,
@@ -217,6 +220,9 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         return
     except Exception as exc:
         state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
+        state.record_server_post_error(
+            pitch.session_id, pitch.camera_id, f"detect_pitch: {exc}"
+        )
         logger.warning(
             "background detect_pitch failed session=%s cam=%s err=%s",
             pitch.session_id, pitch.camera_id, exc,
@@ -236,6 +242,9 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         await asyncio.to_thread(state.record, pitch)
     except Exception as exc:
         state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
+        state.record_server_post_error(
+            pitch.session_id, pitch.camera_id, f"record: {exc}"
+        )
         logger.warning(
             "background re-record failed session=%s cam=%s err=%s",
             pitch.session_id, pitch.camera_id, exc,
@@ -265,6 +274,9 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         return
     except Exception as exc:
         state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=False)
+        state.record_server_post_error(
+            pitch.session_id, pitch.camera_id, f"annotate: {exc}"
+        )
         logger.warning(
             "annotate_video failed session=%s cam=%s err=%s",
             pitch.session_id, pitch.camera_id, exc,
