@@ -32,7 +32,7 @@
       pc: pbcStr,
       d: e.duration_s != null ? Number(e.duration_s).toFixed(2) : null,
       z: e.peak_z_m != null ? Number(e.peak_z_m).toFixed(2) : null,
-      mph: e.speed_mph != null ? Number(e.speed_mph).toFixed(1) : null,
+      mph: e.ballistic_speed_mph != null ? Number(e.ballistic_speed_mph).toFixed(1) : null,
       pr: e.processing_state || '-',
       st: e.server_post_ts || null,
       b: currentEventsBucket,
@@ -76,7 +76,7 @@
     if (triangulated > 0) metaBits.push(`<span class="k">pts</span><span class="v">${triangulated}</span>`);
     if (e.duration_s != null) metaBits.push(`<span class="k">dur</span><span class="v">${Number(e.duration_s).toFixed(2)}s</span>`);
     if (e.peak_z_m != null) metaBits.push(`<span class="k">z</span><span class="v">${Number(e.peak_z_m).toFixed(2)}m</span>`);
-    if (e.speed_mph != null) metaBits.push(`<span class="k">mph</span><span class="v">${Number(e.speed_mph).toFixed(1)}</span>`);
+    if (e.ballistic_speed_mph != null) metaBits.push(`<span class="k">mph</span><span class="v">${Number(e.ballistic_speed_mph).toFixed(1)}</span>`);
     const metaHtml = metaBits.length ? `<div class="event-meta">${metaBits.join('')}</div>` : '';
     const processingState = e.processing_state ? `<span class="chip ${esc(e.processing_state)}">${esc(e.processing_state)}</span>` : '';
     const serverStatus = (e.path_status || {}).server_post || '-';
