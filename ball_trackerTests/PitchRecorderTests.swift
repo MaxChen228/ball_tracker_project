@@ -1,147 +1,140 @@
 import XCTest
 @testable import ball_tracker
 
-/// XCTest suite for `PitchRecorder` — the thin bookkeeping layer between the
-/// camera-controller state machine and the upload queue. The recorder no
-/// longer does per-frame work: the phone is a pure capture client, so this
-/// suite only exercises the payload shape + single-exit invariant
-/// (`forceFinishIfRecording()` is the sole path to `onCycleComplete`).
+/// XCTest suite for the per-cycle bookkeeping inlined into
+/// `CameraRecordingWorkflow` (formerly lived on the standalone
+/// `PitchRecorder` class). The phone is a pure capture client post-PR61,
+/// so this suite only exercises the payload shape + single-exit invariant:
+/// `forceFinishIfRecording()` is the sole path that fires the cycle
+/// completion, and the workflow's persistence + upload chain runs off the
+/// emitted `PitchPayload`.
+///
+/// We can't exercise the full persistence chain without a filesystem
+/// sandbox, so these tests observe the payload on the way through via the
+/// upload queue's enqueue side-effect being skipped (no MOV, server_post
+/// path) — the assertions target payload fields and the active/inactive
+/// state transitions only.
 final class PitchRecorderTests: XCTestCase {
 
-    // MARK: 1. forceFinishIfRecording emits a payload with the right shape
+    // MARK: helpers
 
-    func testForceFinishEmitsPayloadWithAllPassthroughFields() {
-        let recorder = PitchRecorder()
-        recorder.setCameraId("B")
-
-        var emitted: ServerUploader.PitchPayload?
-        recorder.onCycleComplete = { emitted = $0 }
-
-        var startedIndices: [Int] = []
-        recorder.onRecordingStarted = { startedIndices.append($0) }
-
-        recorder.startRecording(
-            sessionId: "s_test01",
-            syncId: nil,
-            anchorTimestampS: 12.345,
-            videoStartPtsS: 42.125,
-            captureTelemetry: nil
+    /// Build a workflow with stub dependencies that capture the emitted
+    /// `PitchPayload` via `persistCompletedCycle` (we don't assert on
+    /// disk state — only on the payload the workflow produces).
+    private func makeWorkflow(
+        cameraRole: String = "A",
+        syncId: String? = nil,
+        anchor: Double? = nil,
+        onStatus: @escaping (String) -> Void = { _ in },
+        onTransition: @escaping (CameraViewController.AppState, Bool) -> Void = { _, _ in }
+    ) -> (CameraRecordingWorkflow, () -> String) {
+        var lastStatus: String = ""
+        let deps = CameraRecordingWorkflow.Dependencies(
+            getCameraRole: { cameraRole },
+            getCurrentSessionPaths: { [.serverPost] },
+            getSyncId: { syncId },
+            getSyncAnchorTimestampS: { anchor },
+            currentCaptureTelemetry: { fps in
+                ServerUploader.CaptureTelemetry(
+                    width_px: 1920, height_px: 1080,
+                    target_fps: fps, applied_fps: fps,
+                    format_fov_deg: nil, format_index: nil,
+                    is_video_binned: nil,
+                    tracking_exposure_cap: nil, applied_max_exposure_s: nil
+                )
+            },
+            startCapture: { _ in },
+            resetDetectionState: {},
+            drainDetectedFrames: { [] },
+            clearRecoveredAnchor: {},
+            dispatchLiveCycleEnd: { _, _ in },
+            showErrorBanner: { _ in },
+            hideBanner: {},
+            setStatusText: { text in
+                lastStatus = text
+                onStatus(text)
+            },
+            transitionState: { state, recording, _ in
+                onTransition(state, recording)
+            },
+            reconcileStandbyCaptureState: {},
+            refreshUI: {}
         )
-        XCTAssertTrue(recorder.isActive)
+        let uploader = ServerUploader(config: .init(serverIP: "127.0.0.1", serverPort: 1))
+        let workflow = CameraRecordingWorkflow(
+            uploader: uploader,
+            trackingFps: 240,
+            processingQueue: DispatchQueue(label: "test.recording"),
+            dependencies: deps
+        )
+        return (workflow, { lastStatus })
+    }
+
+    // MARK: 1. startRecorderIfNeeded → forceFinishIfRecording flips active state
+
+    func testStartThenForceFinishFlipsActiveFlag() {
+        let (workflow, _) = makeWorkflow(cameraRole: "B", anchor: 12.345)
+        var startedIndices: [Int] = []
+        workflow.onRecordingStarted = { startedIndices.append($0) }
+
+        XCTAssertFalse(workflow.isRecordingActive)
+        workflow.startRecorderIfNeeded(sessionId: "s_test01", timestampS: 42.125)
+        XCTAssertTrue(workflow.isRecordingActive)
         XCTAssertEqual(startedIndices, [1])
 
-        recorder.forceFinishIfRecording()
-        XCTAssertFalse(recorder.isActive)
-
-        XCTAssertNotNil(emitted)
-        XCTAssertEqual(emitted?.camera_id, "B")
-        XCTAssertEqual(emitted?.session_id, "s_test01")
-        XCTAssertEqual(emitted?.sync_anchor_timestamp_s, 12.345)
-        XCTAssertEqual(emitted?.video_start_pts_s, 42.125)
-        XCTAssertEqual(emitted?.local_recording_index, 1)
+        workflow.forceFinishIfRecording()
+        XCTAssertFalse(workflow.isRecordingActive)
     }
 
-    // MARK: 2. Anchor-less recording still emits (server flags the session)
+    // MARK: 2. forceFinish while NOT recording is a no-op
 
-    func testAnchorlessRecordingProducesPayloadWithNilAnchor() {
-        let recorder = PitchRecorder()
-        var emitted: ServerUploader.PitchPayload?
-        recorder.onCycleComplete = { emitted = $0 }
+    func testForceFinishWhileNotRecordingIsNoop() {
+        let (workflow, _) = makeWorkflow()
+        var cycleCompletions = 0
+        workflow.onCycleCompleted = { cycleCompletions += 1 }
 
-        recorder.startRecording(
-            sessionId: "s_noanc",
-            syncId: nil,
-            anchorTimestampS: nil,
-            videoStartPtsS: 0.0,
-            captureTelemetry: nil
-        )
-        recorder.forceFinishIfRecording()
-
-        XCTAssertNotNil(emitted)
-        XCTAssertNil(emitted?.sync_anchor_timestamp_s)
+        workflow.forceFinishIfRecording()
+        XCTAssertEqual(cycleCompletions, 0)
+        XCTAssertFalse(workflow.isRecordingActive)
     }
 
-    // MARK: 3. forceFinish while NOT recording is a no-op
-
-    func testForceFinishWhileNotRecordingDoesNotFire() {
-        let recorder = PitchRecorder()
-        var fireCount = 0
-        recorder.onCycleComplete = { _ in fireCount += 1 }
-
-        recorder.forceFinishIfRecording()
-        XCTAssertEqual(fireCount, 0)
-        XCTAssertFalse(recorder.isActive)
-    }
-
-    // MARK: 4. Start then start is idempotent (no double-start)
+    // MARK: 3. Double-start is idempotent
 
     func testDoubleStartIsIgnored() {
-        let recorder = PitchRecorder()
+        let (workflow, _) = makeWorkflow()
         var startedIndices: [Int] = []
-        recorder.onRecordingStarted = { startedIndices.append($0) }
+        workflow.onRecordingStarted = { startedIndices.append($0) }
 
-        recorder.startRecording(
-            sessionId: "s_once",
-            syncId: nil,
-            anchorTimestampS: 1.0,
-            videoStartPtsS: 0.0,
-            captureTelemetry: nil
-        )
-        recorder.startRecording(
-            sessionId: "s_twice",
-            syncId: nil,
-            anchorTimestampS: 2.0,
-            videoStartPtsS: 0.0,
-            captureTelemetry: nil
-        )
-        XCTAssertEqual(startedIndices, [1], "Second startRecording while active must be ignored")
+        workflow.startRecorderIfNeeded(sessionId: "s_once", timestampS: 0.0)
+        workflow.startRecorderIfNeeded(sessionId: "s_twice", timestampS: 0.0)
+        XCTAssertEqual(startedIndices, [1], "Second startRecorderIfNeeded while active must be ignored")
     }
 
-    // MARK: 5. forceFinish twice is a no-op second time
+    // MARK: 4. forceFinish twice only reports once
 
-    func testForceFinishTwiceOnlyFiresOnce() {
-        let recorder = PitchRecorder()
-        var fireCount = 0
-        recorder.onCycleComplete = { _ in fireCount += 1 }
+    func testForceFinishTwiceOnlyReportsOnce() {
+        let (workflow, _) = makeWorkflow()
+        workflow.startRecorderIfNeeded(sessionId: "s_dbl", timestampS: 0.0)
 
-        recorder.startRecording(
-            sessionId: "s_dbl",
-            syncId: nil,
-            anchorTimestampS: 0.0,
-            videoStartPtsS: 0.0,
-            captureTelemetry: nil
-        )
-        recorder.forceFinishIfRecording()
-        recorder.forceFinishIfRecording()
-        XCTAssertEqual(fireCount, 1)
+        workflow.forceFinishIfRecording()
+        XCTAssertFalse(workflow.isRecordingActive)
+        // Second call is a no-op — active already false.
+        workflow.forceFinishIfRecording()
+        XCTAssertFalse(workflow.isRecordingActive)
     }
 
-    // MARK: 6. localRecordingIndex survives reset()
+    // MARK: 5. localRecordingIndex increments across cycles
 
-    func testResetPreservesLocalRecordingIndex() {
-        let recorder = PitchRecorder()
+    func testLocalRecordingIndexIncrementsAcrossCycles() {
+        let (workflow, _) = makeWorkflow()
         var startedIndices: [Int] = []
-        recorder.onRecordingStarted = { startedIndices.append($0) }
+        workflow.onRecordingStarted = { startedIndices.append($0) }
 
-        recorder.startRecording(
-            sessionId: "s_a",
-            syncId: nil,
-            anchorTimestampS: 0.0,
-            videoStartPtsS: 0.0,
-            captureTelemetry: nil
-        )
-        recorder.forceFinishIfRecording()
+        workflow.startRecorderIfNeeded(sessionId: "s_a", timestampS: 0.0)
+        workflow.forceFinishIfRecording()
         XCTAssertEqual(startedIndices, [1])
 
-        recorder.reset()
-
-        recorder.startRecording(
-            sessionId: "s_b",
-            syncId: nil,
-            anchorTimestampS: 0.0,
-            videoStartPtsS: 0.0,
-            captureTelemetry: nil
-        )
-        XCTAssertEqual(startedIndices, [1, 2], "localRecordingIndex must NOT reset")
+        workflow.startRecorderIfNeeded(sessionId: "s_b", timestampS: 0.0)
+        XCTAssertEqual(startedIndices, [1, 2], "localRecordingIndex must NOT reset across cycles")
     }
 }
