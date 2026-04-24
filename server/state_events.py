@@ -84,6 +84,11 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                 "trashed": trashed,
                 "processing_state": processing_state,
                 "processing_resumable": processing_resumable,
+                # Cams whose live frames arrived without a calibration on
+                # file — dashboard surfaces this so the operator can spot a
+                # silent live path instead of tailing the server log.
+                # TODO: pill UI in render_dashboard_events.py.
+                "live_missing_calibration": state.live_missing_calibration_for(sid),
             }
         )
 
