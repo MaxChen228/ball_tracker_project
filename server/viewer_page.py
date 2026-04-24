@@ -221,6 +221,10 @@ def render_viewer_html(
         <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
         <div class="divider" aria-hidden="true"></div>
         <button id="fit-toggle" type="button" aria-pressed="false" title="Fit a ballistic trajectory (gravity = 9.81 m/s² pinned) through the filtered points and show launch kinematics.">Fit</button>
+        <span class="fit-source-group" role="group" aria-label="Fit source pipeline">
+          <button id="fit-src-svr" class="fit-src-pill" type="button" data-src="server_post" aria-pressed="true" title="Fit using server_post triangulated points">svr</button>
+          <button id="fit-src-live" class="fit-src-pill" type="button" data-src="live" aria-pressed="false" title="Fit using live triangulated points">live</button>
+        </span>
       </div>
       <div id="fit-info" class="fit-info" hidden aria-live="polite"></div>
     </div>
@@ -254,10 +258,10 @@ def render_viewer_html(
               <input type="range" id="residual-filter-slider" min="0" max="200" step="1" value="200" aria-label="Residual filter threshold (cm)">
               <span id="residual-filter-readout" class="readout">off</span>
             </span>
-            <span class="layer-group" data-layer="velocity" id="velocity-filter-group" title="Forward-greedy velocity cap: drop any triangulated point whose inferred speed from the previously kept point exceeds this cap. Survives the residual check but teleports — e.g. a window-reflection peak that briefly aligns with the ball ray — get pruned here.">
-              <span class="layer-name">Velocity</span>
-              <input type="range" id="velocity-filter-slider" min="1" max="60" step="1" value="60" aria-label="Velocity cap (m/s)">
-              <span id="velocity-filter-readout" class="readout">off</span>
+            <span class="layer-group" data-layer="fitres" id="fitres-filter-group" title="Spatial isolation outlier rejection. For each triangulated point, compute the mean distance to its 3 nearest neighbours in 3D — cluster points sit a few cm apart, isolated outliers sit ≥ 1 m away. Reject points whose isolation > median + κ·MAD. κ = slider value; off = no rejection. Does NOT fit a curve first, so it survives the LSQ leverage problem where one outlier warps the fit.">
+              <span class="layer-name">Outlier</span>
+              <input type="range" id="fitres-filter-slider" min="10" max="60" step="1" value="60" aria-label="Outlier rejection (κ · MAD; 60 = off)">
+              <span id="fitres-filter-readout" class="readout">off</span>
             </span>
           </span>
         </div>
@@ -572,7 +576,7 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     padding:3px 8px; height:26px; box-sizing:border-box;
     border:1px solid var(--border-base); border-radius:var(--r); background:var(--surface); }}
   .layer-toggles .layer-group[data-layer="residual"],
-  .layer-toggles .layer-group[data-layer="velocity"] {{ border-color:var(--ink-light, #7a756c); }}
+  .layer-toggles .layer-group[data-layer="fitres"] {{ border-color:var(--ink-light, #7a756c); }}
   .layer-toggles .layer-name {{ font-size:10px; letter-spacing:0.1em; color:var(--ink); text-transform:uppercase;
     display:inline-flex; align-items:center; gap:4px; font-weight:500; }}
   .layer-toggles .layer-name .swatch {{ width:8px; height:8px; display:inline-block; border:1px solid rgba(0,0,0,0.12); }}
@@ -657,7 +661,8 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .speed-group button:last-child {{ border-right:none; }}
   .speed-group button.active {{ background:var(--ink); color:var(--surface); font-weight:500; }}
   .scene-col .scene-toolbar {{ position:absolute; top:var(--s-4); right:var(--s-3); z-index:5;
-    display:inline-flex; align-items:stretch; border:1px solid var(--border-base);
+    display:inline-flex; align-items:stretch; flex-wrap:nowrap; white-space:nowrap;
+    border:1px solid var(--border-base);
     border-radius:var(--r); overflow:hidden; background:var(--surface); }}
   .scene-col .scene-toolbar button {{ padding:5px 12px; border:none; background:transparent; color:var(--sub);
     cursor:pointer; min-width:auto; border-radius:0; font:inherit; font-size:11px; letter-spacing:0.1em;
@@ -666,6 +671,12 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .scene-col .scene-toolbar button[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); font-weight:500; }}
   .scene-col .scene-toolbar .reset {{ font-size:14px; padding:4px 12px; }}
   .scene-col .scene-toolbar .divider {{ width:1px; background:var(--border-base); align-self:stretch; }}
+  .scene-col .scene-toolbar .fit-source-group {{ display:inline-flex; align-items:stretch;
+    border-left:1px solid var(--border-base); }}
+  .scene-col .scene-toolbar .fit-src-pill {{ padding:5px 8px; font-size:10px;
+    text-transform:lowercase; letter-spacing:0.05em; }}
+  .scene-col .scene-toolbar .fit-src-pill + .fit-src-pill {{ border-left:1px solid var(--border-base); }}
+  .scene-col .scene-toolbar .fit-src-pill[disabled] {{ opacity:0.35; cursor:not-allowed; }}
   .scene-col .fit-info {{ position:absolute; top:46px; right:var(--s-3); z-index:4;
     background:var(--surface); border:1px solid var(--border-base); border-radius:var(--r);
     padding:8px 12px; font:inherit; font-size:11px; line-height:1.55; color:var(--ink);
@@ -862,44 +873,70 @@ def _viewer_js() -> str:
   // --- Triangulation filters ---
   // Residual: drop points whose ray-midpoint gap exceeds this cap (m).
   //   Real ball pairs sit sub-cm; static-target false pairs blow up to m.
-  // Velocity: forward-greedy cap on inferred speed from the previously
-  //   kept point. Catches the corner case where two moving false targets
-  //   happen to triangulate to a low-residual point that's physically
-  //   impossible given the previous kept location.
-  // Both default "off" (Infinity) and persist to localStorage.
+  // FitRes: RANSAC-lite. Run ballistic LSQ on residual-survivors, drop
+  //   any point whose 3D distance to the fit curve > k × RMSE, then
+  //   re-fit once. k is the slider value. Catches outliers that residual
+  //   missed (e.g. two moving false targets triangulating with low gap
+  //   but to a physically impossible location). Symmetric in time so
+  //   head/tail are not privileged.
+  // Both default "off" (residual = Infinity, fitres k = Infinity) and
+  // persist to localStorage.
   const RESIDUAL_FILTER_KEY = "ball_tracker_viewer_residual_cap_cm";
-  const VELOCITY_FILTER_KEY = "ball_tracker_viewer_velocity_cap_mps";
+  const FITRES_FILTER_KEY = "ball_tracker_viewer_fitres_kappa";
   let residualCapM = Infinity;
-  let velocityCapMps = Infinity;
+  let fitResKappa = Infinity;
   let fitMode = false;
+  // Which triangulation pipeline to fit. Explicit user choice — no fallback.
+  const FIT_SOURCE_KEY = "ball_tracker_viewer_fit_source";
+  let fitSource = "server_post";
+  try {{
+    const saved = localStorage.getItem(FIT_SOURCE_KEY);
+    if (saved === "live" || saved === "server_post") fitSource = saved;
+  }} catch (_e) {{ /* ignore */ }}
   try {{
     const saved = parseFloat(localStorage.getItem(RESIDUAL_FILTER_KEY));
     if (Number.isFinite(saved) && saved >= 0 && saved < 200) residualCapM = saved / 100;
   }} catch (_e) {{ /* ignore */ }}
   try {{
-    const saved = parseFloat(localStorage.getItem(VELOCITY_FILTER_KEY));
-    if (Number.isFinite(saved) && saved >= 1 && saved < 60) velocityCapMps = saved;
+    const saved = parseFloat(localStorage.getItem(FITRES_FILTER_KEY));
+    if (Number.isFinite(saved) && saved >= 1.0 && saved < 6.0) fitResKappa = saved;
   }} catch (_e) {{ /* ignore */ }}
   function passResidualFilter(p) {{
     if (!Number.isFinite(residualCapM)) return true;
     const r = (p && typeof p.residual_m === "number") ? p.residual_m : 0;
     return r <= residualCapM;
   }}
-  // Apply the velocity cap AFTER residual — points are assumed already
-  // residual-filtered and sorted by `t_rel_s`. Clamp dt to 0.5 ms so two
-  // near-simultaneous paired points don't blow v → Infinity.
-  function applyVelocityFilter(pts) {{
-    if (!Number.isFinite(velocityCapMps) || !pts.length) return pts;
-    const out = [pts[0]];
-    let last = pts[0];
-    for (let i = 1; i < pts.length; i++) {{
-      const p = pts[i];
-      const dt = Math.max(p.t_rel_s - last.t_rel_s, 0.0005);
-      const dx = p.x - last.x, dy = p.y - last.y, dz = p.z - last.z;
-      const v = Math.sqrt(dx*dx + dy*dy + dz*dz) / dt;
-      if (v <= velocityCapMps) {{ out.push(p); last = p; }}
-    }}
-    return out;
+  // Spatial isolation outlier rejection. **Does NOT fit first** — a single
+  // high-leverage outlier warps LSQ so that the bad point ends up closest
+  // to the warped curve and good cluster points look like outliers
+  // (inversion). Instead: for each point compute mean distance to its k=3
+  // nearest neighbours in 3D; cluster points sit ~ inter-frame spacing
+  // apart (5-20 cm), an isolated outlier sits ≥ 1 m away. Reject any point
+  // whose isolation > median + κ · 1.4826 · MAD (κ = slider value, MAD →
+  // σ-equivalent). MAD is robust to ~50% outliers; the 1e-3 floor stops a
+  // tightly clustered set from collapsing the cutoff to zero.
+  function applyFitResidualFilter(pts) {{
+    if (!Number.isFinite(fitResKappa) || pts.length < 5) return pts;
+    const K_NN = 3;
+    const isol = pts.map((p, i) => {{
+      const ds = [];
+      for (let j = 0; j < pts.length; j++) {{
+        if (j === i) continue;
+        const dx = pts[j].x - p.x, dy = pts[j].y - p.y, dz = pts[j].z - p.z;
+        ds.push(Math.sqrt(dx*dx + dy*dy + dz*dz));
+      }}
+      ds.sort((a, b) => a - b);
+      const k = Math.min(K_NN, ds.length);
+      let s = 0; for (let m = 0; m < k; m++) s += ds[m];
+      return s / k;
+    }});
+    const sorted = isol.slice().sort((a, b) => a - b);
+    const med = sorted[Math.floor(sorted.length / 2)];
+    const absDev = isol.map(d => Math.abs(d - med)).sort((a, b) => a - b);
+    const mad = Math.max(absDev[Math.floor(absDev.length / 2)], 1e-3);
+    const cutoffM = med + fitResKappa * 1.4826 * mad;
+    const survivors = pts.filter((_, i) => isol[i] <= cutoffM);
+    return (survivors.length >= 4 && survivors.length < pts.length) ? survivors : pts;
   }}
   // Run both filters on a path's full point list; returns the filtered,
   // time-sorted array. Caller passes cutoff for playback clipping.
@@ -909,7 +946,7 @@ def _viewer_js() -> str:
       .filter(p => p.t_rel_s <= cutoff && passResidualFilter(p))
       .slice()
       .sort((a, b) => a.t_rel_s - b.t_rel_s);
-    return applyVelocityFilter(residualKept);
+    return applyFitResidualFilter(residualKept);
   }}
   function hasPathForLayer(layer, path) {{
     if (layer === "traj") return HAS_TRAJ_PATH[path];
@@ -1100,13 +1137,15 @@ def _viewer_js() -> str:
     // on the analytic result. The regular layer state is not mutated, so
     // toggling Fit off restores the previous view byte-for-byte. ---
     if (fitMode) {{
-      const svrRaw = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
-        ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
-      const liveRaw = TRAJ_BY_PATH.live || [];
-      const svrPts = filteredTrajectory(svrRaw, Infinity);
-      const livePts = filteredTrajectory(liveRaw, Infinity);
-      const source = svrPts.length >= 4 ? svrPts : (livePts.length >= 4 ? livePts : []);
-      const sourceLabel = source === svrPts ? "server_post" : "live";
+      let raw;
+      if (fitSource === "live") {{
+        raw = TRAJ_BY_PATH.live || [];
+      }} else {{
+        raw = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
+          ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
+      }}
+      const source = filteredTrajectory(raw, Infinity);
+      const sourceLabel = fitSource;
       if (source.length >= 4) {{
         const fit = ballisticFit(source);
         const t0 = source[0].t_rel_s;
@@ -1339,7 +1378,7 @@ def _viewer_js() -> str:
     // no spin, pure gravity) is probably wrong — or filters still leak
     // outliers. Tell the user instead of silently fitting garbage.
     if (fit.rmse_m > 0.10) {{
-      html += `<div class="fit-warn">RMSE ${{(fit.rmse_m*100).toFixed(1)}} cm — drag/spin present OR outliers leaked past filters. Tighten Residual / Velocity and retry.</div>`;
+      html += `<div class="fit-warn">RMSE ${{(fit.rmse_m*100).toFixed(1)}} cm — drag/spin present OR outliers leaked past filters. Tighten Residual / Outlier and retry.</div>`;
     }}
     box.hidden = false;
     box.innerHTML = html;
@@ -1822,31 +1861,32 @@ def _viewer_js() -> str:
       scheduleSceneDraw();
     }});
   }}
-  // --- Velocity filter slider ---
-  const velocitySlider = document.getElementById("velocity-filter-slider");
-  const velocityReadout = document.getElementById("velocity-filter-readout");
-  function paintVelocityReadout() {{
-    if (!velocityReadout) return;
-    if (!Number.isFinite(velocityCapMps)) velocityReadout.textContent = "off";
-    else velocityReadout.textContent = `≤ ${{velocityCapMps.toFixed(0)}} m/s`;
+  // --- Fit-residual filter slider (k × MAD; slider is 10–60 → 1.0–6.0) ---
+  const fitresSlider = document.getElementById("fitres-filter-slider");
+  const fitresReadout = document.getElementById("fitres-filter-readout");
+  function paintFitresReadout() {{
+    if (!fitresReadout) return;
+    if (!Number.isFinite(fitResKappa)) fitresReadout.textContent = "off";
+    else fitresReadout.textContent = `κ ≤ ${{fitResKappa.toFixed(1)}}`;
   }}
-  if (velocitySlider) {{
-    if (Number.isFinite(velocityCapMps)) {{
-      velocitySlider.value = String(Math.min(60, Math.round(velocityCapMps)));
+  if (fitresSlider) {{
+    if (Number.isFinite(fitResKappa)) {{
+      fitresSlider.value = String(Math.round(fitResKappa * 10));
     }} else {{
-      velocitySlider.value = "60";
+      fitresSlider.value = "60";
     }}
-    paintVelocityReadout();
-    velocitySlider.addEventListener("input", () => {{
-      const mps = parseFloat(velocitySlider.value);
-      if (!Number.isFinite(mps) || mps >= 60) {{
-        velocityCapMps = Infinity;
-        try {{ localStorage.removeItem(VELOCITY_FILTER_KEY); }} catch (_e) {{}}
+    paintFitresReadout();
+    fitresSlider.addEventListener("input", () => {{
+      const raw = parseFloat(fitresSlider.value);
+      const k = raw / 10.0;
+      if (!Number.isFinite(k) || k >= 6.0) {{
+        fitResKappa = Infinity;
+        try {{ localStorage.removeItem(FITRES_FILTER_KEY); }} catch (_e) {{}}
       }} else {{
-        velocityCapMps = mps;
-        try {{ localStorage.setItem(VELOCITY_FILTER_KEY, String(mps)); }} catch (_e) {{}}
+        fitResKappa = k;
+        try {{ localStorage.setItem(FITRES_FILTER_KEY, String(k)); }} catch (_e) {{}}
       }}
-      paintVelocityReadout();
+      paintFitresReadout();
       scheduleSceneDraw();
     }});
   }}
@@ -1859,6 +1899,26 @@ def _viewer_js() -> str:
       scheduleSceneDraw();
     }});
   }}
+  // --- Fit source selector (svr / live) ---
+  const fitSrcPills = Array.from(document.querySelectorAll(".fit-src-pill"));
+  function paintFitSourcePills() {{
+    for (const btn of fitSrcPills) {{
+      const src = btn.dataset.src;
+      const has = src === "live" ? HAS_TRAJ_PATH.live : HAS_TRAJ_PATH.server_post;
+      btn.disabled = !has;
+      btn.setAttribute("aria-pressed", (fitSource === src) ? "true" : "false");
+    }}
+  }}
+  for (const btn of fitSrcPills) {{
+    btn.addEventListener("click", () => {{
+      if (btn.disabled) return;
+      fitSource = btn.dataset.src;
+      try {{ localStorage.setItem(FIT_SOURCE_KEY, fitSource); }} catch (_e) {{}}
+      paintFitSourcePills();
+      if (fitMode) scheduleSceneDraw();
+    }});
+  }}
+  paintFitSourcePills();
   layerToggles.addEventListener("click", (e) => {{
     const pill = e.target.closest(".layer-pill");
     if (!pill || pill.hidden || pill.disabled) return;
