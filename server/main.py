@@ -633,6 +633,23 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 telem = msg.get("sync_telemetry")
                 if isinstance(telem, dict):
                     state.record_sync_telemetry(camera_id, telem)
+                # SSE: broadcast heartbeat-derived fields (battery, ws
+                # latency, last_seen) so the dashboard can update the
+                # Devices card without waiting for the 5 s /status fallback.
+                _ws_snap = device_ws.snapshot().get(camera_id)
+                _now = state._time_fn()
+                await sse_hub.broadcast(
+                    "device_heartbeat",
+                    {
+                        "cam": camera_id,
+                        "battery_level": battery_level,
+                        "battery_state": battery_state,
+                        "ws_latency_ms": _ws_snap.last_latency_ms if _ws_snap is not None else None,
+                        "last_seen_at": _ws_snap.last_seen_at if _ws_snap is not None else _now,
+                        "time_synced": (reported_sync_id is not None and reported_anchor is not None),
+                        "time_sync_id": reported_sync_id,
+                    },
+                )
                 continue
             if mtype == "frame":
                 device_ws.note_seen(camera_id)

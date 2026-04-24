@@ -68,11 +68,28 @@
 
   const _origRenderEvents = renderEvents;
   renderEvents = function(events) {
-    const key = JSON.stringify((events || []).map(e => ({
-      id: e.session_id, status: e.status, n: e.n_triangulated,
-      p: e.processing_state,
-      srv: (e.path_status || {}).server_post || '-',
-    })));
+    // Full hash — every field renderEvents reads must contribute,
+    // otherwise the skip-path leaves the row stale (e.g. n_ball_frames_
+    // by_path flipping from empty to full on a live-session complete
+    // would've been invisible under the previous 4-key digest).
+    const key = JSON.stringify((events || []).map(e => {
+      const pbc = e.n_ball_frames_by_path || {};
+      const pbcStr = Object.keys(pbc).sort().map(p => {
+        const cams = pbc[p] || {};
+        return p + ':' + Object.keys(cams).sort().map(c => c + '=' + cams[c]).join(',');
+      }).join('|');
+      const ps = e.path_status || {};
+      return {
+        id: e.session_id, status: e.status, n: e.n_triangulated,
+        p: e.processing_state,
+        pl: ps.live || '-', srv: ps.server_post || '-',
+        st: e.server_post_ts || null,
+        pc: pbcStr,
+        d: e.duration_s != null ? Number(e.duration_s).toFixed(2) : null,
+        z: e.peak_z_m != null ? Number(e.peak_z_m).toFixed(2) : null,
+        mph: e.speed_mph != null ? Number(e.speed_mph).toFixed(1) : null,
+      };
+    }));
     if (key === _lastEvKey) return;
     _lastEvKey = key;
     _origRenderEvents(events);
