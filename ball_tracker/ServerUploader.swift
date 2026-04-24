@@ -162,18 +162,6 @@ final class ServerUploader: @unchecked Sendable {
         let calibration_frame_requested: Bool?
     }
 
-    /// iOS-side capture-mode enum. Kept string-valued so it round-trips
-    /// directly through HeartbeatResponse without a custom decoder.
-    enum CaptureMode: String, Codable {
-        case cameraOnly = "camera_only"
-
-        var displayLabel: String {
-            switch self {
-            case .cameraOnly: return "Camera-only"
-            }
-        }
-    }
-
     enum TrackingExposureCapMode: String, Codable {
         case frameDuration = "frame_duration"
         case shutter500 = "shutter_500"
