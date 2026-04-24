@@ -295,6 +295,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// frame so the writer uses the real pixel-buffer dimensions.
     func enterRecordingMode() {
         guard state == .standby else { return }
+        // 240 fps capture / 60 Hz detection. `live_pairing` server-side
+        // can't consume 240 Hz anyway, and the ~12-18 ms HSV pipeline
+        // would heat the phone. Stride 4 picks 1-of-4 frames → 60 Hz,
+        // which stays above the server's 8 ms A/B pair-window budget.
+        // ClipRecorder is on a separate sink so the MOV still captures
+        // every sample regardless of stride.
+        detectionPool.setFrameStride(4)
         recordingWorkflow.enterRecordingMode(
             sessionId: currentSessionId,
             serverTimeSyncConfirmed: serverTimeSyncConfirmed
@@ -317,6 +324,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             currentSessionId: currentSessionId,
             currentState: state
         )
+        // Back to 60 fps capture in standby/timeSyncWaiting — no need to
+        // stride, every frame can hit detection if the path ever needs it.
+        detectionPool.setFrameStride(1)
     }
 
     private func setAppliedCaptureTelemetry(
@@ -370,6 +380,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func applyServerCaptureHeight(_ newHeight: Int) {
+        // Guard against resolution swap during an armed recording — the
+        // ~400 ms format reconfigure tears down the running session, drops
+        // every in-flight frame, and leaves ClipRecorder holding a mismatched
+        // dims snapshot. Reject with an explicit log (no silent fallback,
+        // no defer queue — if the operator retries after disarm it'll apply
+        // then via the next server push / heartbeat tick).
+        guard state == .standby else {
+            log.warning("ignore capture_height push newHeight=\(newHeight) during state=\(Self.stateText(self.state), privacy: .public) — resolution swap allowed only in .standby")
+            return
+        }
         captureRuntime.applyServerCaptureHeight(newHeight, bounds: view.bounds)
     }
 
