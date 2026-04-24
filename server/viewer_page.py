@@ -220,7 +220,7 @@ def render_viewer_html(
         <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
         <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
         <div class="divider" aria-hidden="true"></div>
-        <button id="fit-toggle" type="button" aria-pressed="false" title="Fit a per-axis cubic polynomial (no physical model) through the filtered points and show launch kinematics. Drag, Magnus lift, spin all show up naturally because nothing is pinned.">Fit</button>
+        <button id="fit-toggle" type="button" aria-pressed="false" title="Fit a ballistic trajectory (gravity = 9.81 m/s² pinned) through the filtered points and show launch kinematics.">Fit</button>
         <span class="fit-source-group" role="group" aria-label="Fit source pipeline">
           <button id="fit-src-svr" class="fit-src-pill" type="button" data-src="server_post" aria-pressed="true" title="Fit using server_post triangulated points">svr</button>
           <button id="fit-src-live" class="fit-src-pill" type="button" data-src="live" aria-pressed="false" title="Fit using live triangulated points">live</button>
@@ -1175,7 +1175,7 @@ def _viewer_js() -> str:
         }}
         out.push({{ type: "scatter3d", x: curveX, y: curveY, z: curveZ,
           mode: "lines", line: {{color: "#A7372A", width: 5}},
-          name: `Cubic fit (${{sourceLabel}}, ${{source.length}} pts, RMSE ${{(fit.rmse_m*100).toFixed(1)}} cm)` }});
+          name: `Ballistic fit (${{sourceLabel}}, ${{source.length}} pts, RMSE ${{(fit.rmse_m*100).toFixed(1)}} cm)` }});
         const renderPts = source.filter(p => p.t_rel_s <= (playback ? cutoff : Infinity));
         out.push({{ type: "scatter3d",
           x: renderPts.map(p => p.x), y: renderPts.map(p => p.y), z: renderPts.map(p => p.z),
@@ -1293,136 +1293,71 @@ def _viewer_js() -> str:
     return out;
   }}
 
-  // Per-axis cubic LSQ fit: p(τ) = c₀ + c₁τ + c₂τ² + c₃τ³, no physical
-  // model. Coefficients are free per axis, so drag, Magnus lift, spin and
-  // any other unmodeled forces show up naturally instead of being absorbed
-  // into a fake initial velocity. Velocity = derivative; |v₀| = ‖p′(0)‖.
-  // Apex z = root of dz/dτ in [0, t₁−t₀]. Needs ≥4 points.
-  function _solve4x4(M, b) {{
-    const a = M.map((row, i) => [...row, b[i]]);
-    for (let i = 0; i < 4; i++) {{
-      let pv = i;
-      for (let k = i + 1; k < 4; k++) if (Math.abs(a[k][i]) > Math.abs(a[pv][i])) pv = k;
-      if (Math.abs(a[pv][i]) < 1e-14) return null;
-      if (pv !== i) {{ const tmp = a[i]; a[i] = a[pv]; a[pv] = tmp; }}
-      for (let k = i + 1; k < 4; k++) {{
-        const f = a[k][i] / a[i][i];
-        for (let j = i; j <= 4; j++) a[k][j] -= f * a[i][j];
-      }}
-    }}
-    const x = new Array(4);
-    for (let i = 3; i >= 0; i--) {{
-      let s = a[i][4];
-      for (let j = i + 1; j < 4; j++) s -= a[i][j] * x[j];
-      x[i] = s / a[i][i];
-    }}
-    return x;
-  }}
+  // Per-axis LSQ ballistic fit: p(t) = p0 + v0*(t-t0) + 0.5*a*(t-t0)²
+  // with a pinned to (0, 0, -9.81). Subtracts the gravity term from z and
+  // solves a 2-parameter linear LSQ per axis (p0, v0).
   function ballisticFit(pts) {{
-    if (!pts || pts.length < 4) return null;
+    const G = 9.81;
     const t0 = pts[0].t_rel_s;
-    const taus = pts.map(p => p.t_rel_s - t0);
-    const n = pts.length;
-    // Moments of τ from τ⁰ to τ⁶
-    const sT = [n, 0, 0, 0, 0, 0, 0];
-    for (const tau of taus) {{
-      let p = 1;
-      for (let k = 1; k <= 6; k++) {{ p *= tau; sT[k] += p; }}
-    }}
-    const M = [
-      [sT[0], sT[1], sT[2], sT[3]],
-      [sT[1], sT[2], sT[3], sT[4]],
-      [sT[2], sT[3], sT[4], sT[5]],
-      [sT[3], sT[4], sT[5], sT[6]],
-    ];
-    function fitAxis(getVal) {{
-      const r = [0, 0, 0, 0];
-      for (let i = 0; i < n; i++) {{
-        const v = getVal(pts[i]);
-        let p = 1;
-        r[0] += v;
-        for (let k = 1; k <= 3; k++) {{ p *= taus[i]; r[k] += p * v; }}
+    const out = {{ p0: {{x:0,y:0,z:0}}, v0: {{x:0,y:0,z:0}}, g: G, t0 }};
+    const axes = ["x", "y", "z"];
+    const rmseSq = {{ x: 0, y: 0, z: 0 }};
+    for (const ax of axes) {{
+      // y = p0 + v0*τ  (z axis subtracts 0.5*G*τ² before fitting)
+      let sumT = 0, sumTT = 0, sumP = 0, sumTP = 0;
+      const n = pts.length;
+      for (const p of pts) {{
+        const tau = p.t_rel_s - t0;
+        let val = p[ax];
+        if (ax === "z") val += 0.5 * G * tau * tau; // pin -g, fit the residual as linear
+        sumT  += tau;
+        sumTT += tau * tau;
+        sumP  += val;
+        sumTP += tau * val;
       }}
-      return _solve4x4(M, r);
+      const det = n * sumTT - sumT * sumT;
+      if (Math.abs(det) < 1e-12) {{ out.p0[ax] = pts[0][ax]; out.v0[ax] = 0; continue; }}
+      const p0 = (sumP * sumTT - sumT * sumTP) / det;
+      const v0 = (n * sumTP - sumT * sumP) / det;
+      out.p0[ax] = p0;
+      out.v0[ax] = v0;
+      // Per-axis RMSE
+      let err2 = 0;
+      for (const p of pts) {{
+        const tau = p.t_rel_s - t0;
+        let pred = p0 + v0 * tau;
+        if (ax === "z") pred -= 0.5 * G * tau * tau;
+        const d = p[ax] - pred;
+        err2 += d * d;
+      }}
+      rmseSq[ax] = err2 / n;
     }}
-    const cx = fitAxis(p => p.x);
-    const cy = fitAxis(p => p.y);
-    const cz = fitAxis(p => p.z);
-    if (!cx || !cy || !cz) return null;
-    const out = {{
-      coeffs: {{ x: cx, y: cy, z: cz }},
-      p0: {{ x: cx[0], y: cy[0], z: cz[0] }},
-      v0: {{ x: cx[1], y: cy[1], z: cz[1] }},
-      a0: {{ x: 2*cx[2], y: 2*cy[2], z: 2*cz[2] }},
-      t0,
-      flight_time_s: pts[n - 1].t_rel_s - t0,
-    }};
-    out.evaluate = (t) => {{
-      const tau = t - t0;
-      const tt = tau * tau, ttt = tt * tau;
-      return {{
-        x: cx[0] + cx[1]*tau + cx[2]*tt + cx[3]*ttt,
-        y: cy[0] + cy[1]*tau + cy[2]*tt + cy[3]*ttt,
-        z: cz[0] + cz[1]*tau + cz[2]*tt + cz[3]*ttt,
-      }};
-    }};
-    out.velocity = (t) => {{
-      const tau = t - t0;
-      return {{
-        x: cx[1] + 2*cx[2]*tau + 3*cx[3]*tau*tau,
-        y: cy[1] + 2*cy[2]*tau + 3*cy[3]*tau*tau,
-        z: cz[1] + 2*cz[2]*tau + 3*cz[3]*tau*tau,
-      }};
-    }};
-    out.acceleration = (t) => {{
-      const tau = t - t0;
-      return {{
-        x: 2*cx[2] + 6*cx[3]*tau,
-        y: 2*cy[2] + 6*cy[3]*tau,
-        z: 2*cz[2] + 6*cz[3]*tau,
-      }};
-    }};
     out.speed_mps = Math.hypot(out.v0.x, out.v0.y, out.v0.z);
     out.speed_kmph = out.speed_mps * 3.6;
+    // Elevation = angle above horizontal (XY plane). Positive = upward.
     const horiz = Math.hypot(out.v0.x, out.v0.y);
     out.elevation_deg = Math.atan2(out.v0.z, horiz) * 180 / Math.PI;
+    // Azimuth = heading in XY plane, measured from +Y (plate depth) axis.
     out.azimuth_deg = Math.atan2(out.v0.x, out.v0.y) * 180 / Math.PI;
-    // Mean acceleration magnitude over flight (for the operator who wants
-    // to know "is g+drag really ~9.81?" without committing to a model).
-    const aMid = out.acceleration(t0 + out.flight_time_s * 0.5);
-    out.a_mid_mag = Math.hypot(aMid.x, aMid.y, aMid.z);
-    out.a_mid_z = aMid.z;
-    let rss = 0, rssZ = 0;
-    for (const p of pts) {{
-      const q = out.evaluate(p.t_rel_s);
-      const dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z;
-      rss += dx*dx + dy*dy + dz*dz;
-      rssZ += dz*dz;
-    }}
-    out.rmse_m = Math.sqrt(rss / n);
-    out.rmse_by_axis_m = {{ z: Math.sqrt(rssZ / n) }};
-    // Apex z: root of dz/dτ = c₁ + 2c₂τ + 3c₃τ² = 0 inside [0, flight]
-    out.apex_time_s = 0;
-    out.apex_height_m = cz[0];
-    const tau1 = out.flight_time_s;
-    if (Math.abs(cz[3]) > 1e-9) {{
-      const A = 3*cz[3], B = 2*cz[2], C = cz[1];
-      const disc = B*B - 4*A*C;
-      if (disc >= 0) {{
-        const sq = Math.sqrt(disc);
-        for (const tau of [(-B + sq)/(2*A), (-B - sq)/(2*A)]) {{
-          if (tau >= 0 && tau <= tau1) {{
-            const z = out.evaluate(t0 + tau).z;
-            if (z > out.apex_height_m) {{ out.apex_time_s = tau; out.apex_height_m = z; }}
-          }}
-        }}
-      }}
-    }} else if (Math.abs(cz[2]) > 1e-9) {{
-      const tau = -cz[1] / (2*cz[2]);
-      if (tau >= 0 && tau <= tau1) {{
-        const z = out.evaluate(t0 + tau).z;
-        if (z > out.apex_height_m) {{ out.apex_time_s = tau; out.apex_height_m = z; }}
-      }}
+    out.rmse_m = Math.sqrt(rmseSq.x + rmseSq.y + rmseSq.z);
+    out.rmse_by_axis_m = {{ x: Math.sqrt(rmseSq.x), y: Math.sqrt(rmseSq.y), z: Math.sqrt(rmseSq.z) }};
+    out.flight_time_s = pts[pts.length - 1].t_rel_s - t0;
+    out.evaluate = (t) => {{
+      const tau = t - t0;
+      return {{
+        x: out.p0.x + out.v0.x * tau,
+        y: out.p0.y + out.v0.y * tau,
+        z: out.p0.z + out.v0.z * tau - 0.5 * G * tau * tau,
+      }};
+    }};
+    // Time-to-apex (z peak), apex height
+    if (Math.abs(out.v0.z) > 1e-6 && out.v0.z > 0) {{
+      out.apex_time_s = out.v0.z / G;
+      const apex = out.evaluate(t0 + out.apex_time_s);
+      out.apex_height_m = apex.z;
+    }} else {{
+      out.apex_time_s = 0;
+      out.apex_height_m = out.p0.z;
     }}
     return out;
   }}
@@ -1434,8 +1369,8 @@ def _viewer_js() -> str:
     if (!fit) {{
       box.hidden = false;
       box.innerHTML = sampleCount
-        ? `<h4>Cubic fit</h4><div class="fit-warn">Need ≥4 filtered points; have ${{sampleCount}}.</div>`
-        : `<h4>Cubic fit</h4><div class="fit-warn">No triangulated points pass the current filters.</div>`;
+        ? `<h4>Ballistic fit</h4><div class="fit-warn">Need ≥4 filtered points; have ${{sampleCount}}.</div>`
+        : `<h4>Ballistic fit</h4><div class="fit-warn">No triangulated points pass the current filters.</div>`;
       return;
     }}
     const v = fit.v0;
@@ -1447,19 +1382,18 @@ def _viewer_js() -> str:
       ["elevation", `${{fit.elevation_deg.toFixed(1)}}°`],
       ["azimuth", `${{fit.azimuth_deg.toFixed(1)}}° from +Y`],
       ["apex z", `${{fit.apex_height_m.toFixed(2)}} m @ t+${{fit.apex_time_s.toFixed(3)}}s`],
-      ["a_z (mid)", `${{fit.a_mid_z.toFixed(2)}} m/s² (g≈-9.81 if free fall)`],
-      ["|a| (mid)", `${{fit.a_mid_mag.toFixed(2)}} m/s²`],
       ["RMSE (fit)", `${{(fit.rmse_m*100).toFixed(1)}} cm`],
       ["RMSE (z only)", `${{(fit.rmse_by_axis_m.z*100).toFixed(1)}} cm`],
     ];
-    let html = `<h4>Cubic fit · per-axis, no physical model</h4>`;
+    let html = `<h4>Ballistic fit · g = 9.81 m/s² pinned</h4>`;
     for (const [k, v] of rows) {{
       html += `<div class="fit-row"><span class="k">${{k}}</span><span class="v">${{v}}</span></div>`;
     }}
-    // Sanity warning: cubic should hit cm-level RMSE on a clean ball
-    // flight; >10 cm means outliers leaked past the filter.
+    // Sanity warning: if RMSE > 10 cm the ballistic assumption (no drag,
+    // no spin, pure gravity) is probably wrong — or filters still leak
+    // outliers. Tell the user instead of silently fitting garbage.
     if (fit.rmse_m > 0.10) {{
-      html += `<div class="fit-warn">RMSE ${{(fit.rmse_m*100).toFixed(1)}} cm — outliers leaked past filters. Tighten Residual / Outlier and retry.</div>`;
+      html += `<div class="fit-warn">RMSE ${{(fit.rmse_m*100).toFixed(1)}} cm — drag/spin present OR outliers leaked past filters. Tighten Residual / Outlier and retry.</div>`;
     }}
     box.hidden = false;
     box.innerHTML = html;
