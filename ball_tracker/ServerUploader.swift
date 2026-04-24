@@ -619,41 +619,6 @@ final class ServerUploader: @unchecked Sendable {
         task.resume()
     }
 
-    /// Wire shape for `POST /sync/report`. Mirrors `server/schemas.py`'s
-    /// `SyncReport` — any field changes here MUST be reflected there too.
-    struct SyncReportPayload: Codable {
-        let camera_id: String
-        let sync_id: String
-        let role: String          // "A" | "B"
-        // Nullable: null when aborted without that band's detection. Server
-        // routes any-null reports to the diagnostic (aborted) path.
-        let t_self_s: Double?
-        let t_from_other_s: Double?
-        let emitted_band: String  // "A" | "B" — rig-config cross-check
-        // Optional matched-filter traces (own-band + other-band) for the
-        // `/sync` debug plot. Mirrors `SyncTraceSample` / `SyncReport` on
-        // the server — both fields optional so a build without trace
-        // support still validates.
-        let trace_self: [TraceSamplePayload]?
-        let trace_other: [TraceSamplePayload]?
-        // Abort telemetry. `aborted=true` means the phone gave up before
-        // both bands fired — the report still ships to give the server
-        // post-mortem data (sub-threshold peaks, noise floor, which band
-        // fired, timing).
-        let aborted: Bool
-        let abort_reason: String?
-    }
-
-    struct TraceSamplePayload: Codable {
-        let t: Double
-        let peak: Float
-        let psr: Float
-    }
-
-    /// Upload this phone's mutual-sync matched-filter report. Fire-and-
-    /// forget from the controller's perspective: the server waits on both
-    /// phones, solves, and publishes Δ via `/status → last_sync`. Retry
-    /// on transient failure is the operator's job (re-press the button).
     /// Metadata ferried alongside a raw-PCM WAV to `/sync/audio_upload`.
     /// Phase A of the sync refactor — iOS is a dumb recorder; server
     /// runs the matched filter and fills in the `SyncReport` shape from
@@ -757,52 +722,6 @@ final class ServerUploader: @unchecked Sendable {
         task.resume()
     }
 
-    func postSyncReport(
-        _ report: SyncReportPayload,
-        completion: ((Result<Void, Error>) -> Void)? = nil
-    ) {
-        guard let base = config.baseURL() else {
-            completion?(.failure(NSError(
-                domain: "ServerUploader",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
-            )))
-            return
-        }
-        let url = base.appendingPathComponent("sync/report")
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        do {
-            request.httpBody = try JSONEncoder().encode(report)
-        } catch {
-            completion?(.failure(error))
-            return
-        }
-        let syncId = report.sync_id
-        let role = report.role
-        let task = URLSession.shared.dataTask(with: request) { _, response, error in
-            if let error = error {
-                log.error("sync report failed sync=\(syncId, privacy: .public) role=\(role, privacy: .public) err=\(error.localizedDescription, privacy: .public)")
-                completion?(.failure(error))
-                return
-            }
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                log.error("sync report rejected sync=\(syncId, privacy: .public) role=\(role, privacy: .public) http=\(http.statusCode)")
-                completion?(.failure(NSError(
-                    domain: "ServerUploader",
-                    code: http.statusCode,
-                    userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"]
-                )))
-                return
-            }
-            log.info("sync report ok sync=\(syncId, privacy: .public) role=\(role, privacy: .public)")
-            completion?(.success(()))
-        }
-        task.resume()
-    }
-
     /// Push one diagnostic line to the server's mutual-sync log ring.
     /// Fire-and-forget — failures are logged locally via `log.error` but
     /// never surface to the caller, because a dropped log line must not
@@ -862,55 +781,6 @@ final class ServerUploader: @unchecked Sendable {
         }
     }
 
-    func fetchStatus(completion: @escaping (Result<[String: Any], Error>) -> Void) {
-        guard let base = config.baseURL() else {
-            completion(.failure(NSError(
-                domain: "ServerUploader",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
-            )))
-            return
-        }
-        let url = base.appendingPathComponent("status")
-
-        let task = URLSession.shared.dataTask(with: url) { data, response, error in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                completion(.failure(NSError(
-                    domain: "ServerUploader",
-                    code: http.statusCode,
-                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
-                )))
-                return
-            }
-            guard let data else {
-                completion(.failure(NSError(
-                    domain: "ServerUploader",
-                    code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: "Empty response"]
-                )))
-                return
-            }
-            do {
-                let obj = try JSONSerialization.jsonObject(with: data, options: [])
-                if let dict = obj as? [String: Any] {
-                    completion(.success(dict))
-                } else {
-                    completion(.failure(NSError(
-                        domain: "ServerUploader",
-                        code: -3,
-                        userInfo: [NSLocalizedDescriptionKey: "Invalid JSON shape"]
-                    )))
-                }
-            } catch {
-                completion(.failure(error))
-            }
-        }
-        task.resume()
-    }
 }
 
 extension ServerUploader.UploadError {
