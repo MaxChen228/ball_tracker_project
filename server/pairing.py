@@ -212,6 +212,57 @@ def _ray_for_frame(
     return angle_ray_cam(theta_x, theta_z)
 
 
+def triangulate_live_pair(
+    pose_a,  # live_pairing.CameraPose
+    pose_b,  # live_pairing.CameraPose
+    frame_a: FramePayload,
+    frame_b: FramePayload,
+    *,
+    anchor_a: float,
+    anchor_b: float,
+) -> "TriangulatedPoint | None":
+    """Hot-path triangulation for the live A/B ray-midpoint pair.
+
+    Bypasses `triangulate_pair` / `scale_pitch_to_video_dims` because the
+    live path's intrinsics are already the calibration snapshot itself
+    (no resolution delta → scale factor 1). Uses pre-cached K/R/C/dist
+    on each `CameraPose` so every pair only pays the ray math + 2×2
+    solve. Returns None when neither frame has a ball or the rays are
+    near-parallel — same failure surface as `triangulate_cycle`."""
+    from schemas import TriangulatedPoint
+    if not (_valid_frame(frame_a) and _valid_frame(frame_b)):
+        return None
+
+    t_rel = frame_a.timestamp_s - anchor_a
+    t_b_rel = frame_b.timestamp_s - anchor_b
+    if abs(t_b_rel - t_rel) > _MAX_DT_S:
+        return None
+
+    d_a_cam = _ray_for_frame(
+        frame_a.theta_x_rad, frame_a.theta_z_rad,
+        frame_a.px, frame_a.py,
+        pose_a.K, pose_a.dist,
+    )
+    d_b_cam = _ray_for_frame(
+        frame_b.theta_x_rad, frame_b.theta_z_rad,
+        frame_b.px, frame_b.py,
+        pose_b.K, pose_b.dist,
+    )
+    d_a_world = pose_a.R.T @ d_a_cam
+    d_b_world = pose_b.R.T @ d_b_cam
+
+    P, gap = triangulate_rays(pose_a.C, d_a_world, pose_b.C, d_b_world)
+    if P is None:
+        return None
+    return TriangulatedPoint(
+        t_rel_s=t_rel,
+        x_m=float(P[0]),
+        y_m=float(P[1]),
+        z_m=float(P[2]),
+        residual_m=gap,
+    )
+
+
 def _valid_frame(f: FramePayload) -> bool:
     has_angles = f.theta_x_rad is not None and f.theta_z_rad is not None
     has_pixels = f.px is not None and f.py is not None
