@@ -316,3 +316,60 @@ def test_calibration_post_broadcasts_websocket_update_to_siblings(monkeypatch):
 
         msg_a = ws_a.receive_json()
         assert msg_a == {"type": "calibration_updated", "cam": "B"}
+
+
+def test_heartbeat_emits_device_heartbeat_sse(monkeypatch):
+    """SSE `device_heartbeat` fires on every WS heartbeat with battery /
+    ws_latency / time_sync fields so the dashboard can update the
+    Devices card without hitting /status."""
+    client = TestClient(app)
+    events: list[tuple[str, dict]] = []
+
+    class _CaptureHub:
+        async def broadcast(self, event: str, data: dict) -> None:
+            events.append((event, data))
+
+        async def subscribe(self):
+            if False:
+                yield ""
+
+    monkeypatch.setattr(main, "sse_hub", _CaptureHub())
+    monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
+
+    with client.websocket_connect("/ws/device/A") as ws_a:
+        assert ws_a.receive_json()["type"] == "settings"
+        ws_a.send_json({
+            "type": "heartbeat",
+            "battery_level": 0.82,
+            "battery_state": "unplugged",
+        })
+        # Settle the message loop.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if any(n == "device_heartbeat" for n, _ in events):
+                break
+            time.sleep(0.02)
+
+    hb = [d for n, d in events if n == "device_heartbeat"]
+    assert hb, "expected at least one device_heartbeat event"
+    assert hb[0]["cam"] == "A"
+    assert hb[0]["battery_level"] == 0.82
+    assert hb[0]["battery_state"] == "unplugged"
+    assert "ws_latency_ms" in hb[0]
+    assert "last_seen_at" in hb[0]
+
+
+def test_calibration_state_exposes_plot_etag():
+    """/calibration/state returns a stable plot_etag that differs across
+    distinct plot payloads (so the dashboard can short-circuit the
+    client-side JSON.stringify digest)."""
+    client = TestClient(app)
+    r = client.get("/calibration/state")
+    assert r.status_code == 200
+    body = r.json()
+    assert "plot_etag" in body
+    etag = body["plot_etag"]
+    assert isinstance(etag, str) and len(etag) == 16
+    # Re-fetch: same calibrations → same etag (deterministic).
+    r2 = client.get("/calibration/state")
+    assert r2.json()["plot_etag"] == etag

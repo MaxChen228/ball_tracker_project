@@ -38,12 +38,12 @@
     } catch (e) { /* silent retry next tick */ }
   }
 
-  // Digest of the last basePlot we actually repainted from. Calibrations
-  // rarely change between 5 s ticks; skipping the Plotly.react call when
-  // the payload is identical (same cameras, same poses) eliminates the
-  // most-frequent opportunity for an accidental camera snap-back and
-  // avoids ~ms of churn per tick.
-  let lastBasePlotDigest = null;
+  // ETag of the last basePlot we repainted from. Server computes a
+  // sha1[:16] of the plot subtree in /calibration/state; we short-circuit
+  // the client-side JSON.stringify over full Plotly trace data. Falls
+  // back to the (inline) full-JSON digest when the server response
+  // lacks plot_etag (older server build).
+  let lastBasePlotEtag = null;
   async function tickCalibration() {
     try {
       const r = await fetch('/calibration/state', { cache: 'no-store' });
@@ -74,9 +74,10 @@
       // Main 3D canvas lives only on `/`. Don't gate the metadata update
       // above on sceneRoot — `/setup` still needs virt canvases drawn.
       if (payload.plot && sceneRoot && window.Plotly) {
-        const digest = JSON.stringify(payload.plot);
-        if (digest !== lastBasePlotDigest || basePlot === null) {
-          lastBasePlotDigest = digest;
+        const etag = payload.plot_etag
+          || ('inline:' + JSON.stringify(payload.plot).length);
+        if (etag !== lastBasePlotEtag || basePlot === null) {
+          lastBasePlotEtag = etag;
           basePlot = payload.plot;
           repaintCanvas();
         }

@@ -8,12 +8,17 @@
   tickEvents();
   tickExtendedMarkers();
   tickIntrinsics();
-  setInterval(tickStatus, 1000);
+  // /status polling is now a safety fallback — SSE `device_status` and
+  // `device_heartbeat` drive the Devices card in real-time. 5 s covers
+  // SSE reconnect gaps without spamming the server at 1 Hz.
+  setInterval(tickStatus, 5000);
   setInterval(tickCalibration, 5000);
   setInterval(tickEvents, 5000);
   setInterval(tickExtendedMarkers, 5000);
   setInterval(tickIntrinsics, 5000);
-  setInterval(tickActiveSession, 100);
+  // The per-session active card was retired (renderActiveSession is a
+  // stub), so the 100 ms tick body is a no-op. Deleted — was ~20 idle
+  // wake-ups/second for nothing.
   // Re-check the degraded banner without waiting for a new device_status
   // event — the grace window ticks forward even when no events arrive,
   // so the banner needs its own cadence to flip on at the right moment.
