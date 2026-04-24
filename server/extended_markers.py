@@ -1,13 +1,13 @@
 """Extended ArUco marker registry.
 
 Phase 5 of the iOS-decoupling refactor. The operator tapes additional
-DICT_4X4_50 markers (IDs 6-49) on the same plane as home plate — floor,
+DICT_4X4_50 markers (IDs 9-49) on the same plane as home plate — floor,
 taped-down board, whatever — and uses the dashboard's "Register markers
 from this camera" button to auto-recover their world coordinates:
 
   1. Grab a preview frame where the operator can see both the plate
-     markers (IDs 0-5) AND the extended markers in the shot.
-  2. Solve the plate homography `H_plate` from the 6 reserved markers.
+     markers (IDs 0-8) AND the extended markers in the shot.
+  2. Solve the plate homography `H_plate` from the 9 reserved markers.
   3. For each extra marker's image centroid, apply `H_plate⁻¹` to
      project it back to world (x, y) on the plate plane (z = 0).
   4. Persist `{id -> (wx, wy)}` to `data/extended_markers.json`.
@@ -38,7 +38,7 @@ from calibration_solver import (
 )
 
 
-# Plate-reserved IDs. IDs 0-5 are baked into `PLATE_MARKER_WORLD` with
+# Plate-reserved IDs. IDs 0-8 are baked into `PLATE_MARKER_WORLD` with
 # ground-truth measured world coordinates; attempting to register one as
 # an extended marker would conflict with that contract.
 _PLATE_RESERVED_IDS: frozenset[int] = frozenset(PLATE_MARKER_WORLD.keys())
@@ -95,7 +95,7 @@ class ExtendedMarkersDB:
     def register(self, marker_id: int, world_xy: tuple[float, float]) -> None:
         if marker_id in _PLATE_RESERVED_IDS:
             raise ValueError(
-                f"marker id {marker_id} is reserved for plate landmarks (0-5)"
+                f"marker id {marker_id} is reserved for plate landmarks (0-8)"
             )
         if not (0 <= marker_id <= 49):
             raise ValueError(f"marker id {marker_id} outside DICT_4X4_50 range 0-49")
@@ -129,7 +129,7 @@ class ExtendedMarkersDB:
         bgr_image: np.ndarray,
     ) -> dict[int, tuple[float, float]]:
         """Detect every DICT_4X4_50 marker in `bgr_image`, solve the plate
-        homography from the 6 reserved IDs, then inverse-project every
+        homography from the 9 reserved IDs, then inverse-project every
         non-plate marker's centroid to world (x, y) on the plate plane.
 
         Returns the NEW `{id: (wx, wy)}` mapping for every marker that
@@ -145,7 +145,7 @@ class ExtendedMarkersDB:
         if result is None:
             raise ValueError(
                 "cannot register extended markers: need ≥5 plate markers "
-                "(IDs 0-5) visible in the same image"
+                "(IDs 0-8) visible in the same image"
             )
         H = np.asarray(result.homography_row_major, dtype=np.float64).reshape(3, 3)
         try:

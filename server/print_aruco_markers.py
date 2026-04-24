@@ -1,17 +1,20 @@
-"""Render ArUco markers (DICT_4X4_50, IDs 0-5) as a single printable PNG.
+"""Render ArUco markers (DICT_4X4_50, IDs 0-8) as a single printable PNG.
 
-Layout matches `CalibrationViewController.markerWorldPoints` in the iOS app:
-six markers centered on home-plate landmarks:
-  - FL (front left)       at (-21.6 cm,  0 cm)
-  - FR (front right)      at (+21.6 cm,  0 cm)
-  - RS (right shoulder)   at (+21.6 cm, 21.6 cm)
-  - LS (left shoulder)    at (-21.6 cm, 21.6 cm)
-  - BT (back tip)         at (  0  cm, 43.2 cm)
-  - MF (mid-front edge)   at (  0  cm,  0 cm)
+Layout matches `PLATE_MARKER_WORLD` in `calibration_solver.py` — a 3x3
+grid on the plate plane (Z=0):
+  - FL (front left)       ID 0  at (-21.6 cm,  0  cm)
+  - FR (front right)      ID 1  at (+21.6 cm,  0  cm)
+  - RS (right shoulder)   ID 2  at (+21.6 cm, 21.6 cm)
+  - LS (left shoulder)    ID 3  at (-21.6 cm, 21.6 cm)
+  - BT (back tip)         ID 4  at (  0  cm, 43.2 cm)
+  - MF (mid-front edge)   ID 5  at (  0  cm,  0  cm)
+  - C  (centre)           ID 6  at (  0  cm, 21.6 cm)
+  - BL (back-left)        ID 7  at (-21.6 cm, 43.2 cm)
+  - BR (back-right)       ID 8  at (+21.6 cm, 43.2 cm)
 
-Print on A4 (3 rows x 2 cols), cut out, tape each marker so its **center**
-sits exactly on the labelled plate landmark. Having 6 points (instead of the
-minimum 4) lets RANSAC tolerate one occluded or misread marker.
+Print, cut out, tape each marker so its **center** sits exactly on the
+labelled plate landmark. 9 points give RANSAC plenty of slack against
+occlusion + misreads.
 
 Usage:
     uv run python print_aruco_markers.py \
@@ -26,7 +29,8 @@ import cv2
 import numpy as np
 
 
-LABELS = {0: "FL", 1: "FR", 2: "RS", 3: "LS", 4: "BT", 5: "MF"}
+LABELS = {0: "FL", 1: "FR", 2: "RS", 3: "LS", 4: "BT", 5: "MF",
+          6: "C",  7: "BL", 8: "BR"}
 
 
 def render_marker_sheet(marker_size_m: float, pixels_per_m: int, out: Path) -> None:
@@ -37,8 +41,8 @@ def render_marker_sheet(marker_size_m: float, pixels_per_m: int, out: Path) -> N
     margin_px = max(40, size_px // 4)
     label_px = 60  # extra space below each marker for the "FL"/"FR"/... text
 
-    # 3x2 grid (3 rows, 2 cols) to fit 6 markers on A4 portrait.
-    rows, cols = 3, 2
+    # 3x3 grid for the 9 plate-landmark markers on A4 portrait.
+    rows, cols = 3, 3
     n_markers = len(LABELS)
     w = cols * size_px + (cols + 1) * margin_px
     h = rows * (size_px + label_px) + (rows + 1) * margin_px

@@ -24,15 +24,20 @@ _PLATE_WIDTH_M = 0.432       # 17" front edge
 _PLATE_SHOULDER_Y_M = 0.216  # 8.5" back to shoulder
 _PLATE_TIP_Y_M = 0.432       # 17" back to back tip
 
-# DICT_4X4_50, IDs 0-5 on the 6 plate landmarks. Mirrors
-# `CalibrationShared.markerWorldPoints`. Units: metres.
+# DICT_4X4_50, IDs 0-8 on the 9 plate-grid landmarks. Forms a 3x3 grid
+# on the plate plane: x ∈ {-W/2, 0, +W/2}, y ∈ {0, shoulder, tip}.
+# IDs 6/7/8 fill the three grid cells the original pentagon doesn't cover
+# (centre, back-left, back-right of the bounding box). Units: metres.
 PLATE_MARKER_WORLD: dict[int, tuple[float, float]] = {
-    0: (-_PLATE_WIDTH_M / 2.0, 0.0),                 # FL
-    1: ( _PLATE_WIDTH_M / 2.0, 0.0),                 # FR
-    2: ( _PLATE_WIDTH_M / 2.0, _PLATE_SHOULDER_Y_M), # RS
-    3: (-_PLATE_WIDTH_M / 2.0, _PLATE_SHOULDER_Y_M), # LS
-    4: ( 0.0, _PLATE_TIP_Y_M),                       # BT (back tip)
-    5: ( 0.0, 0.0),                                  # MF (mid-front)
+    0: (-_PLATE_WIDTH_M / 2.0, 0.0),                 # FL  (front-left)
+    1: ( _PLATE_WIDTH_M / 2.0, 0.0),                 # FR  (front-right)
+    2: ( _PLATE_WIDTH_M / 2.0, _PLATE_SHOULDER_Y_M), # RS  (right shoulder)
+    3: (-_PLATE_WIDTH_M / 2.0, _PLATE_SHOULDER_Y_M), # LS  (left shoulder)
+    4: ( 0.0, _PLATE_TIP_Y_M),                       # BT  (back tip)
+    5: ( 0.0, 0.0),                                  # MF  (mid-front)
+    6: ( 0.0, _PLATE_SHOULDER_Y_M),                  # C   (plate centre, on LS-RS line)
+    7: (-_PLATE_WIDTH_M / 2.0, _PLATE_TIP_Y_M),      # BL  (back-left, behind LS)
+    8: ( _PLATE_WIDTH_M / 2.0, _PLATE_TIP_Y_M),      # BR  (back-right, behind RS)
 }
 _ALL_MARKER_IDS = tuple(sorted(PLATE_MARKER_WORLD.keys()))
 
@@ -59,7 +64,7 @@ class CalibrationSolveResult:
 
 def detect_plate_markers(bgr_image: np.ndarray) -> list[DetectedMarker]:
     """Run ArUco (DICT_4X4_50) detection on a BGR image and return only
-    markers with IDs in the plate-landmark set (0-5). Extra / unknown IDs
+    markers with IDs in the plate-landmark set (0-8). Extra / unknown IDs
     are silently dropped so a stray marker in the background can't poison
     the homography solve."""
     return [m for m in detect_all_markers_in_dict(bgr_image)
@@ -70,7 +75,7 @@ def detect_all_markers_in_dict(bgr_image: np.ndarray) -> list[DetectedMarker]:
     """Run ArUco (DICT_4X4_50) detection and return every detected marker
     (IDs 0-49). Used by Phase 5's extended-markers registration + the
     generalised `solve_homography_from_world_map` so operators can tape
-    additional markers on the plate plane as landmarks beyond IDs 0-5."""
+    additional markers on the plate plane as landmarks beyond IDs 0-8."""
     if bgr_image.ndim != 3 or bgr_image.shape[2] != 3:
         raise ValueError(f"expected BGR image, got shape {bgr_image.shape}")
     gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY)
@@ -151,7 +156,7 @@ def solve_homography_from_world_map(
     can't poison the solve).
 
     `missing_ids` in the result is always relative to the plate-landmark
-    set (IDs 0-5) so dashboards keep a stable "which plate marker did we
+    set (IDs 0-8) so dashboards keep a stable "which plate marker did we
     miss?" signal regardless of how many extended markers were in play."""
     markers_by_id = {m.id: m for m in detected if m.id in world_map}
     detected_ids = sorted(markers_by_id.keys())
