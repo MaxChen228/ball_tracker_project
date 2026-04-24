@@ -194,6 +194,28 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
     state = _main.state
     detect_pitch = _main.detect_pitch
 
+    # Compute per-session expected ball radius from this camera's
+    # calibration; on any failure we fall back to no-prior mode with an
+    # explicit log (not silent).
+    expected_radius_px: float | None = None
+    snap = state.calibrations().get(pitch.camera_id)
+    if snap is not None and snap.homography is not None:
+        try:
+            from geometry_priors import expected_ball_radius_px
+            expected_radius_px = expected_ball_radius_px(
+                fx=snap.intrinsics.fx,
+                fy=snap.intrinsics.fy,
+                cx=snap.intrinsics.cx,
+                cy=snap.intrinsics.cy,
+                homography_row_major=snap.homography,
+            )
+        except Exception as exc:
+            logger.info(
+                "radius prior unavailable session=%s cam=%s err=%s",
+                pitch.session_id, pitch.camera_id, exc,
+            )
+            expected_radius_px = None
+
     if not state.start_server_post_job(pitch.session_id, pitch.camera_id):
         logger.info(
             "background detection skipped session=%s cam=%s reason=not-runnable",
@@ -210,6 +232,7 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             pitch.video_start_pts_s,
             hsv_range=state.hsv_range(),
             should_cancel=lambda: state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id),
+            expected_radius_px=expected_radius_px,
         )
     except ProcessingCanceled:
         state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=True)

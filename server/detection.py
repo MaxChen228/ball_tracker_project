@@ -13,6 +13,7 @@ the ball — e.g. a deep-blue baseball uses `100,130,140,255,40,255`.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 
@@ -63,10 +64,42 @@ class HSVRange:
         return np.array([self.h_max, self.s_max, self.v_max], dtype=np.uint8)
 
 
-# Minimum / maximum area (in pixels) a candidate blob must have to be
-# considered a ball. Same bounds as the Swift implementation used.
+# Fallback minimum / maximum area (in pixels) a candidate blob must
+# have when no per-session radius prior is supplied. 1080p = 2.07 M px
+# so 150_000 = 7.2% of frame — unrealistically large for a ball in
+# flight, but kept as a loose cap for the fallback path.
 _MIN_AREA_PX = 20
 _MAX_AREA_PX = 150_000
+
+# Multipliers on `expected_radius_px` when a radius prior is supplied.
+# `area = π r²` so bounds of r/2 and 1.8r give area ∈ [π(0.5r)², π(1.8r)²].
+# 0.5× lower bound catches far-side frames where the ball is smaller
+# than the plate-distance estimate; 1.8× upper bound absorbs motion
+# blur smearing + perspective foreshortening near the camera.
+_RADIUS_PRIOR_MIN_FACTOR = 0.5
+_RADIUS_PRIOR_MAX_FACTOR = 1.8
+
+
+def area_bounds_from_radius_prior(
+    expected_radius_px: float,
+) -> tuple[int, int]:
+    """Compute (min_area_px, max_area_px) from an expected pixel radius.
+
+    Raises `ValueError` on non-finite / non-positive input — **never**
+    falls back to the loose defaults silently, per project's no-silent-
+    fallback rule. Callers that want the fallback must pass
+    `expected_radius_px=None` explicitly.
+    """
+    if not math.isfinite(expected_radius_px) or expected_radius_px <= 0:
+        raise ValueError(
+            f"expected_radius_px must be finite positive; got {expected_radius_px!r}"
+        )
+    area_min = math.pi * (_RADIUS_PRIOR_MIN_FACTOR * expected_radius_px) ** 2
+    area_max = math.pi * (_RADIUS_PRIOR_MAX_FACTOR * expected_radius_px) ** 2
+    # Never loosen below the default floor — a sub-pixel blob is noise
+    # regardless of any prior; never go tighter than sensible. Round to
+    # int for cv2 stats comparability.
+    return max(_MIN_AREA_PX, int(area_min)), max(int(area_max), _MIN_AREA_PX + 1)
 
 # Shape gates against yellow-green clutter (cardboard, clothes, pale floor
 # tiles) that slip through HSV. A real ball — even one in flight — stays
@@ -89,21 +122,34 @@ def detect_ball(
     hsv_range: HSVRange,
     *,
     fg_mask: np.ndarray | None = None,
+    expected_radius_px: float | None = None,
 ) -> tuple[float, float] | None:
-    """Find the largest HSV-masked blob whose area is within
-    `[MIN_AREA_PX, MAX_AREA_PX]` AND whose bbox aspect ratio and fill
-    ratio clear the ball-shape gates. Returns `(px, py)` centroid in
-    pixel coordinates, else `None`.
+    """Find the largest HSV-masked blob whose area is within the active
+    area bounds AND whose bbox aspect ratio and fill ratio clear the
+    ball-shape gates. Returns `(px, py)` centroid in pixel coordinates,
+    else `None`.
 
     `fg_mask` (uint8 0/255) is optionally AND-ed with the HSV mask — used
     by the pipeline to restrict detection to moving pixels from a
     background subtractor. Pass `None` for HSV-only behaviour.
+
+    `expected_radius_px` narrows the area gate to
+    `[π(0.5r)², π(1.8r)²]` — callers derive `r` from calibration (plate
+    distance + focal length + real ball radius). Pass `None` to opt into
+    the loose `[_MIN_AREA_PX, _MAX_AREA_PX]` fallback (roughly 30×
+    looser at the top end). This is **never** a silent fallback — the
+    caller chooses; `pipeline.detect_pitch` logs once per session which
+    mode it picked.
 
     Simple-minded on purpose: no morphological ops, no temporal smoothing.
     Anything more aggressive belongs in a follow-up ML-based detector.
     """
     if frame_bgr is None or frame_bgr.size == 0:
         return None
+    if expected_radius_px is None:
+        min_area, max_area = _MIN_AREA_PX, _MAX_AREA_PX
+    else:
+        min_area, max_area = area_bounds_from_radius_prior(expected_radius_px)
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, hsv_range.lo(), hsv_range.hi())
     if fg_mask is not None:
@@ -120,7 +166,7 @@ def detect_ball(
     best_area = -1
     for idx in range(1, num_labels):
         area = int(stats[idx, cv2.CC_STAT_AREA])
-        if area < _MIN_AREA_PX or area > _MAX_AREA_PX:
+        if area < min_area or area > max_area:
             continue
         w = int(stats[idx, cv2.CC_STAT_WIDTH])
         h = int(stats[idx, cv2.CC_STAT_HEIGHT])

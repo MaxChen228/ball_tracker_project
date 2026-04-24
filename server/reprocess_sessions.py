@@ -110,10 +110,27 @@ def rerun_detection(pitch_path: Path, hsv: HSVRange, dry_run: bool) -> PitchPayl
         logger.warning("  skip %s/%s — no MOV", pitch.session_id, pitch.camera_id)
         return None
     old_hits = sum(1 for f in pitch.frames if f.px is not None)
+    expected_radius_px: float | None = None
+    if pitch.intrinsics is not None and pitch.homography is not None:
+        try:
+            from geometry_priors import expected_ball_radius_px
+            expected_radius_px = expected_ball_radius_px(
+                fx=pitch.intrinsics.fx,
+                fy=pitch.intrinsics.fy,
+                cx=pitch.intrinsics.cx,
+                cy=pitch.intrinsics.cy,
+                homography_row_major=pitch.homography,
+            )
+        except Exception as exc:
+            logger.info(
+                "  %s/%s radius prior unavailable: %s — using loose bounds",
+                pitch.session_id, pitch.camera_id, exc,
+            )
     frames = detect_pitch(
         video_path=video,
         video_start_pts_s=pitch.video_start_pts_s,
         hsv_range=hsv,
+        expected_radius_px=expected_radius_px,
     )
     new_hits = sum(1 for f in frames if f.px is not None)
     logger.info(
