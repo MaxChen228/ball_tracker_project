@@ -1094,6 +1094,57 @@ def _viewer_js() -> str:
   }}
   function buildDynamicTraces(cutoff, playback) {{
     const out = [];
+    // --- Fit mode: isolated view. Return ONLY fit traces + the sample
+    // points used for the fit + info box. No rays, no ground traces, no
+    // camera diamonds, no raw trajectories — keeps the 3D scene focused
+    // on the analytic result. The regular layer state is not mutated, so
+    // toggling Fit off restores the previous view byte-for-byte. ---
+    if (fitMode) {{
+      const svrRaw = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
+        ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
+      const liveRaw = TRAJ_BY_PATH.live || [];
+      const svrPts = filteredTrajectory(svrRaw, Infinity);
+      const livePts = filteredTrajectory(liveRaw, Infinity);
+      const source = svrPts.length >= 4 ? svrPts : (livePts.length >= 4 ? livePts : []);
+      const sourceLabel = source === svrPts ? "server_post" : "live";
+      if (source.length >= 4) {{
+        const fit = ballisticFit(source);
+        const t0 = source[0].t_rel_s;
+        const tEnd = playback ? Math.min(cutoff, source[source.length - 1].t_rel_s)
+                              : source[source.length - 1].t_rel_s;
+        const nCurve = 80;
+        const curveX = [], curveY = [], curveZ = [];
+        for (let i = 0; i <= nCurve; i++) {{
+          const t = t0 + (tEnd - t0) * (i / nCurve);
+          const p = fit.evaluate(t);
+          curveX.push(p.x); curveY.push(p.y); curveZ.push(p.z);
+        }}
+        out.push({{ type: "scatter3d", x: curveX, y: curveY, z: curveZ,
+          mode: "lines", line: {{color: "#A7372A", width: 5}},
+          name: `Ballistic fit (${{sourceLabel}}, ${{source.length}} pts, RMSE ${{(fit.rmse_m*100).toFixed(1)}} cm)` }});
+        const renderPts = source.filter(p => p.t_rel_s <= (playback ? cutoff : Infinity));
+        out.push({{ type: "scatter3d",
+          x: renderPts.map(p => p.x), y: renderPts.map(p => p.y), z: renderPts.map(p => p.z),
+          mode: "markers", marker: {{size: 4, color: "#2A2520", opacity: 0.85}},
+          name: `Fit samples (${{renderPts.length}}/${{source.length}})`, showlegend: false }});
+        const v0 = fit.v0;
+        const origin = fit.evaluate(t0);
+        const arrowLen = Math.min(2.0, Math.max(0.3, fit.speed_mps * 0.05));
+        const vn = Math.max(1e-9, Math.hypot(v0.x, v0.y, v0.z));
+        out.push({{ type: "scatter3d",
+          x: [origin.x, origin.x + v0.x/vn*arrowLen],
+          y: [origin.y, origin.y + v0.y/vn*arrowLen],
+          z: [origin.z, origin.z + v0.z/vn*arrowLen],
+          mode: "lines+markers",
+          line: {{color: "#A7372A", width: 4, dash: "dash"}},
+          marker: {{size: [0, 6], color: "#A7372A", symbol: "diamond"}},
+          hoverinfo: "skip", showlegend: false }});
+        updateFitInfoPanel(fit, source.length, sourceLabel);
+      }} else {{
+        updateFitInfoPanel(null, source.length, sourceLabel);
+      }}
+      return out;
+    }}
     // --- cameras (diamond + axis triad), gated on the per-cam pipeline pills ---
     for (const c of (SCENE.cameras || [])) {{
       if (!cameraIsAnyPathVisible(c.camera_id)) continue;
@@ -1146,7 +1197,7 @@ def _viewer_js() -> str:
       }}
     }}
     // --- 3D trajectory: server_post ---
-    if (isLayerVisible("traj", "server_post") && !fitMode) {{
+    if (isLayerVisible("traj", "server_post")) {{
       const svrPts = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
         ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
       const triPts = filteredTrajectory(svrPts, cutoff);
@@ -1165,7 +1216,7 @@ def _viewer_js() -> str:
       }}
     }}
     // --- 3D trajectory: live ---
-    if (isLayerVisible("traj", "live") && !fitMode) {{
+    if (isLayerVisible("traj", "live")) {{
       const livePts = filteredTrajectory(TRAJ_BY_PATH.live || [], cutoff);
       if (livePts.length) {{
         out.push({{ type: "scatter3d", x: livePts.map(p => p.x), y: livePts.map(p => p.y), z: livePts.map(p => p.z),
@@ -1182,60 +1233,9 @@ def _viewer_js() -> str:
         }}
       }}
     }}
-    // --- Fit mode: ballistic LSQ fit with gravity pinned to 9.81 m/s². ---
-    // Pick source: prefer server_post (cleaner detection), fall back to
-    // live. Passes through residual + velocity filters first so the fit
-    // sees only physically plausible points.
-    if (fitMode) {{
-      const svrRaw = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
-        ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
-      const liveRaw = TRAJ_BY_PATH.live || [];
-      const svrPts = filteredTrajectory(svrRaw, Infinity);
-      const livePts = filteredTrajectory(liveRaw, Infinity);
-      const source = svrPts.length >= 4 ? svrPts : (livePts.length >= 4 ? livePts : []);
-      const sourceLabel = source === svrPts ? "server_post" : "live";
-      if (source.length >= 4) {{
-        const fit = ballisticFit(source);
-        const renderPts = source.filter(p => p.t_rel_s <= cutoff);
-        // Sampled smooth curve over the full span (ignores cutoff for
-        // the "All" mode; playback head is still a single marker).
-        const t0 = source[0].t_rel_s;
-        const tN = (playback ? cutoff : source[source.length - 1].t_rel_s);
-        const tEnd = Math.min(source[source.length - 1].t_rel_s, tN);
-        const nCurve = 80;
-        const curveX = [], curveY = [], curveZ = [];
-        for (let i = 0; i <= nCurve; i++) {{
-          const t = t0 + (tEnd - t0) * (i / nCurve);
-          const p = fit.evaluate(t);
-          curveX.push(p.x); curveY.push(p.y); curveZ.push(p.z);
-        }}
-        out.push({{ type: "scatter3d", x: curveX, y: curveY, z: curveZ,
-          mode: "lines", line: {{color: "#A7372A", width: 5}},
-          name: `Ballistic fit (${{sourceLabel}}, ${{source.length}} pts, RMSE ${{(fit.rmse_m*100).toFixed(1)}} cm)` }});
-        // Residual points: plot raw kept points dimmed so user can eyeball
-        // fit quality — a good fit has points hugging the curve tightly.
-        out.push({{ type: "scatter3d",
-          x: renderPts.map(p => p.x), y: renderPts.map(p => p.y), z: renderPts.map(p => p.z),
-          mode: "markers", marker: {{size: 3, color: "#2A2520", opacity: 0.5}},
-          name: `Fit samples (${{renderPts.length}}/${{source.length}})`, showlegend: false }});
-        // Launch velocity vector: arrow at fit origin pointing along v0.
-        const v0 = fit.v0;
-        const origin = fit.evaluate(t0);
-        const arrowLen = Math.min(2.0, Math.max(0.3, fit.speed_mps * 0.05));
-        const vn = Math.max(1e-9, Math.hypot(v0.x, v0.y, v0.z));
-        out.push({{ type: "scatter3d",
-          x: [origin.x, origin.x + v0.x/vn*arrowLen],
-          y: [origin.y, origin.y + v0.y/vn*arrowLen],
-          z: [origin.z, origin.z + v0.z/vn*arrowLen],
-          mode: "lines", line: {{color: "#A7372A", width: 3, dash: "dash"}},
-          hoverinfo: "skip", showlegend: false }});
-        updateFitInfoPanel(fit, source.length, sourceLabel);
-      }} else {{
-        updateFitInfoPanel(null, source.length, sourceLabel);
-      }}
-    }} else {{
-      updateFitInfoPanel(null, 0, null);
-    }}
+    // Fit mode short-circuits at the top of this function; reaching here
+    // means we're in non-fit mode and the info panel should stay hidden.
+    updateFitInfoPanel(null, 0, null);
     return out;
   }}
 
