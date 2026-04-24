@@ -12,7 +12,6 @@ from typing import Any, Callable
 
 from schemas import (
     CalibrationSnapshot,
-    CaptureMode,
     DetectionPath,
     Device,
     DeviceIntrinsics,
@@ -28,7 +27,6 @@ from schemas import (
     TriangulatedPoint,
     _DEFAULT_SESSION_TIMEOUT_S,
     _DEFAULT_PATHS,
-    mode_for_paths,
 )
 from chain_filter import annotate as chain_filter_annotate
 from detection import HSVRange
@@ -971,8 +969,8 @@ class State:
     ) -> Session:
         """Begin a new armed session. If one is already armed, return it
         unchanged (idempotent so dashboard double-clicks don't double-arm).
-        Snapshots the current global `capture_mode` so a late dashboard
-        toggle can't disturb the in-flight recording."""
+        Snapshots the current global path-set + tracking exposure cap so a
+        late dashboard toggle can't disturb the in-flight recording."""
         now = self._time_fn()
         with self._lock:
             self._check_session_timeout_locked(now)
@@ -984,7 +982,6 @@ class State:
                 started_at=now,
                 max_duration_s=max_duration_s,
                 paths=chosen_paths,
-                mode=mode_for_paths(chosen_paths),
                 tracking_exposure_cap=self._runtime_settings.tracking_exposure_cap,
                 sync_id=self._common_time_sync_id_locked(now),
             )
@@ -992,13 +989,6 @@ class State:
             self._current_session = session
             self._sync.clear_time_sync_intent_locked()
             return session
-
-    def current_mode(self) -> CaptureMode:
-        """Dashboard-selected capture mode (global, not session-scoped).
-        iPhones read this from WS settings messages to render the HUD mode
-        chip even while idle."""
-        with self._lock:
-            return mode_for_paths(self._runtime_settings.default_paths)
 
     def default_paths(self) -> set[DetectionPath]:
         with self._lock:
@@ -1013,12 +1003,6 @@ class State:
             self._hsv_range = hsv_range
             self._persist_hsv_range_locked()
             return self._hsv_range
-
-    def set_mode(self, mode: CaptureMode) -> CaptureMode:
-        """Record the dashboard's mode choice. Only affects sessions armed
-        after this call — in-flight sessions keep their snapshot mode."""
-        with self._lock:
-            return self._runtime_settings.set_mode(mode)
 
     def set_default_paths(self, paths: set[DetectionPath]) -> set[DetectionPath]:
         with self._lock:

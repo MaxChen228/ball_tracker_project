@@ -419,25 +419,18 @@ def test_pitch_upload_keeps_session_armed_until_stop():
 # --- Capture mode (mode-one / mode-two dashboard toggle) -------------------
 
 
-def test_default_mode_is_camera_only(tmp_path):
-    s = main.State(data_dir=tmp_path)
-    assert s.current_mode().value == "camera_only"
-
-
-def test_status_includes_capture_mode():
+def test_status_includes_capture_mode_wire_compat():
+    """CaptureMode was retired; /status still exposes a hard-wired
+    `capture_mode=camera_only` string for legacy dashboard JS."""
     client = TestClient(app)
     status = client.get("/status").json()
     assert status["capture_mode"] == "camera_only"
 
 
-# test_heartbeat_reply_includes_capture_mode deleted — /heartbeat is
-# retired. capture_mode surfaces on /status (test_status_includes_capture_mode)
-# and on the WS settings message on connect.
-
-
 def test_set_mode_endpoint_removed():
-    """The legacy /sessions/set_mode toggle was retired — CaptureMode has
-    only one value and the dashboard no longer surfaces a picker."""
+    """The legacy /sessions/set_mode toggle was retired alongside
+    CaptureMode — only one value ever shipped and the dashboard no
+    longer surfaces a picker."""
     client = TestClient(app)
     r = client.post(
         "/sessions/set_mode",
