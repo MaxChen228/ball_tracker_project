@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any
 
 from fastapi import WebSocket
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,22 +67,53 @@ class DeviceSocketManager:
             }
 
     async def send(self, camera_id: str, message: dict[str, Any]) -> bool:
+        """Send `message` to the named cam socket.
+
+        Returns True on success, False if the cam is not connected or the
+        underlying WS send raised. On failure a warning is logged with the
+        cam id + message type so operators don't have to cross-reference a
+        silent /events row against a clean server log — important because
+        commands (arm, disarm, sync_command, settings) go through here and
+        a silent drop means the phone sits in the wrong state.
+        """
+        mtype = message.get("type") if isinstance(message, dict) else "<non-dict>"
         with self._lock:
             websocket = self._sockets.get(camera_id)
         if websocket is None:
+            logger.warning(
+                "device_ws.send: cam=%s not connected, dropped type=%s",
+                camera_id,
+                mtype,
+            )
             return False
         try:
             await websocket.send_json(message)
             return True
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "device_ws.send: cam=%s send failed (type=%s): %s",
+                camera_id,
+                mtype,
+                exc,
+            )
             self.disconnect(camera_id, websocket)
             return False
 
     async def broadcast(self, message_by_camera: dict[str, dict[str, Any]]) -> None:
+        """Fire-and-forget broadcast. Per-cam failures are already logged
+        by `send()`; we additionally log any exception that leaks out of
+        gather (shouldn't happen since send catches, but belt + braces)."""
         if not message_by_camera:
             return
-        await asyncio.gather(
+        results = await asyncio.gather(
             *(self.send(cam, msg) for cam, msg in message_by_camera.items()),
             return_exceptions=True,
         )
+        for (cam, _msg), result in zip(message_by_camera.items(), results):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "device_ws.broadcast: cam=%s unexpected exception: %s",
+                    cam,
+                    result,
+                )
 
