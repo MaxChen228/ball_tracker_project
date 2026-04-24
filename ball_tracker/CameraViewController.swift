@@ -487,9 +487,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 applyChirpThreshold: { [weak self] threshold in
                     self?.captureRuntime.setChirpThreshold(threshold)
                 },
-                applyMutualSyncThreshold: { [weak self] threshold in
-                    self?.applyPushedMutualSyncThreshold(threshold)
-                },
                 applyHeartbeatInterval: { [weak self] interval in
                     self?.healthMonitor.updateBaseInterval(interval)
                 },
@@ -517,10 +514,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             serverTimeSyncId = syncId
             DispatchQueue.main.async { self.updateUIForState() }
         }
-    }
-
-    private func applyPushedMutualSyncThreshold(_ threshold: Double) {
-        _ = threshold
     }
 
     private func applyPushedHSVRange(_ hsvRange: ServerUploader.HSVRangePayload) {

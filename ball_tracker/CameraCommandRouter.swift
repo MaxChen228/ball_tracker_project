@@ -18,7 +18,6 @@ final class CameraCommandRouter {
         let applyRemoteDisarm: () -> Void
         let updateTimeSyncServerState: (Bool, String?) -> Void
         let chirpThresholdDidPush: (Double) -> Void
-        let mutualSyncThresholdDidPush: (Double) -> Void
         let heartbeatIntervalDidPush: (Double) -> Void
         let hsvRangeDidPush: (ServerUploader.HSVRangePayload) -> Void
         let handleTrackingExposureCap: (String) -> Void
@@ -100,9 +99,6 @@ final class CameraCommandRouter {
             applyPushedPaths(message["paths"] as? [String])
             if let threshold = message["chirp_detect_threshold"] as? Double {
                 deps.chirpThresholdDidPush(threshold)
-            }
-            if let mThreshold = message["mutual_sync_threshold"] as? Double {
-                deps.mutualSyncThresholdDidPush(mThreshold)
             }
             if let interval = message["heartbeat_interval_s"] as? Double {
                 deps.heartbeatIntervalDidPush(interval)
