@@ -197,6 +197,25 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
     sid = pitch.session_id
     cam = pitch.camera_id
 
+    expected_radius_px: float | None = None
+    snap = state.calibrations().get(cam)
+    if snap is not None and snap.homography is not None:
+        try:
+            from geometry_priors import expected_ball_radius_px
+            expected_radius_px = expected_ball_radius_px(
+                fx=snap.intrinsics.fx,
+                fy=snap.intrinsics.fy,
+                cx=snap.intrinsics.cx,
+                cy=snap.intrinsics.cy,
+                homography_row_major=snap.homography,
+            )
+        except Exception as exc:
+            logger.info(
+                "radius prior unavailable session=%s cam=%s err=%s",
+                sid, cam, exc,
+            )
+            expected_radius_px = None
+
     if not proc.start_server_post_job(sid, cam):
         logger.info(
             "background detection skipped session=%s cam=%s reason=not-runnable",
@@ -213,6 +232,8 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             pitch.video_start_pts_s,
             hsv_range=state.hsv_range(),
             should_cancel=lambda: proc.should_cancel_server_post_job(sid, cam),
+            expected_radius_px=expected_radius_px,
+            enable_bg_subtraction=state.detection_bg_subtraction_enabled(),
         )
     except ProcessingCanceled:
         proc.finish_server_post_job(sid, cam, canceled=True)
