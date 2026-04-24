@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ballistic_fit import MPS_TO_MPH, fit_ballistic_ransac
 from detection_paths import (
     get_path_frames,
     normalize_paths,
@@ -25,6 +26,7 @@ from detection_paths import (
 )
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from schemas import (
+    BallisticSummary,
     DetectionPath,
     FramePayload,
     PitchPayload,
@@ -227,6 +229,37 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             # has finalized frames on the sole uploaded camera it should be
             # surfaced as completed instead of lingering in "stopped".
             result.paths_completed.add(path.value)
+
+    # Per-path ballistic RANSAC fit. Runs once per path that produced
+    # triangulated points. N < min_inliers → explicit skip (no summary).
+    for path_value, pts in result.triangulated_by_path.items():
+        if not pts:
+            continue
+        fit = fit_ballistic_ransac(pts)
+        if fit is None:
+            continue
+        summary = BallisticSummary(
+            release_point_m=fit.release_point_m,
+            release_velocity_mps=fit.release_velocity_mps,
+            speed_mps=float(
+                (fit.release_velocity_mps[0] ** 2
+                 + fit.release_velocity_mps[1] ** 2
+                 + fit.release_velocity_mps[2] ** 2) ** 0.5
+            ),
+            speed_mph=fit.speed_mph,
+            g_fit=fit.g_fit,
+            g_mode=fit.g_mode,
+            n_inliers=fit.n_inliers,
+            n_total=fit.n_total,
+            rmse_m=fit.rmse_m,
+            t0_s=fit.t0_s,
+            inlier_indices=list(fit.inlier_indices),
+        )
+        result.ballistic_by_path[path_value] = summary
+        if path_value == DetectionPath.live.value:
+            result.ballistic_live = summary
+        elif path_value == DetectionPath.server_post.value:
+            result.ballistic_server_post = summary
 
     authority: list[TriangulatedPoint] = []
     for path in (
