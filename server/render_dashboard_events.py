@@ -136,6 +136,17 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f'no cal: {html.escape(",".join(missing_cal))}</span>'
             if missing_cal else ""
         )
+        # server_post background-task failure, tooltip shows the raw
+        # exception string so operator doesn't need to ssh into the server.
+        sp_errors = e.get("server_post_errors") or {}
+        sp_error_html = ""
+        if sp_errors:
+            tip = "; ".join(f"{cam}: {msg}" for cam, msg in sorted(sp_errors.items()))
+            cams_label = ",".join(sorted(sp_errors.keys()))
+            sp_error_html = (
+                f'<span class="chip error" title="{html.escape(tip)}">'
+                f'srv err: {html.escape(cams_label)}</span>'
+            )
         parts.append(
             f'<div class="event-item">'
             f"{toggle_html}"
@@ -146,7 +157,7 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f"</div>"
             f"{meta_html}"
             f"</a>"
-            f'<div class="event-status">{processing_chip}{status_chip_html}{missing_cal_html}</div>'
+            f'<div class="event-status">{processing_chip}{status_chip_html}{missing_cal_html}{sp_error_html}</div>'
             f'<div class="event-actions">{processing_html}{lifecycle_html}</div>'
             f"</div>"
         )
