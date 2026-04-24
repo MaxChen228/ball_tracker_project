@@ -48,7 +48,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     nonisolated(unsafe) private let frameStateBox = FrameStateBox()
     nonisolated(unsafe) private let frameProcessingState = CameraFrameProcessingState()
     nonisolated(unsafe) private var captureQueueCameraRole: String = "A"
-    nonisolated(unsafe) private var captureQueueUploader: ServerUploader!
+    /// Lock-guarded so main-queue swaps during `applyUpdatedSettings`
+    /// can't race with capture-queue reads. See `AtomicUploaderBox` for
+    /// the full rationale (was previously `nonisolated(unsafe)` with an
+    /// unsynchronized swap).
+    private let captureQueueUploaderBox = AtomicUploaderBox()
     nonisolated(unsafe) private var captureQueueRecordingWorkflow: CameraRecordingWorkflow!
     nonisolated(unsafe) private var captureQueueTransportCoordinator: CameraTransportCoordinator!
     nonisolated(unsafe) private var captureQueueRuntime: CameraCaptureRuntime!
@@ -252,7 +256,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         )
         captureRuntime.requestAudioCaptureAccess(cameraRole: settings.cameraRole)
         captureQueueCameraRole = settings.cameraRole
-        captureQueueUploader = uploader
+        captureQueueUploaderBox.set(uploader)
         captureQueueRuntime = captureRuntime
         healthMonitor.start()
         transportCoordinator.connect()
@@ -383,7 +387,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// DICT_4X4_50 detection threshold at 30 px now clear it comfortably.
     nonisolated private func uploadCalibrationFrame() {
         let cam = captureQueueCameraRole
-        guard let uploader = captureQueueUploader,
+        guard let uploader = captureQueueUploaderBox.snapshot(),
               let runtime = captureQueueRuntime else { return }
         runtime.captureHighResStill { jpeg, size in
             guard let jpeg = jpeg else {
@@ -651,7 +655,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 serverPort: AppSettings.serverPortFixed
             )
             uploader = ServerUploader(config: serverConfig)
-            captureQueueUploader = uploader
+            captureQueueUploaderBox.set(uploader)
             recordingWorkflow.updateUploader(uploader)
             transportCoordinator.updateConnection(
                 serverConfig: serverConfig,
