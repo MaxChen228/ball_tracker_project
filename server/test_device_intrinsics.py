@@ -138,6 +138,51 @@ def test_auto_cal_consumes_charuco_prior(tmp_path, monkeypatch):
     assert intrinsics_720.fx == pytest.approx(1580.5 * (1280 / 1920), rel=1e-6)
 
 
+def test_auto_cal_handles_4_3_source_via_center_crop(tmp_path, monkeypatch):
+    """Real-world case: operator has a calibrate_intrinsics.py run from
+    4:3 Camera.app stills (4032×3024). Auto-cal frames arrive as 16:9
+    (1920×1080). The scale helper center-crops the 4:3 source vertically
+    to match the 16:9 target, so cy shifts and the final K matches what
+    the video-format sensor crop would produce."""
+    from schemas import DeviceIntrinsics
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    state = main.state
+    state.heartbeat("A", device_id=_DEVICE_ID, device_model="iPhone15,3")
+    rec = DeviceIntrinsics.model_validate({
+        "device_id": _DEVICE_ID,
+        "device_model": "iPhone15,3",
+        "source_width_px": 4032,
+        "source_height_px": 3024,
+        "intrinsics": {
+            "fx": 2879.46,
+            "fz": 2893.06,
+            "cx": 2019.97,
+            "cy": 1505.34,
+            "distortion": [0.19, -0.66, -0.002, 0.001, 0.67],
+        },
+        "rms_reprojection_px": 1.07,
+        "n_images": 39,
+    })
+    state.set_device_intrinsics(rec)
+
+    from routes.calibration import _derive_auto_cal_intrinsics
+    intr, _ = _derive_auto_cal_intrinsics("A", w_img=1920, h_img=1080, h_fov_deg=None)
+
+    # Scale factor: 4032→1920 = 0.4762 (same as 2268→1080 after crop).
+    scale = 1920 / 4032
+    # fx scales linearly. Rel 1e-3 tolerates the tiny fp drift from the
+    # crop-then-scale path vs raw scale (AR identical post-crop).
+    assert intr.fx == pytest.approx(2879.46 * scale, rel=1e-3)
+    # cy was 1505.34 in 4032×3024; center-cropped to 2268 tall means
+    # dy = (3024 - 2268) / 2 = 378; cy_cropped = 1127.34; scaled cy ≈ 536.8
+    expected_cy = (1505.34 - (3024 - 3024 * (9 / 16) * (4032 / 4032)) / 2) * scale
+    # Simpler: new_h = 4032 * 9/16 = 2268, dy = (3024 - 2268)/2 = 378.
+    expected_cy = (1505.34 - 378) * (1080 / 2268)
+    assert intr.cy == pytest.approx(expected_cy, rel=1e-3)
+    # Distortion propagates verbatim
+    assert intr.distortion == [0.19, -0.66, -0.002, 0.001, 0.67]
+
+
 def test_auto_cal_falls_back_without_prior(tmp_path, monkeypatch):
     """No ChArUco record + no CalibrationSnapshot → FOV fallback with zero
     distortion. This is the pre-existing degraded mode."""

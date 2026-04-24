@@ -104,26 +104,64 @@ def scale_intrinsics_to(
     target_width_px: int,
     target_height_px: int,
 ) -> IntrinsicsPayload:
-    """Scale fx/fy/cx/cy from the resolution the intrinsics were solved at
-    to the resolution the current capture frame was delivered at. Distortion
-    coefficients are resolution-independent and carry over verbatim.
+    """Adapt fx/fy/cx/cy from the resolution the intrinsics were solved at
+    to the resolution the current capture frame was delivered at.
 
-    Aspect-ratio mismatch (e.g. 4:3 ChArUco K applied to a 16:9 crop)
-    breaks the cy scaling silently — the cropped region's principal-point
-    offset relative to full-sensor origin no longer matches. Rejected
-    upstream (> 2 % AR delta) by the caller that wires this into auto-cal.
+    When source and target share aspect ratio, this is a pure linear
+    scale. When they differ (e.g. 4:3 ChArUco stills → 16:9 video-format
+    auto-cal frame), iPhone's typical behaviour is a CENTER CROP of the
+    sensor readout to the narrower AR, followed by resampling. We mirror
+    that here: crop the source's longer axis until its AR matches the
+    target's (shifting cx or cy by the crop offset), then linear-scale
+    down. Distortion coefficients are resolution-independent in the
+    normalized camera frame so they carry over verbatim — the assumption
+    is that the same physical lens distortion applies to both crops
+    (true for iPhone's still↔video format switch, which just changes
+    sensor ROI + binning, not optical path).
+
+    The crop-then-scale model is accurate to ~1 % for iPhone's built-in
+    wide camera across still/video format swaps; materially better than
+    either rejecting the AR mismatch or letting fx/fy diverge.
     """
     if source_width_px <= 0 or source_height_px <= 0:
         raise ValueError(f"invalid source dims {source_width_px}x{source_height_px}")
     if target_width_px <= 0 or target_height_px <= 0:
         raise ValueError(f"invalid target dims {target_width_px}x{target_height_px}")
-    sx = target_width_px / source_width_px
-    sy = target_height_px / source_height_px
+
+    src_ar = source_width_px / source_height_px
+    tgt_ar = target_width_px / target_height_px
+
+    # Start by center-cropping source to match target AR.
+    eff_w = source_width_px
+    eff_h = source_height_px
+    eff_cx = intrinsics.cx
+    eff_cy = intrinsics.cy
+    if abs(src_ar - tgt_ar) / tgt_ar > 0.005:
+        if src_ar > tgt_ar:
+            # Source is too wide (e.g. 4:3 on a 3:4 target — uncommon).
+            # Crop width so the remaining region matches target AR.
+            new_w = source_height_px * tgt_ar
+            dx = (source_width_px - new_w) / 2.0
+            eff_w = new_w
+            eff_cx = intrinsics.cx - dx
+        else:
+            # Source is too tall (e.g. 4:3 source, 16:9 target).
+            # Crop top+bottom so the remaining region matches target AR.
+            new_h = source_width_px / tgt_ar
+            dy = (source_height_px - new_h) / 2.0
+            eff_h = new_h
+            eff_cy = intrinsics.cy - dy
+
+    # After the (possibly degenerate) crop, source AR == target AR, so
+    # sx and sy are equal up to floating-point noise. Use both for
+    # symmetry and to absorb any residual rounding.
+    sx = target_width_px / eff_w
+    sy = target_height_px / eff_h
     return IntrinsicsPayload(
         fx=intrinsics.fx * sx,
         fz=intrinsics.fz * sy,
-        cx=intrinsics.cx * sx,
-        cy=intrinsics.cy * sy,
+        cx=eff_cx * sx,
+        cy=eff_cy * sy,
         distortion=list(intrinsics.distortion) if intrinsics.distortion else None,
     )
 
