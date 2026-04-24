@@ -25,3 +25,26 @@
       });
     });
   }
+
+  // === Shape gate controls init ===
+  // Two-way bind slider (0-100 int) ↔ number (0.00-1.00). Submit is
+  // a plain form POST — server returns 303 back to '/' just like HSV.
+  function initShapeGateControls() {
+    const form = document.getElementById('shape-gate-form');
+    if (!form) return;
+    form.querySelectorAll('[data-shape-range]').forEach((slider) => {
+      slider.addEventListener('input', () => {
+        const key = slider.dataset.shapeRange;
+        const num = form.querySelector(`[data-shape-number="${key}"]`);
+        if (num) num.value = (Number(slider.value) / 100).toFixed(2);
+      });
+    });
+    form.querySelectorAll('[data-shape-number]').forEach((num) => {
+      num.addEventListener('input', () => {
+        const key = num.dataset.shapeNumber;
+        const slider = form.querySelector(`[data-shape-range="${key}"]`);
+        const val = Math.max(0, Math.min(1, Number(num.value) || 0));
+        if (slider) slider.value = String(Math.round(val * 100));
+      });
+    });
+  }

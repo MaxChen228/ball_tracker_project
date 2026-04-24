@@ -35,7 +35,52 @@ _HSV_PRESETS = {
 }
 
 
-def _render_hsv_body(hsv_range: dict[str, object] | None) -> str:
+def _render_shape_gate_body(shape_gate: dict[str, object] | None) -> str:
+    """Aspect / fill thresholds applied after HSV + connected-components.
+    Lives inside the DETECTION HSV card as a sub-form so operators tune
+    the full blob filter in one place. Hot-reloaded to iOS over WS."""
+    current = {"aspect_min": 0.70, "fill_min": 0.55}
+    if shape_gate:
+        for key in current:
+            if key in shape_gate:
+                try:
+                    current[key] = float(shape_gate[key])
+                except (TypeError, ValueError):
+                    pass
+
+    def _row(name: str, label: str, hint: str) -> str:
+        val = current[name]
+        slider_val = int(round(val * 100))
+        return (
+            '<div class="hsv-row">'
+            f'<div class="hsv-label" title="{html.escape(hint)}">{html.escape(label)}</div>'
+            '<div class="hsv-pair">'
+            f'<label><span>Min</span>'
+            f'<input type="range" min="0" max="100" step="1" value="{slider_val}" data-shape-range="{name}">'
+            f'<input class="hsv-num" type="number" step="0.01" min="0" max="1" name="{name}" value="{val:.2f}" data-shape-number="{name}">'
+            '</label>'
+            '</div>'
+            '</div>'
+        )
+
+    return (
+        '<form method="POST" action="/detection/shape_gate" id="shape-gate-form" class="hsv-form shape-gate-form">'
+        '<div class="hsv-subtitle">Shape gate</div>'
+        '<div class="hsv-grid">'
+        f'{_row("aspect_min", "ASPECT", "min(w,h)/max(w,h) — 1.0 = perfect square bbox. Lower lets elongated blobs through.")}'
+        f'{_row("fill_min", "FILL", "area / (w*h) — π/4 ≈ 0.785 theoretical; real balls measure 0.63-0.70. Lower accepts partial occlusion.")}'
+        '</div>'
+        '<div class="hsv-actions">'
+        '<button class="btn" type="submit">Apply shape gate</button>'
+        '</div>'
+        '</form>'
+    )
+
+
+def _render_hsv_body(
+    hsv_range: dict[str, object] | None,
+    shape_gate: dict[str, object] | None = None,
+) -> str:
     current = {
         "h_min": 25,
         "h_max": 55,
@@ -84,6 +129,7 @@ def _render_hsv_body(hsv_range: dict[str, object] | None) -> str:
         '<button class="btn" type="submit">Apply HSV</button>'
         '</div>'
         '</form>'
+        + _render_shape_gate_body(shape_gate)
     )
 
 
