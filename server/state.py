@@ -6,8 +6,6 @@ import os
 import re
 import secrets
 import time
-from collections import deque
-from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
@@ -36,7 +34,6 @@ from chain_filter import annotate as chain_filter_annotate
 from detection import HSVRange
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
-from sync_solver import compute_mutual_sync
 from live_pairing import LivePairingSession
 from reconstruct import Ray, ray_for_frame
 from state_runtime import RuntimeSettingsStore, SyncParams
@@ -53,6 +50,17 @@ from state_calibration import (
 from state_devices import DeviceRegistry
 from state_events import build_events
 from state_processing import SessionProcessingState
+from state_sync import (
+    SyncCoordinator,
+    _LegacyTimeSyncIntent,
+    _new_sync_id,
+    _SYNC_COMMAND_TTL_S,
+    _SYNC_COOLDOWN_S,
+    _SYNC_LATE_REPORT_GRACE_S,
+    _SYNC_TIMEOUT_S,
+    _TIME_SYNC_INTENT_WINDOW_S,
+    _TIME_SYNC_MAX_AGE_S,
+)
 import session_results
 
 logger = logging.getLogger("ball_tracker")
@@ -82,39 +90,9 @@ _DEVICE_REGISTRY_CAP = 64
 # on its next poll. Long enough to cover any sensible poll cadence.
 _DISARM_ECHO_S = 5.0
 
-# Maximum wall time a mutual-sync run may stay active waiting for both
-# phones to post their matched-filter reports. If one side fails to hear
-# the peer (weak speaker, noise floor), the run is dropped and the
-# dashboard surfaces "Sync timed out".
-_SYNC_TIMEOUT_S = 8.0
-
-# Window after a sync ends (solved OR aborted) during which late aborted
-# reports can still merge traces into the run's SyncResult. The side that
-# never heard both bands typically POSTs its abort report right around
-# the server-side timeout, and without this grace window the trace data
-# (our main post-mortem signal) gets silently dropped as "no_sync".
-_SYNC_LATE_REPORT_GRACE_S = 5.0
-
-# After a mutual sync solves (or times out), block subsequent /sync/start
-# for this long. Prevents rapid-fire retries thrashing the phones through
-# the state transition and gives the operator time to read the result.
-_SYNC_COOLDOWN_S = 10.0
-
-# Time-sync (single-listener chirp) command TTL. When the dashboard's
-# CALIBRATE TIME button fires, each target camera gets a pending
-# `sync_command: "start"` flag. A camera consumes it on its next
-# heartbeat (one-shot), or the flag self-expires after this many
-# seconds so a stale command doesn't fire if the operator gave up.
-_SYNC_COMMAND_TTL_S = 10.0
-
-# Legacy third-device chirp sync ids stay shareable for one listening
-# window so two phones that begin 時間校正 a few seconds apart can still
-# claim the same run id.
-_TIME_SYNC_INTENT_WINDOW_S = 20.0
-
-# Maximum server-observed age of a legacy chirp sync before it no longer
-# counts as "ready" for a fresh arm.
-_TIME_SYNC_MAX_AGE_S = 30.0
+# Sync / chirp subsystem constants live in state_sync.py. `_TIME_SYNC_MAX_AGE_S`
+# is re-exported here because `_common_time_sync_id_locked` (device-registry
+# aware, kept on State) still consults it.
 
 # Hard cap on `/pitch` video upload size. A 5 s cycle at 4K / 240 fps sits
 # comfortably under this; anything beyond is almost certainly a misbehaving
@@ -131,19 +109,6 @@ def _new_session_id() -> str:
     # 8 hex chars ≈ 4 bytes of entropy — plenty for a personal-LAN tool
     # where sessions are seconds apart, not microseconds.
     return "s_" + secrets.token_hex(4)
-
-
-def _new_sync_id() -> str:
-    # Distinct `sy_` prefix so log lines immediately differentiate a
-    # mutual-sync run id from a pitch session id at a glance.
-    return "sy_" + secrets.token_hex(4)
-
-
-@dataclass
-class _LegacyTimeSyncIntent:
-    id: str
-    started_at: float
-    expires_at: float
 
 
 class State:
@@ -201,34 +166,6 @@ class State:
             atomic_write=self._atomic_write,
         )
         self._hsv_range = self._load_hsv_range_from_disk()
-        # Mutual chirp sync: at most one run active at a time. Both phones
-        # must be online and no session may be armed when a run starts.
-        # `_last_sync_result` survives across runs so the dashboard + the
-        # triangulation pairing can keep applying Δ until the next sync
-        # refreshes it. In-memory only — a restart drops any cached Δ,
-        # which matches the "re-sync before each shoot" operator flow.
-        self._current_sync: SyncRun | None = None
-        self._last_sync_result: SyncResult | None = None
-        self._sync_cooldown_until: float = 0.0
-        # Ring buffer of diagnostic events from the mutual-sync flow, both
-        # server-emitted and phone-pushed (via POST /sync/log). Dashboard's
-        # Time Sync panel renders the last N entries. 500 lines ≈ 20 runs'
-        # worth of detail — plenty for diagnosing a single failed run.
-        self._sync_log: deque[SyncLogEntry] = deque(maxlen=500)
-        # Legacy third-device chirp sync intent. A live intent supplies the
-        # shared `sync_id` both phones should stamp onto their recovered
-        # anchors. The dashboard-remote path also fans this intent out as
-        # per-camera pending commands consumed on the next WS heartbeat.
-        self._current_time_sync_intent: _LegacyTimeSyncIntent | None = None
-        self._sync_command_pending: dict[str, _LegacyTimeSyncIntent] = {}
-        # Per-cam "the id we EXPECT this cam to report back with after the
-        # current attempt succeeds". Set on every /sync/trigger (quick)
-        # and /sync/start (mutual); a heartbeat's `time_sync_id` is
-        # treated as synced-for-UI only when it matches. Without this, a
-        # phone that successfully synced a previous attempt keeps its
-        # LED green forever, so the operator can't see the current
-        # attempt's progress.
-        self._expected_sync_id_per_cam: dict[str, str] = {}
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
         # Runtime tunables pushed from the dashboard, hot-applied on the
@@ -244,15 +181,20 @@ class State:
             data_dir / "runtime_settings.json",
             atomic_write=self._atomic_write,
         )
+        # Sync / chirp subsystem: mutual-chirp run lifecycle, legacy
+        # single-listener command dispatch, diagnostic log, per-cam
+        # telemetry. Shares the State lock — all `*_locked` coordinator
+        # helpers assume the caller already holds it.
+        self._sync = SyncCoordinator(
+            self._lock,
+            self._time_fn,
+            self._runtime_settings,
+        )
         # Live-preview buffer (Phase 4a). Keeps one latest JPEG per camera
         # in memory, gated by a per-camera "dashboard is watching" flag
         # with a 5 s TTL. Shares the State-level `_time_fn` so clock-drift
         # tests apply here too without a parallel shim.
         self._preview = PreviewBuffer(time_fn=time_fn)
-        # Per-cam live quick-chirp telemetry (input RMS, peak, matched-
-        # filter peaks, CFAR floors). Populated by WS heartbeat messages
-        # when the phone is in .timeSyncWaiting; drained by /sync page.
-        self._sync_telemetry: dict[str, dict[str, Any]] = {}
         # One-shot high-resolution calibration frame per camera. Separate
         # buffer from preview (preview is 480p, advisory; calibration
         # frames are native capture res, accuracy-critical). `_cal_frames`
@@ -290,6 +232,35 @@ class State:
         # the intrinsic-scale factor (MOV dims vs. calibration dims).
         self._load_session_meta_from_disk()
         self._load_from_disk()
+
+    # ---- Sync coordinator passthroughs --------------------------------
+    # Back-compat shims so external callers (older tests, old diagnostic
+    # hooks) that poked at `state._current_sync` / `state._last_sync_result`
+    # / `state._sync_cooldown_until` keep working after the sync subsystem
+    # moved into `SyncCoordinator`.
+    @property
+    def _current_sync(self) -> SyncRun | None:
+        return self._sync._current_sync
+
+    @_current_sync.setter
+    def _current_sync(self, value: SyncRun | None) -> None:
+        self._sync._current_sync = value
+
+    @property
+    def _last_sync_result(self) -> SyncResult | None:
+        return self._sync._last_sync_result
+
+    @_last_sync_result.setter
+    def _last_sync_result(self, value: SyncResult | None) -> None:
+        self._sync._last_sync_result = value
+
+    @property
+    def _sync_cooldown_until(self) -> float:
+        return self._sync._sync_cooldown_until
+
+    @_sync_cooldown_until.setter
+    def _sync_cooldown_until(self, value: float) -> None:
+        self._sync._sync_cooldown_until = value
 
     @property
     def data_dir(self) -> Path:
@@ -869,44 +840,10 @@ class State:
             "live_missing_calibration": missing_cal,
         }
 
-    def _live_time_sync_intent_locked(self, now: float) -> _LegacyTimeSyncIntent | None:
-        intent = self._current_time_sync_intent
-        if intent is None:
-            return None
-        if intent.expires_at <= now:
-            self._current_time_sync_intent = None
-            return None
-        return intent
-
-    def _claim_time_sync_intent_locked(
-        self, now: float, *, force_new: bool = False,
-    ) -> _LegacyTimeSyncIntent:
-        """`force_new=True` always mints a fresh id. Used by the
-        dashboard-remote trigger where each button click is a distinct
-        attempt — otherwise a second click inside the intent window
-        would hand back the same id, and cams already synced from the
-        prior attempt wouldn't flip their LED red (the id_match stayed
-        true). The per-phone POST /sync/claim path still gets the dedup
-        behavior so two phones claiming within a few seconds of each
-        other converge on one id."""
-        if not force_new:
-            intent = self._live_time_sync_intent_locked(now)
-            if intent is not None:
-                return intent
-        intent = _LegacyTimeSyncIntent(
-            id=_new_sync_id(),
-            started_at=now,
-            expires_at=now + _TIME_SYNC_INTENT_WINDOW_S,
-        )
-        self._current_time_sync_intent = intent
-        return intent
-
     def claim_time_sync_intent(self) -> _LegacyTimeSyncIntent:
         """Return the currently-live legacy chirp sync run id, minting a
         fresh one when the prior listening window expired."""
-        now = self._time_fn()
-        with self._lock:
-            return self._claim_time_sync_intent_locked(now)
+        return self._sync.claim_time_sync_intent()
 
     def heartbeat(
         self,
@@ -938,80 +875,16 @@ class State:
             )
 
     def record_sync_telemetry(self, camera_id: str, telem: dict[str, Any]) -> None:
-        """Stash the latest quick-chirp live telemetry for a cam AND roll
-        a per-cam peak-observed window so the operator can read maxima
-        achieved during a Quick chirp attempt even AFTER the phone stops
-        listening. `reset_sync_telemetry_peaks` clears the window at the
-        start of each /sync/trigger so the numbers reflect this attempt,
-        not all-time."""
-        now = self._time_fn()
-        with self._lock:
-            prior = self._sync_telemetry.get(camera_id, {})
-
-            def roll_max(key: str) -> float | None:
-                new_raw = telem.get(key)
-                try:
-                    new_v = None if new_raw is None else float(new_raw)
-                except (TypeError, ValueError):
-                    new_v = None
-                old_raw = prior.get(f"peak_{key}")
-                try:
-                    old_v = None if old_raw is None else float(old_raw)
-                except (TypeError, ValueError):
-                    old_v = None
-                if new_v is None:
-                    return old_v
-                if old_v is None:
-                    return new_v
-                return max(old_v, new_v)
-
-            rolled = {
-                f"peak_{k}": roll_max(k)
-                for k in ("input_rms", "input_peak", "up_peak", "down_peak")
-            }
-            self._sync_telemetry[camera_id] = {
-                "ts": now,
-                **{k: telem.get(k) for k in (
-                    "mode", "armed", "input_rms", "input_peak",
-                    "up_peak", "down_peak", "cfar_up_floor",
-                    "cfar_down_floor", "threshold", "pending_up",
-                )},
-                **rolled,
-            }
+        self._sync.record_sync_telemetry(camera_id, telem)
 
     def clear_last_sync_result(self) -> None:
-        """Drop the latched `last_sync_result` so a fresh listen window
-        doesn't render stale ABORTED text in the Sync Control card."""
-        with self._lock:
-            self._last_sync_result = None
+        self._sync.clear_last_sync_result()
 
     def reset_sync_telemetry_peaks(self, camera_ids: list[str] | None = None) -> None:
-        """Zero the rolling peak columns for the named cams (or every cam
-        currently in the registry). Called at the start of each
-        /sync/trigger so the operator sees peaks for THIS attempt only."""
-        with self._lock:
-            targets = camera_ids if camera_ids is not None else list(self._sync_telemetry.keys())
-            for cam in targets:
-                rec = self._sync_telemetry.get(cam)
-                if rec is None:
-                    continue
-                for k in ("input_rms", "input_peak", "up_peak", "down_peak"):
-                    rec.pop(f"peak_{k}", None)
+        self._sync.reset_sync_telemetry_peaks(camera_ids)
 
     def sync_telemetry_snapshot(self) -> dict[str, dict[str, Any]]:
-        """Per-cam telemetry. No staleness sweep — the operator wants to
-        read the last observed values AFTER the phone stops listening
-        for post-hoc analysis. `age_s` is attached so the UI can decorate
-        stale entries (fade / "last seen N s ago") without inventing a
-        client clock."""
-        now = self._time_fn()
-        with self._lock:
-            out: dict[str, dict[str, Any]] = {}
-            for cam, rec in self._sync_telemetry.items():
-                r = dict(rec)
-                r["age_s"] = max(0.0, now - float(rec.get("ts", now)))
-                out[cam] = r
-        return out
+        return self._sync.sync_telemetry_snapshot()
 
     def mark_device_offline(self, camera_id: str) -> None:
         """Age out `last_seen_at` so the device shows offline on the very
@@ -1117,7 +990,7 @@ class State:
             )
             self._live_pairings[session.id] = LivePairingSession(session.id)
             self._current_session = session
-            self._current_time_sync_intent = None
+            self._sync.clear_time_sync_intent_locked()
             return session
 
     def current_mode(self) -> CaptureMode:
@@ -1217,233 +1090,31 @@ class State:
     def log_sync_event(
         self, source: str, event: str, detail: dict[str, Any] | None = None
     ) -> None:
-        """Append one diagnostic line to the in-memory sync log. Both server
-        code paths and the phone-pushed `POST /sync/log` endpoint end up
-        here. Safe to call with the lock held or released — the ring append
-        is the only shared-state mutation."""
-        entry = SyncLogEntry(
-            ts=self._time_fn(),
-            source=source,
-            event=event,
-            detail=detail or {},
-        )
-        with self._lock:
-            self._sync_log.append(entry)
-        logger.info(
-            "sync_log source=%s event=%s detail=%s",
-            source, event, entry.detail,
-        )
+        self._sync.log_sync_event(source, event, detail)
 
     def sync_logs(self, limit: int = 200) -> list[SyncLogEntry]:
-        """Most recent N diagnostic entries, oldest-first."""
-        with self._lock:
-            return list(self._sync_log)[-limit:]
+        return self._sync.sync_logs(limit)
 
     def _check_sync_timeout_locked(self, now: float) -> None:
-        """Drop `_current_sync` if it has been waiting past the timeout.
-        Caller must hold `self._lock`. Also latches the cooldown so a new
-        run can't start immediately after a timeout — gives the operator
-        a window to see the failure surface on the dashboard. Synthesises
-        an aborted `SyncResult` carrying whatever partial reports landed
-        (incl. traces) so the `/sync` panel can show sub-threshold peaks /
-        noise floor from a failed run instead of going blank."""
-        s = self._current_sync
-        if s is None:
-            return
-        if now - s.started_at > _SYNC_TIMEOUT_S:
-            received = sorted(s.reports.keys())
-            self._sync_log.append(SyncLogEntry(
-                ts=now, source="server", event="timeout",
-                detail={"id": s.id, "reports_received": received},
-            ))
-            logger.warning(
-                "sync timeout id=%s received=%s", s.id, received
-            )
-            self._last_sync_result = self._build_aborted_result_locked(s, now)
-            self._current_sync = None
-            self._sync_cooldown_until = now + _SYNC_COOLDOWN_S
-
-    def _merge_late_abort_report_locked(
-        self, report: SyncReport, now: float,
-    ) -> None:
-        """Merge a post-timeout abort report's traces into the already-
-        latched `_last_sync_result`. Keeps the run's diagnostic picture
-        intact even when one phone's abort POST races the server-side
-        timeout. Logs a post-mortem line for the merged streams so the
-        sync log still carries the quantitative context. Caller must
-        hold `self._lock`."""
-        result = self._last_sync_result
-        if result is None:
-            return
-        updates: dict[str, Any] = {}
-        reasons = dict(result.abort_reasons)
-        if report.abort_reason:
-            reasons[report.role] = report.abort_reason
-        else:
-            reasons.setdefault(report.role, "aborted_late")
-        updates["abort_reasons"] = reasons
-        updates["aborted"] = True
-        if report.role == "A":
-            if report.trace_self is not None:
-                updates["trace_a_self"] = report.trace_self
-            if report.trace_other is not None:
-                updates["trace_a_other"] = report.trace_other
-            if report.t_self_s is not None:
-                updates["t_a_self_s"] = report.t_self_s
-            if report.t_from_other_s is not None:
-                updates["t_a_from_b_s"] = report.t_from_other_s
-        else:
-            if report.trace_self is not None:
-                updates["trace_b_self"] = report.trace_self
-            if report.trace_other is not None:
-                updates["trace_b_other"] = report.trace_other
-            if report.t_self_s is not None:
-                updates["t_b_self_s"] = report.t_self_s
-            if report.t_from_other_s is not None:
-                updates["t_b_from_a_s"] = report.t_from_other_s
-        self._last_sync_result = result.model_copy(update=updates)
-        self._sync_log.append(SyncLogEntry(
-            ts=now, source="server", event="report_late_merged",
-            detail={
-                "id": report.sync_id,
-                "role": report.role,
-                "reason": report.abort_reason,
-                "had_traces": {
-                    "self": report.trace_self is not None,
-                    "other": report.trace_other is not None,
-                },
-            },
-        ))
-        logger.info(
-            "sync report_late_merged id=%s role=%s reason=%s",
-            report.sync_id, report.role, report.abort_reason,
-        )
-        # Fire post-mortem on the newly-merged streams so the sync log
-        # has a self-contained quantitative line per late-arriving abort.
-        # Mutual-sync uses its own threshold; quick-chirp's is independent.
-        thr = self._runtime_settings.mutual_sync_threshold
-        if report.role == "A":
-            self._log_trace_post_mortem_locked(
-                report.sync_id, "A.self", report.trace_self, thr)
-            self._log_trace_post_mortem_locked(
-                report.sync_id, "A.other", report.trace_other, thr)
-        else:
-            self._log_trace_post_mortem_locked(
-                report.sync_id, "B.self", report.trace_self, thr)
-            self._log_trace_post_mortem_locked(
-                report.sync_id, "B.other", report.trace_other, thr)
-
-    def _log_trace_post_mortem_locked(
-        self, run_id: str, label: str,
-        trace: list | None, threshold: float,
-    ) -> None:
-        """Compute + log {best_peak, t_best, median, p90, margin_to_threshold}
-        for one matched-filter trace so post-mortem failures show up in the
-        sync log (and the terminal) with quantitative context. Silently
-        skips empty / missing traces — the log entry exists purely to let
-        me read `how close did that band come to firing?`."""
-        if not trace:
-            self._sync_log.append(SyncLogEntry(
-                ts=self._time_fn(), source="server", event="post_mortem",
-                detail={"id": run_id, "stream": label, "status": "no_trace"},
-            ))
-            logger.info("sync post_mortem id=%s stream=%s status=no_trace", run_id, label)
-            return
-        peaks = sorted(float(s.peak) for s in trace)
-        n = len(peaks)
-        best = peaks[-1]
-        median = peaks[n // 2]
-        p90 = peaks[min(n - 1, int(n * 0.9))]
-        # Find t of best sample (first occurrence)
-        t_best = None
-        for s in trace:
-            if float(s.peak) == best:
-                t_best = float(s.t)
-                break
-        margin = best / threshold if threshold > 0 else 0.0
-        detail = {
-            "id": run_id, "stream": label, "status": "ok",
-            "n": n, "best": round(best, 4), "t_best": round(t_best or 0.0, 3),
-            "noise_median": round(median, 4), "noise_p90": round(p90, 4),
-            "threshold": round(threshold, 4),
-            "margin_x_threshold": round(margin, 3),
-        }
-        self._sync_log.append(SyncLogEntry(
-            ts=self._time_fn(), source="server", event="post_mortem",
-            detail=detail,
-        ))
-        logger.info(
-            "sync post_mortem id=%s stream=%s best=%.3f@%.2fs noise_med=%.3f p90=%.3f thr=%.3f margin=%.2fx n=%d",
-            run_id, label, best, t_best or 0.0, median, p90, threshold, margin, n,
-        )
-
-    def _build_aborted_result_locked(
-        self, run: "SyncRun", solved_at: float
-    ) -> SyncResult:
-        """Build a diagnostic-only `SyncResult` from a timed-out or
-        partially-reported run. Pulls whatever traces + abort reasons the
-        phones shipped so the dashboard can render the failed run's
-        matched-filter plot. delta / distance / raw timestamps stay None;
-        aborted=True is the flag dashboards should branch on."""
-        rep_a = run.reports.get("A")
-        rep_b = run.reports.get("B")
-        reasons: dict[str, str] = {}
-        if rep_a is not None and rep_a.aborted and rep_a.abort_reason:
-            reasons["A"] = rep_a.abort_reason
-        if rep_b is not None and rep_b.aborted and rep_b.abort_reason:
-            reasons["B"] = rep_b.abort_reason
-        if rep_a is None:
-            reasons.setdefault("A", "no_report")
-        if rep_b is None:
-            reasons.setdefault("B", "no_report")
-        # Post-mortem per stream: logs best peak, noise floor, and the
-        # margin to threshold so I can read the log and learn why this
-        # run failed (too far? wrong band? speaker silent?).
-        thr = self._runtime_settings.chirp_detect_threshold
-        self._log_trace_post_mortem_locked(
-            run.id, "A.self",  rep_a.trace_self if rep_a else None, thr)
-        self._log_trace_post_mortem_locked(
-            run.id, "A.other", rep_a.trace_other if rep_a else None, thr)
-        self._log_trace_post_mortem_locked(
-            run.id, "B.self",  rep_b.trace_self if rep_b else None, thr)
-        self._log_trace_post_mortem_locked(
-            run.id, "B.other", rep_b.trace_other if rep_b else None, thr)
-        return SyncResult(
-            id=run.id,
-            delta_s=None,
-            distance_m=None,
-            solved_at=solved_at,
-            t_a_self_s=rep_a.t_self_s if rep_a else None,
-            t_a_from_b_s=rep_a.t_from_other_s if rep_a else None,
-            t_b_self_s=rep_b.t_self_s if rep_b else None,
-            t_b_from_a_s=rep_b.t_from_other_s if rep_b else None,
-            aborted=True,
-            abort_reasons=reasons,
-            trace_a_self=rep_a.trace_self if rep_a else None,
-            trace_a_other=rep_a.trace_other if rep_a else None,
-            trace_b_self=rep_b.trace_self if rep_b else None,
-            trace_b_other=rep_b.trace_other if rep_b else None,
-        )
+        """Delegate to the sync coordinator. Kept on State as a back-compat
+        entry point for code paths that acquire the shared lock and then
+        want to advance the sync-run state machine (e.g. `commands_for_devices`,
+        `trigger_sync_command`). Caller must hold `self._lock`."""
+        self._sync._check_sync_timeout_locked(now)
 
     def current_sync(self) -> SyncRun | None:
         """Snapshot of the in-progress sync run (None when idle). Lazily
         applies the timeout on read, mirroring `current_session()`."""
-        now = self._time_fn()
-        with self._lock:
-            self._check_sync_timeout_locked(now)
-            return self._current_sync
+        return self._sync.current_sync()
 
     def last_sync_result(self) -> SyncResult | None:
         """Most recently solved sync result, or None if no sync has ever
         succeeded on this server instance."""
-        with self._lock:
-            return self._last_sync_result
+        return self._sync.last_sync_result()
 
     def sync_cooldown_remaining_s(self) -> float:
         """Seconds remaining on the post-sync cooldown. 0 when ready."""
-        now = self._time_fn()
-        with self._lock:
-            return max(0.0, self._sync_cooldown_until - now)
+        return self._sync.sync_cooldown_remaining_s()
 
     # --- Time-sync command dispatch (single-listener, third-device chirp) ---
     #
@@ -1481,95 +1152,24 @@ class State:
                 # Skip every online camera — every online cam during an
                 # armed session is considered "recording" in this rig.
                 targets = []
-            # Dashboard trigger = explicit new attempt. Force a fresh id
-            # so previously-synced cams' LEDs flip red (id_match breaks)
-            # instead of silently reusing the previous intent's id.
-            intent = (
-                self._claim_time_sync_intent_locked(now, force_new=True)
-                if targets else None
-            )
-            dispatched: list[str] = []
-            for cam in sorted(set(targets)):
-                assert intent is not None
-                self._sync_command_pending[cam] = _LegacyTimeSyncIntent(
-                    id=intent.id,
-                    started_at=intent.started_at,
-                    expires_at=now + _SYNC_COMMAND_TTL_S,
-                )
-                dispatched.append(cam)
-            # Also sweep any expired entries so the map can't grow forever
-            # even if `consume_sync_command` never runs for a stale cam.
-            stale = [
-                c for c, pending in self._sync_command_pending.items()
-                if pending.expires_at <= now
-            ]
-            for c in stale:
-                del self._sync_command_pending[c]
-        return dispatched
+            return self._sync.dispatch_sync_commands_locked(now, targets)
 
     def consume_sync_command(self, camera_id: str) -> tuple[str | None, str | None]:
         """Atomically pop + return a pending time-sync command for the
-        named camera, or `(None, None)` when there's nothing queued. Used by the
-        WS heartbeat handler so the same beat that reports liveness also
-        clears the flag — one-shot dispatch, matching how arm/disarm
-        commands self-cancel on consumption.
-
-        Expired entries (past `_SYNC_COMMAND_TTL_S`) are silently dropped
-        without firing — the operator is presumed to have moved on."""
-        now = self._time_fn()
-        with self._lock:
-            pending = self._sync_command_pending.pop(camera_id, None)
-        if pending is None:
-            return None, None
-        if pending.expires_at <= now:
-            return None, None
-        return "start", pending.id
+        named camera, or `(None, None)` when there's nothing queued."""
+        return self._sync.consume_sync_command(camera_id)
 
     def pending_sync_commands(self) -> dict[str, str]:
-        """Snapshot of cameras with a currently-live pending time-sync
-        command. Read-only — used by /status so the dashboard can render
-        a "pending" indicator on each device chip until the phone's next
-        heartbeat drains the flag."""
-        now = self._time_fn()
-        with self._lock:
-            return {
-                cam: "start"
-                for cam, pending in self._sync_command_pending.items()
-                if pending.expires_at > now
-            }
+        return self._sync.pending_sync_commands()
 
     def set_expected_sync_id(self, camera_ids: list[str], sync_id: str) -> None:
-        """Record `sync_id` as the id we expect the listed cams to report
-        after the current listen window succeeds. Heartbeats reporting
-        anything else are rendered as not-synced on the dashboard,
-        which gives the operator a per-cam "listening" → "synced"
-        transition instead of a stuck-green LED from a previous
-        attempt."""
-        with self._lock:
-            for cam in camera_ids:
-                self._expected_sync_id_per_cam[cam] = sync_id
+        self._sync.set_expected_sync_id(camera_ids, sync_id)
 
     def expected_sync_id_snapshot(self) -> dict[str, str]:
-        with self._lock:
-            return dict(self._expected_sync_id_per_cam)
+        return self._sync.expected_sync_id_snapshot()
 
     def pending_sync_command_ids(self) -> dict[str, str]:
-        """Per-cam mapping from cam → the actual legacy-sync intent id,
-        for WS push to iOS. The public `pending_sync_commands()` returns
-        the literal "start" as its value because it feeds a dashboard
-        chip that doesn't need the id — but the WS push MUST send the
-        real `_LegacyTimeSyncIntent.id` so iOS can echo it back in its
-        heartbeat's `time_sync_id`. Earlier the WS push re-used the
-        dashboard-chip map and accidentally shipped "start" as the id,
-        which then appeared verbatim on the dashboard as
-        `sync_id start`."""
-        now = self._time_fn()
-        with self._lock:
-            return {
-                cam: pending.id
-                for cam, pending in self._sync_command_pending.items()
-                if pending.expires_at > now
-            }
+        return self._sync.pending_sync_command_ids()
 
     def _session_is_trashed_locked(self, session_id: str) -> bool:
         return self._processing.is_trashed(session_id)
@@ -1727,181 +1327,17 @@ class State:
         current = self.current_session()
         online_ids = [d.camera_id for d in self.online_devices()]
         with self._lock:
-            self._check_sync_timeout_locked(now)
-            reject_reason: str | None = None
-            if current is not None:
-                reject_reason = "session_armed"
-            elif self._current_sync is not None:
-                reject_reason = "sync_in_progress"
-            elif now < self._sync_cooldown_until:
-                reject_reason = "cooldown"
-            elif len(online_ids) < 2:
-                reject_reason = "devices_missing"
-            if reject_reason is not None:
-                self._sync_log.append(SyncLogEntry(
-                    ts=now, source="server", event="start_rejected",
-                    detail={"reason": reject_reason, "online": online_ids},
-                ))
-                logger.info(
-                    "sync start rejected reason=%s online=%s",
-                    reject_reason, online_ids,
-                )
-                return None, reject_reason
-            run = SyncRun(id=_new_sync_id(), started_at=now)
-            self._current_sync = run
-            # Fresh listen window → drop prior run's result so the "Last"
-            # chip doesn't show stale ABORTED / timing from a previous
-            # attempt. Telemetry peaks reset independently via
-            # `reset_sync_telemetry_peaks`.
-            self._last_sync_result = None
-            self._sync_log.append(SyncLogEntry(
-                ts=now, source="server", event="start",
-                detail={"id": run.id, "online": online_ids},
-            ))
-            logger.info("sync start id=%s online=%s", run.id, online_ids)
-            return run, None
+            return self._sync.start_sync_locked(
+                now,
+                online_ids,
+                session_armed=current is not None,
+            )
 
     def record_sync_report(
         self, report: SyncReport
     ) -> tuple[SyncRun | None, SyncResult | None, str | None]:
-        """Attach a phone's matched-filter report to the current run.
-        Returns `(run_after, solved_result_or_None, reason_or_None)`:
-          - `reason == "no_sync"` when no run is active
-          - `reason == "stale_sync_id"` when report belongs to a past run
-          - `reason is None` on success (run_after is always the updated
-            run; solved_result is set on the second report when the
-            solver fires)
-
-        When both roles have reported the solver runs inside the lock
-        (O(1) arithmetic), the result is latched into `_last_sync_result`,
-        the run is cleared, and cooldown begins."""
-        now = self._time_fn()
-        with self._lock:
-            self._check_sync_timeout_locked(now)
-            run = self._current_sync
-            if run is None:
-                # Late abort reports arrive right after the server-side
-                # timeout fired and cleared `_current_sync`. Without this
-                # grace path we lose the trace data from the side that
-                # never produced a full report (typically the failed cam),
-                # which is exactly the diagnostic we need most.
-                if (
-                    report.aborted
-                    and self._last_sync_result is not None
-                    and self._last_sync_result.id == report.sync_id
-                    and now - self._last_sync_result.solved_at <= _SYNC_LATE_REPORT_GRACE_S
-                ):
-                    self._merge_late_abort_report_locked(report, now)
-                    return None, None, None
-                self._sync_log.append(SyncLogEntry(
-                    ts=now, source="server", event="report_no_sync",
-                    detail={"role": report.role, "sync_id": report.sync_id},
-                ))
-                logger.info(
-                    "sync report no active sync role=%s sync_id=%s",
-                    report.role, report.sync_id,
-                )
-                return None, None, "no_sync"
-            if run.id != report.sync_id:
-                self._sync_log.append(SyncLogEntry(
-                    ts=now, source="server", event="report_stale",
-                    detail={
-                        "role": report.role,
-                        "posted_sync_id": report.sync_id,
-                        "current_sync_id": run.id,
-                    },
-                ))
-                logger.info(
-                    "sync report stale role=%s posted=%s current=%s",
-                    report.role, report.sync_id, run.id,
-                )
-                return run, None, "stale_sync_id"
-            run.reports[report.role] = report
-            self._sync_log.append(SyncLogEntry(
-                ts=now, source="server", event="report_received",
-                detail={
-                    "role": report.role,
-                    "t_self_s": report.t_self_s,
-                    "t_from_other_s": report.t_from_other_s,
-                    "emitted_band": report.emitted_band,
-                    "received_so_far": sorted(run.reports.keys()),
-                },
-            ))
-            # Nullable on aborted reports (phone heard its own band but
-            # not the other's, or timed out before either) — can't format
-            # None with %f, so render them as strings first.
-            fmt_ts = lambda v: "None" if v is None else f"{float(v):.6f}"
-            logger.info(
-                "sync report received id=%s role=%s t_self=%s t_from_other=%s aborted=%s",
-                run.id, report.role,
-                fmt_ts(report.t_self_s), fmt_ts(report.t_from_other_s),
-                bool(report.aborted),
-            )
-            if not run.complete:
-                return run, None, None
-            rep_a = run.reports["A"]
-            rep_b = run.reports["B"]
-            # Abort path: either phone flagged aborted, OR one of its
-            # required timestamps is None. Solver needs four non-null
-            # timestamps; anything less → synthesize a diagnostic-only
-            # result carrying the traces + reasons so the /sync panel
-            # still visualises the failure.
-            any_aborted = (
-                rep_a.aborted or rep_b.aborted
-                or rep_a.t_self_s is None or rep_a.t_from_other_s is None
-                or rep_b.t_self_s is None or rep_b.t_from_other_s is None
-            )
-            if any_aborted:
-                result = self._build_aborted_result_locked(run, now)
-                self._last_sync_result = result
-                self._current_sync = None
-                self._sync_cooldown_until = now + _SYNC_COOLDOWN_S
-                self._sync_log.append(SyncLogEntry(
-                    ts=now, source="server", event="aborted",
-                    detail={
-                        "id": result.id,
-                        "reasons": result.abort_reasons,
-                        "had_traces": {
-                            "a_self": rep_a.trace_self is not None,
-                            "a_other": rep_a.trace_other is not None,
-                            "b_self": rep_b.trace_self is not None,
-                            "b_other": rep_b.trace_other is not None,
-                        },
-                    },
-                ))
-                logger.warning(
-                    "sync aborted id=%s reasons=%s",
-                    result.id, result.abort_reasons,
-                )
-                return None, result, None
-            result = compute_mutual_sync(rep_a, rep_b, solved_at=now)
-            # Attach per-role matched-filter traces so the /sync debug
-            # plot can render post-hoc (page reload / past-run inspection)
-            # — the /sync/state live tick also rides this payload via
-            # model_dump. Silently None when the iPhone didn't include
-            # them (old builds).
-            result = result.model_copy(update={
-                "trace_a_self": rep_a.trace_self,
-                "trace_a_other": rep_a.trace_other,
-                "trace_b_self": rep_b.trace_self,
-                "trace_b_other": rep_b.trace_other,
-            })
-            self._last_sync_result = result
-            self._current_sync = None
-            self._sync_cooldown_until = now + _SYNC_COOLDOWN_S
-            self._sync_log.append(SyncLogEntry(
-                ts=now, source="server", event="solved",
-                detail={
-                    "id": result.id,
-                    "delta_s": result.delta_s,
-                    "distance_m": result.distance_m,
-                },
-            ))
-            logger.info(
-                "sync solved id=%s delta_s=%.6f distance_m=%.3f",
-                result.id, result.delta_s, result.distance_m,
-            )
-            return None, result, None
+        """Attach a phone's matched-filter report to the current run."""
+        return self._sync.record_sync_report(report)
 
     def clear_last_ended_session(self) -> bool:
         """Drop the `_last_ended_session` pointer so the dashboard's
@@ -1966,8 +1402,8 @@ class State:
         current = self.current_session()  # applies timeout
         online_ids = [d.camera_id for d in self.online_devices()]
         with self._lock:
-            self._check_sync_timeout_locked(now)
-            sync_run = self._current_sync
+            self._sync._check_sync_timeout_locked(now)
+            sync_run = self._sync._current_sync
             last_ended = self._last_ended_session
         cmds: dict[str, str] = {}
         if sync_run is not None:
