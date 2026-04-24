@@ -56,6 +56,29 @@ _BG_SUBTRACTOR_WARMUP_FRAMES = 30
 # ball outline into adjacent motion.
 _BG_CLOSE_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 
+# MOG2 tuning: OpenCV defaults (history=500, varThreshold=16) bake a
+# background model over ~2 s @ 240 fps. A ball that sits still mid-
+# windup for half a second gets learned into the background and then
+# disappears from the foreground mask once it starts moving again —
+# false-negatives on the first few frames of flight.
+#
+# history=120 ≈ 0.5 s @ 240 fps — short enough that the model tracks
+# operator movement without baking in a stationary ball, long enough to
+# stabilize against single-frame flicker. varThreshold kept at OpenCV
+# default (16) because lowering it produces more edge noise on the
+# indoor rig's dim background.
+_BG_HISTORY = 120
+_BG_VAR_THRESHOLD = 16
+
+# Explicit low learning rate instead of MOG2's auto-compute
+# (`-1` → 1/min(2*frameCount, history)). auto-compute is ~1/240 early on,
+# fast enough to learn the ball into the background during the windup
+# standstill. 0.0005 ≈ 1/2000 — the model adapts to genuine lighting
+# drift over seconds but stays blind to brief stationary objects like
+# a held ball. This pairs with the shorter `history` above so the
+# two knobs reinforce rather than cancel.
+_BG_LEARNING_RATE = 0.0005
+
 
 def detect_pitch(
     video_path: Path,
@@ -81,7 +104,11 @@ def detect_pitch(
     """
     hsv = hsv_range if hsv_range is not None else HSVRange.from_env()
     subtractor = (
-        cv2.createBackgroundSubtractorMOG2(detectShadows=False)
+        cv2.createBackgroundSubtractorMOG2(
+            history=_BG_HISTORY,
+            varThreshold=_BG_VAR_THRESHOLD,
+            detectShadows=False,
+        )
         if enable_bg_subtraction
         else None
     )
@@ -104,7 +131,7 @@ def detect_pitch(
             raise ProcessingCanceled(f"detection canceled for {video_path.name}")
         fg_mask = None
         if subtractor is not None:
-            fg_mask_raw = subtractor.apply(bgr)
+            fg_mask_raw = subtractor.apply(bgr, learningRate=_BG_LEARNING_RATE)
             # Skip detection during warm-up; still feed the subtractor so
             # the model keeps building across the whole clip.
             if idx >= _BG_SUBTRACTOR_WARMUP_FRAMES:
