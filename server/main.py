@@ -796,6 +796,10 @@ def events_index() -> HTMLResponse:
             arm_readiness=_arm_readiness(devices, calibrations),
             capture_mode="camera_only",
             hsv_range=state.hsv_range().__dict__,
+            shape_gate={
+                "aspect_min": state.shape_gate().aspect_min,
+                "fill_min": state.shape_gate().fill_min,
+            },
             sync=sync_run.to_dict() if sync_run is not None else None,
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
             chirp_detect_threshold=state.chirp_detect_threshold(),

@@ -268,6 +268,8 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .hsv-pair input[type="range"] {{ width: 100%; margin: 0; accent-color: var(--ink); }}
 .hsv-num {{ width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--border-base); border-radius: var(--r); background: var(--surface); color: var(--ink); font-family: var(--mono); font-size: 11px; }}
 .hsv-actions {{ display: flex; justify-content: flex-end; }}
+.shape-gate-form {{ margin-top: var(--s-3); padding-top: var(--s-3); border-top: 1px solid var(--border-l); }}
+.hsv-subtitle {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub); }}
 .active-head {{ display:flex; align-items:center; gap:var(--s-2); margin-bottom:var(--s-2); }}
 .active-grid {{ display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:var(--s-2); margin-top:var(--s-3); }}
 .active-grid span {{ display:flex; flex-direction:column; gap:2px; padding:6px 8px;

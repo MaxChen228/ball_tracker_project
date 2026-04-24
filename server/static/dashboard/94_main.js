@@ -3,6 +3,7 @@
   // (1 s) and is the only high-frequency tick.
   initLiveStream();
   initHSVControls();
+  initShapeGateControls();
   tickStatus();
   tickCalibration();
   tickEvents();
