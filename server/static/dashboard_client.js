@@ -301,37 +301,66 @@
     return bestIdx.map(i => pts[i]);
   }
 
-  // Per-axis ballistic LSQ with gravity pinned. Mirrors viewer's
-  // `ballisticFit` but reads `{x_m, y_m, z_m, t_rel_s}` and returns
-  // `evaluate(t) -> {x_m, y_m, z_m}`.
+  // Per-axis cubic LSQ. No physical model (no g pinned); drag, lift,
+  // spin all show up naturally. Mirrors viewer's `ballisticFit` but reads
+  // `{x_m, y_m, z_m, t_rel_s}`.
+  function _solve4x4Dash(M, b) {
+    const a = M.map((row, i) => [...row, b[i]]);
+    for (let i = 0; i < 4; i++) {
+      let pv = i;
+      for (let k = i + 1; k < 4; k++) if (Math.abs(a[k][i]) > Math.abs(a[pv][i])) pv = k;
+      if (Math.abs(a[pv][i]) < 1e-14) return null;
+      if (pv !== i) { const tmp = a[i]; a[i] = a[pv]; a[pv] = tmp; }
+      for (let k = i + 1; k < 4; k++) {
+        const f = a[k][i] / a[i][i];
+        for (let j = i; j <= 4; j++) a[k][j] -= f * a[i][j];
+      }
+    }
+    const x = new Array(4);
+    for (let i = 3; i >= 0; i--) {
+      let s = a[i][4];
+      for (let j = i + 1; j < 4; j++) s -= a[i][j] * x[j];
+      x[i] = s / a[i][i];
+    }
+    return x;
+  }
   function ballisticFitDash(pts) {
     if (!pts || pts.length < 4) return null;
-    const G = 9.81;
     const t0 = pts[0].t_rel_s;
-    function fitAxis(getVal, accelTerm) {
-      let sumT = 0, sumTT = 0, sumP = 0, sumTP = 0;
-      const n = pts.length;
-      for (const p of pts) {
-        const tau = p.t_rel_s - t0;
-        const v = getVal(p) - accelTerm * tau * tau;
-        sumT += tau; sumTT += tau*tau; sumP += v; sumTP += tau*v;
-      }
-      const det = n * sumTT - sumT * sumT;
-      if (Math.abs(det) < 1e-12) return { p0: getVal(pts[0]), v0: 0 };
-      return {
-        p0: (sumP * sumTT - sumT * sumTP) / det,
-        v0: (n * sumTP - sumT * sumP) / det,
-      };
+    const taus = pts.map(p => p.t_rel_s - t0);
+    const n = pts.length;
+    const sT = [n, 0, 0, 0, 0, 0, 0];
+    for (const tau of taus) {
+      let p = 1;
+      for (let k = 1; k <= 6; k++) { p *= tau; sT[k] += p; }
     }
-    const fx = fitAxis(p => p.x_m, 0);
-    const fy = fitAxis(p => p.y_m, 0);
-    const fz = fitAxis(p => p.z_m, -0.5 * G);
+    const M = [
+      [sT[0], sT[1], sT[2], sT[3]],
+      [sT[1], sT[2], sT[3], sT[4]],
+      [sT[2], sT[3], sT[4], sT[5]],
+      [sT[3], sT[4], sT[5], sT[6]],
+    ];
+    function fitAxis(getVal) {
+      const r = [0, 0, 0, 0];
+      for (let i = 0; i < n; i++) {
+        const v = getVal(pts[i]);
+        let p = 1;
+        r[0] += v;
+        for (let k = 1; k <= 3; k++) { p *= taus[i]; r[k] += p * v; }
+      }
+      return _solve4x4Dash(M, r);
+    }
+    const cx = fitAxis(p => p.x_m);
+    const cy = fitAxis(p => p.y_m);
+    const cz = fitAxis(p => p.z_m);
+    if (!cx || !cy || !cz) return null;
     function evaluate(t) {
       const tau = t - t0;
+      const tt = tau*tau, ttt = tt*tau;
       return {
-        x_m: fx.p0 + fx.v0 * tau,
-        y_m: fy.p0 + fy.v0 * tau,
-        z_m: fz.p0 + fz.v0 * tau - 0.5 * G * tau * tau,
+        x_m: cx[0] + cx[1]*tau + cx[2]*tt + cx[3]*ttt,
+        y_m: cy[0] + cy[1]*tau + cy[2]*tt + cy[3]*ttt,
+        z_m: cz[0] + cz[1]*tau + cz[2]*tt + cz[3]*ttt,
       };
     }
     return { evaluate, t0, t1: pts[pts.length - 1].t_rel_s };
