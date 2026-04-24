@@ -248,15 +248,16 @@ def render_viewer_html(
               <button type="button" class="layer-pill" data-layer="camB" data-path="live" aria-pressed="true">live</button>
               <button type="button" class="layer-pill" data-layer="camB" data-path="server_post" aria-pressed="true">svr</button>
             </span>
+            <span class="layer-divider" aria-hidden="true"></span>
             <span class="layer-group" data-layer="residual" id="residual-filter-group" title="Drop triangulated points whose ray-midpoint residual exceeds this threshold. Real ball pairs sit at sub-cm residual; static-target false pairs blow up to metres.">
               <span class="layer-name">Residual</span>
-              <input type="range" id="residual-filter-slider" min="0" max="200" step="1" value="200" style="width:96px;vertical-align:middle;" aria-label="Residual filter threshold (cm)">
-              <span id="residual-filter-readout" style="font:inherit;font-size:9px;letter-spacing:0.06em;min-width:48px;display:inline-block;text-align:right;">off</span>
+              <input type="range" id="residual-filter-slider" min="0" max="200" step="1" value="200" aria-label="Residual filter threshold (cm)">
+              <span id="residual-filter-readout" class="readout">off</span>
             </span>
             <span class="layer-group" data-layer="velocity" id="velocity-filter-group" title="Forward-greedy velocity cap: drop any triangulated point whose inferred speed from the previously kept point exceeds this cap. Survives the residual check but teleports — e.g. a window-reflection peak that briefly aligns with the ball ray — get pruned here.">
               <span class="layer-name">Velocity</span>
-              <input type="range" id="velocity-filter-slider" min="1" max="60" step="1" value="60" style="width:96px;vertical-align:middle;" aria-label="Velocity cap (m/s)">
-              <span id="velocity-filter-readout" style="font:inherit;font-size:9px;letter-spacing:0.06em;min-width:56px;display:inline-block;text-align:right;">off</span>
+              <input type="range" id="velocity-filter-slider" min="1" max="60" step="1" value="60" aria-label="Velocity cap (m/s)">
+              <span id="velocity-filter-readout" class="readout">off</span>
             </span>
           </span>
         </div>
@@ -278,13 +279,17 @@ def render_viewer_html(
         </div>
         <div class="strip-note" id="strip-note-multi" hidden></div>
       </div>
-      <span id="frame-label" class="frame-label">
-        <span class="primary" id="frame-primary">t=0.000s</span>
-        <span class="sub" id="frame-meta">
-          <input id="frame-input" type="number" min="0" max="0" value="0" step="1" title="Type a frame index to jump" />/<span id="frame-total">0</span>
-        </span>
-        <span class="sub" id="frame-sub"></span>
-      </span>
+      <div id="frame-label" class="frame-label" role="group" aria-label="Playback position">
+        <div class="frame-label-head">
+          <span class="primary" id="frame-primary">t=0.000s</span>
+          <span class="frame-meta">
+            <input id="frame-input" type="number" min="0" max="0" value="0" step="1" title="Type a frame index to jump" />
+            <span class="frame-slash">/</span>
+            <span id="frame-total" class="frame-total">0</span>
+          </span>
+        </div>
+        <div class="frame-label-body" id="frame-sub"></div>
+      </div>
     </div>
     <div class="tl-row">
       <div class="transport" role="group" aria-label="transport">
@@ -559,27 +564,65 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     gap:10px; align-items:center; flex-wrap:wrap; text-transform:uppercase; }}
   .strip-legend .sw {{ display:inline-block; width:10px; height:10px; vertical-align:middle;
     margin-right:4px; border:1px solid var(--border-base); }}
-  .layer-toggles {{ margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }}
-  .layer-toggles .layer-label {{ color:var(--sub); letter-spacing:0.08em; font-size:10px; }}
-  .layer-toggles .layer-group {{ display:inline-flex; align-items:center; gap:4px; padding:2px 4px 2px 6px;
-    border:1px solid var(--border-base); border-radius:var(--r); }}
-  .layer-toggles .layer-name {{ font-size:10px; letter-spacing:0.08em; color:var(--ink); text-transform:uppercase;
-    padding-right:2px; display:inline-flex; align-items:center; gap:4px; }}
+  .layer-toggles {{ margin-left:auto; display:flex; gap:6px; align-items:stretch; flex-wrap:wrap;
+    padding:0; }}
+  .layer-toggles .layer-label {{ color:var(--sub); letter-spacing:0.08em; font-size:10px;
+    align-self:center; padding-right:4px; }}
+  .layer-toggles .layer-group {{ display:inline-flex; align-items:center; gap:6px;
+    padding:3px 8px; height:26px; box-sizing:border-box;
+    border:1px solid var(--border-base); border-radius:var(--r); background:var(--surface); }}
+  .layer-toggles .layer-group[data-layer="residual"],
+  .layer-toggles .layer-group[data-layer="velocity"] {{ border-color:var(--ink-light, #7a756c); }}
+  .layer-toggles .layer-name {{ font-size:10px; letter-spacing:0.1em; color:var(--ink); text-transform:uppercase;
+    display:inline-flex; align-items:center; gap:4px; font-weight:500; }}
   .layer-toggles .layer-name .swatch {{ width:8px; height:8px; display:inline-block; border:1px solid rgba(0,0,0,0.12); }}
-  .layer-toggles .layer-pill {{ font:inherit; font-size:9px; letter-spacing:0.06em; padding:1px 6px;
+  .layer-toggles .layer-pill {{ font:inherit; font-size:9px; letter-spacing:0.08em; padding:2px 8px;
     background:transparent; color:var(--sub); border:1px solid var(--border-base); border-radius:2px;
-    cursor:pointer; text-transform:uppercase; transition:background 0.12s, color 0.12s, border-color 0.12s; }}
+    cursor:pointer; text-transform:uppercase; line-height:1;
+    transition:background 0.12s, color 0.12s, border-color 0.12s; }}
   .layer-toggles .layer-pill[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); border-color:var(--ink); }}
   .layer-toggles .layer-pill:hover {{ border-color:var(--ink); }}
   .layer-toggles .layer-pill[hidden] {{ display:none; }}
-  .tl-row .frame-label {{ min-width:300px; text-align:right; color:var(--ink); font-weight:500; font-size:10px;
-    letter-spacing:0.02em; white-space:nowrap; font-variant-numeric:tabular-nums;
-    display:inline-flex; align-items:center; justify-content:flex-end; gap:4px; }}
-  .tl-row .frame-label .primary {{ color:var(--ink); font-weight:600; font-size:13px;
+  .layer-toggles .layer-divider {{ width:1px; align-self:stretch;
+    background:var(--border-base); margin:2px 2px; }}
+  .layer-toggles input[type="range"] {{ -webkit-appearance:none; appearance:none;
+    width:96px; height:2px; background:var(--border-base); border-radius:2px;
+    margin:0; accent-color:var(--ink); cursor:pointer; }}
+  .layer-toggles input[type="range"]::-webkit-slider-thumb {{ -webkit-appearance:none;
+    width:12px; height:12px; background:var(--ink); border-radius:50%; cursor:pointer;
+    border:1px solid var(--ink); }}
+  .layer-toggles input[type="range"]::-moz-range-thumb {{ width:12px; height:12px; background:var(--ink);
+    border-radius:50%; cursor:pointer; border:1px solid var(--ink); }}
+  .layer-toggles .layer-group .readout {{ font:inherit; font-size:9px; letter-spacing:0.06em;
+    color:var(--sub); min-width:52px; display:inline-block; text-align:right;
+    font-variant-numeric:tabular-nums; }}
+  /* --- Fixed-width playback info card ---
+     Pinned width so scrubber doesn't reflow as per-path stats change. */
+  .tl-row .frame-label {{ flex:0 0 auto; width:260px; padding:6px 10px;
+    border:1px solid var(--border-base); border-radius:var(--r); background:var(--surface);
+    color:var(--ink); font-size:10px; letter-spacing:0.02em;
+    font-variant-numeric:tabular-nums; display:flex; flex-direction:column; gap:4px;
+    align-self:stretch; justify-content:center; }}
+  .tl-row .frame-label .frame-label-head {{ display:flex; justify-content:space-between;
+    align-items:baseline; gap:8px; }}
+  .tl-row .frame-label .primary {{ color:var(--ink); font-weight:600; font-size:14px;
     font-variant-numeric:tabular-nums; letter-spacing:0.04em; }}
-  .tl-row .frame-label .sub {{ color:var(--sub); font-weight:400; }}
-  .tl-row .frame-label .det {{ color:var(--contra); font-weight:500; }}
-  .tl-row .frame-label .det.no {{ color:var(--sub); }}
+  .tl-row .frame-label .frame-meta {{ display:inline-flex; align-items:baseline; gap:2px;
+    color:var(--sub); }}
+  .tl-row .frame-label .frame-slash {{ color:var(--sub); padding:0 1px; }}
+  .tl-row .frame-label .frame-total {{ color:var(--sub); font-weight:400; }}
+  .tl-row .frame-label .frame-label-body {{ display:flex; flex-direction:column; gap:2px;
+    border-top:1px solid var(--border-base); padding-top:4px; }}
+  .tl-row .frame-label .frame-label-body:empty {{ display:none; }}
+  .tl-row .frame-label .fl-row {{ display:grid; grid-template-columns:40px 1fr 1fr;
+    gap:8px; align-items:baseline; color:var(--ink); }}
+  .tl-row .frame-label .fl-pathlabel {{ color:var(--sub); letter-spacing:0.08em;
+    text-transform:uppercase; font-size:9px; }}
+  .tl-row .frame-label .fl-cell {{ display:inline-flex; align-items:baseline; gap:3px;
+    color:var(--ink); font-weight:500; }}
+  .tl-row .frame-label .fl-cell-blank {{ color:var(--sub); font-weight:400; }}
+  .tl-row .frame-label .fl-det {{ color:var(--contra); font-weight:600; }}
+  .tl-row .frame-label .fl-det-no {{ color:var(--sub); font-weight:400; }}
   #frame-input {{ width:58px; font:inherit; font-size:10px; background:var(--bg);
     border:1px solid var(--border-base); color:var(--ink); padding:1px 4px; text-align:center;
     font-variant-numeric:tabular-nums; border-radius:var(--r); }}
@@ -1447,24 +1490,25 @@ def _viewer_js() -> str:
     const v = String(currentFrame);
     if (document.activeElement !== frameInput && frameInput.value !== v) frameInput.value = v;
     const tRel = currentT - tMin;
-    const parts = [];
-    // Emit one (cam:idx ✓/·) pair per active path. Wrapped in a label so the
-    // operator can tell at a glance which pipeline contributed the mark.
+    framePrimary.textContent = `t=${{tRel.toFixed(3)}}s`;
+    // Structured per-path rows: `<PATH>  A:idx ✓  B:idx ✓`. Two cams pad
+    // into fixed slots so the card width doesn't jitter as idx changes
+    // width (e.g. going from 99 → 100).
+    const rows = [];
     for (const path of PATHS) {{
       const cams = camsWithFramesByPath[path];
       if (!cams.length) continue;
-      const inner = [];
-      for (const cam of cams) {{
+      const cells = ["A", "B"].map((cam) => {{
+        if (!cams.includes(cam)) return `<span class="fl-cell fl-cell-blank">${{cam}}:—</span>`;
         const entry = camAtFrameByPath[path][cam][currentFrame];
-        if (entry === null) {{ inner.push(`<span class="sub">${{cam}}:—</span>`); continue; }}
-        const cls = entry.detected ? "det" : "det no";
+        if (!entry) return `<span class="fl-cell fl-cell-blank">${{cam}}:—</span>`;
+        const cls = entry.detected ? "fl-det" : "fl-det fl-det-no";
         const mark = entry.detected ? "✓" : "·";
-        inner.push(`<span class="sub">${{cam}}:${{entry.idx}}</span><span class="${{cls}}">${{mark}}</span>`);
-      }}
-      parts.push(`<span class="sub">${{PATH_LABEL[path]}}</span> ${{inner.join(" ")}}`);
+        return `<span class="fl-cell">${{cam}}:${{entry.idx}}<span class="${{cls}}">${{mark}}</span></span>`;
+      }}).join("");
+      rows.push(`<div class="fl-row"><span class="fl-pathlabel">${{PATH_LABEL[path]}}</span>${{cells}}</div>`);
     }}
-    framePrimary.textContent = `t=${{tRel.toFixed(3)}}s`;
-    frameSub.innerHTML = parts.join(" · ");
+    frameSub.innerHTML = rows.join("");
   }}
   function setFrame(f, {{ seekVideos = true }} = {{}}) {{
     currentFrame = Math.max(0, Math.min(TOTAL_FRAMES - 1, f | 0));
