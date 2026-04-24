@@ -216,15 +216,14 @@ class State:
         self._live_missing_cal: dict[str, set[str]] = {}
         # Dedupe key for the warn-once-per-cam-session log below.
         self._live_missing_cal_logged: set[tuple[str, str]] = set()
-        # Per-session latest server_post error string, keyed session_id → {cam: err}.
-        # Populated by routes/pitch.py::_run_server_detection when a stage
-        # (detect / re-record / annotate) raises, so /events surfaces the
-        # reason instead of forcing the operator to tail the log.
-        self._server_post_errors: dict[str, dict[str, str]] = {}
-        # Session-level trash + processing-control metadata. Trash is
-        # persisted; processing state is in-memory orchestration around
-        # server-side post-processing jobs.
+        # Session-level trash + server_post-processing job coordinator.
+        # Owns job state, per-(session, cam) error strings, and the
+        # candidate-finder used by /events + /sessions/{sid}/run_server_post.
+        # Trash is persisted through State's session-meta JSON; everything
+        # else is in-memory orchestration. attach() wires up the State +
+        # lock refs so the coordinator can read pitches / video dir.
         self._processing = SessionProcessingState()
+        self._processing.attach(self, self._lock)
         # Calibrations first — _load_from_disk re-triangulates every cached
         # pitch, and triangulation needs the calibration snapshot to decide
         # the intrinsic-scale factor (MOV dims vs. calibration dims).
@@ -1155,9 +1154,6 @@ class State:
     def pending_sync_command_ids(self) -> dict[str, str]:
         return self._sync.pending_sync_command_ids()
 
-    def _session_is_trashed_locked(self, session_id: str) -> bool:
-        return self._processing.is_trashed(session_id)
-
     def trash_session(self, session_id: str) -> bool:
         now = self._time_fn()
         with self._lock:
@@ -1188,113 +1184,12 @@ class State:
         with self._lock:
             return self._processing.trash_count()
 
-    def _session_server_post_candidates(self, session_id: str) -> list[tuple[str, PitchPayload, Path]]:
-        """Pitches in this session eligible for server-post detection.
-
-        Eligibility is just "MOV on disk + server_post not yet run +
-        session not trashed". The pitch's original `paths` tag is NOT
-        consulted — server_post is an on-demand analysis, available to
-        any session that happens to have a MOV (which is every session
-        now that iOS records unconditionally)."""
-        with self._lock:
-            pitches = [
-                (cam, pitch)
-                for (cam, sid), pitch in self.pitches.items()
-                if sid == session_id
-            ]
-        candidates: list[tuple[str, PitchPayload, Path]] = []
-        for cam, pitch in pitches:
-            if self._session_is_trashed(session_id):
-                continue
-            if pitch.frames_server_post:
-                continue
-            clip_path = self._find_video_for_session_camera(session_id, cam)
-            if clip_path is None:
-                continue
-            candidates.append((cam, pitch, clip_path))
-        return candidates
-
-    def _find_video_for_session_camera(self, session_id: str, camera_id: str) -> Path | None:
-        matches = sorted(self._video_dir.glob(f"session_{session_id}_{camera_id}.*"))
-        for path in matches:
-            if path.name.endswith(".tmp"):
-                continue
-            if "_annotated." in path.name:
-                continue
-            return path
-        return None
-
-    def _session_is_trashed(self, session_id: str) -> bool:
-        with self._lock:
-            return self._session_is_trashed_locked(session_id)
-
-    def mark_server_post_queued(self, session_id: str, camera_id: str) -> None:
-        with self._lock:
-            self._processing.mark_queued((camera_id, session_id))
-
-    def start_server_post_job(self, session_id: str, camera_id: str) -> bool:
-        with self._lock:
-            return self._processing.start_job((camera_id, session_id))
-
-    def should_cancel_server_post_job(self, session_id: str, camera_id: str) -> bool:
-        with self._lock:
-            return self._processing.should_cancel((camera_id, session_id))
-
-    def finish_server_post_job(self, session_id: str, camera_id: str, *, canceled: bool) -> None:
-        with self._lock:
-            self._processing.finish_job((camera_id, session_id), canceled=canceled)
-
-    def record_server_post_error(self, session_id: str, camera_id: str, message: str) -> None:
-        """Remember a server_post failure reason for display on /events.
-        Last write wins per (session, cam) — a retry that succeeds should
-        call clear_server_post_error for the same key."""
-        with self._lock:
-            self._server_post_errors.setdefault(session_id, {})[camera_id] = message
-
-    def clear_server_post_error(self, session_id: str, camera_id: str) -> None:
-        with self._lock:
-            cams = self._server_post_errors.get(session_id)
-            if cams is None:
-                return
-            cams.pop(camera_id, None)
-            if not cams:
-                self._server_post_errors.pop(session_id, None)
-
-    def server_post_errors_for(self, session_id: str) -> dict[str, str]:
-        with self._lock:
-            return dict(self._server_post_errors.get(session_id, {}))
-
-    def cancel_processing(self, session_id: str) -> bool:
-        keys = [(cam, session_id) for cam, _pitch, _clip in self._session_server_post_candidates(session_id)]
-        with self._lock:
-            return self._processing.cancel(keys)
-
-    def resume_processing(self, session_id: str) -> list[tuple[Path, PitchPayload]]:
-        candidates = self._session_server_post_candidates(session_id)
-        by_key = {
-            (cam, session_id): (clip_path, pitch)
-            for cam, pitch, clip_path in candidates
-        }
-        with self._lock:
-            queued_keys = self._processing.resume(by_key.keys())
-        return [
-            (by_key[key][0], by_key[key][1].model_copy(deep=True))
-            for key in queued_keys
-        ]
-
-    def session_processing_summary(self, session_id: str) -> tuple[str | None, bool]:
-        candidates = self._session_server_post_candidates(session_id)
-        pending_keys = {(cam, session_id) for cam, _pitch, _clip in candidates}
-        with self._lock:
-            completed = any(
-                sid == session_id and bool(pitch.frames_server_post)
-                for (_cam, sid), pitch in self.pitches.items()
-            )
-            return self._processing.summary(
-                pending_keys=pending_keys,
-                completed=completed,
-                has_candidates=bool(candidates),
-            )
+    # server_post lifecycle moved to SessionProcessingState — call
+    # `state._processing.{mark_server_post_queued, start_server_post_job,
+    # should_cancel_server_post_job, finish_server_post_job, record_error,
+    # clear_error, errors_for, cancel_processing, resume_processing,
+    # session_summary, session_candidates, find_video_for}` directly from
+    # routes/. State no longer proxies these.
 
     def start_sync(self) -> tuple[SyncRun | None, str | None]:
         """Begin a mutual-sync run. Returns `(run, None)` on success or
@@ -1446,7 +1341,6 @@ class State:
             self._live_missing_cal_logged = {
                 key for key in self._live_missing_cal_logged if key[0] != session_id
             }
-            self._server_post_errors.pop(session_id, None)
             if (
                 self._last_ended_session is not None
                 and self._last_ended_session.id == session_id
@@ -1485,7 +1379,6 @@ class State:
             self._processing.clear()
             self._live_missing_cal.clear()
             self._live_missing_cal_logged.clear()
-            self._server_post_errors.clear()
             self._persist_session_meta_locked()
             if purge_disk:
                 for path in self._pitch_dir.glob("session_*.json*"):

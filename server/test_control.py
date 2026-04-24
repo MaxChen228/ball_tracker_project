@@ -624,19 +624,19 @@ def test_cancel_and_resume_processing_summary(tmp_path):
     s.record(pitch)
     (tmp_path / "videos" / f"session_{sid(7)}_A.mov").write_bytes(b"fake mov")
 
-    s.mark_server_post_queued(sid(7), "A")
-    status, resumable = s.session_processing_summary(sid(7))
+    s._processing.mark_server_post_queued(sid(7), "A")
+    status, resumable = s._processing.session_summary(sid(7))
     assert status == "queued"
     assert resumable is True
 
-    assert s.cancel_processing(sid(7)) is True
-    status, resumable = s.session_processing_summary(sid(7))
+    assert s._processing.cancel_processing(sid(7)) is True
+    status, resumable = s._processing.session_summary(sid(7))
     assert status == "canceled"
     assert resumable is True
 
-    queued = s.resume_processing(sid(7))
+    queued = s._processing.resume_processing(sid(7))
     assert len(queued) == 1
-    status, resumable = s.session_processing_summary(sid(7))
+    status, resumable = s._processing.session_summary(sid(7))
     assert status == "queued"
     assert resumable is True
 
@@ -683,7 +683,7 @@ def test_sessions_cancel_and_resume_processing_json_api(tmp_path):
     pitch.paths = [main.DetectionPath.server_post.value]
     main.state.record(pitch)
     (main.state.video_dir / f"session_{sid(34)}_A.mov").write_bytes(b"fake mov")
-    main.state.mark_server_post_queued(sid(34), "A")
+    main.state._processing.mark_server_post_queued(sid(34), "A")
 
     cancel = client.post(
         f"/sessions/{sid(34)}/cancel_processing",
