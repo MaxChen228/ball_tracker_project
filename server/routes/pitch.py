@@ -233,6 +233,7 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             hsv_range=state.hsv_range(),
             should_cancel=lambda: state.should_cancel_server_post_job(pitch.session_id, pitch.camera_id),
             expected_radius_px=expected_radius_px,
+            enable_bg_subtraction=state.detection_bg_subtraction_enabled(),
         )
     except ProcessingCanceled:
         state.finish_server_post_job(pitch.session_id, pitch.camera_id, canceled=True)
