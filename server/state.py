@@ -269,6 +269,13 @@ class State:
         self._auto_cal_runs = AutoCalibrationRunStore(time_fn=time_fn)
         # Live streaming state keyed by session id.
         self._live_pairings: dict[str, LivePairingSession] = {}
+        # Cams observed to be missing calibration while live frames were
+        # arriving, keyed by session id. Surfaced on live_session_summary
+        # / /events so the operator sees a reason for a silent live path
+        # instead of having to tail the server log.
+        self._live_missing_cal: dict[str, set[str]] = {}
+        # Dedupe key for the warn-once-per-cam-session log below.
+        self._live_missing_cal_logged: set[tuple[str, str]] = set()
         # Session-level trash + processing-control metadata. Trash is
         # persisted; processing state is in-memory orchestration around
         # server-side post-processing jobs.
@@ -546,7 +553,20 @@ class State:
         with self._lock:
             cal = self._calibration_store.get(camera_id)
             dev = self._device_registry.get(camera_id)
+            if cal is None:
+                self._live_missing_cal.setdefault(session_id, set()).add(camera_id)
+                log_key = (session_id, camera_id)
+                should_log = log_key not in self._live_missing_cal_logged
+                if should_log:
+                    self._live_missing_cal_logged.add(log_key)
         if cal is None:
+            if should_log:
+                logger.warning(
+                    "live_ray_for_frame: cam=%s session=%s has no calibration on "
+                    "file — live rays dropped until /calibration or /calibration/auto runs",
+                    camera_id,
+                    session_id,
+                )
             return None
         anchor = (
             dev.sync_anchor_timestamp_s
@@ -795,6 +815,12 @@ class State:
                 camera_id, message, level=level, data=data
             )
 
+    def live_missing_calibration_for(self, session_id: str) -> list[str]:
+        """Cams whose live frames were dropped for missing calibration in this
+        session, sorted. Empty list if none / unknown session."""
+        with self._lock:
+            return sorted(self._live_missing_cal.get(session_id, set()))
+
     def live_session_summary(self) -> dict[str, Any] | None:
         session = self.session_snapshot()
         if session is None:
@@ -802,6 +828,7 @@ class State:
         with self._lock:
             live = self._live_pairings.get(session.id)
             result = self.results.get(session.id)
+            missing_cal = sorted(self._live_missing_cal.get(session.id, set()))
         paths_completed = sorted(result.paths_completed) if result is not None else []
         if live is None:
             return {
@@ -812,6 +839,7 @@ class State:
                 "point_count": 0,
                 "paths_completed": paths_completed,
                 "abort_reasons": {},
+                "live_missing_calibration": missing_cal,
             }
         return {
             "session_id": session.id,
@@ -822,6 +850,7 @@ class State:
             "paths_completed": paths_completed,
             "completed_cameras": sorted(live.completed_cameras),
             "abort_reasons": dict(live.abort_reasons),
+            "live_missing_calibration": missing_cal,
         }
 
     def _live_time_sync_intent_locked(self, now: float) -> _LegacyTimeSyncIntent | None:

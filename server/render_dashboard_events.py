@@ -125,6 +125,17 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f'<span class="chip {status}">{stat_label}</span>'
             if status == "error" else ""
         )
+        # Surface live-path calibration gaps inline. Cams listed here had
+        # live frames arriving while `data/calibrations/<cam>.json` was
+        # missing, so live rays silently dropped — without this pill the
+        # operator would only see an empty L|n count and have to tail
+        # the log to understand why.
+        missing_cal = e.get("live_missing_calibration") or []
+        missing_cal_html = (
+            f'<span class="chip error" title="live frames dropped: no calibration on file">'
+            f'no cal: {html.escape(",".join(missing_cal))}</span>'
+            if missing_cal else ""
+        )
         parts.append(
             f'<div class="event-item">'
             f"{toggle_html}"
@@ -135,7 +146,7 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             f"</div>"
             f"{meta_html}"
             f"</a>"
-            f'<div class="event-status">{processing_chip}{status_chip_html}</div>'
+            f'<div class="event-status">{processing_chip}{status_chip_html}{missing_cal_html}</div>'
             f'<div class="event-actions">{processing_html}{lifecycle_html}</div>'
             f"</div>"
         )
