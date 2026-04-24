@@ -96,6 +96,69 @@ final class ConcurrentDetectionPoolTests: XCTestCase {
         XCTAssertEqual(Set(indices).count, total)
     }
 
+    func testStrideThrottlesDetectionTo25PercentAtStride4() {
+        // 240 fps capture → stride 4 → 60 Hz effective detection rate.
+        // Semaphore large enough to never drop; so the only filter is stride.
+        let pool = ConcurrentDetectionPool(maxConcurrency: 8)
+        pool.setFrameStride(4)
+
+        let total = 100
+        let exp = expectation(description: "Stride=4 fires ~25 of 100 frames")
+        let expected = total / 4
+        exp.expectedFulfillmentCount = expected
+
+        var fireCount = 0
+        let lock = NSLock()
+        pool.onFrame = { _ in
+            lock.lock(); fireCount += 1; lock.unlock()
+            exp.fulfill()
+        }
+
+        var acceptedSync = 0
+        for i in 0..<total {
+            if pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: Double(i)) {
+                acceptedSync += 1
+            }
+        }
+        // With maxConcurrency=8 there should be no saturation drops; the
+        // accept count should exactly equal the stride output. Synchronous
+        // accept count is deterministic (stride check is synchronous).
+        XCTAssertEqual(acceptedSync, expected, "stride=4 should accept exactly \(expected) of \(total)")
+        XCTAssertEqual(pool.droppedFrameCount, 0, "stride skips are not saturation drops")
+        XCTAssertEqual(pool.stridedSkipCount, total - expected)
+
+        waitForExpectations(timeout: 3.0)
+        XCTAssertEqual(fireCount, expected, "onFrame should fire exactly \(expected) times under stride=4")
+    }
+
+    func testStrideOfOneSendsEveryFrame() {
+        let pool = ConcurrentDetectionPool(maxConcurrency: 8)
+        pool.setFrameStride(1)
+        var accepted = 0
+        for _ in 0..<20 {
+            if pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 0) {
+                accepted += 1
+            }
+        }
+        XCTAssertEqual(accepted, 20)
+        XCTAssertEqual(pool.stridedSkipCount, 0)
+    }
+
+    func testSetStrideResetsCursorSoNextFrameAlwaysFires() {
+        // Enqueue a couple of frames at stride=4 to advance cursor off zero.
+        let pool = ConcurrentDetectionPool(maxConcurrency: 8)
+        pool.setFrameStride(4)
+        _ = pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 0) // fires
+        _ = pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 1) // skipped
+        _ = pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 2) // skipped
+
+        // Change stride; cursor should reset so the next enqueue fires
+        // regardless of where we were in the old window.
+        pool.setFrameStride(1)
+        let accepted = pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 3)
+        XCTAssertTrue(accepted, "setFrameStride should reset cursor")
+    }
+
     func testReset() {
         let pool = ConcurrentDetectionPool(maxConcurrency: 1)
         while pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 0) {}
