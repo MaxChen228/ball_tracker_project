@@ -251,6 +251,11 @@ def render_viewer_html(
               <button type="button" class="layer-pill" data-layer="camB" data-path="live" aria-pressed="true">live</button>
               <button type="button" class="layer-pill" data-layer="camB" data-path="server_post" aria-pressed="true">svr</button>
             </span>
+            <span class="layer-group" data-layer="residual" id="residual-filter-group" title="Drop triangulated points whose ray-midpoint residual exceeds this threshold. Real ball pairs sit at sub-cm residual; static-target false pairs blow up to metres.">
+              <span class="layer-name">Residual</span>
+              <input type="range" id="residual-filter-slider" min="0" max="200" step="1" value="200" style="width:96px;vertical-align:middle;" aria-label="Residual filter threshold (cm)">
+              <span id="residual-filter-readout" style="font:inherit;font-size:9px;letter-spacing:0.06em;min-width:48px;display:inline-block;text-align:right;">off</span>
+            </span>
           </span>
         </div>
         <div class="strip-row strip-row-scrubber">
@@ -768,6 +773,21 @@ def _viewer_js() -> str:
     server_post: (TRAJ_BY_PATH.server_post || []).length > 0
       || (SCENE.triangulated || []).length > 0,
   }};
+  // Residual filter — drop triangulated points whose ray-midpoint
+  // residual exceeds this cap (in metres). `Infinity` disables it.
+  // Persisted across reloads so an operator who's tuned 5 cm doesn't
+  // have to redrag every time.
+  const RESIDUAL_FILTER_KEY = "ball_tracker_viewer_residual_cap_cm";
+  let residualCapM = Infinity;
+  try {{
+    const saved = parseFloat(localStorage.getItem(RESIDUAL_FILTER_KEY));
+    if (Number.isFinite(saved) && saved >= 0 && saved < 200) residualCapM = saved / 100;
+  }} catch (_e) {{ /* ignore */ }}
+  function passResidualFilter(p) {{
+    if (!Number.isFinite(residualCapM)) return true;
+    const r = (p && typeof p.residual_m === "number") ? p.residual_m : 0;
+    return r <= residualCapM;
+  }}
   function hasPathForLayer(layer, path) {{
     if (layer === "traj") return HAS_TRAJ_PATH[path];
     const cam = layer.startsWith("cam") ? layer.slice(3) : null;
@@ -1006,7 +1026,7 @@ def _viewer_js() -> str:
     if (isLayerVisible("traj", "server_post")) {{
       const svrPts = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
         ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
-      const triPts = svrPts.filter(p => p.t_rel_s <= cutoff);
+      const triPts = svrPts.filter(p => p.t_rel_s <= cutoff && passResidualFilter(p));
       if (triPts.length) {{
         const t0 = triPts[0].t_rel_s;
         const ts = triPts.map(p => p.t_rel_s - t0);
@@ -1026,7 +1046,7 @@ def _viewer_js() -> str:
     }}
     // --- 3D trajectory: live ---
     if (isLayerVisible("traj", "live")) {{
-      const livePts = (TRAJ_BY_PATH.live || []).filter(p => p.t_rel_s <= cutoff);
+      const livePts = (TRAJ_BY_PATH.live || []).filter(p => p.t_rel_s <= cutoff && passResidualFilter(p));
       if (livePts.length) {{
         out.push({{ type: "scatter3d", x: livePts.map(p => p.x), y: livePts.map(p => p.y), z: livePts.map(p => p.z),
           mode: "lines+markers",
@@ -1493,6 +1513,35 @@ def _viewer_js() -> str:
     }}
   }}
   paintLayerPills();
+  // --- Residual filter slider ---
+  const residualSlider = document.getElementById("residual-filter-slider");
+  const residualReadout = document.getElementById("residual-filter-readout");
+  function paintResidualReadout() {{
+    if (!residualReadout) return;
+    if (!Number.isFinite(residualCapM)) residualReadout.textContent = "off";
+    else residualReadout.textContent = `≤ ${{(residualCapM * 100).toFixed(0)}} cm`;
+  }}
+  if (residualSlider) {{
+    // Hydrate slider from persisted cap. Slider scale is cm; 200 = "off".
+    if (Number.isFinite(residualCapM)) {{
+      residualSlider.value = String(Math.min(200, Math.round(residualCapM * 100)));
+    }} else {{
+      residualSlider.value = "200";
+    }}
+    paintResidualReadout();
+    residualSlider.addEventListener("input", () => {{
+      const cm = parseFloat(residualSlider.value);
+      if (!Number.isFinite(cm) || cm >= 200) {{
+        residualCapM = Infinity;
+        try {{ localStorage.removeItem(RESIDUAL_FILTER_KEY); }} catch (_e) {{}}
+      }} else {{
+        residualCapM = cm / 100;
+        try {{ localStorage.setItem(RESIDUAL_FILTER_KEY, String(cm)); }} catch (_e) {{}}
+      }}
+      paintResidualReadout();
+      scheduleSceneDraw();
+    }});
+  }}
   layerToggles.addEventListener("click", (e) => {{
     const pill = e.target.closest(".layer-pill");
     if (!pill || pill.hidden || pill.disabled) return;
