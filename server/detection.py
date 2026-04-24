@@ -106,6 +106,8 @@ def area_bounds_from_radius_prior(
 # very close to a filled circle on our rig; operator confirmed motion blur
 # at 240 fps causes only mild ellipsing. Tuned loose enough to keep those
 # through, tight enough to drop clothing folds and elongated reflections.
+# Runtime-overridable via `ShapeGate` (state.shape_gate()); these constants
+# are the defaults used when no override is supplied.
 _MIN_ASPECT = 0.70  # min(w,h)/max(w,h); 1.0 = square bbox, 0.70 ≈ 3:2
 # Theoretical circle fill = π/4 ≈ 0.785 but empirical `combined = hsv AND
 # fg_mask` fill for real balls on our rig sits at 0.63-0.70 (median 0.68
@@ -117,6 +119,24 @@ _MIN_ASPECT = 0.70  # min(w,h)/max(w,h); 1.0 = square bbox, 0.70 ≈ 3:2
 _MIN_FILL = 0.55
 
 
+@dataclass(frozen=True)
+class ShapeGate:
+    """Operator-tunable aspect/fill thresholds for the HSV blob filter.
+
+    Kept separate from the module-level `_MIN_ASPECT` / `_MIN_FILL`
+    fallbacks so callers that don't plumb state (tests, offline scripts)
+    still work. `state.shape_gate()` produces a snapshot; the dashboard
+    and iOS both receive it so the `live` / `server_post` paths agree.
+    """
+
+    aspect_min: float
+    fill_min: float
+
+    @classmethod
+    def default(cls) -> "ShapeGate":
+        return cls(aspect_min=_MIN_ASPECT, fill_min=_MIN_FILL)
+
+
 def detect_ball(
     frame_bgr: np.ndarray,
     hsv_range: HSVRange,
@@ -126,6 +146,7 @@ def detect_ball(
     prev_position: tuple[float, float] | None = None,
     prev_velocity: tuple[float, float] | None = None,
     dt: float | None = None,
+    shape_gate: ShapeGate | None = None,
 ) -> tuple[float, float] | None:
     """Find the largest HSV-masked blob whose area is within the active
     area bounds AND whose bbox aspect ratio and fill ratio clear the
@@ -153,6 +174,7 @@ def detect_ball(
         min_area, max_area = _MIN_AREA_PX, _MAX_AREA_PX
     else:
         min_area, max_area = area_bounds_from_radius_prior(expected_radius_px)
+    gate = shape_gate if shape_gate is not None else ShapeGate.default()
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, hsv_range.lo(), hsv_range.hi())
     if fg_mask is not None:
@@ -177,10 +199,10 @@ def detect_ball(
         if w <= 0 or h <= 0:
             continue
         aspect = min(w, h) / max(w, h)
-        if aspect < _MIN_ASPECT:
+        if aspect < gate.aspect_min:
             continue
         fill = area / (w * h)
-        if fill < _MIN_FILL:
+        if fill < gate.fill_min:
             continue
         cx, cy = centroids[idx]
         survivors.append(

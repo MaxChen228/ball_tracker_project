@@ -387,6 +387,10 @@ def _build_status_response() -> dict[str, Any]:
         "capture_mode": "camera_only",
         "default_paths": sorted(p.value for p in state.default_paths()),
         "hsv_range": state.hsv_range().__dict__,
+        "shape_gate": {
+            "aspect_min": state.shape_gate().aspect_min,
+            "fill_min": state.shape_gate().fill_min,
+        },
         # Mutual-sync context. `sync.id` is the sole dedupe key the phone
         # uses to decide whether a fresh `sync_run` command has arrived
         # vs. a repeat of an in-flight run. `last_sync` lets the dashboard
@@ -450,6 +454,7 @@ def _settings_message_for(camera_id: str) -> dict[str, Any]:
         "camera_id": camera_id,
         "paths": status.get("default_paths", []),
         "hsv_range": status.get("hsv_range"),
+        "shape_gate": status.get("shape_gate"),
         "chirp_detect_threshold": status.get("chirp_detect_threshold"),
         "mutual_sync_threshold": status.get("mutual_sync_threshold"),
         "heartbeat_interval_s": status.get("heartbeat_interval_s"),

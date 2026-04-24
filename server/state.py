@@ -29,7 +29,7 @@ from schemas import (
     _DEFAULT_PATHS,
 )
 from chain_filter import annotate as chain_filter_annotate
-from detection import HSVRange
+from detection import HSVRange, ShapeGate
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
 from live_pairing import LivePairingSession
@@ -127,6 +127,7 @@ class State:
         self._video_dir = data_dir / "videos"
         self._calibration_dir = data_dir / "calibrations"
         self._hsv_path = data_dir / "hsv_range.json"
+        self._shape_gate_path = data_dir / "shape_gate.json"
         self._session_meta_path = data_dir / "session_meta.json"
         self._pitch_dir.mkdir(parents=True, exist_ok=True)
         self._result_dir.mkdir(parents=True, exist_ok=True)
@@ -164,6 +165,7 @@ class State:
             atomic_write=self._atomic_write,
         )
         self._hsv_range = self._load_hsv_range_from_disk()
+        self._shape_gate = self._load_shape_gate_from_disk()
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
         # Runtime tunables pushed from the dashboard, hot-applied on the
@@ -381,6 +383,30 @@ class State:
             indent=2,
         )
         self._atomic_write(self._hsv_path, payload)
+
+    def _load_shape_gate_from_disk(self) -> ShapeGate:
+        path = self._shape_gate_path
+        if not path.exists():
+            return ShapeGate.default()
+        try:
+            obj = json.loads(path.read_text())
+            return ShapeGate(
+                aspect_min=float(obj["aspect_min"]),
+                fill_min=float(obj["fill_min"]),
+            )
+        except Exception as e:
+            logger.warning("skip corrupt shape_gate %s: %s", path, e)
+            return ShapeGate.default()
+
+    def _persist_shape_gate_locked(self) -> None:
+        payload = json.dumps(
+            {
+                "aspect_min": self._shape_gate.aspect_min,
+                "fill_min": self._shape_gate.fill_min,
+            },
+            indent=2,
+        )
+        self._atomic_write(self._shape_gate_path, payload)
 
     def _calibration_path(self, camera_id: str) -> Path:
         return self._calibration_store.path(camera_id)
@@ -1009,6 +1035,16 @@ class State:
             self._hsv_range = hsv_range
             self._persist_hsv_range_locked()
             return self._hsv_range
+
+    def shape_gate(self) -> ShapeGate:
+        with self._lock:
+            return self._shape_gate
+
+    def set_shape_gate(self, shape_gate: ShapeGate) -> ShapeGate:
+        with self._lock:
+            self._shape_gate = shape_gate
+            self._persist_shape_gate_locked()
+            return self._shape_gate
 
     def set_default_paths(self, paths: set[DetectionPath]) -> set[DetectionPath]:
         with self._lock:
