@@ -1,30 +1,30 @@
-"""Follow-up coverage for PR #81: AliasChoices legacy fz, live-ray
-missing-calibration dedupe/surface, server_post error clear-on-retry,
-and reset/delete cleanup of the new observability dicts."""
+"""Follow-up coverage for PR #81: live-ray missing-calibration dedupe/surface,
+server_post error clear-on-retry, and reset/delete cleanup of the new
+observability dicts."""
 from __future__ import annotations
 
 import logging
+
+import pytest
+from pydantic import ValidationError
 
 from schemas import FramePayload, IntrinsicsPayload
 from state import State
 
 
-def test_intrinsics_accepts_legacy_fz_alias():
-    """Historical calibration JSONs stored vertical focal length as `fz`.
-    The rename preserves load compatibility via AliasChoices; dump must
-    always emit the canonical `fy` so re-persisted files drift forward."""
+def test_intrinsics_rejects_legacy_fz_alias():
+    """The fz→fy alias was removed after `scripts/migrate_fz_to_fy.py`
+    rewrote all persisted JSON. A raw `fz` key now fails validation
+    instead of silently aliasing — migration is mandatory."""
     legacy = {"fx": 1000.0, "fz": 1100.0, "cx": 960.0, "cy": 540.0}
-    intr = IntrinsicsPayload.model_validate(legacy)
-    assert intr.fy == 1100.0
+    with pytest.raises(ValidationError):
+        IntrinsicsPayload.model_validate(legacy)
 
+    # Canonical `fy` constructor path stays ergonomic.
+    intr = IntrinsicsPayload(fx=1.0, fy=2.0, cx=3.0, cy=4.0)
+    assert intr.fy == 2.0
     dumped = intr.model_dump()
-    assert "fy" in dumped
-    assert "fz" not in dumped
-    assert dumped["fy"] == 1100.0
-
-    # New constructor path (field name) stays ergonomic.
-    intr2 = IntrinsicsPayload(fx=1.0, fy=2.0, cx=3.0, cy=4.0)
-    assert intr2.fy == 2.0
+    assert "fy" in dumped and "fz" not in dumped
 
 
 def _frame(i: int) -> FramePayload:
