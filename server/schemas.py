@@ -207,6 +207,33 @@ class SessionResult(BaseModel):
 
 
 
+class DeviceIntrinsics(BaseModel):
+    """Per-device ChArUco-measured camera intrinsics, keyed by stable
+    hardware identity (`identifierForVendor`) rather than role. Holds K and
+    the 5-coefficient distortion at the resolution the ChArUco shots were
+    taken at; the auto-cal path scales fx/fy/cx/cy to whatever resolution
+    the current capture frame actually delivers.
+
+    `source_width_px` / `source_height_px` are the pixel grid the K was
+    solved on — not necessarily 4032×3024; any constant grid works as long
+    as the target preserves aspect ratio (4:3 ChArUco on a sensor that
+    outputs 4:3 stills is fine). An AR mismatch at scale time is an
+    operator error (tried to reuse 4:3 ChArUco K on a 16:9-cropped still),
+    logged + rejected by the scale helper."""
+
+    device_id: str = Field(..., pattern=r"^[A-Za-z0-9_\-]{1,64}$")
+    device_model: str | None = Field(default=None, max_length=32)
+    source_width_px: int = Field(..., gt=0)
+    source_height_px: int = Field(..., gt=0)
+    intrinsics: IntrinsicsPayload
+    rms_reprojection_px: float | None = Field(default=None, ge=0)
+    n_images: int | None = Field(default=None, ge=1)
+    calibrated_at: float | None = Field(default=None, ge=0)
+    # Operator-supplied label, e.g. "charuco-a4-iphone15pro". Free-form,
+    # no server-side semantics; shown in the dashboard's intrinsics card.
+    source_label: str | None = Field(default=None, max_length=64)
+
+
 class CalibrationSnapshot(BaseModel):
     """Standalone calibration upload. Sent by the phone whenever the user
     finishes Auto (ArUco) or Manual 5-handle Save, so the dashboard can draw
