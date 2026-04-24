@@ -73,14 +73,15 @@ _MAX_AREA_PX = 150_000
 # very close to a filled circle on our rig; operator confirmed motion blur
 # at 240 fps causes only mild ellipsing. Tuned loose enough to keep those
 # through, tight enough to drop clothing folds and elongated reflections.
-_MIN_ASPECT = 0.75  # min(w,h)/max(w,h); 1.0 = square bbox, 0.75 ≈ 4:3
+_MIN_ASPECT = 0.70  # min(w,h)/max(w,h); 1.0 = square bbox, 0.70 ≈ 3:2
 # Theoretical circle fill = π/4 ≈ 0.785 but empirical `combined = hsv AND
 # fg_mask` fill for real balls on our rig sits at 0.63-0.70 (median 0.68
 # across s_fcf73afa/s_03d533c4) because ball-side shadows, the seam, and
-# HSV edge bleed each carve ~10-15% out of the bbox. 0.60 is calibrated
-# to that measured distribution with a small safety margin below the
-# lowest observed ball.
-_MIN_FILL = 0.60
+# HSV edge bleed each carve ~10-15% out of the bbox. 0.55 sits a safety
+# margin below the lowest observed ball (0.63) and catches marginal
+# frames that 0.60 was just barely rejecting. p50=0.68 empirical gives
+# 0.13 of headroom which is ~2σ in our measured distribution.
+_MIN_FILL = 0.55
 
 
 def detect_ball(
