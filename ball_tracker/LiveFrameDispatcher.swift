@@ -61,6 +61,13 @@ final class LiveFrameDispatcher {
 
     /// Stream one detected frame to the server if the live path is active.
     /// Non-blocking; drops silently with counter increment on any guard fail.
+    ///
+    /// Encoding note: the `[String: Any]` below is handed to
+    /// `ServerWebSocketConnection.send`, which bounces onto its WS queue and
+    /// calls `JSONSerialization.data(withJSONObject:)` on that queue. There
+    /// is **no** per-frame `JSONEncoder()` alloc; `JSONEncoder` is not used
+    /// on this path. Do not swap to `JSONEncoder` without reusing one
+    /// instance — `JSONEncoder` allocates a fresh writer per call.
     func dispatchFrame(_ frame: ServerUploader.FramePayload) {
         guard currentPaths().contains(.live) else {
             lock.lock(); _drop.notLive += 1; lock.unlock()
