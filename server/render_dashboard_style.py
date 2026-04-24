@@ -580,6 +580,49 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .chip.canceled {{ color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }}
 .chip.completed {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
 
+/* --- Intrinsics (ChArUco) card --- */
+.intrinsics-roles {{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:var(--s-2); }}
+.intrinsics-roles-empty {{ color:var(--sub); font-family:var(--mono); font-size:10px;
+                           letter-spacing:0.08em; margin-bottom:var(--s-2); }}
+.intrinsics-empty {{ color:var(--sub); font-family:var(--mono); font-size:10px;
+                     letter-spacing:0.04em; padding:var(--s-2) 0; }}
+.intrinsics-empty code {{ font-size:10px; background:var(--border-base-bg, transparent);
+                          padding:0 4px; }}
+.intrinsics-list {{ display:flex; flex-direction:column; gap:6px;
+                    margin-bottom:var(--s-2); }}
+.intrinsics-row {{ border:1px solid var(--border-base); border-radius:var(--r);
+                   padding:var(--s-2); background:var(--surface); }}
+.intrinsics-row-top {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
+.intrinsics-row-top .dev-id {{ font-family:var(--mono); font-size:12px;
+                               font-weight:500; color:var(--ink); }}
+.intrinsics-row-top .dev-model {{ font-family:var(--mono); font-size:10px;
+                                  color:var(--sub); }}
+.intrinsics-row-top .dim {{ font-family:var(--mono); font-size:9px;
+                            color:var(--sub); letter-spacing:0.06em; }}
+.intrinsics-row-top .chip.small {{ font-size:9px; padding:1px 6px; }}
+.intrinsics-row-top .btn.danger {{ margin-left:auto; color:var(--failed);
+                                    border-color:var(--failed); }}
+.intrinsics-row-top .btn.danger:hover {{ background:var(--failed-bg); }}
+.intrinsics-row-sub {{ margin-top:4px; font-family:var(--mono); font-size:10px;
+                       color:var(--sub); letter-spacing:0.02em; }}
+.intrinsics-upload {{ border-top:1px dashed var(--border-base);
+                      padding-top:var(--s-2); }}
+.intrinsics-upload-row {{ display:flex; gap:6px; align-items:center;
+                          flex-wrap:wrap; }}
+.intrinsics-upload-row select {{ font-family:var(--mono); font-size:10px;
+                                  padding:3px 6px; border:1px solid var(--border-base);
+                                  border-radius:var(--r); background:var(--surface);
+                                  color:var(--ink); }}
+.intrinsics-upload-row input[type=file] {{ font-family:var(--mono); font-size:9px;
+                                            color:var(--sub); }}
+.intrinsics-upload-hint {{ margin-top:6px; font-family:var(--mono); font-size:9px;
+                           color:var(--sub); letter-spacing:0.04em; }}
+.intrinsics-upload-hint code {{ font-size:9px; }}
+.intrinsics-upload-status {{ margin-top:6px; font-family:var(--mono); font-size:10px;
+                              min-height:14px; }}
+.intrinsics-upload-status.ok {{ color:var(--passed); }}
+.intrinsics-upload-status.err {{ color:var(--failed); }}
+
 /* --- Canvas overlay hint --- moved to bottom-left to free the top row for
    the mode toggle + Plotly's modebar. */
 .canvas-hint {{ position: absolute; left: var(--s-4); bottom: var(--s-4); z-index: 5;

@@ -7,6 +7,7 @@ from reconstruct import build_calibration_scene
 from render_dashboard_client import _JS_TEMPLATE
 from render_dashboard_events import _render_events_body
 from render_dashboard_html import render_dashboard_html as _render_dashboard_html
+from render_dashboard_intrinsics import _render_intrinsics_body
 from render_dashboard_session import _render_hsv_body, _render_session_body
 from render_dashboard_style import _CSS
 from render_scene import _build_figure
@@ -71,12 +72,39 @@ def render_events_index_html(
         capture_height_px=capture_height_px,
     )
     events_html = _render_events_body(events)
+    # SSR the intrinsics card with whatever we already know. The JS layer
+    # refreshes from /calibration/intrinsics on mount + every 5 s so stale
+    # counts self-heal without a page reload.
+    intrinsics_records = [
+        {
+            "device_id": r.device_id,
+            "device_model": r.device_model,
+            "source_width_px": r.source_width_px,
+            "source_height_px": r.source_height_px,
+            "fx": r.intrinsics.fx,
+            "fy": r.intrinsics.fz,
+            "rms_reprojection_px": r.rms_reprojection_px,
+            "n_images": r.n_images,
+            "calibrated_at": r.calibrated_at,
+            "distortion": r.intrinsics.distortion,
+        }
+        for r in sorted(state.device_intrinsics().values(), key=lambda rr: rr.device_id)
+    ]
+    online_roles = {
+        dev.camera_id: {
+            "device_id": dev.device_id,
+            "device_model": dev.device_model,
+        }
+        for dev in state.online_devices()
+    }
+    intrinsics_html = _render_intrinsics_body(intrinsics_records, online_roles)
     return _render_dashboard_html(
         css=_CSS,
         nav_html=nav_html,
         session_html=session_html,
         hsv_html=hsv_html,
         tuning_html=tuning_html,
+        intrinsics_html=intrinsics_html,
         events_html=events_html,
         scene_div=scene_div,
         dashboard_js=_JS_TEMPLATE,
