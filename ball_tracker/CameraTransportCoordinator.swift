@@ -48,6 +48,7 @@ final class CameraTransportCoordinator: NSObject {
         let applyChirpThreshold: (Double) -> Void
         let applyHeartbeatInterval: (Double) -> Void
         let applyHSVRange: (ServerUploader.HSVRangePayload) -> Void
+        let applyShapeGate: (ServerUploader.ShapeGatePayload) -> Void
         let applyTrackingExposureCap: (String, Double) -> Void
         let applyServerCaptureHeight: (Int) -> Void
         let startStandbyCapture: () -> Void
@@ -262,6 +263,9 @@ final class CameraTransportCoordinator: NSObject {
                 },
                 hsvRangeDidPush: { [weak self] hsvRange in
                     self?.dependencies.applyHSVRange(hsvRange)
+                },
+                shapeGateDidPush: { [weak self] shapeGate in
+                    self?.dependencies.applyShapeGate(shapeGate)
                 },
                 handleTrackingExposureCap: { [weak self] cap in
                     guard let self else { return }

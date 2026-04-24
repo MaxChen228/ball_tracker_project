@@ -20,6 +20,7 @@ final class CameraCommandRouter {
         let chirpThresholdDidPush: (Double) -> Void
         let heartbeatIntervalDidPush: (Double) -> Void
         let hsvRangeDidPush: (ServerUploader.HSVRangePayload) -> Void
+        let shapeGateDidPush: (ServerUploader.ShapeGatePayload) -> Void
         let handleTrackingExposureCap: (String) -> Void
         let currentCaptureHeight: () -> Int
         let applyServerCaptureHeight: (Int) -> Void
@@ -118,6 +119,18 @@ final class CameraCommandRouter {
                         s_max: sMax,
                         v_min: vMin,
                         v_max: vMax
+                    )
+                )
+            }
+            if let gate = message["shape_gate"] as? [String: Any],
+               let aspectMin = (gate["aspect_min"] as? Double)
+                    ?? (gate["aspect_min"] as? Int).map(Double.init),
+               let fillMin = (gate["fill_min"] as? Double)
+                    ?? (gate["fill_min"] as? Int).map(Double.init) {
+                deps.shapeGateDidPush(
+                    ServerUploader.ShapeGatePayload(
+                        aspect_min: aspectMin,
+                        fill_min: fillMin
                     )
                 )
             }

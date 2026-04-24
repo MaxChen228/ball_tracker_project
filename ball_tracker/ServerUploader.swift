@@ -24,6 +24,17 @@ final class ServerUploader: @unchecked Sendable {
         static let tennis = HSVRangePayload(h_min: 25, h_max: 55, s_min: 90, s_max: 255, v_min: 90, v_max: 255)
     }
 
+    /// Server-owned shape gate (aspect/fill thresholds applied after HSV +
+    /// connected-components). Mirrors `ShapeGate` in server/detection.py.
+    /// Pushed via WS `settings.shape_gate`; defaults match the server's
+    /// `ShapeGate.default()` so iOS rejects the same blobs as server_post.
+    struct ShapeGatePayload: Codable, Equatable {
+        let aspect_min: Double
+        let fill_min: Double
+
+        static let `default` = ShapeGatePayload(aspect_min: 0.70, fill_min: 0.55)
+    }
+
     enum DetectionPath: String, Codable, CaseIterable {
         case live = "live"
         case serverPost = "server_post"

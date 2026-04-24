@@ -14,6 +14,7 @@ final class ConcurrentDetectionPool {
     private let detectionSemaphore: DispatchSemaphore
     private let stateLock = NSLock()
     private var hsvRange: ServerUploader.HSVRangePayload = .tennis
+    private var shapeGate: ServerUploader.ShapeGatePayload = .default
 
     private var currentGeneration: Int = 0
     private var callIndex: Int = 0
@@ -74,6 +75,7 @@ final class ConcurrentDetectionPool {
         let gen = currentGeneration
         let index = callIndex
         let hsvRange = self.hsvRange
+        let shapeGate = self.shapeGate
         callIndex += 1
         stateLock.unlock()
 
@@ -96,7 +98,9 @@ final class ConcurrentDetectionPool {
                 sMin: Int32(hsvRange.s_min),
                 sMax: Int32(hsvRange.s_max),
                 vMin: Int32(hsvRange.v_min),
-                vMax: Int32(hsvRange.v_max)
+                vMax: Int32(hsvRange.v_max),
+                aspectMin: shapeGate.aspect_min,
+                fillMin: shapeGate.fill_min
             )
             let frame = ServerUploader.FramePayload(
                 frame_index: index,
@@ -135,6 +139,12 @@ final class ConcurrentDetectionPool {
     func updateHSVRange(_ hsvRange: ServerUploader.HSVRangePayload) {
         stateLock.lock()
         self.hsvRange = hsvRange
+        stateLock.unlock()
+    }
+
+    func updateShapeGate(_ shapeGate: ServerUploader.ShapeGatePayload) {
+        stateLock.lock()
+        self.shapeGate = shapeGate
         stateLock.unlock()
     }
 }
