@@ -440,6 +440,15 @@ class Device:
     # UIDevice.batteryState as lowercase string: "unknown" | "unplugged"
     # | "charging" | "full". None when not reported.
     battery_state: str | None = None
+    # Stable hardware identity: `UIDevice.identifierForVendor.uuidString`.
+    # Survives app launches on the same device; reinstalling the app rotates
+    # it. This is the key used to look up per-device ChArUco intrinsics in
+    # `data/intrinsics/{device_id}.json` — the camera role ("A"/"B") only
+    # identifies position, not the physical sensor.
+    device_id: str | None = None
+    # sysctl machine identifier (e.g. "iPhone15,3"). Operator-facing hint so
+    # the dashboard can show a friendlier label alongside the UUID.
+    device_model: str | None = None
 
 
 @dataclass
