@@ -20,6 +20,11 @@ Contract:
 - Distance cost is normalized by `r_px_expected`; unit-less score so
   the area and distance terms are commensurable without tuning per
   resolution.
+
+Tuning knobs are dashboard-owned (`state.candidate_selector_tuning()`).
+The four parameters — `r_px_expected` (fallback when caller omits one),
+`w_area`, `w_dist`, `dist_cost_sat_radii` — are passed in explicitly by
+the caller; this module ships **no** module-level fallback constants.
 """
 from __future__ import annotations
 
@@ -27,19 +32,42 @@ import math
 from dataclasses import dataclass
 
 
-# Weight on area score vs distance cost in the combined metric. Both
-# terms are clipped to [0, 1] so the weights read as a direct ratio.
-# 0.3 / 0.7 pulls strongly toward the temporal prior when it's present
-# (the main point of this module); area breaks ties when the prediction
-# is ambiguous.
-_W_AREA = 0.3
-_W_DIST = 0.7
+@dataclass(frozen=True)
+class CandidateSelectorTuning:
+    """Hot-tunable parameters for `select_best_candidate`.
 
-# Distance cost saturates at this many expected-ball-radii away from
-# the prediction — beyond this, everything looks equally bad and area
-# determines the winner. 8× covers one frame of ball motion at 200 km/h
-# with a 30 cm ball radius @ 240 fps (≈ 23 cm = 6.9 r) plus headroom.
-_DIST_COST_SAT_RADII = 8.0
+    Owned by `state.candidate_selector_tuning()`; persisted to
+    `data/candidate_selector_tuning.json`. The four fields:
+
+    - `r_px_expected` — expected ball radius in pixels, used to
+      normalize the distance cost. Falls back to this value when the
+      caller's `r_px_expected` arg is None.
+    - `w_area` — weight on `(1 - area_score)` in the combined cost
+      (lower area_score → higher cost).
+    - `w_dist` — weight on `dist_cost` in the combined cost. Dashboard
+      enforces `w_area = 1 - w_dist` so only one slider is exposed.
+    - `dist_cost_sat_radii` — distance cost saturates at this many
+      expected-ball-radii; beyond it everything looks equally bad and
+      area determines the winner.
+    """
+
+    r_px_expected: float
+    w_area: float
+    w_dist: float
+    dist_cost_sat_radii: float
+
+    @classmethod
+    def default(cls) -> "CandidateSelectorTuning":
+        # 12 px @ 1080p ≈ tennis ball at ~3 m on iPhone main cam (rig
+        # baseline). 0.3/0.7 pulls strongly toward temporal prior; 8×
+        # radii saturation covers one frame of 200 km/h ball motion at
+        # 240 fps with headroom.
+        return cls(
+            r_px_expected=12.0,
+            w_area=0.3,
+            w_dist=0.7,
+            dist_cost_sat_radii=8.0,
+        )
 
 
 @dataclass
@@ -59,10 +87,17 @@ def select_best_candidate(
     prev_velocity: tuple[float, float] | None = None,
     dt: float | None = None,
     r_px_expected: float | None = None,
+    w_area: float,
+    w_dist: float,
+    dist_cost_sat_radii: float,
 ) -> Candidate | None:
     """Pick the best candidate. See module docstring for the scoring.
 
     Returns `None` iff `candidates` is empty.
+
+    The three scoring weights (`w_area`, `w_dist`, `dist_cost_sat_radii`)
+    are required keyword-only args — no module-level defaults so callers
+    cannot silently inherit a stale magic number.
     """
     if not candidates:
         return None
@@ -75,6 +110,8 @@ def select_best_candidate(
         and r_px_expected > 0
         and math.isfinite(dt)
         and dt > 0
+        and math.isfinite(dist_cost_sat_radii)
+        and dist_cost_sat_radii > 0
     )
     if not has_temporal:
         # Explicit fallback — no prior info, pick by area. Documented
@@ -90,10 +127,10 @@ def select_best_candidate(
         dx = c.cx - px_pred
         dy = c.cy - py_pred
         dist_radii = math.hypot(dx, dy) / r_px_expected
-        dist_cost = min(dist_radii / _DIST_COST_SAT_RADII, 1.0)
+        dist_cost = min(dist_radii / dist_cost_sat_radii, 1.0)
         # Lower is better. Area contributes as `1 - area_score` (big =
         # low cost); distance is already a cost.
-        score = _W_AREA * (1.0 - c.area_score) + _W_DIST * dist_cost
+        score = w_area * (1.0 - c.area_score) + w_dist * dist_cost
         if score < best_score:
             best_score = score
             best = c
