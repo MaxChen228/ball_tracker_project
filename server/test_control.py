@@ -618,7 +618,6 @@ def test_trash_session_hides_from_active_events_and_restore_brings_it_back(tmp_p
 def test_cancel_and_resume_processing_summary(tmp_path):
     s = main.State(data_dir=tmp_path)
     pitch = _minimal_pitch("A", session_id=sid(7)).model_copy(deep=True)
-    pitch.frames = []
     pitch.frames_server_post = []
     pitch.paths = [main.DetectionPath.server_post.value]
     s.record(pitch)
@@ -675,10 +674,9 @@ def test_sessions_trash_and_restore_json_api():
     assert [e["session_id"] for e in main.state.events(bucket="active")] == [sid(33)]
 
 
-def test_sessions_cancel_and_resume_processing_json_api(tmp_path):
+def test_sessions_cancel_and_run_server_post_json_api(tmp_path):
     client = TestClient(app)
     pitch = _minimal_pitch("A", session_id=sid(34)).model_copy(deep=True)
-    pitch.frames = []
     pitch.frames_server_post = []
     pitch.paths = [main.DetectionPath.server_post.value]
     main.state.record(pitch)
@@ -693,7 +691,7 @@ def test_sessions_cancel_and_resume_processing_json_api(tmp_path):
     assert cancel.json() == {"ok": True, "session_id": sid(34)}
 
     resume = client.post(
-        f"/sessions/{sid(34)}/resume_processing",
+        f"/sessions/{sid(34)}/run_server_post",
         headers={"Accept": "application/json"},
     )
     assert resume.status_code == 200
@@ -862,7 +860,6 @@ def test_state_marks_single_camera_server_post_path_completed(tmp_path):
     s = main.State(data_dir=tmp_path)
     pitch = _minimal_pitch("A", session_id=sid(90))
     pitch.paths = [main.DetectionPath.server_post.value]
-    pitch.frames = []
     pitch.frames_server_post = [
         main.FramePayload(frame_index=0, timestamp_s=0.0, px=100.0, py=100.0, ball_detected=True),
     ]
@@ -887,7 +884,7 @@ def test_record_merges_live_frames_into_single_camera_pitch(tmp_path):
 
     pitch = _minimal_pitch("A", session_id=sid(92))
     pitch.paths = [main.DetectionPath.live.value]
-    pitch.frames = []
+    pitch.frames_server_post = []
 
     s.record(pitch)
     stored = s.pitches_for_session(sid(92))["A"]

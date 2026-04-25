@@ -105,10 +105,6 @@ final class ServerUploader: @unchecked Sendable {
         let local_recording_index: Int?
         /// Snapshot of the enabled detection paths for this session.
         let paths: [String]?
-        /// Per-frame detection results. Empty on the wire — the server
-        /// runs detection on the uploaded MOV. Default [] so the field
-        /// always encodes to a concrete array.
-        let frames: [FramePayload]
         /// Actual capture conditions the phone observed while recording
         /// this take. Server persists this into the session so the web
         /// UI can answer "what format/FOV/exposure did this clip really use?"
@@ -123,21 +119,6 @@ final class ServerUploader: @unchecked Sendable {
         // triangulation, so the wire shape shrinks to just session-level
         // metadata + per-frame detection output.
 
-        /// Return a copy of this payload with `frames` replaced.
-        func withFrames(_ newFrames: [FramePayload]) -> PitchPayload {
-            PitchPayload(
-                camera_id: camera_id,
-                session_id: session_id,
-                sync_id: sync_id,
-                sync_anchor_timestamp_s: sync_anchor_timestamp_s,
-                video_start_pts_s: video_start_pts_s,
-                local_recording_index: local_recording_index,
-                paths: paths,
-                frames: newFrames,
-                capture_telemetry: capture_telemetry
-            )
-        }
-
         func withPaths(_ newPaths: [DetectionPath]) -> PitchPayload {
             PitchPayload(
                 camera_id: camera_id,
@@ -147,7 +128,6 @@ final class ServerUploader: @unchecked Sendable {
                 video_start_pts_s: video_start_pts_s,
                 local_recording_index: local_recording_index,
                 paths: newPaths.map(\.rawValue),
-                frames: frames,
                 capture_telemetry: capture_telemetry
             )
         }

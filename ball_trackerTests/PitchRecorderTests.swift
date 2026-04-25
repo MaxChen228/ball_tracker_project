@@ -45,7 +45,6 @@ final class PitchRecorderTests: XCTestCase {
             },
             startCapture: { _ in },
             resetDetectionState: {},
-            drainDetectedFrames: { [] },
             clearRecoveredAnchor: {},
             dispatchLiveCycleEnd: { _, _ in },
             showErrorBanner: { _ in },

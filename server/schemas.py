@@ -117,10 +117,10 @@ class CaptureTelemetryPayload(BaseModel):
 
 
 class PitchPayload(BaseModel):
-    """Wire + in-memory shape. The iPhone posts the wire subset (no `frames`);
-    server detection populates `frames` before triangulation and re-saves
-    the enriched record to disk, so reloads across restarts skip re-
-    detection."""
+    """Wire + in-memory shape. The iPhone posts the wire subset (no per-frame
+    detections); server populates `frames_server_post` from MOV decoding and
+    `frames_live` from the WS stream, then re-saves the enriched record so
+    reloads across restarts skip re-detection."""
     # Legacy JSON on disk may still carry a `mode` field from the
     # defunct CaptureMode enum. Pydantic's default extra='ignore' drops
     # it silently so old records keep loading — we keep the explicit
@@ -161,9 +161,6 @@ class PitchPayload(BaseModel):
     local_recording_index: int | None = None
     # Snapshot of the session's requested detection paths.
     paths: list[str] | None = None
-    # Server-side synthesised per-frame data (populated after detection).
-    # Server fills this from the uploaded MOV before triangulation.
-    frames: list[FramePayload] = Field(default_factory=list)
     # Live-streamed frame detections captured over WebSocket during the
     # active session. Persisted for forensics / future viewer switching.
     frames_live: list[FramePayload] = Field(default_factory=list)

@@ -302,8 +302,6 @@ class State:
         for path in sorted(self._pitch_dir.glob("session_*.json")):
             try:
                 obj = json.loads(path.read_text())
-                if "frames" in obj and "frames_server_post" not in obj:
-                    obj["frames_server_post"] = obj.get("frames", [])
                 pitch = PitchPayload.model_validate(obj)
             except Exception as e:
                 logger.warning("skip corrupt pitch file %s: %s", path.name, e)
@@ -313,7 +311,6 @@ class State:
             # without a reprocess_sessions run.
             chain_filter_annotate(pitch.frames_live)
             chain_filter_annotate(pitch.frames_server_post)
-            chain_filter_annotate(pitch.frames)
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
 
         seen_sessions = {sid for _, sid in self.pitches.keys()}
@@ -671,8 +668,6 @@ class State:
                     merged.frames_live = list(existing.frames_live)
                 if not merged.frames_server_post and existing.frames_server_post:
                     merged.frames_server_post = list(existing.frames_server_post)
-                if not merged.frames and existing.frames:
-                    merged.frames = list(existing.frames)
             if not merged.frames_live and live_frames:
                 merged.frames_live = list(live_frames)
             # Annotate whichever buckets we just touched. Safe to re-run:
@@ -680,7 +675,6 @@ class State:
             # so late-arriving frames get a fresh verdict alongside the old.
             chain_filter_annotate(merged.frames_live)
             chain_filter_annotate(merged.frames_server_post)
-            chain_filter_annotate(merged.frames)
             pitch = merged
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
             # Drive the session state machine forward — any upload arriving
@@ -1243,7 +1237,7 @@ class State:
     # server_post lifecycle moved to SessionProcessingState — call
     # `state._processing.{mark_server_post_queued, start_server_post_job,
     # should_cancel_server_post_job, finish_server_post_job, record_error,
-    # clear_error, errors_for, cancel_processing, resume_processing,
+    # clear_error, errors_for, cancel_processing, run_server_post,
     # session_summary, session_candidates, find_video_for}` directly from
     # routes/. State no longer proxies these.
 

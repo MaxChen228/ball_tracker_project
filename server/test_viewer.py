@@ -85,7 +85,7 @@ def _pitch(cam_id, cycle, K, R, t, H, P_trajectory):
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames=frames,
+        frames_server_post=frames,
         intrinsics=schemas.IntrinsicsPayload(fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
         homography=H.flatten().tolist(),
     )
@@ -156,7 +156,7 @@ def test_build_scene_includes_persisted_live_rays():
     P = np.array([0.0, 0.2, 0.4])
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([]))
     u, v = _project_pixels(K, R_a, t_a, P)
-    pitch.frames = []
+    pitch.frames_server_post = []
     pitch.frames_live = [
         schemas.FramePayload(
             frame_index=7,
@@ -645,7 +645,7 @@ def test_viewer_health_banner_rate_bar_colour_tiers():
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames=frames,
+        frames_server_post=frames,
         intrinsics=schemas.IntrinsicsPayload(
             fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
@@ -931,7 +931,7 @@ def test_viewer_exposes_camera_t_rel_offsets(tmp_path):
         sync_anchor_timestamp_s=100.0,  # chirp hit at session-clock 100 s
         video_start_pts_s=101.5,        # first MOV frame at 101.5 s
         video_fps=240.0,
-        frames=[schemas.FramePayload(
+        frames_server_post=[schemas.FramePayload(
             frame_index=0, timestamp_s=101.5, px=960.0, py=540.0,
             ball_detected=True,
         )],
@@ -1045,7 +1045,7 @@ def test_events_path_status_marks_live_done_on_frame_existence_not_triangulation
         for i in range(2)
     ]
     # Stitch frames_live on top while keeping the rest of the payload valid.
-    enriched = base.model_copy(update={"frames_live": live_frames, "frames": []})
+    enriched = base.model_copy(update={"frames_live": live_frames, "frames_server_post": []})
     main.state.record(enriched)
 
     client = TestClient(app)

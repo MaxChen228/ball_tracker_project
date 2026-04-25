@@ -374,7 +374,7 @@ def build_scene(
         viz_length = max(5.0, 2.0 * float(np.linalg.norm(C)))
 
         server_rays, server_trace = _rays_and_trace_for_source(
-            pitch.frames, K=K, R_wc=R_wc, C=C, dist=dist, anchor=anchor,
+            pitch.frames_server_post, K=K, R_wc=R_wc, C=C, dist=dist, anchor=anchor,
             cam_id=cam_id, source="server", viz_length=viz_length,
         )
         scene.rays.extend(server_rays)

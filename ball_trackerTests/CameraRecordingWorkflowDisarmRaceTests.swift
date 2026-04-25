@@ -33,8 +33,7 @@ final class CameraRecordingWorkflowDisarmRaceTests: XCTestCase {
 
     private func makeWorkflow(
         processingQueue: DispatchQueue,
-        recorder: TransitionRecorder = TransitionRecorder(),
-        drainedFrames: [ServerUploader.FramePayload] = []
+        recorder: TransitionRecorder = TransitionRecorder()
     ) -> (CameraRecordingWorkflow, TransitionRecorder) {
         let deps = CameraRecordingWorkflow.Dependencies(
             getCameraRole: { "A" },
@@ -52,7 +51,6 @@ final class CameraRecordingWorkflowDisarmRaceTests: XCTestCase {
             },
             startCapture: { _ in },
             resetDetectionState: {},
-            drainDetectedFrames: { drainedFrames },
             clearRecoveredAnchor: {},
             dispatchLiveCycleEnd: { _, _ in },
             showErrorBanner: { _ in },
@@ -179,31 +177,4 @@ final class CameraRecordingWorkflowDisarmRaceTests: XCTestCase {
         XCTAssertEqual(recorder.finalState, .standby)
     }
 
-    // MARK: 5. live-path advisory frames are persisted when no MOV exists
-
-    func testDisarmBeforeFrameStillDrainsAdvisoryFrames() {
-        let q = DispatchQueue(label: "test.disarm.advisory")
-        let recorder = TransitionRecorder()
-        let dummyFrame = ServerUploader.FramePayload(
-            frame_index: 7,
-            timestamp_s: 0.5,
-            px: 120.0, py: 240.0,
-            ball_detected: true
-        )
-        let (workflow, _) = makeWorkflow(
-            processingQueue: q,
-            recorder: recorder,
-            drainedFrames: [dummyFrame]
-        )
-
-        workflow.enterRecordingMode(sessionId: "s_adv00001", serverTimeSyncConfirmed: true)
-        workflow.startRecorderIfNeeded(sessionId: "s_adv00001", timestampS: 0.0)
-        // No bootstrapClipRecorder → clipRecorder stays nil → handleFinishedClip
-        // will take the "no MOV + live-only paths" branch.
-        workflow.handleRemoteDisarm(currentSessionId: "s_adv00001", currentState: .recording)
-        drain(processingQueue: q)
-
-        XCTAssertFalse(workflow.isRecordingActive)
-        XCTAssertEqual(recorder.finalState, .standby)
-    }
 }
