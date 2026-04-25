@@ -53,12 +53,39 @@ final class ServerUploader: @unchecked Sendable {
     /// `server/schemas.FramePayload`. `px` / `py` are nil on frames where
     /// the detector didn't find a ball (mode-two still records those so
     /// the server can see the timestamp coverage).
+    /// One blob that survived area+aspect+fill on the live path. Mirrors
+    /// `server/schemas.BlobCandidate`. The server's `live_pairing` runs
+    /// `candidate_selector.select_best_candidate` over this list using a
+    /// per-cam temporal prior before triangulation.
+    struct BlobCandidate: Codable {
+        let px: Double
+        let py: Double
+        let area: Int
+        let area_score: Double
+    }
+
     struct FramePayload: Codable {
         let frame_index: Int
         let timestamp_s: Double
         let px: Double?
         let py: Double?
         let ball_detected: Bool
+        /// Multi-candidate live-path blobs. nil for legacy single-blob
+        /// emitters; non-nil → server's temporal-prior selector picks the
+        /// winner. When non-nil and non-empty, px/py should still be set
+        /// to the largest-area pick so consumers ignoring `candidates`
+        /// keep working unchanged.
+        let candidates: [BlobCandidate]?
+
+        init(frame_index: Int, timestamp_s: Double, px: Double?, py: Double?,
+             ball_detected: Bool, candidates: [BlobCandidate]? = nil) {
+            self.frame_index = frame_index
+            self.timestamp_s = timestamp_s
+            self.px = px
+            self.py = py
+            self.ball_detected = ball_detected
+            self.candidates = candidates
+        }
     }
 
     struct CaptureTelemetry: Codable {

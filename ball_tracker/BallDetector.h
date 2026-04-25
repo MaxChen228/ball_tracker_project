@@ -54,6 +54,18 @@ NS_ASSUME_NONNULL_BEGIN
                                         aspectMin:(double)aspectMin
                                           fillMin:(double)fillMin;
 
+/// Multi-candidate variant: return ALL blobs passing area+aspect+fill,
+/// sorted by area desc. Empty array → no candidates. Used by the live
+/// path to ship every survivor to the server (`schemas.BlobCandidate`),
+/// which then applies the temporal-prior selector before pairing.
+/// Single-blob callers can take the first element of the array.
++ (NSArray<BTBallDetection *> *)detectAllCandidatesInPixelBuffer:(CVPixelBufferRef)pixelBuffer
+                                                            hMin:(int)hMin hMax:(int)hMax
+                                                            sMin:(int)sMin sMax:(int)sMax
+                                                            vMin:(int)vMin vMax:(int)vMax
+                                                       aspectMin:(double)aspectMin
+                                                         fillMin:(double)fillMin;
+
 @end
 
 /// Stateful per-frame detector that reuses work across frames:
