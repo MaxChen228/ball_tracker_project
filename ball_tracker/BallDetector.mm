@@ -199,6 +199,55 @@ static BTBallDetection *_Nullable detectBallCoreScratch(
                                         areaPx:(NSInteger)bestArea];
 }
 
+/// Multi-candidate variant of detectBallCoreScratch — collects every
+/// blob passing area+aspect+fill, sorted by area desc. No best-of pick
+/// (caller picks); centroid offset still applied so callers can pass a
+/// ROI crop (we don't currently — full frame only — but stay symmetric).
+static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
+    const cv::Mat &bgra,
+    int hMin, int hMax, int sMin, int sMax, int vMin, int vMax,
+    double aspectMin, double fillMin,
+    CVScratch &scratch
+) {
+    cv::cvtColor(bgra, scratch.bgr, cv::COLOR_BGRA2BGR);
+    cv::cvtColor(scratch.bgr, scratch.hsv, cv::COLOR_BGR2HSV);
+    cv::inRange(scratch.hsv,
+                cv::Scalar(hMin, sMin, vMin),
+                cv::Scalar(hMax, sMax, vMax),
+                scratch.mask);
+    int ncomp = cv::connectedComponentsWithStats(
+        scratch.mask, scratch.labels, scratch.stats, scratch.centroids, 8, CV_32S
+    );
+    struct Cand { int area; double cx; double cy; };
+    std::vector<Cand> cands;
+    cands.reserve(8);
+    for (int i = 1; i < ncomp; i++) {
+        int area = scratch.stats.at<int>(i, cv::CC_STAT_AREA);
+        if (area < kMinAreaPx || area > kMaxAreaPx) { continue; }
+        int w = scratch.stats.at<int>(i, cv::CC_STAT_WIDTH);
+        int h = scratch.stats.at<int>(i, cv::CC_STAT_HEIGHT);
+        if (w <= 0 || h <= 0) { continue; }
+        double aspect = (double)std::min(w, h) / (double)std::max(w, h);
+        if (aspect < aspectMin) { continue; }
+        double fill = (double)area / (double)(w * h);
+        if (fill < fillMin) { continue; }
+        cands.push_back({
+            area,
+            scratch.centroids.at<double>(i, 0),
+            scratch.centroids.at<double>(i, 1),
+        });
+    }
+    std::sort(cands.begin(), cands.end(),
+              [](const Cand &a, const Cand &b){ return a.area > b.area; });
+    NSMutableArray<BTBallDetection *> *out = [NSMutableArray arrayWithCapacity:cands.size()];
+    for (const auto &c : cands) {
+        [out addObject:[[BTBallDetection alloc] initWithPx:(CGFloat)c.cx
+                                                        py:(CGFloat)c.cy
+                                                    areaPx:(NSInteger)c.area]];
+    }
+    return out;
+}
+
 /// Lock a CVPixelBuffer for read + wrap its base address in a zero-copy
 /// cv::Mat. Returns false when the buffer can't be mapped (nil, wrong
 /// pixel format, or no base address). Caller MUST call
@@ -307,6 +356,23 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
     reportIfDue(gStatelessTiming, "stateless");
 #endif
     return detection;
+}
+
++ (NSArray<BTBallDetection *> *)detectAllCandidatesInPixelBuffer:(CVPixelBufferRef)pixelBuffer
+                                                            hMin:(int)hMin hMax:(int)hMax
+                                                            sMin:(int)sMin sMax:(int)sMax
+                                                            vMin:(int)vMin vMax:(int)vMax
+                                                       aspectMin:(double)aspectMin
+                                                         fillMin:(double)fillMin
+{
+    cv::Mat bgra;
+    if (!mapBGRAPixelBuffer(pixelBuffer, bgra)) { return @[]; }
+    thread_local CVScratch scratch;
+    NSArray<BTBallDetection *> *cands = detectAllCandidatesScratch(
+        bgra, hMin, hMax, sMin, sMax, vMin, vMax, aspectMin, fillMin, scratch
+    );
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+    return cands;
 }
 
 @end

@@ -91,7 +91,11 @@ final class ConcurrentDetectionPool {
                 self.detectionSemaphore.signal()
             }
 
-            let detection = BTBallDetector.detect(
+            // Multi-candidate path: ship every blob that passed area +
+            // aspect + fill so the server's temporal-prior selector picks
+            // the winner. Largest-area is mirrored into px/py for
+            // consumers that don't read `candidates`.
+            let allCandidates = BTBallDetector.detectAllCandidates(
                 in: pb,
                 hMin: Int32(hsvRange.h_min),
                 hMax: Int32(hsvRange.h_max),
@@ -102,12 +106,25 @@ final class ConcurrentDetectionPool {
                 aspectMin: shapeGate.aspect_min,
                 fillMin: shapeGate.fill_min
             )
+            let maxArea = allCandidates.map { Int($0.areaPx) }.max() ?? 1
+            let candidatesPayload: [ServerUploader.BlobCandidate]? = allCandidates.isEmpty
+                ? nil
+                : allCandidates.map { d in
+                    ServerUploader.BlobCandidate(
+                        px: Double(d.px),
+                        py: Double(d.py),
+                        area: Int(d.areaPx),
+                        area_score: maxArea > 0 ? Double(d.areaPx) / Double(maxArea) : 1.0
+                    )
+                }
+            let best = allCandidates.first  // detectAllCandidates returns sorted by area desc
             let frame = ServerUploader.FramePayload(
                 frame_index: index,
                 timestamp_s: timestampS,
-                px: detection.map { Double($0.px) },
-                py: detection.map { Double($0.py) },
-                ball_detected: detection != nil
+                px: best.map { Double($0.px) },
+                py: best.map { Double($0.py) },
+                ball_detected: best != nil,
+                candidates: candidatesPayload
             )
 
             self.stateLock.lock()

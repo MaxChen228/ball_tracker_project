@@ -81,7 +81,7 @@ final class LiveFrameDispatcher {
             lock.lock(); _drop.wsDown += 1; lock.unlock()
             return
         }
-        connection.send([
+        var msg: [String: Any] = [
             "type": "frame",
             "cam": cameraId,
             "sid": sid,
@@ -90,7 +90,21 @@ final class LiveFrameDispatcher {
             "px": frame.px as Any,
             "py": frame.py as Any,
             "detected": frame.ball_detected,
-        ])
+        ]
+        if let cands = frame.candidates, !cands.isEmpty {
+            // Hand-encoded into [[String: Any]] so JSONSerialization on the
+            // WS queue serialises without a Codable round-trip. Mirrors
+            // server/schemas.BlobCandidate field-for-field.
+            msg["candidates"] = cands.map { c -> [String: Any] in
+                [
+                    "px": c.px,
+                    "py": c.py,
+                    "area": c.area,
+                    "area_score": c.area_score,
+                ]
+            }
+        }
+        connection.send(msg)
     }
 
     /// Send a `cycle_end` signal. No-op if the live path is not active.
