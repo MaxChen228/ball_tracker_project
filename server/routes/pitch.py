@@ -230,6 +230,7 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             enable_bg_subtraction=state.detection_bg_subtraction_enabled(),
             shape_gate=state.shape_gate(),
             selector_tuning=state.candidate_selector_tuning(),
+            chain_filter_params=state.chain_filter_params(),
         )
     except ProcessingCanceled:
         proc.finish_server_post_job(sid, cam, canceled=True)

@@ -268,7 +268,19 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .hsv-pair input[type="range"] {{ width: 100%; margin: 0; accent-color: var(--ink); }}
 .hsv-num {{ width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--border-base); border-radius: var(--r); background: var(--surface); color: var(--ink); font-family: var(--mono); font-size: 11px; }}
 .hsv-actions {{ display: flex; justify-content: flex-end; }}
-.shape-gate-form {{ margin-top: var(--s-3); padding-top: var(--s-3); border-top: 1px solid var(--border-l); }}
+.shape-gate-form {{ margin-top: 0; padding-top: 0; border-top: 0; }}
+.tune-section {{ border-top: 1px solid var(--border-l); padding: var(--s-2) 0; }}
+.tune-section:first-of-type {{ border-top: 0; padding-top: 0; }}
+.tune-section > summary {{ cursor: pointer; list-style: none; display: flex; justify-content: space-between; align-items: baseline;
+                            padding: 4px 0; font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em; text-transform: uppercase; color: var(--sub); }}
+.tune-section > summary::-webkit-details-marker {{ display: none; }}
+.tune-section > summary::after {{ content: '▸'; color: var(--sub); margin-left: var(--s-2); }}
+.tune-section[open] > summary::after {{ content: '▾'; color: var(--ink); }}
+.tune-section[open] > summary {{ color: var(--ink); }}
+.tune-section .tune-name {{ font-weight: 600; }}
+.tune-section .tune-summary {{ color: var(--sub); font-size: 10px; letter-spacing: 0.04em; text-transform: none; }}
+.tune-section[open] .tune-summary {{ display: none; }}
+.tune-section > .hsv-form {{ margin-top: var(--s-2); }}
 .hsv-subtitle {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub); }}
 .shape-row {{ display: grid; grid-template-columns: 60px minmax(0, 1fr) 56px; gap: var(--s-2); align-items: center; }}
 .shape-label {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em; text-transform: uppercase; color: var(--sub); }}

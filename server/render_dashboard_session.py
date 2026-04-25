@@ -130,10 +130,56 @@ def _render_candidate_selector_body(
     )
 
 
+def _render_chain_filter_body(params: dict[str, object] | None) -> str:
+    """Per-camera temporal noise gate. Server-side only — applied wherever
+    `chain_filter_annotate` runs (boot replay, live persist, server_post)."""
+    current = {"max_frame_gap": 15, "max_jump_px": 160.0, "min_run_len": 10}
+    if params:
+        for key in current:
+            if key in params:
+                try:
+                    current[key] = type(current[key])(params[key])
+                except (TypeError, ValueError):
+                    pass
+    gap = int(current["max_frame_gap"])
+    jump = float(current["max_jump_px"])
+    run = int(current["min_run_len"])
+    return (
+        '<form method="POST" action="/detection/chain_filter" '
+        'id="chain-filter-form" class="hsv-form shape-gate-form">'
+        '<div class="hsv-subtitle">Chain filter</div>'
+        '<div class="hsv-grid">'
+        '<label class="shape-row" title="Max pixel jump between consecutive detections. '
+        'Larger jumps split the chain; the short side gets tagged rejected_jump.">'
+        '<span class="shape-label">JUMP</span>'
+        '<input class="hsv-num" type="number" step="1" min="1" max="2000" name="max_jump_px" '
+        f'value="{jump:.0f}" data-cf-number="max_jump_px">'
+        '</label>'
+        '<label class="shape-row" title="Min consecutive detections to keep a chain. '
+        'Shorter chains are tagged rejected_flicker (or rejected_jump if a jump bounded them).">'
+        '<span class="shape-label">RUN</span>'
+        '<input class="hsv-num" type="number" step="1" min="1" max="240" name="min_run_len" '
+        f'value="{run}" data-cf-number="min_run_len">'
+        '</label>'
+        '<label class="shape-row" title="Max frame-index gap before a quiet stretch breaks the chain. '
+        'Frames=240/s so 15 ≈ 62 ms.">'
+        '<span class="shape-label">GAP</span>'
+        '<input class="hsv-num" type="number" step="1" min="1" max="240" name="max_frame_gap" '
+        f'value="{gap}" data-cf-number="max_frame_gap">'
+        '</label>'
+        '</div>'
+        '<div class="hsv-actions">'
+        '<button class="btn" type="submit">Apply chain filter</button>'
+        '</div>'
+        '</form>'
+    )
+
+
 def _render_hsv_body(
     hsv_range: dict[str, object] | None,
     shape_gate: dict[str, object] | None = None,
     candidate_selector_tuning: dict[str, object] | None = None,
+    chain_filter_params: dict[str, object] | None = None,
 ) -> str:
     current = {
         "h_min": 25,
@@ -169,7 +215,26 @@ def _render_hsv_body(
         f'{html.escape(str(preset["label"]))}</button>'
         for name, preset in _HSV_PRESETS.items()
     )
-    return (
+    sg = shape_gate or {"aspect_min": 0.70, "fill_min": 0.55}
+    cs = candidate_selector_tuning or {"r_px_expected": 12.0, "w_dist": 0.7, "dist_cost_sat_radii": 8.0}
+    cf = chain_filter_params or {"max_jump_px": 160.0, "min_run_len": 10, "max_frame_gap": 15}
+    hsv_summary = (
+        f'h[{current["h_min"]}-{current["h_max"]}] '
+        f's[{current["s_min"]}-{current["s_max"]}] '
+        f'v[{current["v_min"]}-{current["v_max"]}]'
+    )
+    sg_summary = f'aspect≥{float(sg.get("aspect_min", 0.70)):.2f} fill≥{float(sg.get("fill_min", 0.55)):.2f}'
+    cs_summary = (
+        f'r{float(cs.get("r_px_expected", 12.0)):.0f} '
+        f'wD{float(cs.get("w_dist", 0.7)):.2f} '
+        f'sat{float(cs.get("dist_cost_sat_radii", 8.0)):.0f}'
+    )
+    cf_summary = (
+        f'jump{float(cf.get("max_jump_px", 160.0)):.0f} '
+        f'run{int(cf.get("min_run_len", 10))} '
+        f'gap{int(cf.get("max_frame_gap", 15))}'
+    )
+    hsv_form = (
         '<form method="POST" action="/detection/hsv" id="hsv-form" class="hsv-form">'
         '<div class="hsv-presets">'
         f'{preset_buttons}'
@@ -183,8 +248,24 @@ def _render_hsv_body(
         '<button class="btn" type="submit">Apply HSV</button>'
         '</div>'
         '</form>'
-        + _render_shape_gate_body(shape_gate)
-        + _render_candidate_selector_body(candidate_selector_tuning)
+    )
+    return (
+        '<details class="tune-section" open>'
+        f'<summary><span class="tune-name">HSV</span><span class="tune-summary">{html.escape(hsv_summary)}</span></summary>'
+        f'{hsv_form}'
+        '</details>'
+        '<details class="tune-section">'
+        f'<summary><span class="tune-name">Shape gate</span><span class="tune-summary">{html.escape(sg_summary)}</span></summary>'
+        f'{_render_shape_gate_body(shape_gate)}'
+        '</details>'
+        '<details class="tune-section">'
+        f'<summary><span class="tune-name">Selector</span><span class="tune-summary">{html.escape(cs_summary)}</span></summary>'
+        f'{_render_candidate_selector_body(candidate_selector_tuning)}'
+        '</details>'
+        '<details class="tune-section">'
+        f'<summary><span class="tune-name">Chain filter</span><span class="tune-summary">{html.escape(cf_summary)}</span></summary>'
+        f'{_render_chain_filter_body(chain_filter_params)}'
+        '</details>'
     )
 
 
