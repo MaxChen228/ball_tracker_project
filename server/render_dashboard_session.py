@@ -73,9 +73,67 @@ def _render_shape_gate_body(shape_gate: dict[str, object] | None) -> str:
     )
 
 
+def _render_candidate_selector_body(
+    tuning: dict[str, object] | None,
+) -> str:
+    """Server-side selector weights. Sits inside the DETECTION HSV card,
+    below the shape-gate sub-form. Operator only sees `w_dist` (slider);
+    `w_area = 1 - w_dist` is enforced server-side. Applies to BOTH live
+    (`live_pairing._resolve_candidates`) and `server_post` paths."""
+    current = {
+        "r_px_expected": 12.0,
+        "w_dist": 0.7,
+        "dist_cost_sat_radii": 8.0,
+    }
+    if tuning:
+        for key in current:
+            if key in tuning:
+                try:
+                    current[key] = float(tuning[key])
+                except (TypeError, ValueError):
+                    pass
+
+    r_val = current["r_px_expected"]
+    w_dist = current["w_dist"]
+    sat = current["dist_cost_sat_radii"]
+    w_dist_slider = int(round(w_dist * 100))
+
+    return (
+        '<form method="POST" action="/detection/candidate_selector" '
+        'id="candidate-selector-form" class="hsv-form shape-gate-form">'
+        '<div class="hsv-subtitle">Candidate selector</div>'
+        '<div class="hsv-grid">'
+        '<label class="shape-row" title="Expected ball radius in px — normalizes the distance cost. '
+        'Falls back here when caller has no calibration-driven prior.">'
+        '<span class="shape-label">RADIUS</span>'
+        '<input class="hsv-num" type="number" step="1" min="1" max="200" name="r_px_expected" '
+        f'value="{r_val:.1f}" data-cs-number="r_px_expected">'
+        '</label>'
+        '<label class="shape-row" title="Weight on distance cost vs area cost. '
+        'w_area = 1 - w_dist is derived server-side.">'
+        '<span class="shape-label">W_DIST</span>'
+        f'<input type="range" min="0" max="100" step="1" value="{w_dist_slider}" data-cs-range="w_dist">'
+        f'<input class="hsv-num" type="number" step="0.01" min="0" max="1" name="w_dist" '
+        f'value="{w_dist:.2f}" data-cs-number="w_dist">'
+        '</label>'
+        '<label class="shape-row" title="Distance-cost saturation radii. Beyond this many ball-radii '
+        'from the predicted point, cost is clamped to 1 (area decides).">'
+        '<span class="shape-label">SAT</span>'
+        '<input class="hsv-num" type="number" step="0.5" min="1" max="50" name="dist_cost_sat_radii" '
+        f'value="{sat:.1f}" data-cs-number="dist_cost_sat_radii">'
+        '</label>'
+        '</div>'
+        '<div class="hsv-actions">'
+        '<button class="btn" type="submit">Apply selector</button>'
+        '</div>'
+        '</form>'
+    )
+
+
 def _render_hsv_body(
     hsv_range: dict[str, object] | None,
     shape_gate: dict[str, object] | None = None,
+    candidate_selector_tuning: dict[str, object] | None = None,
 ) -> str:
     current = {
         "h_min": 25,
@@ -126,6 +184,7 @@ def _render_hsv_body(
         '</div>'
         '</form>'
         + _render_shape_gate_body(shape_gate)
+        + _render_candidate_selector_body(candidate_selector_tuning)
     )
 
 

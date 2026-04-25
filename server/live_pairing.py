@@ -5,16 +5,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from candidate_selector import Candidate, select_best_candidate
+from candidate_selector import Candidate, CandidateSelectorTuning, select_best_candidate
 from schemas import FramePayload, TriangulatedPoint
-
-
-# Fallback ball radius (px) used when the inbound frame doesn't carry
-# enough info to derive one from blob area. Tennis ball at ~3 m on a
-# 1080p main-wide cam ≈ 12-18 px radius; pick the lower end so distance
-# cost saturates a touch sooner. The selector saturates at 8r anyway, so
-# being off by 2× barely shifts the winner.
-_DEFAULT_R_PX_EXPECTED = 12.0
 
 
 _OTHER_CAM = {"A": "B", "B": "A"}
@@ -71,6 +63,11 @@ class LivePairingSession:
     last_position: dict[str, tuple[float, float]] = field(default_factory=dict)
     last_velocity: dict[str, tuple[float, float]] = field(default_factory=dict)
     last_timestamp_s: dict[str, float] = field(default_factory=dict)
+    # Selector tuning, refreshed by state.ingest_live_frame from the
+    # dashboard-controlled `state.candidate_selector_tuning()` on every
+    # ingest. Defaults so a session built outside that call (tests) still
+    # has a usable tuning instead of None.
+    tuning: CandidateSelectorTuning = field(default_factory=CandidateSelectorTuning.default)
 
     def _resolve_candidates(self, cam: str, frame: FramePayload) -> FramePayload:
         """Pick the winning candidate using the temporal prior. Empty
@@ -97,7 +94,10 @@ class LivePairingSession:
             prev_position=prev_pos,
             prev_velocity=prev_vel,
             dt=dt,
-            r_px_expected=_DEFAULT_R_PX_EXPECTED,
+            r_px_expected=self.tuning.r_px_expected,
+            w_area=self.tuning.w_area,
+            w_dist=self.tuning.w_dist,
+            dist_cost_sat_radii=self.tuning.dist_cost_sat_radii,
         )
         # Selector returns None iff input is empty — guarded above.
         assert winner is not None
