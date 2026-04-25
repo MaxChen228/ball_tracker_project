@@ -21,7 +21,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from chain_filter import annotate as chain_filter_annotate
+from chain_filter import ChainFilterParams, annotate as chain_filter_annotate
 from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate, detect_ball
 from schemas import FramePayload
@@ -92,6 +92,7 @@ def detect_pitch(
     expected_radius_px: float | None = None,
     shape_gate: ShapeGate | None = None,
     selector_tuning: "CandidateSelectorTuning | None" = None,
+    chain_filter_params: ChainFilterParams | None = None,
 ) -> list[FramePayload]:
     """Decode `video_path`, run HSV + (optional) MOG2 background
     subtraction on every frame, and return one `FramePayload` per decoded
@@ -204,7 +205,7 @@ def detect_pitch(
             prev_position = (px, py)
             prev_timestamp_s = absolute_pts_s
     ball_frames = sum(1 for f in out if f.ball_detected)
-    chain_filter_annotate(out)
+    chain_filter_annotate(out, chain_filter_params or ChainFilterParams())
     logger.info(
         "detection video=%s frames=%d ball=%d hsv=h[%d-%d]s[%d-%d]v[%d-%d] bg_sub=%s",
         video_path.name, len(out), ball_frames,

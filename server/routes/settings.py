@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from candidate_selector import CandidateSelectorTuning
+from chain_filter import ChainFilterParams
 from detection import HSVRange, ShapeGate
 from schemas import TrackingExposureCapMode
 
@@ -181,6 +182,70 @@ async def detection_candidate_selector(request: Request):
             "w_area": applied.w_area,
             "w_dist": applied.w_dist,
             "dist_cost_sat_radii": applied.dist_cost_sat_radii,
+        },
+    }
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return payload
+
+
+def _validated_chain_filter_params(values: dict[str, object]) -> ChainFilterParams:
+    """Parse + range-check the three chain-filter knobs.
+    `max_jump_px` is a pixel distance ceiling; `max_frame_gap` and
+    `min_run_len` are integer frame counts."""
+    def _int_field(name: str, lo: int, hi: int) -> int:
+        raw = values.get(name)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"missing or invalid '{name}'")
+        if not (lo <= value <= hi):
+            raise HTTPException(status_code=400, detail=f"'{name}' out of range [{lo}, {hi}]")
+        return value
+
+    def _float_field(name: str, lo: float, hi: float) -> float:
+        raw = values.get(name)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"missing or invalid '{name}'")
+        if not (lo <= value <= hi):
+            raise HTTPException(status_code=400, detail=f"'{name}' out of range [{lo}, {hi}]")
+        return value
+
+    max_frame_gap = _int_field("max_frame_gap", 1, 240)
+    max_jump_px = _float_field("max_jump_px", 1.0, 2000.0)
+    min_run_len = _int_field("min_run_len", 1, 240)
+    return ChainFilterParams(
+        max_frame_gap=max_frame_gap,
+        max_jump_px=max_jump_px,
+        min_run_len=min_run_len,
+    )
+
+
+@router.post("/detection/chain_filter")
+async def detection_chain_filter(request: Request):
+    """Operator-tunable chain filter (per-cam temporal noise gate).
+    Server-side only — applied wherever `chain_filter_annotate` runs
+    (live persist, server_post detect_pitch, boot-time replay)."""
+    from main import state, _wants_html
+
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json()
+        params = _validated_chain_filter_params(body)
+    else:
+        form = await request.form()
+        params = _validated_chain_filter_params(
+            {k: form.get(k) for k in ("max_frame_gap", "max_jump_px", "min_run_len")}
+        )
+    applied = state.set_chain_filter_params(params)
+    payload = {
+        "ok": True,
+        "chain_filter_params": {
+            "max_frame_gap": applied.max_frame_gap,
+            "max_jump_px": applied.max_jump_px,
+            "min_run_len": applied.min_run_len,
         },
     }
     if _wants_html(request):
