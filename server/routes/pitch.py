@@ -277,8 +277,11 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         if annotated_path.exists():
             try:
                 annotated_path.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning(
+                    "failed to remove canceled annotated clip session=%s cam=%s path=%s err=%s",
+                    sid, cam, annotated_path, exc,
+                )
         return
     except Exception as exc:
         proc.finish_server_post_job(sid, cam, canceled=False)
@@ -290,8 +293,11 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         if annotated_path.exists():
             try:
                 annotated_path.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning(
+                    "failed to remove failed annotated clip session=%s cam=%s path=%s err=%s",
+                    sid, cam, annotated_path, exc,
+                )
     ball = sum(1 for f in frames if f.ball_detected)
     logger.info(
         "background detection complete session=%s cam=%s frames=%d ball=%d",
