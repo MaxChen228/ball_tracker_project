@@ -28,6 +28,7 @@ from schemas import (
     _DEFAULT_SESSION_TIMEOUT_S,
     _DEFAULT_PATHS,
 )
+from candidate_selector import CandidateSelectorTuning
 from chain_filter import annotate as chain_filter_annotate
 from detection import HSVRange, ShapeGate
 from preview import PreviewBuffer
@@ -128,6 +129,7 @@ class State:
         self._calibration_dir = data_dir / "calibrations"
         self._hsv_path = data_dir / "hsv_range.json"
         self._shape_gate_path = data_dir / "shape_gate.json"
+        self._candidate_selector_tuning_path = data_dir / "candidate_selector_tuning.json"
         self._session_meta_path = data_dir / "session_meta.json"
         self._pitch_dir.mkdir(parents=True, exist_ok=True)
         self._result_dir.mkdir(parents=True, exist_ok=True)
@@ -166,6 +168,7 @@ class State:
         )
         self._hsv_range = self._load_hsv_range_from_disk()
         self._shape_gate = self._load_shape_gate_from_disk()
+        self._candidate_selector_tuning = self._load_candidate_selector_tuning_from_disk()
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
         # Runtime tunables pushed from the dashboard, hot-applied on the
@@ -412,6 +415,35 @@ class State:
         )
         self._atomic_write(self._shape_gate_path, payload)
 
+    def _load_candidate_selector_tuning_from_disk(self) -> CandidateSelectorTuning:
+        path = self._candidate_selector_tuning_path
+        if not path.exists():
+            return CandidateSelectorTuning.default()
+        try:
+            obj = json.loads(path.read_text())
+            return CandidateSelectorTuning(
+                r_px_expected=float(obj["r_px_expected"]),
+                w_area=float(obj["w_area"]),
+                w_dist=float(obj["w_dist"]),
+                dist_cost_sat_radii=float(obj["dist_cost_sat_radii"]),
+            )
+        except Exception as e:
+            logger.warning("skip corrupt candidate_selector_tuning %s: %s", path, e)
+            return CandidateSelectorTuning.default()
+
+    def _persist_candidate_selector_tuning_locked(self) -> None:
+        t = self._candidate_selector_tuning
+        payload = json.dumps(
+            {
+                "r_px_expected": t.r_px_expected,
+                "w_area": t.w_area,
+                "w_dist": t.w_dist,
+                "dist_cost_sat_radii": t.dist_cost_sat_radii,
+            },
+            indent=2,
+        )
+        self._atomic_write(self._candidate_selector_tuning_path, payload)
+
     def _calibration_path(self, camera_id: str) -> Path:
         return self._calibration_store.path(camera_id)
 
@@ -492,6 +524,9 @@ class State:
     ) -> tuple[list[TriangulatedPoint], dict[str, int], FramePayload]:
         with self._lock:
             live = self._live_pairings.setdefault(session_id, LivePairingSession(session_id))
+            # Refresh selector tuning every ingest so dashboard slider
+            # changes apply on the next frame without a session reset.
+            live.tuning = self._candidate_selector_tuning
             cal_a = self._calibration_store.get("A")
             cal_b = self._calibration_store.get("B")
             dev_a = self._device_registry.get("A")
@@ -1112,6 +1147,18 @@ class State:
     def shape_gate(self) -> ShapeGate:
         with self._lock:
             return self._shape_gate
+
+    def candidate_selector_tuning(self) -> CandidateSelectorTuning:
+        with self._lock:
+            return self._candidate_selector_tuning
+
+    def set_candidate_selector_tuning(
+        self, tuning: CandidateSelectorTuning
+    ) -> CandidateSelectorTuning:
+        with self._lock:
+            self._candidate_selector_tuning = tuning
+            self._persist_candidate_selector_tuning_locked()
+            return self._candidate_selector_tuning
 
     def set_shape_gate(self, shape_gate: ShapeGate) -> ShapeGate:
         with self._lock:

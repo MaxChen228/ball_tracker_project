@@ -4,8 +4,20 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from candidate_selector import Candidate, select_best_candidate
+from candidate_selector import (
+    Candidate,
+    CandidateSelectorTuning,
+    select_best_candidate,
+)
 from detection import HSVRange, detect_ball
+
+
+_DEFAULT_T = CandidateSelectorTuning.default()
+_DEFAULTS = dict(
+    w_area=_DEFAULT_T.w_area,
+    w_dist=_DEFAULT_T.w_dist,
+    dist_cost_sat_radii=_DEFAULT_T.dist_cost_sat_radii,
+)
 
 
 def _yg() -> tuple[int, int, int]:
@@ -15,13 +27,13 @@ def _yg() -> tuple[int, int, int]:
 
 
 def test_empty_returns_none():
-    assert select_best_candidate([]) is None
+    assert select_best_candidate([], **_DEFAULTS) is None
 
 
 def test_fallback_largest_without_prior():
     small = Candidate(cx=10, cy=10, area=100, area_score=0.5)
     big = Candidate(cx=200, cy=200, area=200, area_score=1.0)
-    assert select_best_candidate([small, big]) is big
+    assert select_best_candidate([small, big], **_DEFAULTS) is big
 
 
 def test_temporal_prior_beats_largest():
@@ -40,6 +52,7 @@ def test_temporal_prior_beats_largest():
         prev_velocity=prev_vel,
         dt=dt,
         r_px_expected=r,
+        **_DEFAULTS,
     )
     assert winner is near_small
 
@@ -54,6 +67,7 @@ def test_temporal_prior_fallback_on_non_finite_dt():
         prev_velocity=(0, 0),
         dt=0.0,
         r_px_expected=10.0,
+        **_DEFAULTS,
     )
     assert out is c_big
 

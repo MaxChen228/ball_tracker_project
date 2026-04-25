@@ -391,6 +391,12 @@ def _build_status_response() -> dict[str, Any]:
             "aspect_min": state.shape_gate().aspect_min,
             "fill_min": state.shape_gate().fill_min,
         },
+        "candidate_selector_tuning": {
+            "r_px_expected": state.candidate_selector_tuning().r_px_expected,
+            "w_area": state.candidate_selector_tuning().w_area,
+            "w_dist": state.candidate_selector_tuning().w_dist,
+            "dist_cost_sat_radii": state.candidate_selector_tuning().dist_cost_sat_radii,
+        },
         # Mutual-sync context. `sync.id` is the sole dedupe key the phone
         # uses to decide whether a fresh `sync_run` command has arrived
         # vs. a repeat of an in-flight run. `last_sync` lets the dashboard
@@ -811,6 +817,12 @@ def events_index() -> HTMLResponse:
             shape_gate={
                 "aspect_min": state.shape_gate().aspect_min,
                 "fill_min": state.shape_gate().fill_min,
+            },
+            candidate_selector_tuning={
+                "r_px_expected": state.candidate_selector_tuning().r_px_expected,
+                "w_area": state.candidate_selector_tuning().w_area,
+                "w_dist": state.candidate_selector_tuning().w_dist,
+                "dist_cost_sat_radii": state.candidate_selector_tuning().dist_cost_sat_radii,
             },
             sync=sync_run.to_dict() if sync_run is not None else None,
             sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),

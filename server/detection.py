@@ -147,6 +147,7 @@ def detect_ball(
     prev_velocity: tuple[float, float] | None = None,
     dt: float | None = None,
     shape_gate: ShapeGate | None = None,
+    selector_tuning: "CandidateSelectorTuning | None" = None,
 ) -> tuple[float, float] | None:
     """Find the largest HSV-masked blob whose area is within the active
     area bounds AND whose bbox aspect ratio and fill ratio clear the
@@ -187,7 +188,8 @@ def detect_ball(
     if num_labels <= 1:
         return None
 
-    from candidate_selector import Candidate, select_best_candidate
+    from candidate_selector import Candidate, CandidateSelectorTuning, select_best_candidate
+    tuning = selector_tuning if selector_tuning is not None else CandidateSelectorTuning.default()
 
     survivors: list[Candidate] = []
     for idx in range(1, num_labels):
@@ -220,12 +222,18 @@ def detect_ball(
         )
         for c in survivors
     ]
+    # `expected_radius_px` (calibration-driven) wins when present;
+    # otherwise fall back to dashboard-tunable r_px_expected.
+    r_px = expected_radius_px if expected_radius_px is not None else tuning.r_px_expected
     winner = select_best_candidate(
         scored,
         prev_position=prev_position,
         prev_velocity=prev_velocity,
         dt=dt,
-        r_px_expected=expected_radius_px,
+        r_px_expected=r_px,
+        w_area=tuning.w_area,
+        w_dist=tuning.w_dist,
+        dist_cost_sat_radii=tuning.dist_cost_sat_radii,
     )
     if winner is None:
         return None

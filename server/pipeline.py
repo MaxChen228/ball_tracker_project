@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 
 from chain_filter import annotate as chain_filter_annotate
+from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate, detect_ball
 from schemas import FramePayload
 from video import iter_frames
@@ -90,6 +91,7 @@ def detect_pitch(
     should_cancel: CancelCheck | None = None,
     expected_radius_px: float | None = None,
     shape_gate: ShapeGate | None = None,
+    selector_tuning: "CandidateSelectorTuning | None" = None,
 ) -> list[FramePayload]:
     """Decode `video_path`, run HSV + (optional) MOG2 background
     subtraction on every frame, and return one `FramePayload` per decoded
@@ -161,6 +163,7 @@ def detect_pitch(
                 prev_velocity=prev_velocity,
                 dt=dt,
                 shape_gate=shape_gate,
+                selector_tuning=selector_tuning,
             )
         if centroid is None:
             out.append(
