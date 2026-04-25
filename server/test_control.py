@@ -893,6 +893,66 @@ def test_record_merges_live_frames_into_single_camera_pitch(tmp_path):
     assert stored.frames_live[0].px == 123.0
 
 
+def test_session_stop_flushes_live_frames_without_pitch_upload(tmp_path):
+    """iOS dies mid-session before sending /pitch — operator presses Stop.
+    The buffered live frames must be persisted under a synthetic pitch so
+    they survive a server restart. Without this, the live path silently
+    drops data on every iOS crash, violating the no-silent-fallback rule."""
+    from schemas import BlobCandidate
+    s = main.State(data_dir=tmp_path)
+    s.arm_session(paths={main.DetectionPath.live})
+    session_id = s.current_session().id
+
+    s.ingest_live_frame("A", session_id, main.FramePayload(
+        frame_index=1, timestamp_s=0.1, ball_detected=True,
+        candidates=[BlobCandidate(px=10.0, py=20.0, area=100, area_score=1.0)],
+    ))
+    s.ingest_live_frame("A", session_id, main.FramePayload(
+        frame_index=2, timestamp_s=0.2, ball_detected=True,
+        candidates=[BlobCandidate(px=11.0, py=21.0, area=100, area_score=1.0)],
+    ))
+
+    # No /pitch upload arrives. Operator presses Stop.
+    s.stop_session()
+
+    stored = s.pitches_for_session(session_id)
+    assert "A" in stored, "synthetic pitch must be written for cam that never uploaded"
+    assert len(stored["A"].frames_live) == 2
+    assert stored["A"].frames_live[0].frame_index == 1
+    assert stored["A"].frames_live[1].px == 11.0
+
+    # Restart simulation: a fresh State reads the synthetic pitch from disk.
+    s2 = main.State(data_dir=tmp_path)
+    reloaded = s2.pitches_for_session(session_id)
+    assert "A" in reloaded
+    assert len(reloaded["A"].frames_live) == 2
+
+
+def test_session_timeout_flushes_live_frames(tmp_path):
+    """Same as above but the session ends via lazy timeout (operator
+    forgot Stop) instead of explicit stop_session. The flush must still
+    fire on the next current_session() poll."""
+    from schemas import BlobCandidate
+    clock = [1000.0]
+    s = main.State(data_dir=tmp_path, time_fn=lambda: clock[0])
+    s.arm_session(max_duration_s=5.0, paths={main.DetectionPath.live})
+    session_id = s.current_session().id
+
+    s.ingest_live_frame("B", session_id, main.FramePayload(
+        frame_index=7, timestamp_s=0.7, ball_detected=True,
+        candidates=[BlobCandidate(px=99.0, py=88.0, area=100, area_score=1.0)],
+    ))
+
+    # Push past timeout, then poll — first poll triggers timeout + flush.
+    clock[0] += 10.0
+    assert s.current_session() is None
+
+    stored = s.pitches_for_session(session_id)
+    assert "B" in stored
+    assert len(stored["B"].frames_live) == 1
+    assert stored["B"].frames_live[0].frame_index == 7
+
+
 def test_setup_page_wires_auto_calibration_status_into_device_renders():
     client = TestClient(app)
     r = client.get("/setup")

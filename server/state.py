@@ -218,6 +218,13 @@ class State:
         self._live_missing_cal: dict[str, set[str]] = {}
         # Dedupe key for the warn-once-per-cam-session log below.
         self._live_missing_cal_logged: set[tuple[str, str]] = set()
+        # Sessions whose live frame buffer needs to be flushed to disk.
+        # Populated by `_check_session_timeout_locked` / `stop_session` and
+        # drained by the next `current_session()` / `arm_session()` call,
+        # which runs the actual flush outside the lock. Covers the case
+        # where iOS dies mid-session without sending `cycle_end`, so the
+        # in-memory live frames would otherwise be lost.
+        self._pending_live_flush_sessions: set[str] = set()
         # Session-level trash + server_post-processing job coordinator.
         # Owns job state, per-(session, cam) error strings, and the
         # candidate-finder used by /events + /sessions/{sid}/run_server_post.
@@ -623,6 +630,50 @@ class State:
         chain_filter_annotate(merged.frames_live)
         return self.record(merged)
 
+    def flush_live_frames_for_session(self, session_id: str) -> None:
+        """Persist any buffered live frames to disk pitch JSONs for the
+        given session. Called at session-end (timeout / Stop) so frames
+        survive even if iOS never sent `cycle_end` (WS death, app crash,
+        force-kill, network partition).
+
+        For cams that already uploaded /pitch, this is a no-op redirect to
+        `persist_live_frames` (which merges live frames into the existing
+        pitch JSON). For cams that died before /pitch arrived, synthesise
+        a minimal pitch carrying just the live bucket — without it the
+        in-memory frames would silently vanish on restart, violating the
+        no-silent-fallback rule.
+
+        Idempotent: safe to call repeatedly per session id."""
+        with self._lock:
+            live = self._live_pairings.get(session_id)
+            cam_ids = sorted(live.frames_by_cam.keys()) if live is not None else []
+        if not cam_ids:
+            return
+        for cam_id in cam_ids:
+            with self._lock:
+                buffered = bool(live.frames_by_cam.get(cam_id))
+                existing = self.pitches.get((cam_id, session_id))
+            if not buffered:
+                continue
+            if existing is not None:
+                self.persist_live_frames(cam_id, session_id)
+                continue
+            with self._lock:
+                dev = self._device_registry.get(cam_id)
+            anchor = dev.sync_anchor_timestamp_s if dev is not None else None
+            synthetic = PitchPayload(
+                camera_id=cam_id,
+                session_id=session_id,
+                sync_anchor_timestamp_s=anchor,
+                video_start_pts_s=anchor if anchor is not None else 0.0,
+                paths=[DetectionPath.live.value],
+            )
+            logger.info(
+                "flush_live_frames: synthesising live-only pitch session=%s cam=%s anchor=%s",
+                session_id, cam_id, anchor,
+            )
+            self.record(synthetic)
+
     def _atomic_write(self, path: Path, payload: str) -> None:
         # Unique tmp filename per call so concurrent writers targeting the
         # same `path` (e.g. two simultaneous /pitch POSTs producing the same
@@ -983,15 +1034,34 @@ class State:
             s.ended_at = now
             self._last_ended_session = s
             self._current_session = None
+            self._pending_live_flush_sessions.add(s.id)
+
+    def _drain_pending_live_flushes_locked(self) -> set[str]:
+        """Pop the pending-flush set under the caller's lock. Caller must
+        run `flush_live_frames_for_session` on each id OUTSIDE the lock."""
+        pending = self._pending_live_flush_sessions
+        self._pending_live_flush_sessions = set()
+        return pending
+
+    def _run_pending_live_flushes(self, pending: set[str]) -> None:
+        for sid in pending:
+            try:
+                self.flush_live_frames_for_session(sid)
+            except Exception:
+                logger.exception("flush_live_frames_for_session failed sid=%s", sid)
 
     def current_session(self) -> Session | None:
         """Current armed session (None if idle). Side-effect: lazily applies
         the timeout so polling callers (status, commands) drive the state
-        machine forward without a background task."""
+        machine forward without a background task. Also drains any pending
+        live-frame flushes triggered by a just-expired timeout."""
         now = self._time_fn()
         with self._lock:
             self._check_session_timeout_locked(now)
-            return self._current_session
+            pending = self._drain_pending_live_flushes_locked()
+            cur = self._current_session
+        self._run_pending_live_flushes(pending)
+        return cur
 
     def arm_session(
         self,
@@ -1005,21 +1075,25 @@ class State:
         now = self._time_fn()
         with self._lock:
             self._check_session_timeout_locked(now)
+            pending = self._drain_pending_live_flushes_locked()
             if self._current_session is not None:
-                return self._current_session
-            chosen_paths = set(paths or self._runtime_settings.default_paths or _DEFAULT_PATHS)
-            session = Session(
-                id=_new_session_id(),
-                started_at=now,
-                max_duration_s=max_duration_s,
-                paths=chosen_paths,
-                tracking_exposure_cap=self._runtime_settings.tracking_exposure_cap,
-                sync_id=self._common_time_sync_id_locked(now),
-            )
-            self._live_pairings[session.id] = LivePairingSession(session.id)
-            self._current_session = session
-            self._sync.clear_time_sync_intent_locked()
-            return session
+                cur = self._current_session
+            else:
+                chosen_paths = set(paths or self._runtime_settings.default_paths or _DEFAULT_PATHS)
+                session = Session(
+                    id=_new_session_id(),
+                    started_at=now,
+                    max_duration_s=max_duration_s,
+                    paths=chosen_paths,
+                    tracking_exposure_cap=self._runtime_settings.tracking_exposure_cap,
+                    sync_id=self._common_time_sync_id_locked(now),
+                )
+                self._live_pairings[session.id] = LivePairingSession(session.id)
+                self._current_session = session
+                self._sync.clear_time_sync_intent_locked()
+                cur = session
+        self._run_pending_live_flushes(pending)
+        return cur
 
     def default_paths(self) -> set[DetectionPath]:
         with self._lock:
@@ -1109,7 +1183,9 @@ class State:
         """End the current armed session (operator pressed Stop on the
         dashboard). Returns the ended session, or None if nothing was
         armed. Data captured during the session is preserved; `Stop` is a
-        normal lifecycle event, not an abort."""
+        normal lifecycle event, not an abort. Triggers a live-frames flush
+        so any in-memory buffer reaches disk even if iOS never sent
+        cycle_end (e.g. app crash, force-kill)."""
         now = self._time_fn()
         with self._lock:
             s = self._current_session
@@ -1118,7 +1194,10 @@ class State:
             s.ended_at = now
             self._last_ended_session = s
             self._current_session = None
-            return s
+            self._pending_live_flush_sessions.add(s.id)
+            pending = self._drain_pending_live_flushes_locked()
+        self._run_pending_live_flushes(pending)
+        return s
 
     def log_sync_event(
         self, source: str, event: str, detail: dict[str, Any] | None = None
