@@ -61,6 +61,18 @@ class IntrinsicsPayload(BaseModel):
     distortion: list[float] | None = None
 
 
+class BlobCandidate(BaseModel):
+    """One CC-stat survivor passing the area+aspect+fill gates. Live path
+    (iOS) uploads top-K per frame so the server can apply the temporal
+    prior (`candidate_selector.select_best_candidate`) before pairing —
+    mirrors what `pipeline.detect_pitch` already does for server_post.
+    `area_score` is area / max_area_in_batch on the producing side."""
+    px: float
+    py: float
+    area: int
+    area_score: float = 1.0
+
+
 class FramePayload(BaseModel):
     """Internal shape produced by server-side detection. NOT part of the wire
     contract any more — the iPhone uploads only the MOV + metadata; server
@@ -74,6 +86,12 @@ class FramePayload(BaseModel):
     theta_z_rad: float | None = None
     px: float | None = None
     py: float | None = None
+    # Live-path multi-candidate. None on server_post (server picks during
+    # detect_pitch); on live, contains every blob that passed area/aspect/fill
+    # gates so live_pairing can apply the temporal prior. When non-empty,
+    # px/py are set to the best-by-area pick so single-candidate consumers
+    # still work without inspecting `candidates`.
+    candidates: list[BlobCandidate] | None = None
     ball_detected: bool
     # Post-detection chain filter verdict. None = not yet scored (raw
     # upload / live frame pre-finalization). "kept" survives all gates;

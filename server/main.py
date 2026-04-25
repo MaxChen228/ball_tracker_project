@@ -653,12 +653,31 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 continue
             if mtype == "frame":
                 device_ws.note_seen(camera_id)
+                # Multi-candidate live path: parse `candidates` if the
+                # phone sent them. Pydantic's BlobCandidate validates each
+                # entry; missing/empty list → single-blob legacy path
+                # (px/py used as-is by live_pairing).
+                raw_cands = msg.get("candidates")
+                cands_payload = None
+                if isinstance(raw_cands, list) and raw_cands:
+                    from schemas import BlobCandidate as _BlobCandidate
+                    cands_payload = [
+                        _BlobCandidate(
+                            px=float(c["px"]),
+                            py=float(c["py"]),
+                            area=int(c.get("area", 0)),
+                            area_score=float(c.get("area_score", 1.0)),
+                        )
+                        for c in raw_cands
+                        if isinstance(c, dict) and c.get("px") is not None and c.get("py") is not None
+                    ] or None
                 frame = FramePayload(
                     frame_index=int(msg.get("i", 0)),
                     timestamp_s=float(msg["ts"]),
                     px=None if msg.get("px") is None else float(msg["px"]),
                     py=None if msg.get("py") is None else float(msg["py"]),
                     ball_detected=bool(msg.get("detected", False)),
+                    candidates=cands_payload,
                 )
                 session_id = str(msg.get("sid") or "")
                 if not session_id:
