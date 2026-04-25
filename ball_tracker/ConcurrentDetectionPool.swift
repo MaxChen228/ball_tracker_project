@@ -91,10 +91,9 @@ final class ConcurrentDetectionPool {
                 self.detectionSemaphore.signal()
             }
 
-            // Multi-candidate path: ship every blob that passed area +
-            // aspect + fill so the server's temporal-prior selector picks
-            // the winner. Largest-area is mirrored into px/py for
-            // consumers that don't read `candidates`.
+            // Ship every blob that passed area+aspect+fill; server's
+            // temporal-prior selector picks the winner. Empty array →
+            // no detection.
             let allCandidates = BTBallDetector.detectAllCandidates(
                 in: pb,
                 hMin: Int32(hsvRange.h_min),
@@ -106,24 +105,18 @@ final class ConcurrentDetectionPool {
                 aspectMin: shapeGate.aspect_min,
                 fillMin: shapeGate.fill_min
             )
-            let maxArea = allCandidates.map { Int($0.areaPx) }.max() ?? 1
-            let candidatesPayload: [ServerUploader.BlobCandidate]? = allCandidates.isEmpty
-                ? nil
-                : allCandidates.map { d in
-                    ServerUploader.BlobCandidate(
-                        px: Double(d.px),
-                        py: Double(d.py),
-                        area: Int(d.areaPx),
-                        area_score: maxArea > 0 ? Double(d.areaPx) / Double(maxArea) : 1.0
-                    )
-                }
-            let best = allCandidates.first  // detectAllCandidates returns sorted by area desc
+            let maxArea = max(1, allCandidates.map { Int($0.areaPx) }.max() ?? 1)
+            let candidatesPayload = allCandidates.map { d in
+                ServerUploader.BlobCandidate(
+                    px: Double(d.px),
+                    py: Double(d.py),
+                    area: Int(d.areaPx),
+                    area_score: Double(d.areaPx) / Double(maxArea)
+                )
+            }
             let frame = ServerUploader.FramePayload(
                 frame_index: index,
                 timestamp_s: timestampS,
-                px: best.map { Double($0.px) },
-                py: best.map { Double($0.py) },
-                ball_detected: best != nil,
                 candidates: candidatesPayload
             )
 

@@ -119,9 +119,7 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
             "sid": session_id,
             "i": 0,
             "ts": 0.25,
-            "px": ua,
-            "py": va,
-            "detected": True,
+            "candidates": [{"px": ua, "py": va, "area": 100, "area_score": 1.0}],
         })
         ws_b.send_json({
             "type": "frame",
@@ -129,9 +127,7 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
             "sid": session_id,
             "i": 0,
             "ts": 0.25,
-            "px": ub,
-            "py": vb,
-            "detected": True,
+            "candidates": [{"px": ub, "py": vb, "area": 100, "area_score": 1.0}],
         })
         assert wait_for_event(
             lambda name, data: name == "frame_count"
@@ -224,9 +220,7 @@ def test_live_websocket_single_camera_emits_ray_without_sync(monkeypatch):
             "sid": session_id,
             "i": 12,
             "ts": 100.0,
-            "px": u,
-            "py": v,
-            "detected": True,
+            "candidates": [{"px": u, "py": v, "area": 100, "area_score": 1.0}],
         })
 
         assert wait_for_event(lambda name, data: name == "ray" and data["sid"] == session_id)

@@ -73,13 +73,11 @@ class LivePairingSession:
     last_timestamp_s: dict[str, float] = field(default_factory=dict)
 
     def _resolve_candidates(self, cam: str, frame: FramePayload) -> FramePayload:
-        """Pick the winning candidate using the temporal prior, mutate the
-        frame's px/py/ball_detected to that pick. No-op when the inbound
-        frame has no `candidates` (single-blob legacy path) — px/py and
-        ball_detected stay as the producer set them."""
+        """Pick the winning candidate using the temporal prior. Empty
+        candidate list → no detection; px/py = None, ball_detected=False."""
         cands = frame.candidates
         if not cands:
-            return frame
+            return frame.model_copy(update={"px": None, "py": None, "ball_detected": False})
         prev_pos = self.last_position.get(cam)
         prev_vel = self.last_velocity.get(cam)
         prev_t = self.last_timestamp_s.get(cam)
@@ -89,7 +87,7 @@ class LivePairingSession:
         )
         # Re-normalize area_score against this frame's batch — producer
         # may have computed it against a different denominator.
-        max_area = max((c.area for c in cands), default=1) or 1
+        max_area = max(c.area for c in cands) or 1
         selector_in = [
             Candidate(cx=c.px, cy=c.py, area=c.area, area_score=c.area / max_area)
             for c in cands
@@ -101,8 +99,8 @@ class LivePairingSession:
             dt=dt,
             r_px_expected=_DEFAULT_R_PX_EXPECTED,
         )
-        if winner is None:
-            return frame.model_copy(update={"px": None, "py": None, "ball_detected": False})
+        # Selector returns None iff input is empty — guarded above.
+        assert winner is not None
         return frame.model_copy(update={
             "px": winner.cx,
             "py": winner.cy,
