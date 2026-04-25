@@ -4,6 +4,7 @@
   initLiveStream();
   initHSVControls();
   initShapeGateControls();
+  initCandidateSelectorControls();
   tickStatus();
   tickCalibration();
   tickEvents();

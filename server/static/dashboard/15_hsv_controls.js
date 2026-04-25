@@ -48,3 +48,28 @@
       });
     });
   }
+
+  // === Candidate selector controls init ===
+  // Two-way bind for w_dist (slider 0-100 ↔ number 0.00-1.00). r_px_expected
+  // and dist_cost_sat_radii are number-only. Submit posts to
+  // /detection/candidate_selector; server derives w_area = 1 - w_dist.
+  function initCandidateSelectorControls() {
+    const form = document.getElementById('candidate-selector-form');
+    if (!form) return;
+    form.querySelectorAll('[data-cs-range]').forEach((slider) => {
+      slider.addEventListener('input', () => {
+        const key = slider.dataset.csRange;
+        const num = form.querySelector(`[data-cs-number="${key}"]`);
+        if (num) num.value = (Number(slider.value) / 100).toFixed(2);
+      });
+    });
+    form.querySelectorAll('[data-cs-number]').forEach((num) => {
+      num.addEventListener('input', () => {
+        const key = num.dataset.csNumber;
+        const slider = form.querySelector(`[data-cs-range="${key}"]`);
+        if (!slider) return;
+        const val = Math.max(0, Math.min(1, Number(num.value) || 0));
+        slider.value = String(Math.round(val * 100));
+      });
+    });
+  }
