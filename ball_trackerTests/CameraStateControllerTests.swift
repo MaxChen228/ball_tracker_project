@@ -45,9 +45,6 @@ final class CameraStateControllerTests: XCTestCase {
         XCTAssertTrue(recSnap.pendingBootstrap)
         XCTAssertEqual(recSnap.sessionId, "s_rec01234")
 
-        ctl.transition(to: .uploading, sessionId: "s_rec01234")
-        XCTAssertEqual(ctl.currentState, .uploading)
-
         ctl.transition(to: .standby, sessionId: nil)
         XCTAssertEqual(ctl.currentState, .standby)
         XCTAssertNil(box.snapshot().sessionId)
@@ -87,7 +84,7 @@ final class CameraStateControllerTests: XCTestCase {
 
     func testDisarmFromEveryStateConvergesToStandby() {
         let cases: [CameraViewController.AppState] = [
-            .standby, .timeSyncWaiting, .mutualSyncing, .recording, .uploading
+            .standby, .timeSyncWaiting, .mutualSyncing, .recording
         ]
         for src in cases {
             let (ctl, box, _) = makeController()

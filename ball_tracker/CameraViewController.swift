@@ -29,7 +29,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case timeSyncWaiting
         case mutualSyncing
         case recording
-        case uploading
     }
 
     // Adaptive capture rate. Idle / time-sync runs at 60 fps to keep the
@@ -97,14 +96,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private var appliedFormatIsVideoBinned: Bool?
     private var appliedMaxExposureS: Double?
 
-    // Live detection is advisory only. It still feeds WS streaming and the
-    // local fallback path if clip writing fails.
+    // Live detection feeds WS streaming for the live path. No local cycle
+    // buffer — the server is authoritative on archived live frames.
     nonisolated(unsafe) private let detectionPool = ConcurrentDetectionPool(maxConcurrency: 3)
-    private let detectionStateLock = NSLock()
-    /// Accumulated per-frame detection results for the current cycle.
-    /// Drained at cycle-complete and either discarded (mode-one) or
-    /// attached to the upload payload (mode-two).
-    private var detectionFramesBuffer: [ServerUploader.FramePayload] = []
 
     // Most recently recovered chirp anchor — session-clock PTS of the
     // chirp peak from the mic matched filter. Stamped onto outgoing
@@ -171,7 +165,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 },
                 startCapture: { [weak self] fps in self?.startCapture(at: fps) },
                 resetDetectionState: { [weak self] in self?.resetBallDetectionState() },
-                drainDetectedFrames: { [weak self] in self?.drainDetectedFrames() ?? [] },
                 clearRecoveredAnchor: { [weak self] in self?.syncCoordinator.clearRecoveredAnchor() },
                 dispatchLiveCycleEnd: { [weak self] sessionId, reason in
                     self?.transportCoordinator?.dispatchLiveCycleEnd(sessionId: sessionId, reason: reason)
@@ -379,7 +372,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         switch state {
         case .recording:
             return trackingFps
-        case .standby, .timeSyncWaiting, .mutualSyncing, .uploading:
+        case .standby, .timeSyncWaiting, .mutualSyncing:
             return standbyFps
         }
     }
@@ -639,7 +632,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         switch state {
         case .standby:
             enterRecordingMode()
-        case .timeSyncWaiting, .mutualSyncing, .recording, .uploading:
+        case .timeSyncWaiting, .mutualSyncing, .recording:
             // Active state — arm is a no-op. `.timeSyncWaiting` finishes
             // on its own and returns to standby; next heartbeat re-sends
             // the arm command and this branch flips us into recording.
@@ -658,10 +651,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             syncCoordinator.cancelTimeSync(reason: "disarmed")
         case .mutualSyncing:
             syncCoordinator.abortMutualSync(reason: "disarmed")
-        case .uploading:
-            // Upload flow runs its own course; state transitions back to
-            // standby via persistCompletedCycle once the queue accepts.
-            break
         case .recording:
             recordingWorkflow.handleRemoteDisarm(
                 currentSessionId: currentSessionId,
@@ -780,7 +769,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case .timeSyncWaiting: return "TIME_SYNC"
         case .mutualSyncing: return "MUTUAL_SYNC"
         case .recording: return "RECORDING"
-        case .uploading: return "UPLOADING"
         }
     }
 
@@ -865,32 +853,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func handleDetectedFrame(_ frame: ServerUploader.FramePayload) {
-        detectionStateLock.lock()
-        detectionFramesBuffer.append(frame)
-        detectionStateLock.unlock()
-
         captureQueueTransportCoordinator.dispatchLiveFrame(frame)
     }
 
-    /// Bump the detection generation, clear the buffer, reset the throttle.
-    /// Called at both ends of a recording cycle so no stale detections
-    /// bleed across arms. Detector itself is stateless — nothing to rebuild.
+    /// Bump the detection generation and reset the throttle. Called at both
+    /// ends of a recording cycle so no stale detections bleed across arms.
+    /// Detector itself is stateless — nothing to rebuild.
     private func resetBallDetectionState() {
-        detectionStateLock.lock()
-        detectionFramesBuffer.removeAll()
-        detectionStateLock.unlock()
         detectionPool.invalidateGeneration()
         detectionPool.reset()
-    }
-
-    /// Take ownership of the accumulated per-frame detection results for
-    /// this recording cycle.
-    func drainDetectedFrames() -> [ServerUploader.FramePayload] {
-        detectionStateLock.lock()
-        defer { detectionStateLock.unlock() }
-        let out = detectionFramesBuffer
-        detectionFramesBuffer.removeAll()
-        return out
     }
 
 }

@@ -56,7 +56,7 @@ def _direct_payload_with_frames(
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames=frames,
+        frames_server_post=frames,
         intrinsics=main.IntrinsicsPayload(
             fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
@@ -199,7 +199,7 @@ def _build_pairing_payloads(
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames=frames(timestamps_a, R_a, t_a),
+        frames_server_post=frames(timestamps_a, R_a, t_a),
         intrinsics=main.IntrinsicsPayload(
             fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
@@ -212,7 +212,7 @@ def _build_pairing_payloads(
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames=frames(timestamps_b, R_b, t_b),
+        frames_server_post=frames(timestamps_b, R_b, t_b),
         intrinsics=main.IntrinsicsPayload(
             fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
@@ -382,14 +382,14 @@ def test_triangulate_live_pair_matches_triangulate_cycle():
     pa = PitchPayload(
         camera_id="A", session_id="s_deadbeef",
         sync_anchor_timestamp_s=anchor, video_start_pts_s=anchor,
-        video_fps=240.0, frames=[fa],
+        video_fps=240.0, frames_server_post=[fa],
         intrinsics=intr, homography=H_a.flatten().tolist(),
         image_width_px=1920, image_height_px=1080,
     )
     pb = PitchPayload(
         camera_id="B", session_id="s_deadbeef",
         sync_anchor_timestamp_s=anchor, video_start_pts_s=anchor,
-        video_fps=240.0, frames=[fb],
+        video_fps=240.0, frames_server_post=[fb],
         intrinsics=intr, homography=H_b.flatten().tolist(),
         image_width_px=1920, image_height_px=1080,
     )

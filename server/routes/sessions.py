@@ -159,15 +159,6 @@ async def sessions_cancel_processing(request: Request, session_id: str):
     return {"ok": True, "session_id": session_id}
 
 
-@router.post("/sessions/{session_id}/resume_processing")
-async def sessions_resume_processing(
-    request: Request,
-    session_id: str,
-    background_tasks: BackgroundTasks,
-):
-    return await _enqueue_server_post(request, session_id, background_tasks)
-
-
 @router.post("/sessions/{session_id}/run_server_post")
 async def sessions_run_server_post(
     request: Request,

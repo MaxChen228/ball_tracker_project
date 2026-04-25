@@ -111,14 +111,6 @@ final class CameraStatusPresenter {
                 chipText: "● 錄影中",
                 chipStyle: .fail
             )
-        case .uploading:
-            return .init(
-                borderColor: DesignTokens.Colors.warning,
-                borderWidth: 6,
-                pulse: false,
-                chipText: "上傳中",
-                chipStyle: .pending
-            )
         }
     }
 }

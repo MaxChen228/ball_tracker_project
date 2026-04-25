@@ -112,9 +112,9 @@ def test_post_pitch_mode_two_accepts_frames_without_video(tmp_path):
     }]
 
     body_a = _base_payload("A", session_id, K, H_a)
-    body_a["frames"] = frames_a
+    body_a["frames_server_post"] = frames_a
     body_b = _base_payload("B", session_id, K, H_b)
-    body_b["frames"] = frames_b
+    body_b["frames_server_post"] = frames_b
 
     r1 = _post_pitch(client, body_a, None)
     assert r1.status_code == 200, r1.text
@@ -219,7 +219,7 @@ def test_post_pitch_anchorless_single_camera_keeps_rays(tmp_path):
     client = TestClient(app)
     body = _base_payload("A", sid(502), K, H_a, anchor_ts=None)
     body["paths"] = ["live"]
-    body["frames"] = [
+    body["frames_live"] = [
         {
             "frame_index": 0,
             "timestamp_s": body["video_start_pts_s"],

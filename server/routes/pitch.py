@@ -106,11 +106,7 @@ async def pitch(
     payload_paths = state._normalize_paths(payload_obj.paths) or state._paths_for_pitch(payload_obj)
     payload_obj.paths = sorted(p.value for p in payload_paths)
     has_video = video is not None and (video.filename or video.size)
-    has_frames = (
-        bool(payload_obj.frames)
-        or bool(payload_obj.frames_live)
-        or bool(payload_obj.frames_server_post)
-    )
+    has_frames = bool(payload_obj.frames_live) or bool(payload_obj.frames_server_post)
     if not has_video and not has_frames:
         raise HTTPException(
             status_code=422,
@@ -151,7 +147,6 @@ async def pitch(
                 payload_obj.image_width_px = mw
                 payload_obj.image_height_px = mh
 
-        payload_obj.frames = []
         payload_obj.frames_server_post = []
     result = await asyncio.to_thread(state.record, payload_obj)
 
@@ -160,7 +155,6 @@ async def pitch(
         for f in (
             payload_obj.frames_server_post
             or payload_obj.frames_live
-            or payload_obj.frames
         )
         if f.ball_detected
     )
@@ -169,7 +163,7 @@ async def pitch(
         payload_obj.camera_id,
         payload_obj.session_id,
         f"{clip_info['bytes']}B" if clip_info else "none",
-        len(payload_obj.frames_server_post or payload_obj.frames_live or payload_obj.frames),
+        len(payload_obj.frames_server_post or payload_obj.frames_live),
         ball_frames,
         "live" if payload_obj.frames_live else "skipped",
         len(result.points),
@@ -256,7 +250,6 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             sid, cam,
         )
         return
-    pitch.frames = frames
     pitch.frames_server_post = frames
     try:
         await asyncio.to_thread(state.record, pitch)

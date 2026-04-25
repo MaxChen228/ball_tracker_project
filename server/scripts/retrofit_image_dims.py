@@ -155,7 +155,7 @@ def retrofit(data_dir: Path, session_filter: str | None, dry_run: bool) -> int:
             camera_a_received=True,
             camera_b_received=True,
         )
-        if a_scaled.frames and b_scaled.frames:
+        if a_scaled.frames_server_post and b_scaled.frames_server_post:
             try:
                 result.points = triangulate_cycle(a_scaled, b_scaled, source="server")
             except Exception as e:
