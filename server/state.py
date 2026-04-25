@@ -485,7 +485,7 @@ class State:
         camera_id: str,
         session_id: str,
         frame: FramePayload,
-    ) -> tuple[list[TriangulatedPoint], dict[str, int]]:
+    ) -> tuple[list[TriangulatedPoint], dict[str, int], FramePayload]:
         with self._lock:
             live = self._live_pairings.setdefault(session_id, LivePairingSession(session_id))
             cal_a = self._calibration_store.get("A")
@@ -552,7 +552,12 @@ class State:
             )
 
         created = live.ingest(camera_id, frame, triangulate_live, anchors=anchors)
-        return created, dict(live.frame_counts)
+        # The frame stored by live.ingest is the candidate-resolved one
+        # (px/py picked by the temporal-prior selector); hand it back so
+        # callers (WS handler → live_ray_for_frame) work off the resolved
+        # version, not the raw inbound.
+        resolved = live.frames_by_cam.get(camera_id, [])[-1] if live.frames_by_cam.get(camera_id) else frame
+        return created, dict(live.frame_counts), resolved
 
     def live_ray_for_frame(
         self,

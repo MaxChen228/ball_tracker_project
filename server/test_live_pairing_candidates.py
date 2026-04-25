@@ -5,31 +5,17 @@ from live_pairing import LivePairingSession
 from schemas import BlobCandidate, FramePayload
 
 
-def _frame(idx: int, t: float, *, candidates: list[BlobCandidate] | None = None,
-           px: float | None = None, py: float | None = None,
-           ball_detected: bool = True) -> FramePayload:
+def _frame(idx: int, t: float, *, candidates: list[BlobCandidate]) -> FramePayload:
     return FramePayload(
         frame_index=idx,
         timestamp_s=t,
         candidates=candidates,
-        px=px,
-        py=py,
-        ball_detected=ball_detected,
+        ball_detected=bool(candidates),
     )
 
 
 def _no_triangulate(_cam, _a, _b):
     return None
-
-
-def test_legacy_single_blob_passthrough():
-    """No `candidates` field → frame.px/py/ball_detected stay as producer set."""
-    sess = LivePairingSession("s_test")
-    f = _frame(0, 1.0, px=100.0, py=200.0, ball_detected=True)
-    sess.ingest("A", f, _no_triangulate)
-    stored = sess.frames_by_cam["A"][0]
-    assert stored.px == 100.0 and stored.py == 200.0
-    assert stored.ball_detected is True
 
 
 def test_first_frame_with_candidates_picks_largest_area():

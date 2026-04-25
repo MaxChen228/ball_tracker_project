@@ -252,7 +252,7 @@ final class CameraRecordingWorkflow {
     ) {
         let advisoryFrames = dependencies.drainDetectedFrames()
         let paths = dependencies.getCurrentSessionPaths()
-        recordingLog.info("cycle complete session=\(enriched.session_id, privacy: .public) paths=\(paths.map(\.rawValue).sorted().joined(separator: ","), privacy: .public) advisory_frames=\(advisoryFrames.count) ball_frames=\(advisoryFrames.filter { $0.ball_detected }.count) has_video=\(videoURL != nil)")
+        recordingLog.info("cycle complete session=\(enriched.session_id, privacy: .public) paths=\(paths.map(\.rawValue).sorted().joined(separator: ","), privacy: .public) advisory_frames=\(advisoryFrames.count) ball_frames=\(advisoryFrames.filter { $0.ballDetected }.count) has_video=\(videoURL != nil)")
         let payload = enriched.withPaths(Array(paths))
 
         if paths.contains(.live) {

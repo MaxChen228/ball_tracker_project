@@ -875,12 +875,12 @@ def test_state_marks_single_camera_server_post_path_completed(tmp_path):
 
 def test_record_merges_live_frames_into_single_camera_pitch(tmp_path):
     s = main.State(data_dir=tmp_path)
+    from schemas import BlobCandidate
     live_frame = main.FramePayload(
         frame_index=3,
         timestamp_s=0.125,
-        px=123.0,
-        py=456.0,
         ball_detected=True,
+        candidates=[BlobCandidate(px=123.0, py=456.0, area=100, area_score=1.0)],
     )
     s.ingest_live_frame("A", sid(92), live_frame)
     s.mark_live_path_ended("A", sid(92), "disarmed")
