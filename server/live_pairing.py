@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from candidate_selector import Candidate, select_best_candidate
 from schemas import FramePayload, TriangulatedPoint
+
+
+# Fallback ball radius (px) used when the inbound frame doesn't carry
+# enough info to derive one from blob area. Tennis ball at ~3 m on a
+# 1080p main-wide cam ≈ 12-18 px radius; pick the lower end so distance
+# cost saturates a touch sooner. The selector saturates at 8r anyway, so
+# being off by 2× barely shifts the winner.
+_DEFAULT_R_PX_EXPECTED = 12.0
 
 
 _OTHER_CAM = {"A": "B", "B": "A"}
@@ -55,6 +65,67 @@ class LivePairingSession:
     # state.ingest_live_frame; reused across the 8 ms pair loop so the
     # hot path skips per-frame pitch construction + SVD extrinsics.
     camera_poses: dict[str, CameraPose] = field(default_factory=dict)
+    # Per-cam temporal prior state for candidate selection. Mirrors the
+    # equal-velocity straight-line model in pipeline.detect_pitch — reset
+    # to None on a miss so we don't extrapolate from a stale anchor.
+    last_position: dict[str, tuple[float, float]] = field(default_factory=dict)
+    last_velocity: dict[str, tuple[float, float]] = field(default_factory=dict)
+    last_timestamp_s: dict[str, float] = field(default_factory=dict)
+
+    def _resolve_candidates(self, cam: str, frame: FramePayload) -> FramePayload:
+        """Pick the winning candidate using the temporal prior, mutate the
+        frame's px/py/ball_detected to that pick. No-op when the inbound
+        frame has no `candidates` (single-blob legacy path) — px/py and
+        ball_detected stay as the producer set them."""
+        cands = frame.candidates
+        if not cands:
+            return frame
+        prev_pos = self.last_position.get(cam)
+        prev_vel = self.last_velocity.get(cam)
+        prev_t = self.last_timestamp_s.get(cam)
+        dt = (
+            frame.timestamp_s - prev_t
+            if prev_t is not None and math.isfinite(prev_t) else None
+        )
+        # Re-normalize area_score against this frame's batch — producer
+        # may have computed it against a different denominator.
+        max_area = max((c.area for c in cands), default=1) or 1
+        selector_in = [
+            Candidate(cx=c.px, cy=c.py, area=c.area, area_score=c.area / max_area)
+            for c in cands
+        ]
+        winner = select_best_candidate(
+            selector_in,
+            prev_position=prev_pos,
+            prev_velocity=prev_vel,
+            dt=dt,
+            r_px_expected=_DEFAULT_R_PX_EXPECTED,
+        )
+        if winner is None:
+            return frame.model_copy(update={"px": None, "py": None, "ball_detected": False})
+        return frame.model_copy(update={
+            "px": winner.cx,
+            "py": winner.cy,
+            "ball_detected": True,
+        })
+
+    def _update_temporal_prior(self, cam: str, frame: FramePayload) -> None:
+        if not frame.ball_detected or frame.px is None or frame.py is None:
+            self.last_position.pop(cam, None)
+            self.last_velocity.pop(cam, None)
+            self.last_timestamp_s.pop(cam, None)
+            return
+        prev_pos = self.last_position.get(cam)
+        prev_t = self.last_timestamp_s.get(cam)
+        if prev_pos is not None and prev_t is not None:
+            dt_seen = frame.timestamp_s - prev_t
+            if dt_seen > 0:
+                self.last_velocity[cam] = (
+                    (frame.px - prev_pos[0]) / dt_seen,
+                    (frame.py - prev_pos[1]) / dt_seen,
+                )
+        self.last_position[cam] = (frame.px, frame.py)
+        self.last_timestamp_s[cam] = frame.timestamp_s
 
     def ingest(
         self,
@@ -74,6 +145,12 @@ class LivePairingSession:
         thousands of seconds apart). Stored frames keep raw timestamps —
         only the dt comparison is anchor-shifted, so downstream persistence
         and triangulation see the original values."""
+        # Apply temporal-prior candidate selection BEFORE buffering, so
+        # downstream pairing + persistence see a single resolved (px, py).
+        # Frames without a `candidates` field (legacy single-blob path)
+        # pass through unchanged.
+        frame = self._resolve_candidates(cam, frame)
+        self._update_temporal_prior(cam, frame)
         buf = self.buffers.setdefault(cam, deque())
         buf.append(frame)
         self.frames_by_cam.setdefault(cam, []).append(frame)
