@@ -14,6 +14,8 @@
   // single JPEG or 404.
   function tickPreviewImages() {
     const t = Date.now();
+    // Legacy 2-pane shape (still used by setup/markers until those phases
+    // land). Skipped when the panel is in 'off' state.
     for (const img of document.querySelectorAll('img[data-preview-img]')) {
       const cam = img.dataset.previewImg;
       if (!cam) continue;
@@ -21,6 +23,15 @@
       if (!panel || panel.classList.contains('off')) continue;
       img.src = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + t;
       img.style.opacity = 1;
+    }
+    // New merged cam-view shape — same MJPEG endpoint, gated on the
+    // .is-offline class set by the device-card renderer.
+    for (const img of document.querySelectorAll('img[data-cam-img]')) {
+      const cam = img.dataset.camImg;
+      if (!cam) continue;
+      const root = img.closest('.cam-view');
+      if (!root || root.classList.contains('is-offline')) continue;
+      img.src = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + t;
     }
   }
   setInterval(tickPreviewImages, 200);
