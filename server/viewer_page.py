@@ -228,6 +228,7 @@ def render_viewer_html(
         </span>
       </div>
       <div id="fit-info" class="fit-info" hidden aria-live="polite"></div>
+      <div id="speed-bars" class="speed-bars" hidden aria-label="Per-segment speed"></div>
     </div>
     <div class="col-resizer" id="col-resizer" role="separator" aria-orientation="vertical" aria-label="Resize 3D scene vs cameras" tabindex="0" title="Drag to resize"></div>
     <div class="videos-col">{ctx.video_cells_html}{ctx.virtual_cells_html}</div>
@@ -265,6 +266,12 @@ def render_viewer_html(
               <span id="fitres-filter-readout" class="readout">off</span>
             </span>
             <span class="layer-divider" aria-hidden="true"></span>
+            <span class="layer-group" data-layer="speed" title="Colour each trajectory segment by instantaneous speed (m/s). Adds a colorbar and a per-segment 2D bar chart below the scene.">
+              <label class="layer-checkbox">
+                <input type="checkbox" id="speed-toggle">
+                <span class="layer-name">Speed</span>
+              </label>
+            </span>
             <span class="layer-group" data-layer="strike-zone" title="Toggle the strike-zone wireframe in the 3D scene. Default on.">
               <label class="layer-checkbox">
                 <input type="checkbox" id="strike-zone-toggle" checked>
@@ -702,6 +709,10 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .scene-col .fit-info h4 {{ margin:0 0 6px 0; font:inherit; font-size:10px; letter-spacing:0.1em;
     text-transform:uppercase; color:var(--sub); font-weight:500; }}
   .scene-col .fit-info .fit-warn {{ color:#A7372A; font-size:10px; margin-top:6px; }}
+  .scene-col .speed-bars {{ position:absolute; left:var(--s-3); right:var(--s-3); bottom:var(--s-3);
+    height:120px; z-index:3; background:var(--surface); border:1px solid var(--border-base);
+    border-radius:var(--r); padding:4px 8px; pointer-events:auto; }}
+  .scene-col .speed-bars[hidden] {{ display:none; }}
   .hint-btn {{ font:inherit; font-size:12px; padding:0; width:26px; height:26px; border:1px solid var(--border-base);
     background:var(--surface); color:var(--sub); border-radius:50%; cursor:pointer; margin-left:auto;
     min-width:auto; font-weight:600; letter-spacing:0; display:inline-flex; align-items:center; justify-content:center; }}
@@ -1248,6 +1259,26 @@ def _viewer_js() -> str:
         }}
       }}
     }}
+    // --- Speed overlay (per-segment colour by instantaneous speed) ---
+    // Drawn AFTER regular trajectories so the colourful segments sit on
+    // top of the plain coloured line, but BEFORE the fit overlay so the
+    // fit dashed curve stays the visual focus when both are on.
+    if (_OVL.speedVisible()) {{
+      // Source: prefer server_post when available; else live; else SCENE.triangulated
+      const svrPts = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
+        ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
+      const livePts = TRAJ_BY_PATH.live || [];
+      const buckets = [
+        {{ pts: filteredTrajectory(svrPts, cutoff), tag: " · svr", layerOn: isLayerVisible("traj", "server_post") }},
+        {{ pts: filteredTrajectory(livePts, cutoff), tag: " · live", layerOn: isLayerVisible("traj", "live") }},
+      ];
+      for (const b of buckets) {{
+        if (!b.layerOn || b.pts.length < 2) continue;
+        for (const tr of _OVL.speedTraces(b.pts, {{cutoff: Infinity, tag: b.tag}})) {{
+          out.push(tr);
+        }}
+      }}
+    }}
     // --- Fit overlay (drawn on top of regular trajectories) ---
     // Fit is a layer, not a mode: the user picks Residual / Outlier
     // filters, the surviving points are the fit input, and the curve sits
@@ -1396,6 +1427,7 @@ def _viewer_js() -> str:
     Plotly.react(sceneDiv, [...staticFiltered, ...buildDynamicTraces(cutoff, playback)], LAYOUT, {{displayModeBar: false, responsive: true}});
     drawVirtuals();
     drawRealPlateOverlays();
+    if (typeof _renderSpeedBars === "function") _renderSpeedBars();
   }}
   function scheduleSceneDraw() {{
     if (sceneDrawRaf !== null) return;
@@ -1842,6 +1874,66 @@ def _viewer_js() -> str:
       scheduleSceneDraw();
     }});
   }}
+
+  // --- Speed overlay toggle + 2D bar chart drawer ---
+  // Bar chart mirrors the same per-segment speed array that drives the
+  // 3D colours so the operator can read exact m/s values without hovering
+  // each tiny segment. When speed is off, the drawer is hidden and the
+  // 3D scene falls back to the plain coloured trajectory.
+  const _speedToggle = document.getElementById("speed-toggle");
+  const _speedBars = document.getElementById("speed-bars");
+  function _renderSpeedBars() {{
+    if (!_speedBars) return;
+    if (!_OVL.speedVisible()) {{ _speedBars.hidden = true; return; }}
+    // Pick whichever path has more points; ties → server_post.
+    const svrPts = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
+      ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
+    const livePts = TRAJ_BY_PATH.live || [];
+    const svrFiltered = filteredTrajectory(svrPts, Infinity);
+    const liveFiltered = filteredTrajectory(livePts, Infinity);
+    const pick = svrFiltered.length >= liveFiltered.length ? svrFiltered : liveFiltered;
+    const sourceLabel = svrFiltered.length >= liveFiltered.length ? "svr" : "live";
+    if (pick.length < 2) {{
+      _speedBars.hidden = false;
+      _speedBars.innerHTML = `<div style="font:11px var(--mono); color:var(--sub); padding:8px;">No filtered points to compute speed.</div>`;
+      return;
+    }}
+    const speeds = _OVL.computeSpeeds(pick);
+    const taus = pick.slice(1).map(p => p.t_rel_s - pick[0].t_rel_s);
+    const vmax = speeds.reduce((a, b) => Math.max(a, b), 0);
+    const colors = speeds.map(v => _OVL.viridisColor(vmax > 0 ? v / vmax : 0));
+    const trace = {{
+      type: "bar", x: taus, y: speeds,
+      marker: {{ color: colors }},
+      hovertemplate: `t=%{{x:.3f}}s<br>v=%{{y:.2f}} m/s · %{{customdata:.1f}} km/h<extra></extra>`,
+      customdata: speeds.map(v => v * 3.6),
+    }};
+    const layout = {{
+      margin: {{l: 36, r: 8, t: 4, b: 22}},
+      xaxis: {{title: {{text: "t (s, anchor-relative)", font: {{size: 9}}}},
+               tickfont: {{size: 9}}, gridcolor: "#E8E4DB"}},
+      yaxis: {{title: {{text: `v (m/s) · ${{sourceLabel}}`, font: {{size: 9}}}},
+               tickfont: {{size: 9}}, gridcolor: "#E8E4DB", rangemode: "tozero"}},
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(0,0,0,0)",
+      font: {{family: "JetBrains Mono, monospace", size: 10}},
+      showlegend: false,
+    }};
+    _speedBars.hidden = false;
+    Plotly.react(_speedBars, [trace], layout, {{displayModeBar: false, responsive: true}});
+  }}
+  if (_speedToggle) {{
+    _speedToggle.checked = _OVL.speedVisible();
+    _speedToggle.addEventListener("change", () => {{
+      _OVL.setSpeedVisible(_speedToggle.checked);
+      scheduleSceneDraw();
+      _renderSpeedBars();
+    }});
+  }}
+  // drawScene() calls _renderSpeedBars() at its tail when defined, so
+  // any filter / playback change that triggers a redraw also keeps the
+  // bar chart in sync. Initial paint:
+  if (_OVL.speedVisible()) _renderSpeedBars();
 
   // --- Fit overlay toggle (was modal "fit mode" — now a layer) ---
   const fitToggleBtn = document.getElementById("fit-toggle");

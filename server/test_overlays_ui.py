@@ -19,6 +19,10 @@ def test_runtime_js_self_check():
     assert "ballisticFit" in OVERLAYS_RUNTIME_JS
     assert "fitTraces" in OVERLAYS_RUNTIME_JS
     assert "strikeZoneVisible" in OVERLAYS_RUNTIME_JS
+    assert "speedVisible" in OVERLAYS_RUNTIME_JS
+    assert "speedTraces" in OVERLAYS_RUNTIME_JS
+    assert "computeSpeeds" in OVERLAYS_RUNTIME_JS
+    assert "viridisColor" in OVERLAYS_RUNTIME_JS
 
 
 def test_dashboard_injects_overlays_runtime():

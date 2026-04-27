@@ -27,6 +27,15 @@
       repaintCanvas();
     });
   }
+  // Speed overlay: shared with viewer via window.BallTrackerOverlays.
+  const _speedToggle = document.getElementById('dash-speed-toggle');
+  if (_speedToggle) {
+    _speedToggle.checked = _OVL.speedVisible();
+    _speedToggle.addEventListener('change', () => {
+      _OVL.setSpeedVisible(_speedToggle.checked);
+      repaintCanvas();
+    });
+  }
   // Fit overlay: shared with viewer via window.BallTrackerOverlays.
   // Source pills pick which trajectory bucket the fit reads from —
   // svr = selected event's /results points (server_post triangulation),

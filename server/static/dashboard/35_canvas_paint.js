@@ -51,6 +51,28 @@
       extraTraces.push(...trajTracesFor(sid, result, trajColorFor(sid)));
     }
     extraTraces.push(...liveTraces());
+    // Speed overlay — recolour each visible trajectory by instantaneous
+    // speed. Stays visible alongside the plain trajectory; the viridis
+    // segments sit on top so the plain line shows through any gaps where
+    // segments are too short to be visible.
+    if (_OVL.speedVisible()) {
+      for (const sid of selectedTrajIds) {
+        const result = trajCache.get(sid);
+        if (!result || !result.points || result.points.length < 2) continue;
+        const pts = result.points.map(p => ({
+          x: p.x_m, y: p.y_m, z: p.z_m, t_rel_s: p.t_rel_s,
+        }));
+        extraTraces.push(..._OVL.speedTraces(pts, { tag: ` · ${sid}` }));
+      }
+      if (currentLiveSession && currentLiveSession.session_id) {
+        const livePts = (livePointStore.get(currentLiveSession.session_id) || [])
+          .map(p => ({ x: p.x, y: p.y, z: p.z, t_rel_s: p.t_rel_s }))
+          .sort((a, b) => a.t_rel_s - b.t_rel_s);
+        if (livePts.length >= 2) {
+          extraTraces.push(..._OVL.speedTraces(livePts, { tag: ' · live' }));
+        }
+      }
+    }
     // Fit overlay — shared math with viewer via window.BallTrackerOverlays.
     // Source picks which point bucket feeds the fit; mirroring the viewer's
     // semantics so a user toggling on either page sees the same result.
