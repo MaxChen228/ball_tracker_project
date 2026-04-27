@@ -382,20 +382,22 @@ _MARKERS_JS = r"""
   }
 
   function compareRows() {
-    const rows = [];
-    (state.compareMarkers || []).forEach(row => rows.push({ ...row, origin: 'known' }));
-    state.markers.forEach(row => {
-      if (!rows.find(existing => Number(existing.marker_id) === Number(row.marker_id))) {
-        rows.push({ ...row, kind: 'stored', origin: 'stored' });
-      }
-    });
-    state.candidates.forEach(row => {
-      const idx = rows.findIndex(existing => Number(existing.marker_id) === Number(row.marker_id));
-      const next = { ...row, kind: 'candidate', origin: 'candidate' };
-      if (idx >= 0) rows[idx] = next;
-      else rows.push(next);
-    });
-    return rows;
+    // Single-pass priority collapse: candidate > stored > known when the
+    // same marker_id shows up across sources. The prior three-segment
+    // build skipped stored on known collisions ('if !rows.find ... push'),
+    // which left those markers stuck as known — and known has no
+    // detail-save / detail-delete path, so the operator could see but
+    // not edit them.
+    const byId = new Map();
+    const upsert = (row, priority) => {
+      const id = Number(row.marker_id);
+      const prev = byId.get(id);
+      if (!prev || prev.priority < priority) byId.set(id, { ...row, priority });
+    };
+    (state.compareMarkers || []).forEach(r => upsert({ ...r, origin: 'known' }, 0));
+    state.markers.forEach(r => upsert({ ...r, kind: 'stored', origin: 'stored' }, 1));
+    state.candidates.forEach(r => upsert({ ...r, kind: 'candidate', origin: 'candidate' }, 2));
+    return Array.from(byId.values(), ({ priority, ...rest }) => rest);
   }
 
   function markerColor(row) {
