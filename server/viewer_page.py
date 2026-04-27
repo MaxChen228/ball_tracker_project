@@ -1376,18 +1376,26 @@ def _viewer_js() -> str:
     const pxArr = framesForThisCam.px || [];
     const pyArr = framesForThisCam.py || [];
     if (!ts.length) return;
+    if (currentT < ts[0]) return;
+    // Floor-not-nearest: pick the largest ts[i] ≤ currentT. The video
+    // element seeks the same way (it shows the frame whose PTS is the
+    // largest one ≤ requested currentTime, not the nearest), so picking
+    // `lo` here keeps canvas + video aligned to the same MOV frame.
+    // Round-to-nearest used to flip to ts[hi] when currentT sat between
+    // two samples, putting the canvas dot one frame ahead of the video
+    // (≈ 5 ms × 30-40 px on a fast pitch — visible as residual drift).
     let lo = 0, hi = ts.length - 1;
     while (lo + 1 < hi) {{
       const mid = (lo + hi) >> 1;
       if (ts[mid] <= currentT) lo = mid; else hi = mid;
     }}
-    let idx = Math.abs(ts[lo] - currentT) <= Math.abs(ts[hi] - currentT) ? lo : hi;
+    let idx = (ts[hi] <= currentT) ? hi : lo;
     const tol = 0.010;
     // chain_filter rejected_jump / server_post frame gaps leave runs of
     // det=false. Without left-scan the dot blanks across the gap; walk
     // back to the nearest detected frame still within tol so it sticks.
-    while (idx >= 0 && !det[idx] && Math.abs(ts[idx] - currentT) <= tol) idx--;
-    if (idx < 0 || !det[idx] || Math.abs(ts[idx] - currentT) > tol) return;
+    while (idx >= 0 && !det[idx] && (currentT - ts[idx]) <= tol) idx--;
+    if (idx < 0 || !det[idx] || (currentT - ts[idx]) > tol) return;
     const px = pxArr[idx], py = pyArr[idx];
     if (px == null || py == null) return;
     const x = px * sx, y = py * sy;
