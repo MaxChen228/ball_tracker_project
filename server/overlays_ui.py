@@ -231,15 +231,16 @@ OVERLAYS_RUNTIME_JS: str = r"""
   NS.speedVisible = function () { return readBool(SPEED_VISIBLE_KEY, false); };
   NS.setSpeedVisible = function (on) { writeBool(SPEED_VISIBLE_KEY, on); };
 
-  // Per-segment speed: ||Δp|| / Δt. Δt ≤ 0 → 0 (don't divide by garbage
-  // if two points share a timestamp, which can happen for a duplicated
-  // upload row). Returns an array of length pts.length - 1.
+  // Per-segment speed: ||Δp|| / Δt. Δt ≤ 0 → null (duplicated rows or
+  // out-of-order timestamps; emitting 0 would silently masquerade as
+  // "ball stationary" — flag-bearing repo policy is no silent fallback,
+  // so consumers see null and decide). Returns array length pts.length-1.
   NS.computeSpeeds = function (pts) {
     if (!pts || pts.length < 2) return [];
     const out = new Array(pts.length - 1);
     for (let i = 1; i < pts.length; i++) {
       const dt = pts[i].t_rel_s - pts[i - 1].t_rel_s;
-      if (dt <= 0) { out[i - 1] = 0; continue; }
+      if (dt <= 0) { out[i - 1] = null; continue; }
       const dx = pts[i].x - pts[i - 1].x;
       const dy = pts[i].y - pts[i - 1].y;
       const dz = pts[i].z - pts[i - 1].z;
@@ -274,61 +275,71 @@ OVERLAYS_RUNTIME_JS: str = r"""
   }
   NS.viridisColor = viridisColor;
 
-  // Build the speed-coloured 3D trajectory traces. cutoff lets the caller
-  // clip to playback time; pass Infinity for "all". Returns an empty list
-  // if pts < 2 (nothing to colour). Always emits one invisible marker
-  // trace at the end carrying the colorbar so the legend reads cleanly.
+  // Build the speed-coloured 3D trajectory traces. Null speeds (Δt ≤ 0)
+  // render as a neutral grey segment so they remain visible but don't
+  // pretend to be a real value. `opts.includeColorbar` defaults true on
+  // the first call; callers building multiple trajectories pass false on
+  // all but one to avoid stacked colorbars at the same position.
+  // `opts.vmaxOverride` shares a global vmax across multiple trajectories
+  // so segments are comparable across them.
   NS.speedTraces = function (pts, opts) {
     const o = opts || {};
     if (!pts || pts.length < 2) return [];
     const cutoff = (o.cutoff === undefined) ? Infinity : o.cutoff;
     const speeds = NS.computeSpeeds(pts);
-    const vmax = speeds.reduce((a, b) => Math.max(a, b), 0);
+    const valid = speeds.filter(v => v !== null && Number.isFinite(v));
+    const vmaxLocal = valid.reduce((a, b) => Math.max(a, b), 0);
+    const vmax = (o.vmaxOverride && o.vmaxOverride > 0) ? o.vmaxOverride : vmaxLocal;
     const vmin = 0;
     const span = Math.max(1e-3, vmax - vmin);
     const traces = [];
     const lineWidth = o.lineWidth || 6;
     const tag = o.tag || "";
+    const NEUTRAL_GREY = "#9C9690";
     for (let i = 0; i < speeds.length; i++) {
       const a = pts[i], b = pts[i + 1];
       if (a.t_rel_s > cutoff) break;
       const v = speeds[i];
-      const t = (v - vmin) / span;
+      const isNull = (v === null || !Number.isFinite(v));
+      const t = isNull ? 0 : (v - vmin) / span;
+      const color = isNull ? NEUTRAL_GREY : viridisColor(t);
+      const hover = isNull
+        ? `seg ${i + 1}/${speeds.length}<br>Δt ≤ 0 — speed undefined<extra></extra>`
+        : `seg ${i + 1}/${speeds.length}<br>` +
+          `t=${a.t_rel_s.toFixed(3)}–${b.t_rel_s.toFixed(3)} s<br>` +
+          `v=${v.toFixed(2)} m/s · ${(v * 3.6).toFixed(1)} km/h<extra></extra>`;
       traces.push({
         type: "scatter3d", mode: "lines",
         x: [a.x, b.x], y: [a.y, b.y], z: [a.z, b.z],
-        line: { color: viridisColor(t), width: lineWidth },
-        hovertemplate:
-          `seg ${i + 1}/${speeds.length}<br>` +
-          `t=${a.t_rel_s.toFixed(3)}–${b.t_rel_s.toFixed(3)} s<br>` +
-          `v=${v.toFixed(2)} m/s · ${(v * 3.6).toFixed(1)} km/h<extra></extra>`,
+        line: { color, width: lineWidth, dash: isNull ? "dot" : "solid" },
+        hovertemplate: hover,
         showlegend: false,
         legendgroup: "speed" + tag,
       });
     }
-    // Colorbar carrier — invisible markers at the start and end so the
-    // colorscale spans vmin..vmax. Single trace; legend entry only here.
-    traces.push({
-      type: "scatter3d", mode: "markers",
-      x: [pts[0].x, pts[pts.length - 1].x],
-      y: [pts[0].y, pts[pts.length - 1].y],
-      z: [pts[0].z, pts[pts.length - 1].z],
-      marker: {
-        size: 0.1, opacity: 0,
-        color: [vmin, vmax],
-        colorscale: "Viridis",
-        cmin: vmin, cmax: vmax,
-        showscale: true,
-        colorbar: {
-          title: { text: "v (m/s)", side: "right" },
-          thickness: 10, len: 0.4, x: 1.02, y: 0.5,
-          tickfont: { size: 10 },
+    if (o.includeColorbar !== false) {
+      traces.push({
+        type: "scatter3d", mode: "markers",
+        x: [pts[0].x, pts[pts.length - 1].x],
+        y: [pts[0].y, pts[pts.length - 1].y],
+        z: [pts[0].z, pts[pts.length - 1].z],
+        marker: {
+          size: 0.1, opacity: 0,
+          color: [vmin, vmax],
+          colorscale: "Viridis",
+          cmin: vmin, cmax: vmax,
+          showscale: true,
+          colorbar: {
+            title: { text: "v (m/s)", side: "right" },
+            thickness: 10, len: 0.4, x: 1.02, y: 0.5,
+            tickfont: { size: 10 },
+          },
         },
-      },
-      name: `Speed${tag} · max ${vmax.toFixed(1)} m/s`,
-      hoverinfo: "skip", showlegend: true,
-      legendgroup: "speed" + tag,
-    });
+        name: `Speed${tag} · max ${vmax.toFixed(1)} m/s`,
+        hoverinfo: "skip", showlegend: true,
+        legendgroup: "speed" + tag,
+      });
+    }
     return traces;
   };
 

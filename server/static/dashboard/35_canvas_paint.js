@@ -56,22 +56,38 @@
     // segments sit on top so the plain line shows through any gaps where
     // segments are too short to be visible.
     if (_OVL.speedVisible()) {
+      // Collect every bucket of points first; share one global vmax so
+      // segments are comparable and only one colorbar is emitted.
+      const buckets = [];
       for (const sid of selectedTrajIds) {
         const result = trajCache.get(sid);
         if (!result || !result.points || result.points.length < 2) continue;
-        const pts = result.points.map(p => ({
-          x: p.x_m, y: p.y_m, z: p.z_m, t_rel_s: p.t_rel_s,
-        }));
-        extraTraces.push(..._OVL.speedTraces(pts, { tag: ` · ${sid}` }));
+        buckets.push({
+          tag: ` · ${sid}`,
+          pts: result.points.map(p => ({
+            x: p.x_m, y: p.y_m, z: p.z_m, t_rel_s: p.t_rel_s,
+          })),
+        });
       }
       if (currentLiveSession && currentLiveSession.session_id) {
         const livePts = (livePointStore.get(currentLiveSession.session_id) || [])
           .map(p => ({ x: p.x, y: p.y, z: p.z, t_rel_s: p.t_rel_s }))
           .sort((a, b) => a.t_rel_s - b.t_rel_s);
-        if (livePts.length >= 2) {
-          extraTraces.push(..._OVL.speedTraces(livePts, { tag: ' · live' }));
+        if (livePts.length >= 2) buckets.push({ tag: ' · live', pts: livePts });
+      }
+      let vmaxGlobal = 0;
+      for (const b of buckets) {
+        for (const v of _OVL.computeSpeeds(b.pts)) {
+          if (Number.isFinite(v) && v > vmaxGlobal) vmaxGlobal = v;
         }
       }
+      buckets.forEach((b, i) => {
+        extraTraces.push(..._OVL.speedTraces(b.pts, {
+          tag: b.tag,
+          vmaxOverride: vmaxGlobal,
+          includeColorbar: i === 0,
+        }));
+      });
     }
     // Fit overlay — shared math with viewer via window.BallTrackerOverlays.
     // Source picks which point bucket feeds the fit; mirroring the viewer's
