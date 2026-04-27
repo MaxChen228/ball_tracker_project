@@ -723,6 +723,11 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-src-pill[disabled] {{ opacity: 0.35; cursor: not-allowed; }}
 .fit-filter-bar .ff-checkbox {{ display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }}
 .fit-filter-bar .ff-checkbox input {{ accent-color: var(--ink); cursor: pointer; }}
+.fit-filter-bar .layer-source-group {{ display: inline-flex; margin-left: 6px;
+    border: 1px solid var(--border-base); border-radius: 2px; overflow: hidden; }}
+.fit-filter-bar .layer-source-group .ff-src-pill {{ border: 0; border-radius: 0;
+    border-left: 1px solid var(--border-base); padding: 2px 6px; font-size: 9px; }}
+.fit-filter-bar .layer-source-group .ff-src-pill:first-child {{ border-left: 0; }}
 
 /* --- Replay playback bar (bottom-center, hidden when mode=inspect) --- */
 .playback-bar {{ position: absolute; left: 50%; bottom: var(--s-4); transform: translateX(-50%);
