@@ -33,7 +33,6 @@ from render_scene_theme import (
 from viewer_fragments import (
     health_banner_html,
     video_cell_html,
-    virtual_cell_html,
 )
 
 
@@ -57,7 +56,6 @@ class ViewerPageContext:
     layout_mode: str
     health_html: str
     video_cells_html: str
-    virtual_cells_html: str
     session_id: str
     server_post_ran: bool
     can_run_server: bool
@@ -100,15 +98,6 @@ def build_viewer_page_context(
             image_height_px=(cams_by_id[cam].image_height_px if cam in cams_by_id else None),
             cx=(cams_by_id[cam].cx if cam in cams_by_id else None),
             cy=(cams_by_id[cam].cy if cam in cams_by_id else None),
-        )
-        for cam in ("A", "B")
-    )
-    virt_cells = "".join(
-        virtual_cell_html(
-            cam,
-            pose_available=(cam in cams_by_id),
-            image_width_px=(cams_by_id[cam].image_width_px if cam in cams_by_id else None),
-            image_height_px=(cams_by_id[cam].image_height_px if cam in cams_by_id else None),
         )
         for cam in ("A", "B")
     )
@@ -166,7 +155,6 @@ def build_viewer_page_context(
         layout_mode=layout_mode,
         health_html=health_banner_html(health),
         video_cells_html=video_cells,
-        virtual_cells_html=virt_cells,
         session_id=scene.session_id,
         server_post_ran=server_post_ran,
         can_run_server=can_run_server,
@@ -251,7 +239,7 @@ def render_viewer_html(
       <div id="speed-bars" class="speed-bars" hidden aria-label="Per-segment speed"></div>
     </div>
     <div class="col-resizer" id="col-resizer" role="separator" aria-orientation="vertical" aria-label="Resize 3D scene vs cameras" tabindex="0" title="Drag to resize"></div>
-    <div class="videos-col">{ctx.video_cells_html}{ctx.virtual_cells_html}</div>
+    <div class="videos-col">{ctx.video_cells_html}</div>
   </div>
   <div class="timeline">
     <div class="tl-row">
@@ -536,7 +524,7 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     background:var(--bg); }}
   #scene {{ position:absolute; inset:0; }}
   .videos-col {{ flex:{videos_flex}; min-width:320px; display:grid;
-    grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:1px;
+    grid-template-columns:1fr 1fr; gap:1px;
     background:var(--border-base); }}
   .work[data-mode="single-cam"] .videos-col {{ min-width:280px; }}
   .col-resizer {{ flex:0 0 6px; cursor:col-resize; position:relative;
@@ -556,20 +544,6 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     min-width:0; }}
   .vid-cell.collapsed {{ padding:var(--s-2) var(--s-3);
     flex-direction:row; align-items:center; gap:var(--s-2); }}
-  .virt-cell {{ background:var(--surface); padding:var(--s-2) var(--s-3);
-    display:flex; flex-direction:column; gap:var(--s-1); min-height:0;
-    min-width:0; position:relative; }}
-  .virt-frame {{ flex:1 1 auto; min-height:0; min-width:0; width:100%; max-width:100%;
-    position:relative; overflow:hidden; background:transparent; }}
-  .virt-media {{ position:absolute; inset:0; margin:auto;
-    max-width:100%; max-height:100%; background:#1A1714;
-    border:1px solid var(--border-base); border-radius:var(--r); overflow:hidden; }}
-  .virt-media canvas {{ display:block; width:100%; height:100%; }}
-  .virt-frame.empty {{ display:flex; align-items:center; justify-content:center;
-    color:var(--sub); font-family:var(--mono); font-size:11px; letter-spacing:0.12em;
-    text-transform:uppercase; background:var(--bg);
-    border:1px dashed var(--border-base); border-radius:var(--r); }}
-  .vid-label.virt {{ color:var(--sub); border-color:var(--border-base); }}
   .vid-head {{ display:flex; align-items:center; gap:var(--s-2); }}
   .vid-label {{ font-family:var(--mono); font-size:10px; font-weight:600;
     letter-spacing:0.18em; border:1px solid; padding:2px 8px; border-radius:var(--r); }}

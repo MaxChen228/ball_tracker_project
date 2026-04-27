@@ -101,21 +101,6 @@ def video_cell_html(
     )
 
 
-def virtual_cell_html(
-    cam: str,
-    *,
-    pose_available: bool,
-    image_width_px: int | None = None,
-    image_height_px: int | None = None,
-) -> str:
-    """Phase 6 retired the standalone virtual cell — virtual reprojection
-    is now drawn as a semi-transparent canvas overlay on top of the real
-    video inside `video_cell_html`. Returns empty string so existing
-    callers (videos-col grid build) keep working without change."""
-    del cam, pose_available, image_width_px, image_height_px
-    return ""
-
-
 def hero_meta_subline(health: dict) -> str:
     parts: list[str] = [f'session {health["session_id"]}']
     dur = health.get("duration_s")

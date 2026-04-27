@@ -723,10 +723,6 @@ def test_viewer_page_context_computes_single_cam_layout_and_video_cells():
 
     assert ctx.layout_mode == "single-cam"
     assert 'data-cam="A"' in ctx.video_cells_html
-    # Phase 6: virtual cell merged into video cell as a canvas overlay
-    # — virtual_cells_html is now empty by design. The "no calibration"
-    # state is reflected by the cam-view's 'uncalibrated' badge instead.
-    assert ctx.virtual_cells_html == ""
     assert ctx.scene_flex == "1 1 0"
     assert ctx.videos_flex == "1 1 0"
 
