@@ -124,3 +124,52 @@ def test_built_in_layer_renderers_registered():
     js = CAM_VIEW_RUNTIME_JS
     assert "layerRenderers.set('plate'" in js
     assert "layerRenderers.set('axes', drawAxesLayer)" in js
+
+
+def test_runtime_passes_skip_builtins_to_drawvirtualbase():
+    """Reviewer flagged: drawVirtualBase has built-in plate+cross painting
+    that double-paints when the cam-view runtime owns plate as a layer.
+    Runtime must opt out via skipBuiltins."""
+    assert "skipBuiltins: true" in CAM_VIEW_RUNTIME_JS
+
+
+def test_drawvirtualbase_supports_skip_builtins():
+    """The opt-out mechanism must actually exist on the helper side too."""
+    from render_compare import DRAW_VIRTUAL_BASE_JS
+    assert "opts.skipBuiltins" in DRAW_VIRTUAL_BASE_JS
+
+
+def test_runtime_exposes_click_api_for_phase4():
+    """Phase 4 markers page needs canvas click hit-testing. The API shape
+    must be settled before Phase 2 ships so the data-attr contract is
+    forward-compatible."""
+    js = CAM_VIEW_RUNTIME_JS
+    assert "onCanvasClick" in js
+    assert "has-click" in js  # CSS toggle that re-enables pointer events
+    # Click info must include image-space u/v (not just css pixels).
+    assert "image_width_px" in js and "image_height_px" in js
+    assert "_emitCanvasClick" in js
+
+
+def test_css_enables_pointer_events_when_click_handler_attached():
+    """has-click class must be the gate for canvas pointer-events."""
+    assert ".cam-view canvas[data-cam-canvas]" in CAM_VIEW_CSS
+    assert "pointer-events: none" in CAM_VIEW_CSS
+    assert ".cam-view.has-click canvas[data-cam-canvas]" in CAM_VIEW_CSS
+    assert "pointer-events: auto" in CAM_VIEW_CSS
+
+
+def test_remount_preserves_layer_state():
+    """tickCalibration rebuilds devicesBox.innerHTML, which destroys
+    every cam-view DOM element. The layerState Map (keyed by camId)
+    must persist user-toggled state across re-mounts — otherwise every
+    /calibration/state tick silently undoes operator toggles."""
+    js = CAM_VIEW_RUNTIME_JS
+    # Mount must seed defaults ONLY for keys not already in layerState.
+    assert "if (!(k in ls))" in js
+
+
+def test_resize_observer_attached():
+    """window resize alone misses container-level reflow (sidebar
+    collapse). ResizeObserver per cam-view root catches it."""
+    assert "ResizeObserver" in CAM_VIEW_RUNTIME_JS
