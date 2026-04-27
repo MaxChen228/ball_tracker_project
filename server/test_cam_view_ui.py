@@ -32,19 +32,53 @@ def test_css_buckets_split_along_class_vs_attr_selector():
     CONTENT bucket. Viewer pulls only CONTENT (it has no .cam-view
     class), so a leak in either direction silently breaks one of the
     two consumer shapes."""
-    # BOX bucket: only `.cam-view ...` selectors. The aspect-ratio frame
-    # and absolute-positioned toolbar belong here — viewer doesn't want
-    # them.
+    # BOX bucket: only selectors that REQUIRE `.cam-view` (either bare or
+    # chained with [data-cam-view]). The aspect-ratio frame, absolute-
+    # positioned toolbar, and dark-theme palette overrides all live here.
     assert ".cam-view {" in CAM_VIEW_BOX_CSS
     assert "aspect-ratio: 16 / 9" in CAM_VIEW_BOX_CSS
-    assert "[data-cam-view]" not in CAM_VIEW_BOX_CSS
-    # CONTENT bucket: only `[data-cam-view] ...` selectors. Pill / slider
-    # / badge styling lives here so viewer's vid-cell inherits without
-    # eating box rules.
+    # Dark-theme palette lives in BOX as `.cam-view[data-cam-view]` chains
+    # so the specificity (0,3,0) clears CONTENT's bare `[data-cam-view]`
+    # base (0,2,0). Bare-attr selectors (without `.cam-view`) still belong
+    # in CONTENT exclusively.
+    # Bare-attr selectors live in CONTENT only — guard against a copy-
+    # paste that drops `[data-cam-view] .cv-layer` into BOX without the
+    # `.cam-view` chain (which would tie specificity with CONTENT and
+    # silently lose to source-order).
+    assert "\n[data-cam-view]" not in CAM_VIEW_BOX_CSS  # no line-leading bare-attr
+    assert ".cam-view[data-cam-view] .cv-layer" in CAM_VIEW_BOX_CSS  # chained palette override
+    # CONTENT bucket: only bare `[data-cam-view] ...` selectors. Pill /
+    # slider / badge styling lives here so viewer's vid-cell inherits
+    # without eating box rules.
     assert "[data-cam-view] .cam-view-toolbar" in CAM_VIEW_CONTENT_CSS
     assert "[data-cam-view] .cam-view-badge" in CAM_VIEW_CONTENT_CSS
+    # CONTENT must hold no rules whose selector starts with `.cam-view`
+    # (regardless of trailing space, dot, brace, attr, etc.) — catches
+    # both the bare `.cam-view {` rule and the dark-theme `.cam-view ...`
+    # palette overrides if they ever leak the wrong way.
+    assert not re.search(
+        r'^\.cam-view(?:[\s\.\{\[]|$)',
+        CAM_VIEW_CONTENT_CSS,
+        re.MULTILINE,
+    )
     # FULL = BOX + CONTENT, by construction.
     assert CAM_VIEW_FULL_CSS == CAM_VIEW_BOX_CSS + CAM_VIEW_CONTENT_CSS
+
+
+def test_dark_theme_palette_beats_content_base():
+    """Phase 3 review: BOX-bucket dark-theme overrides for `.cv-layer`,
+    `.cv-layer.on`, `.cv-opacity`, and `.cv-opacity input` must use a
+    selector with strictly higher specificity than the matching bare
+    `[data-cam-view] ...` rules in CONTENT, otherwise FULL_CSS = BOX +
+    CONTENT silently flips dashboard / setup / markers back to the light
+    palette via source-order tiebreak."""
+    for selector in (
+        ".cam-view[data-cam-view] .cv-layer {",
+        ".cam-view[data-cam-view] .cv-layer.on {",
+        ".cam-view[data-cam-view] .cv-opacity {",
+        ".cam-view[data-cam-view] .cv-opacity input[type=range] {",
+    ):
+        assert selector in CAM_VIEW_BOX_CSS, f"missing dark-theme override: {selector!r}"
 
 
 def test_viewer_imports_only_content_bucket():
@@ -393,6 +427,48 @@ def test_runtime_warns_loud_when_badge_container_missing():
     js = CAM_VIEW_RUNTIME_JS
     assert "_warnedBadgesMissing" in js
     assert "cam-view-badges container missing" in js
+
+
+def test_runtime_treats_data_no_badges_as_explicit_optout():
+    """Phase 4 review: viewer's vid-cell carries data-cam-view but no
+    cam-view-badges container — viewer surfaces those signals via its
+    own vid-head label. The runtime must read data-no-badges as an
+    explicit opt-out and skip silently, otherwise every viewer page
+    open noisily warns about a contract the page isn't trying to
+    fulfill."""
+    js = CAM_VIEW_RUNTIME_JS
+    assert "data-no-badges" in js
+    assert "hasAttribute('data-no-badges')" in js
+
+
+def test_viewer_fragments_emits_data_no_badges_optout():
+    """Pin the partner side: viewer's video_cell_html must stamp
+    data-no-badges in the cam-view attrs block so the runtime's
+    opt-out path actually triggers — checked at the source level
+    because the function's branching makes a single fixture call
+    awkward."""
+    import inspect
+    import viewer_fragments
+    src = inspect.getsource(viewer_fragments.video_cell_html)
+    # data-no-badges must appear inside the cam_view_attrs assembly so
+    # every entry-present render emits it.
+    assert "data-no-badges" in src
+    assert "data-cam-view" in src
+
+
+def test_start_calibration_polling_logs_errors_not_silent():
+    """Phase 2 review: original `catch (_) { /* silent retry */ }` and
+    `try { onPayload(...) } catch (_) {}` violated the project's no-
+    silent-fallback rule. Network errors throttled to once a minute
+    (avoid hosing console on full outage); onPayload errors logged
+    every time (caller bugs, not network bugs)."""
+    js = CAM_VIEW_RUNTIME_JS
+    # No bare silent catch in startCalibrationPolling.
+    assert "/* silent retry */" not in js
+    # onPayload errors get a meaningful log.
+    assert "onPayload threw" in js
+    # Network errors throttled, not muted.
+    assert "NET_WARN_COOLDOWN_MS" in js
 
 
 def test_runtime_does_not_expose_internal_state_handle():

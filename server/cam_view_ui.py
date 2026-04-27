@@ -119,18 +119,23 @@ CAM_VIEW_BOX_CSS = """
 }
 
 /* Inside the dashboard / setup / markers `.cam-view` box, override pill
-   colours to a dark-theme palette (yellow accent on near-black bg). */
-.cam-view .cv-layer {
+   colours to a dark-theme palette (yellow accent on near-black bg).
+   Specificity-bumped via `.cam-view[data-cam-view]` (0,2,0 → 0,3,0) so
+   these rules beat the [data-cam-view] base in CONTENT_CSS regardless of
+   source-order tiebreak — Phase 3 split FULL_CSS as BOX + CONTENT, so
+   without the bump CONTENT wins by being later in the cascade and dark
+   theme silently flips back to the light-theme default. */
+.cam-view[data-cam-view] .cv-layer {
   border-color: rgba(255, 255, 255, 0.14);
   color: rgba(248, 247, 244, 0.66);
 }
-.cam-view .cv-layer.on {
+.cam-view[data-cam-view] .cv-layer.on {
   background: rgba(255, 200, 0, 0.18);
   border-color: rgba(255, 200, 0, 0.55);
   color: #FFE08A;
 }
-.cam-view .cv-opacity { color: #F8F7F4; }
-.cam-view .cv-opacity input[type=range] { accent-color: #FFD86A; }
+.cam-view[data-cam-view] .cv-opacity { color: #F8F7F4; }
+.cam-view[data-cam-view] .cv-opacity input[type=range] { accent-color: #FFD86A; }
 """
 
 
@@ -323,6 +328,10 @@ CAM_VIEW_RUNTIME_JS = (
     const meta = camMeta.get(camId);
     const calibrated = !!(meta && meta.fx != null && meta.R_wc && meta.t_wc);
     root.classList.toggle('is-offline', !status.online);
+    // Pages can opt out of runtime-managed badges by setting
+    // data-no-badges on the cam-view root (viewer surfaces those signals
+    // via its own vid-head label). Skip silently — opt-out is intentional.
+    if (root.hasAttribute('data-no-badges')) return;
     const badges = root.querySelector('.cam-view-badges');
     if (!badges) {
       if (!_warnedBadgesMissing.has(camId) && window.console && console.warn) {
@@ -330,7 +339,8 @@ CAM_VIEW_RUNTIME_JS = (
           'cam-view: .cam-view-badges container missing for ' + camId
           + ' — status/calibration/rms badges will not render. '
           + 'Pages that want the runtime to manage badges must include '
-          + '<div class="cam-view-badges"></div> inside the cam-view root.',
+          + '<div class="cam-view-badges"></div> inside the cam-view root, '
+          + 'or set data-no-badges to opt out.',
         );
         _warnedBadgesMissing.add(camId);
       }
@@ -554,6 +564,15 @@ CAM_VIEW_RUNTIME_JS = (
     // observer leaks, no ghost preview pollers. setMeta(null) is a
     // softer "decalibrated but still here" signal; forgetCam is the
     // hard "this cam is gone" signal.
+    //
+    // No production caller today: dashboard / setup / markers all keep
+    // their cam set fixed at A/B and use setMeta(null) for the soft
+    // path. Exposed for two reasons:
+    //   1. cleanup partner for startPreviewPolling — when a future
+    //      caller stops polling on a cam and wants to drop everything,
+    //      one call covers it.
+    //   2. dynamic cam-list pages (none yet) need the hard reset.
+    // Tests pin the cleanup contract so the partnership doesn't drift.
     camMeta.delete(camId);
     camExtras.delete(camId);
     camStatus.delete(camId);
@@ -626,11 +645,24 @@ CAM_VIEW_RUNTIME_JS = (
     const endpoint = o.endpoint || '/calibration/state';
     const onPayload = typeof o.onPayload === 'function' ? o.onPayload : null;
     let stopped = false;
+    // Throttle network-error log to once per minute so a 5 s polling
+    // loop can't hose the console when the server is genuinely down,
+    // but transient blips still surface a warning. onPayload errors
+    // are logged every time — those are caller bugs, not network bugs.
+    let lastNetWarnAt = 0;
+    const NET_WARN_COOLDOWN_MS = 60_000;
     const tick = async () => {
       if (stopped) return;
       try {
         const r = await fetch(endpoint, { cache: 'no-store' });
-        if (!r.ok) return;
+        if (!r.ok) {
+          const now = Date.now();
+          if (now - lastNetWarnAt > NET_WARN_COOLDOWN_MS && window.console && console.warn) {
+            console.warn('cam-view: ' + endpoint + ' returned ' + r.status + ', skipping tick');
+            lastNetWarnAt = now;
+          }
+          return;
+        }
         const payload = await r.json();
         const cams = (payload.scene && payload.scene.cameras) || [];
         const live = new Set();
@@ -643,9 +675,19 @@ CAM_VIEW_RUNTIME_JS = (
           if (!live.has(cam)) setMeta(cam, null);
         }
         if (onPayload) {
-          try { onPayload(payload); } catch (_) {}
+          try { onPayload(payload); } catch (e) {
+            if (window.console && console.warn) {
+              console.warn('cam-view: startCalibrationPolling onPayload threw', e);
+            }
+          }
         }
-      } catch (_) { /* silent retry */ }
+      } catch (e) {
+        const now = Date.now();
+        if (now - lastNetWarnAt > NET_WARN_COOLDOWN_MS && window.console && console.warn) {
+          console.warn('cam-view: ' + endpoint + ' tick failed', e);
+          lastNetWarnAt = now;
+        }
+      }
     };
     tick();
     const id = setInterval(tick, intervalMs);
