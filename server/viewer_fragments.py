@@ -53,26 +53,57 @@ def video_cell_html(
                 f'<div class="pp-cross" '
                 f'style="left:{pct_x:.3f}%;top:{pct_y:.3f}%"></div>'
             )
+        # Phase 6 merged pane: real video as base, virtual reprojection
+        # painted into the overlay <canvas> by BallTrackerCamView. Plate
+        # outline + per-frame detection blob (registered by viewer JS as
+        # the `detection_blobs` layer) sit on top of the video so
+        # calibration drift / detection misalignment reads as overlay
+        # offset against the real ball.
         body = (
             f'<div class="vid-frame">'
             f'<div class="vid-media"{media_style}>'
             f'<video data-cam="{cam}" preload="auto" playsinline muted '
             f'src="{url}"></video>'
-            f'<svg class="plate-overlay-real" id="real-plate-overlay-{cam}" '
-            f'aria-hidden="true"><polygon></polygon></svg>'
+            f'<canvas class="virt-overlay-canvas" data-cam-canvas="{cam}"></canvas>'
             f"{pp_html}"
             f"</div>"
             f"</div>"
         )
         hint = "synced to chirp"
+    cam_view_attrs = ""
+    toolbar_html = ""
+    if entry is not None:
+        # Layer set: plate (calibration alignment), axes (orientation
+        # reference), detection_live + detection_svr (per-frame ball
+        # detection from each pipeline, drawn as half-transparent dots
+        # on top of the video). Operator picks which pipeline they
+        # trust by checkbox; both default-on so divergence is visible.
+        cam_view_attrs = (
+            f' data-cam-view="{cam}"'
+            ' data-layers="plate,axes,detection_live,detection_svr"'
+            ' data-layers-on="plate,detection_live,detection_svr"'
+            ' data-default-opacity="65"'
+        )
+        toolbar_html = (
+            '<div class="cam-view-toolbar">'
+            '<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>'
+            '<button type="button" class="cv-layer" data-layer="axes">AXES</button>'
+            '<button type="button" class="cv-layer on" data-layer="detection_live">LIVE</button>'
+            '<button type="button" class="cv-layer on" data-layer="detection_svr">SVR</button>'
+            '<span class="cv-opacity">OVL'
+            '<input type="range" min="0" max="100" step="1" value="65" aria-label="Overlay opacity">'
+            '</span>'
+            '</div>'
+        )
     return (
-        f'<div class="vid-cell">'
+        f'<div class="vid-cell"{cam_view_attrs}>'
         f'<div class="vid-head">'
         f'<span class="vid-label" style="color:{color};border-color:{color};">'
         f"CAM {cam}</span>"
         f'<span class="vid-hint">{hint}</span>'
         f"</div>"
         f"{body}"
+        f"{toolbar_html}"
         f"</div>"
     )
 
@@ -84,37 +115,12 @@ def virtual_cell_html(
     image_width_px: int | None = None,
     image_height_px: int | None = None,
 ) -> str:
-    label_color = _camera_color(cam)
-    if not pose_available:
-        body = '<div class="virt-frame empty">no calibration</div>'
-    else:
-        w = image_width_px or 4
-        h = image_height_px or 3
-        aspect_style = f'style="aspect-ratio:{w}/{h}"'
-        body = (
-            f'<div class="virt-frame">'
-            f'<div class="virt-media" {aspect_style} id="virt-frame-{cam}">'
-            f'<canvas id="virt-canvas-{cam}"></canvas>'
-            f"</div>"
-            f"</div>"
-        )
-    hint_title = (
-        "2D reprojection through the camera's full K + distortion + "
-        "extrinsics. The plate pentagon should overlap the real plate "
-        "visible in the MOV above; the trajectory should track the "
-        "actual ball. Divergence = calibration / triangulation error."
-    )
-    return (
-        f'<div class="virt-cell">'
-        f'<div class="vid-head">'
-        f'<span class="vid-label virt" title="{hint_title}">VIRT</span>'
-        f'<span class="vid-label" style="color:{label_color};'
-        f'border-color:{label_color};">CAM {cam}</span>'
-        f'<span class="vid-hint" title="{hint_title}">reprojected K·[R|t]·P</span>'
-        f"</div>"
-        f"{body}"
-        f"</div>"
-    )
+    """Phase 6 retired the standalone virtual cell — virtual reprojection
+    is now drawn as a semi-transparent canvas overlay on top of the real
+    video inside `video_cell_html`. Returns empty string so existing
+    callers (videos-col grid build) keep working without change."""
+    del cam, pose_available, image_width_px, image_height_px
+    return ""
 
 
 def hero_meta_subline(health: dict) -> str:

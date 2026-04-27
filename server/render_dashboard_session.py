@@ -23,8 +23,8 @@ _HSV_PRESETS = {
         "v_min": 90,
         "v_max": 255,
     },
-    "baseball": {
-        "label": "Baseball",
+    "blue_ball": {
+        "label": "Blue ball",
         "h_min": 100,
         "h_max": 130,
         "s_min": 140,

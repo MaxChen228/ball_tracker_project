@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json as _json
 
+from cam_view_ui import CAM_VIEW_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
 from reconstruct import Scene
 from render_compare import (
-    DRAW_PLATE_OVERLAY_JS,
     DRAW_VIRTUAL_BASE_JS,
     PLATE_WORLD_JS,
     PROJECTION_JS,
@@ -173,6 +173,26 @@ def build_viewer_page_context(
     )
 
 
+# Phase 6: viewer's vid-cell adopts the cam-view runtime via the
+# data-cam-view attribute (no .cam-view class — viewer keeps its
+# own vid-cell layout). These overrides position the overlay canvas
+# on top of the video and style the per-cam layer toolbar to match
+# the dashboard / setup / markers cam-view but inside vid-cell.
+_VIEWER_CAM_VIEW_OVERRIDES = (
+    CAM_VIEW_CSS
+    + """
+.vid-cell[data-cam-view] .vid-media { position: relative; }
+.vid-cell[data-cam-view] canvas[data-cam-canvas] {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; display: block;
+}
+.vid-cell[data-cam-view] .cam-view-toolbar {
+  position: absolute; right: 8px; top: 36px; z-index: 4;
+}
+"""
+)
+
+
 def render_viewer_html(
     scene: Scene,
     videos: list[tuple[str, str, float, float, dict[str, list]]],
@@ -202,6 +222,7 @@ def render_viewer_html(
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>
 {_viewer_css(ctx.scene_flex, ctx.videos_flex)}
+{_VIEWER_CAM_VIEW_OVERRIDES}
 </style>
 </head><body>
 <div class="viewer">
@@ -360,6 +381,9 @@ def render_viewer_html(
 }}</script>
 <script>
 {OVERLAYS_RUNTIME_JS}
+</script>
+<script>
+{CAM_VIEW_RUNTIME_JS}
 </script>
 <script>
 {_viewer_js()}
@@ -1385,67 +1409,53 @@ def _viewer_js() -> str:
   {PLATE_WORLD_JS}
   {PROJECTION_JS}
   {DRAW_VIRTUAL_BASE_JS}
-  {DRAW_PLATE_OVERLAY_JS}
-  const VIRT_CANVASES = [];
-  const REAL_OVERLAYS = [];
-  for (const c of (SCENE.cameras || [])) {{
-    if (c.fx == null || c.R_wc == null || c.t_wc == null || c.image_width_px == null || c.image_height_px == null) continue;
-    const canvas = document.getElementById(`virt-canvas-${{c.camera_id}}`);
-    if (!canvas) continue;
-    VIRT_CANVASES.push({{cam: c.camera_id, canvas, meta: c}});
-    const overlay = document.getElementById(`real-plate-overlay-${{c.camera_id}}`);
-    if (overlay) REAL_OVERLAYS.push({{cam: c.camera_id, overlay, meta: c}});
-  }}
-  function drawVirtCanvas(entry) {{
-    const {{canvas, meta}} = entry;
-    const base = drawVirtualBase(canvas, meta, {{ plateStroke: "rgba(219, 214, 205, 0.55)", plateFill: "rgba(219, 214, 205, 0.08)", plateLineWidth: 1, plateDash: [4, 3] }});
-    if (!base) return;
-    const {{ctx, sx, sy}} = base;
-    function drawCurrentDetection(framesForThisCam, opts) {{
-      if (!framesForThisCam) return;
-      const ts = framesForThisCam.t_rel_s || [];
-      const det = framesForThisCam.detected || [];
-      const pxArr = framesForThisCam.px || [];
-      const pyArr = framesForThisCam.py || [];
-      if (!ts.length) return;
-      let lo = 0, hi = ts.length - 1;
-      while (lo + 1 < hi) {{
-        const mid = (lo + hi) >> 1;
-        if (ts[mid] <= currentT) lo = mid; else hi = mid;
-      }}
-      const iLo = Math.abs(ts[lo] - currentT) <= Math.abs(ts[hi] - currentT) ? lo : hi;
-      const tol = 0.020;
-      if (Math.abs(ts[iLo] - currentT) > tol || !det[iLo]) return;
-      const px = pxArr[iLo], py = pyArr[iLo];
-      if (px == null || py == null) return;
-      const x = px * sx, y = py * sy;
-      ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
-      ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = opts.color;
-      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+
+  // Phase 6: virtual reprojection is now drawn as canvas layers on
+  // BallTrackerCamView, painted on top of the real video. plate +
+  // axes come from the runtime; viewer registers two extra layers
+  // (detection_live / detection_svr) that draw the per-frame ball
+  // detection blob from each pipeline. Currentframe lookup closes
+  // over the viewer's `currentT` clock.
+  function _drawDetectionForPath(ctx, sx, sy, cam, path, color) {{
+    const framesForThisCam = framesByPath[path] && framesByPath[path][cam.camera_id];
+    if (!framesForThisCam) return;
+    const ts = framesForThisCam.t_rel_s || [];
+    const det = framesForThisCam.detected || [];
+    const pxArr = framesForThisCam.px || [];
+    const pyArr = framesForThisCam.py || [];
+    if (!ts.length) return;
+    let lo = 0, hi = ts.length - 1;
+    while (lo + 1 < hi) {{
+      const mid = (lo + hi) >> 1;
+      if (ts[mid] <= currentT) lo = mid; else hi = mid;
     }}
-    const cam = meta.camera_id;
-    const camLayer = `cam${{cam}}`;
-    // Draw the per-path detection dot independently. If the session only has
-    // `live` data (camera_only + no chirp flow + no server post-pass), only
-    // the LIVE dot should appear; same symmetry for the other two paths.
-    // Drawing order: deepest → highlighted, so svr/post (more definitive)
-    // sits on top of live.
-    const DOT_COLOR = {{
-      live: colorForCamPath(cam, "live"),
-      server_post: ACCENT,
-    }};
-    const PATH_ORDER = ["live", "server_post"];
-    for (const path of PATH_ORDER) {{
-      if (!isLayerVisible(camLayer, path)) continue;
-      const frames = framesByPath[path][cam];
-      if (!frames || !(frames.t_rel_s || []).length) continue;
-      drawCurrentDetection(frames, {{color: DOT_COLOR[path]}});
-    }}
-    ctx.restore();
+    const iLo = Math.abs(ts[lo] - currentT) <= Math.abs(ts[hi] - currentT) ? lo : hi;
+    const tol = 0.020;
+    if (Math.abs(ts[iLo] - currentT) > tol || !det[iLo]) return;
+    const px = pxArr[iLo], py = pyArr[iLo];
+    if (px == null || py == null) return;
+    const x = px * sx, y = py * sy;
+    ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
   }}
-  function drawVirtuals() {{ for (const entry of VIRT_CANVASES) drawVirtCanvas(entry); }}
-  function drawRealPlateOverlays() {{ for (const entry of REAL_OVERLAYS) redrawPlateOverlay(entry.overlay, entry.meta); }}
+  if (window.BallTrackerCamView) {{
+    window.BallTrackerCamView.registerLayer('detection_live', function (ctx, sx, sy, cam) {{
+      _drawDetectionForPath(ctx, sx, sy, cam, 'live', colorForCamPath(cam.camera_id, 'live'));
+    }});
+    window.BallTrackerCamView.registerLayer('detection_svr', function (ctx, sx, sy, cam) {{
+      _drawDetectionForPath(ctx, sx, sy, cam, 'server_post', ACCENT);
+    }});
+    for (const c of (SCENE.cameras || [])) {{
+      if (c.fx == null || c.R_wc == null || c.t_wc == null
+          || c.image_width_px == null || c.image_height_px == null) continue;
+      window.BallTrackerCamView.setMeta(c.camera_id, c);
+    }}
+  }}
+  function drawVirtuals() {{
+    if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();
+  }}
   function drawScene() {{
     const playback = mode !== "all";
     const cutoff = playback ? currentT : Infinity;
@@ -1457,7 +1467,8 @@ def _viewer_js() -> str:
       ? STATIC
       : STATIC.filter(t => !((t.meta || {{}}).feature === "strike_zone"));
     Plotly.react(sceneDiv, [...staticFiltered, ...buildDynamicTraces(cutoff, playback)], LAYOUT, {{displayModeBar: false, responsive: true}});
-    drawRealPlateOverlays();
+    // Plate overlay is now part of the cam-view 'plate' layer painted
+    // onto the canvas overlay above the video — no separate SVG path.
     // virtual canvases + speed-bars are NOT called here on purpose. Both
     // are scheduled on their own RAF (scheduleVirtualDraw /
     // scheduleSpeedBarsDraw) so a heavy Plotly.react redraw can't stall
@@ -1488,7 +1499,8 @@ def _viewer_js() -> str:
     scheduleVirtualDraw();
     if (_OVL.speedVisible()) scheduleSpeedBarsDraw();
   }}
-  window.addEventListener("resize", () => {{ drawVirtuals(); drawRealPlateOverlays(); }});
+  // BallTrackerCamView's per-cam ResizeObserver handles canvas reflow
+  // automatically; no need for a window resize listener here.
   function markManualSeekWindow(ms = 180) {{
     suppressVideoFeedbackUntilMs = Math.max(suppressVideoFeedbackUntilMs, performance.now() + ms);
   }}

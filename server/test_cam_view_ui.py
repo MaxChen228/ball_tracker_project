@@ -371,6 +371,51 @@ def test_markers_page_drops_legacy_svg_marker_overlay():
     assert "const virtCamMeta" not in _MARKERS_JS
 
 
+def test_viewer_page_uses_cam_view_with_detection_layers():
+    """Phase 6: /viewer migrated to merged cam-view substrate. Each cam's
+    vid-cell carries data-cam-view + a canvas overlay; the runtime
+    registers detection_live / detection_svr layers that draw the
+    per-frame ball blob from each pipeline. Per-cam toolbar exposes
+    PLATE / AXES / LIVE / SVR pills so the operator can toggle each
+    overlay independently — half-transparent over the real video."""
+    from fastapi.testclient import TestClient
+    import main
+    from main import app
+    import numpy as np
+    from conftest import sid
+    from test_viewer import _make_rig, _pitch, _record_pitch
+
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(99100)
+    _record_pitch(_pitch("A", 99100, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+    body = TestClient(app).get(f"/viewer/{session_id}").text
+
+    # Runtime injected before viewer JS.
+    assert_cam_view_present(body)
+    cv = body.find("BallTrackerCamView")
+    viewer_iife = body.find("function _viewer") if False else body.find("scheduleSceneDraw")
+    assert cv > 0 and viewer_iife > 0 and cv < viewer_iife
+
+    # Each cam: data-cam-view attribute + overlaid canvas.
+    assert 'data-cam-view="A"' in body
+    assert 'data-cam-canvas="A"' in body
+    # Layer set + initial-on subset declared per cam.
+    assert 'data-layers="plate,axes,detection_live,detection_svr"' in body
+    assert 'data-layers-on="plate,detection_live,detection_svr"' in body
+    # Default opacity 65 — half-transparent overlay over the real video.
+    assert 'data-default-opacity="65"' in body
+    # Per-cam toolbar pills for all four toggleable layers.
+    for layer in ("plate", "axes", "detection_live", "detection_svr"):
+        assert f'data-layer="{layer}"' in body
+    # Detection blob layers registered with the runtime.
+    assert "registerLayer('detection_live'" in body
+    assert "registerLayer('detection_svr'" in body
+    # Legacy SVG plate overlay + standalone virt-canvas DOM removed.
+    assert 'real-plate-overlay-A' not in body
+    assert 'id="virt-canvas-A"' not in body
+
+
 def test_markers_page_preview_poll_uses_cam_img_selector():
     """The inline tickPreviewImages must query [data-cam-img] (new
     merged pane) instead of legacy [data-preview-img]."""

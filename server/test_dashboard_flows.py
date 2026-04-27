@@ -89,7 +89,12 @@ def test_dashboard_drives_mode_one_end_to_end(tmp_path):
     viewer_html = client.get(f"/viewer/{session_id}").text
     assert "mode camera-only" in viewer_html
     assert "<video" in viewer_html
-    assert 'id="real-plate-overlay-A"' in viewer_html
-    assert 'id="real-plate-overlay-B"' in viewer_html
+    # Phase 6: viewer is on the merged cam-view substrate. Plate
+    # overlay is now drawn into the per-cam canvas via the runtime's
+    # 'plate' layer (no more SVG real-plate-overlay element).
+    assert 'data-cam-view="A"' in viewer_html
+    assert 'data-cam-view="B"' in viewer_html
+    assert 'data-cam-canvas="A"' in viewer_html
+    assert 'BallTrackerCamView' in viewer_html
 
 

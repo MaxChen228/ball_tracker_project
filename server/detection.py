@@ -8,7 +8,8 @@ which synthesises `FramePayload`s for the existing `triangulate_cycle` path.
 HSV defaults target a yellow tennis ball (the fluorescent yellow-green
 ball currently used on the rig). Override via the `BALL_TRACKER_HSV_RANGE`
 env var (comma-separated `hMin,hMax,sMin,sMax,vMin,vMax`) if you change
-the ball — e.g. a deep-blue baseball uses `100,130,140,255,40,255`.
+the ball — e.g. a deep-blue ball uses `100,130,140,255,40,255` (the
+dashboard's "blue ball" preset).
 """
 from __future__ import annotations
 
