@@ -100,17 +100,34 @@
         const data = JSON.parse(evt.data);
         const sid = data.sid;
         if (!sid) return;
-        // Drop the entire sid entry — both cams' progress snapshots
-        // are gone. tickEvents() below refills n_ball_frames_by_path
-        // with the post-completion counts so the chip seamlessly
-        // transitions from `S|13/240·…` to the stable `S|40·27`.
-        serverPostProgress.delete(sid);
+        // Per-cam: drop only the finishing cam's slot. Drop the whole
+        // sid entry only when the LAST cam finishes — otherwise the
+        // still-running cam's next progress event would re-create the
+        // entry without the just-completed cam, hiding A's stable count
+        // behind '—' in the chip override branch.
+        const entry = serverPostProgress.get(sid);
+        let isLastCam = false;
+        if (entry) {
+          delete entry[data.cam];
+          if (Object.keys(entry).length === 0) {
+            serverPostProgress.delete(sid);
+            isLastCam = true;
+          }
+        } else {
+          // No progress entry for this sid (SSE reconnected mid-job, or
+          // the priming was missed) — treat this done as last-known so
+          // tickEvents reconciles and the row finishes cleanly.
+          isLastCam = true;
+        }
         _lastEvKey = null;
         if (typeof tickEvents === 'function') tickEvents();
-        // Celebrate success only; canceled / error dismiss silently
-        // since the chip-state change (queued/processing → null) is
-        // already self-explanatory.
-        if (data.reason === 'ok') {
+        // Flash only on the LAST cam to finish so dual-cam doesn't
+        // double-celebrate. data.reason==='ok' is per-cam; if A errors
+        // and B succeeds we still flash because the row's stable error
+        // chip from the next /events tick will surface the failure.
+        // Canceled / error finishes dismiss silently since the
+        // chip-state change is already self-explanatory.
+        if (isLastCam && data.reason === 'ok') {
           const row = document.querySelector(`.event-item[data-sid="${sid}"]`);
           if (row) {
             row.classList.add('flash-done');

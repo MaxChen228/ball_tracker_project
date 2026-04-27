@@ -600,8 +600,9 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 /* Row-level treatment while a server_post job is queued/processing —
    complements the inline status chip with an ambient orange pulse so the
    in-flight session is visible at a glance from across the sidebar. The
-   border-left + matching padding offset prevents layout shift when the
-   class toggles on/off. */
+   2px border-left + 2px padding-left adds a 4px content shift while the
+   class is on; small enough not to read as visual noise and not worth
+   counter-offsetting on the base rule. */
 .event-item.processing {{ border-left: 2px solid var(--warn);
                            padding-left: calc(var(--s-1) - 2px);
                            animation: rs-pulse 1.5s ease-in-out infinite; }}
