@@ -12,15 +12,13 @@ from schemas import SessionResult
 router = APIRouter()
 
 _VIDEO_FILENAME_RE = re.compile(
-    r"^session_s_[0-9a-f]{4,32}_[A-Za-z0-9_-]{1,16}(_annotated)?\.(mov|mp4|m4v)$"
+    r"^session_s_[0-9a-f]{4,32}_[A-Za-z0-9_-]{1,16}\.(mov|mp4|m4v)$"
 )
 
 
 def _find_clip_on_disk(session_id: str, camera_id: str) -> Path | None:
     from main import state
     for path in state.video_dir.glob(f"session_{session_id}_{camera_id}.*"):
-        if path.stem.endswith("_annotated"):
-            continue
         return path
     return None
 
@@ -185,11 +183,8 @@ def _videos_for_session(
         if not _VIDEO_FILENAME_RE.match(name):
             continue
         stem = name.rsplit(".", 1)[0]
-        is_annotated = stem.endswith("_annotated")
         cam = stem[len(prefix):]
-        if is_annotated:
-            cam = cam[: -len("_annotated")]
-        if cam not in best or (is_annotated and "_annotated" not in best[cam]):
+        if cam not in best:
             best[cam] = name
 
     def _stream(frames, rel_anchor) -> dict[str, list]:

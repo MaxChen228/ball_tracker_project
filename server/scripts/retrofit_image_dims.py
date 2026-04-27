@@ -41,8 +41,6 @@ log = logging.getLogger("retrofit")
 
 def _find_clip(video_dir: Path, session_id: str, cam: str) -> Path | None:
     for path in video_dir.glob(f"session_{session_id}_{cam}.*"):
-        if path.stem.endswith("_annotated"):
-            continue
         return path
     return None
 

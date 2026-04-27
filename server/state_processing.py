@@ -143,8 +143,6 @@ class SessionProcessingState:
         for path in matches:
             if path.name.endswith(".tmp"):
                 continue
-            if "_annotated." in path.name:
-                continue
             return path
         return None
 

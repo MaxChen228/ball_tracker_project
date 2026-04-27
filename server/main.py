@@ -114,7 +114,7 @@ from schemas import (
 )
 from collections import deque
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
-from pipeline import ProcessingCanceled, annotate_video, detect_pitch
+from pipeline import ProcessingCanceled, detect_pitch
 from video import probe_dims
 from chirp import chirp_wav_bytes
 import sync_audio_detect
