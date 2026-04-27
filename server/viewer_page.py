@@ -1449,17 +1449,36 @@ def _viewer_js() -> str:
       ? STATIC
       : STATIC.filter(t => !((t.meta || {{}}).feature === "strike_zone"));
     Plotly.react(sceneDiv, [...staticFiltered, ...buildDynamicTraces(cutoff, playback)], LAYOUT, {{displayModeBar: false, responsive: true}});
-    drawVirtuals();
     drawRealPlateOverlays();
-    if (typeof _renderSpeedBars === "function") _renderSpeedBars();
+    // virtual canvases + speed-bars are NOT called here on purpose. Both
+    // are scheduled on their own RAF (scheduleVirtualDraw /
+    // scheduleSpeedBarsDraw) so a heavy Plotly.react redraw can't stall
+    // the cheap canvas2D paints. During playback the virtual cameras
+    // need to stay locked to the video clock, even when the 3D scene
+    // drops a frame.
   }}
-  function scheduleSceneDraw() {{
-    if (sceneDrawRaf !== null) return;
-    sceneDrawRaf = requestAnimationFrame(() => {{ sceneDrawRaf = null; drawScene(); }});
-  }}
+  let speedBarsRaf = null;
   function scheduleVirtualDraw() {{
     if (virtualDrawRaf !== null) return;
     virtualDrawRaf = requestAnimationFrame(() => {{ virtualDrawRaf = null; drawVirtuals(); }});
+  }}
+  function scheduleSpeedBarsDraw() {{
+    if (speedBarsRaf !== null) return;
+    if (typeof _renderSpeedBars !== "function") return;
+    speedBarsRaf = requestAnimationFrame(() => {{ speedBarsRaf = null; _renderSpeedBars(); }});
+  }}
+  // Fans out to all three paint paths. Each owns its own RAF, so the
+  // expensive Plotly.react can't block the cheap canvas2D paints — but
+  // every existing `scheduleSceneDraw()` callsite still triggers a
+  // full coherent update without rewriting them. In playback mode
+  // setFrame() also calls scheduleVirtualDraw directly so the virtual
+  // cameras stay locked to the video clock independent of this dedup.
+  function scheduleSceneDraw() {{
+    if (sceneDrawRaf === null) {{
+      sceneDrawRaf = requestAnimationFrame(() => {{ sceneDrawRaf = null; drawScene(); }});
+    }}
+    scheduleVirtualDraw();
+    if (_OVL.speedVisible()) scheduleSpeedBarsDraw();
   }}
   window.addEventListener("resize", () => {{ drawVirtuals(); drawRealPlateOverlays(); }});
   function markManualSeekWindow(ms = 180) {{
@@ -1555,8 +1574,15 @@ def _viewer_js() -> str:
     renderFrameLabel();
     renderDetectionStrip();
     if (seekVideos) syncVideosToT(currentT);
+    // Schedule all three independent paint paths. Each owns its own RAF
+    // dedup so a heavy Plotly.react can't block the canvas2D virtual cam
+    // paints — they fall behind only when the JS event loop itself stalls
+    // (in which case so does the video, and the operator wouldn't perceive
+    // a sync glitch). In "all" mode the scene doesn't depend on currentT,
+    // so skip the expensive scene redraw — virtual + speed-bars still tick.
+    scheduleVirtualDraw();
+    if (_OVL.speedVisible()) scheduleSpeedBarsDraw();
     if (mode === "playback") scheduleSceneDraw();
-    if (mode !== "playback") scheduleVirtualDraw();
   }}
   let virtualRAF = null;
   let virtualLastPerfMs = 0;
@@ -1966,14 +1992,16 @@ def _viewer_js() -> str:
     _speedToggle.checked = _OVL.speedVisible();
     _speedToggle.addEventListener("change", () => {{
       _OVL.setSpeedVisible(_speedToggle.checked);
+      // Toggle off → hide drawer immediately, no need for an RAF round-trip.
+      if (!_speedToggle.checked && _speedBars) _speedBars.hidden = true;
       scheduleSceneDraw();
-      _renderSpeedBars();
     }});
   }}
-  // drawScene() calls _renderSpeedBars() at its tail when defined, so
-  // any filter / playback change that triggers a redraw also keeps the
-  // bar chart in sync. Initial paint:
-  if (_OVL.speedVisible()) _renderSpeedBars();
+  // scheduleSceneDraw() fans out to scheduleSpeedBarsDraw whenever speed
+  // is visible — every filter / playback / mode change that touches
+  // points already triggers it, so no manual paint hooks are needed.
+  // Initial paint:
+  if (_OVL.speedVisible()) scheduleSpeedBarsDraw();
 
   // --- Fit overlay toggle (was modal "fit mode" — now a layer) ---
   const fitToggleBtn = document.getElementById("fit-toggle");
