@@ -42,6 +42,12 @@ from render_compare import (
 
 
 CAM_VIEW_CSS = """
+/* === Box / positioning model — applies only when caller opts in via
+   the `.cam-view` class. Dashboard / setup / markers wrap each cam in
+   a 16:9 box with the canvas absolute-positioned over an MJPEG <img>;
+   viewer skips the .cam-view class and arranges its own video + cell
+   layout, but still uses the data-cam-view attribute below. ============ */
+
 .cam-view {
   position: relative;
   width: 100%;
@@ -63,13 +69,17 @@ CAM_VIEW_CSS = """
   object-fit: cover;
   background: #120F0D;
 }
-.cam-view canvas[data-cam-canvas] {
-  pointer-events: none;
-  /* opacity controlled by runtime via inline style */
-}
-.cam-view.has-click canvas[data-cam-canvas] {
-  pointer-events: auto;
-  cursor: crosshair;
+.cam-view.is-offline img[data-cam-img] { opacity: 0.15; }
+.cam-view .cam-view-toolbar {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  z-index: 3;
+  background: rgba(26, 23, 20, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--r);
+  padding: 5px 8px;
+  color: #F8F7F4;
 }
 .cam-view .cam-view-badges {
   position: absolute;
@@ -81,7 +91,83 @@ CAM_VIEW_CSS = """
   gap: 6px;
   pointer-events: none;
 }
-.cam-view .cam-view-badge {
+.cam-view .cam-view-extra {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  gap: 6px;
+  pointer-events: none;
+}
+
+/* === Content styling — works regardless of `.cam-view` class. The
+   data-cam-view attribute is the contract; pages that want a different
+   container layout (viewer's vid-cell) get the same pill / badge /
+   slider styling for free. ============================================ */
+
+[data-cam-view] canvas[data-cam-canvas] {
+  pointer-events: none;
+  /* opacity controlled by runtime via inline style */
+}
+[data-cam-view].has-click canvas[data-cam-canvas] {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+[data-cam-view] .cam-view-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono, monospace);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+[data-cam-view] .cv-layer {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: var(--r, 4px);
+  border: 1px solid var(--border-base, rgba(120, 120, 120, 0.4));
+  background: transparent;
+  color: var(--sub, rgba(120, 120, 120, 0.7));
+  cursor: pointer;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+}
+[data-cam-view] .cv-layer.on {
+  background: var(--ink, #2A2520);
+  border-color: var(--ink, #2A2520);
+  color: var(--surface, #FCFBFA);
+}
+[data-cam-view] .cv-opacity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--sub, rgba(120, 120, 120, 0.7));
+}
+[data-cam-view] .cv-opacity input[type=range] {
+  width: 70px;
+  accent-color: var(--ink, #2A2520);
+}
+
+/* Inside the dashboard / setup / markers `.cam-view` box, override pill
+   colors to a dark-theme palette (yellow accent on near-black bg). */
+.cam-view .cv-layer {
+  border-color: rgba(255, 255, 255, 0.14);
+  color: rgba(248, 247, 244, 0.66);
+}
+.cam-view .cv-layer.on {
+  background: rgba(255, 200, 0, 0.18);
+  border-color: rgba(255, 200, 0, 0.55);
+  color: #FFE08A;
+}
+.cam-view .cv-opacity { color: #F8F7F4; }
+.cam-view .cv-opacity input[type=range] { accent-color: #FFD86A; }
+
+[data-cam-view] .cam-view-badge {
   padding: 5px 9px;
   border-radius: var(--r);
   background: rgba(26, 23, 20, 0.84);
@@ -92,63 +178,10 @@ CAM_VIEW_CSS = """
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
-.cam-view .cam-view-badge.cam-id { border-color: rgba(202, 61, 47, 0.32); }
-.cam-view .cam-view-badge.status-offline { border-color: rgba(202, 61, 47, 0.6); color: #F8C8C0; }
-.cam-view .cam-view-badge.status-uncal { border-color: rgba(255, 200, 0, 0.5); color: #FFD86A; }
-.cam-view .cam-view-badge.rms { border-color: rgba(120, 200, 140, 0.45); color: #C4F0CD; }
-.cam-view .cam-view-toolbar {
-  position: absolute;
-  right: 10px;
-  top: 10px;
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: rgba(26, 23, 20, 0.78);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: var(--r);
-  padding: 5px 8px;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #F8F7F4;
-}
-.cam-view .cam-view-toolbar .cv-layer {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  border-radius: var(--r);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: transparent;
-  color: rgba(248, 247, 244, 0.66);
-  cursor: pointer;
-}
-.cam-view .cam-view-toolbar .cv-layer.on {
-  background: rgba(255, 200, 0, 0.18);
-  border-color: rgba(255, 200, 0, 0.55);
-  color: #FFE08A;
-}
-.cam-view .cam-view-toolbar .cv-opacity {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.cam-view .cam-view-toolbar .cv-opacity input[type=range] {
-  width: 80px;
-  accent-color: #FFD86A;
-}
-.cam-view .cam-view-extra {
-  position: absolute;
-  left: 12px;
-  bottom: 12px;
-  z-index: 3;
-  display: flex;
-  gap: 6px;
-  pointer-events: none;
-}
-.cam-view.is-offline img[data-cam-img] { opacity: 0.15; }
+[data-cam-view] .cam-view-badge.cam-id { border-color: rgba(202, 61, 47, 0.32); }
+[data-cam-view] .cam-view-badge.status-offline { border-color: rgba(202, 61, 47, 0.6); color: #F8C8C0; }
+[data-cam-view] .cam-view-badge.status-uncal { border-color: rgba(255, 200, 0, 0.5); color: #FFD86A; }
+[data-cam-view] .cam-view-badge.rms { border-color: rgba(120, 200, 140, 0.45); color: #C4F0CD; }
 """
 
 

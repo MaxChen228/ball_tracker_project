@@ -173,21 +173,26 @@ def build_viewer_page_context(
     )
 
 
-# Phase 6: viewer's vid-cell adopts the cam-view runtime via the
-# data-cam-view attribute (no .cam-view class — viewer keeps its
-# own vid-cell layout). These overrides position the overlay canvas
-# on top of the video and style the per-cam layer toolbar to match
-# the dashboard / setup / markers cam-view but inside vid-cell.
+# Phase 6: viewer's vid-cell uses cam-view via data-cam-view (no
+# .cam-view class — viewer owns its own video + cell layout). These
+# rules glue the runtime canvas onto the existing .vid-media and
+# render the per-cam layer toolbar as a slim footer bar beneath the
+# video, NOT floating absolute over the video. The toolbar inherits
+# pill / slider styling from CAM_VIEW_CSS's [data-cam-view] selectors.
 _VIEWER_CAM_VIEW_OVERRIDES = (
     CAM_VIEW_CSS
     + """
 .vid-cell[data-cam-view] .vid-media { position: relative; }
 .vid-cell[data-cam-view] canvas[data-cam-canvas] {
-  position: absolute; inset: 0; width: 100%; height: 100%;
-  pointer-events: none; display: block;
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
 }
 .vid-cell[data-cam-view] .cam-view-toolbar {
-  position: absolute; right: 8px; top: 36px; z-index: 4;
+  margin-top: var(--s-2, 6px);
+  padding: 5px 8px;
+  background: var(--surface, #FCFBFA);
+  border: 1px solid var(--border-base, #DBD6CD);
+  border-radius: var(--r, 4px);
+  flex-wrap: wrap;
 }
 """
 )
@@ -251,8 +256,9 @@ def render_viewer_html(
   <div class="timeline">
     <div class="tl-row">
       <div class="scrubber-wrap">
-        <div class="strip-legend" aria-hidden="true"
-             title="Strip colors: A detected (orange) · B detected (brown) · missed (grey) · no frame (pale) · chirp anchor (accent)">
+        <div class="strip-legend"
+             title="Strip colors: A detected (orange) · B detected (brown) · missed (grey) · no frame (pale) · chirp anchor (accent)"
+             role="group" aria-label="Layer visibility + filters">
           <span class="layer-toggles" id="layer-toggles" aria-label="Layer visibility">
             <span class="layer-group" data-layer="traj">
               <span class="layer-name">Traj</span>
@@ -735,10 +741,12 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .layer-source-group {{ display:inline-flex; align-items:center; margin-left:6px;
     border:1px solid var(--border-base); border-radius:var(--r); overflow:hidden; }}
   /* Source pills go dormant when Fit is off — picking svr/live without
-     a visible Fit overlay does nothing user-observable, so the pills
-     read as muted to match. The pressed state still tracks selection
-     so re-enabling Fit shows the operator which source they had. */
-  .layer-source-group.is-off {{ opacity:0.45; }}
+     a visible Fit overlay does nothing user-observable. Stronger than
+     plain opacity: drop saturation so the pressed-state black bg fades
+     to grey, and gate pointer-events so a click can't silently change
+     the dormant source. Pressed state still tracks the user's choice
+     so re-enabling Fit shows them what they had. */
+  .layer-source-group.is-off {{ opacity:0.4; filter:saturate(0.15); pointer-events:none; }}
   .fit-src-pill {{ padding:2px 6px; font-family:var(--mono); font-size:9px;
     letter-spacing:0.06em; background:var(--surface); border:0; color:var(--sub);
     cursor:pointer; line-height:1.4; }}
