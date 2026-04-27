@@ -533,14 +533,10 @@ _MARKERS_JS = r"""
     }));
   }
 
-  function tickPreviewImages() {
-    const t = Date.now();
-    compareRoot.querySelectorAll('img[data-cam-img]').forEach(img => {
-      const cam = img.dataset.camImg;
-      if (!cam) return;
-      img.src = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + t;
-    });
-  }
+  // Preview <img> cache-bust + calibration meta polling both live in the
+  // shared BallTrackerCamView runtime — see Phase 2 init below for the
+  // start calls. Markers used to roll its own loop here without an
+  // is-offline gate, so two-cam-offline pages hammered /preview 404s.
 
   function renderCandidates() {
     if (!state.candidates.length) {
@@ -830,7 +826,10 @@ _MARKERS_JS = r"""
   // Wire BallTrackerCamView: register the marker_footprints layer,
   // attach click hit-testing per cam, push initial scene meta. The
   // runtime owns paint scheduling + ResizeObserver — no need for a
-  // window resize listener here.
+  // window resize listener here. startCalibrationPolling keeps meta
+  // fresh so cross-tab auto-calibrations move the footprints without
+  // a manual page reload. startPreviewPolling carries the offline
+  // gate / cache-bust that markers used to lack.
   if (window.BallTrackerCamView) {
     window.BallTrackerCamView.registerLayer('marker_footprints', drawMarkerFootprintLayer);
     for (const cam of (state.scene.cameras || [])) {
@@ -838,12 +837,13 @@ _MARKERS_JS = r"""
     }
     window.BallTrackerCamView.onCanvasClick('A', handleCamClick);
     window.BallTrackerCamView.onCanvasClick('B', handleCamClick);
+    window.BallTrackerCamView.startPreviewPolling('A');
+    window.BallTrackerCamView.startPreviewPolling('B');
+    window.BallTrackerCamView.startCalibrationPolling();
   }
 
   tickPreviewRefresh();
-  tickPreviewImages();
   setInterval(tickPreviewRefresh, 2000);
-  setInterval(tickPreviewImages, 200);
   renderAll();
 })();
 """
