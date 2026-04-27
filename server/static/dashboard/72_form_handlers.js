@@ -5,8 +5,30 @@
   // the POST and the next tickEvents round-trip.
   document.addEventListener('submit', async (e) => {
     const form = e.target;
-    if (form.action && /\/sessions\/[^/]+\/(trash|restore|delete|cancel_processing|resume_processing|run_server_post)$/.test(form.action)) {
+    const m = form.action && form.action.match(/\/sessions\/([^/]+)\/(trash|restore|delete|cancel_processing|resume_processing|run_server_post)$/);
+    if (m) {
       e.preventDefault();
+      const sid = m[1];
+      const op = m[2];
+      // Optimistic: flip the row's processing_state in-memory and
+      // re-render BEFORE the fetch resolves, so the operator sees Cancel
+      // (or Run srv reappear) within ~1 frame instead of waiting for the
+      // polling tick. tickEvents() at the end reconciles real state, so
+      // a fetch reject naturally rolls the optimistic mutation back.
+      if (op === 'run_server_post' || op === 'cancel_processing') {
+        const target = (currentEvents || []).find(ev => ev && ev.session_id === sid);
+        if (target) {
+          // Cancel mirrors what the server settles on (state_processing
+          // emits 'canceled', not null). Setting null briefly would drop
+          // the chip until the next polling tick and then flash 'canceled'
+          // back in 5 s later; 'canceled' keeps the chip in place and lets
+          // 60_events_render's button branch swap Cancel → Run srv since
+          // its hide-condition only fires on {queued,processing}.
+          target.processing_state = (op === 'run_server_post') ? 'queued' : 'canceled';
+          _lastEvKey = null;
+          renderEvents(currentEvents);
+        }
+      }
       try {
         await fetch(form.action, { method: 'POST', body: new FormData(form), headers: { 'Accept': 'application/json' } });
       } catch (_) {}

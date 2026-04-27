@@ -1,5 +1,13 @@
 // === SSE live stream init ===
 
+  // Per-session, per-cam server_post progress driven by SSE events.
+  // Keyed by sid → { [cam]: { done, total } }. 60_events_render.js
+  // reads this map when rendering the S path-chip so the chip text
+  // tracks decode progress live instead of waiting for the next
+  // /events tick. Cleared on server_post_done regardless of reason —
+  // polling refills the row's authoritative counts.
+  const serverPostProgress = new Map();
+
   function initLiveStream() {
     if (!window.EventSource) return;
     const es = new EventSource('/stream');
@@ -57,6 +65,57 @@
         if (typeof tickEvents === 'function') {
           _lastEvKey = null;
           tickEvents();
+        }
+      } catch (_) {}
+    });
+    es.addEventListener('server_post_progress', (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        const sid = data.sid;
+        if (!sid) return;
+        let entry = serverPostProgress.get(sid);
+        if (!entry) {
+          entry = {};
+          serverPostProgress.set(sid, entry);
+        }
+        entry[data.cam] = {
+          done: Number(data.frames_done || 0),
+          // Server can ship null when probe_frame_count returned None;
+          // the renderer falls back to indeterminate "n decoded" then.
+          total: data.frames_total != null ? Number(data.frames_total) : null,
+        };
+        // Bust the row diff cache and re-render so the new progress
+        // snapshot lands in the chip. Backend throttles to 30 frames
+        // (≈1 Hz per cam) so dual-cam tops out at ~2 Hz here — well
+        // within DOM-render budget; no client-side throttle needed.
+        _lastEvKey = null;
+        if (typeof currentEvents !== 'undefined' && currentEvents
+            && typeof renderEvents === 'function') {
+          renderEvents(currentEvents);
+        }
+      } catch (_) {}
+    });
+    es.addEventListener('server_post_done', (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        const sid = data.sid;
+        if (!sid) return;
+        // Drop the entire sid entry — both cams' progress snapshots
+        // are gone. tickEvents() below refills n_ball_frames_by_path
+        // with the post-completion counts so the chip seamlessly
+        // transitions from `S|13/240·…` to the stable `S|40·27`.
+        serverPostProgress.delete(sid);
+        _lastEvKey = null;
+        if (typeof tickEvents === 'function') tickEvents();
+        // Celebrate success only; canceled / error dismiss silently
+        // since the chip-state change (queued/processing → null) is
+        // already self-explanatory.
+        if (data.reason === 'ok') {
+          const row = document.querySelector(`.event-item[data-sid="${sid}"]`);
+          if (row) {
+            row.classList.add('flash-done');
+            setTimeout(() => row.classList.remove('flash-done'), 700);
+          }
         }
       } catch (_) {}
     });

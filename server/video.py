@@ -83,3 +83,34 @@ def count_frames(video_path: Path) -> int:
         return n
     finally:
         container.close()
+
+
+def probe_frame_count(video_path: Path) -> int | None:
+    """Estimate frame count from container metadata without decoding any
+    samples — used to seed UX progress bars where ±1-2 frames of error is
+    irrelevant. Returns None when metadata is missing (rare but possible
+    on some MOV variants); callers should fall back to indeterminate
+    progress in that case.
+
+    Cheap: opens the container, reads stream headers, closes. Avoid
+    `count_frames` for this — it's a full second decode pass."""
+    try:
+        container = av.open(str(video_path))
+    except Exception as e:
+        logger.warning("probe_frame_count failed for %s: %s", video_path, e)
+        return None
+    try:
+        stream = container.streams.video[0]
+        duration = stream.duration
+        time_base = stream.time_base
+        rate = stream.average_rate or stream.base_rate
+        if duration is None or time_base is None or rate is None or rate == 0:
+            return None
+        seconds = float(duration * time_base)
+        n = int(round(seconds * float(rate)))
+        return n if n > 0 else None
+    except Exception as e:
+        logger.warning("probe_frame_count metadata read failed for %s: %s", video_path, e)
+        return None
+    finally:
+        container.close()

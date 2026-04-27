@@ -15,6 +15,22 @@
   // buttons jumped whenever the tick arrived even if nothing changed.
   const _eventRowCache = new Map(); // sid -> { el, key }
 
+  function _eventRowClasses(e, existingClassName = '') {
+    // Drives the row-level visual treatment (e.g. orange pulse while a
+    // server_post job is queued/processing). The Phase 4 SSE listener
+    // also adds a transient .flash-done class for ~700 ms on success;
+    // preserve it across re-renders so a row diff that lands mid-flash
+    // doesn't strip the class and abort the animation.
+    const cls = ['event-item'];
+    if (e.processing_state === 'queued' || e.processing_state === 'processing') {
+      cls.push('processing');
+    }
+    if (existingClassName && existingClassName.indexOf('flash-done') !== -1) {
+      cls.push('flash-done');
+    }
+    return cls.join(' ');
+  }
+
   function _eventRowKey(e) {
     // Must cover every field rendered in the row. Missing a field =
     // stuck row. n_ball_frames_by_path is reduced to a compact string
@@ -25,6 +41,14 @@
       return p + ':' + Object.keys(cams).sort().map(c => c + '=' + cams[c]).join(',');
     }).join('|');
     const ps = e.path_status || {};
+    // Server-post in-flight snapshot. Must be part of the diff key,
+    // otherwise SSE-driven progress updates won't trigger a row
+    // re-render — busting `_lastEvKey` only forces a global walk; the
+    // per-row key still has to differ for the row's innerHTML to swap.
+    const sp = (typeof serverPostProgress !== 'undefined'
+                && serverPostProgress.has(e.session_id))
+      ? JSON.stringify(serverPostProgress.get(e.session_id))
+      : null;
     return JSON.stringify({
       s: e.status,
       pl: ps.live || '-', ps: ps.server_post || '-',
@@ -36,6 +60,7 @@
       pr: e.processing_state || '-',
       st: e.server_post_ts || null,
       b: currentEventsBucket,
+      sp,
     });
   }
 
@@ -53,9 +78,38 @@
       .map(([path, label]) => {
         const status = pathStatus[path] || '-';
         const counts = pathCounts[path] || {};
-        const total = Object.values(counts).reduce((a, v) => a + Number(v || 0), 0);
+        // Per-cam in fixed A·B order — see render_dashboard_events.py
+        // for the rationale. Must stay in sync with the SSR path so a
+        // page reload doesn't shift between two formats.
         const cls = status === 'done' ? ' on' : status === 'error' ? ' err' : '';
-        const countHtml = total > 0 ? `<span class="pc">${total}</span>` : '';
+
+        // Server_post in-flight: replace the stable post-completion
+        // counts with a live `done/total · done/total` so the chip
+        // ticks during the 8-20 s decode. Falls back to bare `done`
+        // (no slash) when probe_frame_count returned null. Once
+        // server_post_done fires, the entry is dropped from the map
+        // and we fall through to the stable-counts branch below.
+        if (path === 'server_post'
+            && typeof serverPostProgress !== 'undefined'
+            && serverPostProgress.has(sid)) {
+          const prog = serverPostProgress.get(sid);
+          const fmt = (camKey) => {
+            const p = prog[camKey];
+            if (!p) return '—';
+            return p.total ? `${p.done}/${p.total}` : `${p.done}`;
+          };
+          const countHtml = `<span class="pc">${fmt('A')}·${fmt('B')}</span>`;
+          const tip = `${pathTitles[path]} · in progress`;
+          return `<span class="path-chip${cls}" title="${esc(tip)}">${label}${countHtml}</span>`;
+        }
+
+        const hasCounts = Object.keys(counts).length > 0;
+        let countHtml = '';
+        if (hasCounts) {
+          const aStr = ('A' in counts) ? String(Number(counts.A || 0)) : '—';
+          const bStr = ('B' in counts) ? String(Number(counts.B || 0)) : '—';
+          countHtml = `<span class="pc">${aStr}·${bStr}</span>`;
+        }
         const detail = Object.keys(counts).sort().map(c => `${c}:${counts[c]}`).join(', ');
         const title = detail ? `${pathTitles[path]} · ${detail}` : pathTitles[path];
         return `<span class="path-chip${cls}" title="${esc(title)}">${label}${countHtml}</span>`;
@@ -157,7 +211,7 @@
       let entry = _eventRowCache.get(sid);
       if (!entry) {
         const el = document.createElement('div');
-        el.className = 'event-item';
+        el.className = _eventRowClasses(e);
         el.dataset.sid = sid;
         el.innerHTML = _eventRowHtml(e);
         eventsBox.appendChild(el);
@@ -167,7 +221,10 @@
         // Preserve the live checkbox state across re-render so a user
         // mid-click isn't reset by an events tick. innerHTML swap is
         // safe: the delegated change handler (40_traj_handlers.js)
-        // rebinds via event delegation.
+        // rebinds via event delegation. Pass the current className so
+        // _eventRowClasses can preserve transient SSE-driven classes
+        // like .flash-done that aren't derived from event data.
+        entry.el.className = _eventRowClasses(e, entry.el.className);
         entry.el.innerHTML = _eventRowHtml(e);
         entry.key = key;
       }

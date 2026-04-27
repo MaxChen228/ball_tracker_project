@@ -29,14 +29,24 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
         def _path_chip(path: str, label: str) -> str:
             status = path_status.get(path, "-")
             counts = path_counts.get(path) or {}
-            total = sum(int(v) for v in counts.values())
+            # Per-cam values in fixed A·B order so the chip width is
+            # stable across rows and one-cam vs two-cam sessions don't
+            # silently merge into a single sum. Aligns with viewer cam
+            # cards which have always shown per-cam stats; the previous
+            # cross-cam sum here meant "L|67" was ambiguous between
+            # "A=67,B=0" (broken pairing) and "A=33,B=34" (healthy).
             if status == "done":
                 cls = " on"
             elif status == "error":
                 cls = " err"
             else:
                 cls = ""
-            count_html = f'<span class="pc">{total}</span>' if total > 0 else ""
+            if counts:
+                a_str = str(int(counts["A"])) if "A" in counts else "—"
+                b_str = str(int(counts["B"])) if "B" in counts else "—"
+                count_html = f'<span class="pc">{a_str}·{b_str}</span>'
+            else:
+                count_html = ""
             title = path_chip_titles.get(path, path)
             if counts:
                 title += " · " + ", ".join(f"{c}:{n}" for c, n in sorted(counts.items()))
@@ -147,8 +157,11 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
                 f'<span class="chip error" title="{html.escape(tip)}">'
                 f'srv err: {html.escape(cams_label)}</span>'
             )
+        item_classes = "event-item"
+        if processing_state in {"queued", "processing"}:
+            item_classes += " processing"
         parts.append(
-            f'<div class="event-item">'
+            f'<div class="{item_classes}">'
             f"{toggle_html}"
             f'<a class="event-row" href="/viewer/{sid}">'
             f'<div class="event-head">'
