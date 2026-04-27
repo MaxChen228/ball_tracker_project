@@ -12,7 +12,9 @@ from __future__ import annotations
 import re
 
 from cam_view_ui import (
-    CAM_VIEW_CSS,
+    CAM_VIEW_BOX_CSS,
+    CAM_VIEW_CONTENT_CSS,
+    CAM_VIEW_FULL_CSS,
     CAM_VIEW_RUNTIME_JS,
     assert_cam_view_present,
     cam_view_runtime_self_check,
@@ -22,6 +24,45 @@ from cam_view_ui import (
 
 def test_runtime_self_check_passes():
     cam_view_runtime_self_check()
+
+
+def test_css_buckets_split_along_class_vs_attr_selector():
+    """Phase 3: every rule starting with `.cam-view` belongs in the BOX
+    bucket; every rule starting with `[data-cam-view]` belongs in the
+    CONTENT bucket. Viewer pulls only CONTENT (it has no .cam-view
+    class), so a leak in either direction silently breaks one of the
+    two consumer shapes."""
+    # BOX bucket: only `.cam-view ...` selectors. The aspect-ratio frame
+    # and absolute-positioned toolbar belong here — viewer doesn't want
+    # them.
+    assert ".cam-view {" in CAM_VIEW_BOX_CSS
+    assert "aspect-ratio: 16 / 9" in CAM_VIEW_BOX_CSS
+    assert "[data-cam-view]" not in CAM_VIEW_BOX_CSS
+    # CONTENT bucket: only `[data-cam-view] ...` selectors. Pill / slider
+    # / badge styling lives here so viewer's vid-cell inherits without
+    # eating box rules.
+    assert "[data-cam-view] .cam-view-toolbar" in CAM_VIEW_CONTENT_CSS
+    assert "[data-cam-view] .cam-view-badge" in CAM_VIEW_CONTENT_CSS
+    # FULL = BOX + CONTENT, by construction.
+    assert CAM_VIEW_FULL_CSS == CAM_VIEW_BOX_CSS + CAM_VIEW_CONTENT_CSS
+
+
+def test_viewer_imports_only_content_bucket():
+    """Viewer imports CAM_VIEW_CONTENT_CSS by itself — pulling the BOX
+    bucket too would dump .cam-view aspect-ratio rules onto the page,
+    a footgun if anyone in viewer ever adds a .cam-view class."""
+    import ast
+    import inspect
+    import viewer_page
+    tree = ast.parse(inspect.getsource(viewer_page))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "cam_view_ui":
+            imported.update(alias.name for alias in node.names)
+    # Viewer must take the CONTENT bucket and nothing else CSS-shaped.
+    assert "CAM_VIEW_CONTENT_CSS" in imported
+    assert "CAM_VIEW_FULL_CSS" not in imported
+    assert "CAM_VIEW_BOX_CSS" not in imported
 
 
 def test_runtime_exposes_required_api():
@@ -142,7 +183,7 @@ def test_render_cam_view_extra_slot():
 def test_assert_cam_view_present_helper():
     """assert_cam_view_present should pass on runtime+render combo, fail on bare."""
     page = (
-        "<html><head><style>" + CAM_VIEW_CSS + "</style></head><body>"
+        "<html><head><style>" + CAM_VIEW_FULL_CSS + "</style></head><body>"
         + render_cam_view("A", preview_src="/x", layers=["plate"])
         + "<script>" + CAM_VIEW_RUNTIME_JS + "</script>"
         + "</body></html>"
@@ -192,10 +233,10 @@ def test_css_enables_pointer_events_when_click_handler_attached():
     """has-click is the gate for canvas pointer-events. CSS now selects
     via [data-cam-view] (the contract) so viewer's vid-cell — which
     skips the .cam-view class — still gets pointer-event handling."""
-    assert "[data-cam-view] canvas[data-cam-canvas]" in CAM_VIEW_CSS
-    assert "pointer-events: none" in CAM_VIEW_CSS
-    assert "[data-cam-view].has-click canvas[data-cam-canvas]" in CAM_VIEW_CSS
-    assert "pointer-events: auto" in CAM_VIEW_CSS
+    assert "[data-cam-view] canvas[data-cam-canvas]" in CAM_VIEW_FULL_CSS
+    assert "pointer-events: none" in CAM_VIEW_FULL_CSS
+    assert "[data-cam-view].has-click canvas[data-cam-canvas]" in CAM_VIEW_FULL_CSS
+    assert "pointer-events: auto" in CAM_VIEW_FULL_CSS
 
 
 def test_remount_preserves_layer_state():

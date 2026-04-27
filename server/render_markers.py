@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from cam_view_ui import CAM_VIEW_CSS, CAM_VIEW_RUNTIME_JS, render_cam_view
+from cam_view_ui import CAM_VIEW_FULL_CSS, CAM_VIEW_RUNTIME_JS, render_cam_view
 from render_shared import _CSS, _render_app_nav
 
 
@@ -872,7 +872,7 @@ def render_markers_html(
         "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
         "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
         "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
-        f"<style>{_CSS}{CAM_VIEW_CSS}{_MARKERS_CSS}</style>"
+        f"<style>{_CSS}{CAM_VIEW_FULL_CSS}{_MARKERS_CSS}</style>"
         "</head><body data-page=\"markers\">"
         f'{_render_app_nav("markers", devices, session, calibrations)}'
         '<main class="main-markers">'

@@ -15,7 +15,7 @@ adds a footprint layer) without forking the base.
 Usage on the Python side:
 
     from cam_view_ui import (
-        CAM_VIEW_CSS, CAM_VIEW_RUNTIME_JS, render_cam_view,
+        CAM_VIEW_FULL_CSS, CAM_VIEW_RUNTIME_JS, render_cam_view,
     )
 
     body = render_cam_view(
@@ -24,6 +24,15 @@ Usage on the Python side:
         layers=["plate", "axes"],
         default_opacity=70,
     )
+
+The CSS is split into two buckets so viewer (which carries
+`data-cam-view` but not `.cam-view`) can pull only the content rules:
+
+    from cam_view_ui import CAM_VIEW_BOX_CSS, CAM_VIEW_CONTENT_CSS
+
+`CAM_VIEW_FULL_CSS = CAM_VIEW_BOX_CSS + CAM_VIEW_CONTENT_CSS` is the
+convenience alias for callers that want both (dashboard / setup /
+markers).
 
 The rendered DOM exposes `[data-cam-view="A"]` containing `[data-cam-img]`
 (MJPEG <img>) + `[data-cam-canvas]` (overlay <canvas>) + a status badge
@@ -41,12 +50,20 @@ from render_compare import (
 )
 
 
-CAM_VIEW_CSS = """
-/* === Box / positioning model — applies only when caller opts in via
-   the `.cam-view` class. Dashboard / setup / markers wrap each cam in
-   a 16:9 box with the canvas absolute-positioned over an MJPEG <img>;
-   viewer skips the .cam-view class and arranges its own video + cell
-   layout, but still uses the data-cam-view attribute below. ============ */
+# Two CSS buckets, split along a single rule of thumb: every selector that
+# starts with `.cam-view` (the box class) goes in CAM_VIEW_BOX_CSS — those
+# rules only matter when a page wraps its cam in the runtime's 16:9 frame
+# (dashboard / setup / markers). Every selector that starts with
+# `[data-cam-view]` goes in CAM_VIEW_CONTENT_CSS — those rules describe
+# the toolbar / pill / slider / badge that should look the same regardless
+# of the wrapper. Viewer's vid-cell carries data-cam-view but no .cam-view
+# class, so it imports CAM_VIEW_CONTENT_CSS only and leaves the box rules
+# behind — no aspect-ratio override, no absolute-positioned toolbar fight.
+
+CAM_VIEW_BOX_CSS = """
+/* Box / positioning — only applies when the caller opts in by giving the
+   wrapper a `.cam-view` class. Dashboard / setup / markers do; viewer's
+   vid-cell intentionally does not. */
 
 .cam-view {
   position: relative;
@@ -101,10 +118,26 @@ CAM_VIEW_CSS = """
   pointer-events: none;
 }
 
-/* === Content styling — works regardless of `.cam-view` class. The
-   data-cam-view attribute is the contract; pages that want a different
-   container layout (viewer's vid-cell) get the same pill / badge /
-   slider styling for free. ============================================ */
+/* Inside the dashboard / setup / markers `.cam-view` box, override pill
+   colours to a dark-theme palette (yellow accent on near-black bg). */
+.cam-view .cv-layer {
+  border-color: rgba(255, 255, 255, 0.14);
+  color: rgba(248, 247, 244, 0.66);
+}
+.cam-view .cv-layer.on {
+  background: rgba(255, 200, 0, 0.18);
+  border-color: rgba(255, 200, 0, 0.55);
+  color: #FFE08A;
+}
+.cam-view .cv-opacity { color: #F8F7F4; }
+.cam-view .cv-opacity input[type=range] { accent-color: #FFD86A; }
+"""
+
+
+CAM_VIEW_CONTENT_CSS = """
+/* Content styling — works wherever the `data-cam-view` attribute lives.
+   Viewer imports this bucket on its own (no .cam-view box) so the toolbar
+   pills + badges still render with the shared styling. */
 
 [data-cam-view] canvas[data-cam-canvas] {
   pointer-events: none;
@@ -153,20 +186,6 @@ CAM_VIEW_CSS = """
   accent-color: var(--ink, #2A2520);
 }
 
-/* Inside the dashboard / setup / markers `.cam-view` box, override pill
-   colors to a dark-theme palette (yellow accent on near-black bg). */
-.cam-view .cv-layer {
-  border-color: rgba(255, 255, 255, 0.14);
-  color: rgba(248, 247, 244, 0.66);
-}
-.cam-view .cv-layer.on {
-  background: rgba(255, 200, 0, 0.18);
-  border-color: rgba(255, 200, 0, 0.55);
-  color: #FFE08A;
-}
-.cam-view .cv-opacity { color: #F8F7F4; }
-.cam-view .cv-opacity input[type=range] { accent-color: #FFD86A; }
-
 [data-cam-view] .cam-view-badge {
   padding: 5px 9px;
   border-radius: var(--r);
@@ -183,6 +202,12 @@ CAM_VIEW_CSS = """
 [data-cam-view] .cam-view-badge.status-uncal { border-color: rgba(255, 200, 0, 0.5); color: #FFD86A; }
 [data-cam-view] .cam-view-badge.rms { border-color: rgba(120, 200, 140, 0.45); color: #C4F0CD; }
 """
+
+
+# Convenience for callers that want both buckets — dashboard / setup /
+# markers all do, viewer doesn't. Pages should prefer the explicit pair
+# over this alias when they only need one bucket.
+CAM_VIEW_FULL_CSS = CAM_VIEW_BOX_CSS + CAM_VIEW_CONTENT_CSS
 
 
 _DRAW_AXES_JS = r"""
