@@ -248,6 +248,28 @@ device_ws = DeviceSocketManager()
 sse_hub = SSEHub()
 
 
+def _gated_time_synced(d: Any, expected_id: str | None, now: float) -> bool:
+    """Single source of truth for whether a cam currently counts as synced.
+    Both /status (`_build_device_status_rows`) and the SSE
+    `device_heartbeat` payload feed dashboard JS that lives off
+    `time_synced`; if they disagree the dashboard flickers as the two
+    sources fight every heartbeat. Gate is: cam reported sync_id+anchor,
+    anchor is fresh, and reported id matches the per-cam expected id (if
+    one is set). `expected_id is None` means no current trigger gating
+    that cam, so any valid anchor passes."""
+    if d is None:
+        return False
+    if not d.time_synced:
+        return False
+    if d.time_sync_id is None or d.time_sync_at is None:
+        return False
+    if now - d.time_sync_at > _TIME_SYNC_MAX_AGE_S:
+        return False
+    if expected_id is not None and d.time_sync_id != expected_id:
+        return False
+    return True
+
+
 def _build_device_status_rows(
     *,
     now: float | None = None,
@@ -274,11 +296,6 @@ def _build_device_status_rows(
         # even if iOS is still reporting an old sync_id from a prior
         # successful attempt.
         exp = expected.get(cam)
-        id_match = (
-            d is not None
-            and d.time_sync_id is not None
-            and (exp is None or d.time_sync_id == exp)
-        )
         devices.append(
             {
                 "camera_id": cam,
@@ -287,14 +304,7 @@ def _build_device_status_rows(
                     if d is not None
                     else (ws.last_seen_at if ws is not None else None)
                 ),
-                "time_synced": (
-                    bool(d is not None)
-                    and d.time_synced
-                    and d.time_sync_id is not None
-                    and d.time_sync_at is not None
-                    and now - d.time_sync_at <= _TIME_SYNC_MAX_AGE_S
-                    and id_match
-                ),
+                "time_synced": _gated_time_synced(d, exp, now),
                 "time_sync_id": (d.time_sync_id if d is not None else None),
                 "time_sync_age_s": (
                     None
@@ -341,6 +351,22 @@ def _arm_readiness(
     elif len(usable) >= 2:
         unsynced = [cam for cam in usable if cam not in synced]
         blockers.extend(f"{cam} not time-synced" for cam in unsynced)
+        if not unsynced:
+            # All cams have a fresh anchor that matches their per-cam
+            # expected id, but those expected ids may differ — that
+            # means each cam locked onto its own chirp event rather
+            # than the shared one mutual-sync was supposed to produce.
+            # Triangulation across mismatched anchors is meaningless,
+            # so block until both ids agree.
+            ids = {
+                str(d.get("time_sync_id"))
+                for d in devices
+                if d.get("camera_id") in usable
+                and d.get("time_synced")
+                and d.get("time_sync_id")
+            }
+            if len(ids) > 1:
+                blockers.append("time sync ids mismatch — re-run mutual sync")
     else:
         missing = [cam for cam in ("A", "B") if cam not in usable]
         if missing:
@@ -647,8 +673,17 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 # SSE: broadcast heartbeat-derived fields (battery, ws
                 # latency, last_seen) so the dashboard can update the
                 # Devices card without waiting for the 5 s /status fallback.
+                # `time_synced` MUST run through the same id_match gate
+                # as /status (`_gated_time_synced`); otherwise SSE flips
+                # the dashboard's cached cam.time_synced=true on every
+                # 1 Hz beat and the next /status tick flips it back to
+                # false, making the LED flicker for a cam whose reported
+                # id doesn't match the active expected id.
                 _ws_snap = device_ws.snapshot().get(camera_id)
                 _now = state._time_fn()
+                _expected = state.expected_sync_id_snapshot().get(camera_id)
+                _d_snapshot = state.device_snapshot(camera_id)
+                _gated = _gated_time_synced(_d_snapshot, _expected, _now)
                 await sse_hub.broadcast(
                     "device_heartbeat",
                     {
@@ -657,7 +692,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                         "battery_state": battery_state,
                         "ws_latency_ms": _ws_snap.last_latency_ms if _ws_snap is not None else None,
                         "last_seen_at": _ws_snap.last_seen_at if _ws_snap is not None else _now,
-                        "time_synced": (reported_sync_id is not None and reported_anchor is not None),
+                        "time_synced": _gated,
                         "time_sync_id": reported_sync_id,
                     },
                 )
