@@ -22,6 +22,14 @@ from render_scene_theme import (
     _INK_40,
     _PLATE_X,
     _PLATE_Y,
+    _STRIKE_ZONE_COLOR,
+    _STRIKE_ZONE_FILL_OPACITY,
+    _STRIKE_ZONE_LINE_WIDTH,
+    _STRIKE_ZONE_X_HALF_M,
+    _STRIKE_ZONE_Y_BACK_M,
+    _STRIKE_ZONE_Y_FRONT_M,
+    _STRIKE_ZONE_Z_BOTTOM_M,
+    _STRIKE_ZONE_Z_TOP_M,
     _SUB,
     _SURFACE,
     _WORLD_AXIS_LEN_M,
@@ -108,6 +116,64 @@ def _build_figure(scene: Scene):
             line=dict(color=_INK, width=3),
             hoverinfo="skip",
             showlegend=False,
+        )
+    )
+
+    # Strike zone — a rectangular prism above the plate. 12-edge wireframe
+    # plus a low-opacity Mesh3d fill so it reads as a volume rather than
+    # eight floating verts. Sits on the same scene as plate / cameras /
+    # rays so it appears in both the dashboard canvas and the per-session
+    # viewer with no extra wiring.
+    sx = _STRIKE_ZONE_X_HALF_M
+    syf = _STRIKE_ZONE_Y_FRONT_M
+    syb = _STRIKE_ZONE_Y_BACK_M
+    szb = _STRIKE_ZONE_Z_BOTTOM_M
+    szt = _STRIKE_ZONE_Z_TOP_M
+    # 8 corners, indexed bottom CCW (0-3) then top CCW (4-7):
+    _sz_corners = [
+        (-sx, syf, szb), (+sx, syf, szb), (+sx, syb, szb), (-sx, syb, szb),
+        (-sx, syf, szt), (+sx, syf, szt), (+sx, syb, szt), (-sx, syb, szt),
+    ]
+    _sz_edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),  # bottom rectangle
+        (4, 5), (5, 6), (6, 7), (7, 4),  # top rectangle
+        (0, 4), (1, 5), (2, 6), (3, 7),  # vertical struts
+    ]
+    sz_xs: list[float | None] = []
+    sz_ys: list[float | None] = []
+    sz_zs: list[float | None] = []
+    for i, j in _sz_edges:
+        sz_xs += [_sz_corners[i][0], _sz_corners[j][0], None]
+        sz_ys += [_sz_corners[i][1], _sz_corners[j][1], None]
+        sz_zs += [_sz_corners[i][2], _sz_corners[j][2], None]
+    traces.append(
+        go.Scatter3d(
+            x=sz_xs,
+            y=sz_ys,
+            z=sz_zs,
+            mode="lines",
+            line=dict(color=_STRIKE_ZONE_COLOR, width=_STRIKE_ZONE_LINE_WIDTH),
+            name="strike zone",
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    # Translucent solid: 6 faces, 12 triangles (i/j/k point into the
+    # 8-corner array above).
+    traces.append(
+        go.Mesh3d(
+            x=[c[0] for c in _sz_corners],
+            y=[c[1] for c in _sz_corners],
+            z=[c[2] for c in _sz_corners],
+            i=[0, 0, 4, 4, 0, 0, 1, 1, 0, 0, 3, 3],
+            j=[1, 2, 5, 6, 1, 5, 2, 6, 4, 3, 4, 7],
+            k=[2, 3, 6, 7, 5, 4, 6, 5, 3, 7, 7, 4],
+            color=_STRIKE_ZONE_COLOR,
+            opacity=_STRIKE_ZONE_FILL_OPACITY,
+            flatshading=True,
+            hoverinfo="skip",
+            showlegend=False,
+            name="strike zone fill",
         )
     )
 
