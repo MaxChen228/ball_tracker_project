@@ -547,15 +547,6 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     pointer-events:none; z-index:1; }}
   .plate-overlay-real polygon {{ fill:none; stroke:rgba(217,59,59,0.92);
     stroke-width:1.8; stroke-dasharray:8 5; stroke-linejoin:round; }}
-  /* .pp-cross retired in Phase 6 — the cam-view 'plate' layer draws
-     the principal-point cross. CSS kept as a no-op in case a stale
-     SSR snapshot still emits the element; can be deleted next cleanup. */
-  .pp-cross {{ display:none; position:absolute; width:14px; height:14px;
-    transform:translate(-50%, -50%); pointer-events:none; z-index:2; }}
-  .pp-cross::before, .pp-cross::after {{ content:""; position:absolute;
-    background:rgba(255,255,255,0.7); box-shadow:0 0 2px rgba(0,0,0,0.85); }}
-  .pp-cross::before {{ left:0; right:0; top:50%; height:1px; transform:translateY(-0.5px); }}
-  .pp-cross::after {{ top:0; bottom:0; left:50%; width:1px; transform:translateX(-0.5px); }}
   .vid-frame.empty {{ background:var(--bg); border:1px dashed var(--border-base);
     color:var(--sub); font-family:var(--mono); font-size:11px;
     letter-spacing:0.12em; text-transform:uppercase; border-radius:var(--r); }}
@@ -1391,8 +1382,16 @@ def _viewer_js() -> str:
     const px = pxArr[idx], py = pyArr[idx];
     if (px == null || py == null) return;
     const x = px * sx, y = py * sy;
+    // 1 px dark stroke ring on the outer white circle so the dot stays
+    // legible against bright video frames (canvas opacity defaults to
+    // 65% so the inner white alpha multiplies down to ~0.585). Stroke
+    // is opaque black at 50% alpha — adds contrast without darkening
+    // the ball when the bg is already dark.
     ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
     ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.5)";
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.stroke();
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
   }}
