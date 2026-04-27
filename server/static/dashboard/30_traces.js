@@ -1,22 +1,12 @@
 // === trace builders ===
-  // The strike zone is now rendered server-side in render_scene._build_figure
-  // so it appears in the dashboard canvas, the per-session viewer, and any
-  // other consumer of the shared scene. Visibility is governed by the
-  // strike-zone toggle (defaults ON, persisted in localStorage).
-  const STRIKE_ZONE_VISIBLE_KEY = 'ball_tracker_strike_zone_visible';
-  function strikeZoneVisible() {
-    try {
-      const raw = localStorage.getItem(STRIKE_ZONE_VISIBLE_KEY);
-      if (raw === null) return true;
-      return raw === '1';
-    } catch (_) { return true; }
-  }
-  function setStrikeZoneVisible(on) {
-    try { localStorage.setItem(STRIKE_ZONE_VISIBLE_KEY, on ? '1' : '0'); } catch (_) {}
-  }
-  function isStrikeZoneTrace(t) {
-    return !!(t && t.meta && t.meta.feature === 'strike_zone');
-  }
+  // The strike zone is rendered server-side in render_scene._build_figure
+  // so it appears in dashboard, viewer, and any other shared-scene
+  // consumer. Visibility helpers come from window.BallTrackerOverlays
+  // (server/overlays_ui.py) — keep dashboard + viewer in lock-step.
+  const _OVL = window.BallTrackerOverlays;
+  const strikeZoneVisible = _OVL.strikeZoneVisible;
+  const setStrikeZoneVisible = _OVL.setStrikeZoneVisible;
+  const isStrikeZoneTrace = _OVL.isStrikeZoneTrace;
 
   function inspectTracesFor(sid, result, color) {
     const raw = result.points || [];

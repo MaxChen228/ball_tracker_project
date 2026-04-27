@@ -12,6 +12,7 @@ def render_dashboard_html(
     intrinsics_html: str,
     events_html: str,
     scene_div: str,
+    overlays_js: str,
     dashboard_js: str,
     trash_count: int,
 ) -> str:
@@ -104,6 +105,7 @@ def render_dashboard_html(
         '</div>'
         "</section>"
         "</div>"
+        f"<script>{overlays_js}</script>"
         f"<script>{dashboard_js}</script>"
         "</body></html>"
     )
