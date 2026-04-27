@@ -237,7 +237,9 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         # Throttle to every 30 frames. Server-side decode runs at
         # ~30 fps wall-clock, so this fires ≈ 1 Hz — fast enough for a
         # visibly moving bar, slow enough to not pressure the SSE pipe.
-        if idx % 30 != 0:
+        # Skip idx=0 because the priming broadcast below already shipped
+        # frames_done=0 with the same payload before detect_pitch ran.
+        if idx == 0 or idx % 30 != 0:
             return
         fut = asyncio.run_coroutine_threadsafe(
             sse_hub.broadcast(
