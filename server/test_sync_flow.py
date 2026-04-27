@@ -84,6 +84,58 @@ def test_sync_claim_reuses_live_intent_then_rolls_after_window(tmp_path, monkeyp
     assert third.id != first.id
 
 
+def test_flush_live_frames_synthesises_pitch_with_calibration(tmp_path, monkeypatch):
+    """When a cam streams `live` frames over WS but its /pitch upload
+    never lands, session-end calls `flush_live_frames_for_session` to
+    synthesise a minimal pitch from the buffered frames. That pitch
+    MUST carry the cam's current calibration + sync_id, otherwise the
+    viewer's persisted pitch JSON has intrinsics=None and renders the
+    misleading "Cam X missing calibration" red banner even though the
+    operator had calibration on file the whole time."""
+    import main
+    from schemas import (
+        CalibrationSnapshot, FramePayload, IntrinsicsPayload,
+    )
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+
+    cal_b = CalibrationSnapshot(
+        camera_id="B",
+        intrinsics=IntrinsicsPayload(fx=1500.0, fy=1500.0, cx=960.0, cy=540.0),
+        homography=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        image_width_px=1920,
+        image_height_px=1080,
+    )
+    main.state.set_calibration(cal_b)
+    main.state.heartbeat(
+        "B", time_synced=True,
+        time_sync_id="sy_abcd1234", sync_anchor_timestamp_s=42.0,
+    )
+
+    sess = main.state.arm_session()
+    sid = sess.id
+    # Seed one buffered live frame for B so flush has work to do.
+    main.state.ingest_live_frame(
+        "B", sid,
+        FramePayload(
+            frame_index=0, timestamp_s=42.1, ball_detected=True,
+            candidates=[{"px": 100.0, "py": 200.0, "area": 50,
+                         "area_score": 1.0}],
+        ),
+    )
+    main.state.flush_live_frames_for_session(sid)
+
+    pitch = main.state.pitches.get(("B", sid))
+    assert pitch is not None
+    assert pitch.intrinsics is not None, "flush must fill intrinsics"
+    assert pitch.intrinsics.fx == 1500.0
+    assert pitch.homography is not None
+    assert len(pitch.homography) == 9
+    assert pitch.image_width_px == 1920
+    assert pitch.image_height_px == 1080
+    assert pitch.sync_id == "sy_abcd1234"
+    assert pitch.sync_anchor_timestamp_s == 42.0
+
+
 def test_quick_chirp_drops_prior_anchor_for_dispatched_cams(tmp_path, monkeypatch):
     """A successful sync from earlier must not survive a fresh
     /sync/trigger: until the phone reports a new anchor matching the
