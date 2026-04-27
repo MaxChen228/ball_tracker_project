@@ -84,6 +84,70 @@ def test_sync_claim_reuses_live_intent_then_rolls_after_window(tmp_path, monkeyp
     assert third.id != first.id
 
 
+def test_quick_chirp_drops_prior_anchor_for_dispatched_cams(tmp_path, monkeypatch):
+    """A successful sync from earlier must not survive a fresh
+    /sync/trigger: until the phone reports a new anchor matching the
+    new expected id, the cam reads as not-synced. Prevents the case
+    where one cam misses the chirp and silently sails through readiness
+    on a stale anchor while the peer locks onto the new one."""
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    main.state.heartbeat(
+        "A", time_synced=True,
+        time_sync_id="sy_old_a", sync_anchor_timestamp_s=10.0,
+    )
+    main.state.heartbeat(
+        "B", time_synced=True,
+        time_sync_id="sy_old_b", sync_anchor_timestamp_s=20.0,
+    )
+    dev_a_before = main.state.device_snapshot("A")
+    assert dev_a_before is not None
+    assert dev_a_before.time_synced is True
+    assert dev_a_before.time_sync_id == "sy_old_a"
+
+    dispatched = main.state.trigger_sync_command(None)
+    assert dispatched == ["A", "B"]
+
+    for cam in ("A", "B"):
+        snap = main.state.device_snapshot(cam)
+        assert snap is not None
+        assert snap.time_synced is False, f"{cam} still claims synced"
+        assert snap.time_sync_id is None, f"{cam} still carries id"
+        assert snap.sync_anchor_timestamp_s is None, f"{cam} still carries anchor"
+
+
+def test_arm_readiness_blocks_mismatched_sync_ids(tmp_path, monkeypatch):
+    """Both cams pass per-cam id_match (each echoed its own expected id)
+    but the two ids differ — that means each cam locked onto its own
+    chirp event. Triangulation across mismatched anchors is meaningless,
+    so readiness must surface a blocker."""
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    # Pretend both cams are calibrated.
+    monkeypatch.setattr(
+        main.state, "calibrations", lambda: {"A": object(), "B": object()},
+    )
+    main.state.heartbeat(
+        "A", time_synced=True,
+        time_sync_id="sy_first", sync_anchor_timestamp_s=10.0,
+    )
+    main.state.heartbeat(
+        "B", time_synced=True,
+        time_sync_id="sy_second", sync_anchor_timestamp_s=20.0,
+    )
+    # Set per-cam expected ids matching each cam's own report so both
+    # pass per-cam id_match — only the pair-check should trip.
+    main.state.set_expected_sync_id(["A"], "sy_first")
+    main.state.set_expected_sync_id(["B"], "sy_second")
+
+    readiness = main._arm_readiness()
+    assert readiness["mode"] == "stereo"
+    assert readiness["ready"] is False
+    assert any(
+        "sync ids mismatch" in b for b in readiness["blockers"]
+    ), readiness["blockers"]
+
+
 def test_paired_payloads_with_mismatched_sync_ids_fail_before_triangulation(tmp_path, monkeypatch):
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))

@@ -68,8 +68,15 @@ final class CameraCommandRouter {
         case "sync_command":
             if let cmd = message["command"] as? String, cmd == "start" {
                 DispatchQueue.main.async {
-                    guard self.deps.getState() == .standby,
-                          let syncId = message["sync_command_id"] as? String else { return }
+                    guard let syncId = message["sync_command_id"] as? String else { return }
+                    let state = self.deps.getState()
+                    // Accept new sync_command from .standby OR from
+                    // .timeSyncWaiting (operator re-fired Quick chirp
+                    // before the prior 15 s timeout expired). beginTimeSync
+                    // cancels the old timeout work and resets pending+anchor
+                    // so the swap is clean. Reject during .recording /
+                    // .mutualSyncing — those states own the audio pipeline.
+                    guard state == .standby || state == .timeSyncWaiting else { return }
                     self.deps.startTimeSync(syncId)
                 }
             }

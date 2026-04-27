@@ -1350,7 +1350,18 @@ class State:
                 # Skip every online camera — every online cam during an
                 # armed session is considered "recording" in this rig.
                 targets = []
-            return self._sync.dispatch_sync_commands_locked(now, targets)
+            dispatched = self._sync.dispatch_sync_commands_locked(now, targets)
+            # Force-drop any stale anchor on the targeted cams. Without
+            # this step the phone keeps reporting its previous successful
+            # anchor on every heartbeat until (and unless) the new chirp
+            # is detected, so a cam that misses the chirp silently passes
+            # readiness with an old id while its peer locked onto the new
+            # one. Cleared cams re-flip to time_synced=True only after
+            # iOS heartbeats with the new id (which `_gated_time_synced`
+            # then matches against the freshly-set expected id).
+            for cam in dispatched:
+                self._device_registry.clear_time_sync(cam)
+            return dispatched
 
     def consume_sync_command(self, camera_id: str) -> tuple[str | None, str | None]:
         """Atomically pop + return a pending time-sync command for the
