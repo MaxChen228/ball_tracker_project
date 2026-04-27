@@ -574,12 +574,22 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .vid-media {{ position:absolute; inset:0; margin:auto;
     max-width:100%; max-height:100%; background:#000;
     border-radius:var(--r); overflow:hidden; }}
-  .vid-media video {{ display:block; width:100%; height:100%; object-fit:cover; }}
+  /* `contain` (was `cover`) keeps the video's pixel grid aligned with
+     the canvas overlay — the cam-view's projection assumes the canvas
+     covers the same image region as the video. `cover` would crop the
+     video if calibration aspect ≠ video aspect (e.g. 4:3 calibration
+     vs 16:9 video), making the projected dot float off the real ball.
+     Letterbox is acceptable because the container already locks
+     aspect-ratio to the calibration dims, so any mismatch is rare. */
+  .vid-media video {{ display:block; width:100%; height:100%; object-fit:contain; }}
   .plate-overlay-real {{ position:absolute; inset:0; width:100%; height:100%;
     pointer-events:none; z-index:1; }}
   .plate-overlay-real polygon {{ fill:none; stroke:rgba(217,59,59,0.92);
     stroke-width:1.8; stroke-dasharray:8 5; stroke-linejoin:round; }}
-  .pp-cross {{ position:absolute; width:14px; height:14px;
+  /* .pp-cross retired in Phase 6 — the cam-view 'plate' layer draws
+     the principal-point cross. CSS kept as a no-op in case a stale
+     SSR snapshot still emits the element; can be deleted next cleanup. */
+  .pp-cross {{ display:none; position:absolute; width:14px; height:14px;
     transform:translate(-50%, -50%); pointer-events:none; z-index:2; }}
   .pp-cross::before, .pp-cross::after {{ content:""; position:absolute;
     background:rgba(255,255,255,0.7); box-shadow:0 0 2px rgba(0,0,0,0.85); }}

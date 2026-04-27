@@ -40,19 +40,12 @@ def video_cell_html(
             media_style = f' style="aspect-ratio:{image_width_px}/{image_height_px}"'
         else:
             media_style = ""
+        # Phase 6 retired the HTML `pp-cross`: the cam-view runtime's
+        # `plate` layer already draws a principal-point cross on the
+        # canvas overlay, and rendering both produced two crosses at
+        # the same pixel.
+        del cx, cy
         pp_html = ""
-        if (
-            cx is not None
-            and cy is not None
-            and image_width_px
-            and image_height_px
-        ):
-            pct_x = cx / image_width_px * 100.0
-            pct_y = cy / image_height_px * 100.0
-            pp_html = (
-                f'<div class="pp-cross" '
-                f'style="left:{pct_x:.3f}%;top:{pct_y:.3f}%"></div>'
-            )
         # Phase 6 merged pane: real video as base, virtual reprojection
         # painted into the overlay <canvas> by BallTrackerCamView. Plate
         # outline + per-frame detection blob (registered by viewer JS as
