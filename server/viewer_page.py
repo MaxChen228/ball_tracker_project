@@ -220,12 +220,6 @@ def render_viewer_html(
         <div class="divider" aria-hidden="true"></div>
         <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
         <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
-        <div class="divider" aria-hidden="true"></div>
-        <button id="fit-toggle" type="button" aria-pressed="false" title="Fit a ballistic trajectory (gravity = 9.81 m/s² pinned) through the filtered points and show launch kinematics.">Fit</button>
-        <span class="fit-source-group" role="group" aria-label="Fit source pipeline">
-          <button id="fit-src-svr" class="fit-src-pill" type="button" data-src="server_post" aria-pressed="true" title="Fit using server_post triangulated points">svr</button>
-          <button id="fit-src-live" class="fit-src-pill" type="button" data-src="live" aria-pressed="false" title="Fit using live triangulated points">live</button>
-        </span>
       </div>
       <div id="fit-info" class="fit-info" hidden aria-live="polite"></div>
       <div id="speed-bars" class="speed-bars" hidden aria-label="Per-segment speed"></div>
@@ -266,6 +260,16 @@ def render_viewer_html(
               <span id="fitres-filter-readout" class="readout">off</span>
             </span>
             <span class="layer-divider" aria-hidden="true"></span>
+            <span class="layer-group" data-layer="fit" title="Overlay a ballistic fit curve (per-axis quadratic, gravity free) on the filtered points. Same overlay flag as the dashboard.">
+              <label class="layer-checkbox">
+                <input type="checkbox" id="fit-toggle">
+                <span class="layer-name">Fit</span>
+              </label>
+              <span class="layer-source-group" role="group" aria-label="Fit source pipeline">
+                <button id="fit-src-svr" class="fit-src-pill" type="button" data-src="server_post" aria-pressed="true" title="Fit using server_post triangulated points">svr</button>
+                <button id="fit-src-live" class="fit-src-pill" type="button" data-src="live" aria-pressed="false" title="Fit using live triangulated points">live</button>
+              </span>
+            </span>
             <span class="layer-group" data-layer="speed" title="Colour each trajectory segment by instantaneous speed (m/s). Adds a colorbar and a per-segment 2D bar chart below the scene.">
               <label class="layer-checkbox">
                 <input type="checkbox" id="speed-toggle">
@@ -691,12 +695,14 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .scene-col .scene-toolbar button[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); font-weight:500; }}
   .scene-col .scene-toolbar .reset {{ font-size:14px; padding:4px 12px; }}
   .scene-col .scene-toolbar .divider {{ width:1px; background:var(--border-base); align-self:stretch; }}
-  .scene-col .scene-toolbar .fit-source-group {{ display:inline-flex; align-items:stretch;
-    border-left:1px solid var(--border-base); }}
-  .scene-col .scene-toolbar .fit-src-pill {{ padding:5px 8px; font-size:10px;
-    text-transform:lowercase; letter-spacing:0.05em; }}
-  .scene-col .scene-toolbar .fit-src-pill + .fit-src-pill {{ border-left:1px solid var(--border-base); }}
-  .scene-col .scene-toolbar .fit-src-pill[disabled] {{ opacity:0.35; cursor:not-allowed; }}
+  .layer-source-group {{ display:inline-flex; align-items:center; margin-left:6px;
+    border:1px solid var(--border-base); border-radius:var(--r); overflow:hidden; }}
+  .fit-src-pill {{ padding:2px 6px; font-family:var(--mono); font-size:9px;
+    letter-spacing:0.06em; background:var(--surface); border:0; color:var(--sub);
+    cursor:pointer; line-height:1.4; }}
+  .fit-src-pill[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); }}
+  .fit-src-pill + .fit-src-pill {{ border-left:1px solid var(--border-base); }}
+  .fit-src-pill[disabled] {{ opacity:0.35; cursor:not-allowed; }}
   .scene-col .fit-info {{ position:absolute; top:46px; right:var(--s-3); z-index:4;
     background:var(--surface); border:1px solid var(--border-base); border-radius:var(--r);
     padding:8px 12px; font:inherit; font-size:11px; line-height:1.55; color:var(--ink);
@@ -711,7 +717,11 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .scene-col .fit-info .fit-warn {{ color:#A7372A; font-size:10px; margin-top:6px; }}
   .scene-col .speed-bars {{ position:absolute; left:var(--s-3); right:var(--s-3); bottom:var(--s-3);
     height:120px; z-index:3; background:var(--surface); border:1px solid var(--border-base);
-    border-radius:var(--r); padding:4px 8px; pointer-events:auto; }}
+    border-radius:var(--r); padding:4px 8px; pointer-events:none; }}
+  /* Re-enable hover/click ONLY for the Plotly chart inside, so the
+     bottom 120 px of the 3D scene still accepts orbit drags everywhere
+     except directly over a bar. */
+  .scene-col .speed-bars > .js-plotly-plot {{ pointer-events:auto; }}
   .scene-col .speed-bars[hidden] {{ display:none; }}
   .hint-btn {{ font:inherit; font-size:12px; padding:0; width:26px; height:26px; border:1px solid var(--border-base);
     background:var(--surface); color:var(--sub); border-radius:50%; cursor:pointer; margin-left:auto;
@@ -1264,7 +1274,6 @@ def _viewer_js() -> str:
     // top of the plain coloured line, but BEFORE the fit overlay so the
     // fit dashed curve stays the visual focus when both are on.
     if (_OVL.speedVisible()) {{
-      // Source: prefer server_post when available; else live; else SCENE.triangulated
       const svrPts = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
         ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
       const livePts = TRAJ_BY_PATH.live || [];
@@ -1272,11 +1281,26 @@ def _viewer_js() -> str:
         {{ pts: filteredTrajectory(svrPts, cutoff), tag: " · svr", layerOn: isLayerVisible("traj", "server_post") }},
         {{ pts: filteredTrajectory(livePts, cutoff), tag: " · live", layerOn: isLayerVisible("traj", "live") }},
       ];
+      // Global vmax across all visible buckets so segments are comparable
+      // and we only emit one colorbar (stacked colorbars are unreadable).
+      let vmaxGlobal = 0;
       for (const b of buckets) {{
         if (!b.layerOn || b.pts.length < 2) continue;
-        for (const tr of _OVL.speedTraces(b.pts, {{cutoff: Infinity, tag: b.tag}})) {{
+        for (const v of _OVL.computeSpeeds(b.pts)) {{
+          if (Number.isFinite(v) && v > vmaxGlobal) vmaxGlobal = v;
+        }}
+      }}
+      let firstBucket = true;
+      for (const b of buckets) {{
+        if (!b.layerOn || b.pts.length < 2) continue;
+        for (const tr of _OVL.speedTraces(b.pts, {{
+          tag: b.tag,
+          vmaxOverride: vmaxGlobal,
+          includeColorbar: firstBucket,
+        }})) {{
           out.push(tr);
         }}
+        firstBucket = false;
       }}
     }}
     // --- Fit overlay (drawn on top of regular trajectories) ---
@@ -1899,14 +1923,25 @@ def _viewer_js() -> str:
       return;
     }}
     const speeds = _OVL.computeSpeeds(pick);
-    const taus = pick.slice(1).map(p => p.t_rel_s - pick[0].t_rel_s);
-    const vmax = speeds.reduce((a, b) => Math.max(a, b), 0);
-    const colors = speeds.map(v => _OVL.viridisColor(vmax > 0 ? v / vmax : 0));
+    // Bar x = segment MIDPOINT τ (not segment-end) so v reads as
+    // "instantaneous speed during this interval" centred where it lives.
+    const t0 = pick[0].t_rel_s;
+    const taus = [];
+    for (let i = 0; i < speeds.length; i++) {{
+      taus.push(((pick[i].t_rel_s + pick[i + 1].t_rel_s) * 0.5) - t0);
+    }}
+    const validSpeeds = speeds.filter(v => v !== null && Number.isFinite(v));
+    const vmax = validSpeeds.reduce((a, b) => Math.max(a, b), 0);
+    const colors = speeds.map(v => {{
+      if (v === null || !Number.isFinite(v)) return "#9C9690";
+      return _OVL.viridisColor(vmax > 0 ? v / vmax : 0);
+    }});
+    const ys = speeds.map(v => (v === null || !Number.isFinite(v)) ? 0 : v);
     const trace = {{
-      type: "bar", x: taus, y: speeds,
+      type: "bar", x: taus, y: ys,
       marker: {{ color: colors }},
       hovertemplate: `t=%{{x:.3f}}s<br>v=%{{y:.2f}} m/s · %{{customdata:.1f}} km/h<extra></extra>`,
-      customdata: speeds.map(v => v * 3.6),
+      customdata: ys.map(v => v * 3.6),
     }};
     const layout = {{
       margin: {{l: 36, r: 8, t: 4, b: 22}},
@@ -1938,11 +1973,9 @@ def _viewer_js() -> str:
   // --- Fit overlay toggle (was modal "fit mode" — now a layer) ---
   const fitToggleBtn = document.getElementById("fit-toggle");
   if (fitToggleBtn) {{
-    fitToggleBtn.setAttribute("aria-pressed", _OVL.fitVisible() ? "true" : "false");
-    fitToggleBtn.addEventListener("click", () => {{
-      const next = !_OVL.fitVisible();
-      _OVL.setFitVisible(next);
-      fitToggleBtn.setAttribute("aria-pressed", next ? "true" : "false");
+    fitToggleBtn.checked = _OVL.fitVisible();
+    fitToggleBtn.addEventListener("change", () => {{
+      _OVL.setFitVisible(fitToggleBtn.checked);
       scheduleSceneDraw();
     }});
   }}
