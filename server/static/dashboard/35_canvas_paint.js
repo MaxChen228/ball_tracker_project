@@ -51,6 +51,38 @@
       extraTraces.push(...trajTracesFor(sid, result, trajColorFor(sid)));
     }
     extraTraces.push(...liveTraces());
+    // Fit overlay — shared math with viewer via window.BallTrackerOverlays.
+    // Source picks which point bucket feeds the fit; mirroring the viewer's
+    // semantics so a user toggling on either page sees the same result.
+    if (_OVL.fitVisible()) {
+      const src = _OVL.fitSource();
+      if (src === 'live' && currentLiveSession && currentLiveSession.session_id) {
+        const livePts = (livePointStore.get(currentLiveSession.session_id) || [])
+          .map(p => ({ x: p.x, y: p.y, z: p.z, t_rel_s: p.t_rel_s }))
+          .sort((a, b) => a.t_rel_s - b.t_rel_s);
+        if (livePts.length >= 4) {
+          const fit = _OVL.ballisticFit(livePts);
+          const t0 = livePts[0].t_rel_s;
+          const tEnd = livePts[livePts.length - 1].t_rel_s;
+          extraTraces.push(..._OVL.fitTraces(fit, t0, tEnd, { nameSuffix: ' · live' }));
+        }
+      } else if (src === 'server_post') {
+        for (const sid of selectedTrajIds) {
+          const result = trajCache.get(sid);
+          if (!result || !result.points || result.points.length < 4) continue;
+          const pts = result.points.map(p => ({
+            x: p.x_m, y: p.y_m, z: p.z_m, t_rel_s: p.t_rel_s,
+          }));
+          const fit = _OVL.ballisticFit(pts);
+          const t0 = pts[0].t_rel_s;
+          const tEnd = pts[pts.length - 1].t_rel_s;
+          extraTraces.push(..._OVL.fitTraces(fit, t0, tEnd, {
+            nameSuffix: ` · ${sid}`,
+            color: trajColorFor(sid),
+          }));
+        }
+      }
+    }
     if (cachedLayout === null) {
       // One-time build from the first basePlot.layout we see. The server
       // sets scene.uirevision='dashboard-canvas' in both SSR and tick

@@ -904,14 +904,9 @@ def _viewer_js() -> str:
   const FITRES_FILTER_KEY = "ball_tracker_viewer_fitres_kappa";
   let residualCapM = Infinity;
   let fitResKappa = Infinity;
-  let fitMode = false;
-  // Which triangulation pipeline to fit. Explicit user choice — no fallback.
-  const FIT_SOURCE_KEY = "ball_tracker_viewer_fit_source";
-  let fitSource = "server_post";
-  try {{
-    const saved = localStorage.getItem(FIT_SOURCE_KEY);
-    if (saved === "live" || saved === "server_post") fitSource = saved;
-  }} catch (_e) {{ /* ignore */ }}
+  // Fit visibility + source live in shared overlay state (window.BallTrackerOverlays)
+  // so dashboard and viewer stay in lock-step. No local copies — read fresh
+  // each time so cross-tab edits to localStorage are picked up on next draw.
   try {{
     const saved = parseFloat(localStorage.getItem(RESIDUAL_FILTER_KEY));
     if (Number.isFinite(saved) && saved >= 0 && saved < 200) residualCapM = saved / 100;
@@ -947,7 +942,7 @@ def _viewer_js() -> str:
       while (idx.size < 4) idx.add(Math.floor(Math.random() * N));
       const sample = [...idx].map(i => pts[i]);
       sample.sort((a, b) => a.t_rel_s - b.t_rel_s);
-      const fit = ballisticFit(sample);
+      const fit = _OVL.ballisticFit(sample);
       if (!fit) continue;
       const dists = new Array(N);
       for (let k = 0; k < N; k++) {{
@@ -1165,59 +1160,6 @@ def _viewer_js() -> str:
   }}
   function buildDynamicTraces(cutoff, playback) {{
     const out = [];
-    // --- Fit mode: isolated view. Return ONLY fit traces + the sample
-    // points used for the fit + info box. No rays, no ground traces, no
-    // camera diamonds, no raw trajectories — keeps the 3D scene focused
-    // on the analytic result. The regular layer state is not mutated, so
-    // toggling Fit off restores the previous view byte-for-byte. ---
-    if (fitMode) {{
-      let raw;
-      if (fitSource === "live") {{
-        raw = TRAJ_BY_PATH.live || [];
-      }} else {{
-        raw = (TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
-          ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []);
-      }}
-      const source = filteredTrajectory(raw, Infinity);
-      const sourceLabel = fitSource;
-      if (source.length >= 4) {{
-        const fit = ballisticFit(source);
-        const t0 = source[0].t_rel_s;
-        const tEnd = playback ? Math.min(cutoff, source[source.length - 1].t_rel_s)
-                              : source[source.length - 1].t_rel_s;
-        const nCurve = 80;
-        const curveX = [], curveY = [], curveZ = [];
-        for (let i = 0; i <= nCurve; i++) {{
-          const t = t0 + (tEnd - t0) * (i / nCurve);
-          const p = fit.evaluate(t);
-          curveX.push(p.x); curveY.push(p.y); curveZ.push(p.z);
-        }}
-        out.push({{ type: "scatter3d", x: curveX, y: curveY, z: curveZ,
-          mode: "lines", line: {{color: "#A7372A", width: 5}},
-          name: `Ballistic fit (${{sourceLabel}}, ${{source.length}} pts, RMSE ${{(fit.rmse_m*100).toFixed(1)}} cm)` }});
-        const renderPts = source.filter(p => p.t_rel_s <= (playback ? cutoff : Infinity));
-        out.push({{ type: "scatter3d",
-          x: renderPts.map(p => p.x), y: renderPts.map(p => p.y), z: renderPts.map(p => p.z),
-          mode: "markers", marker: {{size: 4, color: "#2A2520", opacity: 0.85}},
-          name: `Fit samples (${{renderPts.length}}/${{source.length}})`, showlegend: false }});
-        const v0 = fit.v0;
-        const origin = fit.evaluate(t0);
-        const arrowLen = Math.min(2.0, Math.max(0.3, fit.speed_mps * 0.05));
-        const vn = Math.max(1e-9, Math.hypot(v0.x, v0.y, v0.z));
-        out.push({{ type: "scatter3d",
-          x: [origin.x, origin.x + v0.x/vn*arrowLen],
-          y: [origin.y, origin.y + v0.y/vn*arrowLen],
-          z: [origin.z, origin.z + v0.z/vn*arrowLen],
-          mode: "lines+markers",
-          line: {{color: "#A7372A", width: 4, dash: "dash"}},
-          marker: {{size: [0, 6], color: "#A7372A", symbol: "diamond"}},
-          hoverinfo: "skip", showlegend: false }});
-        updateFitInfoPanel(fit, source.length, sourceLabel);
-      }} else {{
-        updateFitInfoPanel(null, source.length, sourceLabel);
-      }}
-      return out;
-    }}
     // --- cameras (diamond + axis triad), gated on the per-cam pipeline pills ---
     for (const c of (SCENE.cameras || [])) {{
       if (!cameraIsAnyPathVisible(c.camera_id)) continue;
@@ -1306,116 +1248,43 @@ def _viewer_js() -> str:
         }}
       }}
     }}
-    // Fit mode short-circuits at the top of this function; reaching here
-    // means we're in non-fit mode and the info panel should stay hidden.
-    updateFitInfoPanel(null, 0, null);
+    // --- Fit overlay (drawn on top of regular trajectories) ---
+    // Fit is a layer, not a mode: the user picks Residual / Outlier
+    // filters, the surviving points are the fit input, and the curve sits
+    // on top of the existing trajectory so the viewer can see fit vs raw
+    // without flipping modes.
+    if (_OVL.fitVisible()) {{
+      const src = _OVL.fitSource();
+      const raw = (src === "live")
+        ? (TRAJ_BY_PATH.live || [])
+        : ((TRAJ_BY_PATH.server_post && TRAJ_BY_PATH.server_post.length)
+            ? TRAJ_BY_PATH.server_post : (SCENE.triangulated || []));
+      const source = filteredTrajectory(raw, Infinity);
+      if (source.length >= 4) {{
+        const fit = _OVL.ballisticFit(source);
+        const tStart = source[0].t_rel_s;
+        const tEnd = playback ? Math.min(cutoff, source[source.length - 1].t_rel_s)
+                              : source[source.length - 1].t_rel_s;
+        for (const tr of _OVL.fitTraces(fit, tStart, tEnd, {{nameSuffix: ` · ${{src}}`}})) {{
+          out.push(tr);
+        }}
+        updateFitInfoPanel(fit, source.length, src);
+      }} else {{
+        updateFitInfoPanel(null, source.length, src);
+      }}
+    }} else {{
+      updateFitInfoPanel(null, 0, null);
+    }}
     return out;
   }}
 
-  // Per-axis quadratic LSQ: p(τ) = p0 + v0·τ + 0.5·a·τ²  (3 params/axis,
-  // 9 total). Acceleration FREE on every axis — gravity not pinned. The
-  // fitted -a_z is reported as `g_fit` so the operator reads it as "the
-  // gravity-equivalent acceleration this pitch's data shows" (drag /
-  // Magnus / spin all push it off 9.81).
-  function _solve3x3(M, b) {{
-    const a = M.map((row, i) => [...row, b[i]]);
-    for (let i = 0; i < 3; i++) {{
-      let pv = i;
-      for (let k = i + 1; k < 3; k++) if (Math.abs(a[k][i]) > Math.abs(a[pv][i])) pv = k;
-      if (Math.abs(a[pv][i]) < 1e-14) return null;
-      if (pv !== i) {{ const tmp = a[i]; a[i] = a[pv]; a[pv] = tmp; }}
-      for (let k = i + 1; k < 3; k++) {{
-        const f = a[k][i] / a[i][i];
-        for (let j = i; j <= 3; j++) a[k][j] -= f * a[i][j];
-      }}
-    }}
-    const x = new Array(3);
-    for (let i = 2; i >= 0; i--) {{
-      let s = a[i][3];
-      for (let j = i + 1; j < 3; j++) s -= a[i][j] * x[j];
-      x[i] = s / a[i][i];
-    }}
-    return x;
-  }}
-  function ballisticFit(pts) {{
-    if (!pts || pts.length < 4) return null;
-    const t0 = pts[0].t_rel_s;
-    const taus = pts.map(p => p.t_rel_s - t0);
-    const n = pts.length;
-    const sT = [n, 0, 0, 0, 0];          // τ⁰..τ⁴
-    for (const tau of taus) {{
-      let p = 1;
-      for (let k = 1; k <= 4; k++) {{ p *= tau; sT[k] += p; }}
-    }}
-    const M = [
-      [sT[0], sT[1], sT[2]],
-      [sT[1], sT[2], sT[3]],
-      [sT[2], sT[3], sT[4]],
-    ];
-    function fitAxis(getVal) {{
-      const r = [0, 0, 0];
-      for (let i = 0; i < n; i++) {{
-        const v = getVal(pts[i]);
-        r[0] += v;
-        r[1] += taus[i] * v;
-        r[2] += taus[i] * taus[i] * v;
-      }}
-      const c = _solve3x3(M, r);
-      if (!c) return null;
-      return {{ p0: c[0], v0: c[1], a: 2 * c[2] }};   // 0.5·a·τ² → c2 = a/2
-    }}
-    const fx = fitAxis(p => p.x);
-    const fy = fitAxis(p => p.y);
-    const fz = fitAxis(p => p.z);
-    if (!fx || !fy || !fz) return null;
-    const out = {{
-      p0: {{ x: fx.p0, y: fy.p0, z: fz.p0 }},
-      v0: {{ x: fx.v0, y: fy.v0, z: fz.v0 }},
-      a:  {{ x: fx.a,  y: fy.a,  z: fz.a  }},
-      g_fit: -fz.a,
-      t0,
-      flight_time_s: pts[n - 1].t_rel_s - t0,
-    }};
-    out.evaluate = (t) => {{
-      const tau = t - t0;
-      const half = 0.5 * tau * tau;
-      return {{
-        x: fx.p0 + fx.v0 * tau + fx.a * half,
-        y: fy.p0 + fy.v0 * tau + fy.a * half,
-        z: fz.p0 + fz.v0 * tau + fz.a * half,
-      }};
-    }};
-    out.speed_mps = Math.hypot(out.v0.x, out.v0.y, out.v0.z);
-    out.speed_kmph = out.speed_mps * 3.6;
-    const horiz = Math.hypot(out.v0.x, out.v0.y);
-    out.elevation_deg = Math.atan2(out.v0.z, horiz) * 180 / Math.PI;
-    out.azimuth_deg = Math.atan2(out.v0.x, out.v0.y) * 180 / Math.PI;
-    let rss = 0, rssZ = 0;
-    for (const p of pts) {{
-      const q = out.evaluate(p.t_rel_s);
-      const dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z;
-      rss += dx*dx + dy*dy + dz*dz;
-      rssZ += dz*dz;
-    }}
-    out.rmse_m = Math.sqrt(rss / n);
-    out.rmse_by_axis_m = {{ z: Math.sqrt(rssZ / n) }};
-    // Apex z: dz/dτ = vz0 + a_z·τ = 0 → τ_apex = -vz0/a_z (need a_z<0 + τ in window)
-    out.apex_time_s = 0;
-    out.apex_height_m = fz.p0;
-    if (Math.abs(fz.a) > 1e-9) {{
-      const tauApex = -fz.v0 / fz.a;
-      if (tauApex > 0 && tauApex < out.flight_time_s) {{
-        const z = out.evaluate(t0 + tauApex).z;
-        if (z > out.apex_height_m) {{ out.apex_time_s = tauApex; out.apex_height_m = z; }}
-      }}
-    }}
-    return out;
-  }}
+  // ballisticFit lives in window.BallTrackerOverlays (see overlays_ui.py)
+  // — same math powers dashboard + viewer + outlier RANSAC above.
 
   function updateFitInfoPanel(fit, sampleCount, sourceLabel) {{
     const box = document.getElementById("fit-info");
     if (!box) return;
-    if (!fitMode) {{ box.hidden = true; return; }}
+    if (!_OVL.fitVisible()) {{ box.hidden = true; return; }}
     if (!fit) {{
       box.hidden = false;
       box.innerHTML = sampleCount
@@ -1974,32 +1843,34 @@ def _viewer_js() -> str:
     }});
   }}
 
-  // --- Fit mode toggle ---
+  // --- Fit overlay toggle (was modal "fit mode" — now a layer) ---
   const fitToggleBtn = document.getElementById("fit-toggle");
   if (fitToggleBtn) {{
+    fitToggleBtn.setAttribute("aria-pressed", _OVL.fitVisible() ? "true" : "false");
     fitToggleBtn.addEventListener("click", () => {{
-      fitMode = !fitMode;
-      fitToggleBtn.setAttribute("aria-pressed", fitMode ? "true" : "false");
+      const next = !_OVL.fitVisible();
+      _OVL.setFitVisible(next);
+      fitToggleBtn.setAttribute("aria-pressed", next ? "true" : "false");
       scheduleSceneDraw();
     }});
   }}
   // --- Fit source selector (svr / live) ---
   const fitSrcPills = Array.from(document.querySelectorAll(".fit-src-pill"));
   function paintFitSourcePills() {{
+    const cur = _OVL.fitSource();
     for (const btn of fitSrcPills) {{
       const src = btn.dataset.src;
       const has = src === "live" ? HAS_TRAJ_PATH.live : HAS_TRAJ_PATH.server_post;
       btn.disabled = !has;
-      btn.setAttribute("aria-pressed", (fitSource === src) ? "true" : "false");
+      btn.setAttribute("aria-pressed", (cur === src) ? "true" : "false");
     }}
   }}
   for (const btn of fitSrcPills) {{
     btn.addEventListener("click", () => {{
       if (btn.disabled) return;
-      fitSource = btn.dataset.src;
-      try {{ localStorage.setItem(FIT_SOURCE_KEY, fitSource); }} catch (_e) {{}}
+      _OVL.setFitSource(btn.dataset.src);
       paintFitSourcePills();
-      if (fitMode) scheduleSceneDraw();
+      if (_OVL.fitVisible()) scheduleSceneDraw();
     }});
   }}
   paintFitSourcePills();
