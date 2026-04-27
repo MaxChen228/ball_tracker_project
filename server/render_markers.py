@@ -487,12 +487,25 @@ _MARKERS_JS = r"""
     const { u, v, meta } = info;
     if (!meta) return;
     const tol = Math.max(20, 0.03 * Math.max(meta.image_width_px || 1920, meta.image_height_px || 1080));
-    let best = null, bestDist = tol;
+    // Tie-break: when a candidate sits on top of its stored row at
+    // near-identical xyz (update_action=refresh), prefer the candidate
+    // so the operator can review the proposed update. Without this,
+    // compareRows order (known → stored → candidate) wins and the
+    // candidate becomes unselectable.
+    let best = null, bestDist = tol, bestRank = 0;
+    function rank(row) {
+      if (row.origin === 'candidate' || row.kind === 'candidate') return 2;
+      return 1;
+    }
     for (const row of compareRows()) {
       const p = projectWorldToPixel([row.x_m, row.y_m, row.z_m || 0], meta);
       if (!p) continue;
       const d = Math.hypot(p.u - u, p.v - v);
-      if (d < bestDist) { bestDist = d; best = row; }
+      if (d > tol) continue;
+      const r = rank(row);
+      if (r > bestRank || (r === bestRank && d < bestDist)) {
+        best = row; bestDist = d; bestRank = r;
+      }
     }
     if (!best) return;
     state.selectedKind = best.kind === 'candidate' ? 'candidate'

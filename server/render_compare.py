@@ -1,115 +1,11 @@
-"""Shared real/virtual compare helpers for server-rendered pages."""
-from __future__ import annotations
+"""Projection-helper JS string library — consumed by `cam_view_ui.py`.
 
-import html
-
-
-LIVE_COMPARE_CSS = """
-.preview-panel, .virt-cell {
-  position: relative;
-  border: 1px solid var(--border-l);
-  border-radius: calc(var(--r) + 2px);
-  overflow: hidden;
-  aspect-ratio: 16 / 9;
-}
-.preview-panel {
-  background: #120F0D;
-}
-.virt-cell {
-  background: #1A1714;
-}
-.preview-panel img,
-.virt-cell canvas,
-.preview-panel .preview-overlay {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-.preview-panel img {
-  position: absolute;
-  inset: 0;
-  object-fit: cover;
-  background: #120F0D;
-}
-.virt-cell canvas {
-  position: absolute;
-  inset: 0;
-}
-.preview-panel .preview-overlay {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.preview-overlay polygon {
-  fill: rgba(202, 61, 47, 0.08);
-  stroke: rgba(202, 61, 47, 0.92);
-  stroke-width: 2.4;
-  stroke-dasharray: 9 7;
-}
-.preview-overlay .marker-dot {
-  stroke: rgba(26, 23, 20, 0.9);
-  stroke-width: 1.5;
-}
-.preview-overlay .marker-tag {
-  stroke: rgba(26, 23, 20, 0.7);
-  stroke-width: 1;
-  rx: 6;
-  ry: 6;
-}
-.preview-overlay .marker-text {
-  fill: #171411;
-  font-family: "JetBrains Mono", monospace;
-  font-size: 13px;
-  font-weight: 700;
-  text-anchor: middle;
-  dominant-baseline: central;
-}
-.preview-overlay .is-selected .marker-tag,
-.preview-overlay .is-selected .marker-dot {
-  stroke: #F8F7F4;
-  stroke-width: 1.6;
-}
-.preview-panel .placeholder,
-.virt-cell .placeholder {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  pointer-events: none;
-}
-.preview-panel .placeholder {
-  color: rgba(255, 255, 255, 0.55);
-}
-.virt-cell .placeholder {
-  color: rgba(219, 214, 205, 0.55);
-}
-.virt-cell.ready .placeholder {
-  display: none;
-}
-.compare-cell-label {
-  position: absolute;
-  left: 12px;
-  top: 12px;
-  z-index: 3;
-  padding: 5px 9px;
-  border-radius: var(--r);
-  background: rgba(26, 23, 20, 0.84);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #F8F7F4;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-.compare-cell-label.real { border-color: rgba(202, 61, 47, 0.32); }
-.compare-cell-label.virt { border-color: rgba(219, 214, 205, 0.18); }
+Hosted the legacy 2-pane `render_live_compare_camera` + `LIVE_COMPARE_CSS`
+shape; both retired in Phase 5 once dashboard / setup / markers all
+migrated to the merged single-pane component. Only the JS string library
+remains so the runtime can compose its IIFE from these blocks.
 """
+from __future__ import annotations
 
 
 PLATE_WORLD_JS = """
@@ -170,8 +66,9 @@ function drawVirtualBase(canvas, cam, opts = {}) {
   ctx.rect(0, 0, cssW, cssH);
   ctx.clip();
   // skipBuiltins lets the cam-view runtime own plate + principal-point
-  // rendering as toggleable layers. Existing callers (legacy 2-pane virt
-  // canvas) pass no opts and keep the built-in plate + cross.
+  // rendering as toggleable layers. The legacy 2-pane caller is gone
+  // (Phase 5), so this branch is the only one taken in practice — kept
+  // as opt-in to allow standalone canvas previews if ever needed.
   if (opts.skipBuiltins) {
     return { ctx, cssW, cssH, sx, sy };
   }
@@ -224,47 +121,3 @@ function redrawPlateOverlay(svg, cam) {
   return true;
 }
 """
-
-
-def render_live_compare_camera(
-    cam_id: str,
-    *,
-    preview_src: str,
-    preview_img_attr: str = "data-preview-img",
-    preview_overlay_attr: str = "data-preview-overlay",
-    virt_canvas_attr: str = "data-virt-canvas",
-    preview_panel_attr: str = "data-preview-panel",
-    virt_cell_attr: str = "data-virt-cell",
-    preview_placeholder: str = "Waiting for preview…",
-    virt_placeholder: str = "Not calibrated",
-    real_label: str | None = None,
-    virt_label: str | None = None,
-    preview_extra_class: str = "",
-    preview_off: bool = False,
-) -> str:
-    cam = html.escape(cam_id)
-    real = html.escape(real_label or f"Real · {cam_id}")
-    virt = html.escape(virt_label or f"Virt · {cam_id}")
-    off_cls = " off" if preview_off else ""
-    extra_cls = f" {preview_extra_class.strip()}" if preview_extra_class.strip() else ""
-    return (
-        f'<div class="camera-compare">'
-        f'<h3 class="compare-title">Camera {cam}</h3>'
-        f'<div class="camera-compare-grid">'
-        f'<div class="preview-panel{off_cls}{extra_cls}" {preview_panel_attr}="{cam}">'
-        f'<span class="compare-cell-label real">{real}</span>'
-        # Skip src when panel is off so the browser doesn't auto-fetch a
-        # preview endpoint that's guaranteed to 404 (no buffered frame
-        # because iOS isn't pushing).
-        f'<img {preview_img_attr}="{cam}" src="{"" if preview_off else html.escape(preview_src)}" alt="preview {cam}">'
-        f'<svg class="preview-overlay" {preview_overlay_attr}="{cam}" aria-hidden="true"><polygon></polygon></svg>'
-        f'<div class="placeholder">{html.escape(preview_placeholder)}</div>'
-        f'</div>'
-        f'<div class="virt-cell" {virt_cell_attr}="{cam}">'
-        f'<span class="compare-cell-label virt">{virt}</span>'
-        f'<canvas {virt_canvas_attr}="{cam}"></canvas>'
-        f'<div class="placeholder">{html.escape(virt_placeholder)}</div>'
-        f'</div>'
-        f'</div>'
-        f'</div>'
-    )

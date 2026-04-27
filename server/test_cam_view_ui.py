@@ -227,12 +227,12 @@ def test_dashboard_tick_pushes_cam_view_meta():
 
 
 def test_dashboard_preview_poll_handles_cam_view_imgs():
-    """tickPreviewImages must cache-bust both legacy [data-preview-img]
-    and new [data-cam-img] so dashboard's merged pane stays fresh."""
+    """tickPreviewImages must cache-bust the merged cam-view <img>.
+    Phase 5 removed the legacy [data-preview-img] selector — single
+    selector now."""
     from render_dashboard_client import _JS_TEMPLATE
     assert "[data-cam-img]" in _JS_TEMPLATE
-    # Legacy selector still present for markers until that phase.
-    assert "[data-preview-img]" in _JS_TEMPLATE
+    assert "[data-preview-img]" not in _JS_TEMPLATE
 
 
 def test_setup_page_uses_cam_view():
@@ -269,18 +269,18 @@ def test_setup_page_runtime_loads_before_main_js():
     assert cv < main_idx, "cam-view runtime must load before dashboard JS IIFE"
 
 
-def test_render_device_rows_use_cam_view_param():
-    """The shared _render_device_rows helper supports both shapes via a
-    use_cam_view param. Default stays legacy 2-pane (preserves /sync /
-    markers); /setup opts in via True."""
+def test_render_device_rows_emits_cam_view_only():
+    """Phase 5: legacy 2-pane branch deleted. _render_device_rows now
+    emits cam-view shape only; data-virt-canvas / data-preview-overlay
+    must not appear."""
     from render_dashboard_devices import _render_device_rows
     devs = [{"camera_id": "A"}, {"camera_id": "B"}]
-    legacy = _render_device_rows(devs, [], compare_mode="toggle", use_cam_view=False)
-    assert 'data-virt-canvas="A"' in legacy
-    assert 'data-cam-view="A"' not in legacy
-    new = _render_device_rows(devs, [], compare_mode="toggle", use_cam_view=True)
-    assert 'data-cam-view="A"' in new
-    assert 'data-virt-canvas="A"' not in new
+    body = _render_device_rows(devs, [], compare_mode="toggle")
+    assert 'data-cam-view="A"' in body
+    assert 'data-cam-view="B"' in body
+    assert 'data-virt-canvas' not in body
+    assert 'data-preview-overlay' not in body
+    assert 'preview-panel' not in body
 
 
 def test_runtime_lists_cams_publicly():

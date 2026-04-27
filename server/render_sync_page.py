@@ -4,7 +4,6 @@ from __future__ import annotations
 from typing import Any
 
 from cam_view_ui import CAM_VIEW_RUNTIME_JS
-from render_compare import LIVE_COMPARE_CSS
 from render_dashboard_client import _JS_TEMPLATE as _DASHBOARD_JS_TEMPLATE
 from render_dashboard_devices import _render_device_rows
 from render_dashboard_style import _CSS
@@ -37,7 +36,7 @@ def render_setup_html(
         "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
         "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
         "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
-        f"<style>{_CSS}{_SYNC_CSS}{LIVE_COMPARE_CSS}</style>"
+        f"<style>{_CSS}{_SYNC_CSS}</style>"
         "</head><body data-page=\"setup\">"
         f'{_render_app_nav("setup", devices, session, calibrations, None, sync_cooldown_remaining_s)}'
         '<main class="main-sync">'
@@ -49,7 +48,7 @@ def render_setup_html(
         '</section>'
         '<div class="card">'
         '<h2 class="card-title">Devices &middot; Calibration</h2>'
-        f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested, compare_mode="toggle", use_cam_view=True, cam_view_layers=("plate", "axes"), cam_view_layers_on=("plate", "axes"))}</div>'
+        f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested, compare_mode="toggle")}</div>'
         "</div>"
         "</main>"
         f"<script>{CAM_VIEW_RUNTIME_JS}</script>"
