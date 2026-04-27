@@ -169,6 +169,18 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 dispatchLiveCycleEnd: { [weak self] sessionId, reason in
                     self?.transportCoordinator?.dispatchLiveCycleEnd(sessionId: sessionId, reason: reason)
                 },
+                waitForDetectionDrain: { [weak self] completion in
+                    guard let self else {
+                        // Pool is gone with the VC → fire completion
+                        // immediately so any teardown using this hook
+                        // doesn't deadlock on a stale waitForDrain call.
+                        completion()
+                        return
+                    }
+                    self.detectionPool.waitForDrain(on: self.processingQueue) {
+                        completion()
+                    }
+                },
                 showErrorBanner: { [weak self] text in self?.showErrorBanner(text) },
                 hideBanner: { [weak self] in self?.hideBanner() },
                 setStatusText: { [weak self] text in
