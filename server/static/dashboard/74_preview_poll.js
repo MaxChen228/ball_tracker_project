@@ -5,23 +5,10 @@
   // No client-side keep-alive or TTL refresh — those created race
   // conditions where toggle-off was silently re-armed by a stale beat.
 
-  // Preview image polling. MJPEG streaming via <img> is flaky across
-  // browsers (Chrome silently aborts when the server's first multipart
-  // boundary doesn't land within a short window), so we bump a
-  // cache-busting query-string on every <img data-preview-img> every
-  // 200 ms — ~5 fps preview, trivial to debug via the Network tab, and
-  // each frame is a normal GET /camera/{id}/preview that returns a
-  // single JPEG or 404.
-  function tickPreviewImages() {
-    const t = Date.now();
-    // Cache-bust the merged cam-view <img> on every tick. Gated on the
-    // .is-offline class so cams with preview disabled don't hammer 404s.
-    for (const img of document.querySelectorAll('img[data-cam-img]')) {
-      const cam = img.dataset.camImg;
-      if (!cam) continue;
-      const root = img.closest('.cam-view');
-      if (!root || root.classList.contains('is-offline')) continue;
-      img.src = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + t;
-    }
+  // Cache-busting <img> polling lives in the cam-view runtime so every
+  // page that mounts a cam-view (dashboard, /setup, /markers) gets the
+  // same offline gate + per-cam abort handle. EXPECTED is fixed for
+  // dashboard, so we kick one poller per cam at boot.
+  if (window.BallTrackerCamView) {
+    for (const cam of EXPECTED) window.BallTrackerCamView.startPreviewPolling(cam);
   }
-  setInterval(tickPreviewImages, 200);
