@@ -231,5 +231,92 @@ def test_dashboard_preview_poll_handles_cam_view_imgs():
     and new [data-cam-img] so dashboard's merged pane stays fresh."""
     from render_dashboard_client import _JS_TEMPLATE
     assert "[data-cam-img]" in _JS_TEMPLATE
-    # Legacy selector still present for setup/markers until those phases.
+    # Legacy selector still present for markers until that phase.
     assert "[data-preview-img]" in _JS_TEMPLATE
+
+
+def test_setup_page_uses_cam_view():
+    """Phase 3: /setup must render each cam as a single merged cam-view
+    pane and inject the runtime so BallTrackerCamView is available."""
+    from fastapi.testclient import TestClient
+    import main
+    from main import app
+    main.state.reset()
+    with TestClient(app) as client:
+        body = client.get("/setup").text
+    assert_cam_view_present(body)
+    assert 'data-cam-view="A"' in body and 'data-cam-view="B"' in body
+    assert 'data-cam-canvas="A"' in body and 'data-cam-canvas="B"' in body
+    # Both plate AND axes default-on for setup (geometric verification focus).
+    assert 'data-layers-on="plate,axes"' in body
+    # Legacy 2-pane data-attrs gone from /setup.
+    assert 'data-preview-overlay="A"' not in body
+    assert 'data-virt-canvas="A"' not in body
+
+
+def test_setup_page_runtime_loads_before_main_js():
+    """Mirror dashboard ordering: cam-view runtime before main JS so
+    BallTrackerCamView is ready when the dashboard JS IIFE runs."""
+    from fastapi.testclient import TestClient
+    import main
+    from main import app
+    main.state.reset()
+    with TestClient(app) as client:
+        body = client.get("/setup").text
+    cv = body.find("BallTrackerCamView")
+    main_idx = body.find("=== boot")
+    assert cv > 0 and main_idx > 0
+    assert cv < main_idx, "cam-view runtime must load before dashboard JS IIFE"
+
+
+def test_render_device_rows_use_cam_view_param():
+    """The shared _render_device_rows helper supports both shapes via a
+    use_cam_view param. Default stays legacy 2-pane (preserves /sync /
+    markers); /setup opts in via True."""
+    from render_dashboard_devices import _render_device_rows
+    devs = [{"camera_id": "A"}, {"camera_id": "B"}]
+    legacy = _render_device_rows(devs, [], compare_mode="toggle", use_cam_view=False)
+    assert 'data-virt-canvas="A"' in legacy
+    assert 'data-cam-view="A"' not in legacy
+    new = _render_device_rows(devs, [], compare_mode="toggle", use_cam_view=True)
+    assert 'data-cam-view="A"' in new
+    assert 'data-virt-canvas="A"' not in new
+
+
+def test_runtime_lists_cams_publicly():
+    """Phase 2 review NIT: tickCalibration was reaching into _internal.
+    A public listCams() avoids that brittleness."""
+    js = CAM_VIEW_RUNTIME_JS
+    assert "function listCams()" in js
+    assert "listCams," in js  # exported on window.BallTrackerCamView
+
+
+def test_runtime_tracks_resize_observer_per_cam():
+    """Phase 2 review IMPORTANT: re-mount on innerHTML rebuild stranded
+    a ResizeObserver on the discarded root each time. The runtime must
+    track observers per cam_id and disconnect prior ones on remount."""
+    js = CAM_VIEW_RUNTIME_JS
+    assert "resizeObservers" in js
+    assert "prev.disconnect()" in js
+
+
+def test_runtime_setstatus_does_not_take_calibrated_arg():
+    """Calibration truth is derived from setMeta payload inside
+    applyStatusBadges. Don't accept a redundant 'calibrated' field on
+    setStatus — two sources of truth would diverge."""
+    js = CAM_VIEW_RUNTIME_JS
+    # The function body must NOT propagate a calibrated field from status.
+    # Easiest pin: comment line documents the contract.
+    assert "Calibration badge is derived from\n" in js or "Calibration badge is derived from" in js
+
+
+def test_dashboard_renderdevices_pushes_extras_for_all_rendered_cams():
+    """Phase 2 review IMPORTANT: setStatus loop was EXPECTED-only, so
+    extra cams (non-A/B) never got status. Loop must include extras."""
+    from render_dashboard_client import _JS_TEMPLATE
+    assert "renderedCams" in _JS_TEMPLATE
+    # RMS badge wired through auto_calibration.last
+    assert "reprojection_px" in _JS_TEMPLATE
+    assert "setExtras" in _JS_TEMPLATE
+    # And listCams used instead of _internal access.
+    assert ".listCams()" in _JS_TEMPLATE

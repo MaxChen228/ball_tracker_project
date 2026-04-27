@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from cam_view_ui import CAM_VIEW_RUNTIME_JS
 from render_compare import LIVE_COMPARE_CSS
 from render_dashboard_client import _JS_TEMPLATE as _DASHBOARD_JS_TEMPLATE
 from render_dashboard_devices import _render_device_rows
@@ -48,9 +49,10 @@ def render_setup_html(
         '</section>'
         '<div class="card">'
         '<h2 class="card-title">Devices &middot; Calibration</h2>'
-        f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested, compare_mode="toggle")}</div>'
+        f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested, compare_mode="toggle", use_cam_view=True, cam_view_layers=("plate", "axes"), cam_view_layers_on=("plate", "axes"))}</div>'
         "</div>"
         "</main>"
+        f"<script>{CAM_VIEW_RUNTIME_JS}</script>"
         f"<script>{_DASHBOARD_JS_TEMPLATE}</script>"
         "</body></html>"
     )
