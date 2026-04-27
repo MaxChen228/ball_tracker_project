@@ -93,6 +93,7 @@ def detect_pitch(
     shape_gate: ShapeGate | None = None,
     selector_tuning: "CandidateSelectorTuning | None" = None,
     chain_filter_params: ChainFilterParams | None = None,
+    progress: Callable[[int], None] | None = None,
 ) -> list[FramePayload]:
     """Decode `video_path`, run HSV + (optional) MOG2 background
     subtraction on every frame, and return one `FramePayload` per decoded
@@ -140,6 +141,13 @@ def detect_pitch(
     for idx, (absolute_pts_s, bgr) in enumerate(frame_iter(video_path, video_start_pts_s)):
         if should_cancel is not None and should_cancel():
             raise ProcessingCanceled(f"detection canceled for {video_path.name}")
+        if progress is not None:
+            # The caller is responsible for throttling — `progress` may
+            # bridge across threads (e.g. asyncio.run_coroutine_threadsafe
+            # from a to_thread worker). Per-frame call cost is negligible
+            # so the cheap thing is to fire every frame and let the
+            # caller decide what to coalesce.
+            progress(idx)
         fg_mask = None
         if subtractor is not None:
             fg_mask_raw = subtractor.apply(bgr, learningRate=_BG_LEARNING_RATE)

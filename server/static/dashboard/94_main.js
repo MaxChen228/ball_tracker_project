@@ -15,7 +15,11 @@
   // SSE reconnect gaps without spamming the server at 1 Hz.
   setInterval(tickStatus, 5000);
   setInterval(tickCalibration, 5000);
-  setInterval(tickEvents, 5000);
+  // Events: SSE drives freshness now (server_post_progress / done +
+  // path_completed all bust _lastEvKey + tickEvents). 15 s polling is
+  // a safety net for the rare SSE reconnect gap. Don't lower this — it
+  // just adds load without UX gain when SSE is up.
+  setInterval(tickEvents, 15000);
   setInterval(tickExtendedMarkers, 5000);
   setInterval(tickIntrinsics, 5000);
   // The per-session active card was retired (renderActiveSession is a

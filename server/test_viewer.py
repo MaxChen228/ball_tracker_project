@@ -1075,7 +1075,8 @@ def test_events_path_status_marks_live_done_on_frame_existence_not_triangulation
     block_end = html_body.find("event-actions", block_start)
     chip_block = html_body[block_start:block_end]
     assert 'class="path-chip on"' in chip_block
-    assert '<span class="pc">2</span>' in chip_block
+    # Per-cam A·B layout — A=2, B absent renders as "2·—".
+    assert '<span class="pc">2·—</span>' in chip_block
 
 
 def test_index_endpoint_lists_events_with_viewer_links():

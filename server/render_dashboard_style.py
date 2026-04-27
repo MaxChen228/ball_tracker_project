@@ -597,6 +597,26 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .chip.processing {{ color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }}
 .chip.queued {{ color: var(--sub); border-color: var(--border-base); background: transparent; }}
 .chip.canceled {{ color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }}
+/* Row-level treatment while a server_post job is queued/processing —
+   complements the inline status chip with an ambient orange pulse so the
+   in-flight session is visible at a glance from across the sidebar. The
+   border-left + matching padding offset prevents layout shift when the
+   class toggles on/off. */
+.event-item.processing {{ border-left: 2px solid var(--warn);
+                           padding-left: calc(var(--s-1) - 2px);
+                           animation: rs-pulse 1.5s ease-in-out infinite; }}
+@keyframes rs-pulse {{
+  0%, 100% {{ background: transparent; }}
+  50%      {{ background: var(--warn-bg); }}
+}}
+/* Transient celebration on server_post_done — Tier 2 flips this class on
+   for ~600 ms then removes it. Standalone keyframe so .processing's
+   pulse can finish naturally before the flash kicks in. */
+.event-item.flash-done {{ animation: rs-flash 0.6s ease-out; }}
+@keyframes rs-flash {{
+  0%   {{ background: rgba(34,197,94,0.22); }}
+  100% {{ background: transparent; }}
+}}
 .chip.completed {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
 
 /* --- Intrinsics (ChArUco) card --- */

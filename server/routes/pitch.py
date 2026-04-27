@@ -15,7 +15,7 @@ from schemas import (
     PitchPayload,
     SessionResult,
 )
-from video import probe_dims
+from video import probe_dims, probe_frame_count
 
 router = APIRouter()
 logger = logging.getLogger("ball_tracker")
@@ -219,6 +219,68 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
     # New run begins — wipe any stale error from the previous attempt so
     # /events doesn't keep showing a resolved failure.
     proc.clear_error(sid, cam)
+
+    sse_hub = _main.sse_hub
+    # Probe frame count from container metadata (no decode pass) so the
+    # dashboard can show "13/240"-style progress. None falls back to
+    # indeterminate "13 decoded".
+    frames_total = await asyncio.to_thread(probe_frame_count, clip_path)
+    # Capture the running loop so the to_thread worker (which has no
+    # event loop of its own) can schedule SSE broadcasts back onto the
+    # main loop via run_coroutine_threadsafe. Cross-thread broadcast is
+    # best-effort: SSE queues are bounded (maxsize=1000) and progress
+    # events are lossy by design, so a dropped event just delays the
+    # next visible tick.
+    loop = asyncio.get_running_loop()
+
+    def on_progress(idx: int) -> None:
+        # Throttle to every 30 frames. Server-side decode runs at
+        # ~30 fps wall-clock, so this fires ≈ 1 Hz — fast enough for a
+        # visibly moving bar, slow enough to not pressure the SSE pipe.
+        if idx % 30 != 0:
+            return
+        fut = asyncio.run_coroutine_threadsafe(
+            sse_hub.broadcast(
+                "server_post_progress",
+                {"sid": sid, "cam": cam,
+                 "frames_done": idx, "frames_total": frames_total},
+            ),
+            loop,
+        )
+        # Consume any exception so asyncio doesn't print "Future
+        # exception was never retrieved" on GC. Progress is lossy by
+        # design — we don't care if a single emit failed.
+        fut.add_done_callback(lambda f: f.exception())
+
+    async def broadcast_done(reason: str, frames_done: int) -> None:
+        # `reason ∈ {"ok", "canceled", "error"}` — the dashboard listener
+        # always clears its progress entry on this event regardless of
+        # reason; reason just drives optional UX (green flash on "ok",
+        # silent dismiss otherwise).
+        # Swallow any broadcast failure so the caller's `finish_server_post_job`
+        # always runs — leaking the job state is worse than dropping a UI
+        # event, since the dashboard's polling tick will eventually
+        # reconcile the row state but a stuck job is stuck forever.
+        try:
+            await sse_hub.broadcast(
+                "server_post_done",
+                {"sid": sid, "cam": cam, "reason": reason,
+                 "frames_done": frames_done, "frames_total": frames_total},
+            )
+        except Exception as exc:
+            logger.warning(
+                "broadcast_done failed sid=%s cam=%s reason=%s err=%s",
+                sid, cam, reason, exc,
+            )
+
+    # Priming event so the row flips into "in progress" mode within
+    # ~1 frame of the BackgroundTask actually starting, instead of
+    # waiting for the first 30-frame milestone (~1 s wall).
+    await sse_hub.broadcast(
+        "server_post_progress",
+        {"sid": sid, "cam": cam, "frames_done": 0, "frames_total": frames_total},
+    )
+
     try:
         frames = await asyncio.to_thread(
             detect_pitch,
@@ -231,12 +293,15 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             shape_gate=state.shape_gate(),
             selector_tuning=state.candidate_selector_tuning(),
             chain_filter_params=state.chain_filter_params(),
+            progress=on_progress,
         )
     except ProcessingCanceled:
+        await broadcast_done("canceled", 0)
         proc.finish_server_post_job(sid, cam, canceled=True)
         logger.info("background detection canceled session=%s cam=%s", sid, cam)
         return
     except Exception as exc:
+        await broadcast_done("error", 0)
         proc.finish_server_post_job(sid, cam, canceled=False)
         proc.record_error(sid, cam, f"detect_pitch: {exc}")
         logger.warning(
@@ -246,6 +311,7 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         return
 
     if proc.should_cancel_server_post_job(sid, cam):
+        await broadcast_done("canceled", len(frames))
         proc.finish_server_post_job(sid, cam, canceled=True)
         logger.info(
             "background detection discarded after cancel session=%s cam=%s",
@@ -256,6 +322,7 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
     try:
         await asyncio.to_thread(state.record, pitch)
     except Exception as exc:
+        await broadcast_done("error", len(frames))
         proc.finish_server_post_job(sid, cam, canceled=False)
         proc.record_error(sid, cam, f"record: {exc}")
         logger.warning(
@@ -274,6 +341,7 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             should_cancel=lambda: proc.should_cancel_server_post_job(sid, cam),
         )
     except ProcessingCanceled:
+        await broadcast_done("canceled", len(frames))
         proc.finish_server_post_job(sid, cam, canceled=True)
         logger.info("background annotation canceled session=%s cam=%s", sid, cam)
         if annotated_path.exists():
@@ -286,6 +354,7 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
                 )
         return
     except Exception as exc:
+        await broadcast_done("error", len(frames))
         proc.finish_server_post_job(sid, cam, canceled=False)
         proc.record_error(sid, cam, f"annotate: {exc}")
         logger.warning(
@@ -300,9 +369,15 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
                     "failed to remove failed annotated clip session=%s cam=%s path=%s err=%s",
                     sid, cam, annotated_path, exc,
                 )
+        # Without this return the function falls through to the success
+        # path below and double-finalizes (broadcast_done("ok") +
+        # finish_server_post_job again). All other finalize branches in
+        # this function explicitly return; this one was the outlier.
+        return
     ball = sum(1 for f in frames if f.ball_detected)
     logger.info(
         "background detection complete session=%s cam=%s frames=%d ball=%d",
         sid, cam, len(frames), ball,
     )
+    await broadcast_done("ok", len(frames))
     proc.finish_server_post_job(sid, cam, canceled=False)
