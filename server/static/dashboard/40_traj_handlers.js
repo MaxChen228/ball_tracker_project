@@ -16,6 +16,18 @@
     });
     tickEvents();
   });
+  // Strike-zone toggle: server-rendered traces stay in basePlot; the
+  // checkbox flips a localStorage flag and forces a repaint, which
+  // filters the strike-zone traces in or out at composition time.
+  const _szToggle = document.getElementById('dash-strike-zone-toggle');
+  if (_szToggle) {
+    _szToggle.checked = strikeZoneVisible();
+    _szToggle.addEventListener('change', () => {
+      setStrikeZoneVisible(_szToggle.checked);
+      repaintCanvas();
+    });
+  }
+
   if (eventsBox) eventsBox.addEventListener('change', (e) => {
     const cb = e.target.closest('input[data-traj-sid]');
     if (!cb) return;

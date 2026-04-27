@@ -45,11 +45,6 @@
     // Load any missing trajectories in parallel — checkbox clicks before
     // the first tick should still paint immediately.
     await Promise.all([...selectedTrajIds].map(sid => ensureTrajLoaded(sid)));
-    // Strike zone shown only in replay mode — serves as a reference target
-    // for where the pitch is going, irrelevant for outlier-inspection.
-    if (canvasMode === 'replay' && selectedTrajIds.size > 0) {
-      extraTraces.push(strikeZoneTrace());
-    }
     for (const sid of selectedTrajIds) {
       const result = trajCache.get(sid);
       if (!result) continue;
@@ -66,7 +61,14 @@
       if (!cachedLayout.scene) cachedLayout.scene = {};
       cachedLayout.scene.uirevision = 'dashboard-canvas';
     }
-    const finalTraces = [...(basePlot.data || []), ...extraTraces];
+    // Filter the server-rendered scene's strike-zone traces in or out
+    // based on the toggle (default ON). Other static traces (plate,
+    // ground, axes, cameras) always pass through.
+    const showZone = strikeZoneVisible();
+    const baseData = (basePlot.data || []).filter(
+      t => showZone || !isStrikeZoneTrace(t)
+    );
+    const finalTraces = [...baseData, ...extraTraces];
     Plotly.react(
       sceneRoot,
       finalTraces,

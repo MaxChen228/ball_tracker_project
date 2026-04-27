@@ -83,6 +83,12 @@ def render_dashboard_html(
         '    <input type="range" id="dash-outlier-slider" min="10" max="60" step="1" value="30" aria-label="Outlier rejection (κ; 60 = off)">'
         '    <span class="ff-readout" id="dash-outlier-readout">κ ≤ 3.0</span>'
         '  </span>'
+        '  <span class="ff-cell" title="Toggle the strike-zone wireframe in the 3D canvas. Default on.">'
+        '    <label class="ff-checkbox">'
+        '      <input type="checkbox" id="dash-strike-zone-toggle" checked>'
+        '      <span class="ff-name">Strike zone</span>'
+        '    </label>'
+        '  </span>'
         '</div>'
         f"{scene_div}"
         '<div class="playback-bar" id="playback-bar">'

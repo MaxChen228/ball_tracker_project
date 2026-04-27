@@ -1,22 +1,21 @@
-// === strike zone + trace builders ===
-  // --- Strike zone geometry: MLB-standard 17" wide at plate, Z in 0.5-1.2 m
-  // for a demo rig (no batter present). Drawn as a dashed wireframe so it
-  // reads as reference grid, not a solid obstacle.
-  const STRIKE_ZONE_HALF_W = 0.216;  // 17" / 2
-  const STRIKE_ZONE_Z_LO = 0.5;
-  const STRIKE_ZONE_Z_HI = 1.2;
-  function strikeZoneTrace() {
-    const hw = STRIKE_ZONE_HALF_W;
-    return {
-      type: 'scatter3d', mode: 'lines',
-      x: [-hw, +hw, +hw, -hw, -hw],
-      y: [0, 0, 0, 0, 0],
-      z: [STRIKE_ZONE_Z_LO, STRIKE_ZONE_Z_LO, STRIKE_ZONE_Z_HI, STRIKE_ZONE_Z_HI, STRIKE_ZONE_Z_LO],
-      line: { color: 'rgba(80,80,80,0.55)', width: 3, dash: 'dash' },
-      name: 'strike zone',
-      hoverinfo: 'skip',
-      showlegend: false,
-    };
+// === trace builders ===
+  // The strike zone is now rendered server-side in render_scene._build_figure
+  // so it appears in the dashboard canvas, the per-session viewer, and any
+  // other consumer of the shared scene. Visibility is governed by the
+  // strike-zone toggle (defaults ON, persisted in localStorage).
+  const STRIKE_ZONE_VISIBLE_KEY = 'ball_tracker_strike_zone_visible';
+  function strikeZoneVisible() {
+    try {
+      const raw = localStorage.getItem(STRIKE_ZONE_VISIBLE_KEY);
+      if (raw === null) return true;
+      return raw === '1';
+    } catch (_) { return true; }
+  }
+  function setStrikeZoneVisible(on) {
+    try { localStorage.setItem(STRIKE_ZONE_VISIBLE_KEY, on ? '1' : '0'); } catch (_) {}
+  }
+  function isStrikeZoneTrace(t) {
+    return !!(t && t.meta && t.meta.feature === 'strike_zone');
   }
 
   function inspectTracesFor(sid, result, color) {
