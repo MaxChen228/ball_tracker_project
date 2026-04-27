@@ -110,24 +110,11 @@ _JS_TEMPLATE = r"""
       <div class="session-actions">${btn}</div>`;
   }
 
-  // --- Nav chip mirror --------------------------------------------------
-  // Three chips only (devices / cal / sync), matching
-  // render_shared.py::_render_nav_status. No editorial headline.
-  function renderNav(state) {
-    if (!navStatus) return;
-    const online = (state.devices || []).length;
-    const cal = (state.calibrations || []).length;
-    const synced = (state.devices || []).filter(d => d && d.time_synced).length;
-    const expected = 2;
-    const check = (label, value, ok) =>
-      `<span class="status-check ${ok ? 'ok' : 'warn'}"><span class="k">${label}</span><span class="v">${value}</span></span>`;
-    navStatus.innerHTML = `
-      <div class="status-checks">
-        ${check('Devices', `${online}/${expected}`, online >= expected)}
-        ${check('Cal', `${cal}/${expected}`, cal >= expected)}
-        ${check('Sync', `${synced}/${expected}`, synced >= expected)}
-      </div>`;
-  }
+  // Nav chip mirror lives in the dashboard JS bundle (loaded on every
+  // page) — sync used to ship its own renderNav writing to the same
+  // #nav-status slot, which made the strip flicker between formats as
+  // the two ticks fought each turn. Removed; the dashboard renderer is
+  // the sole writer everywhere now.
 
   // --- Sync log tick (moved verbatim from render_dashboard.py) -------------
   let _syncLogClearedAtTs = 0;
@@ -250,7 +237,6 @@ _JS_TEMPLATE = r"""
       if (!r.ok) return;
       const s = await r.json();
       renderSync(s);
-      renderNav(s);
       renderPerCamSync(s);
     } catch (e) { /* silent */ }
   }

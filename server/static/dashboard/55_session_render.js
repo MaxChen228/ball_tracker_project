@@ -215,18 +215,18 @@
     renderActiveSession(currentLiveSession);
 
     // Mirror live state into the shared app-header status strip.
-    // /sync ships its own nav renderer (render_sync_client.py::renderNav)
-    // with a fraction-format ("Sync 1/2"); both bundles load on /sync,
-    // so writing here too means the two ticks fight every cycle and the
-    // operator sees the strip flicker between formats. Skip on /sync —
-    // dashboard / setup keep the single-value format we own.
-    if (navStatus && pageMode !== 'sync') {
+    // Stereo rig: every chip is `n/2` against the expected cam count.
+    // Single sole writer across dashboard / setup / sync — sync's own
+    // renderer (render_sync_client.py::renderNav) was retired so there
+    // is nothing left to fight us for #nav-status.
+    if (navStatus) {
+      const expected = 2;
       const online = (state.devices || []).length;
       const usable = (readiness.calibrated_online_cameras || []).length;
       const syncedUsable = (readiness.synced_calibrated_online_cameras || []).length;
       const check = (label, value, ok) =>
         `<span class="status-check ${ok ? 'ok' : 'warn'}"><span class="k">${label}</span><span class="v">${value}</span></span>`;
-      const html = `<div class="status-checks">${check('Devices', `${online}`, online >= 1)}${check('Cal', `${usable}`, usable >= 1)}${check('Sync', readiness.requires_time_sync ? `${syncedUsable}/${usable}` : 'single', !readiness.requires_time_sync || syncedUsable >= usable)}</div>`;
+      const html = `<div class="status-checks">${check('Devices', `${online}/${expected}`, online >= expected)}${check('Cal', `${usable}/${expected}`, usable >= expected)}${check('Sync', `${syncedUsable}/${expected}`, syncedUsable >= expected)}</div>`;
       if (navStatus.innerHTML !== html) navStatus.innerHTML = html;
     }
 
