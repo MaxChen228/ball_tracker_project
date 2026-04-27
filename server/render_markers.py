@@ -4,14 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from render_compare import (
-    DRAW_VIRTUAL_BASE_JS,
-    DRAW_PLATE_OVERLAY_JS,
-    LIVE_COMPARE_CSS,
-    PLATE_WORLD_JS,
-    PROJECTION_JS,
-    render_live_compare_camera,
-)
+from cam_view_ui import CAM_VIEW_CSS, CAM_VIEW_RUNTIME_JS, render_cam_view
 from render_shared import _CSS, _render_app_nav
 
 
@@ -98,10 +91,6 @@ _MARKERS_CSS = """
 .compare-title {
   margin: 0; font-family: var(--mono); font-size: 13px;
   letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink);
-}
-""" + LIVE_COMPARE_CSS + """
-.camera-compare .preview-panel .placeholder {
-  display: none;
 }
 .markers-right { display: flex; flex-direction: column; gap: var(--s-3); }
 .controls-row {
@@ -242,11 +231,9 @@ _MARKERS_JS = r"""
     showArucoIds: true,
   };
 
-  """ + PLATE_WORLD_JS + """
-  const virtCamMeta = new Map((state.scene.cameras || []).map(cam => [cam.camera_id, cam]));
-  """ + PROJECTION_JS + """
-  """ + DRAW_VIRTUAL_BASE_JS + """
-  """ + DRAW_PLATE_OVERLAY_JS + """
+  // Projection helpers + plate constants are provided by the shared
+  // BallTrackerCamView runtime (cam_view_ui.py) injected ahead of this
+  // script. Don't redeclare here — single source of truth.
 
   function esc(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
@@ -472,16 +459,13 @@ _MARKERS_JS = r"""
     ctx.fillText(label, lx - tw / 2, ly - 9);
   }
 
-  function drawCompareVirtual(canvas, camId) {
-    const cam = virtCamMeta.get(camId);
-    const base = drawVirtualBase(canvas, cam, {
-      plateStroke: 'rgba(202, 61, 47, 0.95)',
-      plateFill: 'rgba(202, 61, 47, 0.10)',
-    });
-    if (!base) {
-      return false;
-    }
-    const { ctx, sx, sy } = base;
+  // Marker footprint layer: registered with BallTrackerCamView so
+  // every cam-view paint draws the current candidate / stored / known
+  // marker set on top of the live preview. Uses image-space projection
+  // (image_width_px / image_height_px from meta), then css-scales via
+  // sx/sy for the canvas — matches the runtime's coordinate convention.
+  function drawMarkerFootprintLayer(ctx, sx, sy, cam) {
+    if (!cam) return;
     const selected = currentSelection();
     compareRows().forEach(row => {
       drawMarkerFootprint(
@@ -493,79 +477,32 @@ _MARKERS_JS = r"""
         selected && Number(selected.marker_id) === Number(row.marker_id),
       );
     });
-    ctx.restore();
-    return true;
   }
 
-  function svgNode(name, attrs) {
-    const el = document.createElementNS('http://www.w3.org/2000/svg', name);
-    Object.entries(attrs || {}).forEach(([k, v]) => el.setAttribute(k, String(v)));
-    return el;
-  }
-
-  function labelWidth(text) {
-    return Math.max(18, 10 + String(text).length * 8);
-  }
-
-  function drawPreviewOverlay(svg, camId) {
-    const meta = virtCamMeta.get(camId);
-    const ok = redrawPlateOverlay(svg, meta);
-    let layer = svg.querySelector('[data-role="marker-layer"]');
-    if (!layer) {
-      layer = svgNode('g', { 'data-role': 'marker-layer' });
-      svg.appendChild(layer);
+  // Click hit-test: clicked u/v arrives in IMAGE-space px (matches
+  // projectWorldToPixel's output). Pick the nearest marker centroid
+  // within ~3% of the image's longer edge so tolerance scales with
+  // capture resolution.
+  function handleCamClick(info) {
+    const { u, v, meta } = info;
+    if (!meta) return;
+    const tol = Math.max(20, 0.03 * Math.max(meta.image_width_px || 1920, meta.image_height_px || 1080));
+    let best = null, bestDist = tol;
+    for (const row of compareRows()) {
+      const p = projectWorldToPixel([row.x_m, row.y_m, row.z_m || 0], meta);
+      if (!p) continue;
+      const d = Math.hypot(p.u - u, p.v - v);
+      if (d < bestDist) { bestDist = d; best = row; }
     }
-    layer.replaceChildren();
-    if (!ok) return;
-    const selected = currentSelection();
-    compareRows().forEach(row => {
-      const point = projectWorldToPixel([row.x_m, row.y_m, row.z_m], meta);
-      if (!point) return;
-      const x = point.u;
-      const y = point.v;
-      const g = svgNode('g', {
-        class: `preview-marker${selected && Number(selected.marker_id) === Number(row.marker_id) ? ' is-selected' : ''}`,
-      });
-      g.appendChild(svgNode('circle', {
-        cx: x,
-        cy: y,
-        r: 4.5,
-        fill: markerColor(row),
-        class: 'marker-dot',
-      }));
-      if (state.showArucoIds) {
-        const text = String(row.marker_id);
-        const width = labelWidth(text);
-        g.appendChild(svgNode('rect', {
-          x: x - width / 2,
-          y: y - 28,
-          width,
-          height: 18,
-          fill: markerColor(row),
-          class: 'marker-tag',
-        }));
-        const textEl = svgNode('text', {
-          x,
-          y: y - 19,
-          class: 'marker-text',
-        });
-        textEl.textContent = text;
-        g.appendChild(textEl);
-      }
-      layer.appendChild(g);
-    });
+    if (!best) return;
+    state.selectedKind = best.kind === 'candidate' ? 'candidate'
+      : best.origin === 'candidate' ? 'candidate' : 'stored';
+    state.selectedId = Number(best.marker_id);
+    renderAll();
   }
 
   function redrawCompareViews() {
-    compareRoot.querySelectorAll('[data-markers-virt-canvas]').forEach(canvas => {
-      const camId = canvas.dataset.markersVirtCanvas;
-      const cell = canvas.closest('.virt-cell');
-      const ok = drawCompareVirtual(canvas, camId);
-      if (cell) cell.classList.toggle('ready', ok);
-    });
-    compareRoot.querySelectorAll('[data-preview-overlay]').forEach(svg => {
-      drawPreviewOverlay(svg, svg.dataset.previewOverlay);
-    });
+    if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();
   }
 
   async function tickPreviewRefresh() {
@@ -583,11 +520,10 @@ _MARKERS_JS = r"""
 
   function tickPreviewImages() {
     const t = Date.now();
-    compareRoot.querySelectorAll('img[data-preview-img]').forEach(img => {
-      const cam = img.dataset.previewImg;
+    compareRoot.querySelectorAll('img[data-cam-img]').forEach(img => {
+      const cam = img.dataset.camImg;
       if (!cam) return;
       img.src = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + t;
-      img.style.opacity = 1;
     });
   }
 
@@ -876,11 +812,23 @@ _MARKERS_JS = r"""
     };
   }
 
-  window.addEventListener('resize', redrawCompareViews);
+  // Wire BallTrackerCamView: register the marker_footprints layer,
+  // attach click hit-testing per cam, push initial scene meta. The
+  // runtime owns paint scheduling + ResizeObserver — no need for a
+  // window resize listener here.
+  if (window.BallTrackerCamView) {
+    window.BallTrackerCamView.registerLayer('marker_footprints', drawMarkerFootprintLayer);
+    for (const cam of (state.scene.cameras || [])) {
+      window.BallTrackerCamView.setMeta(cam.camera_id, cam);
+    }
+    window.BallTrackerCamView.onCanvasClick('A', handleCamClick);
+    window.BallTrackerCamView.onCanvasClick('B', handleCamClick);
+  }
+
   tickPreviewRefresh();
   tickPreviewImages();
   setInterval(tickPreviewRefresh, 2000);
-  setInterval(tickPreviewImages, 250);
+  setInterval(tickPreviewImages, 200);
   renderAll();
 })();
 """
@@ -909,7 +857,7 @@ def render_markers_html(
         "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
         "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
         "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
-        f"<style>{_CSS}{_MARKERS_CSS}</style>"
+        f"<style>{_CSS}{CAM_VIEW_CSS}{_MARKERS_CSS}</style>"
         "</head><body data-page=\"markers\">"
         f'{_render_app_nav("markers", devices, session, calibrations)}'
         '<main class="main-markers">'
@@ -933,8 +881,12 @@ def render_markers_html(
         '<h2 class="card-title">Camera Compare</h2>'
         '</div>'
         '<div id="compare-root" class="compare-grid">'
-        f'{render_live_compare_camera("A", preview_src="/camera/A/preview?t=0", virt_canvas_attr="data-markers-virt-canvas")}'
-        f'{render_live_compare_camera("B", preview_src="/camera/B/preview?t=0", virt_canvas_attr="data-markers-virt-canvas")}'
+        # Markers focuses on ArUco footprints + IDs as the primary overlay,
+        # with plate context + axes available as secondary toggles.
+        # Click on a footprint selects that marker (handled by
+        # BallTrackerCamView.onCanvasClick wiring in _MARKERS_JS).
+        f'{render_cam_view("A", preview_src="/camera/A/preview?t=0", layers=["plate", "axes", "marker_footprints"], layers_on=["plate", "marker_footprints"], cam_label="Cam A")}'
+        f'{render_cam_view("B", preview_src="/camera/B/preview?t=0", layers=["plate", "axes", "marker_footprints"], layers_on=["plate", "marker_footprints"], cam_label="Cam B")}'
         '</div>'
         '</section>'
         '<section class="markers-grid">'
@@ -954,6 +906,7 @@ def render_markers_html(
         '</section>'
         '</main>'
         f"<script>{_NAV_RESIZE_JS}</script>"
+        f"<script>{CAM_VIEW_RUNTIME_JS}</script>"
         f"<script>{_MARKERS_JS.replace('__INITIAL_STATE__', initial_state)}</script>"
         "</body></html>"
     )
