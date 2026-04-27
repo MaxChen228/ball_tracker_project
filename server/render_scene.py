@@ -156,6 +156,11 @@ def _build_figure(scene: Scene):
             name="strike zone",
             hoverinfo="skip",
             showlegend=False,
+            # `feature` (not `trace_kind`) so the viewer's static-trace
+            # filter — which drops anything with trace_kind set — keeps
+            # the zone in STATIC. The strike-zone toggle reads this on
+            # the JS side to hide the wireframe + fill in lock-step.
+            meta=dict(feature="strike_zone"),
         )
     )
     # Translucent solid: 6 faces, 12 triangles (i/j/k point into the
@@ -174,6 +179,7 @@ def _build_figure(scene: Scene):
             hoverinfo="skip",
             showlegend=False,
             name="strike zone fill",
+            meta=dict(feature="strike_zone"),
         )
     )
 

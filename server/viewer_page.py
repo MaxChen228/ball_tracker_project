@@ -263,6 +263,13 @@ def render_viewer_html(
               <input type="range" id="fitres-filter-slider" min="10" max="60" step="1" value="60" aria-label="Outlier rejection (κ · MAD; 60 = off)">
               <span id="fitres-filter-readout" class="readout">off</span>
             </span>
+            <span class="layer-divider" aria-hidden="true"></span>
+            <span class="layer-group" data-layer="strike-zone" title="Toggle the strike-zone wireframe in the 3D scene. Default on.">
+              <label class="layer-checkbox">
+                <input type="checkbox" id="strike-zone-toggle" checked>
+                <span class="layer-name">Strike zone</span>
+              </label>
+            </span>
           </span>
         </div>
         <div class="strip-row strip-row-scrubber">
@@ -587,6 +594,8 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .layer-toggles .layer-pill[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); border-color:var(--ink); }}
   .layer-toggles .layer-pill:hover {{ border-color:var(--ink); }}
   .layer-toggles .layer-pill[hidden] {{ display:none; }}
+  .layer-toggles .layer-checkbox {{ display:inline-flex; align-items:center; gap:5px; cursor:pointer; }}
+  .layer-toggles .layer-checkbox input {{ accent-color:var(--ink); cursor:pointer; }}
   .layer-toggles .layer-divider {{ width:1px; align-self:stretch;
     background:var(--border-base); margin:2px 2px; }}
   .layer-toggles input[type="range"] {{ -webkit-appearance:none; appearance:none;
@@ -746,6 +755,20 @@ def _viewer_js() -> str:
   const DATA = JSON.parse(document.getElementById("viewer-data").textContent);
   const SCENE = DATA.scene;
   const STATIC = DATA.static_traces || [];
+  // Strike-zone visibility — persisted independently from layer pills so
+  // it carries across sessions. Default true; the checkbox in
+  // #layer-toggles mirrors and writes this flag.
+  const STRIKE_ZONE_VISIBLE_KEY = "ball_tracker_strike_zone_visible";
+  function strikeZoneVisible() {{
+    try {{
+      const raw = localStorage.getItem(STRIKE_ZONE_VISIBLE_KEY);
+      if (raw === null) return true;
+      return raw === "1";
+    }} catch (_e) {{ return true; }}
+  }}
+  function setStrikeZoneVisible(on) {{
+    try {{ localStorage.setItem(STRIKE_ZONE_VISIBLE_KEY, on ? "1" : "0"); }} catch (_e) {{}}
+  }}
   const LAYOUT = DATA.layout;
   const CAM_COLOR = DATA.camera_colors || {{}};
   const FALLBACK = DATA.fallback_color;
@@ -1498,7 +1521,14 @@ def _viewer_js() -> str:
   function drawScene() {{
     const playback = mode !== "all";
     const cutoff = playback ? currentT : Infinity;
-    Plotly.react(sceneDiv, [...STATIC, ...buildDynamicTraces(cutoff, playback)], LAYOUT, {{displayModeBar: false, responsive: true}});
+    // Strike-zone toggle: filter the wireframe + fill traces out of
+    // STATIC when the user unticks the box. Default ON, persisted in
+    // localStorage so the choice survives page reload.
+    const showZone = strikeZoneVisible();
+    const staticFiltered = showZone
+      ? STATIC
+      : STATIC.filter(t => !((t.meta || {{}}).feature === "strike_zone"));
+    Plotly.react(sceneDiv, [...staticFiltered, ...buildDynamicTraces(cutoff, playback)], LAYOUT, {{displayModeBar: false, responsive: true}});
     drawVirtuals();
     drawRealPlateOverlays();
   }}
@@ -1938,6 +1968,16 @@ def _viewer_js() -> str:
       scheduleSceneDraw();
     }});
   }}
+  // --- Strike-zone visibility toggle ---
+  const _szToggle = document.getElementById("strike-zone-toggle");
+  if (_szToggle) {{
+    _szToggle.checked = strikeZoneVisible();
+    _szToggle.addEventListener("change", () => {{
+      setStrikeZoneVisible(_szToggle.checked);
+      scheduleSceneDraw();
+    }});
+  }}
+
   // --- Fit mode toggle ---
   const fitToggleBtn = document.getElementById("fit-toggle");
   if (fitToggleBtn) {{

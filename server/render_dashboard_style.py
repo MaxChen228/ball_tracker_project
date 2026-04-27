@@ -721,6 +721,8 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-src-pill[aria-pressed="true"] {{ background: var(--ink); color: var(--surface);
                                                     border-color: var(--ink); }}
 .fit-filter-bar .ff-src-pill[disabled] {{ opacity: 0.35; cursor: not-allowed; }}
+.fit-filter-bar .ff-checkbox {{ display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }}
+.fit-filter-bar .ff-checkbox input {{ accent-color: var(--ink); cursor: pointer; }}
 
 /* --- Replay playback bar (bottom-center, hidden when mode=inspect) --- */
 .playback-bar {{ position: absolute; left: 50%; bottom: var(--s-4); transform: translateX(-50%);
