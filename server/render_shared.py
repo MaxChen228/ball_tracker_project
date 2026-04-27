@@ -22,7 +22,13 @@ _DUAL = "#D35400"
 _ACCENT = "#E6B300"
 
 
-_CSS = f"""
+# Shared `:root` design-token block. Imported by render_shared._CSS
+# AND render_dashboard_style._CSS — two pages embed two `<style>` blobs
+# with the same tokens, so this single source of truth beats keeping two
+# verbatim copies in sync. Component-level CSS (.nav, .device, etc.)
+# legitimately differs between the dashboard and the simpler shells, so
+# only the tokens are factored out, not the whole stylesheet.
+_TOKENS_CSS = f"""
 :root {{
   --bg: {_BG};
   --surface: {_SURFACE};
@@ -52,6 +58,11 @@ _CSS = f"""
   --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px; --s-5: 24px;
   --r: 3px;
 }}
+"""
+
+
+_CSS = f"""
+{_TOKENS_CSS}
 
 * {{ box-sizing: border-box; }}
 html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--ink);
