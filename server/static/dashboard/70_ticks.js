@@ -63,26 +63,20 @@
         auto_calibration: currentAutoCalibration,
       });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
-      // Update per-camera virt reprojection metadata from scene.cameras
-      // (carries fx/fy/cx/cy/R_wc/t_wc/distortion/dims). Push to both
-      // the legacy virtCamMeta (still consumed by setup/markers until
-      // those phases land) AND the new shared BallTrackerCamView so
-      // the dashboard's merged cam-view picks up calibration changes.
-      virtCamMeta.clear();
-      for (const c of ((payload.scene || {}).cameras || [])) {
-        virtCamMeta.set(c.camera_id, c);
-        if (window.BallTrackerCamView) window.BallTrackerCamView.setMeta(c.camera_id, c);
-      }
-      // Cameras that were previously set but are absent now — clear so
-      // the cam-view drops back to "uncalibrated" badge.
+      // Push per-camera reprojection metadata into BallTrackerCamView.
+      // The runtime owns paint scheduling + clears absent cams to the
+      // uncalibrated badge so the operator sees calibration drop-off
+      // immediately on /, /setup, /markers.
       if (window.BallTrackerCamView) {
-        const live = new Set(((payload.scene || {}).cameras || []).map(c => c.camera_id));
+        const live = new Set();
+        for (const c of ((payload.scene || {}).cameras || [])) {
+          window.BallTrackerCamView.setMeta(c.camera_id, c);
+          live.add(c.camera_id);
+        }
         for (const cam of window.BallTrackerCamView.listCams()) {
           if (!live.has(cam)) window.BallTrackerCamView.setMeta(cam, null);
         }
       }
-      redrawAllVirtCanvases();
-      redrawAllPreviewPlateOverlays();
       // Main 3D canvas lives only on `/`. Don't gate the metadata update
       // above on sceneRoot — `/setup` still needs virt canvases drawn.
       if (payload.plot && sceneRoot && window.Plotly) {

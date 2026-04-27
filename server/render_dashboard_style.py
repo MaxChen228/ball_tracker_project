@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from cam_view_ui import CAM_VIEW_CSS
-from render_compare import LIVE_COMPARE_CSS
 
 
 # --- Design-system tokens (mirrored in render_scene.py) ----------------------
@@ -443,7 +442,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
    the viewer's bottom-row virt canvas — if the reprojected outline
    doesn't align with the plate in the real preview above, calibration
    is off. */
-{LIVE_COMPARE_CSS}
 {CAM_VIEW_CSS}
 
 /* Calibration card (Phase 5). Per-camera auto-calibrate row + an
