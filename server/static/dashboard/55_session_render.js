@@ -215,7 +215,12 @@
     renderActiveSession(currentLiveSession);
 
     // Mirror live state into the shared app-header status strip.
-    if (navStatus) {
+    // /sync ships its own nav renderer (render_sync_client.py::renderNav)
+    // with a fraction-format ("Sync 1/2"); both bundles load on /sync,
+    // so writing here too means the two ticks fight every cycle and the
+    // operator sees the strip flicker between formats. Skip on /sync —
+    // dashboard / setup keep the single-value format we own.
+    if (navStatus && pageMode !== 'sync') {
       const online = (state.devices || []).length;
       const usable = (readiness.calibrated_online_cameras || []).length;
       const syncedUsable = (readiness.synced_calibrated_online_cameras || []).length;
