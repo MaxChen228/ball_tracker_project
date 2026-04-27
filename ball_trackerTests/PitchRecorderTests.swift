@@ -47,6 +47,9 @@ final class PitchRecorderTests: XCTestCase {
             resetDetectionState: {},
             clearRecoveredAnchor: {},
             dispatchLiveCycleEnd: { _, _ in },
+            // serverPost-only path → drain hook not exercised, but the
+            // dependency is still required by the init shape.
+            waitForDetectionDrain: { completion in completion() },
             showErrorBanner: { _ in },
             hideBanner: {},
             setStatusText: { text in

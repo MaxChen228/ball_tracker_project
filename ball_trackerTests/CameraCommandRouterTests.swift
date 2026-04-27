@@ -33,6 +33,7 @@ final class CameraCommandRouterTests: XCTestCase {
         private(set) var chirpThresholdPushes: [Double] = []
         private(set) var heartbeatIntervalPushes: [Double] = []
         private(set) var hsvPushes: [ServerUploader.HSVRangePayload] = []
+        private(set) var shapeGatePushes: [ServerUploader.ShapeGatePayload] = []
         private(set) var exposureCapPushes: [String] = []
         private(set) var captureHeightApplied: [Int] = []
         private(set) var ensurePreviewUploaderCount = 0
@@ -90,6 +91,9 @@ final class CameraCommandRouterTests: XCTestCase {
                 },
                 hsvRangeDidPush: { hsv in
                     self.guarded { self.hsvPushes.append(hsv) }
+                },
+                shapeGateDidPush: { sg in
+                    self.guarded { self.shapeGatePushes.append(sg) }
                 },
                 handleTrackingExposureCap: { cap in
                     self.guarded { self.exposureCapPushes.append(cap) }

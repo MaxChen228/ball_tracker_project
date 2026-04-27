@@ -162,4 +162,120 @@ final class BallDetectorTests: XCTestCase {
         let buf = makeBGRA(circleCenter: nil)
         XCTAssertNil(detector.detect(in: buf))
     }
+
+    // MARK: - Stateful + ROI multi-candidate
+
+    /// Adds a second filled circle to an existing buffer at `extraCenter`,
+    /// so a multi-candidate test can assert the detector ships both blobs.
+    /// The second circle uses the same yellow-green colour by default —
+    /// caller can override via `rgb` if a test wants different magnitudes.
+    private func addCircle(
+        _ buffer: CVPixelBuffer,
+        center: CGPoint,
+        radius: CGFloat,
+        rgb: (r: UInt8, g: UInt8, b: UInt8) = (210, 235, 40)
+    ) {
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        let base = CVPixelBufferGetBaseAddress(buffer)!
+        let rowBytes = CVPixelBufferGetBytesPerRow(buffer)
+        let width = CVPixelBufferGetWidth(buffer)
+        let height = CVPixelBufferGetHeight(buffer)
+        let r2 = radius * radius
+        let minX = max(0, Int(center.x - radius))
+        let maxX = min(width - 1, Int(center.x + radius))
+        let minY = max(0, Int(center.y - radius))
+        let maxY = min(height - 1, Int(center.y + radius))
+        for y in minY...maxY {
+            let row = base.advanced(by: y * rowBytes).assumingMemoryBound(to: UInt8.self)
+            for x in minX...maxX {
+                let dx = CGFloat(x) - center.x
+                let dy = CGFloat(y) - center.y
+                if dx * dx + dy * dy <= r2 {
+                    let i = x * 4
+                    row[i + 0] = rgb.b
+                    row[i + 1] = rgb.g
+                    row[i + 2] = rgb.r
+                    row[i + 3] = 0xFF
+                }
+            }
+        }
+    }
+
+    func testStatefulMultiCandidateReturnsAllOnFullFrame() {
+        // First arm of the detector — no prior ROI, so the multi-cand path
+        // takes the full-frame branch and should return both discs sorted
+        // by area desc.
+        let detector = BTStatefulBallDetector()
+        let bigCenter = CGPoint(x: 600, y: 400)
+        let smallCenter = CGPoint(x: 1200, y: 700)
+        let buf = makeBGRA(circleCenter: bigCenter, radius: 32)
+        addCircle(buf, center: smallCenter, radius: 18)
+
+        let cands = detector.detectAllCandidates(in: buf)
+        XCTAssertEqual(cands.count, 2, "Both yellow-green discs must pass the gates")
+        // Largest first.
+        XCTAssertEqual(Double(cands[0].px), Double(bigCenter.x), accuracy: 5.0)
+        XCTAssertEqual(Double(cands[0].py), Double(bigCenter.y), accuracy: 5.0)
+        XCTAssertGreaterThan(cands[0].areaPx, cands[1].areaPx)
+    }
+
+    func testStatefulMultiCandidateUsesROIAfterPriorHit() {
+        // Frame 0: full-frame run anchors the ROI on the big disc.
+        let detector = BTStatefulBallDetector()
+        let bigCenter = CGPoint(x: 600, y: 400)
+        let buf0 = makeBGRA(circleCenter: bigCenter, radius: 32)
+        let cands0 = detector.detectAllCandidates(in: buf0)
+        XCTAssertEqual(cands0.count, 1)
+
+        // Frame 1: same big disc moved slightly (within 3× radius ROI), plus
+        // a far-away decoy that's OUTSIDE the ROI. The ROI pass should
+        // ignore the decoy entirely → exactly one candidate returned.
+        let bigMoved = CGPoint(x: bigCenter.x + 50, y: bigCenter.y - 30)
+        let decoyCenter = CGPoint(x: 1700, y: 950)
+        let buf1 = makeBGRA(circleCenter: bigMoved, radius: 32)
+        addCircle(buf1, center: decoyCenter, radius: 18)
+        let cands1 = detector.detectAllCandidates(in: buf1)
+        XCTAssertEqual(cands1.count, 1, "ROI should crop out the far decoy")
+        XCTAssertEqual(Double(cands1[0].px), Double(bigMoved.x), accuracy: 5.0)
+        XCTAssertEqual(Double(cands1[0].py), Double(bigMoved.y), accuracy: 5.0)
+    }
+
+    func testStatefulMultiCandidateFallsBackOnROIMiss() {
+        // Frame 0: anchor ROI on top-left.
+        let detector = BTStatefulBallDetector()
+        let c0 = CGPoint(x: 120, y: 120)
+        XCTAssertEqual(detector.detectAllCandidates(in: makeBGRA(circleCenter: c0, radius: 28)).count, 1)
+
+        // Frame 1: ball jumps far outside ROI; full-frame fallback must
+        // recover it (and update tracking from the new largest blob).
+        let c1 = CGPoint(x: 1800, y: 960)
+        let buf1 = makeBGRA(circleCenter: c1, radius: 32)
+        addCircle(buf1, center: CGPoint(x: 1500, y: 800), radius: 18)
+        let cands1 = detector.detectAllCandidates(in: buf1)
+        XCTAssertEqual(cands1.count, 2, "Both visible blobs survive the gate")
+        XCTAssertEqual(Double(cands1[0].px), Double(c1.x), accuracy: 5.0)
+    }
+
+    func testStatefulMultiCandidateReturnsEmptyOnBlankImage() {
+        let detector = BTStatefulBallDetector()
+        let buf = makeBGRA(circleCenter: nil)
+        XCTAssertEqual(detector.detectAllCandidates(in: buf).count, 0)
+    }
+
+    func testStatefulMultiCandidateSharesROIStateWithSingleBest() {
+        // Single-best `detect` and multi `detectAllCandidates` must read /
+        // write the same ROI state — calling one then the other on
+        // overlapping frames should keep the cropping consistent.
+        let detector = BTStatefulBallDetector()
+        let c0 = CGPoint(x: 800, y: 500)
+        XCTAssertNotNil(detector.detect(in: makeBGRA(circleCenter: c0, radius: 28)))
+
+        // Far decoy now ignored by both APIs since they share `_hasPrev`.
+        let cMoved = CGPoint(x: 850, y: 480)
+        let buf = makeBGRA(circleCenter: cMoved, radius: 28)
+        addCircle(buf, center: CGPoint(x: 1700, y: 100), radius: 18)
+        let cands = detector.detectAllCandidates(in: buf)
+        XCTAssertEqual(cands.count, 1, "ROI from prior single-best call should still crop the decoy out")
+    }
 }

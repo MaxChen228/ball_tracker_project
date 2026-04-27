@@ -2,6 +2,12 @@ import XCTest
 import CoreVideo
 @testable import ball_tracker
 
+/// Tests for the post-Phase-3 single-worker `ConcurrentDetectionPool`.
+/// The class kept its name for historical continuity but is no longer
+/// concurrent: a serial queue feeds a single ROI-tracking
+/// `BTStatefulBallDetector`, with `maxBacklog` as the only backpressure
+/// knob. Stride / `maxConcurrency` were removed — running 240 Hz HSV at
+/// ~3 ms/frame doesn't need either.
 final class ConcurrentDetectionPoolTests: XCTestCase {
 
     private func createDummyPixelBuffer() -> CVPixelBuffer {
@@ -14,156 +20,112 @@ final class ConcurrentDetectionPoolTests: XCTestCase {
         return pixelBuffer!
     }
 
-    func testDispatchUnderConcurrencyLimitFiresAllFrames() {
-        let pool = ConcurrentDetectionPool(maxConcurrency: 3)
+    func testDispatchFiresAllAcceptedFrames() {
+        let pool = ConcurrentDetectionPool(maxBacklog: 32)
         let exp = expectation(description: "Fires all frames")
-        exp.expectedFulfillmentCount = 3
-        
+        exp.expectedFulfillmentCount = 5
+
         pool.onFrame = { _ in
             exp.fulfill()
         }
-        
-        for i in 0..<3 {
+
+        for i in 0..<5 {
             let accepted = pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: Double(i))
             XCTAssertTrue(accepted)
         }
-        
+
         waitForExpectations(timeout: 2.0)
     }
 
-    func testDispatchOverConcurrencyLimitDropsExcess() {
-        let pool = ConcurrentDetectionPool(maxConcurrency: 1)
-        
+    func testBacklogOverflowDropsExcess() {
+        // Tight backlog + many synchronous enqueues: the serial queue
+        // can't keep up while the loop is running, so we should bottom
+        // out at `maxBacklog` accepted before drops kick in.
+        let pool = ConcurrentDetectionPool(maxBacklog: 1)
+
         var acceptedCount = 0
         for _ in 0..<100 {
             if pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 0) {
                 acceptedCount += 1
             }
         }
-        
-        XCTAssertTrue(acceptedCount < 100, "Should have dropped some frames")
-        XCTAssertTrue(pool.droppedFrameCount > 0, "Telemetry should record dropped frames")
+
+        XCTAssertLessThan(acceptedCount, 100, "Should have dropped some frames")
+        XCTAssertGreaterThan(pool.droppedFrameCount, 0, "Telemetry should record dropped frames")
     }
 
     func testInvalidateGenerationSilencesInFlightWorkers() {
-        let pool = ConcurrentDetectionPool(maxConcurrency: 3)
+        let pool = ConcurrentDetectionPool(maxBacklog: 32)
         var receivedCallbackCount = 0
         pool.onFrame = { _ in receivedCallbackCount += 1 }
-        
+
         _ = pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 0.1)
         pool.invalidateGeneration()
-        
+
         let exp = expectation(description: "Wait to ensure callback does not fire")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             exp.fulfill()
         }
         waitForExpectations(timeout: 1.0)
-        
-        // It's possible the logic executed fast enough to fire the callback before invalidation, 
-        // but typically async overhead prevents it when there's no waiting.
-        // Assuming test machine overhead pushes async block after main thread invalidates.
+
         XCTAssertEqual(receivedCallbackCount, 0, "Invalidated generation should silence workers")
     }
 
-    func testFrameIndexIsMonotonicAcrossConcurrentDispatches() {
-        let pool = ConcurrentDetectionPool(maxConcurrency: 5)
+    func testFrameIndexIsMonotonic() {
+        let pool = ConcurrentDetectionPool(maxBacklog: 64)
         var indices: [Int] = []
         let lock = NSLock()
-        
+
         let exp = expectation(description: "Receive all frames")
         let total = 20
         exp.expectedFulfillmentCount = total
-        
+
         pool.onFrame = { frame in
             lock.lock()
             indices.append(frame.frame_index)
             lock.unlock()
             exp.fulfill()
         }
-        
+
         for i in 0..<total {
             while !pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: Double(i)) {
                 Thread.sleep(forTimeInterval: 0.01)
             }
         }
-        
+
         waitForExpectations(timeout: 5.0)
-        
-        let sortedIndices = indices.sorted()
-        XCTAssertEqual(indices.count, total)
-        XCTAssertEqual(sortedIndices.first, 0)
-        XCTAssertEqual(sortedIndices.last, total - 1)
-        XCTAssertEqual(Set(indices).count, total)
+
+        // Serial worker → frames arrive at onFrame in dispatch order.
+        XCTAssertEqual(indices, Array(0..<total),
+                       "Serial worker must deliver frames in monotonic order")
     }
 
-    func testStrideThrottlesDetectionTo25PercentAtStride4() {
-        // 240 fps capture → stride 4 → 60 Hz effective detection rate.
-        // Semaphore large enough to never drop; so the only filter is stride.
-        let pool = ConcurrentDetectionPool(maxConcurrency: 8)
-        pool.setFrameStride(4)
+    func testWaitForDrainCompletesAfterAllQueuedFramesProcessed() {
+        let pool = ConcurrentDetectionPool(maxBacklog: 64)
+        let firedCount = NSCountedSet()
+        pool.onFrame = { _ in firedCount.add("frame") }
 
-        let total = 100
-        let exp = expectation(description: "Stride=4 fires ~25 of 100 frames")
-        let expected = total / 4
-        exp.expectedFulfillmentCount = expected
+        let total = 8
+        for i in 0..<total {
+            XCTAssertTrue(pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: Double(i)))
+        }
 
-        var fireCount = 0
-        let lock = NSLock()
-        pool.onFrame = { _ in
-            lock.lock(); fireCount += 1; lock.unlock()
+        let exp = expectation(description: "waitForDrain fires after backlog clears")
+        let drainQueue = DispatchQueue(label: "test.drain.callback")
+        pool.waitForDrain(on: drainQueue) {
+            // By contract this lambda runs strictly AFTER every queued
+            // worker, so onFrame must have fired `total` times by now.
+            XCTAssertEqual(firedCount.count(for: "frame"), total)
             exp.fulfill()
         }
-
-        var acceptedSync = 0
-        for i in 0..<total {
-            if pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: Double(i)) {
-                acceptedSync += 1
-            }
-        }
-        // With maxConcurrency=8 there should be no saturation drops; the
-        // accept count should exactly equal the stride output. Synchronous
-        // accept count is deterministic (stride check is synchronous).
-        XCTAssertEqual(acceptedSync, expected, "stride=4 should accept exactly \(expected) of \(total)")
-        XCTAssertEqual(pool.droppedFrameCount, 0, "stride skips are not saturation drops")
-        XCTAssertEqual(pool.stridedSkipCount, total - expected)
-
-        waitForExpectations(timeout: 3.0)
-        XCTAssertEqual(fireCount, expected, "onFrame should fire exactly \(expected) times under stride=4")
-    }
-
-    func testStrideOfOneSendsEveryFrame() {
-        let pool = ConcurrentDetectionPool(maxConcurrency: 8)
-        pool.setFrameStride(1)
-        var accepted = 0
-        for _ in 0..<20 {
-            if pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 0) {
-                accepted += 1
-            }
-        }
-        XCTAssertEqual(accepted, 20)
-        XCTAssertEqual(pool.stridedSkipCount, 0)
-    }
-
-    func testSetStrideResetsCursorSoNextFrameAlwaysFires() {
-        // Enqueue a couple of frames at stride=4 to advance cursor off zero.
-        let pool = ConcurrentDetectionPool(maxConcurrency: 8)
-        pool.setFrameStride(4)
-        _ = pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 0) // fires
-        _ = pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 1) // skipped
-        _ = pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 2) // skipped
-
-        // Change stride; cursor should reset so the next enqueue fires
-        // regardless of where we were in the old window.
-        pool.setFrameStride(1)
-        let accepted = pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 3)
-        XCTAssertTrue(accepted, "setFrameStride should reset cursor")
+        waitForExpectations(timeout: 5.0)
     }
 
     func testReset() {
-        let pool = ConcurrentDetectionPool(maxConcurrency: 1)
+        let pool = ConcurrentDetectionPool(maxBacklog: 1)
         while pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 0) {}
-        XCTAssertTrue(pool.droppedFrameCount > 0)
-        
+        XCTAssertGreaterThan(pool.droppedFrameCount, 0)
+
         pool.reset()
         XCTAssertEqual(pool.droppedFrameCount, 0)
     }
