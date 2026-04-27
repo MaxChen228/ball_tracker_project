@@ -385,6 +385,39 @@ def test_runtime_tracks_resize_observer_per_cam():
     assert "prev.disconnect()" in js
 
 
+def test_runtime_warns_loud_when_badge_container_missing():
+    """Phase 4: applyStatusBadges used to silently return when the
+    cam-view root had no `.cam-view-badges` child. That's a contract
+    violation between the runtime and the page's HTML — make it loud
+    once per cam (not every tick) so the operator notices."""
+    js = CAM_VIEW_RUNTIME_JS
+    assert "_warnedBadgesMissing" in js
+    assert "cam-view-badges container missing" in js
+
+
+def test_runtime_does_not_expose_internal_state_handle():
+    """Phase 4: _internal: { camMeta, ... } was kept around as a debug
+    escape hatch but the previous round of review already showed
+    callers used it (tickCalibration reached into camMeta directly)
+    and had to be migrated to listCams(). Drop the hatch — public
+    API only on window.BallTrackerCamView."""
+    js = CAM_VIEW_RUNTIME_JS
+    assert "_internal:" not in js
+    assert "_internal," not in js
+
+
+def test_runtime_click_handlers_dedupe_same_fn():
+    """Phase 4: onCanvasClick was push, so the same fn registered twice
+    fired twice. Move the handlers Map value to a Set so reference
+    equality dedupes — defensive against re-init paths that forget to
+    deregister, and harmless when only one handler is registered."""
+    js = CAM_VIEW_RUNTIME_JS
+    assert "clickHandlers.set(camId, new Set())" in js
+    assert "clickHandlers.get(camId).add(fn)" in js
+    # Comment block of the previous shape (push to array) must be gone.
+    assert "clickHandlers.get(camId).push" not in js
+
+
 def test_runtime_setstatus_does_not_take_calibrated_arg():
     """Calibration truth is derived from setMeta payload inside
     applyStatusBadges. Don't accept a redundant 'calibrated' field on
