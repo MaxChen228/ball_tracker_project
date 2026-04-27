@@ -208,10 +208,13 @@
         window.BallTrackerCamView.setStatus(cam, { online: onlineSet.has(cam) });
         // Auto-cal homography fit RMS — surfaces "is this camera correctly
         // placed?" as a number badge, complements the visual overlay.
+        // Always call setExtras (with null when reproj is missing) so the
+        // runtime can drop a stale badge if calibration moved to a path
+        // that doesn't produce reproj (e.g. ChArUco upload after auto-cal).
         const reproj = autoLast[cam] && autoLast[cam].result && autoLast[cam].result.reprojection_px;
-        if (typeof reproj === 'number' && isFinite(reproj)) {
-          window.BallTrackerCamView.setExtras(cam, { rms_px: reproj });
-        }
+        window.BallTrackerCamView.setExtras(cam, {
+          rms_px: typeof reproj === 'number' && isFinite(reproj) ? reproj : null,
+        });
       }
     }
   }
