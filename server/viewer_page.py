@@ -337,11 +337,19 @@ def render_viewer_html(
     </div>
     <div class="tl-row">
       <div class="transport" role="group" aria-label="transport">
-        <button id="step-first" type="button" title="First frame (Home)">&#x23ee;</button>
-        <button id="step-back" type="button" title="Prev frame (,)">&#x23ea;</button>
+        <button id="step-first" type="button" title="First frame (Home)" aria-label="First frame">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="1.6" height="10" fill="currentColor"/><path d="M14 3 L14 13 L6.4 8 Z" fill="currentColor"/></svg>
+        </button>
+        <button id="step-back" type="button" title="Prev frame (,)" aria-label="Previous frame">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M14 3 L14 13 L8 8 Z" fill="currentColor"/><path d="M8 3 L8 13 L2 8 Z" fill="currentColor"/></svg>
+        </button>
         <button id="play-btn" class="play-btn" type="button" title="Play/pause (Space)">Play</button>
-        <button id="step-fwd" type="button" title="Next frame (.)">&#x23e9;</button>
-        <button id="step-last" type="button" title="Last frame (End)">&#x23ed;</button>
+        <button id="step-fwd" type="button" title="Next frame (.)" aria-label="Next frame">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3 L2 13 L8 8 Z" fill="currentColor"/><path d="M8 3 L8 13 L14 8 Z" fill="currentColor"/></svg>
+        </button>
+        <button id="step-last" type="button" title="Last frame (End)" aria-label="Last frame">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3 L2 13 L9.6 8 Z" fill="currentColor"/><rect x="11.4" y="3" width="1.6" height="10" fill="currentColor"/></svg>
+        </button>
       </div>
       <div class="speed-group" id="speed-group" role="group" aria-label="playback speed">
         <button data-rate="0.1" type="button">0.1&times;</button>
@@ -659,6 +667,7 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     transition:background 0.12s, color 0.12s; }}
   .timeline .transport button:first-child {{ border-left:none; }}
   .timeline .transport button:hover:not(:disabled) {{ background:var(--surface-hover); color:var(--ink); }}
+  .timeline .transport button svg {{ width:14px; height:14px; display:block; }}
   .timeline .transport .play-btn {{ min-width:72px; width:auto; height:100%; padding:0 16px;
     background:var(--ink); color:var(--surface); font-weight:500; font-size:10px;
     letter-spacing:0.12em; text-transform:uppercase; border-radius:0; margin:0; }}
@@ -2056,8 +2065,12 @@ def _viewer_js() -> str:
       ctx.fillStyle = STRIP_EMPTY;
       ctx.fillRect(0, y, W, rowH);
       if (!strip) continue;
-      const muted = !isLayerVisible(`cam${{cam}}`, path);
-      const detColor = muted ? STRIP_MUTED : colorForCamPath(cam, path);
+      // Strip detection coloring is independent of the 3D ray-layer
+      // toggles — the strip exists to answer "which frames had a ball
+      // detected on this pipeline?", a different question from "do I
+      // want to see those rays in the 3D scene right now?". Always
+      // paint detected frames in the cam-path colour.
+      const detColor = colorForCamPath(cam, path);
       for (let x = 0; x < W; ++x) {{
         const i = TOTAL_FRAMES <= 1 ? 0 : Math.min(TOTAL_FRAMES - 1, Math.round(x * (TOTAL_FRAMES - 1) / (W - 1)));
         const e = strip[i];
