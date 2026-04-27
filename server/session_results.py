@@ -79,9 +79,9 @@ def live_frames_for_camera_locked(
 
 
 def session_sync_id_locked(state: "State", session_id: str) -> str | None:
-    for session in (state._current_session, state._last_ended_session):
-        if session is not None and session.id == session_id:
-            return session.sync_id
+    session = state._lookup_session_locked(session_id)
+    if session is not None:
+        return session.sync_id
     return None
 
 
@@ -132,17 +132,7 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         a = state.pitches.get(("A", session_id))
         b = state.pitches.get(("B", session_id))
         live = state._live_pairings.get(session_id)
-        current = (
-            state._current_session
-            if state._current_session and state._current_session.id == session_id
-            else None
-        )
-        ended = (
-            state._last_ended_session
-            if state._last_ended_session and state._last_ended_session.id == session_id
-            else None
-        )
-        session_obj = current or ended
+        session_obj = state._lookup_session_locked(session_id)
 
     result = empty_result_for_session(
         state,

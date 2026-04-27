@@ -53,6 +53,11 @@ final class CameraRecordingWorkflowDisarmRaceTests: XCTestCase {
             resetDetectionState: {},
             clearRecoveredAnchor: {},
             dispatchLiveCycleEnd: { _, _ in },
+            // The test doesn't exercise the post-disarm drain — fire the
+            // completion synchronously so the cycle continues straight
+            // through `dispatchLiveCycleEnd → persistCompletedCycle`,
+            // matching pre-Phase-4 sequencing for race-coverage purposes.
+            waitForDetectionDrain: { completion in completion() },
             showErrorBanner: { _ in },
             hideBanner: {},
             setStatusText: { _ in },

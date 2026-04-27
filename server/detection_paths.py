@@ -8,7 +8,7 @@ project the pitch onto a single path for triangulation.
 The pure helpers (`normalize_paths`, `has_server_frames`) depend on nothing
 and are safe to call anywhere. The state-dependent helpers
 (`paths_for_pitch`, `get_path_frames`, `pitch_with_path_frames`) read
-`state._current_session` / `state._last_ended_session` /
+`state._current_session` / `state._recently_ended_sessions` /
 `state._runtime_settings` under `state._lock`.
 """
 
@@ -51,9 +51,9 @@ def paths_for_pitch(state: "State", pitch: PitchPayload) -> set[DetectionPath]:
     if explicit:
         return explicit
     with state._lock:
-        for session in (state._current_session, state._last_ended_session):
-            if session is not None and session.id == pitch.session_id:
-                return set(session.paths)
+        session = state._lookup_session_locked(pitch.session_id)
+        if session is not None:
+            return set(session.paths)
         return set(state._runtime_settings.default_paths)
 
 

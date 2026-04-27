@@ -46,4 +46,15 @@ ACCESS_FLAG="--no-access-log"
 if [ "${BALL_TRACKER_ACCESS_LOG:-0}" = "1" ]; then
   ACCESS_FLAG="--access-log"
 fi
-exec uv run uvicorn main:app --host 0.0.0.0 --port "$PORT" $ACCESS_FLAG
+# `cv2` (opencv-contrib-python-headless) and `av` (PyAV) each bundle their
+# own copy of FFmpeg's libavdevice. Both register the AVFFrameReceiver
+# and AVFAudioReceiver Obj-C classes, so dyld emits two
+# `objc[pid]: Class … is implemented in both …` warnings on every boot.
+# Neither library actually uses libavdevice on this server's hot path
+# (cv2 only does inRange / connectedComponents / aruco; PyAV reads files
+# via libavformat), so the warnings are cosmetic — but they bury real
+# stderr. Filter only the `objc[pid]:` lines; everything else still goes
+# to stderr untouched. `--line-buffered` so the filter doesn't hold
+# lines in pipe buffers waiting for more output.
+exec uv run uvicorn main:app --host 0.0.0.0 --port "$PORT" $ACCESS_FLAG \
+  2> >(grep --line-buffered -v '^objc\[[0-9]\+\]:' >&2)

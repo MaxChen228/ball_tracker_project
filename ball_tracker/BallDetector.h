@@ -102,6 +102,18 @@ NS_ASSUME_NONNULL_BEGIN
 /// pass or the full-frame fallback.
 - (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer;
 
+/// Multi-candidate ROI variant of `detectInPixelBuffer:`. Same ROI gating
+/// as the single-best path but returns ALL blobs passing area+aspect+fill
+/// in the winning region (ROI crop on hit, full-frame fallback on ROI
+/// miss), sorted by area desc. Empty array → no candidates anywhere.
+///
+/// Tracking state is updated from the largest blob (`firstObject`) on
+/// hit, mirroring the single-best detector. The server's temporal-prior
+/// candidate selector may pick a smaller candidate as the actual ball,
+/// but iOS doesn't get that decision back over the WS, so ROI follows
+/// largest-blob with the same `kROIMaxConsecutiveMisses` recovery.
+- (NSArray<BTBallDetection *> *)detectAllCandidatesInPixelBuffer:(CVPixelBufferRef)pixelBuffer;
+
 /// Drop any cached ROI tracking state — call on session boundaries
 /// (arm / disarm / re-entry to capture) so a stale hit from a prior
 /// recording doesn't bias the first frame's crop.

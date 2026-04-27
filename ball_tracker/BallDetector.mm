@@ -201,13 +201,18 @@ static BTBallDetection *_Nullable detectBallCoreScratch(
 
 /// Multi-candidate variant of detectBallCoreScratch — collects every
 /// blob passing area+aspect+fill, sorted by area desc. No best-of pick
-/// (caller picks); centroid offset still applied so callers can pass a
-/// ROI crop (we don't currently — full frame only — but stay symmetric).
+/// (caller picks). `offsetX` / `offsetY` are added to each centroid so
+/// ROI-cropped Mats can be passed and still get image-coordinate
+/// centroids back. `outLargestW` / `outLargestH` (nullable) receive the
+/// width/height of the largest-area blob — used by the stateful path
+/// to update its ROI radius hint after a multi-candidate hit.
 static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
     const cv::Mat &bgra,
     int hMin, int hMax, int sMin, int sMax, int vMin, int vMax,
     double aspectMin, double fillMin,
-    CVScratch &scratch
+    CVScratch &scratch,
+    double offsetX, double offsetY,
+    int *_Nullable outLargestW, int *_Nullable outLargestH
 ) {
     cv::cvtColor(bgra, scratch.bgr, cv::COLOR_BGRA2BGR);
     cv::cvtColor(scratch.bgr, scratch.hsv, cv::COLOR_BGR2HSV);
@@ -218,7 +223,7 @@ static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
     int ncomp = cv::connectedComponentsWithStats(
         scratch.mask, scratch.labels, scratch.stats, scratch.centroids, 8, CV_32S
     );
-    struct Cand { int area; double cx; double cy; };
+    struct Cand { int area; int w; int h; double cx; double cy; };
     std::vector<Cand> cands;
     cands.reserve(8);
     for (int i = 1; i < ncomp; i++) {
@@ -232,13 +237,20 @@ static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
         double fill = (double)area / (double)(w * h);
         if (fill < fillMin) { continue; }
         cands.push_back({
-            area,
-            scratch.centroids.at<double>(i, 0),
-            scratch.centroids.at<double>(i, 1),
+            area, w, h,
+            scratch.centroids.at<double>(i, 0) + offsetX,
+            scratch.centroids.at<double>(i, 1) + offsetY,
         });
     }
     std::sort(cands.begin(), cands.end(),
               [](const Cand &a, const Cand &b){ return a.area > b.area; });
+    if (!cands.empty()) {
+        if (outLargestW) *outLargestW = cands[0].w;
+        if (outLargestH) *outLargestH = cands[0].h;
+    } else {
+        if (outLargestW) *outLargestW = 0;
+        if (outLargestH) *outLargestH = 0;
+    }
     NSMutableArray<BTBallDetection *> *out = [NSMutableArray arrayWithCapacity:cands.size()];
     for (const auto &c : cands) {
         [out addObject:[[BTBallDetection alloc] initWithPx:(CGFloat)c.cx
@@ -329,10 +341,12 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
     cv::Mat bgra;
     if (!mapBGRAPixelBuffer(pixelBuffer, bgra)) { return nil; }
 
-    // thread_local scratch: the stateless path is used by
-    // ConcurrentDetectionPool with up to `maxConcurrency` workers; giving
-    // each thread its own buffers avoids allocator churn without needing
-    // a lock.
+    // thread_local scratch: a leftover from when the stateless path was
+    // dispatched onto a concurrent worker pool. Post-Phase-3 the live
+    // path uses BTStatefulBallDetector on a serial queue, but this
+    // stateless variant is still callable from anywhere (tests, parity
+    // fixtures), so per-thread scratch keeps it allocator-cheap on
+    // whichever thread happens to call.
     thread_local CVScratch scratch;
 #if BT_DETECTOR_TIMING
     double hsvMs = 0, ccMs = 0;
@@ -369,7 +383,9 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
     if (!mapBGRAPixelBuffer(pixelBuffer, bgra)) { return @[]; }
     thread_local CVScratch scratch;
     NSArray<BTBallDetection *> *cands = detectAllCandidatesScratch(
-        bgra, hMin, hMax, sMin, sMax, vMin, vMax, aspectMin, fillMin, scratch
+        bgra, hMin, hMax, sMin, sMax, vMin, vMax, aspectMin, fillMin, scratch,
+        /*offsetX=*/0.0, /*offsetY=*/0.0,
+        /*outLargestW=*/nullptr, /*outLargestH=*/nullptr
     );
     CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
     return cands;
@@ -524,6 +540,90 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
         _lastHitRadius = 0;
     }
     return nil;
+}
+
+- (NSArray<BTBallDetection *> *)detectAllCandidatesInPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+    cv::Mat bgra;
+    if (!mapBGRAPixelBuffer(pixelBuffer, bgra)) { return @[]; }
+
+    NSArray<BTBallDetection *> *result = @[];
+    @try {
+        result = [self detectAllCandidatesInBGRA:bgra];
+    } @catch (NSException *e) {
+        NSLog(@"BallDetector: exception during multi-candidate detection: %@", e);
+        result = @[];
+    }
+
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+    return result;
+}
+
+- (NSArray<BTBallDetection *> *)detectAllCandidatesInBGRA:(const cv::Mat &)bgra {
+    const int W = bgra.cols;
+    const int H = bgra.rows;
+
+    // --- ROI pass, if we have a prior hit ------------------------------
+    if (_hasPrev && _lastHitRadius > 0.0f) {
+        int side = std::max(kROIMinSide, (int)std::ceil(2.0f * kROIRadiusMultiplier * _lastHitRadius));
+        int half = side / 2;
+        int x0 = std::max(0, (int)std::round(_lastHitCenter.x) - half);
+        int y0 = std::max(0, (int)std::round(_lastHitCenter.y) - half);
+        int x1 = std::min(W, x0 + side);
+        int y1 = std::min(H, y0 + side);
+        x0 = std::max(0, x1 - side);
+        y0 = std::max(0, y1 - side);
+        if (x1 > x0 && y1 > y0) {
+            cv::Rect roi(x0, y0, x1 - x0, y1 - y0);
+            cv::Mat crop = bgra(roi);
+            int largestW = 0, largestH = 0;
+            NSArray<BTBallDetection *> *cands = detectAllCandidatesScratch(
+                crop, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
+                _aspectMin, _fillMin,
+                _scratch,
+                /*offsetX=*/(double)x0, /*offsetY=*/(double)y0,
+                &largestW, &largestH
+            );
+            if (cands.count > 0) {
+                BTBallDetection *largest = cands.firstObject;
+                _lastHitCenter = cv::Point2f((float)largest.px, (float)largest.py);
+                _lastHitRadius = 0.5f * (float)std::max(largestW, largestH);
+                _consecutiveMisses = 0;
+                return cands;
+            }
+            // ROI miss — same loud fallback as the single-best path.
+            NSLog(@"BallDetector: ROI miss (multi) at (%.1f,%.1f r=%.1f), falling back to full frame",
+                  _lastHitCenter.x, _lastHitCenter.y, _lastHitRadius);
+        }
+    }
+
+    // --- Full-frame pass -----------------------------------------------
+    int largestW = 0, largestH = 0;
+    NSArray<BTBallDetection *> *cands = detectAllCandidatesScratch(
+        bgra, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
+        _aspectMin, _fillMin,
+        _scratch,
+        /*offsetX=*/0.0, /*offsetY=*/0.0,
+        &largestW, &largestH
+    );
+    if (cands.count > 0) {
+        BTBallDetection *largest = cands.firstObject;
+        _lastHitCenter = cv::Point2f((float)largest.px, (float)largest.py);
+        _lastHitRadius = 0.5f * (float)std::max(largestW, largestH);
+        _hasPrev = true;
+        _consecutiveMisses = 0;
+        return cands;
+    }
+
+    _consecutiveMisses++;
+    if (_consecutiveMisses >= kROIMaxConsecutiveMisses) {
+        if (_hasPrev) {
+            NSLog(@"BallDetector: %d consecutive misses (multi), dropping ROI tracking",
+                  _consecutiveMisses);
+        }
+        _hasPrev = false;
+        _lastHitRadius = 0;
+    }
+    return @[];
 }
 
 @end

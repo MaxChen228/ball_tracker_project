@@ -59,6 +59,8 @@ Hydration: initial SSR paints every panel + canvas, then three JS ticks keep eve
 ### iOS
 Open `ball_tracker.xcodeproj` in Xcode. The app needs a **physical device** (camera + 240 fps capture + microphone). Unit tests in `ball_trackerTests/`, UI tests in `ball_trackerUITests/` via Xcode's Test action (`⌘U`).
 
+**Agent rule: do NOT run iOS tests via xcodebuild.** They take minutes per pass and the operator runs them manually in Xcode. Agents may run `xcodebuild ... build` to verify the iOS source compiles, but never `xcodebuild ... test`. If a refactor invalidates iOS test files, fix the test files for compilation only and let the operator run them.
+
 ## Architecture
 
 ### iOS state machine — `CameraViewController`

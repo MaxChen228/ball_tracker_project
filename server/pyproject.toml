@@ -8,7 +8,15 @@ dependencies = [
     "uvicorn[standard]>=0.44",
     "pydantic>=2.13",
     "numpy>=2.0",
-    "opencv-contrib-python>=4.10",
+    # Headless variant — no Qt/GUI bundles, no libavdevice. PyAV ships its own
+    # libavdevice copy and the duplicate symbol registration was producing
+    # "Class AVFFrameReceiver is implemented in both ..." warnings on every
+    # server boot. The full opencv-contrib-python adds libavdevice for
+    # cv2.VideoCapture("avfoundation://") and friends, none of which this
+    # server uses (we only need cv2.aruco / inRange / connectedComponents).
+    # Same wheel content otherwise; cv2.aruco is included in the contrib
+    # variant either way.
+    "opencv-contrib-python-headless>=4.10",
     "python-multipart>=0.0.12",
     "plotly>=5.24",
     "av>=17.0.0",

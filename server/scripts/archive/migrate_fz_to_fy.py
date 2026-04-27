@@ -54,10 +54,18 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def migrate(data_dir: Path, *, dry_run: bool = False) -> dict[str, int]:
-    """Walk data_dir's `calibrations/` and `pitches/` subdirs. Return
-    {"files_scanned", "files_rewritten", "total_replacements"}."""
+    """Walk data_dir's `calibrations/`, `pitches/`, and `intrinsics/`
+    subdirs. Returns {"files_scanned", "files_rewritten", "total_replacements"}.
+
+    The original script only covered `calibrations/` + `pitches/`, but
+    `data/intrinsics/<device_id>.json` (per-device ChArUco K, written by
+    the dashboard intrinsics upload) follows the same shape and was
+    silently skipped — any pre-migration intrinsics file still loads
+    today via `DeviceIntrinsics` schema validation, but fails because
+    `IntrinsicsPayload` no longer accepts `fz` as an alias. Adding the
+    third subdir here covers that case."""
     stats = {"files_scanned": 0, "files_rewritten": 0, "total_replacements": 0}
-    for sub in ("calibrations", "pitches"):
+    for sub in ("calibrations", "pitches", "intrinsics"):
         root = data_dir / sub
         if not root.is_dir():
             continue

@@ -28,6 +28,12 @@ final class CameraRecordingWorkflow {
         let resetDetectionState: () -> Void
         let clearRecoveredAnchor: () -> Void
         let dispatchLiveCycleEnd: (String, String) -> Void
+        /// Wait until the live-detection backlog is fully drained, then run
+        /// `completion` on the workflow's processing queue. Used to defer
+        /// `cycle_end` past disarm so the server's `persist_live_frames`
+        /// sees every frame iOS produced — including those that were still
+        /// in flight on the detection worker when ClipRecorder finished.
+        let waitForDetectionDrain: (@escaping () -> Void) -> Void
         let showErrorBanner: (String) -> Void
         let hideBanner: () -> Void
         let setStatusText: (String) -> Void
@@ -253,10 +259,24 @@ final class CameraRecordingWorkflow {
         let payload = enriched.withPaths(Array(paths))
 
         if paths.contains(.live) {
-            dependencies.dispatchLiveCycleEnd(payload.session_id, "disarmed")
+            // Capture has stopped (ClipRecorder finished), but the
+            // detection worker can still hold a few hundred ms of
+            // backlog — frames whose pixel buffers were retained by the
+            // pool while their HSV+CC pass was running. Defer cycle_end
+            // and the standby transition until that backlog drains; the
+            // server's `cycle_end` handler triggers `persist_live_frames`
+            // which writes the live bucket to disk in a single shot, so
+            // late frames must arrive BEFORE that fires or they'd never
+            // make it onto the pitch JSON.
+            dependencies.waitForDetectionDrain { [weak self] in
+                guard let self else { return }
+                self.dependencies.dispatchLiveCycleEnd(payload.session_id, "disarmed")
+                self.persistCompletedCycle(payload, videoURL: videoURL)
+            }
+        } else {
+            // No live path → no detection backlog to drain.
+            persistCompletedCycle(payload, videoURL: videoURL)
         }
-
-        persistCompletedCycle(payload, videoURL: videoURL)
     }
 
     private func persistCompletedCycle(
