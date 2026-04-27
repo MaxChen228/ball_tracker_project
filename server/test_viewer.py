@@ -723,7 +723,10 @@ def test_viewer_page_context_computes_single_cam_layout_and_video_cells():
 
     assert ctx.layout_mode == "single-cam"
     assert 'data-cam="A"' in ctx.video_cells_html
-    assert "no calibration" in ctx.virtual_cells_html  # B has no pose
+    # Phase 6: virtual cell merged into video cell as a canvas overlay
+    # — virtual_cells_html is now empty by design. The "no calibration"
+    # state is reflected by the cam-view's 'uncalibrated' badge instead.
+    assert ctx.virtual_cells_html == ""
     assert ctx.scene_flex == "1 1 0"
     assert ctx.videos_flex == "1 1 0"
 
@@ -773,10 +776,13 @@ def test_viewer_ships_interactive_diagnostic_widgets():
 
 
 def test_viewer_virtual_detection_follows_per_camera_ray_toggle():
-    """The VIRT dot is the current camera's own ray collapsed to (px, py),
-    so its visibility must follow `Rays A/B`, not the global trajectory
-    toggle. Otherwise hiding 3D trajectory incorrectly blanks the virtual
-    camera even though the per-camera detection stream is still enabled."""
+    """Phase 6: the virtual detection blob is now drawn as two
+    BallTrackerCamView layers (`detection_live` / `detection_svr`)
+    on top of the per-cam video. Each cam's vid-cell renders LIVE +
+    SVR pills in its cam-view-toolbar, and toggling those flips the
+    layer visibility independently — the live-vs-svr split that the
+    legacy `Rays A/B` toggles used to provide is preserved as a
+    per-cam UI affordance."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(714)
     _record_pitch(_pitch("A", 714, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -784,14 +790,17 @@ def test_viewer_virtual_detection_follows_per_camera_ray_toggle():
 
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
-    assert 'const camLayer = `cam${cam}`;' in body
-    # The VIRT dot iterates PATHS and calls isLayerVisible per pipeline
-    # (live / server_post), so these two names must appear
-    # verbatim in the generated JS — that is the only proof we ship that
-    # each pipeline is checked on its own.
-    assert '"live"' in body
-    assert '"server_post"' in body
-    assert 'for (const path of PATH_ORDER)' in body
+    # Both detection-blob layers are registered with the runtime.
+    assert "registerLayer('detection_live'" in body
+    assert "registerLayer('detection_svr'" in body
+    # Per-cam toolbar exposes the LIVE / SVR pills so the operator can
+    # toggle each pipeline's overlay independently.
+    assert 'data-layer="detection_live"' in body
+    assert 'data-layer="detection_svr"' in body
+    # The per-cam canvas + viewer's currentT scrubber is what drives the
+    # blob's frame lookup; still must reference both pipelines by name.
+    assert "'live'" in body or '"live"' in body
+    assert "'server_post'" in body or '"server_post"' in body
 
 
 def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():

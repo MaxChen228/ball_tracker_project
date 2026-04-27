@@ -493,6 +493,8 @@ _LAYER_LABELS = {
     "marker_footprints": "MARKERS",
     "ball_crosshair": "BALL",
     "reproj_check": "REPROJ",
+    "detection_live": "LIVE",
+    "detection_svr": "SVR",
 }
 
 
