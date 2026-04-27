@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import time
+from collections import deque
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
@@ -148,7 +149,17 @@ class State:
         # registry; all writes go through DeviceRegistry.
         self._devices = self._device_registry.devices
         self._current_session: Session | None = None
-        self._last_ended_session: Session | None = None
+        # Recently-ended sessions ring (most recent first). Kept >1 deep so
+        # that an iOS phone draining its detection backlog after disarm can
+        # still locate its session even if the operator has armed (and
+        # ended) another session in the meantime — the prior single-slot
+        # `_last_ended_session` would silently lose the original reference,
+        # causing late frames to fall through `ingest_live_frame` lookup.
+        # `maxlen` covers four overlapping drain/arm cycles which is well
+        # above any realistic operator cadence; older sessions still live
+        # on disk via `pitches` / `results` for any consumer that needs
+        # historical reconstruction.
+        self._recently_ended_sessions: deque[Session] = deque(maxlen=4)
         # Per-camera calibration snapshots. Written by POST /calibration,
         # read by the dashboard canvas so the 3D preview shows where each
         # phone "thinks it is" relative to the plate, independent of any
@@ -560,11 +571,7 @@ class State:
             cal_b = self._calibration_store.get("B")
             dev_a = self._device_registry.get("A")
             dev_b = self._device_registry.get("B")
-            session_obj = None
-            for candidate in (self._current_session, self._last_ended_session):
-                if candidate is not None and candidate.id == session_id:
-                    session_obj = candidate
-                    break
+            session_obj = self._lookup_session_locked(session_id)
 
         # Each iPhone's `frame.timestamp_s` is its own mach-absolute clock
         # (seconds since device boot), so the two cameras' raw timestamps
@@ -1112,9 +1119,28 @@ class State:
             return
         if now - s.started_at > s.max_duration_s:
             s.ended_at = now
-            self._last_ended_session = s
+            self._recently_ended_sessions.appendleft(s)
             self._current_session = None
             self._pending_live_flush_sessions.add(s.id)
+
+    def _lookup_session_locked(self, session_id: str) -> Session | None:
+        """Find a Session by id across the current and recently-ended ring.
+        Returns None when the id is unknown — caller must hold `self._lock`.
+        Searches current first, then recent-most-first across the ring; the
+        ring is short so the linear scan is trivial."""
+        cur = self._current_session
+        if cur is not None and cur.id == session_id:
+            return cur
+        for ended in self._recently_ended_sessions:
+            if ended.id == session_id:
+                return ended
+        return None
+
+    def _most_recent_ended_session_locked(self) -> Session | None:
+        """Most recent ended session, or None. Caller holds `self._lock`."""
+        if not self._recently_ended_sessions:
+            return None
+        return self._recently_ended_sessions[0]
 
     def _drain_pending_live_flushes_locked(self) -> set[str]:
         """Pop the pending-flush set under the caller's lock. Caller must
@@ -1294,7 +1320,7 @@ class State:
             if s is None or s.ended_at is not None:
                 return None
             s.ended_at = now
-            self._last_ended_session = s
+            self._recently_ended_sessions.appendleft(s)
             self._current_session = None
             self._pending_live_flush_sessions.add(s.id)
             pending = self._drain_pending_live_flushes_locked()
@@ -1461,16 +1487,16 @@ class State:
         return self._sync.record_sync_report(report)
 
     def clear_last_ended_session(self) -> bool:
-        """Drop the `_last_ended_session` pointer so the dashboard's
+        """Drop the recently-ended sessions ring so the dashboard's
         session card goes blank again. No-op (returns False) when a
         session is currently armed or there's nothing to clear — the
-        pointer is strictly a dashboard-idle-state concern."""
+        ring is strictly a dashboard-idle-state concern."""
         with self._lock:
             if self._current_session is not None and self._current_session.ended_at is None:
                 return False
-            if self._last_ended_session is None:
+            if not self._recently_ended_sessions:
                 return False
-            self._last_ended_session = None
+            self._recently_ended_sessions.clear()
             return True
 
     def _register_upload_in_session_locked(self, pitch: PitchPayload) -> None:
@@ -1500,7 +1526,7 @@ class State:
         if current is not None:
             return current
         with self._lock:
-            return self._last_ended_session
+            return self._most_recent_ended_session_locked()
 
     def commands_for_devices(self) -> dict[str, str]:
         """Derive per-device commands from the current session state. The
@@ -1525,7 +1551,7 @@ class State:
         with self._lock:
             self._sync._check_sync_timeout_locked(now)
             sync_run = self._sync._current_sync
-            last_ended = self._last_ended_session
+            last_ended = self._most_recent_ended_session_locked()
         cmds: dict[str, str] = {}
         if sync_run is not None:
             for cam in online_ids:
@@ -1556,7 +1582,7 @@ class State:
 
         Wipes the pitches / results / videos files for `session_id` (both
         the live and any `.tmp` siblings), and clears the entry from
-        `_pitches`, `_results`, and the `_last_ended_session` pointer if
+        `_pitches`, `_results`, and the `_recently_ended_sessions` ring if
         it matches."""
         with self._lock:
             current = self._current_session
@@ -1583,11 +1609,11 @@ class State:
             self._live_missing_cal_logged = {
                 key for key in self._live_missing_cal_logged if key[0] != session_id
             }
-            if (
-                self._last_ended_session is not None
-                and self._last_ended_session.id == session_id
-            ):
-                self._last_ended_session = None
+            if any(s.id == session_id for s in self._recently_ended_sessions):
+                # `deque` has no `remove_if`; rebuild preserving order/maxlen.
+                kept = [s for s in self._recently_ended_sessions if s.id != session_id]
+                self._recently_ended_sessions.clear()
+                self._recently_ended_sessions.extend(kept)
             self._persist_session_meta_locked()
 
         # Disk cleanup outside the lock — same pattern record() uses.
@@ -1617,7 +1643,7 @@ class State:
             self.results.clear()
             self._device_registry.clear()
             self._current_session = None
-            self._last_ended_session = None
+            self._recently_ended_sessions.clear()
             self._processing.clear()
             self._live_missing_cal.clear()
             self._live_missing_cal_logged.clear()

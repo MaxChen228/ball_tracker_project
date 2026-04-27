@@ -201,10 +201,10 @@ def test_session_times_out_automatically(tmp_path):
     clock["now"] = 1006.0   # past max_duration
     assert s.current_session() is None
 
-    # `_last_ended_session` should be set so commands_for_devices can
-    # emit disarm during the echo window.
-    assert s._last_ended_session is not None
-    assert s._last_ended_session.ended_at is not None
+    # The recently-ended sessions ring should have the timed-out session
+    # so commands_for_devices can emit disarm during the echo window.
+    assert len(s._recently_ended_sessions) == 1
+    assert s._recently_ended_sessions[0].ended_at is not None
 
 
 # --- Cross-camera command dispatch ----------------------------------------
@@ -549,6 +549,70 @@ def test_clear_refuses_while_armed(tmp_path):
     s.arm_session()
     assert s.clear_last_ended_session() is False
     assert s.session_snapshot() is not None
+
+
+def test_lookup_session_locked_finds_through_recently_ended_ring(tmp_path):
+    """Late frames from cam A draining its detection backlog after disarm
+    must still resolve back to session A even when the operator has already
+    armed (and ended) session B in the meantime. The single-slot
+    `_last_ended_session` predecessor would lose A's reference here."""
+    s = main.State(data_dir=tmp_path)
+
+    a_session = s.arm_session()
+    s.stop_session()
+    assert s._lookup_session_locked(a_session.id) is a_session
+
+    b_session = s.arm_session()
+    # While B is armed, lookups for either session work — A is in the ring,
+    # B is current.
+    assert s._lookup_session_locked(a_session.id) is a_session
+    assert s._lookup_session_locked(b_session.id) is b_session
+
+    s.stop_session()
+    # Both sessions ended → ring holds both, current is None. A's drain
+    # frames can still find their session even though B has displaced A as
+    # "most recent".
+    assert s._lookup_session_locked(a_session.id) is a_session
+    assert s._lookup_session_locked(b_session.id) is b_session
+    # Most recent still surfaces as B.
+    assert s._most_recent_ended_session_locked() is b_session
+
+
+def test_recently_ended_sessions_ring_evicts_oldest_at_maxlen(tmp_path):
+    """The ring's maxlen=4 caps memory; the oldest session is silently
+    dropped. Beyond the ring, a stale lookup returns None and the caller
+    is expected to fall back to disk (pitches / results)."""
+    s = main.State(data_dir=tmp_path)
+    sessions = []
+    for _ in range(5):
+        sess = s.arm_session()
+        s.stop_session()
+        sessions.append(sess)
+
+    # Oldest (sessions[0]) was evicted; the next four remain.
+    assert s._lookup_session_locked(sessions[0].id) is None
+    for sess in sessions[1:]:
+        assert s._lookup_session_locked(sess.id) is sess
+
+
+def test_delete_session_removes_target_from_ring_only(tmp_path):
+    """Deleting one session must not collapse the rest of the ring — its
+    purpose is to keep multi-session lookup working through deletes."""
+    s = main.State(data_dir=tmp_path)
+    a = s.arm_session()
+    s.stop_session()
+    b = s.arm_session()
+    s.stop_session()
+    # `delete_session` only returns True when there are pitches/results to
+    # remove; we pre-record a pitch for A so the call exercises the ring
+    # cleanup branch on a real removal, mirroring
+    # `test_delete_clears_last_ended_session_pointer`.
+    s.record(_minimal_pitch("A", session_id=a.id))
+
+    assert s.delete_session(a.id) is True
+    assert s._lookup_session_locked(a.id) is None
+    assert s._lookup_session_locked(b.id) is b
+    assert s._most_recent_ended_session_locked() is b
 
 
 def test_sessions_clear_html_redirect():
