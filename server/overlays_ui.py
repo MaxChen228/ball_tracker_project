@@ -348,6 +348,9 @@ OVERLAYS_RUNTIME_JS: str = r"""
         nullBucket.z.push(a.z, b.z, NaN);
         continue;
       }
+      // bIdx = floor(t * N) maps [0, 1] → [0, N]; v == vmax lands on N
+      // and is rescued by the clamp below into bucket N-1. Don't drop the
+      // clamp without finding another way to handle the upper edge.
       let bIdx = Math.floor(((v - vmin) / span) * SPEED_N_BUCKETS);
       if (bIdx < 0) bIdx = 0;
       if (bIdx >= SPEED_N_BUCKETS) bIdx = SPEED_N_BUCKETS - 1;
@@ -394,11 +397,15 @@ OVERLAYS_RUNTIME_JS: str = r"""
     // If there's nothing to colour, skip — markers with empty arrays are
     // a Plotly footgun.
     if (markerX.length) {
+      // Markers exist only as the per-vertex hover hit-target. Keep them
+      // small + low-opacity so they blend into the bucketed line and
+      // don't read as "a string of dots strung along the trajectory".
       traces.push({
         type: "scatter3d", mode: "markers",
         x: markerX, y: markerY, z: markerZ,
         marker: {
-          size: 3,
+          size: 2,
+          opacity: 0.35,
           color: markerC,
           colorscale: "Viridis",
           cmin: vmin, cmax: vmax,
