@@ -27,6 +27,32 @@
       repaintCanvas();
     });
   }
+  // Fit overlay: shared with viewer via window.BallTrackerOverlays.
+  // Source pills pick which trajectory bucket the fit reads from —
+  // svr = selected event's /results points (server_post triangulation),
+  // live = current armed session's WS-streamed live points.
+  const _fitToggle = document.getElementById('dash-fit-toggle');
+  if (_fitToggle) {
+    _fitToggle.checked = _OVL.fitVisible();
+    _fitToggle.addEventListener('change', () => {
+      _OVL.setFitVisible(_fitToggle.checked);
+      repaintCanvas();
+    });
+  }
+  function paintDashFitSourcePills() {
+    const cur = _OVL.fitSource();
+    document.querySelectorAll('.ff-src-pill').forEach(btn => {
+      btn.setAttribute('aria-pressed', btn.dataset.src === cur ? 'true' : 'false');
+    });
+  }
+  paintDashFitSourcePills();
+  document.querySelectorAll('.ff-src-pill').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _OVL.setFitSource(btn.dataset.src);
+      paintDashFitSourcePills();
+      if (_OVL.fitVisible()) repaintCanvas();
+    });
+  });
 
   if (eventsBox) eventsBox.addEventListener('change', (e) => {
     const cb = e.target.closest('input[data-traj-sid]');
