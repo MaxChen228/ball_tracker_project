@@ -221,6 +221,117 @@ OVERLAYS_RUNTIME_JS: str = r"""
     return traces;
   };
 
+  // --- Speed overlay ---
+  // Per-segment instantaneous speed (m/s) coloured along the trajectory.
+  // Plotly Scatter3d does not support per-segment line colour in a single
+  // trace, so we emit one line trace per segment plus a hidden marker
+  // trace that carries the shared colorbar. Bar chart (viewer-only) is
+  // built off the same speeds[] array so the two views are consistent.
+  const SPEED_VISIBLE_KEY = "ball_tracker_overlay_speed_enabled";
+  NS.speedVisible = function () { return readBool(SPEED_VISIBLE_KEY, false); };
+  NS.setSpeedVisible = function (on) { writeBool(SPEED_VISIBLE_KEY, on); };
+
+  // Per-segment speed: ||Δp|| / Δt. Δt ≤ 0 → 0 (don't divide by garbage
+  // if two points share a timestamp, which can happen for a duplicated
+  // upload row). Returns an array of length pts.length - 1.
+  NS.computeSpeeds = function (pts) {
+    if (!pts || pts.length < 2) return [];
+    const out = new Array(pts.length - 1);
+    for (let i = 1; i < pts.length; i++) {
+      const dt = pts[i].t_rel_s - pts[i - 1].t_rel_s;
+      if (dt <= 0) { out[i - 1] = 0; continue; }
+      const dx = pts[i].x - pts[i - 1].x;
+      const dy = pts[i].y - pts[i - 1].y;
+      const dz = pts[i].z - pts[i - 1].z;
+      out[i - 1] = Math.sqrt(dx * dx + dy * dy + dz * dz) / dt;
+    }
+    return out;
+  };
+
+  // Viridis-ish 5-stop ramp. Plotly accepts named "Viridis" colorscales
+  // for the colorbar trace, but we need a JS-callable lookup for the
+  // per-segment line colours, so do it locally. t ∈ [0, 1].
+  const VIRIDIS = [
+    [0.0, [68, 1, 84]],
+    [0.25, [59, 82, 139]],
+    [0.5, [33, 145, 140]],
+    [0.75, [94, 201, 98]],
+    [1.0, [253, 231, 37]],
+  ];
+  function viridisColor(t) {
+    if (!Number.isFinite(t)) t = 0;
+    if (t < 0) t = 0; if (t > 1) t = 1;
+    let lo = VIRIDIS[0], hi = VIRIDIS[VIRIDIS.length - 1];
+    for (let i = 1; i < VIRIDIS.length; i++) {
+      if (t <= VIRIDIS[i][0]) { hi = VIRIDIS[i]; lo = VIRIDIS[i - 1]; break; }
+    }
+    const span = Math.max(1e-9, hi[0] - lo[0]);
+    const f = (t - lo[0]) / span;
+    const r = Math.round(lo[1][0] + (hi[1][0] - lo[1][0]) * f);
+    const g = Math.round(lo[1][1] + (hi[1][1] - lo[1][1]) * f);
+    const b = Math.round(lo[1][2] + (hi[1][2] - lo[1][2]) * f);
+    return `rgb(${r},${g},${b})`;
+  }
+  NS.viridisColor = viridisColor;
+
+  // Build the speed-coloured 3D trajectory traces. cutoff lets the caller
+  // clip to playback time; pass Infinity for "all". Returns an empty list
+  // if pts < 2 (nothing to colour). Always emits one invisible marker
+  // trace at the end carrying the colorbar so the legend reads cleanly.
+  NS.speedTraces = function (pts, opts) {
+    const o = opts || {};
+    if (!pts || pts.length < 2) return [];
+    const cutoff = (o.cutoff === undefined) ? Infinity : o.cutoff;
+    const speeds = NS.computeSpeeds(pts);
+    const vmax = speeds.reduce((a, b) => Math.max(a, b), 0);
+    const vmin = 0;
+    const span = Math.max(1e-3, vmax - vmin);
+    const traces = [];
+    const lineWidth = o.lineWidth || 6;
+    const tag = o.tag || "";
+    for (let i = 0; i < speeds.length; i++) {
+      const a = pts[i], b = pts[i + 1];
+      if (a.t_rel_s > cutoff) break;
+      const v = speeds[i];
+      const t = (v - vmin) / span;
+      traces.push({
+        type: "scatter3d", mode: "lines",
+        x: [a.x, b.x], y: [a.y, b.y], z: [a.z, b.z],
+        line: { color: viridisColor(t), width: lineWidth },
+        hovertemplate:
+          `seg ${i + 1}/${speeds.length}<br>` +
+          `t=${a.t_rel_s.toFixed(3)}–${b.t_rel_s.toFixed(3)} s<br>` +
+          `v=${v.toFixed(2)} m/s · ${(v * 3.6).toFixed(1)} km/h<extra></extra>`,
+        showlegend: false,
+        legendgroup: "speed" + tag,
+      });
+    }
+    // Colorbar carrier — invisible markers at the start and end so the
+    // colorscale spans vmin..vmax. Single trace; legend entry only here.
+    traces.push({
+      type: "scatter3d", mode: "markers",
+      x: [pts[0].x, pts[pts.length - 1].x],
+      y: [pts[0].y, pts[pts.length - 1].y],
+      z: [pts[0].z, pts[pts.length - 1].z],
+      marker: {
+        size: 0.1, opacity: 0,
+        color: [vmin, vmax],
+        colorscale: "Viridis",
+        cmin: vmin, cmax: vmax,
+        showscale: true,
+        colorbar: {
+          title: { text: "v (m/s)", side: "right" },
+          thickness: 10, len: 0.4, x: 1.02, y: 0.5,
+          tickfont: { size: 10 },
+        },
+      },
+      name: `Speed${tag} · max ${vmax.toFixed(1)} m/s`,
+      hoverinfo: "skip", showlegend: true,
+      legendgroup: "speed" + tag,
+    });
+    return traces;
+  };
+
   window.BallTrackerOverlays = NS;
 })();
 """
