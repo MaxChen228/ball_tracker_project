@@ -98,7 +98,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // Live detection feeds WS streaming for the live path. No local cycle
     // buffer — the server is authoritative on archived live frames.
-    nonisolated(unsafe) private let detectionPool = ConcurrentDetectionPool(maxConcurrency: 3)
+    nonisolated(unsafe) private let detectionPool = ConcurrentDetectionPool()
 
     // Most recently recovered chirp anchor — session-clock PTS of the
     // chirp peak from the mic matched filter. Stamped onto outgoing
@@ -293,13 +293,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// frame so the writer uses the real pixel-buffer dimensions.
     func enterRecordingMode() {
         guard state == .standby else { return }
-        // 240 fps capture / 60 Hz detection. `live_pairing` server-side
-        // can't consume 240 Hz anyway, and the ~12-18 ms HSV pipeline
-        // would heat the phone. Stride 4 picks 1-of-4 frames → 60 Hz,
-        // which stays above the server's 8 ms A/B pair-window budget.
-        // ClipRecorder is on a separate sink so the MOV still captures
-        // every sample regardless of stride.
-        detectionPool.setFrameStride(4)
+        // 240 fps capture; detection runs at native rate via the ROI-
+        // tracking stateful detector inside `ConcurrentDetectionPool`
+        // (~3 ms/frame on ROI hits, ~15 ms on full-frame fallback).
+        // No stride throttle — the pool's bounded backlog is the
+        // backpressure mechanism, and any drops show up loudly on
+        // `droppedFrameCount` instead of being baked into the design.
         recordingWorkflow.enterRecordingMode(
             sessionId: currentSessionId,
             serverTimeSyncConfirmed: serverTimeSyncConfirmed
@@ -322,9 +321,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             currentSessionId: currentSessionId,
             currentState: state
         )
-        // Back to 60 fps capture in standby/timeSyncWaiting — no need to
-        // stride, every frame can hit detection if the path ever needs it.
-        detectionPool.setFrameStride(1)
     }
 
     private func setAppliedCaptureTelemetry(
