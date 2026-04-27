@@ -134,6 +134,22 @@ final class CameraSyncCoordinator {
     }
 
     private func beginTimeSync(syncId: String) {
+        // Cancel any in-flight timeout from a prior sync attempt — the
+        // dashboard's Quick chirp can re-fire while we're still in
+        // .timeSyncWaiting, and the stale work item would otherwise
+        // bounce us back to .standby mid-listen.
+        timeSyncTimeoutWork?.cancel()
+        timeSyncTimeoutWork = nil
+        // Drop the previous successful anchor at the moment a new
+        // attempt starts. Heartbeats during the listen window now
+        // report time_sync_id=nil + anchor=nil, which on the server
+        // gates `time_synced` to False until either the chirp lands
+        // (giving us the new anchor) or the operator triggers again.
+        // Without this, a missed chirp would silently leave us
+        // claiming the old anchor — readiness then accepts a stereo
+        // session whose A/B anchors point at different physical chirps.
+        lastSyncAnchor = nil
+        deps.healthMonitor()?.updateTimeSyncId(nil)
         pendingTimeSyncId = syncId
         guard let detector = deps.chirpDetector() else {
             deps.setupAudioCapture()
@@ -190,6 +206,12 @@ final class CameraSyncCoordinator {
             pendingSyncId = nil
             return
         }
+        // Same anchor-clearing rationale as beginTimeSync: a /sync/start
+        // run that fails to recover an anchor must not leave us claiming
+        // the previous one. Heartbeats during the recording window will
+        // report id=nil until handleMutualSyncRecording lands.
+        lastSyncAnchor = nil
+        deps.healthMonitor()?.updateTimeSyncId(nil)
 
         let audio = deps.makeMutualSyncAudio(pendingSyncEmitAtS, pendingSyncRecordDurationS)
         syncAudio = audio

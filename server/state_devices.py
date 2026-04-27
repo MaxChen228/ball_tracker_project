@@ -127,3 +127,34 @@ class DeviceRegistry:
 
     def clear(self) -> None:
         self.devices.clear()
+
+    def clear_time_sync(self, camera_id: str) -> bool:
+        """Drop time-sync state for one cam without touching liveness or
+        battery. Used when /sync/trigger fires: until the phone reports a
+        fresh anchor matching the new expected id, the cam must read as
+        not-synced rather than carrying its previous anchor forward.
+        Returns True iff the cam existed and had any sync state to drop."""
+        dev = self.devices.get(camera_id)
+        if dev is None:
+            return False
+        had_state = (
+            dev.time_synced
+            or dev.time_sync_id is not None
+            or dev.time_sync_at is not None
+            or dev.sync_anchor_timestamp_s is not None
+        )
+        if not had_state:
+            return False
+        self.devices[camera_id] = Device(
+            camera_id=dev.camera_id,
+            last_seen_at=dev.last_seen_at,
+            time_synced=False,
+            time_sync_id=None,
+            time_sync_at=None,
+            sync_anchor_timestamp_s=None,
+            battery_level=dev.battery_level,
+            battery_state=dev.battery_state,
+            device_id=dev.device_id,
+            device_model=dev.device_model,
+        )
+        return True
