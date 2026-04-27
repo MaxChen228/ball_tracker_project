@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json as _json
 
+from overlays_ui import OVERLAYS_RUNTIME_JS
 from reconstruct import Scene
 from render_compare import (
     DRAW_PLATE_OVERLAY_JS,
@@ -346,6 +347,9 @@ def render_viewer_html(
   "videos": {ctx.videos_json},
   "has_triangulated": {str(ctx.has_triangulated).lower()}
 }}</script>
+<script>
+{OVERLAYS_RUNTIME_JS}
+</script>
 <script>
 {_viewer_js()}
 </script>
@@ -755,20 +759,12 @@ def _viewer_js() -> str:
   const DATA = JSON.parse(document.getElementById("viewer-data").textContent);
   const SCENE = DATA.scene;
   const STATIC = DATA.static_traces || [];
-  // Strike-zone visibility — persisted independently from layer pills so
-  // it carries across sessions. Default true; the checkbox in
-  // #layer-toggles mirrors and writes this flag.
-  const STRIKE_ZONE_VISIBLE_KEY = "ball_tracker_strike_zone_visible";
-  function strikeZoneVisible() {{
-    try {{
-      const raw = localStorage.getItem(STRIKE_ZONE_VISIBLE_KEY);
-      if (raw === null) return true;
-      return raw === "1";
-    }} catch (_e) {{ return true; }}
-  }}
-  function setStrikeZoneVisible(on) {{
-    try {{ localStorage.setItem(STRIKE_ZONE_VISIBLE_KEY, on ? "1" : "0"); }} catch (_e) {{}}
-  }}
+  // Strike-zone visibility — shared with dashboard via
+  // window.BallTrackerOverlays (server/overlays_ui.py). One key, one
+  // implementation, two surfaces.
+  const _OVL = window.BallTrackerOverlays;
+  const strikeZoneVisible = _OVL.strikeZoneVisible;
+  const setStrikeZoneVisible = _OVL.setStrikeZoneVisible;
   const LAYOUT = DATA.layout;
   const CAM_COLOR = DATA.camera_colors || {{}};
   const FALLBACK = DATA.fallback_color;

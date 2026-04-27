@@ -10,6 +10,7 @@ from render_dashboard_html import render_dashboard_html as _render_dashboard_htm
 from render_dashboard_intrinsics import _render_intrinsics_body
 from render_dashboard_session import _render_hsv_body, _render_session_body
 from render_dashboard_style import _CSS
+from overlays_ui import OVERLAYS_RUNTIME_JS
 from render_scene import _build_figure
 from render_shared import _render_app_nav
 from render_tuning import _render_tuning_body
@@ -110,6 +111,7 @@ def render_events_index_html(
         intrinsics_html=intrinsics_html,
         events_html=events_html,
         scene_div=scene_div,
+        overlays_js=OVERLAYS_RUNTIME_JS,
         dashboard_js=_JS_TEMPLATE,
         trash_count=trash_count,
     )
