@@ -35,6 +35,13 @@ final class ConcurrentDetectionPool {
     private let maxBacklog: Int
     private let detectionQueue: DispatchQueue
     private let stateLock = NSLock()
+    /// `BTStatefulBallDetector` is documented "Not thread-safe. Intended
+    /// for a single capture-queue worker." It's constructed here on the
+    /// caller's thread (the camera VC's main thread) but every subsequent
+    /// access — `setHMin`, `setAspectMin`, `detectAllCandidates`,
+    /// `resetTracking` — is dispatched onto `detectionQueue` (serial),
+    /// so post-construction it is queue-confined. Don't reach into this
+    /// detector from any other thread.
     private let detector = BTStatefulBallDetector()
     private var hsvRange: ServerUploader.HSVRangePayload = .tennis
     private var shapeGate: ServerUploader.ShapeGatePayload = .default
@@ -137,6 +144,14 @@ final class ConcurrentDetectionPool {
     /// Run `completion` once every currently-queued frame has finished
     /// processing. Internally just appends a no-op task to the serial
     /// detection queue, so it can't run before any task ahead of it.
+    ///
+    /// **Caller responsibility — stop producing enqueues before calling
+    /// this.** Any `enqueue` call landing after `waitForDrain` lands
+    /// *behind* the drain marker on the serial queue, so the completion
+    /// keeps slipping by however long the new work takes. In the live
+    /// camera flow this is fine because capture has stopped (ClipRecorder
+    /// finish callback) before drain is requested; if you call it during
+    /// active capture you'll wait for a moving target.
     ///
     /// **Must NOT be called from the detection queue or from main when
     /// main is blocking on detection.** The completion fires on `queue`,

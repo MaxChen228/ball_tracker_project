@@ -584,6 +584,9 @@ def test_recently_ended_sessions_ring_evicts_oldest_at_maxlen(tmp_path):
     is expected to fall back to disk (pitches / results)."""
     s = main.State(data_dir=tmp_path)
     sessions = []
+    # Each `stop_session` synchronously frees `_current_session` before
+    # the next `arm_session` runs, so this tight loop deterministically
+    # walks the ring without overlapping armed-window guards.
     for _ in range(5):
         sess = s.arm_session()
         s.stop_session()
@@ -613,6 +616,8 @@ def test_delete_session_removes_target_from_ring_only(tmp_path):
     assert s._lookup_session_locked(a.id) is None
     assert s._lookup_session_locked(b.id) is b
     assert s._most_recent_ended_session_locked() is b
+    # Ring rebuild preserved B without accidentally collapsing both.
+    assert len(s._recently_ended_sessions) == 1
 
 
 def test_sessions_clear_html_redirect():

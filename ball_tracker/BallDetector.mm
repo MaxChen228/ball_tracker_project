@@ -341,10 +341,12 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
     cv::Mat bgra;
     if (!mapBGRAPixelBuffer(pixelBuffer, bgra)) { return nil; }
 
-    // thread_local scratch: the stateless path is used by
-    // ConcurrentDetectionPool with up to `maxConcurrency` workers; giving
-    // each thread its own buffers avoids allocator churn without needing
-    // a lock.
+    // thread_local scratch: a leftover from when the stateless path was
+    // dispatched onto a concurrent worker pool. Post-Phase-3 the live
+    // path uses BTStatefulBallDetector on a serial queue, but this
+    // stateless variant is still callable from anywhere (tests, parity
+    // fixtures), so per-thread scratch keeps it allocator-cheap on
+    // whichever thread happens to call.
     thread_local CVScratch scratch;
 #if BT_DETECTOR_TIMING
     double hsvMs = 0, ccMs = 0;
