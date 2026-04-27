@@ -33,12 +33,49 @@ def test_runtime_exposes_required_api():
         "function setLayer(",
         "function setOpacity(",
         "function registerLayer(",
+        "function forgetCam(",
+        "function startPreviewPolling(",
+        "function startCalibrationPolling(",
         "layerRenderers.set('plate'",
         "layerRenderers.set('axes'",
         "drawVirtualBase",
         "applyStatusBadges",
     ):
         assert needle in js, f"runtime missing {needle!r}"
+    # Phase 2 lifecycle + polling helpers must be exported on the public
+    # surface — without this, callers fall back to inlining the loop and
+    # the offline-gate / cleanup divergence resurfaces (see preview poll
+    # divergence between dashboard and markers prior to Phase 2).
+    assert "forgetCam, startPreviewPolling, startCalibrationPolling" in js
+
+
+def test_forgetcam_clears_all_cam_keyed_state():
+    """forgetCam is the hard 'cam is gone' signal — every Map keyed by
+    camId, the ResizeObserver, and any preview pollers must drop.
+    setMeta(null) is the softer 'decalibrated but still present' path
+    and intentionally leaves layer toggles + opacity sliders alone."""
+    js = CAM_VIEW_RUNTIME_JS
+    for clear_call in (
+        "camMeta.delete(camId)",
+        "camExtras.delete(camId)",
+        "camStatus.delete(camId)",
+        "layerState.delete(camId)",
+        "opacityState.delete(camId)",
+        "clickHandlers.delete(camId)",
+        "resizeObservers.delete(camId)",
+        "previewPollers.delete(camId)",
+    ):
+        assert clear_call in js, f"forgetCam missing cleanup: {clear_call!r}"
+
+
+def test_start_calibration_polling_setmeta_diff_drops_absent_cams():
+    """startCalibrationPolling must call setMeta(cam, null) for cams that
+    appear in listCams() but not in the latest /calibration/state — that's
+    how the runtime flips the badge to 'uncalibrated' the moment the
+    server stops reporting a cam, without waiting for a page reload."""
+    js = CAM_VIEW_RUNTIME_JS
+    assert "for (const cam of listCams())" in js
+    assert "setMeta(cam, null)" in js
 
 
 def test_runtime_reuses_existing_projection_helpers():
@@ -230,12 +267,15 @@ def test_dashboard_tick_pushes_cam_view_meta():
     assert "BallTrackerCamView.mountAll" in _JS_TEMPLATE
 
 
-def test_dashboard_preview_poll_handles_cam_view_imgs():
-    """tickPreviewImages must cache-bust the merged cam-view <img>.
-    Phase 5 removed the legacy [data-preview-img] selector — single
-    selector now."""
+def test_dashboard_preview_poll_uses_runtime_api():
+    """Phase 2: dashboard delegates preview polling to the cam-view
+    runtime via startPreviewPolling. The inline cache-bust loop moved
+    into cam_view_ui.py so /setup and /markers share the same
+    offline gate + per-cam abort handle."""
     from render_dashboard_client import _JS_TEMPLATE
-    assert "[data-cam-img]" in _JS_TEMPLATE
+    assert "BallTrackerCamView.startPreviewPolling" in _JS_TEMPLATE
+    # Legacy inline tickPreviewImages + selector removed.
+    assert "setInterval(tickPreviewImages" not in _JS_TEMPLATE
     assert "[data-preview-img]" not in _JS_TEMPLATE
 
 
@@ -420,11 +460,17 @@ def test_viewer_page_uses_cam_view_with_detection_layers():
     assert 'id="virt-canvas-A"' not in body
 
 
-def test_markers_page_preview_poll_uses_cam_img_selector():
-    """The inline tickPreviewImages must query [data-cam-img] (new
-    merged pane) instead of legacy [data-preview-img]."""
+def test_markers_page_preview_poll_uses_runtime_api():
+    """Phase 2: markers init delegates the preview cache-bust loop to
+    the cam-view runtime (offline gate + per-cam abort handle now
+    shared across all four pages) and kicks startCalibrationPolling
+    so a cross-tab auto-cal updates marker footprints in-place
+    without a manual reload."""
     from render_markers import _MARKERS_JS
-    assert "[data-cam-img]" in _MARKERS_JS
+    assert "BallTrackerCamView.startPreviewPolling('A')" in _MARKERS_JS
+    assert "BallTrackerCamView.startPreviewPolling('B')" in _MARKERS_JS
+    assert "BallTrackerCamView.startCalibrationPolling" in _MARKERS_JS
+    # Legacy inline tickPreviewImages + setInterval removed.
+    assert "function tickPreviewImages" not in _MARKERS_JS
+    assert "setInterval(tickPreviewImages" not in _MARKERS_JS
     assert "[data-preview-img]" not in _MARKERS_JS
-    # Markers tick aligned to the rest of the codebase at 200 ms (was 250).
-    assert "setInterval(tickPreviewImages, 200)" in _MARKERS_JS

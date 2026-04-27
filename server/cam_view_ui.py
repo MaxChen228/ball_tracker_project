@@ -417,6 +417,7 @@ CAM_VIEW_RUNTIME_JS = (
 
   const clickHandlers = new Map(); // cam_id -> [fn(eventInfo), ...]
   const resizeObservers = new Map(); // cam_id -> ResizeObserver
+  const previewPollers = new Map(); // cam_id -> Set<intervalId>  (cleared by forgetCam)
 
   function onCanvasClick(camId, fn) {
     if (typeof fn !== 'function') return;
@@ -501,6 +502,111 @@ CAM_VIEW_RUNTIME_JS = (
     document.querySelectorAll('[data-cam-view]').forEach(mount);
   }
 
+  function forgetCam(camId) {
+    // Drop every cam-keyed bit of state. After this call the runtime
+    // behaves as if the cam had never been registered, so re-mounting
+    // the same camId starts fresh — no stale layer toggles, no
+    // observer leaks, no ghost preview pollers. setMeta(null) is a
+    // softer "decalibrated but still here" signal; forgetCam is the
+    // hard "this cam is gone" signal.
+    camMeta.delete(camId);
+    camExtras.delete(camId);
+    camStatus.delete(camId);
+    layerState.delete(camId);
+    opacityState.delete(camId);
+    clickHandlers.delete(camId);
+    const obs = resizeObservers.get(camId);
+    if (obs) obs.disconnect();
+    resizeObservers.delete(camId);
+    const pollers = previewPollers.get(camId);
+    if (pollers) {
+      for (const id of pollers) clearInterval(id);
+      previewPollers.delete(camId);
+    }
+    const root = document.querySelector(`[data-cam-view="${camId}"]`);
+    if (root) {
+      root.classList.remove('has-click');
+      root.classList.remove('is-offline');
+      const badges = root.querySelector('.cam-view-badges');
+      if (badges) badges.querySelectorAll('.cam-view-badge').forEach(el => el.remove());
+      const canvas = root.querySelector('[data-cam-canvas]');
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+  }
+
+  function startPreviewPolling(camId, opts) {
+    // Cache-busting GET on the cam's <img data-cam-img>. Multipart MJPEG
+    // via <img> is too flaky across browsers (Chrome silently aborts when
+    // the first boundary doesn't land within a short window), so we
+    // simulate streaming by bumping a query-string. Default 200 ms ≈ 5 fps.
+    // Gated on .is-offline so cams with preview disabled don't pin the
+    // network with 404s — same gating dashboard always had, now uniformly
+    // available to /setup and /markers.
+    const o = opts || {};
+    const intervalMs = o.intervalMs || 200;
+    const gateOffline = o.gateOffline !== false;
+    const urlBuilder = o.urlBuilder
+      || (cam => '/camera/' + encodeURIComponent(cam) + '/preview?t=' + Date.now());
+    const tick = () => {
+      const root = document.querySelector(`[data-cam-view="${camId}"]`);
+      if (!root) return;
+      if (gateOffline && root.classList.contains('is-offline')) return;
+      const img = root.querySelector(`img[data-cam-img]`);
+      if (!img) return;
+      img.src = urlBuilder(camId);
+    };
+    const id = setInterval(tick, intervalMs);
+    if (!previewPollers.has(camId)) previewPollers.set(camId, new Set());
+    previewPollers.get(camId).add(id);
+    return () => {
+      clearInterval(id);
+      const set = previewPollers.get(camId);
+      if (set) set.delete(id);
+    };
+  }
+
+  function startCalibrationPolling(opts) {
+    // Periodic GET /calibration/state. setMeta the cams the server's
+    // scene reports; setMeta(null) the cams we've seen before but the
+    // server didn't return — that flips them to 'uncalibrated' badge
+    // immediately rather than waiting for next page load. For "cam fully
+    // gone" semantics callers want forgetCam, but dashboard / setup /
+    // markers all keep their EXPECTED set fixed so setMeta(null) is the
+    // right default here.
+    const o = opts || {};
+    const intervalMs = o.intervalMs || 5000;
+    const endpoint = o.endpoint || '/calibration/state';
+    const onPayload = typeof o.onPayload === 'function' ? o.onPayload : null;
+    let stopped = false;
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const r = await fetch(endpoint, { cache: 'no-store' });
+        if (!r.ok) return;
+        const payload = await r.json();
+        const cams = (payload.scene && payload.scene.cameras) || [];
+        const live = new Set();
+        for (const c of cams) {
+          if (!c || !c.camera_id) continue;
+          setMeta(c.camera_id, c);
+          live.add(c.camera_id);
+        }
+        for (const cam of listCams()) {
+          if (!live.has(cam)) setMeta(cam, null);
+        }
+        if (onPayload) {
+          try { onPayload(payload); } catch (_) {}
+        }
+      } catch (_) { /* silent retry */ }
+    };
+    tick();
+    const id = setInterval(tick, intervalMs);
+    return () => { stopped = true; clearInterval(id); };
+  }
+
   window.addEventListener('resize', redrawAll);
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', mountAll);
@@ -513,7 +619,8 @@ CAM_VIEW_RUNTIME_JS = (
     setMeta, setExtras, setStatus,
     setLayer, setOpacity, registerLayer,
     onCanvasClick, listCams,
-    _internal: { camMeta, camExtras, camStatus, layerState, opacityState, layerRenderers, clickHandlers, resizeObservers },
+    forgetCam, startPreviewPolling, startCalibrationPolling,
+    _internal: { camMeta, camExtras, camStatus, layerState, opacityState, layerRenderers, clickHandlers, resizeObservers, previewPollers },
   };
 })();
 """
