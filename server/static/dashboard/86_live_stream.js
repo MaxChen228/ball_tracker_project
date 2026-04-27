@@ -313,6 +313,5 @@
       devices: currentDevices,
       session: currentSession,
       calibrations: currentCalibrations || [],
-      capture_mode: currentCaptureMode,
     });
   }

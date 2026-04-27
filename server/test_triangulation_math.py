@@ -13,7 +13,6 @@ import pairing
 from cleanup_old_sessions import cleanup_expired_sessions
 from conftest import sid
 from triangulate import (
-    angle_ray_cam,
     build_K,
     camera_center_world,
     recover_extrinsics,
@@ -25,7 +24,6 @@ from _test_helpers import (
     _encode_mov,
     _make_frame_with_ball,
     _make_scene,
-    _project,
     _project_pixels,
 )
 
@@ -78,30 +76,20 @@ def test_triangulate_perfect_rays_recovers_point():
     K, *_, (R_a, t_a, C_a, H_a), (R_b, t_b, C_b, H_b) = _make_scene()
     P_true = np.array([0.25, 0.6, 1.55])
 
-    theta_x_a, theta_z_a = _project(K, R_a, t_a, P_true)
-    theta_x_b, theta_z_b = _project(K, R_b, t_b, P_true)
+    u_a, v_a = _project_pixels(K, R_a, t_a, P_true)
+    u_b, v_b = _project_pixels(K, R_b, t_b, P_true)
 
     R_a_r, t_a_r = recover_extrinsics(K, H_a)
     R_b_r, t_b_r = recover_extrinsics(K, H_b)
     C_a_r = camera_center_world(R_a_r, t_a_r)
     C_b_r = camera_center_world(R_b_r, t_b_r)
 
-    d_a = R_a_r.T @ angle_ray_cam(theta_x_a, theta_z_a)
-    d_b = R_b_r.T @ angle_ray_cam(theta_x_b, theta_z_b)
+    d_a = R_a_r.T @ undistorted_ray_cam(u_a, v_a, K, np.zeros(5))
+    d_b = R_b_r.T @ undistorted_ray_cam(u_b, v_b, K, np.zeros(5))
 
     P_rec, gap = triangulate_rays(C_a_r, d_a, C_b_r, d_b)
     np.testing.assert_allclose(P_rec, P_true, atol=1e-6)
     assert gap < 1e-6
-
-
-def test_undistorted_ray_cam_zero_dist_matches_angle_ray():
-    K = build_K(1600.0, 1600.0, 960.0, 540.0)
-    u, v = 1234.5, 678.9
-    theta_x = np.arctan2(u - K[0, 2], K[0, 0])
-    theta_z = np.arctan2(v - K[1, 2], K[1, 1])
-    d_angle = angle_ray_cam(theta_x, theta_z)
-    d_pix = undistorted_ray_cam(u, v, K, np.zeros(5))
-    np.testing.assert_allclose(d_pix, d_angle, atol=1e-12)
 
 
 # --------------------------- triangulate_cycle unit (direct, no /pitch) ------

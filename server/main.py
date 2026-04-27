@@ -408,9 +408,6 @@ def _build_status_response() -> dict[str, Any]:
         "arm_readiness": arm_readiness,
         "session": session.to_dict() if session is not None else None,
         "commands": state.commands_for_devices(),
-        # Wire-compat: dashboard JS still reads capture_mode. Hard-wired
-        # since CaptureMode was removed and only one value ever shipped.
-        "capture_mode": "camera_only",
         "default_paths": sorted(p.value for p in state.default_paths()),
         "hsv_range": state.hsv_range().__dict__,
         "shape_gate": {
@@ -852,7 +849,6 @@ def events_index() -> HTMLResponse:
             session=session.to_dict() if session is not None else None,
             calibrations=calibrations,
             arm_readiness=_arm_readiness(devices, calibrations),
-            capture_mode="camera_only",
             hsv_range=state.hsv_range().__dict__,
             shape_gate={
                 "aspect_min": state.shape_gate().aspect_min,

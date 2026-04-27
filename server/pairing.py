@@ -14,7 +14,6 @@ import numpy as np
 
 from schemas import IntrinsicsPayload, FramePayload, PitchPayload, TriangulatedPoint
 from triangulate import (
-    angle_ray_cam,
     build_K,
     camera_center_world,
     recover_extrinsics,
@@ -187,29 +186,19 @@ def _camera_pose(intr: IntrinsicsPayload, H_list: list[float]):
 
 
 def _ray_for_frame(
-    theta_x: float | None,
-    theta_z: float | None,
-    px: float | None,
-    py: float | None,
+    px: float,
+    py: float,
     K: np.ndarray,
     dist_coeffs: list[float] | None,
 ) -> np.ndarray:
-    """Per-frame ray choice. Prefer the undistorted-pixel path whenever
-    `px`/`py` are present (server detection always produces them); fall
-    back to the on-device angle path only when pixels are missing.
-    Zero-distortion is the default when `dist_coeffs` is absent — equivalent
-    to the pinhole projection the angle path computes, so both yield the
-    same ray for zero-distortion input."""
-    if px is not None and py is not None:
-        coeffs = (
-            np.asarray(dist_coeffs, dtype=float)
-            if dist_coeffs is not None
-            else np.zeros(5, dtype=float)
-        )
-        return undistorted_ray_cam(px, py, K, coeffs)
-    if theta_x is None or theta_z is None:
-        raise ValueError("frame has neither usable angles nor pixels")
-    return angle_ray_cam(theta_x, theta_z)
+    """Undistorted-pixel ray for one frame. Zero-distortion fallback when
+    `dist_coeffs` is absent — equivalent to a pinhole projection."""
+    coeffs = (
+        np.asarray(dist_coeffs, dtype=float)
+        if dist_coeffs is not None
+        else np.zeros(5, dtype=float)
+    )
+    return undistorted_ray_cam(px, py, K, coeffs)
 
 
 def triangulate_live_pair(
@@ -238,16 +227,8 @@ def triangulate_live_pair(
     if abs(t_b_rel - t_rel) > _MAX_DT_S:
         return None
 
-    d_a_cam = _ray_for_frame(
-        frame_a.theta_x_rad, frame_a.theta_z_rad,
-        frame_a.px, frame_a.py,
-        pose_a.K, pose_a.dist,
-    )
-    d_b_cam = _ray_for_frame(
-        frame_b.theta_x_rad, frame_b.theta_z_rad,
-        frame_b.px, frame_b.py,
-        pose_b.K, pose_b.dist,
-    )
+    d_a_cam = _ray_for_frame(frame_a.px, frame_a.py, pose_a.K, pose_a.dist)
+    d_b_cam = _ray_for_frame(frame_b.px, frame_b.py, pose_b.K, pose_b.dist)
     d_a_world = pose_a.R.T @ d_a_cam
     d_b_world = pose_b.R.T @ d_b_cam
 
@@ -264,14 +245,12 @@ def triangulate_live_pair(
 
 
 def _valid_frame(f: FramePayload) -> bool:
-    has_angles = f.theta_x_rad is not None and f.theta_z_rad is not None
-    has_pixels = f.px is not None and f.py is not None
-    return f.ball_detected and (has_angles or has_pixels)
+    return f.ball_detected and f.px is not None and f.py is not None
 
 
 def _frame_items(p: PitchPayload, *, source: str = "server"):
-    """Ball-bearing frames as `(t_rel, θx, θz, px, py)`, sorted by
-    anchor-relative time. `t_rel = timestamp_s − sync_anchor_timestamp_s`.
+    """Ball-bearing frames as `(t_rel, px, py)`, sorted by anchor-relative
+    time. `t_rel = timestamp_s − sync_anchor_timestamp_s`.
 
     `source` is kept as a parameter for API compatibility; only `"server"`
     is supported now — it reads `p.frames_server_post` (which the caller
@@ -280,7 +259,7 @@ def _frame_items(p: PitchPayload, *, source: str = "server"):
     frames = p.frames_server_post
     anchor = p.sync_anchor_timestamp_s
     out = [
-        (f.timestamp_s - anchor, f.theta_x_rad, f.theta_z_rad, f.px, f.py)
+        (f.timestamp_s - anchor, f.px, f.py)
         for f in frames if _valid_frame(f)
     ]
     out.sort(key=lambda x: x[0])
@@ -313,7 +292,7 @@ def triangulate_cycle(
         dist_a = a.intrinsics.distortion
         dist_b = b.intrinsics.distortion
 
-        for t_rel, tx_a, tz_a, px_a, py_a in items_a:
+        for t_rel, px_a, py_a in items_a:
             idx = int(np.argmin(np.abs(b_times - t_rel)))
             dt = float(b_times[idx] - t_rel)
             if abs(dt) > _MAX_DT_S:
@@ -323,10 +302,10 @@ def triangulate_cycle(
                     t_rel, dt, _MAX_DT_S,
                 )
                 continue
-            _, tx_b, tz_b, px_b, py_b = items_b[idx]
+            _, px_b, py_b = items_b[idx]
 
-            d_a_cam = _ray_for_frame(tx_a, tz_a, px_a, py_a, K_a, dist_a)
-            d_b_cam = _ray_for_frame(tx_b, tz_b, px_b, py_b, K_b, dist_b)
+            d_a_cam = _ray_for_frame(px_a, py_a, K_a, dist_a)
+            d_b_cam = _ray_for_frame(px_b, py_b, K_b, dist_b)
             d_a_world = R_a.T @ d_a_cam
             d_b_world = R_b.T @ d_b_cam
 

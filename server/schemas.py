@@ -75,14 +75,10 @@ class BlobCandidate(BaseModel):
 class FramePayload(BaseModel):
     """Internal shape produced by server-side detection. NOT part of the wire
     contract any more — the iPhone uploads only the MOV + metadata; server
-    synthesises one `FramePayload` per decoded video frame. `theta_x_rad`
-    / `theta_z_rad` are always None now (the phone doesn't do angle
-    projection); px/py come from server detection, and triangulation
-    always uses the pixel+distortion path."""
+    synthesises one `FramePayload` per decoded video frame. px/py come from
+    server detection; triangulation uses the pixel+distortion path."""
     frame_index: int
     timestamp_s: float
-    theta_x_rad: float | None = None
-    theta_z_rad: float | None = None
     px: float | None = None
     py: float | None = None
     # Live-path multi-candidate. None on server_post (server picks during
