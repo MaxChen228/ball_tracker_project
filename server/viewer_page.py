@@ -1936,12 +1936,17 @@ def _viewer_js() -> str:
       if (v === null || !Number.isFinite(v)) return "#9C9690";
       return _OVL.viridisColor(vmax > 0 ? v / vmax : 0);
     }});
-    const ys = speeds.map(v => (v === null || !Number.isFinite(v)) ? 0 : v);
+    // Plotly bar accepts null in y → skips that bar entirely. A 0-height
+    // bar would look identical to "no data" and (combined with the grey
+    // colour) was borderline misleading; null leaves a visible gap in
+    // the strip so the user sees the segment exists but has no value.
+    const ys = speeds.map(v => (v === null || !Number.isFinite(v)) ? null : v);
+    const customdata = speeds.map(v => (v === null || !Number.isFinite(v)) ? null : v * 3.6);
     const trace = {{
       type: "bar", x: taus, y: ys,
       marker: {{ color: colors }},
       hovertemplate: `t=%{{x:.3f}}s<br>v=%{{y:.2f}} m/s · %{{customdata:.1f}} km/h<extra></extra>`,
-      customdata: ys.map(v => v * 3.6),
+      customdata,
     }};
     const layout = {{
       margin: {{l: 36, r: 8, t: 4, b: 22}},
