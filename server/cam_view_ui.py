@@ -67,6 +67,10 @@ CAM_VIEW_CSS = """
   pointer-events: none;
   /* opacity controlled by runtime via inline style */
 }
+.cam-view.has-click canvas[data-cam-canvas] {
+  pointer-events: auto;
+  cursor: crosshair;
+}
 .cam-view .cam-view-badges {
   position: absolute;
   left: 12px;
@@ -193,7 +197,20 @@ CAM_VIEW_RUNTIME_JS = (
 
   // Built-in layer renderers — register here so plate/axes work out of the box
   // and callers can registerLayer('marker_footprints', ...) to plug in extras.
+  // registerLayer silently overrides — pages that want to customise plate
+  // rendering can replace this. Reserved keys: plate, axes.
   layerRenderers.set('plate', function (ctx, sx, sy, cam) {
+    // Plate pentagon + principal-point cross. Bundled together because
+    // they're both calibration-alignment indicators — toggle 'plate' off
+    // gives the operator a clean image with no overlay annotations.
+    const cxPx = cam.cx * sx;
+    const cyPx = cam.cy * sy;
+    ctx.strokeStyle = 'rgba(219, 214, 205, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cxPx - 6, cyPx); ctx.lineTo(cxPx + 6, cyPx);
+    ctx.moveTo(cxPx, cyPx - 6); ctx.lineTo(cxPx, cyPx + 6);
+    ctx.stroke();
     const proj = PLATE_WORLD.map(P => projectWorldToPixel(P, cam));
     if (!proj.every(Boolean)) return;
     ctx.strokeStyle = 'rgba(255, 200, 0, 0.85)';
@@ -286,7 +303,9 @@ CAM_VIEW_RUNTIME_JS = (
     const canvas = root.querySelector('[data-cam-canvas]');
     if (!canvas) return;
     const meta = camMeta.get(camId);
-    const base = drawVirtualBase(canvas, meta, { background: 'transparent' });
+    // skipBuiltins: cam-view runtime owns plate + principal-point as
+    // toggleable layers. Otherwise drawVirtualBase double-paints them.
+    const base = drawVirtualBase(canvas, meta, { background: 'transparent', skipBuiltins: true });
     if (!base) return;
     const { ctx, sx, sy } = base;
     const layers = ensureLayerState(camId);
@@ -356,14 +375,50 @@ CAM_VIEW_RUNTIME_JS = (
     if (typeof fn === 'function') layerRenderers.set(key, fn);
   }
 
+  const clickHandlers = new Map(); // cam_id -> [fn(eventInfo), ...]
+
+  function onCanvasClick(camId, fn) {
+    if (typeof fn !== 'function') return;
+    if (!clickHandlers.has(camId)) clickHandlers.set(camId, []);
+    clickHandlers.get(camId).push(fn);
+    const root = document.querySelector(`[data-cam-view="${camId}"]`);
+    if (root) root.classList.add('has-click');
+  }
+
+  function _emitCanvasClick(camId, ev) {
+    const handlers = clickHandlers.get(camId);
+    if (!handlers || handlers.length === 0) return;
+    const meta = camMeta.get(camId);
+    const target = ev.currentTarget;
+    const rect = target.getBoundingClientRect();
+    const cssX = ev.clientX - rect.left;
+    const cssY = ev.clientY - rect.top;
+    // Map css px -> image-space pixels using meta.image_*. Without meta,
+    // fall back to css coords so the handler at least sees the click.
+    let u = cssX, v = cssY;
+    if (meta && meta.image_width_px && meta.image_height_px && rect.width > 0 && rect.height > 0) {
+      u = cssX * (meta.image_width_px / rect.width);
+      v = cssY * (meta.image_height_px / rect.height);
+    }
+    const info = { camId, u, v, cssX, cssY, meta, event: ev };
+    for (const fn of handlers) {
+      try { fn(info); } catch (e) {
+        if (window.console && console.warn) console.warn('cam-view click handler error', e);
+      }
+    }
+  }
+
   function mount(root) {
     const camId = root.dataset.camView;
     if (!camId) return;
     // Initialise layer state from data-layers="plate,axes" + data-layers-on="plate,axes".
+    // Re-mount preserves existing user-toggled state — only seed keys we
+    // haven't seen before. Otherwise tickCalibration's renderDevices
+    // innerHTML rebuild would silently undo every toggle.
     const all = (root.dataset.layers || '').split(',').map(s => s.trim()).filter(Boolean);
     const onSet = new Set((root.dataset.layersOn || '').split(',').map(s => s.trim()).filter(Boolean));
     const ls = ensureLayerState(camId);
-    for (const k of all) ls[k] = onSet.has(k);
+    for (const k of all) if (!(k in ls)) ls[k] = onSet.has(k);
     // Wire per-layer toggle buttons.
     root.querySelectorAll('.cv-layer').forEach(btn => {
       const key = btn.dataset.layer;
@@ -375,6 +430,18 @@ CAM_VIEW_RUNTIME_JS = (
     if (slider) {
       slider.value = String(ensureOpacity(camId));
       slider.addEventListener('input', () => setOpacity(camId, slider.value));
+    }
+    // Wire canvas click (no-op until onCanvasClick registers a handler).
+    const canvas = root.querySelector('[data-cam-canvas]');
+    if (canvas) {
+      canvas.addEventListener('click', (ev) => _emitCanvasClick(camId, ev));
+    }
+    if (clickHandlers.has(camId)) root.classList.add('has-click');
+    // ResizeObserver catches sidebar/grid reflow that doesn't trigger
+    // window 'resize' (e.g. dashboard side card collapse).
+    if (typeof ResizeObserver !== 'undefined' && !root._cvResizeObs) {
+      root._cvResizeObs = new ResizeObserver(() => paintOne(root));
+      root._cvResizeObs.observe(root);
     }
     applyCanvasOpacity(camId);
     applyStatusBadges(camId);
@@ -396,7 +463,8 @@ CAM_VIEW_RUNTIME_JS = (
     mount, mountAll, redraw, redrawAll,
     setMeta, setExtras, setStatus,
     setLayer, setOpacity, registerLayer,
-    _internal: { camMeta, camExtras, camStatus, layerState, opacityState, layerRenderers },
+    onCanvasClick,
+    _internal: { camMeta, camExtras, camStatus, layerState, opacityState, layerRenderers, clickHandlers },
   };
 })();
 """

@@ -169,6 +169,12 @@ function drawVirtualBase(canvas, cam, opts = {}) {
   ctx.beginPath();
   ctx.rect(0, 0, cssW, cssH);
   ctx.clip();
+  // skipBuiltins lets the cam-view runtime own plate + principal-point
+  // rendering as toggleable layers. Existing callers (legacy 2-pane virt
+  // canvas) pass no opts and keep the built-in plate + cross.
+  if (opts.skipBuiltins) {
+    return { ctx, cssW, cssH, sx, sy };
+  }
   const cxPx = cam.cx * sx;
   const cyPx = cam.cy * sy;
   ctx.strokeStyle = opts.crossColor || 'rgba(219, 214, 205, 0.25)';
