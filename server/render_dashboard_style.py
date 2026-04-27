@@ -254,6 +254,8 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
 .sidebar .arm-gate {{ margin-top: 8px; font-size: 11px; line-height: 1.45; color: var(--ink); }}
 .sidebar .gate-label {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.10em;
                         text-transform: uppercase; color: var(--sub); margin-right: 6px; }}
+.sidebar .arm-error {{ margin-top: 6px; font-size: 11px; line-height: 1.45;
+                       color: var(--danger, #B14343); font-family: var(--mono); }}
 .sidebar .paths-stack {{ gap: 10px; margin-top: 12px; }}
 .sidebar .path-option {{ padding: 6px 8px; }}
 .sidebar .paths-actions {{ margin-top: 10px; }}
