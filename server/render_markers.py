@@ -388,6 +388,9 @@ _MARKERS_JS = r"""
     // which left those markers stuck as known — and known has no
     // detail-save / detail-delete path, so the operator could see but
     // not edit them.
+    //
+    // Mirrors cam_view_math.compare_rows_collapse — keep both halves in
+    // sync (origins/priorities/coercion).
     const byId = new Map();
     const upsert = (row, priority) => {
       const id = Number(row.marker_id);
@@ -485,6 +488,9 @@ _MARKERS_JS = r"""
   // projectWorldToPixel's output). Pick the nearest marker centroid
   // within ~3% of the image's longer edge so tolerance scales with
   // capture resolution.
+  //
+  // Algorithm mirrors cam_view_math.hit_test_nearest — keep both
+  // halves in sync (rank, tie-break, tol gate).
   function handleCamClick(info) {
     const { u, v, meta } = info;
     if (!meta) return;

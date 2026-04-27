@@ -1365,6 +1365,9 @@ def _viewer_js() -> str:
   // (detection_live / detection_svr) that draw the per-frame ball
   // detection blob from each pipeline. Currentframe lookup closes
   // over the viewer's `currentT` clock.
+  //
+  // Algorithm mirrors cam_view_math.find_detection_index — keep both
+  // halves in sync (binary search + left-scan-on-gap + tol gate).
   function _drawDetectionForPath(ctx, sx, sy, cam, path, color) {{
     const framesForThisCam = framesByPath[path] && framesByPath[path][cam.camera_id];
     if (!framesForThisCam) return;
