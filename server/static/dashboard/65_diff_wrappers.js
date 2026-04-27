@@ -15,8 +15,6 @@
   // state data rather than innerHTML strings because the browser re-serialises
   // HTML differently from the raw template literals we build.
   let _lastDevKey = null;
-  let _lastSessKey = null;
-  let _lastNavKey = null;
   let _lastEvKey = null;
 
   const _origRenderDevices = renderDevices;
@@ -25,7 +23,11 @@
       devices: (state.devices || []).map(d => ({
         id: d.camera_id,
         ts: d.time_synced,
-        seen: d.last_seen_at,
+        // last_seen_at is NOT in the key. It changes on every 1 Hz
+        // heartbeat but doesn't affect anything renderDevices paints
+        // (no "X s ago" label here). Including it forced a full
+        // innerHTML rebuild every second, flickering hover state on
+        // the PREVIEW / Auto-cal buttons.
         ws: d.ws_connected,
         // Round battery to 5% buckets so tiny-wobble heartbeats don't
         // repaint the whole devices card every second.
@@ -44,27 +46,11 @@
     _origRenderDevices(state);
   };
 
-  const _origRenderSession = renderSession;
-  renderSession = function(state) {
-    const s = state.session;
-    const sessKey = JSON.stringify({
-      armed: !!(s && s.armed), id: s && s.id, mode: s && s.mode,
-      capture_mode: state.capture_mode,
-      paths: state.default_paths || [],
-      live_session: state.live_session || null,
-    });
-    const cooldownBucket = Number(state.sync_cooldown_remaining_s || 0) > 0 ? 1 : 0;
-    const navKey = JSON.stringify({
-      online: (state.devices || []).length,
-      cal: (state.calibrations || []).length,
-      armed: !!(s && s.armed), id: s && s.id,
-      syncing: !!state.sync, cooling: cooldownBucket,
-    });
-    if (sessKey === _lastSessKey && navKey === _lastNavKey) return;
-    _lastSessKey = sessKey;
-    _lastNavKey = navKey;
-    _origRenderSession(state);
-  };
+  // renderSession now does surgical DOM patches that are idempotent and
+  // cheap; no need for a coarse JSON-key short-circuit in front of it.
+  // The previous wrapper's sessKey also lacked readiness fields, so a
+  // device flipping time_synced left the Arm button stale until something
+  // unrelated invalidated the key.
 
   const _origRenderEvents = renderEvents;
   renderEvents = function(events) {

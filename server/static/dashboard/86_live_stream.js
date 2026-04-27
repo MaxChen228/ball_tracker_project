@@ -221,9 +221,10 @@
     } else {
       currentDevices = list;
     }
+    // renderDevices still has a diff key; reset it so the patched
+    // device list repaints. renderSession does its own surgical
+    // patching now and ignores _lastSessKey / _lastNavKey.
     _lastDevKey = null;
-    _lastSessKey = null;
-    _lastNavKey = null;
     renderDevices({
       devices: currentDevices,
       calibrations: currentCalibrations || [],
