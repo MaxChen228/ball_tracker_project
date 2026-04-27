@@ -41,10 +41,16 @@
   // svr = selected event's /results points (server_post triangulation),
   // live = current armed session's WS-streamed live points.
   const _fitToggle = document.getElementById('dash-fit-toggle');
+  const _fitSourceGroup = document.querySelector('.fit-filter-bar .layer-source-group');
+  function _syncDashFitSourceDormant() {
+    if (_fitSourceGroup) _fitSourceGroup.classList.toggle('is-off', !_OVL.fitVisible());
+  }
   if (_fitToggle) {
     _fitToggle.checked = _OVL.fitVisible();
+    _syncDashFitSourceDormant();
     _fitToggle.addEventListener('change', () => {
       _OVL.setFitVisible(_fitToggle.checked);
+      _syncDashFitSourceDormant();
       repaintCanvas();
     });
   }
