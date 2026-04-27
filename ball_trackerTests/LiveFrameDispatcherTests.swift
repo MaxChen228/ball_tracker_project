@@ -7,14 +7,17 @@ import XCTest
 /// without needing a live server.
 final class LiveFrameDispatcherTests: XCTestCase {
 
-    // A minimal FramePayload helper
+    // A minimal FramePayload helper. Phase B wire shape: `detected` is
+    // expressed as one synthetic candidate (or none). `ballDetected` is
+    // derived from `candidates.isEmpty` on the FramePayload itself.
     private func makeFrame(index: Int = 0, detected: Bool = true) -> ServerUploader.FramePayload {
-        ServerUploader.FramePayload(
+        let candidates: [ServerUploader.BlobCandidate] = detected
+            ? [ServerUploader.BlobCandidate(px: 320.0, py: 240.0, area: 100, area_score: 1.0)]
+            : []
+        return ServerUploader.FramePayload(
             frame_index: index,
             timestamp_s: Double(index) * (1.0 / 240.0),
-            px: detected ? 320.0 : nil,
-            py: detected ? 240.0 : nil,
-            ball_detected: detected
+            candidates: candidates
         )
     }
 
