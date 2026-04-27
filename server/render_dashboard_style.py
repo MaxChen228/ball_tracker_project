@@ -725,6 +725,10 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-checkbox input {{ accent-color: var(--ink); cursor: pointer; }}
 .fit-filter-bar .layer-source-group {{ display: inline-flex; margin-left: 6px;
     border: 1px solid var(--border-base); border-radius: 2px; overflow: hidden; }}
+/* Source pills go dormant when Fit checkbox is off — picking svr/live
+   without a visible Fit overlay does nothing user-observable, so the
+   pills mute. Pressed state still tracks the selection. */
+.fit-filter-bar .layer-source-group.is-off {{ opacity: 0.45; }}
 .fit-filter-bar .layer-source-group .ff-src-pill {{ border: 0; border-radius: 0;
     border-left: 1px solid var(--border-base); padding: 2px 6px; font-size: 9px; }}
 .fit-filter-bar .layer-source-group .ff-src-pill:first-child {{ border-left: 0; }}

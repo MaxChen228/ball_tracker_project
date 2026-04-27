@@ -693,10 +693,18 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     text-transform:uppercase; font-weight:400; line-height:1; }}
   .scene-col .scene-toolbar button.active {{ background:var(--ink); color:var(--surface); font-weight:500; }}
   .scene-col .scene-toolbar button[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); font-weight:500; }}
-  .scene-col .scene-toolbar .reset {{ font-size:14px; padding:4px 12px; }}
+  /* Reset arrow uses the same padding as siblings — slightly larger
+     glyph but unified vertical metrics so the pill reads as one
+     toolbar, not "icon button + tab group". */
+  .scene-col .scene-toolbar .reset {{ font-size:14px; padding:5px 12px; }}
   .scene-col .scene-toolbar .divider {{ width:1px; background:var(--border-base); align-self:stretch; }}
   .layer-source-group {{ display:inline-flex; align-items:center; margin-left:6px;
     border:1px solid var(--border-base); border-radius:var(--r); overflow:hidden; }}
+  /* Source pills go dormant when Fit is off — picking svr/live without
+     a visible Fit overlay does nothing user-observable, so the pills
+     read as muted to match. The pressed state still tracks selection
+     so re-enabling Fit shows the operator which source they had. */
+  .layer-source-group.is-off {{ opacity:0.45; }}
   .fit-src-pill {{ padding:2px 6px; font-family:var(--mono); font-size:9px;
     letter-spacing:0.06em; background:var(--surface); border:0; color:var(--sub);
     cursor:pointer; line-height:1.4; }}
@@ -2005,10 +2013,16 @@ def _viewer_js() -> str:
 
   // --- Fit overlay toggle (was modal "fit mode" — now a layer) ---
   const fitToggleBtn = document.getElementById("fit-toggle");
+  const fitSourceGroup = document.querySelector(".layer-source-group");
+  function syncFitSourceGroupDormant() {{
+    if (fitSourceGroup) fitSourceGroup.classList.toggle("is-off", !_OVL.fitVisible());
+  }}
   if (fitToggleBtn) {{
     fitToggleBtn.checked = _OVL.fitVisible();
+    syncFitSourceGroupDormant();
     fitToggleBtn.addEventListener("change", () => {{
       _OVL.setFitVisible(fitToggleBtn.checked);
+      syncFitSourceGroupDormant();
       scheduleSceneDraw();
     }});
   }}
