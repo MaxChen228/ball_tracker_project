@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json as _json
 
-from cam_view_ui import CAM_VIEW_CSS, CAM_VIEW_RUNTIME_JS
+from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
 from reconstruct import Scene
 from render_compare import (
@@ -169,9 +169,12 @@ def build_viewer_page_context(
 # rules glue the runtime canvas onto the existing .vid-media and
 # render the per-cam layer toolbar as a slim footer bar beneath the
 # video, NOT floating absolute over the video. The toolbar inherits
-# pill / slider styling from CAM_VIEW_CSS's [data-cam-view] selectors.
+# pill / slider styling from the CAM_VIEW_CONTENT_CSS bucket; the
+# CAM_VIEW_BOX_CSS bucket (with .cam-view aspect-ratio + absolute
+# toolbar positioning) is intentionally NOT pulled in here — viewer
+# already owns its container layout.
 _VIEWER_CAM_VIEW_OVERRIDES = (
-    CAM_VIEW_CSS
+    CAM_VIEW_CONTENT_CSS
     + """
 .vid-cell[data-cam-view] .vid-media { position: relative; }
 .vid-cell[data-cam-view] canvas[data-cam-canvas] {
