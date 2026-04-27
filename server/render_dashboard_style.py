@@ -1,7 +1,7 @@
 """Dashboard-specific CSS and design tokens."""
 from __future__ import annotations
 
-from cam_view_ui import CAM_VIEW_CSS
+from cam_view_ui import CAM_VIEW_FULL_CSS
 
 
 # --- Design-system tokens (mirrored in render_scene.py) ----------------------
@@ -442,7 +442,7 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
    the viewer's bottom-row virt canvas — if the reprojected outline
    doesn't align with the plate in the real preview above, calibration
    is off. */
-{CAM_VIEW_CSS}
+{CAM_VIEW_FULL_CSS}
 
 /* Calibration card (Phase 5). Per-camera auto-calibrate row + an
    extended-markers block. Visually aligned with .device rows so the
