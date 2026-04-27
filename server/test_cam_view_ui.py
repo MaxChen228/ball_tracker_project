@@ -152,10 +152,12 @@ def test_runtime_exposes_click_api_for_phase4():
 
 
 def test_css_enables_pointer_events_when_click_handler_attached():
-    """has-click class must be the gate for canvas pointer-events."""
-    assert ".cam-view canvas[data-cam-canvas]" in CAM_VIEW_CSS
+    """has-click is the gate for canvas pointer-events. CSS now selects
+    via [data-cam-view] (the contract) so viewer's vid-cell — which
+    skips the .cam-view class — still gets pointer-event handling."""
+    assert "[data-cam-view] canvas[data-cam-canvas]" in CAM_VIEW_CSS
     assert "pointer-events: none" in CAM_VIEW_CSS
-    assert ".cam-view.has-click canvas[data-cam-canvas]" in CAM_VIEW_CSS
+    assert "[data-cam-view].has-click canvas[data-cam-canvas]" in CAM_VIEW_CSS
     assert "pointer-events: auto" in CAM_VIEW_CSS
 
 
@@ -201,7 +203,9 @@ def test_dashboard_css_includes_cam_view_styles():
     with TestClient(app) as client:
         body = client.get("/").text
     assert ".cam-view" in body
-    assert ".cam-view.has-click canvas" in body
+    # has-click rule now lives on the data-attr selector so viewer (no
+    # .cam-view class) gets the same click hit-test path.
+    assert "[data-cam-view].has-click canvas" in body
 
 
 def test_dashboard_js_renders_cam_view_in_device_row():

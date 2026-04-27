@@ -725,10 +725,13 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-checkbox input {{ accent-color: var(--ink); cursor: pointer; }}
 .fit-filter-bar .layer-source-group {{ display: inline-flex; margin-left: 6px;
     border: 1px solid var(--border-base); border-radius: 2px; overflow: hidden; }}
-/* Source pills go dormant when Fit checkbox is off — picking svr/live
-   without a visible Fit overlay does nothing user-observable, so the
-   pills mute. Pressed state still tracks the selection. */
-.fit-filter-bar .layer-source-group.is-off {{ opacity: 0.45; }}
+/* Source pills go dormant when Fit checkbox is off. Stronger than plain
+   opacity: drop saturation so the pressed-state black bg fades to grey,
+   and gate pointer-events so a click can't silently change the dormant
+   source. Pressed state still tracks the user's choice. */
+.fit-filter-bar .layer-source-group.is-off {{
+  opacity: 0.4; filter: saturate(0.15); pointer-events: none;
+}}
 .fit-filter-bar .layer-source-group .ff-src-pill {{ border: 0; border-radius: 0;
     border-left: 1px solid var(--border-base); padding: 2px 6px; font-size: 9px; }}
 .fit-filter-bar .layer-source-group .ff-src-pill:first-child {{ border-left: 0; }}
