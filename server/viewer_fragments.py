@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import datetime as _dt
-
 from render_scene_theme import (
     _CAMERA_COLORS,
     _FALLBACK_CAMERA_COLOR,
@@ -101,84 +99,66 @@ def video_cell_html(
     )
 
 
-def hero_meta_subline(health: dict) -> str:
-    parts: list[str] = [f'session {health["session_id"]}']
-    dur = health.get("duration_s")
-    if dur is not None:
-        parts.append(f"duration {dur:.2f}s")
-    rx = health.get("received_at")
-    if rx is not None:
-        ts = _dt.datetime.fromtimestamp(rx).strftime("%m-%d %H:%M")
-        parts.append(f"received {ts}")
-    mode = health.get("mode")
-    if mode:
-        label = (
-            "live-only" if mode == "live_only"
-            else "camera-only"
-        )
-        parts.append(f"mode {label}")
-    return " · ".join(parts)
-
-
-def health_banner_html(health: dict) -> str:
+def health_nav_strip_html(health: dict) -> str:
+    """Compact per-session status strip for the viewer's nav bar. Replaces
+    the legacy `.health` row (hero card + per-cam cards) — same data, ~1/3
+    the vertical space. Failures are surfaced separately via
+    `failure_strip_html`, which renders below the nav as its own banner."""
     tri_n = health.get("triangulated_count", 0)
-    sub = hero_meta_subline(health)
-    note = "points triangulated"
-    if tri_n > 0:
-        hero_block = (
-            f'<div class="hero-card ok">'
-            f'<div class="hero-title">3D Trajectory</div>'
-            f'<div class="hero-tri">{tri_n}</div>'
-            f'<div class="hero-note">{note}</div>'
-            f'<div class="hero-sub">{sub}</div>'
-            f"</div>"
-        )
-    else:
-        hero_block = (
-            f'<div class="hero-card">'
-            f'<div class="hero-title">3D Trajectory</div>'
-            f'<div class="hero-tri zero">—</div>'
-            f'<div class="hero-note">no triangulation</div>'
-            f'<div class="hero-sub">{sub}</div>'
-            f"</div>"
-        )
+    sid = health.get("session_id", "")
+    dur = health.get("duration_s")
+    mode = health.get("mode")
 
-    cam_rows = "".join(
-        cam_card_html(cam_id, health["cameras"][cam_id])
+    tri_klass = "ok" if tri_n > 0 else "zero"
+    tri_label = f"{tri_n}" if tri_n > 0 else "—"
+    tri_title = "points triangulated" if tri_n > 0 else "no triangulation"
+
+    meta_bits: list[str] = [f'<span class="hs-sid">{sid}</span>']
+    if dur is not None:
+        meta_bits.append(f'<span class="hs-dur">{dur:.2f}s</span>')
+    if mode == "camera_only":
+        meta_bits.append('<span class="hs-mode">camera-only</span>')
+    elif mode == "live_only":
+        meta_bits.append('<span class="hs-mode">live-only</span>')
+
+    cams_html = "".join(
+        cam_strip_chip_html(cam_id, health["cameras"][cam_id])
         for cam_id in ("A", "B")
     )
-    fail_strip = failure_strip_html(health)
     return (
-        f'<div class="health">'
-        f'<div class="health-row">'
-        f"{hero_block}"
-        f'<div class="cam-stack">{cam_rows}</div>'
-        f"</div>"
-        f"{fail_strip}"
+        f'<div class="health-strip" role="status" aria-label="Session health">'
+        f'<span class="hs-tri {tri_klass}" title="{tri_title}">'
+        f'<span class="hs-tri-n">{tri_label}</span>'
+        f'<span class="hs-tri-lbl">pts</span></span>'
+        f'<span class="hs-meta">{" · ".join(meta_bits)}</span>'
+        f'<span class="hs-cams">{cams_html}</span>'
         f"</div>"
     )
 
 
-def cam_card_html(cam_id: str, cam: dict) -> str:
+def cam_strip_chip_html(cam_id: str, cam: dict) -> str:
+    """One inline chip per camera for the nav-bar health strip. Drops the
+    legacy rate-bar (a 1px wide bar that was always 100% post-arrival,
+    no info) in favour of pure path-stat chips. Detection-rate tier is
+    encoded in each chip's `data-rate-klass` attribute and visualised by
+    border colour via the `.path-stat[data-rate-klass=...]` CSS rules."""
     if not cam["received"]:
         return (
-            f'<div class="cam-card missing">'
+            f'<span class="hs-cam missing" data-cam="{cam_id}" '
+            f'title="single-camera session, triangulation skipped">'
             f'<span class="cam-badge {cam_id}">CAM {cam_id}</span>'
-            f'<span class="cam-state fail">never uploaded</span>'
-            f'<span class="cam-note">single-camera session, '
-            f"triangulation skipped</span>"
-            f"</div>"
+            f'<span class="hs-fail">never uploaded</span>'
+            f"</span>"
         )
 
     checks = [
-        ("calibrated", cam["calibrated"], "intrinsics + homography"),
-        ("time synced", cam["time_synced"], "chirp anchor"),
+        ("✓" if cam["calibrated"] else "✗", cam["calibrated"], "calibrated"),
+        ("✓" if cam["time_synced"] else "✗", cam["time_synced"], "time synced"),
     ]
     checks_html = "".join(
-        f'<span class="check {"pass" if ok else "fail"}" title="{tip}">'
-        f'<span class="mark">{"✓" if ok else "✗"}</span>{label}'
-        f"</span>"
-        for (label, ok, tip) in checks
+        f'<span class="hs-check {"pass" if ok else "fail"}" title="{tip}">'
+        f"{mark}</span>"
+        for (mark, ok, tip) in checks
     )
 
     counts = cam.get("counts_by_path") or {}
@@ -187,72 +167,41 @@ def cam_card_html(cam_id: str, cam: dict) -> str:
         ("server_post", "S", "server post (PyAV decode + server-side detection)"),
     )
 
-    def _rate_bits(total: int, det: int) -> tuple[str, int]:
+    def _rate_klass(total: int, det: int) -> str:
         if total == 0:
-            return ("empty", 0)
+            return "empty"
         r = det / total
-        klass = "fail" if r < 0.05 else "pending" if r < 0.30 else "ok"
-        pct = max(2, round(r * 100)) if det > 0 else 0
-        return (klass, pct)
+        return "fail" if r < 0.05 else "pending" if r < 0.30 else "ok"
 
-    # Default active path: prefer server_post if it has data, else live.
-    active_path = next(
-        (k for k in ("server_post", "live") if (counts.get(k) or {}).get("total", 0) > 0),
-        "server_post",
-    )
     path_chips: list[str] = []
-    init_pct = 0
-    init_klass = "empty"
     for key, abbr, tip in _PATHS:
         c = counts.get(key) or {"total": 0, "detected": 0, "fps": None}
         total = c.get("total", 0)
         det = c.get("detected", 0)
         fps = c.get("fps")
         has_data = total > 0
-        klass = "on" if has_data else "off"
-        rate_klass, pct = _rate_bits(total, det)
+        rate_klass = _rate_klass(total, det)
         ratio_txt = f"{det}/{total}" if has_data else "—"
         fps_txt = (
             f'<span class="fps" title="effective fps = frames / duration">'
             f"{fps:.0f} fps</span>"
             if isinstance(fps, (int, float)) else ""
         )
-        is_active = has_data and key == active_path
-        if is_active:
-            init_pct = pct
-            init_klass = rate_klass
-            klass += " active"
-        disabled = "" if has_data else "disabled"
+        klass = "on" if has_data else "off"
         path_chips.append(
-            f'<button type="button" class="path-stat {klass}" '
-            f'data-path="{key}" data-pct="{pct}" data-rate-klass="{rate_klass}" '
-            f'aria-pressed="{"true" if is_active else "false"}" '
-            f'title="{tip}" {disabled}>'
+            f'<span class="path-stat {klass}" data-path="{key}" '
+            f'data-rate-klass="{rate_klass}" title="{tip}">'
             f'<span class="lbl">{abbr}</span>'
             f'<span class="val">{ratio_txt}</span>'
-            f"{fps_txt}</button>"
-        )
-    stats_html = "".join(path_chips)
-    telemetry_html = ""
-    if init_klass == "empty":
-        rate_html = '<span class="rate-empty">—</span>'
-    else:
-        rate_html = (
-            f'<span class="rate-bar"><span class="rate-fill {init_klass}" '
-            f'style="width:{init_pct}%"></span></span>'
+            f"{fps_txt}</span>"
         )
 
     return (
-        f'<div class="cam-card received">'
-        f'<div class="cam-head">'
+        f'<span class="hs-cam received" data-cam="{cam_id}">'
         f'<span class="cam-badge {cam_id}">CAM {cam_id}</span>'
-        f'<span class="cam-state ok">uploaded</span>'
-        f'<span class="cam-checks">{checks_html}</span>'
-        f"</div>"
-        f'<div class="cam-rate">{rate_html}<span class="cam-stats">'
-        f"{stats_html}</span></div>"
-        f"{telemetry_html}"
-        f"</div>"
+        f'<span class="hs-checks">{checks_html}</span>'
+        f'<span class="hs-paths">{"".join(path_chips)}</span>'
+        f"</span>"
     )
 
 

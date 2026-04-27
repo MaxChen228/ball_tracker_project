@@ -552,8 +552,8 @@ def test_viewer_endpoint_without_clips_still_renders():
 
 
 def test_viewer_banner_tags_camera_only_when_video_on_disk(tmp_path):
-    """Mode-one session: any MOV under data/videos/ flips the banner's
-    sub-line to `mode camera-only`."""
+    """Mode-one session: any MOV under data/videos/ flips the nav strip's
+    mode chip to `camera-only`."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(707)
     _record_pitch(_pitch("A", 707, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -562,14 +562,14 @@ def test_viewer_banner_tags_camera_only_when_video_on_disk(tmp_path):
     (main.state.video_dir / f"session_{session_id}_A.mov").write_bytes(b"fake")
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
-    assert "mode camera-only" in body
+    assert 'class="hs-mode">camera-only</span>' in body
 
 
-def test_viewer_health_banner_shows_partial_session_failure():
-    """A-only session → health banner must surface (a) A's uploaded chip,
-    (b) B's collapsed 'never uploaded' row, and (c) an explicit failure
-    strip explaining triangulation was skipped. This is the whole reason
-    the banner exists — a glance should answer 'why is the 3D empty?'."""
+def test_viewer_health_strip_shows_partial_session_failure():
+    """A-only session → nav strip must surface (a) A's CAM chip with
+    receive checks, (b) B's missing chip, and (c) a separate failure
+    banner explaining triangulation was skipped. A glance must answer
+    'why is the 3D empty?'."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(720)
     _record_pitch(_pitch("A", 720, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -577,25 +577,20 @@ def test_viewer_health_banner_shows_partial_session_failure():
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
     assert "CAM A" in body and "CAM B" in body
-    assert "uploaded" in body
-    # Missing cam now collapses to a one-row 'never uploaded' notice +
-    # the failure strip surfaces the same wording so the operator can't
-    # miss it.
+    # Missing cam chip + failure banner both surface 'never uploaded'.
     assert "never uploaded" in body
     assert "triangulation skipped" in body
-    # Hero triangulation card falls to the zero state.
-    assert "no triangulation" in body
-    # Layout mode is `single-cam` so the videos column collapses and
-    # the 3D scene gets ~70% width via the data-mode CSS rule.
+    # Hero `pts` count falls to the zero state.
+    assert 'class="hs-tri zero"' in body
+    # Layout mode is `single-cam` so videos-col collapses to a single row.
     assert 'data-mode="single-cam"' in body
-    # Missing cam-card is rendered with the `missing` class — present in
-    # the SSR HTML even though it's a single collapsed row visually.
-    assert "cam-card missing" in body
+    # Missing cam chip is rendered with `hs-cam missing` class.
+    assert 'class="hs-cam missing"' in body
 
 
-def test_viewer_health_banner_shows_paired_triangulation_count():
-    """Both A and B present + triangulated points → hero shows the
-    count, the per-cam rate bars render, and no failure strip exists."""
+def test_viewer_health_strip_shows_paired_triangulation_count():
+    """Both A and B present + triangulated points → strip shows the
+    count, each cam chip renders pass checks, no failure banner exists."""
     K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
     session_id = sid(721)
     P = np.array([[0.1, 0.3, 1.0], [0.2, 0.5, 1.2]])
@@ -604,28 +599,29 @@ def test_viewer_health_banner_shows_paired_triangulation_count():
 
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
-    assert "points triangulated" in body
-    # Hero card must render the big triangulation digit, not a chip.
-    assert 'class="hero-tri"' in body
-    # Detection-rate progress bar must render for each received cam.
-    assert 'class="rate-bar"' in body
-    assert 'rate-fill ok' in body  # both cams hit 100% detection
+    # Strip must render the triangulation count chip.
+    assert 'class="hs-tri ok"' in body
+    assert 'class="hs-tri-n">2<' in body
+    # Each path chip carries its rate-tier class; both cams at 100%
+    # detection → ok tier.
+    assert 'data-rate-klass="ok"' in body
     # Layout mode is `paired` since both cameras uploaded.
     assert 'data-mode="paired"' in body
-    # Hero sub-line carries the metadata that used to live in the nav.
-    assert "session " + session_id in body
-    assert "duration " in body
-    # No failure strip should render when every check passes.
+    # Strip carries session metadata.
+    assert f'class="hs-sid">{session_id}<' in body
+    assert 'class="hs-dur"' in body
+    # No failure banner should render when every check passes.
     assert 'class="fail-strip"' not in body
-    # Nav bar must NOT carry the old `.meta` strip — metadata moved
-    # into the hero so it doesn't appear twice on the page.
-    assert 'class="meta"' not in body
+    # Old `.health` row must NOT render — metadata moved into nav strip.
+    assert 'class="health-row"' not in body
+    assert 'class="hero-card"' not in body
 
 
-def test_viewer_health_banner_rate_bar_colour_tiers():
-    """Detection-rate progress bar must tint by ratio: <5% fail (red),
-    <30% pending (amber), else ok (green). The tier is what the operator
-    actually scans for — the colour answers 'is this signal usable?'."""
+def test_viewer_health_strip_path_chip_colour_tiers():
+    """Detection-rate tier must encode into each path-stat chip's
+    `data-rate-klass`: <5% fail, <30% pending, else ok. The chip's
+    border colour visualises this — the operator's at-a-glance signal
+    that says 'is this pipeline usable?'."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(723)
     # 20 frames, only 1 detection → 5% (just at the pending threshold).
@@ -655,11 +651,11 @@ def test_viewer_health_banner_rate_bar_colour_tiers():
 
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
-    # 1/20 = 5% → pending tier (amber). Boundary is `< 0.30`.
-    assert "rate-fill pending" in body
-    # Stats now surface per-pipeline chips. server_post chip reads "1/20".
-    assert 'class="path-stat on' in body
+    # 1/20 = 5% → pending tier. Boundary is `< 0.30`.
+    assert 'data-rate-klass="pending"' in body
+    # server_post chip reads "1/20".
     assert ">S</span><span class=\"val\">1/20<" in body
+    assert 'class="path-stat on"' in body
 
 
 def test_viewer_health_banner_flags_missing_time_sync():
