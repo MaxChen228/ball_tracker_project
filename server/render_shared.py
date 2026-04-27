@@ -156,7 +156,12 @@ def _render_nav_status(
         synced_usable = [
             str(v) for v in (arm_readiness.get("synced_calibrated_online_cameras") or synced_usable)
         ]
-    requires_time_sync = len(usable) >= 2
+
+    # Stereo rig: every chip is rendered as `n/2` against the expected
+    # cam count. The legacy single-camera branch ("Sync · single") was
+    # retired — the rig is permanently A+B and rendering "single" hid
+    # the fact that the second cam was missing.
+    expected = 2
 
     def _check_row(label: str, value: str, ok: bool) -> str:
         cls = "ok" if ok else "warn"
@@ -169,13 +174,9 @@ def _render_nav_status(
 
     checks = "".join(
         [
-            _check_row("Devices", f"{online}", online >= 1),
-            _check_row("Cal", f"{len(usable)}", len(usable) >= 1),
-            _check_row(
-                "Sync",
-                f"{len(synced_usable)}/{len(usable)}" if requires_time_sync else "single",
-                (not requires_time_sync) or len(synced_usable) >= len(usable),
-            ),
+            _check_row("Devices", f"{online}/{expected}", online >= expected),
+            _check_row("Cal", f"{len(usable)}/{expected}", len(usable) >= expected),
+            _check_row("Sync", f"{len(synced_usable)}/{expected}", len(synced_usable) >= expected),
         ]
     )
     return f'<div class="status-checks">{checks}</div>'
