@@ -31,7 +31,8 @@ from render_scene_theme import (
     _SURFACE,
 )
 from viewer_fragments import (
-    health_banner_html,
+    failure_strip_html,
+    health_nav_strip_html,
     video_cell_html,
 )
 
@@ -54,7 +55,8 @@ class ViewerPageContext:
     scene_flex: str
     videos_flex: str
     layout_mode: str
-    health_html: str
+    health_strip_html: str
+    health_failure_html: str
     video_cells_html: str
     session_id: str
     server_post_ran: bool
@@ -153,7 +155,8 @@ def build_viewer_page_context(
         scene_flex=scene_flex,
         videos_flex=videos_flex,
         layout_mode=layout_mode,
-        health_html=health_banner_html(health),
+        health_strip_html=health_nav_strip_html(health),
+        health_failure_html=failure_strip_html(health),
         video_cells_html=video_cells,
         session_id=scene.session_id,
         server_post_ran=server_post_ran,
@@ -221,11 +224,11 @@ def render_viewer_html(
 <div class="viewer">
   <div class="nav">
     <span class="brand"><span class="dot"></span>BALL_TRACKER</span>
-    <span class="nav-spacer"></span>
+    {ctx.health_strip_html}
     {action_html}
     <a class="back" href="/">&larr; dashboard</a>
   </div>
-  {ctx.health_html}
+  {ctx.health_failure_html}
   <div class="work" data-mode="{ctx.layout_mode}">
     <div class="scene-col">
       <div id="scene"></div>
@@ -412,7 +415,6 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     letter-spacing:0.16em; color:var(--ink); }}
   .nav .brand .dot {{ display:inline-block; width:7px; height:7px;
     background:var(--ink); margin-right:var(--s-2); vertical-align:middle; }}
-  .nav .nav-spacer {{ flex:1 1 auto; }}
   .nav .back {{ font-family:var(--mono); font-size:11px;
     letter-spacing:0.12em; text-transform:uppercase; color:var(--sub);
     text-decoration:none; }}
@@ -431,89 +433,64 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     letter-spacing:0.10em; text-transform:uppercase; color:var(--passed);
     border:1px solid var(--passed); background:var(--passed-bg);
     padding:3px 8px; border-radius:var(--r); }}
-  .health {{ flex:0 0 auto; background:var(--surface);
-    border-bottom:1px solid var(--border-base);
-    padding:var(--s-3) var(--s-5);
-    display:flex; flex-direction:column; gap:var(--s-2); }}
-  .health-row {{ display:grid; grid-template-columns:1fr 1fr;
-    gap:var(--s-3); align-items:stretch; }}
-  .cam-stack {{ display:flex; flex-direction:column; gap:var(--s-2); }}
-  .hero-card {{ border:1px solid var(--border-base); border-radius:var(--r);
-    padding:var(--s-2) var(--s-4); background:var(--bg); display:flex;
-    flex-direction:column; justify-content:center; gap:var(--s-1); }}
-  .hero-card.ok {{ background:var(--surface); border-color:var(--accent); }}
-  .hero-title {{ font-family:var(--mono); font-size:10px;
-    letter-spacing:0.12em; text-transform:uppercase; color:var(--sub); }}
-  .hero-tri {{ font-family:var(--mono);
-    font-size:clamp(30px, 3.2vh, 40px); font-weight:500;
-    line-height:1; color:var(--accent); letter-spacing:0.02em; }}
-  .hero-tri.zero {{ color:var(--sub); }}
-  .hero-note {{ font-family:var(--mono); font-size:11px;
-    letter-spacing:0.04em; color:var(--sub); }}
-  .hero-sub {{ font-family:var(--mono); font-size:11px;
-    letter-spacing:0.04em; color:var(--sub); margin-top:var(--s-1);
-    border-top:1px solid var(--border-l); padding-top:6px; }}
-  .cam-card {{ border:1px solid var(--border-base); border-radius:var(--r);
-    padding:6px 10px; background:var(--bg);
-    display:flex; flex-direction:column; gap:var(--s-1); }}
-  .cam-card.received {{ background:var(--surface); }}
-  .cam-card.missing {{ opacity:0.85; flex-direction:row;
-    align-items:center; gap:10px; }}
-  .cam-head {{ display:flex; align-items:center; gap:10px;
-    flex-wrap:wrap; }}
+  .health-strip {{ flex:1 1 auto; min-width:0; display:flex;
+    align-items:center; gap:var(--s-3); flex-wrap:wrap;
+    font-family:var(--mono); font-size:11px; color:var(--sub);
+    letter-spacing:0.04em; overflow:hidden; }}
+  .health-strip .hs-tri {{ display:inline-flex; align-items:baseline; gap:4px;
+    padding:3px 8px; border:1px solid var(--accent); border-radius:var(--r);
+    background:var(--surface); }}
+  .health-strip .hs-tri.zero {{ border-color:var(--border-base); }}
+  .health-strip .hs-tri-n {{ font-size:14px; font-weight:600; color:var(--accent);
+    line-height:1; font-variant-numeric:tabular-nums; }}
+  .health-strip .hs-tri.zero .hs-tri-n {{ color:var(--sub); }}
+  .health-strip .hs-tri-lbl {{ font-size:9px; letter-spacing:0.1em;
+    text-transform:uppercase; color:var(--sub); }}
+  .health-strip .hs-meta {{ display:inline-flex; gap:6px; align-items:baseline;
+    color:var(--sub); }}
+  .health-strip .hs-meta .hs-sid {{ color:var(--ink); font-weight:500; }}
+  .health-strip .hs-meta .hs-dur {{ font-variant-numeric:tabular-nums; }}
+  .health-strip .hs-meta > span + span::before {{ content:"·"; margin-right:6px;
+    color:var(--border-base); }}
+  .health-strip .hs-cams {{ display:inline-flex; gap:var(--s-2); flex-wrap:wrap; }}
+  .health-strip .hs-cam {{ display:inline-flex; align-items:center; gap:6px;
+    padding:2px 6px; border:1px solid var(--border-base); border-radius:var(--r);
+    background:var(--bg); }}
+  .health-strip .hs-cam.received {{ background:var(--surface); }}
+  .health-strip .hs-cam.missing {{ border-color:var(--dev);
+    background:rgba(192, 57, 43, 0.04); }}
+  .health-strip .hs-fail {{ color:var(--dev); font-size:10px;
+    text-transform:uppercase; letter-spacing:0.08em; }}
+  .health-strip .hs-checks {{ display:inline-flex; gap:2px; }}
+  .health-strip .hs-check {{ display:inline-flex; align-items:center;
+    justify-content:center; width:14px; height:14px; font-size:10px;
+    font-weight:700; border-radius:2px; }}
+  .health-strip .hs-check.pass {{ color:var(--ok); }}
+  .health-strip .hs-check.fail {{ color:var(--dev); }}
+  .health-strip .hs-paths {{ display:inline-flex; gap:4px; }}
   .cam-badge {{ font-family:var(--mono); font-weight:600; font-size:11px;
     letter-spacing:0.18em; padding:2px 8px; border:1px solid;
     border-radius:var(--r); }}
   .cam-badge.A {{ color:var(--contra); border-color:var(--contra); }}
   .cam-badge.B {{ color:var(--dual); border-color:var(--dual); }}
-  .cam-state {{ font-family:var(--mono); font-size:11px;
-    letter-spacing:0.08em; text-transform:uppercase; }}
-  .cam-state.ok {{ color:var(--ok); }}
-  .cam-state.fail {{ color:var(--dev); }}
-  .cam-note {{ font-family:var(--mono); font-size:11px; color:var(--sub);
-    letter-spacing:0.02em; }}
-  .cam-checks {{ display:inline-flex; flex-wrap:wrap; gap:4px 12px;
-    margin-left:auto; }}
-  .check {{ font-family:var(--mono); font-size:11px;
-    letter-spacing:0.04em; color:var(--sub);
-    display:inline-flex; align-items:center; gap:6px; }}
-  .check .mark {{ font-weight:700; width:12px; display:inline-block;
-    text-align:center; }}
-  .check.pass {{ color:var(--ink); }}
-  .check.pass .mark {{ color:var(--ok); }}
-  .check.fail .mark {{ color:var(--dev); }}
-  .cam-rate {{ display:flex; align-items:center; gap:10px; }}
-  .cam-stats {{ font-family:var(--mono); font-size:12px; color:var(--ink);
-    letter-spacing:0.02em; white-space:nowrap; display:inline-flex; gap:8px; align-items:center; }}
-  .cam-stats .n {{ font-weight:500; }}
-  .cam-stats .of {{ color:var(--sub); }}
   .path-stat {{ display:inline-flex; align-items:baseline; gap:3px;
-    font-family:var(--mono); font-size:11px; letter-spacing:0.02em;
+    font-family:var(--mono); font-size:10px; letter-spacing:0.02em;
     padding:1px 5px; border:1px solid var(--border-l); border-radius:var(--r);
-    background:transparent; color:inherit; cursor:pointer; }}
-  .path-stat:disabled {{ cursor:not-allowed; }}
-  .path-stat:not(:disabled):hover {{ border-color:var(--ink); }}
-  .path-stat.active {{ border-color:var(--ink); background:var(--surface); }}
+    background:transparent; color:inherit; }}
   .path-stat .lbl {{ font-size:9px; letter-spacing:0.12em; color:var(--sub);
     text-transform:uppercase; }}
-  .path-stat.active .lbl {{ color:var(--ink); font-weight:600; }}
   .path-stat .val {{ font-variant-numeric:tabular-nums; color:var(--ink); }}
   .path-stat .fps {{ font-variant-numeric:tabular-nums; color:var(--sub);
-    font-size:10px; border-left:1px solid var(--border-l); padding-left:4px;
+    font-size:9px; border-left:1px solid var(--border-l); padding-left:4px;
     margin-left:2px; }}
   .path-stat.off {{ opacity:0.45; }}
   .path-stat.off .val {{ color:var(--sub); }}
-  .rate-bar {{ flex:1 1 auto; min-width:60px; height:4px;
-    background:var(--border-l); border-radius:var(--r); overflow:hidden;
-    display:inline-block; }}
-  .rate-fill {{ display:block; height:100%; transition:width .3s; }}
-  .rate-fill.ok {{ background:var(--ok); }}
-  .rate-fill.pending {{ background:var(--pending); }}
-  .rate-fill.fail {{ background:var(--dev); }}
-  .rate-empty {{ font-family:var(--mono); font-size:12px;
-    color:var(--sub); flex:1; }}
+  .path-stat[data-rate-klass="ok"] {{ border-color:var(--ok); }}
+  .path-stat[data-rate-klass="pending"] {{ border-color:var(--pending); }}
+  .path-stat[data-rate-klass="fail"] {{ border-color:var(--dev); }}
   .fail-strip {{ font-family:var(--mono); font-size:12px;
-    letter-spacing:0.02em; padding:var(--s-2) var(--s-3); border-radius:var(--r);
+    letter-spacing:0.02em; margin:var(--s-2) var(--s-5);
+    padding:var(--s-2) var(--s-3); border-radius:var(--r);
     border:1px solid var(--dev); color:var(--dev);
     background:rgba(192, 57, 43, 0.06); display:flex;
     align-items:center; gap:var(--s-2); }}
@@ -524,8 +501,9 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     background:var(--bg); }}
   #scene {{ position:absolute; inset:0; }}
   .videos-col {{ flex:{videos_flex}; min-width:320px; display:grid;
-    grid-template-columns:1fr 1fr; gap:1px;
+    grid-template-rows:1fr 1fr; gap:1px;
     background:var(--border-base); }}
+  .work[data-mode="single-cam"] .videos-col {{ grid-template-rows:1fr; }}
   .work[data-mode="single-cam"] .videos-col {{ min-width:280px; }}
   .col-resizer {{ flex:0 0 6px; cursor:col-resize; position:relative;
     background:var(--border-base);
@@ -760,14 +738,9 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .hint-overlay td {{ padding:2px 8px; vertical-align:top; }}
   .hint-overlay td:first-child {{ color:var(--sub); font-family:var(--mono); white-space:nowrap; }}
   @media (max-height: 980px) {{
-    .health {{ padding:var(--s-2) var(--s-5); gap:6px; }}
-    .health-row {{ gap:10px; }}
-    .cam-stack {{ gap:6px; }}
-    .hero-card {{ padding:6px 10px; }}
-    .hero-tri {{ font-size:28px; }}
-    .hero-note, .hero-sub, .cam-note, .cam-state, .check, .cam-stats {{
-      font-size:10px;
-    }}
+    .health-strip {{ gap:var(--s-2); font-size:10px; }}
+    .health-strip .hs-tri-n {{ font-size:12px; }}
+    .health-strip .hs-cam {{ padding:1px 5px; }}
     .timeline {{ gap:6px; padding:6px var(--s-5); }}
     .scrubber-wrap canvas {{ height:16px; }}
     .scrubber-wrap .strip-row canvas.strip-canvas {{ height:24px; }}
@@ -782,25 +755,6 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
 def _viewer_js() -> str:
     return f"""
 (() => {{
-  // Per-card L/S pill → drives that card's rate-bar.
-  for (const card of document.querySelectorAll(".cam-card.received")) {{
-    const bar = card.querySelector(".rate-bar");
-    const fill = card.querySelector(".rate-fill");
-    if (!bar || !fill) continue;
-    for (const btn of card.querySelectorAll(".path-stat")) {{
-      btn.addEventListener("click", () => {{
-        if (btn.disabled || btn.getAttribute("aria-pressed") === "true") return;
-        const pct = btn.dataset.pct || "0";
-        const klass = btn.dataset.rateKlass || "ok";
-        for (const sib of card.querySelectorAll(".path-stat")) {{
-          sib.classList.toggle("active", sib === btn);
-          sib.setAttribute("aria-pressed", sib === btn ? "true" : "false");
-        }}
-        fill.className = "rate-fill " + klass;
-        fill.style.width = pct + "%";
-      }});
-    }}
-  }}
   const DATA = JSON.parse(document.getElementById("viewer-data").textContent);
   const SCENE = DATA.scene;
   const STATIC = DATA.static_traces || [];

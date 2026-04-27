@@ -87,7 +87,7 @@ def test_dashboard_drives_mode_one_end_to_end(tmp_path):
 
     # 5. Viewer banner + embedded <video> element.
     viewer_html = client.get(f"/viewer/{session_id}").text
-    assert "mode camera-only" in viewer_html
+    assert 'class="hs-mode">camera-only</span>' in viewer_html
     assert "<video" in viewer_html
     # Phase 6: viewer is on the merged cam-view substrate. Plate
     # overlay is now drawn into the per-cam canvas via the runtime's
