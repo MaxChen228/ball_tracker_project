@@ -724,17 +724,33 @@ class State:
                 continue
             with self._lock:
                 dev = self._device_registry.get(cam_id)
+                cal_snap = self._calibration_store.get(cam_id)
             anchor = dev.sync_anchor_timestamp_s if dev is not None else None
+            sync_id = dev.time_sync_id if dev is not None else None
+            # Mirror the /pitch handler: pitches that hit `record()` MUST
+            # carry calibration + sync_id, otherwise the viewer reads back
+            # a row with intrinsics=None and renders the misleading
+            # "Cam X missing calibration" error even though the operator
+            # set everything up correctly. /pitch fills these from
+            # state.calibrations() before record(); the synthesise path
+            # used to skip that step, leaving a permanently-broken pitch
+            # JSON on disk for any cam whose MOV upload didn't land.
             synthetic = PitchPayload(
                 camera_id=cam_id,
                 session_id=session_id,
+                sync_id=sync_id,
                 sync_anchor_timestamp_s=anchor,
                 video_start_pts_s=anchor if anchor is not None else 0.0,
                 paths=[DetectionPath.live.value],
+                intrinsics=cal_snap.intrinsics if cal_snap is not None else None,
+                homography=list(cal_snap.homography) if cal_snap is not None else None,
+                image_width_px=cal_snap.image_width_px if cal_snap is not None else None,
+                image_height_px=cal_snap.image_height_px if cal_snap is not None else None,
             )
             logger.info(
-                "flush_live_frames: synthesising live-only pitch session=%s cam=%s anchor=%s",
-                session_id, cam_id, anchor,
+                "flush_live_frames: synthesising live-only pitch session=%s cam=%s "
+                "anchor=%s sync_id=%s calibrated=%s",
+                session_id, cam_id, anchor, sync_id, cal_snap is not None,
             )
             self.record(synthetic)
 
