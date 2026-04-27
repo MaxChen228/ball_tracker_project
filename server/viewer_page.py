@@ -1375,10 +1375,14 @@ def _viewer_js() -> str:
       const mid = (lo + hi) >> 1;
       if (ts[mid] <= currentT) lo = mid; else hi = mid;
     }}
-    const iLo = Math.abs(ts[lo] - currentT) <= Math.abs(ts[hi] - currentT) ? lo : hi;
-    const tol = 0.020;
-    if (Math.abs(ts[iLo] - currentT) > tol || !det[iLo]) return;
-    const px = pxArr[iLo], py = pyArr[iLo];
+    let idx = Math.abs(ts[lo] - currentT) <= Math.abs(ts[hi] - currentT) ? lo : hi;
+    const tol = 0.010;
+    // chain_filter rejected_jump / server_post frame gaps leave runs of
+    // det=false. Without left-scan the dot blanks across the gap; walk
+    // back to the nearest detected frame still within tol so it sticks.
+    while (idx >= 0 && !det[idx] && Math.abs(ts[idx] - currentT) <= tol) idx--;
+    if (idx < 0 || !det[idx] || Math.abs(ts[idx] - currentT) > tol) return;
+    const px = pxArr[idx], py = pyArr[idx];
     if (px == null || py == null) return;
     const x = px * sx, y = py * sy;
     ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
