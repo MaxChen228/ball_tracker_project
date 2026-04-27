@@ -320,3 +320,62 @@ def test_dashboard_renderdevices_pushes_extras_for_all_rendered_cams():
     assert "setExtras" in _JS_TEMPLATE
     # And listCams used instead of _internal access.
     assert ".listCams()" in _JS_TEMPLATE
+
+
+def test_markers_page_uses_cam_view_with_footprint_layer():
+    """Phase 4: /markers must render each cam as a single merged
+    cam-view pane, register the marker_footprints layer, and wire
+    onCanvasClick for selection. Legacy SVG marker overlay + virt
+    canvas must be gone."""
+    from fastapi.testclient import TestClient
+    import main
+    from main import app
+    main.state.reset()
+    with TestClient(app) as client:
+        body = client.get("/markers").text
+    assert_cam_view_present(body)
+    # Single merged pane per cam.
+    assert 'data-cam-view="A"' in body and 'data-cam-view="B"' in body
+    # Three layers offered, two on by default (plate + marker_footprints).
+    assert 'data-layers="plate,axes,marker_footprints"' in body
+    assert 'data-layers-on="plate,marker_footprints"' in body
+    # Layer registration + click wiring inside _MARKERS_JS.
+    assert "registerLayer('marker_footprints'" in body
+    assert "onCanvasClick('A'" in body
+    assert "onCanvasClick('B'" in body
+    # Marker hit-test uses image-space u/v matching projectWorldToPixel.
+    assert "handleCamClick" in body
+
+
+def test_markers_page_no_longer_inlines_projection_helpers():
+    """The shared cam-view runtime injects PLATE_WORLD / projection /
+    drawVirtualBase ahead of _MARKERS_JS. Markers must NOT redeclare
+    these — single source of truth pulls duplication risk to zero."""
+    from render_markers import _MARKERS_JS
+    # The helpers are defined ONCE in CAM_VIEW_RUNTIME_JS (which already
+    # contains PLATE_WORLD / projectWorldToPixel definitions). Markers
+    # JS must not redefine them.
+    assert "const PLATE_WORLD =" not in _MARKERS_JS
+    assert "function projectWorldToPixel" not in _MARKERS_JS
+    assert "function drawVirtualBase" not in _MARKERS_JS
+
+
+def test_markers_page_drops_legacy_svg_marker_overlay():
+    """The SVG-based preview-overlay marker drawing path is replaced
+    by the canvas marker_footprints layer. drawPreviewOverlay should
+    no longer exist in the markers JS."""
+    from render_markers import _MARKERS_JS
+    assert "drawPreviewOverlay" not in _MARKERS_JS
+    assert "drawCompareVirtual" not in _MARKERS_JS
+    # virtCamMeta map gone — meta lives in BallTrackerCamView now.
+    assert "const virtCamMeta" not in _MARKERS_JS
+
+
+def test_markers_page_preview_poll_uses_cam_img_selector():
+    """The inline tickPreviewImages must query [data-cam-img] (new
+    merged pane) instead of legacy [data-preview-img]."""
+    from render_markers import _MARKERS_JS
+    assert "[data-cam-img]" in _MARKERS_JS
+    assert "[data-preview-img]" not in _MARKERS_JS
+    # Markers tick aligned to the rest of the codebase at 200 ms (was 250).
+    assert "setInterval(tickPreviewImages, 200)" in _MARKERS_JS

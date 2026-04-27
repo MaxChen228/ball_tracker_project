@@ -1007,12 +1007,20 @@ def test_markers_page_renders_workspace():
     body = r.text
     assert 'id="markers-plot"' in body
     assert 'id="compare-root"' in body
-    assert 'data-preview-img="A"' in body
-    assert 'data-preview-img="B"' in body
-    assert 'data-markers-virt-canvas="A"' in body
-    assert 'data-markers-virt-canvas="B"' in body
-    assert 'data-preview-overlay="A"' in body
-    assert 'data-preview-overlay="B"' in body
+    # Phase 4: markers migrated to merged single-pane cam-view; the
+    # marker_footprints layer draws ArUco quads + IDs over the live
+    # preview, click hit-tests via BallTrackerCamView.onCanvasClick.
+    assert 'data-cam-view="A"' in body
+    assert 'data-cam-view="B"' in body
+    assert 'data-cam-img="A"' in body
+    assert 'data-cam-canvas="A"' in body
+    # marker_footprints must be one of the toggleable layers + on by default.
+    assert 'data-layer="marker_footprints"' in body
+    assert 'BallTrackerCamView' in body
+    # Negative: legacy 2-pane shape gone from markers page.
+    assert 'data-preview-img="A"' not in body
+    assert 'data-markers-virt-canvas' not in body
+    assert 'data-preview-overlay="A"' not in body
     assert 'id="candidate-body"' in body
     assert 'id="stored-body"' in body
     assert 'id="details-body"' in body
