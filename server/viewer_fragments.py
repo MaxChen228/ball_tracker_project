@@ -69,8 +69,14 @@ def video_cell_html(
         # detection from each pipeline, drawn as half-transparent dots
         # on top of the video). Operator picks which pipeline they
         # trust by checkbox; both default-on so divergence is visible.
+        # data-no-badges opts out of the runtime's status/calibration/RMS
+        # badge slot — viewer surfaces those signals through its own
+        # vid-head label, no .cam-view-badges container in the DOM. The
+        # runtime treats the attr as an explicit "no badges, please" and
+        # skips the missing-container warn.
         cam_view_attrs = (
             f' data-cam-view="{cam}"'
+            ' data-no-badges'
             ' data-layers="plate,axes,detection_live,detection_svr"'
             ' data-layers-on="plate,detection_live,detection_svr"'
             ' data-default-opacity="65"'
