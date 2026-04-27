@@ -138,15 +138,27 @@
       } else {
         _previewRenderState.set(cam, { on: false, src: '', t: nowMs });
       }
-      const previewPanel = `<div class="preview-panel${previewOn ? '' : ' off'}" data-preview-panel="${esc(cam)}">` +
-        `<img data-preview-img="${esc(cam)}" src="${initialSrc}" alt="preview ${esc(cam)}">` +
-        `<svg class="plate-overlay" data-preview-overlay="${esc(cam)}" aria-hidden="true"><polygon></polygon></svg>` +
-        `<div class="placeholder">${previewOn ? '…' : 'Preview off'}</div>` +
-        `</div>`;
-      const virtCell = `<div class="virt-cell" data-virt-cell="${esc(cam)}">` +
-        `<canvas data-virt-canvas="${esc(cam)}"></canvas>` +
-        `<div class="virt-label">VIRT · ${esc(cam)}</div>` +
-        `<div class="placeholder">${isCal ? 'loading…' : 'not calibrated'}</div>` +
+      // Merged single-pane cam-view: real MJPEG as base, virtual
+      // reprojection drawn as semi-transparent canvas overlay. plate is
+      // default-on; axes is a toggleable secondary layer. Empty src when
+      // preview is off so the browser doesn't hammer a 404 endpoint.
+      const camViewSrc = previewOn ? initialSrc : '';
+      const camViewBlock =
+        `<div class="cam-view${previewOn ? '' : ' is-offline'}" data-cam-view="${esc(cam)}" ` +
+        `data-layers="plate,axes" data-layers-on="plate" data-default-opacity="70">` +
+        `<img data-cam-img="${esc(cam)}" src="${camViewSrc}" alt="preview ${esc(cam)}">` +
+        `<canvas data-cam-canvas="${esc(cam)}"></canvas>` +
+        `<div class="cam-view-badges">` +
+          `<span class="cam-view-badge cam-id">Cam ${esc(cam)}</span>` +
+        `</div>` +
+        `<div class="cam-view-toolbar">` +
+          `<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>` +
+          `<button type="button" class="cv-layer" data-layer="axes">AXES</button>` +
+          `<span class="cv-opacity">OVL` +
+            `<input type="range" min="0" max="100" step="1" value="70" aria-label="Overlay opacity">` +
+          `</span>` +
+        `</div>` +
+        `<div class="cam-view-extra"></div>` +
         `</div>`;
       const syncLedCls = !online ? 'offline'
                         : pending ? 'listening'
@@ -170,8 +182,7 @@
             <div class="chip-col">${batteryChip(deviceRecord, online)}${statusChip(cam, online, isCal)}</div>
           </div>
           <div class="device-actions">${previewBtn}${autoCalBtn}${autoLogBtn}</div>
-          ${previewPanel}
-          ${virtCell}
+          ${camViewBlock}
         </div>`;
     }
 
@@ -180,10 +191,21 @@
       .filter(d => !EXPECTED.includes(d.camera_id))
       .map(d => row(d.camera_id, d)).join('');
     devicesBox.innerHTML = `<div class="devices-grid">${rows + extras}</div>`;
-    // The innerHTML rebuild above destroys any existing canvases inside
-    // the virt cells and preview overlays — redraw them on the fresh DOM.
-    if (typeof redrawAllVirtCanvases === 'function') redrawAllVirtCanvases();
-    if (typeof redrawAllPreviewPlateOverlays === 'function') redrawAllPreviewPlateOverlays();
+    // The innerHTML rebuild above destroys every cam-view DOM element.
+    // BallTrackerCamView.mountAll re-mounts on the fresh DOM (preserves
+    // user-toggled layer + opacity state internally, see Phase 1).
+    if (window.BallTrackerCamView) window.BallTrackerCamView.mountAll();
+    // Also flag online/calibrated status so the badge layer reflects it.
+    if (window.BallTrackerCamView) {
+      const calSet = new Set(state.calibrations || []);
+      const onlineSet = new Set((state.devices || []).map(d => d.camera_id));
+      for (const cam of EXPECTED) {
+        window.BallTrackerCamView.setStatus(cam, {
+          online: onlineSet.has(cam),
+          calibrated: calSet.has(cam),
+        });
+      }
+    }
   }
 
   const MODE_LABELS = { camera_only: 'Camera-only' };

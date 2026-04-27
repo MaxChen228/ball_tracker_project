@@ -1,6 +1,7 @@
 """Dashboard-specific CSS and design tokens."""
 from __future__ import annotations
 
+from cam_view_ui import CAM_VIEW_CSS
 from render_compare import LIVE_COMPARE_CSS
 
 
@@ -443,6 +444,7 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
    doesn't align with the plate in the real preview above, calibration
    is off. */
 {LIVE_COMPARE_CSS}
+{CAM_VIEW_CSS}
 
 /* Calibration card (Phase 5). Per-camera auto-calibrate row + an
    extended-markers block. Visually aligned with .device rows so the

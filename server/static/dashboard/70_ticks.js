@@ -64,10 +64,22 @@
       });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
       // Update per-camera virt reprojection metadata from scene.cameras
-      // (carries fx/fy/cx/cy/R_wc/t_wc/distortion/dims).
+      // (carries fx/fy/cx/cy/R_wc/t_wc/distortion/dims). Push to both
+      // the legacy virtCamMeta (still consumed by setup/markers until
+      // those phases land) AND the new shared BallTrackerCamView so
+      // the dashboard's merged cam-view picks up calibration changes.
       virtCamMeta.clear();
       for (const c of ((payload.scene || {}).cameras || [])) {
         virtCamMeta.set(c.camera_id, c);
+        if (window.BallTrackerCamView) window.BallTrackerCamView.setMeta(c.camera_id, c);
+      }
+      // Cameras that were previously set but are absent now — clear so
+      // the cam-view drops back to "uncalibrated" badge.
+      if (window.BallTrackerCamView) {
+        const live = new Set(((payload.scene || {}).cameras || []).map(c => c.camera_id));
+        for (const cam of (window.BallTrackerCamView._internal.camMeta.keys())) {
+          if (!live.has(cam)) window.BallTrackerCamView.setMeta(cam, null);
+        }
       }
       redrawAllVirtCanvases();
       redrawAllPreviewPlateOverlays();

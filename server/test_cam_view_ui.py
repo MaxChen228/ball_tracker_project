@@ -173,3 +173,63 @@ def test_resize_observer_attached():
     """window resize alone misses container-level reflow (sidebar
     collapse). ResizeObserver per cam-view root catches it."""
     assert "ResizeObserver" in CAM_VIEW_RUNTIME_JS
+
+
+def test_dashboard_injects_cam_view_runtime():
+    """Phase 2: dashboard / page must include CAM_VIEW_RUNTIME_JS before
+    the page-local JS, mirroring the OVERLAYS_RUNTIME_JS pattern."""
+    from fastapi.testclient import TestClient
+    import main
+    from main import app
+    main.state.reset()
+    with TestClient(app) as client:
+        body = client.get("/").text
+    assert_cam_view_present(body)
+    cam_view_idx = body.find("BallTrackerCamView")
+    main_idx = body.find("=== boot")
+    assert cam_view_idx > 0 and main_idx > 0
+    assert cam_view_idx < main_idx, "cam-view runtime must load before dashboard JS IIFE"
+
+
+def test_dashboard_css_includes_cam_view_styles():
+    """Dashboard CSS bundle must carry .cam-view rules so the merged
+    real+virtual pane styles apply on /."""
+    from fastapi.testclient import TestClient
+    import main
+    from main import app
+    main.state.reset()
+    with TestClient(app) as client:
+        body = client.get("/").text
+    assert ".cam-view" in body
+    assert ".cam-view.has-click canvas" in body
+
+
+def test_dashboard_js_renders_cam_view_in_device_row():
+    """The JS-side device row builder (50_renderers.js) must emit the
+    new cam-view shape — data-cam-view + data-cam-img + data-cam-canvas
+    + a layer toggle bar — instead of the legacy 2-pane preview-panel
+    + virt-cell pair."""
+    from render_dashboard_client import _JS_TEMPLATE
+    assert 'data-cam-view="' in _JS_TEMPLATE
+    assert 'data-cam-img="' in _JS_TEMPLATE
+    assert 'data-cam-canvas="' in _JS_TEMPLATE
+    assert 'data-layers="plate,axes"' in _JS_TEMPLATE
+    # Old 2-pane shape must be gone from the dashboard's row builder.
+    assert 'data-preview-panel="${esc(cam)}"' not in _JS_TEMPLATE
+    assert 'data-virt-cell="${esc(cam)}"' not in _JS_TEMPLATE
+
+
+def test_dashboard_tick_pushes_cam_view_meta():
+    """tickCalibration must forward scene.cameras to BallTrackerCamView."""
+    from render_dashboard_client import _JS_TEMPLATE
+    assert "BallTrackerCamView.setMeta" in _JS_TEMPLATE
+    assert "BallTrackerCamView.mountAll" in _JS_TEMPLATE
+
+
+def test_dashboard_preview_poll_handles_cam_view_imgs():
+    """tickPreviewImages must cache-bust both legacy [data-preview-img]
+    and new [data-cam-img] so dashboard's merged pane stays fresh."""
+    from render_dashboard_client import _JS_TEMPLATE
+    assert "[data-cam-img]" in _JS_TEMPLATE
+    # Legacy selector still present for setup/markers until those phases.
+    assert "[data-preview-img]" in _JS_TEMPLATE
