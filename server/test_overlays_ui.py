@@ -54,3 +54,41 @@ def test_viewer_injects_overlays_runtime():
     r = client.get(f"/viewer/{session_id}")
     assert r.status_code == 200
     assert_overlays_present(r.text)
+
+
+def test_viewer_overlay_controls_in_layer_toggles():
+    """Phase 4 moved fit-toggle from scene-toolbar into layer-toggles so
+    the four overlay layers (Fit / Speed / Strike zone / source pills)
+    read as one consistent control surface. Guard against accidental
+    relocation back to a button in the toolbar."""
+    import numpy as np
+    from conftest import sid
+    from test_viewer import _make_rig, _pitch, _record_pitch
+
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(99002)
+    _record_pitch(_pitch("A", 99002, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    body = TestClient(app).get(f"/viewer/{session_id}").text
+
+    # fit-toggle is now an <input type="checkbox">, not a <button>.
+    assert '<input type="checkbox" id="fit-toggle">' in body
+    assert '<input type="checkbox" id="speed-toggle">' in body
+    assert '<input type="checkbox" id="strike-zone-toggle"' in body
+    # Source pills + speed-bars container exist.
+    assert 'id="fit-src-svr"' in body and 'id="fit-src-live"' in body
+    assert 'id="speed-bars"' in body
+    # speed-bars wrapper must not eat 3D drag — pointer-events:none on the
+    # outer container, re-enabled on the inner Plotly child.
+    assert "pointer-events:none" in body
+
+
+def test_dashboard_overlay_controls_present():
+    """Dashboard fit-filter-bar must expose the same Fit / Speed / Strike
+    zone overlay checkboxes plus svr/live source pills."""
+    main.state.reset()
+    body = TestClient(app).get("/").text
+    for control_id in (
+        "dash-fit-toggle", "dash-speed-toggle", "dash-strike-zone-toggle",
+        "dash-src-svr", "dash-src-live",
+    ):
+        assert f'id="{control_id}"' in body, f"missing {control_id} in dashboard HTML"
