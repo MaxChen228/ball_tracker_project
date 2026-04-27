@@ -1555,9 +1555,9 @@ class State:
         into a half-deleted slot.
 
         Wipes the pitches / results / videos files for `session_id` (both
-        the live and any `.tmp` siblings) plus the annotated clip, and
-        clears the entry from `_pitches`, `_results`, and the
-        `_last_ended_session` pointer if it matches."""
+        the live and any `.tmp` siblings), and clears the entry from
+        `_pitches`, `_results`, and the `_last_ended_session` pointer if
+        it matches."""
         with self._lock:
             current = self._current_session
             if (
@@ -1606,7 +1606,7 @@ class State:
                 path.unlink(missing_ok=True)
                 removed_any = True
         for path in self._video_dir.glob(f"session_{session_id}_*"):
-            # Includes raw + `_annotated` + any in-flight `.tmp` sibling.
+            # Includes raw + any in-flight `.tmp` sibling.
             path.unlink(missing_ok=True)
             removed_any = True
         return removed_any

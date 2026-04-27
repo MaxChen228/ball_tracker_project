@@ -9,7 +9,7 @@ import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import ValidationError
 
-from pipeline import ProcessingCanceled, annotate_video
+from pipeline import ProcessingCanceled
 from schemas import (
     DetectionPath,
     PitchPayload,
@@ -333,49 +333,6 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         )
         return
 
-    annotated_path = clip_path.with_stem(clip_path.stem + "_annotated")
-    try:
-        await asyncio.to_thread(
-            annotate_video,
-            clip_path,
-            annotated_path,
-            frames,
-            should_cancel=lambda: proc.should_cancel_server_post_job(sid, cam),
-        )
-    except ProcessingCanceled:
-        await broadcast_done("canceled", len(frames))
-        proc.finish_server_post_job(sid, cam, canceled=True)
-        logger.info("background annotation canceled session=%s cam=%s", sid, cam)
-        if annotated_path.exists():
-            try:
-                annotated_path.unlink()
-            except OSError as exc:
-                logger.warning(
-                    "failed to remove canceled annotated clip session=%s cam=%s path=%s err=%s",
-                    sid, cam, annotated_path, exc,
-                )
-        return
-    except Exception as exc:
-        await broadcast_done("error", len(frames))
-        proc.finish_server_post_job(sid, cam, canceled=False)
-        proc.record_error(sid, cam, f"annotate: {exc}")
-        logger.warning(
-            "annotate_video failed session=%s cam=%s err=%s",
-            sid, cam, exc,
-        )
-        if annotated_path.exists():
-            try:
-                annotated_path.unlink()
-            except OSError as exc:
-                logger.warning(
-                    "failed to remove failed annotated clip session=%s cam=%s path=%s err=%s",
-                    sid, cam, annotated_path, exc,
-                )
-        # Without this return the function falls through to the success
-        # path below and double-finalizes (broadcast_done("ok") +
-        # finish_server_post_job again). All other finalize branches in
-        # this function explicitly return; this one was the outlier.
-        return
     ball = sum(1 for f in frames if f.ball_detected)
     logger.info(
         "background detection complete session=%s cam=%s frames=%d ball=%d",

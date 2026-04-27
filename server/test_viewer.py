@@ -525,21 +525,6 @@ def test_viewer_endpoint_embeds_video_tags_for_available_clips():
     assert 'data-cam="B"' in body
 
 
-def test_viewer_endpoint_prefers_annotated_clip_when_available():
-    """Raw + annotated both on disk → viewer picks the annotated one."""
-    K, (R_a, t_a, _, H_a), _ = _make_rig()
-    session_id = sid(708)
-    _record_pitch(_pitch("A", 708, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
-    main.state.save_clip("A", session_id, b"raw", "mov")
-    # Annotated counterpart — server-side normal path writes this too.
-    annotated = main.state.video_dir / f"session_{session_id}_A_annotated.mov"
-    annotated.write_bytes(b"annotated")
-    client = TestClient(app)
-    body = client.get(f"/viewer/{session_id}").text
-    assert f'src="/videos/session_{session_id}_A_annotated.mov"' in body
-    assert f'src="/videos/session_{session_id}_A.mov"' not in body
-
-
 def test_viewer_endpoint_without_clips_still_renders():
     """No MOVs on disk → viewer renders a placeholder instead of 500."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()

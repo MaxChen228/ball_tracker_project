@@ -108,11 +108,10 @@ def test_start_job_refuses_when_trashed(tmp_path):
     assert s._processing.start_server_post_job(sid, "A") is False
 
 
-def test_find_video_skips_tmp_and_annotated(tmp_path):
+def test_find_video_skips_tmp(tmp_path):
     s = State(data_dir=tmp_path)
     sid = _sid(6)
     (s.video_dir / f"session_{sid}_A.mov.tmp").write_bytes(b"")
-    (s.video_dir / f"session_{sid}_A_annotated.mp4").write_bytes(b"")
     real = s.video_dir / f"session_{sid}_A.mov"
     real.write_bytes(b"")
 
