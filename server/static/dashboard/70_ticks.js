@@ -77,7 +77,7 @@
       // the cam-view drops back to "uncalibrated" badge.
       if (window.BallTrackerCamView) {
         const live = new Set(((payload.scene || {}).cameras || []).map(c => c.camera_id));
-        for (const cam of (window.BallTrackerCamView._internal.camMeta.keys())) {
+        for (const cam of window.BallTrackerCamView.listCams()) {
           if (!live.has(cam)) window.BallTrackerCamView.setMeta(cam, null);
         }
       }

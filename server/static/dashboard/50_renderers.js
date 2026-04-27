@@ -195,15 +195,23 @@
     // BallTrackerCamView.mountAll re-mounts on the fresh DOM (preserves
     // user-toggled layer + opacity state internally, see Phase 1).
     if (window.BallTrackerCamView) window.BallTrackerCamView.mountAll();
-    // Also flag online/calibrated status so the badge layer reflects it.
+    // Push online status + RMS extras for every rendered cam (EXPECTED A/B
+    // plus any extra cams that registered with non-A/B ids). Calibration
+    // truth is derived inside the runtime from setMeta payload — don't
+    // pass it here.
     if (window.BallTrackerCamView) {
-      const calSet = new Set(state.calibrations || []);
       const onlineSet = new Set((state.devices || []).map(d => d.camera_id));
-      for (const cam of EXPECTED) {
-        window.BallTrackerCamView.setStatus(cam, {
-          online: onlineSet.has(cam),
-          calibrated: calSet.has(cam),
-        });
+      const renderedCams = new Set(EXPECTED);
+      for (const d of (state.devices || [])) renderedCams.add(d.camera_id);
+      const autoLast = (state.auto_calibration && state.auto_calibration.last) || {};
+      for (const cam of renderedCams) {
+        window.BallTrackerCamView.setStatus(cam, { online: onlineSet.has(cam) });
+        // Auto-cal homography fit RMS — surfaces "is this camera correctly
+        // placed?" as a number badge, complements the visual overlay.
+        const reproj = autoLast[cam] && autoLast[cam].result && autoLast[cam].result.reprojection_px;
+        if (typeof reproj === 'number' && isFinite(reproj)) {
+          window.BallTrackerCamView.setExtras(cam, { rms_px: reproj });
+        }
       }
     }
   }

@@ -345,8 +345,15 @@ CAM_VIEW_RUNTIME_JS = (
   }
 
   function setStatus(camId, status) {
+    // status = { online: bool }. Calibration badge is derived from
+    // setMeta payload, not from this status arg — keeping calibration
+    // truth in one place avoids two callers disagreeing.
     camStatus.set(camId, Object.assign({ online: true }, status || {}));
     applyStatusBadges(camId);
+  }
+
+  function listCams() {
+    return Array.from(camMeta.keys());
   }
 
   function setLayer(camId, layerKey, on) {
@@ -376,6 +383,7 @@ CAM_VIEW_RUNTIME_JS = (
   }
 
   const clickHandlers = new Map(); // cam_id -> [fn(eventInfo), ...]
+  const resizeObservers = new Map(); // cam_id -> ResizeObserver
 
   function onCanvasClick(camId, fn) {
     if (typeof fn !== 'function') return;
@@ -438,10 +446,18 @@ CAM_VIEW_RUNTIME_JS = (
     }
     if (clickHandlers.has(camId)) root.classList.add('has-click');
     // ResizeObserver catches sidebar/grid reflow that doesn't trigger
-    // window 'resize' (e.g. dashboard side card collapse).
-    if (typeof ResizeObserver !== 'undefined' && !root._cvResizeObs) {
-      root._cvResizeObs = new ResizeObserver(() => paintOne(root));
-      root._cvResizeObs.observe(root);
+    // window 'resize' (e.g. dashboard side card collapse). Track per
+    // camId so renderDevices' innerHTML rebuild can disconnect the
+    // stranded observer on the discarded root before we attach a new one.
+    if (typeof ResizeObserver !== 'undefined') {
+      const prev = resizeObservers.get(camId);
+      if (prev) prev.disconnect();
+      const obs = new ResizeObserver(() => {
+        const r = document.querySelector(`[data-cam-view="${camId}"]`);
+        if (r) paintOne(r);
+      });
+      obs.observe(root);
+      resizeObservers.set(camId, obs);
     }
     applyCanvasOpacity(camId);
     applyStatusBadges(camId);
@@ -463,8 +479,8 @@ CAM_VIEW_RUNTIME_JS = (
     mount, mountAll, redraw, redrawAll,
     setMeta, setExtras, setStatus,
     setLayer, setOpacity, registerLayer,
-    onCanvasClick,
-    _internal: { camMeta, camExtras, camStatus, layerState, opacityState, layerRenderers, clickHandlers },
+    onCanvasClick, listCams,
+    _internal: { camMeta, camExtras, camStatus, layerState, opacityState, layerRenderers, clickHandlers, resizeObservers },
   };
 })();
 """

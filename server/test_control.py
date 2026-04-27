@@ -972,11 +972,16 @@ def test_setup_page_renders_all_config_surfaces():
     assert 'href="/markers"' in body
     assert 'Camera Position Setup' in body
     assert 'href="/sync"' in body
-    assert 'data-preview-overlay="A"' in body
-    assert 'data-preview-overlay="B"' in body
-    assert 'data-preview-cam="A"' in body
+    # Phase 3 migrated /setup to the merged single-pane cam-view.
+    # Each cam now renders one [data-cam-view] block instead of two
+    # side-by-side [preview-panel] + [virt-cell] panels.
+    assert 'data-cam-view="A"' in body
+    assert 'data-cam-view="B"' in body
+    assert 'data-cam-img="A"' in body
+    assert 'data-cam-canvas="A"' in body
+    assert 'data-preview-cam="A"' in body  # PREVIEW button still present
     assert 'data-preview-cam="B"' in body
-    assert 'Preview off' in body
+    assert 'BallTrackerCamView' in body
 
 
 def test_sync_page_renders_time_sync_and_tuning_surfaces():

@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as _dt
 import html
 
+from cam_view_ui import render_cam_view
 from render_compare import render_live_compare_camera
 
 
@@ -48,6 +49,9 @@ def _render_device_rows(
     calibration_last_ts: dict[str, float] | None = None,
     preview_requested: dict[str, bool] | None = None,
     compare_mode: str = "toggle",
+    use_cam_view: bool = False,
+    cam_view_layers: tuple[str, ...] = ("plate", "axes"),
+    cam_view_layers_on: tuple[str, ...] = ("plate", "axes"),
 ) -> str:
     """Merged Devices card row — status + per-cam calibration actions +
     per-cam preview toggle + inline MJPEG panel. JS will replace within
@@ -89,13 +93,27 @@ def _render_device_rows(
             f'data-preview-enabled="{1 if preview_on else 0}"{disabled_attr}>'
             f'{"PREVIEW ON" if preview_on else "PREVIEW"}</button>'
         ) if not always_on else ""
-        compare_block = render_live_compare_camera(
-            cam_id,
-            preview_src=f"/camera/{html.escape(cam_id)}/preview?t=0",
-            preview_placeholder=("" if always_on else ("…" if preview_on else "Preview off")),
-            virt_placeholder=("loading…" if is_cal else "not calibrated"),
-            preview_off=(not always_on and not preview_on),
-        )
+        if use_cam_view:
+            # New merged single-pane: real MJPEG as base, virtual
+            # reprojection drawn as semi-transparent canvas overlay.
+            # Calibration correctness reads as overlay-vs-image alignment.
+            preview_off = (not always_on and not preview_on)
+            compare_block = render_cam_view(
+                cam_id,
+                preview_src=("" if preview_off else f"/camera/{html.escape(cam_id)}/preview?t=0"),
+                layers=list(cam_view_layers),
+                layers_on=list(cam_view_layers_on),
+                default_opacity=70,
+                cam_label=f"Cam {cam_id}",
+            )
+        else:
+            compare_block = render_live_compare_camera(
+                cam_id,
+                preview_src=f"/camera/{html.escape(cam_id)}/preview?t=0",
+                preview_placeholder=("" if always_on else ("…" if preview_on else "Preview off")),
+                virt_placeholder=("loading…" if is_cal else "not calibrated"),
+                preview_off=(not always_on and not preview_on),
+            )
         sync_led_cls = "offline" if not online else ("synced" if time_synced else "waiting")
         auto_dot = "warn" if online else "bad"
         battery_level = dev.get("battery_level") if dev else None
