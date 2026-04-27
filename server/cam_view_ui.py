@@ -310,6 +310,12 @@ CAM_VIEW_RUNTIME_JS = (
     canvas.style.opacity = String(ensureOpacity(camId) / 100);
   }
 
+  // Track cams we've already warned about a missing badge container, so
+  // a 5 s tickCalibration loop doesn't spam the console once it starts.
+  // First miss is loud (operator catches the schema mismatch); subsequent
+  // misses are silent.
+  const _warnedBadgesMissing = new Set();
+
   function applyStatusBadges(camId) {
     const root = document.querySelector(`[data-cam-view="${camId}"]`);
     if (!root) return;
@@ -318,7 +324,18 @@ CAM_VIEW_RUNTIME_JS = (
     const calibrated = !!(meta && meta.fx != null && meta.R_wc && meta.t_wc);
     root.classList.toggle('is-offline', !status.online);
     const badges = root.querySelector('.cam-view-badges');
-    if (!badges) return;
+    if (!badges) {
+      if (!_warnedBadgesMissing.has(camId) && window.console && console.warn) {
+        console.warn(
+          'cam-view: .cam-view-badges container missing for ' + camId
+          + ' — status/calibration/rms badges will not render. '
+          + 'Pages that want the runtime to manage badges must include '
+          + '<div class="cam-view-badges"></div> inside the cam-view root.',
+        );
+        _warnedBadgesMissing.add(camId);
+      }
+      return;
+    }
     let off = badges.querySelector('.status-offline');
     if (!status.online) {
       if (!off) {
@@ -440,21 +457,24 @@ CAM_VIEW_RUNTIME_JS = (
     if (typeof fn === 'function') layerRenderers.set(key, fn);
   }
 
-  const clickHandlers = new Map(); // cam_id -> [fn(eventInfo), ...]
+  const clickHandlers = new Map(); // cam_id -> Set<fn(eventInfo)>
   const resizeObservers = new Map(); // cam_id -> ResizeObserver
   const previewPollers = new Map(); // cam_id -> Set<intervalId>  (cleared by forgetCam)
 
   function onCanvasClick(camId, fn) {
     if (typeof fn !== 'function') return;
-    if (!clickHandlers.has(camId)) clickHandlers.set(camId, []);
-    clickHandlers.get(camId).push(fn);
+    // Set, not array — registering the same fn twice for the same cam
+    // (e.g. via a re-init path that forgets to deregister first) must
+    // fire it exactly once, not N times.
+    if (!clickHandlers.has(camId)) clickHandlers.set(camId, new Set());
+    clickHandlers.get(camId).add(fn);
     const root = document.querySelector(`[data-cam-view="${camId}"]`);
     if (root) root.classList.add('has-click');
   }
 
   function _emitCanvasClick(camId, ev) {
     const handlers = clickHandlers.get(camId);
-    if (!handlers || handlers.length === 0) return;
+    if (!handlers || handlers.size === 0) return;
     const meta = camMeta.get(camId);
     const target = ev.currentTarget;
     const rect = target.getBoundingClientRect();
@@ -645,7 +665,6 @@ CAM_VIEW_RUNTIME_JS = (
     setLayer, setOpacity, registerLayer,
     onCanvasClick, listCams,
     forgetCam, startPreviewPolling, startCalibrationPolling,
-    _internal: { camMeta, camExtras, camStatus, layerState, opacityState, layerRenderers, clickHandlers, resizeObservers, previewPollers },
   };
 })();
 """
