@@ -112,6 +112,41 @@ def _new_session_id() -> str:
 
 
 class State:
+    """Server-wide in-memory state, protected by a single `_lock` (see
+    invariant below).
+
+    **Lock model — read before refactoring**
+
+    There is exactly one mutex (`self._lock`, a non-reentrant
+    `threading.Lock`) and it serialises every read/write to ANY of the
+    underlying stores: pitches, results, sessions, calibration stores,
+    device registry, sync coordinator, runtime settings, live pairings.
+    The stores themselves (`RuntimeSettingsStore`, `CalibrationStore`,
+    `DeviceIntrinsicsStore`, etc.) are deliberately NOT thread-safe in
+    isolation — `state_runtime.py` even spells this out: "State owns
+    synchronization; this class owns validation, defaults, and the JSON
+    shape on disk."
+
+    This is why the ~22 settings facades and ~18 calibration facades on
+    this class look like one-line pass-through (`with self._lock: return
+    self._runtime_settings.X`). They are not vestigial abstraction — the
+    `with self._lock` IS the work. Deleting them and pointing callers
+    directly at `state._runtime_settings.X` would silently lose the
+    synchronization. Don't.
+
+    The single-lock-everything model is intentional for now (personal LAN
+    rig, low contention) but it does mean a long-running operation under
+    `_lock` blocks every other touchpoint. If contention ever shows up as
+    a real symptom, the next move is to push locks INTO each store and
+    then collapse the facades — both at once, atomically. Don't try to
+    do half of it.
+
+    Methods whose name ends in `_locked` MUST be called with `self._lock`
+    already held. Methods that take the lock themselves must not be
+    called from another `_lock`-holding context — `Lock` is non-reentrant
+    and would deadlock; if you need that pattern, switch the lock to
+    `RLock` first."""
+
     def __init__(
         self,
         data_dir: Path = _DEFAULT_DATA_DIR,

@@ -30,7 +30,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from triangulate import (
-    angle_ray_cam,
     build_K,
     camera_center_world,
     recover_extrinsics,
@@ -183,25 +182,18 @@ def _ray_viz_endpoint(
 
 
 def _world_ray(
-    theta_x: float | None,
-    theta_z: float | None,
-    px: float | None,
-    py: float | None,
+    px: float,
+    py: float,
     K: np.ndarray,
     dist_coeffs: list[float] | None,
     R_wc: np.ndarray,
 ) -> np.ndarray:
-    if px is not None and py is not None:
-        coeffs = (
-            np.asarray(dist_coeffs, dtype=float)
-            if dist_coeffs is not None
-            else np.zeros(5, dtype=float)
-        )
-        d_cam = undistorted_ray_cam(px, py, K, coeffs)
-    elif theta_x is not None and theta_z is not None:
-        d_cam = angle_ray_cam(theta_x, theta_z)
-    else:
-        raise ValueError("frame has neither angles nor pixels")
+    coeffs = (
+        np.asarray(dist_coeffs, dtype=float)
+        if dist_coeffs is not None
+        else np.zeros(5, dtype=float)
+    )
+    d_cam = undistorted_ray_cam(px, py, K, coeffs)
     d_world = R_wc.T @ d_cam
     return d_world / np.linalg.norm(d_world)
 
@@ -220,14 +212,10 @@ def _rays_and_trace_for_source(
     for f in frames:
         if not f.ball_detected:
             continue
-        has_angles = f.theta_x_rad is not None and f.theta_z_rad is not None
-        has_pixels = f.px is not None and f.py is not None
-        if not (has_angles or has_pixels):
+        if f.px is None or f.py is None:
             continue
         try:
-            d_world = _world_ray(
-                f.theta_x_rad, f.theta_z_rad, f.px, f.py, K, dist, R_wc
-            )
+            d_world = _world_ray(f.px, f.py, K, dist, R_wc)
         except Exception:
             continue
         ground = _ray_ground_intersection(C, d_world)

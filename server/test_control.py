@@ -416,15 +416,16 @@ def test_pitch_upload_keeps_session_armed_until_stop():
     assert set(status["session"]["uploads_received"]) == {"A"}
 
 
-# --- Capture mode (mode-one / mode-two dashboard toggle) -------------------
+# --- Capture mode (legacy CaptureMode enum) --------------------------------
 
 
-def test_status_includes_capture_mode_wire_compat():
-    """CaptureMode was retired; /status still exposes a hard-wired
-    `capture_mode=camera_only` string for legacy dashboard JS."""
+def test_status_does_not_include_capture_mode():
+    """CaptureMode was retired and the wire-compat string was removed
+    — /status no longer exposes `capture_mode` and the dashboard JS
+    no longer reads it."""
     client = TestClient(app)
     status = client.get("/status").json()
-    assert status["capture_mode"] == "camera_only"
+    assert "capture_mode" not in status
 
 
 def test_set_mode_endpoint_removed():

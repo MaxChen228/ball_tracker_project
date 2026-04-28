@@ -62,18 +62,6 @@ def camera_center_world(R_wc: np.ndarray, t_wc: np.ndarray) -> np.ndarray:
     return -R_wc.T @ t_wc
 
 
-def angle_ray_cam(theta_x: float, theta_z: float) -> np.ndarray:
-    """Unit ray in camera coords for BallDetector angles.
-
-    BallDetector.swift uses:
-      theta_x = atan2(u - cx, fx)
-      theta_z = atan2(v - cy, fy)
-    So the direction in camera coords is (tan θx, tan θz, 1) normalized.
-    """
-    d = np.array([np.tan(theta_x), np.tan(theta_z), 1.0])
-    return d / np.linalg.norm(d)
-
-
 def undistorted_ray_cam(
     px: float, py: float, K: np.ndarray, dist_coeffs: np.ndarray
 ) -> np.ndarray:

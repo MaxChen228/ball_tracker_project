@@ -271,7 +271,6 @@ def _render_hsv_body(
 
 def _render_session_body(
     session: dict[str, object] | None,
-    capture_mode: str = "camera_only",
     devices: list[dict[str, object]] | None = None,
     calibrations: list[str] | None = None,
     arm_readiness: dict[str, object] | None = None,

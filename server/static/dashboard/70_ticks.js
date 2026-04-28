@@ -10,7 +10,6 @@
       s.calibrations = currentCalibrations || [];
       currentDevices = s.devices || [];
       currentSession = s.session || null;
-      currentCaptureMode = s.capture_mode || 'camera_only';
       currentPreviewRequested = s.preview_requested || {};
       currentSyncCommands = s.sync_commands || {};
       currentAutoCalibration = s.auto_calibration || { active: {}, last: {} };
@@ -62,7 +61,7 @@
         calibration_last_ts: currentCalibrationLastTs,
         auto_calibration: currentAutoCalibration,
       });
-      renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations, capture_mode: currentCaptureMode });
+      renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations });
       // Push per-camera reprojection metadata into BallTrackerCamView.
       // The runtime owns paint scheduling + clears absent cams to the
       // uncalibrated badge so the operator sees calibration drop-off

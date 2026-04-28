@@ -1,53 +1,15 @@
-"""Dashboard-specific CSS and design tokens."""
+"""Dashboard-specific CSS. Design tokens (`:root` block) are imported
+from render_shared so the dashboard and the simpler shells stay in sync
+— component CSS (.nav, .device, etc.) legitimately diverges per page,
+so only the tokens are shared, not the whole stylesheet."""
 from __future__ import annotations
 
 from cam_view_ui import CAM_VIEW_FULL_CSS
-
-
-# --- Design-system tokens (mirrored in render_scene.py) ----------------------
-_BG = "#F8F7F4"
-_SURFACE = "#FCFBFA"
-_BORDER_BASE = "#DBD6CD"
-_BORDER_L = "#E8E4DB"
-_INK = "#2A2520"
-_SUB = "#7A756C"
-_INK_LIGHT = "#5A5550"
-_DEV = "#C0392B"
-_CONTRA = "#4A6B8C"
-_DUAL = "#D35400"
-_ACCENT = "#E6B300"
+from render_shared import _TOKENS_CSS
 
 
 _CSS = f"""
-:root {{
-  --bg: {_BG};
-  --surface: {_SURFACE};
-  --surface-hover: #F3F0EA;
-  --border-base: {_BORDER_BASE};
-  --border-l: {_BORDER_L};
-  --ink: {_INK};
-  --sub: {_SUB};
-  --ink-light: {_INK_LIGHT};
-  --dev: {_DEV};
-  --contra: {_CONTRA};
-  --dual: {_DUAL};
-  --accent: {_ACCENT};
-  /* Semantic state washes — mirror kg admin's badge palette so chips
-     read as subdued backgrounds rather than saturated pills. */
-  --passed:      #256246; --passed-bg:  rgba(37,98,70,.08);
-  --warn:        #9B6B16; --warn-bg:    rgba(155,107,22,.08);
-  --failed:      #A7372A; --failed-bg:  rgba(167,55,42,.08);
-  --idle-bg:     rgba(105,114,125,.06);
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --sans: "Noto Sans TC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --nav-h: 82px;
-  --nav-offset: var(--nav-h);
-  --sidebar-w: 440px;
-  /* Unified 8px-grid spacing + single border-radius. Use var(--r)
-     everywhere; the old 4/12/2 mix collapses to one rhythm. */
-  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px; --s-5: 24px;
-  --r: 3px;
-}}
+{_TOKENS_CSS}
 
 * {{ box-sizing: border-box; }}
 html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--ink);
