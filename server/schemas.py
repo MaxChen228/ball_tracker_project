@@ -117,12 +117,7 @@ class PitchPayload(BaseModel):
     detections); server populates `frames_server_post` from MOV decoding and
     `frames_live` from the WS stream, then re-saves the enriched record so
     reloads across restarts skip re-detection."""
-    # Legacy JSON on disk may still carry a `mode` field from the
-    # defunct CaptureMode enum. Pydantic's default extra='ignore' drops
-    # it silently so old records keep loading — we keep the explicit
-    # setting here so a future switch to extra='forbid' doesn't re-break
-    # historical payloads.
-    model_config = {"extra": "ignore"}
+    model_config = {"extra": "forbid"}
     # Constrained so we can safely interpolate into filenames (clips,
     # pitch json). Matches the iOS-side values ("A" / "B") with slack for
     # future role additions but blocks path-traversal attempts.

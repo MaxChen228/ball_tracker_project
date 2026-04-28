@@ -94,12 +94,6 @@ def validate_pair_sync(
         return "no time sync"
     with state._lock:
         expected_sync_id = session_sync_id_locked(state, a.session_id)
-    if a.sync_id is None and b.sync_id is None:
-        # Backward-compat: historical sessions recorded before sync_id
-        # existed still carry valid anchor-relative timing, so keep loading
-        # them unless this armed session explicitly expected a shared sync
-        # id snapshot.
-        return "sync id missing" if expected_sync_id is not None else None
     if a.sync_id is None or b.sync_id is None:
         return "sync id missing"
     if a.sync_id != b.sync_id:
