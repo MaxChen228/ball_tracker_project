@@ -154,6 +154,8 @@ _CSS = f"""
 .sync-led.waiting::before  {{ background: var(--partial, #D9A441); }}
 .sync-led.synced::before   {{ background: var(--full, #4C7A3F); }}
 .sync-led.synced {{ color: var(--ink); border-color: var(--full, #4C7A3F); }}
+.sync-age {{ font-family: var(--mono); font-size: 10px; color: var(--sub);
+             margin-right: 4px; letter-spacing: 0.04em; }}
 .sidebar .session-actions button.btn {{ padding: 7px 12px; }}
 .sidebar .arm-gate {{ margin-top: 8px; font-size: 11px; line-height: 1.45; color: var(--ink); }}
 .sidebar .gate-label {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.10em;

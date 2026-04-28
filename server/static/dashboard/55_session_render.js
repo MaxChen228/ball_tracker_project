@@ -45,12 +45,15 @@
   //   synced  → holding a fresh anchor
   function syncLedState(state, cam) {
     const dev = ((state && state.devices) || []).find(d => d.camera_id === cam);
-    if (!dev) return { cls: 'off', tip: cam + ': offline' };
-    if (dev.time_synced) {
-      const age = (typeof dev.time_sync_age_s === 'number') ? ' · ' + dev.time_sync_age_s.toFixed(0) + 's ago' : '';
-      return { cls: 'synced', tip: cam + ': synced' + age };
+    const ageS = dev && typeof dev.time_sync_age_s === 'number' ? dev.time_sync_age_s : null;
+    const ageText = ageS != null ? ageS.toFixed(0) + 's' : '—';
+    if (!dev) {
+      return { cls: 'off', tip: cam + ': offline', ageText: ageS != null ? ageText : '—' };
     }
-    return { cls: 'waiting', tip: cam + ': waiting' };
+    if (dev.time_synced) {
+      return { cls: 'synced', tip: cam + ': synced · ' + ageText + ' ago', ageText };
+    }
+    return { cls: 'waiting', tip: cam + ': waiting' + (ageS != null ? ' (last ' + ageText + ' ago)' : ''), ageText };
   }
 
   let sessionDom = null;
@@ -85,7 +88,9 @@
           <button class="btn secondary" type="submit" data-role="sync-btn">Quick chirp</button>
         </form>
         <span class="sync-led" data-role="led-A">A</span>
+        <span class="sync-age" data-role="age-A">—</span>
         <span class="sync-led" data-role="led-B">B</span>
+        <span class="sync-age" data-role="age-B">—</span>
       </div>`;
     const $ = sel => sessionBox.querySelector(sel);
     sessionDom = {
@@ -102,6 +107,8 @@
       syncBtn: $('[data-role=sync-btn]'),
       ledA: $('[data-role=led-A]'),
       ledB: $('[data-role=led-B]'),
+      ageA: $('[data-role=age-A]'),
+      ageB: $('[data-role=age-B]'),
     };
     sessionDom.armForm.addEventListener('submit', onArmSubmit);
     return sessionDom;
@@ -206,10 +213,12 @@
       // sync LEDs
       for (const cam of ['A', 'B']) {
         const led = cam === 'A' ? dom.ledA : dom.ledB;
-        const { cls, tip } = syncLedState(state, cam);
+        const ageEl = cam === 'A' ? dom.ageA : dom.ageB;
+        const { cls, tip, ageText } = syncLedState(state, cam);
         const klass = 'sync-led ' + cls;
         if (led.className !== klass) led.className = klass;
         if (led.title !== tip) led.title = tip;
+        if (ageEl && ageEl.textContent !== ageText) ageEl.textContent = ageText;
       }
     }
 
