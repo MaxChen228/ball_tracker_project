@@ -310,6 +310,12 @@ def _read_last_prompt(state) -> str:
 
 
 _GT_CSS = """
+/* Make HTML `hidden` attribute beat author display rules.
+   Without this, `.gt-cam-toggle { display: flex }` etc override the
+   user-agent `[hidden] { display: none }`, leaving the editor form
+   visible before any session is selected (visible bug 2026-04-28). */
+[hidden] { display: none !important; }
+
 .main-gt {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr) 360px;
