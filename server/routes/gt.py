@@ -1,49 +1,50 @@
-"""GT-driven distillation routes.
+"""GT labelling + distillation routes.
 
-Phase E2 of the GT-driven distillation pipeline. Provides operator-
-facing HTTP surfaces for:
+Two coexisting workflows live in this module (mini-plan v4):
 
-  POST /sessions/{sid}/run_gt_labelling   queue SAM 3 GT labelling job
-  POST /sessions/{sid}/run_validation     queue three-way validation
-  POST /sessions/{sid}/cancel_gt          cancel a queued/running job
-  POST /gt/distill                        run fit pipeline on all GT
-  POST /gt/apply_proposal                 apply per-category proposals
-                                          to data/*.json + WS broadcast
-  GET  /gt/proposals                      return latest fit_proposals
-  GET  /report/{sid}                      SSR three-way report page
+  **Labelling** — operator picks a session, marks a video-relative
+    time window per cam, and adds a queue item. The persistent FIFO
+    in `state.gt_queue` is consumed by the in-process GTQueueWorker
+    (started in main.py lifespan) which spawns `label_with_sam3.py`
+    as a subprocess. All endpoints under `/gt/queue/*` and the
+    page/listing endpoints (`/gt`, `/gt/sessions`, `/gt/timeline/*`,
+    `/gt/preview/*`, `/gt/sessions/{sid}/skip`) drive this surface.
 
-Background tasks:
-  - label_with_sam3.py is invoked via subprocess so the heavy SAM 3 +
-    torch deps stay in tools/.venv. Production server venv never
-    imports torch.
-  - distill_all.py + validate_three_way.py run in-process — they only
-    need numpy / opencv (server venv has both). Avoids subprocess
-    startup overhead which dominates over the actual fit cost.
+  **Distillation** — fit HSV / shape_gate / selector params from the
+    pooled GT mask statistics. Distillation never touches the
+    labelling queue (mini-plan v4 cut auto-pause); operator presses
+    [Pause] manually if they want to interleave a long fit-eval. The
+    distillation routes (`/gt/distill`, `/gt/cancel_distill`,
+    `/gt/proposals`, `/gt/apply_proposal`) and `GET /report/{sid}`
+    plus `POST /sessions/{sid}/run_validation` are preserved here.
 
-Cancellation:
-  Each GT job lives in `state._gt_processing` keyed by job kind +
-  session id. `should_cancel` callback flips when the operator hits
-  /sessions/{sid}/cancel_gt. SAM 3 subprocess gets killed via
-  Popen.terminate(); in-process distill / validate sees the cancel
-  flag at the start of each per-record loop iteration.
+The dropped surface (mini-plan v4):
+  * `POST /sessions/{sid}/run_gt_labelling` → use `POST /gt/queue`.
+  * `POST /sessions/{sid}/cancel_gt` → use `DELETE /gt/queue/{id}`.
+
+These removed endpoints share no code path with the new queue (the
+old per-session `state._gt_processing` "label" jobs were a tracker,
+not a queue). They have no callers in the dashboard after Phase 5.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+import os
 import re
-import subprocess
 import sys
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from pydantic import BaseModel, Field
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _SESSION_ID_RE = re.compile(r"^s_[0-9a-f]{4,32}$")
+_QUEUE_ID_RE = re.compile(r"^q_[0-9a-f]{8}$")
 
 
 # ----- helpers -----------------------------------------------------
@@ -59,90 +60,17 @@ def _validate_sid(session_id: str, request: Request) -> None:
         return
     from main import _wants_html
     if _wants_html(request):
-        # We can't raise from a sync helper for the HTML path — leave
-        # the redirect to the caller. But also block the bad id from
-        # reaching state.* by raising HTTPException; the route handler
-        # catches it for HTML and redirects.
         raise HTTPException(status_code=422, detail="invalid session_id")
     raise HTTPException(status_code=422, detail="invalid session_id")
 
 
-# ----- background workers ------------------------------------------
-
-
-def _run_sam3_label_subprocess(
-    session_id: str,
-    camera_id: str,
-    prompt: str,
-    min_confidence: float,
-) -> None:
-    """Invoke `label_with_sam3.py` via the tools venv. Runs in a
-    BackgroundTask thread (not async); blocking subprocess is fine.
-
-    The script writes its own GT JSON to data/gt/sam3/. We just
-    propagate completion/cancel flags through state._gt_processing so
-    the dashboard can show progress."""
-    from main import state
-    proc = state._gt_processing
-    job_key = ("label", session_id, camera_id)
-    cmd = [
-        "uv", "run", "--project", "../tools",
-        "python", str(_scripts_dir() / "label_with_sam3.py"),
-        "--session", session_id,
-        "--cam", camera_id,
-        "--prompt", prompt,
-        "--min-confidence", str(min_confidence),
-    ]
-    log_path = state.data_dir / "gt" / "sam3" / f"session_{session_id}_{camera_id}.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    # Pre-cancel check: if the operator hit Cancel between start_job
-    # (request thread) and now (BackgroundTask thread spinning up), bail
-    # without ever spawning the subprocess. Without this we'd burn a
-    # full subprocess startup + ~5GB model load before noticing.
-    if proc.is_canceled(job_key):
-        proc.finish_job(job_key, status="canceled")
-        return
-    try:
-        with log_path.open("w") as logf:
-            popen = subprocess.Popen(
-                cmd,
-                cwd=Path(__file__).resolve().parent.parent,
-                stdout=logf,
-                stderr=subprocess.STDOUT,
-            )
-            proc.set_subprocess_pid(job_key, popen.pid)
-            while popen.poll() is None:
-                if proc.is_canceled(job_key):
-                    popen.terminate()
-                    try:
-                        popen.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        popen.kill()
-                    break
-                # We can't asyncio.sleep in a BackgroundTask thread —
-                # use blocking sleep. ~1 s polling means cancel takes
-                # at most 1 s to reach SIGTERM.
-                try:
-                    popen.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    pass
-            rc = popen.returncode
-        if rc == 0:
-            proc.finish_job(job_key, status="completed")
-        else:
-            proc.finish_job(
-                job_key,
-                status="canceled" if proc.is_canceled(job_key) else "error",
-                error=f"label_with_sam3 exit={rc} (see {log_path.name})" if rc != 0 else None,
-            )
-    except Exception as e:
-        logger.exception("sam3 label job failed: %s", e)
-        proc.finish_job(job_key, status="error", error=str(e))
+# ----- background workers (kept from v1: validation + distillation) ---
 
 
 def _run_validation_inproc(session_id: str, camera_id: str) -> None:
-    """Direct in-process call into validate_three_way (server venv
-    has all deps it needs)."""
+    """Direct in-process call into validate_three_way (server venv has
+    all deps). Uses `state._gt_processing` purely for cancel/error
+    tracking — the new `state.gt_queue` is for labelling only."""
     from main import state
     proc = state._gt_processing
     job_key = ("validate", session_id, camera_id)
@@ -166,6 +94,12 @@ def _run_validation_inproc(session_id: str, camera_id: str) -> None:
             match_radius_px=8.0,
         )
         _write_outputs(report, rows, out_dir=state.data_dir / "gt" / "validation")
+        # Validation just rewrote per-session JSON — invalidate the
+        # /gt index entry so the next session-list fetch reflects it.
+        try:
+            state.gt_index.invalidate(session_id)
+        except Exception:
+            pass
         proc.finish_job(job_key, status="completed")
     except Exception as e:
         logger.exception("validate job failed: %s", e)
@@ -180,8 +114,6 @@ def _run_distill_inproc() -> None:
     try:
         from distill_all import main as distill_main  # type: ignore[import-not-found]
         out_path = state.data_dir / "gt" / "fit_proposals.json"
-        # `--skip-eval` would speed this up, but we want the eval; the
-        # operator-side button explicitly chose this.
         rc = distill_main(
             [
                 "--data-dir", str(state.data_dir),
@@ -190,14 +122,11 @@ def _run_distill_inproc() -> None:
             should_cancel=lambda: proc.is_canceled(job_key),
         )
         if rc == 130:
-            # distill_all returns 130 (SIGINT-style) on operator cancel.
             proc.finish_job(job_key, status="canceled")
             return
         if rc != 0:
             proc.finish_job(job_key, status="error", error=f"distill_all exit={rc}")
             return
-        # Cache the freshly written proposals on State so the dashboard
-        # doesn't have to re-read the file on every /status tick.
         state._gt_proposals = json.loads(out_path.read_text())
         proc.finish_job(job_key, status="completed")
     except Exception as e:
@@ -205,53 +134,7 @@ def _run_distill_inproc() -> None:
         proc.finish_job(job_key, status="error", error=str(e))
 
 
-# ----- routes ------------------------------------------------------
-
-
-@router.post("/sessions/{session_id}/run_gt_labelling")
-async def run_gt_labelling(
-    session_id: str,
-    request: Request,
-    background_tasks: BackgroundTasks,
-):
-    """Queue SAM 3 GT labelling for both cameras of a session.
-
-    Body (optional JSON): {"prompt": "blue ball", "min_confidence": 0.5,
-                           "cams": ["A", "B"]}"""
-    from main import state, _wants_html
-    _validate_sid(session_id, request)
-    prompt = "blue ball"
-    min_confidence = 0.5
-    cams = ["A", "B"]
-    if request.headers.get("content-type", "").lower().startswith("application/json"):
-        body = await request.json()
-        prompt = str(body.get("prompt") or prompt)
-        min_confidence = float(body.get("min_confidence") or min_confidence)
-        if isinstance(body.get("cams"), list):
-            cams = [str(c) for c in body["cams"]]
-
-    queued = []
-    for cam in cams:
-        clip = next(
-            (p for p in (state.data_dir / "videos").glob(f"session_{session_id}_{cam}.*")
-             if p.suffix.lower() in (".mov", ".mp4", ".m4v")),
-            None,
-        )
-        if clip is None:
-            logger.warning("skip GT label %s/%s: no MOV", session_id, cam)
-            continue
-        if not state._gt_processing.start_job(("label", session_id, cam)):
-            logger.info("GT label %s/%s already running, skipping", session_id, cam)
-            continue
-        background_tasks.add_task(
-            _run_sam3_label_subprocess,
-            session_id, cam, prompt, min_confidence,
-        )
-        queued.append(cam)
-
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "session_id": session_id, "queued": queued}
+# ----- validation + distill routes (preserved) -----------------------
 
 
 @router.post("/sessions/{session_id}/run_validation")
@@ -260,7 +143,11 @@ async def run_validation(
     request: Request,
     background_tasks: BackgroundTasks,
 ):
-    """Queue three-way validation for both cameras of a session."""
+    """Queue three-way validation for both cameras of a session.
+
+    NOTE: triggered manually from the operator's CLI / `/gt` page after
+    GT exists; never auto-fires. The /gt page renders a [Validate]
+    button on the session detail header that POSTs here."""
     from main import state, _wants_html
     _validate_sid(session_id, request)
     cams = ["A", "B"]
@@ -273,16 +160,6 @@ async def run_validation(
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "session_id": session_id, "queued": queued}
-
-
-@router.post("/sessions/{session_id}/cancel_gt")
-async def cancel_gt(session_id: str, request: Request):
-    from main import state, _wants_html
-    _validate_sid(session_id, request)
-    n_canceled = state._gt_processing.cancel_session(session_id)
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "session_id": session_id, "n_canceled": n_canceled}
 
 
 @router.post("/gt/distill")
@@ -301,10 +178,6 @@ async def gt_distill(request: Request, background_tasks: BackgroundTasks):
 
 @router.post("/gt/cancel_distill")
 async def gt_cancel_distill(request: Request):
-    """Flag the running distillation job for cancellation. The eval
-    loop in distill_all polls between holdout records / between frames
-    and bails with exit 130 within ~1 frame's decode time. Idempotent
-    — calling when no distill is running returns ok=True, flagged=False."""
     from main import state, _wants_html
     flagged = state._gt_processing.cancel_distill()
     if _wants_html(request):
@@ -314,8 +187,6 @@ async def gt_cancel_distill(request: Request):
 
 @router.get("/gt/proposals")
 async def gt_proposals():
-    """Latest fit_proposals.json contents — cached on State to avoid
-    file IO on every dashboard tick."""
     from main import state
     proposals_path = state.data_dir / "gt" / "fit_proposals.json"
     if state._gt_proposals is not None:
@@ -375,8 +246,6 @@ async def gt_apply_proposal(request: Request):
             dist_cost_sat_radii=float(values["dist_cost_sat_radii"]),
         )
         state.set_candidate_selector_tuning(tuning)
-        # selector_tuning is server-only; no WS broadcast (per existing
-        # convention in routes/settings.py).
 
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
@@ -404,3 +273,268 @@ async def report(session_id: str):
     from render_report import render_report_page
     html = render_report_page(session_id, cam_payloads)
     return HTMLResponse(html)
+
+
+# ----- /gt page + queue endpoints (mini-plan v4) ---------------------
+
+
+class QueueAddBody(BaseModel):
+    """`POST /gt/queue` body. Field-level validation lives here; range +
+    MOV-existence checks happen in the handler against State so we get
+    a 422 with detail rather than a Pydantic 422 with a generic message."""
+    session_id: str = Field(pattern=r"^s_[0-9a-f]{4,32}$")
+    camera_id: Literal["A", "B"]
+    time_range: tuple[float, float]
+    prompt: str = Field(min_length=1, max_length=200)
+
+
+@router.get("/gt", response_class=HTMLResponse)
+async def gt_page(request: Request):
+    """SSR /gt page. Phase 4 fills in the renderer; for now we return
+    a placeholder so the route shape is exercised by tests."""
+    try:
+        from render_gt_page import render_gt_page
+    except ImportError:
+        return HTMLResponse(
+            "<html><body><h1>/gt</h1><p>page renderer not yet wired</p></body></html>",
+            status_code=200,
+        )
+    from main import state
+    return HTMLResponse(render_gt_page(state))
+
+
+@router.get("/gt/sessions")
+async def gt_sessions():
+    """JSON: every session with a pitch JSON, sorted by recency.
+
+    Front-end polls this every 5 s to refresh row tints / glyphs after
+    GT / validation / skip writes."""
+    from main import state
+    states = state.gt_index.get_all()
+    return {"sessions": [s.to_dict() for s in states]}
+
+
+@router.get("/gt/timeline/{session_id}/{camera_id}.json")
+async def gt_timeline(session_id: str, camera_id: str):
+    """Detection-density heatmap for the editor timeline.
+
+    Returns 100 ms-bucket counts of frames where px ≠ None. Source
+    preference: `frames_live` → `frames_server_post` → empty. Buckets
+    are returned as a `[start_s, count]` list; the renderer normalises
+    to 0-1 by dividing by the bucket max."""
+    if not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(status_code=422, detail="invalid session_id")
+    if camera_id not in ("A", "B"):
+        raise HTTPException(status_code=422, detail="camera_id must be A or B")
+    from main import state
+    pitch_path = state.data_dir / "pitches" / f"session_{session_id}_{camera_id}.json"
+    if not pitch_path.is_file():
+        raise HTTPException(status_code=404, detail="no pitch JSON for that (session, cam)")
+    payload = json.loads(pitch_path.read_text())
+    video_start = float(payload.get("video_start_pts_s", 0.0))
+    # Source selection: live first; if empty, fall back to server_post.
+    chosen_source = "frames_live"
+    frames = [
+        f for f in (payload.get("frames_live") or [])
+        if isinstance(f, dict) and f.get("px") is not None
+    ]
+    if not frames:
+        frames = [
+            f for f in (payload.get("frames_server_post") or [])
+            if isinstance(f, dict) and f.get("px") is not None
+        ]
+        chosen_source = "frames_server_post"
+
+    # Bucket size 100 ms. Find duration first so the renderer knows
+    # the timeline span even when there are no detections.
+    duration_s = 0.0
+    last_ts = None
+    for source in (payload.get("frames_server_post") or [], payload.get("frames_live") or []):
+        if source:
+            last = source[-1]
+            if isinstance(last, dict) and isinstance(last.get("timestamp_s"), (int, float)):
+                last_ts = float(last["timestamp_s"])
+                break
+    if last_ts is not None:
+        duration_s = max(0.0, last_ts - video_start)
+
+    bucket_size_s = 0.1
+    n_buckets = max(1, int(round(duration_s / bucket_size_s)))
+    counts = [0] * n_buckets
+    for f in frames:
+        ts = f.get("timestamp_s")
+        if not isinstance(ts, (int, float)):
+            continue
+        t_video = float(ts) - video_start
+        if t_video < 0:
+            continue
+        idx = int(t_video / bucket_size_s)
+        if 0 <= idx < n_buckets:
+            counts[idx] += 1
+
+    return {
+        "session_id": session_id,
+        "camera_id": camera_id,
+        "source": chosen_source if frames else "empty",
+        "bucket_size_s": bucket_size_s,
+        "duration_s": duration_s,
+        "buckets": counts,
+    }
+
+
+@router.post("/gt/queue")
+async def gt_queue_add(body: QueueAddBody):
+    """Add an item to the GT labelling queue.
+
+    Returns 422 if:
+      * range invalid (start ≥ end, start < 0, end > video_duration + 0.5s slack)
+      * (sid, cam) has no MOV on disk
+      * sid not in the GTIndex (no pitch JSON)
+    Otherwise returns the minted queue id."""
+    from main import state
+    t_start, t_end = body.time_range
+    if not (0.0 <= t_start < t_end):
+        raise HTTPException(
+            status_code=422,
+            detail=f"time_range must satisfy 0 <= start < end (got {t_start}, {t_end})",
+        )
+    try:
+        sgt = state.gt_index.get(body.session_id)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"session not in index: {e}")
+    if not sgt.cams_present.get(body.camera_id):
+        raise HTTPException(
+            status_code=422,
+            detail=f"no pitch JSON for {body.session_id}/{body.camera_id}",
+        )
+    if not sgt.has_mov.get(body.camera_id):
+        raise HTTPException(
+            status_code=422,
+            detail=f"no MOV on disk for {body.session_id}/{body.camera_id}",
+        )
+    duration = sgt.video_duration_s.get(body.camera_id)
+    if duration is not None and t_end > duration + 0.5:
+        raise HTTPException(
+            status_code=422,
+            detail=f"time_range end ({t_end}) exceeds video duration ({duration:.3f}+0.5)",
+        )
+
+    qid = state.gt_queue.add(
+        session_id=body.session_id,
+        camera_id=body.camera_id,
+        time_range=(t_start, t_end),
+        prompt=body.prompt,
+    )
+    # Persist last-used prompt globally so the next add prefills it.
+    try:
+        last_prompt_path = state.data_dir / "gt" / "last_prompt.json"
+        last_prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = last_prompt_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"prompt": body.prompt}))
+        os.replace(tmp, last_prompt_path)
+    except Exception:
+        pass
+    return {"id": qid, "session_id": body.session_id, "camera_id": body.camera_id}
+
+
+@router.get("/gt/queue")
+async def gt_queue_get():
+    """Full queue state for 1 Hz front-end poll."""
+    from main import state
+    items = state.gt_queue.get_all()
+    return {
+        "items": [item.to_dict() for item in items],
+        "paused": state.gt_queue.paused(),
+    }
+
+
+@router.delete("/gt/queue/{queue_id}")
+async def gt_queue_cancel(queue_id: str):
+    if not _QUEUE_ID_RE.match(queue_id):
+        raise HTTPException(status_code=422, detail="invalid queue_id")
+    from main import state
+    ok = state.gt_queue.cancel(queue_id)
+    return {"ok": ok}
+
+
+@router.post("/gt/queue/{queue_id}/retry")
+async def gt_queue_retry(queue_id: str):
+    if not _QUEUE_ID_RE.match(queue_id):
+        raise HTTPException(status_code=422, detail="invalid queue_id")
+    from main import state
+    new_id = state.gt_queue.retry(queue_id)
+    if new_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail="item is not in a retryable state (must be error/canceled/done)",
+        )
+    return {"id": new_id}
+
+
+@router.delete("/gt/queue/done")
+async def gt_queue_clear_done():
+    from main import state
+    n = state.gt_queue.clear_done()
+    return {"removed": n}
+
+
+@router.delete("/gt/queue/errors")
+async def gt_queue_clear_errors():
+    from main import state
+    n = state.gt_queue.clear_errors()
+    return {"removed": n}
+
+
+@router.post("/gt/queue/run")
+async def gt_queue_run():
+    from main import state
+    state.gt_queue.resume()
+    return {"ok": True, "paused": False}
+
+
+@router.post("/gt/queue/pause")
+async def gt_queue_pause():
+    from main import state
+    state.gt_queue.pause()
+    return {"ok": True, "paused": True}
+
+
+@router.get("/gt/preview/{queue_id}.jpg")
+async def gt_preview(queue_id: str):
+    """Serve the worker-written mask preview JPEG.
+
+    Regex-validate the queue id BEFORE Path joining (path traversal
+    hardening). Miss returns **204** rather than 404 because the front
+    end polls this URL aggressively from the moment a job goes
+    `running` — the very first PROGRESS line lands before the first
+    JPEG is written, and a 404 in DevTools console for that brief
+    window is just noise."""
+    if not _QUEUE_ID_RE.match(queue_id):
+        raise HTTPException(status_code=422, detail="invalid queue_id")
+    from main import state
+    path = state.data_dir / "gt" / "preview" / f"{queue_id}.jpg"
+    if not path.is_file():
+        return Response(status_code=204)
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post("/gt/sessions/{session_id}/skip")
+async def gt_skip(session_id: str):
+    if not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(status_code=422, detail="invalid session_id")
+    from main import state
+    state.gt_index.add_skip(session_id)
+    return {"ok": True, "session_id": session_id, "skipped": True}
+
+
+@router.post("/gt/sessions/{session_id}/unskip")
+async def gt_unskip(session_id: str):
+    if not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(status_code=422, detail="invalid session_id")
+    from main import state
+    state.gt_index.remove_skip(session_id)
+    return {"ok": True, "session_id": session_id, "skipped": False}
