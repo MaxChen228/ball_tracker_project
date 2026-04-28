@@ -5,6 +5,7 @@ import re
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
+import session_results
 from schemas import DetectionPath, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
 
 router = APIRouter()
@@ -24,7 +25,7 @@ async def sessions_arm(
         body = await request.json()
         raw_paths = body.get("paths")
         if isinstance(raw_paths, list):
-            requested_paths = state._normalize_paths(raw_paths)
+            requested_paths = session_results.normalize_paths(raw_paths)
     readiness = _arm_readiness()
     if not readiness.get("ready"):
         if _wants_html(request):

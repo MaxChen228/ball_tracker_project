@@ -12,14 +12,14 @@ def test_sync_trigger_flags_all_online_cameras():
     main.state.heartbeat("B")
     dispatched = main.state.trigger_sync_command(None)
     assert dispatched == ["A", "B"]
-    cmd_a, sync_id_a = main.state.consume_sync_command("A")
-    cmd_b, sync_id_b = main.state.consume_sync_command("B")
+    cmd_a, sync_id_a = main.state._sync.consume_sync_command("A")
+    cmd_b, sync_id_b = main.state._sync.consume_sync_command("B")
     assert cmd_a == "start"
     assert cmd_b == "start"
     assert sync_id_a is not None
     assert sync_id_a == sync_id_b
     # Both cams show up in the pending-commands snapshot.
-    assert main.state.pending_sync_commands() == {}
+    assert main.state._sync.pending_sync_commands() == {}
 
 
 def test_sync_trigger_skips_armed_session():
@@ -32,7 +32,7 @@ def test_sync_trigger_skips_armed_session():
     main.state.arm_session()
     dispatched = main.state.trigger_sync_command(None)
     assert dispatched == []
-    assert main.state.pending_sync_commands() == {}
+    assert main.state._sync.pending_sync_commands() == {}
 
 
 def test_sync_command_drains_on_heartbeat_consumption():
@@ -42,12 +42,12 @@ def test_sync_command_drains_on_heartbeat_consumption():
     main.state.heartbeat("A")
     main.state.trigger_sync_command(["A"])
     # First consume returns the command.
-    first = main.state.consume_sync_command("A")
+    first = main.state._sync.consume_sync_command("A")
     assert first[0] == "start"
     assert first[1] is not None
     # Second consume is empty — flag drained.
-    assert main.state.consume_sync_command("A") == (None, None)
-    assert main.state.pending_sync_commands() == {}
+    assert main.state._sync.consume_sync_command("A") == (None, None)
+    assert main.state._sync.pending_sync_commands() == {}
 
 
 def test_sync_command_expires_after_ttl(tmp_path, monkeypatch):
@@ -60,11 +60,11 @@ def test_sync_command_expires_after_ttl(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
     main.state.heartbeat("A")
     main.state.trigger_sync_command(["A"])
-    assert "A" in main.state.pending_sync_commands()
+    assert "A" in main.state._sync.pending_sync_commands()
     # Advance past the TTL.
     clock[0] += main._SYNC_COMMAND_TTL_S + 1.0
-    assert main.state.consume_sync_command("A") == (None, None)
-    assert main.state.pending_sync_commands() == {}
+    assert main.state._sync.consume_sync_command("A") == (None, None)
+    assert main.state._sync.pending_sync_commands() == {}
 
 
 def test_sync_claim_reuses_live_intent_then_rolls_after_window(tmp_path, monkeypatch):
@@ -75,12 +75,12 @@ def test_sync_claim_reuses_live_intent_then_rolls_after_window(tmp_path, monkeyp
         return clock[0]
 
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
-    first = main.state.claim_time_sync_intent()
-    second = main.state.claim_time_sync_intent()
+    first = main.state._sync.claim_time_sync_intent()
+    second = main.state._sync.claim_time_sync_intent()
     assert first.id == second.id
 
     clock[0] += main._TIME_SYNC_INTENT_WINDOW_S + 0.1
-    third = main.state.claim_time_sync_intent()
+    third = main.state._sync.claim_time_sync_intent()
     assert third.id != first.id
 
 
@@ -189,8 +189,8 @@ def test_arm_readiness_blocks_mismatched_sync_ids(tmp_path, monkeypatch):
     )
     # Set per-cam expected ids matching each cam's own report so both
     # pass per-cam id_match — only the pair-check should trip.
-    main.state.set_expected_sync_id(["A"], "sy_first")
-    main.state.set_expected_sync_id(["B"], "sy_second")
+    main.state._sync.set_expected_sync_id(["A"], "sy_first")
+    main.state._sync.set_expected_sync_id(["B"], "sy_second")
 
     readiness = main._arm_readiness()
     assert readiness["mode"] == "stereo"
