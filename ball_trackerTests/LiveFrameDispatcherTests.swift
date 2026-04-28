@@ -17,7 +17,8 @@ final class LiveFrameDispatcherTests: XCTestCase {
         return ServerUploader.FramePayload(
             frame_index: index,
             timestamp_s: Double(index) * (1.0 / 240.0),
-            candidates: candidates
+            candidates: candidates,
+            engine: BallDetectionEngineID.hsvIOS
         )
     }
 

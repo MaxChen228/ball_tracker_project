@@ -2,16 +2,23 @@ import AVFoundation
 import CoreMedia
 import Foundation
 
-/// Single-worker dispatch pool around a ROI-tracking `BTStatefulBallDetector`.
+/// Single-worker dispatch pool around a `BallDetectionEngine`.
 ///
 /// The class is **named** `ConcurrentDetectionPool` for historical
 /// continuity but is no longer concurrent: HSV + connected-components on
 /// a ROI crop runs at ~3 ms/frame, so 240 fps × 3 ms = 720 ms/wall-s of
 /// CPU work — well under one P-core. A single serial worker keeps frame
-/// order monotonic, which is what `BTStatefulBallDetector` needs to keep
-/// its ROI state coherent across frames (each frame's ROI hint is the
-/// previous frame's hit). Multiple workers would either race the
-/// non-thread-safe detector or each maintain a divergent ROI history.
+/// order monotonic, which is what stateful engines (e.g. the HSV ROI
+/// tracker in `HSVDetectionEngine`) need to keep their per-frame state
+/// coherent (each frame's anchor is the previous frame's hit). Multiple
+/// workers would either race the non-thread-safe engine or each maintain
+/// a divergent history.
+///
+/// The pool itself is engine-agnostic for detection but HSV-aware for
+/// settings application — HSV range + shape gate are runtime-tunable
+/// from the dashboard and are inherently engine-specific. Routed via a
+/// downcast to `HSVDetectionEngine`; future engines (ML) will expose
+/// their own settings paths through analogous concrete-typed methods.
 ///
 /// On ROI miss the per-frame cost spikes to ~15 ms (full-frame fallback),
 /// at which point the producer can outpace the consumer. We absorb a
@@ -35,14 +42,15 @@ final class ConcurrentDetectionPool {
     private let maxBacklog: Int
     private let detectionQueue: DispatchQueue
     private let stateLock = NSLock()
-    /// `BTStatefulBallDetector` is documented "Not thread-safe. Intended
-    /// for a single capture-queue worker." It's constructed here on the
-    /// caller's thread (the camera VC's main thread) but every subsequent
-    /// access — `setHMin`, `setAspectMin`, `detectAllCandidates`,
-    /// `resetTracking` — is dispatched onto `detectionQueue` (serial),
-    /// so post-construction it is queue-confined. Don't reach into this
-    /// detector from any other thread.
-    private let detector = BTStatefulBallDetector()
+    /// The detection engine is constructed here on the caller's thread
+    /// (the camera VC's main thread) but every subsequent access —
+    /// `applyConfig`, `detect`, `resetTracking` — is dispatched onto
+    /// `detectionQueue` (serial), so post-construction it is queue-
+    /// confined. Don't reach into this engine from any other thread.
+    /// `HSVDetectionEngine` (today's only impl) wraps the non-thread-
+    /// safe `BTStatefulBallDetector`; this confinement is what keeps
+    /// the inner C++ state coherent.
+    private let engine: BallDetectionEngine
     private var hsvRange: ServerUploader.HSVRangePayload = .tennis
     private var shapeGate: ServerUploader.ShapeGatePayload = .default
 
@@ -54,7 +62,11 @@ final class ConcurrentDetectionPool {
     /// pixel-buffer pool. ~33 ms slack at 240 fps producer, which covers
     /// transient ROI-miss spikes without letting the queue grow into the
     /// hundreds of MB of retained pixel buffers.
-    init(maxBacklog: Int = 8) {
+    init(
+        engine: BallDetectionEngine = HSVDetectionEngine(),
+        maxBacklog: Int = 8
+    ) {
+        self.engine = engine
         self.maxBacklog = max(1, maxBacklog)
         self.detectionQueue = DispatchQueue(
             label: "com.Max0228.ball-tracker.detection",
@@ -93,28 +105,19 @@ final class ConcurrentDetectionPool {
                 self.stateLock.unlock()
             }
 
-            // Apply runtime knobs to the detector inside the queue so the
-            // BTStatefulBallDetector — explicitly "Not thread-safe.
-            // Intended for a single capture-queue worker." — is only ever
-            // touched from this serial queue.
-            self.detector.setHMin(
-                Int32(hsvSnapshot.h_min),
-                hMax: Int32(hsvSnapshot.h_max),
-                sMin: Int32(hsvSnapshot.s_min),
-                sMax: Int32(hsvSnapshot.s_max),
-                vMin: Int32(hsvSnapshot.v_min),
-                vMax: Int32(hsvSnapshot.v_max)
-            )
-            self.detector.setAspectMin(
-                shapeSnapshot.aspect_min,
-                fillMin: shapeSnapshot.fill_min
-            )
+            // Apply HSV-flavoured runtime knobs inside the queue so the
+            // (non-thread-safe) inner detector is only ever touched from
+            // this serial worker. Non-HSV engines silently no-op the
+            // cast — they expose their own settings paths.
+            if let hsvEngine = self.engine as? HSVDetectionEngine {
+                hsvEngine.applyConfig(hsv: hsvSnapshot, shape: shapeSnapshot)
+            }
 
-            // ROI-tracked multi-candidate detection. Same gate semantics
-            // as the stateless `BTBallDetector.detectAllCandidates`, but
-            // the ROI crop short-circuits the ~15 ms full-frame pass to
-            // ~3 ms when the ball stays close to its prior position.
-            let cands = self.detector.detectAllCandidates(in: pb)
+            // Engine.detect on a stateful HSV impl uses its ROI hint to
+            // short-circuit the ~15 ms full-frame pass to ~3 ms when the
+            // ball stays close to its prior position. The pool doesn't
+            // know or care — that's the engine's contract.
+            let cands = self.engine.detect(in: pb)
             let maxArea = max(1, cands.map { Int($0.areaPx) }.max() ?? 1)
             let candidatesPayload = cands.map { d in
                 ServerUploader.BlobCandidate(
@@ -127,7 +130,8 @@ final class ConcurrentDetectionPool {
             let frame = ServerUploader.FramePayload(
                 frame_index: index,
                 timestamp_s: timestampS,
-                candidates: candidatesPayload
+                candidates: candidatesPayload,
+                engine: self.engine.name
             )
 
             self.stateLock.lock()
@@ -173,11 +177,11 @@ final class ConcurrentDetectionPool {
         currentGeneration &+= 1
         callIndex = 0
         stateLock.unlock()
-        // Detector ROI hint is per-arm-window. Reset on the queue so the
-        // call lands AFTER any in-flight worker still using the old
+        // Engine tracking state is per-arm-window. Reset on the queue so
+        // the call lands AFTER any in-flight worker still using the old
         // tracking state, before the first frame of the next generation.
-        detectionQueue.async { [detector = self.detector] in
-            detector.resetTracking()
+        detectionQueue.async { [engine = self.engine] in
+            engine.resetTracking()
         }
     }
 

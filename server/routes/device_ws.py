@@ -132,11 +132,11 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 continue
             if mtype == "frame":
                 device_ws.note_seen(camera_id)
-                # iOS always sends `candidates` (possibly empty) on every
-                # frame — live_pairing's selector resolves the winner.
-                # Skipping pydantic validation (model_construct) — iOS lockstep
-                # guarantees the 4 primitive fields; missing key surfaces as
-                # KeyError, bad type as ValueError.
+                # iOS always sends `candidates` (possibly empty) + `engine`
+                # on every frame — live_pairing's selector resolves the
+                # winner. Skipping pydantic validation (model_construct) —
+                # iOS lockstep guarantees the wire fields; missing key
+                # surfaces as KeyError, bad type as ValueError.
                 from schemas import BlobCandidate as _BlobCandidate
                 cands_payload = [
                     _BlobCandidate.model_construct(
@@ -147,11 +147,16 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                     )
                     for c in msg["candidates"]
                 ]
+                # `engine` is required on the wire (Phase 2). Lockstep
+                # iOS+server: if a frame arrives without it, the iOS
+                # build is older than the server, fail loudly rather than
+                # silently filling in a default that may be wrong.
                 frame = FramePayload(
                     frame_index=int(msg["i"]),
                     timestamp_s=float(msg["ts"]),
                     ball_detected=bool(cands_payload),
                     candidates=cands_payload,
+                    detection_engine=str(msg["engine"]),
                 )
                 session_id = str(msg.get("sid") or "")
                 if not session_id:
