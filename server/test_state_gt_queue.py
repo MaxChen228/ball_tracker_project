@@ -26,7 +26,9 @@ def _add_basic(q: GTQueue, sid: str = "s_deadbeef", cam: str = "A") -> str:
         session_id=sid,
         camera_id=cam,
         time_range=(0.5, 1.5),
-        prompt="blue ball",
+        click_x=960,
+        click_y=540,
+        click_t_video_rel=0.5,
     )
 
 
@@ -117,7 +119,9 @@ def test_retry_creates_new_id_keeps_old_audit(queue: GTQueue):
     assert queue.get(qid).status == "error"
     assert queue.get(new_id).status == "pending"
     assert queue.get(new_id).time_range == (0.5, 1.5)
-    assert queue.get(new_id).prompt == "blue ball"
+    assert queue.get(new_id).click_x == 960
+    assert queue.get(new_id).click_y == 540
+    assert queue.get(new_id).click_t_video_rel == 0.5
 
 
 def test_retry_pending_returns_none(queue: GTQueue):

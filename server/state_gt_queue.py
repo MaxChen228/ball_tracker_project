@@ -1,9 +1,12 @@
-"""Persistent FIFO queue for SAM 3 GT labelling jobs.
+"""Persistent FIFO queue for SAM 2 GT labelling jobs.
 
-Design principles (per mini-plan v4):
+Design principles:
 
   * Operator drives the queue from /gt — adds (session, cam, time_range,
-    prompt) items, presses Run, watches a single worker chew through.
+    click_x, click_y, click_t) items, presses Run, watches a single
+    worker chew through. Click is image-pixel coords on the source MOV
+    (1920×1080) plus the video-relative second to seed at; SAM 2 starts
+    propagating from that frame.
   * Persistence: every mutation flushes the full queue.json under a single
     lock so a crash mid-write can never produce a partial file. On boot we
     drag any "running" item back to "pending" — the in-process worker
@@ -16,7 +19,13 @@ Design principles (per mini-plan v4):
   * No reason-stack on pause: a single bool flag is enough — operator who
     wants to interleave distillation manually presses [Pause] before
     [Run distillation], then [Run] when distill is done. Distill never
-    auto-touches this queue (mini-plan v4 cut).
+    auto-touches this queue.
+
+Schema migration 2026-04-29: SAM 3 → SAM 2. Old items had a `prompt`
+text field; new ones have `click_x` / `click_y` / `click_t_video_rel`.
+On-disk queue.json from the SAM 3 era is wiped on this deploy because
+the schema changed (no graceful migration — the old `error` items are
+worthless anyway).
 
 The queue is the SOLE coordinator. The worker thread (gt_queue_worker.py)
 is the SOLE consumer. Routes only call mutation methods (add / cancel /
@@ -50,12 +59,19 @@ def _utc_now_iso() -> str:
 
 @dataclass
 class GTQueueItem:
-    """One operator-submitted SAM 3 labelling job.
+    """One operator-submitted SAM 2 labelling job.
 
-    `time_range` is video-relative seconds (NOT anchor-relative — see
-    mini-plan v4 clock convention; sync_anchor can be 357s before
-    video_start on the smoke-tested session, so anchor-relative would
+    `time_range` is video-relative seconds (NOT anchor-relative — sync
+    anchor can be 357s before video_start, so anchor-relative would
     silently filter out empty sets).
+
+    Click seed:
+      * `click_x` / `click_y`: image-pixel coords on the source video
+        (typically 1920×1080). JS captures from the `<video>` element
+        scaling CSS-px to videoWidth/videoHeight before POSTing.
+      * `click_t_video_rel`: where to seed (video-relative seconds);
+        must lie within `time_range`. SAM 2 propagates forward from the
+        decoded frame nearest this PTS.
 
     `subprocess_pid` is informational only; recover_on_boot does NOT
     consult it (avoids macOS PID-recycle false positives during long
@@ -66,7 +82,9 @@ class GTQueueItem:
     session_id: str
     camera_id: str  # "A" | "B"
     time_range: tuple[float, float]
-    prompt: str
+    click_x: int  # image-pixel X on source video
+    click_y: int  # image-pixel Y on source video
+    click_t_video_rel: float  # seed timestamp, video-relative seconds
     status: Literal["pending", "running", "done", "error", "canceled"]
     created_at: str
     started_at: str | None = None
@@ -88,6 +106,11 @@ class GTQueueItem:
         rng = d.get("time_range")
         if isinstance(rng, list) and len(rng) == 2:
             d = {**d, "time_range": (float(rng[0]), float(rng[1]))}
+        # Drop unknown keys so old SAM 3 era items (with `prompt`) don't
+        # crash from_dict; we don't try to migrate them — operator
+        # re-clicks if they care about a stale queue.
+        valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
+        d = {k: v for k, v in d.items() if k in valid_keys}
         return cls(**d)
 
 
@@ -153,7 +176,9 @@ class GTQueue:
         session_id: str,
         camera_id: str,
         time_range: tuple[float, float],
-        prompt: str,
+        click_x: int,
+        click_y: int,
+        click_t_video_rel: float,
     ) -> str:
         """Append a new pending item; returns minted id."""
         item = GTQueueItem(
@@ -161,7 +186,9 @@ class GTQueue:
             session_id=session_id,
             camera_id=camera_id,
             time_range=(float(time_range[0]), float(time_range[1])),
-            prompt=prompt,
+            click_x=int(click_x),
+            click_y=int(click_y),
+            click_t_video_rel=float(click_t_video_rel),
             status="pending",
             created_at=_utc_now_iso(),
         )
@@ -211,7 +238,9 @@ class GTQueue:
                 session_id=old.session_id,
                 camera_id=old.camera_id,
                 time_range=old.time_range,
-                prompt=old.prompt,
+                click_x=old.click_x,
+                click_y=old.click_y,
+                click_t_video_rel=old.click_t_video_rel,
                 status="pending",
                 created_at=_utc_now_iso(),
             )

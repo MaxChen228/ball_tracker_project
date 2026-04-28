@@ -1,34 +1,23 @@
-/* Sessions panel (left rail) — render + filter + click-to-select.
+/* Sessions panel (left rail) — render + free-text filter + click-to-select.
  *
  * The SSR pre-paints the list; this module rebinds events on first
- * load and re-renders on every 5s tick (or after a skip / unskip
+ * load and re-renders on every 5 s tick (or after a skip / unskip
  * mutation). We keep the row markup identical to the SSR so the row
  * doesn't visibly reflow when JS takes over.
+ *
+ * 2026-04-29: dropped the unlabeled-only / show-no-MOV / show-skipped
+ * checkboxes — operator confirmed they didn't help workflow. Plain
+ * substring filter on session id is the only filter left.
  */
 (function () {
   const elList = document.getElementById('gt-session-list');
   const elCount = document.getElementById('gt-session-count');
   const elFilterText = document.getElementById('gt-filter-text');
-  const elFilterUnlab = document.getElementById('gt-filter-unlabeled');
-  const elFilterNoMov = document.getElementById('gt-filter-no-mov');
-  const elFilterSkipped = document.getElementById('gt-filter-skipped');
 
   function applyFilters(sessions) {
     const text = (elFilterText.value || '').trim().toLowerCase();
-    const unlabeledOnly = elFilterUnlab.checked;
-    const showNoMov = elFilterNoMov.checked;
-    const showSkipped = elFilterSkipped.checked;
-    return sessions.filter((s) => {
-      if (text && !s.session_id.toLowerCase().includes(text)) return false;
-      if (s.is_skipped && !showSkipped) return false;
-      const hasMov = !!(s.has_mov && (s.has_mov.A || s.has_mov.B));
-      if (!hasMov && !showNoMov) return false;
-      if (unlabeledOnly) {
-        const hasGT = !!(s.has_gt && (s.has_gt.A || s.has_gt.B));
-        if (hasGT) return false;
-      }
-      return true;
-    });
+    if (!text) return sessions;
+    return sessions.filter((s) => s.session_id.toLowerCase().includes(text));
   }
 
   function renderRow(s) {
@@ -50,7 +39,7 @@
   function renderList() {
     const filtered = applyFilters(window.GT.sessions);
     if (filtered.length === 0) {
-      elList.innerHTML = '<div class="gt-empty">No sessions match filters.</div>';
+      elList.innerHTML = '<div class="gt-empty">No sessions match filter.</div>';
     } else {
       elList.innerHTML = filtered.map(renderRow).join('');
     }
@@ -70,14 +59,12 @@
     window.GT.selected.sid = sid;
     window.GT.selected.cam = 'A';
     window.GT.editor.dirty = false;
+    window.GT.editor.click = { x: null, y: null, t: null };
     renderList();
     if (window.GT.render.editor) window.GT.render.editor();
   });
 
-  [elFilterText, elFilterUnlab, elFilterNoMov, elFilterSkipped].forEach((el) => {
-    el.addEventListener('input', renderList);
-    el.addEventListener('change', renderList);
-  });
+  elFilterText.addEventListener('input', renderList);
 
   window.GT.render.sessionList = renderList;
 })();

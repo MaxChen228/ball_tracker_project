@@ -90,7 +90,9 @@ def _mk_item(**overrides) -> GTQueueItem:
         session_id="s_aaaaaaaa",
         camera_id="A",
         time_range=(0.5, 1.5),
-        prompt="blue ball",
+        click_x=960,
+        click_y=540,
+        click_t_video_rel=0.5,
         status="pending",
         created_at="2026-04-28T12:00:00Z",
     )
@@ -160,28 +162,20 @@ def test_render_gt_page_html_contains_panels(tmp_path: Path):
     assert "__GT_INITIAL_STATE__" in html
 
 
-def test_render_gt_page_initial_state_includes_last_prompt(tmp_path: Path):
-    state = _mk_state(tmp_path)
-    # Drop a last_prompt.json
-    (tmp_path / "gt").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "gt" / "last_prompt.json").write_text(
-        json.dumps({"prompt": "tennis ball"})
-    )
-    html = render_gt_page(state)
-    assert "tennis ball" in html
-
-
 def test_render_gt_page_renders_pending_queue_items(tmp_path: Path):
     state = _mk_state(tmp_path)
     state.gt_queue.add(
         session_id="s_deadbeef",
         camera_id="A",
         time_range=(0.5, 1.5),
-        prompt="blue ball",
+        click_x=960,
+        click_y=540,
+        click_t_video_rel=0.5,
     )
     html = render_gt_page(state)
     assert "s_deadbeef/A" in html
     assert "[0.50–1.50s]" in html
+    assert "click=(960,540)@0.50" in html
     # The "Queue idle" string lives both in the SSR empty state and in
     # the JS bundle as the empty-state fallback. Slice the queue panel
     # list to test the SSR markup specifically.

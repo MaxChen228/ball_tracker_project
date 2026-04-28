@@ -86,7 +86,6 @@ def render_gt_page(state: "State") -> str:
 
     sessions = state.gt_index.get_all()
     queue_items = state.gt_queue.get_all()
-    last_prompt = _read_last_prompt(state)
 
     initial_state = json.dumps(
         {
@@ -95,7 +94,6 @@ def render_gt_page(state: "State") -> str:
                 "items": [it.to_dict() for it in queue_items],
                 "paused": state.gt_queue.paused(),
             },
-            "lastPrompt": last_prompt,
         },
         ensure_ascii=False,
     )
@@ -117,7 +115,7 @@ def render_gt_page(state: "State") -> str:
         f"{_render_app_nav('gt', devices_payload, session, calibrations)}"
         '<main class="main-gt">'
         f"{_render_sessions_panel(sessions)}"
-        f"{_render_editor_panel(last_prompt)}"
+        f"{_render_editor_panel()}"
         f"{_render_queue_panel(queue_items, state.gt_queue.paused())}"
         "</main>"
         f"<script>window.__GT_INITIAL_STATE__ = {initial_state};</script>"
@@ -131,7 +129,12 @@ def render_gt_page(state: "State") -> str:
 
 def _render_sessions_panel(sessions) -> str:
     """Left rail. SSR-only static markup; gt_main.js refreshes this on
-    the 5 s tick by replacing the inner list."""
+    the 5 s tick by replacing the inner list.
+
+    Filter checkboxes (`unlabeled only` / `show no-MOV` / `show skipped`)
+    were dropped 2026-04-29 — the operator confirmed they didn't help
+    the workflow and just added cognitive load. Plain free-text filter
+    is enough."""
     rows_html = "".join(_render_session_row(s) for s in sessions) or (
         '<div class="gt-empty">No sessions yet — record some pitches first.</div>'
     )
@@ -142,9 +145,6 @@ def _render_sessions_panel(sessions) -> str:
         '</div>'
         '<div class="gt-filters">'
         '<input type="text" id="gt-filter-text" placeholder="filter sid…" autocomplete="off">'
-        '<label><input type="checkbox" id="gt-filter-unlabeled" checked> unlabeled only</label>'
-        '<label><input type="checkbox" id="gt-filter-no-mov"> show no-MOV</label>'
-        '<label><input type="checkbox" id="gt-filter-skipped"> show skipped</label>'
         '</div>'
         f'<div class="gt-session-list" id="gt-session-list" role="list">{rows_html}</div>'
         '</aside>'
@@ -194,16 +194,16 @@ def _tint_for(s) -> str:
     return "gt-row-neutral"
 
 
-def _render_editor_panel(last_prompt: str) -> str:
-    """Right pane. Initial state shows a placeholder; gt_main.js wires
-    the click → load flow."""
+def _render_editor_panel() -> str:
+    """Middle pane. SAM 2 era: drop the prompt input (text prompts don't
+    apply to SAM 2), drop the Validate button (Validate / Report were
+    SAM 3 era validation flows; CLI / direct URL still works), wrap the
+    `<video>` in a positioned div so JS can overlay a click marker."""
     return (
         '<section class="gt-editor card">'
         '<div class="gt-panel-head">'
         '<h2 id="gt-editor-title">← pick a session</h2>'
         '<div class="gt-detail-actions" id="gt-detail-actions" hidden>'
-        '<button type="button" class="btn" id="gt-validate-btn" disabled>Validate</button>'
-        '<a class="btn secondary" id="gt-report-link" href="#" target="_blank" hidden>Report →</a>'
         '<button type="button" class="btn danger" id="gt-skip-btn">Skip permanently</button>'
         '<button type="button" class="btn secondary" id="gt-unskip-btn" hidden>Unskip</button>'
         '</div>'
@@ -212,8 +212,21 @@ def _render_editor_panel(last_prompt: str) -> str:
         '<label><input type="radio" name="gt-cam" value="A" checked> Cam A</label>'
         '<label><input type="radio" name="gt-cam" value="B"> Cam B</label>'
         '</div>'
+        '<div class="gt-click-hint" id="gt-click-hint" hidden>'
+        'Pause at the first frame where the ball is clearly visible, '
+        'then click the ball to set the seed point.'
+        '</div>'
         '<div class="gt-video-wrap" id="gt-video-wrap" hidden>'
-        '<video id="gt-video" controls preload="metadata"></video>'
+        '<video id="gt-video" preload="metadata"></video>'
+        '<div class="gt-video-overlay" id="gt-video-overlay">'
+        '<div class="gt-click-marker" id="gt-click-marker" hidden></div>'
+        '</div>'
+        '<div class="gt-video-controls" id="gt-video-controls">'
+        '<button type="button" class="btn small" id="gt-video-play">Play</button>'
+        '<button type="button" class="btn small secondary" id="gt-video-step-back" title=", → step −1 frame (~240 fps)">⟨</button>'
+        '<button type="button" class="btn small secondary" id="gt-video-step-fwd" title=". → step +1 frame">⟩</button>'
+        '<span class="gt-video-time" id="gt-video-time">0.00 / 0.00 s</span>'
+        '</div>'
         '<div class="gt-video-meta" id="gt-video-meta">—</div>'
         '</div>'
         '<div class="gt-timeline" id="gt-timeline" hidden>'
@@ -223,10 +236,10 @@ def _render_editor_panel(last_prompt: str) -> str:
         '<div class="gt-range-row" id="gt-range-row" hidden>'
         '<label>start <input type="number" step="0.01" min="0" id="gt-range-start"></label>'
         '<label>end <input type="number" step="0.01" min="0" id="gt-range-end"></label>'
-        f'<label class="gt-prompt-label">prompt <input type="text" id="gt-prompt" value="{last_prompt}" maxlength="200"></label>'
+        '<span class="gt-click-readout" id="gt-click-readout">click: —</span>'
         '</div>'
         '<div class="gt-add-row" id="gt-add-row" hidden>'
-        '<button type="button" class="btn" id="gt-add-btn" disabled>Add to queue</button>'
+        '<button type="button" class="btn primary" id="gt-add-btn" disabled>Add to queue</button>'
         '<span class="gt-overwrite-warn" id="gt-overwrite-warn" hidden>⚠ overwrites existing GT</span>'
         '<span class="gt-add-error" id="gt-add-error" hidden></span>'
         '</div>'
@@ -266,7 +279,8 @@ def _render_queue_row(it) -> str:
 
 def _label_for_queue_item(it) -> str:
     range_str = f"[{it.time_range[0]:.2f}–{it.time_range[1]:.2f}s]"
-    base = f"{it.session_id}/{it.camera_id} {range_str}"
+    click_str = f" click=({it.click_x},{it.click_y})@{it.click_t_video_rel:.2f}"
+    base = f"{it.session_id}/{it.camera_id} {range_str}{click_str}"
     if it.status == "running" and it.progress:
         cur = it.progress.get("current_frame", 0)
         total = it.progress.get("total_frames", 0)
@@ -300,16 +314,6 @@ def _summary_text(items, paused: bool) -> str:
     if paused:
         base += " · PAUSED"
     return base
-
-
-def _read_last_prompt(state) -> str:
-    path = state.data_dir / "gt" / "last_prompt.json"
-    if not path.is_file():
-        return "blue ball"
-    try:
-        return str(json.loads(path.read_text()).get("prompt") or "blue ball")
-    except Exception:
-        return "blue ball"
 
 
 # ----- inline CSS (top-level layout) ----------------------------------
@@ -383,10 +387,46 @@ _GT_CSS = """
   font-family: var(--mono); font-size: 12px;
 }
 .gt-video-wrap { position: relative; margin-bottom: var(--s-3); }
-.gt-video-wrap video { width: 100%; max-height: 50vh; background: #000; }
+.gt-video-wrap video {
+  width: 100%; max-height: 50vh; background: #000;
+  display: block;
+  cursor: crosshair;  /* signals "click to seed" affordance */
+}
+/* Overlay sits over the video and proxies clicks; the video element
+   itself ignores pointer events so our click handler sees the crosshair
+   target. Marker is positioned absolutely in CSS-px space relative to
+   the wrap, so we don't have to worry about video aspect-fit math. */
+.gt-video-overlay {
+  position: absolute; inset: 0; pointer-events: none;
+}
+.gt-click-marker {
+  position: absolute; width: 16px; height: 16px;
+  border: 2px solid var(--failed); border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.8);
+}
+.gt-video-controls {
+  display: flex; gap: var(--s-2); align-items: center;
+  margin-top: var(--s-2);
+}
+.gt-video-time {
+  font-family: var(--mono); font-size: 11px; color: var(--sub);
+  margin-left: var(--s-2);
+}
 .gt-video-meta {
   font-family: var(--mono); font-size: 10px; color: var(--sub);
   margin-top: var(--s-1);
+}
+.gt-click-hint {
+  font-family: var(--mono); font-size: 11px; color: var(--sub);
+  background: var(--warn-bg); border: 1px solid var(--warn);
+  padding: 6px 10px; border-radius: var(--r);
+  margin-bottom: var(--s-2);
+}
+.gt-click-readout {
+  font-family: var(--mono); font-size: 11px; color: var(--sub);
+  align-self: end;
 }
 .gt-timeline {
   position: relative; margin-bottom: var(--s-3);
@@ -410,10 +450,6 @@ _GT_CSS = """
   border: 1px solid var(--border-base); border-radius: var(--r);
   background: var(--surface);
 }
-.gt-prompt-label { flex: 1; min-width: 240px; }
-.gt-prompt-label input { width: 100%; padding: 4px 6px;
-  border: 1px solid var(--border-base); border-radius: var(--r);
-  background: var(--surface); font-family: var(--mono); }
 .gt-add-row {
   display: flex; gap: var(--s-3); align-items: center; flex-wrap: wrap;
 }

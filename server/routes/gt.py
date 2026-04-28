@@ -280,12 +280,21 @@ async def report(session_id: str):
 
 class QueueAddBody(BaseModel):
     """`POST /gt/queue` body. Field-level validation lives here; range +
-    MOV-existence checks happen in the handler against State so we get
-    a 422 with detail rather than a Pydantic 422 with a generic message."""
+    click-in-range + MOV-existence checks happen in the handler against
+    State so we get a 422 with a human detail rather than Pydantic's
+    list-of-errors shape.
+
+    Click-prompt era (post 2026-04-29 SAM 3 → SAM 2 swap): operator
+    clicks the ball on the source video; JS scales CSS-px to image-px
+    via `videoEl.videoWidth / videoEl.clientWidth`. `click_t_video_rel`
+    must lie within `time_range`; the worker seeds SAM 2 at the decoded
+    frame nearest that PTS and propagates forward."""
     session_id: str = Field(pattern=r"^s_[0-9a-f]{4,32}$")
     camera_id: Literal["A", "B"]
     time_range: tuple[float, float]
-    prompt: str = Field(min_length=1, max_length=200)
+    click_x: int = Field(ge=0, le=8192)
+    click_y: int = Field(ge=0, le=8192)
+    click_t_video_rel: float = Field(ge=0.0)
 
 
 @router.get("/gt", response_class=HTMLResponse)
@@ -418,22 +427,23 @@ async def gt_queue_add(body: QueueAddBody):
             status_code=422,
             detail=f"time_range end ({t_end}) exceeds video duration ({duration:.3f}+0.5)",
         )
+    if not (t_start <= body.click_t_video_rel <= t_end):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"click_t_video_rel ({body.click_t_video_rel}) must lie within "
+                f"time_range [{t_start}, {t_end}]"
+            ),
+        )
 
     qid = state.gt_queue.add(
         session_id=body.session_id,
         camera_id=body.camera_id,
         time_range=(t_start, t_end),
-        prompt=body.prompt,
+        click_x=body.click_x,
+        click_y=body.click_y,
+        click_t_video_rel=body.click_t_video_rel,
     )
-    # Persist last-used prompt globally so the next add prefills it.
-    try:
-        last_prompt_path = state.data_dir / "gt" / "last_prompt.json"
-        last_prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = last_prompt_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"prompt": body.prompt}))
-        os.replace(tmp, last_prompt_path)
-    except Exception:
-        pass
     return {"id": qid, "session_id": body.session_id, "camera_id": body.camera_id}
 
 
