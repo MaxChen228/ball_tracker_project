@@ -85,13 +85,17 @@ _MAX_AREA_PX = 150_000
 # Runtime-overridable via `ShapeGate` (state.shape_gate()); these constants
 # are the defaults used when no override is supplied.
 _MIN_ASPECT = 0.70  # min(w,h)/max(w,h); 1.0 = square bbox, 0.70 ≈ 3:2
-# Theoretical circle fill = π/4 ≈ 0.785 but empirical `combined = hsv AND
-# fg_mask` fill for real balls on our rig sits at 0.63-0.70 (median 0.68
-# across s_fcf73afa/s_03d533c4) because ball-side shadows, the seam, and
-# HSV edge bleed each carve ~10-15% out of the bbox. 0.55 sits a safety
+# Theoretical circle fill = π/4 ≈ 0.785 but empirical mask fill for
+# real balls on our rig sits at 0.63-0.70 (median 0.68 across
+# s_fcf73afa/s_03d533c4) because ball-side shadows, the seam, and HSV
+# edge bleed each carve ~10-15% out of the bbox. 0.55 sits a safety
 # margin below the lowest observed ball (0.63) and catches marginal
 # frames that 0.60 was just barely rejecting. p50=0.68 empirical gives
-# 0.13 of headroom which is ~2σ in our measured distribution.
+# 0.13 of headroom which is ~2σ in our measured distribution. The
+# legacy MOG2-AND-HSV combined-mask measurement is gone post-Phase-A;
+# the values quoted here were re-checked against pure-HSV masks and
+# match (MOG2 was removing motion not bbox interior, so it didn't
+# meaningfully shift fill).
 _MIN_FILL = 0.55
 
 
@@ -117,7 +121,6 @@ def detect_ball(
     frame_bgr: np.ndarray,
     hsv_range: HSVRange,
     *,
-    fg_mask: np.ndarray | None = None,
     prev_position: tuple[float, float] | None = None,
     prev_velocity: tuple[float, float] | None = None,
     dt: float | None = None,
@@ -129,12 +132,11 @@ def detect_ball(
     ratio clear the ball-shape gates. Returns `(px, py)` centroid in
     pixel coordinates, else `None`.
 
-    `fg_mask` (uint8 0/255) is optionally AND-ed with the HSV mask — used
-    by the pipeline to restrict detection to moving pixels from a
-    background subtractor. Pass `None` for HSV-only behaviour.
-
     Simple-minded on purpose: no morphological ops, no temporal smoothing.
     Anything more aggressive belongs in a follow-up ML-based detector.
+    The MOG2 / fg_mask plumbing was removed alongside Phase A — `live`
+    and `server_post` paths now share this exact function with no
+    pipeline-only kwargs left to drift between.
     """
     if frame_bgr is None or frame_bgr.size == 0:
         return None
@@ -142,8 +144,6 @@ def detect_ball(
     gate = shape_gate if shape_gate is not None else ShapeGate.default()
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, hsv_range.lo(), hsv_range.hi())
-    if fg_mask is not None:
-        mask = cv2.bitwise_and(mask, fg_mask)
 
     # Connected components with stats (label 0 is the background).
     num_labels, _labels, stats, centroids = cv2.connectedComponentsWithStats(

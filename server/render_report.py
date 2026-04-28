@@ -136,8 +136,23 @@ table.metrics .num { text-align: right; font-variant-numeric: tabular-nums; }
 """
 
 
-def _gate(value: float, *, low: float, high: float, higher_is_better: bool = True) -> str:
-    """Render a pass/warn/fail badge based on threshold."""
+def _gate(
+    value: float,
+    *,
+    low: float,
+    high: float,
+    higher_is_better: bool = True,
+    available: bool = True,
+) -> str:
+    """Render a pass/warn/fail/n_a badge based on threshold.
+
+    `available=False` short-circuits to an n/a badge — used when the
+    underlying metric was computed on zero samples (e.g. p95=0.0 from
+    an empty distance list would otherwise read as a perfect 0 px
+    alignment, which is meaningless and visually misleads the operator
+    into "everything passes")."""
+    if not available:
+        return '<span class="gate" style="background:#888;color:#fff;">n/a</span>'
     if higher_is_better:
         if value >= high: return '<span class="gate pass">pass</span>'
         if value >= low: return '<span class="gate warn">warn</span>'
@@ -182,10 +197,24 @@ def _render_cam_card(cam_id: str, payload: dict[str, Any]) -> str:
     # Acceptance gates (per plan):
     #   - live_vs_server p95 ≤ 1 px → algorithms aligned (NV12 success)
     #   - live recall vs GT > 0.90 → distillation worth applying
-    live_recall_gate = _gate(float(live_vs_gt.get("recall", 0.0)), low=0.80, high=0.90)
+    #
+    # `available` flips false when the underlying pair has zero
+    # samples — without this, p95=0.0 from an empty distance list
+    # renders as "pass" (≤ 1.0) and the operator sees a green check on
+    # a session that never produced detections. Same for live_recall
+    # when n_gt is 0.
+    live_recall_available = int(live_vs_gt.get("n_b_total", 0)) > 0
+    align_available = int(live_vs_server.get("n_both_present", 0)) > 0
+    live_recall_gate = _gate(
+        float(live_vs_gt.get("recall", 0.0)),
+        low=0.80, high=0.90,
+        available=live_recall_available,
+    )
     align_gate = _gate(
         float(live_vs_server.get("centroid_p95_px", 99.0)),
-        low=1.0, high=3.0, higher_is_better=False,
+        low=1.0, high=3.0,
+        higher_is_better=False,
+        available=align_available,
     )
 
     rows = [
