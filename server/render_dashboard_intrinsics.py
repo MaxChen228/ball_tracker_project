@@ -147,9 +147,15 @@ def _render_intrinsics_body(
             '<option>No phones online</option></select>'
         )
 
+    # Split into dynamic block (replaced wholesale on each /calibration/intrinsics
+    # tick) and static block (file input + upload button + status — JS only
+    # patches the <select> children, never the surrounding nodes). Without
+    # this split, polling stomps the user's just-picked file mid-selection.
     return (
+        '<div id="intrinsics-dynamic">'
         f'{role_strip}'
         f'{records_html}'
+        '</div>'
         '<div class="intrinsics-upload">'
         '<div class="intrinsics-upload-row">'
         f'{device_select}'

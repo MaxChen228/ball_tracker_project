@@ -18,8 +18,10 @@
     } catch (_) { return '—'; }
   }
   function renderIntrinsicsCard(items, onlineRoles) {
-    const body = document.getElementById('intrinsics-body');
-    if (!body) return;
+    // Surgical update: only patch #intrinsics-dynamic (role strip + records
+    // list) and the <select> options. The file input, upload button, and
+    // status div are SSR-static — replacing them mid-selection wipes the
+    // user's picked file (DOM file lists can't be reattached to a new node).
     items = items || [];
     onlineRoles = onlineRoles || {};
     const esc = (s) => String(s == null ? '' : s)
@@ -88,33 +90,35 @@
       listHtml = `<div class="intrinsics-list">${rows}</div>`;
     }
 
-    // Upload dropdown (role → device_id from online map)
-    const options = roleKeys
-      .filter(role => (onlineRoles[role] || {}).device_id)
-      .map(role => {
-        const info = onlineRoles[role];
-        const label = info.device_model
-          ? `${esc(role)} (${esc(info.device_model)})`
-          : esc(role);
-        return `<option value="${esc(info.device_id)}" data-role="${esc(role)}">${label}</option>`;
-      }).join('');
-    const selectHtml = options.length
-      ? `<select id="intrinsics-target">${options}</select>`
-      : `<select id="intrinsics-target" disabled><option>No phones online</option></select>`;
+    const dyn = document.getElementById('intrinsics-dynamic');
+    if (dyn) dyn.innerHTML = roleStripHtml + listHtml;
 
-    body.innerHTML = roleStripHtml + listHtml
-      + `<div class="intrinsics-upload">
-          <div class="intrinsics-upload-row">
-            ${selectHtml}
-            <input type="file" id="intrinsics-file" accept=".json,application/json">
-            <button type="button" class="btn small" id="intrinsics-upload-btn">Upload</button>
-          </div>
-          <div class="intrinsics-upload-hint">
-            Accepts <code>calibrate_intrinsics.py</code> output JSON
-            (<code>fx / fy / cx / cy / distortion_coeffs / image_width / image_height</code>).
-          </div>
-          <div id="intrinsics-upload-status" class="intrinsics-upload-status"></div>
-        </div>`;
+    // Patch the <select> in place: replace only its <option> children so
+    // the element identity (and the user's selectedIndex) survives.
+    const sel = document.getElementById('intrinsics-target');
+    if (sel) {
+      const optionsHtml = roleKeys
+        .filter(role => (onlineRoles[role] || {}).device_id)
+        .map(role => {
+          const info = onlineRoles[role];
+          const label = info.device_model
+            ? `${esc(role)} (${esc(info.device_model)})`
+            : esc(role);
+          return `<option value="${esc(info.device_id)}" data-role="${esc(role)}">${label}</option>`;
+        }).join('');
+      const prev = sel.value;
+      if (optionsHtml) {
+        sel.innerHTML = optionsHtml;
+        sel.disabled = false;
+        if (prev) {
+          const stillThere = Array.from(sel.options).some(o => o.value === prev);
+          if (stillThere) sel.value = prev;
+        }
+      } else {
+        sel.innerHTML = '<option>No phones online</option>';
+        sel.disabled = true;
+      }
+    }
   }
 
   async function tickIntrinsics() {
