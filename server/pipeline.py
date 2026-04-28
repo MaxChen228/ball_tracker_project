@@ -78,6 +78,15 @@ def detect_pitch(
             shape_gate=shape_gate,
             selector_tuning=selector_tuning,
         )
+    elif (hsv_range is not None or shape_gate is not None
+          or selector_tuning is not None):
+        # An engine was supplied AND HSV-flavoured knobs — these don't
+        # plumb through to a generic engine, so silently ignoring them
+        # would lie about which config actually ran. Caller picks one.
+        raise ValueError(
+            "detect_pitch: pass either `engine` or "
+            "`hsv_range`/`shape_gate`/`selector_tuning`, not both"
+        )
     logger.info("detect_pitch video=%s engine=%s", video_path.name, engine.name)
     out: list[FramePayload] = []
     # Temporal prior state — equal-velocity straight-line model that

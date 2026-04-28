@@ -16,6 +16,9 @@ the gate that enforces the production-write requirement.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+import cv2
 import numpy as np
 import pytest
 
@@ -37,8 +40,7 @@ def _frame_with_blue_circle() -> np.ndarray:
     HSVRange.default() targets yellow-green so we use the blue_ball
     preset HSV via a custom range."""
     img = np.zeros((1080, 1920, 3), dtype=np.uint8)
-    cv2_circle = __import__("cv2").circle
-    cv2_circle(img, (960, 540), 30, (255, 50, 0), -1)  # BGR blue
+    cv2.circle(img, (960, 540), 30, (255, 50, 0), -1)  # BGR blue
     return img
 
 
@@ -127,7 +129,7 @@ def test_detect_pitch_stamps_engine_name_on_every_frame():
 
     engine = HSVDetectionEngine(_blue_ball_hsv())
     out = detect_pitch(
-        video_path=__import__("pathlib").Path("/tmp/fake.mov"),
+        video_path=Path("/tmp/fake.mov"),
         video_start_pts_s=0.0,
         frame_iter=fake_iter,
         engine=engine,
@@ -136,6 +138,24 @@ def test_detect_pitch_stamps_engine_name_on_every_frame():
     for frame in out:
         assert frame.detection_engine == "hsv@1.0", (
             f"missing/wrong engine on frame: {frame!r}"
+        )
+
+
+def test_detect_pitch_rejects_conflicting_engine_and_hsv_args():
+    """Passing both `engine` and HSV-flavoured knobs is ambiguous — the
+    engine owns its config, so the knobs would be silently ignored.
+    Project rule: no silent fallback / no silent arg drop."""
+    def fake_iter(_path, _start):
+        yield (0.0, np.zeros((1080, 1920, 3), dtype=np.uint8))
+
+    engine = HSVDetectionEngine(_blue_ball_hsv())
+    with pytest.raises(ValueError, match="not both"):
+        detect_pitch(
+            video_path=Path("/tmp/fake.mov"),
+            video_start_pts_s=0.0,
+            frame_iter=fake_iter,
+            engine=engine,
+            hsv_range=HSVRange.default(),  # conflicts with engine
         )
 
 
@@ -148,7 +168,7 @@ def test_detect_pitch_default_engine_uses_hsv_with_supplied_range():
         yield (0.0, img)
 
     out = detect_pitch(
-        video_path=__import__("pathlib").Path("/tmp/fake.mov"),
+        video_path=Path("/tmp/fake.mov"),
         video_start_pts_s=0.0,
         frame_iter=fake_iter,
         hsv_range=_blue_ball_hsv(),
