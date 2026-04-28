@@ -24,7 +24,6 @@ def render_events_index_html(
     session: dict[str, Any] | None = None,
     calibrations: list[str] | None = None,
     arm_readiness: dict[str, Any] | None = None,
-    capture_mode: str = "camera_only",
     hsv_range: dict[str, int] | None = None,
     shape_gate: dict[str, float] | None = None,
     candidate_selector_tuning: dict[str, float] | None = None,
@@ -68,7 +67,7 @@ def render_events_index_html(
         "dashboard", devices, session, calibrations, sync, sync_cooldown_remaining_s, arm_readiness
     )
     session_html = _render_session_body(
-        session, capture_mode, devices, calibrations, arm_readiness
+        session, devices, calibrations, arm_readiness
     )
     hsv_html = _render_hsv_body(hsv_range, shape_gate, candidate_selector_tuning, chain_filter_params)
     tuning_html = _render_tuning_body(

@@ -42,13 +42,6 @@ def _look_at(pos: np.ndarray, target: np.ndarray, up: np.ndarray = np.array([0.0
     return R_wc, t_wc
 
 
-def _project(K: np.ndarray, R: np.ndarray, t: np.ndarray, P_world: np.ndarray):
-    P_cam = R @ P_world + t
-    theta_x = float(np.arctan2(P_cam[0], P_cam[2]))
-    theta_z = float(np.arctan2(P_cam[1], P_cam[2]))
-    return theta_x, theta_z
-
-
 def _project_pixels(K: np.ndarray, R: np.ndarray, t: np.ndarray, P_world: np.ndarray):
     """Project a world point to (undistorted) pixel coords (u, v)."""
     P_cam = R @ P_world + t

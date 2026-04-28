@@ -3,7 +3,6 @@
   let currentDevices = null;
   let currentSession = null;
   let currentCalibrations = null;
-  let currentCaptureMode = 'camera_only';
   let currentPreviewRequested = {};
   let currentSyncCommands = {};
   let currentCalibrationLastTs = {};
