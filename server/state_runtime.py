@@ -57,11 +57,6 @@ class RuntimeSettingsStore:
         self.sync_params: SyncParams = SyncParams()
         self.tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
         self.capture_height_px: int = 1080
-        # MOG2 background subtraction on server_post detection. Default
-        # True — it pays for itself on cluttered rigs by removing static
-        # yellow-green (buttons, door handles). A runtime kill-switch so
-        # operators can A/B a session against pure-HSV when debugging.
-        self.detection_bg_subtraction_enabled: bool = True
         self.load()
 
     def load(self) -> None:
@@ -90,9 +85,6 @@ class RuntimeSettingsStore:
                 self.tracking_exposure_cap = TrackingExposureCapMode(tec)
             except ValueError:
                 pass
-        bg_sub = obj.get("detection_bg_subtraction_enabled")
-        if isinstance(bg_sub, bool):
-            self.detection_bg_subtraction_enabled = bg_sub
         paths = obj.get("default_paths")
         if isinstance(paths, list):
             parsed: set[DetectionPath] = set()
@@ -123,7 +115,6 @@ class RuntimeSettingsStore:
                 "capture_height_px": self.capture_height_px,
                 "tracking_exposure_cap": self.tracking_exposure_cap.value,
                 "default_paths": sorted(p.value for p in self.default_paths),
-                "detection_bg_subtraction_enabled": self.detection_bg_subtraction_enabled,
             },
             indent=2,
         )
@@ -169,13 +160,6 @@ class RuntimeSettingsStore:
         self.heartbeat_interval_s = v
         self.persist()
         return v
-
-    def set_detection_bg_subtraction_enabled(self, enabled: bool) -> bool:
-        if not isinstance(enabled, bool):
-            raise ValueError("enabled must be bool")
-        self.detection_bg_subtraction_enabled = enabled
-        self.persist()
-        return enabled
 
     def set_tracking_exposure_cap(self, mode: TrackingExposureCapMode) -> TrackingExposureCapMode:
         self.tracking_exposure_cap = mode

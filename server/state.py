@@ -1254,14 +1254,6 @@ class State:
         with self._lock:
             return self._runtime_settings.set_mutual_sync_threshold(value)
 
-    def detection_bg_subtraction_enabled(self) -> bool:
-        with self._lock:
-            return self._runtime_settings.detection_bg_subtraction_enabled
-
-    def set_detection_bg_subtraction_enabled(self, enabled: bool) -> bool:
-        with self._lock:
-            return self._runtime_settings.set_detection_bg_subtraction_enabled(enabled)
-
     def sync_params(self) -> SyncParams:
         with self._lock:
             return self._runtime_settings.sync_params

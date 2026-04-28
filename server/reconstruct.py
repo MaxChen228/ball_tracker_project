@@ -89,10 +89,11 @@ class Ray:
     origin: list[float]
     endpoint: list[float]
     # Detection stream this ray was traced from. "server" = server-side
-    # HSV+MOG2 pipeline; "live" = iPhone-end detection streamed over WS
-    # during the active session. Viewer overlays them with different colors
-    # so operators can see where the two streams disagree while tuning
-    # constants.
+    # HSV pipeline (pure HSV + shape gate, byte-aligned with iOS live);
+    # "live" = iPhone-end detection streamed over WS during the active
+    # session. Viewer overlays them with different colors so operators
+    # can see where the two streams disagree — the diff reflects H.264
+    # vs BGRA input asymmetry, not algorithm differences.
     source: str = "server"
     # Chain-filter verdict for the frame this ray came from. "kept" / None
     # render normally; "rejected_flicker" / "rejected_jump" are drawn in
@@ -113,7 +114,7 @@ class Scene:
     # the legacy "authoritative" list (whichever path priority resolves to)
     # so existing viewer code keeps working. Per-path lets the UI offer a
     # toggle between live (iOS HSV streamed over WS) and server_post (server
-    # HSV+MOG2 on uploaded MOV) trajectories.
+    # HSV on uploaded MOV) trajectories.
     triangulated_by_path: dict[str, list[dict[str, float]]] = field(default_factory=dict)
     # Per-camera ground-plane trace: the (x, y, 0) intersection of every
     # ball-detected ray with the plate plane, ordered by anchor-relative

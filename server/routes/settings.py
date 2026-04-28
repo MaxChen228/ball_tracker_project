@@ -253,42 +253,6 @@ async def detection_chain_filter(request: Request):
     return payload
 
 
-@router.post("/detection/bg_subtraction")
-async def detection_bg_subtraction(request: Request):
-    """Toggle server_post MOG2 background subtraction.
-
-    Body accepts JSON `{"enabled": bool}` or form `enabled=true|false`.
-    No WS broadcast — this knob is server-side only (iOS `live` path has
-    no MOG2 regardless). Dashboard UI wiring is a follow-up; the
-    endpoint exists now so operators + scripts can flip it while
-    debugging detection deltas."""
-    from main import state, _wants_html
-
-    ctype = request.headers.get("content-type", "").lower()
-    if "application/json" in ctype:
-        body = await request.json()
-        raw = body.get("enabled")
-    else:
-        form = await request.form()
-        raw = form.get("enabled")
-    if isinstance(raw, bool):
-        enabled = raw
-    elif isinstance(raw, str):
-        low = raw.strip().lower()
-        if low in ("true", "1", "on", "yes"):
-            enabled = True
-        elif low in ("false", "0", "off", "no"):
-            enabled = False
-        else:
-            raise HTTPException(status_code=400, detail=f"invalid 'enabled': {raw!r}")
-    else:
-        raise HTTPException(status_code=400, detail="missing or invalid 'enabled'")
-    applied = state.set_detection_bg_subtraction_enabled(enabled)
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {"ok": True, "enabled": applied}
-
-
 @router.post("/settings/chirp_threshold")
 async def settings_chirp_threshold(request: Request):
     from main import state, device_ws, _settings_message_for, _wants_html
