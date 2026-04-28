@@ -143,7 +143,6 @@
     const pipesHtml = `<div class="ev-pipes">
       ${_pipeChip('L', liveStatus, pathCounts.live, pipeTitles.live, e.session_id, false)}
       ${_pipeChip('S', srvStatus, pathCounts.server_post, pipeTitles.server_post, e.session_id, inFlight)}
-      ${_gtPipeChip(e)}
     </div>`;
 
     const metricBits = [];
@@ -159,16 +158,6 @@
       actBits.push(_formBtn(`/sessions/${sid}/cancel_processing`, 'Cancel', 'warn'));
     } else if (!trashed && srvStatus !== 'done') {
       actBits.push(_formBtn(`/sessions/${sid}/run_server_post`, 'Run srv', 'ok'));
-    }
-    const hasGt = e.has_gt || {};
-    const hasVal = e.has_validation || {};
-    if (!trashed) {
-      actBits.push(_formBtn(`/sessions/${sid}/run_gt_labelling`, 'Run GT', 'accent', null, 'Queue SAM 3 GT labelling for both cams'));
-      const gtAll = Object.keys(hasGt).length && Object.values(hasGt).every(Boolean);
-      if (gtAll) actBits.push(_formBtn(`/sessions/${sid}/run_validation`, 'Validate', 'accent', null, 'Run three-way validation'));
-      if (Object.values(hasVal).some(Boolean)) {
-        actBits.push(`<a class="ev-btn accent" href="/report/${sid}" title="Open three-way validation report">Report</a>`);
-      }
     }
     if (trashed) {
       actBits.push(_formBtn(`/sessions/${sid}/restore`, 'Restore', 'ok'));
@@ -188,15 +177,6 @@
       </div>
       <div class="ev-row2">${pipesHtml}${metricsHtml}</div>
       ${actionsHtml}`;
-  }
-
-  function _gtPipeChip(e) {
-    const has = e.has_gt || {};
-    if (!Object.keys(has).length) return '';
-    const a = has.A ? '✓' : '—';
-    const b = has.B ? '✓' : '—';
-    const cls = (has.A && has.B) ? 'ev-pipe on' : 'ev-pipe';
-    return `<span class="${cls}" title="GT — SAM 3 ground truth (A·B)">G<b>${a}·${b}</b></span>`;
   }
 
   function _formBtn(action, label, variant, confirm, title) {

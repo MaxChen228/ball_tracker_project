@@ -146,9 +146,7 @@ def _pipe_chip(label: str, status: str, counts: dict[str, int] | None,
 
 
 def _pipes_html(e: dict[str, Any]) -> str:
-    """Live + server detection pipe chips. The GT existence chip lived
-    here in v1 but was moved to the dedicated /gt page (mini-plan v4):
-    events row is per-session recording state, GT is a global workflow."""
+    """Live + server detection pipe chips."""
     path_status = e.get("path_status") or {}
     path_counts = e.get("n_ball_frames_by_path") or {}
     bits = [
@@ -186,12 +184,6 @@ def _actions_html(e: dict[str, Any], sid: str,
         parts.append(_form_btn(f"/sessions/{sid}/cancel_processing", "Cancel", "warn"))
     elif not trashed and server_status != "done":
         parts.append(_form_btn(f"/sessions/{sid}/run_server_post", "Run srv", "ok"))
-
-    # GT / Validate / Report buttons live on /gt now (mini-plan v4
-    # first principle: events list = per-session recording records;
-    # GT + distillation are global workflows that don't belong here).
-    # The dashboard nav has a [GT →] tab; per-session GT controls are
-    # in the /gt session detail header.
 
     if trashed:
         parts.append(_form_btn(

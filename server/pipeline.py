@@ -24,8 +24,7 @@ import numpy as np
 
 from chain_filter import ChainFilterParams, annotate as chain_filter_annotate
 from candidate_selector import CandidateSelectorTuning
-from detection import HSVRange, ShapeGate
-from detection_engine import DetectionEngine, HSVDetectionEngine
+from detection import HSVRange, ShapeGate, detect_ball_with_candidates
 from schemas import FramePayload
 from video import iter_frames
 
@@ -53,41 +52,19 @@ def detect_pitch(
     selector_tuning: "CandidateSelectorTuning | None" = None,
     chain_filter_params: ChainFilterParams | None = None,
     progress: Callable[[int], None] | None = None,
-    engine: DetectionEngine | None = None,
 ) -> list[FramePayload]:
-    """Decode `video_path`, run ball detection via `engine` on every frame,
-    and return one `FramePayload` per decoded sample. `timestamp_s` is the
+    """Decode `video_path`, run HSV ball detection on every frame, and
+    return one `FramePayload` per decoded sample. `timestamp_s` is the
     absolute iOS session-clock PTS (same space as `sync_anchor_timestamp_s`).
-    `px` / `py` are filled when the post-filter blob matches the engine's
-    gates.
+    `px` / `py` are filled when the post-filter blob matches HSV + area +
+    shape.
 
-    Default engine is `HSVDetectionEngine` constructed from the supplied
-    `hsv_range` + `shape_gate` + `selector_tuning`; pass an explicit
-    `engine` to override (e.g. ML model). When `engine` is provided the
-    three legacy knobs are ignored — the engine owns its own configuration.
-
-    Algorithm of the default HSV engine is byte-for-byte aligned with the
-    iOS `live` HSV path so a diff between the two reflects the H.264 vs
-    BGRA input asymmetry (chroma 4:2:0 + DCT quantization), not the
-    algorithm itself.
+    Algorithm is byte-for-byte aligned with the iOS `live` path so a
+    diff between the two reflects the H.264 vs BGRA input asymmetry
+    (chroma 4:2:0 + DCT quantization), not the algorithm itself.
     """
-    if engine is None:
-        hsv = hsv_range if hsv_range is not None else HSVRange.from_env()
-        engine = HSVDetectionEngine(
-            hsv_range=hsv,
-            shape_gate=shape_gate,
-            selector_tuning=selector_tuning,
-        )
-    elif (hsv_range is not None or shape_gate is not None
-          or selector_tuning is not None):
-        # An engine was supplied AND HSV-flavoured knobs — these don't
-        # plumb through to a generic engine, so silently ignoring them
-        # would lie about which config actually ran. Caller picks one.
-        raise ValueError(
-            "detect_pitch: pass either `engine` or "
-            "`hsv_range`/`shape_gate`/`selector_tuning`, not both"
-        )
-    logger.info("detect_pitch video=%s engine=%s", video_path.name, engine.name)
+    hsv = hsv_range if hsv_range is not None else HSVRange.from_env()
+    logger.info("detect_pitch video=%s", video_path.name)
     out: list[FramePayload] = []
     # Temporal prior state — equal-velocity straight-line model that
     # carries the ball's last known (position, velocity). Reset to None
@@ -110,11 +87,13 @@ def detect_pitch(
             absolute_pts_s - prev_timestamp_s
             if prev_timestamp_s is not None else None
         )
-        winner, blobs = engine.detect(
-            bgr,
+        winner, blobs = detect_ball_with_candidates(
+            bgr, hsv,
             prev_position=prev_position,
             prev_velocity=prev_velocity,
             dt=dt,
+            shape_gate=shape_gate,
+            selector_tuning=selector_tuning,
         )
         if winner is None:
             out.append(
@@ -125,7 +104,6 @@ def detect_pitch(
                     py=None,
                     ball_detected=False,
                     candidates=blobs or None,
-                    detection_engine=engine.name,
                 )
             )
             # Temporal prior resets on miss — extrapolating from a stale
@@ -143,7 +121,6 @@ def detect_pitch(
                     py=py,
                     ball_detected=True,
                     candidates=blobs,
-                    detection_engine=engine.name,
                 )
             )
             # Update velocity from the previous hit if we have one; on
@@ -161,7 +138,8 @@ def detect_pitch(
     ball_frames = sum(1 for f in out if f.ball_detected)
     chain_filter_annotate(out, chain_filter_params or ChainFilterParams())
     logger.info(
-        "detection video=%s engine=%s frames=%d ball=%d",
-        video_path.name, engine.name, len(out), ball_frames,
+        "detection video=%s frames=%d ball=%d hsv=h[%d-%d]s[%d-%d]v[%d-%d]",
+        video_path.name, len(out), ball_frames,
+        hsv.h_min, hsv.h_max, hsv.s_min, hsv.s_max, hsv.v_min, hsv.v_max,
     )
     return out
