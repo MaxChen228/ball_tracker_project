@@ -109,16 +109,22 @@ static void reportIfDue(TimingRing &ring, const char *tag) {
 // ---------------------------------------------------------------------------
 // Shared cv::Mat scratch buffers.
 //
-// We intentionally do NOT merge BGRA→HSV into one cvtColor call — OpenCV
-// has no COLOR_BGRA2HSV flag, so we go BGRA→BGR→HSV (two passes). We tried
-// the Accelerate/vImage route (vImageConvert_BGRA8888toRGB888 + manual HSV)
-// but rejected it to avoid introducing a new framework link dependency in
-// ball_tracker.xcodeproj (only OpenCV is linked today). Instead we reuse
-// cv::Mat buffers across calls so the cvtColor writes land in pre-allocated
-// memory — Mat::create is a no-op when dims + type already match.
+// Production capture is NV12 (4:2:0 bi-planar Y + UV) per
+// CameraCaptureRuntime — that's what we ask AVCaptureSession for so the
+// chroma resolution matches what server_post sees post H.264 decode.
+// `mapPixelBufferToBGR` also accepts BGRA so unit tests can keep
+// constructing BGRA fixtures without taking the YUV conversion path.
+//
+// `nv12` holds the contiguous (h*1.5, w) Y+UV buffer that
+// cv::cvtColor(COLOR_YUV2BGR_NV12) consumes (the planes are NOT
+// guaranteed contiguous in CVPixelBuffer, so we copy them in). `bgr` is
+// the converted output that downstream HSV / shape-gate code reads.
+// `Mat::create` is a no-op when dims + type match across frames so the
+// allocations are amortized.
 // ---------------------------------------------------------------------------
 namespace {
 struct CVScratch {
+    cv::Mat nv12;
     cv::Mat bgr;
     cv::Mat hsv;
     cv::Mat mask;
@@ -128,7 +134,7 @@ struct CVScratch {
 };
 } // namespace
 
-/// Core HSV + CC + shape gate pass, operating on an already-mapped BGRA
+/// Core HSV + CC + shape gate pass, operating on an already-mapped BGR
 /// cv::Mat (possibly a ROI slice). Writes intermediates into the provided
 /// scratch buffers — the caller owns their lifetime, which lets us reuse
 /// them across frames on the stateful path and across concurrent calls
@@ -137,7 +143,7 @@ struct CVScratch {
 /// `offsetX` / `offsetY` are added to the returned centroid so callers can
 /// pass a ROI crop and still get image-coordinate output.
 static BTBallDetection *_Nullable detectBallCoreScratch(
-    const cv::Mat &bgra,
+    const cv::Mat &bgr,
     int hMin, int hMax, int sMin, int sMax, int vMin, int vMax,
     double aspectMin, double fillMin,
     CVScratch &scratch,
@@ -148,8 +154,7 @@ static BTBallDetection *_Nullable detectBallCoreScratch(
 #endif
 ) {
     BT_TIMING_START(tHsv);
-    cv::cvtColor(bgra, scratch.bgr, cv::COLOR_BGRA2BGR);
-    cv::cvtColor(scratch.bgr, scratch.hsv, cv::COLOR_BGR2HSV);
+    cv::cvtColor(bgr, scratch.hsv, cv::COLOR_BGR2HSV);
 
     cv::inRange(scratch.hsv,
                 cv::Scalar(hMin, sMin, vMin),
@@ -207,15 +212,14 @@ static BTBallDetection *_Nullable detectBallCoreScratch(
 /// width/height of the largest-area blob — used by the stateful path
 /// to update its ROI radius hint after a multi-candidate hit.
 static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
-    const cv::Mat &bgra,
+    const cv::Mat &bgr,
     int hMin, int hMax, int sMin, int sMax, int vMin, int vMax,
     double aspectMin, double fillMin,
     CVScratch &scratch,
     double offsetX, double offsetY,
     int *_Nullable outLargestW, int *_Nullable outLargestH
 ) {
-    cv::cvtColor(bgra, scratch.bgr, cv::COLOR_BGRA2BGR);
-    cv::cvtColor(scratch.bgr, scratch.hsv, cv::COLOR_BGR2HSV);
+    cv::cvtColor(bgr, scratch.hsv, cv::COLOR_BGR2HSV);
     cv::inRange(scratch.hsv,
                 cv::Scalar(hMin, sMin, vMin),
                 cv::Scalar(hMax, sMax, vMax),
@@ -260,26 +264,73 @@ static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
     return out;
 }
 
-/// Lock a CVPixelBuffer for read + wrap its base address in a zero-copy
-/// cv::Mat. Returns false when the buffer can't be mapped (nil, wrong
-/// pixel format, or no base address). Caller MUST call
-/// CVPixelBufferUnlockBaseAddress before the returned Mat goes out of scope.
-static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
+/// Convert a CVPixelBuffer to BGR.
+///
+/// Production capture is NV12 (4:2:0 bi-planar Y + UV) per
+/// CameraCaptureRuntime. Tests construct BGRA buffers directly. This
+/// function accepts both — the BGRA path is `BGRA→BGR` (cvtColor) and
+/// the NV12 path is `(Y plane + UV plane) memcpy → cvtColor(NV12→BGR)`.
+///
+/// `nv12Scratch` (caller-owned) holds the contiguous (h*1.5, w) Y+UV
+/// buffer needed by cv::cvtColor's NV12 mode — CVPixelBuffer's planes
+/// are not guaranteed contiguous so we copy them in. Reused across
+/// frames so the allocation is amortized. Unused on the BGRA path.
+///
+/// `out` ends up as a `CV_8UC3` BGR Mat OWNING its data — callers do
+/// NOT need to balance an unlock; the unlock happens inside this
+/// function once the conversion has completed.
+///
+/// Note on color matrix: cv::cvtColor with `COLOR_YUV2BGR_NV12` uses
+/// BT.601 coefficients; iPhone video capture tags streams as BT.709.
+/// The hue offset between the two on saturated colours is small (~3°)
+/// — fine for our HSV-thresholded blue ball but flagged here in case
+/// the rig moves to a tone-sensitive use case later. Switch to
+/// libyuv's `H420ToARGB` if precise BT.709 conversion is required.
+static bool mapPixelBufferToBGR(
+    CVPixelBufferRef pixelBuffer,
+    cv::Mat &nv12Scratch,
+    cv::Mat &out
+) {
     if (!pixelBuffer) { return false; }
-    if (CVPixelBufferGetPixelFormatType(pixelBuffer) != kCVPixelFormatType_32BGRA) {
-        return false;
-    }
+    const OSType fmt = CVPixelBufferGetPixelFormatType(pixelBuffer);
     CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-    const size_t w = CVPixelBufferGetWidth(pixelBuffer);
-    const size_t h = CVPixelBufferGetHeight(pixelBuffer);
-    const size_t row = CVPixelBufferGetBytesPerRow(pixelBuffer);
-    void *base = CVPixelBufferGetBaseAddress(pixelBuffer);
-    if (!base) {
-        CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-        return false;
+    bool ok = false;
+    if (fmt == kCVPixelFormatType_32BGRA) {
+        const size_t w = CVPixelBufferGetWidth(pixelBuffer);
+        const size_t h = CVPixelBufferGetHeight(pixelBuffer);
+        const size_t row = CVPixelBufferGetBytesPerRow(pixelBuffer);
+        void *base = CVPixelBufferGetBaseAddress(pixelBuffer);
+        if (base) {
+            cv::Mat bgra((int)h, (int)w, CV_8UC4, base, row);
+            cv::cvtColor(bgra, out, cv::COLOR_BGRA2BGR);
+            ok = true;
+        }
+    } else if (fmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+               fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
+        const size_t w = CVPixelBufferGetWidth(pixelBuffer);
+        const size_t h = CVPixelBufferGetHeight(pixelBuffer);
+        const size_t yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
+        const size_t uvStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1);
+        const uint8_t *yBase = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
+        const uint8_t *uvBase = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1);
+        if (yBase && uvBase) {
+            nv12Scratch.create((int)(h + h / 2), (int)w, CV_8UC1);
+            // Copy Y plane (h rows of `w` bytes each).
+            for (size_t y = 0; y < h; ++y) {
+                memcpy(nv12Scratch.ptr((int)y), yBase + y * yStride, w);
+            }
+            // Copy UV plane (h/2 rows of interleaved CbCr, `w` bytes
+            // each — same width as Y because UV is sub-sampled 2x in
+            // both axes but interleaved).
+            for (size_t y = 0; y < h / 2; ++y) {
+                memcpy(nv12Scratch.ptr((int)(h + y)), uvBase + y * uvStride, w);
+            }
+            cv::cvtColor(nv12Scratch, out, cv::COLOR_YUV2BGR_NV12);
+            ok = true;
+        }
     }
-    out = cv::Mat((int)h, (int)w, CV_8UC4, base, row);
-    return true;
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+    return ok;
 }
 
 // MARK: - BTBallDetection
@@ -338,9 +389,6 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
                                         aspectMin:(double)aspectMin
                                           fillMin:(double)fillMin
 {
-    cv::Mat bgra;
-    if (!mapBGRAPixelBuffer(pixelBuffer, bgra)) { return nil; }
-
     // thread_local scratch: a leftover from when the stateless path was
     // dispatched onto a concurrent worker pool. Post-Phase-3 the live
     // path uses BTStatefulBallDetector on a serial queue, but this
@@ -348,11 +396,13 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
     // fixtures), so per-thread scratch keeps it allocator-cheap on
     // whichever thread happens to call.
     thread_local CVScratch scratch;
+    if (!mapPixelBufferToBGR(pixelBuffer, scratch.nv12, scratch.bgr)) { return nil; }
+
 #if BT_DETECTOR_TIMING
     double hsvMs = 0, ccMs = 0;
 #endif
     BTBallDetection *detection = detectBallCoreScratch(
-        bgra, hMin, hMax, sMin, sMax, vMin, vMax,
+        scratch.bgr, hMin, hMax, sMin, sMax, vMin, vMax,
         aspectMin, fillMin,
         scratch, /*offsetX=*/0, /*offsetY=*/0,
         /*outBestW=*/nullptr, /*outBestH=*/nullptr
@@ -360,7 +410,6 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
         , &hsvMs, &ccMs
 #endif
     );
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 
 #if BT_DETECTOR_TIMING
     // ConcurrentDetectionPool has its own lock; the ring buffer here is
@@ -379,15 +428,13 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
                                                        aspectMin:(double)aspectMin
                                                          fillMin:(double)fillMin
 {
-    cv::Mat bgra;
-    if (!mapBGRAPixelBuffer(pixelBuffer, bgra)) { return @[]; }
     thread_local CVScratch scratch;
+    if (!mapPixelBufferToBGR(pixelBuffer, scratch.nv12, scratch.bgr)) { return @[]; }
     NSArray<BTBallDetection *> *cands = detectAllCandidatesScratch(
-        bgra, hMin, hMax, sMin, sMax, vMin, vMax, aspectMin, fillMin, scratch,
+        scratch.bgr, hMin, hMax, sMin, sMax, vMin, vMax, aspectMin, fillMin, scratch,
         /*offsetX=*/0.0, /*offsetY=*/0.0,
         /*outLargestW=*/nullptr, /*outLargestH=*/nullptr
     );
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
     return cands;
 }
 
@@ -442,24 +489,21 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
 }
 
 - (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer {
-    cv::Mat bgra;
-    if (!mapBGRAPixelBuffer(pixelBuffer, bgra)) { return nil; }
+    if (!mapPixelBufferToBGR(pixelBuffer, _scratch.nv12, _scratch.bgr)) { return nil; }
 
     BTBallDetection *result = nil;
     @try {
-        result = [self detectInBGRA:bgra];
+        result = [self detectInBGR:_scratch.bgr];
     } @catch (NSException *e) {
         NSLog(@"BallDetector: exception during detection: %@", e);
         result = nil;
     }
-
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
     return result;
 }
 
-- (nullable BTBallDetection *)detectInBGRA:(const cv::Mat &)bgra {
-    const int W = bgra.cols;
-    const int H = bgra.rows;
+- (nullable BTBallDetection *)detectInBGR:(const cv::Mat &)bgr {
+    const int W = bgr.cols;
+    const int H = bgr.rows;
 
 #if BT_DETECTOR_TIMING
     double hsvMs = 0, ccMs = 0;
@@ -478,7 +522,7 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
         y0 = std::max(0, y1 - side);
         if (x1 > x0 && y1 > y0) {
             cv::Rect roi(x0, y0, x1 - x0, y1 - y0);
-            cv::Mat crop = bgra(roi);
+            cv::Mat crop = bgr(roi);
             int bestW = 0, bestH = 0;
             BTBallDetection *hit = detectBallCoreScratch(
                 crop, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
@@ -509,7 +553,7 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
     // --- Full-frame pass -----------------------------------------------
     int bestW = 0, bestH = 0;
     BTBallDetection *hit = detectBallCoreScratch(
-        bgra, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
+        bgr, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
         _aspectMin, _fillMin,
         _scratch, /*offsetX=*/0, /*offsetY=*/0,
         &bestW, &bestH
@@ -543,24 +587,21 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
 }
 
 - (NSArray<BTBallDetection *> *)detectAllCandidatesInPixelBuffer:(CVPixelBufferRef)pixelBuffer {
-    cv::Mat bgra;
-    if (!mapBGRAPixelBuffer(pixelBuffer, bgra)) { return @[]; }
+    if (!mapPixelBufferToBGR(pixelBuffer, _scratch.nv12, _scratch.bgr)) { return @[]; }
 
     NSArray<BTBallDetection *> *result = @[];
     @try {
-        result = [self detectAllCandidatesInBGRA:bgra];
+        result = [self detectAllCandidatesInBGR:_scratch.bgr];
     } @catch (NSException *e) {
         NSLog(@"BallDetector: exception during multi-candidate detection: %@", e);
         result = @[];
     }
-
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
     return result;
 }
 
-- (NSArray<BTBallDetection *> *)detectAllCandidatesInBGRA:(const cv::Mat &)bgra {
-    const int W = bgra.cols;
-    const int H = bgra.rows;
+- (NSArray<BTBallDetection *> *)detectAllCandidatesInBGR:(const cv::Mat &)bgr {
+    const int W = bgr.cols;
+    const int H = bgr.rows;
 
     // --- ROI pass, if we have a prior hit ------------------------------
     if (_hasPrev && _lastHitRadius > 0.0f) {
@@ -574,7 +615,7 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
         y0 = std::max(0, y1 - side);
         if (x1 > x0 && y1 > y0) {
             cv::Rect roi(x0, y0, x1 - x0, y1 - y0);
-            cv::Mat crop = bgra(roi);
+            cv::Mat crop = bgr(roi);
             int largestW = 0, largestH = 0;
             NSArray<BTBallDetection *> *cands = detectAllCandidatesScratch(
                 crop, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
@@ -599,7 +640,7 @@ static bool mapBGRAPixelBuffer(CVPixelBufferRef pixelBuffer, cv::Mat &out) {
     // --- Full-frame pass -----------------------------------------------
     int largestW = 0, largestH = 0;
     NSArray<BTBallDetection *> *cands = detectAllCandidatesScratch(
-        bgra, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
+        bgr, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
         _aspectMin, _fillMin,
         _scratch,
         /*offsetX=*/0.0, /*offsetY=*/0.0,
