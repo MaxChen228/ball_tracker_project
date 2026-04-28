@@ -163,7 +163,7 @@
       source_width_px: Math.round(w),
       source_height_px: Math.round(h),
       intrinsics: {
-        fx, fz: fy, cx, cy,
+        fx, fy, cx, cy,
         distortion: (dist && dist.length === 5) ? dist.map(Number) : null,
       },
       rms_reprojection_px: typeof parsed.rms_reprojection_error_px === 'number'
