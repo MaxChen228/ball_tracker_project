@@ -103,6 +103,15 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                 # on the next successful run. Empty dict = no pending
                 # failure. Surfaced as an inline chip on the events row.
                 "server_post_errors": state._processing.errors_for(sid),
+                # GT pipeline status per cam (existence-only — cheap I/O):
+                #   has_gt[cam]            True iff data/gt/sam3/session_<sid>_<cam>.json exists
+                #   has_validation[cam]    True iff data/gt/validation/session_<sid>_<cam>.json exists
+                # The render layer uses these to gate the "Run GT" /
+                # "Validate" buttons + the G|✓·✓ path chip. Frame counts
+                # are not loaded per tick — the report page reads the
+                # JSON contents on demand.
+                "has_gt": _gt_existence(state, sid, "sam3", cams_present),
+                "has_validation": _gt_existence(state, sid, "validation", cams_present),
                 "ballistic_speed_mph": ballistic_speed_mph,
                 "ballistic_g_fit": ballistic_g_fit,
             }
@@ -172,6 +181,21 @@ def _snapshot_sessions_locked(
                 )
             )
     return snapshots
+
+
+def _gt_existence(
+    state: "State", sid: str, kind: str, cams_present: list[str]
+) -> dict[str, bool]:
+    """Cheap existence-only check for GT artefacts. `kind` ∈ {"sam3",
+    "validation"} resolves to the right subdirectory under data/gt/.
+    Returns a {cam: True/False} map keyed by every cam that appears in
+    this session — so the renderer can show G|✓·— style chips when only
+    one cam has been labelled."""
+    base = state.data_dir / "gt" / kind
+    out: dict[str, bool] = {}
+    for cam in cams_present:
+        out[cam] = (base / f"session_{sid}_{cam}.json").is_file()
+    return out
 
 
 def _latest_pitch_mtime(state: "State", cams_present: list[str], sid: str) -> float | None:
