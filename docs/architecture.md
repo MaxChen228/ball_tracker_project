@@ -1,0 +1,45 @@
+# Architecture
+
+## System overview
+
+**iOS-decoupling status (Phase 1-5 complete)**: the dashboard at `/` is the sole control surface. Per-session operator flow requires zero iPhone touches: enable preview per cam → **Auto calibrate** (server-side ArUco) → either dashboard **Calibrate time** (legacy single-listener chirp trigger) or `/setup` **Run mutual sync** (two-device chirp exchange) → **Arm session** → throw ball → event auto-captured. iOS UI is display-only status (`AutoCalibrationViewController` kept as field fallback; no local time-sync button; no Manual 5-handle path). Per-camera intrinsics + homography live in `data/calibrations/<cam>.json` (authoritative — iOS no longer echoes on pitch uploads). HSV / chirp threshold / heartbeat interval / extended markers are server-persisted and pushed over the WS settings path.
+
+Two-iPhone stereo tracker. The default HSV targets a yellow-green tennis ball; the rig actually runs a deep-blue ball via the `blue_ball` preset (`data/hsv_range.json`). Presets: `tennis` / `blue_ball` + custom range available from the dashboard's DETECTION · HSV card. Each phone runs the iOS app in role `A` or `B`, aimed at home plate. Both phones share time by jointly detecting an **audio chirp** (played from a third device) as a common sync anchor. The server pairs A/B frames within an 8 ms window of anchor-relative time and triangulates 3D positions via ray-midpoint.
+
+## Two detection paths (live always on, server_post on-demand)
+
+Every armed session runs the `live` path unconditionally and archives the MOV for every camera — `Session.paths` snapshots `{live}` at arm time; `server_post` is triggered post-hoc on whichever session the operator cares about via the events-row **Run server** button. The legacy `CaptureMode` enum + `capture_mode` wire field are both gone (#85 phase 1).
+
+- **`live`** (always on) — iOS runs HSV + connectedComponents + shape-gate per-frame on raw BGRA and streams each `{type: "frame", ...}` over `/ws/device/{cam}`. `live_pairing.py` buffers A/B arrivals and triangulates incrementally; viewer / dashboard see points before the session has ended.
+- **`server_post`** (on-demand) — iOS *always* records an H.264 MOV (PR61 made this unconditional; `CameraViewController.captureOutput` bootstraps `ClipRecorder` on first sample regardless of the arm message's `paths`). The MOV is uploaded to `data/videos/session_{sid}_{cam}.mov` via `POST /pitch`. Server-side HSV detection only runs when the operator hits `POST /sessions/{sid}/run_server_post` from the events list (or the CLI `reprocess_sessions.py --session s_xxxx`). 20–60 MB per camera on disk; 8–20 s detection cost paid on-demand.
+
+The `ios_post` path (iOS re-decoded MOV locally, uploaded via `/pitch_analysis`) was removed — `live` fully subsumes it with lower latency and no tmp MOV churn.
+
+HSV / area / shape constants are kept lock-step across both — see the header comment in `ball_tracker/BallDetector.mm` and the shared `server/detection.py` + `server/pipeline.py`. **Algorithms are byte-aligned** (HSV → connectedComponents → shape gate → temporal selector); the legacy MOG2 + 3×3 CLOSE prepass on `server_post` was removed so a single set of HSV / shape_gate parameters applies uniformly to both paths. The remaining divergence is **input asymmetry only**: BGRA 4:4:4 (iOS sensor direct) vs H.264-decoded BGR with chroma 4:2:0 + DCT quantization (server_post sees the encoded MOV). This is a physical-layer gap, not an algorithm gap. Viewer overlays each path independently (two pill sets, two A/B strip rows), so a path that found the ball where the other missed reads as a visible delta — and that delta now isolates the input gap rather than mixing algorithm + input differences.
+
+## Components
+
+- **iOS app** — `ball_tracker/` (Swift + Obj-C++, UIKit). Xcode project at `ball_tracker.xcodeproj`. Bundle ID `com.Max0228.ball-tracker`, iOS 26.2 target, Swift 5.0. `LiveFrameDispatcher` streams per-frame detections over WS and `ClipRecorder` writes the MOV — both run unconditionally on every armed session. `currentSessionPaths` is updated dynamically from the server's WS arm message via `CameraCommandRouter.applyPushedPaths`; `CameraRecordingWorkflow` reads it to gate the `waitForDetectionDrain` step (only fires when paths contains `.live`), so it is real behaviour state, not vestige.
+- **Server** — `server/` (FastAPI + `python-multipart` + PyAV + OpenCV). `uv`-managed venv at `server/.venv` (Python 3.13). In-memory `State` plus `data/` persistence (`pitches/`, `results/`, `videos/`); a restart reloads enriched pitch JSONs (both frame buckets preserved) and re-triangulates. `POST /pitch` is multipart; the `video` part arrives on every real iOS upload (post-PR61 ClipRecorder is unconditional), though tests can omit it when supplying pre-computed `frames_server_post` for synthetic scenes. `/pitch` just archives the MOV; server-side HSV detection is on-demand via `POST /sessions/{sid}/run_server_post`. Live frames arrive independently over `WS /ws/device/{cam}` and are paired by `live_pairing.LivePairingSession` without touching `/pitch`. Events + viewer tag each historical session by looking for a MOV on disk under `data/videos/session_<sid>_*`.
+
+## Dashboard
+
+The root URL `http://<server>:8765/` is the **dashboard** — a three-zone layout styled after the `PHYSICS_LAB` design system (warm-neutral palette, JetBrains Mono + Noto Sans TC, 1 px borders replacing shadows):
+
+- 52 px top nav: `BALL_TRACKER` brand + live status strip (`Devices n · Cal n · Sync n/n`). Three chips only; no editorial headline.
+- 440 px left sidebar: **Session** (`armed`/`idle` chip + `Arm` / `Stop` + `Quick chirp` + per-cam sync LEDs), **Detection HSV**, **Capture Tuning**, **Events**. The old Session Monitor card (per-cam fps / frames / live-pairs panel) was retired — during a live stream the operator only watches the 3D canvas; fps now surfaces per-path in the `/viewer/{sid}` cam cards as `L|n/m N fps` (effective fps = frames / duration).
+- full-bleed right canvas: live Plotly 3D scene showing the plate mesh and whichever cameras have a calibration persisted — even before any pitch is uploaded. Drag to orbit.
+
+Events rows are single-line: `sid · L|n · S|n · [status chip] · [Run srv | Cancel] · [Trash]`. "Run srv" POSTs to `/sessions/{sid}/run_server_post` which fires the same background detection as the legacy auto-path (MOVs are always archived now, so any session with a clip is eligible). The same button also lives in the viewer's top-right nav when the session hasn't had server detection run yet — displays `[server done]` chip instead once frames_server_post is populated.
+
+Hydration: initial SSR paints every panel + canvas, then three JS ticks keep everything fresh — `/status` every 1 s (devices/session/nav strip), `/calibration/state` every 5 s (canvas repaint via `Plotly.react`), `/events` every 5 s (sidebar event list). Plotly.js is loaded once from CDN at the top of the document and shared across the canvas and `/viewer/{session_id}`; there is no build step. Arm flips the server into an armed session and starts dispatching `{cam: "arm"}` to online devices via `/status`; the first uploaded pitch auto-ends it (one-shot).
+
+## Dashboard control plane
+
+**Single-lock model**: `state._lock` is a non-reentrant `Lock` that serialises all store access (~40 `with self._lock` blocks). Per-store facades on `State` (settings / calibration / runtime) are synchronisation boundaries, not vestigial pass-through — the underlying stores are deliberately not thread-safe in isolation, so deleting a facade and pointing callers at the inner store would silently lose synchronisation. `_marker_registry` / `_preview` carry their own internal locks separate from `_lock`. See the `class State` docstring in `state.py`.
+
+`State` owns three pieces of in-memory state (all reset on server restart):
+
+- **Device registry** (`_devices`) — `{camera_id: Device(last_seen_at)}`, updated by WS `hello` / `heartbeat` messages. `online_devices()` filters to beats within 3 s. Clock is injectable (`time_fn` ctor arg) so tests age devices in microseconds.
+- **Session** (`_current_session` + `_last_ended_session`) — at most one armed `Session` at a time with a generated `s_xxxxxxxx` id, a `max_duration_s` auto-timeout (default 60 s), a snapshotted `paths: set[DetectionPath]` (taken at `POST /sessions/arm`, immune to mid-session dashboard edits), and a list of `camera_id`s uploaded during its armed window. `arm_session` is idempotent (double-click safe); `cancel_session` is 409 on idle for API callers but always 303 for HTML form callers so the dashboard button never looks broken. `current_session()` lazily applies the timeout on read — no background task.
+- **Command dispatch** (`commands_for_devices()`) — derives `{camera_id: "arm"|"disarm"}` from session state: `arm` while armed, `disarm` for `_DISARM_ECHO_S` (5 s) after any end. The live iPhone path consumes these via WS `arm` / `disarm`; `/status` mirrors them for dashboard observability.
