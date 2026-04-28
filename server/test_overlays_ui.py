@@ -40,6 +40,41 @@ def test_dashboard_injects_overlays_runtime():
     assert overlays_idx < main_idx, "overlays runtime must load before dashboard JS IIFE"
 
 
+def test_setup_injects_overlays_runtime():
+    """`/setup` shares the dashboard JS bundle, which references
+    window.BallTrackerOverlays at module-eval time (30_traces.js). A
+    missing injection crashes the IIFE before any click handler is wired,
+    silently disabling every button on the page (PREVIEW, Run auto-cal,
+    etc). Guard the injection so the regression that prompted this test
+    can't recur."""
+    main.state.reset()
+    with TestClient(app) as client:
+        r = client.get("/setup")
+    assert r.status_code == 200
+    assert_overlays_present(r.text)
+    body = r.text
+    overlays_idx = body.find("BallTrackerOverlays")
+    main_idx = body.find("=== boot")
+    assert overlays_idx > 0 and main_idx > 0
+    assert overlays_idx < main_idx, "overlays runtime must load before dashboard JS IIFE"
+
+
+def test_sync_injects_overlays_runtime():
+    """`/sync` shares the same dashboard JS bundle as `/setup` and `/`,
+    so the overlays runtime must be present for any of its buttons to
+    work. Same regression class as test_setup_injects_overlays_runtime."""
+    main.state.reset()
+    with TestClient(app) as client:
+        r = client.get("/sync")
+    assert r.status_code == 200
+    assert_overlays_present(r.text)
+    body = r.text
+    overlays_idx = body.find("BallTrackerOverlays")
+    main_idx = body.find("=== boot")
+    assert overlays_idx > 0 and main_idx > 0
+    assert overlays_idx < main_idx, "overlays runtime must load before dashboard JS IIFE"
+
+
 def test_viewer_injects_overlays_runtime():
     """Hit /viewer/{sid} via TestClient — the runtime script must be in
     the rendered HTML so dashboard + viewer share strike/fit/speed flags."""

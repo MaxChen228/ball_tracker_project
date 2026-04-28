@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from cam_view_ui import CAM_VIEW_RUNTIME_JS
+from overlays_ui import OVERLAYS_RUNTIME_JS
 from render_dashboard_client import _JS_TEMPLATE as _DASHBOARD_JS_TEMPLATE
 from render_dashboard_devices import _render_device_rows
 from render_dashboard_style import _CSS
@@ -52,6 +53,7 @@ def render_setup_html(
         "</div>"
         "</main>"
         f"<script>{CAM_VIEW_RUNTIME_JS}</script>"
+        f"<script>{OVERLAYS_RUNTIME_JS}</script>"
         f"<script>{_DASHBOARD_JS_TEMPLATE}</script>"
         "</body></html>"
     )
@@ -107,6 +109,7 @@ def render_sync_html(
         '<pre class="sync-log" id="sync-log"></pre>'
         "</div>"
         "</main>"
+        f"<script>{OVERLAYS_RUNTIME_JS}</script>"
         f"<script>{_DASHBOARD_JS_TEMPLATE}</script>"
         f"<script>{sync_js}</script>"
         "</body></html>"
