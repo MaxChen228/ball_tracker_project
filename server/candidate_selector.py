@@ -80,7 +80,7 @@ class Candidate:
     area_score: float
 
 
-def select_best_candidate(
+def score_candidates(
     candidates: list[Candidate],
     *,
     prev_position: tuple[float, float] | None = None,
@@ -90,17 +90,20 @@ def select_best_candidate(
     w_area: float,
     w_dist: float,
     dist_cost_sat_radii: float,
-) -> Candidate | None:
-    """Pick the best candidate. See module docstring for the scoring.
+) -> list[float]:
+    """Compute the selector cost for every candidate, in input order.
 
-    Returns `None` iff `candidates` is empty.
+    With temporal prior: `cost = w_area·(1-area_score) + w_dist·dist_cost`.
+    Without (first frame, post-miss, dt invalid): pure area fallback,
+    `cost = 1 - area_score` — equivalent ranking to "largest area wins"
+    because area_score = area / max_area.
 
-    The three scoring weights (`w_area`, `w_dist`, `dist_cost_sat_radii`)
-    are required keyword-only args — no module-level defaults so callers
-    cannot silently inherit a stale magic number.
+    Empty input → empty output. The three scoring weights are required
+    keyword-only args — no module defaults so callers cannot silently
+    inherit a stale magic number.
     """
     if not candidates:
-        return None
+        return []
 
     has_temporal = (
         prev_position is not None
@@ -114,24 +117,49 @@ def select_best_candidate(
         and dist_cost_sat_radii > 0
     )
     if not has_temporal:
-        # Explicit fallback — no prior info, pick by area. Documented
-        # (see docstring), not silent.
-        return max(candidates, key=lambda c: c.area)
+        return [1.0 - c.area_score for c in candidates]
 
     px_pred = prev_position[0] + prev_velocity[0] * dt
     py_pred = prev_position[1] + prev_velocity[1] * dt
-
-    best: Candidate | None = None
-    best_score = math.inf
+    out: list[float] = []
     for c in candidates:
         dx = c.cx - px_pred
         dy = c.cy - py_pred
         dist_radii = math.hypot(dx, dy) / r_px_expected
         dist_cost = min(dist_radii / dist_cost_sat_radii, 1.0)
-        # Lower is better. Area contributes as `1 - area_score` (big =
-        # low cost); distance is already a cost.
-        score = w_area * (1.0 - c.area_score) + w_dist * dist_cost
-        if score < best_score:
-            best_score = score
-            best = c
-    return best
+        out.append(w_area * (1.0 - c.area_score) + w_dist * dist_cost)
+    return out
+
+
+def select_best_candidate(
+    candidates: list[Candidate],
+    *,
+    prev_position: tuple[float, float] | None = None,
+    prev_velocity: tuple[float, float] | None = None,
+    dt: float | None = None,
+    r_px_expected: float | None = None,
+    w_area: float,
+    w_dist: float,
+    dist_cost_sat_radii: float,
+) -> Candidate | None:
+    """Pick the best candidate (lowest cost from `score_candidates`).
+
+    Returns `None` iff `candidates` is empty.
+
+    Tie-breaking: returns the **first** candidate at the minimum cost
+    (Python `min` is stable on `range`). Matches the original loop's
+    `if score < best_score` semantics.
+    """
+    if not candidates:
+        return None
+    costs = score_candidates(
+        candidates,
+        prev_position=prev_position,
+        prev_velocity=prev_velocity,
+        dt=dt,
+        r_px_expected=r_px_expected,
+        w_area=w_area,
+        w_dist=w_dist,
+        dist_cost_sat_radii=dist_cost_sat_radii,
+    )
+    return candidates[min(range(len(costs)), key=lambda i: costs[i])]

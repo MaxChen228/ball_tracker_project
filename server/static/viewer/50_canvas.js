@@ -42,6 +42,81 @@
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
   }
+  // ----- BLOBS overlay (multi-candidate, top-K by selector cost) -----
+  // Operator opens the BLOBS layer to see the non-winner candidates the
+  // selector saw on each frame. K (number of rings drawn, including winner
+  // when it's in the top-K) is persisted to localStorage so a setting
+  // survives page reload. Set to 0 to hide, 20 to show all in practice.
+  const _BLOBS_K_KEY = "viewer.cand_top_k";
+  function _candTopK() {
+    try {
+      const v = parseInt(localStorage.getItem(_BLOBS_K_KEY), 10);
+      return Number.isFinite(v) ? Math.max(0, Math.min(20, v)) : 5;
+    } catch (_e) { return 5; }
+  }
+  function _setCandTopK(v) {
+    const k = Math.max(0, Math.min(20, parseInt(v, 10) || 0));
+    try { localStorage.setItem(_BLOBS_K_KEY, String(k)); } catch (_e) { /* private mode */ }
+    if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();
+  }
+  // Expose for the toolbar's inline `oninput`. Viewer-only — not added to
+  // the shared cam_view runtime because no other surface needs this knob.
+  window._setCandTopK = _setCandTopK;
+
+  // Per-frame sort key: cost when present, else `1 - area_score` so legacy
+  // JSONs (cost=null) and the rare case of a partially-resolved frame
+  // degrade gracefully to area-desc ordering.
+  function _candSortKey(c) {
+    return (c.cost != null && Number.isFinite(c.cost))
+      ? c.cost
+      : (1.0 - (c.area_score || 0));
+  }
+
+  // Plain floor lookup (no det back-walk): BLOBS draws every candidate the
+  // selector saw on the matched frame, regardless of whether the winner
+  // was kept or rejected by chain_filter downstream. The winner-layer's
+  // back-walk to skip det=false frames doesn't apply here.
+  function _findClosestFrameIdx(ts, currentT, tol) {
+    if (!ts.length || currentT < ts[0] - tol) return -1;
+    let lo = 0, hi = ts.length - 1;
+    while (lo + 1 < hi) {
+      const mid = (lo + hi) >> 1;
+      if (ts[mid] <= currentT) lo = mid; else hi = mid;
+    }
+    const idx = (ts[hi] <= currentT) ? hi : lo;
+    return (currentT - ts[idx]) <= tol ? idx : -1;
+  }
+
+  function _drawBlobsForPath(ctx, sx, sy, cam, path, color) {
+    const f = framesByPath[path] && framesByPath[path][cam.camera_id];
+    if (!f) return;
+    const ts = f.t_rel_s || [], cands = f.candidates || [];
+    if (!ts.length || !cands.length) return;
+    const idx = _findClosestFrameIdx(ts, currentT, 0.010);
+    if (idx < 0) return;
+    const frameCands = cands[idx] || [];
+    if (!frameCands.length) return;
+    const k = _candTopK();
+    if (k <= 0) return;
+    const sorted = [...frameCands].sort((a, b) => _candSortKey(a) - _candSortKey(b)).slice(0, k);
+    // Solid ring at ~80% alpha so the BLOBS layer reads through the OVL
+    // canvas-opacity slider (default 65%, often dialled lower) at roughly
+    // the same effective contrast as the detection_live winner dot.
+    // Dashed at radius 4 was producing 6 short segments that blurred into
+    // noise when candidates clustered in a tight image region (e.g. iOS
+    // false positives in a corner — 9 rings squeezed into 40×120 image-px
+    // overlapped into mush at typical display zoom).
+    ctx.strokeStyle = (typeof color === 'string' && color.length === 7 && color[0] === '#')
+      ? color + 'CC'  // ~80% alpha
+      : color;
+    ctx.lineWidth = 1.5;
+    for (const c of sorted) {
+      ctx.beginPath();
+      ctx.arc(c.px * sx, c.py * sy, 4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
   if (window.BallTrackerCamView) {
     window.BallTrackerCamView.registerLayer('detection_live', function (ctx, sx, sy, cam) {
       _drawDetectionForPath(ctx, sx, sy, cam, 'live', colorForCamPath(cam.camera_id, 'live'));
@@ -49,11 +124,29 @@
     window.BallTrackerCamView.registerLayer('detection_svr', function (ctx, sx, sy, cam) {
       _drawDetectionForPath(ctx, sx, sy, cam, 'server_post', ACCENT);
     });
+    // Two BLOBS layers — one per path — so toolbar's LIVE/SVR path groups
+    // can toggle each independently. Color-tier matches the corresponding
+    // winner layer (cam color for live, ACCENT for svr) so a frame with
+    // both paths on reads as two color-coded ring sets around their
+    // respective dots.
+    window.BallTrackerCamView.registerLayer('detection_blobs_live', function (ctx, sx, sy, cam) {
+      _drawBlobsForPath(ctx, sx, sy, cam, 'live', colorForCamPath(cam.camera_id, 'live'));
+    });
+    window.BallTrackerCamView.registerLayer('detection_blobs_svr', function (ctx, sx, sy, cam) {
+      _drawBlobsForPath(ctx, sx, sy, cam, 'server_post', ACCENT);
+    });
     for (const c of (SCENE.cameras || [])) {
       if (c.fx == null || c.R_wc == null || c.t_wc == null
           || c.image_width_px == null || c.image_height_px == null) continue;
       window.BallTrackerCamView.setMeta(c.camera_id, c);
     }
+    // Mount-time slider sync: the `<input type=range>` ships with HTML
+    // value="5" hardcoded; pull the persisted K out of localStorage and
+    // overwrite each cam's K slider so a previously-set value survives
+    // page reload.
+    document.querySelectorAll('.cv-blobs-k input[type=range]').forEach(el => {
+      el.value = String(_candTopK());
+    });
   }
   function drawVirtuals() {
     if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();

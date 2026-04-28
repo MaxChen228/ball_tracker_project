@@ -71,31 +71,50 @@ def video_cell_html(
     cam_view_attrs = ""
     toolbar_html = ""
     if entry is not None:
-        # Layer set: plate (calibration alignment), axes (orientation
-        # reference), detection_live + detection_svr (per-frame ball
-        # detection from each pipeline, drawn as half-transparent dots
-        # on top of the video). Operator picks which pipeline they
-        # trust by checkbox; both default-on so divergence is visible.
+        # Layer matrix: 2 (path: live / svr) × 2 (type: winner / cands)
+        # plus PLATE + AXES calibration overlays. Toolbar groups WIN +
+        # CAND together per path so the operator's mental model is "show
+        # me live winner and its candidates" rather than four
+        # independent toggles. PLATE on by default; LIVE WIN/CAND on
+        # (current rig path); SVR WIN/CAND off (legacy / live-only
+        # sessions have no svr data — opt-in via Run server first).
         # data-no-badges opts out of the runtime's status/calibration/RMS
         # badge slot — viewer surfaces those signals through its own
-        # vid-head label, no .cam-view-badges container in the DOM. The
-        # runtime treats the attr as an explicit "no badges, please" and
-        # skips the missing-container warn.
+        # vid-head label, no .cam-view-badges container in the DOM.
         cam_view_attrs = (
             f' data-cam-view="{cam}"'
             ' data-no-badges'
-            ' data-layers="plate,axes,detection_live,detection_svr"'
-            ' data-layers-on="plate,detection_live,detection_svr"'
+            ' data-layers="plate,axes,detection_live,detection_blobs_live,detection_svr,detection_blobs_svr"'
+            ' data-layers-on="plate,detection_live,detection_blobs_live"'
             ' data-default-opacity="65"'
         )
+        # Path-grouped toolbar. Each path group = label + WIN chip + CAND
+        # chip; chips inherit the path's color tier (cam color for live,
+        # ACCENT for svr) so the operator can read at a glance which
+        # winner corresponds to which cands. K slider is global (top-K
+        # applied per path, both paths drawn when both CAND chips on) and
+        # routes through viewer-only `_setCandTopK` in 50_canvas.js.
         toolbar_html = (
             '<div class="cam-view-toolbar">'
             '<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>'
             '<button type="button" class="cv-layer" data-layer="axes">AXES</button>'
-            '<button type="button" class="cv-layer on" data-layer="detection_live">LIVE</button>'
-            '<button type="button" class="cv-layer on" data-layer="detection_svr">SVR</button>'
+            '<span class="cv-path-group" data-path="live">'
+            '<span class="cv-path-lbl">LIVE</span>'
+            '<button type="button" class="cv-layer on" data-layer="detection_live">WIN</button>'
+            '<button type="button" class="cv-layer on" data-layer="detection_blobs_live">CAND</button>'
+            '</span>'
+            '<span class="cv-path-group" data-path="svr">'
+            '<span class="cv-path-lbl">SVR</span>'
+            '<button type="button" class="cv-layer" data-layer="detection_svr">WIN</button>'
+            '<button type="button" class="cv-layer" data-layer="detection_blobs_svr">CAND</button>'
+            '</span>'
             '<span class="cv-opacity">OVL'
             '<input type="range" min="0" max="100" step="1" value="65" aria-label="Overlay opacity">'
+            '</span>'
+            '<span class="cv-blobs-k">K'
+            '<input type="range" min="0" max="20" step="1" value="5" '
+            'aria-label="Top-K candidates" '
+            'oninput="window._setCandTopK(this.value)">'
             '</span>'
             '</div>'
         )

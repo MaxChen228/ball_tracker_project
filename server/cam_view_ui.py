@@ -97,6 +97,10 @@ CAM_VIEW_BOX_CSS = """
   border-radius: var(--r);
   padding: 5px 8px;
   color: #F8F7F4;
+  /* Allow controls to wrap onto a second row when the cam shrinks
+     (viewer's narrow-cam mode, dashboard's two-up grid). Without this
+     the BLOBS button + K slider squeeze the OVL slider off-screen. */
+  flex-wrap: wrap;
 }
 .cam-view .cam-view-badges {
   position: absolute;
@@ -136,6 +140,18 @@ CAM_VIEW_BOX_CSS = """
 }
 .cam-view[data-cam-view] .cv-opacity { color: #F8F7F4; }
 .cam-view[data-cam-view] .cv-opacity input[type=range] { accent-color: #FFD86A; }
+.cam-view[data-cam-view] .cv-blobs-k { color: #F8F7F4; }
+.cam-view[data-cam-view] .cv-blobs-k input[type=range] { accent-color: #FFD86A; }
+.cam-view[data-cam-view] .cv-path-group {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+.cam-view[data-cam-view] .cv-path-group[data-path="svr"] {
+  border-color: rgba(255, 200, 0, 0.55);
+}
+.cam-view[data-cam-view] .cv-path-lbl { color: rgba(248, 247, 244, 0.66); }
+.cam-view[data-cam-view] .cv-path-group[data-path="svr"] .cv-path-lbl {
+  color: #FFE08A;
+}
 """
 
 
@@ -189,6 +205,43 @@ CAM_VIEW_CONTENT_CSS = """
 [data-cam-view] .cv-opacity input[type=range] {
   width: 70px;
   accent-color: var(--ink, #2A2520);
+}
+[data-cam-view] .cv-blobs-k {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--sub, rgba(120, 120, 120, 0.7));
+}
+[data-cam-view] .cv-blobs-k input[type=range] {
+  width: 60px;
+  accent-color: var(--ink, #2A2520);
+}
+
+/* Path-grouped detection chips: LIVE + WIN/CAND, SVR + WIN/CAND. The
+   group is a thin pill with a path label on the left and the two type
+   chips inline. Border tints per path so live (cam color) and svr
+   (ACCENT) read distinct without color-coding the chip text itself —
+   chips reuse the standard .cv-layer pill so the on/off state styling
+   stays unified. */
+[data-cam-view] .cv-path-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 5px 1px 6px;
+  border-radius: var(--r, 4px);
+  border: 1px solid var(--border-base, rgba(120, 120, 120, 0.4));
+}
+[data-cam-view] .cv-path-group[data-path="svr"] {
+  border-color: rgba(202, 61, 47, 0.45);
+}
+[data-cam-view] .cv-path-lbl {
+  font: inherit;
+  letter-spacing: 0.1em;
+  color: var(--sub, rgba(120, 120, 120, 0.7));
+  padding-right: 2px;
+}
+[data-cam-view] .cv-path-group[data-path="svr"] .cv-path-lbl {
+  color: rgba(202, 61, 47, 0.85);
 }
 
 [data-cam-view] .cam-view-badge {

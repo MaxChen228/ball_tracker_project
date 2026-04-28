@@ -76,3 +76,58 @@ def test_per_camera_state_isolated():
     ]), _no_triangulate)
     stored = sess.frames_by_cam["B"][0]
     assert stored.px == 999.0
+
+
+def test_resolved_frame_temporal_winner_has_min_cost():
+    """After temporal prior is built, the persisted candidates each carry
+    a `cost`; the winner's cost must be the minimum, and all costs ∈ [0,1].
+    Pins the contract that `_resolve_candidates` writes the same costs the
+    selector used — viewer relies on this for top-K rendering."""
+    sess = LivePairingSession("s_test")
+    # Build prior with two hits at (100,100) → (110,100), v=(10,0) px/s.
+    sess.ingest("A", _frame(0, 0.0, candidates=[
+        BlobCandidate(px=100.0, py=100.0, area=100, area_score=1.0),
+    ]), _no_triangulate)
+    sess.ingest("A", _frame(1, 1.0, candidates=[
+        BlobCandidate(px=110.0, py=100.0, area=100, area_score=1.0),
+    ]), _no_triangulate)
+    # Frame 2: predicted ≈ (110.04, 100). Small near-pred blob vs big clutter.
+    sess.ingest("A", _frame(2, 2.0, candidates=[
+        BlobCandidate(px=120.0, py=100.0, area=80, area_score=0.4),
+        BlobCandidate(px=500.0, py=500.0, area=200, area_score=1.0),
+    ]), _no_triangulate)
+    stored = sess.frames_by_cam["A"][2]
+    cands = stored.candidates
+    assert cands is not None and len(cands) == 2
+    for c in cands:
+        assert c.cost is not None
+        assert 0.0 <= c.cost <= 1.0
+    # Winner is cands[0] (the near-pred blob); its cost must be the minimum.
+    min_cost = min(c.cost for c in cands)
+    assert cands[0].cost == min_cost
+    assert (stored.px, stored.py) == (cands[0].px, cands[0].py)
+
+
+def test_resolved_frame_fallback_cost_matches_area_inverse():
+    """First frame (no prior) → fallback path uses pure area scoring.
+    Stamped cost must equal `1 - area_score` exactly so the viewer's
+    area-fallback sort key for legacy data agrees with what the selector
+    used."""
+    sess = LivePairingSession("s_test")
+    raw = [
+        BlobCandidate(px=10.0, py=10.0, area=80, area_score=0.4),
+        BlobCandidate(px=300.0, py=400.0, area=200, area_score=1.0),
+        BlobCandidate(px=50.0, py=50.0, area=120, area_score=0.6),
+    ]
+    sess.ingest("A", _frame(0, 0.0, candidates=raw), _no_triangulate)
+    stored = sess.frames_by_cam["A"][0]
+    cands = stored.candidates
+    assert cands is not None and len(cands) == 3
+    # Re-normalised area_score = area / max_area inside _resolve_candidates;
+    # cost = 1 - area_score. Compute the same here for comparison.
+    max_area = max(c.area for c in raw)
+    for stamped, orig in zip(cands, raw):
+        expected = 1.0 - (orig.area / max_area)
+        assert stamped.cost == expected, (
+            f"expected {expected}, got {stamped.cost} for area {orig.area}"
+        )

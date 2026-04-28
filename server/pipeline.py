@@ -24,7 +24,7 @@ import numpy as np
 
 from chain_filter import ChainFilterParams, annotate as chain_filter_annotate
 from candidate_selector import CandidateSelectorTuning
-from detection import HSVRange, ShapeGate, detect_ball
+from detection import HSVRange, ShapeGate, detect_ball_with_candidates
 from schemas import FramePayload
 from video import iter_frames
 
@@ -87,7 +87,7 @@ def detect_pitch(
             absolute_pts_s - prev_timestamp_s
             if prev_timestamp_s is not None else None
         )
-        centroid = detect_ball(
+        winner, blobs = detect_ball_with_candidates(
             bgr, hsv,
             prev_position=prev_position,
             prev_velocity=prev_velocity,
@@ -95,7 +95,7 @@ def detect_pitch(
             shape_gate=shape_gate,
             selector_tuning=selector_tuning,
         )
-        if centroid is None:
+        if winner is None:
             out.append(
                 FramePayload(
                     frame_index=idx,
@@ -103,6 +103,7 @@ def detect_pitch(
                     px=None,
                     py=None,
                     ball_detected=False,
+                    candidates=blobs or None,
                 )
             )
             # Temporal prior resets on miss — extrapolating from a stale
@@ -111,7 +112,7 @@ def detect_pitch(
             prev_velocity = None
             prev_timestamp_s = None
         else:
-            px, py = centroid
+            px, py = winner.px, winner.py
             out.append(
                 FramePayload(
                     frame_index=idx,
@@ -119,6 +120,7 @@ def detect_pitch(
                     px=px,
                     py=py,
                     ball_detected=True,
+                    candidates=blobs,
                 )
             )
             # Update velocity from the previous hit if we have one; on

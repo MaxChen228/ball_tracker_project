@@ -164,6 +164,62 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
     }
 
 
+def _stream(frames, rel_anchor, *, include_candidates: bool) -> dict[str, list]:
+    """Serialise a frame list into the per-cam wire shape consumed by
+    [server/static/viewer/10_video_master.js](../static/viewer/10_video_master.js).
+
+    iOS live WS stream can arrive out-of-order (packet reordering); sort
+    by timestamp so the viewer's O(n) walk of t_rel_s stays monotonic —
+    the strip's frame lookup assumes ascending ts.
+
+    `include_candidates`: gates the per-frame candidates list on the
+    wire. Both live and server_post paths populate `FramePayload.candidates`
+    post-resolution (live via `live_pairing._resolve_candidates`,
+    server_post via `pipeline.detect_pitch`), so the wire shape is
+    symmetric. Toggleable so the empty-pitch fallback in
+    `_videos_for_session` and any future viewer that wants a slim payload
+    can opt out.
+    """
+    ordered = sorted(frames, key=lambda f: f.timestamp_s)
+    out: dict[str, list] = {
+        "t_rel_s": [float(f.timestamp_s - rel_anchor) for f in ordered],
+        "detected": [bool(f.ball_detected) for f in ordered],
+        "px": [float(f.px) if f.px is not None else None for f in ordered],
+        "py": [float(f.py) if f.py is not None else None for f in ordered],
+        # Per-frame metadata so the viewer can show the *real* source-
+        # frame number (iOS capture-queue index for live, PyAV decode
+        # order for server_post) alongside the timestamp-sort array
+        # index. Array index alone hides drops/throttle gaps; frame_index
+        # tells you which physical frame the detection came from.
+        "frame_index": [int(f.frame_index) for f in ordered],
+        # chain_filter verdict (None for non-detection frames or live
+        # path which doesn't run chain_filter). Null distinguished from
+        # "kept" so the viewer can show "uncategorised" vs "actively
+        # validated" — important for live which never runs the filter.
+        "filter_status": [f.filter_status for f in ordered],
+    }
+    if include_candidates:
+        # Each frame's value is a list of {px,py,area,area_score,cost}
+        # dicts in the order `live_pairing._resolve_candidates` saw them.
+        # `cost` is the selector cost stamped at decision time (None on
+        # legacy JSONs persisted before cost-persistence landed; viewer
+        # falls back to area-asc sort).
+        out["candidates"] = [
+            [
+                {
+                    "px": float(c.px),
+                    "py": float(c.py),
+                    "area": int(c.area),
+                    "area_score": float(c.area_score),
+                    "cost": float(c.cost) if c.cost is not None else None,
+                }
+                for c in (f.candidates or [])
+            ]
+            for f in ordered
+        ]
+    return out
+
+
 def _videos_for_session(
     session_id: str,
 ) -> list[tuple[str, str, float, float, dict[str, list]]]:
@@ -187,29 +243,6 @@ def _videos_for_session(
         if cam not in best:
             best[cam] = name
 
-    def _stream(frames, rel_anchor) -> dict[str, list]:
-        # iOS live WS stream can arrive out-of-order (packet reordering);
-        # sort by timestamp so the viewer's O(n) walk of t_rel_s stays
-        # monotonic — the strip's frame lookup assumes ascending ts.
-        ordered = sorted(frames, key=lambda f: f.timestamp_s)
-        return {
-            "t_rel_s": [float(f.timestamp_s - rel_anchor) for f in ordered],
-            "detected": [bool(f.ball_detected) for f in ordered],
-            "px": [float(f.px) if f.px is not None else None for f in ordered],
-            "py": [float(f.py) if f.py is not None else None for f in ordered],
-            # Per-frame metadata so the viewer can show the *real* source-
-            # frame number (iOS capture-queue index for live, PyAV decode
-            # order for server_post) alongside the timestamp-sort array
-            # index. Array index alone hides drops/throttle gaps; frame_index
-            # tells you which physical frame the detection came from.
-            "frame_index": [int(f.frame_index) for f in ordered],
-            # chain_filter verdict (None for non-detection frames or live
-            # path which doesn't run chain_filter). Null distinguished from
-            # "kept" so the viewer can show "uncategorised" vs "actively
-            # validated" — important for live which never runs the filter.
-            "filter_status": [f.filter_status for f in ordered],
-        }
-
     out: list[tuple[str, str, float, float, dict[str, list]]] = []
     all_cams = sorted(
         set(best)
@@ -231,14 +264,18 @@ def _videos_for_session(
                 else pitch.video_start_pts_s
             )
             frames_info = {
-                "live": _stream(pitch.frames_live, rel_anchor),
-                "server_post": _stream(pitch.frames_server_post, rel_anchor),
+                "live": _stream(pitch.frames_live, rel_anchor, include_candidates=True),
+                "server_post": _stream(pitch.frames_server_post, rel_anchor, include_candidates=True),
             }
         else:
-            empty = {"t_rel_s": [], "detected": [], "px": [], "py": []}
+            # Canonical empty-shape parity: route through `_stream` with no
+            # frames so every dict key (including the new `candidates`
+            # channel and the previously-missing frame_index/filter_status)
+            # is present and shaped identically to the live branch. Older
+            # ad-hoc dict literal silently drifted as fields were added.
             frames_info = {
-                "live": dict(empty),
-                "server_post": dict(empty),
+                "live": _stream([], 0.0, include_candidates=True),
+                "server_post": _stream([], 0.0, include_candidates=True),
             }
         url = f"/videos/{name}" if name else None
         out.append((cam, url, offset, fps, frames_info))
