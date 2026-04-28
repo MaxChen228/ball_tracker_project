@@ -215,6 +215,7 @@ _PAGE_META: dict[str, tuple[str, str]] = {
     "setup": ("Calibration", "Setup"),
     "sync": ("Time Sync", "Sync"),
     "markers": ("Registry", "Markers"),
+    "gt": ("Ground Truth", "GT"),
 }
 
 
@@ -224,6 +225,7 @@ def _render_primary_nav(active_page: str) -> str:
         ("setup", "/setup", "Setup"),
         ("sync", "/sync", "Sync"),
         ("markers", "/markers", "Markers"),
+        ("gt", "/gt", "GT"),
     ]
     return "".join(
         f'<a class="nav-tab{" active" if key == active_page else ""}" href="{href}">{label}</a>'
