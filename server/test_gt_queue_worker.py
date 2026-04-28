@@ -123,7 +123,9 @@ def _add(queue: GTQueue, sid: str = "s_deadbeef", cam: str = "A") -> str:
         session_id=sid,
         camera_id=cam,
         time_range=(0.0, 1.0),
-        prompt="blue ball",
+        click_x=960,
+        click_y=540,
+        click_t_video_rel=0.0,
     )
 
 

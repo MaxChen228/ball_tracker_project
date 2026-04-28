@@ -1,13 +1,13 @@
-"""Background worker that drives the SAM 3 labelling queue.
+"""Background worker that drives the SAM 2 labelling queue.
 
-Single-threaded: one SAM 3 model fits in MPS at a time on M4, so
+Single-threaded: one SAM 2 model fits in MPS at a time on M4, so
 parallelism would only thrash. The worker thread pulls one
-`GTQueueItem` at a time, spawns `label_with_sam3.py` as a subprocess,
+`GTQueueItem` at a time, spawns `label_with_sam2.py` as a subprocess,
 parses progress from its stderr, and finalises the item.
 
 Hard-won subprocess details (per mini-plan v4 review findings):
 
-  * `start_new_session=True` puts the SAM 3 process in its own process
+  * `start_new_session=True` puts the SAM 2 process in its own process
     group. Cancel uses `os.killpg(pgid, SIGTERM)` so child threads /
     tokenizer workers all die together. PyTorch + MPS kernels can ignore
     SIGTERM mid-inference, so we escalate to `SIGKILL` after a 5-second
@@ -71,16 +71,18 @@ def _spawn(
     scripts_dir: Path,
     tools_project: str,
 ) -> subprocess.Popen:
-    """Spawn the SAM 3 labeller subprocess. cwd is pinned to server_dir
+    """Spawn the SAM 2 labeller subprocess. cwd is pinned to server_dir
     (avoid inheriting an arbitrary cwd from the FastAPI launcher), and
     `--project ../tools` is resolved relative to that fixed cwd."""
     cmd = [
         "uv", "run", "--project", tools_project,
-        "python", str(scripts_dir / "label_with_sam3.py"),
+        "python", str(scripts_dir / "label_with_sam2.py"),
         "--session", item.session_id,
         "--cam", item.camera_id,
         "--time-range", f"{item.time_range[0]:.3f}", f"{item.time_range[1]:.3f}",
-        "--prompt", item.prompt,
+        "--click-x", str(item.click_x),
+        "--click-y", str(item.click_y),
+        "--click-t", f"{item.click_t_video_rel:.3f}",
         "--queue-id", item.id,
         "--overwrite",
     ]
@@ -189,7 +191,7 @@ def _run_one(
         target=_stderr_drain,
         args=(proc, queue, item.id, ring, last_progress_at, parsed_done),
         daemon=True,
-        name=f"sam3-stderr-{item.id}",
+        name=f"sam2-stderr-{item.id}",
     )
     drain_thread.start()
 

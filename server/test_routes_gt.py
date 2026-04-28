@@ -354,7 +354,9 @@ def test_gt_queue_add_happy_path():
         "session_id": sid,
         "camera_id": "A",
         "time_range": [0.1, 1.0],
-        "prompt": "blue ball",
+        "click_x": 960,
+        "click_y": 540,
+        "click_t_video_rel": 0.5,
     })
     assert r.status_code == 200
     body = r.json()
@@ -384,12 +386,10 @@ def test_gt_queue_add_rejects_missing_mov():
         "session_id": sid,
         "camera_id": "A",
         "time_range": [0.0, 1.0],
-        "prompt": "blue ball",
+        "click_x": 960, "click_y": 540, "click_t_video_rel": 0.5,
     })
     assert r.status_code == 422
     detail = r.json()["detail"]
-    # Our handler raises HTTPException(detail=str), so detail is a string
-    # (NOT Pydantic's list-of-errors shape).
     assert isinstance(detail, str)
     assert "no mov" in detail.lower()
 
@@ -401,7 +401,7 @@ def test_gt_queue_add_rejects_inverted_range():
         "session_id": sid,
         "camera_id": "A",
         "time_range": [1.0, 0.5],
-        "prompt": "blue ball",
+        "click_x": 960, "click_y": 540, "click_t_video_rel": 0.5,
     })
     assert r.status_code == 422
 
@@ -412,22 +412,24 @@ def test_gt_queue_add_rejects_range_past_video_end():
     r = _client().post("/gt/queue", json={
         "session_id": sid,
         "camera_id": "A",
-        "time_range": [0.0, 100.0],  # way past 2.5 + 0.5
-        "prompt": "blue ball",
+        "time_range": [0.0, 100.0],
+        "click_x": 960, "click_y": 540, "click_t_video_rel": 0.5,
     })
     assert r.status_code == 422
 
 
-def test_gt_queue_add_rejects_empty_prompt():
+def test_gt_queue_add_rejects_click_outside_range():
+    """Click at t=2.5s but range is [0.0, 1.0] → 422."""
     sid = "s_aabbccdd"
     _seed_pitch_and_mov(sid, "A")
     r = _client().post("/gt/queue", json={
         "session_id": sid,
         "camera_id": "A",
         "time_range": [0.0, 1.0],
-        "prompt": "",
+        "click_x": 960, "click_y": 540, "click_t_video_rel": 2.5,
     })
     assert r.status_code == 422
+    assert "click_t_video_rel" in r.json()["detail"]
 
 
 def test_gt_queue_cancel_pending():
@@ -435,7 +437,8 @@ def test_gt_queue_cancel_pending():
     _seed_pitch_and_mov(sid, "A")
     r = _client().post("/gt/queue", json={
         "session_id": sid, "camera_id": "A",
-        "time_range": [0.0, 1.0], "prompt": "blue ball",
+        "time_range": [0.0, 1.0],
+        "click_x": 960, "click_y": 540, "click_t_video_rel": 0.5,
     })
     qid = r.json()["id"]
     r2 = _client().delete(f"/gt/queue/{qid}")
@@ -455,7 +458,8 @@ def test_gt_queue_retry_creates_new_id():
     _seed_pitch_and_mov(sid, "A")
     qid = main.state.gt_queue.add(
         session_id=sid, camera_id="A",
-        time_range=(0.0, 1.0), prompt="blue ball",
+        time_range=(0.0, 1.0),
+        click_x=960, click_y=540, click_t_video_rel=0.5,
     )
     main.state.gt_queue.mark_running(qid, pid=1)
     main.state.gt_queue.mark_error(qid, "boom")
@@ -469,7 +473,8 @@ def test_gt_queue_retry_creates_new_id():
 def test_gt_queue_retry_pending_409():
     qid = main.state.gt_queue.add(
         session_id="s_pending1", camera_id="A",
-        time_range=(0.0, 1.0), prompt="blue ball",
+        time_range=(0.0, 1.0),
+        click_x=960, click_y=540, click_t_video_rel=0.5,
     )
     r = _client().post(f"/gt/queue/{qid}/retry")
     assert r.status_code == 409
