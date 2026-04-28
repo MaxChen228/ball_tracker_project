@@ -30,7 +30,22 @@ def video_cell_html(
                 f'<span class="vid-hint">never uploaded</span>'
                 f"</div>"
             )
-        body = '<div class="vid-frame empty">no clips on disk</div>'
+        # Reserve a 16:9 (or calibration-aspect) box so the cell takes the
+        # same internal footprint as a populated cell — avoids the page
+        # shifting once the MOV upload lands. Aspect inherits from the
+        # base `.vid-media` rule; `.vid-media.empty` adds the dashed
+        # border + centred message.
+        if image_width_px and image_height_px:
+            media_style = f' style="aspect-ratio:{image_width_px}/{image_height_px}"'
+        else:
+            media_style = ""
+        body = (
+            f'<div class="vid-frame">'
+            f'<div class="vid-media empty"{media_style}>'
+            f'<div class="vid-empty-msg">awaiting upload</div>'
+            f'</div>'
+            f'</div>'
+        )
         hint = "awaiting upload"
     else:
         url, _ = entry
@@ -270,11 +285,18 @@ def failure_strip_html(health: dict) -> str:
                            for k in ("live", "server_post"))
             no_detect = [c for c in ("A", "B") if not _any_detected_across_paths(cams[c])]
             if no_detect:
+                # `no_detect` stands on its own — fires regardless of mode,
+                # because zero detections across both paths is a real
+                # failure signal even in the live-only intermediate state.
                 reasons.append(
                     f"{' + '.join('Cam ' + c for c in no_detect)} detected no ball "
                     f"in any frame — check lighting / HSV range"
                 )
-            else:
+            elif health.get("mode") == "camera_only":
+                # Only complain about empty triangulation once the MOV is
+                # on disk — i.e. /pitch landed and SessionResult should
+                # have been built. In `live_only` (MOV still uploading)
+                # an empty result is by-design, not a failure.
                 reasons.append(
                     "triangulation produced no points — check A/B pairing "
                     "window or frame timing"
