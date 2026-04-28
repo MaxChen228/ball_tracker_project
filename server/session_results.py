@@ -151,21 +151,25 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             # the live triangulation path on rebuild even after restart.
             if pitch.frames_live:
                 candidate_paths.add(DetectionPath.live)
-    if live is not None and live.frame_counts:
+    live_frame_counts = live.frame_counts_snapshot() if live is not None else {}
+    if any(c for c in live_frame_counts.values()):
         candidate_paths.add(DetectionPath.live)
     if not candidate_paths:
         candidate_paths = set(_DEFAULT_PATHS)
 
     if live is not None:
+        with live._lock:
+            triangulated_copy = list(live.triangulated)
+            abort_reasons_copy = dict(live.abort_reasons)
         result.frame_counts_by_path[DetectionPath.live.value] = {
-            cam: int(count) for cam, count in live.frame_counts.items() if count
+            cam: int(count) for cam, count in live_frame_counts.items() if count
         }
-        if live.triangulated:
-            result.triangulated_by_path[DetectionPath.live.value] = list(live.triangulated)
+        if triangulated_copy:
+            result.triangulated_by_path[DetectionPath.live.value] = triangulated_copy
             result.paths_completed.add(DetectionPath.live.value)
-        if live.abort_reasons:
+        if abort_reasons_copy:
             result.abort_reasons.update(
-                {f"live:{cam}": why for cam, why in live.abort_reasons.items()}
+                {f"live:{cam}": why for cam, why in abort_reasons_copy.items()}
             )
 
     sync_error = None
