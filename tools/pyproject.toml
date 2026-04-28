@@ -1,0 +1,48 @@
+[project]
+name = "ball-tracker-tools"
+version = "0.1.0"
+description = "Offline SAM 3 GT labelling + parameter distillation for ball_tracker server"
+requires-python = ">=3.12"
+# This is a separate uv project from server/ on purpose. SAM 3 + transformers
+# main-branch + torch ~= 2-5 GB of deps and only run on the operator's M4
+# Mac Air (or any Apple Silicon / CUDA box) — not on the live LAN server.
+# Keeping these out of server/pyproject.toml means production state.py
+# imports never trigger torch / transformers loading and the server boot
+# stays fast.
+#
+# Why git+main for transformers:
+#   The pip release of transformers (≤ 4.47 at time of writing) doesn't
+#   yet ship Sam3VideoModel. The model classes were added on main
+#   November 2025; we pin via git rev so the offline GT pipeline is
+#   reproducible across operator machines.
+#
+# Why no flash-attn / Triton:
+#   Both are CUDA-only. SAM 3's official repo (facebookresearch/sam3)
+#   hard-requires Triton via Euclidean Distance Transform calculations
+#   and refuses to load on Apple Silicon. The HuggingFace transformers
+#   port has neither dependency, which is why this is the only path
+#   that works on M4. CUDA boxes can also use this same path without
+#   loss of accuracy.
+dependencies = [
+    "torch>=2.7",
+    "torchvision",
+    # Pin to a commit on main that includes Sam3VideoModel. Update the
+    # rev when transformers cuts a release with SAM 3 in stable.
+    "transformers @ git+https://github.com/huggingface/transformers@main",
+    "accelerate>=1.0",
+    "huggingface-hub>=0.27",
+    "pillow>=10.0",
+    "opencv-contrib-python-headless>=4.10",
+    "av>=17.0.0",
+    "numpy>=2.0",
+    "pydantic>=2.13",
+    "tqdm>=4.66",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+]
+
+[tool.uv]
+package = false
