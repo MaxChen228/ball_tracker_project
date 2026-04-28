@@ -46,6 +46,7 @@ from state_calibration import (
 )
 from state_devices import DeviceRegistry
 from state_events import build_events
+from state_gt_processing import GTProcessingState
 from state_processing import SessionProcessingState
 from state_sync import (
     SyncCoordinator,
@@ -288,6 +289,18 @@ class State:
         # lock refs so the coordinator can read pitches / video dir.
         self._processing = SessionProcessingState()
         self._processing.attach(self, self._lock)
+        # GT-driven distillation job tracker. Keys are 3-tuples
+        # (kind, session_id, camera_id) where kind ∈ {"label",
+        # "validate", "distill"} and "global" is used for non-session-
+        # scoped jobs like distillation. Values are dicts carrying
+        # status / pid / error so the dashboard can render progress.
+        # State is in-memory only — restart loses queue position but
+        # the on-disk artefacts (data/gt/*) persist.
+        self._gt_processing = GTProcessingState()
+        # Cached fit_proposals.json contents — populated on demand by
+        # routes/gt.py. None means "not loaded yet"; missing file is
+        # signalled separately at the route layer.
+        self._gt_proposals: dict | None = None
         # Calibrations first — _load_from_disk re-triangulates every cached
         # pitch, and triangulation needs the calibration snapshot to decide
         # the intrinsic-scale factor (MOV dims vs. calibration dims).
