@@ -643,35 +643,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                     font-family: var(--mono); font-size: 11px; color: var(--failed);
                     letter-spacing: 0.04em; max-width: 80%; }}
 .degraded-banner .degraded-icon {{ font-size: 14px; }}
-.telemetry-panel {{ position: absolute; left: var(--s-4);
-                    top: calc(var(--s-4) + 42px); z-index: 7;
-                    background: var(--surface); border: 1px solid var(--border-base);
-                    border-radius: var(--r); max-width: 320px; font-family: var(--mono);
-                    font-size: 11px; color: var(--ink); }}
-.telemetry-panel summary {{ cursor: pointer; padding: var(--s-2) var(--s-3);
-                             letter-spacing: 0.12em; color: var(--sub);
-                             user-select: none; list-style: none; }}
-.telemetry-panel summary::-webkit-details-marker {{ display: none; }}
-.telemetry-panel summary::after {{ content: ' ▸'; color: var(--sub); }}
-.telemetry-panel[open] summary::after {{ content: ' ▾'; color: var(--ink); }}
-.telemetry-panel[open] summary {{ color: var(--ink); border-bottom: 1px solid var(--border-l); }}
-.telemetry-body {{ padding: var(--s-2) var(--s-3); display: flex; flex-direction: column;
-                   gap: var(--s-2); max-height: min(340px, calc(100vh - var(--nav-h) - 120px));
-                   overflow-y: auto; }}
-.tel-row {{ display: grid; grid-template-columns: 60px 80px 1fr; align-items: center;
-            gap: var(--s-2); }}
-.tel-row .k {{ font-size: 10px; color: var(--sub); letter-spacing: 0.08em; }}
-.tel-row .v {{ font-size: 10px; color: var(--ink); }}
-.tel-row .tel-spark {{ width: 80px; height: 16px; display: block; }}
-.tel-block {{ display: flex; flex-direction: column; gap: 4px; }}
-.tel-block .k {{ font-size: 10px; color: var(--sub); letter-spacing: 0.08em; }}
-.tel-matrix {{ display: flex; gap: 4px; flex-wrap: wrap; }}
-.tel-cell {{ font-size: 9px; padding: 2px 4px; border: 1px solid var(--border-l);
-             border-radius: var(--r); font-family: var(--mono); color: var(--ink); }}
-.tel-errors {{ display: flex; flex-direction: column; gap: 2px; }}
-.tel-err {{ font-size: 10px; color: var(--failed); display: flex; gap: var(--s-2); }}
-.tel-err .t {{ color: var(--sub); }}
-.tel-none {{ font-size: 10px; color: var(--sub); font-style: italic; }}
 .canvas-mode-toggle {{ position: absolute; left: var(--s-4); top: var(--s-4); z-index: 6;
                        display: inline-flex; gap: 0; font-family: var(--mono); font-size: 10px;
                        letter-spacing: 0.12em; text-transform: uppercase;

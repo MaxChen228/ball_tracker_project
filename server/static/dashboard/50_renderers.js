@@ -284,12 +284,3 @@
     return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${ds}`;
   }
 
-  // Dashboard Session Monitor card was removed — the operator's only
-  // during-stream concern is the live 3D canvas. fps/frame telemetry
-  // still gets tracked on `currentLiveSession` (frame_samples +
-  // frame_fps) via pushFrameSample so post-session consumers (e.g. the
-  // viewer page, telemetry panel) have the data. This stub keeps the
-  // legacy call sites from erroring.
-  function renderActiveSession(_liveSession) {
-    return;
-  }
