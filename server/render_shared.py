@@ -9,17 +9,20 @@ import html
 from typing import Any
 
 
-_BG = "#F8F7F4"
-_SURFACE = "#FCFBFA"
-_BORDER_BASE = "#DBD6CD"
-_BORDER_L = "#E8E4DB"
-_INK = "#2A2520"
-_SUB = "#7A756C"
-_INK_LIGHT = "#5A5550"
-_DEV = "#C0392B"
-_CONTRA = "#4A6B8C"
-_DUAL = "#D35400"
-_ACCENT = "#E6B300"
+from palette import (
+    _ACCENT,
+    _BG,
+    _BORDER_BASE,
+    _BORDER_L,
+    _CONTRA,
+    _DEV,
+    _DUAL,
+    _INK,
+    _INK_LIGHT,
+    _SUB,
+    _SURFACE,
+    _SURFACE_HOVER,
+)
 
 
 # Shared `:root` design-token block. Imported by render_shared._CSS
@@ -32,7 +35,7 @@ _TOKENS_CSS = f"""
 :root {{
   --bg: {_BG};
   --surface: {_SURFACE};
-  --surface-hover: #F3F0EA;
+  --surface-hover: {_SURFACE_HOVER};
   --border-base: {_BORDER_BASE};
   --border-l: {_BORDER_L};
   --ink: {_INK};
@@ -61,9 +64,14 @@ _TOKENS_CSS = f"""
 """
 
 
-_CSS = f"""
-{_TOKENS_CSS}
-
+# Layout + nav + card body shared between render_shared._CSS (used by
+# /markers + /sync) and render_dashboard_style._CSS (dashboard + setup).
+# The dashboard layers four extra rules on top (status-main /
+# status-badge / status-headline / status-context) and overrides
+# `.layout` to be `height:100vh; overflow:hidden` instead of
+# `min-height:100vh` — those overrides are concatenated in
+# render_dashboard_style.py rather than edited into the shared body.
+_SHARED_LAYOUT_NAV_CSS = f"""
 * {{ box-sizing: border-box; }}
 html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--ink);
               font-family: var(--sans); font-weight: 300; line-height: 1.8;
@@ -137,6 +145,15 @@ html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color:
                   margin-top: var(--s-3); margin-bottom: var(--s-1); }}
 .card section + section {{ border-top: 1px solid var(--border-l); margin-top: var(--s-3);
                            padding-top: var(--s-3); }}
+"""
+
+
+# Full stylesheet for the simpler shells (/markers, /sync) — tokens +
+# shared layout/nav body. Dashboard ships its own _CSS that layers
+# extra rules on top of the same body (see render_dashboard_style.py).
+_CSS = f"""
+{_TOKENS_CSS}
+{_SHARED_LAYOUT_NAV_CSS}
 """
 
 

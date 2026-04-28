@@ -5,102 +5,44 @@ so only the tokens are shared, not the whole stylesheet."""
 from __future__ import annotations
 
 from cam_view_ui import CAM_VIEW_FULL_CSS
-from render_shared import _TOKENS_CSS
+from render_shared import _SHARED_LAYOUT_NAV_CSS, _TOKENS_CSS
+
+
+# Dashboard-specific overrides on top of the shared layout/nav body.
+# Four extra status-* rules render the dashboard's editorial nav strip
+# (status-main / status-badge / status-headline / status-context); the
+# .layout override pins the dashboard to the viewport so the canvas
+# can host a fixed-height Plotly scene without document scroll. Both
+# arrive AFTER _SHARED_LAYOUT_NAV_CSS in the CSS cascade so they win.
+_DASHBOARD_NAV_OVERRIDES_CSS = """
+.nav .status-main { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+                    font-family: var(--mono); text-transform: uppercase; }
+.nav .status-badge { display: inline-flex; align-items: center; padding: 3px 8px;
+                     border: 1px solid var(--border-base); border-radius: var(--r);
+                     font-size: 10px; letter-spacing: 0.12em; color: var(--sub); }
+.nav .status-badge.ready, .nav .status-badge.recording {
+  color: var(--passed); border-color: var(--passed); background: var(--passed-bg);
+}
+.nav .status-badge.blocked, .nav .status-badge.cooldown {
+  color: var(--warn); border-color: var(--warn); background: var(--warn-bg);
+}
+.nav .status-badge.syncing {
+  color: var(--ink); border-color: var(--ink); background: rgba(42,37,32,.04);
+}
+.nav .status-headline { font-size: 12px; letter-spacing: 0.12em; color: var(--ink); }
+.nav .status-context { font-size: 10px; letter-spacing: 0.08em; color: var(--sub); }
+
+/* Dashboard pins the layout to the viewport (no document scroll) so the
+   canvas can host the fixed-height Plotly scene. The shared body uses
+   `min-height: 100vh` for /markers + /sync where the sidebar grows. */
+.layout { height: 100vh; box-sizing: border-box; overflow: hidden; }
+"""
 
 
 _CSS = f"""
 {_TOKENS_CSS}
-
-* {{ box-sizing: border-box; }}
-html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--ink);
-              font-family: var(--sans); font-weight: 300; line-height: 1.8;
-              -webkit-font-smoothing: antialiased; }}
-
-/* --- App header --- */
-.nav {{ position: fixed; top: 0; left: 0; right: 0; min-height: var(--nav-h);
-        background: rgba(252, 251, 250, 0.96); backdrop-filter: blur(10px);
-        border-bottom: 1px solid var(--border-base); padding: 12px 24px 10px 24px;
-        z-index: 20; display: flex; flex-direction: column; gap: 8px; }}
-.nav-main {{ display: grid; grid-template-columns: minmax(0, 1fr) auto;
-             align-items: start; gap: 12px 24px; }}
-.nav-brand-block {{ display: flex; align-items: center; gap: 18px; min-width: 0; }}
-.nav .brand {{ font-family: var(--mono); font-weight: 700; font-size: 14px;
-               letter-spacing: 0.16em; color: var(--ink); text-decoration: none;
-               line-height: 1.3; white-space: nowrap; }}
-.nav .brand .dot {{ display: inline-block; width: 7px; height: 7px; background: var(--ink);
-                    margin-right: 10px; vertical-align: middle; border-radius: 0; }}
-.nav-page {{ display: flex; flex-direction: column; gap: 2px; min-width: 0; }}
-.nav-page-kicker {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
-                    text-transform: uppercase; color: var(--sub); }}
-.nav-page-title {{ font-family: var(--mono); font-size: 18px; line-height: 1.1;
-                   letter-spacing: 0.02em; color: var(--ink); }}
-.nav-tabs {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }}
-.nav-tab {{ display: inline-flex; align-items: center; min-height: 32px;
-            padding: 6px 12px; border: 1px solid var(--border-base); border-radius: var(--r);
-            text-decoration: none; background: transparent; color: var(--sub);
-            font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em;
-            text-transform: uppercase; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease; }}
-.nav-tab:hover {{ border-color: var(--ink); color: var(--ink); background: var(--surface-hover); }}
-.nav-tab.active {{ background: var(--ink); border-color: var(--ink); color: var(--surface); }}
-.nav-status-row {{ display: flex; justify-content: flex-end; }}
-.nav .status-line {{ display: flex; flex-direction: column; align-items: flex-end;
-                     gap: 6px; min-width: min(560px, 100%); }}
-.nav .status-main {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-                     font-family: var(--mono); text-transform: uppercase; }}
-.nav .status-badge {{ display: inline-flex; align-items: center; padding: 3px 8px;
-                      border: 1px solid var(--border-base); border-radius: var(--r);
-                      font-size: 10px; letter-spacing: 0.12em; color: var(--sub); }}
-.nav .status-badge.ready, .nav .status-badge.recording {{
-  color: var(--passed); border-color: var(--passed); background: var(--passed-bg);
-}}
-.nav .status-badge.blocked, .nav .status-badge.cooldown {{
-  color: var(--warn); border-color: var(--warn); background: var(--warn-bg);
-}}
-.nav .status-badge.syncing {{
-  color: var(--ink); border-color: var(--ink); background: rgba(42,37,32,.04);
-}}
-.nav .status-headline {{ font-size: 12px; letter-spacing: 0.12em; color: var(--ink); }}
-.nav .status-context {{ font-size: 10px; letter-spacing: 0.08em; color: var(--sub); }}
-.nav .status-checks {{ display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }}
-.nav .status-check {{ display: inline-flex; align-items: center; gap: 6px;
-                      padding: 2px 8px; border: 1px solid var(--border-base);
-                      border-radius: var(--r); font-family: var(--mono); font-size: 10px;
-                      letter-spacing: 0.08em; text-transform: uppercase; color: var(--sub); }}
-.nav .status-check.ok {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
-.nav .status-check.warn {{ color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }}
-.nav .status-check .k {{ opacity: 0.8; }}
-.nav .status-check .v {{ color: currentColor; font-weight: 600; }}
-
-/* --- Main layout: sidebar + canvas --- */
-.layout {{ display: flex; height: 100vh; padding-top: var(--nav-offset);
-           box-sizing: border-box; overflow: hidden; }}
-.sidebar {{ width: var(--sidebar-w); flex-shrink: 0; overflow-y: auto;
-            background: var(--surface); border-right: 1px solid var(--border-base);
-            padding: var(--s-5) var(--s-4); z-index: 10;
-            display: flex; flex-direction: column; gap: var(--s-3); }}
-.canvas {{ flex: 1; position: relative; overflow: hidden;
-           background: var(--bg); }}
-#scene-root {{ position: absolute; inset: 0; }}
-
-/* --- Scrollbar --- */
-.sidebar::-webkit-scrollbar {{ width: 4px; }}
-.sidebar::-webkit-scrollbar-track {{ background: transparent; }}
-.sidebar::-webkit-scrollbar-thumb {{ background: var(--border-base); }}
-.sidebar::-webkit-scrollbar-thumb:hover {{ background: var(--sub); }}
-
-/* --- Card --- */
-.card {{ background: var(--surface); border: 1px solid var(--border-base);
-         border-radius: var(--r); padding: var(--s-4); }}
-.card + .card {{ margin-top: 0; }}
-.card-title {{ font-family: var(--mono); font-weight: 500; font-size: 11px;
-               letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub);
-               margin: 0 0 var(--s-3) 0; padding: 0 0 var(--s-2) 0;
-               border-bottom: 1px solid var(--border-l); }}
-.card-subtitle {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
-                  text-transform: uppercase; color: var(--sub);
-                  margin-top: var(--s-3); margin-bottom: var(--s-1); }}
-.card section + section {{ border-top: 1px solid var(--border-l); margin-top: var(--s-3);
-                           padding-top: var(--s-3); }}
+{_SHARED_LAYOUT_NAV_CSS}
+{_DASHBOARD_NAV_OVERRIDES_CSS}
 
 /* --- Device rows --- */
 /* Middle column uses minmax so a wider chip (CALIBRATED vs OFFLINE) can't
