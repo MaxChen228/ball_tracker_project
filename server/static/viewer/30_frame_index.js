@@ -1,6 +1,8 @@
   function buildCamIndexFor(frameMap, cam) {
     const f = frameMap[cam];
     const ts = f.t_rel_s, det = f.detected;
+    const fidx = f.frame_index || [];
+    const fstat = f.filter_status || [];
     const out = new Array(TOTAL_FRAMES).fill(null);
     if (!ts.length) return out;
     const tol = 0.010;
@@ -16,7 +18,13 @@
       // though ts[0] > t — preserves the prior "show closest valid frame
       // in pre-roll slack" behaviour rather than going strict-floor.
       while (j + 1 < ts.length && ts[j + 1] <= t) j++;
-      out[i] = { idx: j, t: ts[j], detected: !!det[j] };
+      out[i] = {
+        idx: j,
+        t: ts[j],
+        detected: !!det[j],
+        frame_index: fidx[j] ?? null,
+        filter_status: fstat[j] ?? null,
+      };
     }
     return out;
   }

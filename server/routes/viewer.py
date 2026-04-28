@@ -197,6 +197,17 @@ def _videos_for_session(
             "detected": [bool(f.ball_detected) for f in ordered],
             "px": [float(f.px) if f.px is not None else None for f in ordered],
             "py": [float(f.py) if f.py is not None else None for f in ordered],
+            # Per-frame metadata so the viewer can show the *real* source-
+            # frame number (iOS capture-queue index for live, PyAV decode
+            # order for server_post) alongside the timestamp-sort array
+            # index. Array index alone hides drops/throttle gaps; frame_index
+            # tells you which physical frame the detection came from.
+            "frame_index": [int(f.frame_index) for f in ordered],
+            # chain_filter verdict (None for non-detection frames or live
+            # path which doesn't run chain_filter). Null distinguished from
+            # "kept" so the viewer can show "uncategorised" vs "actively
+            # validated" — important for live which never runs the filter.
+            "filter_status": [f.filter_status for f in ordered],
         }
 
     out: list[tuple[str, str, float, float, dict[str, list]]] = []

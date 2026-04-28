@@ -20,12 +20,22 @@
   for (const v of VIDEO_META) {
     const f = v.frames || {};
     for (const path of PATHS) {
-      const stream = f[path] || { t_rel_s: [], detected: [], px: [], py: [] };
+      const stream = f[path] || { t_rel_s: [], detected: [], px: [], py: [], frame_index: [], filter_status: [] };
       framesByPath[path][v.camera_id] = {
         t_rel_s: stream.t_rel_s || [],
         detected: stream.detected || [],
         px: stream.px || [],
         py: stream.py || [],
+        // frame_index: iOS capture-queue index (live) or PyAV decode order
+        // (server_post). Distinct from the array idx which is just position
+        // in the timestamp-sorted stream — this is the *physical* frame
+        // counter and exposes throttle/drop gaps.
+        frame_index: stream.frame_index || [],
+        // filter_status: chain_filter verdict — "kept" / "rejected_flicker"
+        // / "rejected_jump" / null. Live path doesn't run chain_filter so
+        // every entry is null there; SVR path is always populated for
+        // detection frames.
+        filter_status: stream.filter_status || [],
       };
     }
   }

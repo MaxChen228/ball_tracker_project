@@ -64,6 +64,32 @@
     // the video element is displaying, not its temporal neighbour.
     return lo;
   }
+  // Translate one camAtFrameByPath entry into (mark glyph, status key).
+  // Status key drives the CSS class on each surface: timeline label uses
+  // `.fl-det-${...}` (PHYSICS_LAB ink palette), per-cam HUD uses
+  // `.hud-mark-${...}` (dark-bg overlay palette). Verdict logic centralised
+  // here so the two surfaces can never drift in interpretation.
+  //   ✓ kept       — chain_filter validated detection
+  //   ✓ unscored   — detected but no chain_filter ran (live path normal)
+  //   F flicker    — chain_filter rejected_flicker (chain too short)
+  //   J jump       — chain_filter rejected_jump   (ray broke max_jump_px)
+  //   · no         — non-detection
+  function frameVerdict(entry) {
+    if (!entry || !entry.detected) return ["·", "no"];
+    switch (entry.filter_status) {
+      case "rejected_flicker": return ["F", "flicker"];
+      case "rejected_jump":    return ["J", "jump"];
+      case "kept":             return ["✓", "kept"];
+      default:                 return ["✓", "unscored"];
+    }
+  }
+  const FL_DET_CLS = {
+    no: "fl-det fl-det-no",
+    flicker: "fl-det fl-det-warn",
+    jump: "fl-det fl-det-bad",
+    kept: "fl-det",
+    unscored: "fl-det fl-det-unscored",
+  };
   function renderFrameLabel() {
     const v = String(currentFrame);
     if (document.activeElement !== frameInput && frameInput.value !== v) frameInput.value = v;
@@ -80,19 +106,50 @@
         if (!cams.includes(cam)) return `<span class="fl-cell fl-cell-blank">${cam}:—</span>`;
         const entry = camAtFrameByPath[path][cam][currentFrame];
         if (!entry) return `<span class="fl-cell fl-cell-blank">${cam}:—</span>`;
-        const cls = entry.detected ? "fl-det" : "fl-det fl-det-no";
-        const mark = entry.detected ? "✓" : "·";
-        return `<span class="fl-cell">${cam}:${entry.idx}<span class="${cls}">${mark}</span></span>`;
+        const [mark, status] = frameVerdict(entry);
+        // frame_index = physical source frame counter (iOS capture-queue
+        // index for live, PyAV decode order for server_post). Distinct
+        // from `idx` which is array position post timestamp-sort —
+        // exposes the throttle/drop gaps that array idx hides.
+        const fidx = entry.frame_index != null ? `<span class="fl-fidx">/${entry.frame_index}</span>` : "";
+        return `<span class="fl-cell">${cam}:${entry.idx}${fidx}<span class="${FL_DET_CLS[status]}">${mark}</span></span>`;
       }).join("");
       rows.push(`<div class="fl-row"><span class="fl-pathlabel">${PATH_LABEL[path]}</span>${cells}</div>`);
     }
     frameSub.innerHTML = rows.join("");
+  }
+  // Per-cam HUD: subset of the timeline label scoped to one camera, layered
+  // over the video as a DOM overlay. Same verdict / frame_index data, but
+  // independent surface so OVL=0 (pure video) keeps the HUD legible.
+  function renderHuds() {
+    for (const cam of ["A", "B"]) {
+      const hud = document.querySelector(`[data-cam-hud="${cam}"]`);
+      if (!hud) continue;
+      const lines = [];
+      for (const path of PATHS) {
+        if (!camsWithFramesByPath[path].includes(cam)) continue;
+        const entry = camAtFrameByPath[path][cam][currentFrame];
+        if (!entry) continue;
+        const [mark, status] = frameVerdict(entry);
+        const fidxBit = entry.frame_index != null
+          ? `<span class="hud-fidx">/${entry.frame_index}</span>` : "";
+        lines.push(
+          `<div class="hud-row">`
+          + `<span class="hud-path">${PATH_LABEL[path]}</span>`
+          + `<span class="hud-idx">${entry.idx}${fidxBit}</span>`
+          + `<span class="hud-mark hud-mark-${status}">${mark}</span>`
+          + `</div>`
+        );
+      }
+      hud.innerHTML = lines.join("");
+    }
   }
   function setFrame(f, { seekVideos = true } = {}) {
     currentFrame = Math.max(0, Math.min(TOTAL_FRAMES - 1, f | 0));
     currentT = unionTimes[currentFrame];
     scrubber.value = String(currentFrame);
     renderFrameLabel();
+    renderHuds();
     renderDetectionStrip();
     if (seekVideos) syncVideosToT(currentT);
     // Schedule all three independent paint paths. Each owns its own RAF
