@@ -90,7 +90,19 @@ final class CameraCaptureRuntime {
 
         videoOutput.setSampleBufferDelegate(videoDelegate, queue: processingQueue)
         videoOutput.alwaysDiscardsLateVideoFrames = true
-        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        // NV12 (4:2:0 bi-planar, video range) instead of BGRA so live HSV
+        // detection sees the same chroma resolution that server_post sees
+        // post H.264 decode. Earlier the iOS path was 4:4:4 BGRA and
+        // server_post was 4:2:0 (chroma upsampled by libswscale during
+        // decode) — that asymmetry made GT-driven HSV distillation give
+        // params that worked on H.264 but not on iOS BGRA. Capturing as
+        // NV12 closes the gap; remaining diff is just DCT quantization.
+        // BallDetector's mapPixelBufferToBGR handles both formats so unit
+        // tests using BGRA buffers still work.
+        videoOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String:
+                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        ]
         if session.canAddOutput(videoOutput) {
             session.addOutput(videoOutput)
         }
