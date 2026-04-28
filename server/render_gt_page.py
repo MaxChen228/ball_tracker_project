@@ -446,4 +446,38 @@ _GT_CSS = """
 .gt-queue-controls {
   display: flex; gap: var(--s-2);
 }
+
+/* ----- buttons -----
+   PHYSICS_LAB family: 1px borders, no shadows, JetBrains Mono.
+   Variants stack: `.btn.primary`, `.btn.secondary`, `.btn.danger`,
+   `.btn.small`. Mirrors the dashboard's `.ev-btn` look but lives under
+   the shorter `.btn` namespace the /gt JS bundle uses. */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.04em;
+  padding: 6px 12px; min-height: 26px;
+  border: 1px solid var(--border-base); border-radius: var(--r);
+  background: var(--surface); color: var(--ink);
+  cursor: pointer; user-select: none;
+  transition: background 0.08s, border-color 0.08s, color 0.08s;
+  text-decoration: none;
+}
+.btn:hover { background: var(--surface-hover); border-color: var(--ink); }
+.btn:active { background: var(--surface-hover); }
+.btn:disabled,
+.btn[disabled] {
+  cursor: not-allowed; opacity: 0.5;
+  background: var(--surface); color: var(--sub);
+  border-color: var(--border-base);
+}
+.btn.primary {
+  background: var(--ink); color: var(--surface); border-color: var(--ink);
+}
+.btn.primary:hover { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.btn.secondary { color: var(--sub); }
+.btn.secondary:hover { color: var(--ink); }
+.btn.danger { color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }
+.btn.danger:hover { background: var(--failed); color: var(--surface); border-color: var(--failed); }
+.btn.small { font-size: 10px; padding: 3px 8px; min-height: 22px; }
 """
