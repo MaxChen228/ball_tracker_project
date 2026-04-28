@@ -552,6 +552,28 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
      Letterbox is acceptable because the container already locks
      aspect-ratio to the calibration dims, so any mismatch is rare. */
   .vid-media video {{ display:block; width:100%; height:100%; object-fit:contain; }}
+  /* Per-cam frame HUD: mirror of timeline label scoped to one cam, drawn
+     over the video as a DOM layer (not canvas) so it stays legible at
+     OVL=0. Same dark-on-light palette as cam-view-toolbar so the two
+     read as a coherent pair. */
+  .vid-media .vid-hud {{ position:absolute; top:8px; left:8px; z-index:4;
+    background:rgba(26,23,20,0.78); border:1px solid rgba(255,255,255,0.12);
+    border-radius:var(--r); padding:4px 7px;
+    font-family:var(--mono); font-size:11px; line-height:1.35;
+    letter-spacing:0.02em; font-variant-numeric:tabular-nums;
+    color:#F8F7F4; pointer-events:none; }}
+  .vid-media .vid-hud:empty {{ display:none; }}
+  .vid-media .vid-hud .hud-row {{ display:flex; gap:8px; align-items:baseline; }}
+  .vid-media .vid-hud .hud-row + .hud-row {{ margin-top:2px; }}
+  .vid-media .vid-hud .hud-path {{ color:#9b948b; min-width:30px;
+    letter-spacing:0.08em; font-size:9px; text-transform:uppercase; }}
+  .vid-media .vid-hud .hud-fidx {{ color:#9b948b; font-size:9px; }}
+  .vid-media .vid-hud .hud-mark {{ font-weight:600; }}
+  .vid-media .vid-hud .hud-mark-kept {{ color:#7eb8a8; }}
+  .vid-media .vid-hud .hud-mark-unscored {{ color:#7eb8a8; opacity:0.6; }}
+  .vid-media .vid-hud .hud-mark-flicker {{ color:#e3b66f; }}
+  .vid-media .vid-hud .hud-mark-jump {{ color:#e08177; }}
+  .vid-media .vid-hud .hud-mark-no {{ color:#6e6863; font-weight:400; }}
   .plate-overlay-real {{ position:absolute; inset:0; width:100%; height:100%;
     pointer-events:none; z-index:1; }}
   .plate-overlay-real polygon {{ fill:none; stroke:rgba(217,59,59,0.92);
@@ -646,6 +668,11 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .tl-row .frame-label .fl-cell-blank {{ color:var(--sub); font-weight:400; }}
   .tl-row .frame-label .fl-det {{ color:var(--contra); font-weight:600; }}
   .tl-row .frame-label .fl-det-no {{ color:var(--sub); font-weight:400; }}
+  .tl-row .frame-label .fl-det-warn {{ color:var(--pending); font-weight:600; }}
+  .tl-row .frame-label .fl-det-bad {{ color:var(--dev); font-weight:600; }}
+  .tl-row .frame-label .fl-det-unscored {{ opacity:0.55; }}
+  .tl-row .frame-label .fl-fidx {{ color:var(--sub); font-size:9px;
+    letter-spacing:0; padding:0 1px; }}
   #frame-input {{ width:58px; font:inherit; font-size:10px; background:var(--bg);
     border:1px solid var(--border-base); color:var(--ink); padding:1px 4px; text-align:center;
     font-variant-numeric:tabular-nums; border-radius:var(--r); }}

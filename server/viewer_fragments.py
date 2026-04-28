@@ -50,12 +50,19 @@ def video_cell_html(
         # the `detection_blobs` layer) sit on top of the video so
         # calibration drift / detection misalignment reads as overlay
         # offset against the real ball.
+        # vid-hud: per-cam DOM HUD overlay layered above video + canvas.
+        # Updated each setFrame() with this cam's LIVE / SVR (idx, frame#,
+        # filter mark) so the operator can read current-frame state directly
+        # off the video without consulting the timeline label. DOM rather
+        # than canvas so it's immune to the OVL opacity slider — at OVL=0
+        # (pure video) the HUD still reads.
         body = (
             f'<div class="vid-frame">'
             f'<div class="vid-media"{media_style}>'
             f'<video data-cam="{cam}" preload="auto" playsinline muted '
             f'src="{url}"></video>'
             f'<canvas class="virt-overlay-canvas" data-cam-canvas="{cam}"></canvas>'
+            f'<div class="vid-hud" data-cam-hud="{cam}"></div>'
             f"{pp_html}"
             f"</div>"
             f"</div>"
