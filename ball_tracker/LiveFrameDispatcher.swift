@@ -99,6 +99,7 @@ final class LiveFrameDispatcher {
             "sid": sid,
             "i": frame.frame_index,
             "ts": frame.timestamp_s,
+            "engine": frame.engine,
             "candidates": candsPayload,
         ])
     }

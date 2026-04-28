@@ -119,6 +119,7 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
             "sid": session_id,
             "i": 0,
             "ts": 0.25,
+            "engine": "hsv@ios.1.0",
             "candidates": [{"px": ua, "py": va, "area": 100, "area_score": 1.0}],
         })
         ws_b.send_json({
@@ -127,6 +128,7 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
             "sid": session_id,
             "i": 0,
             "ts": 0.25,
+            "engine": "hsv@ios.1.0",
             "candidates": [{"px": ub, "py": vb, "area": 100, "area_score": 1.0}],
         })
         assert wait_for_event(
@@ -220,6 +222,7 @@ def test_live_websocket_single_camera_emits_ray_without_sync(monkeypatch):
             "sid": session_id,
             "i": 12,
             "ts": 100.0,
+            "engine": "hsv@ios.1.0",
             "candidates": [{"px": u, "py": v, "area": 100, "area_score": 1.0}],
         })
 
