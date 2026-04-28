@@ -223,20 +223,14 @@ def _render_editor_panel() -> str:
         '</div>'
         '<div class="gt-video-controls" id="gt-video-controls">'
         '<button type="button" class="btn small" id="gt-video-play">Play</button>'
-        '<button type="button" class="btn small secondary" id="gt-video-step-back" title=", → step −1 frame (~240 fps)">⟨</button>'
-        '<button type="button" class="btn small secondary" id="gt-video-step-fwd" title=". → step +1 frame">⟩</button>'
         '<span class="gt-video-time" id="gt-video-time">0.00 / 0.00 s</span>'
+        '<span class="gt-readout" id="gt-readout">click: — · range: — — —</span>'
         '</div>'
         '<div class="gt-video-meta" id="gt-video-meta">—</div>'
         '</div>'
         '<div class="gt-timeline" id="gt-timeline" hidden>'
         '<svg id="gt-timeline-svg" preserveAspectRatio="none"></svg>'
         '<div class="gt-timeline-hint" id="gt-timeline-hint"></div>'
-        '</div>'
-        '<div class="gt-range-row" id="gt-range-row" hidden>'
-        '<label>start <input type="number" step="0.01" min="0" id="gt-range-start"></label>'
-        '<label>end <input type="number" step="0.01" min="0" id="gt-range-end"></label>'
-        '<span class="gt-click-readout" id="gt-click-readout">click: —</span>'
         '</div>'
         '<div class="gt-add-row" id="gt-add-row" hidden>'
         '<button type="button" class="btn primary" id="gt-add-btn" disabled>Add to queue</button>'
@@ -400,12 +394,17 @@ _GT_CSS = """
   position: absolute; inset: 0; pointer-events: none;
 }
 .gt-click-marker {
-  position: absolute; width: 16px; height: 16px;
-  border: 2px solid var(--failed); border-radius: 50%;
+  position: absolute; width: 28px; height: 28px;
+  border: 3px solid var(--failed); border-radius: 50%;
   transform: translate(-50%, -50%);
   pointer-events: none;
-  box-shadow: 0 0 0 1px rgba(255,255,255,0.8);
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.95), 0 0 12px rgba(167,55,42,0.5);
+  /* Inner crosshair so the seed point is precise even on fuzzy frames. */
+  background:
+    linear-gradient(to right, transparent 47%, var(--failed) 47% 53%, transparent 53%),
+    linear-gradient(to bottom, transparent 47%, var(--failed) 47% 53%, transparent 53%);
 }
+/* Marker fades out as you scrub away from click_t — JS sets opacity. */
 .gt-video-controls {
   display: flex; gap: var(--s-2); align-items: center;
   margin-top: var(--s-2);
@@ -424,32 +423,30 @@ _GT_CSS = """
   padding: 6px 10px; border-radius: var(--r);
   margin-bottom: var(--s-2);
 }
-.gt-click-readout {
-  font-family: var(--mono); font-size: 11px; color: var(--sub);
-  align-self: end;
+.gt-readout {
+  font-family: var(--mono); font-size: 11px; color: var(--ink);
+  margin-left: var(--s-2);
 }
+/* Unified timeline — single control surface for scrub + range + click.
+   The SVG inside renders heatmap → range shade → handles → click tick →
+   playback cursor in z-order; mousedown on the SVG decides drag mode
+   (handle / click-tick / cursor) by hit-testing against the rendered
+   element data-role attribute. */
 .gt-timeline {
   position: relative; margin-bottom: var(--s-3);
-  height: 80px; border: 1px solid var(--border-base); background: var(--surface);
+  height: 96px; border: 1px solid var(--border-base);
+  background: var(--surface);
+  cursor: pointer;  /* signals "click anywhere to seek" */
 }
-.gt-timeline svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.gt-timeline svg {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  display: block;
+}
 .gt-timeline-hint {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
   font-family: var(--mono); font-size: 10px; color: var(--sub); pointer-events: none;
 }
-
-.gt-range-row {
-  display: flex; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-3);
-}
-.gt-range-row label {
-  font-family: var(--mono); font-size: 11px; color: var(--sub);
-  display: flex; flex-direction: column; gap: 4px;
-}
-.gt-range-row input[type=number] {
-  width: 100px; font-family: var(--mono); padding: 4px 6px;
-  border: 1px solid var(--border-base); border-radius: var(--r);
-  background: var(--surface);
-}
+.gt-timeline.dragging { cursor: ew-resize; }
 .gt-add-row {
   display: flex; gap: var(--s-3); align-items: center; flex-wrap: wrap;
 }
