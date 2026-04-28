@@ -56,6 +56,20 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
             )
 
         path_html = "".join(_path_chip(p, l) for p, l in path_chip_specs)
+        # GT path chip — existence-only ✓/— per cam, no count (those
+        # live in the GT JSON itself, fetched on demand by /report/{sid}).
+        # Chip lights `on` only when both cams have GT — partial GT is
+        # still surfaced via the ✓·— glyph but the chip stays neutral.
+        has_gt_map = e.get("has_gt") or {}
+        if has_gt_map:
+            a = "✓" if has_gt_map.get("A") else "—"
+            b = "✓" if has_gt_map.get("B") else "—"
+            gt_cls = " on" if (has_gt_map.get("A") and has_gt_map.get("B")) else ""
+            path_html += (
+                f'<span class="path-chip{gt_cls}" '
+                f'title="GT — SAM 3 ground truth (A·B)">'
+                f'G<span class="pc">{a}·{b}</span></span>'
+            )
         peak_z = e.get("peak_z_m")
         duration = e.get("duration_s")
         n_tri = int(e.get("n_triangulated") or 0)
@@ -124,6 +138,33 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
                 f'<button class="event-action ok" type="submit">Run srv</button>'
                 f"</form>"
             )
+        # GT pipeline buttons. Layout: Run GT (queue SAM 3) → Validate
+        # (run three-way comparison) → Report (open /report/{sid}).
+        # Each gates on the prerequisite artefact existing.
+        has_gt = e.get("has_gt") or {}
+        has_val = e.get("has_validation") or {}
+        gt_done_all = bool(has_gt) and all(has_gt.values())
+        val_done_any = any(has_val.values())
+        if not e.get("trashed"):
+            gt_html = (
+                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/run_gt_labelling">'
+                f'<button class="event-action accent" type="submit" '
+                f'title="Queue SAM 3 GT labelling for both cams">Run GT</button>'
+                f"</form>"
+            )
+            if gt_done_all:
+                gt_html += (
+                    f'<form class="event-action-form" method="POST" action="/sessions/{sid}/run_validation">'
+                    f'<button class="event-action accent" type="submit" '
+                    f'title="Run three-way validation (live vs server vs GT)">Validate</button>'
+                    f"</form>"
+                )
+            if val_done_any:
+                gt_html += (
+                    f'<a class="event-action accent" href="/report/{sid}" '
+                    f'title="Open three-way validation report">Report</a>'
+                )
+            processing_html += gt_html
         # Only surface status chips that carry real signal. The path
         # chips already encode "was each pipeline completed?" via their
         # count + on/off/err state, so `partial` / `paired` /
