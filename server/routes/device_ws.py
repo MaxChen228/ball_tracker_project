@@ -136,7 +136,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 # Pydantic raises on a malformed entry; let it.
                 from schemas import BlobCandidate as _BlobCandidate
                 cands_payload = [
-                    _BlobCandidate(
+                    _BlobCandidate.model_construct(
                         px=float(c["px"]),
                         py=float(c["py"]),
                         area=int(c["area"]),
