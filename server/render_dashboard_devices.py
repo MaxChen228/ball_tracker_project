@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import html
+import time as _time
 
 from cam_view_ui import render_cam_view
 
@@ -11,6 +12,17 @@ def _fmt_hhmm(ts: float | None) -> str:
     if ts is None:
         return "—"
     return _dt.datetime.fromtimestamp(ts).strftime("%H:%M")
+
+
+def _fmt_age(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{int(seconds)}s ago"
+    if seconds < 3600:
+        return f"{int(seconds / 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds / 3600)}h ago"
+    return f"{int(seconds / 86400)}d ago"
 
 
 def _render_battery_chip(
@@ -76,10 +88,13 @@ def _render_device_rows(
         cal_dot = "ok" if is_cal else ("warn" if online else "bad")
         sync_dot = "ok" if time_synced else ("warn" if online else "bad")
         sync_label = "synced" if time_synced else ("not synced" if online else "offline")
-        cal_label = (
-            f"last {html.escape(_fmt_hhmm(last_ts))}" if (is_cal and last_ts)
-            else ("pending" if online else "offline")
-        )
+        if is_cal and last_ts:
+            cal_label = (
+                f"last {html.escape(_fmt_hhmm(last_ts))} "
+                f"({html.escape(_fmt_age(_time.time() - last_ts))})"
+            )
+        else:
+            cal_label = "pending" if online else "offline"
         disabled_attr = "" if online else " disabled"
         auto_cal_btn = (
             f'<button type="button" class="btn small" '

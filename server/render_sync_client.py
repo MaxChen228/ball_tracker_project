@@ -278,18 +278,25 @@ _JS_TEMPLATE = r"""
                       : 'not synced';
       const sid = d && d.time_sync_id;
       const ageS = d && typeof d.time_sync_age_s === 'number' ? d.time_sync_age_s : null;
-      const ageTxt = ageS != null ? ` · ${ageS.toFixed(0)}s ago` : '';
+      const ageTxt = ageS != null ? `${ageS.toFixed(0)}s ago` : null;
       const idChip = (synced && sid)
         ? `<span class="sid-chip" title="${esc(sid)}">·${esc(shortSyncId(sid))}</span>`
         : '';
       const pairBadge = (synced && bothPaired) ? ' <span class="pair-ok">paired</span>' : '';
-      const meta = synced
-        ? `<div class="pcs-meta">${idChip}${ageTxt}${pairBadge}</div>`
-        : isListening
-          ? `<div class="pcs-meta">waiting for chirp…</div>`
-          : online
-            ? `<div class="pcs-meta">press Run mutual sync</div>`
-            : `<div class="pcs-meta">device offline</div>`;
+      let metaInner;
+      if (synced) {
+        metaInner = `${idChip} last sync · ${ageTxt}${pairBadge}`;
+      } else if (ageTxt) {
+        const suffix = isListening ? ' · listening…'
+                     : online      ? ' · awaiting new chirp'
+                                   : ' · device offline';
+        metaInner = `last sync · ${ageTxt}${suffix}`;
+      } else {
+        metaInner = isListening ? 'waiting for chirp…'
+                  : online      ? 'press Run mutual sync'
+                                : 'device offline';
+      }
+      const meta = `<div class="pcs-meta">${metaInner}</div>`;
       return `<div class="pcs-cam ${cls}">
         <div class="led"></div>
         <div class="pcs-body">
