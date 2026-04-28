@@ -989,6 +989,26 @@ def test_viewer_exposes_per_frame_index_and_filter_status(tmp_path):
     assert '"filter_status": ["kept", "rejected_jump", null]' in body
 
 
+def test_viewer_renders_per_cam_hud_div_for_each_uploaded_clip():
+    """Each cam with an uploaded clip gets a `data-cam-hud` overlay div
+    inside its `vid-media` container — DOM HUD that mirrors the timeline
+    label, scoped to one cam, layered over video. JS populates it on
+    setFrame; the DOM hook just needs to exist for both cams."""
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    P = np.array([[0.1, 0.3, 1.0]])
+    _record_pitch(_pitch("A", 712, K, R_a, t_a, H_a, P))
+    _record_pitch(_pitch("B", 712, K, R_b, t_b, H_b, P))
+    main.state.save_clip("A", sid(712), b"clip", "mov")
+    main.state.save_clip("B", sid(712), b"clip", "mov")
+    client = TestClient(app)
+    body = client.get(f"/viewer/{sid(712)}").text
+    assert 'data-cam-hud="A"' in body
+    assert 'data-cam-hud="B"' in body
+    # HUD CSS class must be present (dark overlay style); without it the
+    # div would just be a transparent layer at default font.
+    assert ".vid-hud" in body
+
+
 def test_video_endpoint_serves_clip_bytes():
     session_id = sid(706)
     main.state.save_clip("A", session_id, b"\x00\x01\x02byte-soup", "mov")
