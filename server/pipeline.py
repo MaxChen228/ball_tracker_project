@@ -48,7 +48,6 @@ def detect_pitch(
     frame_iter: FrameIteratorFactory = iter_frames,
     *,
     should_cancel: CancelCheck | None = None,
-    expected_radius_px: float | None = None,
     shape_gate: ShapeGate | None = None,
     selector_tuning: "CandidateSelectorTuning | None" = None,
     chain_filter_params: ChainFilterParams | None = None,
@@ -65,16 +64,7 @@ def detect_pitch(
     (chroma 4:2:0 + DCT quantization), not the algorithm itself.
     """
     hsv = hsv_range if hsv_range is not None else HSVRange.from_env()
-    if expected_radius_px is None:
-        logger.info(
-            "detect_pitch video=%s mode=no-radius-prior (area∈[20,150000])",
-            video_path.name,
-        )
-    else:
-        logger.info(
-            "detect_pitch video=%s expected_radius_px=%.1f",
-            video_path.name, expected_radius_px,
-        )
+    logger.info("detect_pitch video=%s", video_path.name)
     out: list[FramePayload] = []
     # Temporal prior state — equal-velocity straight-line model that
     # carries the ball's last known (position, velocity). Reset to None
@@ -99,7 +89,6 @@ def detect_pitch(
         )
         centroid = detect_ball(
             bgr, hsv,
-            expected_radius_px=expected_radius_px,
             prev_position=prev_position,
             prev_velocity=prev_velocity,
             dt=dt,

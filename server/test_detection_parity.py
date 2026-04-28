@@ -98,10 +98,9 @@ def test_cluttered_scene_temporal_prior_disambiguates(hsv):
     assert no_prior is not None
     assert abs(no_prior[0] - 900) < 3
 
-    # With prior pointing toward the smaller blob.
+    # With temporal prior pointing toward the smaller blob.
     prior = detect_ball(
         img, hsv,
-        expected_radius_px=14.0,
         prev_position=(390.0, 360.0),
         prev_velocity=(2400.0, 0.0),  # +10 px/frame @ 240 fps
         dt=1.0 / 240,
