@@ -53,6 +53,10 @@ env/
 # Server runtime state (pitch/results cache, written per-request).
 server/data/
 
+# Tools venv (SAM 3 + transformers main, ~5 GB; managed by uv from tools/pyproject.toml)
+tools/.venv/
+tools/.python-version
+
 # Per-device calibration artefacts (large image sets + device-specific JSON).
 server/calib_A/
 server/calib_B/
