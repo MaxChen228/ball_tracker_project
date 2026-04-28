@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates
+from detection_engine import HSV_IOS_ENGINE_NAME
 from schemas import FramePayload, TriangulatedPoint
 
 logger = logging.getLogger("ball_tracker")
@@ -94,8 +95,19 @@ class LivePairingSession:
         selector at view time (which would diverge from "cost actually
         used to pick winner" if dashboard tuning changed)."""
         cands = frame.candidates
+        # Stamp the engine that produced these candidates if the upstream
+        # ingest path didn't already do it. Until iOS sends the field on
+        # the wire (Phase 2), the live path candidates always come from
+        # the iOS HSV pipeline, so default to that identifier — explicit
+        # statement of reality, not a silent fallback.
+        engine_name = frame.detection_engine or HSV_IOS_ENGINE_NAME
         if not cands:
-            return frame.model_copy(update={"px": None, "py": None, "ball_detected": False})
+            return frame.model_copy(update={
+                "px": None,
+                "py": None,
+                "ball_detected": False,
+                "detection_engine": engine_name,
+            })
         prev_pos = self.last_position.get(cam)
         prev_vel = self.last_velocity.get(cam)
         prev_t = self.last_timestamp_s.get(cam)
@@ -131,6 +143,7 @@ class LivePairingSession:
             "px": winner.px,
             "py": winner.py,
             "ball_detected": True,
+            "detection_engine": engine_name,
         })
 
     def _update_temporal_prior(self, cam: str, frame: FramePayload) -> None:

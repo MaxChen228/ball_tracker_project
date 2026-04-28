@@ -100,6 +100,14 @@ class FramePayload(BaseModel):
     # = chain broke because the ray direction jumped past max_jump_px. Set
     # only on frames where ball_detected is True — non-detections stay None.
     filter_status: Literal["kept", "rejected_flicker", "rejected_jump"] | None = None
+    # Identity of the detection engine that produced this frame's
+    # candidates / px / py. Convention: `<family>@<version-or-sha>` —
+    # server-side HSV is `hsv@1.0`, iOS-side HSV is `hsv@ios.1.0`,
+    # future ML engines will be `ml@<sha256[:8]>`. Stamped at production
+    # time and persisted so historical sessions remain reproducible.
+    # None on legacy pitch JSONs written before this field landed; new
+    # writes always populate it. See `detection_engine.py`.
+    detection_engine: str | None = None
 
 
 class CaptureTelemetryPayload(BaseModel):
