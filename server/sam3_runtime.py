@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -216,6 +217,9 @@ class Sam3VideoLabeller:
         prompt: str = "blue ball",
         min_confidence: float = 0.5,
         max_frames: int | None = None,
+        time_range: tuple[float, float] | None = None,
+        progress_callback: Callable[[int, int, float], None] | None = None,
+        preview_callback: Callable[[int, np.ndarray, np.ndarray], None] | None = None,
     ) -> SAM3GTRecord:
         """Decode the MOV, run SAM 3 video propagation with the text
         prompt, and return a `SAM3GTRecord`.
@@ -229,7 +233,23 @@ class Sam3VideoLabeller:
           `frames` — distillation treats absence as ground-truth miss.
         - `max_frames` clamps the propagation window for dev iteration.
           None means full video.
+        - `time_range` is **video-relative seconds** (`[t_start, t_end]`,
+          where `t = absolute_pts_s − video_start_pts_s`). Only frames
+          whose video-relative PTS falls inside the window are kept.
+          Mutually exclusive with `max_frames` (raises ValueError).
+        - `progress_callback(current, total, ms_per_frame)` is invoked
+          synchronously after each propagation step. The CLI driver
+          turns it into stderr `PROGRESS:` lines for the queue worker.
+        - `preview_callback(frame_idx, bgr, mask)` is invoked
+          synchronously after each propagation step that produced a
+          mask above `min_confidence`. `mask` is the chosen object's
+          binary mask (uint8 0/255). The CLI driver writes a JPEG
+          overlay so the operator can confirm SAM 3 is tracking the
+          right object before the run finishes.
         """
+        if max_frames is not None and time_range is not None:
+            raise ValueError("max_frames and time_range are mutually exclusive")
+
         self.load()
         assert self._model is not None and self._processor is not None
 
@@ -239,17 +259,31 @@ class Sam3VideoLabeller:
 
         # Pre-load all frames + their absolute PTS. We need the BGR
         # buffers anyway to compute mask_hue_* etc, so caching them is
-        # not extra cost.
+        # not extra cost. `time_range` filters here; `max_frames` clamps.
+        t_start_abs = (
+            video_start_pts_s + time_range[0] if time_range is not None else None
+        )
+        t_end_abs = (
+            video_start_pts_s + time_range[1] if time_range is not None else None
+        )
         frame_bgrs: list[np.ndarray] = []
         frame_pts: list[float] = []
         for absolute_pts_s, bgr in iter_frames(mov_path, video_start_pts_s):
+            if time_range is not None:
+                if absolute_pts_s < t_start_abs:
+                    continue
+                if absolute_pts_s > t_end_abs:
+                    break
             frame_bgrs.append(bgr)
             frame_pts.append(absolute_pts_s)
             if max_frames is not None and len(frame_bgrs) >= max_frames:
                 break
 
         if not frame_bgrs:
-            raise RuntimeError(f"no decodable frames in {mov_path}")
+            raise RuntimeError(
+                f"no decodable frames in {mov_path}"
+                + (f" within time_range {time_range}" if time_range else "")
+            )
 
         video_fps = (
             (len(frame_pts) - 1) / (frame_pts[-1] - frame_pts[0])
@@ -274,29 +308,49 @@ class Sam3VideoLabeller:
         )
 
         gt_frames: list[SAM3GTFrame] = []
+        total_frames = len(frame_rgbs)
+        ema_ms_per_frame: float | None = None
+        last_tick = time.monotonic()
         for model_outputs in self._model.propagate_in_video_iterator(
             inference_session=session,
-            max_frame_num_to_track=len(frame_rgbs) - 1,
-            show_progress_bar=True,
+            max_frame_num_to_track=total_frames - 1,
+            show_progress_bar=False,  # CLI emits its own PROGRESS lines
         ):
             processed = self._processor.postprocess_outputs(
                 session, model_outputs
             )
             frame_idx = int(model_outputs.frame_idx)
+
+            # Per-frame elapsed → exponentially-weighted moving avg so
+            # the CLI's `ms_per_frame` field doesn't yo-yo on warmup.
+            now = time.monotonic()
+            sample_ms = (now - last_tick) * 1000.0
+            last_tick = now
+            if ema_ms_per_frame is None:
+                ema_ms_per_frame = sample_ms
+            else:
+                ema_ms_per_frame = 0.7 * ema_ms_per_frame + 0.3 * sample_ms
+
             scores = processed.get("scores")
             masks = processed.get("masks")
             if scores is None or masks is None or len(scores) == 0:
+                if progress_callback is not None:
+                    progress_callback(frame_idx + 1, total_frames, ema_ms_per_frame)
                 continue
             scores_np = scores.detach().cpu().float().numpy()
             best_idx = int(np.argmax(scores_np))
             best_score = float(scores_np[best_idx])
             if best_score < min_confidence:
+                if progress_callback is not None:
+                    progress_callback(frame_idx + 1, total_frames, ema_ms_per_frame)
                 continue
             best_mask = masks[best_idx].detach().cpu().numpy()
             stats = analyze_mask(best_mask, frame_bgrs[frame_idx])
             if stats is None:
                 # Mask was non-empty in score sort but degenerated after
                 # binary threshold (rare edge). Treat as miss.
+                if progress_callback is not None:
+                    progress_callback(frame_idx + 1, total_frames, ema_ms_per_frame)
                 continue
             gt_frames.append(SAM3GTFrame(
                 frame_idx=frame_idx,
@@ -312,6 +366,18 @@ class Sam3VideoLabeller:
                 mask_val_mean=stats.val_mean,
                 confidence=best_score,
             ))
+            if preview_callback is not None:
+                # Pass a normalised 0/255 uint8 mask so callers don't
+                # have to second-guess dtype; matches what analyze_mask
+                # internally normalises to.
+                m_u8 = best_mask.astype(np.uint8)
+                m_u8 = np.where(m_u8 > 0, np.uint8(255), np.uint8(0))
+                try:
+                    preview_callback(frame_idx, frame_bgrs[frame_idx], m_u8)
+                except Exception as e:
+                    logger.warning("preview_callback raised: %s", e)
+            if progress_callback is not None:
+                progress_callback(frame_idx + 1, total_frames, ema_ms_per_frame)
 
         gt_frames.sort(key=lambda f: f.frame_idx)
         return SAM3GTRecord(
