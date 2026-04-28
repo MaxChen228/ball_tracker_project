@@ -148,6 +148,34 @@ def test_render_report_gates_pass_when_thresholds_met():
     assert html.count('class="gate pass"') >= 2
 
 
+def test_render_report_zero_data_shows_na_not_pass():
+    """Regression: a session with zero detections must NOT render
+    "Algorithm alignment p95: 0.00px pass" — that p95=0.0 came from an
+    empty distance list and is meaningless. Should show n/a instead."""
+    empty_pair = {
+        "n_a_total": 0, "n_b_total": 0, "n_hits": 0,
+        "n_both_present": 0, "n_a_only": 0, "n_b_only": 0, "n_neither": 0,
+        "recall": 0.0, "precision": 0.0,
+        "centroid_mae_px": 0.0, "centroid_p95_px": 0.0,
+    }
+    payloads = {"A": {
+        "session_id": "s_deadbeef", "camera_id": "A", "match_radius_px": 8.0,
+        "n_gt_frames": 0, "n_live_frames": 0, "n_server_frames": 0,
+        "live_vs_gt": dict(empty_pair),
+        "server_vs_gt": dict(empty_pair),
+        "live_vs_server": dict(empty_pair),
+    }}
+    html = render_report_page("s_deadbeef", payloads)
+    # The two gates in the summary row must render n/a, not pass.
+    # Slice from the actual <div class="summary-row"> opener (not the
+    # CSS rule named the same way).
+    marker = '<div class="summary-row">'
+    assert marker in html, "summary-row div not in rendered HTML"
+    summary_section = html.split(marker, 1)[1].split("</div>", 1)[0]
+    assert "n/a" in summary_section, summary_section
+    assert "gate pass" not in summary_section, summary_section
+
+
 # ----- routes ---------------------------------------------------------
 
 
@@ -208,6 +236,34 @@ def test_post_cancel_gt_returns_count_zero_when_no_jobs():
     r = _client().post("/sessions/s_deadbeef/cancel_gt")
     assert r.status_code == 200
     assert r.json().get("n_canceled") == 0
+
+
+def test_post_cancel_distill_idempotent_when_no_running_job():
+    r = _client().post("/gt/cancel_distill")
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is True
+    assert body.get("flagged") is False
+
+
+def test_gt_state_cancel_distill_flips_global_distill_only():
+    """Regression: distill key is ('distill', 'global', 'global'); the
+    earlier cancel_session implementation matched key[1] == session_id
+    so a literal session_id 'global' would have been needed. The
+    explicit cancel_distill() helper avoids that."""
+    s = GTProcessingState()
+    label_key = ("label", "s_aaa", "A")
+    distill_key = ("distill", "global", "global")
+    s.start_job(label_key)
+    s.start_job(distill_key)
+    flagged = s.cancel_distill()
+    assert flagged is True
+    assert s.is_canceled(distill_key) is True
+    # Per-session label job is NOT touched.
+    assert s.is_canceled(label_key) is False
+    # Idempotent — calling again on a not-running job returns False.
+    s.finish_job(distill_key, status="canceled")
+    assert s.cancel_distill() is False
 
 
 def test_get_report_404_when_no_validation():

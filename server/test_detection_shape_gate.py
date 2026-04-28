@@ -87,7 +87,7 @@ def test_accepts_fill_0p60_ring():
     """A filled circle with a small hole — bbox fill drops toward 0.60
     (inside the new 0.55 gate, would have been borderline before). The
     p50=0.68 empirical distribution says real balls often look like
-    this after HSV∧fg_mask edge carving."""
+    this after HSV edge carving."""
     img = _blank()
     cv2.circle(img, (320, 240), 30, _yellow_green_bgr(), thickness=-1)
     # carve an off-center hole so bbox/area ratio falls but aspect stays ~1.

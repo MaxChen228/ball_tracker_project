@@ -46,6 +46,7 @@ import logging
 import math
 import random
 import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -114,17 +115,21 @@ def _eval_on_record(
     record: SAM3GTRecord,
     *,
     videos_dir: Path,
-    pitches_dir: Path,
     hsv: HSVRange,
     gate: ShapeGate,
     sel: CandidateSelectorTuning,
     match_radius_px: float,
+    should_cancel: "Callable[[], bool] | None" = None,
 ) -> EvalMetrics:
     """Run `detect_ball` on every decoded frame of the holdout MOV with
     the given params; compare against the per-frame GT centroid.
 
     Frames that SAM 3 didn't label are not counted in either numerator
-    or denominator — we only score frames where ground truth exists."""
+    or denominator — we only score frames where ground truth exists.
+
+    `should_cancel` is checked between frames so the dashboard's Cancel
+    button can interrupt a multi-minute eval without orphaning the
+    decode loop. None disables the check."""
     clip = None
     for ext in (".mov", ".mp4", ".m4v"):
         cand = videos_dir / f"session_{record.session_id}_{record.camera_id}{ext}"
@@ -148,6 +153,8 @@ def _eval_on_record(
     prev_vel: tuple[float, float] | None = None
     prev_t: float | None = None
     for idx, (t, bgr) in enumerate(iter_frames(clip, 0.0)):
+        if should_cancel is not None and should_cancel():
+            raise KeyboardInterrupt(f"distill canceled mid-eval on {record.session_id}/{record.camera_id}")
         dt = (t - prev_t) if prev_t is not None else None
         centroid = detect_ball(
             bgr, hsv,
@@ -263,7 +270,14 @@ def _load_records(gt_dir: Path) -> list[SAM3GTRecord]:
     return records
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+) -> int:
+    """`should_cancel` is checked between holdout records so the
+    dashboard's Cancel can interrupt a multi-minute run. The CLI never
+    passes one; routes/gt.py wires this to GTProcessingState."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--data-dir",
@@ -298,11 +312,16 @@ def main(argv: list[str] | None = None) -> int:
     if not records:
         log.error("no GT records under %s", gt_dir)
         return 1
-    if len(records) < 2 and not args.skip_eval:
+    if len(records) < 5 and not args.skip_eval:
+        # Below ~5 records the holdout split degenerates: a 20% holdout
+        # of 4 records is 1 record, so train/eval overlap is huge and
+        # the metrics are essentially self-evaluation. Loud warning;
+        # operator is expected to either feed more GT or pass
+        # --skip-eval to acknowledge the metrics are vapor.
         log.warning(
-            "only %d GT record(s) — can't split holdout. Falling back to "
-            "fitting on all records and evaluating on themselves (will "
-            "overstate quality). Add more GT or pass --skip-eval.",
+            "only %d GT record(s) — holdout will overlap heavily with train; "
+            "metrics will overstate quality. Add more GT (target ≥ 5) or "
+            "pass --skip-eval to acknowledge.",
             len(records),
         )
         train, holdout = records, records
@@ -333,43 +352,47 @@ def main(argv: list[str] | None = None) -> int:
         current_metrics = None
         proposed_metrics = None
     else:
-        log.info("evaluating CURRENT params on %d holdout records ...", len(holdout))
-        current_per_record = [
-            _eval_on_record(
-                r,
-                videos_dir=args.data_dir / "videos",
-                pitches_dir=args.data_dir / "pitches",
-                hsv=current_hsv,
-                gate=current_gate,
-                sel=current_sel,
-                match_radius_px=args.match_radius_px,
-            ) for r in holdout
-        ]
-        current_metrics = _aggregate_metrics(current_per_record)
-        log.info(
-            "  current: recall=%.3f precision=%.3f mae=%.2fpx p95=%.2fpx",
-            current_metrics.recall, current_metrics.precision,
-            current_metrics.centroid_mae_px, current_metrics.centroid_p95_px,
-        )
+        try:
+            log.info("evaluating CURRENT params on %d holdout records ...", len(holdout))
+            current_per_record = [
+                _eval_on_record(
+                    r,
+                    videos_dir=args.data_dir / "videos",
+                    hsv=current_hsv,
+                    gate=current_gate,
+                    sel=current_sel,
+                    match_radius_px=args.match_radius_px,
+                    should_cancel=should_cancel,
+                ) for r in holdout
+            ]
+            current_metrics = _aggregate_metrics(current_per_record)
+            log.info(
+                "  current: recall=%.3f precision=%.3f mae=%.2fpx p95=%.2fpx",
+                current_metrics.recall, current_metrics.precision,
+                current_metrics.centroid_mae_px, current_metrics.centroid_p95_px,
+            )
 
-        log.info("evaluating PROPOSED params on %d holdout records ...", len(holdout))
-        proposed_per_record = [
-            _eval_on_record(
-                r,
-                videos_dir=args.data_dir / "videos",
-                pitches_dir=args.data_dir / "pitches",
-                hsv=proposed_hsv,
-                gate=proposed_gate,
-                sel=proposed_sel,
-                match_radius_px=args.match_radius_px,
-            ) for r in holdout
-        ]
-        proposed_metrics = _aggregate_metrics(proposed_per_record)
-        log.info(
-            "  proposed: recall=%.3f precision=%.3f mae=%.2fpx p95=%.2fpx",
-            proposed_metrics.recall, proposed_metrics.precision,
-            proposed_metrics.centroid_mae_px, proposed_metrics.centroid_p95_px,
-        )
+            log.info("evaluating PROPOSED params on %d holdout records ...", len(holdout))
+            proposed_per_record = [
+                _eval_on_record(
+                    r,
+                    videos_dir=args.data_dir / "videos",
+                    hsv=proposed_hsv,
+                    gate=proposed_gate,
+                    sel=proposed_sel,
+                    match_radius_px=args.match_radius_px,
+                    should_cancel=should_cancel,
+                ) for r in holdout
+            ]
+            proposed_metrics = _aggregate_metrics(proposed_per_record)
+            log.info(
+                "  proposed: recall=%.3f precision=%.3f mae=%.2fpx p95=%.2fpx",
+                proposed_metrics.recall, proposed_metrics.precision,
+                proposed_metrics.centroid_mae_px, proposed_metrics.centroid_p95_px,
+            )
+        except KeyboardInterrupt as e:
+            log.warning("distill canceled mid-eval: %s", e)
+            return 130
 
     # ------- write -------
     payload = {

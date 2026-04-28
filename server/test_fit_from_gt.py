@@ -58,7 +58,7 @@ def _synthetic_record(
         video_fps=240.0,
         video_dims=(1920, 1080),
         frames=frames,
-        frames_total=n_frames,
+        frames_decoded=n_frames,
         frames_labelled=n_frames,
         min_confidence=0.5,
     )
