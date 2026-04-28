@@ -78,6 +78,14 @@
       const d = new Date(ts * 1000);
       return d.toTimeString().slice(0, 5);
     }
+    function ageTxt(ts) {
+      if (!ts) return '';
+      const s = Math.max(0, Date.now() / 1000 - ts);
+      if (s < 60) return Math.floor(s) + 's ago';
+      if (s < 3600) return Math.floor(s / 60) + 'm ago';
+      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+      return Math.floor(s / 86400) + 'd ago';
+    }
 
     function row(cam, deviceRecord) {
       const online = !!deviceRecord;
@@ -95,7 +103,7 @@
                     : (autoLast && autoLast.status === 'completed' ? 'ok'
                     : (autoLast && autoLast.status === 'failed' ? 'bad' : (online ? 'warn' : 'bad')));
       const syncLabel = !online ? 'offline' : (pending ? 'pending…' : (timeSynced ? 'synced' : 'not synced'));
-      const calLabel = (isCal && lastTs) ? ('last ' + hhmm(lastTs))
+      const calLabel = (isCal && lastTs) ? ('last ' + hhmm(lastTs) + ' (' + ageTxt(lastTs) + ')')
                      : (!online ? 'offline' : (isCal ? 'calibrated' : 'pending'));
       const autoLabel = autoCalLabel(autoRun, autoLast, online);
       const previewDisabled = previewBusy || !online;
