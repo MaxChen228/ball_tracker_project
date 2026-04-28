@@ -1,218 +1,249 @@
-"""Dashboard event-list partial renderers."""
+"""Dashboard event-list partial renderers.
+
+Card structure (3 visual rows max, row 2/3 collapse when empty):
+
+  row1: [swatch] HH:MM  s_xxxxxxxx                       [status chips]
+  row2: [L|252·157] [S|0·0] [G|✓·—]   ·   65 pts · 1.40 s · 1.65 m · 28 mph
+  row3:                                          [Run srv] [Trash] [...]
+
+DOM root keeps `.event-item` + `data-sid` because `86_live_stream.js`
+selects on it for the flash-done SSE animation, and `40_traj_handlers.js`
+delegates clicks on `.traj-toggle`. Internals renamed `.ev-*` so the new
+flexbox layout cannot be confused with the prior CSS-grid one."""
 from __future__ import annotations
 
 import html
 from typing import Any
-
-from render_dashboard_session import _PATH_LABELS
 
 
 def _render_events_body(events: list[dict[str, Any]]) -> str:
     if not events:
         return '<div class="events-empty">No sessions received yet.</div>'
     parts: list[str] = []
+    last_day: str | None = None
     for e in events:
-        sid = html.escape(e["session_id"])
-        status = html.escape(e.get("status", ""))
-        stat_label = status.replace("_", " ")
-        # Per-pipeline chip: state (on/err/-) + detection count. "L|67"
-        # reads quickly as "live produced 67 detections"; "S|—" means
-        # server pipeline never ran.
-        path_status = e.get("path_status") or {}
-        path_counts = e.get("n_ball_frames_by_path") or {}
-        path_chip_specs = (("live", "L"), ("server_post", "S"))
-        path_chip_titles = {
-            "live": "Live — iOS real-time detection (WS streamed)",
-            "server_post": "SVR — server-side detection on decoded MOV",
-        }
-
-        def _path_chip(path: str, label: str) -> str:
-            status = path_status.get(path, "-")
-            counts = path_counts.get(path) or {}
-            # Per-cam values in fixed A·B order so the chip width is
-            # stable across rows and one-cam vs two-cam sessions don't
-            # silently merge into a single sum. Aligns with viewer cam
-            # cards which have always shown per-cam stats; the previous
-            # cross-cam sum here meant "L|67" was ambiguous between
-            # "A=67,B=0" (broken pairing) and "A=33,B=34" (healthy).
-            if status == "done":
-                cls = " on"
-            elif status == "error":
-                cls = " err"
-            else:
-                cls = ""
-            if counts:
-                a_str = str(int(counts["A"])) if "A" in counts else "—"
-                b_str = str(int(counts["B"])) if "B" in counts else "—"
-                count_html = f'<span class="pc">{a_str}·{b_str}</span>'
-            else:
-                count_html = ""
-            title = path_chip_titles.get(path, path)
-            if counts:
-                title += " · " + ", ".join(f"{c}:{n}" for c, n in sorted(counts.items()))
-            return (
-                f'<span class="path-chip{cls}" title="{html.escape(title)}">'
-                f"{label}{count_html}</span>"
+        day = e.get("created_day") or "—"
+        if day != last_day:
+            parts.append(
+                f'<div class="event-day" data-day="{html.escape(day)}">'
+                f'{html.escape(day)}</div>'
             )
-
-        path_html = "".join(_path_chip(p, l) for p, l in path_chip_specs)
-        # GT path chip — existence-only ✓/— per cam, no count (those
-        # live in the GT JSON itself, fetched on demand by /report/{sid}).
-        # Chip lights `on` only when both cams have GT — partial GT is
-        # still surfaced via the ✓·— glyph but the chip stays neutral.
-        has_gt_map = e.get("has_gt") or {}
-        if has_gt_map:
-            a = "✓" if has_gt_map.get("A") else "—"
-            b = "✓" if has_gt_map.get("B") else "—"
-            gt_cls = " on" if (has_gt_map.get("A") and has_gt_map.get("B")) else ""
-            path_html += (
-                f'<span class="path-chip{gt_cls}" '
-                f'title="GT — SAM 3 ground truth (A·B)">'
-                f'G<span class="pc">{a}·{b}</span></span>'
-            )
-        peak_z = e.get("peak_z_m")
-        duration = e.get("duration_s")
-        n_tri = int(e.get("n_triangulated") or 0)
-        meta_bits: list[str] = []
-        if n_tri > 0:
-            meta_bits.append(
-                f'<span class="k">pts</span><span class="v">{n_tri}</span>'
-            )
-        if duration is not None:
-            meta_bits.append(
-                f'<span class="k">dur</span><span class="v">{duration:.2f}s</span>'
-            )
-        if peak_z is not None:
-            meta_bits.append(
-                f'<span class="k">z</span><span class="v">{peak_z:.2f}m</span>'
-            )
-        meta_html = f'<div class="event-meta">{"".join(meta_bits)}</div>' if meta_bits else ""
-        has_traj = n_tri > 0
-        if has_traj:
-            toggle_html = (
-                '<label class="traj-toggle" title="Overlay trajectory on canvas">'
-                f'<input type="checkbox" data-traj-sid="{sid}">'
-                '<span class="swatch"></span>'
-                "</label>"
-            )
-        else:
-            toggle_html = '<span class="traj-toggle-placeholder" aria-hidden="true"></span>'
-        processing_state = e.get("processing_state")
-        processing_chip = (
-            f'<span class="chip {html.escape(processing_state)}">{html.escape(processing_state)}</span>'
-            if processing_state else ""
-        )
-        if e.get("trashed"):
-            lifecycle_html = (
-                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/restore">'
-                f'<button class="event-action ok" type="submit">Restore</button>'
-                f"</form>"
-                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/delete" '
-                f'onsubmit="return confirm(\'刪除 session {sid}？此動作無法復原。\');">'
-                f'<button class="event-action dev" type="submit">Delete</button>'
-                f"</form>"
-            )
-        else:
-            lifecycle_html = (
-                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/trash" '
-                f'onsubmit="return confirm(\'移動 session {sid} 到垃圾桶？\');">'
-                f'<button class="event-action dev" type="submit">Trash</button>'
-                f"</form>"
-            )
-        processing_html = ""
-        server_status = (path_status or {}).get("server_post") or "-"
-        show_run_server = (
-            not e.get("trashed")
-            and server_status != "done"
-            and processing_state not in {"queued", "processing"}
-        )
-        if processing_state in {"queued", "processing"}:
-            processing_html = (
-                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/cancel_processing">'
-                f'<button class="event-action warn" type="submit">Cancel</button>'
-                f"</form>"
-            )
-        elif show_run_server:
-            processing_html = (
-                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/run_server_post">'
-                f'<button class="event-action ok" type="submit">Run srv</button>'
-                f"</form>"
-            )
-        # GT pipeline buttons. Layout: Run GT (queue SAM 3) → Validate
-        # (run three-way comparison) → Report (open /report/{sid}).
-        # Each gates on the prerequisite artefact existing.
-        has_gt = e.get("has_gt") or {}
-        has_val = e.get("has_validation") or {}
-        gt_done_all = bool(has_gt) and all(has_gt.values())
-        val_done_any = any(has_val.values())
-        if not e.get("trashed"):
-            gt_html = (
-                f'<form class="event-action-form" method="POST" action="/sessions/{sid}/run_gt_labelling">'
-                f'<button class="event-action accent" type="submit" '
-                f'title="Queue SAM 3 GT labelling for both cams">Run GT</button>'
-                f"</form>"
-            )
-            if gt_done_all:
-                gt_html += (
-                    f'<form class="event-action-form" method="POST" action="/sessions/{sid}/run_validation">'
-                    f'<button class="event-action accent" type="submit" '
-                    f'title="Run three-way validation (live vs server vs GT)">Validate</button>'
-                    f"</form>"
-                )
-            if val_done_any:
-                gt_html += (
-                    f'<a class="event-action accent" href="/report/{sid}" '
-                    f'title="Open three-way validation report">Report</a>'
-                )
-            processing_html += gt_html
-        # Only surface status chips that carry real signal. The path
-        # chips already encode "was each pipeline completed?" via their
-        # count + on/off/err state, so `partial` / `paired` /
-        # `paired_no_points` are visual noise that just ate sidebar
-        # width. `error` is the only result-status chip worth showing;
-        # processing-state chips (queued/processing/canceled/completed)
-        # are actionable and stay.
-        status_chip_html = (
-            f'<span class="chip {status}">{stat_label}</span>'
-            if status == "error" else ""
-        )
-        # Surface live-path calibration gaps inline. Cams listed here had
-        # live frames arriving while `data/calibrations/<cam>.json` was
-        # missing, so live rays silently dropped — without this pill the
-        # operator would only see an empty L|n count and have to tail
-        # the log to understand why.
-        missing_cal = e.get("live_missing_calibration") or []
-        missing_cal_html = (
-            f'<span class="chip error" title="live frames dropped: no calibration on file">'
-            f'no cal: {html.escape(",".join(missing_cal))}</span>'
-            if missing_cal else ""
-        )
-        # server_post background-task failure, tooltip shows the raw
-        # exception string so operator doesn't need to ssh into the server.
-        sp_errors = e.get("server_post_errors") or {}
-        sp_error_html = ""
-        if sp_errors:
-            tip = "; ".join(f"{cam}: {msg}" for cam, msg in sorted(sp_errors.items()))
-            cams_label = ",".join(sorted(sp_errors.keys()))
-            sp_error_html = (
-                f'<span class="chip error" title="{html.escape(tip)}">'
-                f'srv err: {html.escape(cams_label)}</span>'
-            )
-        item_classes = "event-item"
-        if processing_state in {"queued", "processing"}:
-            item_classes += " processing"
-        parts.append(
-            f'<div class="{item_classes}">'
-            f"{toggle_html}"
-            f'<a class="event-row" href="/viewer/{sid}">'
-            f'<div class="event-head">'
-            f'<span class="sid">{sid}</span>'
-            f"{path_html}"
-            f"</div>"
-            f"{meta_html}"
-            f"</a>"
-            f'<div class="event-status">{processing_chip}{status_chip_html}{missing_cal_html}{sp_error_html}</div>'
-            f'<div class="event-actions">{processing_html}{lifecycle_html}</div>'
-            f"</div>"
-        )
+            last_day = day
+        parts.append(_render_card(e))
     return "".join(parts)
+
+
+def _render_card(e: dict[str, Any]) -> str:
+    sid = html.escape(e["session_id"])
+    hm = html.escape(e.get("created_hm") or "—:—")
+    n_tri = int(e.get("n_triangulated") or 0)
+    processing_state = e.get("processing_state") or ""
+    trashed = bool(e.get("trashed"))
+
+    classes = ["event-item"]
+    if processing_state in {"queued", "processing"}:
+        classes.append("processing")
+
+    swatch_html = _swatch_html(sid, n_tri > 0)
+    statuses_html = _statuses_html(e)
+    pipes_html = _pipes_html(e)
+    metrics_html = _metrics_html(e, n_tri)
+    actions_html = _actions_html(e, sid, processing_state, trashed)
+
+    row1 = (
+        f'<div class="ev-row1">'
+        f'{swatch_html}'
+        f'<span class="ev-time">{hm}</span>'
+        f'<a class="ev-sid" href="/viewer/{sid}">{sid}</a>'
+        f'<span class="ev-spacer"></span>'
+        f'{statuses_html}'
+        f'</div>'
+    )
+    row2 = (
+        f'<div class="ev-row2">{pipes_html}{metrics_html}</div>'
+        if (pipes_html or metrics_html) else ""
+    )
+    row3 = (
+        f'<div class="ev-row3">{actions_html}</div>'
+        if actions_html else ""
+    )
+    return (
+        f'<div class="{" ".join(classes)}" data-sid="{sid}">'
+        f'{row1}{row2}{row3}'
+        f'</div>'
+    )
+
+
+def _swatch_html(sid: str, has_traj: bool) -> str:
+    if has_traj:
+        return (
+            '<label class="traj-toggle" title="Overlay trajectory on canvas">'
+            f'<input type="checkbox" data-traj-sid="{sid}">'
+            '<span class="swatch"></span>'
+            '</label>'
+        )
+    return '<span class="swatch swatch-empty" aria-hidden="true"></span>'
+
+
+def _statuses_html(e: dict[str, Any]) -> str:
+    """Right-aligned chips on row 1: processing state, error, missing-cal,
+    server_post error. Path-completion is encoded by the pipe chips on
+    row 2 (on/err/neutral), so we don't dup `paired`/`partial` here."""
+    chips: list[str] = []
+
+    proc = e.get("processing_state") or ""
+    if proc:
+        chips.append(f'<span class="chip {html.escape(proc)}">{html.escape(proc)}</span>')
+
+    if e.get("status") == "error":
+        chips.append('<span class="chip error">error</span>')
+
+    missing = e.get("live_missing_calibration") or []
+    if missing:
+        chips.append(
+            f'<span class="chip error" '
+            f'title="live frames dropped: no calibration on file">'
+            f'no cal: {html.escape(",".join(missing))}</span>'
+        )
+
+    sp_errors = e.get("server_post_errors") or {}
+    if sp_errors:
+        tip = "; ".join(f"{cam}: {msg}" for cam, msg in sorted(sp_errors.items()))
+        cams = ",".join(sorted(sp_errors.keys()))
+        chips.append(
+            f'<span class="chip error" title="{html.escape(tip)}">'
+            f'srv err: {html.escape(cams)}</span>'
+        )
+
+    return f'<div class="ev-statuses">{"".join(chips)}</div>' if chips else ""
+
+
+_PIPE_TITLES = {
+    "live": "Live — iOS real-time detection (WS streamed)",
+    "server_post": "Server — HSV detection on decoded MOV",
+}
+
+
+def _pipe_chip(label: str, status: str, counts: dict[str, int] | None,
+               title_base: str) -> str:
+    cls = "ev-pipe"
+    if status == "done":
+        cls += " on"
+    elif status == "error":
+        cls += " err"
+    counts = counts or {}
+    if counts:
+        a = str(int(counts["A"])) if "A" in counts else "—"
+        b = str(int(counts["B"])) if "B" in counts else "—"
+        body = f'<b>{a}·{b}</b>'
+        title = title_base + " · " + ", ".join(
+            f"{c}:{n}" for c, n in sorted(counts.items())
+        )
+    else:
+        body = '<b>—</b>'
+        title = title_base
+    return f'<span class="{cls}" title="{html.escape(title)}">{label}{body}</span>'
+
+
+def _pipes_html(e: dict[str, Any]) -> str:
+    path_status = e.get("path_status") or {}
+    path_counts = e.get("n_ball_frames_by_path") or {}
+    bits = [
+        _pipe_chip("L", path_status.get("live", "-"),
+                   path_counts.get("live"), _PIPE_TITLES["live"]),
+        _pipe_chip("S", path_status.get("server_post", "-"),
+                   path_counts.get("server_post"), _PIPE_TITLES["server_post"]),
+    ]
+    has_gt = e.get("has_gt") or {}
+    if has_gt:
+        a = "✓" if has_gt.get("A") else "—"
+        b = "✓" if has_gt.get("B") else "—"
+        cls = "ev-pipe on" if (has_gt.get("A") and has_gt.get("B")) else "ev-pipe"
+        bits.append(
+            f'<span class="{cls}" title="GT — SAM 3 ground truth (A·B)">'
+            f'G<b>{a}·{b}</b></span>'
+        )
+    return f'<div class="ev-pipes">{"".join(bits)}</div>'
+
+
+def _metrics_html(e: dict[str, Any], n_tri: int) -> str:
+    bits: list[str] = []
+    if n_tri > 0:
+        bits.append(f'<span class="ev-metric"><i>{n_tri}</i>pts</span>')
+    duration = e.get("duration_s")
+    if duration is not None:
+        bits.append(f'<span class="ev-metric"><i>{duration:.2f}</i>s</span>')
+    peak_z = e.get("peak_z_m")
+    if peak_z is not None:
+        bits.append(f'<span class="ev-metric"><i>{peak_z:.2f}</i>m</span>')
+    mph = e.get("ballistic_speed_mph")
+    if mph is not None:
+        bits.append(f'<span class="ev-metric"><i>{mph:.1f}</i>mph</span>')
+    return f'<div class="ev-metrics">{"".join(bits)}</div>' if bits else ""
+
+
+def _actions_html(e: dict[str, Any], sid: str,
+                  processing_state: str, trashed: bool) -> str:
+    parts: list[str] = []
+
+    path_status = e.get("path_status") or {}
+    server_status = path_status.get("server_post") or "-"
+    if processing_state in {"queued", "processing"}:
+        parts.append(_form_btn(f"/sessions/{sid}/cancel_processing", "Cancel", "warn"))
+    elif not trashed and server_status != "done":
+        parts.append(_form_btn(f"/sessions/{sid}/run_server_post", "Run srv", "ok"))
+
+    has_gt = e.get("has_gt") or {}
+    has_val = e.get("has_validation") or {}
+    if not trashed:
+        parts.append(_form_btn(
+            f"/sessions/{sid}/run_gt_labelling", "Run GT", "accent",
+            title="Queue SAM 3 GT labelling for both cams",
+        ))
+        if has_gt and all(has_gt.values()):
+            parts.append(_form_btn(
+                f"/sessions/{sid}/run_validation", "Validate", "accent",
+                title="Run three-way validation (live vs server vs GT)",
+            ))
+        if any(has_val.values()):
+            parts.append(
+                f'<a class="ev-btn accent" href="/report/{sid}" '
+                f'title="Open three-way validation report">Report</a>'
+            )
+
+    if trashed:
+        parts.append(_form_btn(
+            f"/sessions/{sid}/restore", "Restore", "ok",
+        ))
+        parts.append(_form_btn(
+            f"/sessions/{sid}/delete", "Delete", "dev",
+            confirm=f"刪除 session {sid}？此動作無法復原。",
+        ))
+    else:
+        parts.append(_form_btn(
+            f"/sessions/{sid}/trash", "Trash", "dev",
+            confirm=f"移動 session {sid} 到垃圾桶？",
+        ))
+
+    return "".join(parts)
+
+
+def _form_btn(action: str, label: str, variant: str,
+              *, confirm: str | None = None, title: str | None = None) -> str:
+    onsubmit = (
+        f' onsubmit="return confirm({_js_string(confirm)});"'
+        if confirm else ""
+    )
+    title_attr = f' title="{html.escape(title)}"' if title else ""
+    return (
+        f'<form class="ev-action-form" method="POST" action="{action}"{onsubmit}>'
+        f'<button class="ev-btn {variant}" type="submit"{title_attr}>{label}</button>'
+        f'</form>'
+    )
+
+
+def _js_string(s: str) -> str:
+    """JSON-encode for safe inline JS (matches the prior `JSON.stringify`-
+    equivalent escaping the JS renderer used)."""
+    import json
+    return html.escape(json.dumps(s), quote=True)

@@ -14,6 +14,7 @@
   // delegated change handler, and Plotly tooltips over the trash/cancel
   // buttons jumped whenever the tick arrived even if nothing changed.
   const _eventRowCache = new Map(); // sid -> { el, key }
+  const _eventDayCache = new Map(); // 'YYYY-MM-DD' -> el
 
   function _eventRowClasses(e, existingClassName = '') {
     // Drives the row-level visual treatment (e.g. orange pulse while a
@@ -60,129 +61,150 @@
       pr: e.processing_state || '-',
       st: e.server_post_ts || null,
       b: currentEventsBucket,
+      hm: e.created_hm || '',
       sp,
     });
   }
 
+  function _pipeChip(label, status, counts, title, sid, isLiveProgress) {
+    const cls = status === 'done' ? ' on' : status === 'err' || status === 'error' ? ' err' : '';
+    if (isLiveProgress) {
+      const prog = serverPostProgress.get(sid);
+      const fmt = (camKey) => {
+        const p = prog[camKey];
+        if (!p) return '—';
+        return p.total ? `${p.done}/${p.total}` : `${p.done}`;
+      };
+      const body = `<b>${fmt('A')}·${fmt('B')}</b>`;
+      return `<span class="ev-pipe${cls}" title="${esc(title + ' · in progress')}">${label}${body}</span>`;
+    }
+    counts = counts || {};
+    let body;
+    let titleFull = title;
+    if (Object.keys(counts).length) {
+      const a = 'A' in counts ? String(Number(counts.A || 0)) : '—';
+      const b = 'B' in counts ? String(Number(counts.B || 0)) : '—';
+      body = `<b>${a}·${b}</b>`;
+      const detail = Object.keys(counts).sort().map(c => `${c}:${counts[c]}`).join(', ');
+      if (detail) titleFull += ' · ' + detail;
+    } else {
+      body = '<b>—</b>';
+    }
+    return `<span class="ev-pipe${cls}" title="${esc(titleFull)}">${label}${body}</span>`;
+  }
+
   function _eventRowHtml(e) {
     const sid = esc(e.session_id);
-    const stat = (e.status || '').replace(/_/g, ' ');
+    const hm = esc(e.created_hm || '—:—');
     const triangulated = Number(e.n_triangulated || 0);
+    const trashed = currentEventsBucket === 'trash';
     const pathStatus = e.path_status || {};
     const pathCounts = e.n_ball_frames_by_path || {};
-    const pathTitles = {
+    const pipeTitles = {
       live: 'Live — iOS real-time detection (WS streamed)',
-      server_post: 'SVR — server-side detection on decoded MOV',
+      server_post: 'Server — HSV detection on decoded MOV',
     };
-    const pathChips = [['live', 'L'], ['server_post', 'S']]
-      .map(([path, label]) => {
-        const status = pathStatus[path] || '-';
-        const counts = pathCounts[path] || {};
-        // Per-cam in fixed A·B order — see render_dashboard_events.py
-        // for the rationale. Must stay in sync with the SSR path so a
-        // page reload doesn't shift between two formats.
-        const cls = status === 'done' ? ' on' : status === 'error' ? ' err' : '';
 
-        // Server_post in-flight: replace the stable post-completion
-        // counts with a live `done/total · done/total` so the chip
-        // ticks during the 8-20 s decode. Falls back to bare `done`
-        // (no slash) when probe_frame_count returned null. Once
-        // server_post_done fires, the entry is dropped from the map
-        // and we fall through to the stable-counts branch below.
-        if (path === 'server_post'
-            && typeof serverPostProgress !== 'undefined'
-            && serverPostProgress.has(sid)) {
-          const prog = serverPostProgress.get(sid);
-          const fmt = (camKey) => {
-            const p = prog[camKey];
-            if (!p) return '—';
-            return p.total ? `${p.done}/${p.total}` : `${p.done}`;
-          };
-          const countHtml = `<span class="pc">${fmt('A')}·${fmt('B')}</span>`;
-          const tip = `${pathTitles[path]} · in progress`;
-          return `<span class="path-chip${cls}" title="${esc(tip)}">${label}${countHtml}</span>`;
-        }
-
-        const hasCounts = Object.keys(counts).length > 0;
-        let countHtml = '';
-        if (hasCounts) {
-          const aStr = ('A' in counts) ? String(Number(counts.A || 0)) : '—';
-          const bStr = ('B' in counts) ? String(Number(counts.B || 0)) : '—';
-          countHtml = `<span class="pc">${aStr}·${bStr}</span>`;
-        }
-        const detail = Object.keys(counts).sort().map(c => `${c}:${counts[c]}`).join(', ');
-        const title = detail ? `${pathTitles[path]} · ${detail}` : pathTitles[path];
-        return `<span class="path-chip${cls}" title="${esc(title)}">${label}${countHtml}</span>`;
-      })
-      .join('');
-    const confirmMsg = `刪除 session ${e.session_id}？此動作無法復原。`;
-    const trashMsg = `移動 session ${e.session_id} 到垃圾桶？`;
+    // --- swatch (row1 leading) ---
     const hasTraj = triangulated > 0;
     const color = hasTraj ? trajColorFor(e.session_id) : '';
     const checked = selectedTrajIds.has(e.session_id) ? 'checked' : '';
-    const toggle = hasTraj
+    const swatch = hasTraj
       ? `<label class="traj-toggle" title="Overlay trajectory on canvas">
            <input type="checkbox" data-traj-sid="${sid}" ${checked}>
            <span class="swatch" style="background:${color}"></span>
          </label>`
-      : `<span class="traj-toggle-placeholder" aria-hidden="true"></span>`;
-    const metaBits = [];
-    if (triangulated > 0) metaBits.push(`<span class="k">pts</span><span class="v">${triangulated}</span>`);
-    if (e.duration_s != null) metaBits.push(`<span class="k">dur</span><span class="v">${Number(e.duration_s).toFixed(2)}s</span>`);
-    if (e.peak_z_m != null) metaBits.push(`<span class="k">z</span><span class="v">${Number(e.peak_z_m).toFixed(2)}m</span>`);
-    if (e.ballistic_speed_mph != null) metaBits.push(`<span class="k">mph</span><span class="v">${Number(e.ballistic_speed_mph).toFixed(1)}</span>`);
-    const metaHtml = metaBits.length ? `<div class="event-meta">${metaBits.join('')}</div>` : '';
-    const processingState = e.processing_state ? `<span class="chip ${esc(e.processing_state)}">${esc(e.processing_state)}</span>` : '';
-    const serverStatus = (e.path_status || {}).server_post || '-';
-    const showRunServer = currentEventsBucket !== 'trash'
-      && serverStatus !== 'done'
-      && e.processing_state !== 'queued'
-      && e.processing_state !== 'processing';
-    const processingAction = e.processing_state === 'queued' || e.processing_state === 'processing'
-      ? `<form class="event-action-form" method="POST" action="/sessions/${sid}/cancel_processing">
-           <button class="event-action warn" type="submit">Cancel</button>
-         </form>`
-      : showRunServer
-        ? `<form class="event-action-form" method="POST" action="/sessions/${sid}/run_server_post">
-             <button class="event-action ok" type="submit">Run srv</button>
-           </form>`
-        : '';
-    const lifecycleAction = currentEventsBucket === 'trash'
-      ? `
-          <form class="event-action-form" method="POST" action="/sessions/${sid}/restore">
-            <button class="event-action ok" type="submit">Restore</button>
-          </form>
-          <form class="event-action-form" method="POST"
-                action="/sessions/${sid}/delete"
-                onsubmit="return confirm(${JSON.stringify(confirmMsg)});">
-            <button class="event-action dev" type="submit">Delete</button>
-          </form>`
-      : `
-          <form class="event-action-form" method="POST"
-                action="/sessions/${sid}/trash"
-                onsubmit="return confirm(${JSON.stringify(trashMsg)});">
-            <button class="event-action dev" type="submit">Trash</button>
-          </form>`;
-    const statusChipHtml = (e.status === 'error')
-      ? `<span class="chip ${esc(e.status || '')}">${esc(stat)}</span>`
-      : '';
+      : `<span class="swatch swatch-empty" aria-hidden="true"></span>`;
+
+    // --- row1 right: status chips ---
+    const statusChips = [];
+    if (e.processing_state) {
+      statusChips.push(`<span class="chip ${esc(e.processing_state)}">${esc(e.processing_state)}</span>`);
+    }
+    if (e.status === 'error') {
+      statusChips.push(`<span class="chip error">error</span>`);
+    }
+    if (Array.isArray(e.live_missing_calibration) && e.live_missing_calibration.length) {
+      statusChips.push(`<span class="chip error" title="live frames dropped: no calibration on file">no cal: ${esc(e.live_missing_calibration.join(','))}</span>`);
+    }
+    const spErr = e.server_post_errors || {};
+    const spKeys = Object.keys(spErr);
+    if (spKeys.length) {
+      const tip = spKeys.sort().map(k => `${k}: ${spErr[k]}`).join('; ');
+      statusChips.push(`<span class="chip error" title="${esc(tip)}">srv err: ${esc(spKeys.sort().join(','))}</span>`);
+    }
+    const statusesHtml = statusChips.length
+      ? `<div class="ev-statuses">${statusChips.join('')}</div>` : '';
+
+    // --- row2: pipes + metrics ---
+    const liveStatus = pathStatus.live || '-';
+    const srvStatus = pathStatus.server_post || '-';
+    const inFlight = typeof serverPostProgress !== 'undefined' && serverPostProgress.has(e.session_id);
+    const pipesHtml = `<div class="ev-pipes">
+      ${_pipeChip('L', liveStatus, pathCounts.live, pipeTitles.live, e.session_id, false)}
+      ${_pipeChip('S', srvStatus, pathCounts.server_post, pipeTitles.server_post, e.session_id, inFlight)}
+      ${_gtPipeChip(e)}
+    </div>`;
+
+    const metricBits = [];
+    if (triangulated > 0) metricBits.push(`<span class="ev-metric"><i>${triangulated}</i>pts</span>`);
+    if (e.duration_s != null) metricBits.push(`<span class="ev-metric"><i>${Number(e.duration_s).toFixed(2)}</i>s</span>`);
+    if (e.peak_z_m != null) metricBits.push(`<span class="ev-metric"><i>${Number(e.peak_z_m).toFixed(2)}</i>m</span>`);
+    if (e.ballistic_speed_mph != null) metricBits.push(`<span class="ev-metric"><i>${Number(e.ballistic_speed_mph).toFixed(1)}</i>mph</span>`);
+    const metricsHtml = metricBits.length ? `<div class="ev-metrics">${metricBits.join('')}</div>` : '';
+
+    // --- row3: actions ---
+    const actBits = [];
+    if (e.processing_state === 'queued' || e.processing_state === 'processing') {
+      actBits.push(_formBtn(`/sessions/${sid}/cancel_processing`, 'Cancel', 'warn'));
+    } else if (!trashed && srvStatus !== 'done') {
+      actBits.push(_formBtn(`/sessions/${sid}/run_server_post`, 'Run srv', 'ok'));
+    }
+    const hasGt = e.has_gt || {};
+    const hasVal = e.has_validation || {};
+    if (!trashed) {
+      actBits.push(_formBtn(`/sessions/${sid}/run_gt_labelling`, 'Run GT', 'accent', null, 'Queue SAM 3 GT labelling for both cams'));
+      const gtAll = Object.keys(hasGt).length && Object.values(hasGt).every(Boolean);
+      if (gtAll) actBits.push(_formBtn(`/sessions/${sid}/run_validation`, 'Validate', 'accent', null, 'Run three-way validation'));
+      if (Object.values(hasVal).some(Boolean)) {
+        actBits.push(`<a class="ev-btn accent" href="/report/${sid}" title="Open three-way validation report">Report</a>`);
+      }
+    }
+    if (trashed) {
+      actBits.push(_formBtn(`/sessions/${sid}/restore`, 'Restore', 'ok'));
+      actBits.push(_formBtn(`/sessions/${sid}/delete`, 'Delete', 'dev', `刪除 session ${e.session_id}？此動作無法復原。`));
+    } else {
+      actBits.push(_formBtn(`/sessions/${sid}/trash`, 'Trash', 'dev', `移動 session ${e.session_id} 到垃圾桶？`));
+    }
+    const actionsHtml = actBits.length ? `<div class="ev-row3">${actBits.join('')}</div>` : '';
+
     return `
-      ${toggle}
-      <a class="event-row" href="/viewer/${sid}">
-        <div class="event-head">
-          <span class="sid">${sid}</span>
-          ${pathChips}
-        </div>
-        ${metaHtml}
-      </a>
-      <div class="event-status">
-        ${processingState}
-        ${statusChipHtml}
+      <div class="ev-row1">
+        ${swatch}
+        <span class="ev-time">${hm}</span>
+        <a class="ev-sid" href="/viewer/${sid}">${sid}</a>
+        <span class="ev-spacer"></span>
+        ${statusesHtml}
       </div>
-      <div class="event-actions">
-        ${processingAction}
-        ${lifecycleAction}
-      </div>`;
+      <div class="ev-row2">${pipesHtml}${metricsHtml}</div>
+      ${actionsHtml}`;
+  }
+
+  function _gtPipeChip(e) {
+    const has = e.has_gt || {};
+    if (!Object.keys(has).length) return '';
+    const a = has.A ? '✓' : '—';
+    const b = has.B ? '✓' : '—';
+    const cls = (has.A && has.B) ? 'ev-pipe on' : 'ev-pipe';
+    return `<span class="${cls}" title="GT — SAM 3 ground truth (A·B)">G<b>${a}·${b}</b></span>`;
+  }
+
+  function _formBtn(action, label, variant, confirm, title) {
+    const onsubmit = confirm
+      ? ` onsubmit="return confirm(${JSON.stringify(confirm).replace(/"/g, '&quot;')});"`
+      : '';
+    const titleAttr = title ? ` title="${esc(title)}"` : '';
+    return `<form class="ev-action-form" method="POST" action="${action}"${onsubmit}><button class="ev-btn ${variant}" type="submit"${titleAttr}>${label}</button></form>`;
   }
 
   function renderEvents(events) {
@@ -200,13 +222,37 @@
     if (hasEmpty || _eventRowCache.size === 0) {
       eventsBox.innerHTML = '';
       _eventRowCache.clear();
+      _eventDayCache.clear();
     }
 
+    // Walk events in (already-sorted) order and emit a `.event-day-header`
+    // whenever the local-tz day flips. Day headers + rows share one DOM
+    // child list so the sequence is `[hdr, row, row, hdr, row, ...]`.
     const liveIds = new Set();
+    const liveDays = new Set();
+    let domIndex = 0;
+    let lastDay = null;
     for (let i = 0; i < events.length; i++) {
       const e = events[i];
       const sid = e.session_id;
+      const day = e.created_day || '—';
       liveIds.add(sid);
+      if (day !== lastDay) {
+        liveDays.add(day);
+        let dayEl = _eventDayCache.get(day);
+        if (!dayEl) {
+          dayEl = document.createElement('div');
+          dayEl.className = 'event-day';
+          dayEl.dataset.day = day;
+          dayEl.textContent = day;
+          _eventDayCache.set(day, dayEl);
+        }
+        if (eventsBox.children[domIndex] !== dayEl) {
+          eventsBox.insertBefore(dayEl, eventsBox.children[domIndex] || null);
+        }
+        domIndex++;
+        lastDay = day;
+      }
       const key = _eventRowKey(e);
       let entry = _eventRowCache.get(sid);
       if (!entry) {
@@ -228,11 +274,10 @@
         entry.el.innerHTML = _eventRowHtml(e);
         entry.key = key;
       }
-      // Ensure DOM order matches the sorted events array. Cheap when
-      // already in place; appendChild re-parents in place.
-      if (eventsBox.children[i] !== entry.el) {
-        eventsBox.insertBefore(entry.el, eventsBox.children[i] || null);
+      if (eventsBox.children[domIndex] !== entry.el) {
+        eventsBox.insertBefore(entry.el, eventsBox.children[domIndex] || null);
       }
+      domIndex++;
     }
 
     // Remove rows for sessions that dropped off the current bucket view.
@@ -243,6 +288,12 @@
         eventsBox.removeChild(entry.el);
       }
       _eventRowCache.delete(sid);
+    }
+    for (const day of Array.from(_eventDayCache.keys())) {
+      if (liveDays.has(day)) continue;
+      const el = _eventDayCache.get(day);
+      if (el && el.parentNode === eventsBox) eventsBox.removeChild(el);
+      _eventDayCache.delete(day);
     }
   }
 

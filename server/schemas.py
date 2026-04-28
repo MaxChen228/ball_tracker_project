@@ -162,6 +162,13 @@ class PitchPayload(BaseModel):
     image_width_px: int | None = None
     image_height_px: int | None = None
     capture_telemetry: CaptureTelemetryPayload | None = None
+    # Server-stamped wall-clock unix timestamp of when this pitch was first
+    # recorded. Set by `state.record()` on first persist; preserved on every
+    # subsequent re-record (server_post backfill, live-frame merge, etc.) so
+    # the events list groups by *original* creation, not last edit. Loader
+    # backfills missing values from the pitch JSON's mtime so legacy files
+    # carry a sensible date instead of "now".
+    created_at: float | None = None
 
 
 class TriangulatedPoint(BaseModel):
