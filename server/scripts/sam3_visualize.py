@@ -109,7 +109,7 @@ def visualize_one(
             idx += 1
             gt = by_idx.get(idx)
             writer.write(_draw_overlay(bgr, gt))
-            if record.frames_total and idx >= record.frames_total - 1:
+            if record.frames_decoded and idx >= record.frames_decoded - 1:
                 break
     finally:
         writer.release()

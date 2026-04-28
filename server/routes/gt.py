@@ -95,6 +95,13 @@ def _run_sam3_label_subprocess(
     ]
     log_path = state.data_dir / "gt" / "sam3" / f"session_{session_id}_{camera_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Pre-cancel check: if the operator hit Cancel between start_job
+    # (request thread) and now (BackgroundTask thread spinning up), bail
+    # without ever spawning the subprocess. Without this we'd burn a
+    # full subprocess startup + ~5GB model load before noticing.
+    if proc.is_canceled(job_key):
+        proc.finish_job(job_key, status="canceled")
+        return
     try:
         with log_path.open("w") as logf:
             popen = subprocess.Popen(
@@ -175,10 +182,17 @@ def _run_distill_inproc() -> None:
         out_path = state.data_dir / "gt" / "fit_proposals.json"
         # `--skip-eval` would speed this up, but we want the eval; the
         # operator-side button explicitly chose this.
-        rc = distill_main([
-            "--data-dir", str(state.data_dir),
-            "--out", str(out_path),
-        ])
+        rc = distill_main(
+            [
+                "--data-dir", str(state.data_dir),
+                "--out", str(out_path),
+            ],
+            should_cancel=lambda: proc.is_canceled(job_key),
+        )
+        if rc == 130:
+            # distill_all returns 130 (SIGINT-style) on operator cancel.
+            proc.finish_job(job_key, status="canceled")
+            return
         if rc != 0:
             proc.finish_job(job_key, status="error", error=f"distill_all exit={rc}")
             return
@@ -283,6 +297,19 @@ async def gt_distill(request: Request, background_tasks: BackgroundTasks):
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "queued": "distill"}
+
+
+@router.post("/gt/cancel_distill")
+async def gt_cancel_distill(request: Request):
+    """Flag the running distillation job for cancellation. The eval
+    loop in distill_all polls between holdout records / between frames
+    and bails with exit 130 within ~1 frame's decode time. Idempotent
+    — calling when no distill is running returns ok=True, flagged=False."""
+    from main import state, _wants_html
+    flagged = state._gt_processing.cancel_distill()
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "flagged": flagged}
 
 
 @router.get("/gt/proposals")

@@ -44,25 +44,32 @@ logging.basicConfig(
 log = logging.getLogger("label_with_sam3")
 
 
-def _load_video_start_pts_s(pitches_dir: Path, session_id: str, cam: str) -> float | None:
+class _MissingPitchError(RuntimeError):
+    """Raised when video_start_pts_s can't be recovered. Callers must
+    skip the session; silently falling back to 0.0 would drop the GT
+    onto the container clock and misalign three-way IoU by ~14681 s."""
+
+
+def _load_video_start_pts_s(pitches_dir: Path, session_id: str, cam: str) -> float:
     """Read `video_start_pts_s` off the persisted pitch payload so the
     SAM 3 GT timestamps share the iOS session clock with the live and
-    server_post frame buckets. Without this the GT frame_pts would be
-    container-relative (starts at 0) and three-way IoU would be
-    misaligned by ~14681 s on every session."""
+    server_post frame buckets. **Hard-fails** on missing or malformed
+    pitch JSON — there is no safe fallback, and per the project's
+    no-silent-fallback rule the caller must explicitly handle the miss
+    (skip the session, surface the error, etc)."""
     candidates = list(pitches_dir.glob(f"session_{session_id}_{cam}.json"))
     if not candidates:
-        log.warning(
-            "no pitch JSON for session=%s cam=%s under %s — using 0.0 as video_start_pts_s",
-            session_id, cam, pitches_dir,
+        raise _MissingPitchError(
+            f"no pitch JSON for session={session_id} cam={cam} under {pitches_dir} — "
+            f"refusing to label without a session-clock anchor (would misalign GT)"
         )
-        return None
     raw = candidates[0].read_text()
     try:
         pitch = PitchPayload.model_validate_json(raw)
     except Exception as e:
-        log.warning("failed to parse %s: %s — using 0.0", candidates[0], e)
-        return None
+        raise _MissingPitchError(
+            f"failed to parse {candidates[0]}: {e} — refusing to label with 0.0 fallback"
+        ) from e
     return float(pitch.video_start_pts_s)
 
 
@@ -112,11 +119,13 @@ def _label_one(
         log.warning("skip %s/%s: no MOV under %s/videos", session_id, camera_id, data_dir)
         return None
 
-    video_start_pts_s = _load_video_start_pts_s(
-        data_dir / "pitches", session_id, camera_id
-    )
-    if video_start_pts_s is None:
-        video_start_pts_s = 0.0  # logged as warning above; proceed with relative PTS
+    try:
+        video_start_pts_s = _load_video_start_pts_s(
+            data_dir / "pitches", session_id, camera_id
+        )
+    except _MissingPitchError as e:
+        log.error("skip %s/%s: %s", session_id, camera_id, e)
+        return None
 
     log.info(
         "labelling session=%s cam=%s clip=%s prompt=%r",
@@ -134,7 +143,7 @@ def _label_one(
     out_path.write_text(record.model_dump_json(indent=2))
     log.info(
         "wrote %s: %d/%d frames labelled (confidence >= %.2f)",
-        out_path.name, record.frames_labelled, record.frames_total, min_confidence,
+        out_path.name, record.frames_labelled, record.frames_decoded, min_confidence,
     )
     return out_path
 

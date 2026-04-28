@@ -598,6 +598,15 @@ class SAM3GTRecord(BaseModel):
     # these to filter out under-labelled videos before fitting (e.g. if
     # SAM 3 only found the ball on 5% of frames the prompt or scene is
     # bad and that record shouldn't be trusted).
-    frames_total: int                        # decoded sample count
+    #
+    # NB: `frames_decoded` is the count actually fed to SAM 3, AFTER
+    # the labeller's `--limit-frames` clamp. The MOV may contain more
+    # frames than this; downstream code reading label coverage should
+    # think of `frames_labelled / frames_decoded`, not `… / total in
+    # MOV`. Renamed from `frames_total` to make the post-clamp
+    # semantics explicit — a 600-frame MOV labelled with
+    # --limit-frames 60 used to record `frames_total=60` and
+    # downstream code mis-read the ratio as 100%.
+    frames_decoded: int                      # count fed to SAM 3 (post --limit-frames)
     frames_labelled: int                     # len(frames), redundant but explicit
     min_confidence: float                    # filter floor used at label time

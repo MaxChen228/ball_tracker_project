@@ -239,7 +239,7 @@ def test_label_video_e2e_with_stub_model(monkeypatch, tmp_path):
     assert record.session_id == "s_deadbeef"
     assert record.camera_id == "A"
     assert record.video_dims == (w, h)
-    assert record.frames_total == n_frames
+    assert record.frames_decoded == n_frames
     assert record.frames_labelled == n_frames - 1  # one miss
     # Frames are sorted by frame_idx and miss-frame-2 is omitted.
     indices = [f.frame_idx for f in record.frames]
@@ -285,7 +285,7 @@ def test_label_video_drops_low_confidence(monkeypatch, tmp_path):
         min_confidence=0.5,
     )
     assert record.frames_labelled == 0
-    assert record.frames_total == n_frames
+    assert record.frames_decoded == n_frames
 
 
 def test_max_frames_clamps_decode(monkeypatch, tmp_path):
@@ -309,4 +309,4 @@ def test_max_frames_clamps_decode(monkeypatch, tmp_path):
         camera_id="A",
         max_frames=5,
     )
-    assert record.frames_total == 5
+    assert record.frames_decoded == 5

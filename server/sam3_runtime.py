@@ -323,7 +323,7 @@ class Sam3VideoLabeller:
             video_fps=video_fps,
             video_dims=dims,
             frames=gt_frames,
-            frames_total=len(frame_bgrs),
+            frames_decoded=len(frame_bgrs),
             frames_labelled=len(gt_frames),
             min_confidence=min_confidence,
         )

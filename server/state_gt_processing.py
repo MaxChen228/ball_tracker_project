@@ -74,7 +74,14 @@ class GTProcessingState:
     def cancel_session(self, session_id: str) -> int:
         """Mark every running job whose session matches as canceled.
         Returns the number of jobs flagged. Workers see the flag on
-        their next poll and bail."""
+        their next poll and bail.
+
+        Special case: distillation is keyed `("distill", "global",
+        "global")` because it spans every record, not a single session.
+        The dashboard exposes it under the same Cancel surface as
+        per-session jobs, so passing `"global"` flags the distill job
+        too — without this the operator could trigger a multi-minute
+        eval and have no way to abort."""
         n = 0
         with self._lock:
             for key, status in list(self._status.items()):
@@ -82,6 +89,18 @@ class GTProcessingState:
                     self._cancel_requested.add(key)
                     n += 1
         return n
+
+    def cancel_distill(self) -> bool:
+        """Flag the global distill job for cancellation. Returns True
+        if a running distill job was found and flagged. Routes call
+        this from /gt/cancel_distill (and we also surface it through
+        cancel_session('global') as a convenience)."""
+        key = ("distill", "global", "global")
+        with self._lock:
+            if self._status.get(key) == "running":
+                self._cancel_requested.add(key)
+                return True
+            return False
 
     def is_canceled(self, key: GTJobKey) -> bool:
         with self._lock:

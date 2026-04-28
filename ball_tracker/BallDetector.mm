@@ -109,22 +109,22 @@ static void reportIfDue(TimingRing &ring, const char *tag) {
 // ---------------------------------------------------------------------------
 // Shared cv::Mat scratch buffers.
 //
-// Production capture is NV12 (4:2:0 bi-planar Y + UV) per
+// Production capture is NV12 VideoRange (4:2:0 bi-planar Y + UV) per
 // CameraCaptureRuntime — that's what we ask AVCaptureSession for so the
 // chroma resolution matches what server_post sees post H.264 decode.
 // `mapPixelBufferToBGR` also accepts BGRA so unit tests can keep
 // constructing BGRA fixtures without taking the YUV conversion path.
 //
-// `nv12` holds the contiguous (h*1.5, w) Y+UV buffer that
-// cv::cvtColor(COLOR_YUV2BGR_NV12) consumes (the planes are NOT
-// guaranteed contiguous in CVPixelBuffer, so we copy them in). `bgr` is
-// the converted output that downstream HSV / shape-gate code reads.
-// `Mat::create` is a no-op when dims + type match across frames so the
-// allocations are amortized.
+// `bgr` is the converted output that downstream HSV / shape-gate code
+// reads. The NV12 path goes through `cv::cvtColorTwoPlane` which reads
+// Y and UV in place via stride-aware Mats — no contiguous stitching
+// buffer is needed (we previously kept an `nv12` scratch for that;
+// removed once cvtColorTwoPlane was wired in). `Mat::create` is a
+// no-op when dims + type match across frames so allocations are
+// amortized.
 // ---------------------------------------------------------------------------
 namespace {
 struct CVScratch {
-    cv::Mat nv12;
     cv::Mat bgr;
     cv::Mat hsv;
     cv::Mat mask;
@@ -266,33 +266,54 @@ static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
 
 /// Convert a CVPixelBuffer to BGR.
 ///
-/// Production capture is NV12 (4:2:0 bi-planar Y + UV) per
+/// Production capture is NV12 VideoRange (4:2:0 bi-planar Y + UV) per
 /// CameraCaptureRuntime. Tests construct BGRA buffers directly. This
-/// function accepts both — the BGRA path is `BGRA→BGR` (cvtColor) and
-/// the NV12 path is `(Y plane + UV plane) memcpy → cvtColor(NV12→BGR)`.
-///
-/// `nv12Scratch` (caller-owned) holds the contiguous (h*1.5, w) Y+UV
-/// buffer needed by cv::cvtColor's NV12 mode — CVPixelBuffer's planes
-/// are not guaranteed contiguous so we copy them in. Reused across
-/// frames so the allocation is amortized. Unused on the BGRA path.
+/// function accepts both via OpenCV 4.x's two-plane NV12 API (no
+/// stitching memcpy needed — pass Y and UV planes as separate
+/// stride-aware Mats and let `cv::cvtColorTwoPlane` do the conversion
+/// in one pass).
 ///
 /// `out` ends up as a `CV_8UC3` BGR Mat OWNING its data — callers do
 /// NOT need to balance an unlock; the unlock happens inside this
 /// function once the conversion has completed.
 ///
+/// FullRange NV12 (`...8BiPlanarFullRange`) is **rejected**, not
+/// silently converted: cv::cvtColor's NV12 path always assumes
+/// VideoRange (Y∈[16,235], UV∈[16,240]) and feeding FullRange
+/// (Y∈[0,255]) crushes blacks + clips highlights, shifting saturation
+/// of pixels near the HSV gate. AVFoundation honours our VideoRange
+/// request in practice, but format negotiation can override at
+/// session-preset boundaries — refuse loudly here so the operator
+/// sees the error in the iOS console rather than silently degraded
+/// detection (project rule: no silent fallback).
+///
 /// Note on color matrix: cv::cvtColor with `COLOR_YUV2BGR_NV12` uses
 /// BT.601 coefficients; iPhone video capture tags streams as BT.709.
-/// The hue offset between the two on saturated colours is small (~3°)
-/// — fine for our HSV-thresholded blue ball but flagged here in case
-/// the rig moves to a tone-sensitive use case later. Switch to
-/// libyuv's `H420ToARGB` if precise BT.709 conversion is required.
+/// Hue offset on saturated colours is ~3-4 in OpenCV's 0-179 hue
+/// units (~6-8° in 0-360° space) — fine for the blue-ball preset
+/// (h∈[100,130] gives ±15 units margin) but tighter for the `tennis`
+/// preset (h∈[25,55], ±15 units total). Re-validate the tennis preset
+/// before relying on it post-NV12. Switch to libyuv's `H420ToARGB`
+/// for precise BT.709 conversion if that ever matters.
 static bool mapPixelBufferToBGR(
     CVPixelBufferRef pixelBuffer,
-    cv::Mat &nv12Scratch,
     cv::Mat &out
 ) {
     if (!pixelBuffer) { return false; }
     const OSType fmt = CVPixelBufferGetPixelFormatType(pixelBuffer);
+    if (fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
+        // Loud refuse — see docstring rationale. dispatch_once so the
+        // log doesn't spam at 240 fps if the session is wedged.
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            NSLog(@"BallDetector: capture delivered NV12 FullRange "
+                  @"(Y∈[0,255]) but we requested VideoRange. cv::cvtColor "
+                  @"would mis-convert; refusing every FullRange frame. "
+                  @"Check AVCaptureSession format negotiation in "
+                  @"CameraCaptureRuntime.swift.");
+        });
+        return false;
+    }
     CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
     bool ok = false;
     if (fmt == kCVPixelFormatType_32BGRA) {
@@ -305,8 +326,7 @@ static bool mapPixelBufferToBGR(
             cv::cvtColor(bgra, out, cv::COLOR_BGRA2BGR);
             ok = true;
         }
-    } else if (fmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
-               fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
+    } else if (fmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
         const size_t w = CVPixelBufferGetWidth(pixelBuffer);
         const size_t h = CVPixelBufferGetHeight(pixelBuffer);
         const size_t yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
@@ -314,18 +334,12 @@ static bool mapPixelBufferToBGR(
         const uint8_t *yBase = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
         const uint8_t *uvBase = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1);
         if (yBase && uvBase) {
-            nv12Scratch.create((int)(h + h / 2), (int)w, CV_8UC1);
-            // Copy Y plane (h rows of `w` bytes each).
-            for (size_t y = 0; y < h; ++y) {
-                memcpy(nv12Scratch.ptr((int)y), yBase + y * yStride, w);
-            }
-            // Copy UV plane (h/2 rows of interleaved CbCr, `w` bytes
-            // each — same width as Y because UV is sub-sampled 2x in
-            // both axes but interleaved).
-            for (size_t y = 0; y < h / 2; ++y) {
-                memcpy(nv12Scratch.ptr((int)(h + y)), uvBase + y * uvStride, w);
-            }
-            cv::cvtColor(nv12Scratch, out, cv::COLOR_YUV2BGR_NV12);
+            // cvtColorTwoPlane reads Y and UV in place via their
+            // strides — no stitching buffer, ~1 ms saved per frame
+            // and the per-thread `nv12Scratch` (~3 MB) goes away.
+            cv::Mat yMat((int)h, (int)w, CV_8UC1, (void *)yBase, yStride);
+            cv::Mat uvMat((int)h / 2, (int)w / 2, CV_8UC2, (void *)uvBase, uvStride);
+            cv::cvtColorTwoPlane(yMat, uvMat, out, cv::COLOR_YUV2BGR_NV12);
             ok = true;
         }
     }
@@ -396,7 +410,7 @@ static bool mapPixelBufferToBGR(
     // fixtures), so per-thread scratch keeps it allocator-cheap on
     // whichever thread happens to call.
     thread_local CVScratch scratch;
-    if (!mapPixelBufferToBGR(pixelBuffer, scratch.nv12, scratch.bgr)) { return nil; }
+    if (!mapPixelBufferToBGR(pixelBuffer, scratch.bgr)) { return nil; }
 
 #if BT_DETECTOR_TIMING
     double hsvMs = 0, ccMs = 0;
@@ -429,7 +443,7 @@ static bool mapPixelBufferToBGR(
                                                          fillMin:(double)fillMin
 {
     thread_local CVScratch scratch;
-    if (!mapPixelBufferToBGR(pixelBuffer, scratch.nv12, scratch.bgr)) { return @[]; }
+    if (!mapPixelBufferToBGR(pixelBuffer, scratch.bgr)) { return @[]; }
     NSArray<BTBallDetection *> *cands = detectAllCandidatesScratch(
         scratch.bgr, hMin, hMax, sMin, sMax, vMin, vMax, aspectMin, fillMin, scratch,
         /*offsetX=*/0.0, /*offsetY=*/0.0,
@@ -489,7 +503,7 @@ static bool mapPixelBufferToBGR(
 }
 
 - (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer {
-    if (!mapPixelBufferToBGR(pixelBuffer, _scratch.nv12, _scratch.bgr)) { return nil; }
+    if (!mapPixelBufferToBGR(pixelBuffer, _scratch.bgr)) { return nil; }
 
     BTBallDetection *result = nil;
     @try {
@@ -587,7 +601,7 @@ static bool mapPixelBufferToBGR(
 }
 
 - (NSArray<BTBallDetection *> *)detectAllCandidatesInPixelBuffer:(CVPixelBufferRef)pixelBuffer {
-    if (!mapPixelBufferToBGR(pixelBuffer, _scratch.nv12, _scratch.bgr)) { return @[]; }
+    if (!mapPixelBufferToBGR(pixelBuffer, _scratch.bgr)) { return @[]; }
 
     NSArray<BTBallDetection *> *result = @[];
     @try {
