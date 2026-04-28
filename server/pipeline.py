@@ -5,6 +5,14 @@ synthesises a list of `FramePayload`s on the iOS session clock. The
 payload's `sync_anchor_timestamp_s` then makes anchor-relative time
 well-defined for A/B pairing, so `pairing.triangulate_cycle` can consume
 the post-detection `PitchPayload` with no code changes.
+
+The detector here is intentionally identical to the iOS `live` path
+(HSV + connectedComponents + shape gate + temporal selector). Earlier
+versions prepended an MOG2 background subtractor + 3x3 CLOSE morphology;
+that asymmetry made `server_post` unable to act as an offline mock for
+iOS-live. Distillation against SAM 3 GT replaces the role MOG2 used to
+play (filtering static yellow-green clutter) by tightening HSV / shape
+gate parameters, applied uniformly to both paths.
 """
 from __future__ import annotations
 
@@ -12,7 +20,6 @@ import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 from chain_filter import ChainFilterParams, annotate as chain_filter_annotate
@@ -34,54 +41,12 @@ class ProcessingCanceled(RuntimeError):
     """Raised when an operator cancels a server-side post-processing job."""
 
 
-# MOG2 background subtractor warm-up: the first few frames MOG2 emits a
-# mostly-all-foreground mask while it builds per-pixel Gaussian models.
-# Skip detection for this window so static yellow-green clutter doesn't
-# sneak through as "moving". 30 frames @ 240 fps ≈ 125 ms — well under
-# any realistic pitch windup.
-_BG_SUBTRACTOR_WARMUP_FRAMES = 30
-
-# 3x3 CLOSE kernel applied to the MOG2 foreground mask before AND-ing with
-# the HSV mask. MOG2's raw mask has 1-2 px edge breakage and pinholes —
-# confirmed on s_fcf73afa, where 14 in-flight frames missed purely because
-# the combined mask's bbox fill fell to 0.61-0.70 (just under the 0.70
-# gate) despite aspect ≈ 0.95. Closing heals those holes so fill returns
-# to the theoretical π/4 ≈ 0.785. Kernel is intentionally tiny — 3x3 is
-# big enough to bridge single-pixel gaps, small enough to not bleed the
-# ball outline into adjacent motion.
-_BG_CLOSE_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-
-# MOG2 tuning: OpenCV defaults (history=500, varThreshold=16) bake a
-# background model over ~2 s @ 240 fps. A ball that sits still mid-
-# windup for half a second gets learned into the background and then
-# disappears from the foreground mask once it starts moving again —
-# false-negatives on the first few frames of flight.
-#
-# history=120 ≈ 0.5 s @ 240 fps — short enough that the model tracks
-# operator movement without baking in a stationary ball, long enough to
-# stabilize against single-frame flicker. varThreshold kept at OpenCV
-# default (16) because lowering it produces more edge noise on the
-# indoor rig's dim background.
-_BG_HISTORY = 120
-_BG_VAR_THRESHOLD = 16
-
-# Explicit low learning rate instead of MOG2's auto-compute
-# (`-1` → 1/min(2*frameCount, history)). auto-compute is ~1/240 early on,
-# fast enough to learn the ball into the background during the windup
-# standstill. 0.0005 ≈ 1/2000 — the model adapts to genuine lighting
-# drift over seconds but stays blind to brief stationary objects like
-# a held ball. This pairs with the shorter `history` above so the
-# two knobs reinforce rather than cancel.
-_BG_LEARNING_RATE = 0.0005
-
-
 def detect_pitch(
     video_path: Path,
     video_start_pts_s: float,
     hsv_range: HSVRange | None = None,
     frame_iter: FrameIteratorFactory = iter_frames,
     *,
-    enable_bg_subtraction: bool = True,
     should_cancel: CancelCheck | None = None,
     expected_radius_px: float | None = None,
     shape_gate: ShapeGate | None = None,
@@ -89,31 +54,17 @@ def detect_pitch(
     chain_filter_params: ChainFilterParams | None = None,
     progress: Callable[[int], None] | None = None,
 ) -> list[FramePayload]:
-    """Decode `video_path`, run HSV + (optional) MOG2 background
-    subtraction on every frame, and return one `FramePayload` per decoded
-    sample. `timestamp_s` is the absolute iOS session-clock PTS (same
-    space as `sync_anchor_timestamp_s`). `px` / `py` are filled when the
-    post-filter blob matches HSV + area + shape + (if enabled) foreground.
+    """Decode `video_path`, run HSV ball detection on every frame, and
+    return one `FramePayload` per decoded sample. `timestamp_s` is the
+    absolute iOS session-clock PTS (same space as `sync_anchor_timestamp_s`).
+    `px` / `py` are filled when the post-filter blob matches HSV + area +
+    shape.
 
-    `enable_bg_subtraction=True` (default) prepends an MOG2 subtractor:
-    only pixels changing across frames can match HSV, so static yellow-
-    green clutter (dehumidifier buttons, door handles, hanger reflections)
-    is ignored regardless of colour. Warm-up (`_BG_SUBTRACTOR_WARMUP_FRAMES`)
-    is skipped because the subtractor's first-frames mask is unreliable.
+    Algorithm is byte-for-byte aligned with the iOS `live` path so a
+    diff between the two reflects the H.264 vs BGRA input asymmetry
+    (chroma 4:2:0 + DCT quantization), not the algorithm itself.
     """
     hsv = hsv_range if hsv_range is not None else HSVRange.from_env()
-    subtractor = (
-        cv2.createBackgroundSubtractorMOG2(
-            history=_BG_HISTORY,
-            varThreshold=_BG_VAR_THRESHOLD,
-            detectShadows=False,
-        )
-        if enable_bg_subtraction
-        else None
-    )
-    # Explicit per-session log so the mode is never ambiguous in field
-    # logs. `no radius prior` means fallback bounds [20, 150_000] px —
-    # not a silent degraded mode, just a different code path.
     if expected_radius_px is None:
         logger.info(
             "detect_pitch video=%s mode=no-radius-prior (area∈[20,150000])",
@@ -142,32 +93,19 @@ def detect_pitch(
             # so the cheap thing is to fire every frame and let the
             # caller decide what to coalesce.
             progress(idx)
-        fg_mask = None
-        if subtractor is not None:
-            fg_mask_raw = subtractor.apply(bgr, learningRate=_BG_LEARNING_RATE)
-            # Skip detection during warm-up; still feed the subtractor so
-            # the model keeps building across the whole clip.
-            if idx >= _BG_SUBTRACTOR_WARMUP_FRAMES:
-                fg_mask = cv2.morphologyEx(
-                    fg_mask_raw, cv2.MORPH_CLOSE, _BG_CLOSE_KERNEL
-                )
-        if subtractor is not None and idx < _BG_SUBTRACTOR_WARMUP_FRAMES:
-            centroid = None  # warm-up → force no-detection
-        else:
-            dt = (
-                absolute_pts_s - prev_timestamp_s
-                if prev_timestamp_s is not None else None
-            )
-            centroid = detect_ball(
-                bgr, hsv,
-                fg_mask=fg_mask,
-                expected_radius_px=expected_radius_px,
-                prev_position=prev_position,
-                prev_velocity=prev_velocity,
-                dt=dt,
-                shape_gate=shape_gate,
-                selector_tuning=selector_tuning,
-            )
+        dt = (
+            absolute_pts_s - prev_timestamp_s
+            if prev_timestamp_s is not None else None
+        )
+        centroid = detect_ball(
+            bgr, hsv,
+            expected_radius_px=expected_radius_px,
+            prev_position=prev_position,
+            prev_velocity=prev_velocity,
+            dt=dt,
+            shape_gate=shape_gate,
+            selector_tuning=selector_tuning,
+        )
         if centroid is None:
             out.append(
                 FramePayload(
@@ -209,11 +147,8 @@ def detect_pitch(
     ball_frames = sum(1 for f in out if f.ball_detected)
     chain_filter_annotate(out, chain_filter_params or ChainFilterParams())
     logger.info(
-        "detection video=%s frames=%d ball=%d hsv=h[%d-%d]s[%d-%d]v[%d-%d] bg_sub=%s",
+        "detection video=%s frames=%d ball=%d hsv=h[%d-%d]s[%d-%d]v[%d-%d]",
         video_path.name, len(out), ball_frames,
         hsv.h_min, hsv.h_max, hsv.s_min, hsv.s_max, hsv.v_min, hsv.v_max,
-        enable_bg_subtraction,
     )
     return out
-
-

@@ -10,7 +10,6 @@ from __future__ import annotations
 import pytest
 
 import main
-import pipeline
 
 
 @pytest.fixture(autouse=True)
@@ -21,19 +20,6 @@ def _reset_main_state(tmp_path, monkeypatch):
     bodies (late import), so they always read the current `main.state`
     value — no extra patching needed."""
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
-    yield
-
-
-@pytest.fixture(autouse=True)
-def _disable_bg_sub_warmup(monkeypatch):
-    """Zero MOG2 warm-up during tests. Real pipeline skips the first 30
-    frames (125 ms @ 240 fps) because the subtractor's initial mask is
-    unreliable — but synthetic test clips ship only 3 static frames with
-    a ground-truth ball, so a warm-up window would force all detections
-    to None and break E2E triangulation asserts. On the first frame MOG2
-    emits an all-foreground mask anyway, so zeroing warm-up is harmless
-    for the static-ball case the tests exercise."""
-    monkeypatch.setattr(pipeline, "_BG_SUBTRACTOR_WARMUP_FRAMES", 0)
     yield
 
 
