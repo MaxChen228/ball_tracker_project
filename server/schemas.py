@@ -100,14 +100,6 @@ class FramePayload(BaseModel):
     # = chain broke because the ray direction jumped past max_jump_px. Set
     # only on frames where ball_detected is True — non-detections stay None.
     filter_status: Literal["kept", "rejected_flicker", "rejected_jump"] | None = None
-    # Identity of the detection engine that produced this frame's
-    # candidates / px / py. Convention: `<family>@<version-or-sha>` —
-    # server-side HSV is `hsv@1.0`, iOS-side HSV is `hsv@ios.1.0`,
-    # future ML engines will be `ml@<sha256[:8]>`. Stamped at production
-    # time and persisted so historical sessions remain reproducible.
-    # None on legacy pitch JSONs written before this field landed; new
-    # writes always populate it. See `detection_engine.py`.
-    detection_engine: str | None = None
 
 
 class CaptureTelemetryPayload(BaseModel):
@@ -570,66 +562,3 @@ class StoredPitch(PitchPayload):
     payload" while staying wire-compatible with `PitchPayload`."""
 
     pass
-
-
-class SAM3GTFrame(BaseModel):
-    """Per-frame ground-truth label produced by `tools/sam3_runtime.py`.
-
-    Fields are derived from the SAM 3 binary mask: bbox / centroid from
-    pixel extents, mask_*/aspect/fill from the mask itself, mask_hue_*
-    by sampling the underlying H.264-decoded BGR through cv2.cvtColor.
-    All values are at the MOV's native resolution (no rescaling).
-
-    Frames where SAM 3 returned no detection above `min_confidence` get
-    omitted from the parent record's `frames` list — there's no "miss"
-    placeholder, the absence IS the label. Distillation scripts treat
-    frame_idx gaps as ground-truth misses."""
-    frame_idx: int
-    t_pts_s: float
-    bbox: tuple[float, float, float, float]   # (x_min, y_min, x_max, y_max), XYXY
-    centroid_px: tuple[float, float]
-    mask_area_px: int
-    mask_aspect: float                        # min(w,h) / max(w,h) of bbox
-    mask_fill: float                          # mask_area_px / (bbox_w * bbox_h)
-    mask_hue_mean: float                      # OpenCV hue (0-179) inside mask
-    mask_hue_std: float
-    mask_sat_mean: float                      # 0-255
-    mask_val_mean: float                      # 0-255
-    confidence: float                         # SAM 3 detection score
-
-
-class SAM3GTRecord(BaseModel):
-    """Per-(session, cam) ground-truth record. One JSON file on disk per
-    MOV at `data/gt/sam3/session_<sid>_<cam>.json`. The contents are
-    consumed by:
-      - `server/scripts/sam3_visualize.py`  (overlay MP4)
-      - `server/scripts/fit_*.py`           (parameter distillation)
-      - `server/scripts/validate_three_way.py` (live vs server vs GT)
-
-    Storage is intentionally separate from `data/pitches/`: GT can be
-    re-run independently, can disagree with the production detection,
-    and shouldn't get tangled with the live triangulation cache."""
-    session_id: str = Field(pattern=r"^s_[0-9a-f]{4,32}$")
-    camera_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,16}$")
-    model_version: str                       # e.g. "facebook/sam3 (transformers main @ <rev>)"
-    labelled_at: str                         # ISO 8601 UTC, "%Y-%m-%dT%H:%M:%SZ"
-    prompt_strategy: str                     # "text:'blue ball'" / "click:..." / "hsv-bootstrap"
-    video_fps: float
-    video_dims: tuple[int, int]              # (width, height) of the decoded grid
-    frames: list[SAM3GTFrame]
-    # Optional non-frame stats for diagnostic logging. Distillation reads
-    # these to filter out under-labelled videos before fitting (e.g. if
-    # SAM 3 only found the ball on 5% of frames the prompt or scene is
-    # bad and that record shouldn't be trusted).
-    #
-    # NB: `frames_decoded` is the count actually fed to SAM 3, AFTER
-    # the labeller's `--limit-frames` clamp. The MOV may contain more
-    # frames than this; downstream code reading label coverage should
-    # think of `frames_labelled / frames_decoded`, not `… / total in
-    # MOV`. Renamed from `frames_total` to make the post-clamp
-    # semantics explicit — a 600-frame MOV labelled with
-    # --limit-frames 60 used to record `frames_total=60` and
-    # downstream code mis-read the ratio as 100%.
-    frames_decoded: int                      # count fed to SAM 3 (post --limit-frames)
-    frames_labelled: int                     # len(frames), redundant but explicit
-    min_confidence: float                    # filter floor used at label time

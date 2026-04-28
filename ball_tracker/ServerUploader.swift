@@ -65,13 +65,6 @@ final class ServerUploader: @unchecked Sendable {
         /// Server's `live_pairing._resolve_candidates` runs the temporal-
         /// prior selector to pick the winner.
         let candidates: [BlobCandidate]
-        /// Identity of the engine that produced these candidates. Mirrors
-        /// `server/schemas.FramePayload.detection_engine`. Sent as
-        /// `engine` over the WS wire (short field name; `engine` and
-        /// `detection_engine` resolve to the same on-disk semantics in
-        /// `device_ws._handle_frame_message`). Required — server lockstep
-        /// rejects frames without it.
-        let engine: String
 
         var ballDetected: Bool { !candidates.isEmpty }
     }

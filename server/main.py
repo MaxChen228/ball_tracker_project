@@ -196,42 +196,7 @@ async def lifespan(app: FastAPI):
             sessions, files, bytes_removed, cleanup_days, state.data_dir,
         )
 
-    # ----- GT queue worker --------------------------------------------
-    # Lifespan startup order (matters):
-    #   1. GT queue boot recovery: `running` → `pending`, sweep orphan
-    #      preview JPEGs from the last run.
-    #   2. Spawn worker thread to consume pending items.
-    # Teardown reverses: stop the worker (5s join), let any in-flight
-    # subprocess die naturally when uvicorn exits.
-    n_requeued, n_orphans = state.gt_queue.recover_on_boot()
-    if n_requeued or n_orphans:
-        logger.info(
-            "GT queue recovery: re-queued %d running items, swept %d orphan previews",
-            n_requeued, n_orphans,
-        )
-    from gt_queue_worker import GTQueueWorker
-
-    def _mov_exists(sid: str, cam: str) -> bool:
-        for ext in (".mov", ".mp4", ".m4v"):
-            if (state.video_dir / f"session_{sid}_{cam}{ext}").is_file():
-                return True
-        return False
-
-    server_dir = Path(__file__).resolve().parent
-    worker = GTQueueWorker(
-        queue=state.gt_queue,
-        index=state.gt_index,
-        server_dir=server_dir,
-        scripts_dir=server_dir / "scripts",
-        tools_project=str(server_dir.parent / "tools"),
-        mov_exists=_mov_exists,
-    )
-    worker.start()
-
-    try:
-        yield
-    finally:
-        worker.stop(timeout=5.0)
+    yield
 
 
 app = FastAPI(title="ball_tracker server", lifespan=lifespan)
@@ -245,7 +210,6 @@ from routes import viewer as _viewer_routes
 from routes import pitch as _pitch_routes
 from routes import calibration as _calibration_routes
 from routes import device_ws as _device_ws_routes
-from routes import gt as _gt_routes
 app.include_router(_markers_routes.router)
 app.include_router(_settings_routes.router)
 app.include_router(_camera_routes.router)
@@ -255,7 +219,6 @@ app.include_router(_viewer_routes.router)
 app.include_router(_pitch_routes.router)
 app.include_router(_calibration_routes.router)
 app.include_router(_device_ws_routes.router)
-app.include_router(_gt_routes.router)
 from routes.camera import _validate_camera_id_or_422
 from routes.sessions import _SESSION_ID_RE
 from routes.viewer import _build_viewer_health, _find_clip_on_disk, _scene_for_session
