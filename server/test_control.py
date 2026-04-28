@@ -965,11 +965,12 @@ def test_record_merges_live_frames_into_single_camera_pitch(tmp_path):
 
 def test_session_stop_flushes_live_frames_without_pitch_upload(tmp_path):
     """iOS dies mid-session before sending /pitch — operator presses Stop.
-    The buffered live frames must be persisted under a synthetic pitch so
-    they survive a server restart. Without this, the live path silently
-    drops data on every iOS crash, violating the no-silent-fallback rule."""
+    With a sync anchor on file the buffered live frames are persisted as a
+    synthetic pitch so they survive a server restart. Without the anchor the
+    flush refuses to synthesise (would peg t_rel_s onto the wrong clock)."""
     from schemas import BlobCandidate
     s = main.State(data_dir=tmp_path)
+    s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
     s.arm_session(paths={main.DetectionPath.live})
     session_id = s.current_session().id
 
@@ -998,6 +999,23 @@ def test_session_stop_flushes_live_frames_without_pitch_upload(tmp_path):
     assert len(reloaded["A"].frames_live) == 2
 
 
+def test_session_stop_drops_live_frames_without_anchor(tmp_path):
+    """No sync anchor on file → flush refuses to synthesise rather than
+    pegging t_rel_s onto a fake 0.0 clock."""
+    from schemas import BlobCandidate
+    s = main.State(data_dir=tmp_path)
+    s.arm_session(paths={main.DetectionPath.live})
+    session_id = s.current_session().id
+
+    s.ingest_live_frame("A", session_id, main.FramePayload(
+        frame_index=1, timestamp_s=0.1, ball_detected=True,
+        candidates=[BlobCandidate(px=10.0, py=20.0, area=100, area_score=1.0)],
+    ))
+    s.stop_session()
+
+    assert s.pitches_for_session(session_id) == {}
+
+
 def test_session_timeout_flushes_live_frames(tmp_path):
     """Same as above but the session ends via lazy timeout (operator
     forgot Stop) instead of explicit stop_session. The flush must still
@@ -1005,6 +1023,7 @@ def test_session_timeout_flushes_live_frames(tmp_path):
     from schemas import BlobCandidate
     clock = [1000.0]
     s = main.State(data_dir=tmp_path, time_fn=lambda: clock[0])
+    s.heartbeat("B", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
     s.arm_session(max_duration_s=5.0, paths={main.DetectionPath.live})
     session_id = s.current_session().id
 
@@ -1292,7 +1311,7 @@ def test_sync_timeout_drops_run_and_triggers_cooldown(tmp_path):
     clock["now"] = 1000.0 + main._SYNC_TIMEOUT_S + 0.5
     s.heartbeat("A")
     s.heartbeat("B")
-    assert s.current_sync() is None
+    assert s._sync.current_sync() is None
     # Fresh /sync/start must wait for cooldown.
     _, reason2 = s.start_sync()
     assert reason2 == "cooldown"
@@ -1321,8 +1340,8 @@ def test_sync_cooldown_blocks_immediate_restart(tmp_path):
         camera_id="B", sync_id=run.id, role="B",
         t_self_s=0.0, t_from_other_s=0.01, emitted_band="B",
     )
-    s.record_sync_report(a)
-    _, result, _ = s.record_sync_report(b)
+    s._sync.record_sync_report(a)
+    _, result, _ = s._sync.record_sync_report(b)
     assert result is not None
 
     # Still in cooldown.
@@ -1349,8 +1368,8 @@ def test_sync_run_ids_are_unique_across_runs(tmp_path):
                     t_self_s=0.0, t_from_other_s=0.0, emitted_band="A")
     b1 = SyncReport(camera_id="B", sync_id=run1.id, role="B",
                     t_self_s=0.0, t_from_other_s=0.0, emitted_band="B")
-    s.record_sync_report(a1)
-    s.record_sync_report(b1)
+    s._sync.record_sync_report(a1)
+    s._sync.record_sync_report(b1)
     clock["now"] += main._SYNC_COOLDOWN_S + 0.1
     s.heartbeat("A")
     s.heartbeat("B")
@@ -1392,7 +1411,7 @@ def _minimal_pitch(camera_id: str, session_id: str) -> main.PitchPayload:
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames=[
+        frames_server_post=[
             main.FramePayload(
                 frame_index=0,
                 timestamp_s=0.0,

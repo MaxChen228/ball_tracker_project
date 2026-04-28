@@ -474,7 +474,10 @@ def test_reconstruction_endpoint_returns_scene_shape():
 
     _record_pitch(pitch)
 
-    r = client.get(f"/reconstruction/{session_id}")
+    # include_rejected=true: single-frame fixture trips chain_filter
+    # (min_run_len=10 → rejected_flicker), which the default wire payload
+    # now hides. The test verifies scene shape, not filter behavior.
+    r = client.get(f"/reconstruction/{session_id}?include_rejected=true")
     assert r.status_code == 200
     body = r.json()
     assert body["session_id"] == session_id

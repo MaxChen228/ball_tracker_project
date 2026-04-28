@@ -23,6 +23,14 @@ from triangulate import build_K, camera_center_world, recover_extrinsics, triang
 router = APIRouter()
 logger = logging.getLogger("ball_tracker")
 
+# iPhone main (1x wide) rear camera horizontal FOV — empirically measured
+# from the device's `activeFormat.videoFieldOfView` at 240 fps (73.828°).
+# Used as the fallback when an uploaded ChArUco/AutoCal pose carries no
+# explicit `h_fov_deg` so derived `fx`/`fy` match the rig's actual sensor
+# rather than the historical 65° guess (which over-estimated fx by ~14%).
+# See MEMORY: reference_iphone_camera_formats.md.
+_IPHONE_MAIN_CAM_HFOV_RAD = 1.2885  # 73.828° measured
+
 
 @router.post("/calibration")
 async def post_calibration(snapshot: CalibrationSnapshot) -> dict[str, Any]:
@@ -545,7 +553,7 @@ def _derive_auto_cal_intrinsics(
                 )
                 return intrinsics, prior
         prior = None
-    h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else 1.1345
+    h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else _IPHONE_MAIN_CAM_HFOV_RAD
     fx, fy, cx, cy = derive_fov_intrinsics(w_img, h_img, h_fov_rad)
     return IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy), None
 

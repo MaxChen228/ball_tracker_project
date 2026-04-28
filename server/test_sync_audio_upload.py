@@ -75,9 +75,9 @@ def _synth_burst(
 
 @pytest.fixture(autouse=True)
 def _reset_state() -> None:
-    main.state._current_sync = None
-    main.state._last_sync_result = None
-    main.state._sync_cooldown_until = 0.0
+    main.state._sync._current_sync = None
+    main.state._sync._last_sync_result = None
+    main.state._sync._sync_cooldown_until = 0.0
     # Ensure default SyncParams for predictable windowed detection windows.
     main.state.set_sync_params(SyncParams())
     yield

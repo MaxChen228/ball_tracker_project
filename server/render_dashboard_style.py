@@ -5,102 +5,44 @@ so only the tokens are shared, not the whole stylesheet."""
 from __future__ import annotations
 
 from cam_view_ui import CAM_VIEW_FULL_CSS
-from render_shared import _TOKENS_CSS
+from render_shared import _SHARED_LAYOUT_NAV_CSS, _TOKENS_CSS
+
+
+# Dashboard-specific overrides on top of the shared layout/nav body.
+# Four extra status-* rules render the dashboard's editorial nav strip
+# (status-main / status-badge / status-headline / status-context); the
+# .layout override pins the dashboard to the viewport so the canvas
+# can host a fixed-height Plotly scene without document scroll. Both
+# arrive AFTER _SHARED_LAYOUT_NAV_CSS in the CSS cascade so they win.
+_DASHBOARD_NAV_OVERRIDES_CSS = """
+.nav .status-main { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+                    font-family: var(--mono); text-transform: uppercase; }
+.nav .status-badge { display: inline-flex; align-items: center; padding: 3px 8px;
+                     border: 1px solid var(--border-base); border-radius: var(--r);
+                     font-size: 10px; letter-spacing: 0.12em; color: var(--sub); }
+.nav .status-badge.ready, .nav .status-badge.recording {
+  color: var(--passed); border-color: var(--passed); background: var(--passed-bg);
+}
+.nav .status-badge.blocked, .nav .status-badge.cooldown {
+  color: var(--warn); border-color: var(--warn); background: var(--warn-bg);
+}
+.nav .status-badge.syncing {
+  color: var(--ink); border-color: var(--ink); background: rgba(42,37,32,.04);
+}
+.nav .status-headline { font-size: 12px; letter-spacing: 0.12em; color: var(--ink); }
+.nav .status-context { font-size: 10px; letter-spacing: 0.08em; color: var(--sub); }
+
+/* Dashboard pins the layout to the viewport (no document scroll) so the
+   canvas can host the fixed-height Plotly scene. The shared body uses
+   `min-height: 100vh` for /markers + /sync where the sidebar grows. */
+.layout { height: 100vh; box-sizing: border-box; overflow: hidden; }
+"""
 
 
 _CSS = f"""
 {_TOKENS_CSS}
-
-* {{ box-sizing: border-box; }}
-html, body {{ margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--ink);
-              font-family: var(--sans); font-weight: 300; line-height: 1.8;
-              -webkit-font-smoothing: antialiased; }}
-
-/* --- App header --- */
-.nav {{ position: fixed; top: 0; left: 0; right: 0; min-height: var(--nav-h);
-        background: rgba(252, 251, 250, 0.96); backdrop-filter: blur(10px);
-        border-bottom: 1px solid var(--border-base); padding: 12px 24px 10px 24px;
-        z-index: 20; display: flex; flex-direction: column; gap: 8px; }}
-.nav-main {{ display: grid; grid-template-columns: minmax(0, 1fr) auto;
-             align-items: start; gap: 12px 24px; }}
-.nav-brand-block {{ display: flex; align-items: center; gap: 18px; min-width: 0; }}
-.nav .brand {{ font-family: var(--mono); font-weight: 700; font-size: 14px;
-               letter-spacing: 0.16em; color: var(--ink); text-decoration: none;
-               line-height: 1.3; white-space: nowrap; }}
-.nav .brand .dot {{ display: inline-block; width: 7px; height: 7px; background: var(--ink);
-                    margin-right: 10px; vertical-align: middle; border-radius: 0; }}
-.nav-page {{ display: flex; flex-direction: column; gap: 2px; min-width: 0; }}
-.nav-page-kicker {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
-                    text-transform: uppercase; color: var(--sub); }}
-.nav-page-title {{ font-family: var(--mono); font-size: 18px; line-height: 1.1;
-                   letter-spacing: 0.02em; color: var(--ink); }}
-.nav-tabs {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }}
-.nav-tab {{ display: inline-flex; align-items: center; min-height: 32px;
-            padding: 6px 12px; border: 1px solid var(--border-base); border-radius: var(--r);
-            text-decoration: none; background: transparent; color: var(--sub);
-            font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em;
-            text-transform: uppercase; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease; }}
-.nav-tab:hover {{ border-color: var(--ink); color: var(--ink); background: var(--surface-hover); }}
-.nav-tab.active {{ background: var(--ink); border-color: var(--ink); color: var(--surface); }}
-.nav-status-row {{ display: flex; justify-content: flex-end; }}
-.nav .status-line {{ display: flex; flex-direction: column; align-items: flex-end;
-                     gap: 6px; min-width: min(560px, 100%); }}
-.nav .status-main {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-                     font-family: var(--mono); text-transform: uppercase; }}
-.nav .status-badge {{ display: inline-flex; align-items: center; padding: 3px 8px;
-                      border: 1px solid var(--border-base); border-radius: var(--r);
-                      font-size: 10px; letter-spacing: 0.12em; color: var(--sub); }}
-.nav .status-badge.ready, .nav .status-badge.recording {{
-  color: var(--passed); border-color: var(--passed); background: var(--passed-bg);
-}}
-.nav .status-badge.blocked, .nav .status-badge.cooldown {{
-  color: var(--warn); border-color: var(--warn); background: var(--warn-bg);
-}}
-.nav .status-badge.syncing {{
-  color: var(--ink); border-color: var(--ink); background: rgba(42,37,32,.04);
-}}
-.nav .status-headline {{ font-size: 12px; letter-spacing: 0.12em; color: var(--ink); }}
-.nav .status-context {{ font-size: 10px; letter-spacing: 0.08em; color: var(--sub); }}
-.nav .status-checks {{ display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }}
-.nav .status-check {{ display: inline-flex; align-items: center; gap: 6px;
-                      padding: 2px 8px; border: 1px solid var(--border-base);
-                      border-radius: var(--r); font-family: var(--mono); font-size: 10px;
-                      letter-spacing: 0.08em; text-transform: uppercase; color: var(--sub); }}
-.nav .status-check.ok {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
-.nav .status-check.warn {{ color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }}
-.nav .status-check .k {{ opacity: 0.8; }}
-.nav .status-check .v {{ color: currentColor; font-weight: 600; }}
-
-/* --- Main layout: sidebar + canvas --- */
-.layout {{ display: flex; height: 100vh; padding-top: var(--nav-offset);
-           box-sizing: border-box; overflow: hidden; }}
-.sidebar {{ width: var(--sidebar-w); flex-shrink: 0; overflow-y: auto;
-            background: var(--surface); border-right: 1px solid var(--border-base);
-            padding: var(--s-5) var(--s-4); z-index: 10;
-            display: flex; flex-direction: column; gap: var(--s-3); }}
-.canvas {{ flex: 1; position: relative; overflow: hidden;
-           background: var(--bg); }}
-#scene-root {{ position: absolute; inset: 0; }}
-
-/* --- Scrollbar --- */
-.sidebar::-webkit-scrollbar {{ width: 4px; }}
-.sidebar::-webkit-scrollbar-track {{ background: transparent; }}
-.sidebar::-webkit-scrollbar-thumb {{ background: var(--border-base); }}
-.sidebar::-webkit-scrollbar-thumb:hover {{ background: var(--sub); }}
-
-/* --- Card --- */
-.card {{ background: var(--surface); border: 1px solid var(--border-base);
-         border-radius: var(--r); padding: var(--s-4); }}
-.card + .card {{ margin-top: 0; }}
-.card-title {{ font-family: var(--mono); font-weight: 500; font-size: 11px;
-               letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub);
-               margin: 0 0 var(--s-3) 0; padding: 0 0 var(--s-2) 0;
-               border-bottom: 1px solid var(--border-l); }}
-.card-subtitle {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
-                  text-transform: uppercase; color: var(--sub);
-                  margin-top: var(--s-3); margin-bottom: var(--s-1); }}
-.card section + section {{ border-top: 1px solid var(--border-l); margin-top: var(--s-3);
-                           padding-top: var(--s-3); }}
+{_SHARED_LAYOUT_NAV_CSS}
+{_DASHBOARD_NAV_OVERRIDES_CSS}
 
 /* --- Device rows --- */
 /* Middle column uses minmax so a wider chip (CALIBRATED vs OFFLINE) can't
@@ -487,16 +429,19 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
    line. No more action-button column that bloated row height. */
 .events-empty {{ color: var(--sub); font-size: 12px; padding: var(--s-3) 0;
                  font-style: italic; font-family: var(--mono); }}
-.event-item {{ display: flex; align-items: center; gap: var(--s-1);
+.event-item {{ display: grid;
+               grid-template-columns: 41px minmax(0, 1fr) auto auto;
+               align-items: center; gap: var(--s-1);
                padding: 6px 0;
                border-top: 1px solid var(--border-l);
-               transition: background 0.12s ease; }}
+               transition: background 0.12s ease;
+               min-width: 0; }}
 .event-item:first-child {{ border-top: 0; }}
 .event-item:hover {{ background: var(--surface-hover); }}
-.event-row {{ flex: 1 1 auto; min-width: 0; display: flex;
+.event-row {{ min-width: 0; display: flex;
               flex-direction: column; gap: 2px;
               text-decoration: none; color: inherit;
-              padding: 2px var(--s-1); }}
+              padding: 2px var(--s-1); overflow: hidden; }}
 /* Trajectory overlay toggle — coloured dot mirrors the trace tint Plotly
    uses in the canvas so the operator can match checkbox → line. The
    checkbox is OUTSIDE the <a>, so clicking it doesn't navigate. */
@@ -515,17 +460,18 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
    intrinsic width); status chip + actions live as sibling flex cells
    of .event-item so nothing competes for sid's or L/S's width. */
 .event-head {{ display: flex; align-items: center; gap: 6px;
-               min-width: 0; flex-wrap: nowrap; }}
+               min-width: 0; flex-wrap: nowrap; overflow: hidden; }}
 .event-head .sid {{ flex: 0 0 auto; font-family: var(--mono); font-size: 11px;
                     font-weight: 500; color: var(--ink);
                     letter-spacing: 0.04em; white-space: nowrap; }}
 .event-head .path-chip {{ flex: 0 0 auto; font-size: 10px; padding: 1px 6px;
-                          letter-spacing: 0.04em; }}
-.event-status {{ flex: 0 0 auto; display: flex; align-items: center;
-                 gap: 4px; justify-content: flex-end; }}
+                          letter-spacing: 0.04em; white-space: nowrap; }}
+.event-status {{ display: flex; align-items: center;
+                 gap: 4px; justify-content: flex-end;
+                 min-width: 0; max-width: 120px; overflow: hidden; }}
 .event-status:empty {{ display: none; }}
 .event-status .chip {{ font-size: 9px; padding: 1px 6px;
-                       letter-spacing: 0.08em; }}
+                       letter-spacing: 0.08em; white-space: nowrap; }}
 .event-meta {{ font-family: var(--mono); font-size: 10px;
                color: var(--sub); letter-spacing: 0.02em;
                white-space: nowrap; overflow: hidden;
@@ -545,7 +491,8 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                   padding:4px 8px; border-radius:var(--r); cursor:pointer; }}
 .events-filter.active {{ background:var(--ink); color:var(--surface); border-color:var(--ink); }}
 .event-actions {{ display:flex; flex-direction:row; align-items:center;
-                  gap:4px; margin: 0 var(--s-1) 0 0; flex: 0 0 auto; }}
+                  gap:4px; margin: 0 var(--s-1) 0 0;
+                  justify-content: flex-end; }}
 .event-action-form {{ margin:0; }}
 .event-action {{ background:transparent; border:1px solid var(--border-base);
                  color:var(--sub); font-family:var(--mono); font-size:9px;
@@ -643,35 +590,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                     font-family: var(--mono); font-size: 11px; color: var(--failed);
                     letter-spacing: 0.04em; max-width: 80%; }}
 .degraded-banner .degraded-icon {{ font-size: 14px; }}
-.telemetry-panel {{ position: absolute; left: var(--s-4);
-                    top: calc(var(--s-4) + 42px); z-index: 7;
-                    background: var(--surface); border: 1px solid var(--border-base);
-                    border-radius: var(--r); max-width: 320px; font-family: var(--mono);
-                    font-size: 11px; color: var(--ink); }}
-.telemetry-panel summary {{ cursor: pointer; padding: var(--s-2) var(--s-3);
-                             letter-spacing: 0.12em; color: var(--sub);
-                             user-select: none; list-style: none; }}
-.telemetry-panel summary::-webkit-details-marker {{ display: none; }}
-.telemetry-panel summary::after {{ content: ' ▸'; color: var(--sub); }}
-.telemetry-panel[open] summary::after {{ content: ' ▾'; color: var(--ink); }}
-.telemetry-panel[open] summary {{ color: var(--ink); border-bottom: 1px solid var(--border-l); }}
-.telemetry-body {{ padding: var(--s-2) var(--s-3); display: flex; flex-direction: column;
-                   gap: var(--s-2); max-height: min(340px, calc(100vh - var(--nav-h) - 120px));
-                   overflow-y: auto; }}
-.tel-row {{ display: grid; grid-template-columns: 60px 80px 1fr; align-items: center;
-            gap: var(--s-2); }}
-.tel-row .k {{ font-size: 10px; color: var(--sub); letter-spacing: 0.08em; }}
-.tel-row .v {{ font-size: 10px; color: var(--ink); }}
-.tel-row .tel-spark {{ width: 80px; height: 16px; display: block; }}
-.tel-block {{ display: flex; flex-direction: column; gap: 4px; }}
-.tel-block .k {{ font-size: 10px; color: var(--sub); letter-spacing: 0.08em; }}
-.tel-matrix {{ display: flex; gap: 4px; flex-wrap: wrap; }}
-.tel-cell {{ font-size: 9px; padding: 2px 4px; border: 1px solid var(--border-l);
-             border-radius: var(--r); font-family: var(--mono); color: var(--ink); }}
-.tel-errors {{ display: flex; flex-direction: column; gap: 2px; }}
-.tel-err {{ font-size: 10px; color: var(--failed); display: flex; gap: var(--s-2); }}
-.tel-err .t {{ color: var(--sub); }}
-.tel-none {{ font-size: 10px; color: var(--sub); font-style: italic; }}
 .canvas-mode-toggle {{ position: absolute; left: var(--s-4); top: var(--s-4); z-index: 6;
                        display: inline-flex; gap: 0; font-family: var(--mono); font-size: 10px;
                        letter-spacing: 0.12em; text-transform: uppercase;

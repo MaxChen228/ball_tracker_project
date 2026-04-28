@@ -19,8 +19,6 @@
           armed: true,
           paths: data.paths || [],
           frame_counts: {},
-          frame_samples: { A: [], B: [] },
-          frame_fps: {},
           point_count: 0,
           point_depths: [],
           paths_completed: [],
@@ -35,7 +33,6 @@
         // takes over visually). lastEndedLiveSid is not cleared here so
         // the operator can still see framing drift even on the first
         // moments of the new cycle.
-        renderActiveSession(currentLiveSession);
         repaintCanvas();
         playCue('armed');
       } catch (_) {}
@@ -46,8 +43,6 @@
         if (!currentLiveSession || currentLiveSession.session_id !== data.sid) return;
         currentLiveSession.frame_counts = currentLiveSession.frame_counts || {};
         currentLiveSession.frame_counts[data.cam] = Number(data.count || 0);
-        pushFrameSample(currentLiveSession, data.cam, Number(data.count || 0));
-        renderActiveSession(currentLiveSession);
       } catch (_) {}
     });
     es.addEventListener('path_completed', (evt) => {
@@ -57,7 +52,6 @@
           const done = new Set(currentLiveSession.paths_completed || []);
           done.add(data.path);
           currentLiveSession.paths_completed = [...done];
-          renderActiveSession(currentLiveSession);
         }
         // Flip the events row's path chip from live→done without waiting
         // for the 5 s /events tick. Invalidate the diff-key memo so the
@@ -180,7 +174,6 @@
           if (currentLiveSession.point_depths.length > 20) {
             currentLiveSession.point_depths.shift();
           }
-          renderActiveSession(currentLiveSession);
           // Fast path: append to the already-anchored live trace slot.
           // Falls back to a full repaint if the slot is stale (e.g. first
           // point after an arm, or after a structural change invalidated
@@ -188,14 +181,6 @@
           if (!extendLivePoint(pt)) repaintCanvas();
         } else {
           repaintCanvas();
-        }
-        // Telemetry: each `point` SSE arrival is one triangulated pair.
-        // Drop samples older than the window so the rolling stats stay
-        // bounded regardless of session count or length.
-        const nowMs = Date.now();
-        pairTimestamps.push(nowMs);
-        while (pairTimestamps.length && nowMs - pairTimestamps[0] > TELEMETRY_WINDOW_MS) {
-          pairTimestamps.shift();
         }
       } catch (_) {}
     });
@@ -208,7 +193,6 @@
           if (Array.isArray(data.paths_completed)) {
             currentLiveSession.paths_completed = data.paths_completed;
           }
-          renderActiveSession(currentLiveSession);
           // Retain the trail reference for ghost preview on the next arm.
           // Clear currentLiveSession after a short delay so the active card
           // stays visible briefly with its final counters.
@@ -217,7 +201,6 @@
             if (currentLiveSession && currentLiveSession.session_id === data.sid && !currentLiveSession.armed) {
               currentLiveSession = null;
               liveTraceIdx = -1;
-              renderActiveSession(null);
               repaintCanvas();
             }
           }, 3000);
@@ -234,7 +217,6 @@
         const prev = wsStatus.get(data.cam);
         if (!prev || prev.connected !== connected) {
           wsStatus.set(data.cam, { connected, since_ms: Date.now() });
-          if (!connected) recordError('ws_disconnect', `Cam ${data.cam} WebSocket dropped`);
         }
         // Authoritative: patch currentDevices in place and repaint.
         // /status polling (now 5 s fallback) no longer needs to be the
@@ -260,13 +242,6 @@
           time_sync_id: data.time_sync_id || null,
           ws_connected: true,
         });
-        // Telemetry sample: same shape tickStatus previously recorded.
-        if (typeof latencySamples === 'object' && typeof data.ws_latency_ms === 'number') {
-          const nowMs = Date.now();
-          const arr = latencySamples[data.cam] = latencySamples[data.cam] || [];
-          arr.push({ t_ms: nowMs, latency: data.ws_latency_ms });
-          while (arr.length && nowMs - arr[0].t_ms > TELEMETRY_WINDOW_MS) arr.shift();
-        }
       } catch (_) {}
     });
   }

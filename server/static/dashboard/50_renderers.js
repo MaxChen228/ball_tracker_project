@@ -225,56 +225,6 @@
     server_post: ['Server post-pass', 'PyAV + OpenCV'],
   };
 
-  // Instantaneous fps derived from the most recent pair of frame_count
-  // samples. Returns 0 when <2 samples or the window is too short to be
-  // meaningful. Keeps the sparkline-per-cam history bounded to 60 entries
-  // (~60s at 1Hz frame_count emission) so arbitrary-long sessions don't
-  // grow unbounded.
-  const FPS_HISTORY_CAP = 60;
-  function pushFrameSample(liveSession, cam, count) {
-    liveSession.frame_samples = liveSession.frame_samples || { A: [], B: [] };
-    const arr = liveSession.frame_samples[cam] = liveSession.frame_samples[cam] || [];
-    const now = Date.now();
-    const prev = arr.length ? arr[arr.length - 1] : null;
-    arr.push({ t: now, count });
-    if (arr.length > FPS_HISTORY_CAP) arr.shift();
-    // fps from most recent two samples
-    if (arr.length >= 2) {
-      const a = arr[arr.length - 2];
-      const b = arr[arr.length - 1];
-      const dtS = Math.max(0.001, (b.t - a.t) / 1000);
-      liveSession.frame_fps = liveSession.frame_fps || {};
-      liveSession.frame_fps[cam] = Math.max(0, (b.count - a.count) / dtS);
-    }
-    return prev;
-  }
-
-  function drawSparkline(canvas, samples) {
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    const W = canvas.width = canvas.clientWidth;
-    const H = canvas.height = canvas.clientHeight;
-    ctx.clearRect(0, 0, W, H);
-    if (!samples || samples.length < 2) return;
-    // Derive per-sample fps on the fly
-    const fps = [];
-    for (let i = 1; i < samples.length; i++) {
-      const dtS = Math.max(0.001, (samples[i].t - samples[i - 1].t) / 1000);
-      fps.push((samples[i].count - samples[i - 1].count) / dtS);
-    }
-    const maxFps = Math.max(240, ...fps);  // keep 240 as visual cap
-    ctx.strokeStyle = '#C0392B';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    fps.forEach((f, i) => {
-      const x = (i / (fps.length - 1 || 1)) * W;
-      const y = H - (f / maxFps) * H;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-  }
-
   function fmtElapsed(ms) {
     if (!ms || ms < 0) return '00:00.0';
     const total = ms / 1000;
@@ -284,12 +234,3 @@
     return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${ds}`;
   }
 
-  // Dashboard Session Monitor card was removed — the operator's only
-  // during-stream concern is the live 3D canvas. fps/frame telemetry
-  // still gets tracked on `currentLiveSession` (frame_samples +
-  // frame_fps) via pushFrameSample so post-session consumers (e.g. the
-  // viewer page, telemetry panel) have the data. This stub keeps the
-  // legacy call sites from erroring.
-  function renderActiveSession(_liveSession) {
-    return;
-  }

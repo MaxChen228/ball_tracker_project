@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import logging
 import math
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from candidate_selector import Candidate, CandidateSelectorTuning, select_best_candidate
 from schemas import FramePayload, TriangulatedPoint
+
+logger = logging.getLogger("ball_tracker")
 
 
 _OTHER_CAM = {"A": "B", "B": "A"}
@@ -68,6 +72,18 @@ class LivePairingSession:
     # ingest. Defaults so a session built outside that call (tests) still
     # has a usable tuning instead of None.
     tuning: CandidateSelectorTuning = field(default_factory=CandidateSelectorTuning.default)
+
+    def __post_init__(self) -> None:
+        # Internal mutex covering buffers / frames_by_cam / frame_counts /
+        # triangulated / paired_frame_ids / camera_poses / temporal-prior
+        # dicts / completed_cameras / abort_reasons. Two ingest threads
+        # (one per cam WS) call into this object concurrently; State holds
+        # its own lock only across the lookup, so mutation here MUST
+        # serialise itself. RLock because `ingest()` holds the lock while
+        # invoking the `triangulate_pair` callback, which legitimately reads
+        # back through `camera_pose()` etc. — same thread re-entry, not a
+        # cross-thread race.
+        self._lock = threading.RLock()
 
     def _resolve_candidates(self, cam: str, frame: FramePayload) -> FramePayload:
         """Pick the winning candidate using the temporal prior. Empty
@@ -143,58 +159,106 @@ class LivePairingSession:
         thousands of seconds apart). Stored frames keep raw timestamps —
         only the dt comparison is anchor-shifted, so downstream persistence
         and triangulation see the original values."""
-        # Apply temporal-prior candidate selection BEFORE buffering, so
-        # downstream pairing + persistence see a single resolved (px, py).
-        # Frames without a `candidates` field (legacy single-blob path)
-        # pass through unchanged.
-        frame = self._resolve_candidates(cam, frame)
-        self._update_temporal_prior(cam, frame)
-        buf = self.buffers.setdefault(cam, deque())
-        buf.append(frame)
-        self.frames_by_cam.setdefault(cam, []).append(frame)
-        while len(buf) > self.max_frames_per_cam:
-            buf.popleft()
-        self.frame_counts[cam] = self.frame_counts.get(cam, 0) + 1
-        if not frame.ball_detected:
-            return []
+        with self._lock:
+            # Apply temporal-prior candidate selection BEFORE buffering, so
+            # downstream pairing + persistence see a single resolved (px, py).
+            frame = self._resolve_candidates(cam, frame)
+            self._update_temporal_prior(cam, frame)
+            buf = self.buffers.setdefault(cam, deque())
+            buf.append(frame)
+            self.frames_by_cam.setdefault(cam, []).append(frame)
+            while len(buf) > self.max_frames_per_cam:
+                buf.popleft()
+            self.frame_counts[cam] = self.frame_counts.get(cam, 0) + 1
+            if not frame.ball_detected:
+                return []
 
-        other = _OTHER_CAM.get(cam)
-        if other is None:
-            return []
-        own_anchor = (anchors or {}).get(cam)
-        peer_anchor = (anchors or {}).get(other)
-        # Drop any anchor offset only when both cams have one — partial
-        # adjustment would be worse than none.
-        adjust = own_anchor is not None and peer_anchor is not None
-        own_t = frame.timestamp_s - own_anchor if adjust else frame.timestamp_s
-        candidates = self.buffers.setdefault(other, deque())
-        created: list[TriangulatedPoint] = []
-        for peer in reversed(candidates):
-            peer_t = peer.timestamp_s - peer_anchor if adjust else peer.timestamp_s
-            dt = peer_t - own_t
-            if dt < -self.window_s:
-                break
-            if abs(dt) > self.window_s or not peer.ball_detected:
-                continue
-            pair_key = (
-                frame.frame_index if cam == "A" else peer.frame_index,
-                peer.frame_index if cam == "A" else frame.frame_index,
-            )
-            if pair_key in self.paired_frame_ids:
-                continue
-            point = triangulate_pair(cam, frame, peer)
-            if point is None:
-                continue
-            self.paired_frame_ids.add(pair_key)
-            self.triangulated.append(point)
-            created.append(point)
-        return created
+            other = _OTHER_CAM.get(cam)
+            if other is None:
+                return []
+            own_anchor = (anchors or {}).get(cam)
+            peer_anchor = (anchors or {}).get(other)
+            if (own_anchor is None) != (peer_anchor is None):
+                # Partial anchor (one cam synced, other not) — refusing to
+                # match on raw timestamps; the two devices' clocks sit
+                # ~10⁴ s apart so any pair would be garbage. Wait for the
+                # second chirp to land.
+                logger.info(
+                    "live_pairing: partial anchor session=%s cam=%s "
+                    "(own=%s peer=%s) — skipping window match",
+                    self.session_id, cam,
+                    own_anchor is not None, peer_anchor is not None,
+                )
+                return []
+            adjust = own_anchor is not None and peer_anchor is not None
+            own_t = frame.timestamp_s - own_anchor if adjust else frame.timestamp_s
+            candidates = self.buffers.setdefault(other, deque())
+            created: list[TriangulatedPoint] = []
+            for peer in reversed(candidates):
+                peer_t = peer.timestamp_s - peer_anchor if adjust else peer.timestamp_s
+                dt = peer_t - own_t
+                if dt < -self.window_s:
+                    break
+                if abs(dt) > self.window_s or not peer.ball_detected:
+                    continue
+                pair_key = (
+                    frame.frame_index if cam == "A" else peer.frame_index,
+                    peer.frame_index if cam == "A" else frame.frame_index,
+                )
+                if pair_key in self.paired_frame_ids:
+                    continue
+                point = triangulate_pair(cam, frame, peer)
+                if point is None:
+                    continue
+                self.paired_frame_ids.add(pair_key)
+                self.triangulated.append(point)
+                created.append(point)
+            return created
 
     def mark_completed(self, cam: str) -> None:
-        self.completed_cameras.add(cam)
+        with self._lock:
+            self.completed_cameras.add(cam)
 
     def mark_aborted(self, cam: str, reason: str) -> None:
-        self.abort_reasons[cam] = reason
+        with self._lock:
+            self.abort_reasons[cam] = reason
 
     def frames_for_camera(self, cam: str) -> list[FramePayload]:
-        return list(self.frames_by_cam.get(cam, []))
+        with self._lock:
+            return list(self.frames_by_cam.get(cam, []))
+
+    def cameras_with_frames(self) -> list[str]:
+        with self._lock:
+            return [c for c, fs in self.frames_by_cam.items() if fs]
+
+    def frame_counts_snapshot(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self.frame_counts)
+
+    def latest_frame_for(self, cam: str) -> FramePayload | None:
+        with self._lock:
+            buf = self.frames_by_cam.get(cam)
+            return buf[-1] if buf else None
+
+    def update_camera_pose(self, cam: str, pose: Any | None) -> None:
+        with self._lock:
+            if pose is None:
+                self.camera_poses.pop(cam, None)
+            else:
+                self.camera_poses[cam] = pose
+
+    def camera_pose(self, cam: str) -> Any | None:
+        with self._lock:
+            return self.camera_poses.get(cam)
+
+    def triangulated_count(self) -> int:
+        with self._lock:
+            return len(self.triangulated)
+
+    def completed_cameras_snapshot(self) -> list[str]:
+        with self._lock:
+            return sorted(self.completed_cameras)
+
+    def abort_reasons_snapshot(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self.abort_reasons)

@@ -235,8 +235,8 @@ def detect_sync_report(
     camera_id: str,
     role: str,
     audio_start_pts_s: float,
-    emit_at_s_self: list[float] | None = None,
-    emit_at_s_other: list[float] | None = None,
+    emit_at_s_self: list[float],
+    emit_at_s_other: list[float],
     search_window_s: float = 0.3,
     expected_sample_rate: int | None = None,
 ) -> tuple[SyncReport, dict[str, float]]:
@@ -264,25 +264,17 @@ def detect_sync_report(
     ref_a = _build_reference(sample_rate, SYNC_BAND_A_F0, SYNC_BAND_A_F1)
     ref_b = _build_reference(sample_rate, SYNC_BAND_B_F0, SYNC_BAND_B_F1)
 
-    # Windowed burst detection when server provides expected emission times;
-    # fall back to global search for backward compat (no emit_at_s provided).
-    if emit_at_s_self and emit_at_s_other:
-        ref_self = ref_a if role == "A" else ref_b
-        ref_other = ref_b if role == "A" else ref_a
-        dets_self = detect_band_windowed(audio, sample_rate, ref_self,
-                                         audio_start_pts_s, emit_at_s_self, search_window_s)
-        dets_other = detect_band_windowed(audio, sample_rate, ref_other,
-                                          audio_start_pts_s, emit_at_s_other, search_window_s)
-        det_self = _median_band_detection(dets_self)
-        det_other = _median_band_detection(dets_other)
-        n_burst = len(emit_at_s_self)
-    else:
-        # Legacy global search
-        det_a = detect_band(audio, sample_rate, ref_a, audio_start_pts_s)
-        det_b = detect_band(audio, sample_rate, ref_b, audio_start_pts_s)
-        det_self = det_a if role == "A" else det_b
-        det_other = det_b if role == "A" else det_a
-        n_burst = 1
+    if not emit_at_s_self or not emit_at_s_other:
+        raise ValueError("emit_at_s_self and emit_at_s_other are required (non-empty lists)")
+    ref_self = ref_a if role == "A" else ref_b
+    ref_other = ref_b if role == "A" else ref_a
+    dets_self = detect_band_windowed(audio, sample_rate, ref_self,
+                                     audio_start_pts_s, emit_at_s_self, search_window_s)
+    dets_other = detect_band_windowed(audio, sample_rate, ref_other,
+                                      audio_start_pts_s, emit_at_s_other, search_window_s)
+    det_self = _median_band_detection(dets_self)
+    det_other = _median_band_detection(dets_other)
+    n_burst = len(emit_at_s_self)
 
     t_self_s = det_self.center_pts_s
     t_from_other_s = det_other.center_pts_s
