@@ -28,7 +28,16 @@
       return `✓ ${base} · ${lab}/${dec} frames`;
     }
     if (it.status === 'error') {
-      const msg = (it.error || 'error').split('\n')[0].slice(0, 80);
+      // Stderr ring is byte-capped from the tail, so the FIRST line of
+      // a saved trace is usually a mid-line garbage fragment ("rocessor(
+      // videos=video..." instead of "...processor(videos=video..."). The
+      // useful line is the last `<Type>Error: ...` row at the bottom of
+      // the trace — that's the actual exception. Fall back to last non-
+      // empty line if no exception pattern matches, then to first line.
+      const raw = (it.error || 'error').trim();
+      const lines = raw.split('\n').map((s) => s.trimEnd()).filter(Boolean);
+      const exc = [...lines].reverse().find((l) => /^[A-Z][A-Za-z]*Error:/.test(l));
+      const msg = (exc || lines[lines.length - 1] || 'error').slice(0, 80);
       return `✗ ${base} · ${msg}`;
     }
     if (it.status === 'canceled') return `⊘ ${base}`;
