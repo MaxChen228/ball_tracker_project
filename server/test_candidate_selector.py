@@ -83,7 +83,6 @@ def test_detect_ball_end_to_end_temporal_prefers_near_prediction():
     dt = 1.0 / 240
     out = detect_ball(
         img, HSVRange.default(),
-        expected_radius_px=12.0,
         prev_position=prev_pos,
         prev_velocity=prev_vel,
         dt=dt,

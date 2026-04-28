@@ -104,7 +104,6 @@ def test_detect_ball_respects_selector_tuning():
     )
     near = detect_ball(
         img, HSVRange.default(),
-        expected_radius_px=12.0,
         prev_position=prev_pos, prev_velocity=prev_vel, dt=dt,
         selector_tuning=dist_tuning,
     )
@@ -117,7 +116,6 @@ def test_detect_ball_respects_selector_tuning():
     )
     far = detect_ball(
         img, HSVRange.default(),
-        expected_radius_px=12.0,
         prev_position=prev_pos, prev_velocity=prev_vel, dt=dt,
         selector_tuning=area_tuning,
     )
