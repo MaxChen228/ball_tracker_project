@@ -51,12 +51,18 @@ def _read_static_file(name: str) -> str:
 
 
 def _concatenate_static(suffix: str) -> str:
+    """Join every file in `_STATIC_DIR` matching `suffix` with a `/* … */`
+    separator. The parens around the separator string are LOAD-BEARING:
+    Python's `.` binds tighter than `+`, so without them only the trailing
+    `" concatenated ----- */\\n\\n"` was passed to `.join()` — the `/*`
+    opener leaked once at the head, swallowing file 1 until the first
+    `*/` and dropping the bundle into a `Unexpected token '--'` parse
+    error in the browser."""
     if not _STATIC_DIR.is_dir():
         return ""
     files = sorted(p for p in _STATIC_DIR.iterdir() if p.name.endswith(suffix))
-    return "\n\n/* ----- " + suffix + " concatenated ----- */\n\n".join(
-        p.read_text() for p in files
-    )
+    sep = "\n\n/* ----- " + suffix + " concatenated ----- */\n\n"
+    return sep.join(p.read_text() for p in files)
 
 
 # ----- top-level render -----------------------------------------------
