@@ -59,5 +59,7 @@ server/calib_B/
 server/intrinsics_*.json
 server/charuco_board.png
 
-# Claude Code session scratch
-.claude/
+# Claude Code session scratch — except checked-in skills
+.claude/*
+!.claude/skills/
+!.claude/skills/**
