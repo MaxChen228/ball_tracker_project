@@ -128,14 +128,23 @@ class Sam2VideoLabeller:
     """
 
     DEFAULT_MODEL_ID = "facebook/sam2.1-hiera-tiny"
+    # Frames per chunked init_video_session. Sam2VideoProcessor.preprocess
+    # resizes every frame in the batch to 1024×1024 float32 (≈12 MB
+    # each) and torchvision.resize allocates ~2× that as a transient.
+    # 60 frames ≈ 1.4 GB peak per chunk — comfortable on a 16 GB M4.
+    # Above ~150 frames the 11 GiB ceiling we hit on 2.57 s × 240 fps
+    # comes back. See `label_video` for the chunk loop.
+    DEFAULT_CHUNK_SIZE = 60
 
     def __init__(
         self,
         model_id: str = DEFAULT_MODEL_ID,
         device: str = "auto",
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
     ):
         self.model_id = model_id
         self.device = _select_device(device)
+        self.chunk_size = max(1, int(chunk_size))
         self._model: Any | None = None
         self._processor: Any | None = None
         self._model_version: str | None = None
@@ -248,95 +257,145 @@ class Sam2VideoLabeller:
             else 0.0
         )
 
-        # SAM 2 video processor wants RGB.
-        frame_rgbs = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frame_bgrs]
-        H, W = frame_rgbs[0].shape[:2]
+        H, W = frame_bgrs[0].shape[:2]
         click_x, click_y = int(click_xy_px[0]), int(click_xy_px[1])
         if not (0 <= click_x < W and 0 <= click_y < H):
             raise ValueError(
                 f"click_xy_px=({click_x},{click_y}) outside frame dims {W}x{H}"
             )
 
-        sess = self._processor.init_video_session(
-            video=frame_rgbs,
-            inference_device=self.device,
-            dtype=self._dtype_for_device(),
-        )
-        # Single positive click on the seed frame for object id 1.
-        # `input_points` shape: [batch=1, num_objs=1, num_points=1, xy=2].
-        # `input_labels`: 1 = positive click, 0 = negative.
-        self._processor.add_inputs_to_inference_session(
-            inference_session=sess,
-            frame_idx=seed_idx,
-            obj_ids=1,
-            input_points=[[[[click_x, click_y]]]],
-            input_labels=[[[1]]],
-        )
-
+        # ----- chunked propagation ------------------------------------
+        # Sam2VideoProcessor batches the entire input video into a single
+        # 1024×1024 float32 tensor and torchvision.resize allocates ~2×
+        # the resized size as a transient. For 617 frames at 1080p that
+        # blew up to 11 GiB on the 16 GB M4 (smoke-test on s_4b23a195
+        # 2026-04-29). We chunk into `self.chunk_size`-frame windows and
+        # carry SAM 2 state across chunks via a re-seed at the centroid
+        # of the previous chunk's last non-empty mask. Chunk boundaries
+        # lose the SAM 2 memory bank, so a small (60-frame) window keeps
+        # the mask-prompted re-seed close to the last frame's geometry.
+        #
+        # Why centroid (point) re-seed, not raw `input_masks`:
+        #   add_inputs_to_inference_session accepts input_masks tensors,
+        #   but the expected internal shape isn't documented stably and
+        #   we'd be coupling to a transformers main-branch implementation
+        #   detail. Centroid is robust, easy to debug, matches what we
+        #   show on the preview thumbnail, and is good enough for a ball
+        #   (~50 px object — point prompts work well).
         gt_frames: list[SAM3GTFrame] = []
-        total_to_track = len(frame_rgbs) - seed_idx
+        total_to_track = len(frame_bgrs) - seed_idx
         ema_ms_per_frame: float | None = None
         last_tick = time.monotonic()
         n_propagated = 0
+        carry_seed_xy: tuple[int, int] = (click_x, click_y)
+        chunk_idx = 0
 
-        for sam2_out in self._model.propagate_in_video_iterator(
-            inference_session=sess,
-            start_frame_idx=seed_idx,
-        ):
-            n_propagated += 1
-            now = time.monotonic()
-            sample_ms = (now - last_tick) * 1000.0
-            last_tick = now
-            if ema_ms_per_frame is None:
-                ema_ms_per_frame = sample_ms
-            else:
-                ema_ms_per_frame = 0.7 * ema_ms_per_frame + 0.3 * sample_ms
-
-            # post_process_masks returns a list keyed by batch; we only
-            # have one batch entry. Each entry is a tensor of shape
-            # [num_objs, 1, H, W] (for our single object: [1, 1, H, W]).
-            masks_list = self._processor.post_process_masks(
-                [sam2_out.pred_masks], original_sizes=[[H, W]]
+        chunk_start = seed_idx
+        while chunk_start < len(frame_bgrs):
+            chunk_end = min(chunk_start + self.chunk_size, len(frame_bgrs))
+            chunk_rgbs = [
+                cv2.cvtColor(b, cv2.COLOR_BGR2RGB)
+                for b in frame_bgrs[chunk_start:chunk_end]
+            ]
+            logger.info(
+                "chunk %d: frames %d..%d (%d), seed=(%d,%d)",
+                chunk_idx, chunk_start, chunk_end - 1,
+                len(chunk_rgbs), carry_seed_xy[0], carry_seed_xy[1],
             )
-            mask_tensor = masks_list[0]
-            # collapse to HxW uint8 binary mask
-            mask_np = mask_tensor[0, 0].detach().to("cpu").to(dtype=__import__("torch").uint8).numpy()
-            mask_u8 = np.where(mask_np > 0, np.uint8(255), np.uint8(0))
 
-            frame_idx = int(sam2_out.frame_idx)
-            stats = analyze_mask(mask_u8, frame_bgrs[frame_idx])
-            if stats is None:
-                # Empty mask — propagation lost the object. Skip the
-                # frame; subsequent frames may re-acquire (rare with
-                # SAM 2) or stay empty.
+            sess = self._processor.init_video_session(
+                video=chunk_rgbs,
+                inference_device=self.device,
+                dtype=self._dtype_for_device(),
+            )
+            # Always seed at chunk-local frame 0:
+            #   chunk 0 → operator's click point
+            #   chunk 1+ → centroid of previous chunk's last good mask
+            self._processor.add_inputs_to_inference_session(
+                inference_session=sess,
+                frame_idx=0,
+                obj_ids=1,
+                input_points=[[[[carry_seed_xy[0], carry_seed_xy[1]]]]],
+                input_labels=[[[1]]],
+            )
+
+            chunk_last_centroid: tuple[int, int] | None = None
+            for sam2_out in self._model.propagate_in_video_iterator(
+                inference_session=sess,
+                start_frame_idx=0,
+            ):
+                n_propagated += 1
+                now = time.monotonic()
+                sample_ms = (now - last_tick) * 1000.0
+                last_tick = now
+                if ema_ms_per_frame is None:
+                    ema_ms_per_frame = sample_ms
+                else:
+                    ema_ms_per_frame = 0.7 * ema_ms_per_frame + 0.3 * sample_ms
+
+                masks_list = self._processor.post_process_masks(
+                    [sam2_out.pred_masks], original_sizes=[[H, W]]
+                )
+                import torch  # local: inside hot loop, but cached after first use
+                mask_np = masks_list[0][0, 0].detach().to("cpu").to(torch.uint8).numpy()
+                mask_u8 = np.where(mask_np > 0, np.uint8(255), np.uint8(0))
+
+                local_idx = int(sam2_out.frame_idx)
+                absolute_idx = chunk_start + local_idx
+                stats = analyze_mask(mask_u8, frame_bgrs[absolute_idx])
+                if stats is None:
+                    # Empty mask — SAM 2 lost the object on this frame.
+                    # Don't update carry_seed_xy from this; if the next
+                    # chunk inherits, we re-use the previous good
+                    # centroid (or the original click on first chunk).
+                    if progress_callback is not None:
+                        progress_callback(n_propagated, total_to_track, ema_ms_per_frame)
+                    continue
+
+                gt_frames.append(SAM3GTFrame(
+                    frame_idx=absolute_idx,
+                    t_pts_s=frame_pts[absolute_idx],
+                    bbox=stats.bbox,
+                    centroid_px=stats.centroid_px,
+                    mask_area_px=stats.area_px,
+                    mask_aspect=stats.aspect,
+                    mask_fill=stats.fill,
+                    mask_hue_mean=stats.hue_mean,
+                    mask_hue_std=stats.hue_std,
+                    mask_sat_mean=stats.sat_mean,
+                    mask_val_mean=stats.val_mean,
+                    confidence=1.0,
+                ))
+                # Update carry centroid from THIS frame's mask. The last
+                # iteration's value is what feeds chunk N+1.
+                chunk_last_centroid = (
+                    int(stats.centroid_px[0]), int(stats.centroid_px[1])
+                )
+                if preview_callback is not None:
+                    try:
+                        preview_callback(absolute_idx, frame_bgrs[absolute_idx], mask_u8)
+                    except Exception as e:
+                        logger.warning("preview_callback raised: %s", e)
                 if progress_callback is not None:
                     progress_callback(n_propagated, total_to_track, ema_ms_per_frame)
-                continue
 
-            gt_frames.append(SAM3GTFrame(
-                frame_idx=frame_idx,
-                t_pts_s=frame_pts[frame_idx],
-                bbox=stats.bbox,
-                centroid_px=stats.centroid_px,
-                mask_area_px=stats.area_px,
-                mask_aspect=stats.aspect,
-                mask_fill=stats.fill,
-                mask_hue_mean=stats.hue_mean,
-                mask_hue_std=stats.hue_std,
-                mask_sat_mean=stats.sat_mean,
-                mask_val_mean=stats.val_mean,
-                # SAM 2 mask "score" isn't directly comparable to SAM 3
-                # confidence; we record 1.0 for kept frames and let
-                # downstream filters use bbox / aspect / fill instead.
-                confidence=1.0,
-            ))
-            if preview_callback is not None:
-                try:
-                    preview_callback(frame_idx, frame_bgrs[frame_idx], mask_u8)
-                except Exception as e:
-                    logger.warning("preview_callback raised: %s", e)
-            if progress_callback is not None:
-                progress_callback(n_propagated, total_to_track, ema_ms_per_frame)
+            # Decide next chunk's seed. If we never produced a non-empty
+            # mask in this chunk, propagation has lost the object — stop
+            # rather than feed the same stale seed forward forever.
+            if chunk_last_centroid is None:
+                logger.warning(
+                    "chunk %d produced no masks — stopping propagation at frame %d",
+                    chunk_idx, chunk_end - 1,
+                )
+                break
+            carry_seed_xy = chunk_last_centroid
+            chunk_idx += 1
+            chunk_start = chunk_end
+
+            # Free the chunk-scope batch + session. The model + processor
+            # stay loaded for the next chunk.
+            del sess
+            del chunk_rgbs
 
         gt_frames.sort(key=lambda f: f.frame_idx)
         return SAM3GTRecord(
@@ -344,7 +403,10 @@ class Sam2VideoLabeller:
             camera_id=camera_id,
             model_version=self._model_version or self.model_id,
             labelled_at=_dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            prompt_strategy=f"click:({click_x},{click_y})@frame={seed_idx}",
+            prompt_strategy=(
+                f"click:({click_x},{click_y})@frame={seed_idx}"
+                f" chunked@{self.chunk_size} centroid-reseed"
+            ),
             video_fps=video_fps,
             video_dims=dims,
             frames=gt_frames,
