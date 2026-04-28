@@ -70,6 +70,11 @@ class BlobCandidate(BaseModel):
     py: float
     area: int
     area_score: float
+    # Selector cost stamped by `live_pairing._resolve_candidates` at
+    # decision time. None = legacy JSON written before cost persistence,
+    # or wire payload from iOS before server-side resolution. Viewer
+    # falls back to area-asc sort on None entries.
+    cost: float | None = None
 
 
 class FramePayload(BaseModel):
@@ -81,9 +86,12 @@ class FramePayload(BaseModel):
     timestamp_s: float
     px: float | None = None
     py: float | None = None
-    # Live-path multi-candidate. None on server_post (server picks during
-    # detect_pitch); on live, every blob that passed area/aspect/fill so
-    # live_pairing can apply the temporal-prior selector.
+    # Multi-candidate list, populated by both paths post-resolution: live
+    # via `live_pairing._resolve_candidates`, server_post via
+    # `pipeline.detect_pitch`. Each blob carries px/py/area/area_score and
+    # the selector cost stamped at decision time. None on legacy JSONs
+    # written before cost persistence landed; viewer falls back to area-asc
+    # sort when cost is missing.
     candidates: list[BlobCandidate] | None = None
     ball_detected: bool
     # Post-detection chain filter verdict. None = not yet scored (raw

@@ -100,18 +100,34 @@
   function isLayerVisible(layer, path) {
     return !!(layerVisibility[layer] && layerVisibility[layer][path]);
   }
-  // Flat cams-present views used by the frame scrubber / label renderer —
-  // we scrub across the UNION of all three streams so the timeline reflects
-  // everything the session captured.
+  // Flat cams-present views used by the frame scrubber / label renderer.
+  // Build the scrubber's discrete time positions per camera, preferring the
+  // live path's timestamps as the canonical clock. server_post for the same
+  // cam represents the SAME physical frames re-decoded from the MOV — its
+  // PTS drifts by up to ±1ms from the iOS sample PTS due to MOV time_base
+  // quantization (30000-tick container vs iOS variable-rate sensor clock).
+  // Adding both as independent scrubber positions almost doubles
+  // TOTAL_FRAMES (e.g. 2000 → 3700 for s_a1cc0233 after running server
+  // detection). Live is the upper-bound on physical frames we have any
+  // detection for; server_post only adds positions for cams that have NO
+  // live data (rare — usually missing-upload sessions). Per-frame
+  // server_post overlays still read from framesByPath[server_post][cam] via
+  // tol-based lookup in 50_canvas.js / 30_frame_index.js — those don't
+  // require dedicated scrubber positions.
   const MASTER_FPS = Math.max(60, ...Object.values(fpsByCam).filter(f => isFinite(f) && f > 0));
   const QUANT = 10000;
   const timeMap = new Map();
-  for (const path of PATHS) {
-    for (const cam of camsWithFramesByPath[path]) {
-      for (const t of framesByPath[path][cam].t_rel_s) {
-        const q = Math.round(t * QUANT);
-        if (!timeMap.has(q)) timeMap.set(q, t);
-      }
+  const _scrubberCams = new Set([
+    ...camsWithFramesByPath.live,
+    ...camsWithFramesByPath.server_post,
+  ]);
+  for (const cam of _scrubberCams) {
+    const liveTs = framesByPath.live[cam]?.t_rel_s;
+    const fallbackTs = framesByPath.server_post[cam]?.t_rel_s;
+    const tsList = (liveTs && liveTs.length) ? liveTs : (fallbackTs || []);
+    for (const t of tsList) {
+      const q = Math.round(t * QUANT);
+      if (!timeMap.has(q)) timeMap.set(q, t);
     }
   }
   if (timeMap.size === 0) {

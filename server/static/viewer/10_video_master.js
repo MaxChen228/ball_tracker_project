@@ -13,14 +13,14 @@
     }
     return master;
   }
-  // framesByPath[path][cam] = {t_rel_s, detected, px, py}. Three entries
-  // always present (even if empty) so the rest of the JS can iterate PATHS
-  // without null checks.
+  // framesByPath[path][cam] = {t_rel_s, detected, px, py, candidates}. Both
+  // entries always present (even if empty) so the rest of the JS can iterate
+  // PATHS without null checks.
   const framesByPath = { live: {}, server_post: {} };
   for (const v of VIDEO_META) {
     const f = v.frames || {};
     for (const path of PATHS) {
-      const stream = f[path] || { t_rel_s: [], detected: [], px: [], py: [], frame_index: [], filter_status: [] };
+      const stream = f[path] || { t_rel_s: [], detected: [], px: [], py: [], frame_index: [], filter_status: [], candidates: [] };
       framesByPath[path][v.camera_id] = {
         t_rel_s: stream.t_rel_s || [],
         detected: stream.detected || [],
@@ -36,6 +36,11 @@
         // every entry is null there; SVR path is always populated for
         // detection frames.
         filter_status: stream.filter_status || [],
+        // candidates[i] = list of {px,py,area,area_score,cost} for frame i.
+        // Populated only on the live path (server_post never produces a
+        // candidates list). cost may be null on legacy JSONs predating the
+        // cost-persistence change — viewer falls back to area-asc sort.
+        candidates: stream.candidates || [],
       };
     }
   }

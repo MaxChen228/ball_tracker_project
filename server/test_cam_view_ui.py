@@ -594,17 +594,36 @@ def test_viewer_page_uses_cam_view_with_detection_layers():
     # Each cam: data-cam-view attribute + overlaid canvas.
     assert 'data-cam-view="A"' in body
     assert 'data-cam-canvas="A"' in body
-    # Layer set + initial-on subset declared per cam.
-    assert 'data-layers="plate,axes,detection_live,detection_svr"' in body
-    assert 'data-layers-on="plate,detection_live,detection_svr"' in body
+    # Layer matrix: 2 (path: live / svr) × 2 (type: winner / cands) plus
+    # PLATE / AXES. Default-on: PLATE + LIVE WIN/CAND. SVR off (legacy /
+    # live-only sessions have no svr data; opt-in via Run server).
+    assert (
+        'data-layers="plate,axes,'
+        'detection_live,detection_blobs_live,'
+        'detection_svr,detection_blobs_svr"'
+    ) in body
+    assert 'data-layers-on="plate,detection_live,detection_blobs_live"' in body
     # Default opacity 65 — half-transparent overlay over the real video.
     assert 'data-default-opacity="65"' in body
-    # Per-cam toolbar pills for all four toggleable layers.
-    for layer in ("plate", "axes", "detection_live", "detection_svr"):
+    # Per-cam toolbar pills for all six toggleable layers.
+    for layer in (
+        "plate", "axes",
+        "detection_live", "detection_blobs_live",
+        "detection_svr", "detection_blobs_svr",
+    ):
         assert f'data-layer="{layer}"' in body
-    # Detection blob layers registered with the runtime.
+    # Path-grouped chips (LIVE: WIN CAND ; SVR: WIN CAND).
+    assert 'class="cv-path-group" data-path="live"' in body
+    assert 'class="cv-path-group" data-path="svr"' in body
+    # Detection blob layers registered with the runtime — one per path.
     assert "registerLayer('detection_live'" in body
     assert "registerLayer('detection_svr'" in body
+    assert "registerLayer('detection_blobs_live'" in body
+    assert "registerLayer('detection_blobs_svr'" in body
+    # K slider for top-K candidate filter, plus the inline `oninput`
+    # handler that routes through the viewer-only window global.
+    assert 'class="cv-blobs-k">K' in body
+    assert 'window._setCandTopK' in body
     # Legacy SVG plate overlay + standalone virt-canvas DOM removed.
     assert 'real-plate-overlay-A' not in body
     assert 'id="virt-canvas-A"' not in body

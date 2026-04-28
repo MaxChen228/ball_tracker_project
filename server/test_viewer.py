@@ -1157,3 +1157,130 @@ def test_index_endpoint_empty_state_is_rendered():
     # Either the empty message or a session event list — the fixture may
     # have left rows behind. Assert the nav brand is in the HTML either way.
     assert "BALL_TRACKER" in r.text
+
+
+# --- _stream candidates wire (BLOBS overlay) ---------------------------------
+
+def test_stream_includes_cost_for_live_candidates():
+    """Live path serialisation: each frame's candidates appear in input
+    order, every dict has px/py/area/area_score/cost. The cost value
+    equals what the producer stamped (here we set it explicitly)."""
+    from routes.viewer import _stream
+    frame = schemas.FramePayload(
+        frame_index=42,
+        timestamp_s=0.5,
+        px=120.0,
+        py=100.0,
+        ball_detected=True,
+        candidates=[
+            schemas.BlobCandidate(px=120.0, py=100.0, area=80,
+                                  area_score=0.4, cost=0.18),
+            schemas.BlobCandidate(px=500.0, py=500.0, area=200,
+                                  area_score=1.0, cost=0.91),
+        ],
+    )
+    out = _stream([frame], 0.0, include_candidates=True)
+    assert "candidates" in out
+    assert len(out["candidates"]) == 1
+    cands = out["candidates"][0]
+    assert len(cands) == 2
+    assert cands[0]["px"] == 120.0 and cands[0]["py"] == 100.0
+    assert cands[0]["area"] == 80
+    assert cands[0]["area_score"] == 0.4
+    assert cands[0]["cost"] == 0.18
+    assert cands[1]["cost"] == 0.91
+
+
+def test_stream_includes_cost_for_server_post_candidates():
+    """server_post path also stamps `cost` on every candidate (after
+    the pipeline / viewer wire opened up to per-path BLOBS). Wire shape
+    is identical to live."""
+    from routes.viewer import _stream
+    frame = schemas.FramePayload(
+        frame_index=7,
+        timestamp_s=0.0,
+        px=10.0,
+        py=20.0,
+        ball_detected=True,
+        candidates=[
+            schemas.BlobCandidate(px=10.0, py=20.0, area=120,
+                                  area_score=1.0, cost=0.05),
+            schemas.BlobCandidate(px=300.0, py=400.0, area=80,
+                                  area_score=0.66, cost=0.42),
+        ],
+    )
+    out = _stream([frame], 0.0, include_candidates=True)
+    assert "candidates" in out
+    cands = out["candidates"][0]
+    assert len(cands) == 2
+    assert cands[0]["cost"] == 0.05
+    assert cands[1]["cost"] == 0.42
+
+
+def test_stream_can_still_omit_candidates():
+    """`include_candidates=False` remains valid (used by the empty-pitch
+    fallback in earlier revisions; kept as the slim-payload path for
+    callers that don't need BLOBS)."""
+    from routes.viewer import _stream
+    frame = schemas.FramePayload(
+        frame_index=1,
+        timestamp_s=0.0,
+        px=10.0,
+        py=20.0,
+        ball_detected=True,
+    )
+    out = _stream([frame], 0.0, include_candidates=False)
+    assert "candidates" not in out
+
+
+def test_stream_legacy_candidates_without_cost_become_null():
+    """Legacy JSONs (cost field absent because they predate the
+    cost-persistence change) serialise with cost=None; the viewer JS
+    falls back to area-asc sorting in this case."""
+    from routes.viewer import _stream
+    frame = schemas.FramePayload(
+        frame_index=0,
+        timestamp_s=0.0,
+        px=10.0,
+        py=10.0,
+        ball_detected=True,
+        candidates=[
+            schemas.BlobCandidate(px=10.0, py=10.0, area=80,
+                                  area_score=0.4),  # no cost
+        ],
+    )
+    out = _stream([frame], 0.0, include_candidates=True)
+    assert out["candidates"][0][0]["cost"] is None
+
+
+def test_video_cell_renders_path_grouped_toolbar_and_k_slider():
+    """`video_cell_html` (the SSR builder for each cam pane) declares the
+    2×2 layer matrix (live/svr × winner/cand) and renders the path-
+    grouped toolbar (LIVE: WIN CAND ; SVR: WIN CAND) plus the K slider
+    so the operator can toggle each overlay independently and debug
+    selector picks per path."""
+    from viewer_fragments import video_cell_html
+    body = video_cell_html(
+        "A",
+        ("/videos/example.mov", 0.0),
+        image_width_px=1920,
+        image_height_px=1080,
+        cx=960.0,
+        cy=540.0,
+    )
+    assert (
+        'data-layers="plate,axes,'
+        'detection_live,detection_blobs_live,'
+        'detection_svr,detection_blobs_svr"'
+    ) in body
+    # SVR off by default — legacy / live-only sessions have no svr data.
+    assert 'data-layers-on="plate,detection_live,detection_blobs_live"' in body
+    # Path-grouped chips with WIN + CAND inside each group.
+    assert 'class="cv-path-group" data-path="live"' in body
+    assert 'class="cv-path-group" data-path="svr"' in body
+    assert 'class="cv-layer on" data-layer="detection_live">WIN' in body
+    assert 'class="cv-layer on" data-layer="detection_blobs_live">CAND' in body
+    assert 'class="cv-layer" data-layer="detection_svr">WIN' in body
+    assert 'class="cv-layer" data-layer="detection_blobs_svr">CAND' in body
+    assert 'class="cv-blobs-k">K' in body
+    assert 'window._setCandTopK' in body

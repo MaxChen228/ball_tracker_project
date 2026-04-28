@@ -117,7 +117,7 @@ class ShapeGate:
         return cls(aspect_min=_MIN_ASPECT, fill_min=_MIN_FILL)
 
 
-def detect_ball(
+def detect_ball_with_candidates(
     frame_bgr: np.ndarray,
     hsv_range: HSVRange,
     *,
@@ -126,20 +126,21 @@ def detect_ball(
     dt: float | None = None,
     shape_gate: ShapeGate | None = None,
     selector_tuning: "CandidateSelectorTuning | None" = None,
-) -> tuple[float, float] | None:
-    """Find the largest HSV-masked blob whose area is within
-    `[_MIN_AREA_PX, _MAX_AREA_PX]` AND whose bbox aspect ratio and fill
-    ratio clear the ball-shape gates. Returns `(px, py)` centroid in
-    pixel coordinates, else `None`.
+) -> tuple["BlobCandidate | None", "list[BlobCandidate]"]:
+    """HSV → CC → shape gate → temporal selector. Returns
+    `(winner_or_None, scored_blobs)` where `scored_blobs` is every
+    survivor with `area_score` and selector `cost` stamped — same shape
+    `live_pairing._resolve_candidates` produces, so server_post can feed
+    `FramePayload.candidates` directly into the viewer's BLOBS overlay.
 
-    Simple-minded on purpose: no morphological ops, no temporal smoothing.
-    Anything more aggressive belongs in a follow-up ML-based detector.
-    The MOG2 / fg_mask plumbing was removed alongside Phase A — `live`
-    and `server_post` paths now share this exact function with no
-    pipeline-only kwargs left to drift between.
+    Empty / no-survivors → `(None, [])`. Both lists ride the same
+    decision: if any candidate exists, the lowest-cost one is the winner.
     """
+    from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates
+    from schemas import BlobCandidate
+
     if frame_bgr is None or frame_bgr.size == 0:
-        return None
+        return None, []
     min_area, max_area = _MIN_AREA_PX, _MAX_AREA_PX
     gate = shape_gate if shape_gate is not None else ShapeGate.default()
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -150,9 +151,8 @@ def detect_ball(
         mask, connectivity=8
     )
     if num_labels <= 1:
-        return None
+        return None, []
 
-    from candidate_selector import Candidate, CandidateSelectorTuning, select_best_candidate
     tuning = selector_tuning if selector_tuning is not None else CandidateSelectorTuning.default()
 
     survivors: list[Candidate] = []
@@ -176,9 +176,8 @@ def detect_ball(
         )
 
     if not survivors:
-        return None
+        return None, []
     max_area_batch = max(c.area for c in survivors)
-    # Finalize area_score now that we know the batch max.
     scored = [
         Candidate(
             cx=c.cx, cy=c.cy, area=c.area,
@@ -186,7 +185,7 @@ def detect_ball(
         )
         for c in survivors
     ]
-    winner = select_best_candidate(
+    costs = score_candidates(
         scored,
         prev_position=prev_position,
         prev_velocity=prev_velocity,
@@ -196,6 +195,38 @@ def detect_ball(
         w_dist=tuning.w_dist,
         dist_cost_sat_radii=tuning.dist_cost_sat_radii,
     )
+    blobs = [
+        BlobCandidate(
+            px=c.cx, py=c.cy, area=c.area,
+            area_score=c.area_score, cost=float(cost),
+        )
+        for c, cost in zip(scored, costs)
+    ]
+    winner_idx = min(range(len(costs)), key=lambda i: costs[i])
+    return blobs[winner_idx], blobs
+
+
+def detect_ball(
+    frame_bgr: np.ndarray,
+    hsv_range: HSVRange,
+    *,
+    prev_position: tuple[float, float] | None = None,
+    prev_velocity: tuple[float, float] | None = None,
+    dt: float | None = None,
+    shape_gate: ShapeGate | None = None,
+    selector_tuning: "CandidateSelectorTuning | None" = None,
+) -> tuple[float, float] | None:
+    """Thin wrapper around `detect_ball_with_candidates` for callers that
+    only want the winner centroid. Returns `(px, py)` or `None`."""
+    winner, _ = detect_ball_with_candidates(
+        frame_bgr,
+        hsv_range,
+        prev_position=prev_position,
+        prev_velocity=prev_velocity,
+        dt=dt,
+        shape_gate=shape_gate,
+        selector_tuning=selector_tuning,
+    )
     if winner is None:
         return None
-    return winner.cx, winner.cy
+    return winner.px, winner.py

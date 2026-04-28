@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from candidate_selector import Candidate, CandidateSelectorTuning, select_best_candidate
+from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates
 from schemas import FramePayload, TriangulatedPoint
 
 logger = logging.getLogger("ball_tracker")
@@ -87,7 +87,12 @@ class LivePairingSession:
 
     def _resolve_candidates(self, cam: str, frame: FramePayload) -> FramePayload:
         """Pick the winning candidate using the temporal prior. Empty
-        candidate list → no detection; px/py = None, ball_detected=False."""
+        candidate list → no detection; px/py = None, ball_detected=False.
+
+        Stamps `cost` on every BlobCandidate so the viewer can render
+        non-winners ranked by selector cost without re-running the
+        selector at view time (which would diverge from "cost actually
+        used to pick winner" if dashboard tuning changed)."""
         cands = frame.candidates
         if not cands:
             return frame.model_copy(update={"px": None, "py": None, "ball_detected": False})
@@ -105,7 +110,7 @@ class LivePairingSession:
             Candidate(cx=c.px, cy=c.py, area=c.area, area_score=c.area / max_area)
             for c in cands
         ]
-        winner = select_best_candidate(
+        costs = score_candidates(
             selector_in,
             prev_position=prev_pos,
             prev_velocity=prev_vel,
@@ -115,11 +120,16 @@ class LivePairingSession:
             w_dist=self.tuning.w_dist,
             dist_cost_sat_radii=self.tuning.dist_cost_sat_radii,
         )
-        # Selector returns None iff input is empty — guarded above.
-        assert winner is not None
+        winner_idx = min(range(len(costs)), key=lambda i: costs[i])
+        winner = cands[winner_idx]
+        cands_with_cost = [
+            c.model_copy(update={"cost": float(cost)})
+            for c, cost in zip(cands, costs)
+        ]
         return frame.model_copy(update={
-            "px": winner.cx,
-            "py": winner.cy,
+            "candidates": cands_with_cost,
+            "px": winner.px,
+            "py": winner.py,
             "ball_detected": True,
         })
 
