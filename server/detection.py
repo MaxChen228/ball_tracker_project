@@ -35,10 +35,11 @@ class HSVRange:
 
     @classmethod
     def default(cls) -> "HSVRange":
-        # Fluorescent yellow-green tennis ball — the ball currently used
-        # on the physical rig. OpenCV H range is 0-179; tennis-ball hue
-        # sits ~25-55 (lime-yellow to yellow-green). High S/V filters out
-        # pale wood floor and warm wall tones.
+        # Default fallback HSV (fluorescent yellow-green tennis ball).
+        # The rig actually runs the `blue_ball` preset; this default is
+        # for headless tests and first-boot. OpenCV H range is 0-179;
+        # tennis-ball hue sits ~25-55 (lime-yellow to yellow-green). High
+        # S/V filters out pale wood floor and warm wall tones.
         return cls(h_min=25, h_max=55, s_min=90, s_max=255, v_min=90, v_max=255)
 
     @classmethod

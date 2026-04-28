@@ -292,16 +292,6 @@ class SessionProcessingState:
             return "completed", False
         return None, False
 
-    # Kept for backwards compatibility with old call sites that used
-    # the pre-split snake_case names.
-    summary = _summary_chip
-
-    def cancel(self, keys: Iterable[JobKey]) -> bool:  # legacy alias
-        return self.cancel_keys(keys)
-
-    def resume(self, keys: Iterable[JobKey]) -> list[JobKey]:  # legacy alias
-        return self.resume_keys(keys)
-
     # ---- Reset / delete cleanup --------------------------------------
 
     def clear(self) -> None:

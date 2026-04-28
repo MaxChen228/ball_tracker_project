@@ -9,6 +9,7 @@ import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import ValidationError
 
+import session_results
 from pipeline import ProcessingCanceled
 from schemas import (
     DetectionPath,
@@ -103,7 +104,7 @@ async def pitch(
         if payload_obj.image_height_px is None:
             payload_obj.image_height_px = cal_snap.image_height_px
 
-    payload_paths = state._normalize_paths(payload_obj.paths) or state._paths_for_pitch(payload_obj)
+    payload_paths = session_results.normalize_paths(payload_obj.paths) or session_results.paths_for_pitch(state, payload_obj)
     payload_obj.paths = sorted(p.value for p in payload_paths)
     has_video = video is not None and (video.filename or video.size)
     has_frames = bool(payload_obj.frames_live) or bool(payload_obj.frames_server_post)

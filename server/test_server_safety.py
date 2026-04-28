@@ -154,7 +154,7 @@ def test_record_does_not_hold_lock_during_io(tmp_path, monkeypatch):
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames=[
+        frames_server_post=[
             main.FramePayload(
                 frame_index=0, timestamp_s=0.0,
                 px=u, py=v, ball_detected=True,

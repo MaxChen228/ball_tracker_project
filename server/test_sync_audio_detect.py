@@ -161,15 +161,19 @@ def test_detect_sync_report_role_a_maps_bands_correctly() -> None:
     audio[15000 : 15000 + len(b_chirp)] += b_chirp
 
     wav = _make_wav_bytes(audio, SAMPLE_RATE)
+    ref_len = int(SAMPLE_RATE * SYNC_CHIRP_DURATION_S)
+    emit_self = [(5000 + ref_len / 2.0) / SAMPLE_RATE]
+    emit_other = [(15000 + ref_len / 2.0) / SAMPLE_RATE]
     report, debug = sync_audio_detect.detect_sync_report(
         wav_bytes=wav,
         sync_id="sy_abcd0001",
         camera_id="A",
         role="A",
         audio_start_pts_s=1000.0,
+        emit_at_s_self=emit_self,
+        emit_at_s_other=emit_other,
     )
 
-    ref_len = int(SAMPLE_RATE * SYNC_CHIRP_DURATION_S)
     expected_t_self = 1000.0 + (5000 + ref_len / 2.0) / SAMPLE_RATE
     expected_t_other = 1000.0 + (15000 + ref_len / 2.0) / SAMPLE_RATE
 
@@ -200,12 +204,16 @@ def test_detect_sync_report_role_b_is_mirrored() -> None:
     audio[15000 : 15000 + len(b_chirp)] += b_chirp
 
     wav = _make_wav_bytes(audio, SAMPLE_RATE)
+    ref_len = int(SAMPLE_RATE * SYNC_CHIRP_DURATION_S)
+    # Role B: self = B band (at sample 15000), other = A band (at 5000)
+    emit_self = [(15000 + ref_len / 2.0) / SAMPLE_RATE]
+    emit_other = [(5000 + ref_len / 2.0) / SAMPLE_RATE]
     report, debug = sync_audio_detect.detect_sync_report(
         wav_bytes=wav, sync_id="sy_abcd0002", camera_id="B", role="B",
         audio_start_pts_s=0.0,
+        emit_at_s_self=emit_self,
+        emit_at_s_other=emit_other,
     )
-    ref_len = int(SAMPLE_RATE * SYNC_CHIRP_DURATION_S)
-    # Role B: self = B band (at sample 15000), other = A band (at 5000)
     expected_t_self = (15000 + ref_len / 2.0) / SAMPLE_RATE
     expected_t_other = (5000 + ref_len / 2.0) / SAMPLE_RATE
     assert abs(report.t_self_s - expected_t_self) < 1.0 / SAMPLE_RATE
@@ -218,6 +226,7 @@ def test_detect_sync_report_rejects_invalid_role() -> None:
         sync_audio_detect.detect_sync_report(
             wav_bytes=wav, sync_id="sy_ffff", camera_id="A", role="C",
             audio_start_pts_s=0.0,
+            emit_at_s_self=[0.1], emit_at_s_other=[0.2],
         )
 
 

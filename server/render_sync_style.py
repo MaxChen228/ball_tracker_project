@@ -41,18 +41,6 @@ _SYNC_CSS = """
   font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em;
   text-transform: uppercase; color: var(--sub);
 }
-.main-sync .telemetry-panel {
-  position: static;
-  left: auto;
-  right: auto;
-  top: auto;
-  bottom: auto;
-  z-index: auto;
-  max-width: none;
-}
-.main-sync .telemetry-body {
-  max-height: 360px;
-}
 .main-sync .camera-compare .preview-panel .placeholder {
   display: none;
 }

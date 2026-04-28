@@ -20,9 +20,6 @@ from schemas import (
     PitchPayload,
     Session,
     SessionResult,
-    SyncLogEntry,
-    SyncReport,
-    SyncResult,
     SyncRun,
     TrackingExposureCapMode,
     TriangulatedPoint,
@@ -145,7 +142,14 @@ class State:
     already held. Methods that take the lock themselves must not be
     called from another `_lock`-holding context — `Lock` is non-reentrant
     and would deadlock; if you need that pattern, switch the lock to
-    `RLock` first."""
+    `RLock` first.
+
+    Exceptions: `_marker_registry` and `_preview` carry their own internal
+    locks and are NOT serialised by `self._lock`. `LivePairingSession` (in
+    `_live_pairings`) likewise owns its own mutex covering buffers/frame
+    counts/triangulated/etc.; lookups against `_live_pairings` itself still
+    take `self._lock`, but mutations on the returned session go through
+    its own thread-safe accessors."""
 
     def __init__(
         self,
@@ -290,35 +294,6 @@ class State:
         self._load_session_meta_from_disk()
         self._load_from_disk()
 
-    # ---- Sync coordinator passthroughs --------------------------------
-    # Back-compat shims so external callers (older tests, old diagnostic
-    # hooks) that poked at `state._current_sync` / `state._last_sync_result`
-    # / `state._sync_cooldown_until` keep working after the sync subsystem
-    # moved into `SyncCoordinator`.
-    @property
-    def _current_sync(self) -> SyncRun | None:
-        return self._sync._current_sync
-
-    @_current_sync.setter
-    def _current_sync(self, value: SyncRun | None) -> None:
-        self._sync._current_sync = value
-
-    @property
-    def _last_sync_result(self) -> SyncResult | None:
-        return self._sync._last_sync_result
-
-    @_last_sync_result.setter
-    def _last_sync_result(self, value: SyncResult | None) -> None:
-        self._sync._last_sync_result = value
-
-    @property
-    def _sync_cooldown_until(self) -> float:
-        return self._sync._sync_cooldown_until
-
-    @_sync_cooldown_until.setter
-    def _sync_cooldown_until(self, value: float) -> None:
-        self._sync._sync_cooldown_until = value
-
     @property
     def data_dir(self) -> Path:
         return self._data_dir
@@ -334,20 +309,17 @@ class State:
         partial transfer cannot leave a corrupt file visible to downstream
         tools. Overwrites any existing clip for (camera_id, session_id).
 
-        The tmp-write + rename must happen under `self._lock` — two
-        simultaneous POSTs for the same (camera, session) would otherwise
-        race on the shared `<path>.tmp` filename. `os.replace` is atomic,
-        but `tmp.write_bytes(data)` is not; a concurrent second write would
-        clobber the first's tmp mid-stream and the first's `replace` would
-        then publish a corrupt clip."""
+        Concurrency: `secrets.token_hex(4)` gives each writer a unique tmp
+        filename, so the bytes write + rename can run outside `self._lock`.
+        Holding the lock across a 50-100 MB write would stall heartbeats
+        for the duration of the disk I/O."""
         safe_ext = (ext or "mov").lstrip(".").lower()
         if not safe_ext or "/" in safe_ext or "\\" in safe_ext:
             safe_ext = "mov"
         path = self._video_dir / f"session_{session_id}_{camera_id}.{safe_ext}"
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with self._lock:
-            tmp.write_bytes(data)
-            tmp.replace(path)
+        tmp = path.with_suffix(path.suffix + f".{secrets.token_hex(4)}.tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
         return path
 
     def _pitch_path(self, camera_id: str, session_id: str) -> Path:
@@ -373,7 +345,7 @@ class State:
 
         seen_sessions = {sid for _, sid in self.pitches.keys()}
         for sid in sorted(seen_sessions):
-            self.results[sid] = self._rebuild_result_for_session(sid)
+            self.results[sid] = session_results.rebuild_result_for_session(self, sid)
 
         if self.pitches:
             logger.info(
@@ -573,24 +545,6 @@ class State:
                 return None
             return self._device_intrinsics.get(dev.device_id)
 
-    # The following three wrappers are kept because external callers
-    # (main.py, routes/sessions.py, routes/settings.py, routes/pitch.py)
-    # reach for them via `state._foo`. The module-level implementations
-    # live in session_results / detection_paths; call those directly from
-    # new code.
-
-    @staticmethod
-    def _normalize_paths(
-        raw_paths: list[str] | set[DetectionPath] | None,
-    ) -> set[DetectionPath]:
-        return session_results.normalize_paths(raw_paths)
-
-    def _paths_for_pitch(self, pitch: PitchPayload) -> set[DetectionPath]:
-        return session_results.paths_for_pitch(self, pitch)
-
-    def _rebuild_result_for_session(self, session_id: str) -> SessionResult:
-        return session_results.rebuild_result_for_session(self, session_id)
-
     def ingest_live_frame(
         self,
         camera_id: str,
@@ -630,23 +584,23 @@ class State:
 
         for cam, cal in (("A", cal_a), ("B", cal_b)):
             if cal is None:
-                live.camera_poses.pop(cam, None)
+                live.update_camera_pose(cam, None)
                 continue
             dims = (cal.image_width_px, cal.image_height_px)
-            existing = live.camera_poses.get(cam)
+            existing = live.camera_pose(cam)
             if existing is not None and existing.image_wh == dims:
                 continue
             K, R, _t, C = _build_pose(cal.intrinsics, list(cal.homography))
-            live.camera_poses[cam] = _CameraPose(
+            live.update_camera_pose(cam, _CameraPose(
                 K=K, R=R, C=C,
                 dist=cal.intrinsics.distortion,
                 image_wh=dims,
-            )
+            ))
 
         def triangulate_live(cam: str, first: FramePayload, second: FramePayload) -> TriangulatedPoint | None:
             left_frame, right_frame = (first, second) if cam == "A" else (second, first)
-            pose_a = live.camera_poses.get("A")
-            pose_b = live.camera_poses.get("B")
+            pose_a = live.camera_pose("A")
+            pose_b = live.camera_pose("B")
             if pose_a is None or pose_b is None:
                 return None
             if dev_a is None or dev_b is None:
@@ -666,8 +620,8 @@ class State:
         # (px/py picked by the temporal-prior selector); hand it back so
         # callers (WS handler → live_ray_for_frame) work off the resolved
         # version, not the raw inbound.
-        resolved = live.frames_by_cam.get(camera_id, [])[-1] if live.frames_by_cam.get(camera_id) else frame
-        return created, dict(live.frame_counts), resolved
+        resolved = live.latest_frame_for(camera_id) or frame
+        return created, live.frame_counts_snapshot(), resolved
 
     def live_ray_for_frame(
         self,
@@ -752,15 +706,14 @@ class State:
         Idempotent: safe to call repeatedly per session id."""
         with self._lock:
             live = self._live_pairings.get(session_id)
-            cam_ids = sorted(live.frames_by_cam.keys()) if live is not None else []
+        if live is None:
+            return
+        cam_ids = live.cameras_with_frames()
         if not cam_ids:
             return
-        for cam_id in cam_ids:
+        for cam_id in sorted(cam_ids):
             with self._lock:
-                buffered = bool(live.frames_by_cam.get(cam_id))
                 existing = self.pitches.get((cam_id, session_id))
-            if not buffered:
-                continue
             if existing is not None:
                 self.persist_live_frames(cam_id, session_id)
                 continue
@@ -769,20 +722,28 @@ class State:
                 cal_snap = self._calibration_store.get(cam_id)
             anchor = dev.sync_anchor_timestamp_s if dev is not None else None
             sync_id = dev.time_sync_id if dev is not None else None
+            if anchor is None:
+                # No sync anchor → synthesising a pitch with video_start_pts_s=0
+                # would peg t_rel_s onto an absolute mach-clock that downstream
+                # reconstruct.py / viewer expect to start at 0. Drop the buffer
+                # rather than write a forever-broken JSON.
+                logger.warning(
+                    "flush_live_frames: skipping synthesise session=%s cam=%s — "
+                    "no sync anchor (live frames discarded)",
+                    session_id, cam_id,
+                )
+                continue
             # Mirror the /pitch handler: pitches that hit `record()` MUST
             # carry calibration + sync_id, otherwise the viewer reads back
             # a row with intrinsics=None and renders the misleading
             # "Cam X missing calibration" error even though the operator
-            # set everything up correctly. /pitch fills these from
-            # state.calibrations() before record(); the synthesise path
-            # used to skip that step, leaving a permanently-broken pitch
-            # JSON on disk for any cam whose MOV upload didn't land.
+            # set everything up correctly.
             synthetic = PitchPayload(
                 camera_id=cam_id,
                 session_id=session_id,
                 sync_id=sync_id,
                 sync_anchor_timestamp_s=anchor,
-                video_start_pts_s=anchor if anchor is not None else 0.0,
+                video_start_pts_s=anchor,
                 paths=[DetectionPath.live.value],
                 intrinsics=cal_snap.intrinsics if cal_snap is not None else None,
                 homography=list(cal_snap.homography) if cal_snap is not None else None,
@@ -822,9 +783,9 @@ class State:
         yield the same points; last-writer-wins on `self.results[sid]`
         and on the result JSON file (both atomic)."""
         pitch_path = self._pitch_path(pitch.camera_id, pitch.session_id)
-        normalized_paths = self._normalize_paths(pitch.paths)
+        normalized_paths = session_results.normalize_paths(pitch.paths)
         if not normalized_paths:
-            normalized_paths = self._paths_for_pitch(pitch)
+            normalized_paths = session_results.paths_for_pitch(self, pitch)
         pitch.paths = sorted(p.value for p in normalized_paths)
 
         # --- Critical section 1: mutate pitches + drive session FSM. ---
@@ -862,7 +823,7 @@ class State:
         self._atomic_write(pitch_path, pitch.model_dump_json())
 
         # --- Outside the lock: build the result + triangulate if paired. ---
-        result = self._rebuild_result_for_session(pitch.session_id)
+        result = session_results.rebuild_result_for_session(self, pitch.session_id)
 
         # --- Outside the lock: persist the result JSON. ---
         self._atomic_write(
@@ -1034,18 +995,13 @@ class State:
             "session_id": session.id,
             "armed": session.armed,
             "paths": sorted(p.value for p in session.paths),
-            "frame_counts": dict(live.frame_counts),
-            "point_count": len(live.triangulated),
+            "frame_counts": live.frame_counts_snapshot(),
+            "point_count": live.triangulated_count(),
             "paths_completed": paths_completed,
-            "completed_cameras": sorted(live.completed_cameras),
-            "abort_reasons": dict(live.abort_reasons),
+            "completed_cameras": live.completed_cameras_snapshot(),
+            "abort_reasons": live.abort_reasons_snapshot(),
             "live_missing_calibration": missing_cal,
         }
-
-    def claim_time_sync_intent(self) -> _LegacyTimeSyncIntent:
-        """Return the currently-live legacy chirp sync run id, minting a
-        fresh one when the prior listening window expired."""
-        return self._sync.claim_time_sync_intent()
 
     def heartbeat(
         self,
@@ -1075,18 +1031,6 @@ class State:
                 device_id=device_id,
                 device_model=device_model,
             )
-
-    def record_sync_telemetry(self, camera_id: str, telem: dict[str, Any]) -> None:
-        self._sync.record_sync_telemetry(camera_id, telem)
-
-    def clear_last_sync_result(self) -> None:
-        self._sync.clear_last_sync_result()
-
-    def reset_sync_telemetry_peaks(self, camera_ids: list[str] | None = None) -> None:
-        self._sync.reset_sync_telemetry_peaks(camera_ids)
-
-    def sync_telemetry_snapshot(self) -> dict[str, dict[str, Any]]:
-        return self._sync.sync_telemetry_snapshot()
 
     def mark_device_offline(self, camera_id: str) -> None:
         """Age out `last_seen_at` so the device shows offline on the very
@@ -1362,35 +1306,6 @@ class State:
         self._run_pending_live_flushes(pending)
         return s
 
-    def log_sync_event(
-        self, source: str, event: str, detail: dict[str, Any] | None = None
-    ) -> None:
-        self._sync.log_sync_event(source, event, detail)
-
-    def sync_logs(self, limit: int = 200) -> list[SyncLogEntry]:
-        return self._sync.sync_logs(limit)
-
-    def _check_sync_timeout_locked(self, now: float) -> None:
-        """Delegate to the sync coordinator. Kept on State as a back-compat
-        entry point for code paths that acquire the shared lock and then
-        want to advance the sync-run state machine (e.g. `commands_for_devices`,
-        `trigger_sync_command`). Caller must hold `self._lock`."""
-        self._sync._check_sync_timeout_locked(now)
-
-    def current_sync(self) -> SyncRun | None:
-        """Snapshot of the in-progress sync run (None when idle). Lazily
-        applies the timeout on read, mirroring `current_session()`."""
-        return self._sync.current_sync()
-
-    def last_sync_result(self) -> SyncResult | None:
-        """Most recently solved sync result, or None if no sync has ever
-        succeeded on this server instance."""
-        return self._sync.last_sync_result()
-
-    def sync_cooldown_remaining_s(self) -> float:
-        """Seconds remaining on the post-sync cooldown. 0 when ready."""
-        return self._sync.sync_cooldown_remaining_s()
-
     # --- Time-sync command dispatch (single-listener, third-device chirp) ---
     #
     # Distinct from the mutual-chirp `/sync/start` flow above — this is the
@@ -1439,23 +1354,6 @@ class State:
             for cam in dispatched:
                 self._device_registry.clear_time_sync(cam)
             return dispatched
-
-    def consume_sync_command(self, camera_id: str) -> tuple[str | None, str | None]:
-        """Atomically pop + return a pending time-sync command for the
-        named camera, or `(None, None)` when there's nothing queued."""
-        return self._sync.consume_sync_command(camera_id)
-
-    def pending_sync_commands(self) -> dict[str, str]:
-        return self._sync.pending_sync_commands()
-
-    def set_expected_sync_id(self, camera_ids: list[str], sync_id: str) -> None:
-        self._sync.set_expected_sync_id(camera_ids, sync_id)
-
-    def expected_sync_id_snapshot(self) -> dict[str, str]:
-        return self._sync.expected_sync_id_snapshot()
-
-    def pending_sync_command_ids(self) -> dict[str, str]:
-        return self._sync.pending_sync_command_ids()
 
     def trash_session(self, session_id: str) -> bool:
         now = self._time_fn()
@@ -1514,12 +1412,6 @@ class State:
                 online_ids,
                 session_armed=current is not None,
             )
-
-    def record_sync_report(
-        self, report: SyncReport
-    ) -> tuple[SyncRun | None, SyncResult | None, str | None]:
-        """Attach a phone's matched-filter report to the current run."""
-        return self._sync.record_sync_report(report)
 
     def clear_last_ended_session(self) -> bool:
         """Drop the recently-ended sessions ring so the dashboard's

@@ -1,19 +1,24 @@
 """Shared design tokens and geometry constants for scene/viewer rendering."""
 from __future__ import annotations
 
-_BG = "#F8F7F4"
-_SURFACE = "#FCFBFA"
-_INK = "#2A2520"
+from palette import (
+    _ACCENT,
+    _BG,
+    _BORDER_BASE,
+    _BORDER_L,
+    _CONTRA,
+    _DEV,
+    _DUAL,
+    _INK,
+    _OK,
+    _PENDING,
+    _SUB,
+    _SURFACE,
+)
+
+# Module-local: a translucent ink for ghost / overlay traces. Lives here
+# (not in palette.py) because no other module shares it.
 _INK_40 = "rgba(42, 37, 32, 0.4)"
-_SUB = "#7A756C"
-_BORDER_BASE = "#DBD6CD"
-_BORDER_L = "#E8E4DB"
-_CONTRA = "#4A6B8C"
-_DUAL = "#D35400"
-_DEV = "#C0392B"
-_ACCENT = "#E6B300"
-_OK = "#3D7B5F"
-_PENDING = "#D49A1F"
 
 # Chain-filter ghost-mode colors. Rejected detections stay drawn but in
 # these distinct hues so operators can see what the filter removed and

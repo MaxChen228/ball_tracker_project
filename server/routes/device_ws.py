@@ -12,6 +12,7 @@ import asyncio
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+import session_results
 from schemas import DetectionPath, FramePayload
 
 router = APIRouter()
@@ -49,7 +50,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
         # If a mutual-sync run is active when a phone (re)connects, push
         # the sync_run signal so it can join late instead of sitting idle
         # until the run times out.
-        active_sync = state.current_sync()
+        active_sync = state._sync.current_sync()
         if active_sync is not None and camera_id not in active_sync.reports:
             _p = state.sync_params()
             await device_ws.send(camera_id, {
@@ -101,7 +102,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 )
                 telem = msg.get("sync_telemetry")
                 if isinstance(telem, dict):
-                    state.record_sync_telemetry(camera_id, telem)
+                    state._sync.record_sync_telemetry(camera_id, telem)
                 # SSE: broadcast heartbeat-derived fields (battery, ws
                 # latency, last_seen) so the dashboard can update the
                 # Devices card without waiting for the 5 s /status fallback.
@@ -113,7 +114,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 # id doesn't match the active expected id.
                 _ws_snap = device_ws.snapshot().get(camera_id)
                 _now = state._time_fn()
-                _expected = state.expected_sync_id_snapshot().get(camera_id)
+                _expected = state._sync.expected_sync_id_snapshot().get(camera_id)
                 _d_snapshot = state.device_snapshot(camera_id)
                 _gated = _gated_time_synced(_d_snapshot, _expected, _now)
                 await sse_hub.broadcast(
@@ -133,10 +134,12 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 device_ws.note_seen(camera_id)
                 # iOS always sends `candidates` (possibly empty) on every
                 # frame — live_pairing's selector resolves the winner.
-                # Pydantic raises on a malformed entry; let it.
+                # Skipping pydantic validation (model_construct) — iOS lockstep
+                # guarantees the 4 primitive fields; missing key surfaces as
+                # KeyError, bad type as ValueError.
                 from schemas import BlobCandidate as _BlobCandidate
                 cands_payload = [
-                    _BlobCandidate(
+                    _BlobCandidate.model_construct(
                         px=float(c["px"]),
                         py=float(c["py"]),
                         area=int(c["area"]),
@@ -201,7 +204,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                         },
                     )
                 if new_points:
-                    result = await asyncio.to_thread(state._rebuild_result_for_session, session_id)
+                    result = await asyncio.to_thread(session_results.rebuild_result_for_session, state, session_id)
                     await asyncio.to_thread(state.store_result, result)
                 continue
             if mtype == "cycle_end":
@@ -213,7 +216,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                     if persisted is not None:
                         result = persisted
                     else:
-                        result = await asyncio.to_thread(state._rebuild_result_for_session, session_id)
+                        result = await asyncio.to_thread(session_results.rebuild_result_for_session, state, session_id)
                         await asyncio.to_thread(state.store_result, result)
                     await sse_hub.broadcast(
                         "path_completed",

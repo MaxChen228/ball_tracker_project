@@ -9,12 +9,6 @@ from __future__ import annotations
 import html
 from typing import Any
 
-from render_dashboard_client import _JS_TEMPLATE as _DASHBOARD_JS_TEMPLATE
-from render_shared import _CSS, _render_app_nav
-from render_sync_style import _SYNC_CSS
-from render_sync_client import _JS_TEMPLATE
-
-
 def _render_sync_body(
     sync: dict[str, Any] | None,
     last_sync: dict[str, Any] | None,

@@ -140,7 +140,7 @@ def test_sse_heartbeat_time_synced_matches_status_when_id_mismatches(fresh_state
         # Cam reports an old id, but server expects a different one
         # (e.g. operator just fired Quick chirp for a fresh attempt).
         _hello(ws_a, "A", sync_id="sy_old", anchor=10.0)
-        main.state.set_expected_sync_id(["A"], "sy_new")
+        main.state._sync.set_expected_sync_id(["A"], "sy_new")
         _heartbeat(ws_a, "A", sync_id="sy_old", anchor=10.0)
 
         sse = hub.wait_for(
@@ -161,7 +161,7 @@ def test_sse_heartbeat_time_synced_matches_status_when_id_matches(fresh_state):
     client = TestClient(app)
     with client.websocket_connect("/ws/device/A") as ws_a:
         _drain_initial_settings(ws_a)
-        main.state.set_expected_sync_id(["A"], "sy_match")
+        main.state._sync.set_expected_sync_id(["A"], "sy_match")
         _hello(ws_a, "A", sync_id="sy_match", anchor=10.0)
         _heartbeat(ws_a, "A", sync_id="sy_match", anchor=10.0)
 

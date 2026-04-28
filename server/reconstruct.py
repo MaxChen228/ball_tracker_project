@@ -133,11 +133,21 @@ class Scene:
         default_factory=dict
     )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, include_rejected: bool = False) -> dict[str, Any]:
+        # Viewer's default render hides chain-filter rejects, so excluding
+        # them at the wire layer trims ~30% of the payload (rays dominate
+        # large sessions) without changing what the user sees. Callers that
+        # need every ray (e.g. reprocess CLI / forensic dumps) pass
+        # `include_rejected=True`.
+        rejected = {"rejected_flicker", "rejected_jump"}
+        if include_rejected:
+            rays_out = [vars(r) for r in self.rays]
+        else:
+            rays_out = [vars(r) for r in self.rays if r.filter_status not in rejected]
         return {
             "session_id": self.session_id,
             "cameras": [vars(c) for c in self.cameras],
-            "rays": [vars(r) for r in self.rays],
+            "rays": rays_out,
             "triangulated": list(self.triangulated),
             "triangulated_by_path": {
                 path: list(pts) for path, pts in self.triangulated_by_path.items()

@@ -212,7 +212,6 @@
         if (led.title !== tip) led.title = tip;
       }
     }
-    renderActiveSession(currentLiveSession);
 
     // Mirror live state into the shared app-header status strip.
     // Stereo rig: every chip is `n/2` against the expected cam count.

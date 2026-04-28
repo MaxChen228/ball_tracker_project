@@ -253,9 +253,14 @@ def results_for_session(session_id: str) -> SessionResult:
 
 
 @router.get("/reconstruction/{session_id}")
-def reconstruction(session_id: str) -> dict[str, Any]:
+def reconstruction(session_id: str, include_rejected: bool = False) -> dict[str, Any]:
+    # Wire payload defaults to hiding chain-filter rejects to match the
+    # viewer's default render. `include_rejected=true` flips both flicker
+    # and jump rays back into the response — used by reprocess CLI dumps
+    # and tests that want to assert on raw monocular detections without
+    # building a 10-frame fixture just to satisfy `min_run_len`.
     scene = _scene_for_session(session_id)
-    return scene.to_dict()
+    return scene.to_dict(include_rejected=include_rejected)
 
 
 @router.get("/viewer/{session_id}", response_class=HTMLResponse)

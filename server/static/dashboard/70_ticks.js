@@ -22,18 +22,6 @@
         auto_calibration: currentAutoCalibration,
       });
       renderSession(s);
-      // Telemetry: record per-cam WS latency sampled from /status.
-      // Server-side ws_latency_ms reflects the last heartbeat round-trip
-      // per the DeviceSocketManager snapshot.
-      const nowMs = Date.now();
-      for (const dev of (s.devices || [])) {
-        if (!dev || !dev.camera_id) continue;
-        const lat = dev.ws_latency_ms;
-        if (typeof lat !== 'number') continue;
-        const arr = latencySamples[dev.camera_id] = latencySamples[dev.camera_id] || [];
-        arr.push({ t_ms: nowMs, latency: lat });
-        while (arr.length && nowMs - arr[0].t_ms > TELEMETRY_WINDOW_MS) arr.shift();
-      }
     } catch (e) { /* silent retry next tick */ }
   }
 

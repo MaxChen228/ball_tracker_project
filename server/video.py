@@ -35,6 +35,7 @@ def iter_frames(
     container = av.open(str(video_path))
     try:
         stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
         time_base = stream.time_base
         first_container_pts: int | None = None
 

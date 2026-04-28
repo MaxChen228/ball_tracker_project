@@ -5,7 +5,6 @@
 
   const sceneRoot = document.getElementById('scene-root');
   const devicesBox = document.getElementById('devices-body');
-  const activeBox = document.getElementById('active-body');
   const sessionBox = document.getElementById('session-body');
   const eventsBox = document.getElementById('events-body');
   const navStatus = document.getElementById('nav-status');
@@ -24,18 +23,4 @@
   // disconnected for more than the grace window.
   const WS_GRACE_MS = 10_000;
   const wsStatus = new Map();
-  // Telemetry panel state. All arrays are rolling windows; entries get
-  // timestamped with Date.now() so the 60s window can be filtered by
-  // wall-clock rather than insertion order. `pairTimestamps` holds the
-  // arrival ms of each `point` SSE event; pair rate (pts/s) is the count
-  // of entries within the trailing 1s window. `latencySamples` tracks
-  // per-cam ws_latency_ms pulls from /status (1Hz).
-  const TELEMETRY_WINDOW_MS = 60_000;
-  const pairTimestamps = [];
-  const latencySamples = { A: [], B: [] };
-  const errorLog = [];  // {t_ms, kind, message}
-  function recordError(kind, message) {
-    errorLog.unshift({ t_ms: Date.now(), kind, message });
-    if (errorLog.length > 10) errorLog.pop();
-  }
 

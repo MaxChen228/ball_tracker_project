@@ -277,7 +277,7 @@ def _build_device_status_rows(
     now = state._time_fn() if now is None else now
     ws_snapshot = device_ws.snapshot() if ws_snapshot is None else ws_snapshot
     fresh_devices = {d.camera_id: d for d in state.online_devices()}
-    expected = state.expected_sync_id_snapshot()
+    expected = state._sync.expected_sync_id_snapshot()
     # Use heartbeat-based presence only. `state.heartbeat()` is called
     # immediately on WS connect (line 468), so a new device appears here
     # without needing the WS-connected fallback. The fallback caused a
@@ -391,8 +391,8 @@ def _build_status_response() -> dict[str, Any]:
     phone just polls this and reacts to `commands[self.camera_id]`."""
     summary = state.summary()
     session = state.session_snapshot()
-    sync_run = state.current_sync()
-    last_sync = state.last_sync_result()
+    sync_run = state._sync.current_sync()
+    last_sync = state._sync.last_sync_result()
     now = state._time_fn()
     ws_snapshot = device_ws.snapshot()
     devices = _build_device_status_rows(now=now, ws_snapshot=ws_snapshot)
@@ -430,13 +430,13 @@ def _build_status_response() -> dict[str, Any]:
         # surface Δ + D without waiting for the next pitch upload.
         "sync": sync_run.to_dict() if sync_run is not None else None,
         "last_sync": last_sync.model_dump() if last_sync is not None else None,
-        "sync_cooldown_remaining_s": state.sync_cooldown_remaining_s(),
+        "sync_cooldown_remaining_s": state._sync.sync_cooldown_remaining_s(),
         # Pending dashboard-triggered time-sync commands, keyed by camera.
         # Observational only: the phone reads its own command via
         # `sync_command` (set on the WS heartbeat / push path), and consumption
         # clears the flag. `/status` surfaces this map so the dashboard
         # can paint a "pending" badge until the phone drains it.
-        "sync_commands": state.pending_sync_commands(),
+        "sync_commands": state._sync.pending_sync_commands(),
         # Runtime tunables pushed from the dashboard. iOS hot-applies any
         # changes from WS settings messages (matched-filter threshold into
         # AudioChirpDetector; cadence into ServerHealthMonitor).
@@ -623,7 +623,7 @@ def events_index() -> HTMLResponse:
     from render_dashboard import render_events_index_html
 
     session = state.session_snapshot()
-    sync_run = state.current_sync()
+    sync_run = state._sync.current_sync()
     devices = _build_device_status_rows()
     calibrations = sorted(state.calibrations().keys())
     return HTMLResponse(
@@ -651,7 +651,7 @@ def events_index() -> HTMLResponse:
                 "min_run_len": state.chain_filter_params().min_run_len,
             },
             sync=sync_run.to_dict() if sync_run is not None else None,
-            sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
+            sync_cooldown_remaining_s=state._sync.sync_cooldown_remaining_s(),
             chirp_detect_threshold=state.chirp_detect_threshold(),
             heartbeat_interval_s=state.heartbeat_interval_s(),
             tracking_exposure_cap=state.tracking_exposure_cap().value,
@@ -674,8 +674,8 @@ def sync_page() -> HTMLResponse:
     from render_sync import render_sync_html
 
     session = state.session_snapshot()
-    sync_run = state.current_sync()
-    last_sync = state.last_sync_result()
+    sync_run = state._sync.current_sync()
+    last_sync = state._sync.last_sync_result()
     return HTMLResponse(
         render_sync_html(
             devices=_build_device_status_rows(),
@@ -683,7 +683,7 @@ def sync_page() -> HTMLResponse:
             calibrations=sorted(state.calibrations().keys()),
             sync=sync_run.to_dict() if sync_run is not None else None,
             last_sync=last_sync.model_dump() if last_sync is not None else None,
-            sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
+            sync_cooldown_remaining_s=state._sync.sync_cooldown_remaining_s(),
             sync_params={
                 "emit_a_at_s": state.sync_params().emit_a_at_s,
                 "emit_b_at_s": state.sync_params().emit_b_at_s,
@@ -705,7 +705,7 @@ def setup_page() -> HTMLResponse:
             devices=_build_device_status_rows(),
             session=session.to_dict() if session is not None else None,
             calibrations=sorted(state.calibrations().keys()),
-            sync_cooldown_remaining_s=state.sync_cooldown_remaining_s(),
+            sync_cooldown_remaining_s=state._sync.sync_cooldown_remaining_s(),
             calibration_last_ts={
                 cam: p.stat().st_mtime
                 for cam in state.calibrations().keys()
