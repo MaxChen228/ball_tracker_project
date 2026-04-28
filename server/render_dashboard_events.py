@@ -146,6 +146,9 @@ def _pipe_chip(label: str, status: str, counts: dict[str, int] | None,
 
 
 def _pipes_html(e: dict[str, Any]) -> str:
+    """Live + server detection pipe chips. The GT existence chip lived
+    here in v1 but was moved to the dedicated /gt page (mini-plan v4):
+    events row is per-session recording state, GT is a global workflow."""
     path_status = e.get("path_status") or {}
     path_counts = e.get("n_ball_frames_by_path") or {}
     bits = [
@@ -154,15 +157,6 @@ def _pipes_html(e: dict[str, Any]) -> str:
         _pipe_chip("S", path_status.get("server_post", "-"),
                    path_counts.get("server_post"), _PIPE_TITLES["server_post"]),
     ]
-    has_gt = e.get("has_gt") or {}
-    if has_gt:
-        a = "✓" if has_gt.get("A") else "—"
-        b = "✓" if has_gt.get("B") else "—"
-        cls = "ev-pipe on" if (has_gt.get("A") and has_gt.get("B")) else "ev-pipe"
-        bits.append(
-            f'<span class="{cls}" title="GT — SAM 3 ground truth (A·B)">'
-            f'G<b>{a}·{b}</b></span>'
-        )
     return f'<div class="ev-pipes">{"".join(bits)}</div>'
 
 
@@ -193,23 +187,11 @@ def _actions_html(e: dict[str, Any], sid: str,
     elif not trashed and server_status != "done":
         parts.append(_form_btn(f"/sessions/{sid}/run_server_post", "Run srv", "ok"))
 
-    has_gt = e.get("has_gt") or {}
-    has_val = e.get("has_validation") or {}
-    if not trashed:
-        parts.append(_form_btn(
-            f"/sessions/{sid}/run_gt_labelling", "Run GT", "accent",
-            title="Queue SAM 3 GT labelling for both cams",
-        ))
-        if has_gt and all(has_gt.values()):
-            parts.append(_form_btn(
-                f"/sessions/{sid}/run_validation", "Validate", "accent",
-                title="Run three-way validation (live vs server vs GT)",
-            ))
-        if any(has_val.values()):
-            parts.append(
-                f'<a class="ev-btn accent" href="/report/{sid}" '
-                f'title="Open three-way validation report">Report</a>'
-            )
+    # GT / Validate / Report buttons live on /gt now (mini-plan v4
+    # first principle: events list = per-session recording records;
+    # GT + distillation are global workflows that don't belong here).
+    # The dashboard nav has a [GT →] tab; per-session GT controls are
+    # in the /gt session detail header.
 
     if trashed:
         parts.append(_form_btn(
