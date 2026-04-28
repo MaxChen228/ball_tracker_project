@@ -225,19 +225,31 @@ class Sam2VideoLabeller:
 
         # Decode all frames in range. SAM 2's video session takes a list
         # of frames; we cache BGR for analyze_mask later.
+        #
+        # We ALSO track the **global MOV decode index** for each kept
+        # frame so the GT JSON's `frame_idx` can be written in the same
+        # index space as `pitch.frames_server_post[i].frame_index`.
+        # validate_three_way + distill_all key both off frame_idx for
+        # cross-source alignment; if GT used a time_range-local index
+        # the matching would silently miss every frame on the SAM 2
+        # side. Consumed in the gt_frames append below.
         t_start_abs = video_start_pts_s + time_range[0]
         t_end_abs = video_start_pts_s + time_range[1]
         t_click_abs = video_start_pts_s + click_t_video_rel
 
         frame_bgrs: list[np.ndarray] = []
         frame_pts: list[float] = []
+        frame_global_idx: list[int] = []
+        global_idx = 0
         for absolute_pts_s, bgr in iter_frames(mov_path, video_start_pts_s):
-            if absolute_pts_s < t_start_abs:
-                continue
-            if absolute_pts_s > t_end_abs:
+            in_range = (absolute_pts_s >= t_start_abs and absolute_pts_s <= t_end_abs)
+            if in_range:
+                frame_bgrs.append(bgr)
+                frame_pts.append(absolute_pts_s)
+                frame_global_idx.append(global_idx)
+            elif absolute_pts_s > t_end_abs:
                 break
-            frame_bgrs.append(bgr)
-            frame_pts.append(absolute_pts_s)
+            global_idx += 1
 
         if not frame_bgrs:
             raise RuntimeError(
@@ -247,8 +259,10 @@ class Sam2VideoLabeller:
         # Find seed frame: the one closest in PTS to t_click_abs.
         seed_idx = int(np.argmin([abs(p - t_click_abs) for p in frame_pts]))
         logger.info(
-            "decoded %d frames in range; seed at idx=%d (pts=%.3f, click=%.3f)",
-            len(frame_bgrs), seed_idx, frame_pts[seed_idx], t_click_abs,
+            "decoded %d frames in range; seed at in_range_idx=%d global_idx=%d "
+            "(pts=%.3f, click=%.3f)",
+            len(frame_bgrs), seed_idx, frame_global_idx[seed_idx],
+            frame_pts[seed_idx], t_click_abs,
         )
 
         video_fps = (
@@ -340,9 +354,13 @@ class Sam2VideoLabeller:
                 mask_np = masks_list[0][0, 0].detach().to("cpu").to(torch.uint8).numpy()
                 mask_u8 = np.where(mask_np > 0, np.uint8(255), np.uint8(0))
 
+                # sam2_out.frame_idx is local to the chunk's input list.
+                # Map back to our `frame_bgrs` index, then to the MOV
+                # global decode index for the GT JSON's frame_idx field.
                 local_idx = int(sam2_out.frame_idx)
-                absolute_idx = chunk_start + local_idx
-                stats = analyze_mask(mask_u8, frame_bgrs[absolute_idx])
+                in_range_idx = chunk_start + local_idx
+                absolute_idx = frame_global_idx[in_range_idx]
+                stats = analyze_mask(mask_u8, frame_bgrs[in_range_idx])
                 if stats is None:
                     # Empty mask — SAM 2 lost the object on this frame.
                     # Don't update carry_seed_xy from this; if the next
@@ -354,7 +372,7 @@ class Sam2VideoLabeller:
 
                 gt_frames.append(SAM3GTFrame(
                     frame_idx=absolute_idx,
-                    t_pts_s=frame_pts[absolute_idx],
+                    t_pts_s=frame_pts[in_range_idx],
                     bbox=stats.bbox,
                     centroid_px=stats.centroid_px,
                     mask_area_px=stats.area_px,
@@ -373,7 +391,7 @@ class Sam2VideoLabeller:
                 )
                 if preview_callback is not None:
                     try:
-                        preview_callback(absolute_idx, frame_bgrs[absolute_idx], mask_u8)
+                        preview_callback(absolute_idx, frame_bgrs[in_range_idx], mask_u8)
                     except Exception as e:
                         logger.warning("preview_callback raised: %s", e)
                 if progress_callback is not None:
@@ -404,7 +422,7 @@ class Sam2VideoLabeller:
             model_version=self._model_version or self.model_id,
             labelled_at=_dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             prompt_strategy=(
-                f"click:({click_x},{click_y})@frame={seed_idx}"
+                f"click:({click_x},{click_y})@global_frame={frame_global_idx[seed_idx]}"
                 f" chunked@{self.chunk_size} centroid-reseed"
             ),
             video_fps=video_fps,
