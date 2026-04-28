@@ -57,7 +57,6 @@
   const stepFwdBtn = document.getElementById("step-fwd");
   const stepLastBtn = document.getElementById("step-last");
   const speedGroup = document.getElementById("speed-group");
-  const sceneResetBtn = document.getElementById("scene-reset");
   const hintBtn = document.getElementById("hint-btn");
   const hintOverlay = document.getElementById("hint-overlay");
   const DEFAULT_CAMERA = (LAYOUT && LAYOUT.scene && LAYOUT.scene.camera)

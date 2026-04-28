@@ -1,7 +1,6 @@
   function setMode(next) { mode = next; modeAll.classList.toggle("active", next === "all"); modePlayback.classList.toggle("active", next === "playback"); scheduleSceneDraw(); }
   modeAll.addEventListener("click", () => setMode("all"));
   modePlayback.addEventListener("click", () => setMode("playback"));
-  sceneResetBtn.addEventListener("click", () => { Plotly.relayout(sceneDiv, { "scene.camera": DEFAULT_CAMERA }); });
   // Draggable divider between the 3D scene and the 2x2 camera panels.
   // Persists the chosen split so reload keeps the operator's layout.
   (() => {

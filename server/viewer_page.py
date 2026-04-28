@@ -236,9 +236,14 @@ def render_viewer_html(
   <div class="work" data-mode="{ctx.layout_mode}">
     <div class="scene-col">
       <div id="scene"></div>
+      <div class="scene-views" role="toolbar" aria-label="Camera presets">
+        <button class="view-preset active" type="button" data-view="iso" title="Isometric overview (default)">ISO</button>
+        <button class="view-preset" type="button" data-view="catch" title="Catcher's view — strike zone front-on (X/Z plane)">CATCH</button>
+        <button class="view-preset" type="button" data-view="side" title="1B-side view — trajectory arc (Y/Z plane)">SIDE</button>
+        <button class="view-preset" type="button" data-view="top" title="Top-down — horizontal break (X/Y plane)">TOP</button>
+        <button class="view-preset" type="button" data-view="pitcher" title="Pitcher's view — looking back at catcher">PITCHER</button>
+      </div>
       <div class="scene-toolbar" role="toolbar" aria-label="Scene controls">
-        <button id="scene-reset" class="reset" type="button" title="Reset 3D view">&#x21BA;</button>
-        <div class="divider" aria-hidden="true"></div>
         <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
         <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
       </div>
@@ -722,11 +727,22 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     text-transform:uppercase; font-weight:400; line-height:1; }}
   .scene-col .scene-toolbar button.active {{ background:var(--ink); color:var(--surface); font-weight:500; }}
   .scene-col .scene-toolbar button[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); font-weight:500; }}
-  /* Reset arrow uses the same padding as siblings — slightly larger
-     glyph but unified vertical metrics so the pill reads as one
-     toolbar, not "icon button + tab group". */
-  .scene-col .scene-toolbar .reset {{ font-size:14px; padding:5px 12px; }}
-  .scene-col .scene-toolbar .divider {{ width:1px; background:var(--border-base); align-self:stretch; }}
+  /* Camera preset picker (top-left). Mirrors .scene-toolbar styling so
+     the two pills read as one design language, just sitting on opposite
+     corners. `active` state means the camera currently matches the
+     preset; first user-drag (plotly_relayouting) clears it because the
+     view is no longer pinned. */
+  .scene-col .scene-views {{ position:absolute; top:var(--s-4); left:var(--s-3); z-index:5;
+    display:inline-flex; align-items:stretch; flex-wrap:nowrap; white-space:nowrap;
+    border:1px solid var(--border-base); border-radius:var(--r);
+    overflow:hidden; background:var(--surface); }}
+  .scene-col .scene-views .view-preset {{ padding:5px 10px; border:none; background:transparent;
+    color:var(--sub); cursor:pointer; min-width:auto; border-radius:0; font:inherit;
+    font-family:var(--mono); font-size:10px; letter-spacing:0.12em; text-transform:uppercase;
+    font-weight:500; line-height:1; }}
+  .scene-col .scene-views .view-preset + .view-preset {{ border-left:1px solid var(--border-l); }}
+  .scene-col .scene-views .view-preset:hover {{ color:var(--ink); }}
+  .scene-col .scene-views .view-preset.active {{ background:var(--ink); color:var(--surface); }}
   .layer-source-group {{ display:inline-flex; align-items:center; margin-left:6px; height:100%;
     border:1px solid var(--border-base); border-radius:var(--r); overflow:hidden; }}
   /* Source pills go dormant when Fit is off — picking svr/live without
@@ -785,6 +801,7 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     .strip-row .strip-sublabels {{ height:24px; font-size:7px; }}
     .strip-note {{ padding-left:48px; }}
     .scene-col .scene-toolbar {{ top:10px; right:8px; }}
+    .scene-col .scene-views {{ top:10px; left:8px; }}
     .scene-col .fit-info {{ top:48px; }}
   }}
 """

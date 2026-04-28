@@ -729,7 +729,7 @@ def test_failure_strip_html_prefers_earliest_blocking_reason():
 
 def test_viewer_ships_interactive_diagnostic_widgets():
     """The viewer's interactive surface — frame-input for jump-to,
-    scene-reset for the 3D camera, strip-legend for the detection canvas,
+    camera presets for the 3D view, strip-legend for the detection canvas,
     and hint-overlay for the keyboard cheat sheet — must all render. These
     widgets are what makes the viewer a diagnostic tool rather than a
     passive playback page; their presence is a contract the JS depends on."""
@@ -741,11 +741,15 @@ def test_viewer_ships_interactive_diagnostic_widgets():
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
     assert 'id="frame-input"' in body
-    assert 'id="scene-reset"' in body
+    # Five camera presets replace the legacy single "scene-reset" button.
+    # ISO is the default-active preset (mirrors the figure's baked camera).
+    assert 'class="scene-views"' in body
+    for view in ("iso", "catch", "side", "top", "pitcher"):
+        assert f'data-view="{view}"' in body
     assert 'class="strip-legend"' in body
     assert 'id="hint-overlay"' in body
     assert 'id="hint-btn"' in body
-    # Default 3D camera baked into the figure layout so the reset button
+    # Default 3D camera baked into the figure layout so the ISO preset
     # has a known target. _build_figure ships scene.camera; assert one of
     # its keys lands in the inline JSON blob.
     assert '"camera"' in body
