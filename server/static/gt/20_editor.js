@@ -54,6 +54,41 @@
   // scrubs near the seed (browser seek snaps to keyframes anyway).
   const CLICK_VISIBILITY_TOLERANCE_S = 0.03;
 
+  // ----- video content rect (object-fit: contain aware) -------------
+  //
+  // <video> defaults to object-fit: contain. With our CSS (width: 100%,
+  // max-height: 50vh) the layout box can have a different aspect ratio
+  // than the intrinsic video — the browser then letterboxes (black bars
+  // on the unused side). `getBoundingClientRect()` and `clientWidth/
+  // clientHeight` give the LAYOUT BOX, not the actual content area, so
+  // naive `cssX × videoWidth / clientWidth` is wrong by the offset of
+  // the letterbox. Verified 2026-04-29 via overlay smoke: a click on
+  // the ball gave imgX/imgY ~50 px off vs the same-frame live-HSV
+  // detection — letterbox sides was eating the X coordinate.
+  //
+  // This helper returns the content rect in CSS-px relative to the
+  // element's top-left. Both click capture and marker positioning go
+  // through here so they stay coherent (a bad helper would still LOOK
+  // right on screen but submit wrong image-px coords).
+  function videoContentRect(video) {
+    const cw = video.clientWidth;
+    const ch = video.clientHeight;
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh) return { x: 0, y: 0, w: cw, h: ch };
+    const aspectLayout = cw / ch;
+    const aspectVideo = vw / vh;
+    if (aspectLayout > aspectVideo) {
+      // Layout is wider than video → letterbox left/right.
+      const w = ch * aspectVideo;
+      return { x: (cw - w) / 2, y: 0, w, h: ch };
+    } else {
+      // Layout is taller than video → letterbox top/bottom.
+      const h = cw / aspectVideo;
+      return { x: 0, y: (ch - h) / 2, w: cw, h };
+    }
+  }
+
   // Drag state for timeline interactions. mode ∈ {null, "rangeStart",
   // "rangeEnd", "click", "cursor"}. We attach mousemove/mouseup at
   // document level once on first drag and tear them down on mouseup.
@@ -282,16 +317,18 @@
       elClickMarker.hidden = true;
       return;
     }
-    // Only show when currentTime is near click_t (the marker conveys
-    // "this is where you clicked on this exact frame", not "ball is
-    // permanently here"). Past tolerance, hide.
     const dt = Math.abs((elVideo.currentTime || 0) - c.t);
     if (dt > CLICK_VISIBILITY_TOLERANCE_S) {
       elClickMarker.hidden = true;
       return;
     }
-    const cssX = c.x * elVideo.clientWidth / elVideo.videoWidth;
-    const cssY = c.y * elVideo.clientHeight / elVideo.videoHeight;
+    // Map image-px → CSS-px through the content rect (NOT clientWidth)
+    // so letterbox offsets are honoured. Marker is positioned absolutely
+    // inside .gt-video-wrap which has the same dimensions as the
+    // <video> element (display:block + no padding/border on the wrap).
+    const content = videoContentRect(elVideo);
+    const cssX = content.x + c.x * content.w / elVideo.videoWidth;
+    const cssY = content.y + c.y * content.h / elVideo.videoHeight;
     elClickMarker.style.left = cssX + 'px';
     elClickMarker.style.top = cssY + 'px';
     elClickMarker.hidden = false;
@@ -307,9 +344,16 @@
     const rect = elVideo.getBoundingClientRect();
     const cssX = evt.clientX - rect.left;
     const cssY = evt.clientY - rect.top;
-    if (cssX < 0 || cssY < 0 || cssX > rect.width || cssY > rect.height) return;
-    const imgX = Math.round(cssX * elVideo.videoWidth / rect.width);
-    const imgY = Math.round(cssY * elVideo.videoHeight / rect.height);
+    // Reject clicks on the letterbox region (outside actual video pixels).
+    // Without this, clicking the black bar would map to a clamped image
+    // edge — visually unhelpful. content rect coords are relative to
+    // the element's top-left, same as cssX/cssY.
+    const content = videoContentRect(elVideo);
+    const localX = cssX - content.x;
+    const localY = cssY - content.y;
+    if (localX < 0 || localY < 0 || localX > content.w || localY > content.h) return;
+    const imgX = Math.round(localX * elVideo.videoWidth / content.w);
+    const imgY = Math.round(localY * elVideo.videoHeight / content.h);
     const t = elVideo.currentTime;
     window.GT.editor.click = { x: imgX, y: imgY, t };
     window.GT.editor.dirty = true;
