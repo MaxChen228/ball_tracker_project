@@ -646,6 +646,11 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .tl-row .frame-label .fl-cell-blank {{ color:var(--sub); font-weight:400; }}
   .tl-row .frame-label .fl-det {{ color:var(--contra); font-weight:600; }}
   .tl-row .frame-label .fl-det-no {{ color:var(--sub); font-weight:400; }}
+  .tl-row .frame-label .fl-det-warn {{ color:var(--pending); font-weight:600; }}
+  .tl-row .frame-label .fl-det-bad {{ color:var(--dev); font-weight:600; }}
+  .tl-row .frame-label .fl-det-unscored {{ opacity:0.55; }}
+  .tl-row .frame-label .fl-fidx {{ color:var(--sub); font-size:9px;
+    letter-spacing:0; padding:0 1px; }}
   #frame-input {{ width:58px; font:inherit; font-size:10px; background:var(--bg);
     border:1px solid var(--border-base); color:var(--ink); padding:1px 4px; text-align:center;
     font-variant-numeric:tabular-nums; border-radius:var(--r); }}

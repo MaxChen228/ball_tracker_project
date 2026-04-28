@@ -80,9 +80,25 @@
         if (!cams.includes(cam)) return `<span class="fl-cell fl-cell-blank">${cam}:—</span>`;
         const entry = camAtFrameByPath[path][cam][currentFrame];
         if (!entry) return `<span class="fl-cell fl-cell-blank">${cam}:—</span>`;
-        const cls = entry.detected ? "fl-det" : "fl-det fl-det-no";
-        const mark = entry.detected ? "✓" : "·";
-        return `<span class="fl-cell">${cam}:${entry.idx}<span class="${cls}">${mark}</span></span>`;
+        // Mark + colour encode chain_filter verdict in one glyph:
+        //   ✓ kept (chain_filter validated)        — var(--contra), bold
+        //   ✓ unscored (detected, no filter run)   — var(--contra), dim
+        //                                            (live path normal case)
+        //   F rejected_flicker (chain_filter)      — var(--pending), bold
+        //   J rejected_jump (chain_filter)         — var(--dev), bold
+        //   · non-detection                        — var(--sub), thin
+        let mark, cls;
+        if (!entry.detected) { mark = "·"; cls = "fl-det fl-det-no"; }
+        else if (entry.filter_status === "rejected_flicker") { mark = "F"; cls = "fl-det fl-det-warn"; }
+        else if (entry.filter_status === "rejected_jump") { mark = "J"; cls = "fl-det fl-det-bad"; }
+        else if (entry.filter_status === "kept") { mark = "✓"; cls = "fl-det"; }
+        else { mark = "✓"; cls = "fl-det fl-det-unscored"; }
+        // frame_index = physical source frame counter (iOS capture-queue
+        // index for live, PyAV decode order for server_post). Distinct
+        // from `idx` which is array position post timestamp-sort —
+        // exposes the throttle/drop gaps that array idx hides.
+        const fidx = entry.frame_index != null ? `<span class="fl-fidx">/${entry.frame_index}</span>` : "";
+        return `<span class="fl-cell">${cam}:${entry.idx}${fidx}<span class="${cls}">${mark}</span></span>`;
       }).join("");
       rows.push(`<div class="fl-row"><span class="fl-pathlabel">${PATH_LABEL[path]}</span>${cells}</div>`);
     }

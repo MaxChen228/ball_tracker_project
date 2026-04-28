@@ -937,6 +937,58 @@ def test_viewer_exposes_camera_t_rel_offsets(tmp_path):
     assert '"t_rel_offset_s": 1.5' in body
 
 
+def test_viewer_exposes_per_frame_index_and_filter_status(tmp_path):
+    """Each per-cam frame stream must carry `frame_index` (physical
+    source-frame counter — iOS capture-queue index for live, PyAV decode
+    order for server_post) and `filter_status` (chain_filter verdict)
+    alongside the existing t_rel_s / detected / px / py. Array idx
+    alone hides drops/throttle gaps; frame_index exposes them, and
+    filter_status lets the label distinguish kept vs rejected runs."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(711)
+    pitch = schemas.PitchPayload(
+        camera_id="A",
+        session_id=session_id,
+        sync_id="sy_deadbeef",
+        sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        frames_server_post=[
+            schemas.FramePayload(
+                frame_index=42, timestamp_s=0.0, px=960.0, py=540.0,
+                ball_detected=True, filter_status="kept",
+            ),
+            schemas.FramePayload(
+                frame_index=43, timestamp_s=0.005, px=961.0, py=541.0,
+                ball_detected=True, filter_status="rejected_jump",
+            ),
+            schemas.FramePayload(
+                frame_index=44, timestamp_s=0.010, ball_detected=False,
+            ),
+        ],
+        intrinsics=schemas.IntrinsicsPayload(
+            fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
+        ),
+        homography=H_a.flatten().tolist(),
+    )
+    main.state.record(pitch)
+    # state.record re-runs chain_filter, which overwrites whatever
+    # filter_status the test passed in. Re-stamp post-record so this
+    # test stays focused on the JSON-serialisation pathway and doesn't
+    # accidentally pin chain_filter's default params.
+    recorded = main.state.pitches_for_session(session_id)["A"]
+    recorded.frames_server_post[0].filter_status = "kept"
+    recorded.frames_server_post[1].filter_status = "rejected_jump"
+    recorded.frames_server_post[2].filter_status = None
+    main.state.save_clip("A", session_id, b"clip", "mov")
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+    # Both arrays must round-trip into the embedded JSON videos blob in
+    # stream order. Non-detection frame keeps frame_index but null status.
+    assert '"frame_index": [42, 43, 44]' in body
+    assert '"filter_status": ["kept", "rejected_jump", null]' in body
+
+
 def test_video_endpoint_serves_clip_bytes():
     session_id = sid(706)
     main.state.save_clip("A", session_id, b"\x00\x01\x02byte-soup", "mov")
