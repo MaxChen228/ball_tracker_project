@@ -604,8 +604,8 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .layer-toggles .layer-pill[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); border-color:var(--ink); }}
   .layer-toggles .layer-pill:hover {{ border-color:var(--ink); }}
   .layer-toggles .layer-pill[hidden] {{ display:none; }}
-  .layer-toggles .layer-checkbox {{ display:inline-flex; align-items:center; gap:5px; cursor:pointer; }}
-  .layer-toggles .layer-checkbox input {{ accent-color:var(--ink); cursor:pointer; }}
+  .layer-toggles .layer-checkbox {{ display:inline-flex; align-items:center; gap:5px; cursor:pointer; height:100%; }}
+  .layer-toggles .layer-checkbox input {{ accent-color:var(--ink); cursor:pointer; width:13px; height:13px; margin:0; vertical-align:middle; }}
   .layer-toggles .layer-divider {{ width:1px; align-self:stretch;
     background:var(--border-base); margin:2px 2px; }}
   .layer-toggles input[type="range"] {{ -webkit-appearance:none; appearance:none;
@@ -694,7 +694,7 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
      toolbar, not "icon button + tab group". */
   .scene-col .scene-toolbar .reset {{ font-size:14px; padding:5px 12px; }}
   .scene-col .scene-toolbar .divider {{ width:1px; background:var(--border-base); align-self:stretch; }}
-  .layer-source-group {{ display:inline-flex; align-items:center; margin-left:6px;
+  .layer-source-group {{ display:inline-flex; align-items:center; margin-left:6px; height:100%;
     border:1px solid var(--border-base); border-radius:var(--r); overflow:hidden; }}
   /* Source pills go dormant when Fit is off — picking svr/live without
      a visible Fit overlay does nothing user-observable. Stronger than
@@ -703,13 +703,13 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
      the dormant source. Pressed state still tracks the user's choice
      so re-enabling Fit shows them what they had. */
   .layer-source-group.is-off {{ opacity:0.4; filter:saturate(0.15); pointer-events:none; }}
-  .fit-src-pill {{ padding:2px 6px; font-family:var(--mono); font-size:9px;
+  .fit-src-pill {{ padding:2px 8px; font-family:var(--mono); font-size:9px;
     letter-spacing:0.06em; background:var(--surface); border:0; color:var(--sub);
-    cursor:pointer; line-height:1.4; }}
+    cursor:pointer; line-height:1; }}
   .fit-src-pill[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); }}
   .fit-src-pill + .fit-src-pill {{ border-left:1px solid var(--border-base); }}
   .fit-src-pill[disabled] {{ opacity:0.35; cursor:not-allowed; }}
-  .scene-col .fit-info {{ position:absolute; top:46px; right:var(--s-3); z-index:4;
+  .scene-col .fit-info {{ position:absolute; top:54px; right:var(--s-3); z-index:6;
     background:var(--surface); border:1px solid var(--border-base); border-radius:var(--r);
     padding:8px 12px; font:inherit; font-size:11px; line-height:1.55; color:var(--ink);
     min-width:220px; max-width:300px; pointer-events:none; }}
@@ -752,6 +752,7 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     .strip-row .strip-sublabels {{ height:24px; font-size:7px; }}
     .strip-note {{ padding-left:48px; }}
     .scene-col .scene-toolbar {{ top:10px; right:8px; }}
+    .scene-col .fit-info {{ top:48px; }}
   }}
 """
 

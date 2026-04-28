@@ -19,8 +19,6 @@
           armed: true,
           paths: data.paths || [],
           frame_counts: {},
-          frame_samples: { A: [], B: [] },
-          frame_fps: {},
           point_count: 0,
           point_depths: [],
           paths_completed: [],
@@ -45,7 +43,6 @@
         if (!currentLiveSession || currentLiveSession.session_id !== data.sid) return;
         currentLiveSession.frame_counts = currentLiveSession.frame_counts || {};
         currentLiveSession.frame_counts[data.cam] = Number(data.count || 0);
-        pushFrameSample(currentLiveSession, data.cam, Number(data.count || 0));
       } catch (_) {}
     });
     es.addEventListener('path_completed', (evt) => {

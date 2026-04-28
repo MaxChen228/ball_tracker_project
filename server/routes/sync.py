@@ -277,6 +277,8 @@ async def sync_params_set(request: Request) -> dict[str, Any]:
     win = float(body.get("search_window_s", cur.search_window_s))
     if not isinstance(emit_a, list) or not isinstance(emit_b, list):
         raise HTTPException(status_code=422, detail="emit_a_at_s and emit_b_at_s must be arrays")
+    if not emit_a or not emit_b:
+        raise HTTPException(status_code=422, detail="emit_a_at_s and emit_b_at_s must be non-empty")
     if dur < 1.0 or dur > 30.0:
         raise HTTPException(status_code=422, detail="record_duration_s must be 1-30 s")
     if win < 0.05 or win > 2.0:

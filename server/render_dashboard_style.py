@@ -429,16 +429,19 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
    line. No more action-button column that bloated row height. */
 .events-empty {{ color: var(--sub); font-size: 12px; padding: var(--s-3) 0;
                  font-style: italic; font-family: var(--mono); }}
-.event-item {{ display: flex; align-items: center; gap: var(--s-1);
+.event-item {{ display: grid;
+               grid-template-columns: 41px minmax(0, 1fr) auto auto;
+               align-items: center; gap: var(--s-1);
                padding: 6px 0;
                border-top: 1px solid var(--border-l);
-               transition: background 0.12s ease; }}
+               transition: background 0.12s ease;
+               min-width: 0; }}
 .event-item:first-child {{ border-top: 0; }}
 .event-item:hover {{ background: var(--surface-hover); }}
-.event-row {{ flex: 1 1 auto; min-width: 0; display: flex;
+.event-row {{ min-width: 0; display: flex;
               flex-direction: column; gap: 2px;
               text-decoration: none; color: inherit;
-              padding: 2px var(--s-1); }}
+              padding: 2px var(--s-1); overflow: hidden; }}
 /* Trajectory overlay toggle — coloured dot mirrors the trace tint Plotly
    uses in the canvas so the operator can match checkbox → line. The
    checkbox is OUTSIDE the <a>, so clicking it doesn't navigate. */
@@ -457,17 +460,18 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
    intrinsic width); status chip + actions live as sibling flex cells
    of .event-item so nothing competes for sid's or L/S's width. */
 .event-head {{ display: flex; align-items: center; gap: 6px;
-               min-width: 0; flex-wrap: nowrap; }}
+               min-width: 0; flex-wrap: nowrap; overflow: hidden; }}
 .event-head .sid {{ flex: 0 0 auto; font-family: var(--mono); font-size: 11px;
                     font-weight: 500; color: var(--ink);
                     letter-spacing: 0.04em; white-space: nowrap; }}
 .event-head .path-chip {{ flex: 0 0 auto; font-size: 10px; padding: 1px 6px;
-                          letter-spacing: 0.04em; }}
-.event-status {{ flex: 0 0 auto; display: flex; align-items: center;
-                 gap: 4px; justify-content: flex-end; }}
+                          letter-spacing: 0.04em; white-space: nowrap; }}
+.event-status {{ display: flex; align-items: center;
+                 gap: 4px; justify-content: flex-end;
+                 min-width: 0; max-width: 120px; overflow: hidden; }}
 .event-status:empty {{ display: none; }}
 .event-status .chip {{ font-size: 9px; padding: 1px 6px;
-                       letter-spacing: 0.08em; }}
+                       letter-spacing: 0.08em; white-space: nowrap; }}
 .event-meta {{ font-family: var(--mono); font-size: 10px;
                color: var(--sub); letter-spacing: 0.02em;
                white-space: nowrap; overflow: hidden;
@@ -487,7 +491,8 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                   padding:4px 8px; border-radius:var(--r); cursor:pointer; }}
 .events-filter.active {{ background:var(--ink); color:var(--surface); border-color:var(--ink); }}
 .event-actions {{ display:flex; flex-direction:row; align-items:center;
-                  gap:4px; margin: 0 var(--s-1) 0 0; flex: 0 0 auto; }}
+                  gap:4px; margin: 0 var(--s-1) 0 0;
+                  justify-content: flex-end; }}
 .event-action-form {{ margin:0; }}
 .event-action {{ background:transparent; border:1px solid var(--border-base);
                  color:var(--sub); font-family:var(--mono); font-size:9px;

@@ -134,7 +134,9 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 device_ws.note_seen(camera_id)
                 # iOS always sends `candidates` (possibly empty) on every
                 # frame — live_pairing's selector resolves the winner.
-                # Pydantic raises on a malformed entry; let it.
+                # Skipping pydantic validation (model_construct) — iOS lockstep
+                # guarantees the 4 primitive fields; missing key surfaces as
+                # KeyError, bad type as ValueError.
                 from schemas import BlobCandidate as _BlobCandidate
                 cands_payload = [
                     _BlobCandidate.model_construct(
