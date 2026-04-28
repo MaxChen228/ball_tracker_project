@@ -46,7 +46,9 @@ from state_calibration import (
 )
 from state_devices import DeviceRegistry
 from state_events import build_events
+from state_gt_index import GTIndex
 from state_gt_processing import GTProcessingState
+from state_gt_queue import GTQueue
 from state_processing import SessionProcessingState
 from state_sync import (
     SyncCoordinator,
@@ -289,14 +291,26 @@ class State:
         # lock refs so the coordinator can read pitches / video dir.
         self._processing = SessionProcessingState()
         self._processing.attach(self, self._lock)
-        # GT-driven distillation job tracker. Keys are 3-tuples
-        # (kind, session_id, camera_id) where kind ∈ {"label",
-        # "validate", "distill"} and "global" is used for non-session-
-        # scoped jobs like distillation. Values are dicts carrying
-        # status / pid / error so the dashboard can render progress.
-        # State is in-memory only — restart loses queue position but
-        # the on-disk artefacts (data/gt/*) persist.
+        # Distillation job tracker (kept from v1 era, scoped to the global
+        # distill job + cancel flag only; per-session label/validate jobs
+        # have been migrated to `_gt_queue` below). distill_all.py uses
+        # `cancel_distill()` to bail mid-eval.
         self._gt_processing = GTProcessingState()
+        # GT labelling queue. Persistent FIFO of operator-submitted SAM 3
+        # jobs; consumed by the GTQueueWorker thread spawned in lifespan.
+        # Each mutation flushes data/gt/queue.json under its own lock —
+        # NOT under self._lock, because routes hit both surfaces and
+        # nesting either way risks AB/BA deadlock. State.py reads queue
+        # state through `self.gt_queue` property without acquiring
+        # self._lock. See state_gt_queue.py docstring.
+        self._gt_queue = GTQueue(
+            queue_path=data_dir / "gt" / "queue.json",
+            preview_dir=data_dir / "gt" / "preview",
+        )
+        # /gt page session-list cache. Lazy build with (mtime_ns, size)
+        # cache keys per dependency file. Routes invalidate per-sid on
+        # any GT-related write. See state_gt_index.py.
+        self._gt_index = GTIndex(data_dir=data_dir)
         # Cached fit_proposals.json contents — populated on demand by
         # routes/gt.py. None means "not loaded yet"; missing file is
         # signalled separately at the route layer.
@@ -314,6 +328,21 @@ class State:
     @property
     def video_dir(self) -> Path:
         return self._video_dir
+
+    @property
+    def gt_queue(self) -> GTQueue:
+        """Read-only access to the GT labelling queue. NOTE: caller must
+        NOT hold self._lock when invoking GT queue methods (the queue
+        has its own lock; nesting risks deadlock). State integration is
+        intentional façade-only — read State data first, release this
+        lock, then call into the queue."""
+        return self._gt_queue
+
+    @property
+    def gt_index(self) -> GTIndex:
+        """Read-only access to the /gt session-list index. Same lock
+        discipline as `gt_queue` — never call while holding self._lock."""
+        return self._gt_index
 
     def save_clip(
         self, camera_id: str, session_id: str, data: bytes, ext: str = "mov"
