@@ -82,6 +82,37 @@ def test_invalid_device_id_rejected(tmp_path, monkeypatch):
     assert r2.status_code in (400, 404)
 
 
+def test_dashboard_adapter_emits_fy_not_fz():
+    """Regression guard for `84_intrinsics.js::_adaptIntrinsicsJson`.
+
+    The adapter pivots `calibrate_intrinsics.py` flat output (`fx/fy/cx/cy`
+    at top level) into the nested `DeviceIntrinsics` shape the endpoint
+    expects. A previous version wrote `fz: fy` (legacy field name) into the
+    nested intrinsics block — but `scripts/migrate_fz_to_fy.py` retired the
+    `fz` alias on `IntrinsicsPayload`, so every dashboard upload then 422'd
+    with `intrinsics.fy Field required`.
+
+    This test reads the JS source and asserts the adapter emits `fy` in the
+    nested block. Source-level guard since the adapter lives in browser JS
+    and there is no JS test runner in this repo."""
+    from pathlib import Path
+
+    js_path = Path(__file__).parent / "static" / "dashboard" / "84_intrinsics.js"
+    src = js_path.read_text()
+    # Pin the exact emit line so a stylistic rewrite still fails this guard
+    # if it reintroduces `fz` in the intrinsics object.
+    assert "fz: fy" not in src, (
+        "84_intrinsics.js::_adaptIntrinsicsJson is emitting legacy `fz` field; "
+        "IntrinsicsPayload no longer accepts fz — write `fy` instead."
+    )
+    # And positive: the adapter must produce an `fy` key inside its
+    # nested `intrinsics: { ... }` block.
+    assert "fx, fy, cx, cy" in src, (
+        "84_intrinsics.js::_adaptIntrinsicsJson should emit `fx, fy, cx, cy` "
+        "in the nested intrinsics object."
+    )
+
+
 def test_principal_point_outside_image_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(app)
