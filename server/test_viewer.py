@@ -535,7 +535,7 @@ def test_viewer_endpoint_without_clips_still_renders():
     _record_pitch(_pitch("A", 705, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
-    assert "no clips on disk" in body
+    assert "awaiting upload" in body
     assert "<video" not in body
 
 

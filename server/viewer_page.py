@@ -578,9 +578,15 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     pointer-events:none; z-index:1; }}
   .plate-overlay-real polygon {{ fill:none; stroke:rgba(217,59,59,0.92);
     stroke-width:1.8; stroke-dasharray:8 5; stroke-linejoin:round; }}
-  .vid-frame.empty {{ background:var(--bg); border:1px dashed var(--border-base);
-    color:var(--sub); font-family:var(--mono); font-size:11px;
-    letter-spacing:0.12em; text-transform:uppercase; border-radius:var(--r); }}
+  /* Awaiting-upload placeholder. Mirrors `.vid-media`'s 16:9 (or
+     calibration-aspect) box so the cell occupies the same footprint as
+     a populated cell — keeps the work-row from reflowing when the MOV
+     upload lands and the auto-refresh swaps in the real video. */
+  .vid-media.empty {{ background:var(--bg); border:1px dashed var(--border-base);
+    display:flex; align-items:center; justify-content:center;
+    border-radius:var(--r); }}
+  .vid-media.empty .vid-empty-msg {{ color:var(--sub); font-family:var(--mono);
+    font-size:11px; letter-spacing:0.12em; text-transform:uppercase; }}
   .timeline {{ flex:0 0 auto; background:var(--surface); display:flex;
     flex-direction:column; gap:var(--s-2); padding:var(--s-2) var(--s-5);
     font-family:var(--mono); font-size:12px; color:var(--sub); position:relative; }}
