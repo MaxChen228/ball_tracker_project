@@ -25,8 +25,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import re
 import sys
 from pathlib import Path
+
+import cv2  # noqa: E402  -- used for preview JPEG composition
+import numpy as np  # noqa: E402
 
 # Resolve the server package (siblings of scripts/) on sys.path. Same
 # pattern as retrofit_image_dims.py — keeps this script invokable from
@@ -42,6 +47,17 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("label_with_sam3")
+
+# Queue worker reads stderr looking for these contract lines. Any other
+# stderr output (warnings, tracebacks) is captured but ignored unless
+# the subprocess exits non-zero. Regex on the worker side must stay in
+# sync with these formats.
+_PROGRESS_FMT = "PROGRESS: frame={current} total={total} elapsed={elapsed:.2f} ms_per_frame={mpf:.2f}"
+_DONE_FMT = "DONE: labelled={labelled} decoded={decoded}"
+
+# Validate `--queue-id` so the preview JPEG path can't be tricked into
+# escaping the data/gt/preview/ directory.
+_QUEUE_ID_RE = re.compile(r"^q_[0-9a-f]{8}$")
 
 
 class _MissingPitchError(RuntimeError):
@@ -95,6 +111,82 @@ def _list_archived_sessions(pitches_dir: Path) -> list[tuple[str, str]]:
     return sorted(set(out))
 
 
+def _atomic_write_text(path: Path, payload: str) -> None:
+    """Write `payload` to `path` via tmp + os.replace. Avoids readers
+    (validate_three_way, GTIndex) seeing a half-written GT JSON when
+    the worker overwrites a file mid-run."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(payload)
+    os.replace(tmp, path)
+
+
+def _make_progress_emitter(*, queue_id: str | None):
+    """Build a `progress_callback(current, total, ms_per_frame)` that
+    writes the worker-parseable PROGRESS line to stderr. Density:
+    every frame for the first 10 (so first thumbnail / ETA arrive
+    quickly and the no-progress watchdog never fires on warmup), every
+    10th frame thereafter to keep stderr noise bounded.
+
+    `queue_id` is included in the log prefix when present so multi-job
+    debugging stays readable. The PROGRESS contract line itself does
+    NOT include queue_id — the worker correlates by association
+    (one subprocess per item)."""
+    elapsed_accumulator = {"start_ms": 0.0}
+
+    def emit(current: int, total: int, ms_per_frame: float) -> None:
+        # Only emit on the chosen cadence. `current` is 1-indexed.
+        if current <= 10 or current % 10 == 0 or current == total:
+            elapsed_accumulator["start_ms"] += ms_per_frame  # rolling sum
+            line = _PROGRESS_FMT.format(
+                current=current,
+                total=total,
+                elapsed=elapsed_accumulator["start_ms"] / 1000.0,
+                mpf=ms_per_frame,
+            )
+            print(line, file=sys.stderr, flush=True)
+
+    return emit
+
+
+def _make_preview_writer(*, preview_path: Path | None):
+    """Build a `preview_callback(frame_idx, bgr, mask)` that writes
+    a JPEG with the SAM 3 mask outlined onto the BGR frame so the
+    operator can visually confirm the model is tracking the ball.
+
+    Cadence: every frame for the first 10, every 5th frame after.
+    Returns a no-op if `preview_path` is None (CLI not driven by the
+    queue worker)."""
+    if preview_path is None:
+        return None
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def emit(frame_idx: int, bgr: np.ndarray, mask: np.ndarray) -> None:
+        if frame_idx > 10 and (frame_idx % 5) != 0:
+            return
+        try:
+            overlay = bgr.copy()
+            # Tinted overlay for the mask area; cheap visual confirmation.
+            color = np.array([0, 255, 0], dtype=np.uint8)  # green in BGR
+            sel = mask > 0
+            if sel.any():
+                overlay[sel] = (0.6 * bgr[sel] + 0.4 * color).astype(np.uint8)
+            # Outline so the mask edge is visible on small thumbnails.
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(overlay, contours, -1, (0, 255, 0), 2)
+            tmp = preview_path.with_suffix(preview_path.suffix + ".tmp")
+            cv2.imwrite(
+                str(tmp), overlay,
+                [int(cv2.IMWRITE_JPEG_QUALITY), 70],
+            )
+            os.replace(tmp, preview_path)
+        except Exception as e:
+            log.warning("preview write failed for frame %d: %s", frame_idx, e)
+
+    return emit
+
+
 def _label_one(
     labeller: Sam3VideoLabeller,
     *,
@@ -105,6 +197,8 @@ def _label_one(
     min_confidence: float,
     max_frames: int | None,
     overwrite: bool,
+    time_range: tuple[float, float] | None = None,
+    queue_id: str | None = None,
 ) -> Path | None:
     """Returns the GT JSON path on success, None on skip / error."""
     out_dir = data_dir / "gt" / "sam3"
@@ -127,9 +221,13 @@ def _label_one(
         log.error("skip %s/%s: %s", session_id, camera_id, e)
         return None
 
+    preview_path: Path | None = None
+    if queue_id is not None:
+        preview_path = data_dir / "gt" / "preview" / f"{queue_id}.jpg"
+
     log.info(
-        "labelling session=%s cam=%s clip=%s prompt=%r",
-        session_id, camera_id, clip.name, prompt,
+        "labelling session=%s cam=%s clip=%s prompt=%r time_range=%s queue_id=%s",
+        session_id, camera_id, clip.name, prompt, time_range, queue_id,
     )
     record = labeller.label_video(
         mov_path=clip,
@@ -139,8 +237,15 @@ def _label_one(
         prompt=prompt,
         min_confidence=min_confidence,
         max_frames=max_frames,
+        time_range=time_range,
+        progress_callback=_make_progress_emitter(queue_id=queue_id),
+        preview_callback=_make_preview_writer(preview_path=preview_path),
     )
-    out_path.write_text(record.model_dump_json(indent=2))
+    _atomic_write_text(out_path, record.model_dump_json(indent=2))
+    print(
+        _DONE_FMT.format(labelled=record.frames_labelled, decoded=record.frames_decoded),
+        file=sys.stderr, flush=True,
+    )
     log.info(
         "wrote %s: %d/%d frames labelled (confidence >= %.2f)",
         out_path.name, record.frames_labelled, record.frames_decoded, min_confidence,
@@ -167,11 +272,33 @@ def main(argv: list[str] | None = None) -> int:
         default=0.5,
         help="drop detections below this score (default 0.5)",
     )
-    parser.add_argument(
+    # `--limit-frames` (head N frames) and `--time-range` (window into
+    # the clip in video-relative seconds) are alternative ways to clamp
+    # the propagation window. Mutually exclusive — passing both is a
+    # programming error and we'd rather fail fast.
+    window = parser.add_mutually_exclusive_group()
+    window.add_argument(
         "--limit-frames",
         type=int,
         default=None,
         help="stop after N decoded frames (dev iteration)",
+    )
+    window.add_argument(
+        "--time-range",
+        type=float,
+        nargs=2,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="label only frames whose video-relative PTS falls in [START_S, END_S]",
+    )
+    parser.add_argument(
+        "--queue-id",
+        default=None,
+        help=(
+            "queue item id (q_<8 hex>) — when set, mask preview JPEGs are "
+            "written to data/gt/preview/<queue-id>.jpg for the dashboard. "
+            "Internal use by gt_queue_worker; ignore for manual CLI runs."
+        ),
     )
     parser.add_argument(
         "--image-size",
@@ -199,6 +326,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.session and not args.cam:
         parser.error("--cam is required with --session")
 
+    if args.queue_id is not None and not _QUEUE_ID_RE.match(args.queue_id):
+        parser.error(
+            f"--queue-id must match {_QUEUE_ID_RE.pattern!r} (got {args.queue_id!r})"
+        )
+
+    if args.time_range is not None:
+        t_start, t_end = args.time_range
+        if not (t_start >= 0.0 and t_end > t_start):
+            parser.error(
+                f"--time-range must satisfy 0 <= START < END (got {t_start}, {t_end})"
+            )
+
+    if args.all and (args.time_range is not None or args.queue_id is not None):
+        parser.error(
+            "--time-range and --queue-id are per-(session, cam) flags; "
+            "they don't make sense with --all (each session has its own window)"
+        )
+
     labeller = Sam3VideoLabeller(
         model_id=args.model_id,
         device=args.device,
@@ -210,6 +355,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         targets = _list_archived_sessions(args.data_dir / "pitches")
         log.info("--all: %d (session, cam) targets found", len(targets))
+
+    time_range = (
+        (float(args.time_range[0]), float(args.time_range[1]))
+        if args.time_range is not None
+        else None
+    )
 
     successes = 0
     for session_id, camera_id in targets:
@@ -223,6 +374,8 @@ def main(argv: list[str] | None = None) -> int:
                 min_confidence=args.min_confidence,
                 max_frames=args.limit_frames,
                 overwrite=args.overwrite,
+                time_range=time_range,
+                queue_id=args.queue_id,
             )
             if result is not None:
                 successes += 1
