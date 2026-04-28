@@ -8,7 +8,14 @@
     for (let i = 0; i < TOTAL_FRAMES; ++i) {
       const t = unionTimes[i];
       if (t < ts[0] - tol || t > ts[ts.length - 1] + tol) continue;
-      while (j + 1 < ts.length && Math.abs(ts[j + 1] - t) <= Math.abs(ts[j] - t)) j++;
+      // Floor: pick largest ts[j] ≤ t. Matches the HTML5 video element
+      // seek behaviour (displays PTS ≤ currentTime) and the canvas overlay's
+      // _drawDetectionForPath floor, so timeline label / canvas dot /
+      // video frame all reflect the same source frame.
+      // tol allowance: when t < ts[0] within 10ms, j stays at 0 even
+      // though ts[0] > t — preserves the prior "show closest valid frame
+      // in pre-roll slack" behaviour rather than going strict-floor.
+      while (j + 1 < ts.length && ts[j + 1] <= t) j++;
       out[i] = { idx: j, t: ts[j], detected: !!det[j] };
     }
     return out;

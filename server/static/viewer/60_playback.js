@@ -58,7 +58,11 @@
       const mid = (lo + hi) >> 1;
       if (unionTimes[mid] <= t) lo = mid; else hi = mid;
     }
-    return (t - unionTimes[lo]) <= (unionTimes[hi] - t) ? lo : hi;
+    // Floor: pick largest unionTimes[lo] ≤ t. Matches the HTML5 video
+    // element seek behaviour (displays PTS ≤ currentTime) so RVFC's
+    // reverse mapping (mediaTime → currentFrame) lands on the same frame
+    // the video element is displaying, not its temporal neighbour.
+    return lo;
   }
   function renderFrameLabel() {
     const v = String(currentFrame);
