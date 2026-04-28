@@ -426,64 +426,13 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
               max-height: 240px; overflow-y: auto;
               white-space: pre; word-break: normal; }}
 
-/* --- Events list — compact single-line-per-event layout. Everything
-   identity/status/actions lives on one row; metrics optional second
-   line. No more action-button column that bloated row height. */
+/* --- Events list (redesigned). 3-line card per session, lines 2/3
+   collapse when empty. Line 1 = identity + status. Line 2 = pipe chips
+   + metrics (wraps cleanly if it overflows the sidebar). Line 3 =
+   actions (right-aligned). All flexbox, no grid — the prior CSS-grid
+   layout clipped chips when the rightmost column ate horizontal width. */
 .events-empty {{ color: var(--sub); font-size: 12px; padding: var(--s-3) 0;
                  font-style: italic; font-family: var(--mono); }}
-.event-item {{ display: grid;
-               grid-template-columns: 41px minmax(0, 1fr) auto auto;
-               align-items: center; gap: var(--s-1);
-               padding: 6px 0;
-               border-top: 1px solid var(--border-l);
-               transition: background 0.12s ease;
-               min-width: 0; }}
-.event-item:first-child {{ border-top: 0; }}
-.event-item:hover {{ background: var(--surface-hover); }}
-.event-row {{ min-width: 0; display: flex;
-              flex-direction: column; gap: 2px;
-              text-decoration: none; color: inherit;
-              padding: 2px var(--s-1); overflow: hidden; }}
-/* Trajectory overlay toggle — coloured dot mirrors the trace tint Plotly
-   uses in the canvas so the operator can match checkbox → line. The
-   checkbox is OUTSIDE the <a>, so clicking it doesn't navigate. */
-.traj-toggle {{ flex: 0 0 auto; padding: 0 0 0 var(--s-2);
-                display: flex; align-items: center; gap: 4px;
-                cursor: pointer; user-select: none; }}
-.traj-toggle input[type=checkbox] {{ accent-color: var(--ink);
-                                      width: 13px; height: 13px; margin: 0;
-                                      cursor: pointer; }}
-.traj-toggle .swatch {{ width: 10px; height: 10px; border-radius: 50%;
-                         border: 1px solid rgba(0,0,0,0.12);
-                         display: inline-block; }}
-.traj-toggle-placeholder {{ flex: 0 0 auto;
-                             width: calc(13px + 10px + var(--s-2) + 8px); }}
-/* Head row: sid + path chips on one line. Everything flex:0 (fixed
-   intrinsic width); status chip + actions live as sibling flex cells
-   of .event-item so nothing competes for sid's or L/S's width. */
-.event-head {{ display: flex; align-items: center; gap: 6px;
-               min-width: 0; flex-wrap: nowrap; overflow: hidden; }}
-.event-head .sid {{ flex: 0 0 auto; font-family: var(--mono); font-size: 11px;
-                    font-weight: 500; color: var(--ink);
-                    letter-spacing: 0.04em; white-space: nowrap; }}
-.event-head .path-chip {{ flex: 0 0 auto; font-size: 10px; padding: 1px 6px;
-                          letter-spacing: 0.04em; white-space: nowrap; }}
-.event-status {{ display: flex; align-items: center;
-                 gap: 4px; justify-content: flex-end;
-                 min-width: 0; max-width: 120px; overflow: hidden; }}
-.event-status:empty {{ display: none; }}
-.event-status .chip {{ font-size: 9px; padding: 1px 6px;
-                       letter-spacing: 0.08em; white-space: nowrap; }}
-.event-meta {{ font-family: var(--mono); font-size: 10px;
-               color: var(--sub); letter-spacing: 0.02em;
-               white-space: nowrap; overflow: hidden;
-               text-overflow: ellipsis;
-               font-variant-numeric: tabular-nums; }}
-.event-meta .k {{ color: var(--sub); opacity: 0.7; margin-right: 2px;
-                  text-transform: uppercase; font-size: 9px;
-                  letter-spacing: 0.08em; }}
-.event-meta .v {{ color: var(--ink); margin-right: var(--s-2); }}
-.event-meta .v:last-child {{ margin-right: 0; }}
 .events-toolbar {{ display:flex; align-items:center; justify-content:space-between;
                    gap:var(--s-2); margin-bottom:var(--s-2); }}
 .events-filters {{ display:flex; gap:6px; }}
@@ -492,28 +441,103 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                   letter-spacing:0.10em; text-transform:uppercase;
                   padding:4px 8px; border-radius:var(--r); cursor:pointer; }}
 .events-filter.active {{ background:var(--ink); color:var(--surface); border-color:var(--ink); }}
-.event-actions {{ display:flex; flex-direction:row; align-items:center;
-                  gap:4px; margin: 0 var(--s-1) 0 0;
-                  justify-content: flex-end; }}
-.event-action-form {{ margin:0; }}
-.event-action {{ background:transparent; border:1px solid var(--border-base);
-                 color:var(--sub); font-family:var(--mono); font-size:9px;
-                 letter-spacing:0.08em; text-transform:uppercase;
-                 line-height:1; padding:4px 7px; border-radius:var(--r);
-                 cursor:pointer; white-space: nowrap;
-                 transition:border-color 0.15s,color 0.15s,background 0.15s; }}
-.event-action.warn:hover {{ border-color:var(--warn); color:var(--warn); background:var(--surface); }}
-.event-action.dev:hover {{ border-color:var(--dev); color:var(--dev); background:var(--surface); }}
-.event-action.ok:hover {{ border-color:var(--passed); color:var(--passed); background:var(--surface); }}
+
+.event-day {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
+              text-transform: uppercase; color: var(--sub);
+              padding: 10px var(--s-1) 4px;
+              border-bottom: 1px solid var(--border-l);
+              margin-top: 8px; }}
+.event-day:first-child {{ margin-top: 0; }}
+
+.event-item {{ padding: 8px var(--s-1);
+               border-top: 1px solid var(--border-l);
+               transition: background 0.12s ease; min-width: 0; }}
+.event-item:first-child,
+.event-day + .event-item {{ border-top: 0; }}
+.event-item:hover {{ background: var(--surface-hover); }}
+
+.ev-row1, .ev-row2, .ev-row3 {{ display: flex; align-items: center;
+                                gap: 8px; min-width: 0; flex-wrap: wrap;
+                                row-gap: 4px; }}
+.ev-row2, .ev-row3 {{ margin-top: 5px; }}
+.ev-row3 {{ justify-content: flex-end; }}
+.ev-spacer {{ flex: 1 1 auto; min-width: 4px; }}
+
+.ev-time {{ font-family: var(--mono); font-size: 12px; font-weight: 600;
+            color: var(--ink); letter-spacing: 0.02em;
+            font-variant-numeric: tabular-nums; flex: 0 0 auto; }}
+.ev-sid  {{ font-family: var(--mono); font-size: 11px; color: var(--sub);
+            letter-spacing: 0.04em; text-decoration: none; flex: 0 0 auto;
+            white-space: nowrap; }}
+.ev-sid:hover {{ color: var(--ink); }}
+
+/* Trajectory toggle — coloured dot mirrors Plotly trace tint. Click goes
+   to the checkbox; the wrapping <label> stops propagation in JS so the
+   <a class="ev-sid"> on the same row doesn't navigate on toggle. */
+.traj-toggle {{ flex: 0 0 auto; display: flex; align-items: center;
+                gap: 4px; cursor: pointer; user-select: none; }}
+.traj-toggle input[type=checkbox] {{ position: absolute; opacity: 0;
+                                      pointer-events: none; }}
+.traj-toggle .swatch,
+.swatch-empty {{ width: 12px; height: 12px; border-radius: 50%;
+                  border: 1px solid rgba(0,0,0,0.18);
+                  display: inline-block; flex: 0 0 auto;
+                  background: var(--surface-2); }}
+.swatch-empty {{ background: transparent; opacity: 0.45; }}
+
+.ev-statuses {{ display: flex; gap: 4px; flex: 0 0 auto;
+                justify-content: flex-end; }}
+.ev-statuses .chip {{ font-size: 9px; padding: 1px 6px;
+                       letter-spacing: 0.08em; white-space: nowrap; }}
+
+.ev-pipes {{ display: flex; gap: 5px; flex: 0 0 auto; flex-wrap: wrap;
+             row-gap: 4px; }}
+.ev-pipe {{ font-family: var(--mono); font-size: 10px; line-height: 1;
+            padding: 3px 7px; border: 1px solid var(--border-base);
+            border-radius: var(--r); color: var(--sub);
+            letter-spacing: 0.04em; white-space: nowrap;
+            font-variant-numeric: tabular-nums; }}
+.ev-pipe b {{ font-weight: 600; color: var(--sub-strong, var(--ink));
+              margin-left: 5px; opacity: 0.85; }}
+.ev-pipe.on {{ color: var(--passed); border-color: var(--passed);
+                background: var(--passed-bg); }}
+.ev-pipe.on b {{ color: var(--passed); opacity: 1; }}
+.ev-pipe.err {{ color: var(--failed); border-color: var(--failed);
+                 background: var(--failed-bg); }}
+.ev-pipe.err b {{ color: var(--failed); opacity: 1; }}
+
+.ev-metrics {{ display: flex; gap: 10px; flex: 1 1 auto; flex-wrap: wrap;
+               row-gap: 2px; padding-left: 4px;
+               border-left: 1px solid var(--border-l); margin-left: 2px; }}
+.ev-metrics:empty {{ display: none; border-left: 0; padding-left: 0; }}
+.ev-metric {{ font-family: var(--mono); font-size: 10px; color: var(--sub);
+              letter-spacing: 0.02em; white-space: nowrap;
+              font-variant-numeric: tabular-nums; }}
+.ev-metric i {{ font-style: normal; font-weight: 600; color: var(--ink);
+                margin-right: 2px; }}
+
+.ev-action-form {{ margin: 0; }}
+.ev-btn {{ background: transparent; border: 1px solid var(--border-base);
+            color: var(--sub); font-family: var(--mono); font-size: 9px;
+            letter-spacing: 0.08em; text-transform: uppercase;
+            line-height: 1; padding: 5px 9px; border-radius: var(--r);
+            cursor: pointer; white-space: nowrap; text-decoration: none;
+            display: inline-block;
+            transition: border-color 0.15s, color 0.15s, background 0.15s; }}
+.ev-btn.warn:hover {{ border-color: var(--warn); color: var(--warn); }}
+.ev-btn.dev:hover {{ border-color: var(--dev); color: var(--dev); }}
+.ev-btn.ok:hover {{ border-color: var(--passed); color: var(--passed); }}
+.ev-btn.accent:hover {{ border-color: var(--ink); color: var(--ink); }}
+
 .chip.processing {{ color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }}
 .chip.queued {{ color: var(--sub); border-color: var(--border-base); background: transparent; }}
 .chip.canceled {{ color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }}
-/* Row-level treatment while a server_post job is queued/processing —
-   complements the inline status chip with an ambient orange pulse so the
-   in-flight session is visible at a glance from across the sidebar. The
-   2px border-left + 2px padding-left adds a 4px content shift while the
-   class is on; small enough not to read as visual noise and not worth
-   counter-offsetting on the base rule. */
+.chip.completed {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
+
+/* Ambient orange pulse while server_post is in-flight; complements the
+   inline `processing` chip with a row-level cue visible from across the
+   sidebar. Border-left adds a 2 px stripe; padding subtracts the same
+   so content doesn't shift on toggle. */
 .event-item.processing {{ border-left: 2px solid var(--warn);
                            padding-left: calc(var(--s-1) - 2px);
                            animation: rs-pulse 1.5s ease-in-out infinite; }}
@@ -521,15 +545,11 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
   0%, 100% {{ background: transparent; }}
   50%      {{ background: var(--warn-bg); }}
 }}
-/* Transient celebration on server_post_done — Tier 2 flips this class on
-   for ~600 ms then removes it. Standalone keyframe so .processing's
-   pulse can finish naturally before the flash kicks in. */
 .event-item.flash-done {{ animation: rs-flash 0.6s ease-out; }}
 @keyframes rs-flash {{
   0%   {{ background: rgba(34,197,94,0.22); }}
   100% {{ background: transparent; }}
 }}
-.chip.completed {{ color: var(--passed); border-color: var(--passed); background: var(--passed-bg); }}
 
 /* --- Intrinsics (ChArUco) card --- */
 .intrinsics-roles {{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:var(--s-2); }}

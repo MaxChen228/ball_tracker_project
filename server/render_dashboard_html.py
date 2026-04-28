@@ -57,7 +57,7 @@ def render_dashboard_html(
         '<em>Report</em>) live on each Events row below.'
         '</div>'
         '<form method="POST" action="/gt/distill" style="margin:0;">'
-        '<button type="submit" class="event-action accent" '
+        '<button type="submit" class="ev-btn accent" '
         'title="Fit HSV / shape_gate / selector against all SAM 3 GT '
         'records, evaluate on holdout, write data/gt/fit_proposals.json">'
         'Run distillation</button>'

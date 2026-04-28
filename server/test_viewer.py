@@ -1124,11 +1124,16 @@ def test_events_path_status_marks_live_done_on_frame_existence_not_triangulation
     assert block_start >= 0
     # Scan forward from the session id to the event's trailing action form
     # so we only match chips inside THIS event's row.
-    block_end = html_body.find("event-actions", block_start)
+    # Find the end of this event-item DOM block by scanning forward to the
+    # next event-day separator OR end-of-document; both are stable anchors
+    # under the redesigned card layout.
+    block_end = html_body.find('class="event-day"', block_start + 1)
+    if block_end < 0:
+        block_end = len(html_body)
     chip_block = html_body[block_start:block_end]
-    assert 'class="path-chip on"' in chip_block
-    # Per-cam A·B layout — A=2, B absent renders as "2·—".
-    assert '<span class="pc">2·—</span>' in chip_block
+    assert 'class="ev-pipe on"' in chip_block
+    # Per-cam A·B layout — A=2, B absent renders as "2·—" inside the bold.
+    assert '<b>2·—</b>' in chip_block
 
 
 def test_index_endpoint_lists_events_with_viewer_links():

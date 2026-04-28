@@ -13,9 +13,15 @@ lock so the dashboard's 5 s tick can't stall /pitch handlers.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING, Any
 
 from schemas import CaptureTelemetryPayload, DetectionPath, SessionResult
+
+# Asia/Taipei. Hard-coded because the only operator runs out of TW and a
+# zoneinfo dependency for one fixed offset is overkill. Adjust if the rig
+# moves jurisdictions.
+_LOCAL_TZ = timezone(timedelta(hours=8))
 
 if TYPE_CHECKING:
     from state import State
@@ -42,7 +48,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
     snapshots = _snapshot_sessions_locked(state)
 
     events: list[dict[str, Any]] = []
-    for sid, cams_present, n_ball_frames_by_path, cam_capture_telemetry, result in snapshots:
+    for sid, cams_present, n_ball_frames_by_path, cam_capture_telemetry, result, created_at in snapshots:
         trashed = state._processing.is_trashed(sid)
         if bucket == "active" and trashed:
             continue
@@ -50,6 +56,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
             continue
 
         latest_mtime = _latest_pitch_mtime(state, cams_present, sid)
+        created_day, created_hm = _format_local(created_at)
         authority_points = result.triangulated if result is not None else []
         n_triangulated = len(authority_points) if result is not None else 0
         error = result.error if result is not None else None
@@ -77,6 +84,11 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                 "status": status,
                 "mode": mode,
                 "received_at": latest_mtime,
+                # Original creation stamp + pre-formatted local strings so
+                # SSR + client renderers don't both reimplement timezone math.
+                "created_at": created_at,
+                "created_day": created_day,
+                "created_hm": created_hm,
                 # Per-pipeline counts (live / server_post). Legacy flat name
                 # kept for older consumers.
                 "n_ball_frames_by_path": n_ball_frames_by_path,
@@ -117,14 +129,23 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
             }
         )
 
-    # Latest events first — session ids carry 4 bytes of random hex so we
-    # sort by `received_at` (fallback to id) to surface the most recently
-    # uploaded session at the top.
+    # Sort by *original* creation stamp, not file mtime — server_post
+    # backfill rewrites the pitch JSON and bumps mtime, which used to make
+    # finished sessions jump to the top of the events list as if they'd just
+    # arrived. `created_at` is set once on first /pitch and preserved across
+    # re-records, so the order reflects when the operator actually threw.
     events.sort(
-        key=lambda e: (e["received_at"] or 0, e["session_id"]),
+        key=lambda e: (e.get("created_at") or 0, e["session_id"]),
         reverse=True,
     )
     return events
+
+
+def _format_local(ts: float | None) -> tuple[str | None, str | None]:
+    if ts is None:
+        return None, None
+    dt = datetime.fromtimestamp(ts, tz=_LOCAL_TZ)
+    return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
 
 
 def _snapshot_sessions_locked(
@@ -136,6 +157,7 @@ def _snapshot_sessions_locked(
         dict[str, dict[str, int]],
         dict[str, CaptureTelemetryPayload | None],
         SessionResult | None,
+        float | None,
     ]
 ]:
     """Grab everything we need from in-memory state under one lock acquisition.
@@ -153,6 +175,7 @@ def _snapshot_sessions_locked(
                 dict[str, dict[str, int]],
                 dict[str, CaptureTelemetryPayload | None],
                 SessionResult | None,
+                float | None,
             ]
         ] = []
         for sid in sessions:
@@ -160,6 +183,7 @@ def _snapshot_sessions_locked(
             n_ball_frames_by_path: dict[str, dict[str, int]] = {
                 path: {} for path, _ in _PATH_TO_FRAMES_ATTR
             }
+            created_candidates: list[float] = []
             for cam in cams_present:
                 pitch = state.pitches[(cam, sid)]
                 for path, attr in _PATH_TO_FRAMES_ATTR:
@@ -167,10 +191,14 @@ def _snapshot_sessions_locked(
                     n_ball_frames_by_path[path][cam] = sum(
                         1 for f in frames if f.ball_detected
                     )
+                if pitch.created_at is not None:
+                    created_candidates.append(pitch.created_at)
             cam_capture_telemetry = {
                 cam: state.pitches[(cam, sid)].capture_telemetry
                 for cam in cams_present
             }
+            # Earliest arrival across A/B is the moment the session "happened".
+            session_created_at = min(created_candidates) if created_candidates else None
             snapshots.append(
                 (
                     sid,
@@ -178,6 +206,7 @@ def _snapshot_sessions_locked(
                     n_ball_frames_by_path,
                     cam_capture_telemetry,
                     state.results.get(sid),
+                    session_created_at,
                 )
             )
     return snapshots

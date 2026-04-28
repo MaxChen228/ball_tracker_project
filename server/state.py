@@ -342,6 +342,7 @@ class State:
         return self._result_dir / f"session_{session_id}.json"
 
     def _load_from_disk(self) -> None:
+        backfill: list[tuple[Path, tuple[str, str]]] = []
         for path in sorted(self._pitch_dir.glob("session_*.json")):
             try:
                 obj = json.loads(path.read_text())
@@ -354,7 +355,26 @@ class State:
             # without a reprocess_sessions run.
             chain_filter_annotate(pitch.frames_live, self._chain_filter_params)
             chain_filter_annotate(pitch.frames_server_post, self._chain_filter_params)
+            # Backfill `created_at` for legacy pitches written before the
+            # field shipped: prefer the file's mtime (real upload moment) so
+            # historical sessions group under the day they actually happened
+            # instead of being smashed into "today" on first restart.
+            if pitch.created_at is None:
+                try:
+                    pitch.created_at = path.stat().st_mtime
+                except OSError:
+                    pitch.created_at = self._time_fn()
+                backfill.append((path, (pitch.camera_id, pitch.session_id)))
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
+
+        for path, key in backfill:
+            pitch = self.pitches.get(key)
+            if pitch is None:
+                continue
+            try:
+                self._atomic_write(path, pitch.model_dump_json())
+            except OSError as e:
+                logger.warning("created_at backfill write failed %s: %s", path, e)
 
         seen_sessions = {sid for _, sid in self.pitches.keys()}
         for sid in sorted(seen_sessions):
@@ -815,6 +835,14 @@ class State:
                     merged.frames_live = list(existing.frames_live)
                 if not merged.frames_server_post and existing.frames_server_post:
                     merged.frames_server_post = list(existing.frames_server_post)
+                # Preserve the original creation stamp across re-records
+                # (server_post backfill, live merge). If the existing record
+                # lacked one (legacy / synthetic before this field shipped),
+                # fall through and stamp now.
+                if existing.created_at is not None:
+                    merged.created_at = existing.created_at
+            if merged.created_at is None:
+                merged.created_at = self._time_fn()
             if not merged.frames_live and live_frames:
                 merged.frames_live = list(live_frames)
             # Annotate whichever buckets we just touched. Safe to re-run:
