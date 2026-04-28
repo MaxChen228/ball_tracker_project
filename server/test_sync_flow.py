@@ -212,7 +212,7 @@ def test_paired_payloads_with_mismatched_sync_ids_fail_before_triangulation(tmp_
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames=frame,
+        frames_server_post=frame,
     )
     pb = main.PitchPayload(
         camera_id="B",
@@ -221,7 +221,7 @@ def test_paired_payloads_with_mismatched_sync_ids_fail_before_triangulation(tmp_
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames=frame,
+        frames_server_post=frame,
     )
     main.state.record(pa)
     result = main.state.record(pb)

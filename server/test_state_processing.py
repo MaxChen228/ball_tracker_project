@@ -21,7 +21,6 @@ def _pitch(cam: str, session_id: str) -> PitchPayload:
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames=[],
         frames_server_post=[],
     )
 
