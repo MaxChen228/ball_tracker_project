@@ -444,8 +444,13 @@ class AutoCalibrationRunStore:
         })
         snap = AutoCalibrationRun(**run.to_dict())
         self._last[camera_id] = snap
-        if status in {"completed", "failed"}:
-            self._active.pop(camera_id, None)
+        # finish() means this run terminated — regardless of outcome
+        # (completed/failed/accumulating/solve_failed). Leaving non-
+        # terminal statuses in _active jammed the cam: frontend grayed
+        # the button (autoCalDisabled = !!autoRun) and start() rejected
+        # the next click with 409. Buffer progress lives in
+        # calibration_buffers, so the UI doesn't lose state.
+        self._active.pop(camera_id, None)
         return snap
 
     def status(self) -> dict[str, Any]:
