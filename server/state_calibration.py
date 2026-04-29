@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+# Single-shot calibration solver hard ceiling: anything worse than this
+# means the solver latched onto garbage (wrong correspondences /
+# degenerate geometry) and shipping it would poison downstream
+# triangulation. Surfaced by route as 422.
+REPROJ_FAIL_PX = 20.0
+
 from schemas import CalibrationSnapshot, DeviceIntrinsics, IntrinsicsPayload
 
 logger = logging.getLogger("ball_tracker")
@@ -444,12 +450,10 @@ class AutoCalibrationRunStore:
         })
         snap = AutoCalibrationRun(**run.to_dict())
         self._last[camera_id] = snap
-        # finish() means this run terminated — regardless of outcome
-        # (completed/failed/accumulating/solve_failed). Leaving non-
-        # terminal statuses in _active jammed the cam: frontend grayed
-        # the button (autoCalDisabled = !!autoRun) and start() rejected
-        # the next click with 409. Buffer progress lives in
-        # calibration_buffers, so the UI doesn't lose state.
+        # finish() means this run terminated — completed or failed.
+        # Leaving the run in _active jammed the cam: frontend grayed the
+        # button (autoCalDisabled = !!autoRun) and start() rejected the
+        # next click with 409.
         self._active.pop(camera_id, None)
         return snap
 
@@ -459,83 +463,16 @@ class AutoCalibrationRunStore:
         return {"active": active, "last": last}
 
 
-# Multi-frame calibration accumulation. Each press of dashboard
-# [Calibrate Cam X] captures one frame, detects markers, unions the
-# (id → image_pts) pairs into a per-cam buffer. When ≥ MIN_MARKERS_FOR_SOLVE
-# distinct ids accumulate, the route attempts a solve; success clears
-# the buffer + writes the snapshot, failure (reproj > REPROJ_FAIL_PX)
-# keeps the buffer + counts as a failure. After MAX_FAILURES consecutive
-# bad solves or BUFFER_STALE_S of no new frame, the buffer auto-clears
-# so stale state never permanently jams the cam.
-MIN_MARKERS_FOR_SOLVE = 5
-REPROJ_FAIL_PX = 20.0
-MAX_FAILURES = 3
-BUFFER_STALE_S = 300.0  # 5 min
-
-
-@dataclass
-class _AccumulatedMarker:
-    """Per-marker last-write-wins entry: image points + their world coords.
-
-    image_corners: shape (4, 2) — ArUco marker's 4 corners in pixel space.
-    world_points: shape (4, 3) — same 4 corners in world frame (z=0 for
-    plate-plane markers, real z for extended 3D markers). Stored alongside
-    so the solver doesn't need to re-resolve world coords later — plate
-    vs extended membership might race against operator edits.
-    last_seen_at: timestamp of the frame this came from.
-    """
-    image_corners: Any  # np.ndarray (4, 2)
-    world_points: Any   # np.ndarray (4, 3)
-    last_seen_at: float
-
-
-@dataclass
-class MarkerAccumulator:
-    markers: dict[int, _AccumulatedMarker] = field(default_factory=dict)
-    failure_count: int = 0
-    last_frame_at: float | None = None
-    last_solved_at: float | None = None
-    last_reproj_px: float | None = None
-    last_solve_status: str | None = None  # "ok" | "reproj_too_high" | "solver_error"
-
-    def is_stale(self, *, now: float) -> bool:
-        if self.last_frame_at is None:
-            return False
-        return now - self.last_frame_at > BUFFER_STALE_S
-
-    def is_exhausted(self) -> bool:
-        return self.failure_count >= MAX_FAILURES
-
-    def ready_to_solve(self) -> bool:
-        return len(self.markers) >= MIN_MARKERS_FOR_SOLVE
-
-    def to_summary(self) -> dict[str, Any]:
-        return {
-            "marker_ids": sorted(self.markers.keys()),
-            "count": len(self.markers),
-            "ready": self.ready_to_solve(),
-            "failure_count": self.failure_count,
-            "last_frame_at": self.last_frame_at,
-            "last_solved_at": self.last_solved_at,
-            "last_reproj_px": self.last_reproj_px,
-            "last_solve_status": self.last_solve_status,
-        }
-
-
 @dataclass
 class LastSolveRecord:
     """Persistent per-cam record of the most recent SUCCESSFUL solve.
-    Survives buffer clears so the dashboard can keep showing operators
-    "what was last calibrated" even when the buffer is empty.
+    Reset only by `reset_rig()` (rig geometry changed → record obsolete).
 
-    First-principles UX rationale: after a successful calibration the
-    accumulator is wiped (clean slate for the next run), but the operator
-    still wants to see "this pose was set N min ago using markers
-    [0..8] with reproj 7.9 px" — without that, the dashboard looks
-    identical to a never-calibrated cam.
-
-    Reset on `reset_rig()` (rig geometry changed → previous record
-    no longer meaningful)."""
+    Operator UX: after a successful calibration the dashboard should
+    keep showing "last calibrated N min ago using markers [0..8] with
+    reproj 7.9 px" — without that, a freshly-rebooted server with
+    on-disk snapshots loaded looks identical to a never-calibrated rig.
+    """
     solved_at: float
     marker_ids: list[int]            # ids that contributed to the solve
     reproj_px: float | None
@@ -562,133 +499,32 @@ class LastSolveRecord:
         }
 
 
-class MarkerAccumulatorStore:
-    """Per-camera marker accumulators for multi-frame auto-calibration.
+class LastSolveStore:
+    """Per-camera record of the most recent successful calibration solve.
 
-    Methods are thread-safe under the caller's lock — `State` holds
-    `_lock` around all access. The store itself is a thin map; the
-    solve-and-persist policy lives in `routes/calibration.py`.
-
-    Auto-stale gate runs lazily on read: any buffer that hasn't seen
-    a frame in BUFFER_STALE_S, or that has exhausted MAX_FAILURES
-    consecutive bad solves, is cleared the next time it's accessed.
-
-    `_last_solve` survives buffer clears so the dashboard can show
-    "last calibrated N min ago using markers […]" persistently —
-    operator's UX continuity. Cleared only on `reset_rig()`.
+    Thread-safe under the caller's lock — `State` holds `_lock` around
+    all access. Single-shot calibration: each press of [Recalibrate] is
+    one frame; success overwrites the record, failure is a hard 422 and
+    leaves the prior record untouched. Reset only by `reset_rig()`.
     """
 
-    def __init__(self, *, time_fn: Callable[[], float]) -> None:
-        self._time_fn = time_fn
-        self._buffers: dict[str, MarkerAccumulator] = {}
-        self._last_solve: dict[str, LastSolveRecord] = {}
+    def __init__(self) -> None:
+        self._records: dict[str, LastSolveRecord] = {}
 
-    def _gc(self, camera_id: str) -> None:
-        buf = self._buffers.get(camera_id)
-        if buf is None:
-            return
-        now = self._time_fn()
-        if buf.is_stale(now=now) or buf.is_exhausted():
-            self._buffers.pop(camera_id, None)
+    def record(self, camera_id: str, record: LastSolveRecord) -> None:
+        self._records[camera_id] = record
 
-    def get(self, camera_id: str) -> MarkerAccumulator:
-        """Return the live accumulator (creating an empty one if needed).
-        GC runs first so callers always get a fresh-or-cleared state."""
-        self._gc(camera_id)
-        buf = self._buffers.get(camera_id)
-        if buf is None:
-            buf = MarkerAccumulator()
-            self._buffers[camera_id] = buf
-        return buf
+    def get(self, camera_id: str) -> LastSolveRecord | None:
+        return self._records.get(camera_id)
 
-    def summary(self, camera_id: str) -> dict[str, Any]:
-        self._gc(camera_id)
-        buf = self._buffers.get(camera_id)
-        body = buf.to_summary() if buf is not None else MarkerAccumulator().to_summary()
-        # Persistent last-solve record (survives buffer clears).
-        last = self._last_solve.get(camera_id)
-        body["last_solve"] = last.to_dict() if last is not None else None
-        return body
+    def summary(self, camera_id: str) -> dict[str, Any] | None:
+        rec = self._records.get(camera_id)
+        return rec.to_dict() if rec is not None else None
 
     def all_summaries(self) -> dict[str, dict[str, Any]]:
-        for cam in list(self._buffers.keys()):
-            self._gc(cam)
-        cams = set(self._buffers.keys()) | set(self._last_solve.keys())
-        out: dict[str, dict[str, Any]] = {}
-        for cam in cams:
-            out[cam] = self.summary(cam)
-        return out
-
-    def record_last_solve(self, camera_id: str, record: LastSolveRecord) -> None:
-        """Persist the metadata of a successful solve. Called from the
-        route AFTER the snapshot has been written so this record always
-        reflects "what's currently on disk for this cam"."""
-        self._last_solve[camera_id] = record
-
-    def get_last_solve(self, camera_id: str) -> LastSolveRecord | None:
-        return self._last_solve.get(camera_id)
-
-    def accumulate(
-        self,
-        camera_id: str,
-        markers: dict[int, tuple[Any, Any]],
-    ) -> tuple[list[int], list[int]]:
-        """Union new (id → (image_corners, world_points)) entries into the
-        buffer. Last-write-wins per id (camera shouldn't move between
-        captures, but if it did the operator should hit Clear).
-
-        Returns (newly_added_ids, all_ids_after).
-        """
-        buf = self.get(camera_id)
-        now = self._time_fn()
-        new_ids: list[int] = []
-        for mid, (img_corners, world_pts) in markers.items():
-            if mid not in buf.markers:
-                new_ids.append(mid)
-            buf.markers[mid] = _AccumulatedMarker(
-                image_corners=img_corners,
-                world_points=world_pts,
-                last_seen_at=now,
-            )
-        buf.last_frame_at = now
-        return new_ids, sorted(buf.markers.keys())
-
-    def record_solve_result(
-        self,
-        camera_id: str,
-        *,
-        reproj_px: float | None,
-        ok: bool,
-        status: str,
-    ) -> None:
-        """Update solve metadata; on success clear the buffer (operator
-        succeeded — start fresh). On failure keep markers, increment
-        failure_count so the GC eventually nukes a permanently-bad buffer."""
-        buf = self._buffers.get(camera_id)
-        if buf is None:
-            return
-        now = self._time_fn()
-        buf.last_solved_at = now
-        buf.last_reproj_px = reproj_px
-        buf.last_solve_status = status
-        if ok:
-            self._buffers.pop(camera_id, None)
-        else:
-            buf.failure_count += 1
-            if buf.is_exhausted():
-                self._buffers.pop(camera_id, None)
-
-    def clear(self, camera_id: str) -> bool:
-        """Drop the live buffer for `camera_id`. Does NOT touch the
-        persistent last-solve record — operator's [Clear] only resets
-        the in-progress accumulation, the prior calibration history
-        is still meaningful."""
-        return self._buffers.pop(camera_id, None) is not None
+        return {cam: rec.to_dict() for cam, rec in self._records.items()}
 
     def clear_all(self) -> int:
-        """Used by reset_rig: wipes every cam's buffer AND last-solve
-        record (rig geometry changed, prior calibration is invalid)."""
-        n = len(self._buffers)
-        self._buffers.clear()
-        self._last_solve.clear()
+        n = len(self._records)
+        self._records.clear()
         return n

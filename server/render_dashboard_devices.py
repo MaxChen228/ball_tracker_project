@@ -145,8 +145,10 @@ def _render_buffer_block(
 
     Designed so an operator can see "what state am I in" and
     "what's already been done" without re-running calibration.
-    Persists across buffer clears via `last_solve` field on the buffer
-    summary (see state_calibration.MarkerAccumulatorStore.summary)."""
+    Phase-1 façade: caller wraps `last_solve` summaries in a buffer-shaped
+    dict (`{cam: {"last_solve": ...}}`) so this block keeps painting until
+    phase 2 redesigns the panel. Buffer/count/failure fields are always
+    empty in this build and the corresponding tiers render nothing."""
     count = int(buf.get("count", 0)) if buf else 0
     buffer_id_list: list[int] = list(buf.get("marker_ids", [])) if buf else []
     failure_count = int(buf.get("failure_count", 0)) if buf else 0

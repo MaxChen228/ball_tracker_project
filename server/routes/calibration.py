@@ -11,7 +11,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from state_calibration import MIN_MARKERS_FOR_SOLVE
+from state_calibration import REPROJ_FAIL_PX
 from calibration_solver import (
     PLATE_MARKER_WORLD,
     derive_fov_intrinsics,
@@ -677,59 +677,22 @@ def _reprojection_error_px(
     return float(np.mean(errs)) if errs else None
 
 
-def _world_xyz_for_id(marker_id: int, state: Any) -> np.ndarray | None:
-    """Look up a marker id's world (X,Y,Z) coords. Plate markers (0-8)
-    live at z=0 from PLATE_MARKER_WORLD; extended markers come from the
-    operator-managed registry. Returns None if the id is unknown."""
-    if marker_id in PLATE_MARKER_WORLD:
-        wx, wy = PLATE_MARKER_WORLD[marker_id]
-        return np.array([wx, wy, 0.0], dtype=np.float64)
-    rec = state._marker_registry.get(marker_id)
-    if rec is None:
-        return None
-    return np.array([rec.x_m, rec.y_m, rec.z_m], dtype=np.float64)
-
-
-def _accumulator_world_points_for(
-    marker_id: int, image_corners: np.ndarray, state: Any,
-) -> np.ndarray | None:
-    """Return (4,3) world-frame coords of a marker's 4 corners, given
-    its center in world. Plate markers are 5 cm squares lying flat; for
-    accumulator caching we just store the centroid replicated 4× — the
-    actual solve recomputes corner geometry from id via the existing
-    plate/extended lookups. The cached world_points field is informational
-    only (currently unused by the solver path)."""
-    center = _world_xyz_for_id(marker_id, state)
-    if center is None:
-        return None
-    return np.tile(center, (4, 1))
-
-
 async def _run_auto_calibration(
     camera_id: str,
     *,
     h_fov_deg: float | None = None,
     track_run: bool = False,
 ) -> dict[str, Any]:
-    """Multi-frame accumulating auto-calibration.
+    """Single-shot auto-calibration.
 
-    Each call captures one full-res JPEG, detects ArUco markers, and
-    unions them into the per-camera buffer. The solver only fires when
-    the buffer accumulates ≥ MIN_MARKERS_FOR_SOLVE (5) distinct ids;
-    success persists the snapshot + clears the buffer, failure keeps
-    the buffer + counts toward the auto-clear threshold.
+    One call = one full-res JPEG → ArUco detect → solve → store. Every
+    failure mode (no frame, no markers, degenerate geometry, reproj > 20
+    px) raises 422/408 — there is no buffer to keep. Operator just
+    re-aims and presses Recalibrate again.
 
-    Return dict always carries `phase` ∈ {"accumulating", "solve_failed",
-    "solve_ok"} plus `buffer_summary`. Solve_ok additionally carries the
-    `result` / `intrinsics` / `reprojection_px` etc that the route uses
-    to write the CalibrationSnapshot.
-
-    HTTPException is still raised for hard errors (frame timeout,
-    no-markers-visible, solver geometric failure) — those are not
-    recoverable by accumulating more frames so the operator should fix
-    the scene before retrying. Reproj > 20 px IS recoverable (operator
-    adds another frame, more markers, may average out the bad fit) so
-    that case routes through phase=solve_failed instead of 422.
+    Returns the solve_ok payload (`result` / `intrinsics` /
+    `reprojection_px` / `delta_*` / `pnp_detected_ids`) that the caller
+    uses to write the CalibrationSnapshot.
     """
     import cv2  # noqa: WPS433
     import main as _main
@@ -743,10 +706,6 @@ async def _run_auto_calibration(
     # swap-back + ~0.4 s upload of a 3-5 MB JPEG ≈ p95 4-5 s. 10 s gives
     # comfortable headroom; old 5 s ceiling was too tight for the new path.
     frame_timeout_s = 10.0
-    # Hard ceiling — anything worse than this means the solver latched
-    # onto garbage (wrong marker correspondences, degenerate geometry) and
-    # shipping it would poison downstream triangulation silently.
-    reproj_reject_px = 20.0
 
     if track_run:
         online_ids = sorted(d.camera_id for d in state.online_devices())
@@ -871,122 +830,53 @@ async def _run_auto_calibration(
             },
         )
     if not detected:
+        plate_ids_str = ",".join(str(i) for i in sorted(PLATE_MARKER_WORLD.keys()))
         raise HTTPException(
             status_code=422,
             detail=(
                 f"no known markers visible on camera {camera_id!r} — "
-                "aim the lens at the plate (IDs 0-5) before retrying"
+                f"aim the lens at the plate (IDs {plate_ids_str}) before retrying"
             ),
         )
-
-    # Accumulate this frame's markers into the per-cam buffer (union by
-    # id, last-write-wins on corners since the cam should be stationary).
-    # Buffer state is what the solver actually sees — current frame's
-    # markers are just the latest contribution.
-    from calibration_solver import DetectedMarker as _DetectedMarker
-
-    accumulator_input: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-    for m in detected:
-        wpts = _accumulator_world_points_for(m.id, m.corners, state)
-        if wpts is None:
-            continue
-        accumulator_input[m.id] = (m.corners, wpts)
-
-    new_ids, all_ids = state.accumulate_calibration_markers(
-        camera_id, accumulator_input,
-    )
-    buf_summary = state.calibration_buffer_summary(camera_id)
-
-    if track_run:
-        state.append_auto_cal_event(
-            camera_id,
-            "buffer accumulated",
-            data={
-                "new_ids": new_ids,
-                "all_ids": all_ids,
-                "count": len(all_ids),
-                "ready": buf_summary["ready"],
-            },
-        )
-
-    if not buf_summary["ready"]:
-        # Not enough markers across the buffer yet — return early so
-        # operator can press [Calibrate] again with the cam aimed at
-        # a different marker subset.
-        if track_run:
-            state.update_auto_cal_run(
-                camera_id,
-                status="accumulating",
-                markers_visible=len(all_ids),
-                detected_ids=all_ids,
-                summary=f"Accumulating ({len(all_ids)}/{MIN_MARKERS_FOR_SOLVE})",
-            )
-        return {
-            "phase": "accumulating",
-            "buffer_summary": buf_summary,
-            "frame_image_size": (w_img, h_img),
-        }
 
     if track_run:
         state.update_auto_cal_run(
             camera_id,
             status="solving",
-            markers_visible=len(all_ids),
-            detected_ids=all_ids,
-            summary=f"Solving from {len(all_ids)} accumulated markers",
+            markers_visible=len(detected),
+            detected_ids=sorted(m.id for m in detected),
+            summary=f"Solving from {len(detected)} markers",
         )
 
-    # Solve from the buffer, not just this frame's markers. Snapshot the
-    # markers under State._lock so a concurrent [Calibrate] press
-    # mutating the dict doesn't trigger
-    # `RuntimeError: dictionary changed size during iteration` here.
-    buffered_markers = state.calibration_buffer_snapshot_for_solve(camera_id)
-    detected_buffered = [
-        _DetectedMarker(id=mid, corners=entry.image_corners)
-        for mid, entry in buffered_markers
-    ]
     result, solver, pnp_detected_ids = _solve_auto_cal_solution(
-        detected_buffered, intrinsics=intrinsics, image_size=(w_img, h_img),
+        detected, intrinsics=intrinsics, image_size=(w_img, h_img),
     )
     if result is None:
-        # Geometry is degenerate even with the accumulated set — record
-        # failure (auto-clear after MAX_FAILURES) and raise 422 so the
-        # dashboard can surface the operator-fixable cause.
-        state.record_calibration_solve_result(
-            camera_id, reproj_px=None, ok=False, status="solver_error",
-        )
-        seen_ids = sorted(m.id for m in detected_buffered)
+        seen_ids = sorted(m.id for m in detected)
         raise HTTPException(
             status_code=422,
             detail=(
-                "pose solver failed — accumulated markers "
+                "pose solver failed — markers "
                 f"{seen_ids} but geometry is degenerate (colinear or too few)"
             ),
         )
 
     reproj_px = _reprojection_error_px(
-        intrinsics, result.homography_row_major, detected_buffered,
+        intrinsics, result.homography_row_major, detected,
     )
-    if reproj_px is not None and reproj_px > reproj_reject_px:
-        # Recoverable failure — keep buffer, count failure. Operator can
-        # add more frames (different angles / markers) to dilute outliers,
-        # or hit Clear and start fresh. After MAX_FAILURES the buffer
-        # auto-clears so a permanently-bad scene doesn't jam the cam.
-        state.record_calibration_solve_result(
-            camera_id, reproj_px=reproj_px, ok=False, status="reproj_too_high",
-        )
+    if reproj_px is not None and reproj_px > REPROJ_FAIL_PX:
         if track_run:
             state.append_auto_cal_event(
                 camera_id, "reproj above ceiling", level="warn",
-                data={"reproj_px": round(reproj_px, 2), "ceiling_px": reproj_reject_px},
+                data={"reproj_px": round(reproj_px, 2), "ceiling_px": REPROJ_FAIL_PX},
             )
-        return {
-            "phase": "solve_failed",
-            "reproj_px": reproj_px,
-            "reproj_ceiling_px": reproj_reject_px,
-            "buffer_summary": state.calibration_buffer_summary(camera_id),
-            "frame_image_size": (w_img, h_img),
-        }
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"reprojection {reproj_px:.1f} px exceeded {REPROJ_FAIL_PX:.0f} px "
+                "limit — re-aim and try again (markers fully visible, less oblique)"
+            ),
+        )
 
     # Rebuild K + H in the canonical 1920×1080 live-video basis.
     #
@@ -1085,16 +975,9 @@ async def _run_auto_calibration(
         delta_ang_deg = float(
             np.degrees(np.arccos(np.clip(np.dot(forward_new, forward_old), -1.0, 1.0)))
         )
-    # Solve succeeded with reproj ≤ ceiling. Mark the buffer ok BEFORE
-    # the route persists the snapshot — record_solve_result(ok=True) clears
-    # the buffer, but we still hold `result` / `intrinsics` locally so
-    # the caller can write the snapshot from this dict.
-    state.record_calibration_solve_result(
-        camera_id, reproj_px=reproj_px, ok=True, status="ok",
-    )
     # Persistent last-solve record — dashboard reads this to keep
-    # showing "last calibrated N min ago, used markers […]" after
-    # the buffer empties on success. Operator's UX continuity.
+    # showing "last calibrated N min ago, used markers […]" between
+    # recalibrations. Operator's UX continuity.
     from state_calibration import LastSolveRecord
     n_extended = sum(
         1 for mid in result.detected_ids if mid not in PLATE_MARKER_WORLD
@@ -1115,7 +998,6 @@ async def _run_auto_calibration(
         ),
     )
     return {
-        "phase": "solve_ok",
         "frames_seen": 1,
         "good_frames": 1,
         "stable_frames": 1,
@@ -1126,7 +1008,6 @@ async def _run_auto_calibration(
         "delta_position_cm": delta_pos_cm,
         "delta_angle_deg": delta_ang_deg,
         "pnp_detected_ids": pnp_detected_ids,
-        "buffer_summary": state.calibration_buffer_summary(camera_id),
     }
 
 
@@ -1136,14 +1017,13 @@ async def calibration_auto(
     request: Request,
     h_fov_deg: float | None = None,
 ) -> dict[str, Any]:
-    """Dashboard-triggered auto-calibration.
+    """Dashboard-triggered single-shot calibration.
 
-    Request a one-shot full-resolution JPEG from the phone via the WS settings path,
-    poll the buffer for up to 2 s, run ArUco at native capture resolution.
-    The snapshot lives in the SAME pixel coord system as the MOVs the
-    phone later uploads for triangulation → K doesn't need rescaling at
-    pitch time and the preview-vs-capture dims-mismatch class of bugs
-    is gone at the source. 408 on no-delivery; no preview fallback.
+    Pull one full-res JPEG from the phone, run ArUco, solve. The
+    snapshot lives in the canonical 1920×1080 video basis so live-path
+    CameraPose + pitch-time pairing.scale_pitch_to_video_dims see a
+    consistent K. 408 on no-frame, 422 on no-markers / degenerate /
+    reproj > 20 px — operator just retries.
     """
     import main as _main
     state = _main.state
@@ -1152,37 +1032,8 @@ async def calibration_auto(
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_id):
         raise HTTPException(status_code=400, detail="invalid camera_id")
     auto = await _run_auto_calibration(camera_id, h_fov_deg=h_fov_deg, track_run=False)
-    phase = auto["phase"]
-    if phase == "accumulating":
-        # Buffer needs more markers — operator should press [Calibrate]
-        # again with the cam pointed at a different marker subset. Not
-        # an error; dashboard polls /status for the buffer count.
-        if _wants_html(request):
-            return RedirectResponse("/", status_code=303)  # type: ignore[return-value]
-        return {
-            "ok": True,
-            "phase": "accumulating",
-            "camera_id": camera_id,
-            "buffer_summary": auto["buffer_summary"],
-        }
-    if phase == "solve_failed":
-        # Reproj > 20 px — buffer kept for retry. 200 (not 422) so the
-        # dashboard surface treats it as actionable instead of a hard
-        # error; the route response carries phase + reproj for the UI.
-        if _wants_html(request):
-            return RedirectResponse("/", status_code=303)  # type: ignore[return-value]
-        return {
-            "ok": False,
-            "phase": "solve_failed",
-            "camera_id": camera_id,
-            "reproj_px": auto["reproj_px"],
-            "reproj_ceiling_px": auto["reproj_ceiling_px"],
-            "buffer_summary": auto["buffer_summary"],
-        }
-    # phase == "solve_ok"
     result = auto["result"]
     intrinsics = auto["intrinsics"]
-    frames_seen = auto["frames_seen"]
     snapshot = CalibrationSnapshot(
         camera_id=camera_id,
         intrinsics=intrinsics,
@@ -1198,7 +1049,6 @@ async def calibration_auto(
         return RedirectResponse("/", status_code=303)  # type: ignore[return-value]
     return {
         "ok": True,
-        "phase": "solve_ok",
         "camera_id": camera_id,
         "detected_ids": result.detected_ids,
         "missing_plate_ids": result.missing_ids,
@@ -1211,13 +1061,12 @@ async def calibration_auto(
             1 for mid in auto["pnp_detected_ids"]
             if mid not in PLATE_MARKER_WORLD
         ),
-        "frames_seen": frames_seen,
+        "frames_seen": auto["frames_seen"],
         "good_frames": auto["good_frames"],
         "stable_frames": auto["stable_frames"],
         "reprojection_px": auto["reprojection_px"],
         "delta_position_cm": auto["delta_position_cm"],
         "delta_angle_deg": auto["delta_angle_deg"],
-        "buffer_summary": auto["buffer_summary"],
     }
 
 
@@ -1239,42 +1088,6 @@ async def calibration_auto_start(
     async def _runner() -> None:
         try:
             auto = await _run_auto_calibration(camera_id, h_fov_deg=h_fov_deg, track_run=True)
-            phase = auto["phase"]
-            if phase == "accumulating":
-                # Frame captured + markers added to buffer, but not yet
-                # at solve threshold. Surface as an "accumulating" run
-                # outcome so the dashboard refreshes with the new count.
-                buf = auto["buffer_summary"]
-                state.finish_auto_cal_run(
-                    camera_id,
-                    status="accumulating",
-                    applied=False,
-                    summary=f"Accumulating ({buf['count']}/{MIN_MARKERS_FOR_SOLVE})",
-                    detail=f"buffer_ids={buf['marker_ids']}",
-                    result={"buffer_summary": buf},
-                )
-                return
-            if phase == "solve_failed":
-                buf = auto["buffer_summary"]
-                state.finish_auto_cal_run(
-                    camera_id,
-                    status="solve_failed",
-                    applied=False,
-                    summary=(
-                        f"Reproj {auto['reproj_px']:.1f}px > "
-                        f"{auto['reproj_ceiling_px']:.0f}px ceiling — buffer kept"
-                    ),
-                    detail=(
-                        f"failure_count={buf['failure_count']} "
-                        f"buffer_ids={buf['marker_ids']}"
-                    ),
-                    result={
-                        "reproj_px": auto["reproj_px"],
-                        "buffer_summary": buf,
-                    },
-                )
-                return
-            # phase == "solve_ok"
             result = auto["result"]
             snapshot = CalibrationSnapshot(
                 camera_id=camera_id,
@@ -1337,23 +1150,10 @@ async def calibration_auto_start(
     return {"ok": True, "camera_id": camera_id, "run_id": run.id}
 
 
-@router.post("/calibration/buffer/clear/{camera_id}")
-async def calibration_buffer_clear(camera_id: str) -> dict[str, Any]:
-    """Clear the per-cam multi-frame accumulator. Operator hits this
-    when they know the cam or board moved — buffer state is no longer
-    valid against the current scene. Idempotent on already-empty cam."""
-    import main as _main
-    state = _main.state
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_id):
-        raise HTTPException(status_code=400, detail="invalid camera_id")
-    cleared = state.clear_calibration_buffer(camera_id)
-    return {"ok": True, "camera_id": camera_id, "cleared": cleared}
-
-
 @router.post("/calibration/reset_rig")
 async def calibration_reset_rig() -> dict[str, Any]:
-    """Wipe all calibrations + extended marker registry + accumulator
-    buffers. Used by dashboard 'Reset rig' for full re-setup (board
+    """Wipe all calibrations + extended marker registry + last-solve
+    records. Used by dashboard 'Reset rig' for full re-setup (board
     moved, cams reseated). Per-device ChArUco intrinsics survive — those
     are sensor-physical and don't change with rig geometry."""
     import main as _main
