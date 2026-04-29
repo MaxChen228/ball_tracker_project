@@ -7,6 +7,7 @@ from pathlib import Path
 
 from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
+from presets import PRESETS
 from reconstruct import Scene
 from render_compare import (
     DRAW_VIRTUAL_BASE_JS,
@@ -244,13 +245,29 @@ def render_viewer_html(
                 f'<span class="action-ts" title="Server detection last completed at {iso}">'
                 f'{iso}</span>'
             )
-        # Phase 2: viewer form pins `source=live` so the operator's
-        # current dashboard config wins. Phase 3 swaps the hidden input
-        # for a <select> exposing live / frozen / preset:<name> so
-        # research compares can run without mutating disk.
+        # Detection-config picker: 'live' is the current dashboard
+        # config (mutating effect — same as the events row "Run srv"
+        # button); 'frozen' replays the per-pitch *_used snapshot for
+        # bit-exact reproduction (409 if any cam in the session lacks
+        # the snapshot, e.g. pre-PR #93 pitches); 'preset:<name>' uses
+        # the canonical HSV from `presets.PRESETS` without touching
+        # disk — the research-compare path. Default selection is
+        # 'live' so a casual operator click matches today's behavior.
+        preset_options = "".join(
+            f'<option value="preset:{name}">Preset: {preset.label}</option>'
+            for name, preset in PRESETS.items()
+        )
         action_html = (
             f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post" class="action-form">'
-            f'<input type="hidden" name="source" value="live">'
+            f'<select class="action-select" name="source"'
+            f' title="Detection config to run with. \'Live\' = current dashboard config'
+            f' (mutates if you tweak after). \'Frozen\' = the config this pitch was'
+            f' originally detected with. \'Preset\' = canonical HSV without disturbing'
+            f' the live dashboard config — for research compares.">'
+            f'<option value="live" selected>Live (current dashboard config)</option>'
+            f'<option value="frozen">Original (frozen at detection time)</option>'
+            f'{preset_options}'
+            f'</select>'
             f'<button class="action" type="submit">{label}</button>'
             f'{ts_html}'
             f'</form>'
@@ -564,6 +581,13 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     padding:3px 8px; border-radius:var(--r); }}
   .nav .action-form {{ display:inline-flex; align-items:center;
     gap:var(--s-2, 6px); }}
+  .nav .action-select {{ font-family:var(--mono); font-size:10px;
+    letter-spacing:0.06em; color:var(--ink); background:var(--surface);
+    border:1px solid var(--border-base); border-radius:var(--r);
+    padding:4px 8px; cursor:pointer;
+    transition:border-color 0.15s, color 0.15s; }}
+  .nav .action-select:hover, .nav .action-select:focus {{
+    border-color:var(--passed); color:var(--passed); outline:none; }}
   .nav .action-ts {{ font-family:var(--mono); font-size:10px;
     color:var(--sub); white-space:nowrap; font-variant-numeric:tabular-nums;
     letter-spacing:0.04em; }}
