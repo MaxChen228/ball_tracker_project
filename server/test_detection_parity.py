@@ -83,28 +83,32 @@ def test_cluttered_scene_without_prior(hsv):
     assert abs(cy - 300) < 3.0
 
 
-def test_cluttered_scene_temporal_prior_disambiguates(hsv):
-    """Two yellow-green blobs, distracter is bigger. Without prior the
-    detector picks the distracter; with a temporal prior near the real
-    ball it picks the ball. Locks the expected delta between the two
-    modes as a regression guard."""
+def test_cluttered_scene_size_prior_picks_expected_radius(hsv):
+    """Two yellow-green blobs differing in size; selector picks the one
+    closer to expected_area = π·r_px_expected². Locks the shape-prior
+    contract as a regression guard."""
+    from candidate_selector import CandidateSelectorTuning
     img = np.zeros((720, 1280, 3), dtype=np.uint8)
     img[:] = (30, 30, 30)
-    cv2.circle(img, (400, 360), 14, _yg_bgr(), thickness=-1)   # smaller ball
-    cv2.circle(img, (900, 360), 28, _yg_bgr(), thickness=-1)   # bigger distracter
+    cv2.circle(img, (400, 360), 12, _yg_bgr(), thickness=-1)   # ~452 px², near r=12 expected
+    cv2.circle(img, (900, 360), 28, _yg_bgr(), thickness=-1)   # ~2460 px², way too big
 
-    # No prior → biggest wins.
-    no_prior = detect_ball(img, hsv)
-    assert no_prior is not None
-    assert abs(no_prior[0] - 900) < 3
-
-    # With temporal prior pointing toward the smaller blob.
-    prior = detect_ball(
+    # r_px_expected=12 → small ball wins.
+    near = detect_ball(
         img, hsv,
-        prev_position=(390.0, 360.0),
-        prev_velocity=(2400.0, 0.0),  # +10 px/frame @ 240 fps
-        dt=1.0 / 240,
+        selector_tuning=CandidateSelectorTuning(
+            r_px_expected=12.0, w_size=1.0, w_aspect=0.0, w_fill=0.0,
+        ),
     )
-    assert prior is not None
-    assert abs(prior[0] - 400) < 4
-    assert abs(prior[1] - 360) < 4
+    assert near is not None
+    assert abs(near[0] - 400) < 3
+
+    # r_px_expected=28 → big ball wins (now it's at expected size).
+    far = detect_ball(
+        img, hsv,
+        selector_tuning=CandidateSelectorTuning(
+            r_px_expected=28.0, w_size=1.0, w_aspect=0.0, w_fill=0.0,
+        ),
+    )
+    assert far is not None
+    assert abs(far[0] - 900) < 3

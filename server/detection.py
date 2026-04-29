@@ -125,20 +125,19 @@ def detect_ball_with_candidates(
     frame_bgr: np.ndarray,
     hsv_range: HSVRange,
     *,
-    prev_position: tuple[float, float] | None = None,
-    prev_velocity: tuple[float, float] | None = None,
-    dt: float | None = None,
     shape_gate: ShapeGate | None = None,
     selector_tuning: "CandidateSelectorTuning | None" = None,
 ) -> tuple["BlobCandidate | None", "list[BlobCandidate]"]:
-    """HSV → CC → shape gate → temporal selector. Returns
+    """HSV → CC → shape gate → shape-prior selector. Returns
     `(winner_or_None, scored_blobs)` where `scored_blobs` is every
-    survivor with `area_score` and selector `cost` stamped — same shape
-    `live_pairing._resolve_candidates` produces, so server_post can feed
-    `FramePayload.candidates` directly into the viewer's BLOBS overlay.
+    survivor with `aspect`, `fill`, `area_score`, and selector `cost`
+    stamped — same shape `live_pairing._resolve_candidates` produces,
+    so server_post can feed `FramePayload.candidates` directly into the
+    viewer's BLOBS overlay.
 
     Empty / no-survivors → `(None, [])`. Both lists ride the same
     decision: if any candidate exists, the lowest-cost one is the winner.
+    Selector is track-independent — no `prev_position` plumbing.
     """
     from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates
     from schemas import BlobCandidate
@@ -159,8 +158,11 @@ def detect_ball_with_candidates(
 
     tuning = selector_tuning if selector_tuning is not None else CandidateSelectorTuning.default()
 
+    # survivors and shape_stats append in lockstep within the same loop
+    # iteration — order is locked. The downstream `scored` comprehension
+    # iterates `survivors` in order, and the final zip relies on that.
     survivors: list[Candidate] = []
-    shape_stats: list[tuple[float, float]] = []  # parallel: (aspect, fill) per survivor
+    shape_stats: list[tuple[float, float]] = []
     for idx in range(1, num_labels):
         area = int(stats[idx, cv2.CC_STAT_AREA])
         if area < min_area or area > max_area:
@@ -177,38 +179,23 @@ def detect_ball_with_candidates(
             continue
         cx, cy = centroids[idx]
         survivors.append(
-            Candidate(cx=float(cx), cy=float(cy), area=area, area_score=0.0)
+            Candidate(cx=float(cx), cy=float(cy), area=area,
+                      aspect=aspect, fill=fill)
         )
         shape_stats.append((aspect, fill))
 
     if not survivors:
         return None, []
     max_area_batch = max(c.area for c in survivors)
-    scored = [
-        Candidate(
-            cx=c.cx, cy=c.cy, area=c.area,
-            area_score=c.area / max_area_batch if max_area_batch > 0 else 0.0,
-        )
-        for c in survivors
-    ]
-    costs = score_candidates(
-        scored,
-        prev_position=prev_position,
-        prev_velocity=prev_velocity,
-        dt=dt,
-        r_px_expected=tuning.r_px_expected,
-        w_area=tuning.w_area,
-        w_dist=tuning.w_dist,
-        dist_cost_sat_radii=tuning.dist_cost_sat_radii,
-    )
+    costs = score_candidates(survivors, tuning)
     blobs = [
         BlobCandidate(
             px=c.cx, py=c.cy, area=c.area,
-            area_score=c.area_score,
+            area_score=c.area / max_area_batch if max_area_batch > 0 else 0.0,
             aspect=float(asp), fill=float(fl),
             cost=float(cost),
         )
-        for c, (asp, fl), cost in zip(scored, shape_stats, costs)
+        for c, (asp, fl), cost in zip(survivors, shape_stats, costs)
     ]
     winner_idx = min(range(len(costs)), key=lambda i: costs[i])
     return blobs[winner_idx], blobs
@@ -218,9 +205,6 @@ def detect_ball(
     frame_bgr: np.ndarray,
     hsv_range: HSVRange,
     *,
-    prev_position: tuple[float, float] | None = None,
-    prev_velocity: tuple[float, float] | None = None,
-    dt: float | None = None,
     shape_gate: ShapeGate | None = None,
     selector_tuning: "CandidateSelectorTuning | None" = None,
 ) -> tuple[float, float] | None:
@@ -229,9 +213,6 @@ def detect_ball(
     winner, _ = detect_ball_with_candidates(
         frame_bgr,
         hsv_range,
-        prev_position=prev_position,
-        prev_velocity=prev_velocity,
-        dt=dt,
         shape_gate=shape_gate,
         selector_tuning=selector_tuning,
     )

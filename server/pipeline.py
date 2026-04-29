@@ -64,13 +64,6 @@ def detect_pitch(
     hsv = hsv_range if hsv_range is not None else HSVRange.from_env()
     logger.info("detect_pitch video=%s", video_path.name)
     out: list[FramePayload] = []
-    # Temporal prior state — equal-velocity straight-line model that
-    # carries the ball's last known (position, velocity). Reset to None
-    # whenever detection fails so we don't extrapolate off a stale point.
-    # No persistence, no Kalman — keep it simple.
-    prev_position: tuple[float, float] | None = None
-    prev_velocity: tuple[float, float] | None = None
-    prev_timestamp_s: float | None = None
     for idx, (absolute_pts_s, bgr) in enumerate(frame_iter(video_path, video_start_pts_s)):
         if should_cancel is not None and should_cancel():
             raise ProcessingCanceled(f"detection canceled for {video_path.name}")
@@ -81,58 +74,21 @@ def detect_pitch(
             # so the cheap thing is to fire every frame and let the
             # caller decide what to coalesce.
             progress(idx)
-        dt = (
-            absolute_pts_s - prev_timestamp_s
-            if prev_timestamp_s is not None else None
-        )
         winner, blobs = detect_ball_with_candidates(
             bgr, hsv,
-            prev_position=prev_position,
-            prev_velocity=prev_velocity,
-            dt=dt,
             shape_gate=shape_gate,
             selector_tuning=selector_tuning,
         )
-        if winner is None:
-            out.append(
-                FramePayload(
-                    frame_index=idx,
-                    timestamp_s=absolute_pts_s,
-                    px=None,
-                    py=None,
-                    ball_detected=False,
-                    candidates=blobs or None,
-                )
+        out.append(
+            FramePayload(
+                frame_index=idx,
+                timestamp_s=absolute_pts_s,
+                px=winner.px if winner else None,
+                py=winner.py if winner else None,
+                ball_detected=winner is not None,
+                candidates=blobs if winner else (blobs or None),
             )
-            # Temporal prior resets on miss — extrapolating from a stale
-            # point can snap onto clutter on the next frame.
-            prev_position = None
-            prev_velocity = None
-            prev_timestamp_s = None
-        else:
-            px, py = winner.px, winner.py
-            out.append(
-                FramePayload(
-                    frame_index=idx,
-                    timestamp_s=absolute_pts_s,
-                    px=px,
-                    py=py,
-                    ball_detected=True,
-                    candidates=blobs,
-                )
-            )
-            # Update velocity from the previous hit if we have one; on
-            # the first hit we only have position — velocity stays None
-            # so next frame's selector falls back to area-only.
-            if prev_position is not None and prev_timestamp_s is not None:
-                dt_seen = absolute_pts_s - prev_timestamp_s
-                if dt_seen > 0:
-                    prev_velocity = (
-                        (px - prev_position[0]) / dt_seen,
-                        (py - prev_position[1]) / dt_seen,
-                    )
-            prev_position = (px, py)
-            prev_timestamp_s = absolute_pts_s
+        )
     ball_frames = sum(1 for f in out if f.ball_detected)
     logger.info(
         "detection video=%s frames=%d ball=%d hsv=h[%d-%d]s[%d-%d]v[%d-%d]",

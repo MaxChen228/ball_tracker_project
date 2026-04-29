@@ -63,9 +63,11 @@ class IntrinsicsPayload(BaseModel):
 
 class BlobCandidate(BaseModel):
     """One CC-stat survivor passing the area+aspect+fill gates. Live path
-    (iOS) uploads top-K per frame so the server can apply the shape-prior
-    selector (`candidate_selector.select_best_candidate`) before pairing.
-    `area_score` is area / max_area_in_batch on the producing side."""
+    (iOS) uploads top-K per frame so the server can run
+    `candidate_selector.select_best_candidate` before pairing — currently
+    a track-independent shape-prior cost over (area, aspect, fill).
+    `area_score` is area / max_area_in_batch on the producing side; kept
+    for the viewer's BLOBS overlay sort fallback."""
     # Old JSONs written before aspect/fill persistence omit those fields;
     # tolerate on load. New code paths always populate them.
     # TODO: drop extra="ignore" once historical pitches/*.json are

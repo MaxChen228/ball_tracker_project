@@ -50,9 +50,9 @@
   }
 
   // === Candidate selector controls init ===
-  // Two-way bind for w_dist (slider 0-100 ↔ number 0.00-1.00). r_px_expected
-  // and dist_cost_sat_radii are number-only. Submit posts to
-  // /detection/candidate_selector; server derives w_area = 1 - w_dist.
+  // Two-way bind for w_size / w_aspect / w_fill (slider 0-100 ↔ number
+  // 0.00-1.00). r_px_expected is number-only. Submit posts to
+  // /detection/candidate_selector — shape-prior cost (no temporal).
   function initCandidateSelectorControls() {
     const form = document.getElementById('candidate-selector-form');
     if (!form) return;

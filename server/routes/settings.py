@@ -128,9 +128,7 @@ async def detection_shape_gate(request: Request):
 
 
 def _validated_candidate_selector_tuning(values: dict[str, object]) -> CandidateSelectorTuning:
-    """Parse + range-check the three operator-tunable knobs. The dashboard
-    exposes only `w_dist`; `w_area = 1 - w_dist` is derived here so callers
-    cannot ship a desynced (w_area, w_dist) pair."""
+    """Parse + range-check the four shape-prior knobs."""
     def _float_field(name: str, lo: float, hi: float) -> float:
         raw = values.get(name)
         try:
@@ -141,29 +139,26 @@ def _validated_candidate_selector_tuning(values: dict[str, object]) -> Candidate
             raise HTTPException(status_code=400, detail=f"'{name}' out of range [{lo}, {hi}]")
         return value
 
-    r_px_expected = _float_field("r_px_expected", 1.0, 200.0)
-    w_dist = _float_field("w_dist", 0.0, 1.0)
-    dist_cost_sat_radii = _float_field("dist_cost_sat_radii", 1.0, 50.0)
-    w_area = 1.0 - w_dist
     return CandidateSelectorTuning(
-        r_px_expected=r_px_expected,
-        w_area=w_area,
-        w_dist=w_dist,
-        dist_cost_sat_radii=dist_cost_sat_radii,
+        r_px_expected=_float_field("r_px_expected", 1.0, 200.0),
+        w_size=_float_field("w_size", 0.0, 1.0),
+        w_aspect=_float_field("w_aspect", 0.0, 1.0),
+        w_fill=_float_field("w_fill", 0.0, 1.0),
     )
 
 
 @router.post("/detection/candidate_selector")
 async def detection_candidate_selector(request: Request):
-    """Operator-tunable scoring weights for `select_best_candidate`.
+    """Operator-tunable shape-prior weights for `select_best_candidate`.
 
     Server-side only — applied in both `live_pairing._resolve_candidates`
     (live path) and `detect_pitch` (server_post path). Body accepts JSON
-    `{"r_px_expected": 12.0, "w_dist": 0.7, "dist_cost_sat_radii": 8.0}`
-    or equivalent form fields. `w_area` is derived as `1 - w_dist`.
+    `{"r_px_expected": 12.0, "w_size": 0.5, "w_aspect": 0.3, "w_fill": 0.2}`
+    or equivalent form fields.
     """
     from main import state, _wants_html
 
+    fields = ("r_px_expected", "w_size", "w_aspect", "w_fill")
     ctype = request.headers.get("content-type", "").lower()
     if "application/json" in ctype:
         body = await request.json()
@@ -171,16 +166,16 @@ async def detection_candidate_selector(request: Request):
     else:
         form = await request.form()
         tuning = _validated_candidate_selector_tuning(
-            {k: form.get(k) for k in ("r_px_expected", "w_dist", "dist_cost_sat_radii")}
+            {k: form.get(k) for k in fields}
         )
     applied = state.set_candidate_selector_tuning(tuning)
     payload = {
         "ok": True,
         "candidate_selector_tuning": {
             "r_px_expected": applied.r_px_expected,
-            "w_area": applied.w_area,
-            "w_dist": applied.w_dist,
-            "dist_cost_sat_radii": applied.dist_cost_sat_radii,
+            "w_size": applied.w_size,
+            "w_aspect": applied.w_aspect,
+            "w_fill": applied.w_fill,
         },
     }
     if _wants_html(request):

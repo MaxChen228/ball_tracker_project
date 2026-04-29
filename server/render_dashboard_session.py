@@ -76,14 +76,19 @@ def _render_shape_gate_body(shape_gate: dict[str, object] | None) -> str:
 def _render_candidate_selector_body(
     tuning: dict[str, object] | None,
 ) -> str:
-    """Server-side selector weights. Sits inside the DETECTION HSV card,
-    below the shape-gate sub-form. Operator only sees `w_dist` (slider);
-    `w_area = 1 - w_dist` is enforced server-side. Applies to BOTH live
-    (`live_pairing._resolve_candidates`) and `server_post` paths."""
+    """Server-side shape-prior selector weights. Sits inside the
+    DETECTION HSV card, below the shape-gate sub-form. Applies to BOTH
+    live (`live_pairing._resolve_candidates`) and `server_post`
+    (`detect_pitch`) paths.
+
+    Cost = w_size·size_pen + w_aspect·aspect_pen + w_fill·fill_pen
+    (track-independent — no temporal prior). See
+    `candidate_selector` module for component definitions."""
     current = {
         "r_px_expected": 12.0,
-        "w_dist": 0.7,
-        "dist_cost_sat_radii": 8.0,
+        "w_size": 0.5,
+        "w_aspect": 0.3,
+        "w_fill": 0.2,
     }
     if tuning:
         for key in current:
@@ -93,36 +98,40 @@ def _render_candidate_selector_body(
                 except (TypeError, ValueError):
                     pass
 
-    r_val = current["r_px_expected"]
-    w_dist = current["w_dist"]
-    sat = current["dist_cost_sat_radii"]
-    w_dist_slider = int(round(w_dist * 100))
+    def _slider(name: str, label: str, title: str, val: float) -> str:
+        slider_val = int(round(val * 100))
+        return (
+            f'<label class="shape-row" title="{title}">'
+            f'<span class="shape-label">{label}</span>'
+            f'<input type="range" min="0" max="100" step="1" value="{slider_val}" data-cs-range="{name}">'
+            f'<input class="hsv-num" type="number" step="0.01" min="0" max="1" name="{name}" '
+            f'value="{val:.2f}" data-cs-number="{name}">'
+            f'</label>'
+        )
 
     return (
         '<form method="POST" action="/detection/candidate_selector" '
         'id="candidate-selector-form" class="hsv-form shape-gate-form">'
-        '<div class="hsv-subtitle">Candidate selector</div>'
+        '<div class="hsv-subtitle">Candidate selector (shape-prior)</div>'
         '<div class="hsv-grid">'
-        '<label class="shape-row" title="Expected ball radius in px — normalizes the distance cost. '
-        'Falls back here when caller has no calibration-driven prior.">'
+        '<label class="shape-row" title="Expected ball radius in px. '
+        'Defines expected_area = π·r² that size_pen scores against.">'
         '<span class="shape-label">RADIUS</span>'
         '<input class="hsv-num" type="number" step="1" min="1" max="200" name="r_px_expected" '
-        f'value="{r_val:.1f}" data-cs-number="r_px_expected">'
+        f'value="{current["r_px_expected"]:.1f}" data-cs-number="r_px_expected">'
         '</label>'
-        '<label class="shape-row" title="Weight on distance cost vs area cost. '
-        'w_area = 1 - w_dist is derived server-side.">'
-        '<span class="shape-label">W_DIST</span>'
-        f'<input type="range" min="0" max="100" step="1" value="{w_dist_slider}" data-cs-range="w_dist">'
-        f'<input class="hsv-num" type="number" step="0.01" min="0" max="1" name="w_dist" '
-        f'value="{w_dist:.2f}" data-cs-number="w_dist">'
-        '</label>'
-        '<label class="shape-row" title="Distance-cost saturation radii. Beyond this many ball-radii '
-        'from the predicted point, cost is clamped to 1 (area decides).">'
-        '<span class="shape-label">SAT</span>'
-        '<input class="hsv-num" type="number" step="0.5" min="1" max="50" name="dist_cost_sat_radii" '
-        f'value="{sat:.1f}" data-cs-number="dist_cost_sat_radii">'
-        '</label>'
-        '</div>'
+        + _slider("w_size", "W_SIZE",
+                  "Weight on log-octave area deviation from expected_area. "
+                  "Saturates at 4× off (=2 octaves).",
+                  current["w_size"])
+        + _slider("w_aspect", "W_ASPECT",
+                  "Weight on (1 - aspect) penalty. Perfectly square (round) blob → 0.",
+                  current["w_aspect"])
+        + _slider("w_fill", "W_FILL",
+                  "Weight on |fill - 0.68| penalty. 0.68 is the empirical median fill for "
+                  "the project ball.",
+                  current["w_fill"])
+        + '</div>'
         '<div class="hsv-actions">'
         '<button class="btn" type="submit">Apply selector</button>'
         '</div>'
@@ -170,7 +179,7 @@ def _render_hsv_body(
         for name, preset in _HSV_PRESETS.items()
     )
     sg = shape_gate or {"aspect_min": 0.70, "fill_min": 0.55}
-    cs = candidate_selector_tuning or {"r_px_expected": 12.0, "w_dist": 0.7, "dist_cost_sat_radii": 8.0}
+    cs = candidate_selector_tuning or {"r_px_expected": 12.0, "w_size": 0.5, "w_aspect": 0.3, "w_fill": 0.2}
     hsv_summary = (
         f'h[{current["h_min"]}-{current["h_max"]}] '
         f's[{current["s_min"]}-{current["s_max"]}] '
@@ -179,8 +188,9 @@ def _render_hsv_body(
     sg_summary = f'aspect≥{float(sg.get("aspect_min", 0.70)):.2f} fill≥{float(sg.get("fill_min", 0.55)):.2f}'
     cs_summary = (
         f'r{float(cs.get("r_px_expected", 12.0)):.0f} '
-        f'wD{float(cs.get("w_dist", 0.7)):.2f} '
-        f'sat{float(cs.get("dist_cost_sat_radii", 8.0)):.0f}'
+        f'wS{float(cs.get("w_size", 0.5)):.2f} '
+        f'wA{float(cs.get("w_aspect", 0.3)):.2f} '
+        f'wF{float(cs.get("w_fill", 0.2)):.2f}'
     )
     hsv_form = (
         '<form method="POST" action="/detection/hsv" id="hsv-form" class="hsv-form">'

@@ -71,15 +71,16 @@ def load_candidate_selector_tuning() -> "CandidateSelectorTuning":
     if not CANDIDATE_SELECTOR_TUNING_PATH.exists():
         return CandidateSelectorTuning.default()
     obj = json.loads(CANDIDATE_SELECTOR_TUNING_PATH.read_text())
+    d = CandidateSelectorTuning.default()
     t = CandidateSelectorTuning(
-        r_px_expected=float(obj["r_px_expected"]),
-        w_area=float(obj["w_area"]),
-        w_dist=float(obj["w_dist"]),
-        dist_cost_sat_radii=float(obj["dist_cost_sat_radii"]),
+        r_px_expected=float(obj.get("r_px_expected", d.r_px_expected)),
+        w_size=float(obj.get("w_size", d.w_size)),
+        w_aspect=float(obj.get("w_aspect", d.w_aspect)),
+        w_fill=float(obj.get("w_fill", d.w_fill)),
     )
     logger.info(
-        "selector r=%.1f wA=%.2f wD=%.2f sat=%.1f",
-        t.r_px_expected, t.w_area, t.w_dist, t.dist_cost_sat_radii,
+        "selector r=%.1f wS=%.2f wA=%.2f wF=%.2f",
+        t.r_px_expected, t.w_size, t.w_aspect, t.w_fill,
     )
     return t
 
