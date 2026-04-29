@@ -25,11 +25,14 @@ a half-written file.
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from pathlib import Path
 from threading import Lock
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from calibration_solver import (
     PLATE_MARKER_WORLD,
@@ -65,6 +68,10 @@ class ExtendedMarkersDB:
         try:
             obj = json.loads(self._path.read_text())
         except Exception:
+            logger.exception(
+                "ExtendedMarkersDB: failed to parse %s — starting empty",
+                self._path,
+            )
             return
         for row in obj.get("markers", []):
             try:

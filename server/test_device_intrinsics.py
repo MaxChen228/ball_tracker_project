@@ -152,7 +152,7 @@ def test_auto_cal_consumes_charuco_prior(tmp_path, monkeypatch):
     state.set_device_intrinsics(rec)
 
     # The auto-cal derive helper should use the prior 1:1 when AR matches.
-    from routes.calibration import _derive_auto_cal_intrinsics
+    from calibration_auto import _derive_auto_cal_intrinsics
 
     intrinsics, legacy_prior = _derive_auto_cal_intrinsics(
         "A", w_img=1920, h_img=1080, h_fov_deg=None,
@@ -196,7 +196,7 @@ def test_auto_cal_handles_4_3_source_via_center_crop(tmp_path, monkeypatch):
     })
     state.set_device_intrinsics(rec)
 
-    from routes.calibration import _derive_auto_cal_intrinsics
+    from calibration_auto import _derive_auto_cal_intrinsics
     intr, _ = _derive_auto_cal_intrinsics("A", w_img=1920, h_img=1080, h_fov_deg=None)
 
     # Scale factor: 4032→1920 = 0.4762 (same as 2268→1080 after crop).
@@ -218,7 +218,7 @@ def test_auto_cal_falls_back_without_prior(tmp_path, monkeypatch):
     """No ChArUco record + no CalibrationSnapshot → FOV fallback with zero
     distortion. This is the pre-existing degraded mode."""
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
-    from routes.calibration import _derive_auto_cal_intrinsics
+    from calibration_auto import _derive_auto_cal_intrinsics
 
     intrinsics, _ = _derive_auto_cal_intrinsics(
         "A", w_img=1920, h_img=1080, h_fov_deg=None,

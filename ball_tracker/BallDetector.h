@@ -33,11 +33,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// byte-for-byte equivalence with the server.
 ///
 /// `BTBallDetector` is the stateless per-frame path (no background model,
-/// no ROI tracking), used by the live detection pipeline's concurrent pool
-/// (`ConcurrentDetectionPool`). `BTStatefulBallDetector` below was the
-/// previous live-path detector; it's retained for unit-test coverage but
-/// has no production caller — see commit "ios: drop ROI tracking" for
-/// the reasoning (static distractors locked the ROI for seconds).
+/// no ROI tracking), used by the live detection pipeline's worker
+/// (`ConcurrentDetectionPool`).
 @interface BTBallDetector : NSObject
 
 /// Run detection with the default HSV range.
@@ -74,59 +71,6 @@ NS_ASSUME_NONNULL_BEGIN
                                                             vMin:(int)vMin vMax:(int)vMax
                                                        aspectMin:(double)aspectMin
                                                          fillMin:(double)fillMin;
-
-@end
-
-/// Stateful per-frame detector that reuses work across frames:
-///
-/// - Keeps an internal ROI around the last successful hit (±3 × blob
-///   radius, clamped to image bounds, minimum 256×256). HSV threshold +
-///   connected-components run on that crop only, cutting ~95% of pixels
-///   on a full-screen follow.
-/// - On ROI miss, falls back to a full-frame pass **loudly** (NSLog
-///   "BallDetector: ROI miss, falling back to full frame") — NOT a silent
-///   fallback. After 10 consecutive misses the ROI state is dropped.
-/// - Reuses cv::Mat scratch buffers (BGR intermediate + HSV + mask +
-///   labels/stats/centroids) across frames so the 1080p path doesn't
-///   re-alloc ~8 MB per frame.
-///
-/// Not thread-safe. Intended for a single capture-queue worker.
-@interface BTStatefulBallDetector : NSObject
-
-/// Default HSV range (yellow-green tennis ball). Mirrors
-/// `HSVRange.default()` in server/detection.py.
-- (instancetype)init;
-
-/// Update the HSV range in place — no allocation, no state reset.
-- (void)setHMin:(int)hMin hMax:(int)hMax
-           sMin:(int)sMin sMax:(int)sMax
-           vMin:(int)vMin vMax:(int)vMax;
-
-/// Update the shape gate in place — no allocation, no state reset.
-/// `aspectMin` ∈ [0, 1]; `fillMin` ∈ [0, 1]. Mirrors server `ShapeGate`.
-- (void)setAspectMin:(double)aspectMin fillMin:(double)fillMin;
-
-/// Run one frame through the ROI-assisted pipeline.
-/// Returns nil when no blob passes area + shape gating on either the ROI
-/// pass or the full-frame fallback.
-- (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer;
-
-/// Multi-candidate ROI variant of `detectInPixelBuffer:`. Same ROI gating
-/// as the single-best path but returns ALL blobs passing area+aspect+fill
-/// in the winning region (ROI crop on hit, full-frame fallback on ROI
-/// miss), sorted by area desc. Empty array → no candidates anywhere.
-///
-/// Tracking state is updated from the largest blob (`firstObject`) on
-/// hit, mirroring the single-best detector. The server's temporal-prior
-/// candidate selector may pick a smaller candidate as the actual ball,
-/// but iOS doesn't get that decision back over the WS, so ROI follows
-/// largest-blob with the same `kROIMaxConsecutiveMisses` recovery.
-- (NSArray<BTBallDetection *> *)detectAllCandidatesInPixelBuffer:(CVPixelBufferRef)pixelBuffer;
-
-/// Drop any cached ROI tracking state — call on session boundaries
-/// (arm / disarm / re-entry to capture) so a stale hit from a prior
-/// recording doesn't bias the first frame's crop.
-- (void)resetTracking;
 
 @end
 

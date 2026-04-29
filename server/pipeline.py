@@ -6,13 +6,10 @@ payload's `sync_anchor_timestamp_s` then makes anchor-relative time
 well-defined for A/B pairing, so `pairing.triangulate_cycle` can consume
 the post-detection `PitchPayload` with no code changes.
 
-The detector here is intentionally identical to the iOS `live` path
-(HSV + connectedComponents + shape gate + temporal selector). Earlier
-versions prepended an MOG2 background subtractor + 3x3 CLOSE morphology;
-that asymmetry made `server_post` unable to act as an offline mock for
-iOS-live. Distillation against SAM 3 GT replaces the role MOG2 used to
-play (filtering static yellow-green clutter) by tightening HSV / shape
-gate parameters, applied uniformly to both paths.
+The detector here is identical to the iOS live path:
+HSV → connectedComponents → shape gate → shape-prior selector. No
+temporal state, no background model — every frame's cost is local, and
+`server_post` is a byte-for-byte offline mock of iOS-live.
 """
 from __future__ import annotations
 

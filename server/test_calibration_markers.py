@@ -407,7 +407,7 @@ def test_calibration_auto_rejects_reproj_above_limit(tmp_path, monkeypatch):
 
     # Force the reproj-error helper to report a value above the ceiling.
     with patch(
-        "routes.calibration._reprojection_error_px",
+        "calibration_auto._reprojection_error_px",
         return_value=REPROJ_FAIL_PX + 5.0,
     ):
         r = client.post("/calibration/auto/A")
