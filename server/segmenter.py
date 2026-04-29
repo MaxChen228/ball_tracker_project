@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import numpy as np
 
 G = np.array([0.0, 0.0, -9.81])
-MPS_TO_MPH = 2.23693629
+MPS_TO_KPH = 3.6
 
 
 @dataclass
@@ -34,8 +34,8 @@ class Segment:
     rmse_m: float
 
     @property
-    def speed_mph(self) -> float:
-        return float(np.linalg.norm(self.v0)) * MPS_TO_MPH
+    def speed_kph(self) -> float:
+        return float(np.linalg.norm(self.v0)) * MPS_TO_KPH
 
     @property
     def speed_mps(self) -> float:
