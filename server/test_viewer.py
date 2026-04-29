@@ -1112,12 +1112,12 @@ def test_stream_legacy_candidates_without_cost_become_null():
     assert out["candidates"][0][0]["cost"] is None
 
 
-def test_video_cell_renders_path_grouped_toolbar_and_k_slider():
+def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
     """`video_cell_html` (the SSR builder for each cam pane) declares the
     2×2 layer matrix (live/svr × winner/cand) and renders the path-
-    grouped toolbar (LIVE: WIN CAND ; SVR: WIN CAND) plus the K slider
-    so the operator can toggle each overlay independently and debug
-    selector picks per path."""
+    grouped toolbar (LIVE: WIN CAND ; SVR: WIN CAND). The legacy K
+    slider was replaced by the session-level cost_threshold slider in
+    the viewer header — no per-cam K knob anymore."""
     from viewer_fragments import video_cell_html
     body = video_cell_html(
         "A",
@@ -1141,5 +1141,6 @@ def test_video_cell_renders_path_grouped_toolbar_and_k_slider():
     assert 'class="cv-layer on" data-layer="detection_blobs_live">CAND' in body
     assert 'class="cv-layer" data-layer="detection_svr">WIN' in body
     assert 'class="cv-layer" data-layer="detection_blobs_svr">CAND' in body
-    assert 'class="cv-blobs-k">K' in body
-    assert 'window._setCandTopK' in body
+    # K slider gone (replaced by viewer-header cost_threshold slider).
+    assert 'class="cv-blobs-k"' not in body
+    assert 'window._setCandTopK' not in body

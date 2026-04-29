@@ -35,6 +35,7 @@ from render_scene_theme import (
 from viewer_fragments import (
     failure_strip_html,
     health_nav_strip_html,
+    session_cost_threshold_strip_html,
     video_cell_html,
 )
 
@@ -59,6 +60,8 @@ class ViewerPageContext:
     layout_mode: str
     health_strip_html: str
     health_failure_html: str
+    session_tuning_html: str
+    cost_threshold: float | None
     video_cells_html: str
     session_id: str
     server_post_ran: bool
@@ -72,6 +75,7 @@ def build_viewer_page_context(
     health: dict,
     *,
     build_figure,
+    cost_threshold: float | None = None,
 ) -> ViewerPageContext:
     fig = build_figure(scene)
     fig_json = _json.loads(fig.to_json())
@@ -166,6 +170,10 @@ def build_viewer_page_context(
         layout_mode=layout_mode,
         health_strip_html=health_nav_strip_html(health),
         health_failure_html=failure_strip_html(health),
+        session_tuning_html=session_cost_threshold_strip_html(
+            cost_threshold, scene.session_id,
+        ),
+        cost_threshold=cost_threshold,
         video_cells_html=video_cells,
         session_id=scene.session_id,
         server_post_ran=server_post_ran,
@@ -208,12 +216,14 @@ def render_viewer_html(
     health: dict,
     *,
     build_figure,
+    cost_threshold: float | None = None,
 ) -> str:
     ctx = build_viewer_page_context(
         scene,
         videos,
         health,
         build_figure=build_figure,
+        cost_threshold=cost_threshold,
     )
     if ctx.can_run_server:
         # Operator may rerun after tweaking HSV / shape gate / selector;
@@ -259,6 +269,7 @@ def render_viewer_html(
   <div class="nav">
     <span class="brand"><span class="dot"></span>BALL_TRACKER</span>
     {ctx.health_strip_html}
+    {ctx.session_tuning_html}
     {progress_html}
     {action_html}
     {fit_link_html}
@@ -403,6 +414,29 @@ def render_viewer_html(
   "has_triangulated": {str(ctx.has_triangulated).lower()}
 }}</script>
 <script>
+window.VIEWER_INITIAL_COST_THRESHOLD = {1.0 if ctx.cost_threshold is None else float(ctx.cost_threshold)};
+window._applyCostThreshold = function(btn) {{
+  const v = parseFloat(document.querySelector('[data-session-cost-threshold]').value);
+  const sid = btn.getAttribute('data-session-id');
+  btn.disabled = true;
+  btn.textContent = 'Recomputing…';
+  fetch('/sessions/' + encodeURIComponent(sid) + '/recompute', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ cost_threshold: v }}),
+  }}).then(function(r) {{
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    // Simplest reload — full re-render with fresh SessionResult.
+    // Future optimization: patch in place via the new result JSON.
+    window.location.reload();
+  }}).catch(function(err) {{
+    btn.disabled = false;
+    btn.textContent = 'Apply';
+    alert('Recompute failed: ' + err);
+  }});
+}};
+</script>
+<script>
 {OVERLAYS_RUNTIME_JS}
 </script>
 <script>
@@ -526,6 +560,23 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     align-items:center; gap:var(--s-3); flex-wrap:wrap;
     font-family:var(--mono); font-size:11px; color:var(--sub);
     letter-spacing:0.04em; overflow:hidden; }}
+  .session-tuning {{ display:inline-flex; align-items:center; gap:6px;
+    padding:3px 8px; border:1px solid var(--border-base);
+    border-radius:var(--r); background:var(--surface);
+    font-family:var(--mono); font-size:11px; color:var(--sub);
+    letter-spacing:0.04em; flex:0 0 auto; }}
+  .session-tuning .st-label {{ font-size:9px; letter-spacing:0.1em;
+    text-transform:uppercase; }}
+  .session-tuning input[type=range] {{ width:80px; accent-color:var(--accent); }}
+  .session-tuning .st-value {{ font-variant-numeric:tabular-nums;
+    font-size:11px; color:var(--ink); min-width:32px; text-align:right; }}
+  .session-tuning .st-apply {{ padding:2px 8px; font:inherit;
+    border:1px solid var(--accent); border-radius:3px;
+    background:var(--surface); color:var(--accent); cursor:pointer;
+    letter-spacing:0.06em; text-transform:uppercase; font-size:9px; }}
+  .session-tuning .st-apply:hover:not(:disabled) {{ background:var(--accent); color:var(--surface); }}
+  .session-tuning .st-apply:disabled {{ opacity:0.4; cursor:default;
+    border-color:var(--border-base); color:var(--sub); }}
   .health-strip .hs-tri {{ display:inline-flex; align-items:baseline; gap:4px;
     padding:3px 8px; border:1px solid var(--accent); border-radius:var(--r);
     background:var(--surface); }}

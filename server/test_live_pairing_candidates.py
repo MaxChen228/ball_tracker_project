@@ -19,7 +19,7 @@ def _frame(idx: int, t: float, *, candidates: list[BlobCandidate]) -> FramePaylo
     )
 
 
-def _no_triangulate(_cam, _a, _b):
+def _no_triangulate(_a, _b):
     return []
 
 
@@ -150,7 +150,7 @@ def test_dedupe_key_extended_with_candidate_idx():
     sess.ingest("B", _frame(0, 0.0, candidates=cands), _no_triangulate)
     # Now A ingest triggers triangulation. Closure emits two points
     # with different candidate-index pairs.
-    def _two_points(_cam, _a, _b):
+    def _two_points(_a, _b):
         return [_make_point(0.0, 0, 1), _make_point(0.0, 1, 0)]
     new_pts = sess.ingest("A", _frame(0, 0.0, candidates=cands), _two_points)
     assert len(new_pts) == 2
@@ -175,14 +175,14 @@ def test_dedupe_key_canonicalized_across_cam_directions():
     sess1 = LivePairingSession("s_test")
     sess1.ingest("B", _frame(5, 0.0, candidates=cands), _no_triangulate)
     sess1.ingest("A", _frame(7, 0.0, candidates=cands),
-                 lambda _cam, _a, _b: [_make_point(0.0, 0, 0)])
+                 lambda _a, _b: [_make_point(0.0, 0, 0)])
     keys1 = set(sess1.paired_frame_ids)
 
     # Direction 2: A arrives first, B triggers.
     sess2 = LivePairingSession("s_test")
     sess2.ingest("A", _frame(7, 0.0, candidates=cands), _no_triangulate)
     sess2.ingest("B", _frame(5, 0.0, candidates=cands),
-                 lambda _cam, _a, _b: [_make_point(0.0, 0, 0)])
+                 lambda _a, _b: [_make_point(0.0, 0, 0)])
     keys2 = set(sess2.paired_frame_ids)
 
     # Same canonical key under both ingest directions: A frame_idx 7,
@@ -199,7 +199,7 @@ def test_fan_out_emits_all_passing_pairs():
                             aspect=1.0, fill=0.68)]
     sess.ingest("B", _frame(0, 0.0, candidates=cands), _no_triangulate)
 
-    def _six_points(_cam, _a, _b):
+    def _six_points(_a, _b):
         return [
             _make_point(0.0, ca, cb)
             for ca in range(2) for cb in range(3)
@@ -218,7 +218,7 @@ def test_fan_out_skips_within_pair_dedupe():
                             aspect=1.0, fill=0.68)]
     sess.ingest("B", _frame(0, 0.0, candidates=cands), _no_triangulate)
 
-    def _duplicate_keys(_cam, _a, _b):
+    def _duplicate_keys(_a, _b):
         return [_make_point(0.0, 0, 0), _make_point(0.0, 0, 0)]
     pts = sess.ingest("A", _frame(0, 0.0, candidates=cands), _duplicate_keys)
     assert len(pts) == 1

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+
 from render_scene_theme import (
     _CAMERA_COLORS,
     _FALLBACK_CAMERA_COLOR,
@@ -106,9 +108,9 @@ def video_cell_html(
         # Path-grouped toolbar. Each path group = label + WIN chip + CAND
         # chip; chips inherit the path's color tier (cam color for live,
         # ACCENT for svr) so the operator can read at a glance which
-        # winner corresponds to which cands. K slider is global (top-K
-        # applied per path, both paths drawn when both CAND chips on) and
-        # routes through viewer-only `_setCandTopK` in 50_canvas.js.
+        # winner corresponds to which cands. CAND visibility is gated by
+        # the session-level cost_threshold slider in the viewer header
+        # (see `session_cost_threshold_strip_html`), no per-cam K knob.
         toolbar_html = (
             '<div class="cam-view-toolbar">'
             '<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>'
@@ -126,11 +128,6 @@ def video_cell_html(
             '<span class="cv-opacity">OVL'
             '<input type="range" min="0" max="100" step="1" value="65" aria-label="Overlay opacity">'
             '</span>'
-            '<span class="cv-blobs-k">K'
-            '<input type="range" min="0" max="20" step="1" value="5" '
-            'aria-label="Top-K candidates" '
-            'oninput="window._setCandTopK(this.value)">'
-            '</span>'
             '</div>'
         )
     return (
@@ -143,6 +140,44 @@ def video_cell_html(
         f"{body}"
         f"{toolbar_html}"
         f"</div>"
+    )
+
+
+def session_cost_threshold_strip_html(
+    cost_threshold: float | None, session_id: str,
+) -> str:
+    """Per-session cost_threshold slider for the viewer's nav bar.
+
+    Drag = client-side preview only (filter blobs + 3D points by
+    `cost > threshold`). Apply = POST /sessions/{sid}/recompute with
+    the chosen value, server reruns pairing + segmenter on existing
+    candidates and overwrites SessionResult. Initial value is
+    `SessionResult.cost_threshold` (None → 1.0 = "no filter") which the
+    server injected onto the page.
+
+    `session_id` is interpolated into the Apply handler's URL — the
+    pattern is `^s_[0-9a-f]{4,32}$` (validated server-side too) so no
+    HTML injection here, but escaping anyway is cheap.
+    """
+    initial = 1.0 if cost_threshold is None else float(cost_threshold)
+    sid_attr = html.escape(session_id, quote=True)
+    return (
+        '<div class="session-tuning" role="group" '
+        'aria-label="Per-session selector cost threshold">'
+        '<label class="st-label">Cost ≤</label>'
+        '<input type="range" min="0" max="1" step="0.01" '
+        f'value="{initial:.2f}" data-session-cost-threshold '
+        'aria-label="cost threshold" '
+        'oninput="window._setCostThreshold && window._setCostThreshold(this.value); '
+        'document.querySelector(\'[data-session-cost-value]\').textContent = '
+        '(+this.value).toFixed(2); '
+        'document.querySelector(\'[data-session-recompute]\').disabled = false;">'
+        f'<span class="st-value" data-session-cost-value>{initial:.2f}</span>'
+        '<button type="button" class="st-apply" data-session-recompute disabled '
+        f'data-session-id="{sid_attr}" '
+        'onclick="window._applyCostThreshold && window._applyCostThreshold(this);">'
+        'Apply</button>'
+        '</div>'
     )
 
 

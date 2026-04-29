@@ -644,14 +644,10 @@ class State:
                 image_wh=live_dims,
             ))
 
-        def triangulate_live(cam: str, first: FramePayload, second: FramePayload) -> list[TriangulatedPoint]:
-            # Canonicalize so left_frame is always cam A's frame, right is
-            # B's — `triangulate_live_pair` stamps source_a_cand_idx /
-            # source_b_cand_idx based on its frame_a / frame_b argument
-            # order, and the dedupe in LivePairingSession.ingest expects
-            # those indices to be A-first / B-second regardless of which
-            # cam triggered ingest.
-            left_frame, right_frame = (first, second) if cam == "A" else (second, first)
+        def triangulate_live(frame_a: FramePayload, frame_b: FramePayload) -> list[TriangulatedPoint]:
+            # frame_a / frame_b are pre-canonicalized A-first by ingest();
+            # the closure name + argument order is the contract. No
+            # cam-direction flipping needed here.
             pose_a = live.camera_pose("A")
             pose_b = live.camera_pose("B")
             if pose_a is None or pose_b is None:
@@ -663,7 +659,7 @@ class State:
             from pairing import triangulate_live_pair
             return triangulate_live_pair(
                 pose_a, pose_b,
-                left_frame, right_frame,
+                frame_a, frame_b,
                 anchor_a=dev_a.sync_anchor_timestamp_s,
                 anchor_b=dev_b.sync_anchor_timestamp_s,
                 tuning=live.pairing_tuning,
