@@ -5,6 +5,8 @@ from datetime import datetime as _datetime
 import json as _json
 from pathlib import Path
 
+import html as _html
+
 from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
 from presets import PRESETS
@@ -253,8 +255,14 @@ def render_viewer_html(
         # the canonical HSV from `presets.PRESETS` without touching
         # disk — the research-compare path. Default selection is
         # 'live' so a casual operator click matches today's behavior.
+        # Defensive escape: today's labels ("Tennis" / "Blue ball") are
+        # safe, but `presets.PRESETS` is the single registry for future
+        # presets — a label introduced later containing `<`/`&`/`"`
+        # would inject without this. Same defensive posture as the
+        # dashboard preset buttons (`render_dashboard_session.py`).
         preset_options = "".join(
-            f'<option value="preset:{name}">Preset: {preset.label}</option>'
+            f'<option value="preset:{_html.escape(name)}">'
+            f'Preset: {_html.escape(preset.label)}</option>'
             for name, preset in PRESETS.items()
         )
         action_html = (

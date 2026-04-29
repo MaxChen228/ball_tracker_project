@@ -617,8 +617,12 @@ def test_viewer_page_renders_run_server_post_source_dropdown():
 
     # Form posts to the right endpoint.
     assert f'action="/sessions/{session_id}/run_server_post"' in html
-    # Dropdown exists with all three source flavors.
-    assert '<select class="action-select" name="source"' in html
+    # Dropdown exists with all three source flavors. Two substring
+    # checks instead of one ordered-attribute slug so a trivial
+    # name=/class= reorder won't false-fail.
+    assert '<select ' in html
+    assert 'name="source"' in html
+    assert 'class="action-select"' in html
     assert '<option value="live" selected>' in html
     assert '<option value="frozen">' in html
     # Both presets surface in the dropdown — not just one — so the
