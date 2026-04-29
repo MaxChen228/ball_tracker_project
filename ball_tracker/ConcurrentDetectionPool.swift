@@ -4,35 +4,21 @@ import Foundation
 
 /// Single-worker dispatch pool around the stateless `BTBallDetector`.
 ///
-/// The class is **named** `ConcurrentDetectionPool` for historical
-/// continuity but is no longer concurrent: full-frame HSV +
-/// connected-components on a 1080p sample is ~15 ms/frame, so 240 fps
-/// × 15 ms = 3.6 s/wall-s — well above one P-core's 1.0 s budget. The
-/// producer (`CameraViewController.dispatchDetection`) does NOT
-/// throttle — every captured sample is enqueued. Effective detection
-/// rate is therefore one core's throughput ≈ 1 / 0.015 ≈ 66
-/// detections/s, with the remaining ~174 fps dropping at
-/// `enqueue` when `inFlightCount >= maxBacklog`. The dashboard surfaces
-/// `droppedFrameCount` so the operator can see this. 66 Hz of full-
-/// frame distractor-immune detection beats 240 Hz of ROI-locked
-/// detection that misses the ball entirely (s_97655fc6 was the wakeup
-/// call).
+/// Despite the name, this is a single-worker serial queue (no parallel
+/// fan-out). Full-frame HSV + connected-components on a 1080p sample is
+/// ~15 ms/frame, so 240 fps × 15 ms = 3.6 s/wall-s — well above one
+/// P-core's 1.0 s budget. The producer
+/// (`CameraViewController.dispatchDetection`) does NOT throttle —
+/// every captured sample is enqueued. Effective detection rate is one
+/// core's throughput ≈ 1 / 0.015 ≈ 66 detections/s, with the remaining
+/// ~174 fps dropping at `enqueue` when `inFlightCount >= maxBacklog`.
+/// The dashboard surfaces `droppedFrameCount` so the operator can see
+/// this.
 ///
-/// Pre-PR: this pool wrapped `BTStatefulBallDetector` which kept an ROI
-/// around the previous hit, cutting cost to ~3 ms when the ball stayed
-/// close. That created two problems we removed:
-///   1. Once a static distractor (e.g. a green plant leaf) became the
-///      "previous hit", the ROI locked onto it and the detector could
-///      go several seconds before the 10-miss reset let it see the
-///      real ball. Same scene processed by server_post (no ROI) found
-///      the ball within one frame.
-///   2. Live and server_post diverged silently: same MOV bytes, same
-///      HSV, same shape gate, but different candidate sets per frame
-///      — making it impossible to tell if "live missed the ball"
-///      meant detector bug, exposure problem, or ROI lock-in.
-/// Stateless full-frame on every frame is exactly what server_post
-/// runs, so live ↔ server_post is now byte-aligned end-to-end and the
-/// operator sees the same evidence the algorithm sees.
+/// Stateless full-frame on every frame matches what server_post runs
+/// against the uploaded MOV, so live ↔ server_post stays byte-aligned
+/// end-to-end and the operator sees the same evidence the algorithm
+/// sees.
 ///
 /// We absorb a short backlog on the serial queue and drop new frames
 /// when the queue already holds `maxBacklog` in-flight tasks.

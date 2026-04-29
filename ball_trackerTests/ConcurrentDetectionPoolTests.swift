@@ -2,16 +2,11 @@ import XCTest
 import CoreVideo
 @testable import ball_tracker
 
-/// Tests for the post-Phase-3 single-worker `ConcurrentDetectionPool`.
-/// The class kept its name for historical continuity but is no longer
-/// concurrent: a serial queue feeds a single stateless `BTBallDetector`
-/// call per frame, with `maxBacklog` as the only backpressure knob.
-/// Stride / `maxConcurrency` were removed — full-frame HSV+CC at 240 Hz
-/// doesn't fit on one P-core, but we drop on overflow rather than
-/// running multiple workers. Pre-PR the pool wrapped a ROI-tracking
-/// `BTStatefulBallDetector`; we removed that because static distractors
-/// (e.g. plant leaves matching the ball HSV) could lock the ROI for
-/// seconds and silently diverge live from server_post.
+/// Tests for the single-worker `ConcurrentDetectionPool`.
+/// Despite the name, a serial queue feeds a single stateless
+/// `BTBallDetector` call per frame, with `maxBacklog` as the only
+/// backpressure knob. Full-frame HSV+CC at 240 Hz doesn't fit on one
+/// P-core, so we drop on overflow rather than running multiple workers.
 final class ConcurrentDetectionPoolTests: XCTestCase {
 
     private func createDummyPixelBuffer() -> CVPixelBuffer {
