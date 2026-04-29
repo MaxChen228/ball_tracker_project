@@ -219,7 +219,11 @@ def test_calibration_auto_crops_4_3_input_and_rescales_to_canonical_16_9(
     assert abs(v - 540.0) < 5.0, f"plate origin v={v} not near canonical centre 540"
 
 
-def test_calibration_auto_returns_422_when_too_few_markers(tmp_path, monkeypatch):
+def test_calibration_auto_returns_accumulating_when_too_few_markers(tmp_path, monkeypatch):
+    """Sub-threshold marker count is no longer an error — the multi-frame
+    accumulator returns phase=accumulating (HTTP 200) so the operator can
+    press [Calibrate] again with the cam pointed at a different marker
+    subset, or hit Clear if they want to start over."""
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(app)
 
@@ -229,9 +233,14 @@ def test_calibration_auto_returns_422_when_too_few_markers(tmp_path, monkeypatch
     _seed_calibration_frame("A", _jpeg_encode(bgr))
 
     r = client.post("/calibration/auto/A")
-    assert r.status_code == 422, r.text
-    detail = r.json()["detail"].lower()
-    assert "degenerate" in detail or "need" in detail
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["phase"] == "accumulating"
+    assert body["buffer_summary"]["count"] == 3
+    assert body["buffer_summary"]["ready"] is False
+    assert sorted(body["buffer_summary"]["marker_ids"]) == [0, 1, 5]
+    # No snapshot written — buffer accumulates instead.
+    assert not (tmp_path / "calibrations" / "A.json").exists()
 
 
 def test_calibration_auto_returns_408_when_no_frame_delivered(tmp_path, monkeypatch):
@@ -296,6 +305,98 @@ def test_calibration_auto_uses_pose_solver_when_3d_markers_available(tmp_path, m
     assert body["used_pose_solver"] is True
     assert body["n_3d_markers_used"] >= 1
     assert 9 in body["detected_ids"]
+
+
+def test_calibration_auto_accumulates_across_multiple_presses_then_solves(
+    tmp_path, monkeypatch,
+):
+    """Each POST captures one frame; markers union into the per-cam
+    buffer until ≥5 distinct ids accumulate, then solve runs and clears.
+    Operator's mental model: 'aim at 3 markers, click; aim at 3 more,
+    click; on the second click ≥5 are accumulated and the snapshot
+    lands.'"""
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    from calibration_solver import PLATE_MARKER_WORLD
+
+    # Frame 1: markers 0, 1, 2 only (sub-threshold).
+    frame1 = {k: PLATE_MARKER_WORLD[k] for k in (0, 1, 2)}
+    bgr1, _ = _render_aruco_scene(frame1)
+    _seed_calibration_frame("A", _jpeg_encode(bgr1))
+    r1 = client.post("/calibration/auto/A")
+    assert r1.status_code == 200, r1.text
+    body1 = r1.json()
+    assert body1["phase"] == "accumulating"
+    assert body1["buffer_summary"]["count"] == 3
+
+    # Frame 2: markers 3, 4, 5 — buffer crosses threshold, solve fires.
+    # _render_aruco_scene draws all PLATE_MARKER_WORLD entries it gets,
+    # so we feed it a different subset to simulate aiming at a new region.
+    frame2 = {k: PLATE_MARKER_WORLD[k] for k in (3, 4, 5)}
+    bgr2, _ = _render_aruco_scene(frame2)
+    _seed_calibration_frame("A", _jpeg_encode(bgr2))
+    r2 = client.post("/calibration/auto/A")
+    assert r2.status_code == 200, r2.text
+    body2 = r2.json()
+    assert body2["phase"] == "solve_ok"
+    assert body2["camera_id"] == "A"
+    # Snapshot written.
+    assert (tmp_path / "calibrations" / "A.json").exists()
+    # Buffer cleared after success.
+    assert body2["buffer_summary"]["count"] == 0
+
+
+def test_calibration_buffer_clear_endpoint_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    from calibration_solver import PLATE_MARKER_WORLD
+    frame = {k: PLATE_MARKER_WORLD[k] for k in (0, 1, 2)}
+    bgr, _ = _render_aruco_scene(frame)
+    _seed_calibration_frame("A", _jpeg_encode(bgr))
+    client.post("/calibration/auto/A")  # populates buffer (sub-threshold)
+
+    r1 = client.post("/calibration/buffer/clear/A")
+    assert r1.status_code == 200
+    assert r1.json() == {"ok": True, "camera_id": "A", "cleared": True}
+
+    # Second clear is idempotent — cleared=False (already empty).
+    r2 = client.post("/calibration/buffer/clear/A")
+    assert r2.status_code == 200
+    assert r2.json() == {"ok": True, "camera_id": "A", "cleared": False}
+
+
+def test_calibration_reset_rig_wipes_calibrations_markers_buffers(tmp_path, monkeypatch):
+    """Dashboard 'Reset rig' clears calibrations + extended markers +
+    accumulator buffers. Per-device ChArUco intrinsics survive (they're
+    sensor-physical, not rig-geometry)."""
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    from calibration_solver import PLATE_MARKER_WORLD
+    bgr, _ = _render_aruco_scene(PLATE_MARKER_WORLD)
+    _seed_calibration_frame("A", _jpeg_encode(bgr))
+    r_solve = client.post("/calibration/auto/A")
+    assert r_solve.json()["phase"] == "solve_ok"
+    assert "A" in main.state.calibrations()
+
+    # Add a partial buffer on B so reset has something to clear there too.
+    partial = {k: PLATE_MARKER_WORLD[k] for k in (0, 1)}
+    bgr_b, _ = _render_aruco_scene(partial)
+    _seed_calibration_frame("B", _jpeg_encode(bgr_b))
+    client.post("/calibration/auto/B")
+    assert main.state.calibration_buffer_summary("B")["count"] == 2
+
+    r_reset = client.post("/calibration/reset_rig")
+    assert r_reset.status_code == 200
+    body = r_reset.json()
+    assert body["ok"] is True
+    assert body["calibrations_removed"] == 1
+    assert body["buffers_cleared"] == 1
+
+    assert main.state.calibrations() == {}
+    assert main.state.calibration_buffer_summary("B")["count"] == 0
 
 
 def test_markers_scan_triangulates_dual_camera_candidates(tmp_path, monkeypatch):
