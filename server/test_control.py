@@ -985,14 +985,13 @@ def test_run_server_post_frozen_failure_does_not_zombie_job_state(tmp_path):
 
 def test_run_server_post_preset_blue_ball_enqueues(tmp_path):
     """`source=preset:blue_ball` should enqueue without mutating disk
-    HSV / shape_gate / selector — the operator's live config across
-    all three sub-knobs is untouched, satisfying the research-compare
-    workflow this redesign exists for."""
+    HSV / shape_gate — the operator's live dashboard config is
+    untouched, satisfying the research-compare workflow this redesign
+    exists for."""
     client = TestClient(app)
     _arm_minimal_session_for_run_server_post(sid(39))
     hsv_before = main.state.hsv_range()
     sg_before = main.state.shape_gate()
-    cs_before = main.state.candidate_selector_tuning()
     r = client.post(
         f"/sessions/{sid(39)}/run_server_post",
         headers={"Accept": "application/json"},
@@ -1001,41 +1000,37 @@ def test_run_server_post_preset_blue_ball_enqueues(tmp_path):
     assert r.status_code == 200, r.text
     assert r.json()["queued"] == 1
     assert r.json()["source"] == "preset:blue_ball"
-    # All three sub-knobs untouched — research compare must not drift
-    # the operator's dashboard state on any axis.
+    # Sub-knobs untouched — research compare must not drift the
+    # operator's dashboard state on any axis.
     assert main.state.hsv_range() == hsv_before
     assert main.state.shape_gate() == sg_before
-    assert main.state.candidate_selector_tuning() == cs_before
 
 
-def test_resolve_detection_config_preset_uses_preset_shape_and_selector():
-    """Phase 1 of unified-config redesign: a preset carries the full
-    triple (HSV + shape_gate + selector). Resolving `source=preset:NAME`
-    must return the preset's own shape_gate / selector, **not** the
-    state's current values. Earlier the preset only carried HSV and the
-    other two leaked from state, so a concurrent dashboard slider edit
-    on shape_gate would silently shift the cost basis of an in-flight
-    research-compare reprocess."""
-    from candidate_selector import CandidateSelectorTuning
+def test_resolve_detection_config_preset_uses_preset_shape():
+    """A preset carries (HSV + shape_gate). Resolving `source=preset:NAME`
+    must return the preset's own shape_gate, **not** the state's current
+    value. Earlier the preset only carried HSV and shape_gate leaked
+    from state, so a concurrent dashboard slider edit on shape_gate
+    would silently shift the cost basis of an in-flight research-compare
+    reprocess. (Selector cost weights are now `_W_ASPECT` / `_W_FILL`
+    constants — no leak path remains.)"""
     from detection import ShapeGate
     from presets import PRESETS
     from routes.sessions import _resolve_detection_config
 
-    # Build a fake state whose shape_gate / selector deliberately
-    # disagree with every preset, so a leak from state would be
-    # observable as the wrong value coming back.
+    # Build a fake state whose shape_gate deliberately disagrees with
+    # every preset, so a leak from state would be observable as the
+    # wrong value coming back.
     class _FakeState:
         def hsv_range(self):
             return PRESETS["tennis"].hsv  # irrelevant for this test
         def shape_gate(self):
             return ShapeGate(aspect_min=0.01, fill_min=0.01)
-        def candidate_selector_tuning(self):
-            return CandidateSelectorTuning(w_aspect=0.99, w_fill=0.99)
 
     fake_pitch = _minimal_pitch("A", session_id=sid(41))
 
     for preset_name in ("tennis", "blue_ball"):
-        hsv, gate, tuning, label = _resolve_detection_config(
+        hsv, gate, _tuning, label = _resolve_detection_config(
             f"preset:{preset_name}", fake_pitch, _FakeState()
         )
         preset = PRESETS[preset_name]
@@ -1043,10 +1038,6 @@ def test_resolve_detection_config_preset_uses_preset_shape_and_selector():
         assert gate == preset.shape_gate, (
             f"preset:{preset_name} leaked shape_gate from state instead of "
             f"using the preset's own ({preset.shape_gate})"
-        )
-        assert tuning == preset.selector, (
-            f"preset:{preset_name} leaked selector from state instead of "
-            f"using the preset's own ({preset.selector})"
         )
         assert label == f"preset:{preset_name}"
 

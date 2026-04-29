@@ -26,7 +26,6 @@ from schemas import (
     _DEFAULT_SESSION_TIMEOUT_S,
     _DEFAULT_PATHS,
 )
-from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate
 from detection_config import (
     DetectionConfig,
@@ -174,14 +173,16 @@ class State:
         self._result_dir = data_dir / "results"
         self._video_dir = data_dir / "videos"
         self._calibration_dir = data_dir / "calibrations"
-        # Phase 2 of unified-config redesign: the detection triple
-        # (HSV + shape gate + selector) lives in a single
-        # `detection_config.json`. Boot reads/migrates from the legacy
-        # three-file layout (hsv_range.json + shape_gate.json +
-        # candidate_selector_tuning.json) on first start, then deletes
-        # the legacy files. The three legacy paths are no longer kept
-        # as instance attrs — anything that needs them goes through
-        # `_detection_config` in memory or the unified file on disk.
+        # Phase 2 of unified-config redesign: the detection pair
+        # (HSV + shape gate) lives in a single `detection_config.json`.
+        # Boot reads/migrates from the legacy three-file layout
+        # (hsv_range.json + shape_gate.json + candidate_selector_tuning.json)
+        # on first start, then deletes the legacy files. The legacy paths
+        # are no longer kept as instance attrs — anything that needs them
+        # goes through `_detection_config` in memory or the unified file
+        # on disk. Selector cost weights were retired post-PR93 and are
+        # now `_W_ASPECT` / `_W_FILL` module constants in
+        # `candidate_selector` rather than a runtime tunable.
         self._detection_config_path = data_dir / "detection_config.json"
         self._pairing_tuning_path = data_dir / "pairing_tuning.json"
         self._session_meta_path = data_dir / "session_meta.json"
@@ -552,21 +553,21 @@ class State:
     ) -> tuple[list[TriangulatedPoint], dict[str, int], FramePayload]:
         with self._lock:
             live = self._live_pairings.setdefault(session_id, LivePairingSession(session_id))
-            # Freeze selector + pairing tuning + hsv/shape on the FIRST real
-            # frame seen by this LivePairingSession. Mirrors the cd87995
-            # PairingTuning-on-SessionResult contract: a session's cost basis
-            # is decided at arm time and cannot shift mid-cycle. Dashboard
-            # slider edits during an active session land on the NEXT session.
+            # Freeze pairing tuning + hsv/shape on the FIRST real frame
+            # seen by this LivePairingSession. Mirrors the cd87995
+            # PairingTuning-on-SessionResult contract: a session's cost
+            # basis is decided at arm time and cannot shift mid-cycle.
+            # Dashboard slider edits during an active session land on
+            # the NEXT session.
             #
             # Idempotent: arm_session pre-creates LivePairingSession (so a
             # `session_id not in dict` check would never fire on the dashboard
             # path), and tests that bypass arm hit the setdefault above. The
             # `hsv_range_used is None` freshness check covers both: stamp
             # exactly once on first ingest regardless of who created the
-            # LivePairingSession. Subsequent ingests see the four fields
-            # already set and skip the block.
+            # LivePairingSession. Subsequent ingests see the fields already
+            # set and skip the block.
             if live.hsv_range_used is None:
-                live.tuning = self._detection_config.selector
                 live.pairing_tuning = self._pairing_tuning
                 live.hsv_range_used = self._detection_config.hsv
                 live.shape_gate_used = self._detection_config.shape_gate
@@ -1388,7 +1389,6 @@ class State:
                 # test-bypass-arm path (build LivePairingSession inline,
                 # call ingest directly) still gets stamped on first frame.
                 live = LivePairingSession(session.id)
-                live.tuning = self._detection_config.selector
                 live.pairing_tuning = self._pairing_tuning
                 live.hsv_range_used = self._detection_config.hsv
                 live.shape_gate_used = self._detection_config.shape_gate
@@ -1404,12 +1404,11 @@ class State:
             return set(self._runtime_settings.default_paths)
 
     def detection_config(self) -> DetectionConfig:
-        """Atomic snapshot of the full detection-config triple + preset
+        """Atomic snapshot of the full detection-config pair + preset
         identity. Phase 2 of the unified-config redesign — earlier
-        callers reached for hsv_range() / shape_gate() / selector()
-        independently and risked seeing values from different write
-        epochs if the three setters were called interleaved by another
-        thread."""
+        callers reached for hsv_range() / shape_gate() independently
+        and risked seeing values from different write epochs if the
+        setters were called interleaved by another thread."""
         with self._lock:
             return self._detection_config
 
@@ -1455,22 +1454,6 @@ class State:
         with self._lock:
             return self._detection_config.shape_gate
 
-    def candidate_selector_tuning(self) -> CandidateSelectorTuning:
-        with self._lock:
-            return self._detection_config.selector
-
-    def set_candidate_selector_tuning(
-        self, tuning: CandidateSelectorTuning
-    ) -> CandidateSelectorTuning:
-        with self._lock:
-            self._detection_config = self._detection_config.with_(
-                selector=tuning,
-                preset=None,
-                last_applied_at=self._time_fn(),
-            )
-            self._persist_detection_config_locked()
-            return self._detection_config.selector
-
     def pairing_tuning(self) -> PairingTuning:
         with self._lock:
             return self._pairing_tuning
@@ -1483,9 +1466,9 @@ class State:
 
     def live_session_frozen_config(
         self, session_id: str
-    ) -> tuple[HSVRange, ShapeGate, CandidateSelectorTuning] | None:
-        """Public accessor for the (hsv_range, shape_gate, selector_tuning)
-        triple frozen onto a LivePairingSession at first ingest_live_frame.
+    ) -> tuple[HSVRange, ShapeGate] | None:
+        """Public accessor for the (hsv_range, shape_gate) pair frozen
+        onto a LivePairingSession at first ingest_live_frame.
 
         Returns None when:
           - no LivePairingSession exists for `session_id` (test fixture
@@ -1508,7 +1491,6 @@ class State:
             return (
                 live.hsv_range_used,
                 live.shape_gate_used,
-                live.tuning,
             )
 
     def set_shape_gate(self, shape_gate: ShapeGate) -> ShapeGate:

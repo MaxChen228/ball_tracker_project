@@ -43,7 +43,6 @@ def test_boot_with_no_files_lands_on_tennis_default(tmp_path, monkeypatch):
     tennis = PRESETS["tennis"]
     assert cfg.hsv == tennis.hsv
     assert cfg.shape_gate == tennis.shape_gate
-    assert cfg.selector == tennis.selector
     # Default config is in-memory only — no disk write yet.
     assert not (tmp_path / "detection_config.json").exists()
 
@@ -61,6 +60,9 @@ def test_boot_migrates_legacy_three_files_into_unified(tmp_path, monkeypatch):
     (tmp_path / "shape_gate.json").write_text(json.dumps({
         "aspect_min": 0.56, "fill_min": 0.45,
     }))
+    # Pre-retirement legacy file: written so the test verifies the
+    # migration cleanup deletes it; selector weights themselves are no
+    # longer loaded (they're `_W_ASPECT` / `_W_FILL` constants now).
     (tmp_path / "candidate_selector_tuning.json").write_text(json.dumps({
         "w_aspect": 0.7, "w_fill": 0.3,
     }))
@@ -68,12 +70,11 @@ def test_boot_migrates_legacy_three_files_into_unified(tmp_path, monkeypatch):
     main = _fresh_main(tmp_path, monkeypatch)
     cfg = main.state.detection_config()
     # Custom config — preset is None on migration (operator may have
-    # hand-edited any of the three files; we don't risk claiming
+    # hand-edited any of the legacy files; we don't risk claiming
     # identity with a preset they never selected).
     assert cfg.preset is None
     assert cfg.hsv.h_min == 105 and cfg.hsv.h_max == 112
     assert cfg.shape_gate.aspect_min == pytest.approx(0.56)
-    assert cfg.selector.w_aspect == pytest.approx(0.7)
     # New file written, legacy files cleaned up.
     assert (tmp_path / "detection_config.json").exists()
     assert not (tmp_path / "hsv_range.json").exists()
@@ -92,13 +93,11 @@ def test_boot_with_partial_legacy_uses_defaults_for_missing(tmp_path, monkeypatc
     }))
 
     main = _fresh_main(tmp_path, monkeypatch)
-    from candidate_selector import CandidateSelectorTuning
     from detection import ShapeGate
 
     cfg = main.state.detection_config()
     assert cfg.hsv.h_min == 105
     assert cfg.shape_gate == ShapeGate.default()
-    assert cfg.selector == CandidateSelectorTuning.default()
     assert cfg.preset is None  # any custom HSV → not preset-pure
 
 
@@ -109,12 +108,10 @@ def test_set_detection_config_writes_atomic_single_file(tmp_path, monkeypatch):
     main = _fresh_main(tmp_path, monkeypatch)
     from detection_config import DetectionConfig
     from detection import HSVRange, ShapeGate
-    from candidate_selector import CandidateSelectorTuning
 
     cfg = DetectionConfig(
         hsv=HSVRange(h_min=10, h_max=20, s_min=30, s_max=40, v_min=50, v_max=60),
         shape_gate=ShapeGate(aspect_min=0.42, fill_min=0.42),
-        selector=CandidateSelectorTuning(w_aspect=0.42, w_fill=0.42),
         preset=None,
         last_applied_at=time.time(),
     )
@@ -123,7 +120,7 @@ def test_set_detection_config_writes_atomic_single_file(tmp_path, monkeypatch):
     persisted = json.loads((tmp_path / "detection_config.json").read_text())
     assert persisted["hsv"]["h_min"] == 10
     assert persisted["shape_gate"]["aspect_min"] == pytest.approx(0.42)
-    assert persisted["selector"]["w_aspect"] == pytest.approx(0.42)
+    assert "selector" not in persisted
     assert persisted["preset"] is None
 
 
@@ -138,7 +135,7 @@ def test_get_detection_config_returns_view_with_modified_fields(tmp_path, monkey
 
     bb = PRESETS["blue_ball"]
     main.state.set_detection_config(DetectionConfig(
-        hsv=bb.hsv, shape_gate=bb.shape_gate, selector=bb.selector,
+        hsv=bb.hsv, shape_gate=bb.shape_gate,
         preset="blue_ball", last_applied_at=12345.0,
     ))
     body = client.get("/detection/config").json()
@@ -156,7 +153,6 @@ def test_get_detection_config_returns_view_with_modified_fields(tmp_path, monkey
     main.state.set_detection_config(DetectionConfig(
         hsv=bb.hsv,
         shape_gate=ShapeGate(aspect_min=0.5, fill_min=bb.shape_gate.fill_min),
-        selector=bb.selector,
         preset="blue_ball",
         last_applied_at=12346.0,
     ))
@@ -172,7 +168,6 @@ def test_post_detection_config_round_trip(tmp_path, monkeypatch):
     body = {
         "hsv": {"h_min": 10, "h_max": 20, "s_min": 30, "s_max": 40, "v_min": 50, "v_max": 60},
         "shape_gate": {"aspect_min": 0.42, "fill_min": 0.42},
-        "selector": {"w_aspect": 0.42, "w_fill": 0.42},
         "preset": None,
     }
     r = client.post("/detection/config", json=body)
@@ -200,7 +195,6 @@ def test_post_detection_config_rejects_preset_value_mismatch(tmp_path, monkeypat
         },
         # Wrong shape_gate vs blue_ball preset.
         "shape_gate": {"aspect_min": 0.10, "fill_min": 0.10},
-        "selector": {"w_aspect": bb.selector.w_aspect, "w_fill": bb.selector.w_fill},
         "preset": "blue_ball",
     }
     r = client.post("/detection/config", json=body)
@@ -214,7 +208,6 @@ def test_post_detection_config_rejects_unknown_preset(tmp_path, monkeypatch):
     body = {
         "hsv": {"h_min": 0, "h_max": 1, "s_min": 0, "s_max": 1, "v_min": 0, "v_max": 1},
         "shape_gate": {"aspect_min": 0.0, "fill_min": 0.0},
-        "selector": {"w_aspect": 0.0, "w_fill": 0.0},
         "preset": "no_such_preset",
     }
     r = client.post("/detection/config", json=body)
@@ -229,7 +222,7 @@ def test_post_detection_config_rejects_missing_section(tmp_path, monkeypatch):
     client = TestClient(main.app)
     r = client.post("/detection/config", json={
         "hsv": {"h_min": 0, "h_max": 1, "s_min": 0, "s_max": 1, "v_min": 0, "v_max": 1},
-        # missing shape_gate + selector
+        # missing shape_gate
     })
     assert r.status_code == 400, r.text
     assert "missing" in r.json()["detail"]
@@ -249,7 +242,7 @@ def test_set_hsv_range_alone_clears_preset_binding(tmp_path, monkeypatch):
     # Start preset-pure on blue_ball.
     bb = PRESETS["blue_ball"]
     main.state.set_detection_config(DetectionConfig(
-        hsv=bb.hsv, shape_gate=bb.shape_gate, selector=bb.selector,
+        hsv=bb.hsv, shape_gate=bb.shape_gate,
         preset="blue_ball", last_applied_at=None,
     ))
 
@@ -261,9 +254,8 @@ def test_set_hsv_range_alone_clears_preset_binding(tmp_path, monkeypatch):
     cfg = main.state.detection_config()
     assert cfg.preset is None  # binding cleared
     assert cfg.hsv.h_min == 100
-    # shape_gate / selector still match blue_ball (we only edited HSV).
+    # shape_gate still matches blue_ball (we only edited HSV).
     assert cfg.shape_gate == bb.shape_gate
-    assert cfg.selector == bb.selector
 
 
 def test_reset_to_preset_endpoint_restores_preset_purity(tmp_path, monkeypatch):
@@ -273,14 +265,12 @@ def test_reset_to_preset_endpoint_restores_preset_purity(tmp_path, monkeypatch):
     main = _fresh_main(tmp_path, monkeypatch)
     from detection_config import DetectionConfig
     from detection import HSVRange, ShapeGate
-    from candidate_selector import CandidateSelectorTuning
     from presets import PRESETS
 
     # Start with a custom config (preset=None).
     main.state.set_detection_config(DetectionConfig(
         hsv=HSVRange(h_min=1, h_max=2, s_min=3, s_max=4, v_min=5, v_max=6),
         shape_gate=ShapeGate(aspect_min=0.1, fill_min=0.1),
-        selector=CandidateSelectorTuning(w_aspect=0.1, w_fill=0.1),
         preset=None,
         last_applied_at=None,
     ))
@@ -294,7 +284,6 @@ def test_reset_to_preset_endpoint_restores_preset_purity(tmp_path, monkeypatch):
     assert body["modified_fields"] == []
     assert main.state.hsv_range() == bb.hsv
     assert main.state.shape_gate() == bb.shape_gate
-    assert main.state.candidate_selector_tuning() == bb.selector
 
 
 def test_reset_to_preset_rejects_unknown_or_missing(tmp_path, monkeypatch):

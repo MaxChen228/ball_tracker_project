@@ -126,8 +126,11 @@ def _render_hsv_body(
             f'data-v-min="{d["v_min"]}" data-v-max="{d["v_max"]}" '
             f'data-aspect-min="{p.shape_gate.aspect_min:.2f}" '
             f'data-fill-min="{p.shape_gate.fill_min:.2f}" '
-            f'data-w-aspect="{p.selector.w_aspect:.2f}" '
-            f'data-w-fill="{p.selector.w_fill:.2f}">'
+            # Selector weights are hardcoded `_W_ASPECT` / `_W_FILL`
+            # constants; phase 4 of the retirement strips these data-*
+            # attrs and the matching JS that reads them.
+            f'data-w-aspect="0.60" '
+            f'data-w-fill="0.40">'
             f'{html.escape(p.label)}</button>'
         )
     preset_buttons = "".join(_preset_button(name) for name in PRESETS)

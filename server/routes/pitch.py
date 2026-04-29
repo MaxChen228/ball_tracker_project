@@ -201,11 +201,15 @@ async def pitch(
     # `detect_pitch` with.
     frozen = state.live_session_frozen_config(payload_obj.session_id)
     if frozen is not None:
-        hsv_used, gate_used, tuning_used = frozen
+        hsv_used, gate_used = frozen
     else:
         hsv_used = state.hsv_range()
         gate_used = state.shape_gate()
-        tuning_used = state.candidate_selector_tuning()
+    # Selector weights are now `_W_ASPECT` / `_W_FILL` constants; phase 3
+    # of the retirement removes the `candidate_selector_tuning_used`
+    # field from the wire schema and `_stamp_detection_config` will
+    # stop taking it.
+    tuning_used = CandidateSelectorTuning.default()
     _stamp_detection_config(
         payload_obj,
         hsv_range=hsv_used,
