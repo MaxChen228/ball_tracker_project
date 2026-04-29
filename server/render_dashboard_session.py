@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import html
 
+from presets import PRESETS, hsv_as_dict
+
 
 _MODE_LABELS = {
     "camera_only": "Camera-only",
@@ -11,27 +13,6 @@ _MODE_LABELS = {
 _PATH_LABELS = {
     "live": ("Live stream", "iOS → WS"),
     "server_post": ("Server post-pass", "PyAV + OpenCV"),
-}
-
-_HSV_PRESETS = {
-    "tennis": {
-        "label": "Tennis",
-        "h_min": 25,
-        "h_max": 55,
-        "s_min": 90,
-        "s_max": 255,
-        "v_min": 90,
-        "v_max": 255,
-    },
-    "blue_ball": {
-        "label": "Blue ball",
-        "h_min": 105,
-        "h_max": 112,
-        "s_min": 140,
-        "s_max": 255,
-        "v_min": 40,
-        "v_max": 255,
-    },
 }
 
 
@@ -158,14 +139,17 @@ def _render_hsv_body(
             '</div>'
         )
 
-    preset_buttons = "".join(
-        f'<button type="button" class="btn small secondary" data-hsv-preset="{name}" '
-        f'data-h-min="{preset["h_min"]}" data-h-max="{preset["h_max"]}" '
-        f'data-s-min="{preset["s_min"]}" data-s-max="{preset["s_max"]}" '
-        f'data-v-min="{preset["v_min"]}" data-v-max="{preset["v_max"]}">'
-        f'{html.escape(str(preset["label"]))}</button>'
-        for name, preset in _HSV_PRESETS.items()
-    )
+    def _preset_button(name: str) -> str:
+        preset = PRESETS[name]
+        d = hsv_as_dict(preset)
+        return (
+            f'<button type="button" class="btn small secondary" data-hsv-preset="{name}" '
+            f'data-h-min="{d["h_min"]}" data-h-max="{d["h_max"]}" '
+            f'data-s-min="{d["s_min"]}" data-s-max="{d["s_max"]}" '
+            f'data-v-min="{d["v_min"]}" data-v-max="{d["v_max"]}">'
+            f'{html.escape(preset.label)}</button>'
+        )
+    preset_buttons = "".join(_preset_button(name) for name in PRESETS)
     sg = shape_gate or {"aspect_min": 0.70, "fill_min": 0.55}
     cs = candidate_selector_tuning or {"w_aspect": 0.6, "w_fill": 0.4}
     hsv_summary = (
