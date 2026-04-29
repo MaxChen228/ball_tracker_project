@@ -26,22 +26,21 @@ Binning means the sensor reads 2×2 pixel groups as one sample — lower
 effective resolution but dramatically faster readout, which is why 240 fps
 is only reachable here.
 
-### FOV is 73.83°, NOT 65°
+### FOV is 73.83°
 
-`CLAUDE.md` currently states:
+✅ **Shipped.** The server's fallback FOV prior is now `1.2885 rad ≈ 73.828°`
+(`server/routes/calibration.py:_IPHONE_MAIN_CAM_HFOV_RAD`). Historical context
+preserved below for git-blame archaeology.
 
-> FOV approximation: fx = (W/2) / tan(hFOV/2), 65° default for iPhone
-> main wide
-
-**The dump says 73.828° for every 1920x1080 16:9 format except a 120 fps
-telephoto-crop variant at 41.173°.** Using 65° derives fx ≈ 1507 for 1920px;
-the correct value at 73.828° is fx ≈ 1278. That's a ~14% over-estimate of
-fx — enough to push recovered depth 10–15% closer than reality and explain
-some of the sub-metre pose discrepancies we've been debugging.
-
-Action: switch the FOV prior from 65° to 73.828° in
-`calibration_solver.derive_fov_intrinsics` calls and the iOS persisted FOV
-(`horizontalFovRadians`) default.
+The dump says 73.828° for every 1920x1080 16:9 format except a 120 fps
+telephoto-crop variant at 41.173°. Earlier code defaulted to 65°, which
+derives `fx ≈ 1507` for 1920px instead of the correct `fx ≈ 1278` —
+a ~14% over-estimate of `fx`, enough to push recovered depth 10–15%
+closer than reality and explain a chunk of the sub-metre pose
+discrepancies we used to chase. Both the server prior and any iOS
+persisted FOV default (`horizontalFovRadians`) are now aligned to the
+73.828° value. The 41.173° telephoto-crop format is unused; ultra-wide
+is rejected.
 
 ### Alternative framings available (not used)
 

@@ -1,8 +1,8 @@
 # docs/
 
 Canonical reference for ball_tracker. **Read these before editing code.**
-`CLAUDE.md` / `AGENTS.md` at the repo root are slim pointers — the
-content lives here.
+`CLAUDE.md` at the repo root is a slim pointer — the content lives here.
+(`AGENTS.md` was retired in e467384.)
 
 ## When to read which
 
