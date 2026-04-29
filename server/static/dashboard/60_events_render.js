@@ -65,7 +65,11 @@
   }
 
   function _pipeChip(label, status, counts, title, sid, isLiveProgress) {
-    const cls = status === 'done' ? ' on' : status === 'err' || status === 'error' ? ' err' : '';
+    let cls = '';
+    if (status === 'done') cls = ' on';
+    else if (status === 'err' || status === 'error') cls = ' err';
+    else if (status === 'streaming') cls = ' streaming';
+    else if (status === 'armed') cls = ' armed';
     if (isLiveProgress) {
       const prog = serverPostProgress.get(sid);
       const fmt = (camKey) => {

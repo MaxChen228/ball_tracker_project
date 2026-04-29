@@ -130,6 +130,10 @@ def _pipe_chip(label: str, status: str, counts: dict[str, int] | None,
         cls += " on"
     elif status == "error":
         cls += " err"
+    elif status == "streaming":
+        cls += " streaming"
+    elif status == "armed":
+        cls += " armed"
     counts = counts or {}
     if counts:
         a = str(int(counts["A"])) if "A" in counts else "—"
