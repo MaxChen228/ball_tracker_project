@@ -38,7 +38,7 @@ from state_calibration import (
     AutoCalibrationRun as _AutoCalibrationRun,
     AutoCalibrationRunStore,
     CalibrationFrameBuffer,
-    MarkerAccumulatorStore,
+    LastSolveStore,
     CalibrationStore,
     CALIBRATION_FRAME_TTL_S as _CALIBRATION_FRAME_TTL_S,
     DeviceIntrinsicsStore,
@@ -255,10 +255,10 @@ class State:
         # holds (jpeg_bytes, ts) keyed by camera_id; `_cal_frame_requested`
         # flags pending requests that iOS drains on its next captureOutput.
         self._calibration_frames = CalibrationFrameBuffer(time_fn=time_fn)
-        # Multi-frame marker accumulation buffer per camera. Each
-        # [Calibrate Cam X] click unions detected ArUco markers into the
-        # buffer; the route solves once ≥5 distinct ids are present.
-        self._marker_accumulators = MarkerAccumulatorStore(time_fn=time_fn)
+        # Per-cam last-successful-solve record (reproj / markers / FOV /
+        # delta-pose). Single-shot calibration: each [Recalibrate] press
+        # is one frame; success overwrites. Reset only by reset_rig().
+        self._last_solves = LastSolveStore()
         # Operator-managed marker registry. Stores 3D world coords plus a
         # "on plate plane" flag so the current planar auto-calibration path
         # can keep consuming only the eligible subset.
@@ -1072,69 +1072,27 @@ class State:
         with self._lock:
             return self._calibration_frames.consume(camera_id, max_age_s=max_age_s)
 
-    # --- Multi-frame marker accumulation ---------------------------------
-
-    def accumulate_calibration_markers(
-        self,
-        camera_id: str,
-        markers: dict[int, tuple[Any, Any]],
-    ) -> tuple[list[int], list[int]]:
-        """Union (id → (image_corners, world_points)) into the per-cam
-        buffer. Returns (newly_added_ids, all_ids_after)."""
-        with self._lock:
-            return self._marker_accumulators.accumulate(camera_id, markers)
-
-    def calibration_buffer_summary(self, camera_id: str) -> dict[str, Any]:
-        """Buffer state for dashboard display: ids list, count, ready,
-        last reproj. Lazy GC on stale / failure-exhausted."""
-        with self._lock:
-            return self._marker_accumulators.summary(camera_id)
-
-    def calibration_buffer_snapshot_for_solve(
-        self, camera_id: str,
-    ) -> list[tuple[int, Any]]:
-        """Snapshot accumulator markers under the lock so the solver can
-        iterate safely OUTSIDE the lock. Returns `[(marker_id, _AccumulatedMarker), …]`
-        in insertion order. A concurrent `accumulate_calibration_markers`
-        call on the same cam would mutate the dict mid-iteration of the
-        live ref (raises `RuntimeError: dictionary changed size`); the
-        snapshot eliminates that race window."""
-        with self._lock:
-            buf = self._marker_accumulators.get(camera_id)
-            return list(buf.markers.items())
-
-    def record_calibration_solve_result(
-        self,
-        camera_id: str,
-        *,
-        reproj_px: float | None,
-        ok: bool,
-        status: str,
-    ) -> None:
-        with self._lock:
-            self._marker_accumulators.record_solve_result(
-                camera_id, reproj_px=reproj_px, ok=ok, status=status,
-            )
+    # --- Last-solve record -----------------------------------------------
 
     def record_calibration_last_solve(self, camera_id: str, record) -> None:
         """Persist the metadata of a successful solve so the dashboard
         can surface "last calibrated N min ago" continuously."""
         with self._lock:
-            self._marker_accumulators.record_last_solve(camera_id, record)
+            self._last_solves.record(camera_id, record)
 
-    def clear_calibration_buffer(self, camera_id: str) -> bool:
+    def calibration_last_solve_summary(self, camera_id: str) -> dict[str, Any] | None:
         with self._lock:
-            return self._marker_accumulators.clear(camera_id)
+            return self._last_solves.summary(camera_id)
 
-    def all_calibration_buffer_summaries(self) -> dict[str, dict[str, Any]]:
+    def all_calibration_last_solves(self) -> dict[str, dict[str, Any]]:
         with self._lock:
-            return self._marker_accumulators.all_summaries()
+            return self._last_solves.all_summaries()
 
     def reset_rig(self) -> dict[str, int]:
-        """Wipe all calibrations + extended marker registry + all
-        accumulator buffers + invalidate cached live camera poses.
-        Returns counts of what was removed. Used by dashboard
-        'Reset rig' for full rig re-setup (board moved, cams reseated).
+        """Wipe all calibrations + extended marker registry + last-solve
+        records + invalidate cached live camera poses. Returns counts
+        of what was removed. Used by dashboard 'Reset rig' for full rig
+        re-setup (board moved, cams reseated).
 
         Intentionally preserved: per-device ChArUco intrinsics
         (sensor-physical, survive rig moves) and in-memory
@@ -1144,14 +1102,14 @@ class State:
         with self._lock:
             cal_count = self._calibration_store.clear()
             marker_count = self._marker_registry.clear()
-            buf_count = self._marker_accumulators.clear_all()
+            ls_count = self._last_solves.clear_all()
             for live in self._live_pairings.values():
                 for cam in ("A", "B"):
                     live.update_camera_pose(cam, None)
             return {
                 "calibrations_removed": cal_count,
                 "extended_markers_removed": marker_count,
-                "buffers_cleared": buf_count,
+                "last_solves_cleared": ls_count,
             }
 
     # --- Auto-calibration runs -------------------------------------------

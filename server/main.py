@@ -459,19 +459,16 @@ def _build_status_response() -> dict[str, Any]:
             cam: True for cam in state.requested_calibration_frame_ids()
         },
         "auto_calibration": state.auto_cal_status(),
-        # Per-cam multi-frame accumulation buffer state. Dashboard reads
-        # this to render the (n/5) marker count + last reproj badge so
-        # operators can see whether they need another [Calibrate] press
-        # or hit Clear to start over. `last_solve` field on each entry
-        # surfaces the persistent metadata of the most recent successful
-        # solve so the operator keeps seeing "last calibrated N min ago,
-        # markers […]" after the buffer empties on success.
-        "calibration_buffers": state.all_calibration_buffer_summaries(),
+        # Per-cam last-solve metadata (reproj / markers / FOV / Δ pose).
+        # Dashboard reads this to keep showing "last calibrated N min ago,
+        # markers […]" between recalibrations. Single-shot model: every
+        # press of [Recalibrate] either overwrites this or 422s without
+        # touching it.
+        "calibration_last_solves": state.all_calibration_last_solves(),
         # Universe of marker IDs the operator can possibly use for
         # calibration: plate (0-8 fixed) + extended (operator-managed
         # registry). Dashboard uses this to render the coverage map
-        # (green = used in last solve, blue = in current buffer, gray
-        # = known but never seen by this cam).
+        # (green = used in last solve, gray = known but never seen).
         "known_marker_ids": {
             "plate": sorted(PLATE_MARKER_WORLD.keys()),
             "extended": sorted(
@@ -722,7 +719,15 @@ def setup_page() -> HTMLResponse:
             },
             markers_count=len(state._marker_registry.all_records()),
             preview_requested=state._preview.requested_map(),
-            calibration_buffers=state.all_calibration_buffer_summaries(),
+            # Phase-1 façade: phase 2 retires the buffer-shaped SSR
+            # parameter in favor of the flat last_solves dict. For now we
+            # wrap the new last-solve summaries in the legacy {last_solve:
+            # ...} shape so render_dashboard_devices keeps painting until
+            # the panel is redesigned.
+            calibration_buffers={
+                cam: {"last_solve": ls}
+                for cam, ls in state.all_calibration_last_solves().items()
+            },
             known_marker_ids={
                 "plate": sorted(PLATE_MARKER_WORLD.keys()),
                 "extended": sorted(
