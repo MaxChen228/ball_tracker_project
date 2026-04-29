@@ -38,18 +38,24 @@ def _resolve_detection_config(
     pitch: PitchPayload,
     state,
 ) -> tuple[HSVRange, ShapeGate, CandidateSelectorTuning, str]:
+    # Selector tuning is no longer dynamic — weights live as
+    # `_W_ASPECT` / `_W_FILL` constants in `candidate_selector`. This
+    # function still returns a `CandidateSelectorTuning` instance because
+    # downstream callers (routes/pitch.py, reprocess) stamp it onto
+    # `pitch.candidate_selector_tuning_used` until phase 3 of the
+    # selector retirement removes that field from the wire/freeze schema.
+    selector = CandidateSelectorTuning.default()
     if source == "live":
         return (
             state.hsv_range(),
             state.shape_gate(),
-            state.candidate_selector_tuning(),
+            selector,
             "live",
         )
     if source == "frozen":
         if (
             pitch.hsv_range_used is None
             or pitch.shape_gate_used is None
-            or pitch.candidate_selector_tuning_used is None
         ):
             raise HTTPException(
                 status_code=409,
@@ -62,7 +68,7 @@ def _resolve_detection_config(
         return (
             HSVRange(**pitch.hsv_range_used.model_dump()),
             ShapeGate(**pitch.shape_gate_used.model_dump()),
-            CandidateSelectorTuning(**pitch.candidate_selector_tuning_used.model_dump()),
+            selector,
             "frozen",
         )
     if source.startswith("preset:"):
@@ -76,7 +82,7 @@ def _resolve_detection_config(
         return (
             preset.hsv,
             preset.shape_gate,
-            preset.selector,
+            selector,
             source,
         )
     raise HTTPException(

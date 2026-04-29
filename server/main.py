@@ -435,10 +435,6 @@ def _build_status_response() -> dict[str, Any]:
             "aspect_min": state.shape_gate().aspect_min,
             "fill_min": state.shape_gate().fill_min,
         },
-        "candidate_selector_tuning": {
-            "w_aspect": state.candidate_selector_tuning().w_aspect,
-            "w_fill": state.candidate_selector_tuning().w_fill,
-        },
         # Mutual-sync context. `sync.id` is the sole dedupe key the phone
         # uses to decide whether a fresh `sync_run` command has arrived
         # vs. a repeat of an in-flight run. `last_sync` lets the dashboard

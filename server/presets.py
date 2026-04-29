@@ -1,19 +1,21 @@
 """Single source of truth for detection presets.
 
-A preset bundles the **full detection-config triple** — HSVRange +
-ShapeGate + CandidateSelectorTuning — so switching presets is a single
-atomic operation that produces a reproducible config, and a frozen
-pitch can be tagged with the preset that generated it. Earlier the
-preset only carried HSV; shape_gate / selector were silently inherited
-from current state during a `source=preset:NAME` reprocess, which
-defeated the whole point of "rerun s_xxx with blue_ball" being
-disk-independent.
+A preset bundles the detection-config pair — HSVRange + ShapeGate —
+so switching presets is a single atomic operation that produces a
+reproducible config, and a frozen pitch can be tagged with the preset
+that generated it. Earlier the preset only carried HSV; shape_gate was
+silently inherited from current state during a `source=preset:NAME`
+reprocess, which defeated the whole point of "rerun s_xxx with
+blue_ball" being disk-independent.
+
+Selector cost weights are no longer presetable — they're locked as
+`_W_ASPECT` / `_W_FILL` module constants in `candidate_selector` (the
+selector retirement). Presets carry HSV + shape gate only.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate
 
 
@@ -23,18 +25,16 @@ class Preset:
     label: str
     hsv: HSVRange
     shape_gate: ShapeGate
-    selector: CandidateSelectorTuning
 
 
 PRESETS: dict[str, Preset] = {
     "tennis": Preset(
         name="tennis",
         label="Tennis",
-        # All three bound to module defaults so retuning a default
-        # auto-propagates to the preset and there's no drift to chase.
+        # Bound to module defaults so retuning a default auto-propagates
+        # to the preset and there's no drift to chase.
         hsv=HSVRange.default(),
         shape_gate=ShapeGate.default(),
-        selector=CandidateSelectorTuning.default(),
     ),
     "blue_ball": Preset(
         name="blue_ball",
@@ -50,10 +50,6 @@ PRESETS: dict[str, Preset] = {
         # rejects more clutter (0.63-0.70 fill range observed at p50;
         # see CLAUDE.md tuning baselines).
         shape_gate=ShapeGate(aspect_min=0.75, fill_min=0.55),
-        # Same selector weights as default — there's no rationale to
-        # weight aspect/fill differently for the blue ball; the cost
-        # function operates on already-normalized residuals.
-        selector=CandidateSelectorTuning.default(),
     ),
 }
 

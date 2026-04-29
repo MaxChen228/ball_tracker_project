@@ -5,7 +5,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate
 from detection_config import (
     DetectionConfig,
@@ -67,24 +66,6 @@ def _validated_shape_gate(values: dict[str, object]) -> ShapeGate:
     return ShapeGate(aspect_min=aspect_min, fill_min=fill_min)
 
 
-def _validated_candidate_selector_tuning(values: dict[str, object]) -> CandidateSelectorTuning:
-    """Parse + range-check the two shape-prior knobs."""
-    def _float_field(name: str, lo: float, hi: float) -> float:
-        raw = values.get(name)
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail=f"missing or invalid '{name}'")
-        if not (lo <= value <= hi):
-            raise HTTPException(status_code=400, detail=f"'{name}' out of range [{lo}, {hi}]")
-        return value
-
-    return CandidateSelectorTuning(
-        w_aspect=_float_field("w_aspect", 0.0, 1.0),
-        w_fill=_float_field("w_fill", 0.0, 1.0),
-    )
-
-
 @router.post("/detection/config/reset_to_preset")
 async def detection_config_reset_to_preset(request: Request):
     """Snap the live detection-config triple to a named preset's
@@ -125,7 +106,6 @@ async def detection_config_reset_to_preset(request: Request):
     cfg = DetectionConfig(
         hsv=p.hsv,
         shape_gate=p.shape_gate,
-        selector=p.selector,
         preset=preset_name,
         last_applied_at=None,
     )
@@ -144,7 +124,7 @@ async def detection_config_reset_to_preset(request: Request):
 
 @router.get("/detection/config")
 async def detection_config_get():
-    """Return the full detection-config triple plus preset identity and
+    """Return the full detection-config pair plus preset identity and
     the list of fields that diverge from the bound preset (empty when
     preset-pure or `preset` is None / custom). The dashboard's phase 3
     unified card calls this on render to populate the identity header
@@ -161,15 +141,14 @@ async def detection_config_get():
 
 @router.post("/detection/config")
 async def detection_config_post(request: Request):
-    """Atomic update of the full detection-config triple.
+    """Atomic update of the full detection-config pair.
 
     Body (JSON) — all required, no per-field defaulting (per CLAUDE.md
     no-silent-fallback):
       - `hsv`: `{h_min, h_max, s_min, s_max, v_min, v_max}` (uint8 range)
       - `shape_gate`: `{aspect_min, fill_min}` (each ∈ [0, 1])
-      - `selector`: `{w_aspect, w_fill}` (each ∈ [0, 1])
       - `preset`: optional string. If supplied AND non-null, the
-        triple MUST exactly match `presets.PRESETS[preset]` — otherwise
+        pair MUST exactly match `presets.PRESETS[preset]` — otherwise
         the operator's "I'm setting blue_ball" claim is contradicted by
         their values, which is exactly the silent-drift failure mode
         this redesign exists to prevent. Caller can pass `preset=null`
@@ -177,15 +156,15 @@ async def detection_config_post(request: Request):
 
     Persists atomically to `data/detection_config.json` and pushes the
     new config to all connected cameras over WS in a single broadcast
-    (vs the legacy three-endpoint dance which fired three pushes for
-    one logical edit).
+    (vs the legacy two-endpoint dance which fired two pushes for one
+    logical edit).
     """
     from main import state, device_ws, _settings_message_for
 
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
-    for key in ("hsv", "shape_gate", "selector"):
+    for key in ("hsv", "shape_gate"):
         if key not in body:
             raise HTTPException(
                 status_code=400,
@@ -193,7 +172,6 @@ async def detection_config_post(request: Request):
             )
     hsv = _validated_hsv_range(body["hsv"])
     gate = _validated_shape_gate(body["shape_gate"])
-    selector = _validated_candidate_selector_tuning(body["selector"])
 
     preset_name = body.get("preset")
     if preset_name is not None:
@@ -212,11 +190,11 @@ async def detection_config_post(request: Request):
         # built to prevent. Operator-facing UI computes the diff client-
         # side and either submits matching values or sets preset=null.
         ref = _HSV_PRESETS[preset_name]
-        if hsv != ref.hsv or gate != ref.shape_gate or selector != ref.selector:
+        if hsv != ref.hsv or gate != ref.shape_gate:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"preset='{preset_name}' but supplied triple differs from "
+                    f"preset='{preset_name}' but supplied pair differs from "
                     f"PRESETS[{preset_name!r}]. Either submit values matching "
                     "the preset exactly, or pass preset=null for custom."
                 ),
@@ -225,7 +203,6 @@ async def detection_config_post(request: Request):
     cfg = DetectionConfig(
         hsv=hsv,
         shape_gate=gate,
-        selector=selector,
         preset=preset_name,
         last_applied_at=None,  # state stamps under lock
     )

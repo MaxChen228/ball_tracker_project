@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates
+from candidate_selector import Candidate, score_candidates
 from detection import HSVRange, ShapeGate
 from pairing_tuning import PairingTuning
 from schemas import FramePayload, TriangulatedPoint
@@ -68,11 +68,6 @@ class LivePairingSession:
     # state.ingest_live_frame; reused across the 8 ms pair loop so the
     # hot path skips per-frame pitch construction + SVD extrinsics.
     camera_poses: dict[str, CameraPose] = field(default_factory=dict)
-    # Selector tuning, refreshed by state.ingest_live_frame from the
-    # dashboard-controlled `state.candidate_selector_tuning()` on every
-    # ingest. Defaults so a session built outside that call (tests) still
-    # has a usable tuning instead of None.
-    tuning: CandidateSelectorTuning = field(default_factory=CandidateSelectorTuning.default)
     # Triangulation fan-out tuning (cost + gap thresholds), refreshed by
     # state.ingest_live_frame on every ingest. Default lets every shape-
     # gate-passed candidate through (cost=1.0); `PairingTuning.gap_threshold_m`
