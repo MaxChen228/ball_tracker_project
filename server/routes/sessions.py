@@ -294,21 +294,36 @@ async def _enqueue_server_post(
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=422, detail="invalid session_id")
     source = await _read_source_field(request)
-    queued = state._processing.resume_processing(session_id)
-    if not queued:
+    # Pre-flight resolve BEFORE `resume_processing` (which transitions
+    # job states to "queued"). Order matters: if `source=frozen` and any
+    # cam lacks a snapshot, raising mid-loop AFTER resume_processing
+    # would leave the cam(s) already-transitioned stuck in "queued"
+    # state with no BackgroundTask backing them — a zombie chip on
+    # /events that no future operator action can clear. Pre-flight reads
+    # candidates non-mutatingly via `session_candidates`, validates the
+    # whole set, then commits with `resume_processing`. The pitches we
+    # peek at here are the same instances `resume_processing` deep-copies
+    # for hand-off; the *_used fields we read are immutable post-/pitch
+    # ingest so the peek-then-copy is safe.
+    candidates = state._processing.session_candidates(session_id)
+    if not candidates:
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
-    # Resolve override for every queued pitch BEFORE kicking off any
-    # background tasks. If `source=frozen` and one cam lacks a frozen
-    # snapshot, fail the whole request (409) — partial runs would mix
-    # configs across cams of the same session, which is the exact
-    # provenance corruption this redesign exists to prevent.
-    plan: list[tuple[Path, PitchPayload, HSVRange, ShapeGate, CandidateSelectorTuning, str]] = []
+    resolved_by_cam: dict[str, tuple[HSVRange, ShapeGate, CandidateSelectorTuning, str]] = {}
+    for cam, pitch, _clip_path in candidates:
+        resolved_by_cam[cam] = _resolve_detection_config(source, pitch, state)
+    queued = state._processing.resume_processing(session_id)
+    if not queued:
+        # `session_candidates` saw something but `resume_processing`
+        # found nothing transitionable (already running / finished).
+        # 409 matches the previous semantics; resolved_by_cam is
+        # discarded with no side effects.
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=409, detail="no resumable processing")
     for clip_path, pitch in queued:
-        hsv, gate, tuning, label = _resolve_detection_config(source, pitch, state)
-        plan.append((clip_path, pitch, hsv, gate, tuning, label))
-    for clip_path, pitch, hsv, gate, tuning, label in plan:
+        hsv, gate, tuning, label = resolved_by_cam[pitch.camera_id]
         background_tasks.add_task(
             _run_server_detection,
             clip_path,
@@ -323,7 +338,7 @@ async def _enqueue_server_post(
     return {
         "ok": True,
         "session_id": session_id,
-        "queued": len(plan),
+        "queued": len(queued),
         "source": source,
     }
 
