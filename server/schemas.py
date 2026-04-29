@@ -63,17 +63,28 @@ class IntrinsicsPayload(BaseModel):
 
 class BlobCandidate(BaseModel):
     """One CC-stat survivor passing the area+aspect+fill gates. Live path
-    (iOS) uploads top-K per frame so the server can apply the temporal
-    prior (`candidate_selector.select_best_candidate`) before pairing.
+    (iOS) uploads top-K per frame so the server can apply the shape-prior
+    selector (`candidate_selector.select_best_candidate`) before pairing.
     `area_score` is area / max_area_in_batch on the producing side."""
+    # Old JSONs written before aspect/fill persistence omit those fields;
+    # tolerate on load. New code paths always populate them.
+    # TODO: drop extra="ignore" once historical pitches/*.json are
+    # all rewritten by reprocess_sessions.
+    model_config = ConfigDict(extra="ignore")
     px: float
     py: float
     area: int
     area_score: float
-    # Selector cost stamped by `live_pairing._resolve_candidates` at
-    # decision time. None = legacy JSON written before cost persistence,
-    # or wire payload from iOS before server-side resolution. Viewer
-    # falls back to area-asc sort on None entries.
+    # Width/height ratio min(w,h)/max(w,h) of the CC bounding box. 1.0 =
+    # perfectly square (round ball ≈ 1); used by the shape-weighted
+    # selector cost. None on legacy JSONs predating shape persistence.
+    aspect: float | None = None
+    # area / (w*h) of the CC bounding box. Empirical median for the blue
+    # ball is ~0.68 (memory: project_ball_empirical_fill). None on legacy.
+    fill: float | None = None
+    # Selector cost stamped at decision time. None = legacy JSON written
+    # before cost persistence, or wire payload from iOS before server-side
+    # resolution. Viewer falls back to area-asc sort on None entries.
     cost: float | None = None
 
 

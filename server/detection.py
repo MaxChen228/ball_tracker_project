@@ -160,6 +160,7 @@ def detect_ball_with_candidates(
     tuning = selector_tuning if selector_tuning is not None else CandidateSelectorTuning.default()
 
     survivors: list[Candidate] = []
+    shape_stats: list[tuple[float, float]] = []  # parallel: (aspect, fill) per survivor
     for idx in range(1, num_labels):
         area = int(stats[idx, cv2.CC_STAT_AREA])
         if area < min_area or area > max_area:
@@ -178,6 +179,7 @@ def detect_ball_with_candidates(
         survivors.append(
             Candidate(cx=float(cx), cy=float(cy), area=area, area_score=0.0)
         )
+        shape_stats.append((aspect, fill))
 
     if not survivors:
         return None, []
@@ -202,9 +204,11 @@ def detect_ball_with_candidates(
     blobs = [
         BlobCandidate(
             px=c.cx, py=c.cy, area=c.area,
-            area_score=c.area_score, cost=float(cost),
+            area_score=c.area_score,
+            aspect=float(asp), fill=float(fl),
+            cost=float(cost),
         )
-        for c, cost in zip(scored, costs)
+        for c, (asp, fl), cost in zip(scored, shape_stats, costs)
     ]
     winner_idx = min(range(len(costs)), key=lambda i: costs[i])
     return blobs[winner_idx], blobs
