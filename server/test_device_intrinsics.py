@@ -88,9 +88,9 @@ def test_dashboard_adapter_emits_fy_not_fz():
     The adapter pivots `calibrate_intrinsics.py` flat output (`fx/fy/cx/cy`
     at top level) into the nested `DeviceIntrinsics` shape the endpoint
     expects. A previous version wrote `fz: fy` (legacy field name) into the
-    nested intrinsics block — but `scripts/migrate_fz_to_fy.py` retired the
-    `fz` alias on `IntrinsicsPayload`, so every dashboard upload then 422'd
-    with `intrinsics.fy Field required`.
+    nested intrinsics block — but the `fz` alias on `IntrinsicsPayload` has
+    been retired (migration script removed 2026-04-29), so every dashboard
+    upload then 422'd with `intrinsics.fy Field required`.
 
     This test reads the JS source and asserts the adapter emits `fy` in the
     nested block. Source-level guard since the adapter lives in browser JS

@@ -240,9 +240,10 @@ from calibration_auto import (
 async def _no_cache_html(request: Request, call_next):
     """Force browsers to always refetch HTML — the dashboard ships its
     JS inline, so a cached HTML doc means stale JS. Plain reload (not
-    Cmd-Shift-R) was serving disk-cached HTML with an older IIFE that
-    still ran the retired tickPreviewRefresh keep-alive loop, which
-    fought the new single-source-of-truth preview flow."""
+    Cmd-Shift-R) was serving disk-cached HTML whose IIFE conflicted with
+    the live one. Note: markers page still runs its own
+    `tickPreviewRefresh` poll loop (see render_markers.py); only the
+    dashboard preview pipeline was retired."""
     response = await call_next(request)
     ctype = response.headers.get("content-type", "")
     if ctype.startswith("text/html"):
