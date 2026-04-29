@@ -334,10 +334,15 @@ def _build_figure(scene: Scene):
             zaxis=axis("Z (up, m)"),
             bgcolor=_BG,
             aspectmode="data",
+            # ISO preset baked into the figure so first paint matches
+            # the toolbar's default-active ISO chip. Centre = strike-zone
+            # centroid (X=0, Y=0.216, Z=0.76) so the box sits at the
+            # frame middle; every preset shares this centre. Keep in
+            # sync with VIEW_PRESETS.iso in 75_view_presets.js.
             camera=dict(
-                eye=dict(x=1.5, y=1.5, z=1.0),
+                eye=dict(x=1.6, y=1.816, z=1.56),
                 up=dict(x=0, y=0, z=1),
-                center=dict(x=0, y=0.2, z=0.3),
+                center=dict(x=0, y=0.216, z=0.76),
             ),
             uirevision="viewer-scene",
         ),
