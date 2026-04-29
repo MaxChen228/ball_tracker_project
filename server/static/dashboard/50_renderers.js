@@ -73,6 +73,7 @@
     const calLastTs = state.calibration_last_ts || {};
     const autoCalActive = (state.auto_calibration && state.auto_calibration.active) || {};
     const autoCalLast = (state.auto_calibration && state.auto_calibration.last) || {};
+    const calBuffers = state.calibration_buffers || {};
     function hhmm(ts) {
       if (!ts) return '';
       const d = new Date(ts * 1000);
@@ -112,8 +113,47 @@
         `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}" ` +
         `${previewDisabled ? 'disabled' : ''}>` +
         `${previewBusy ? (previewOn ? 'PREVIEW ON…' : 'PREVIEW…') : (previewOn ? 'PREVIEW ON' : 'PREVIEW')}</button>`);
+      // Multi-frame accumulation buffer state. Drives both the
+      // [Calibrate]/[Re-calibrate] label and the optional [Clear] button
+      // visibility. Empty buf object {} means no accumulation in flight.
+      const buf = calBuffers[cam] || {};
+      const bufCount = Number(buf.count || 0);
+      const bufIds = Array.isArray(buf.marker_ids) ? buf.marker_ids : [];
+      const bufReproj = (typeof buf.last_reproj_px === 'number') ? buf.last_reproj_px : null;
+      const bufFails = Number(buf.failure_count || 0);
+      let calBtnLabel;
+      if (autoRun) calBtnLabel = autoCalButtonLabel(autoRun);
+      else if (bufCount > 0) calBtnLabel = 'Calibrate (' + bufCount + '/5)';
+      else if (isCal) calBtnLabel = 'Re-calibrate';
+      else calBtnLabel = 'Calibrate';
       const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}" ${autoCalDisabled ? 'disabled' : ''}>` +
-        `${autoCalButtonLabel(autoRun)}</button>`;
+        `${esc(calBtnLabel)}</button>`;
+      const clearBtn = (bufCount > 0)
+        ? `<button type="button" class="btn small secondary" data-clear-buffer="${esc(cam)}">Clear</button>`
+        : '';
+      // Buffer state strip — sits between device-head and device-actions
+      // so operators see "where am I" before choosing the next button.
+      let bufferBlock = '';
+      const bufParts = [];
+      if (bufCount > 0) {
+        bufParts.push('<span class="buffer-progress">accum [' + bufIds.join(', ') +
+                      '] <strong>(' + bufCount + '/5)</strong></span>');
+      } else if (isCal) {
+        bufParts.push('<span class="buffer-progress idle">✓ calibrated</span>');
+      }
+      if (bufReproj !== null) {
+        const bcls = bufReproj < 5 ? 'ok' : bufReproj < 15 ? 'warn' : 'bad';
+        bufParts.push('<span class="reproj-badge ' + bcls +
+                      '" title="last solve reprojection error">reproj <strong>' +
+                      bufReproj.toFixed(1) + '</strong> px</span>');
+      }
+      if (bufFails > 0) {
+        bufParts.push('<span class="buffer-fail">failed ' + bufFails + '/3</span>');
+      }
+      if (bufParts.length > 0) {
+        bufferBlock = '<div class="buffer-block" data-cam="' + esc(cam) + '">' +
+                      bufParts.join('') + '</div>';
+      }
       const autoLogBtn = (autoLast && autoLast.status === 'failed')
         ? `<button type="button" class="btn small secondary" data-auto-cal-log="${esc(cam)}" title="Copy full auto-cal log to clipboard for debugging">Copy log</button>`
         : '';
@@ -189,7 +229,8 @@
             </div>
             <div class="chip-col">${batteryChip(deviceRecord, online)}${statusChip(cam, online, isCal)}</div>
           </div>
-          <div class="device-actions">${previewBtn}${autoCalBtn}${autoLogBtn}</div>
+          ${bufferBlock}
+          <div class="device-actions">${previewBtn}${autoCalBtn}${clearBtn}${autoLogBtn}</div>
           ${camViewBlock}
         </div>`;
     }

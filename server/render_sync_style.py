@@ -92,6 +92,40 @@ _SYNC_CSS = """
 .device-actions { display: flex; gap: var(--s-2); margin-top: var(--s-2);
                   margin-bottom: var(--s-2); flex-wrap: wrap; }
 .preview-btn.active { background: var(--ink); color: var(--surface); }
+/* Multi-frame accumulation buffer state strip — sits between the
+   device-head (status chips) and the device-actions (buttons) so
+   operators see "where am I in the calibration sequence" before
+   choosing which button to press. */
+.buffer-block { display: flex; gap: var(--s-2); flex-wrap: wrap;
+                align-items: center; margin: var(--s-2) 0;
+                padding: var(--s-1) var(--s-2);
+                font-family: var(--mono); font-size: 11px;
+                letter-spacing: 0.06em;
+                background: var(--surface-deep); border: 1px solid var(--border-base);
+                border-radius: 6px; }
+.buffer-block .buffer-progress { color: var(--ink); }
+.buffer-block .buffer-progress.idle { color: var(--passed); }
+.buffer-block .buffer-progress strong { font-weight: 600; }
+.buffer-block .reproj-badge { padding: 2px 8px; border-radius: 4px;
+                              border: 1px solid; }
+.buffer-block .reproj-badge.ok { color: var(--passed); border-color: var(--passed);
+                                 background: var(--passed-bg); }
+.buffer-block .reproj-badge.warn { color: var(--warn); border-color: var(--warn);
+                                   background: var(--warn-bg); }
+.buffer-block .reproj-badge.bad { color: var(--failed); border-color: var(--failed);
+                                  background: var(--failed-bg); }
+.buffer-block .buffer-fail { color: var(--failed); font-weight: 600; }
+/* Reset rig — destructive affordance at the bottom of the devices card.
+   Same .danger styling as other destructive buttons (delete intrinsics). */
+.reset-rig-row { display: flex; justify-content: flex-end;
+                 margin-top: var(--s-3); padding-top: var(--s-3);
+                 border-top: 1px solid var(--border-base); }
+.btn.small.danger { color: var(--failed); border-color: var(--failed);
+                    background: transparent; }
+.btn.small.danger:hover { background: var(--failed-bg); }
+.btn.small.secondary { color: var(--sub); border-color: var(--border-base);
+                       background: transparent; }
+.btn.small.secondary:hover { background: var(--surface-deep); }
 .tuning-status {
   min-height: 18px;
   margin-bottom: var(--s-2);

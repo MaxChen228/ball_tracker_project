@@ -30,6 +30,58 @@
     }
   });
 
+  // [Clear] — drop the per-cam accumulator buffer. Operator presses
+  // this when they know the cam or board moved between [Calibrate]
+  // presses (buffer state is no longer aligned with the scene).
+  // Idempotent on already-empty buffers; tickStatus refreshes the row.
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-clear-buffer]');
+    if (!btn) return;
+    if (btn.disabled) return;
+    const cam = btn.dataset.clearBuffer;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = 'Clearing…';
+    try {
+      await fetch('/calibration/buffer/clear/' + encodeURIComponent(cam),
+                  { method: 'POST' });
+      tickStatus();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  });
+
+  // [Reset rig] — full re-setup affordance. Wipes calibrations +
+  // extended markers + accumulator buffers. Behind a confirm so a
+  // misclick doesn't nuke a working rig.
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-reset-rig]');
+    if (!btn) return;
+    if (btn.disabled) return;
+    const ok = window.confirm(
+      'Reset rig?\n\nThis wipes all calibrations + extended markers + accumulator buffers ' +
+      'across both cams. Per-device ChArUco intrinsics survive.\n\nProceed?'
+    );
+    if (!ok) return;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = 'Resetting…';
+    try {
+      const r = await fetch('/calibration/reset_rig', { method: 'POST' });
+      if (!r.ok) {
+        let msg = 'Reset failed';
+        try { const body = await r.json(); if (body.detail) msg = body.detail; } catch (_) {}
+        alert(msg);
+        return;
+      }
+      tickStatus();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  });
+
   // Copy a full auto-cal failure log to the clipboard. Surfaces the
   // active + last-run dump plus a /status snapshot so the operator can
   // paste the whole context into an AI / bug report without digging

@@ -7,6 +7,7 @@
   let currentSyncCommands = {};
   let currentCalibrationLastTs = {};
   let currentAutoCalibration = { active: {}, last: {} };
+  let currentCalibrationBuffers = {};
   let currentEventsBucket = 'active';
   const pendingPreviewMutations = new Set();
 
@@ -39,6 +40,16 @@
       last_ts: state.calibration_last_ts || {},
       sync_pending: Object.keys(state.sync_commands || {}).sort(),
       auto_calibration: state.auto_calibration || { active: {}, last: {} },
+      // Repaint when buffer count / reproj / failure_count flips so the
+      // operator sees the (n/5) progress + reproj badge update without
+      // a manual reload.
+      cal_buffers: Object.fromEntries(
+        Object.entries(state.calibration_buffers || {}).map(([cam, b]) => [cam, {
+          c: b.count || 0,
+          r: (typeof b.last_reproj_px === 'number') ? Math.round(b.last_reproj_px * 10) / 10 : null,
+          f: b.failure_count || 0,
+        }])
+      ),
     });
     if (key === _lastDevKey) return;
     _lastDevKey = key;

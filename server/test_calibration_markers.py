@@ -399,6 +399,52 @@ def test_calibration_reset_rig_wipes_calibrations_markers_buffers(tmp_path, monk
     assert main.state.calibration_buffer_summary("B")["count"] == 0
 
 
+def test_setup_page_renders_buffer_state_and_reset_rig_button(tmp_path, monkeypatch):
+    """SSR check: /setup paints the buffer block + Calibrate label + Reset
+    rig button without needing JS. Operator hitting a fresh dashboard
+    sees the right affordances on first paint."""
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    # Plant some buffer state so the buffer block has something to render.
+    from calibration_solver import PLATE_MARKER_WORLD
+    bgr, _ = _render_aruco_scene(
+        {k: PLATE_MARKER_WORLD[k] for k in (0, 1, 2)},
+    )
+    _seed_calibration_frame("A", _jpeg_encode(bgr))
+    client.post("/calibration/auto/A")  # accumulating phase, count=3
+
+    r = client.get("/setup")
+    assert r.status_code == 200
+    body = r.text
+    # Buffer block surfaces the (3/5) progress for cam A.
+    assert 'class="buffer-block"' in body
+    assert "(3/5)" in body
+    # Reset rig button is present with confirm-handling JS hook.
+    assert 'data-reset-rig="1"' in body
+    assert "Reset rig" in body
+
+
+def test_status_payload_carries_calibration_buffers(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    # Empty initially.
+    s = client.get("/status").json()
+    assert s["calibration_buffers"] == {}
+
+    # Plant a buffer entry via the auto-cal endpoint.
+    from calibration_solver import PLATE_MARKER_WORLD
+    bgr, _ = _render_aruco_scene({k: PLATE_MARKER_WORLD[k] for k in (0, 1)})
+    _seed_calibration_frame("A", _jpeg_encode(bgr))
+    client.post("/calibration/auto/A")
+
+    s = client.get("/status").json()
+    assert "A" in s["calibration_buffers"]
+    assert s["calibration_buffers"]["A"]["count"] == 2
+    assert s["calibration_buffers"]["A"]["ready"] is False
+
+
 def test_markers_scan_triangulates_dual_camera_candidates(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(app)
