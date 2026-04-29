@@ -283,6 +283,13 @@
       sync_commands: currentSyncCommands,
       calibration_last_ts: currentCalibrationLastTs || {},
       auto_calibration: currentAutoCalibration,
+      // Forward the cached calibration buffer + known marker IDs so a
+      // SSE-triggered repaint doesn't drop the cal-panel + marker
+      // coverage chips. Without these, the diff key sees empty pools,
+      // marker chips collapse, then next tickStatus restores them —
+      // that's the "auto-expand/collapse" flicker on board IDs.
+      calibration_buffers: currentCalibrationBuffers || {},
+      known_marker_ids: currentKnownMarkerIds || { plate: [], extended: [] },
     });
     renderSession({
       devices: currentDevices,
