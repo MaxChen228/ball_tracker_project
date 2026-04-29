@@ -1008,15 +1008,30 @@ class State:
         with self._lock:
             return self._calibration_frames.requested_ids()
 
-    def store_calibration_frame(self, camera_id: str, jpeg_bytes: bytes) -> None:
-        """Phone pushed a calibration frame; stash it and clear the flag."""
+    def store_calibration_frame(
+        self,
+        camera_id: str,
+        jpeg_bytes: bytes,
+        *,
+        photo_fov_deg: float | None = None,
+        video_fov_deg: float | None = None,
+    ) -> None:
+        """Phone pushed a calibration frame; stash it and clear the flag.
+        FOVs (when iOS reports them) carry the photo format's basis +
+        the live video format's basis so the auto-cal route can solve
+        in one and store in the other."""
         with self._lock:
-            self._calibration_frames.store(camera_id, jpeg_bytes)
+            self._calibration_frames.store(
+                camera_id, jpeg_bytes,
+                photo_fov_deg=photo_fov_deg,
+                video_fov_deg=video_fov_deg,
+            )
 
     def consume_calibration_frame(
         self, camera_id: str, max_age_s: float = _CALIBRATION_FRAME_TTL_S,
-    ) -> tuple[bytes, float] | None:
-        """Atomic pop-if-fresh. Returns None if no frame cached or stale."""
+    ):
+        """Atomic pop-if-fresh. Returns the CalibrationFramePayload (jpeg
+        + received_at + FOV pair) or None if no frame cached or stale."""
         with self._lock:
             return self._calibration_frames.consume(camera_id, max_age_s=max_age_s)
 

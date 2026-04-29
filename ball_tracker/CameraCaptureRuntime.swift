@@ -570,29 +570,51 @@ final class CameraCaptureRuntime {
     /// it at the standby grid means `reconcileStandbyCaptureState` can
     /// recover the session via `reconfigureActiveSession` if rollback
     /// itself fails (lock contention).
+    /// Calibration capture result envelope. Carries the FOVs of both
+    /// formats so the server can solve in 12 MP basis but rebuild K + H
+    /// in the live 1080p video basis. Without these the linear K rescale
+    /// silently mismatches the standby preview's actual FOV (12 MP photo
+    /// format and 1080p binned video format crop the sensor differently
+    /// → the dashboard overlay drifts a few px after each calibration).
+    struct CalibrationCaptureResult {
+        let jpeg: Data
+        let size: CGSize
+        let photoFovDeg: Double  // 12 MP format's videoFieldOfView (capture basis)
+        let videoFovDeg: Double  // 1080p video format's videoFieldOfView (live basis)
+    }
+
     func pauseAndCaptureHighResStill(
         timeout: TimeInterval = 5.0,
-        completion: @escaping (Data?, CGSize) -> Void
+        completion: @escaping (CalibrationCaptureResult?) -> Void
     ) {
         sessionQueue.async { [weak self] in
             guard let self = self else {
-                completion(nil, .zero)
+                completion(nil)
                 return
             }
             guard let device = self.currentCaptureDevice else {
                 captureLog.error("calibration swap: no current capture device")
-                completion(nil, .zero)
+                completion(nil)
                 return
             }
             guard let photoFormat = self.findLargestPhotoFormat(device: device) else {
                 captureLog.error("calibration swap: no high-res photo format available")
-                completion(nil, .zero)
+                completion(nil)
                 return
             }
             let originalFormat = device.activeFormat
             let origDims = CMVideoFormatDescriptionGetDimensions(originalFormat.formatDescription)
             let newDims = CMVideoFormatDescriptionGetDimensions(photoFormat.formatDescription)
-            captureLog.info("calibration swap: \(origDims.width)x\(origDims.height) → \(newDims.width)x\(newDims.height)")
+            // Capture both FOVs BEFORE the swap. photoFormat's videoFieldOfView
+            // is the 12 MP photo basis (where ArUco corners get detected);
+            // originalFormat's videoFieldOfView is the 1080p video basis (where
+            // live frames + viewer overlay live). They differ on iPhone main
+            // cams because the binned video format crops the sensor differently
+            // from the full-frame photo format — server uses both to rebuild
+            // K + H in the live basis after solving in the photo basis.
+            let photoFovDeg = Double(photoFormat.videoFieldOfView)
+            let videoFovDeg = Double(originalFormat.videoFieldOfView)
+            captureLog.info("calibration swap: \(origDims.width)x\(origDims.height) (fov=\(String(format: "%.3f", videoFovDeg))) → \(newDims.width)x\(newDims.height) (fov=\(String(format: "%.3f", photoFovDeg)))")
 
             let cycleID = UUID()
             self.currentPhotoCycle = cycleID
@@ -607,7 +629,7 @@ final class CameraCaptureRuntime {
                 captureLog.error("calibration swap-to: lockForConfiguration failed err=\(error.localizedDescription, privacy: .public)")
                 self.currentPhotoCycle = nil
                 self.rollbackToFormat(device: device, original: originalFormat, restoreFps: self.standbyFps, wasRunning: wasRunning)
-                completion(nil, .zero)
+                completion(nil)
                 return
             }
             if #available(iOS 16.0, *),
@@ -650,7 +672,15 @@ final class CameraCaptureRuntime {
                         device: device, original: originalFormat,
                         restoreFps: self.standbyFps, wasRunning: wasRunning
                     )
-                    completion(data, size)
+                    if let data = data {
+                        completion(CalibrationCaptureResult(
+                            jpeg: data, size: size,
+                            photoFovDeg: photoFovDeg,
+                            videoFovDeg: videoFovDeg,
+                        ))
+                    } else {
+                        completion(nil)
+                    }
                 }
             }
             self.photoDelegateLock.withLock {
@@ -673,7 +703,7 @@ final class CameraCaptureRuntime {
                     device: device, original: originalFormat,
                     restoreFps: self.standbyFps, wasRunning: wasRunning
                 )
-                completion(nil, .zero)
+                completion(nil)
             }
 
             self.photoOutput.capturePhoto(with: settings, delegate: delegate)

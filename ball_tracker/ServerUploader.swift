@@ -602,7 +602,21 @@ final class ServerUploader: @unchecked Sendable {
             )))
             return
         }
-        let url = base.appendingPathComponent(path.hasPrefix("/") ? String(path.dropFirst()) : path)
+        // Build URL preserving query string (?key=val&...) — `appendingPathComponent`
+        // percent-encodes `?` and `=`, turning calibration_frame?photo_fov=...
+        // into a 404. String concatenation against the base's absoluteString
+        // keeps the query string in its proper place.
+        let baseStr = base.absoluteString
+        let baseTrimmed = baseStr.hasSuffix("/") ? String(baseStr.dropLast()) : baseStr
+        let pathWithSlash = path.hasPrefix("/") ? path : "/" + path
+        guard let url = URL(string: baseTrimmed + pathWithSlash) else {
+            completion?(.failure(NSError(
+                domain: "ServerUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid URL: \(baseTrimmed + pathWithSlash)"]
+            )))
+            return
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")

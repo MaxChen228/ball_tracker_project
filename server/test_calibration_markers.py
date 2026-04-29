@@ -128,11 +128,24 @@ def _render_aruco_scene_3d(
     return bgr
 
 
-def _seed_calibration_frame(camera_id: str, jpeg: bytes) -> None:
+def _seed_calibration_frame(
+    camera_id: str, jpeg: bytes,
+    *,
+    photo_fov_deg: float | None = None,
+    video_fov_deg: float | None = None,
+) -> None:
     """Simulate an iPhone pushing a native-resolution calibration JPEG.
     Bypasses the request/TTL handshake — the polling loop in
-    /calibration/auto finds the cached frame on its first iteration."""
-    main.state.store_calibration_frame(camera_id, jpeg)
+    /calibration/auto finds the cached frame on its first iteration.
+
+    `photo_fov_deg` / `video_fov_deg` mirror the new iOS upload flow
+    (FOVs of the 12 MP photo format and the 1080p video format). When
+    omitted the legacy linear-rescale path is exercised."""
+    main.state.store_calibration_frame(
+        camera_id, jpeg,
+        photo_fov_deg=photo_fov_deg,
+        video_fov_deg=video_fov_deg,
+    )
 
 
 def test_calibration_auto_writes_snapshot_from_calibration_frame(tmp_path, monkeypatch):

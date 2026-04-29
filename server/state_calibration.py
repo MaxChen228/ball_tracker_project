@@ -241,12 +241,24 @@ class DeviceIntrinsicsStore:
         return dict(self._items)
 
 
+@dataclass
+class CalibrationFramePayload:
+    """Wraps the JPEG bytes + iOS-reported FOVs of the photo format
+    (capture basis, 12 MP) and video format (live basis, 1080p). FOVs
+    are optional only because tests / older clients may omit them; the
+    auto-cal route falls back to the legacy h_fov path when missing."""
+    jpeg_bytes: bytes
+    received_at: float
+    photo_fov_deg: float | None
+    video_fov_deg: float | None
+
+
 class CalibrationFrameBuffer:
     """One-shot high-resolution calibration frames pushed by iOS."""
 
     def __init__(self, *, time_fn: Callable[[], float]) -> None:
         self._time_fn = time_fn
-        self._frames: dict[str, tuple[bytes, float]] = {}
+        self._frames: dict[str, CalibrationFramePayload] = {}
         self._requested: dict[str, float] = {}
 
     def request(self, camera_id: str) -> None:
@@ -266,9 +278,21 @@ class CalibrationFrameBuffer:
     def requested_ids(self) -> list[str]:
         return [cam for cam in list(self._requested.keys()) if self.is_requested(cam)]
 
-    def store(self, camera_id: str, jpeg_bytes: bytes) -> None:
+    def store(
+        self,
+        camera_id: str,
+        jpeg_bytes: bytes,
+        *,
+        photo_fov_deg: float | None = None,
+        video_fov_deg: float | None = None,
+    ) -> None:
         now = self._time_fn()
-        self._frames[camera_id] = (jpeg_bytes, now)
+        self._frames[camera_id] = CalibrationFramePayload(
+            jpeg_bytes=jpeg_bytes,
+            received_at=now,
+            photo_fov_deg=photo_fov_deg,
+            video_fov_deg=video_fov_deg,
+        )
         self._requested.pop(camera_id, None)
 
     def consume(
@@ -276,13 +300,12 @@ class CalibrationFrameBuffer:
         camera_id: str,
         *,
         max_age_s: float = CALIBRATION_FRAME_TTL_S,
-    ) -> tuple[bytes, float] | None:
+    ) -> CalibrationFramePayload | None:
         now = self._time_fn()
         got = self._frames.pop(camera_id, None)
         if got is None:
             return None
-        _, ts = got
-        if now - ts > max_age_s:
+        if now - got.received_at > max_age_s:
             return None
         return got
 
