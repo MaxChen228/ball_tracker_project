@@ -65,6 +65,11 @@ class MarkerRegistryDB:
                         source_camera_ids=[],
                     )
             except Exception:
+                logger.warning(
+                    "MarkerRegistry: skipped malformed row in %s: %r",
+                    self._path,
+                    row,
+                )
                 continue
             self._markers[rec.marker_id] = rec
 
