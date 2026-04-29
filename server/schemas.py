@@ -558,12 +558,3 @@ class Session:
             "tracking_exposure_cap": self.tracking_exposure_cap.value,
             "sync_id": self.sync_id,
         }
-
-
-class StoredPitch(PitchPayload):
-    """On-disk enriched payload shape.
-
-    Exists mainly as a semantic marker so migration code can say "stored
-    payload" while staying wire-compatible with `PitchPayload`."""
-
-    pass
