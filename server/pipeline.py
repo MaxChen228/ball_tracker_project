@@ -19,7 +19,6 @@ from pathlib import Path
 
 import numpy as np
 
-from candidate_selector import CandidateSelectorTuning  # noqa: F401  phase-2 cleanup pending
 from detection import HSVRange, ShapeGate, detect_ball_with_candidates
 from schemas import FramePayload
 from video import iter_frames
@@ -45,12 +44,6 @@ def detect_pitch(
     *,
     should_cancel: CancelCheck | None = None,
     shape_gate: ShapeGate | None = None,
-    # Vestigial — accepted but ignored. Weights are now `_W_ASPECT` /
-    # `_W_FILL` module constants in `candidate_selector`; phase 2 of
-    # the selector retirement removes this kwarg from all callers
-    # (routes/pitch, routes/sessions, reprocess_sessions) and from
-    # this signature.
-    selector_tuning: "CandidateSelectorTuning | None" = None,
     progress: Callable[[int], None] | None = None,
 ) -> list[FramePayload]:
     """Decode `video_path`, run HSV ball detection on every frame, and

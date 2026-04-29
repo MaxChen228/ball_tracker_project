@@ -60,12 +60,12 @@ def test_boot_migrates_legacy_three_files_into_unified(tmp_path, monkeypatch):
     (tmp_path / "shape_gate.json").write_text(json.dumps({
         "aspect_min": 0.56, "fill_min": 0.45,
     }))
-    # Pre-retirement legacy file: written so the test verifies the
-    # migration cleanup deletes it; selector weights themselves are no
-    # longer loaded (they're `_W_ASPECT` / `_W_FILL` constants now).
-    (tmp_path / "candidate_selector_tuning.json").write_text(json.dumps({
-        "w_aspect": 0.7, "w_fill": 0.3,
-    }))
+    # Pre-retirement legacy file: content irrelevant (selector weights
+    # are no longer loaded — they're `_W_ASPECT` / `_W_FILL` constants
+    # now). Touched so the migration cleanup loop has something to
+    # unlink; the post-condition asserts the file is gone, not its
+    # value.
+    (tmp_path / "candidate_selector_tuning.json").write_text("{}")
 
     main = _fresh_main(tmp_path, monkeypatch)
     cfg = main.state.detection_config()

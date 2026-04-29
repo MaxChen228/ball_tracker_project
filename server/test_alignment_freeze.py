@@ -8,10 +8,9 @@ got skipped. These tests pin the post-fix invariant: arm + mid-cycle
 slider drag + first ingest → frozen values are the ones in effect at
 arm time, NOT the post-drag values.
 
-Covers all four frozen fields exposed via `LivePairingSession`:
+Covers the frozen fields exposed via `LivePairingSession`:
   - hsv_range_used
   - shape_gate_used
-  - tuning            (CandidateSelectorTuning, dashboard selector slider)
   - pairing_tuning    (cd87995 cost/gap freeze contract)
 """
 from __future__ import annotations
@@ -19,7 +18,6 @@ from __future__ import annotations
 from dataclasses import replace
 
 import main
-from candidate_selector import CandidateSelectorTuning
 from conftest import sid
 from detection import HSVRange, ShapeGate
 from pairing_tuning import PairingTuning
@@ -62,7 +60,7 @@ def test_arm_then_slider_drag_then_ingest_freezes_arm_time_hsv(tmp_path):
 
     frozen = s.live_session_frozen_config(session.id)
     assert frozen is not None, "first ingest must have stamped"
-    hsv_frozen, _gate_frozen, _tuning_frozen = frozen
+    hsv_frozen, _gate_frozen = frozen
     assert hsv_frozen == hsv_x, (
         f"frozen hsv should be arm-time X, got {hsv_frozen}; "
         "slider drag between arm and first ingest poisoned the session"
@@ -74,7 +72,7 @@ def test_arm_then_slider_drag_then_ingest_freezes_arm_time_hsv(tmp_path):
     s.ingest_live_frame("A", session.id, _make_frame(2))
     frozen2 = s.live_session_frozen_config(session.id)
     assert frozen2 is not None
-    hsv_frozen2, _, _ = frozen2
+    hsv_frozen2, _ = frozen2
     assert hsv_frozen2 == hsv_x, "stamp must be idempotent — never re-stamped"
 
 
@@ -92,26 +90,8 @@ def test_arm_then_slider_drag_then_ingest_freezes_arm_time_shape_gate(tmp_path):
 
     frozen = s.live_session_frozen_config(session.id)
     assert frozen is not None
-    _hsv, gate_frozen, _tuning = frozen
+    _hsv, gate_frozen = frozen
     assert gate_frozen == gate_x
-
-
-def test_arm_then_slider_drag_then_ingest_freezes_arm_time_selector_tuning(tmp_path):
-    s = main.State(data_dir=tmp_path)
-    s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef",
-                sync_anchor_timestamp_s=0.0)
-    sel_x = CandidateSelectorTuning(w_aspect=0.71, w_fill=0.29)
-    s.set_candidate_selector_tuning(sel_x)
-    session = s.arm_session(paths={main.DetectionPath.live})
-
-    sel_y = CandidateSelectorTuning(w_aspect=0.10, w_fill=0.90)
-    s.set_candidate_selector_tuning(sel_y)
-    s.ingest_live_frame("A", session.id, _make_frame(1))
-
-    frozen = s.live_session_frozen_config(session.id)
-    assert frozen is not None
-    _hsv, _gate, sel_frozen = frozen
-    assert sel_frozen == sel_x
 
 
 def test_arm_then_slider_drag_then_ingest_freezes_arm_time_pairing_tuning(tmp_path):
@@ -162,5 +142,5 @@ def test_arm_alone_stamps_without_waiting_for_ingest(tmp_path):
 
     frozen = s.live_session_frozen_config(session.id)
     assert frozen is not None, "arm_session must stamp synchronously"
-    hsv_frozen, _, _ = frozen
+    hsv_frozen, _ = frozen
     assert hsv_frozen == hsv_x

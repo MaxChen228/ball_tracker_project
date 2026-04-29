@@ -192,13 +192,11 @@ def _load_legacy_triple(data_dir: Path) -> DetectionConfig | None:
     files exist — caller treats that as "fresh install" and takes
     `_default_config()`.
 
-    The legacy `candidate_selector_tuning.json` is unlinked here without
-    parsing — selector weights are now `_W_ASPECT` / `_W_FILL` module
-    constants, so any operator-edited values from before the retirement
-    are intentionally dropped (CLAUDE.md no-backcompat: pre-retirement
-    sessions reproducible only via `--use-frozen-snapshot` against
-    pitch JSONs that carried the values, but the on-disk operator
-    surface is gone).
+    The legacy `candidate_selector_tuning.json` is **not parsed** here
+    (selector weights are now `_W_ASPECT` / `_W_FILL` module constants)
+    and the file itself is unlinked by `load_or_migrate`'s cleanup loop
+    after migration succeeds. Operator-edited values from before the
+    retirement are intentionally dropped (CLAUDE.md no-backcompat).
 
     Preset is intentionally left None on migration: the operator may
     have hand-edited the legacy files, so we cannot safely claim

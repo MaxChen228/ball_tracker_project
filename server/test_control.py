@@ -1030,7 +1030,7 @@ def test_resolve_detection_config_preset_uses_preset_shape():
     fake_pitch = _minimal_pitch("A", session_id=sid(41))
 
     for preset_name in ("tennis", "blue_ball"):
-        hsv, gate, _tuning, label = _resolve_detection_config(
+        hsv, gate, label = _resolve_detection_config(
             f"preset:{preset_name}", fake_pitch, _FakeState()
         )
         preset = PRESETS[preset_name]
