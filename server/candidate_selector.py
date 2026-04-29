@@ -60,21 +60,24 @@ _FILL_TYPICAL = 0.68
 # (typically 0.56) so candidates near the gate already score badly.
 _ASPECT_PEN_FLOOR = 0.5
 
+# Cost weights. Previously a runtime-tunable `CandidateSelectorTuning`
+# dataclass plumbed through state / disk / WS / freeze schema, but the
+# default `PairingTuning.cost_threshold = 1.0` equals `w_aspect + w_fill`
+# = max possible cost — so the gate never fires at default. Pairing
+# fan-out doesn't read the winner. The only downstream effect was the
+# monocular ground-trace overlay's per-frame winner; not worth a tunable.
+# Locked as constants; change requires code edit + restart.
+_W_ASPECT = 0.6
+_W_FILL = 0.4
+
 
 @dataclass(frozen=True)
 class CandidateSelectorTuning:
-    """Operator-tunable shape-prior weights for `select_best_candidate`.
-
-    Owned by `state.candidate_selector_tuning()`; persisted to
-    `data/candidate_selector_tuning.json`. Both fields must be supplied
-    — no module-level fallbacks, so callers cannot silently inherit a
-    stale magic number.
-
-    - `w_aspect` / `w_fill` — penalty weights. Should sum to ≤ 1 for
-      the cost to live in [0, 1], but unconstrained here so the
-      operator can dial heavier than-unit total if they want a
-      sharper preference (the argmin is invariant under positive
-      scaling anyway).
+    """Vestigial wrapper kept only so DetectionConfig / Preset / state
+    facade still type-check while phase 2 of the selector retirement
+    completes. The fields no longer affect cost calculation — see
+    `_W_ASPECT` / `_W_FILL` module constants. Will be deleted in
+    phase 2.
     """
 
     w_aspect: float
@@ -82,14 +85,7 @@ class CandidateSelectorTuning:
 
     @classmethod
     def default(cls) -> "CandidateSelectorTuning":
-        # Carried over from the prior 0.5/0.3/0.2 size/aspect/fill split:
-        # normalize the remaining 0.3/0.2 to sum=1 → 0.6/0.4. The argmin
-        # is invariant under positive scaling but keeping the range in
-        # [0, 1] makes inspecting cost values intuitive.
-        return cls(
-            w_aspect=0.6,
-            w_fill=0.4,
-        )
+        return cls(w_aspect=_W_ASPECT, w_fill=_W_FILL)
 
 
 @dataclass
@@ -106,10 +102,7 @@ class Candidate:
     fill: float | None = None
 
 
-def score_candidates(
-    candidates: list[Candidate],
-    tuning: CandidateSelectorTuning,
-) -> list[float]:
+def score_candidates(candidates: list[Candidate]) -> list[float]:
     """Return one cost per candidate, in input order. Lower is more
     ball-like. Empty input → empty output.
 
@@ -132,21 +125,15 @@ def score_candidates(
         else:
             fill_pen = min(abs(c.fill - _FILL_TYPICAL) / _FILL_TYPICAL, 1.0)
 
-        out.append(
-            tuning.w_aspect * aspect_pen
-            + tuning.w_fill * fill_pen
-        )
+        out.append(_W_ASPECT * aspect_pen + _W_FILL * fill_pen)
     return out
 
 
-def select_best_candidate(
-    candidates: list[Candidate],
-    tuning: CandidateSelectorTuning,
-) -> Candidate | None:
+def select_best_candidate(candidates: list[Candidate]) -> Candidate | None:
     """Pick the lowest-cost candidate. Returns None iff `candidates`
     is empty. Tie-break: first candidate at the minimum (Python `min`
     is stable on `range`)."""
     if not candidates:
         return None
-    costs = score_candidates(candidates, tuning)
+    costs = score_candidates(candidates)
     return candidates[min(range(len(costs)), key=lambda i: costs[i])]

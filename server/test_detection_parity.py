@@ -86,16 +86,14 @@ def test_cluttered_scene_without_prior(hsv):
 def test_cluttered_scene_aspect_prior_picks_round(hsv):
     """A round circle vs an oblong ellipse — selector's aspect_pen
     picks the round one. Locks the scale-invariant shape-prior
-    contract as a regression guard."""
-    from candidate_selector import CandidateSelectorTuning
+    contract as a regression guard. With w_aspect=0.6 / w_fill=0.4
+    locked as module constants, both terms still favour the circle
+    so the assertion holds without explicit tuning override."""
     img = np.zeros((720, 1280, 3), dtype=np.uint8)
     img[:] = (30, 30, 30)
     cv2.circle(img, (400, 360), 18, _yg_bgr(), thickness=-1)
     cv2.ellipse(img, (900, 360), (32, 26), 0, 0, 360, _yg_bgr(), -1)
 
-    out = detect_ball(
-        img, hsv,
-        selector_tuning=CandidateSelectorTuning(w_aspect=1.0, w_fill=0.0),
-    )
+    out = detect_ball(img, hsv)
     assert out is not None
     assert abs(out[0] - 400) < 3
