@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -124,3 +126,49 @@ def calibration_markers_delete_legacy(marker_id: int) -> dict[str, Any]:
 @router.post("/calibration/markers/clear")
 def calibration_markers_clear_legacy() -> dict[str, Any]:
     return markers_clear()
+
+
+@router.post("/markers/scan")
+async def markers_scan(
+    camera_a_id: str = "A",
+    camera_b_id: str = "B",
+) -> dict[str, Any]:
+    # Helpers stay in routes.calibration: _await_calibration_frame and
+    # _decode_calibration_jpeg are also used by /calibration/auto/*, and
+    # _triangulate_marker_candidates is reused by the auto-cal solver.
+    # Importing them here keeps a single source of truth without
+    # duplicating logic.
+    from routes.calibration import (
+        _await_calibration_frame,
+        _decode_calibration_jpeg,
+        _triangulate_marker_candidates,
+    )
+    from main import state
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_a_id):
+        raise HTTPException(status_code=400, detail="invalid camera_a_id")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_b_id):
+        raise HTTPException(status_code=400, detail="invalid camera_b_id")
+    if camera_a_id == camera_b_id:
+        raise HTTPException(status_code=400, detail="camera_a_id and camera_b_id must differ")
+
+    jpeg_a, jpeg_b = await asyncio.gather(
+        _await_calibration_frame(camera_a_id),
+        _await_calibration_frame(camera_b_id),
+    )
+    bgr_a = _decode_calibration_jpeg(jpeg_a)
+    bgr_b = _decode_calibration_jpeg(jpeg_b)
+    scan = _triangulate_marker_candidates(
+        camera_a_id=camera_a_id,
+        camera_b_id=camera_b_id,
+        bgr_a=bgr_a,
+        bgr_b=bgr_b,
+    )
+    existing_ids = {rec.marker_id for rec in state._marker_registry.all_records()}
+    return {
+        "ok": True,
+        "camera_ids": [camera_a_id, camera_b_id],
+        "candidates": scan["candidates"],
+        "visibility": scan["visibility"],
+        "existing_marker_ids": sorted(existing_ids),
+    }

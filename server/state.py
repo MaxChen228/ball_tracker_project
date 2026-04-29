@@ -69,16 +69,17 @@ _DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
 # stalled wifi roam without flapping.
 _DEVICE_STALE_S = 3.0
 
-# Entries in `_devices` older than this get pruned on every heartbeat write.
-# Legitimate phones beat at 1 Hz so anything beyond 60 s is not coming back;
-# pruning on write is what keeps a malformed/spoofed client from ballooning
-# the registry forever without needing a background task.
+# Entries in the device registry older than this get pruned on every
+# heartbeat write. Legitimate phones beat at 1 Hz so anything beyond 60 s
+# is not coming back; pruning on write is what keeps a malformed/spoofed
+# client from ballooning the registry forever without needing a
+# background task.
 _DEVICE_GC_AFTER_S = 60.0
 
-# Hard cap on `_devices` size. Even with GC-on-write, a burst of distinct
-# camera_ids within the GC window could push memory up. Cap at 64 — more
-# than enough for any plausible rig (we run 2-phone stereo) while still
-# bounding adversarial input.
+# Hard cap on the device registry size. Even with GC-on-write, a burst
+# of distinct camera_ids within the GC window could push memory up. Cap
+# at 64 — more than enough for any plausible rig (we run 2-phone stereo)
+# while still bounding adversarial input.
 _DEVICE_REGISTRY_CAP = 64
 
 # When a session ends, server keeps advertising `disarm` on /status for a
