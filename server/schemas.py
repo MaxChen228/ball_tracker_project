@@ -200,11 +200,23 @@ class PitchPayload(BaseModel):
 
 
 class TriangulatedPoint(BaseModel):
+    # Persisted JSONs from before the multi-candidate fan-out landed don't
+    # carry the source candidate indices. Tolerate them on load — viewer's
+    # cost-threshold preview falls back to "no client-side filter possible"
+    # for legacy points (still server-recomputable via /sessions/{sid}/recompute).
+    model_config = ConfigDict(extra="ignore")
     t_rel_s: float
     x_m: float
     y_m: float
     z_m: float
     residual_m: float
+    # Index into source frame's `candidates[]` that contributed this point.
+    # `_a` for the A-cam frame, `_b` for B. Populated by every fan-out
+    # triangulation since pairing.py landed multi-candidate; None on
+    # pre-fan-out persisted points or any synthetic test fixture that
+    # bypassed the fan-out path.
+    source_a_cand_idx: int | None = None
+    source_b_cand_idx: int | None = None
 
 
 class SessionResult(BaseModel):

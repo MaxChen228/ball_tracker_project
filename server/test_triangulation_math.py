@@ -228,9 +228,9 @@ def test_pairing_drop_diagnostics(caplog):
     summaries = [m for m in info_msgs if "pairing cycle complete" in m]
     assert len(summaries) == 1, info_msgs
     summary = summaries[0]
-    assert "pairs_in_a=2" in summary
-    assert "pairs_in_b=2" in summary
-    assert "pairs_out=1" in summary
+    assert "frames_in_a=2" in summary
+    assert "frames_in_b=2" in summary
+    assert "points_out=1" in summary
     assert "drop_outside_window=1" in summary
     assert "drop_near_parallel=0" in summary
     assert session_id in summary
@@ -388,11 +388,14 @@ def test_triangulate_live_pair_matches_triangulate_cycle():
 
     pose_a = CameraPose(K=K, R=R_a, C=C_a, dist=None, image_wh=(1920, 1080))
     pose_b = CameraPose(K=K, R=R_b, C=C_b, dist=None, image_wh=(1920, 1080))
-    live_pt = pairing.triangulate_live_pair(
+    from pairing_tuning import PairingTuning
+    live_points = pairing.triangulate_live_pair(
         pose_a, pose_b, fa, fb,
         anchor_a=anchor, anchor_b=anchor,
+        tuning=PairingTuning.default(),
     )
-    assert live_pt is not None
+    assert len(live_points) == 1
+    live_pt = live_points[0]
 
     assert abs(live_pt.t_rel_s - ref_pt.t_rel_s) < 1e-9
     assert abs(live_pt.x_m - ref_pt.x_m) < 1e-9

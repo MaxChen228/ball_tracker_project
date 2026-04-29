@@ -12,7 +12,8 @@ import os
 
 import numpy as np
 
-from schemas import IntrinsicsPayload, FramePayload, PitchPayload, TriangulatedPoint
+from schemas import BlobCandidate, IntrinsicsPayload, FramePayload, PitchPayload, TriangulatedPoint
+from pairing_tuning import PairingTuning
 from triangulate import (
     build_K,
     camera_center_world,
@@ -209,48 +210,94 @@ def triangulate_live_pair(
     *,
     anchor_a: float,
     anchor_b: float,
-) -> "TriangulatedPoint | None":
-    """Hot-path triangulation for the live A/B ray-midpoint pair.
+    tuning: PairingTuning,
+) -> list[TriangulatedPoint]:
+    """Hot-path multi-candidate triangulation for the live A/B ray pair.
+
+    Iterates every (frame_a.candidates × frame_b.candidates) combination,
+    runs ray-midpoint triangulation per pair, filters by selector cost
+    and skew-line gap from `tuning`, returns all survivors. Empty list
+    when no candidates pair up (no ball detected, outside time window,
+    all near-parallel, or all gap-rejected) — same failure surface as
+    `triangulate_cycle`.
 
     Bypasses `triangulate_pair` / `scale_pitch_to_video_dims` because the
     live path's intrinsics are already the calibration snapshot itself
     (no resolution delta → scale factor 1). Uses pre-cached K/R/C/dist
     on each `CameraPose` so every pair only pays the ray math + 2×2
-    solve. Returns None when neither frame has a ball or the rays are
-    near-parallel — same failure surface as `triangulate_cycle`."""
-    from schemas import TriangulatedPoint
+    solve."""
     if not (_valid_frame(frame_a) and _valid_frame(frame_b)):
-        return None
+        return []
 
     t_rel = frame_a.timestamp_s - anchor_a
     t_b_rel = frame_b.timestamp_s - anchor_b
     if abs(t_b_rel - t_rel) > _MAX_DT_S:
-        return None
+        return []
 
-    d_a_cam = _ray_for_frame(frame_a.px, frame_a.py, pose_a.K, pose_a.dist)
-    d_b_cam = _ray_for_frame(frame_b.px, frame_b.py, pose_b.K, pose_b.dist)
-    d_a_world = pose_a.R.T @ d_a_cam
-    d_b_world = pose_b.R.T @ d_b_cam
+    cands_a = _frame_candidates(frame_a)
+    cands_b = _frame_candidates(frame_b)
+    if not cands_a or not cands_b:
+        return []
 
-    P, gap = triangulate_rays(pose_a.C, d_a_world, pose_b.C, d_b_world)
-    if P is None:
-        return None
-    return TriangulatedPoint(
-        t_rel_s=t_rel,
-        x_m=float(P[0]),
-        y_m=float(P[1]),
-        z_m=float(P[2]),
-        residual_m=gap,
-    )
+    out: list[TriangulatedPoint] = []
+    for ca_idx, ca in enumerate(cands_a):
+        if ca.cost is not None and ca.cost > tuning.cost_threshold:
+            continue
+        d_a_cam = _ray_for_frame(ca.px, ca.py, pose_a.K, pose_a.dist)
+        d_a_world = pose_a.R.T @ d_a_cam
+        for cb_idx, cb in enumerate(cands_b):
+            if cb.cost is not None and cb.cost > tuning.cost_threshold:
+                continue
+            d_b_cam = _ray_for_frame(cb.px, cb.py, pose_b.K, pose_b.dist)
+            d_b_world = pose_b.R.T @ d_b_cam
+            P, gap = triangulate_rays(pose_a.C, d_a_world, pose_b.C, d_b_world)
+            if P is None or gap > tuning.gap_threshold_m:
+                continue
+            out.append(TriangulatedPoint(
+                t_rel_s=t_rel,
+                x_m=float(P[0]),
+                y_m=float(P[1]),
+                z_m=float(P[2]),
+                residual_m=gap,
+                source_a_cand_idx=ca_idx,
+                source_b_cand_idx=cb_idx,
+            ))
+    return out
+
+
+def _frame_candidates(f: FramePayload) -> list[BlobCandidate]:
+    """Return the candidates the fan-out loop should iterate.
+
+    Production wire (post the iOS aspect/fill landing) always populates
+    `frame.candidates`. Legacy persisted JSONs and minimal test
+    fixtures sometimes ship `frame.px / frame.py` only with no
+    candidates list — synthesize a single-candidate stand-in from the
+    resolved winner so the same code path triangulates them too. The
+    synthetic candidate carries area=0 / cost=None, fine because the
+    selector cost is no longer read by the cost gate when cost is None.
+    Returns empty list when neither candidates nor px/py is usable."""
+    if f.candidates:
+        return list(f.candidates)
+    if f.px is None or f.py is None:
+        return []
+    return [BlobCandidate(
+        px=float(f.px), py=float(f.py),
+        area=0, area_score=0.0,
+        aspect=None, fill=None, cost=None,
+    )]
 
 
 def _valid_frame(f: FramePayload) -> bool:
-    return f.ball_detected and f.px is not None and f.py is not None
+    """A frame is pair-able iff it has at least one usable candidate
+    (real or synthesized from a resolved winner — see
+    `_frame_candidates`)."""
+    return bool(_frame_candidates(f))
 
 
 def _frame_items(p: PitchPayload, *, source: str = "server"):
-    """Ball-bearing frames as `(t_rel, px, py)`, sorted by anchor-relative
-    time. `t_rel = timestamp_s − sync_anchor_timestamp_s`.
+    """Ball-bearing frames as `(t_rel, frame)`, sorted by anchor-relative
+    time. `t_rel = timestamp_s − sync_anchor_timestamp_s`. Caller iterates
+    `frame.candidates` for fan-out triangulation.
 
     `source` is kept as a parameter for API compatibility; only `"server"`
     is supported now — it reads `p.frames_server_post` (which the caller
@@ -259,7 +306,7 @@ def _frame_items(p: PitchPayload, *, source: str = "server"):
     frames = p.frames_server_post
     anchor = p.sync_anchor_timestamp_s
     out = [
-        (f.timestamp_s - anchor, f.px, f.py)
+        (f.timestamp_s - anchor, f)
         for f in frames if _valid_frame(f)
     ]
     out.sort(key=lambda x: x[0])
@@ -268,14 +315,23 @@ def _frame_items(p: PitchPayload, *, source: str = "server"):
 
 def triangulate_cycle(
     a: PitchPayload, b: PitchPayload, *, source: str = "server",
+    tuning: PairingTuning | None = None,
 ) -> list[TriangulatedPoint]:
-    """Pair A and B frames within an 8 ms window of anchor-relative time and
-    run ray-midpoint triangulation. Requires intrinsics + homography on both
-    cameras."""
+    """Pair A and B frames within an 8 ms window of anchor-relative time
+    and run multi-candidate fan-out triangulation. Each matched frame
+    pair iterates every (A.candidates × B.candidates) combination,
+    filters by `tuning.cost_threshold` + `tuning.gap_threshold_m`, and
+    emits all survivors. Requires intrinsics + homography on both
+    cameras. Default tuning (`PairingTuning.default()`) emits every
+    shape-gate-passed candidate (cost_threshold=1.0) and aligns the gap
+    gate with segmenter (0.20m)."""
     if a.intrinsics is None or a.homography is None:
         raise ValueError("camera A missing calibration (run Calibrate in iPhone app)")
     if b.intrinsics is None or b.homography is None:
         raise ValueError("camera B missing calibration (run Calibrate in iPhone app)")
+
+    if tuning is None:
+        tuning = PairingTuning.default()
 
     K_a, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
     K_b, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
@@ -285,20 +341,20 @@ def triangulate_cycle(
 
     drop_outside_window = 0
     drop_near_parallel = 0
+    drop_gap = 0
+    drop_cost = 0
     results: list[TriangulatedPoint] = []
 
     if items_a and items_b:
         # `_frame_items` already sorts by t_rel, so we can binary-search
         # for each A frame's nearest B in O(log N) instead of the
-        # full-array O(N) argmin scan. Same answer because the closest
-        # element in a sorted array is always the searchsorted insertion
-        # neighbour or its predecessor.
+        # full-array O(N) argmin scan.
         b_times = np.array([x[0] for x in items_b])
         n_b = len(b_times)
         dist_a = a.intrinsics.distortion
         dist_b = b.intrinsics.distortion
 
-        for t_rel, px_a, py_a in items_a:
+        for t_rel, frame_a in items_a:
             ins = int(np.searchsorted(b_times, t_rel))
             cands = [i for i in (ins - 1, ins) if 0 <= i < n_b]
             idx = min(cands, key=lambda i: abs(b_times[i] - t_rel))
@@ -310,36 +366,45 @@ def triangulate_cycle(
                     t_rel, dt, _MAX_DT_S,
                 )
                 continue
-            _, px_b, py_b = items_b[idx]
+            _, frame_b = items_b[idx]
 
-            d_a_cam = _ray_for_frame(px_a, py_a, K_a, dist_a)
-            d_b_cam = _ray_for_frame(px_b, py_b, K_b, dist_b)
-            d_a_world = R_a.T @ d_a_cam
-            d_b_world = R_b.T @ d_b_cam
-
-            P, gap = triangulate_rays(C_a, d_a_world, C_b, d_b_world)
-            if P is None:
-                # Near-parallel rays for this frame pair — no meaningful 3D point.
-                drop_near_parallel += 1
-                logger.debug(
-                    "pairing drop reason=near_parallel t_rel=%.6f",
-                    t_rel,
-                )
-                continue
-            results.append(
-                TriangulatedPoint(
-                    t_rel_s=t_rel,
-                    x_m=float(P[0]),
-                    y_m=float(P[1]),
-                    z_m=float(P[2]),
-                    residual_m=gap,
-                )
-            )
+            cands_a = _frame_candidates(frame_a)
+            cands_b = _frame_candidates(frame_b)
+            for ca_idx, ca in enumerate(cands_a):
+                if ca.cost is not None and ca.cost > tuning.cost_threshold:
+                    drop_cost += 1
+                    continue
+                d_a_cam = _ray_for_frame(ca.px, ca.py, K_a, dist_a)
+                d_a_world = R_a.T @ d_a_cam
+                for cb_idx, cb in enumerate(cands_b):
+                    if cb.cost is not None and cb.cost > tuning.cost_threshold:
+                        drop_cost += 1
+                        continue
+                    d_b_cam = _ray_for_frame(cb.px, cb.py, K_b, dist_b)
+                    d_b_world = R_b.T @ d_b_cam
+                    P, gap = triangulate_rays(C_a, d_a_world, C_b, d_b_world)
+                    if P is None:
+                        drop_near_parallel += 1
+                        continue
+                    if gap > tuning.gap_threshold_m:
+                        drop_gap += 1
+                        continue
+                    results.append(TriangulatedPoint(
+                        t_rel_s=t_rel,
+                        x_m=float(P[0]),
+                        y_m=float(P[1]),
+                        z_m=float(P[2]),
+                        residual_m=gap,
+                        source_a_cand_idx=ca_idx,
+                        source_b_cand_idx=cb_idx,
+                    ))
 
     logger.info(
-        "pairing cycle complete session_id=%s source=%s pairs_in_a=%d pairs_in_b=%d "
-        "pairs_out=%d drop_outside_window=%d drop_near_parallel=%d max_dt=%.6f",
+        "pairing cycle complete session_id=%s source=%s frames_in_a=%d frames_in_b=%d "
+        "points_out=%d drop_outside_window=%d drop_near_parallel=%d "
+        "drop_gap=%d drop_cost=%d max_dt=%.6f cost_thr=%.3f gap_thr=%.3f",
         a.session_id, source, len(items_a), len(items_b), len(results),
-        drop_outside_window, drop_near_parallel, _MAX_DT_S,
+        drop_outside_window, drop_near_parallel, drop_gap, drop_cost,
+        _MAX_DT_S, tuning.cost_threshold, tuning.gap_threshold_m,
     )
     return results
