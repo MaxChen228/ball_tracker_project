@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates
+from detection import HSVRange, ShapeGate
 from pairing_tuning import PairingTuning
 from schemas import FramePayload, TriangulatedPoint
 
@@ -79,6 +80,13 @@ class LivePairingSession:
     # /sessions/{sid}/recompute) is the sole residual gate — segmenter
     # and viewer trust it, no downstream re-filter.
     pairing_tuning: PairingTuning = field(default_factory=PairingTuning.default)
+    # HSV / shape-gate snapshot frozen at first ingest of this session
+    # (state.ingest_live_frame). None when the session was constructed
+    # outside that path (tests / direct LivePairingSession()); stamping
+    # in routes/pitch.py treats None as "fall back to state's current
+    # snapshot" so test fixtures still produce a usable PitchPayload.
+    hsv_range_used: HSVRange | None = None
+    shape_gate_used: ShapeGate | None = None
 
     def __post_init__(self) -> None:
         # Internal mutex covering buffers / frames_by_cam / frame_counts /
