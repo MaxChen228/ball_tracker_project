@@ -305,12 +305,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// frame so the writer uses the real pixel-buffer dimensions.
     func enterRecordingMode() {
         guard state == .standby else { return }
-        // 240 fps capture; detection runs at native rate via the ROI-
-        // tracking stateful detector inside `ConcurrentDetectionPool`
-        // (~3 ms/frame on ROI hits, ~15 ms on full-frame fallback).
-        // No stride throttle — the pool's bounded backlog is the
-        // backpressure mechanism, and any drops show up loudly on
-        // `droppedFrameCount` instead of being baked into the design.
+        // 240 fps capture; detection runs at native rate via the
+        // stateless full-frame detector inside `ConcurrentDetectionPool`
+        // (~15 ms/frame, byte-aligned with server_post). No stride
+        // throttle — the pool's bounded backlog is the backpressure
+        // mechanism, and any drops show up loudly on `droppedFrameCount`
+        // instead of being baked into the design.
         recordingWorkflow.enterRecordingMode(
             sessionId: currentSessionId,
             serverTimeSyncConfirmed: serverTimeSyncConfirmed

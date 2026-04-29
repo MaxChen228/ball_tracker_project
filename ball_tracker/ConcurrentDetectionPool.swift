@@ -2,23 +2,37 @@ import AVFoundation
 import CoreMedia
 import Foundation
 
-/// Single-worker dispatch pool around a ROI-tracking `BTStatefulBallDetector`.
+/// Single-worker dispatch pool around the stateless `BTBallDetector`.
 ///
 /// The class is **named** `ConcurrentDetectionPool` for historical
-/// continuity but is no longer concurrent: HSV + connected-components on
-/// a ROI crop runs at ~3 ms/frame, so 240 fps × 3 ms = 720 ms/wall-s of
-/// CPU work — well under one P-core. A single serial worker keeps frame
-/// order monotonic, which is what `BTStatefulBallDetector` needs to keep
-/// its ROI state coherent across frames (each frame's ROI hint is the
-/// previous frame's hit). Multiple workers would either race the
-/// non-thread-safe detector or each maintain a divergent ROI history.
+/// continuity but is no longer concurrent: full-frame HSV +
+/// connected-components on a 1080p sample is ~15 ms/frame, so 240 fps
+/// × 15 ms = 3.6 s/wall-s — well above one P-core's 1.0 s budget but
+/// fine because (a) iOS only WS-streams every Nth frame in practice
+/// and (b) we just drop overflow on `maxBacklog` rather than blocking
+/// capture.
 ///
-/// On ROI miss the per-frame cost spikes to ~15 ms (full-frame fallback),
-/// at which point the producer can outpace the consumer. We absorb a
-/// short backlog on the serial queue and drop new frames when the queue
-/// already holds `maxBacklog` in-flight tasks. AVFoundation's pixel-
-/// buffer pool ultimately bounds how much we can buffer; oversize
-/// `maxBacklog` would just push drops upstream where they're invisible.
+/// Pre-PR: this pool wrapped `BTStatefulBallDetector` which kept an ROI
+/// around the previous hit, cutting cost to ~3 ms when the ball stayed
+/// close. That created two problems we removed:
+///   1. Once a static distractor (e.g. a green plant leaf) became the
+///      "previous hit", the ROI locked onto it and the detector could
+///      go several seconds before the 10-miss reset let it see the
+///      real ball. Same scene processed by server_post (no ROI) found
+///      the ball within one frame.
+///   2. Live and server_post diverged silently: same MOV bytes, same
+///      HSV, same shape gate, but different candidate sets per frame
+///      — making it impossible to tell if "live missed the ball"
+///      meant detector bug, exposure problem, or ROI lock-in.
+/// Stateless full-frame on every frame is exactly what server_post
+/// runs, so live ↔ server_post is now byte-aligned end-to-end and the
+/// operator sees the same evidence the algorithm sees.
+///
+/// We absorb a short backlog on the serial queue and drop new frames
+/// when the queue already holds `maxBacklog` in-flight tasks.
+/// AVFoundation's pixel-buffer pool ultimately bounds how much we can
+/// buffer; oversize `maxBacklog` would just push drops upstream where
+/// they're invisible.
 final class ConcurrentDetectionPool {
 
     /// Public counter — frames dropped at `enqueue` because the in-flight
@@ -35,14 +49,6 @@ final class ConcurrentDetectionPool {
     private let maxBacklog: Int
     private let detectionQueue: DispatchQueue
     private let stateLock = NSLock()
-    /// `BTStatefulBallDetector` is documented "Not thread-safe. Intended
-    /// for a single capture-queue worker." It's constructed here on the
-    /// caller's thread (the camera VC's main thread) but every subsequent
-    /// access — `setHMin`, `setAspectMin`, `detectAllCandidates`,
-    /// `resetTracking` — is dispatched onto `detectionQueue` (serial),
-    /// so post-construction it is queue-confined. Don't reach into this
-    /// detector from any other thread.
-    private let detector = BTStatefulBallDetector()
     private var hsvRange: ServerUploader.HSVRangePayload = .tennis
     private var shapeGate: ServerUploader.ShapeGatePayload = .default
 
@@ -51,8 +57,8 @@ final class ConcurrentDetectionPool {
 
     /// `maxBacklog` defaults to 8 — a tight bound that prefers visible
     /// `droppedFrameCount` increments over silently pinning AVFoundation's
-    /// pixel-buffer pool. ~33 ms slack at 240 fps producer, which covers
-    /// transient ROI-miss spikes without letting the queue grow into the
+    /// pixel-buffer pool. ~33 ms slack at 240 fps producer covers full-
+    /// frame HSV+CC spikes without letting the queue grow into the
     /// hundreds of MB of retained pixel buffers.
     init(maxBacklog: Int = 8) {
         self.maxBacklog = max(1, maxBacklog)
@@ -93,28 +99,18 @@ final class ConcurrentDetectionPool {
                 self.stateLock.unlock()
             }
 
-            // Apply runtime knobs to the detector inside the queue so the
-            // BTStatefulBallDetector — explicitly "Not thread-safe.
-            // Intended for a single capture-queue worker." — is only ever
-            // touched from this serial queue.
-            self.detector.setHMin(
-                Int32(hsvSnapshot.h_min),
-                hMax: Int32(hsvSnapshot.h_max),
-                sMin: Int32(hsvSnapshot.s_min),
-                sMax: Int32(hsvSnapshot.s_max),
-                vMin: Int32(hsvSnapshot.v_min),
-                vMax: Int32(hsvSnapshot.v_max)
-            )
-            self.detector.setAspectMin(
-                shapeSnapshot.aspect_min,
+            // Stateless full-frame multi-candidate detection — every
+            // frame runs the same HSV→CC→shape-gate pipeline as
+            // server_post against the uploaded MOV. No ROI tracking,
+            // no across-frame state.
+            let cands = BTBallDetector.detectAllCandidates(
+                in: pb,
+                hMin: Int32(hsvSnapshot.h_min), hMax: Int32(hsvSnapshot.h_max),
+                sMin: Int32(hsvSnapshot.s_min), sMax: Int32(hsvSnapshot.s_max),
+                vMin: Int32(hsvSnapshot.v_min), vMax: Int32(hsvSnapshot.v_max),
+                aspectMin: shapeSnapshot.aspect_min,
                 fillMin: shapeSnapshot.fill_min
             )
-
-            // ROI-tracked multi-candidate detection. Same gate semantics
-            // as the stateless `BTBallDetector.detectAllCandidates`, but
-            // the ROI crop short-circuits the ~15 ms full-frame pass to
-            // ~3 ms when the ball stays close to its prior position.
-            let cands = self.detector.detectAllCandidates(in: pb)
             let maxArea = max(1, cands.map { Int($0.areaPx) }.max() ?? 1)
             let candidatesPayload = cands.map { d in
                 ServerUploader.BlobCandidate(
@@ -168,19 +164,12 @@ final class ConcurrentDetectionPool {
 
     /// Bump the generation so any in-flight worker that finishes after
     /// this call drops its `onFrame` callback. Resets the per-frame index
-    /// for the next session and clears the detector's ROI tracking so
-    /// the new arm window starts unbiased.
+    /// for the next session. Stateless detector — no ROI cache to flush.
     func invalidateGeneration() {
         stateLock.lock()
         currentGeneration &+= 1
         callIndex = 0
         stateLock.unlock()
-        // Detector ROI hint is per-arm-window. Reset on the queue so the
-        // call lands AFTER any in-flight worker still using the old
-        // tracking state, before the first frame of the next generation.
-        detectionQueue.async { [detector = self.detector] in
-            detector.resetTracking()
-        }
     }
 
     func reset() {
