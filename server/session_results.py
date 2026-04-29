@@ -267,29 +267,30 @@ def recompute_result_for_session(
     session_id: str,
     *,
     cost_threshold: float,
+    gap_threshold_m: float,
 ) -> SessionResult:
     """Re-run pairing fan-out + segmenter on this session's already-
-    detected frames using a per-session cost_threshold override.
+    detected frames using per-session `cost_threshold` + `gap_threshold_m`
+    overrides.
 
     Differences from `rebuild_result_for_session`:
       - Always re-triangulates the live path (does NOT reuse
         `LivePairingSession.triangulated`, which was built incrementally
         under the old/global tuning at ingest time).
-      - Both live and server_post paths use a `PairingTuning` whose
-        `cost_threshold` is overridden by the caller; `gap_threshold_m`
-        comes from the global tuning unchanged.
-      - Stamps the chosen `cost_threshold` into the resulting
-        `SessionResult.cost_threshold` for viewer slider re-init.
+      - Both live and server_post paths use a `PairingTuning` built from
+        BOTH caller-supplied values — no fallback to global tuning here;
+        the route is responsible for resolving defaults before calling.
+      - Stamps both chosen values into `SessionResult.cost_threshold` /
+        `SessionResult.gap_threshold_m` for viewer slider re-init.
 
     Caller is the `POST /sessions/{sid}/recompute` route. No MOV decode,
     no HSV — candidates are read from the persisted `frames_live` /
     `frames_server_post` directly. Sub-second on a typical session."""
     from pairing_tuning import PairingTuning
 
-    base_gap = state.pairing_tuning().gap_threshold_m
     tuning = PairingTuning(
         cost_threshold=float(cost_threshold),
-        gap_threshold_m=base_gap,
+        gap_threshold_m=float(gap_threshold_m),
     )
 
     with state._lock:
@@ -303,6 +304,7 @@ def recompute_result_for_session(
         camera_b_received=b is not None,
     )
     result.cost_threshold = float(cost_threshold)
+    result.gap_threshold_m = float(gap_threshold_m)
 
     server_post_ts = [
         p.server_post_ran_at for p in (a, b)

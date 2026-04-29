@@ -259,6 +259,12 @@ class SessionResult(BaseModel):
     # default — the viewer treats None as "show the global default" for
     # the slider's initial position.
     cost_threshold: float | None = None
+    # Same story for `PairingTuning.gap_threshold_m` (skew-line residual
+    # cap, metres). None on legacy results / when the recompute caller
+    # didn't override (route used `state.pairing_tuning()` default).
+    # Viewer reads it for the Gap slider's initial position; sibling of
+    # `cost_threshold` in the per-session tuning strip.
+    gap_threshold_m: float | None = None
 
 
 
