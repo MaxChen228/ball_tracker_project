@@ -20,7 +20,9 @@ final class CameraCommandRouterTests: XCTestCase {
         var sessionPaths: Set<ServerUploader.DetectionPath> = [.live]
         var captureHeight: Int = 1080
         var previewRequested: Bool = false
-        var calibrationArmed: Bool = false
+        var calCaptureState: CalCaptureState = .idle
+        var armCalibrationCaptureResult: Bool = true
+        private(set) var armCalibrationCaptureCount = 0
 
         private(set) var setSessionIdCalls: [String?] = []
         private(set) var setSessionPathsCalls: [Set<ServerUploader.DetectionPath>] = []
@@ -121,11 +123,14 @@ final class CameraCommandRouterTests: XCTestCase {
                 stopCapture: {
                     self.guarded { self.stopCaptureCount += 1 }
                 },
-                isCalibrationFrameCaptureArmed: {
-                    self.guarded { self.calibrationArmed }
+                getCalCaptureState: {
+                    self.guarded { self.calCaptureState }
                 },
-                setCalibrationFrameCaptureArmed: { armed in
-                    self.guarded { self.calibrationArmed = armed }
+                armCalibrationCapture: {
+                    self.guarded {
+                        self.armCalibrationCaptureCount += 1
+                        return self.armCalibrationCaptureResult
+                    }
                 }
             )
         }
@@ -147,14 +152,35 @@ final class CameraCommandRouterTests: XCTestCase {
         wait(for: [exp], timeout: 1.0)
     }
 
+    /// Server lockstep contract (server/main.py:510): every `settings` push
+    /// includes `device_time_synced`, `preview_requested`, and
+    /// `calibration_frame_requested`. Missing any of those triggers an
+    /// atomic-drop in the router. Tests covering optional fields must
+    /// include the required scaffolding so they exercise the field under
+    /// test, not the drop guard.
+    private func settingsMessage(
+        deviceTimeSynced: Bool = false,
+        deviceTimeSyncId: String? = nil,
+        previewRequested: Bool = false,
+        calibrationFrameRequested: Bool = false,
+        extra: [String: Any] = [:]
+    ) -> [String: Any] {
+        var msg: [String: Any] = [
+            "type": "settings",
+            "device_time_synced": deviceTimeSynced,
+            "preview_requested": previewRequested,
+            "calibration_frame_requested": calibrationFrameRequested
+        ]
+        if let deviceTimeSyncId { msg["device_time_sync_id"] = deviceTimeSyncId }
+        for (k, v) in extra { msg[k] = v }
+        return msg
+    }
+
     // MARK: settings · chirp_threshold
 
     func testSettingsPushesChirpThreshold() {
         let (router, fixture, _) = makeRouter()
-        router.handle(message: [
-            "type": "settings",
-            "chirp_detect_threshold": 0.42
-        ])
+        router.handle(message: settingsMessage(extra: ["chirp_detect_threshold": 0.42]))
         drainMain()
         XCTAssertEqual(fixture.chirpThresholdPushes, [0.42])
     }
@@ -163,10 +189,7 @@ final class CameraCommandRouterTests: XCTestCase {
 
     func testSettingsPushesHeartbeatInterval() {
         let (router, fixture, _) = makeRouter()
-        router.handle(message: [
-            "type": "settings",
-            "heartbeat_interval_s": 2.5
-        ])
+        router.handle(message: settingsMessage(extra: ["heartbeat_interval_s": 2.5]))
         drainMain()
         XCTAssertEqual(fixture.heartbeatIntervalPushes, [2.5])
     }
@@ -176,22 +199,20 @@ final class CameraCommandRouterTests: XCTestCase {
     func testSettingsPushesHSVRangeOnlyWhenComplete() {
         let (router, fixture, _) = makeRouter()
         // Partial dict → ignored.
-        router.handle(message: [
-            "type": "settings",
+        router.handle(message: settingsMessage(extra: [
             "hsv_range": ["h_min": 20, "h_max": 60]
-        ])
+        ]))
         drainMain()
         XCTAssertTrue(fixture.hsvPushes.isEmpty, "Incomplete hsv_range must be ignored")
 
         // Full dict → pushed.
-        router.handle(message: [
-            "type": "settings",
+        router.handle(message: settingsMessage(extra: [
             "hsv_range": [
                 "h_min": 25, "h_max": 55,
                 "s_min": 90, "s_max": 255,
                 "v_min": 90, "v_max": 255
             ]
-        ])
+        ]))
         drainMain()
         XCTAssertEqual(fixture.hsvPushes.count, 1)
         XCTAssertEqual(fixture.hsvPushes.first, ServerUploader.HSVRangePayload.tennis)
@@ -204,10 +225,7 @@ final class CameraCommandRouterTests: XCTestCase {
         fixture.state = .standby
         fixture.captureHeight = 1080
 
-        router.handle(message: [
-            "type": "settings",
-            "capture_height_px": 720
-        ])
+        router.handle(message: settingsMessage(extra: ["capture_height_px": 720]))
         drainMain()
         XCTAssertEqual(fixture.captureHeightApplied, [720])
     }
@@ -217,10 +235,7 @@ final class CameraCommandRouterTests: XCTestCase {
         fixture.state = .standby
         fixture.captureHeight = 1080
 
-        router.handle(message: [
-            "type": "settings",
-            "capture_height_px": 1080
-        ])
+        router.handle(message: settingsMessage(extra: ["capture_height_px": 1080]))
         drainMain()
         XCTAssertTrue(fixture.captureHeightApplied.isEmpty,
                       "Same-value capture_height_px must not trigger apply")
@@ -231,10 +246,7 @@ final class CameraCommandRouterTests: XCTestCase {
         fixture.state = .recording
         fixture.captureHeight = 1080
 
-        router.handle(message: [
-            "type": "settings",
-            "capture_height_px": 720
-        ])
+        router.handle(message: settingsMessage(extra: ["capture_height_px": 720]))
         drainMain()
         XCTAssertTrue(fixture.captureHeightApplied.isEmpty,
                       "capture_height must not swap mid-recording (format reconfig would kill in-flight MOV)")
@@ -244,13 +256,14 @@ final class CameraCommandRouterTests: XCTestCase {
 
     func testSettingsFansOutExposureCapAndSyncState() {
         let (router, fixture, _) = makeRouter()
-        router.handle(message: [
-            "type": "settings",
-            "tracking_exposure_cap": "120fps",
-            "device_time_synced": true,
-            "device_time_sync_id": "chirp_abc",
-            "paths": ["live"]
-        ])
+        router.handle(message: settingsMessage(
+            deviceTimeSynced: true,
+            deviceTimeSyncId: "chirp_abc",
+            extra: [
+                "tracking_exposure_cap": "120fps",
+                "paths": ["live"]
+            ]
+        ))
         drainMain()
         XCTAssertEqual(fixture.exposureCapPushes, ["120fps"])
         XCTAssertEqual(fixture.updateTimeSyncServerCalls.count, 1)
@@ -266,10 +279,11 @@ final class CameraCommandRouterTests: XCTestCase {
         fixture.state = .standby
         fixture.previewRequested = false
 
-        router.handle(message: [
-            "type": "settings",
-            "preview_requested": true
-        ])
+        router.handle(message: settingsMessage(
+            deviceTimeSynced: true,
+            previewRequested: true,
+            calibrationFrameRequested: false
+        ))
         drainMain()
         XCTAssertTrue(fixture.previewRequested)
         XCTAssertEqual(fixture.ensurePreviewUploaderCount, 1)
@@ -281,14 +295,44 @@ final class CameraCommandRouterTests: XCTestCase {
         fixture.state = .standby
         fixture.previewRequested = true
 
-        router.handle(message: [
-            "type": "settings",
-            "preview_requested": false
-        ])
+        router.handle(message: settingsMessage(
+            deviceTimeSynced: true,
+            previewRequested: false,
+            calibrationFrameRequested: false
+        ))
         drainMain()
         XCTAssertFalse(fixture.previewRequested)
         XCTAssertEqual(fixture.resetPreviewUploaderCount, 1)
         XCTAssertEqual(fixture.stopCaptureCount, 1)
+    }
+
+    /// Regression: a `settings` push missing any required scaffolding
+    /// field (here: `device_time_synced`) must atomic-drop — no
+    /// paths/exposure/hsv side effect leaks through before the bail.
+    func testSettingsDropsWhenRequiredFieldMissing() {
+        let (router, fixture, _) = makeRouter()
+        // Intentionally raw dict (no helper) — drop `device_time_synced`.
+        router.handle(message: [
+            "type": "settings",
+            "preview_requested": false,
+            "calibration_frame_requested": false,
+            "paths": ["live", "server_post"],
+            "tracking_exposure_cap": "120fps",
+            "hsv_range": [
+                "h_min": 25, "h_max": 55,
+                "s_min": 90, "s_max": 255,
+                "v_min": 90, "v_max": 255
+            ]
+        ])
+        drainMain()
+        XCTAssertTrue(fixture.setSessionPathsCalls.isEmpty,
+                      "atomic drop: paths must not be applied")
+        XCTAssertTrue(fixture.exposureCapPushes.isEmpty,
+                      "atomic drop: exposure cap must not be applied")
+        XCTAssertTrue(fixture.hsvPushes.isEmpty,
+                      "atomic drop: hsv must not be applied")
+        XCTAssertTrue(fixture.updateTimeSyncServerCalls.isEmpty,
+                      "atomic drop: time-sync state must not be applied")
     }
 
     // MARK: arm / disarm / sync routing
@@ -339,36 +383,48 @@ final class CameraCommandRouterTests: XCTestCase {
         XCTAssertEqual(fixture.startTimeSyncCalls, ["sc_idle"])
     }
 
-    func testSyncRunAppliesMutualSyncWithDefaults() {
+    /// Server lockstep: `emit_at_s` and `record_duration_s` are required
+    /// (server/main.py emits both unconditionally). Missing either one
+    /// must drop the whole sync_run, never silently fall back to a
+    /// hard-coded local default.
+    func testSyncRunDropsWhenRequiredFieldsMissing() {
         let (router, fixture, _) = makeRouter()
         router.handle(message: [
             "type": "sync_run",
             "sync_id": "mutual_x"
+            // emit_at_s + record_duration_s missing on purpose
+        ])
+        drainMain()
+        XCTAssertTrue(fixture.applyMutualSyncCalls.isEmpty,
+                      "sync_run must atomic-drop when required fields are absent")
+    }
+
+    func testSyncRunAppliesMutualSyncWithRequiredFields() {
+        let (router, fixture, _) = makeRouter()
+        router.handle(message: [
+            "type": "sync_run",
+            "sync_id": "mutual_y",
+            "emit_at_s": [0.5, 1.5],
+            "record_duration_s": 4.0
         ])
         drainMain()
         XCTAssertEqual(fixture.applyMutualSyncCalls.count, 1)
         let call = fixture.applyMutualSyncCalls.first
-        XCTAssertEqual(call?.0, "mutual_x")
-        XCTAssertEqual(call?.1, [0.3], "default emit schedule")
-        XCTAssertEqual(call?.2, 3.0, "default record duration")
+        XCTAssertEqual(call?.0, "mutual_y")
+        XCTAssertEqual(call?.1, [0.5, 1.5])
+        XCTAssertEqual(call?.2, 4.0)
     }
 
     // MARK: paths parser — empty / garbage tolerant
 
     func testSettingsPathsParserIgnoresGarbage() {
         let (router, fixture, _) = makeRouter()
-        router.handle(message: [
-            "type": "settings",
-            "paths": ["bogus", "also_bogus"]
-        ])
+        router.handle(message: settingsMessage(extra: ["paths": ["bogus", "also_bogus"]]))
         drainMain()
         XCTAssertTrue(fixture.setSessionPathsCalls.isEmpty,
                       "Unparseable paths must not clobber session paths")
 
-        router.handle(message: [
-            "type": "settings",
-            "paths": ["live", "???"]
-        ])
+        router.handle(message: settingsMessage(extra: ["paths": ["live", "???"]]))
         drainMain()
         XCTAssertEqual(fixture.setSessionPathsCalls.last, [.live])
     }
