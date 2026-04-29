@@ -137,6 +137,9 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 # Skipping pydantic validation (model_construct) — iOS
                 # lockstep guarantees the wire fields; missing key
                 # surfaces as KeyError, bad type as ValueError.
+                # `aspect` / `fill` are required as of the shape-prior
+                # selector landing — old iOS builds without them KeyError
+                # loud here, exactly the lockstep failure we want.
                 from schemas import BlobCandidate as _BlobCandidate
                 cands_payload = [
                     _BlobCandidate.model_construct(
@@ -144,6 +147,8 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                         py=float(c["py"]),
                         area=int(c["area"]),
                         area_score=float(c["area_score"]),
+                        aspect=float(c["aspect"]),
+                        fill=float(c["fill"]),
                     )
                     for c in msg["candidates"]
                 ]

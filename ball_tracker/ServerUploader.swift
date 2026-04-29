@@ -50,19 +50,26 @@ final class ServerUploader: @unchecked Sendable {
     /// One blob that survived area+aspect+fill on the live path. Mirrors
     /// `server/schemas.BlobCandidate`. The server's `live_pairing` runs
     /// `candidate_selector.select_best_candidate` over this list using a
-    /// per-cam temporal prior before triangulation.
+    /// shape-prior cost (size + aspect + fill) before triangulation.
+    ///
+    /// `aspect` (min(w,h)/max(w,h)) and `fill` (area/(w*h)) are
+    /// scale-invariant geometric stats — they survive the ball flying
+    /// near→far without needing a distance-dependent expected size.
+    /// Server selector treats both as required from the wire.
     struct BlobCandidate: Codable {
         let px: Double
         let py: Double
         let area: Int
         let area_score: Double
+        let aspect: Double
+        let fill: Double
     }
 
     struct FramePayload: Codable {
         let frame_index: Int
         let timestamp_s: Double
         /// Every blob that passed area+aspect+fill. Empty → no detection.
-        /// Server's `live_pairing._resolve_candidates` runs the temporal-
+        /// Server's `live_pairing._resolve_candidates` runs the shape-
         /// prior selector to pick the winner.
         let candidates: [BlobCandidate]
 

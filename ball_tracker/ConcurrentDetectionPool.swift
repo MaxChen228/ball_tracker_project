@@ -121,7 +121,9 @@ final class ConcurrentDetectionPool {
                     px: Double(d.px),
                     py: Double(d.py),
                     area: Int(d.areaPx),
-                    area_score: Double(d.areaPx) / Double(maxArea)
+                    area_score: Double(d.areaPx) / Double(maxArea),
+                    aspect: Double(d.aspect),
+                    fill: Double(d.fill)
                 )
             }
             let frame = ServerUploader.FramePayload(

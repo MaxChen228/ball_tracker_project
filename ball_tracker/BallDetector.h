@@ -13,6 +13,13 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) CGFloat px;
 @property(nonatomic, readonly) CGFloat py;
 @property(nonatomic, readonly) NSInteger areaPx;
+/// min(w,h)/max(w,h) of the CC bounding box. 1.0 = perfectly square
+/// (round ball ≈ 1). Server-side selector cost reads this — scale-
+/// invariant geometric signal that survives the ball flying near→far.
+@property(nonatomic, readonly) CGFloat aspect;
+/// area / (w*h). Empirical median for the project blue ball is ~0.68
+/// (memory: project_ball_empirical_fill). Also scale-invariant.
+@property(nonatomic, readonly) CGFloat fill;
 @end
 
 /// Obj-C++ OpenCV wrapper for HSV-threshold + connectedComponentsWithStats
