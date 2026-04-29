@@ -31,7 +31,8 @@ async def sync_start(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=status_code, detail={"ok": False, "error": reason})
     assert run is not None
     state._sync.reset_sync_telemetry_peaks(None)
-    state._sync.set_expected_sync_id([d.camera_id for d in state.online_devices()], run.id)
+    online_cams = list(state.online_devices())
+    state._sync.set_expected_sync_id([d.camera_id for d in online_cams], run.id)
     params = state.sync_params()
     per_cam = {
         cam.camera_id: {
@@ -40,7 +41,7 @@ async def sync_start(request: Request) -> dict[str, Any]:
             "emit_at_s": params.emit_a_at_s if cam.camera_id == "A" else params.emit_b_at_s,
             "record_duration_s": params.record_duration_s,
         }
-        for cam in state.online_devices()
+        for cam in online_cams
     }
     await device_ws.broadcast(per_cam)
     return {"ok": True, "sync": run.to_dict()}
