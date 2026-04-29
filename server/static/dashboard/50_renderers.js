@@ -87,7 +87,7 @@
     return fmtAgeShort(s);
   }
 
-  function _calPanelHTML(cam, isCal, lastSolve, knownMarkers) {
+  function _calPanelHTML(isCal, lastSolve, knownMarkers) {
     const parts = [];
     // 1. Status header
     if (isCal && lastSolve) {
@@ -172,7 +172,7 @@
       ? `<button type="button" class="btn small secondary" data-auto-cal-log="${esc(cam)}" title="Copy full auto-cal log to clipboard for debugging">Copy log</button>`
       : '';
     const calPanel = '<div class="cal-panel" data-cam="' + esc(cam) + '">' +
-                     _calPanelHTML(cam, isCal, lastSolve, knownMarkers) + '</div>';
+                     _calPanelHTML(isCal, lastSolve, knownMarkers) + '</div>';
     const camViewSrc = previewOn ? initialSrc : '';
     const imgTag = previewOn
       ? `<img data-cam-img="${esc(cam)}" src="${camViewSrc}" alt="preview ${esc(cam)}">`
@@ -246,7 +246,7 @@
     }
     const calPanel = rowEl.querySelector('.cal-panel');
     if (calPanel) {
-      calPanel.innerHTML = _calPanelHTML(cam, isCal, lastSolve, knownMarkers);
+      calPanel.innerHTML = _calPanelHTML(isCal, lastSolve, knownMarkers);
     }
     // Buttons: patch attributes / text in place, preserve node identity.
     const previewBtn = rowEl.querySelector('button[data-preview-cam]');
@@ -382,11 +382,22 @@
     const camList = expectedCams.concat(extraCams);
     const camSetKey = camList.join(',');
 
+    // First-tick fast path: if the SSR DOM already has rows matching
+    // the current cam set (each .device tagged data-cam-id), we adopt
+    // them and go straight to surgical patch — avoiding the SSR-then-
+    // innerHTML-rebuild flash. Only fires when _lastCamSetKey is null
+    // AND every cam has a corresponding SSR row.
+    if (_lastCamSetKey === null) {
+      const ssrCovers = camList.every(
+        c => devicesBox.querySelector('.device[data-cam-id="' + c + '"]')
+      );
+      if (ssrCovers) _lastCamSetKey = camSetKey;
+    }
+
     if (_lastCamSetKey !== camSetKey) {
-      // Cam set changed (or first paint) — full innerHTML build. The
-      // SSR HTML on first paint is replaced here, but that's a one-shot
-      // operation; subsequent ticks go through _patchRow and never
-      // rebuild button DOM, so :hover survives.
+      // Cam set changed (or first paint with no usable SSR) — full
+      // innerHTML build. Subsequent ticks go through _patchRow and
+      // never rebuild button DOM, so :hover survives.
       const rows = camList.map(cam => _buildRowHTML(cam, fieldsFor(cam))).join('');
       devicesBox.innerHTML = `<div class="devices-grid">${rows}</div>`;
       _lastCamSetKey = camSetKey;

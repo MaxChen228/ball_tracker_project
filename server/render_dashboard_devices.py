@@ -266,7 +266,7 @@ def _render_device_rows(
             now=now,
         )
         return (
-            f'<div class="device">'
+            f'<div class="device" data-cam-id="{html.escape(cam_id)}">'
             f'<div class="device-head">'
             f'<span class="sync-led {sync_led_cls}" title="time sync · {sync_label}"></span>'
             f'<div class="id">{html.escape(cam_id)}</div>'
