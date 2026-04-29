@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime as _datetime
 import json as _json
 from pathlib import Path
 
@@ -62,6 +63,7 @@ class ViewerPageContext:
     session_id: str
     server_post_ran: bool
     can_run_server: bool
+    server_post_ran_at: float | None
 
 
 def build_viewer_page_context(
@@ -123,7 +125,13 @@ def build_viewer_page_context(
         return int(counts.get("total") or 0)
 
     server_post_ran = any(_server_post_count(c) > 0 for c in ("A", "B"))
-    can_run_server = health.get("mode") == "camera_only" and not server_post_ran
+    # Drop the `not server_post_ran` gate — the operator may want to
+    # rerun after tweaking HSV / shape gate / selector tuning. The button
+    # label flips to "Rerun" once a previous run is detected.
+    can_run_server = health.get("mode") == "camera_only"
+    # SessionResult.server_post_ran_at is the per-session aggregate (max
+    # of A/B). None when nothing has run yet for this session.
+    server_post_ran_at = health.get("server_post_ran_at")
 
     return ViewerPageContext(
         scene_json=_json.dumps(scene.to_dict()),
@@ -162,6 +170,7 @@ def build_viewer_page_context(
         session_id=scene.session_id,
         server_post_ran=server_post_ran,
         can_run_server=can_run_server,
+        server_post_ran_at=server_post_ran_at,
     )
 
 
@@ -207,13 +216,25 @@ def render_viewer_html(
         build_figure=build_figure,
     )
     if ctx.can_run_server:
+        # Operator may rerun after tweaking HSV / shape gate / selector;
+        # label flips to "Rerun" once a previous server_post detection
+        # has populated frames for either cam. Timestamp surfaces next
+        # to the button so the operator sees how stale the current
+        # results are before deciding to rerun.
+        label = "Rerun server" if ctx.server_post_ran else "Run server detection"
+        ts_html = ""
+        if ctx.server_post_ran_at is not None:
+            iso = _datetime.fromtimestamp(ctx.server_post_ran_at).strftime("%Y-%m-%d %H:%M:%S")
+            ts_html = (
+                f'<span class="action-ts" title="Server detection last completed at {iso}">'
+                f'{iso}</span>'
+            )
         action_html = (
-            f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post">'
-            f'<button class="action" type="submit">Run server detection</button>'
+            f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post" class="action-form">'
+            f'<button class="action" type="submit">{label}</button>'
+            f'{ts_html}'
             f'</form>'
         )
-    elif ctx.server_post_ran:
-        action_html = '<span class="action-chip">server done</span>'
     else:
         action_html = ""
     fit_link_html = (
@@ -496,6 +517,11 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     letter-spacing:0.10em; text-transform:uppercase; color:var(--passed);
     border:1px solid var(--passed); background:var(--passed-bg);
     padding:3px 8px; border-radius:var(--r); }}
+  .nav .action-form {{ display:inline-flex; align-items:center;
+    gap:var(--s-2, 6px); }}
+  .nav .action-ts {{ font-family:var(--mono); font-size:10px;
+    color:var(--sub); white-space:nowrap; font-variant-numeric:tabular-nums;
+    letter-spacing:0.04em; }}
   .health-strip {{ flex:1 1 auto; min-width:0; display:flex;
     align-items:center; gap:var(--s-3); flex-wrap:wrap;
     font-family:var(--mono); font-size:11px; color:var(--sub);

@@ -156,6 +156,9 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         "duration_s": duration_s,
         "received_at": latest_mtime,
         "mode": mode,
+        "server_post_ran_at": (
+            result.server_post_ran_at if result is not None else None
+        ),
     }
 
 

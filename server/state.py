@@ -792,6 +792,11 @@ class State:
                     merged.frames_live = list(existing.frames_live)
                 if not merged.frames_server_post and existing.frames_server_post:
                     merged.frames_server_post = list(existing.frames_server_post)
+                # Preserve the previous run's wall-clock when the
+                # incoming pitch doesn't carry one (e.g., live-frames
+                # merge after server_post had already completed).
+                if merged.server_post_ran_at is None and existing.server_post_ran_at is not None:
+                    merged.server_post_ran_at = existing.server_post_ran_at
                 # Preserve the original creation stamp across re-records
                 # (server_post backfill, live merge). If the existing record
                 # lacked one (legacy / synthetic before this field shipped),

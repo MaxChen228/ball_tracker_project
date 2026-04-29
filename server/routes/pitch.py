@@ -298,6 +298,10 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         )
         return
     pitch.frames_server_post = frames
+    # Stamp the wall-clock for this cam's just-completed run so the
+    # SessionResult rebuild picks it up via max(A, B). Only set on
+    # success — cancellation / errors above return before this line.
+    pitch.server_post_ran_at = state._time_fn()
     try:
         await asyncio.to_thread(state.record, pitch)
     except Exception as exc:
