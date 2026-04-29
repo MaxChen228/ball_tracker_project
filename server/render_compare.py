@@ -65,38 +65,9 @@ function drawVirtualBase(canvas, cam, opts = {}) {
   ctx.beginPath();
   ctx.rect(0, 0, cssW, cssH);
   ctx.clip();
-  // skipBuiltins lets the cam-view runtime own plate + principal-point
-  // rendering as toggleable layers. The legacy 2-pane caller is gone
-  // (Phase 5), so this branch is the only one taken in practice — kept
-  // as opt-in to allow standalone canvas previews if ever needed.
-  if (opts.skipBuiltins) {
-    return { ctx, cssW, cssH, sx, sy };
-  }
-  const cxPx = cam.cx * sx;
-  const cyPx = cam.cy * sy;
-  ctx.strokeStyle = opts.crossColor || 'rgba(219, 214, 205, 0.25)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(cxPx - 6, cyPx); ctx.lineTo(cxPx + 6, cyPx);
-  ctx.moveTo(cxPx, cyPx - 6); ctx.lineTo(cxPx, cyPx + 6);
-  ctx.stroke();
-  const plateProj = PLATE_WORLD.map(P => projectWorldToPixel(P, cam));
-  if (plateProj.every(Boolean)) {
-    ctx.strokeStyle = opts.plateStroke || 'rgba(219, 214, 205, 0.65)';
-    ctx.fillStyle = opts.plateFill || 'rgba(219, 214, 205, 0.08)';
-    ctx.lineWidth = opts.plateLineWidth || 1.5;
-    ctx.setLineDash(opts.plateDash || [5, 3]);
-    ctx.beginPath();
-    for (let i = 0; i < plateProj.length; i++) {
-      const x = plateProj[i].u * sx;
-      const y = plateProj[i].v * sy;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    }
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
+  // Cam-view runtime owns plate + principal-point rendering as toggleable
+  // layers; the legacy 2-pane caller that drew built-ins here was retired
+  // in Phase 5. This helper now only sets up the canvas surface.
   return { ctx, cssW, cssH, sx, sy };
 }
 """

@@ -238,17 +238,14 @@ def test_built_in_layer_renderers_registered():
     assert "layerRenderers.set('axes', drawAxesLayer)" in js
 
 
-def test_runtime_passes_skip_builtins_to_drawvirtualbase():
-    """Reviewer flagged: drawVirtualBase has built-in plate+cross painting
-    that double-paints when the cam-view runtime owns plate as a layer.
-    Runtime must opt out via skipBuiltins."""
-    assert "skipBuiltins: true" in CAM_VIEW_RUNTIME_JS
-
-
-def test_drawvirtualbase_supports_skip_builtins():
-    """The opt-out mechanism must actually exist on the helper side too."""
+def test_drawvirtualbase_does_not_paint_builtin_plate():
+    """drawVirtualBase must only set up the canvas surface — plate +
+    principal-point are owned by the cam-view runtime's toggleable
+    layers. The legacy built-in painting branch was removed; verify it
+    stays gone so we don't double-paint."""
     from render_compare import DRAW_VIRTUAL_BASE_JS
-    assert "opts.skipBuiltins" in DRAW_VIRTUAL_BASE_JS
+    assert "PLATE_WORLD.map" not in DRAW_VIRTUAL_BASE_JS
+    assert "skipBuiltins" not in DRAW_VIRTUAL_BASE_JS
 
 
 def test_runtime_exposes_click_api_for_phase4():
