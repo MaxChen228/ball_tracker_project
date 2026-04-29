@@ -154,7 +154,11 @@ final class CameraRecordingWorkflow {
         let tmpURL = payloadStore.makeTempVideoURL()
         let recorder = ClipRecorder(outputURL: tmpURL)
         do {
-            try recorder.prepare(width: width, height: height)
+            // Pass capture fps so AVAssetWriter sizes its encoder budget
+            // for 240 Hz instead of the ~30 Hz default — without it the
+            // H.264 hardware encoder back-pressures and drops the vast
+            // majority of frames (see ClipRecorder.prepare comment).
+            try recorder.prepare(width: width, height: height, expectedFps: Int(trackingFps.rounded()))
             clipRecorder = recorder
             recordingLog.info("camera clip bootstrap ok session=\(sessionId ?? "nil", privacy: .public)")
             return true

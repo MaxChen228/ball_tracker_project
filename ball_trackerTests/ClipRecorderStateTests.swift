@@ -24,7 +24,7 @@ final class ClipRecorderStateTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
 
         let recorder = ClipRecorder(outputURL: outputURL)
-        try recorder.prepare(width: 1920, height: 1080)
+        try recorder.prepare(width: 1920, height: 1080, expectedFps: 240)
 
         // Stale file is gone; AVAssetWriter only finalises the URL on
         // finishWriting, so post-prepare the file should NOT exist.
@@ -50,7 +50,7 @@ final class ClipRecorderStateTests: XCTestCase {
     func testCancelBeforeAnyAppendLeavesNoFile() throws {
         let outputURL = Self.makeTempOutputURL()
         let recorder = ClipRecorder(outputURL: outputURL)
-        try recorder.prepare(width: 1920, height: 1080)
+        try recorder.prepare(width: 1920, height: 1080, expectedFps: 240)
         recorder.cancel()
         XCTAssertFalse(FileManager.default.fileExists(atPath: outputURL.path),
                        "cancel() before append must not produce a clip file")
@@ -63,7 +63,7 @@ final class ClipRecorderStateTests: XCTestCase {
     func testCancelTearsDownAndAppendBecomesNoop() throws {
         let outputURL = Self.makeTempOutputURL()
         let recorder = ClipRecorder(outputURL: outputURL)
-        try recorder.prepare(width: 1920, height: 1080)
+        try recorder.prepare(width: 1920, height: 1080, expectedFps: 240)
 
         recorder.cancel()
         XCTAssertFalse(FileManager.default.fileExists(atPath: outputURL.path),
@@ -85,7 +85,7 @@ final class ClipRecorderStateTests: XCTestCase {
     func testHappyPathProducesFileAndURL() throws {
         let outputURL = Self.makeTempOutputURL()
         let recorder = ClipRecorder(outputURL: outputURL)
-        try recorder.prepare(width: 1920, height: 1080)
+        try recorder.prepare(width: 1920, height: 1080, expectedFps: 240)
 
         // Append one synthetic frame at PTS 0.5 s (within the writer's
         // accepted PTS space).
@@ -119,7 +119,7 @@ final class ClipRecorderStateTests: XCTestCase {
         let outputURL = Self.makeTempOutputURL()
         let recorder = ClipRecorder(outputURL: outputURL)
 
-        try recorder.prepare(width: 1920, height: 1080)
+        try recorder.prepare(width: 1920, height: 1080, expectedFps: 240)
         let sample = try Self.makeSampleBuffer(ptsSeconds: 1.0)
         recorder.append(sampleBuffer: sample)
         XCTAssertNotNil(recorder.firstSamplePTS)
@@ -127,7 +127,7 @@ final class ClipRecorderStateTests: XCTestCase {
         // A fresh prepare() — meant for the next cycle — must wipe state
         // back to zero so the previous cycle's PTS does not bleed into the
         // new clip.
-        try recorder.prepare(width: 1920, height: 1080)
+        try recorder.prepare(width: 1920, height: 1080, expectedFps: 240)
         XCTAssertNil(recorder.firstSamplePTS,
                      "prepare() on a used recorder must reset firstSamplePTS")
         XCTAssertEqual(recorder.droppedFrameCount, 0,
