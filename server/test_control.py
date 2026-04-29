@@ -708,6 +708,38 @@ def test_store_result_skips_unknown_session(tmp_path):
     assert not (tmp_path / "results" / f"session_{sid(901)}.json").exists()
 
 
+def test_store_result_skips_live_only_session_after_delete(tmp_path):
+    """`store_result` guard includes `_live_pairings`; for the guard
+    to actually fire on a live-only WS session that was deleted,
+    `delete_session` must also purge `_live_pairings`. Otherwise a
+    live-only ghost would slip past the guard."""
+    from schemas import SessionResult
+    from live_pairing import LivePairingSession
+
+    s = main.State(data_dir=tmp_path)
+    # Synthesise a live-only session by directly populating
+    # `_live_pairings` — same shape as ingest_live_frame would produce,
+    # no /pitch upload, no entries in `pitches` or `results`.
+    s._live_pairings[sid(902)] = LivePairingSession(sid(902))
+    assert sid(902) in s._live_pairings
+    assert s.delete_session(sid(902)) is True
+    assert sid(902) not in s._live_pairings, (
+        "delete_session must purge _live_pairings or the store_result "
+        "guard's live-path check is ineffective"
+    )
+
+    # store_result on the dead session must noop — guard sees no
+    # pitches, no results, no live pairing.
+    fake_result = SessionResult(
+        session_id=sid(902),
+        camera_a_received=False,
+        camera_b_received=False,
+    )
+    s.store_result(fake_result)
+    assert sid(902) not in s.results
+    assert not (tmp_path / "results" / f"session_{sid(902)}.json").exists()
+
+
 def test_sessions_delete_html_form_redirects():
     client = TestClient(app)
     main.state.record(_minimal_pitch("A", session_id=sid(2)))
