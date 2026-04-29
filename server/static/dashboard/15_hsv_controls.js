@@ -22,6 +22,18 @@
     if (num) num.value = v.toFixed(2);
   }
 
+  // Manual slider/number edit clears any pending preset-identity claim
+  // — once the operator nudges a value, the form no longer matches the
+  // preset they clicked, so Apply must send preset=null (custom).
+  // Without this, a click-Tennis → drag-h_min → Apply request would
+  // claim preset=tennis with non-tennis values, get rejected by the
+  // server's strict identity validation (400), and the operator has
+  // to click the same Apply again. Drop the claim eagerly for a clean
+  // single-click recovery.
+  function _clearPendingPreset(form) {
+    delete form.dataset.pendingPreset;
+  }
+
   function _readHSV(form) {
     const get = (k) => Number(form.querySelector(`[data-hsv-number="${k}"]`).value);
     return {
@@ -45,23 +57,32 @@
     const form = document.getElementById('detection-config-form');
     if (!form) return;
 
-    // HSV slider <-> number two-way bind.
+    // HSV slider <-> number two-way bind. Manual edit clears any
+    // pending preset-identity claim (see _clearPendingPreset).
     form.querySelectorAll('[data-hsv-range]').forEach((input) => {
-      input.addEventListener('input', () => _syncHSVField(form, input.dataset.hsvRange, input.value));
+      input.addEventListener('input', () => {
+        _syncHSVField(form, input.dataset.hsvRange, input.value);
+        _clearPendingPreset(form);
+      });
     });
     form.querySelectorAll('[data-hsv-number]').forEach((input) => {
-      input.addEventListener('input', () => _syncHSVField(form, input.dataset.hsvNumber, input.value));
+      input.addEventListener('input', () => {
+        _syncHSVField(form, input.dataset.hsvNumber, input.value);
+        _clearPendingPreset(form);
+      });
     });
 
     // Shape-gate slider (0..100) <-> number (0..1).
     form.querySelectorAll('[data-shape-range]').forEach((slider) => {
       slider.addEventListener('input', () => {
         _syncShapeOrSelector(form, 'shape', slider.dataset.shapeRange, Number(slider.value) / 100);
+        _clearPendingPreset(form);
       });
     });
     form.querySelectorAll('[data-shape-number]').forEach((num) => {
       num.addEventListener('input', () => {
         _syncShapeOrSelector(form, 'shape', num.dataset.shapeNumber, Number(num.value));
+        _clearPendingPreset(form);
       });
     });
 
@@ -69,11 +90,13 @@
     form.querySelectorAll('[data-cs-range]').forEach((slider) => {
       slider.addEventListener('input', () => {
         _syncShapeOrSelector(form, 'cs', slider.dataset.csRange, Number(slider.value) / 100);
+        _clearPendingPreset(form);
       });
     });
     form.querySelectorAll('[data-cs-number]').forEach((num) => {
       num.addEventListener('input', () => {
         _syncShapeOrSelector(form, 'cs', num.dataset.csNumber, Number(num.value));
+        _clearPendingPreset(form);
       });
     });
 
@@ -135,15 +158,28 @@
 
     // Reset-to-preset button (only present when current state has
     // modified_fields, see render_dashboard_session._render_hsv_body).
+    // Errors surface in the same status node as Apply so a failed
+    // reset doesn't silently no-op.
+    const status = form.querySelector('[data-detection-apply-status]');
     document.querySelectorAll('[data-detection-reset-preset]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const presetName = btn.dataset.detectionResetPreset;
-        const r = await fetch('/detection/config/reset_to_preset', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ preset: presetName }),
-        });
-        if (r.ok) window.location.reload();
+        if (status) status.textContent = '…';
+        try {
+          const r = await fetch('/detection/config/reset_to_preset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ preset: presetName }),
+          });
+          if (!r.ok) {
+            const t = await r.text();
+            if (status) status.textContent = `reset error: ${t.slice(0, 200)}`;
+            return;
+          }
+          window.location.reload();
+        } catch (e) {
+          if (status) status.textContent = `network error: ${e}`;
+        }
       });
     });
   }
