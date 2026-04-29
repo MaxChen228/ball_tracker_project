@@ -280,7 +280,7 @@ def _build_device_status_rows(
     now: float | None = None,
     ws_snapshot: dict[str, DeviceSocketSnapshot] | None = None,
 ) -> list[dict[str, Any]]:
-    now = state._time_fn() if now is None else now
+    now = state.now() if now is None else now
     ws_snapshot = device_ws.snapshot() if ws_snapshot is None else ws_snapshot
     fresh_devices = {d.camera_id: d for d in state.online_devices()}
     expected = state._sync.expected_sync_id_snapshot()
@@ -399,7 +399,7 @@ def _build_status_response() -> dict[str, Any]:
     session = state.session_snapshot()
     sync_run = state._sync.current_sync()
     last_sync = state._sync.last_sync_result()
-    now = state._time_fn()
+    now = state.now()
     ws_snapshot = device_ws.snapshot()
     devices = _build_device_status_rows(now=now, ws_snapshot=ws_snapshot)
     calibrations = sorted(state.calibrations().keys())
