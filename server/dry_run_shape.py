@@ -248,7 +248,7 @@ def run_seg(pts):
     if not pts:
         return []
     objs = [_Pt(p["t_rel_s"], p["x_m"], p["y_m"], p["z_m"], p["residual_m"]) for p in pts]
-    segs, _, _ = find_segments(objs)
+    segs, _ = find_segments(objs)
     return segs
 
 

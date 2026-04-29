@@ -163,38 +163,21 @@ def build_fit_figure(
     scene: Scene,
     pts_in: list[Any],
     pts_sorted: np.ndarray,
-    kept_mask: np.ndarray,
     segments: list[Segment],
 ) -> go.Figure:
     """Return a Plotly Figure mirroring viewer theme + segment overlay.
 
-    `pts_in` is the original-order list (list[TriangulatedPoint]); used
-    to render rejected (residual >= cap) points as X marks. `pts_sorted`
-    is the segmenter's collapsed+filtered+time-sorted (M, 5) array.
-    `kept_mask` is over the original-order list."""
+    `pts_in` is the original-order list (list[TriangulatedPoint]) — all
+    points are trusted (pairing's gap_threshold_m is the upstream gate;
+    nothing is rejected here). `pts_sorted` is the segmenter's
+    time-sorted (M, 5) array."""
     traces = _static_traces(scene)
-
-    raw = np.array(
-        [[p.t_rel_s, p.x_m, p.y_m, p.z_m, p.residual_m] for p in pts_in],
-        dtype=float,
-    )
-    rejected = raw[~kept_mask] if raw.size else raw
 
     in_seg = np.zeros(pts_sorted.shape[0], dtype=bool)
     for s in segments:
         for k in s.indices:
             in_seg[k] = True
     background = pts_sorted[~in_seg] if pts_sorted.size else pts_sorted
-
-    if rejected.size:
-        traces.append(go.Scatter3d(
-            x=rejected[:, 1], y=rejected[:, 2], z=rejected[:, 3],
-            mode="markers",
-            marker=dict(size=3, color="#444", symbol="x", opacity=0.35),
-            name=f"residual≥0.20m ({len(rejected)})",
-            hovertemplate="REJ residual=%{text:.3f}m<extra></extra>",
-            text=rejected[:, 4],
-        ))
 
     if background.size:
         # `pts_sorted` is the collapsed+sorted set; its first row's t is
@@ -296,7 +279,6 @@ def render_fit_html(
     path: str,
     available_paths: list[str],
     n_input: int,
-    n_kept: int,
     segments: list[Segment],
     fig_html: str,
 ) -> str:
@@ -386,7 +368,6 @@ html, body {{ margin: 0; padding: 0; height: 100%;
     <span class="path-toggle">{path_pills}</span>
     <span class="stats">
       <span>n_input <b>{n_input}</b></span>
-      <span>kept <b>{n_kept}</b></span>
       <span>segments <b>{len(segments)}</b></span>
     </span>
   </div>
