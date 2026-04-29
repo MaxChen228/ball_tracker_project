@@ -8,8 +8,12 @@ which synthesises `FramePayload`s for the existing `triangulate_cycle` path.
 HSV defaults target a yellow tennis ball (the fluorescent yellow-green
 ball currently used on the rig). Override via the `BALL_TRACKER_HSV_RANGE`
 env var (comma-separated `hMin,hMax,sMin,sMax,vMin,vMax`) if you change
-the ball — e.g. a deep-blue ball uses `100,130,140,255,40,255` (the
-dashboard's "blue ball" preset).
+the ball — e.g. the deep-blue ball on the rig uses
+`105,112,140,255,40,255` (dashboard's "blue ball" preset, narrowed
+through 2026-04 from the original h 100-130 after measuring the
+actual ball's hue band; v_min stays at 40 to retain the ball's
+shadowed underside, otherwise the mask collapses to a thin highlight
+arc when the ball is close to the camera).
 """
 from __future__ import annotations
 

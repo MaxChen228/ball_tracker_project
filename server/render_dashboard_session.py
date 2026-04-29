@@ -25,8 +25,8 @@ _HSV_PRESETS = {
     },
     "blue_ball": {
         "label": "Blue ball",
-        "h_min": 100,
-        "h_max": 130,
+        "h_min": 105,
+        "h_max": 112,
         "s_min": 140,
         "s_max": 255,
         "v_min": 40,

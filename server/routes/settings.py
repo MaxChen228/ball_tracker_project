@@ -14,7 +14,7 @@ router = APIRouter()
 
 _HSV_PRESETS = {
     "tennis": HSVRange.default(),
-    "blue_ball": HSVRange(h_min=100, h_max=130, s_min=140, s_max=255, v_min=40, v_max=255),
+    "blue_ball": HSVRange(h_min=105, h_max=112, s_min=140, s_max=255, v_min=40, v_max=255),
 }
 
 
