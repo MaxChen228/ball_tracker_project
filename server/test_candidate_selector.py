@@ -1,17 +1,12 @@
-"""Unit tests for `candidate_selector.select_best_candidate` and the
-underlying `score_candidates` helper. Cost is shape-prior (track-
-independent) and scale-invariant: aspect + fill only, no size term,
-no temporal input."""
+"""Unit tests for `candidate_selector.score_candidates`. Cost is
+shape-prior (track-independent) and scale-invariant: aspect + fill
+only, no size term, no temporal input."""
 from __future__ import annotations
 
 import cv2
 import numpy as np
 
-from candidate_selector import (
-    Candidate,
-    score_candidates,
-    select_best_candidate,
-)
+from candidate_selector import Candidate, score_candidates
 from detection import HSVRange, detect_ball, detect_ball_with_candidates
 
 
@@ -21,10 +16,6 @@ def _yg() -> tuple[int, int, int]:
     return int(bgr[0]), int(bgr[1]), int(bgr[2])
 
 
-def test_empty_returns_none():
-    assert select_best_candidate([]) is None
-
-
 def test_score_candidates_empty_returns_empty():
     assert score_candidates([]) == []
 
@@ -32,8 +23,7 @@ def test_score_candidates_empty_returns_empty():
 def test_ideal_candidate_has_zero_cost():
     """A blob at aspect=1.0 (perfectly square bbox) and fill=0.68
     (project-ball median) is the ideal-shape point — both penalties
-    evaluate to zero, so total cost is exactly 0. Locks the
-    ideal-point invariant directly."""
+    evaluate to zero, so total cost is exactly 0."""
     ideal = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68)
     assert score_candidates([ideal]) == [0.0]
 
@@ -48,10 +38,11 @@ def test_size_does_not_affect_cost():
 
 
 def test_aspect_prior_prefers_round():
-    """Equal fill, perfectly round beats oblong."""
+    """Equal fill, perfectly round beats oblong (lower cost = better)."""
     round_ = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68)
     oblong = Candidate(cx=0, cy=0, area=452, aspect=0.6, fill=0.68)
-    assert select_best_candidate([round_, oblong]) is round_
+    costs = score_candidates([round_, oblong])
+    assert costs[0] < costs[1]
 
 
 def test_fill_prior_prefers_typical():
@@ -59,14 +50,14 @@ def test_fill_prior_prefers_typical():
     far from it."""
     typical = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68)
     too_dense = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=1.0)
-    assert select_best_candidate([typical, too_dense]) is typical
+    costs = score_candidates([typical, too_dense])
+    assert costs[0] < costs[1]
 
 
 def test_unknown_aspect_fill_is_neutral():
     """`aspect=None` / `fill=None` (legacy persisted JSONs predating
     aspect/fill capture) contribute 0 to both penalties — explicit
-    neutral-default per module docstring. Effectively all-zero cost,
-    so argmin tie-break (first index) decides."""
+    neutral-default per module docstring."""
     a = Candidate(cx=0, cy=0, area=452, aspect=None, fill=None)
     b = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68)
     costs = score_candidates([a, b])
@@ -84,19 +75,6 @@ def test_costs_in_unit_interval():
     ]
     for c in score_candidates(cands):
         assert 0.0 <= c <= 1.0
-
-
-def test_select_best_equals_argmin_score():
-    """White-box invariant: `select_best_candidate` is the argmin
-    indexed back into the input list."""
-    cands = [
-        Candidate(cx=0, cy=0, area=300, aspect=0.85, fill=0.55),
-        Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68),
-        Candidate(cx=0, cy=0, area=50, aspect=0.7, fill=0.45),
-    ]
-    costs = score_candidates(cands)
-    argmin = min(range(len(costs)), key=lambda i: costs[i])
-    assert select_best_candidate(cands) is cands[argmin]
 
 
 # --- end-to-end on a synthetic frame ---
