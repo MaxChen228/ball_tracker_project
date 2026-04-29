@@ -1,48 +1,9 @@
-  function _drawDetectionForPath(ctx, sx, sy, cam, path, color) {
-    const framesForThisCam = framesByPath[path] && framesByPath[path][cam.camera_id];
-    if (!framesForThisCam) return;
-    const ts = framesForThisCam.t_rel_s || [];
-    const det = framesForThisCam.detected || [];
-    const pxArr = framesForThisCam.px || [];
-    const pyArr = framesForThisCam.py || [];
-    if (!ts.length) return;
-    if (currentT < ts[0]) return;
-    // Floor-not-nearest: pick the largest ts[i] ≤ currentT. The video
-    // element seeks the same way (it shows the frame whose PTS is the
-    // largest one ≤ requested currentTime, not the nearest), so picking
-    // `lo` here keeps canvas + video aligned to the same MOV frame.
-    // Round-to-nearest used to flip to ts[hi] when currentT sat between
-    // two samples, putting the canvas dot one frame ahead of the video
-    // (≈ 5 ms × 30-40 px on a fast pitch — visible as residual drift).
-    let lo = 0, hi = ts.length - 1;
-    while (lo + 1 < hi) {
-      const mid = (lo + hi) >> 1;
-      if (ts[mid] <= currentT) lo = mid; else hi = mid;
-    }
-    let idx = (ts[hi] <= currentT) ? hi : lo;
-    const tol = 0.010;
-    // server_post frame gaps leave runs of det=false. Without left-scan
-    // the dot blanks across the gap; walk back to the nearest detected
-    // frame still within tol so it sticks.
-    while (idx >= 0 && !det[idx] && (currentT - ts[idx]) <= tol) idx--;
-    if (idx < 0 || !det[idx] || (currentT - ts[idx]) > tol) return;
-    const px = pxArr[idx], py = pyArr[idx];
-    if (px == null || py == null) return;
-    const x = px * sx, y = py * sy;
-    // 1 px dark stroke ring on the outer white circle so the dot stays
-    // legible against bright video frames (canvas opacity defaults to
-    // 65% so the inner white alpha multiplies down to ~0.585). Stroke
-    // is opaque black at 50% alpha — adds contrast without darkening
-    // the ball when the bg is already dark.
-    ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
-    ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = "rgba(0, 0, 0, 0.5)";
-    ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.stroke();
-    ctx.fillStyle = color;
-    ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
-  }
   // ----- BLOBS overlay (multi-candidate, gated by selector cost ≤ threshold) -----
+  // Sole 2D overlay layer for detection. Pre-fan-out there was also a
+  // `detection_live` / `detection_svr` "winner dot" layer drawn from
+  // f.px/f.py — that's gone: with fan-out triangulation no candidate
+  // is "the winner", every shape-gate-passing candidate gets its own
+  // ring + 3D ray + 3D point, gated only by the cost_threshold slider.
   // Operator opens the BLOBS layer to see candidates the selector saw on
   // each frame. The session-level cost_threshold slider in the viewer
   // header (see `session_cost_threshold_strip_html`) controls which
@@ -67,12 +28,19 @@
     const t = Math.max(0, Math.min(1.0, parseFloat(v)));
     _costThreshold = Number.isFinite(t) ? t : 1.0;
     if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();
+    // Also redraw the 3D scene — `raysAtT` reads `_candPassesThreshold`
+    // to decide which fan-out rays to draw at the matched frame, so the
+    // slider has visible effect on the 3D point cloud's ray bundle.
+    if (typeof scheduleSceneDraw === 'function') scheduleSceneDraw();
   }
   function _getCostThreshold() { return _costThreshold; }
   // Expose for the header slider's inline `oninput` + the 3D-scene filter
   // hook used by 60_session_tuning.js.
   window._setCostThreshold = _setCostThreshold;
   window._getCostThreshold = _getCostThreshold;
+  // Expose so 30_frame_index.js's raysAtT can apply the same predicate
+  // as the BLOBS canvas overlay — single source of truth for "passing".
+  window._candPassesThreshold = _candPassesThreshold;
 
   // A candidate passes the threshold filter when its cost is ≤ the
   // current setting. Legacy JSONs with cost=null pass unconditionally —
@@ -84,9 +52,10 @@
     return c.cost <= _costThreshold;
   }
 
-  // Plain floor lookup (no det back-walk): BLOBS draws every candidate the
-  // selector saw on the matched frame. The winner-layer's back-walk to
-  // skip det=false frames doesn't apply here.
+  // Plain floor lookup: BLOBS draws every candidate on the matched
+  // frame; if the frame has no candidates we just render nothing for
+  // that instant. No det back-walk because there is no winner-only
+  // layer to keep "alive" across detection gaps anymore.
   function _findClosestFrameIdx(ts, currentT, tol) {
     if (!ts.length || currentT < ts[0] - tol) return -1;
     let lo = 0, hi = ts.length - 1;
@@ -114,8 +83,7 @@
     const passing = frameCands.filter(_candPassesThreshold);
     if (!passing.length) return;
     // Solid ring at ~80% alpha so the BLOBS layer reads through the OVL
-    // canvas-opacity slider (default 65%, often dialled lower) at roughly
-    // the same effective contrast as the detection_live winner dot.
+    // canvas-opacity slider (default 65%, often dialled lower).
     ctx.strokeStyle = (typeof color === 'string' && color.length === 7 && color[0] === '#')
       ? color + 'CC'  // ~80% alpha
       : color;
@@ -128,17 +96,12 @@
   }
 
   if (window.BallTrackerCamView) {
-    window.BallTrackerCamView.registerLayer('detection_live', function (ctx, sx, sy, cam) {
-      _drawDetectionForPath(ctx, sx, sy, cam, 'live', colorForCamPath(cam.camera_id, 'live'));
-    });
-    window.BallTrackerCamView.registerLayer('detection_svr', function (ctx, sx, sy, cam) {
-      _drawDetectionForPath(ctx, sx, sy, cam, 'server_post', ACCENT);
-    });
     // Two BLOBS layers — one per path — so toolbar's LIVE/SVR path groups
-    // can toggle each independently. Color-tier matches the corresponding
-    // winner layer (cam color for live, ACCENT for svr) so a frame with
-    // both paths on reads as two color-coded ring sets around their
-    // respective dots.
+    // can toggle each independently. Color-tier: cam color for live,
+    // ACCENT for svr. There used to be a `detection_live` /
+    // `detection_svr` "winner dot" layer here too; fan-out triangulation
+    // killed the winner concept, so BLOBS is now the only 2D overlay
+    // and the cost_threshold slider is the only knob.
     window.BallTrackerCamView.registerLayer('detection_blobs_live', function (ctx, sx, sy, cam) {
       _drawBlobsForPath(ctx, sx, sy, cam, 'live', colorForCamPath(cam.camera_id, 'live'));
     });

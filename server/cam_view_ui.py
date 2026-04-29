@@ -99,7 +99,7 @@ CAM_VIEW_BOX_CSS = """
   color: #F8F7F4;
   /* Allow controls to wrap onto a second row when the cam shrinks
      (viewer's narrow-cam mode, dashboard's two-up grid). Without this
-     the BLOBS button + K slider squeeze the OVL slider off-screen. */
+     the BLOBS buttons squeeze the OVL slider off-screen. */
   flex-wrap: wrap;
 }
 .cam-view .cam-view-badges {
@@ -205,12 +205,13 @@ CAM_VIEW_CONTENT_CSS = """
   accent-color: var(--ink, #2A2520);
 }
 
-/* Path-grouped detection chips: LIVE + WIN/CAND, SVR + WIN/CAND. The
-   group is a thin pill with a path label on the left and the two type
-   chips inline. Border tints per path so live (cam color) and svr
-   (ACCENT) read distinct without color-coding the chip text itself —
-   chips reuse the standard .cv-layer pill so the on/off state styling
-   stays unified. */
+/* Path-grouped detection chips: LIVE / SVR each get a single BLOBS
+   chip (winner-dot layer is gone post fan-out). The group is a thin
+   pill with a path label on the left and the BLOBS chip inline.
+   Border tint per path so live (cam color) and svr (ACCENT) read
+   distinct without color-coding the chip text itself — chip reuses
+   the standard .cv-layer pill so the on/off state styling stays
+   unified. */
 [data-cam-view] .cv-path-group {
   display: inline-flex;
   align-items: center;
@@ -760,8 +761,8 @@ _LAYER_LABELS = {
     "marker_footprints": "MARKERS",
     "ball_crosshair": "BALL",
     "reproj_check": "REPROJ",
-    "detection_live": "LIVE",
-    "detection_svr": "SVR",
+    "detection_blobs_live": "BLOBS",
+    "detection_blobs_svr": "BLOBS",
 }
 
 

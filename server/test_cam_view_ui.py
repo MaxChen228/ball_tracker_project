@@ -568,10 +568,12 @@ def test_markers_page_drops_legacy_svg_marker_overlay():
 def test_viewer_page_uses_cam_view_with_detection_layers():
     """Phase 6: /viewer migrated to merged cam-view substrate. Each cam's
     vid-cell carries data-cam-view + a canvas overlay; the runtime
-    registers detection_live / detection_svr layers that draw the
-    per-frame ball blob from each pipeline. Per-cam toolbar exposes
-    PLATE / AXES / LIVE / SVR pills so the operator can toggle each
-    overlay independently — half-transparent over the real video."""
+    registers BLOBS layers (detection_blobs_live / detection_blobs_svr)
+    that draw every shape-gate-passing candidate ring on the matched
+    frame. Per-cam toolbar exposes PLATE / AXES / LIVE BLOBS / SVR
+    BLOBS pills so the operator can toggle each overlay independently
+    — half-transparent over the real video. Pre-fan-out there was also
+    a winner-dot layer per path; that's gone now (no winner concept)."""
     from fastapi.testclient import TestClient
     import main
     from main import app
@@ -594,32 +596,35 @@ def test_viewer_page_uses_cam_view_with_detection_layers():
     # Each cam: data-cam-view attribute + overlaid canvas.
     assert 'data-cam-view="A"' in body
     assert 'data-cam-canvas="A"' in body
-    # Layer matrix: 2 (path: live / svr) × 2 (type: winner / cands) plus
-    # PLATE / AXES. Default-on: PLATE + LIVE WIN/CAND. SVR off (legacy /
+    # Layer set: PLATE + AXES calibration overlays + one BLOBS layer per
+    # detection path. Default-on: PLATE + LIVE BLOBS. SVR off (legacy /
     # live-only sessions have no svr data; opt-in via Run server).
     assert (
         'data-layers="plate,axes,'
-        'detection_live,detection_blobs_live,'
-        'detection_svr,detection_blobs_svr"'
+        'detection_blobs_live,detection_blobs_svr"'
     ) in body
-    assert 'data-layers-on="plate,detection_live,detection_blobs_live"' in body
+    assert 'data-layers-on="plate,detection_blobs_live"' in body
     # Default opacity 65 — half-transparent overlay over the real video.
     assert 'data-default-opacity="65"' in body
-    # Per-cam toolbar pills for all six toggleable layers.
+    # Per-cam toolbar pills for all four toggleable layers.
     for layer in (
         "plate", "axes",
-        "detection_live", "detection_blobs_live",
-        "detection_svr", "detection_blobs_svr",
+        "detection_blobs_live",
+        "detection_blobs_svr",
     ):
         assert f'data-layer="{layer}"' in body
-    # Path-grouped chips (LIVE: WIN CAND ; SVR: WIN CAND).
+    # Winner-dot layers gone post fan-out — the toolbar must not surface
+    # them or the operator gets two redundant toggles.
+    assert 'data-layer="detection_live"' not in body
+    assert 'data-layer="detection_svr"' not in body
+    # Path-grouped chips (LIVE: BLOBS ; SVR: BLOBS).
     assert 'class="cv-path-group" data-path="live"' in body
     assert 'class="cv-path-group" data-path="svr"' in body
-    # Detection blob layers registered with the runtime — one per path.
-    assert "registerLayer('detection_live'" in body
-    assert "registerLayer('detection_svr'" in body
+    # Only the BLOBS layers are registered now.
     assert "registerLayer('detection_blobs_live'" in body
     assert "registerLayer('detection_blobs_svr'" in body
+    assert "registerLayer('detection_live'" not in body
+    assert "registerLayer('detection_svr'" not in body
     # K slider replaced by session-header cost_threshold slider — the
     # CAND layer's filtering is now driven by `window._setCostThreshold`.
     assert 'class="cv-blobs-k"' not in body

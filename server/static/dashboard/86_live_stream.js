@@ -174,11 +174,17 @@
         const cam = data.cam || '?';
         if (!currentLiveSession || currentLiveSession.session_id !== sid) return;
         if (!Array.isArray(data.origin) || !Array.isArray(data.endpoint)) return;
+        // Fan-out: one event per candidate. Server stamps `cand_idx`
+        // (>=0 for fan-out, -1 for legacy single-ray) and `cost` so the
+        // dashboard ray store can later apply the same cost-threshold
+        // filter the viewer uses on post-pitch sessions.
         pushLiveRay(sid, cam, {
           origin: data.origin.map(Number),
           endpoint: data.endpoint.map(Number),
           t_rel_s: Number(data.t_rel_s || 0),
           frame_index: Number(data.frame_index || 0),
+          cand_idx: data.cand_idx == null ? -1 : Number(data.cand_idx),
+          cost: data.cost == null ? null : Number(data.cost),
         });
         scheduleLiveRayRepaint();
       } catch (_) {}

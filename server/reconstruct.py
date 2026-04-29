@@ -95,6 +95,17 @@ class Ray:
     # can see where the two streams disagree — the diff reflects H.264
     # vs BGRA input asymmetry, not algorithm differences.
     source: str = "server"
+    # Index into FramePayload.candidates this ray corresponds to. Each
+    # detected frame fans out into one ray per candidate so the viewer
+    # can apply the cost_threshold filter to rays the same way it does
+    # to BLOBS overlay + 3D points. -1 reserved for legacy rays
+    # synthesised from frames that pre-date candidate persistence.
+    cand_idx: int = -1
+    # Selector cost stamped onto the candidate at detection time
+    # (live: live_pairing._resolve_candidates, server_post: pipeline).
+    # None on legacy rays. Viewer's `_candPassesThreshold` predicate
+    # uses this to gate ray drawing in playback mode.
+    cost: float | None = None
 
 
 @dataclass
@@ -193,49 +204,82 @@ def _rays_and_trace_for_source(
     for f in frames:
         if not f.ball_detected:
             continue
-        if f.px is None or f.py is None:
-            continue
-        try:
-            d_world = _world_ray(f.px, f.py, K, dist, R_wc)
-        except Exception:
-            continue
-        ground = _ray_ground_intersection(C, d_world)
-        ground_within_radius = (
-            ground is not None
-            and float(np.linalg.norm(ground - C)) <= _MAX_RENDER_DIST_M
-        )
-        if ground_within_radius:
-            endpoint = ground
-        else:
-            viz_len = (
-                _MAX_RENDER_DIST_M if ground is not None else min(viz_length, _MAX_RENDER_DIST_M)
-            )
-            endpoint = C + viz_len * d_world
         t_rel = float(f.timestamp_s - anchor)
-        rays.append(
-            Ray(
-                camera_id=cam_id,
-                t_rel_s=t_rel,
-                frame_index=f.frame_index,
-                origin=C.tolist(),
-                endpoint=endpoint.tolist(),
-                source=source,
+        # Fan out one ray per candidate so the viewer can filter by
+        # cost_threshold in playback (and so the operator can SEE every
+        # blob the detector saw, not only the winner). When candidates
+        # is empty we fall back to a single ray from f.px/f.py — covers
+        # legacy JSONs persisted before candidate-stamping landed.
+        cand_iter: list[tuple[int, float, float, float | None]]
+        if f.candidates:
+            cand_iter = [
+                (i, c.px, c.py, c.cost)
+                for i, c in enumerate(f.candidates)
+                if c.px is not None and c.py is not None
+            ]
+        elif f.px is not None and f.py is not None:
+            cand_iter = [(-1, f.px, f.py, None)]
+        else:
+            cand_iter = []
+
+        # Ground trace remains "winner only" — it's a monocular
+        # trajectory proxy, fan-out distractors would clutter the line
+        # rather than improve it. Identify the winner candidate by
+        # px/py match (within 0.5 px) when candidates is populated.
+        winner_idx: int | None = None
+        if f.candidates and f.px is not None and f.py is not None:
+            for i, c in enumerate(f.candidates):
+                if (
+                    c.px is not None and c.py is not None
+                    and abs(c.px - f.px) < 0.5 and abs(c.py - f.py) < 0.5
+                ):
+                    winner_idx = i
+                    break
+
+        for cand_idx, px, py, cost in cand_iter:
+            try:
+                d_world = _world_ray(px, py, K, dist, R_wc)
+            except Exception:
+                continue
+            ground = _ray_ground_intersection(C, d_world)
+            ground_within_radius = (
+                ground is not None
+                and float(np.linalg.norm(ground - C)) <= _MAX_RENDER_DIST_M
             )
-        )
-        if ground_within_radius:
-            trace.append(
-                {
-                    "t_rel_s": t_rel,
-                    "x": float(ground[0]),
-                    "y": float(ground[1]),
-                    "z": float(ground[2]),
-                }
+            if ground_within_radius:
+                endpoint = ground
+            else:
+                viz_len = (
+                    _MAX_RENDER_DIST_M if ground is not None else min(viz_length, _MAX_RENDER_DIST_M)
+                )
+                endpoint = C + viz_len * d_world
+            rays.append(
+                Ray(
+                    camera_id=cam_id,
+                    t_rel_s=t_rel,
+                    frame_index=f.frame_index,
+                    origin=C.tolist(),
+                    endpoint=endpoint.tolist(),
+                    source=source,
+                    cand_idx=cand_idx,
+                    cost=cost,
+                )
             )
+            is_winner = (cand_idx == winner_idx) or (cand_idx == -1)
+            if is_winner and ground_within_radius:
+                trace.append(
+                    {
+                        "t_rel_s": t_rel,
+                        "x": float(ground[0]),
+                        "y": float(ground[1]),
+                        "z": float(ground[2]),
+                    }
+                )
     trace.sort(key=lambda p: p["t_rel_s"])
     return rays, trace
 
 
-def ray_for_frame(
+def rays_for_frame(
     *,
     camera_id: str,
     frame: Any,
@@ -243,14 +287,19 @@ def ray_for_frame(
     homography: list[float],
     anchor_timestamp_s: float,
     source: str = "live",
-) -> Ray | None:
-    """Build one renderable world ray for a calibrated camera frame.
+) -> list[Ray]:
+    """Build one renderable world ray per candidate for a calibrated frame.
 
-    This is the single-frame version of `_rays_and_trace_for_source`, used by
-    the dashboard live stream before any pitch JSON exists on disk.
+    Single-frame version of `_rays_and_trace_for_source`, used by the
+    dashboard live stream before any pitch JSON exists on disk. Returns
+    one ray per shape-gate-passing candidate in `frame.candidates`
+    (fan-out parity with `_rays_and_trace_for_source` so the dashboard
+    sees the same ray bundle as the post-pitch viewer scene). Empty
+    list when no candidates pass — the WS handler treats that as "no
+    SSE 'ray' broadcast for this frame".
     """
     if not frame.ball_detected:
-        return None
+        return []
     K = build_K(intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy)
     H = np.array(homography, dtype=float).reshape(3, 3)
     R_wc, t_wc = recover_extrinsics(K, H)
@@ -267,7 +316,7 @@ def ray_for_frame(
         source=source,
         viz_length=viz_length,
     )
-    return rays[0] if rays else None
+    return rays
 
 
 def build_scene(

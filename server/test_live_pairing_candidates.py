@@ -100,8 +100,11 @@ def test_per_camera_independence():
 
 def test_resolved_frame_winner_has_min_cost():
     """`_resolve_candidates` stamps `cost` on every BlobCandidate; the
-    winner's cost is the minimum. Viewer relies on this for top-K
-    rendering — what was used to pick must match what's persisted."""
+    legacy `frame.px/py` fallback (used only when `frame.candidates` is
+    empty on legacy JSONs) corresponds to the minimum-cost candidate.
+    The viewer's cost_threshold slider relies on this `cost` field
+    being persisted — what was used to score must match what filters
+    BLOBS / 3D rays / 3D points."""
     sess = LivePairingSession("s_test")
     raw = [
         BlobCandidate(px=10.0, py=10.0, area=80, area_score=0.4,

@@ -627,13 +627,15 @@ def test_viewer_ships_interactive_diagnostic_widgets():
 
 
 def test_viewer_virtual_detection_follows_per_camera_ray_toggle():
-    """Phase 6: the virtual detection blob is now drawn as two
-    BallTrackerCamView layers (`detection_live` / `detection_svr`)
-    on top of the per-cam video. Each cam's vid-cell renders LIVE +
-    SVR pills in its cam-view-toolbar, and toggling those flips the
-    layer visibility independently — the live-vs-svr split that the
-    legacy `Rays A/B` toggles used to provide is preserved as a
-    per-cam UI affordance."""
+    """Phase 6: per-pipeline detection overlay is now drawn as the two
+    BallTrackerCamView BLOBS layers (`detection_blobs_live` /
+    `detection_blobs_svr`) on top of each per-cam video. The vid-cell
+    renders LIVE BLOBS + SVR BLOBS pills in its cam-view-toolbar so the
+    operator can toggle each pipeline's overlay independently. Pre
+    fan-out there was also a winner-dot layer per path
+    (`detection_live` / `detection_svr`) — that's been removed because
+    fan-out triangulation has no winner concept and the dot was just
+    redrawing the lowest-cost candidate already shown by BLOBS."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(714)
     _record_pitch(_pitch("A", 714, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -641,13 +643,19 @@ def test_viewer_virtual_detection_follows_per_camera_ray_toggle():
 
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
-    # Both detection-blob layers are registered with the runtime.
-    assert "registerLayer('detection_live'" in body
-    assert "registerLayer('detection_svr'" in body
-    # Per-cam toolbar exposes the LIVE / SVR pills so the operator can
-    # toggle each pipeline's overlay independently.
-    assert 'data-layer="detection_live"' in body
-    assert 'data-layer="detection_svr"' in body
+    # Both BLOBS layers are registered with the runtime.
+    assert "registerLayer('detection_blobs_live'" in body
+    assert "registerLayer('detection_blobs_svr'" in body
+    # Winner-dot layers are GONE — fan-out triangulation killed the
+    # winner concept; `_drawDetectionForPath` and its registrations
+    # were removed in the same change.
+    assert "registerLayer('detection_live'" not in body
+    assert "registerLayer('detection_svr'" not in body
+    assert 'data-layer="detection_live"' not in body
+    assert 'data-layer="detection_svr"' not in body
+    # Per-cam toolbar exposes the LIVE / SVR BLOBS pills.
+    assert 'data-layer="detection_blobs_live"' in body
+    assert 'data-layer="detection_blobs_svr"' in body
     # The per-cam canvas + viewer's currentT scrubber is what drives the
     # blob's frame lookup; still must reference both pipelines by name.
     assert "'live'" in body or '"live"' in body
@@ -1114,10 +1122,11 @@ def test_stream_legacy_candidates_without_cost_become_null():
 
 def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
     """`video_cell_html` (the SSR builder for each cam pane) declares the
-    2×2 layer matrix (live/svr × winner/cand) and renders the path-
-    grouped toolbar (LIVE: WIN CAND ; SVR: WIN CAND). The legacy K
-    slider was replaced by the session-level cost_threshold slider in
-    the viewer header — no per-cam K knob anymore."""
+    layer set (PLATE + AXES + LIVE BLOBS + SVR BLOBS) and renders the
+    path-grouped toolbar (LIVE: BLOBS ; SVR: BLOBS). Pre-fan-out the
+    matrix had a per-path WIN + CAND pair; WIN is gone because fan-out
+    triangulation has no winner. The legacy K slider was replaced by
+    the session-level cost_threshold slider in the viewer header."""
     from viewer_fragments import video_cell_html
     body = video_cell_html(
         "A",
@@ -1129,18 +1138,20 @@ def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
     )
     assert (
         'data-layers="plate,axes,'
-        'detection_live,detection_blobs_live,'
-        'detection_svr,detection_blobs_svr"'
+        'detection_blobs_live,detection_blobs_svr"'
     ) in body
     # SVR off by default — legacy / live-only sessions have no svr data.
-    assert 'data-layers-on="plate,detection_live,detection_blobs_live"' in body
-    # Path-grouped chips with WIN + CAND inside each group.
+    assert 'data-layers-on="plate,detection_blobs_live"' in body
+    # Path-grouped chips, BLOBS-only.
     assert 'class="cv-path-group" data-path="live"' in body
     assert 'class="cv-path-group" data-path="svr"' in body
-    assert 'class="cv-layer on" data-layer="detection_live">WIN' in body
-    assert 'class="cv-layer on" data-layer="detection_blobs_live">CAND' in body
-    assert 'class="cv-layer" data-layer="detection_svr">WIN' in body
-    assert 'class="cv-layer" data-layer="detection_blobs_svr">CAND' in body
+    assert 'class="cv-layer on" data-layer="detection_blobs_live">BLOBS' in body
+    assert 'class="cv-layer" data-layer="detection_blobs_svr">BLOBS' in body
+    # Winner-dot layers gone post fan-out.
+    assert 'data-layer="detection_live"' not in body
+    assert 'data-layer="detection_svr"' not in body
+    assert '>WIN<' not in body
+    assert '>CAND<' not in body
     # K slider gone (replaced by viewer-header cost_threshold slider).
     assert 'class="cv-blobs-k"' not in body
     assert 'window._setCandTopK' not in body

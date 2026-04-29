@@ -32,7 +32,7 @@ from pairing_tuning import PairingTuning
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
 from live_pairing import LivePairingSession
-from reconstruct import Ray, ray_for_frame
+from reconstruct import Ray, rays_for_frame
 from state_runtime import RuntimeSettingsStore, SyncParams
 from state_calibration import (
     AutoCalibrationRun as _AutoCalibrationRun,
@@ -668,23 +668,27 @@ class State:
         created = live.ingest(camera_id, frame, triangulate_live, anchors=anchors)
         # The frame stored by live.ingest is the candidate-resolved one
         # (px/py picked by the shape-prior selector); hand it back so
-        # callers (WS handler → live_ray_for_frame) work off the resolved
+        # callers (WS handler → live_rays_for_frame) work off the resolved
         # version, not the raw inbound.
         resolved = live.latest_frame_for(camera_id) or frame
         return created, live.frame_counts_snapshot(), resolved
 
-    def live_ray_for_frame(
+    def live_rays_for_frame(
         self,
         camera_id: str,
         session_id: str,
         frame: FramePayload,
-    ) -> Ray | None:
-        """Project one live detection into world space for dashboard rays.
+    ) -> list[Ray]:
+        """Project this frame's candidates into world space for dashboard rays.
 
-        Stereo live points still require A/B pairing and a shared time anchor.
-        A monocular ray only needs that camera's calibration; if the phone has
-        no sync anchor, use the frame index as an approximate relative clock so
-        hover/color values stay small and readable.
+        Returns one ray per shape-gate-passing candidate (fan-out parity
+        with the post-pitch viewer scene). Empty list when no calibration
+        on file, no anchor reachable, or `frame.ball_detected` is False.
+
+        Stereo live points still require A/B pairing and a shared time
+        anchor. A monocular ray only needs that camera's calibration;
+        if the phone has no sync anchor, use the frame index as an
+        approximate relative clock so hover/color values stay small.
         """
         with self._lock:
             cal = self._calibration_store.get(camera_id)
@@ -698,18 +702,18 @@ class State:
         if cal is None:
             if should_log:
                 logger.warning(
-                    "live_ray_for_frame: cam=%s session=%s has no calibration on "
+                    "live_rays_for_frame: cam=%s session=%s has no calibration on "
                     "file — live rays dropped until /calibration or /calibration/auto runs",
                     camera_id,
                     session_id,
                 )
-            return None
+            return []
         anchor = (
             dev.sync_anchor_timestamp_s
             if dev is not None and dev.sync_anchor_timestamp_s is not None
             else frame.timestamp_s - (float(frame.frame_index) / 240.0)
         )
-        return ray_for_frame(
+        return rays_for_frame(
             camera_id=camera_id,
             frame=frame,
             intrinsics=cal.intrinsics,
