@@ -67,3 +67,5 @@ server/charuco_board.png
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+
+.DS_Store
