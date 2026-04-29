@@ -32,12 +32,12 @@ def video_cell_html(
                 f'<span class="vid-hint">never uploaded</span>'
                 f"</div>"
             )
-        # Reserve a 16:9 (or calibration-aspect) box so the cell takes the
-        # same internal footprint as a populated cell — avoids the page
-        # shifting once the MOV upload lands. Without an aspect-ratio
-        # the absolutely-positioned `.vid-media` collapses inside the
-        # flex `.vid-frame` and the placeholder ends up a thin strip;
-        # 16:9 is the safe default (matches 1920x1080 capture).
+        # Reserve a 16:9 (or calibration-aspect) box so the cell takes a
+        # real footprint even when the parent grid is short on vertical
+        # space (e.g. small browser window). `.vid-media.empty` switches
+        # to position:relative + width:100% so the inline aspect-ratio
+        # actually drives intrinsic height; with the populated cell's
+        # position:absolute + inset:0 it would be ignored.
         if image_width_px and image_height_px:
             media_style = f' style="aspect-ratio:{image_width_px}/{image_height_px}"'
         else:

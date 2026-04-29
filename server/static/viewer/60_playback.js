@@ -279,8 +279,8 @@
       case " ": ev.preventDefault(); playBtn.click(); break;
       case ",": ev.preventDefault(); stepFrames(ev.shiftKey ? -10 : -1); break;
       case ".": ev.preventDefault(); stepFrames(ev.shiftKey ? +10 : +1); break;
-      case "ArrowLeft": ev.preventDefault(); stepFrames(-Math.round(0.5 * MASTER_FPS)); break;
-      case "ArrowRight": ev.preventDefault(); stepFrames(+Math.round(0.5 * MASTER_FPS)); break;
+      case "ArrowLeft": ev.preventDefault(); stepFrames(-1); break;
+      case "ArrowRight": ev.preventDefault(); stepFrames(+1); break;
       case "Home": ev.preventDefault(); stepFrames(-TOTAL_FRAMES); break;
       case "End": ev.preventDefault(); stepFrames(+TOTAL_FRAMES); break;
       case "d": case "D": ev.preventDefault(); jumpDetection(-1); break;
