@@ -13,9 +13,9 @@ from state import State
 
 
 def test_intrinsics_rejects_legacy_fz_alias():
-    """The fz→fy alias was removed after `scripts/migrate_fz_to_fy.py`
-    rewrote all persisted JSON. A raw `fz` key now fails validation
-    instead of silently aliasing — migration is mandatory."""
+    """The fz→fy alias was removed (migration script retired 2026-04-29
+    after rewriting all persisted JSON). A raw `fz` key now fails
+    validation instead of silently aliasing — migration is mandatory."""
     legacy = {"fx": 1000.0, "fz": 1100.0, "cx": 960.0, "cy": 540.0}
     with pytest.raises(ValidationError):
         IntrinsicsPayload.model_validate(legacy)
@@ -68,23 +68,23 @@ def test_server_post_error_cleared_on_retry(tmp_path):
     state = State(data_dir=tmp_path)
     sid = "s_cafebabe"
 
-    state._processing.record_error(sid, "A", "detect: PyAV decode failed")
-    state._processing.record_error(sid, "B", "annotate: cv2 draw failed")
-    assert state._processing.errors_for(sid) == {
+    state.processing.record_error(sid, "A", "detect: PyAV decode failed")
+    state.processing.record_error(sid, "B", "annotate: cv2 draw failed")
+    assert state.processing.errors_for(sid) == {
         "A": "detect: PyAV decode failed",
         "B": "annotate: cv2 draw failed",
     }
 
-    state._processing.clear_error(sid, "A")
-    assert state._processing.errors_for(sid) == {"B": "annotate: cv2 draw failed"}
+    state.processing.clear_error(sid, "A")
+    assert state.processing.errors_for(sid) == {"B": "annotate: cv2 draw failed"}
 
     # Clearing the last cam collapses the session entry entirely.
-    state._processing.clear_error(sid, "B")
-    assert state._processing.errors_for(sid) == {}
+    state.processing.clear_error(sid, "B")
+    assert state.processing.errors_for(sid) == {}
 
     # Idempotent on unknown keys.
-    state._processing.clear_error(sid, "A")
-    state._processing.clear_error("s_nonexistent", "A")
+    state.processing.clear_error(sid, "A")
+    state.processing.clear_error("s_nonexistent", "A")
 
 
 def test_reset_and_delete_clear_observability_state(tmp_path):
@@ -97,15 +97,15 @@ def test_reset_and_delete_clear_observability_state(tmp_path):
 
     state.live_rays_for_frame("A", sid1, _frame(0))
     state.live_rays_for_frame("B", sid2, _frame(0))
-    state._processing.record_error(sid1, "A", "boom")
-    state._processing.record_error(sid2, "B", "kaboom")
+    state.processing.record_error(sid1, "A", "boom")
+    state.processing.record_error(sid2, "B", "kaboom")
 
     # delete_session only purges the targeted sid.
     state.delete_session(sid1)
     assert state.live_missing_calibration_for(sid1) == []
-    assert state._processing.errors_for(sid1) == {}
+    assert state.processing.errors_for(sid1) == {}
     assert state.live_missing_calibration_for(sid2) == ["B"]
-    assert state._processing.errors_for(sid2) == {"B": "kaboom"}
+    assert state.processing.errors_for(sid2) == {"B": "kaboom"}
 
     # A second live_ray call for sid1's cam should re-populate the set —
     # the per-(sid,cam) dedupe key must have been dropped too, so the
@@ -117,5 +117,5 @@ def test_reset_and_delete_clear_observability_state(tmp_path):
     state.reset()
     assert state.live_missing_calibration_for(sid1) == []
     assert state.live_missing_calibration_for(sid2) == []
-    assert state._processing.errors_for(sid1) == {}
-    assert state._processing.errors_for(sid2) == {}
+    assert state.processing.errors_for(sid1) == {}
+    assert state.processing.errors_for(sid2) == {}

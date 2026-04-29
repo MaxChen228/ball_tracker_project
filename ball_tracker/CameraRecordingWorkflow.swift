@@ -23,7 +23,12 @@ final class CameraRecordingWorkflow {
         let getCurrentSessionPaths: () -> Set<ServerUploader.DetectionPath>
         let getSyncId: () -> String?
         let getSyncAnchorTimestampS: () -> Double?
-        let currentCaptureTelemetry: (Double) -> ServerUploader.CaptureTelemetry
+        /// Returns `nil` when no real telemetry is available yet (no frames
+        /// observed, or AVCaptureDevice callback hasn't fired). The recording
+        /// workflow embeds whatever it gets — `nil` flows through to the
+        /// pitch payload's optional `capture_telemetry` field rather than a
+        /// zero-filled fabrication.
+        let currentCaptureTelemetry: (Double) -> ServerUploader.CaptureTelemetry?
         let startCapture: (Double) -> Void
         let resetDetectionState: () -> Void
         let clearRecoveredAnchor: () -> Void

@@ -175,16 +175,16 @@ PR `a66d5db` 退役 HTTP `/heartbeat`，改純 WS 後曾漏掉 `/sync/start` 的
 - `parkCameraInStandby` 已移除；standby 永遠保持 capture session 60fps
   running
 
-**保留的 iOS UI（fallback / bootstrap 用）**：
+**保留的 iOS UI**：
 
-- `AutoCalibrationViewController`（dashboard 壞掉的 fallback）
-- Settings（IP/port/role bootstrap）
-- ReadyCard 狀態顯示（不可點）
+- `CameraViewController` + monitor overlay
+- 無 in-app calibration / settings VC（`AutoCalibrationViewController` /
+  `IntrinsicsStore` / `Settings*Controller` 已全部刪除，Phase 6 清理已
+  落地）；`AppSettingsStore` 從 `UserDefaults` 讀 `server_ip` /
+  `camera_role` 作 bootstrap
 
 **未做（不是 bug，是還沒排）**：
 
-- Phase 6 最終 iOS 清理（刪 AutoCalibrationVC + Settings 剝到最小） —
-  等 dashboard path 穩
 - N-view triangulation — 等第三台 iPhone
 
 **WS 取代 heartbeat 已 ship**（PR `a66d5db`）：iOS 純 WS heartbeat，HTTP
@@ -260,8 +260,9 @@ User goal：iOS live = production，server detection = oracle / debug。
 
 - 看到「live vs server_post 對不上」→ 不要先猜 HSV，先跑
   `server/dry_run_live_vs_server.py --session <sid>` 看 centroid Δ 量化
-- 要 reproduce 舊 session detection → reprocess 自動讀 `pitch.*_used`
-  frozen snapshot；要強制當下 config 加 `--use-current-config`
+- 要 reproduce 舊 session detection → reprocess 預設行為已是用 disk 當下
+  config（commit `0b300a4`，2026-04-29）。要凍結快照重現舊 detection 加
+  `--use-frozen-snapshot`（讀 `pitch.*_used`）
 - 改 wire schema → 同 commit 改 `docs/protocols.md` + iOS 端
   `CameraCommandRouter` guard
 - 動 `state.py` 內共用 state → 用 public accessor（如
@@ -292,9 +293,9 @@ User goal：iOS live = production，server detection = oracle / debug。
 - 2026-04-29 收緊：h 從 100-130 縮到 105-112 過濾背景藍
 - **v_min 必須 ≥ 40**：球下半進陰影 V 會掉到 80 以下；v_min 抬高會讓近相機
   的球只剩高光環、mask 變扁、aspect gate 砍掉（s_cc0dcaa5 reprocess 對比為證）
-- preset key 字串散在 `render_dashboard_session.py::_HSV_PRESETS`、
-  `routes/settings.py::_HSV_PRESETS`、`test_control.py` — 改 preset 三處
-  要同步
+- preset 註冊單一 source：`server/presets.py::PRESETS`。
+  `render_dashboard_session.py` / `routes/settings.py` 都從這裡 import；
+  `test_control.py` 只持有字串 assertion，不是 source of truth
 - `detection.py` docstring 寫「default 是黃綠網球」是歷史 fallback，不要
   改
 
@@ -312,7 +313,8 @@ combined mask `hsv_mask AND fg_mask` 下實測 fill **0.63-0.70 中位 0.68**
 
 240 fps 下飛行中的球近乎完美圓（最多輕微橢圓含邊界彎曲）。
 
-- **aspect ratio ≥ 0.75** 是合理門檻（4:3 bbox）
+- 目前 code `_MIN_ASPECT = 0.70`（`server/detection.py:106`）；實測
+  ≥ 0.75 也合理但要先量化才 bump（backlog）
 - 若改用 `4πA/P²` circularity，起點 ≥ 0.8
 - 不要為「吞運動模糊」放寬 — 模糊不是這場遊戲的問題
 - 不要引入 HoughCircles
@@ -394,12 +396,10 @@ for S/V。使用者講色相數字時先確認是 OpenCV 還是標準 0-360；UI
   不可能拿到 non-binned 銳利畫面
 - **FOV 實測 73.828°**（horizontalFovRadians ≈ **1.2885 rad**）。1920x1080
   所有 16:9 格式 FOV 一致（除 format[36]/[37] 120fps 望遠裁切版 41.173°）
-- 舊 65° fallback 已修：`server/routes/calibration.py`
+- 舊 65° fallback 已修：`server/calibration_auto.py:51`
   `_IPHONE_MAIN_CAM_HFOV_RAD = 1.2885`。歷史 65° 預設曾讓 fx 高估 14%
   （1920px 下 fx=1507 vs 真值 1278），recovered 深度低估 10-15%
 - 寫新 fallback / default FOV → 用 `1.2885`，不要再 hardcode `1.1345`
-- iOS `IntrinsicsStore` 是否仍藏 65° 預設值未驗證；若改 iOS calibration
-  邏輯，順手 grep 確認
 
 ## reprocess_sessions.py — HSV 改完重算舊 session
 

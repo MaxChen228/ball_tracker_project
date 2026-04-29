@@ -255,7 +255,7 @@ async def sessions_cancel_processing(request: Request, session_id: str):
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=422, detail="invalid session_id")
-    canceled = state._processing.cancel_processing(session_id)
+    canceled = state.processing.cancel_processing(session_id)
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     if not canceled:
@@ -305,7 +305,7 @@ async def _enqueue_server_post(
     # peek at here are the same instances `resume_processing` deep-copies
     # for hand-off; the *_used fields we read are immutable post-/pitch
     # ingest so the peek-then-copy is safe.
-    candidates = state._processing.session_candidates(session_id)
+    candidates = state.processing.session_candidates(session_id)
     if not candidates:
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
@@ -313,7 +313,7 @@ async def _enqueue_server_post(
     resolved_by_cam: dict[str, tuple[HSVRange, ShapeGate, CandidateSelectorTuning, str]] = {}
     for cam, pitch, _clip_path in candidates:
         resolved_by_cam[cam] = _resolve_detection_config(source, pitch, state)
-    queued = state._processing.resume_processing(session_id)
+    queued = state.processing.resume_processing(session_id)
     if not queued:
         # `session_candidates` saw something but `resume_processing`
         # found nothing transitionable (already running / finished).

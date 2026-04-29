@@ -24,7 +24,7 @@ and effectively forced argmin into a coin-flip between candidates
 with capped cost. Aspect and fill are scale-invariant geometric
 properties of a sphere — they hold from r=4 to r=25 — and they're
 the only honest shape signals for a track-independent selector.
-Area still gates entry via `MIN_AREA = 15` in `detection.py` (reject
+Area still gates entry via `_MIN_AREA_PX = 20` in `detection.py` (reject
 sub-pixel noise), but it is NOT a cost term.
 
 Cost formula:
@@ -114,7 +114,7 @@ def score_candidates(
     ball-like. Empty input → empty output.
 
     Caller invariant: every candidate has `area > 0`. Production callers
-    enforce this via `MIN_AREA = 15` in `detection.py`. Area is no longer
+    enforce this via `_MIN_AREA_PX = 20` in `detection.py`. Area is no longer
     a cost term — it only gates entry — so this function does not read
     `c.area`."""
     if not candidates:

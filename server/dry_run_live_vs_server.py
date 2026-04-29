@@ -32,8 +32,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).parent))
-
 DATA_DIR = Path(__file__).parent / "data"
 PITCH_DIR = DATA_DIR / "pitches"
 REPORT_DIR = DATA_DIR / "alignment_reports"

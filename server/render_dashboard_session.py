@@ -169,6 +169,7 @@ def _render_hsv_body(
         '</div>'
         '<div class="hsv-grid">'
         f'{_row("h", 179)}'
+        '<div class="hsv-hint">Hue uses OpenCV 0-179 scale (= standard 0-360&deg; &divide; 2). Blue &asymp; 105-125, yellow-green &asymp; 25-55.</div>'
         f'{_row("s", 255)}'
         f'{_row("v", 255)}'
         '</div>'

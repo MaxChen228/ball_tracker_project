@@ -103,16 +103,27 @@ final class ConcurrentDetectionPool {
                 aspectMin: shapeSnapshot.aspect_min,
                 fillMin: shapeSnapshot.fill_min
             )
-            let maxArea = max(1, cands.map { Int($0.areaPx) }.max() ?? 1)
-            let candidatesPayload = cands.map { d in
-                ServerUploader.BlobCandidate(
-                    px: Double(d.px),
-                    py: Double(d.py),
-                    area: Int(d.areaPx),
-                    area_score: Double(d.areaPx) / Double(maxArea),
-                    aspect: Double(d.aspect),
-                    fill: Double(d.fill)
-                )
+            // Empty `cands` is the normal "no detection on this frame" case
+            // and must not be treated as a logic error — we just emit a
+            // FramePayload with an empty candidate list. Only compute
+            // `maxArea` when there is at least one candidate so the
+            // area-score divisor is real instead of a fallback `1`.
+            let candidatesPayload: [ServerUploader.BlobCandidate]
+            if cands.isEmpty {
+                candidatesPayload = []
+            } else {
+                let maxArea = cands.map { Int($0.areaPx) }.max()!
+                assert(maxArea > 0, "non-empty cands must have positive max area")
+                candidatesPayload = cands.map { d in
+                    ServerUploader.BlobCandidate(
+                        px: Double(d.px),
+                        py: Double(d.py),
+                        area: Int(d.areaPx),
+                        area_score: Double(d.areaPx) / Double(maxArea),
+                        aspect: Double(d.aspect),
+                        fill: Double(d.fill)
+                    )
+                }
             }
             let frame = ServerUploader.FramePayload(
                 frame_index: index,

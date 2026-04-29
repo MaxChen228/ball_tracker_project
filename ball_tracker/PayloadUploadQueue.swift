@@ -77,6 +77,14 @@ final class PayloadUploadQueue {
     /// In-memory only — a fresh app launch gets a fresh budget per file.
     private var clientErrorRetryCount: [URL: Int] = [:]
 
+    /// Generation counter bumped by every `clearPending`. The in-flight
+    /// upload's completion callback captures the value at dispatch time and
+    /// re-checks before re-inserting the file on retry; a mismatch means a
+    /// `clearPending` happened while the upload was in flight, so the
+    /// completion drops its file silently instead of resurrecting a queue
+    /// the caller asked to drain.
+    private var queueGeneration: Int = 0
+
     /// Called with a short human-readable string destined for the
     /// "Upload: …" HUD label.
     var onStatusTextChanged: ((String) -> Void)?
@@ -124,6 +132,7 @@ final class PayloadUploadQueue {
         pendingFiles.removeAll(keepingCapacity: true)
         clientErrorRetryCount.removeAll(keepingCapacity: false)
         serverBackoffTier = 0
+        queueGeneration &+= 1
         setUploading(false)
     }
 
@@ -157,10 +166,16 @@ final class PayloadUploadQueue {
         }
 
         let videoURL = store.videoURL(forPayload: fileURL)
+        let dispatchGeneration = queueGeneration
 
         uploader.uploadPitchTyped(payload, videoURL: videoURL) { [weak self] result in
             guard let self else { return }
             DispatchQueue.main.async {
+                // `clearPending` bumps `queueGeneration`. If a clear landed
+                // between dispatch and completion, the queue has been
+                // intentionally drained — re-inserting `fileURL` would
+                // silently resurrect work the caller asked to discard.
+                let cleared = (dispatchGeneration != self.queueGeneration)
                 switch result {
                 case .success(let response):
                     self.store.delete(fileURL)
@@ -170,7 +185,9 @@ final class PayloadUploadQueue {
                     self.onStatusTextChanged?("Uploaded \(payload.session_id)")
                     self.onLastResultChanged?(Self.formatResultSummary(response))
                     self.setUploading(false)
-                    self.processNextIfNeeded()
+                    if !cleared {
+                        self.processNextIfNeeded()
+                    }
 
                 case .failure(let error):
                     // 4xx with budget exhausted → drop the poisoned payload.
@@ -183,7 +200,19 @@ final class PayloadUploadQueue {
                         )
                         self.onPayloadDropped?(fileURL, error)
                         self.setUploading(false)
-                        self.processNextIfNeeded()
+                        if !cleared {
+                            self.processNextIfNeeded()
+                        }
+                        return
+                    }
+
+                    if cleared {
+                        // The queue was cleared while this upload was in
+                        // flight. Drop the in-flight file (it stays on disk;
+                        // a later `reloadPending` can pick it back up) and
+                        // do NOT re-insert + schedule another attempt.
+                        log.info("queue dropping in-flight file after clearPending url=\(fileURL.lastPathComponent, privacy: .public)")
+                        self.setUploading(false)
                         return
                     }
 
@@ -276,12 +305,12 @@ final class PayloadUploadQueue {
         if r.triangulated_points == 0 {
             return "\(sid) ✗ 0 pts (時間窗口未對齊?)"
         }
-        let gapMm = (r.mean_residual_m ?? 0) * 1000.0
-        let peakZ = r.peak_z_m ?? 0
-        let dur = r.duration_s ?? 0
-        return String(
-            format: "%@ ✓ %d pts gap=%.0fmm peak=%.2fm dur=%.2fs",
-            sid, r.triangulated_points, gapMm, peakZ, dur
-        )
+        // Show `—` when a metric is missing rather than substituting 0 —
+        // a 0 mm residual / 0 m peak is a meaningful (if unlikely) value
+        // and we don't want it confused with "server didn't return one".
+        let gap = r.mean_residual_m.map { String(format: "%.0fmm", $0 * 1000.0) } ?? "—"
+        let peak = r.peak_z_m.map { String(format: "%.2fm", $0) } ?? "—"
+        let dur = r.duration_s.map { String(format: "%.2fs", $0) } ?? "—"
+        return "\(sid) ✓ \(r.triangulated_points) pts gap=\(gap) peak=\(peak) dur=\(dur)"
     }
 }

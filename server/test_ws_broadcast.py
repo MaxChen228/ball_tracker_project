@@ -173,7 +173,14 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
     assert any(name == "path_completed" and data["sid"] == session_id and data["point_count"] == 1 for name, data in events)
 
 
-def test_live_websocket_single_camera_emits_ray_without_sync(monkeypatch):
+def test_live_websocket_single_camera_no_sync_anchor_drops_rays(monkeypatch):
+    """Regression: when a phone has no `sync_anchor_timestamp_s` (never
+    completed mutual sync), `live_rays_for_frame` MUST return [] rather
+    than synthesise an anchor from `frame.ts - i/240`. The previous
+    silent fallback produced rays whose `t_rel_s` looked plausible but
+    was decoupled from any real clock — they would ship to the dashboard
+    indistinguishable from genuine sync-aligned rays. See
+    state.py::live_rays_for_frame and CLAUDE.md silent-fallback rule."""
     K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
     P_true = np.array([0.08, 0.34, 0.92])
     u, v = _project_pixels(K, R_a, t_a, P_true)
@@ -181,14 +188,6 @@ def test_live_websocket_single_camera_emits_ray_without_sync(monkeypatch):
     assert _post_calibration(client, "A", K, H_a).status_code == 200
 
     events: list[tuple[str, dict]] = []
-
-    def wait_for_event(predicate, timeout_s: float = 2.0) -> bool:
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if any(predicate(name, data) for name, data in events):
-                return True
-            time.sleep(0.01)
-        return any(predicate(name, data) for name, data in events)
 
     class _CaptureHub:
         async def broadcast(self, event: str, data: dict) -> None:
@@ -203,6 +202,7 @@ def test_live_websocket_single_camera_emits_ray_without_sync(monkeypatch):
 
     with client.websocket_connect("/ws/device/A") as ws_a:
         assert ws_a.receive_json()["type"] == "settings"
+        # Hello WITHOUT sync_anchor_timestamp_s — phone never synced.
         ws_a.send_json({"type": "hello", "cam": "A"})
         assert ws_a.receive_json()["type"] == "settings"
 
@@ -223,12 +223,18 @@ def test_live_websocket_single_camera_emits_ray_without_sync(monkeypatch):
             "candidates": [{"px": u, "py": v, "area": 100, "area_score": 1.0, "aspect": 1.0, "fill": 0.68}],
         })
 
-        assert wait_for_event(lambda name, data: name == "ray" and data["sid"] == session_id)
-        ray_events = [data for name, data in events if name == "ray"]
-        assert ray_events[0]["cam"] == "A"
-        assert len(ray_events[0]["origin"]) == 3
-        assert len(ray_events[0]["endpoint"]) == 3
-        assert not any(name == "point" for name, _data in events)
+        # Drain a beat so the frame handler runs.
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            if any(name == "frame_count" for name, _ in events):
+                break
+            time.sleep(0.01)
+
+        # frame_count still fires (it doesn't depend on the anchor) but
+        # no rays should escape since the device has no sync anchor.
+        assert any(name == "frame_count" for name, _ in events)
+        assert not any(name == "ray" for name, _ in events)
+        assert not any(name == "point" for name, _ in events)
 
 
 def test_sync_trigger_broadcasts_websocket_command(monkeypatch):
