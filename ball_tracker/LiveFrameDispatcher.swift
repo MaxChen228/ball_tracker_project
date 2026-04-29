@@ -91,6 +91,8 @@ final class LiveFrameDispatcher {
                 "py": c.py,
                 "area": c.area,
                 "area_score": c.area_score,
+                "aspect": c.aspect,
+                "fill": c.fill,
             ]
         }
         connection.send([
