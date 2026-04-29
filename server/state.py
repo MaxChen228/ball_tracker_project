@@ -758,12 +758,26 @@ class State:
         and dashboard `/status` reads don't block on a slow disk or a
         millisecond-scale triangulation run.
 
-        Race note: two simultaneous A+B uploads for the same session can
-        each observe the other inside their own critical section and both
-        trigger triangulation. That's redundant CPU but not incorrect —
-        both computations take the same (a, b) snapshot and deterministically
-        yield the same points; last-writer-wins on `self.results[sid]`
-        and on the result JSON file (both atomic)."""
+        Race note 1 — concurrent A+B record(): two simultaneous A+B
+        uploads for the same session can each observe the other inside
+        their own critical section and both trigger triangulation.
+        That's redundant CPU but not incorrect — both computations take
+        the same (a, b) snapshot and deterministically yield the same
+        points; last-writer-wins on `self.results[sid]` and on the
+        result JSON file (both atomic).
+
+        Race note 2 — record vs delete_session: CS1 and CS2 are
+        deliberately separated so disk I/O + triangulation don't block
+        WS heartbeats. A concurrent `delete_session` squeezed between
+        CS1 and CS2 would otherwise resurrect the just-deleted session
+        via the result publish (both the `_atomic_write` of the result
+        JSON and the CS2 republish). The guards below re-check
+        `(camera_id, session_id) in self.pitches` before each write,
+        collapsing the resurrection window from "duration of
+        triangulation + disk I/O" (milliseconds) to "between read and
+        write" (microseconds). Fully eliminating it would need a
+        generation counter on `(camera_id, session_id)`; not worth the
+        complexity for a personal LAN tool."""
         pitch_path = self._pitch_path(pitch.camera_id, pitch.session_id)
         normalized_paths = session_results.normalize_paths(pitch.paths)
         if not normalized_paths:
@@ -810,14 +824,29 @@ class State:
         # --- Outside the lock: build the result + triangulate if paired. ---
         result = session_results.rebuild_result_for_session(self, pitch.session_id)
 
+        # --- Guard: bail before disk write if delete_session ran between
+        # CS1 and now. See "Race note 2" in the docstring. ---
+        with self._lock:
+            still_present = (pitch.camera_id, pitch.session_id) in self.pitches
+        if not still_present:
+            logger.info(
+                "record: session %s deleted during write — discarding result publish",
+                pitch.session_id,
+            )
+            return result
+
         # --- Outside the lock: persist the result JSON. ---
         self._atomic_write(
             self._result_path(pitch.session_id),
             result.model_dump_json(),
         )
 
-        # --- Critical section 2: publish the result into the in-memory map. ---
+        # --- Critical section 2: publish the result into the in-memory map.
+        # Re-check once more — delete_session could have raced into the
+        # window between the guard above and this line. ---
         with self._lock:
+            if (pitch.camera_id, pitch.session_id) not in self.pitches:
+                return result
             self.results[pitch.session_id] = result
         return result
 
@@ -849,9 +878,32 @@ class State:
             return self.results.get(session_id)
 
     def store_result(self, result: SessionResult) -> None:
-        self._atomic_write(self._result_path(result.session_id), result.model_dump_json())
+        # Same delete-during-write race as record() (see "Race note 2"
+        # there). Bail if the session has been purged from EVERY
+        # in-memory home it could live in: pitches, results, and the
+        # live pairing map. Live-only WS sessions never enter `pitches`
+        # until persist_live_frames flushes, so we must include
+        # _live_pairings — otherwise the very first publish from the
+        # WS frame loop would incorrectly trip the guard.
+        sid = result.session_id
         with self._lock:
-            self.results[result.session_id] = result
+            known = (
+                any(s == sid for _, s in self.pitches)
+                or sid in self.results
+                or sid in self._live_pairings
+            )
+        if not known:
+            return
+        self._atomic_write(self._result_path(sid), result.model_dump_json())
+        with self._lock:
+            still_known = (
+                any(s == sid for _, s in self.pitches)
+                or sid in self.results
+                or sid in self._live_pairings
+            )
+            if not still_known:
+                return
+            self.results[sid] = result
 
     def pitches_for_session(self, session_id: str) -> dict[str, PitchPayload]:
         """Snapshot of all pitches currently stored for `session_id`, keyed

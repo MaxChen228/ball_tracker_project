@@ -656,6 +656,58 @@ def test_delete_refuses_armed_session(tmp_path):
         s.delete_session(armed.id)
 
 
+def test_record_does_not_resurrect_deleted_session(tmp_path, monkeypatch):
+    """A `delete_session` racing with the middle of a `record` call must
+    NOT come back to life via the result publish.
+
+    record() releases the lock between CS1 (mutate pitches) and CS2
+    (publish result). If delete_session lands in that window,
+    `_atomic_write` of the result JSON + the CS2 republish would
+    otherwise resurrect the session. We simulate the race by patching
+    rebuild_result_for_session to call delete_session() mid-call;
+    record() must observe the deletion via its re-check guards and
+    discard the result publish."""
+    s = main.State(data_dir=tmp_path)
+    pitch = _minimal_pitch("A", session_id=sid(900))
+
+    import session_results as _sr
+    real_rebuild = _sr.rebuild_result_for_session
+
+    def rebuild_then_delete(state, session_id):
+        result = real_rebuild(state, session_id)
+        state.delete_session(session_id)
+        return result
+
+    monkeypatch.setattr(_sr, "rebuild_result_for_session", rebuild_then_delete)
+
+    s.record(pitch)
+
+    # delete_session ran mid-record; record's guards must have aborted
+    # the publish. Both in-memory maps and on-disk artefacts should
+    # reflect the deletion, not a resurrected session.
+    assert ("A", sid(900)) not in s.pitches
+    assert sid(900) not in s.results
+    assert not (tmp_path / "results" / f"session_{sid(900)}.json").exists()
+    assert not (tmp_path / "pitches" / f"session_{sid(900)}_A.json").exists()
+
+
+def test_store_result_skips_unknown_session(tmp_path):
+    """`store_result` on a session that isn't in pitches OR results must
+    not write the result JSON or republish into memory — the session
+    has been deleted (or never recorded), and resurrecting it would
+    surface a ghost in /events."""
+    s = main.State(data_dir=tmp_path)
+    pitch = _minimal_pitch("A", session_id=sid(901))
+    s.record(pitch)
+    result = s.results[sid(901)]
+    assert s.delete_session(sid(901)) is True
+
+    # Session is gone from both maps + disk. store_result must be a no-op.
+    s.store_result(result)
+    assert sid(901) not in s.results
+    assert not (tmp_path / "results" / f"session_{sid(901)}.json").exists()
+
+
 def test_sessions_delete_html_form_redirects():
     client = TestClient(app)
     main.state.record(_minimal_pitch("A", session_id=sid(2)))
