@@ -846,6 +846,10 @@ class State:
         # window between the guard above and this line. ---
         with self._lock:
             if (pitch.camera_id, pitch.session_id) not in self.pitches:
+                logger.info(
+                    "record: session %s deleted between disk write and CS2 — discarding republish",
+                    pitch.session_id,
+                )
                 return result
             self.results[pitch.session_id] = result
         return result
@@ -883,8 +887,14 @@ class State:
         # in-memory home it could live in: pitches, results, and the
         # live pairing map. Live-only WS sessions never enter `pitches`
         # until persist_live_frames flushes, so we must include
-        # _live_pairings — otherwise the very first publish from the
-        # WS frame loop would incorrectly trip the guard.
+        # `_live_pairings` — otherwise the very first publish from the
+        # WS frame loop would incorrectly trip the guard. (The
+        # `_live_pairings` lookup here is just a key existence check
+        # under self._lock; mutating the LivePairingSession itself
+        # still goes through its own internal mutex, see the State
+        # docstring.) `delete_session` purges all four in the same
+        # critical section, so a True read here means the session was
+        # alive at the moment we checked.
         sid = result.session_id
         with self._lock:
             known = (
@@ -893,6 +903,7 @@ class State:
                 or sid in self._live_pairings
             )
         if not known:
+            logger.info("store_result: skipping unknown session %s (deleted?)", sid)
             return
         self._atomic_write(self._result_path(sid), result.model_dump_json())
         with self._lock:
@@ -902,6 +913,10 @@ class State:
                 or sid in self._live_pairings
             )
             if not still_known:
+                logger.info(
+                    "store_result: session %s deleted between disk write and republish",
+                    sid,
+                )
                 return
             self.results[sid] = result
 
@@ -1548,10 +1563,20 @@ class State:
                 for (cam, sid) in self.pitches
                 if sid == session_id
             ]
-            removed_any = bool(keys_to_drop) or session_id in self.results
+            removed_any = (
+                bool(keys_to_drop)
+                or session_id in self.results
+                or session_id in self._live_pairings
+            )
             for key in keys_to_drop:
                 self.pitches.pop(key, None)
             self.results.pop(session_id, None)
+            # Purge the live-pairing entry too. Without this the
+            # store_result race guard (which treats "session in
+            # _live_pairings" as proof the session is still alive)
+            # would never trigger for a live-only WS session that gets
+            # deleted mid-stream.
+            self._live_pairings.pop(session_id, None)
             self._processing.remove_session(session_id)
             self._live_missing_cal.pop(session_id, None)
             self._live_missing_cal_logged = {
