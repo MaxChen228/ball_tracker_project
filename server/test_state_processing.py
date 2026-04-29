@@ -48,7 +48,10 @@ def test_candidates_exclude_trashed_session(tmp_path):
     assert s._processing.session_candidates(sid) == []
 
 
-def test_candidates_exclude_completed_pitches(tmp_path):
+def test_candidates_include_completed_pitches_for_rerun(tmp_path):
+    """A pitch that already has frames_server_post is still eligible —
+    the viewer's Rerun-server button re-queues it. Eligibility is gated
+    on MOV-on-disk only."""
     s = State(data_dir=tmp_path)
     sid = _sid(2)
     p = _pitch("A", sid)
@@ -58,7 +61,9 @@ def test_candidates_exclude_completed_pitches(tmp_path):
     s.record(p)
     (s.video_dir / f"session_{sid}_A.mov").write_bytes(b"x")
 
-    assert s._processing.session_candidates(sid) == []
+    cands = s._processing.session_candidates(sid)
+    assert len(cands) == 1
+    assert cands[0][0] == "A"
 
 
 def test_cancel_then_resume_transitions_queue_state(tmp_path):

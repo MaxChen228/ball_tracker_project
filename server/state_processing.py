@@ -151,10 +151,12 @@ class SessionProcessingState:
     ) -> list[tuple[str, "PitchPayload", Path]]:
         """Pitches in this session eligible for server-post detection.
 
-        Eligibility: MOV on disk + server_post not yet run + session not
-        trashed. The pitch's original `paths` tag is NOT consulted —
-        server_post is on-demand and available to any session with a
-        MOV (which is every session now that iOS records unconditionally)."""
+        Eligibility: MOV on disk + session not trashed. Previously also
+        gated on `frames_server_post` being empty so a completed run
+        wouldn't re-queue itself; the viewer's Rerun button now relies
+        on this being a re-runnable affordance, so any cam with a MOV
+        is fair game. `state.record` overwrites `frames_server_post`
+        on each persist — semantics are correct for re-runs."""
         owner, lock = self._require_owner()
         with lock:
             pitches = [
@@ -167,8 +169,6 @@ class SessionProcessingState:
             return []
         candidates: list[tuple[str, PitchPayload, Path]] = []
         for cam, pitch in pitches:
-            if pitch.frames_server_post:
-                continue
             clip_path = self.find_video_for(session_id, cam)
             if clip_path is None:
                 continue
