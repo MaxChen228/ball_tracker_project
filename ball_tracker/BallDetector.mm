@@ -103,7 +103,10 @@ static void reportIfDue(TimingRing &ring, const char *tag) {
 // Private initialiser for BTBallDetection — the .h only exposes read-only
 // properties, but the detector needs to construct instances from C++.
 @interface BTBallDetection ()
-- (instancetype)initWithPx:(CGFloat)px py:(CGFloat)py areaPx:(NSInteger)areaPx;
+- (instancetype)initWithPx:(CGFloat)px py:(CGFloat)py
+                    areaPx:(NSInteger)areaPx
+                    aspect:(CGFloat)aspect
+                      fill:(CGFloat)fill;
 @end
 
 // ---------------------------------------------------------------------------
@@ -172,6 +175,7 @@ static BTBallDetection *_Nullable detectBallCoreScratch(
     int bestLabel = -1;
     int bestArea = 0;
     int bestW = 0, bestH = 0;
+    double bestAspect = 0.0, bestFill = 0.0;
     for (int i = 1; i < ncomp; i++) {
         int area = scratch.stats.at<int>(i, cv::CC_STAT_AREA);
         if (area < kMinAreaPx || area > kMaxAreaPx) { continue; }
@@ -187,6 +191,8 @@ static BTBallDetection *_Nullable detectBallCoreScratch(
             bestLabel = i;
             bestW = w;
             bestH = h;
+            bestAspect = aspect;
+            bestFill = fill;
         }
     }
 #if BT_DETECTOR_TIMING
@@ -201,7 +207,9 @@ static BTBallDetection *_Nullable detectBallCoreScratch(
     if (outBestH) *outBestH = bestH;
     return [[BTBallDetection alloc] initWithPx:(CGFloat)cx
                                             py:(CGFloat)cy
-                                        areaPx:(NSInteger)bestArea];
+                                        areaPx:(NSInteger)bestArea
+                                        aspect:(CGFloat)bestAspect
+                                          fill:(CGFloat)bestFill];
 }
 
 /// Multi-candidate variant of detectBallCoreScratch — collects every
@@ -227,7 +235,7 @@ static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
     int ncomp = cv::connectedComponentsWithStats(
         scratch.mask, scratch.labels, scratch.stats, scratch.centroids, 8, CV_32S
     );
-    struct Cand { int area; int w; int h; double cx; double cy; };
+    struct Cand { int area; int w; int h; double cx; double cy; double aspect; double fill; };
     std::vector<Cand> cands;
     cands.reserve(8);
     for (int i = 1; i < ncomp; i++) {
@@ -244,6 +252,7 @@ static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
             area, w, h,
             scratch.centroids.at<double>(i, 0) + offsetX,
             scratch.centroids.at<double>(i, 1) + offsetY,
+            aspect, fill,
         });
     }
     std::sort(cands.begin(), cands.end(),
@@ -259,7 +268,9 @@ static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
     for (const auto &c : cands) {
         [out addObject:[[BTBallDetection alloc] initWithPx:(CGFloat)c.cx
                                                         py:(CGFloat)c.cy
-                                                    areaPx:(NSInteger)c.area]];
+                                                    areaPx:(NSInteger)c.area
+                                                    aspect:(CGFloat)c.aspect
+                                                      fill:(CGFloat)c.fill]];
     }
     return out;
 }
@@ -353,14 +364,21 @@ static bool mapPixelBufferToBGR(
     CGFloat _px;
     CGFloat _py;
     NSInteger _areaPx;
+    CGFloat _aspect;
+    CGFloat _fill;
 }
 
-- (instancetype)initWithPx:(CGFloat)px py:(CGFloat)py areaPx:(NSInteger)areaPx {
+- (instancetype)initWithPx:(CGFloat)px py:(CGFloat)py
+                    areaPx:(NSInteger)areaPx
+                    aspect:(CGFloat)aspect
+                      fill:(CGFloat)fill {
     self = [super init];
     if (self) {
         _px = px;
         _py = py;
         _areaPx = areaPx;
+        _aspect = aspect;
+        _fill = fill;
     }
     return self;
 }
@@ -368,6 +386,8 @@ static bool mapPixelBufferToBGR(
 - (CGFloat)px { return _px; }
 - (CGFloat)py { return _py; }
 - (NSInteger)areaPx { return _areaPx; }
+- (CGFloat)aspect { return _aspect; }
+- (CGFloat)fill { return _fill; }
 
 @end
 

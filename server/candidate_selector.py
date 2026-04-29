@@ -28,10 +28,9 @@ Each component is normalized into [0, 1]:
   median for the project ball (memory: project_ball_empirical_fill).
 
 Unknown shape (`aspect=None` or `fill=None`) maps to **zero penalty**
-on that axis. iOS-sourced live candidates predate aspect/fill in the
-wire schema and arrive with both as None — this design choice is
-explicit (a known unknown is treated as neutral, not as bad). Once
-iOS starts shipping shape stats, this clause becomes vestigial.
+on that axis. Both server_post and live (iOS) populate both fields
+in this build forward — None only appears when historical pitch JSONs
+written before aspect/fill landed get reloaded for offline analysis.
 """
 from __future__ import annotations
 
@@ -93,10 +92,11 @@ class Candidate:
     cx: float
     cy: float
     area: int
-    # Optional shape stats. Server-side detection always populates both
-    # (it has the bbox). iOS-sourced candidates leave them None until
-    # iOS adopts the new wire format — the cost function treats None as
-    # "neutral" on that axis (see module docstring).
+    # Shape stats from the CC bounding box. Both server_post and live
+    # (iOS) always populate them; None only appears when historical
+    # pitch JSONs predating aspect/fill persistence get reloaded for
+    # offline analysis. Cost function treats None as neutral on that
+    # axis (see module docstring).
     aspect: float | None = None
     fill: float | None = None
 

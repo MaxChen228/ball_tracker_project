@@ -88,9 +88,8 @@ class LivePairingSession:
         selector at view time (which would diverge from "cost actually
         used to pick winner" if dashboard tuning changed).
 
-        iOS-sourced candidates currently lack `aspect`/`fill` (legacy
-        wire schema). The shape cost treats those Nones as neutral on
-        their respective axes — see candidate_selector module docstring.
+        iOS sends `aspect` and `fill` on every candidate — the live
+        path runs the same 3-axis shape cost as server_post.
         """
         cands = frame.candidates
         if not cands:
