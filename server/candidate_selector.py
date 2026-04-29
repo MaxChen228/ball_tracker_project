@@ -10,18 +10,29 @@ contaminated `prev_position`. Confirmed in two production sessions
 locked the selector for the entire pitch.
 
 The new cost is **frame-local and track-independent** — it judges each
-candidate purely on shape signals (size, aspect, fill) compared to the
+candidate purely on shape signals (aspect, fill) compared to the
 known-ball prior. There is no `prev_position` input; nothing to
 contaminate. A wrong pick on one frame does not affect the next.
 
+**Why no size term?** Earlier revisions had a `size_pen` that scored
+candidates by log-octave distance from `expected_area = π · r_px²`.
+That assumed the ball has a fixed apparent radius — false. A 240 fps
+pitch sweeps from far (~10 m, r ≈ 4 px) to near (~2 m, r ≈ 25 px), so
+absolute area is a function of distance, not of "is this object a
+ball." The old size_pen saturated to 1.0 across most of the flight
+and effectively forced argmin into a coin-flip between candidates
+with capped cost. Aspect and fill are scale-invariant geometric
+properties of a sphere — they hold from r=4 to r=25 — and they're
+the only honest shape signals for a track-independent selector.
+Area still gates entry via `MIN_AREA = 15` in `detection.py` (reject
+sub-pixel noise), but it is NOT a cost term.
+
 Cost formula:
 
-    cost = w_size · size_pen + w_aspect · aspect_pen + w_fill · fill_pen
+    cost = w_aspect · aspect_pen + w_fill · fill_pen
 
 Each component is normalized into [0, 1]:
 
-- `size_pen` — log-octave distance from `expected_area = π · r_px²`.
-  An order-of-magnitude off saturates the penalty.
 - `aspect_pen` — `(1 - aspect)` normalized so a perfectly-square blob
   (aspect=1) costs 0 and a barely-passing one (aspect ≈ 0.5) costs 1.
 - `fill_pen` — `|fill - 0.68|` normalized; 0.68 is the empirical
@@ -30,11 +41,10 @@ Each component is normalized into [0, 1]:
 Unknown shape (`aspect=None` or `fill=None`) maps to **zero penalty**
 on that axis. Both server_post and live (iOS) populate both fields
 in this build forward — None only appears when historical pitch JSONs
-written before aspect/fill landed get reloaded for offline analysis.
+predating aspect/fill persistence get reloaded for offline analysis.
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 
@@ -56,34 +66,29 @@ class CandidateSelectorTuning:
     """Operator-tunable shape-prior weights for `select_best_candidate`.
 
     Owned by `state.candidate_selector_tuning()`; persisted to
-    `data/candidate_selector_tuning.json`. All four fields must be
-    supplied — no module-level fallbacks, so callers cannot silently
-    inherit a stale magic number.
+    `data/candidate_selector_tuning.json`. Both fields must be supplied
+    — no module-level fallbacks, so callers cannot silently inherit a
+    stale magic number.
 
-    - `r_px_expected` — expected ball radius in pixels. Defines the
-      target area `π·r²` against which `size_pen` is computed.
-    - `w_size` / `w_aspect` / `w_fill` — penalty weights. Should sum
-      to ≤ 1 for the cost to live in [0, 1], but unconstrained here so
-      the operator can dial heavier than-unit total if they want a
+    - `w_aspect` / `w_fill` — penalty weights. Should sum to ≤ 1 for
+      the cost to live in [0, 1], but unconstrained here so the
+      operator can dial heavier than-unit total if they want a
       sharper preference (the argmin is invariant under positive
       scaling anyway).
     """
 
-    r_px_expected: float
-    w_size: float
     w_aspect: float
     w_fill: float
 
     @classmethod
     def default(cls) -> "CandidateSelectorTuning":
-        # Validated on 11 production sessions in dry_run_shape.py: shape
-        # mode hits live ground truth on all 10 stable sessions and
-        # recovers s_962a7db9 from 0 segs to 84.3 kph (live truth: 84.2).
+        # Carried over from the prior 0.5/0.3/0.2 size/aspect/fill split:
+        # normalize the remaining 0.3/0.2 to sum=1 → 0.6/0.4. The argmin
+        # is invariant under positive scaling but keeping the range in
+        # [0, 1] makes inspecting cost values intuitive.
         return cls(
-            r_px_expected=12.0,
-            w_size=0.5,
-            w_aspect=0.3,
-            w_fill=0.2,
+            w_aspect=0.6,
+            w_fill=0.4,
         )
 
 
@@ -109,18 +114,14 @@ def score_candidates(
     ball-like. Empty input → empty output.
 
     Caller invariant: every candidate has `area > 0`. Production callers
-    enforce this via `MIN_AREA = 15` in `detection.py`; direct unit-test
-    callers must pass positive areas (size_pen uses `log2(area / r²)`
-    and would raise `ValueError` on `area=0`)."""
+    enforce this via `MIN_AREA = 15` in `detection.py`. Area is no longer
+    a cost term — it only gates entry — so this function does not read
+    `c.area`."""
     if not candidates:
         return []
-    expected_area = math.pi * tuning.r_px_expected * tuning.r_px_expected
     aspect_denom = max(1.0 - _ASPECT_PEN_FLOOR, 1e-6)
     out: list[float] = []
     for c in candidates:
-        # log-octave distance, saturates at 4× off (=2 octaves)
-        size_pen = min(abs(math.log2(c.area / expected_area)) / 2.0, 1.0)
-
         if c.aspect is None:
             aspect_pen = 0.0
         else:
@@ -132,8 +133,7 @@ def score_candidates(
             fill_pen = min(abs(c.fill - _FILL_TYPICAL) / _FILL_TYPICAL, 1.0)
 
         out.append(
-            tuning.w_size * size_pen
-            + tuning.w_aspect * aspect_pen
+            tuning.w_aspect * aspect_pen
             + tuning.w_fill * fill_pen
         )
     return out

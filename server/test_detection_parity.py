@@ -83,32 +83,19 @@ def test_cluttered_scene_without_prior(hsv):
     assert abs(cy - 300) < 3.0
 
 
-def test_cluttered_scene_size_prior_picks_expected_radius(hsv):
-    """Two yellow-green blobs differing in size; selector picks the one
-    closer to expected_area = π·r_px_expected². Locks the shape-prior
+def test_cluttered_scene_aspect_prior_picks_round(hsv):
+    """A round circle vs an oblong ellipse — selector's aspect_pen
+    picks the round one. Locks the scale-invariant shape-prior
     contract as a regression guard."""
     from candidate_selector import CandidateSelectorTuning
     img = np.zeros((720, 1280, 3), dtype=np.uint8)
     img[:] = (30, 30, 30)
-    cv2.circle(img, (400, 360), 12, _yg_bgr(), thickness=-1)   # ~452 px², near r=12 expected
-    cv2.circle(img, (900, 360), 28, _yg_bgr(), thickness=-1)   # ~2460 px², way too big
+    cv2.circle(img, (400, 360), 18, _yg_bgr(), thickness=-1)
+    cv2.ellipse(img, (900, 360), (32, 26), 0, 0, 360, _yg_bgr(), -1)
 
-    # r_px_expected=12 → small ball wins.
-    near = detect_ball(
+    out = detect_ball(
         img, hsv,
-        selector_tuning=CandidateSelectorTuning(
-            r_px_expected=12.0, w_size=1.0, w_aspect=0.0, w_fill=0.0,
-        ),
+        selector_tuning=CandidateSelectorTuning(w_aspect=1.0, w_fill=0.0),
     )
-    assert near is not None
-    assert abs(near[0] - 400) < 3
-
-    # r_px_expected=28 → big ball wins (now it's at expected size).
-    far = detect_ball(
-        img, hsv,
-        selector_tuning=CandidateSelectorTuning(
-            r_px_expected=28.0, w_size=1.0, w_aspect=0.0, w_fill=0.0,
-        ),
-    )
-    assert far is not None
-    assert abs(far[0] - 900) < 3
+    assert out is not None
+    assert abs(out[0] - 400) < 3
