@@ -216,6 +216,15 @@ def render_viewer_html(
         action_html = '<span class="action-chip">server done</span>'
     else:
         action_html = ""
+    fit_link_html = (
+        f'<a class="fit-link" href="/fit/{ctx.session_id}?path=server_post"'
+        f' title="Independent fit page — multi-segment ballistic extraction">'
+        f'Fit&nbsp;&rarr;</a>'
+    )
+    progress_html = (
+        '<span class="srv-progress" id="srv-progress" hidden'
+        ' aria-live="polite"></span>'
+    )
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><title>Session {scene.session_id}</title>
@@ -229,7 +238,9 @@ def render_viewer_html(
   <div class="nav">
     <span class="brand"><span class="dot"></span>BALL_TRACKER</span>
     {ctx.health_strip_html}
+    {progress_html}
     {action_html}
+    {fit_link_html}
     <a class="back" href="/">&larr; dashboard</a>
   </div>
   {ctx.health_failure_html}
@@ -402,6 +413,52 @@ def render_viewer_html(
 <script>
 {_viewer_js()}
 </script>
+<script>
+(function() {{
+  if (!window.EventSource) return;
+  const VIEWER_SID = {_json.dumps(ctx.session_id)};
+  const el = document.getElementById('srv-progress');
+  if (!el) return;
+  const slots = {{}};  // cam → {{ done, total }}
+  function render() {{
+    const cams = Object.keys(slots).sort();
+    if (cams.length === 0) {{ el.hidden = true; el.textContent = ''; return; }}
+    el.hidden = false;
+    el.textContent = cams.map(function(c) {{
+      const s = slots[c];
+      const tot = (s.total != null) ? s.total : '?';
+      return 'svr ' + c + ' ' + s.done + '/' + tot;
+    }}).join(' · ');
+  }}
+  const es = new EventSource('/stream');
+  es.addEventListener('server_post_progress', function(evt) {{
+    try {{
+      const d = JSON.parse(evt.data);
+      if (d.sid !== VIEWER_SID) return;
+      slots[d.cam] = {{
+        done: Number(d.frames_done || 0),
+        total: d.frames_total != null ? Number(d.frames_total) : null,
+      }};
+      render();
+    }} catch (_) {{}}
+  }});
+  es.addEventListener('server_post_done', function(evt) {{
+    try {{
+      const d = JSON.parse(evt.data);
+      if (d.sid !== VIEWER_SID) return;
+      delete slots[d.cam];
+      render();
+      // Authoritative refresh once the last cam wraps so the page picks
+      // up the new triangulated points + path_status without a manual
+      // reload. autorefresh.js already polls /events and reload()s on
+      // detected change; we just nudge it forward.
+      if (Object.keys(slots).length === 0) {{
+        setTimeout(function() {{ location.reload(); }}, 800);
+      }}
+    }} catch (_) {{}}
+  }});
+}})();
+</script>
 </body></html>"""
 
 
@@ -436,6 +493,18 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     letter-spacing:0.12em; text-transform:uppercase; color:var(--sub);
     text-decoration:none; }}
   .nav .back:hover {{ color:var(--ink); }}
+  .nav .fit-link {{ font-family:var(--mono); font-size:10px;
+    letter-spacing:0.12em; text-transform:uppercase; color:var(--ink);
+    text-decoration:none; padding:5px 10px;
+    border:1px solid var(--border-base); border-radius:var(--r);
+    background:var(--surface);
+    transition:border-color 0.15s, color 0.15s; }}
+  .nav .fit-link:hover {{ border-color:var(--accent); color:var(--accent); }}
+  .nav .srv-progress {{ font-family:var(--mono); font-size:10px;
+    letter-spacing:0.06em; color:var(--accent);
+    padding:3px 8px; border:1px solid var(--accent); border-radius:var(--r);
+    background:var(--surface); font-variant-numeric:tabular-nums;
+    white-space:nowrap; }}
   .nav form {{ margin:0; }}
   .nav .action {{ font-family:var(--mono); font-size:10px;
     letter-spacing:0.10em; text-transform:uppercase; color:var(--ink);
