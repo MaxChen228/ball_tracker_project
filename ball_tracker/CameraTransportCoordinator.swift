@@ -6,6 +6,20 @@ import os
 
 private let transportLog = Logger(subsystem: "com.Max0228.ball-tracker", category: "camera.transport")
 
+/// Lifecycle of a single auto-calibration capture cycle. Replaces the
+/// older single `calibrationFrameCaptureArmed: Bool` flag because the
+/// 12 MP photo-format swap is multi-phase and any settings push that
+/// triggers `lockForConfiguration` mid-swap can clobber the rollback
+/// target — that's the suspected root cause of the prior 12 MP swap
+/// revert (delegate silently never fires). Every WS settings handler
+/// gates on `calCaptureState == .idle` so only one configuration mutator
+/// runs against the AVCaptureSession at a time.
+enum CalCaptureState {
+    case idle           // no calibration capture in flight
+    case swappingTo     // server requested capture; will swap activeFormat → 12 MP next frame callback
+    case capturing      // 12 MP format active, AVCapturePhotoOutput.capturePhoto in flight (runtime owns the swap-back internally)
+}
+
 /// Stable per-device identity for keying ChArUco intrinsics server-side.
 /// `identifierForVendor` survives app launches on the same device + vendor;
 /// reinstalling the app rotates it, which is acceptable (operator reruns
@@ -71,7 +85,7 @@ final class CameraTransportCoordinator: NSObject {
     private var lastServerHeartbeatInterval: Double?
     private var lastServerTrackingExposureCapMode: ServerUploader.TrackingExposureCapMode?
     private var previewRequestedByServer: Bool = false
-    private var calibrationFrameCaptureArmed: Bool = false
+    private var calCaptureState: CalCaptureState = .idle
 
     init(
         healthMonitor: HeartbeatScheduler,
@@ -91,7 +105,7 @@ final class CameraTransportCoordinator: NSObject {
     }
 
     var isPreviewRequested: Bool { previewRequestedByServer }
-    var hasPendingCalibrationFrameCaptureRequest: Bool { calibrationFrameCaptureArmed }
+    var hasPendingCalibrationFrameCaptureRequest: Bool { calCaptureState != .idle }
 
     func connect() {
         guard let baseURL = webSocketURL() else { return }
@@ -139,7 +153,7 @@ final class CameraTransportCoordinator: NSObject {
         previewUploader?.updateUploader(uploader)
         if roleChanged {
             previewUploader = nil
-            calibrationFrameCaptureArmed = false
+            calCaptureState = .idle
         }
 
         if endpointChanged || roleChanged {
@@ -163,15 +177,37 @@ final class CameraTransportCoordinator: NSObject {
         frameDispatcher?.dispatchCycleEnd(sessionId: sessionId, reason: reason)
     }
 
+    /// WS settings push has armed a fresh calibration capture. Returns
+    /// false if a previous cycle is still in flight or the device is in
+    /// a state that forbids the swap (recording, time-sync waiting); the
+    /// router should drop the request rather than queue it (server retries).
+    func armCalibrationCapture(whileIn state: CameraViewController.AppState) -> Bool {
+        guard calCaptureState == .idle,
+              state != .recording,
+              state != .timeSyncWaiting else { return false }
+        calCaptureState = .swappingTo
+        return true
+    }
+
+    /// Frame callback asks: should we kick off the photo-format swap NOW?
+    /// Returns true exactly once per armed cycle, transitioning to
+    /// `.capturing` so concurrent frame callbacks can't double-fire.
     func consumeCalibrationFrameCaptureRequest(
         whileIn state: CameraViewController.AppState
     ) -> Bool {
-        guard calibrationFrameCaptureArmed,
+        guard calCaptureState == .swappingTo,
               state != .recording,
               state != .timeSyncWaiting else { return false }
-        calibrationFrameCaptureArmed = false
+        calCaptureState = .capturing
         return true
     }
+
+    /// Runtime advances state to `.idle` when its completion fires —
+    /// either delegate-success or timeout-rollback path. The runtime
+    /// owns the swap-back internally (rollbackToFormat), so callers
+    /// only see two transitions visible at the coordinator boundary:
+    /// .swappingTo → .capturing (consume) and .capturing → .idle (mark).
+    func markCalIdle() { calCaptureState = .idle }
 
     private func webSocketURL() -> URL? {
         guard
@@ -283,8 +319,11 @@ final class CameraTransportCoordinator: NSObject {
                 resetPreviewUploader: { [weak self] in self?.previewUploader?.reset() },
                 startStandbyCapture: { [weak self] in self?.dependencies.startStandbyCapture() },
                 stopCapture: { [weak self] in self?.dependencies.stopCapture() },
-                isCalibrationFrameCaptureArmed: { [weak self] in self?.calibrationFrameCaptureArmed ?? false },
-                setCalibrationFrameCaptureArmed: { [weak self] in self?.calibrationFrameCaptureArmed = $0 }
+                getCalCaptureState: { [weak self] in self?.calCaptureState ?? .idle },
+                armCalibrationCapture: { [weak self] in
+                    guard let self else { return false }
+                    return self.armCalibrationCapture(whileIn: self.dependencies.getState())
+                }
             )
         )
     }

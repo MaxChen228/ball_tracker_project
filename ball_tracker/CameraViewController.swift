@@ -399,31 +399,39 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         captureRuntime.applyServerCaptureHeight(newHeight, bounds: view.bounds)
     }
 
-    /// Encode the given pixel buffer at its NATIVE resolution (no
-    /// downsample, no scale) as a high-quality JPEG and POST it to the
-    /// Fire a native-resolution JPEG capture via `AVCapturePhotoOutput` and
-    /// POST it to the server's calibration-frame endpoint. The phone used
-    /// to encode the 1080p preview pixel buffer for this; 12 MP stills via
-    /// photo output give the server-side ArUco detector ~3x the marker
-    /// pixel footprint, so markers that used to drop off near the
-    /// DICT_4X4_50 detection threshold at 30 px now clear it comfortably.
+    /// Pause the 240 fps capture session, swap to a 12 MP photo format,
+    /// snap one JPEG, swap back, and POST the JPEG to the server's
+    /// calibration-frame endpoint. ~2.1× linear pixel footprint on
+    /// ArUco markers vs. the prior 1080p path. Coordinator's
+    /// `calCaptureState` is advanced through the swap so concurrent
+    /// settings pushes (capture-height, exposure, sync-run) get gated.
     nonisolated private func uploadCalibrationFrame() {
         let cam = captureQueueCameraRole
         guard let uploader = captureQueueUploaderBox.snapshot(),
-              let runtime = captureQueueRuntime else { return }
-        runtime.captureHighResStill { jpeg, size in
+              let runtime = captureQueueRuntime,
+              let coord = captureQueueTransportCoordinator else { return }
+        // Coordinator is in .capturing here (set by consumeCalibrationFrameCaptureRequest).
+        // Runtime owns the rollback-to-240fps internally; on completion
+        // (success OR timeout) it has already restored activeFormat.
+        runtime.pauseAndCaptureHighResStill { jpeg, size in
+            coord.markCalIdle()
             guard let jpeg = jpeg else {
                 log.error("calibration frame: high-res capture failed cam=\(cam, privacy: .public)")
                 return
             }
             log.info("calibration frame: \(Int(size.width))x\(Int(size.height)) bytes=\(jpeg.count)")
+            // Late-arrival POST guard: if the cycle was rolled back via
+            // failure path we already returned above. Successful jpeg
+            // path here always proceeds.
             let path = "/camera/\(cam)/calibration_frame"
+            let uploadStart = Date()
             uploader.postRawJPEG(path: path, jpeg: jpeg) { result in
+                let elapsedMs = Int(Date().timeIntervalSince(uploadStart) * 1000)
                 switch result {
                 case .success:
-                    log.info("calibration frame upload ok cam=\(cam, privacy: .public) bytes=\(jpeg.count)")
+                    log.info("calibration frame upload ok cam=\(cam, privacy: .public) bytes=\(jpeg.count) elapsed_ms=\(elapsedMs)")
                 case .failure(let err):
-                    log.error("calibration frame upload failed cam=\(cam, privacy: .public) err=\(err.localizedDescription, privacy: .public)")
+                    log.error("calibration frame upload failed cam=\(cam, privacy: .public) bytes=\(jpeg.count) elapsed_ms=\(elapsedMs) err=\(err.localizedDescription, privacy: .public)")
                 }
             }
         }

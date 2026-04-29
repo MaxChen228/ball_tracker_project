@@ -27,6 +27,12 @@ final class CameraCaptureRuntime {
     // parallel calibration shots (unlikely but possible) wouldn't collide.
     private var pendingPhotoDelegates: [Int64: PhotoCaptureDelegate] = [:]
     private let photoDelegateLock = NSLock()
+    // Active calibration capture cycle. Set when pauseAndCaptureHighResStill
+    // begins the photo-format swap; cleared on completion / timeout. The
+    // PhotoCaptureDelegate completion checks this before honoring the
+    // delegate fire — a late delegate that arrives after the timeout's
+    // rollback is silently dropped (no stale 12 MP JPEG POST).
+    private var currentPhotoCycle: UUID?
 
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var audioInput: AVCaptureDeviceInput?
@@ -545,16 +551,27 @@ final class CameraCaptureRuntime {
 
     // MARK: - High-res still capture (calibration frames)
 
-    /// Snap one native-resolution JPEG via `AVCapturePhotoOutput`. Used by
-    /// auto-calibration: a 12 MP still (~4032×3024 on iPhone 14+ 1x wide)
-    /// gives the server-side ArUco detector ~3x the pixel footprint of the
-    /// 1080p preview buffer the calibration path used to upload, which was
-    /// dropping markers at the 30 px edge of the DICT_4X4_50 detection
-    /// threshold. Completion fires on the session queue with the JPEG data
-    /// plus the ISP-resolved pixel dims; nil data means the capture failed.
-    /// Requires the session to already be running (caller is expected to
-    /// `startStandbyCapture()` before invoking this).
-    func captureHighResStill(
+    /// Pause the 240 fps video capture session, swap activeFormat to a
+    /// 12 MP photo format (4032×3024 on iPhone 14+ 1x wide), snap one
+    /// JPEG via `AVCapturePhotoOutput`, then swap back to the original
+    /// 240 fps format. The whole dance lives on `sessionQueue` so it
+    /// serialises cleanly with any other format swap.
+    ///
+    /// The previous attempt at mid-session 12 MP swap reverted because
+    /// "the photo delegate silently never fires"; suspected root cause
+    /// is parallel `lockForConfiguration` from a settings push. This
+    /// path relies on `CameraCommandRouter` gating all such handlers
+    /// while `calCaptureState != .idle`. Local belt-and-braces: a
+    /// wall-clock timeout drives rollback if the delegate doesn't fire,
+    /// and `currentPhotoCycle` lets a late delegate detect that its
+    /// cycle has expired and silently drop.
+    ///
+    /// `currentCaptureHeight` is intentionally NOT modified — keeping
+    /// it at the standby grid means `reconcileStandbyCaptureState` can
+    /// recover the session via `reconfigureActiveSession` if rollback
+    /// itself fails (lock contention).
+    func pauseAndCaptureHighResStill(
+        timeout: TimeInterval = 5.0,
         completion: @escaping (Data?, CGSize) -> Void
     ) {
         sessionQueue.async { [weak self] in
@@ -562,52 +579,158 @@ final class CameraCaptureRuntime {
                 completion(nil, .zero)
                 return
             }
-            guard self.session.isRunning else {
-                captureLog.warning("high-res still: session not running")
+            guard let device = self.currentCaptureDevice else {
+                captureLog.error("calibration swap: no current capture device")
                 completion(nil, .zero)
                 return
             }
-            // Pin the photo connection to landscape-right (0°) so the JPEG's
-            // raw pixels match the video pipeline's orientation. Without this
-            // AVCapturePhotoOutput bakes whatever the current device rotation
-            // is, and the server's ArUco→homography solve ends up in a
-            // rotated pixel frame → correct marker detection but wrong
-            // decomposed pose.
-            if let conn = self.photoOutput.connection(with: .video) {
-                if conn.isVideoRotationAngleSupported(0) {
-                    conn.videoRotationAngle = 0
-                }
+            guard let photoFormat = self.findLargestPhotoFormat(device: device) else {
+                captureLog.error("calibration swap: no high-res photo format available")
+                completion(nil, .zero)
+                return
+            }
+            let originalFormat = device.activeFormat
+            let origDims = CMVideoFormatDescriptionGetDimensions(originalFormat.formatDescription)
+            let newDims = CMVideoFormatDescriptionGetDimensions(photoFormat.formatDescription)
+            captureLog.info("calibration swap: \(origDims.width)x\(origDims.height) → \(newDims.width)x\(newDims.height)")
+
+            let cycleID = UUID()
+            self.currentPhotoCycle = cycleID
+
+            let wasRunning = self.session.isRunning
+            if wasRunning { self.session.stopRunning() }
+            do {
+                try device.lockForConfiguration()
+                device.activeFormat = photoFormat
+                device.unlockForConfiguration()
+            } catch {
+                captureLog.error("calibration swap-to: lockForConfiguration failed err=\(error.localizedDescription, privacy: .public)")
+                self.currentPhotoCycle = nil
+                self.rollbackToFormat(device: device, original: originalFormat, restoreFps: self.standbyFps, wasRunning: wasRunning)
+                completion(nil, .zero)
+                return
+            }
+            if #available(iOS 16.0, *),
+               let maxDims = photoFormat.supportedMaxPhotoDimensions
+                    .max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }) {
+                self.photoOutput.maxPhotoDimensions = maxDims
+            }
+            if wasRunning { self.session.startRunning() }
+
+            // Pin photo connection orientation BEFORE capturePhoto so the
+            // JPEG's raw pixel grid matches video pipeline orientation.
+            if let conn = self.photoOutput.connection(with: .video),
+               conn.isVideoRotationAngleSupported(0) {
+                conn.videoRotationAngle = 0
             }
             let settings = AVCapturePhotoSettings(format: [
                 AVVideoCodecKey: AVVideoCodecType.jpeg
             ])
-            // Pull max dims from the CURRENT activeFormat. This caps us at
-            // 1080p on most video-oriented activeFormats, but a full
-            // 12 MP format swap mid-session reliably breaks the video
-            // pipeline and the photo delegate silently never fires — we
-            // reverted that path. Best-effort higher-than-video if the
-            // selected format happens to advertise a bigger still.
-            if #available(iOS 16.0, *),
-               let dev = (self.session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
-                          .first { $0.device.hasMediaType(.video) })?.device,
-               let maxDims = dev.activeFormat.supportedMaxPhotoDimensions
-                    .max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }) {
-                self.photoOutput.maxPhotoDimensions = maxDims
-                settings.maxPhotoDimensions = maxDims
-                captureLog.info("high-res still request max dims \(maxDims.width)x\(maxDims.height)")
+            if #available(iOS 16.0, *) {
+                settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
             }
             let uniqueID = settings.uniqueID
+
+            // Delegate-vs-timeout winner-takes-all uses currentPhotoCycle
+            // alone. Both branches dispatch onto serial sessionQueue, so
+            // the first to clear `currentPhotoCycle` wins; the loser sees
+            // nil (or a different cycleID after re-entry) and bails.
             let delegate = PhotoCaptureDelegate { [weak self] data, size in
-                self?.photoDelegateLock.withLock {
-                    _ = self?.pendingPhotoDelegates.removeValue(forKey: uniqueID)
+                guard let self else { return }
+                self.photoDelegateLock.withLock {
+                    _ = self.pendingPhotoDelegates.removeValue(forKey: uniqueID)
                 }
-                completion(data, size)
+                self.sessionQueue.async {
+                    guard self.currentPhotoCycle == cycleID else {
+                        captureLog.warning("calibration swap: late-delegate dropped (cycle expired)")
+                        return
+                    }
+                    self.currentPhotoCycle = nil
+                    self.rollbackToFormat(
+                        device: device, original: originalFormat,
+                        restoreFps: self.standbyFps, wasRunning: wasRunning
+                    )
+                    completion(data, size)
+                }
             }
             self.photoDelegateLock.withLock {
                 self.pendingPhotoDelegates[uniqueID] = delegate
             }
+
+            // Wall-clock timeout. If delegate doesn't fire by `timeout`,
+            // we treat the cycle as failed, force rollback, and complete
+            // with nil. The original "delegate silently never fires"
+            // failure mode is now bounded.
+            self.sessionQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self else { return }
+                guard self.currentPhotoCycle == cycleID else { return }
+                captureLog.error("calibration swap: capturePhoto timeout \(timeout)s")
+                self.currentPhotoCycle = nil
+                self.photoDelegateLock.withLock {
+                    _ = self.pendingPhotoDelegates.removeValue(forKey: uniqueID)
+                }
+                self.rollbackToFormat(
+                    device: device, original: originalFormat,
+                    restoreFps: self.standbyFps, wasRunning: wasRunning
+                )
+                completion(nil, .zero)
+            }
+
             self.photoOutput.capturePhoto(with: settings, delegate: delegate)
         }
+    }
+
+    private func findLargestPhotoFormat(device: AVCaptureDevice) -> AVCaptureDevice.Format? {
+        // Prefer non-binned formats supporting ≥30 fps (photo-capable);
+        // pick the format with the largest pixel area. iPhone 14+ wide
+        // cam: format[58]/[59] 4032×3024 4:3 (see docs/iphone_camera_formats.md).
+        let candidates = device.formats.filter { format in
+            let supports30 = format.videoSupportedFrameRateRanges.contains { range in
+                range.minFrameRate <= 30 && range.maxFrameRate >= 30
+            }
+            return supports30 && !format.isVideoBinned
+        }
+        return candidates.max { lhs, rhs in
+            let l = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
+            let r = CMVideoFormatDescriptionGetDimensions(rhs.formatDescription)
+            return Int64(l.width) * Int64(l.height) < Int64(r.width) * Int64(r.height)
+        }
+    }
+
+    /// Restore the original 240 fps activeFormat. Runs on sessionQueue
+    /// from the swap path; if `lockForConfiguration` fails (device busy)
+    /// we log error and leave the session stopped — `reconcileStandbyCaptureState`
+    /// on the next settings push will call back into `reconfigureActiveSession`
+    /// using `currentCaptureWidth/Height` (preserved across the swap)
+    /// to recover.
+    ///
+    /// Critical invariant: do NOT `startRunning()` when activeFormat
+    /// restoration failed. Restarting with the 12 MP photo format still
+    /// active would feed 4032×3024 frames into the video pipeline and
+    /// silently break tracking (intrinsics + currentCaptureWidth/Height
+    /// no longer match activeFormat). Leaving the session stopped lets
+    /// reconcileStandbyCaptureState rebuild from the canonical
+    /// currentCaptureWidth/Height (unchanged across the swap).
+    private func rollbackToFormat(
+        device: AVCaptureDevice,
+        original: AVCaptureDevice.Format,
+        restoreFps: Double,
+        wasRunning: Bool
+    ) {
+        if self.session.isRunning { self.session.stopRunning() }
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            device.activeFormat = original
+            let frameDuration = CMTime(value: 1, timescale: Int32(restoreFps))
+            device.activeVideoMinFrameDuration = frameDuration
+            device.activeVideoMaxFrameDuration = frameDuration
+            captureLog.info("calibration rollback: activeFormat restored fov_deg=\(String(format: "%.3f", original.videoFieldOfView), privacy: .public)")
+        } catch {
+            captureLog.error("calibration rollback: lockForConfiguration failed err=\(error.localizedDescription, privacy: .public) — leaving session stopped, recover on next settings push")
+            return
+        }
+        if wasRunning { self.session.startRunning() }
     }
 }
 
