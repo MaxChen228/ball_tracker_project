@@ -20,7 +20,7 @@ def _frame(idx: int, t: float, *, candidates: list[BlobCandidate]) -> FramePaylo
 
 
 def _no_triangulate(_cam, _a, _b):
-    return None
+    return []
 
 
 def test_aspect_fill_pick_round_typical():
@@ -121,3 +121,105 @@ def test_resolved_frame_winner_has_min_cost():
     # cands[1] has best shape — should win.
     assert cands[1].cost == min_cost
     assert (stored.px, stored.py) == (cands[1].px, cands[1].py)
+
+
+# ---------- multi-candidate fan-out + dedupe tests ----------
+
+from schemas import TriangulatedPoint
+
+
+def _make_point(t_rel: float, ca_idx: int, cb_idx: int,
+                gap: float = 0.05) -> TriangulatedPoint:
+    return TriangulatedPoint(
+        t_rel_s=t_rel, x_m=0.0, y_m=0.0, z_m=0.0,
+        residual_m=gap,
+        source_a_cand_idx=ca_idx,
+        source_b_cand_idx=cb_idx,
+    )
+
+
+def test_dedupe_key_extended_with_candidate_idx():
+    """Two ingests of the same frame-pair but different candidate-pair
+    indices should both land — old 2-tuple key would have collapsed
+    them into one. (a,b,0,1) and (a,b,1,0) are different physical
+    candidate pairs, both should survive dedupe."""
+    sess = LivePairingSession("s_test")
+    cands = [BlobCandidate(px=10.0, py=10.0, area=100, area_score=1.0,
+                            aspect=1.0, fill=0.68)]
+    # Seed cam B's buffer first (same timestamp, single candidate).
+    sess.ingest("B", _frame(0, 0.0, candidates=cands), _no_triangulate)
+    # Now A ingest triggers triangulation. Closure emits two points
+    # with different candidate-index pairs.
+    def _two_points(_cam, _a, _b):
+        return [_make_point(0.0, 0, 1), _make_point(0.0, 1, 0)]
+    new_pts = sess.ingest("A", _frame(0, 0.0, candidates=cands), _two_points)
+    assert len(new_pts) == 2
+    # Same call again should dedupe to zero (same keys).
+    new_pts = sess.ingest("A", _frame(0, 0.0, candidates=cands), _two_points)
+    # frame_index repeats are filtered earlier (peer windowing) but the
+    # dedupe set should also block re-emission via key match.
+    # A repeated A frame at frame_index=0 will re-pair against the
+    # cam-B frame with its existing key.
+    assert len(new_pts) == 0
+
+
+def test_dedupe_key_canonicalized_across_cam_directions():
+    """Same physical candidate pair, ingest via cam A vs ingest via
+    cam B → same dedupe key. Without canonicalization, B-triggered
+    ingest would produce a different key from A-triggered, double-
+    counting the pair."""
+    cands = [BlobCandidate(px=10.0, py=10.0, area=100, area_score=1.0,
+                            aspect=1.0, fill=0.68)]
+
+    # Direction 1: B arrives first, A triggers.
+    sess1 = LivePairingSession("s_test")
+    sess1.ingest("B", _frame(5, 0.0, candidates=cands), _no_triangulate)
+    sess1.ingest("A", _frame(7, 0.0, candidates=cands),
+                 lambda _cam, _a, _b: [_make_point(0.0, 0, 0)])
+    keys1 = set(sess1.paired_frame_ids)
+
+    # Direction 2: A arrives first, B triggers.
+    sess2 = LivePairingSession("s_test")
+    sess2.ingest("A", _frame(7, 0.0, candidates=cands), _no_triangulate)
+    sess2.ingest("B", _frame(5, 0.0, candidates=cands),
+                 lambda _cam, _a, _b: [_make_point(0.0, 0, 0)])
+    keys2 = set(sess2.paired_frame_ids)
+
+    # Same canonical key under both ingest directions: A frame_idx 7,
+    # B frame_idx 5, both candidate indices 0.
+    assert keys1 == {(7, 5, 0, 0)}
+    assert keys2 == {(7, 5, 0, 0)}
+
+
+def test_fan_out_emits_all_passing_pairs():
+    """Closure emits 6 points (2A × 3B), session keeps all 6 + records
+    each under a distinct dedupe key. Zero points dropped."""
+    sess = LivePairingSession("s_test")
+    cands = [BlobCandidate(px=10.0, py=10.0, area=100, area_score=1.0,
+                            aspect=1.0, fill=0.68)]
+    sess.ingest("B", _frame(0, 0.0, candidates=cands), _no_triangulate)
+
+    def _six_points(_cam, _a, _b):
+        return [
+            _make_point(0.0, ca, cb)
+            for ca in range(2) for cb in range(3)
+        ]
+    pts = sess.ingest("A", _frame(0, 0.0, candidates=cands), _six_points)
+    assert len(pts) == 6
+    # 6 unique dedupe keys recorded.
+    assert len(sess.paired_frame_ids) == 6
+
+
+def test_fan_out_skips_within_pair_dedupe():
+    """Closure returns two points with the SAME (ca, cb) index pair
+    (e.g. via redundant triangulation). The second one is deduped out."""
+    sess = LivePairingSession("s_test")
+    cands = [BlobCandidate(px=10.0, py=10.0, area=100, area_score=1.0,
+                            aspect=1.0, fill=0.68)]
+    sess.ingest("B", _frame(0, 0.0, candidates=cands), _no_triangulate)
+
+    def _duplicate_keys(_cam, _a, _b):
+        return [_make_point(0.0, 0, 0), _make_point(0.0, 0, 0)]
+    pts = sess.ingest("A", _frame(0, 0.0, candidates=cands), _duplicate_keys)
+    assert len(pts) == 1
+    assert len(sess.paired_frame_ids) == 1

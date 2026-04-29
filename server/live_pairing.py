@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates
+from pairing_tuning import PairingTuning
 from schemas import FramePayload, TriangulatedPoint
 
 logger = logging.getLogger("ball_tracker")
@@ -53,7 +54,13 @@ class LivePairingSession:
         default_factory=lambda: {"A": 0, "B": 0}
     )
     triangulated: list[TriangulatedPoint] = field(default_factory=list)
-    paired_frame_ids: set[tuple[int, int]] = field(default_factory=set)
+    # Dedupe key for already-triangulated candidate pairs, keyed by
+    # (a_frame_idx, b_frame_idx, ca_idx, cb_idx) — the candidate-index
+    # half is canonicalized so position [2] always references A's
+    # candidate index and [3] always references B's, regardless of which
+    # cam triggered the ingest call (mirrors the A-first canonicalization
+    # already applied to the frame-index half by the ingest loop).
+    paired_frame_ids: set[tuple[int, int, int, int]] = field(default_factory=set)
     completed_cameras: set[str] = field(default_factory=set)
     abort_reasons: dict[str, str] = field(default_factory=dict)
     # Per-cam cached geometry. Populated on first ingest per camera by
@@ -65,6 +72,11 @@ class LivePairingSession:
     # ingest. Defaults so a session built outside that call (tests) still
     # has a usable tuning instead of None.
     tuning: CandidateSelectorTuning = field(default_factory=CandidateSelectorTuning.default)
+    # Triangulation fan-out tuning (cost + gap thresholds), refreshed by
+    # state.ingest_live_frame on every ingest. Default lets every shape-
+    # gate-passed candidate through (cost=1.0) and aligns the gap gate
+    # with segmenter (0.20m).
+    pairing_tuning: PairingTuning = field(default_factory=PairingTuning.default)
 
     def __post_init__(self) -> None:
         # Internal mutex covering buffers / frames_by_cam / frame_counts /
@@ -116,7 +128,7 @@ class LivePairingSession:
         self,
         cam: str,
         frame: FramePayload,
-        triangulate_pair: Callable[[str, FramePayload, FramePayload], TriangulatedPoint | None],
+        triangulate_pair: Callable[[str, FramePayload, FramePayload], list[TriangulatedPoint]],
         anchors: dict[str, float | None] | None = None,
     ) -> list[TriangulatedPoint]:
         """Buffer one frame and pair it against the most recent peer-cam
@@ -171,18 +183,33 @@ class LivePairingSession:
                     break
                 if abs(dt) > self.window_s or not peer.ball_detected:
                     continue
-                pair_key = (
-                    frame.frame_index if cam == "A" else peer.frame_index,
-                    peer.frame_index if cam == "A" else frame.frame_index,
-                )
-                if pair_key in self.paired_frame_ids:
+                # Frame-pair key (canonicalized A-first regardless of which
+                # cam triggered ingest). Candidate-index pair is added per
+                # triangulated point below — same A-first convention.
+                a_frame_idx = frame.frame_index if cam == "A" else peer.frame_index
+                b_frame_idx = peer.frame_index if cam == "A" else frame.frame_index
+                points = triangulate_pair(cam, frame, peer)
+                if not points:
                     continue
-                point = triangulate_pair(cam, frame, peer)
-                if point is None:
-                    continue
-                self.paired_frame_ids.add(pair_key)
-                self.triangulated.append(point)
-                created.append(point)
+                for pt in points:
+                    # Canonicalize candidate indices: pt.source_a/b_cand_idx
+                    # were stamped by `triangulate_live_pair` from its
+                    # frame_a / frame_b argument order, which the closure
+                    # routes from the cam-direction-dependent (own, peer)
+                    # call. We don't know here which side is which without
+                    # inspecting the closure — instead the closure must
+                    # pass frame_a=A-cam and frame_b=B-cam consistently
+                    # (state.ingest_live_frame's closure does this).
+                    pair_key = (
+                        a_frame_idx, b_frame_idx,
+                        pt.source_a_cand_idx if pt.source_a_cand_idx is not None else -1,
+                        pt.source_b_cand_idx if pt.source_b_cand_idx is not None else -1,
+                    )
+                    if pair_key in self.paired_frame_ids:
+                        continue
+                    self.paired_frame_ids.add(pair_key)
+                    self.triangulated.append(pt)
+                    created.append(pt)
             return created
 
     def mark_completed(self, cam: str) -> None:

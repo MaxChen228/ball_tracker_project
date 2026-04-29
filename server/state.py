@@ -28,6 +28,7 @@ from schemas import (
 )
 from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate
+from pairing_tuning import PairingTuning
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
 from live_pairing import LivePairingSession
@@ -171,6 +172,7 @@ class State:
         self._hsv_path = data_dir / "hsv_range.json"
         self._shape_gate_path = data_dir / "shape_gate.json"
         self._candidate_selector_tuning_path = data_dir / "candidate_selector_tuning.json"
+        self._pairing_tuning_path = data_dir / "pairing_tuning.json"
         self._session_meta_path = data_dir / "session_meta.json"
         self._pitch_dir.mkdir(parents=True, exist_ok=True)
         self._result_dir.mkdir(parents=True, exist_ok=True)
@@ -217,6 +219,7 @@ class State:
         self._hsv_range = self._load_hsv_range_from_disk()
         self._shape_gate = self._load_shape_gate_from_disk()
         self._candidate_selector_tuning = self._load_candidate_selector_tuning_from_disk()
+        self._pairing_tuning = self._load_pairing_tuning_from_disk()
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
         # Runtime tunables pushed from the dashboard, hot-applied on the
@@ -480,6 +483,32 @@ class State:
         )
         self._atomic_write(self._candidate_selector_tuning_path, payload)
 
+    def _load_pairing_tuning_from_disk(self) -> PairingTuning:
+        path = self._pairing_tuning_path
+        if not path.exists():
+            return PairingTuning.default()
+        try:
+            obj = json.loads(path.read_text())
+            d = PairingTuning.default()
+            return PairingTuning(
+                cost_threshold=float(obj.get("cost_threshold", d.cost_threshold)),
+                gap_threshold_m=float(obj.get("gap_threshold_m", d.gap_threshold_m)),
+            )
+        except Exception as e:
+            logger.warning("skip corrupt pairing_tuning %s: %s", path, e)
+            return PairingTuning.default()
+
+    def _persist_pairing_tuning_locked(self) -> None:
+        t = self._pairing_tuning
+        payload = json.dumps(
+            {
+                "cost_threshold": t.cost_threshold,
+                "gap_threshold_m": t.gap_threshold_m,
+            },
+            indent=2,
+        )
+        self._atomic_write(self._pairing_tuning_path, payload)
+
     def _calibration_path(self, camera_id: str) -> Path:
         return self._calibration_store.path(camera_id)
 
@@ -550,9 +579,10 @@ class State:
     ) -> tuple[list[TriangulatedPoint], dict[str, int], FramePayload]:
         with self._lock:
             live = self._live_pairings.setdefault(session_id, LivePairingSession(session_id))
-            # Refresh selector tuning every ingest so dashboard slider
-            # changes apply on the next frame without a session reset.
+            # Refresh selector + pairing tuning every ingest so dashboard
+            # slider changes apply on the next frame without a session reset.
             live.tuning = self._candidate_selector_tuning
+            live.pairing_tuning = self._pairing_tuning
             cal_a = self._calibration_store.get("A")
             cal_b = self._calibration_store.get("B")
             dev_a = self._device_registry.get("A")
@@ -614,22 +644,29 @@ class State:
                 image_wh=live_dims,
             ))
 
-        def triangulate_live(cam: str, first: FramePayload, second: FramePayload) -> TriangulatedPoint | None:
+        def triangulate_live(cam: str, first: FramePayload, second: FramePayload) -> list[TriangulatedPoint]:
+            # Canonicalize so left_frame is always cam A's frame, right is
+            # B's — `triangulate_live_pair` stamps source_a_cand_idx /
+            # source_b_cand_idx based on its frame_a / frame_b argument
+            # order, and the dedupe in LivePairingSession.ingest expects
+            # those indices to be A-first / B-second regardless of which
+            # cam triggered ingest.
             left_frame, right_frame = (first, second) if cam == "A" else (second, first)
             pose_a = live.camera_pose("A")
             pose_b = live.camera_pose("B")
             if pose_a is None or pose_b is None:
-                return None
+                return []
             if dev_a is None or dev_b is None:
-                return None
+                return []
             if dev_a.sync_anchor_timestamp_s is None or dev_b.sync_anchor_timestamp_s is None:
-                return None
+                return []
             from pairing import triangulate_live_pair
             return triangulate_live_pair(
                 pose_a, pose_b,
                 left_frame, right_frame,
                 anchor_a=dev_a.sync_anchor_timestamp_s,
                 anchor_b=dev_b.sync_anchor_timestamp_s,
+                tuning=live.pairing_tuning,
             )
 
         created = live.ingest(camera_id, frame, triangulate_live, anchors=anchors)
@@ -1408,6 +1445,16 @@ class State:
             self._candidate_selector_tuning = tuning
             self._persist_candidate_selector_tuning_locked()
             return self._candidate_selector_tuning
+
+    def pairing_tuning(self) -> PairingTuning:
+        with self._lock:
+            return self._pairing_tuning
+
+    def set_pairing_tuning(self, tuning: PairingTuning) -> PairingTuning:
+        with self._lock:
+            self._pairing_tuning = tuning
+            self._persist_pairing_tuning_locked()
+            return self._pairing_tuning
 
     def set_shape_gate(self, shape_gate: ShapeGate) -> ShapeGate:
         with self._lock:

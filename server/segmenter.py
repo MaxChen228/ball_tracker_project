@@ -116,39 +116,29 @@ def find_segments(
     if n_in == 0:
         return [], np.zeros((0, 5)), np.zeros(0, dtype=bool)
 
-    # Collapse same-timestamp twins. Live multi-pair triangulation
-    # emits multiple 3D estimates per frame (A_t × B_{t±k}); all are
-    # noisy estimates of one physical position, so the ML estimate of
-    # the true position is the mean. Doing this BEFORE residual filter
-    # and segmentation:
-    #   (1) prevents twins from biasing the early v0 estimate (each
-    #       twin would otherwise pull grow's direction differently)
-    #   (2) collapses 446 → ~229 inputs (unique timestamps) so grow
-    #       walks one candidate per frame instead of choosing among
-    #       4 noisy versions
-    # `inverse` maps each original-order row → its collapsed row so the
-    # caller's viewer can still mark per-original-point rejection state.
-    raw, inverse = _collapse_timestamp_twins(raw_full)
-
-    # Hard physics pre-filter on the COLLAPSED set.
-    kept_collapsed = raw[:, 4] < residual_max_m
-    # Project back to original-order mask for caller visualisation.
-    kept_mask = kept_collapsed[inverse]
-
-    # Sort the collapsed survivors by time. `back_to_orig` maps each
-    # working index → the FIRST original-input index that contributed
-    # to this collapsed row (any one is fine — used only for caller's
-    # `original_indices` provenance, not for math).
-    survivor_collapsed_idx = np.where(kept_collapsed)[0]
-    if survivor_collapsed_idx.size < min_seg_len:
+    # No timestamp-twin collapse. The earlier code averaged position
+    # across same-timestamp rows under the assumption they were multiple
+    # noisy estimates of ONE physical object (peer-frame fan-out only).
+    # Multi-candidate fan-out introduces twins that are different
+    # physical objects (real ball + distractor that happened to clear
+    # the gap threshold) — averaging contaminates position; min-residual
+    # cluster member would survive the 20cm gate based on a meaningless
+    # mean. The grow loop's RMSE gate (`gate_r0_m`, `gate_b`) is the
+    # correct outlier filter in the fan-out world: it walks ballistic
+    # predictions point-by-point, skipping candidates that don't fit.
+    # Running with the raw cloud is ~9× more input points (typical fan-
+    # out factor) but `_grow_segment` is numpy-fast.
+    kept_mask = raw_full[:, 4] < residual_max_m
+    survivor_idx = np.where(kept_mask)[0]
+    if survivor_idx.size < min_seg_len:
         return [], np.zeros((0, 5)), kept_mask
 
-    survivor = raw[survivor_collapsed_idx]
+    survivor = raw_full[survivor_idx]
     sort_perm = np.argsort(survivor[:, 0], kind="stable")
     pts = survivor[sort_perm]
-
-    first_orig_for_collapsed = _first_original_index_per_collapsed(inverse, len(raw))
-    back_to_orig = first_orig_for_collapsed[survivor_collapsed_idx[sort_perm]]
+    # Each working-index row corresponds 1-to-1 with an original input
+    # row (no collapse), so `back_to_orig[k] = original input index`.
+    back_to_orig = survivor_idx[sort_perm]
     n = pts.shape[0]
 
     # Median frame interval (over positive Δt only).
@@ -350,33 +340,6 @@ def _dedupe_segments(
             keep.append(s)
     # Re-sort kept segments by t_start so consumer sees chronological order.
     return sorted(keep, key=lambda s: s.t_start)
-
-
-def _collapse_timestamp_twins(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Average multiple 3D estimates sharing a timestamp into one row.
-    Position uses arithmetic mean (ML estimate under Gaussian noise).
-    residual_m takes the min (best-paired version of the pair).
-    Returns (collapsed (M,5), inverse (N,) mapping orig→collapsed)."""
-    ts = raw[:, 0]
-    unique_ts, inverse = np.unique(ts, return_inverse=True)
-    m = unique_ts.size
-    out = np.empty((m, 5))
-    out[:, 0] = unique_ts
-    for i in range(m):
-        members = raw[inverse == i]
-        out[i, 1:4] = members[:, 1:4].mean(axis=0)
-        out[i, 4] = members[:, 4].min()
-    return out, inverse
-
-
-def _first_original_index_per_collapsed(inverse: np.ndarray, m: int) -> np.ndarray:
-    """For each collapsed row, return any one original-input index that
-    contributed to it. Used only for caller-visible provenance."""
-    out = np.full(m, -1, dtype=int)
-    for orig_idx, collapsed_idx in enumerate(inverse):
-        if out[collapsed_idx] == -1:
-            out[collapsed_idx] = orig_idx
-    return out
 
 
 def _fill_in_segment(
