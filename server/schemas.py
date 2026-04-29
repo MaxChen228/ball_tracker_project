@@ -249,6 +249,12 @@ class SessionResult(BaseModel):
     abort_reasons: dict[str, str] = Field(default_factory=dict)
     points: list[TriangulatedPoint] = []
     error: str | None = None
+    # Operator-chosen `PairingTuning.cost_threshold` last applied via
+    # POST /sessions/{sid}/recompute. None on legacy results (predates
+    # the recompute endpoint) and on results computed under the global
+    # default — the viewer treats None as "show the global default" for
+    # the slider's initial position.
+    cost_threshold: float | None = None
 
 
 

@@ -34,6 +34,7 @@ from schemas import (
 )
 
 if TYPE_CHECKING:
+    from pairing_tuning import PairingTuning
     from state import State
 
 
@@ -43,6 +44,7 @@ def triangulate_pair(
     b: PitchPayload,
     *,
     source: str = "server",
+    tuning: "PairingTuning | None" = None,
 ) -> list[TriangulatedPoint]:
     """Scale each pitch's intrinsics + homography to its MOV's actual pixel
     grid (using the cached calibration snapshot as the reference resolution)
@@ -52,7 +54,12 @@ def triangulate_pair(
     at the calibration resolution.
 
     `source` picks the detection stream (`"server"` default reads
-    `pitch.frames_server_post`)."""
+    `pitch.frames_server_post`).
+
+    `tuning` overrides the pairing fan-out cost/gap thresholds; defaults to
+    `state.pairing_tuning()` (operator's currently-applied global tuning)."""
+    if tuning is None:
+        tuning = state.pairing_tuning()
     with state._lock:
         cal_a = state._calibration_store.get(a.camera_id)
         cal_b = state._calibration_store.get(b.camera_id)
@@ -64,7 +71,7 @@ def triangulate_pair(
         b,
         (cal_b.image_width_px, cal_b.image_height_px) if cal_b else None,
     )
-    return triangulate_cycle(a_scaled, b_scaled, source=source)
+    return triangulate_cycle(a_scaled, b_scaled, source=source, tuning=tuning)
 
 
 def live_frames_for_camera_locked(
@@ -255,6 +262,114 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
     return result
 
 
+def recompute_result_for_session(
+    state: "State",
+    session_id: str,
+    *,
+    cost_threshold: float,
+) -> SessionResult:
+    """Re-run pairing fan-out + segmenter on this session's already-
+    detected frames using a per-session cost_threshold override.
+
+    Differences from `rebuild_result_for_session`:
+      - Always re-triangulates the live path (does NOT reuse
+        `LivePairingSession.triangulated`, which was built incrementally
+        under the old/global tuning at ingest time).
+      - Both live and server_post paths use a `PairingTuning` whose
+        `cost_threshold` is overridden by the caller; `gap_threshold_m`
+        comes from the global tuning unchanged.
+      - Stamps the chosen `cost_threshold` into the resulting
+        `SessionResult.cost_threshold` for viewer slider re-init.
+
+    Caller is the `POST /sessions/{sid}/recompute` route. No MOV decode,
+    no HSV — candidates are read from the persisted `frames_live` /
+    `frames_server_post` directly. Sub-second on a typical session."""
+    from pairing_tuning import PairingTuning
+
+    base_gap = state.pairing_tuning().gap_threshold_m
+    tuning = PairingTuning(
+        cost_threshold=float(cost_threshold),
+        gap_threshold_m=base_gap,
+    )
+
+    with state._lock:
+        a = state.pitches.get(("A", session_id))
+        b = state.pitches.get(("B", session_id))
+
+    result = empty_result_for_session(
+        state,
+        session_id,
+        camera_a_received=a is not None,
+        camera_b_received=b is not None,
+    )
+    result.cost_threshold = float(cost_threshold)
+
+    server_post_ts = [
+        p.server_post_ran_at for p in (a, b)
+        if p is not None and p.server_post_ran_at is not None
+    ]
+    if server_post_ts:
+        result.server_post_ran_at = max(server_post_ts)
+
+    candidate_paths: set[DetectionPath] = set()
+    for pitch in (a, b):
+        if pitch is None:
+            continue
+        if pitch.frames_server_post:
+            candidate_paths.add(DetectionPath.server_post)
+        if pitch.frames_live:
+            candidate_paths.add(DetectionPath.live)
+
+    sync_error = None
+    if a is not None and b is not None:
+        sync_error = validate_pair_sync(state, a, b)
+        if sync_error is not None:
+            result.error = sync_error
+
+    if a is not None and b is not None and sync_error is None:
+        for path in sorted(candidate_paths, key=lambda p: p.value):
+            frames_a = get_path_frames(state, a, path)
+            frames_b = get_path_frames(state, b, path)
+            if not frames_a or not frames_b:
+                continue
+            result.frame_counts_by_path[path.value] = {
+                "A": len(frames_a),
+                "B": len(frames_b),
+            }
+            try:
+                pts = triangulate_pair(
+                    state,
+                    pitch_with_path_frames(state, a, path),
+                    pitch_with_path_frames(state, b, path),
+                    source="server",
+                    tuning=tuning,
+                )
+            except Exception as exc:
+                result.abort_reasons[path.value] = f"{type(exc).__name__}: {exc}"
+                continue
+            result.triangulated_by_path[path.value] = pts
+            result.paths_completed.add(path.value)
+
+    authority: list[TriangulatedPoint] = []
+    for path in (DetectionPath.server_post.value, DetectionPath.live.value):
+        pts = result.triangulated_by_path.get(path)
+        if pts:
+            authority = pts
+            break
+    result.triangulated = authority
+    result.points = list(
+        result.triangulated_by_path.get(DetectionPath.server_post.value, [])
+        or result.triangulated_by_path.get(DetectionPath.live.value, [])
+    )
+
+    if not result.triangulated and result.error is None and (a is not None or b is not None):
+        if result.abort_reasons:
+            result.aborted = True
+        elif a is not None and b is not None:
+            result.error = "no detection completed"
+    return result
+
+
 # Re-export `normalize_paths` so `State._normalize_paths` (and the handful
 # of external callers that still reach for `state._normalize_paths`) can
 # route through session_results without importing detection_paths
@@ -265,6 +380,7 @@ __all__ = [
     "normalize_paths",
     "paths_for_pitch",
     "rebuild_result_for_session",
+    "recompute_result_for_session",
     "session_sync_id_locked",
     "triangulate_pair",
     "validate_pair_sync",

@@ -48,6 +48,8 @@ def render_viewer_html(
     scene: Scene,
     videos: list[tuple[str, str, float, float, dict[str, list]]],
     health: dict,
+    *,
+    cost_threshold: float | None = None,
 ) -> str:
     from viewer_page import render_viewer_html as _render_viewer_html
 
@@ -56,6 +58,7 @@ def render_viewer_html(
         videos,
         health,
         build_figure=_build_figure,
+        cost_threshold=cost_threshold,
     )
 
 

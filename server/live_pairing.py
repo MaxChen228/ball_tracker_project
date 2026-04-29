@@ -128,7 +128,7 @@ class LivePairingSession:
         self,
         cam: str,
         frame: FramePayload,
-        triangulate_pair: Callable[[str, FramePayload, FramePayload], list[TriangulatedPoint]],
+        triangulate_pair: Callable[[FramePayload, FramePayload], list[TriangulatedPoint]],
         anchors: dict[str, float | None] | None = None,
     ) -> list[TriangulatedPoint]:
         """Buffer one frame and pair it against the most recent peer-cam
@@ -183,23 +183,24 @@ class LivePairingSession:
                     break
                 if abs(dt) > self.window_s or not peer.ball_detected:
                     continue
-                # Frame-pair key (canonicalized A-first regardless of which
-                # cam triggered ingest). Candidate-index pair is added per
-                # triangulated point below — same A-first convention.
-                a_frame_idx = frame.frame_index if cam == "A" else peer.frame_index
-                b_frame_idx = peer.frame_index if cam == "A" else frame.frame_index
-                points = triangulate_pair(cam, frame, peer)
+                # Canonicalize frame ordering: A-cam first, B-cam second,
+                # regardless of which cam triggered this ingest call. The
+                # callback receives (frame_a, frame_b) in that order so
+                # `triangulate_live_pair` stamps source_a_cand_idx from
+                # the A-side index by construction — no comment-only
+                # contract needed.
+                if cam == "A":
+                    frame_a, frame_b = frame, peer
+                else:
+                    frame_a, frame_b = peer, frame
+                a_frame_idx, b_frame_idx = frame_a.frame_index, frame_b.frame_index
+                points = triangulate_pair(frame_a, frame_b)
                 if not points:
                     continue
                 for pt in points:
-                    # Canonicalize candidate indices: pt.source_a/b_cand_idx
-                    # were stamped by `triangulate_live_pair` from its
-                    # frame_a / frame_b argument order, which the closure
-                    # routes from the cam-direction-dependent (own, peer)
-                    # call. We don't know here which side is which without
-                    # inspecting the closure — instead the closure must
-                    # pass frame_a=A-cam and frame_b=B-cam consistently
-                    # (state.ingest_live_frame's closure does this).
+                    # Index pair is A-first / B-second by construction —
+                    # ca_idx stamped from `triangulate_live_pair`'s loop
+                    # over `frame_a.candidates`, which is A's frame above.
                     pair_key = (
                         a_frame_idx, b_frame_idx,
                         pt.source_a_cand_idx if pt.source_a_cand_idx is not None else -1,

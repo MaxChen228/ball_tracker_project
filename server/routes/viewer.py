@@ -309,11 +309,20 @@ def reconstruction(session_id: str) -> dict[str, Any]:
 
 @router.get("/viewer/{session_id}", response_class=HTMLResponse)
 def viewer(session_id: str) -> HTMLResponse:
+    from main import state
     from render_scene import render_viewer_html
     scene = _scene_for_session(session_id)
     videos_with_offsets = _videos_for_session(session_id)
     health = _build_viewer_health(session_id)
-    return HTMLResponse(render_viewer_html(scene, videos_with_offsets, health))
+    # Per-session selector cost_threshold for the viewer header slider.
+    # None on legacy SessionResult (predates the recompute endpoint) →
+    # session_cost_threshold_strip_html shows 1.0 (= no filter).
+    result = state.get(session_id)
+    cost_threshold = result.cost_threshold if result is not None else None
+    return HTMLResponse(render_viewer_html(
+        scene, videos_with_offsets, health,
+        cost_threshold=cost_threshold,
+    ))
 
 
 @router.get("/videos/{filename}")

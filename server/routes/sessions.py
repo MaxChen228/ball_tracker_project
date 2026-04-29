@@ -193,3 +193,43 @@ async def _enqueue_server_post(
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "session_id": session_id, "queued": len(queued)}
+
+
+@router.post("/sessions/{session_id}/recompute")
+async def sessions_recompute(request: Request, session_id: str):
+    """Re-run pairing fan-out + segmenter on this session's already-
+    detected frames using a per-session `cost_threshold` override. No
+    MOV decode, no HSV — candidates are read from the persisted
+    `frames_live` / `frames_server_post` directly. Sub-second on a
+    typical session.
+
+    Body (JSON): `{"cost_threshold": 0.45}`. Range [0, 1].
+    """
+    from main import state
+    from session_results import recompute_result_for_session
+
+    if not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(status_code=422, detail="invalid session_id")
+    body = await request.json()
+    raw = body.get("cost_threshold")
+    try:
+        cost_threshold = float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="missing or invalid 'cost_threshold'")
+    if not 0.0 <= cost_threshold <= 1.0:
+        raise HTTPException(
+            status_code=400,
+            detail="cost_threshold out of range [0, 1]",
+        )
+
+    with state._lock:
+        a = state.pitches.get(("A", session_id))
+        b = state.pitches.get(("B", session_id))
+    if a is None and b is None:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+
+    new_result = recompute_result_for_session(
+        state, session_id, cost_threshold=cost_threshold,
+    )
+    state.store_result(new_result)
+    return {"ok": True, "result": new_result.model_dump()}

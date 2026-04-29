@@ -42,34 +42,46 @@
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
   }
-  // ----- BLOBS overlay (multi-candidate, top-K by selector cost) -----
-  // Operator opens the BLOBS layer to see the non-winner candidates the
-  // selector saw on each frame. K (number of rings drawn, including winner
-  // when it's in the top-K) is persisted to localStorage so a setting
-  // survives page reload. Set to 0 to hide, 20 to show all in practice.
-  const _BLOBS_K_KEY = "viewer.cand_top_k";
-  function _candTopK() {
-    try {
-      const v = parseInt(localStorage.getItem(_BLOBS_K_KEY), 10);
-      return Number.isFinite(v) ? Math.max(0, Math.min(20, v)) : 5;
-    } catch (_e) { return 5; }
-  }
-  function _setCandTopK(v) {
-    const k = Math.max(0, Math.min(20, parseInt(v, 10) || 0));
-    try { localStorage.setItem(_BLOBS_K_KEY, String(k)); } catch (_e) { /* private mode */ }
+  // ----- BLOBS overlay (multi-candidate, gated by selector cost ≤ threshold) -----
+  // Operator opens the BLOBS layer to see candidates the selector saw on
+  // each frame. The session-level cost_threshold slider in the viewer
+  // header (see `session_cost_threshold_strip_html`) controls which
+  // candidates are drawn: cost ≤ threshold = show, cost > threshold =
+  // hide. The same threshold value is what the recompute endpoint will
+  // apply when the operator clicks Apply.
+  //
+  // Why threshold-based, not rank-based: rank ("top K") is cosmetic —
+  // it doesn't change which candidates the selector actually picks.
+  // Threshold is the same knob the server uses, so what you see in
+  // the overlay is what gets triangulated post-recompute.
+  //
+  // Initial value is seeded from SessionResult.cost_threshold (server-
+  // injected via VIEWER_INITIAL_COST_THRESHOLD), or 1.0 (no filter)
+  // when the session was computed before the recompute endpoint
+  // landed. Lives on `window` so the header slider's oninput can mutate
+  // it and trigger a redraw without the canvas knowing about the DOM
+  // input element.
+  let _costThreshold = (typeof window.VIEWER_INITIAL_COST_THRESHOLD === "number")
+    ? window.VIEWER_INITIAL_COST_THRESHOLD : 1.0;
+  function _setCostThreshold(v) {
+    const t = Math.max(0, Math.min(1.0, parseFloat(v)));
+    _costThreshold = Number.isFinite(t) ? t : 1.0;
     if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();
   }
-  // Expose for the toolbar's inline `oninput`. Viewer-only — not added to
-  // the shared cam_view runtime because no other surface needs this knob.
-  window._setCandTopK = _setCandTopK;
+  function _getCostThreshold() { return _costThreshold; }
+  // Expose for the header slider's inline `oninput` + the 3D-scene filter
+  // hook used by 60_session_tuning.js.
+  window._setCostThreshold = _setCostThreshold;
+  window._getCostThreshold = _getCostThreshold;
 
-  // Per-frame sort key: cost when present, else `1 - area_score` so legacy
-  // JSONs (cost=null) and the rare case of a partially-resolved frame
-  // degrade gracefully to area-desc ordering.
-  function _candSortKey(c) {
-    return (c.cost != null && Number.isFinite(c.cost))
-      ? c.cost
-      : (1.0 - (c.area_score || 0));
+  // A candidate passes the threshold filter when its cost is ≤ the
+  // current setting. Legacy JSONs with cost=null pass unconditionally —
+  // there's no meaningful selector cost to compare against, so they
+  // can't be filtered at view time. Recompute is the path to assign
+  // costs to legacy data.
+  function _candPassesThreshold(c) {
+    if (c.cost == null || !Number.isFinite(c.cost)) return true;
+    return c.cost <= _costThreshold;
   }
 
   // Plain floor lookup (no det back-walk): BLOBS draws every candidate the
@@ -95,21 +107,20 @@
     if (idx < 0) return;
     const frameCands = cands[idx] || [];
     if (!frameCands.length) return;
-    const k = _candTopK();
-    if (k <= 0) return;
-    const sorted = [...frameCands].sort((a, b) => _candSortKey(a) - _candSortKey(b)).slice(0, k);
+    // Threshold filter: candidates whose cost ≤ slider value get drawn.
+    // Same `_candPassesThreshold` predicate the 3D scene filter (in
+    // 60_session_tuning.js) uses, so what the operator sees on the 2D
+    // overlay matches what's in the 3D point cloud at this threshold.
+    const passing = frameCands.filter(_candPassesThreshold);
+    if (!passing.length) return;
     // Solid ring at ~80% alpha so the BLOBS layer reads through the OVL
     // canvas-opacity slider (default 65%, often dialled lower) at roughly
     // the same effective contrast as the detection_live winner dot.
-    // Dashed at radius 4 was producing 6 short segments that blurred into
-    // noise when candidates clustered in a tight image region (e.g. iOS
-    // false positives in a corner — 9 rings squeezed into 40×120 image-px
-    // overlapped into mush at typical display zoom).
     ctx.strokeStyle = (typeof color === 'string' && color.length === 7 && color[0] === '#')
       ? color + 'CC'  // ~80% alpha
       : color;
     ctx.lineWidth = 1.5;
-    for (const c of sorted) {
+    for (const c of passing) {
       ctx.beginPath();
       ctx.arc(c.px * sx, c.py * sy, 4, 0, Math.PI * 2);
       ctx.stroke();
