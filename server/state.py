@@ -1070,7 +1070,13 @@ class State:
         """Wipe all calibrations + extended marker registry + all
         accumulator buffers + invalidate cached live camera poses.
         Returns counts of what was removed. Used by dashboard
-        'Reset rig' for full rig re-setup (board moved, cams reseated)."""
+        'Reset rig' for full rig re-setup (board moved, cams reseated).
+
+        Intentionally preserved: per-device ChArUco intrinsics
+        (sensor-physical, survive rig moves) and in-memory
+        AutoCalibrationRunStore history (harmless, restart-volatile).
+        Operator deletes individual ChArUco entries via the existing
+        /calibration/intrinsics/{device_id} DELETE route if needed."""
         with self._lock:
             cal_count = self._calibration_store.clear()
             marker_count = self._marker_registry.clear()
