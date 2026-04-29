@@ -148,10 +148,6 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         mode = "camera_only"
     else:
         mode = "live_only"
-    ballistic_by_path = (
-        {k: v.model_dump(mode="json") for k, v in result.ballistic_by_path.items()}
-        if result is not None else {}
-    )
     return {
         "session_id": session_id,
         "cameras": cams,
@@ -160,7 +156,6 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         "duration_s": duration_s,
         "received_at": latest_mtime,
         "mode": mode,
-        "ballistic_by_path": ballistic_by_path,
     }
 
 

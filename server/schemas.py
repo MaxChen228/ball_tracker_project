@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DetectionPath(str, Enum):
@@ -187,33 +187,15 @@ class TriangulatedPoint(BaseModel):
     residual_m: float
 
 
-class BallisticSummary(BaseModel):
-    """Per-path ballistic RANSAC fit summary. Populated by
-    `session_results.rebuild_result_for_session` when a path's
-    triangulated set has >= `min_inliers` points and consensus is
-    reached; otherwise absent (no silent defaults)."""
-
-    release_point_m: tuple[float, float, float]
-    release_velocity_mps: tuple[float, float, float]
-    speed_mps: float
-    speed_mph: float
-    g_fit: float
-    g_mode: str  # "free" | "pinned"
-    n_inliers: int
-    n_total: int
-    rmse_m: float
-    t0_s: float
-    inlier_indices: list[int] = Field(default_factory=list)
-    # Per-axis [p0, v0, a] packed 3×3 (rows = x, y, z). Persisted so
-    # `ballistic_fit.sample_trajectory` can reconstruct the curve for the
-    # viewer overlay without re-running RANSAC. Shape-validated at read.
-    params: list[list[float]] = Field(default_factory=list)
-
-
 class SessionResult(BaseModel):
     """One armed-session's triangulation result. Replaces the old
     `CycleResult` now that "cycle" is a per-device recording-window concept
     and the pitch unit is server-level "session"."""
+    # Persisted JSONs from before the multi-segment fit migration carry
+    # `ballistic_by_path` / `ballistic_live` / `ballistic_server_post` /
+    # `peak_z_m` / `ballistic_speed_mph`. Tolerate them on load — a single
+    # rebuild of the session strips them on next write.
+    model_config = ConfigDict(extra="ignore")
     session_id: str
     camera_a_received: bool
     camera_b_received: bool
@@ -226,12 +208,6 @@ class SessionResult(BaseModel):
     abort_reasons: dict[str, str] = Field(default_factory=dict)
     points: list[TriangulatedPoint] = []
     error: str | None = None
-    # Per-path ballistic RANSAC fit summaries. Absent when a path has
-    # fewer than min_inliers points or consensus failed — explicit
-    # absence, no defaults.
-    ballistic_by_path: dict[str, BallisticSummary] = Field(default_factory=dict)
-    ballistic_live: BallisticSummary | None = None
-    ballistic_server_post: BallisticSummary | None = None
 
 
 
