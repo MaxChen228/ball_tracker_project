@@ -37,6 +37,7 @@ from state_calibration import (
     AutoCalibrationRun as _AutoCalibrationRun,
     AutoCalibrationRunStore,
     CalibrationFrameBuffer,
+    MarkerAccumulatorStore,
     CalibrationStore,
     CALIBRATION_FRAME_TTL_S as _CALIBRATION_FRAME_TTL_S,
     DeviceIntrinsicsStore,
@@ -251,6 +252,10 @@ class State:
         # holds (jpeg_bytes, ts) keyed by camera_id; `_cal_frame_requested`
         # flags pending requests that iOS drains on its next captureOutput.
         self._calibration_frames = CalibrationFrameBuffer(time_fn=time_fn)
+        # Multi-frame marker accumulation buffer per camera. Each
+        # [Calibrate Cam X] click unions detected ArUco markers into the
+        # buffer; the route solves once ≥5 distinct ids are present.
+        self._marker_accumulators = MarkerAccumulatorStore(time_fn=time_fn)
         # Operator-managed marker registry. Stores 3D world coords plus a
         # "on plate plane" flag so the current planar auto-calibration path
         # can keep consuming only the eligible subset.
@@ -1014,6 +1019,70 @@ class State:
         """Atomic pop-if-fresh. Returns None if no frame cached or stale."""
         with self._lock:
             return self._calibration_frames.consume(camera_id, max_age_s=max_age_s)
+
+    # --- Multi-frame marker accumulation ---------------------------------
+
+    def accumulate_calibration_markers(
+        self,
+        camera_id: str,
+        markers: dict[int, tuple[Any, Any]],
+    ) -> tuple[list[int], list[int]]:
+        """Union (id → (image_corners, world_points)) into the per-cam
+        buffer. Returns (newly_added_ids, all_ids_after)."""
+        with self._lock:
+            return self._marker_accumulators.accumulate(camera_id, markers)
+
+    def calibration_buffer_summary(self, camera_id: str) -> dict[str, Any]:
+        """Buffer state for dashboard display: ids list, count, ready,
+        last reproj. Lazy GC on stale / failure-exhausted."""
+        with self._lock:
+            return self._marker_accumulators.summary(camera_id)
+
+    def calibration_buffer_for_solve(self, camera_id: str):
+        """Return live MarkerAccumulator (after GC) so the route can read
+        accumulated markers + record solve result. Caller must not hold
+        the lock while solving — return references, not copies."""
+        with self._lock:
+            return self._marker_accumulators.get(camera_id)
+
+    def record_calibration_solve_result(
+        self,
+        camera_id: str,
+        *,
+        reproj_px: float | None,
+        ok: bool,
+        status: str,
+    ) -> None:
+        with self._lock:
+            self._marker_accumulators.record_solve_result(
+                camera_id, reproj_px=reproj_px, ok=ok, status=status,
+            )
+
+    def clear_calibration_buffer(self, camera_id: str) -> bool:
+        with self._lock:
+            return self._marker_accumulators.clear(camera_id)
+
+    def all_calibration_buffer_summaries(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            return self._marker_accumulators.all_summaries()
+
+    def reset_rig(self) -> dict[str, int]:
+        """Wipe all calibrations + extended marker registry + all
+        accumulator buffers + invalidate cached live camera poses.
+        Returns counts of what was removed. Used by dashboard
+        'Reset rig' for full rig re-setup (board moved, cams reseated)."""
+        with self._lock:
+            cal_count = self._calibration_store.clear()
+            marker_count = self._marker_registry.clear()
+            buf_count = self._marker_accumulators.clear_all()
+            for live in self._live_pairings.values():
+                for cam in ("A", "B"):
+                    live.update_camera_pose(cam, None)
+            return {
+                "calibrations_removed": cal_count,
+                "extended_markers_removed": marker_count,
+                "buffers_cleared": buf_count,
+            }
 
     # --- Auto-calibration runs -------------------------------------------
 
