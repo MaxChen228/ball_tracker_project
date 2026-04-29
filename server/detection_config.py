@@ -263,9 +263,12 @@ def load_or_migrate(
         try:
             return from_dict(json.loads(new_path.read_text()))
         except Exception as e:
-            # Strict: a corrupt new file is a real bug, not "fall back to
-            # defaults". Re-raise so boot fails loudly. Operator can
-            # delete the file by hand to force re-migration / default.
+            # Strict: a corrupt new file is a real bug, not "fall back
+            # to defaults". Re-raise so boot fails loudly. Recovery is
+            # to delete the file by hand — the next boot will fall
+            # through to the fresh-Tennis-default branch (legacy
+            # files were already cleaned up on the prior migrating
+            # boot, so re-migration is not on the menu).
             raise RuntimeError(
                 f"detection_config.json corrupt at {new_path}: {e}"
             ) from e

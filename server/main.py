@@ -227,7 +227,22 @@ from routes.camera import _validate_camera_id_or_422
 from routes.sessions import _SESSION_ID_RE
 from routes.viewer import _build_viewer_health, _find_clip_on_disk, _scene_for_session
 from routes.pitch import _summarize_result, _run_server_detection
+from detection_config import (
+    modified_fields as _detection_config_modified_fields,
+    to_dict as _detection_config_to_dict,
+)
 from routes.calibration import _await_calibration_frame
+
+
+def _detection_config_view(state) -> dict:
+    """Wire shape consumed by `_render_hsv_body` and the dashboard JS
+    (same shape that GET /detection/config returns). Centralised here
+    so a future schema tweak only needs editing in one place."""
+    cfg = state.detection_config()
+    return {
+        **_detection_config_to_dict(cfg),
+        "modified_fields": _detection_config_modified_fields(cfg),
+    }
 from calibration_auto import (
     _all_marker_world_xyz, _decode_calibration_jpeg,
     _derive_auto_cal_intrinsics, _marker_camera_pose, _pose_from_homography,
@@ -650,15 +665,7 @@ def events_index() -> HTMLResponse:
             session=session.to_dict() if session is not None else None,
             calibrations=calibrations,
             arm_readiness=_arm_readiness(devices, calibrations),
-            hsv_range=state.hsv_range().__dict__,
-            shape_gate={
-                "aspect_min": state.shape_gate().aspect_min,
-                "fill_min": state.shape_gate().fill_min,
-            },
-            candidate_selector_tuning={
-                "w_aspect": state.candidate_selector_tuning().w_aspect,
-                "w_fill": state.candidate_selector_tuning().w_fill,
-            },
+            detection_config=_detection_config_view(state),
             sync=sync_run.to_dict() if sync_run is not None else None,
             sync_cooldown_remaining_s=state._sync.sync_cooldown_remaining_s(),
             chirp_detect_threshold=state.chirp_detect_threshold(),

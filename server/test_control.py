@@ -1136,19 +1136,29 @@ def test_dashboard_no_longer_renders_detection_path_picker():
     assert 'id="paths-form"' not in body
 
 
-def test_dashboard_renders_hsv_controls():
+def test_dashboard_renders_unified_detection_config_card():
+    """Phase 3 of unified-config redesign: single form, single Apply,
+    identity header. The legacy three Apply buttons are gone — the JS
+    handler in `static/dashboard/15_hsv_controls.js` POSTs the full
+    triple to `/detection/config` on a single submit."""
     client = TestClient(app)
     body = client.get("/").text
     assert 'id="hsv-body"' in body
-    assert 'action="/detection/hsv"' in body
+    assert 'id="detection-config-form"' in body
+    # Identity header element + the new preset-button data attrs
+    # (which now also carry shape_gate / selector values for one-click
+    # full-triple loads).
+    assert 'class="detection-identity"' in body
     assert 'data-hsv-preset="tennis"' in body
     assert 'data-hsv-preset="blue_ball"' in body
-    assert 'name="h_min"' in body
-    assert 'name="h_max"' in body
-    assert 'name="s_min"' in body
-    assert 'name="s_max"' in body
-    assert 'name="v_min"' in body
-    assert 'name="v_max"' in body
+    assert 'data-aspect-min=' in body
+    assert 'data-w-aspect=' in body
+    # Legacy per-section Apply forms must be absent.
+    assert 'action="/detection/hsv"' not in body
+    assert 'action="/detection/shape_gate"' not in body
+    assert 'action="/detection/candidate_selector"' not in body
+    # Single Apply button.
+    assert 'data-detection-apply' in body
 
 
 def _seed_minimal_calibration(camera_id: str) -> None:

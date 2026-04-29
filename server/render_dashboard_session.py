@@ -16,181 +16,182 @@ _PATH_LABELS = {
 }
 
 
-def _render_shape_gate_body(shape_gate: dict[str, object] | None) -> str:
-    """Aspect / fill thresholds applied after HSV + connected-components.
-    Lives inside the DETECTION HSV card as a sub-form so operators tune
-    the full blob filter in one place. Hot-reloaded to iOS over WS."""
-    current = {"aspect_min": 0.70, "fill_min": 0.55}
-    if shape_gate:
-        for key in current:
-            if key in shape_gate:
-                try:
-                    current[key] = float(shape_gate[key])
-                except (TypeError, ValueError):
-                    pass
-
-    def _row(name: str, label: str, hint: str) -> str:
-        val = current[name]
-        slider_val = int(round(val * 100))
-        return (
-            '<label class="shape-row" title="' + html.escape(hint) + '">'
-            f'<span class="shape-label">{html.escape(label)}</span>'
-            f'<input type="range" min="0" max="100" step="1" value="{slider_val}" data-shape-range="{name}">'
-            f'<input class="hsv-num" type="number" step="0.01" min="0" max="1" name="{name}" value="{val:.2f}" data-shape-number="{name}">'
-            '</label>'
-        )
-
+def _render_hsv_axis_row(axis: str, upper: int, lo: int, hi: int) -> str:
+    lo_key = f"{axis}_min"
+    hi_key = f"{axis}_max"
     return (
-        '<form method="POST" action="/detection/shape_gate" id="shape-gate-form" class="hsv-form shape-gate-form">'
-        '<div class="hsv-subtitle">Shape gate</div>'
-        '<div class="hsv-grid">'
-        f'{_row("aspect_min", "ASPECT", "min(w,h)/max(w,h) — 1.0 = perfect square bbox. Lower lets elongated blobs through.")}'
-        f'{_row("fill_min", "FILL", "area / (w*h) — π/4 ≈ 0.785 theoretical; real balls measure 0.63-0.70. Lower accepts partial occlusion.")}'
+        '<div class="hsv-row">'
+        f'<div class="hsv-label">{html.escape(axis.upper())}</div>'
+        '<div class="hsv-pair">'
+        f'<label><span>Min</span>'
+        f'<input type="range" min="0" max="{upper}" value="{lo}" data-hsv-range="{lo_key}">'
+        f'<input class="hsv-num" type="number" name="{lo_key}" min="0" max="{upper}" value="{lo}" data-hsv-number="{lo_key}">'
+        '</label>'
+        f'<label><span>Max</span>'
+        f'<input type="range" min="0" max="{upper}" value="{hi}" data-hsv-range="{hi_key}">'
+        f'<input class="hsv-num" type="number" name="{hi_key}" min="0" max="{upper}" value="{hi}" data-hsv-number="{hi_key}">'
+        '</label>'
         '</div>'
-        '<div class="hsv-actions">'
-        '<button class="btn" type="submit">Apply shape gate</button>'
         '</div>'
-        '</form>'
     )
 
 
-def _render_candidate_selector_body(
-    tuning: dict[str, object] | None,
+def _render_shape_or_selector_row(
+    *,
+    name: str,
+    label: str,
+    hint: str,
+    val: float,
+    data_attr: str,
 ) -> str:
-    """Server-side shape-prior selector weights. Sits inside the
-    DETECTION HSV card, below the shape-gate sub-form. Applies to BOTH
-    live (`live_pairing._resolve_candidates`) and `server_post`
-    (`detect_pitch`) paths.
-
-    Cost = w_aspect·aspect_pen + w_fill·fill_pen (scale-invariant —
-    no size term, no temporal prior). See `candidate_selector` module
-    for component definitions."""
-    current = {
-        "w_aspect": 0.6,
-        "w_fill": 0.4,
-    }
-    if tuning:
-        for key in current:
-            if key in tuning:
-                try:
-                    current[key] = float(tuning[key])
-                except (TypeError, ValueError):
-                    pass
-
-    def _slider(name: str, label: str, title: str, val: float) -> str:
-        slider_val = int(round(val * 100))
-        return (
-            f'<label class="shape-row" title="{title}">'
-            f'<span class="shape-label">{label}</span>'
-            f'<input type="range" min="0" max="100" step="1" value="{slider_val}" data-cs-range="{name}">'
-            f'<input class="hsv-num" type="number" step="0.01" min="0" max="1" name="{name}" '
-            f'value="{val:.2f}" data-cs-number="{name}">'
-            f'</label>'
-        )
-
+    """Shared 0..1 slider+number pair. `data_attr` distinguishes which
+    JS handler binds (`shape` or `cs`)."""
+    slider_val = int(round(val * 100))
     return (
-        '<form method="POST" action="/detection/candidate_selector" '
-        'id="candidate-selector-form" class="hsv-form shape-gate-form">'
-        '<div class="hsv-subtitle">Candidate selector (shape-prior)</div>'
-        '<div class="hsv-grid">'
-        + _slider("w_aspect", "W_ASPECT",
-                  "Weight on (1 - aspect) penalty. Perfectly square (round) blob → 0.",
-                  current["w_aspect"])
-        + _slider("w_fill", "W_FILL",
-                  "Weight on |fill - 0.68| penalty. 0.68 is the empirical median fill for "
-                  "the project ball.",
-                  current["w_fill"])
-        + '</div>'
-        '<div class="hsv-actions">'
-        '<button class="btn" type="submit">Apply selector</button>'
-        '</div>'
-        '</form>'
+        f'<label class="shape-row" title="{html.escape(hint)}">'
+        f'<span class="shape-label">{html.escape(label)}</span>'
+        f'<input type="range" min="0" max="100" step="1" value="{slider_val}" data-{data_attr}-range="{name}">'
+        f'<input class="hsv-num" type="number" step="0.01" min="0" max="1" name="{name}" '
+        f'value="{val:.2f}" data-{data_attr}-number="{name}">'
+        '</label>'
     )
 
 
 def _render_hsv_body(
-    hsv_range: dict[str, object] | None,
-    shape_gate: dict[str, object] | None = None,
-    candidate_selector_tuning: dict[str, object] | None = None,
+    detection_config: dict[str, object] | None,
 ) -> str:
-    current = {
-        "h_min": 25,
-        "h_max": 55,
-        "s_min": 90,
-        "s_max": 255,
-        "v_min": 90,
-        "v_max": 255,
-    }
-    if hsv_range:
-        for key in current:
-            if key in hsv_range:
-                current[key] = int(hsv_range[key])
+    """Phase 3 of unified-config redesign: single form, single Apply,
+    identity header. The previous three-form / three-Apply layout is
+    gone — every slider edits a shared form which the JS Apply button
+    POSTs as a full triple to `/detection/config` in one shot.
 
-    def _row(axis: str, upper: int) -> str:
-        lo_key = f"{axis}_min"
-        hi_key = f"{axis}_max"
-        return (
-            '<div class="hsv-row">'
-            f'<div class="hsv-label">{html.escape(axis.upper())}</div>'
-            '<div class="hsv-pair">'
-            f'<label><span>Min</span><input type="range" min="0" max="{upper}" value="{current[lo_key]}" data-hsv-range="{lo_key}"><input class="hsv-num" type="number" name="{lo_key}" min="0" max="{upper}" value="{current[lo_key]}" data-hsv-number="{lo_key}"></label>'
-            f'<label><span>Max</span><input type="range" min="0" max="{upper}" value="{current[hi_key]}" data-hsv-range="{hi_key}"><input class="hsv-num" type="number" name="{hi_key}" min="0" max="{upper}" value="{current[hi_key]}" data-hsv-number="{hi_key}"></label>'
-            '</div>'
-            '</div>'
+    `detection_config` is the wire shape returned by
+    `GET /detection/config` (so the dashboard can refetch on mount and
+    re-hydrate the same way without an alternative shape). When None
+    or missing fields, falls back to Tennis-preset values so the SSR
+    boot path renders something coherent.
+    """
+    cfg = detection_config or {}
+    hsv = cfg.get("hsv") or {}
+    sg = cfg.get("shape_gate") or {}
+    sel = cfg.get("selector") or {}
+    preset_name = cfg.get("preset")
+    modified_fields = cfg.get("modified_fields") or []
+
+    h_lo, h_hi = int(hsv.get("h_min", 25)), int(hsv.get("h_max", 55))
+    s_lo, s_hi = int(hsv.get("s_min", 90)), int(hsv.get("s_max", 255))
+    v_lo, v_hi = int(hsv.get("v_min", 90)), int(hsv.get("v_max", 255))
+    aspect_min = float(sg.get("aspect_min", 0.70))
+    fill_min = float(sg.get("fill_min", 0.55))
+    w_aspect = float(sel.get("w_aspect", 0.6))
+    w_fill = float(sel.get("w_fill", 0.4))
+
+    # Identity header ------------------------------------------------
+    if preset_name is None:
+        identity_label = "Custom"
+        identity_class = "identity-custom"
+    elif modified_fields:
+        identity_label = f"{PRESETS[preset_name].label} · modified ({len(modified_fields)})"
+        identity_class = "identity-modified"
+    else:
+        identity_label = f"{PRESETS[preset_name].label}"
+        identity_class = "identity-pure"
+
+    reset_btn = ""
+    if preset_name is not None and modified_fields:
+        # Only show reset when there's something to revert to.
+        reset_btn = (
+            f'<button type="button" class="btn small" '
+            f'data-detection-reset-preset="{html.escape(preset_name)}" '
+            f'title="Snap back to {html.escape(PRESETS[preset_name].label)} preset values">'
+            'Reset to preset</button>'
         )
 
+    identity_html = (
+        '<div class="detection-identity">'
+        f'<span class="identity-tag {identity_class}">{html.escape(identity_label)}</span>'
+        f'{reset_btn}'
+        '</div>'
+    )
+
+    # Preset picker --------------------------------------------------
     def _preset_button(name: str) -> str:
-        preset = PRESETS[name]
-        d = hsv_as_dict(preset)
+        p = PRESETS[name]
+        d = hsv_as_dict(p)
+        active = " active" if name == preset_name and not modified_fields else ""
         return (
-            f'<button type="button" class="btn small secondary" data-hsv-preset="{name}" '
+            f'<button type="button" class="btn small secondary{active}" data-hsv-preset="{html.escape(name)}" '
             f'data-h-min="{d["h_min"]}" data-h-max="{d["h_max"]}" '
             f'data-s-min="{d["s_min"]}" data-s-max="{d["s_max"]}" '
-            f'data-v-min="{d["v_min"]}" data-v-max="{d["v_max"]}">'
-            f'{html.escape(preset.label)}</button>'
+            f'data-v-min="{d["v_min"]}" data-v-max="{d["v_max"]}" '
+            f'data-aspect-min="{p.shape_gate.aspect_min:.2f}" '
+            f'data-fill-min="{p.shape_gate.fill_min:.2f}" '
+            f'data-w-aspect="{p.selector.w_aspect:.2f}" '
+            f'data-w-fill="{p.selector.w_fill:.2f}">'
+            f'{html.escape(p.label)}</button>'
         )
     preset_buttons = "".join(_preset_button(name) for name in PRESETS)
-    sg = shape_gate or {"aspect_min": 0.70, "fill_min": 0.55}
-    cs = candidate_selector_tuning or {"w_aspect": 0.6, "w_fill": 0.4}
-    hsv_summary = (
-        f'h[{current["h_min"]}-{current["h_max"]}] '
-        f's[{current["s_min"]}-{current["s_max"]}] '
-        f'v[{current["v_min"]}-{current["v_max"]}]'
+
+    # Sub-section markup --------------------------------------------
+    hsv_block = (
+        '<div class="detection-section">'
+        '<div class="hsv-subtitle">HSV</div>'
+        '<div class="hsv-grid">'
+        f'{_render_hsv_axis_row("h", 179, h_lo, h_hi)}'
+        '<div class="hsv-hint">Hue uses OpenCV 0-179 scale (= standard 0-360&deg; &divide; 2). Blue &asymp; 105-125, yellow-green &asymp; 25-55.</div>'
+        f'{_render_hsv_axis_row("s", 255, s_lo, s_hi)}'
+        f'{_render_hsv_axis_row("v", 255, v_lo, v_hi)}'
+        '</div>'
+        '</div>'
     )
-    sg_summary = f'aspect≥{float(sg.get("aspect_min", 0.70)):.2f} fill≥{float(sg.get("fill_min", 0.55)):.2f}'
-    cs_summary = (
-        f'wA{float(cs.get("w_aspect", 0.6)):.2f} '
-        f'wF{float(cs.get("w_fill", 0.4)):.2f}'
+    shape_block = (
+        '<div class="detection-section">'
+        '<div class="hsv-subtitle">Shape gate</div>'
+        '<div class="hsv-grid">'
+        + _render_shape_or_selector_row(
+            name="aspect_min", label="ASPECT",
+            hint="min(w,h)/max(w,h) — 1.0 = perfect square bbox. Lower lets elongated blobs through.",
+            val=aspect_min, data_attr="shape",
+        )
+        + _render_shape_or_selector_row(
+            name="fill_min", label="FILL",
+            hint="area / (w*h) — π/4 ≈ 0.785 theoretical; real balls measure 0.63-0.70. Lower accepts partial occlusion.",
+            val=fill_min, data_attr="shape",
+        )
+        + '</div></div>'
     )
-    hsv_form = (
-        '<form method="POST" action="/detection/hsv" id="hsv-form" class="hsv-form">'
+    selector_block = (
+        '<div class="detection-section">'
+        '<div class="hsv-subtitle">Selector (shape-prior)</div>'
+        '<div class="hsv-grid">'
+        + _render_shape_or_selector_row(
+            name="w_aspect", label="W_ASPECT",
+            hint="Weight on (1 - aspect) penalty. Perfectly square (round) blob → 0.",
+            val=w_aspect, data_attr="cs",
+        )
+        + _render_shape_or_selector_row(
+            name="w_fill", label="W_FILL",
+            hint="Weight on |fill - 0.68| penalty. 0.68 is the empirical median fill for the project ball.",
+            val=w_fill, data_attr="cs",
+        )
+        + '</div></div>'
+    )
+
+    # Single Apply button at the bottom drives a JS fetch to
+    # /detection/config carrying the full triple. No per-section
+    # Apply: phase 3 collapses three sub-button-presses into one.
+    return (
+        f'{identity_html}'
         '<div class="hsv-presets">'
         f'{preset_buttons}'
         '</div>'
-        '<div class="hsv-grid">'
-        f'{_row("h", 179)}'
-        '<div class="hsv-hint">Hue uses OpenCV 0-179 scale (= standard 0-360&deg; &divide; 2). Blue &asymp; 105-125, yellow-green &asymp; 25-55.</div>'
-        f'{_row("s", 255)}'
-        f'{_row("v", 255)}'
-        '</div>'
+        '<form id="detection-config-form" class="hsv-form" data-detection-config-form>'
+        f'{hsv_block}{shape_block}{selector_block}'
         '<div class="hsv-actions">'
-        '<button class="btn" type="submit">Apply HSV</button>'
+        '<button class="btn" type="submit" data-detection-apply>Apply detection config</button>'
+        '<span class="detection-apply-status" data-detection-apply-status></span>'
         '</div>'
         '</form>'
-    )
-    return (
-        '<details class="tune-section" open>'
-        f'<summary><span class="tune-name">HSV</span><span class="tune-summary">{html.escape(hsv_summary)}</span></summary>'
-        f'{hsv_form}'
-        '</details>'
-        '<details class="tune-section">'
-        f'<summary><span class="tune-name">Shape gate</span><span class="tune-summary">{html.escape(sg_summary)}</span></summary>'
-        f'{_render_shape_gate_body(shape_gate)}'
-        '</details>'
-        '<details class="tune-section">'
-        f'<summary><span class="tune-name">Selector</span><span class="tune-summary">{html.escape(cs_summary)}</span></summary>'
-        f'{_render_candidate_selector_body(candidate_selector_tuning)}'
-        '</details>'
     )
 
 

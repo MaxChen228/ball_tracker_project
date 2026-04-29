@@ -51,40 +51,6 @@ def _validated_hsv_range(values: dict[str, object]) -> HSVRange:
     )
 
 
-@router.post("/detection/hsv")
-async def detection_hsv(request: Request):
-    from main import state, device_ws, _settings_message_for, _wants_html
-
-    ctype = request.headers.get("content-type", "").lower()
-    if "application/json" in ctype:
-        body = await request.json()
-        preset = body.get("preset")
-        if isinstance(preset, str) and preset in _HSV_PRESETS and not any(
-            key in body for key in ("h_min", "h_max", "s_min", "s_max", "v_min", "v_max")
-        ):
-            hsv = _HSV_PRESETS[preset].hsv
-        else:
-            hsv = _validated_hsv_range(body)
-    else:
-        form = await request.form()
-        preset = form.get("preset")
-        if isinstance(preset, str) and preset in _HSV_PRESETS and not any(
-            form.get(key) is not None for key in ("h_min", "h_max", "s_min", "s_max", "v_min", "v_max")
-        ):
-            hsv = _HSV_PRESETS[preset].hsv
-        else:
-            hsv = _validated_hsv_range({key: form.get(key) for key in ("h_min", "h_max", "s_min", "s_max", "v_min", "v_max")})
-
-    applied = state.set_hsv_range(hsv)
-    await device_ws.broadcast(
-        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
-    )
-    payload = {"ok": True, "hsv_range": applied.__dict__}
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return payload
-
-
 def _validated_shape_gate(values: dict[str, object]) -> ShapeGate:
     def _float_field(name: str, lo: float, hi: float) -> float:
         raw = values.get(name)
@@ -99,33 +65,6 @@ def _validated_shape_gate(values: dict[str, object]) -> ShapeGate:
     aspect_min = _float_field("aspect_min", 0.0, 1.0)
     fill_min = _float_field("fill_min", 0.0, 1.0)
     return ShapeGate(aspect_min=aspect_min, fill_min=fill_min)
-
-
-@router.post("/detection/shape_gate")
-async def detection_shape_gate(request: Request):
-    """Operator-tunable aspect/fill gates for HSV blob filter.
-
-    Both gates ∈ [0, 1]. Pushed to iOS over WS `settings` so the `live`
-    path applies the same thresholds as `server_post`. Body accepts JSON
-    `{"aspect_min": 0.7, "fill_min": 0.55}` or form fields.
-    """
-    from main import state, device_ws, _settings_message_for, _wants_html
-
-    ctype = request.headers.get("content-type", "").lower()
-    if "application/json" in ctype:
-        body = await request.json()
-        gate = _validated_shape_gate(body)
-    else:
-        form = await request.form()
-        gate = _validated_shape_gate({k: form.get(k) for k in ("aspect_min", "fill_min")})
-    applied = state.set_shape_gate(gate)
-    await device_ws.broadcast(
-        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
-    )
-    payload = {"ok": True, "shape_gate": {"aspect_min": applied.aspect_min, "fill_min": applied.fill_min}}
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return payload
 
 
 def _validated_candidate_selector_tuning(values: dict[str, object]) -> CandidateSelectorTuning:
@@ -146,37 +85,61 @@ def _validated_candidate_selector_tuning(values: dict[str, object]) -> Candidate
     )
 
 
-@router.post("/detection/candidate_selector")
-async def detection_candidate_selector(request: Request):
-    """Operator-tunable shape-prior weights for `select_best_candidate`.
+@router.post("/detection/config/reset_to_preset")
+async def detection_config_reset_to_preset(request: Request):
+    """Snap the live detection-config triple to a named preset's
+    canonical values. Used by the dashboard's "Reset to preset" button
+    when the operator wants to abandon a tuning session and return to
+    a known good config without manually typing back the six HSV ints
+    + four float thresholds.
 
-    Server-side only — applied in both `live_pairing._resolve_candidates`
-    (live path) and `detect_pitch` (server_post path). Body accepts JSON
-    `{"w_aspect": 0.6, "w_fill": 0.4}` or equivalent form fields.
+    Body (JSON or form): `preset` — required, must be a key in
+    `presets.PRESETS`. `preset=null` is rejected (custom configs
+    aren't reachable by name).
     """
-    from main import state, _wants_html
+    from main import state, device_ws, _settings_message_for, _wants_html
 
-    fields = ("w_aspect", "w_fill")
     ctype = request.headers.get("content-type", "").lower()
     if "application/json" in ctype:
-        body = await request.json()
-        tuning = _validated_candidate_selector_tuning(body)
+        body = await request.json() if await request.body() else {}
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="body must be a JSON object")
+        preset_name = body.get("preset")
     else:
         form = await request.form()
-        tuning = _validated_candidate_selector_tuning(
-            {k: form.get(k) for k in fields}
+        preset_name = form.get("preset")
+    if not isinstance(preset_name, str) or not preset_name:
+        raise HTTPException(
+            status_code=400,
+            detail="missing required field 'preset' (preset name to reset to)",
         )
-    applied = state.set_candidate_selector_tuning(tuning)
-    payload = {
-        "ok": True,
-        "candidate_selector_tuning": {
-            "w_aspect": applied.w_aspect,
-            "w_fill": applied.w_fill,
-        },
-    }
+    if preset_name not in _HSV_PRESETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown preset: {preset_name!r} (known: {sorted(_HSV_PRESETS)})",
+        )
+    p = _HSV_PRESETS[preset_name]
+    # `last_applied_at=None` here — `state.set_detection_config` stamps
+    # the actual write epoch under the lock, so any pre-stamp would be
+    # overwritten anyway.
+    cfg = DetectionConfig(
+        hsv=p.hsv,
+        shape_gate=p.shape_gate,
+        selector=p.selector,
+        preset=preset_name,
+        last_applied_at=None,
+    )
+    applied = state.set_detection_config(cfg)
+    await device_ws.broadcast(
+        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
+    )
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
-    return payload
+    return {
+        "ok": True,
+        **_detection_config_to_dict(applied),
+        "modified_fields": _modified_fields(applied),
+    }
 
 
 @router.get("/detection/config")
@@ -264,7 +227,7 @@ async def detection_config_post(request: Request):
         shape_gate=gate,
         selector=selector,
         preset=preset_name,
-        last_applied_at=state._time_fn(),
+        last_applied_at=None,  # state stamps under lock
     )
     applied = state.set_detection_config(cfg)
     await device_ws.broadcast(

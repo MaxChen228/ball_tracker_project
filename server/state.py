@@ -1418,14 +1418,16 @@ class State:
         cfg: DetectionConfig,
     ) -> DetectionConfig:
         """Atomic single-write replacement for the legacy three setters.
-        Caller owns `cfg.last_applied_at` (typically `_time_fn()` at
-        call site). The new endpoint `POST /detection/config` calls
-        this directly; the legacy per-section endpoints route through
-        `set_hsv_range` / `set_shape_gate` / `set_candidate_selector_tuning`
-        below, which forward here with `preset=None` (editing one
-        sub-knob means leaving the named preset)."""
+
+        Stamps `last_applied_at` from `self._time_fn()` under the lock —
+        callers must NOT pre-fill it (any value supplied is overwritten),
+        so the persisted `last_applied_at` always equals the actual lock-
+        held write epoch. This keeps cross-module callers (`routes/`)
+        out of `state._time_fn`, and means a "now()" stamp can never
+        drift from when the disk row was actually written.
+        """
         with self._lock:
-            self._detection_config = cfg
+            self._detection_config = cfg.with_(last_applied_at=self._time_fn())
             self._persist_detection_config_locked()
             return self._detection_config
 
@@ -1434,11 +1436,12 @@ class State:
             return self._detection_config.hsv
 
     def set_hsv_range(self, hsv_range: HSVRange) -> HSVRange:
-        """Legacy single-section setter. Editing HSV alone clears the
-        preset binding — the resulting config no longer matches any
-        named preset by definition. Phase 3 retires this in favor of
-        `set_detection_config(triple, preset=...)` from a unified
-        Apply button."""
+        """Single-section convenience setter — used by tests and any
+        legacy caller that wants to mutate just HSV. Editing one sub-
+        knob clears preset binding (the resulting config no longer
+        matches any named preset by definition). HTTP exposure of this
+        retired in phase 3; the dashboard goes through unified
+        `POST /detection/config` only."""
         with self._lock:
             self._detection_config = self._detection_config.with_(
                 hsv=hsv_range,
