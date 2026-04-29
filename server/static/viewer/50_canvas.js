@@ -150,13 +150,10 @@
           || c.image_width_px == null || c.image_height_px == null) continue;
       window.BallTrackerCamView.setMeta(c.camera_id, c);
     }
-    // Mount-time slider sync: the `<input type=range>` ships with HTML
-    // value="5" hardcoded; pull the persisted K out of localStorage and
-    // overwrite each cam's K slider so a previously-set value survives
-    // page reload.
-    document.querySelectorAll('.cv-blobs-k input[type=range]').forEach(el => {
-      el.value = String(_candTopK());
-    });
+    // Mount-time cost-threshold slider sync: HTML ships with the
+    // server-injected SessionResult.cost_threshold (or 1.0 default), so
+    // there's nothing extra to pull from localStorage — the value is
+    // session-scoped and authoritative on the server.
   }
   function drawVirtuals() {
     if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();

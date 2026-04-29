@@ -113,6 +113,24 @@ def test_recompute_unknown_session_returns_404(tmp_path, monkeypatch):
     assert r.status_code == 404
 
 
+def test_recompute_accepts_live_only_session_in_live_pairings(tmp_path, monkeypatch):
+    """Live-only WS sessions live in `_live_pairings` until persist_live_frames
+    flushes them to `state.pitches`. The 404 guard MUST recognise them via
+    `_live_pairings` (matching `state.store_result`'s own guard) — otherwise
+    operator hits Apply mid-session and gets a misleading 404."""
+    import main
+    from live_pairing import LivePairingSession
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    sid = "s_eeee0005"
+    main.state._live_pairings[sid] = LivePairingSession(sid)
+    client = TestClient(main.app)
+    r = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": 0.5})
+    # Not 404 — the guard recognised the session. May be 200 with empty
+    # result (no pitches persisted yet), but the response code is what
+    # we're asserting here.
+    assert r.status_code != 404
+
+
 def test_recompute_invalid_session_id_returns_422(tmp_path, monkeypatch):
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))

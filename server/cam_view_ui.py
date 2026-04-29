@@ -140,8 +140,6 @@ CAM_VIEW_BOX_CSS = """
 }
 .cam-view[data-cam-view] .cv-opacity { color: #F8F7F4; }
 .cam-view[data-cam-view] .cv-opacity input[type=range] { accent-color: #FFD86A; }
-.cam-view[data-cam-view] .cv-blobs-k { color: #F8F7F4; }
-.cam-view[data-cam-view] .cv-blobs-k input[type=range] { accent-color: #FFD86A; }
 .cam-view[data-cam-view] .cv-path-group {
   border-color: rgba(255, 255, 255, 0.14);
 }
@@ -204,16 +202,6 @@ CAM_VIEW_CONTENT_CSS = """
 }
 [data-cam-view] .cv-opacity input[type=range] {
   width: 70px;
-  accent-color: var(--ink, #2A2520);
-}
-[data-cam-view] .cv-blobs-k {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--sub, rgba(120, 120, 120, 0.7));
-}
-[data-cam-view] .cv-blobs-k input[type=range] {
-  width: 60px;
   accent-color: var(--ink, #2A2520);
 }
 
