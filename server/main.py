@@ -144,7 +144,7 @@ from state import (
     _DEVICE_REGISTRY_CAP,
     _DEVICE_STALE_S,
     _DISARM_ECHO_S,
-    _LegacyTimeSyncIntent,
+    TimeSyncIntent,
     _MAX_PITCH_UPLOAD_BYTES,
     _new_session_id,
     _new_sync_id,
@@ -618,7 +618,7 @@ def chirp_wav() -> Response:
 
 @app.get("/", response_class=HTMLResponse)
 def events_index() -> HTMLResponse:
-    from render_dashboard import render_events_index_html
+    from render_dashboard_page import render_events_index_html
 
     session = state.session_snapshot()
     sync_run = state._sync.current_sync()

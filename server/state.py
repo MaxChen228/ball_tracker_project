@@ -48,7 +48,7 @@ from state_events import build_events
 from state_processing import SessionProcessingState
 from state_sync import (
     SyncCoordinator,
-    _LegacyTimeSyncIntent,
+    TimeSyncIntent,
     _new_sync_id,
     _SYNC_COMMAND_TTL_S,
     _SYNC_COOLDOWN_S,
@@ -182,9 +182,6 @@ class State:
             gc_after_s=_DEVICE_GC_AFTER_S,
             cap=_DEVICE_REGISTRY_CAP,
         )
-        # Back-compat for tests and old diagnostics that inspected the raw
-        # registry; all writes go through DeviceRegistry.
-        self._devices = self._device_registry.devices
         self._current_session: Session | None = None
         # Recently-ended sessions ring (most recent first). Kept >1 deep so
         # that an iOS phone draining its detection backlog after disarm can

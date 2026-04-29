@@ -116,7 +116,7 @@ _JS_TEMPLATE = r"""
   // the two ticks fought each turn. Removed; the dashboard renderer is
   // the sole writer everywhere now.
 
-  // --- Sync log tick (moved verbatim from render_dashboard.py) -------------
+  // --- Sync log tick (originally lived in the old render_dashboard.py) ----
   let _syncLogClearedAtTs = 0;
   function fmtSyncLogEntry(entry) {
     const d = new Date(entry.ts * 1000);

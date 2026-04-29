@@ -61,7 +61,7 @@ def _new_sync_id() -> str:
 
 
 @dataclass
-class _LegacyTimeSyncIntent:
+class TimeSyncIntent:
     id: str
     started_at: float
     expires_at: float
@@ -97,8 +97,8 @@ class SyncCoordinator:
         self._sync_log: deque[SyncLogEntry] = deque(maxlen=500)
         # Legacy third-device chirp sync intent + per-cam pending command
         # dispatch (one-shot flag consumed on next WS heartbeat).
-        self._current_time_sync_intent: _LegacyTimeSyncIntent | None = None
-        self._sync_command_pending: dict[str, _LegacyTimeSyncIntent] = {}
+        self._current_time_sync_intent: TimeSyncIntent | None = None
+        self._sync_command_pending: dict[str, TimeSyncIntent] = {}
         # Per-cam "the id we EXPECT this cam to report back with after the
         # current attempt succeeds".
         self._expected_sync_id_per_cam: dict[str, str] = {}
@@ -209,7 +209,7 @@ class SyncCoordinator:
 
     # ---- legacy chirp intent (single-listener) -------------------------
 
-    def _live_time_sync_intent_locked(self, now: float) -> _LegacyTimeSyncIntent | None:
+    def _live_time_sync_intent_locked(self, now: float) -> TimeSyncIntent | None:
         intent = self._current_time_sync_intent
         if intent is None:
             return None
@@ -220,12 +220,12 @@ class SyncCoordinator:
 
     def _claim_time_sync_intent_locked(
         self, now: float, *, force_new: bool = False,
-    ) -> _LegacyTimeSyncIntent:
+    ) -> TimeSyncIntent:
         if not force_new:
             intent = self._live_time_sync_intent_locked(now)
             if intent is not None:
                 return intent
-        intent = _LegacyTimeSyncIntent(
+        intent = TimeSyncIntent(
             id=_new_sync_id(),
             started_at=now,
             expires_at=now + _TIME_SYNC_INTENT_WINDOW_S,
@@ -233,7 +233,7 @@ class SyncCoordinator:
         self._current_time_sync_intent = intent
         return intent
 
-    def claim_time_sync_intent(self) -> _LegacyTimeSyncIntent:
+    def claim_time_sync_intent(self) -> TimeSyncIntent:
         now = self._time_fn()
         with self._lock:
             return self._claim_time_sync_intent_locked(now)
@@ -256,7 +256,7 @@ class SyncCoordinator:
         dispatched: list[str] = []
         for cam in sorted(set(targets)):
             assert intent is not None
-            self._sync_command_pending[cam] = _LegacyTimeSyncIntent(
+            self._sync_command_pending[cam] = TimeSyncIntent(
                 id=intent.id,
                 started_at=intent.started_at,
                 expires_at=now + _SYNC_COMMAND_TTL_S,
