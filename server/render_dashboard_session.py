@@ -81,14 +81,12 @@ def _render_candidate_selector_body(
     live (`live_pairing._resolve_candidates`) and `server_post`
     (`detect_pitch`) paths.
 
-    Cost = w_size·size_pen + w_aspect·aspect_pen + w_fill·fill_pen
-    (track-independent — no temporal prior). See
-    `candidate_selector` module for component definitions."""
+    Cost = w_aspect·aspect_pen + w_fill·fill_pen (scale-invariant —
+    no size term, no temporal prior). See `candidate_selector` module
+    for component definitions."""
     current = {
-        "r_px_expected": 12.0,
-        "w_size": 0.5,
-        "w_aspect": 0.3,
-        "w_fill": 0.2,
+        "w_aspect": 0.6,
+        "w_fill": 0.4,
     }
     if tuning:
         for key in current:
@@ -114,16 +112,6 @@ def _render_candidate_selector_body(
         'id="candidate-selector-form" class="hsv-form shape-gate-form">'
         '<div class="hsv-subtitle">Candidate selector (shape-prior)</div>'
         '<div class="hsv-grid">'
-        '<label class="shape-row" title="Expected ball radius in px. '
-        'Defines expected_area = π·r² that size_pen scores against.">'
-        '<span class="shape-label">RADIUS</span>'
-        '<input class="hsv-num" type="number" step="1" min="1" max="200" name="r_px_expected" '
-        f'value="{current["r_px_expected"]:.1f}" data-cs-number="r_px_expected">'
-        '</label>'
-        + _slider("w_size", "W_SIZE",
-                  "Weight on log-octave area deviation from expected_area. "
-                  "Saturates at 4× off (=2 octaves).",
-                  current["w_size"])
         + _slider("w_aspect", "W_ASPECT",
                   "Weight on (1 - aspect) penalty. Perfectly square (round) blob → 0.",
                   current["w_aspect"])
@@ -179,7 +167,7 @@ def _render_hsv_body(
         for name, preset in _HSV_PRESETS.items()
     )
     sg = shape_gate or {"aspect_min": 0.70, "fill_min": 0.55}
-    cs = candidate_selector_tuning or {"r_px_expected": 12.0, "w_size": 0.5, "w_aspect": 0.3, "w_fill": 0.2}
+    cs = candidate_selector_tuning or {"w_aspect": 0.6, "w_fill": 0.4}
     hsv_summary = (
         f'h[{current["h_min"]}-{current["h_max"]}] '
         f's[{current["s_min"]}-{current["s_max"]}] '
@@ -187,10 +175,8 @@ def _render_hsv_body(
     )
     sg_summary = f'aspect≥{float(sg.get("aspect_min", 0.70)):.2f} fill≥{float(sg.get("fill_min", 0.55)):.2f}'
     cs_summary = (
-        f'r{float(cs.get("r_px_expected", 12.0)):.0f} '
-        f'wS{float(cs.get("w_size", 0.5)):.2f} '
-        f'wA{float(cs.get("w_aspect", 0.3)):.2f} '
-        f'wF{float(cs.get("w_fill", 0.2)):.2f}'
+        f'wA{float(cs.get("w_aspect", 0.6)):.2f} '
+        f'wF{float(cs.get("w_fill", 0.4)):.2f}'
     )
     hsv_form = (
         '<form method="POST" action="/detection/hsv" id="hsv-form" class="hsv-form">'

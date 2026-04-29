@@ -451,15 +451,12 @@ class State:
             return CandidateSelectorTuning.default()
         try:
             obj = json.loads(path.read_text())
-            # Old persisted files (w_area / w_dist / dist_cost_sat_radii)
-            # predate the shape-prior swap. Missing keys → fall back to
-            # class defaults rather than failing-loud, since the cost
-            # function changed shape entirely; the operator's previous
-            # weights have no equivalent in the new space.
+            # Old persisted files carry r_px_expected / w_size from the
+            # size_pen era; those keys are silently dropped here (the
+            # cost function no longer reads area). Missing w_aspect /
+            # w_fill → class defaults.
             d = CandidateSelectorTuning.default()
             return CandidateSelectorTuning(
-                r_px_expected=float(obj.get("r_px_expected", d.r_px_expected)),
-                w_size=float(obj.get("w_size", d.w_size)),
                 w_aspect=float(obj.get("w_aspect", d.w_aspect)),
                 w_fill=float(obj.get("w_fill", d.w_fill)),
             )
@@ -471,8 +468,6 @@ class State:
         t = self._candidate_selector_tuning
         payload = json.dumps(
             {
-                "r_px_expected": t.r_px_expected,
-                "w_size": t.w_size,
                 "w_aspect": t.w_aspect,
                 "w_fill": t.w_fill,
             },

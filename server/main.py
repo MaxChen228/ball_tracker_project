@@ -417,8 +417,6 @@ def _build_status_response() -> dict[str, Any]:
             "fill_min": state.shape_gate().fill_min,
         },
         "candidate_selector_tuning": {
-            "r_px_expected": state.candidate_selector_tuning().r_px_expected,
-            "w_size": state.candidate_selector_tuning().w_size,
             "w_aspect": state.candidate_selector_tuning().w_aspect,
             "w_fill": state.candidate_selector_tuning().w_fill,
         },
@@ -638,8 +636,6 @@ def events_index() -> HTMLResponse:
                 "fill_min": state.shape_gate().fill_min,
             },
             candidate_selector_tuning={
-                "r_px_expected": state.candidate_selector_tuning().r_px_expected,
-                "w_size": state.candidate_selector_tuning().w_size,
                 "w_aspect": state.candidate_selector_tuning().w_aspect,
                 "w_fill": state.candidate_selector_tuning().w_fill,
             },

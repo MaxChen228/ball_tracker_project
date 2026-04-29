@@ -50,9 +50,9 @@
   }
 
   // === Candidate selector controls init ===
-  // Two-way bind for w_size / w_aspect / w_fill (slider 0-100 ↔ number
-  // 0.00-1.00). r_px_expected is number-only. Submit posts to
-  // /detection/candidate_selector — shape-prior cost (no temporal).
+  // Two-way bind for w_aspect / w_fill (slider 0-100 ↔ number
+  // 0.00-1.00). Submit posts to /detection/candidate_selector —
+  // scale-invariant shape-prior cost (no size term, no temporal).
   function initCandidateSelectorControls() {
     const form = document.getElementById('candidate-selector-form');
     if (!form) return;

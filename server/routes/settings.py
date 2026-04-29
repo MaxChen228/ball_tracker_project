@@ -128,7 +128,7 @@ async def detection_shape_gate(request: Request):
 
 
 def _validated_candidate_selector_tuning(values: dict[str, object]) -> CandidateSelectorTuning:
-    """Parse + range-check the four shape-prior knobs."""
+    """Parse + range-check the two shape-prior knobs."""
     def _float_field(name: str, lo: float, hi: float) -> float:
         raw = values.get(name)
         try:
@@ -140,8 +140,6 @@ def _validated_candidate_selector_tuning(values: dict[str, object]) -> Candidate
         return value
 
     return CandidateSelectorTuning(
-        r_px_expected=_float_field("r_px_expected", 1.0, 200.0),
-        w_size=_float_field("w_size", 0.0, 1.0),
         w_aspect=_float_field("w_aspect", 0.0, 1.0),
         w_fill=_float_field("w_fill", 0.0, 1.0),
     )
@@ -153,12 +151,11 @@ async def detection_candidate_selector(request: Request):
 
     Server-side only — applied in both `live_pairing._resolve_candidates`
     (live path) and `detect_pitch` (server_post path). Body accepts JSON
-    `{"r_px_expected": 12.0, "w_size": 0.5, "w_aspect": 0.3, "w_fill": 0.2}`
-    or equivalent form fields.
+    `{"w_aspect": 0.6, "w_fill": 0.4}` or equivalent form fields.
     """
     from main import state, _wants_html
 
-    fields = ("r_px_expected", "w_size", "w_aspect", "w_fill")
+    fields = ("w_aspect", "w_fill")
     ctype = request.headers.get("content-type", "").lower()
     if "application/json" in ctype:
         body = await request.json()
@@ -172,8 +169,6 @@ async def detection_candidate_selector(request: Request):
     payload = {
         "ok": True,
         "candidate_selector_tuning": {
-            "r_px_expected": applied.r_px_expected,
-            "w_size": applied.w_size,
             "w_aspect": applied.w_aspect,
             "w_fill": applied.w_fill,
         },
