@@ -949,6 +949,40 @@ def test_run_server_post_frozen_without_snapshot_returns_409(tmp_path):
     assert "frozen" in r.json()["detail"]
 
 
+def test_run_server_post_frozen_failure_does_not_zombie_job_state(tmp_path):
+    """Regression for the pre-flight ordering bug caught in phase 2
+    review: if `_resolve_detection_config` raised AFTER
+    `resume_processing` had already mutated job states to "queued",
+    the failed cams stayed stuck in "queued" forever (no
+    BackgroundTask backing them, no operator path to clear). The fix
+    is to validate config resolution against `session_candidates`
+    BEFORE `resume_processing`. This test pins that ordering: the 409
+    must leave the job in its pre-request state so a subsequent
+    `source=live` retry works without `cancel_processing` first."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(40))
+    # First: source=frozen must 409 because _minimal_pitch has no
+    # *_used snapshot.
+    r1 = client.post(
+        f"/sessions/{sid(40)}/run_server_post",
+        headers={"Accept": "application/json"},
+        json={"source": "frozen"},
+    )
+    assert r1.status_code == 409, r1.text
+    # Second: a follow-up `source=live` request must succeed without
+    # any intervening cancel. If pre-flight ordering is wrong, the cam
+    # is stuck in "queued" and resume_processing returns nothing → 409
+    # "no resumable processing" instead of 200.
+    r2 = client.post(
+        f"/sessions/{sid(40)}/run_server_post",
+        headers={"Accept": "application/json"},
+        json={"source": "live"},
+    )
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["queued"] == 1
+    assert r2.json()["source"] == "live"
+
+
 def test_run_server_post_preset_blue_ball_enqueues(tmp_path):
     """`source=preset:blue_ball` should enqueue without mutating disk
     HSV — the operator's live config is untouched, satisfying the

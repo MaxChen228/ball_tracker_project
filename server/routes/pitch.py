@@ -349,8 +349,8 @@ async def _run_server_detection(
     gate_used = shape_gate
     tuning_used = selector_tuning
     logger.info(
-        "background detection start session=%s cam=%s config=%s hsv=%s",
-        sid, cam, config_label, hsv_used.__dict__,
+        "background detection start session=%s cam=%s config=%s hsv=%r",
+        sid, cam, config_label, hsv_used,
     )
     try:
         frames = await asyncio.to_thread(
