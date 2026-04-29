@@ -54,9 +54,15 @@
   frameTotal.textContent = String(TOTAL_FRAMES - 1);
   function ballDetectedRaysUpTo(rays, t) {
     const xs = [], ys = [], zs = [];
-    const passes = (typeof window._candPassesThreshold === 'function')
-      ? window._candPassesThreshold
-      : (() => true);
+    // No silent fallback: 50_canvas.js sets window._candPassesThreshold
+    // at IIFE init before any user interaction can fire a redraw, so a
+    // missing predicate here is a real bug (init-order regression),
+    // not a tolerated edge case. Throw loudly per project rule
+    // "禁止 silent fallback".
+    const passes = window._candPassesThreshold;
+    if (typeof passes !== 'function') {
+      throw new Error('viewer init order broken: window._candPassesThreshold not set');
+    }
     for (const r of rays) {
       if (r.t_rel_s > t) continue;
       // Same cost-threshold gate as playback mode + BLOBS overlay so
@@ -83,9 +89,10 @@
       if (dt <= tol && dt < bestDt) { bestT = r.t_rel_s; bestDt = dt; }
     }
     if (bestT === null) return {xs: [], ys: [], zs: []};
-    const passes = (typeof window._candPassesThreshold === 'function')
-      ? window._candPassesThreshold
-      : (() => true);
+    const passes = window._candPassesThreshold;
+    if (typeof passes !== 'function') {
+      throw new Error('viewer init order broken: window._candPassesThreshold not set');
+    }
     const xs = [], ys = [], zs = [];
     for (const r of rays) {
       // Match the frame by timestamp identity rather than dt < tol so a
