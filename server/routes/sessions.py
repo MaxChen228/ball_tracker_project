@@ -1,16 +1,119 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 import session_results
-from schemas import DetectionPath, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
+from candidate_selector import CandidateSelectorTuning
+from detection import HSVRange, ShapeGate
+from presets import PRESETS
+from schemas import DetectionPath, PitchPayload, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
 
 router = APIRouter()
 
 _SESSION_ID_RE = re.compile(r"^s_[0-9a-f]{4,32}$")
+
+
+# Detection config sources accepted by /sessions/{sid}/run_server_post.
+# - "live": current dashboard config (state.hsv_range() / shape_gate() / ...).
+#   Mutating effect on subsequent live sessions; used for re-running with
+#   the operator's just-tuned values.
+# - "frozen": the per-pitch frozen snapshot (`pitch.*_used`). Reproduces the
+#   exact config detection ran with originally — required for sanity-checking
+#   that an algorithm change didn't shift results. Fails fast (409) if any
+#   queued pitch lacks one of the three frozen fields (legacy pitch from
+#   before PR #93 stamping landed).
+# - "preset:<name>": canonical HSV preset from `presets.PRESETS`. Shape gate
+#   and selector tuning still come from current state, since presets are
+#   HSV-only today. Does NOT mutate disk — research compares run cleanly
+#   without disturbing the live dashboard config.
+def _resolve_detection_config(
+    source: str,
+    pitch: PitchPayload,
+    state,
+) -> tuple[HSVRange, ShapeGate, CandidateSelectorTuning, str]:
+    if source == "live":
+        return (
+            state.hsv_range(),
+            state.shape_gate(),
+            state.candidate_selector_tuning(),
+            "live",
+        )
+    if source == "frozen":
+        if (
+            pitch.hsv_range_used is None
+            or pitch.shape_gate_used is None
+            or pitch.candidate_selector_tuning_used is None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"frozen config unavailable for cam={pitch.camera_id}: "
+                    "pitch lacks one or more *_used fields (likely a pitch "
+                    "recorded before PR #93 stamping landed)"
+                ),
+            )
+        return (
+            HSVRange(**pitch.hsv_range_used.model_dump()),
+            ShapeGate(**pitch.shape_gate_used.model_dump()),
+            CandidateSelectorTuning(**pitch.candidate_selector_tuning_used.model_dump()),
+            "frozen",
+        )
+    if source.startswith("preset:"):
+        name = source.split(":", 1)[1]
+        if name not in PRESETS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown preset: {name!r} (known: {sorted(PRESETS)})",
+            )
+        return (
+            PRESETS[name].hsv,
+            state.shape_gate(),
+            state.candidate_selector_tuning(),
+            source,
+        )
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"unknown 'source': {source!r}. "
+            "Accepted: 'live' | 'frozen' | 'preset:<name>'."
+        ),
+    )
+
+
+async def _read_source_field(request: Request) -> str:
+    """Pull the required `source` field from either JSON or form body.
+    Per CLAUDE.md (no silent fallback): missing/blank → HTTP 400 rather
+    than implicitly defaulting. Callers (viewer form, events row) submit
+    `source=live` explicitly."""
+    ctype = request.headers.get("content-type", "").lower()
+    raw: object = None
+    if "application/json" in ctype:
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict):
+            raw = body.get("source")
+    else:
+        try:
+            form = await request.form()
+        except Exception:
+            form = None
+        if form is not None:
+            raw = form.get("source")
+    if not isinstance(raw, str) or not raw.strip():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "missing required field 'source' "
+                "(one of: 'live' | 'frozen' | 'preset:<name>')"
+            ),
+        )
+    return raw.strip()
 
 
 @router.post("/sessions/arm")
@@ -169,7 +272,14 @@ async def sessions_run_server_post(
     """Operator-triggered: run server-side HSV detection against every
     camera's archived MOV for this session. Replaces the old "arm with
     server_post checked" auto-flow now that MOVs are always recorded and
-    the detection cost is paid only when the operator asks for it."""
+    the detection cost is paid only when the operator asks for it.
+
+    Body (form or JSON) — required:
+      - `source`: one of `live` | `frozen` | `preset:<name>`. See
+        `_resolve_detection_config` for semantics. No default — every
+        caller (viewer form, events row, JSON API) must specify
+        explicitly to keep research provenance auditable.
+    """
     return await _enqueue_server_post(request, session_id, background_tasks)
 
 
@@ -183,16 +293,39 @@ async def _enqueue_server_post(
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=422, detail="invalid session_id")
+    source = await _read_source_field(request)
     queued = state._processing.resume_processing(session_id)
     if not queued:
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
+    # Resolve override for every queued pitch BEFORE kicking off any
+    # background tasks. If `source=frozen` and one cam lacks a frozen
+    # snapshot, fail the whole request (409) — partial runs would mix
+    # configs across cams of the same session, which is the exact
+    # provenance corruption this redesign exists to prevent.
+    plan: list[tuple[Path, PitchPayload, HSVRange, ShapeGate, CandidateSelectorTuning, str]] = []
     for clip_path, pitch in queued:
-        background_tasks.add_task(_run_server_detection, clip_path, pitch)
+        hsv, gate, tuning, label = _resolve_detection_config(source, pitch, state)
+        plan.append((clip_path, pitch, hsv, gate, tuning, label))
+    for clip_path, pitch, hsv, gate, tuning, label in plan:
+        background_tasks.add_task(
+            _run_server_detection,
+            clip_path,
+            pitch,
+            hsv_range=hsv,
+            shape_gate=gate,
+            selector_tuning=tuning,
+            config_label=label,
+        )
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
-    return {"ok": True, "session_id": session_id, "queued": len(queued)}
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "queued": len(plan),
+        "source": source,
+    }
 
 
 @router.post("/sessions/{session_id}/recompute")

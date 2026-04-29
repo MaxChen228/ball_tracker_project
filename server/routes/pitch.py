@@ -10,6 +10,8 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import ValidationError
 
 import session_results
+from candidate_selector import CandidateSelectorTuning
+from detection import HSVRange, ShapeGate
 from pipeline import ProcessingCanceled
 from schemas import (
     CandidateSelectorTuningPayload,
@@ -232,12 +234,31 @@ async def pitch(
     return response
 
 
-async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
+async def _run_server_detection(
+    clip_path: Path,
+    pitch: PitchPayload,
+    *,
+    hsv_range: "HSVRange",
+    shape_gate: "ShapeGate",
+    selector_tuning: "CandidateSelectorTuning",
+    config_label: str,
+) -> None:
     """Background task: decode the MOV, run HSV detection, annotate, then
     re-record the pitch so `result.points` (and the annotated MP4) land on
     disk. Runs after /pitch has already returned — the dashboard sees the
     session + on-device points immediately, and this task backfills the
-    server-side trace 8-20 s later."""
+    server-side trace 8-20 s later.
+
+    The detection config triple (`hsv_range` / `shape_gate` /
+    `selector_tuning`) is resolved by the caller — `_enqueue_server_post`
+    in `routes/sessions.py` based on the `source` request field. We
+    receive an already-resolved triple so this background task never
+    reads from `state` mid-run; that decoupling is what lets the operator
+    trigger a `preset:blue_ball` reprocess without disturbing the live
+    dashboard config (and concurrent live-streaming sessions). The
+    `config_label` ('live' / 'frozen' / 'preset:<name>') is for log
+    provenance only.
+    """
     import main as _main
     state = _main.state
     detect_pitch = _main.detect_pitch
@@ -318,13 +339,19 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         {"sid": sid, "cam": cam, "frames_done": 0, "frames_total": frames_total},
     )
 
-    # Snapshot once and reuse for both the actual call and the stamp,
-    # so the persisted `*_used` values cannot drift from what was
-    # passed to detect_pitch (e.g. operator edits config between the
-    # two reads).
-    hsv_used = state.hsv_range()
-    gate_used = state.shape_gate()
-    tuning_used = state.candidate_selector_tuning()
+    # The triple was resolved at request time by
+    # `_resolve_detection_config` — never re-read from state here, since
+    # the operator's choice (`preset:blue_ball`, `frozen`, ...) must be
+    # honored regardless of any concurrent dashboard edit. The persisted
+    # `*_used` stamp records exactly what `detect_pitch` ran with, so
+    # later reprocess can reproduce this run from frozen snapshot alone.
+    hsv_used = hsv_range
+    gate_used = shape_gate
+    tuning_used = selector_tuning
+    logger.info(
+        "background detection start session=%s cam=%s config=%s hsv=%s",
+        sid, cam, config_label, hsv_used.__dict__,
+    )
     try:
         frames = await asyncio.to_thread(
             detect_pitch,

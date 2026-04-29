@@ -244,8 +244,13 @@ def render_viewer_html(
                 f'<span class="action-ts" title="Server detection last completed at {iso}">'
                 f'{iso}</span>'
             )
+        # Phase 2: viewer form pins `source=live` so the operator's
+        # current dashboard config wins. Phase 3 swaps the hidden input
+        # for a <select> exposing live / frozen / preset:<name> so
+        # research compares can run without mutating disk.
         action_html = (
             f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post" class="action-form">'
+            f'<input type="hidden" name="source" value="live">'
             f'<button class="action" type="submit">{label}</button>'
             f'{ts_html}'
             f'</form>'

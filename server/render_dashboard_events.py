@@ -170,7 +170,13 @@ def _actions_html(e: dict[str, Any], sid: str,
     if processing_state in {"queued", "processing"}:
         parts.append(_form_btn(f"/sessions/{sid}/cancel_processing", "Cancel", "warn"))
     elif not trashed and server_status != "done":
-        parts.append(_form_btn(f"/sessions/{sid}/run_server_post", "Run srv", "ok"))
+        # Events row triggers server_post with the dashboard's current
+        # detection config (`source=live`). Per-preset / frozen reruns
+        # live in the viewer page where the operator picks deliberately.
+        parts.append(_form_btn(
+            f"/sessions/{sid}/run_server_post", "Run srv", "ok",
+            hidden={"source": "live"},
+        ))
 
     if trashed:
         parts.append(_form_btn(
@@ -190,14 +196,20 @@ def _actions_html(e: dict[str, Any], sid: str,
 
 
 def _form_btn(action: str, label: str, variant: str,
-              *, confirm: str | None = None, title: str | None = None) -> str:
+              *, confirm: str | None = None, title: str | None = None,
+              hidden: dict[str, str] | None = None) -> str:
     onsubmit = (
         f' onsubmit="return confirm({_js_string(confirm)});"'
         if confirm else ""
     )
     title_attr = f' title="{html.escape(title)}"' if title else ""
+    hidden_html = "".join(
+        f'<input type="hidden" name="{html.escape(k)}" value="{html.escape(v)}">'
+        for k, v in (hidden or {}).items()
+    )
     return (
         f'<form class="ev-action-form" method="POST" action="{action}"{onsubmit}>'
+        f'{hidden_html}'
         f'<button class="ev-btn {variant}" type="submit"{title_attr}>{label}</button>'
         f'</form>'
     )
