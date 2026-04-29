@@ -69,71 +69,63 @@ def test_chirp_threshold_rejects_out_of_range(tmp_path, monkeypatch):
         main.state.set_chirp_detect_threshold(2.0)
 
 
-def test_detection_hsv_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):
+def test_detection_config_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):
+    """Phase 3 of unified-config redesign: the legacy
+    `/detection/{hsv,shape_gate,candidate_selector}` endpoints are
+    retired. Single `POST /detection/config` accepts the full triple
+    atomically."""
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(main.app)
 
     r = client.get("/status")
     assert r.json()["hsv_range"] == {
-        "h_min": 25,
-        "h_max": 55,
-        "s_min": 90,
-        "s_max": 255,
-        "v_min": 90,
-        "v_max": 255,
+        "h_min": 25, "h_max": 55, "s_min": 90, "s_max": 255, "v_min": 90, "v_max": 255,
     }
 
-    r = client.post(
-        "/detection/hsv",
-        json={"h_min": 100, "h_max": 130, "s_min": 140, "s_max": 255, "v_min": 40, "v_max": 255},
-    )
-    assert r.status_code == 200
-    assert r.json()["hsv_range"] == {
-        "h_min": 100,
-        "h_max": 130,
-        "s_min": 140,
-        "s_max": 255,
-        "v_min": 40,
-        "v_max": 255,
+    r = client.post("/detection/config", json={
+        "hsv": {"h_min": 100, "h_max": 130, "s_min": 140, "s_max": 255, "v_min": 40, "v_max": 255},
+        "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+        "selector": {"w_aspect": 0.6, "w_fill": 0.4},
+        "preset": None,
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["hsv"] == {
+        "h_min": 100, "h_max": 130, "s_min": 140, "s_max": 255, "v_min": 40, "v_max": 255,
     }
 
-    assert client.get("/status").json()["hsv_range"] == r.json()["hsv_range"]
+    assert client.get("/status").json()["hsv_range"] == r.json()["hsv"]
     ws_json = _fetch_ws_settings(client, "A")
-    assert ws_json["hsv_range"] == r.json()["hsv_range"]
+    assert ws_json["hsv_range"] == r.json()["hsv"]
 
-    r = client.post(
-        "/detection/hsv",
-        data={"h_min": "25", "h_max": "55", "s_min": "90", "s_max": "255", "v_min": "90", "v_max": "255"},
-        headers={"accept": "text/html"},
-        follow_redirects=False,
-    )
-    assert r.status_code == 303
-    # Phase 2 of unified-config redesign: the triple now lives in a
-    # single `detection_config.json`. Editing one section drops preset
-    # binding (since the resulting config no longer matches any named
-    # preset by definition) and stamps `last_applied_at`.
     persisted = _json.loads((tmp_path / "detection_config.json").read_text())
-    assert persisted["hsv"] == {
-        "h_min": 25,
-        "h_max": 55,
-        "s_min": 90,
-        "s_max": 255,
-        "v_min": 90,
-        "v_max": 255,
-    }
+    assert persisted["hsv"]["h_min"] == 100
     assert persisted["preset"] is None
     assert isinstance(persisted["last_applied_at"], (int, float))
 
 
-def test_detection_hsv_rejects_invalid_values(tmp_path, monkeypatch):
+def test_legacy_detection_endpoints_are_retired(tmp_path, monkeypatch):
+    """The legacy per-section endpoints must 404 — anything still
+    POSTing to them is broken and should fail loud rather than
+    silently fall through to /detection/config."""
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(main.app)
-    r = client.post(
-        "/detection/hsv",
-        json={"h_min": -1, "h_max": 55, "s_min": 90, "s_max": 255, "v_min": 90, "v_max": 255},
-    )
+    for path in ("/detection/hsv", "/detection/shape_gate", "/detection/candidate_selector"):
+        r = client.post(path, json={})
+        assert r.status_code == 404, f"{path} should be retired but returned {r.status_code}"
+
+
+def test_detection_config_rejects_invalid_hsv_value(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+    r = client.post("/detection/config", json={
+        "hsv": {"h_min": -1, "h_max": 55, "s_min": 90, "s_max": 255, "v_min": 90, "v_max": 255},
+        "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+        "selector": {"w_aspect": 0.6, "w_fill": 0.4},
+        "preset": None,
+    })
     assert r.status_code == 400
     assert "out of range" in r.json()["detail"]
 

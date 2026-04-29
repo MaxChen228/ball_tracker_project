@@ -1,10 +1,28 @@
-"""Route tests for POST /detection/candidate_selector (shape-prior knobs)."""
+"""Route tests for the candidate-selector tuning surface inside the
+unified `POST /detection/config` endpoint (phase 3 of the unified-
+config redesign — the legacy `/detection/candidate_selector` endpoint
+is retired)."""
 from __future__ import annotations
 
 import json as _json
 
 import pytest
 from fastapi.testclient import TestClient
+
+
+def _post_config(client, *, w_aspect: float, w_fill: float):
+    return client.post(
+        "/detection/config",
+        json={
+            "hsv": {
+                "h_min": 25, "h_max": 55, "s_min": 90, "s_max": 255,
+                "v_min": 90, "v_max": 255,
+            },
+            "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+            "selector": {"w_aspect": w_aspect, "w_fill": w_fill},
+            "preset": None,
+        },
+    )
 
 
 def test_candidate_selector_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):
@@ -19,37 +37,20 @@ def test_candidate_selector_post_persists_and_surfaces_on_status(tmp_path, monke
     assert cst["w_aspect"] == pytest.approx(0.6)
     assert cst["w_fill"] == pytest.approx(0.4)
 
-    # JSON push.
-    r = client.post(
-        "/detection/candidate_selector",
-        json={"w_aspect": 0.7, "w_fill": 0.3},
-    )
-    assert r.status_code == 200
-    body = r.json()["candidate_selector_tuning"]
-    assert body["w_aspect"] == pytest.approx(0.7)
-    assert body["w_fill"] == pytest.approx(0.3)
+    # POST through the unified config endpoint.
+    r = _post_config(client, w_aspect=0.7, w_fill=0.3)
+    assert r.status_code == 200, r.text
+    sel = r.json()["selector"]
+    assert sel["w_aspect"] == pytest.approx(0.7)
+    assert sel["w_fill"] == pytest.approx(0.3)
 
     # Surfaces on /status.
-    assert client.get("/status").json()["candidate_selector_tuning"] == body
+    assert client.get("/status").json()["candidate_selector_tuning"] == sel
 
-    # Persisted to disk inside the unified detection_config.json
-    # (phase 2 of unified-config redesign — selector lives alongside
-    # HSV + shape_gate in a single atomic file).
+    # Persisted to disk inside the unified detection_config.json.
     persisted = _json.loads((tmp_path / "detection_config.json").read_text())
     assert persisted["selector"] == {"w_aspect": 0.7, "w_fill": 0.3}
-    assert persisted["preset"] is None  # editing a sub-knob clears preset binding
-
-    # Form push (HTML caller) redirects 303.
-    r = client.post(
-        "/detection/candidate_selector",
-        data={"w_aspect": "0.55", "w_fill": "0.45"},
-        headers={"accept": "text/html"},
-        follow_redirects=False,
-    )
-    assert r.status_code == 303
-    t = main.state.candidate_selector_tuning()
-    assert t.w_aspect == pytest.approx(0.55)
-    assert t.w_fill == pytest.approx(0.45)
+    assert persisted["preset"] is None
 
 
 def test_candidate_selector_rejects_out_of_range(tmp_path, monkeypatch):
@@ -57,17 +58,15 @@ def test_candidate_selector_rejects_out_of_range(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(main.app)
 
-    valid = {"w_aspect": 0.6, "w_fill": 0.4}
-    bad_payloads = [
-        {**valid, "w_aspect": -0.1},
-        {**valid, "w_aspect": 1.5},
-        {**valid, "w_fill": -0.1},
-        {**valid, "w_fill": 1.5},
-        {"w_aspect": 0.6},  # missing w_fill
+    bad_pairs = [
+        (-0.1, 0.4),  # w_aspect under
+        (1.5, 0.4),   # w_aspect over
+        (0.6, -0.1),  # w_fill under
+        (0.6, 1.5),   # w_fill over
     ]
-    for body in bad_payloads:
-        r = client.post("/detection/candidate_selector", json=body)
-        assert r.status_code == 400, f"expected 400 for {body}"
+    for wa, wf in bad_pairs:
+        r = _post_config(client, w_aspect=wa, w_fill=wf)
+        assert r.status_code == 400, f"expected 400 for ({wa},{wf})"
 
     # Defaults unchanged.
     t = main.state.candidate_selector_tuning()
@@ -80,10 +79,7 @@ def test_candidate_selector_persists_across_state_restart(tmp_path, monkeypatch)
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(main.app)
-    r = client.post(
-        "/detection/candidate_selector",
-        json={"w_aspect": 0.4, "w_fill": 0.2},
-    )
+    r = _post_config(client, w_aspect=0.4, w_fill=0.2)
     assert r.status_code == 200
 
     # Simulate restart.

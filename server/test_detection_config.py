@@ -235,14 +235,14 @@ def test_post_detection_config_rejects_missing_section(tmp_path, monkeypatch):
     assert "missing" in r.json()["detail"]
 
 
-def test_legacy_hsv_endpoint_clears_preset_binding(tmp_path, monkeypatch):
-    """Editing HSV alone via the legacy `/detection/hsv` endpoint MUST
-    drop preset identity (the resulting config no longer matches any
-    named preset by definition). This is the contract that lets the
-    dashboard's identity header trustworthy-ly say "blue_ball ·
-    modified" — the moment the operator edits, we are no longer
-    blue_ball-pure."""
+def test_set_hsv_range_alone_clears_preset_binding(tmp_path, monkeypatch):
+    """The single-section convenience setter (state-level, no HTTP
+    surface as of phase 3) must drop preset identity — the resulting
+    config no longer matches any named preset by definition. Lets the
+    dashboard identity header trustworthy-ly say "blue_ball · modified"
+    — the moment one sub-knob diverges, we are no longer blue_ball-pure."""
     main = _fresh_main(tmp_path, monkeypatch)
+    from detection import HSVRange
     from detection_config import DetectionConfig
     from presets import PRESETS
 
@@ -250,16 +250,13 @@ def test_legacy_hsv_endpoint_clears_preset_binding(tmp_path, monkeypatch):
     bb = PRESETS["blue_ball"]
     main.state.set_detection_config(DetectionConfig(
         hsv=bb.hsv, shape_gate=bb.shape_gate, selector=bb.selector,
-        preset="blue_ball", last_applied_at=time.time(),
+        preset="blue_ball", last_applied_at=None,
     ))
 
-    # Tweak via legacy endpoint.
-    client = TestClient(main.app)
-    r = client.post("/detection/hsv", json={
-        "h_min": 100, "h_max": 120, "s_min": 100, "s_max": 200,
-        "v_min": 30, "v_max": 200,
-    })
-    assert r.status_code == 200, r.text
+    # Tweak HSV alone via the state-level convenience setter.
+    main.state.set_hsv_range(HSVRange(
+        h_min=100, h_max=120, s_min=100, s_max=200, v_min=30, v_max=200,
+    ))
 
     cfg = main.state.detection_config()
     assert cfg.preset is None  # binding cleared
@@ -267,3 +264,45 @@ def test_legacy_hsv_endpoint_clears_preset_binding(tmp_path, monkeypatch):
     # shape_gate / selector still match blue_ball (we only edited HSV).
     assert cfg.shape_gate == bb.shape_gate
     assert cfg.selector == bb.selector
+
+
+def test_reset_to_preset_endpoint_restores_preset_purity(tmp_path, monkeypatch):
+    """`POST /detection/config/reset_to_preset` snaps the live triple
+    to the named preset's canonical values and re-binds preset identity
+    in one atomic operation."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    from detection_config import DetectionConfig
+    from detection import HSVRange, ShapeGate
+    from candidate_selector import CandidateSelectorTuning
+    from presets import PRESETS
+
+    # Start with a custom config (preset=None).
+    main.state.set_detection_config(DetectionConfig(
+        hsv=HSVRange(h_min=1, h_max=2, s_min=3, s_max=4, v_min=5, v_max=6),
+        shape_gate=ShapeGate(aspect_min=0.1, fill_min=0.1),
+        selector=CandidateSelectorTuning(w_aspect=0.1, w_fill=0.1),
+        preset=None,
+        last_applied_at=None,
+    ))
+
+    client = TestClient(main.app)
+    r = client.post("/detection/config/reset_to_preset", json={"preset": "blue_ball"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    bb = PRESETS["blue_ball"]
+    assert body["preset"] == "blue_ball"
+    assert body["modified_fields"] == []
+    assert main.state.hsv_range() == bb.hsv
+    assert main.state.shape_gate() == bb.shape_gate
+    assert main.state.candidate_selector_tuning() == bb.selector
+
+
+def test_reset_to_preset_rejects_unknown_or_missing(tmp_path, monkeypatch):
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    r = client.post("/detection/config/reset_to_preset", json={"preset": "no_such"})
+    assert r.status_code == 400, r.text
+    assert "no_such" in r.json()["detail"]
+    r = client.post("/detection/config/reset_to_preset", json={})
+    assert r.status_code == 400, r.text
+    assert "preset" in r.json()["detail"]

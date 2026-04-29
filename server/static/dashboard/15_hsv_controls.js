@@ -1,75 +1,149 @@
-// === HSV controls init ===
-  function initHSVControls() {
-    const form = document.getElementById('hsv-form');
-    if (!form) return;
-    const syncField = (key, value) => {
-      const range = form.querySelector(`[data-hsv-range="${key}"]`);
-      const number = form.querySelector(`[data-hsv-number="${key}"]`);
-      if (range) range.value = String(value);
-      if (number) number.value = String(value);
-    };
-    form.querySelectorAll('[data-hsv-range]').forEach((input) => {
-      input.addEventListener('input', () => syncField(input.dataset.hsvRange, input.value));
-    });
-    form.querySelectorAll('[data-hsv-number]').forEach((input) => {
-      input.addEventListener('input', () => syncField(input.dataset.hsvNumber, input.value));
-    });
-    form.querySelectorAll('[data-hsv-preset]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        syncField('h_min', btn.dataset.hMin);
-        syncField('h_max', btn.dataset.hMax);
-        syncField('s_min', btn.dataset.sMin);
-        syncField('s_max', btn.dataset.sMax);
-        syncField('v_min', btn.dataset.vMin);
-        syncField('v_max', btn.dataset.vMax);
-      });
-    });
+// === Detection-config card (phase 3 of unified-config redesign) ===
+//
+// One form, one Apply button, atomic POST to /detection/config. Sliders
+// edit local form state only — they no longer hit the server on every
+// drag. Preset buttons load a preset's full triple (HSV + shape gate +
+// selector) into the form, but DO NOT apply server-side until the
+// operator clicks Apply. Reset-to-preset is a server-side snap that
+// also reloads the page so the SSR identity header refreshes.
+
+  function _syncHSVField(form, key, value) {
+    const range = form.querySelector(`[data-hsv-range="${key}"]`);
+    const num = form.querySelector(`[data-hsv-number="${key}"]`);
+    if (range) range.value = String(value);
+    if (num) num.value = String(value);
   }
 
-  // === Shape gate controls init ===
-  // Two-way bind slider (0-100 int) ↔ number (0.00-1.00). Submit is
-  // a plain form POST — server returns 303 back to '/' just like HSV.
-  function initShapeGateControls() {
-    const form = document.getElementById('shape-gate-form');
+  function _syncShapeOrSelector(form, attr, key, value01) {
+    const range = form.querySelector(`[data-${attr}-range="${key}"]`);
+    const num = form.querySelector(`[data-${attr}-number="${key}"]`);
+    const v = Math.max(0, Math.min(1, Number(value01) || 0));
+    if (range) range.value = String(Math.round(v * 100));
+    if (num) num.value = v.toFixed(2);
+  }
+
+  function _readHSV(form) {
+    const get = (k) => Number(form.querySelector(`[data-hsv-number="${k}"]`).value);
+    return {
+      h_min: get('h_min'), h_max: get('h_max'),
+      s_min: get('s_min'), s_max: get('s_max'),
+      v_min: get('v_min'), v_max: get('v_max'),
+    };
+  }
+
+  function _readShape(form) {
+    const get = (k) => Number(form.querySelector(`[data-shape-number="${k}"]`).value);
+    return { aspect_min: get('aspect_min'), fill_min: get('fill_min') };
+  }
+
+  function _readSelector(form) {
+    const get = (k) => Number(form.querySelector(`[data-cs-number="${k}"]`).value);
+    return { w_aspect: get('w_aspect'), w_fill: get('w_fill') };
+  }
+
+  function initDetectionConfigControls() {
+    const form = document.getElementById('detection-config-form');
     if (!form) return;
+
+    // HSV slider <-> number two-way bind.
+    form.querySelectorAll('[data-hsv-range]').forEach((input) => {
+      input.addEventListener('input', () => _syncHSVField(form, input.dataset.hsvRange, input.value));
+    });
+    form.querySelectorAll('[data-hsv-number]').forEach((input) => {
+      input.addEventListener('input', () => _syncHSVField(form, input.dataset.hsvNumber, input.value));
+    });
+
+    // Shape-gate slider (0..100) <-> number (0..1).
     form.querySelectorAll('[data-shape-range]').forEach((slider) => {
       slider.addEventListener('input', () => {
-        const key = slider.dataset.shapeRange;
-        const num = form.querySelector(`[data-shape-number="${key}"]`);
-        if (num) num.value = (Number(slider.value) / 100).toFixed(2);
+        _syncShapeOrSelector(form, 'shape', slider.dataset.shapeRange, Number(slider.value) / 100);
       });
     });
     form.querySelectorAll('[data-shape-number]').forEach((num) => {
       num.addEventListener('input', () => {
-        const key = num.dataset.shapeNumber;
-        const slider = form.querySelector(`[data-shape-range="${key}"]`);
-        const val = Math.max(0, Math.min(1, Number(num.value) || 0));
-        if (slider) slider.value = String(Math.round(val * 100));
+        _syncShapeOrSelector(form, 'shape', num.dataset.shapeNumber, Number(num.value));
       });
     });
-  }
 
-  // === Candidate selector controls init ===
-  // Two-way bind for w_aspect / w_fill (slider 0-100 ↔ number
-  // 0.00-1.00). Submit posts to /detection/candidate_selector —
-  // scale-invariant shape-prior cost (no size term, no temporal).
-  function initCandidateSelectorControls() {
-    const form = document.getElementById('candidate-selector-form');
-    if (!form) return;
+    // Selector slider <-> number.
     form.querySelectorAll('[data-cs-range]').forEach((slider) => {
       slider.addEventListener('input', () => {
-        const key = slider.dataset.csRange;
-        const num = form.querySelector(`[data-cs-number="${key}"]`);
-        if (num) num.value = (Number(slider.value) / 100).toFixed(2);
+        _syncShapeOrSelector(form, 'cs', slider.dataset.csRange, Number(slider.value) / 100);
       });
     });
     form.querySelectorAll('[data-cs-number]').forEach((num) => {
       num.addEventListener('input', () => {
-        const key = num.dataset.csNumber;
-        const slider = form.querySelector(`[data-cs-range="${key}"]`);
-        if (!slider) return;
-        const val = Math.max(0, Math.min(1, Number(num.value) || 0));
-        slider.value = String(Math.round(val * 100));
+        _syncShapeOrSelector(form, 'cs', num.dataset.csNumber, Number(num.value));
+      });
+    });
+
+    // Preset button: load full triple values into the form. Does NOT
+    // apply server-side — operator confirms with Apply.
+    document.querySelectorAll('[data-hsv-preset]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        _syncHSVField(form, 'h_min', btn.dataset.hMin);
+        _syncHSVField(form, 'h_max', btn.dataset.hMax);
+        _syncHSVField(form, 's_min', btn.dataset.sMin);
+        _syncHSVField(form, 's_max', btn.dataset.sMax);
+        _syncHSVField(form, 'v_min', btn.dataset.vMin);
+        _syncHSVField(form, 'v_max', btn.dataset.vMax);
+        _syncShapeOrSelector(form, 'shape', 'aspect_min', btn.dataset.aspectMin);
+        _syncShapeOrSelector(form, 'shape', 'fill_min', btn.dataset.fillMin);
+        _syncShapeOrSelector(form, 'cs', 'w_aspect', btn.dataset.wAspect);
+        _syncShapeOrSelector(form, 'cs', 'w_fill', btn.dataset.wFill);
+        // Stash the chosen preset name so Apply can claim identity.
+        form.dataset.pendingPreset = btn.dataset.hsvPreset;
+      });
+    });
+
+    // Apply button: POST /detection/config with the full triple. The
+    // identity claim (`preset`) is only sent if the operator just
+    // clicked a preset button and hasn't dragged anything since —
+    // otherwise we send `preset: null` and the server records custom.
+    form.addEventListener('submit', async (evt) => {
+      evt.preventDefault();
+      const status = form.querySelector('[data-detection-apply-status]');
+      const presetClaim = form.dataset.pendingPreset || null;
+      const body = {
+        hsv: _readHSV(form),
+        shape_gate: _readShape(form),
+        selector: _readSelector(form),
+        preset: presetClaim,
+      };
+      if (status) status.textContent = '…';
+      try {
+        const r = await fetch('/detection/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) {
+          const t = await r.text();
+          if (status) status.textContent = `error: ${t.slice(0, 200)}`;
+          return;
+        }
+        // Clear pending preset claim so subsequent Apply (after manual
+        // edits) defaults back to `preset: null`.
+        delete form.dataset.pendingPreset;
+        // Reload so the SSR identity header re-renders against the
+        // new state (active preset / modified flag / etc.).
+        window.location.reload();
+      } catch (e) {
+        if (status) status.textContent = `network error: ${e}`;
+      }
+    });
+
+    // Reset-to-preset button (only present when current state has
+    // modified_fields, see render_dashboard_session._render_hsv_body).
+    document.querySelectorAll('[data-detection-reset-preset]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const presetName = btn.dataset.detectionResetPreset;
+        const r = await fetch('/detection/config/reset_to_preset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ preset: presetName }),
+        });
+        if (r.ok) window.location.reload();
       });
     });
   }

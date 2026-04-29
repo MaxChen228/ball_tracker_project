@@ -24,9 +24,7 @@ def render_events_index_html(
     session: dict[str, Any] | None = None,
     calibrations: list[str] | None = None,
     arm_readiness: dict[str, Any] | None = None,
-    hsv_range: dict[str, int] | None = None,
-    shape_gate: dict[str, float] | None = None,
-    candidate_selector_tuning: dict[str, float] | None = None,
+    detection_config: dict[str, Any] | None = None,
     sync: dict[str, Any] | None = None,
     sync_cooldown_remaining_s: float = 0.0,
     chirp_detect_threshold: float = 0.18,
@@ -68,7 +66,7 @@ def render_events_index_html(
     session_html = _render_session_body(
         session, devices, calibrations, arm_readiness
     )
-    hsv_html = _render_hsv_body(hsv_range, shape_gate, candidate_selector_tuning)
+    hsv_html = _render_hsv_body(detection_config)
     tuning_html = _render_tuning_body(
         heartbeat_interval_s=heartbeat_interval_s,
         tracking_exposure_cap=tracking_exposure_cap,

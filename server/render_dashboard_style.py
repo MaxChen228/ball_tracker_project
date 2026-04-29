@@ -191,6 +191,21 @@ _CSS = f"""
 .tune-section[open] .tune-summary {{ display: none; }}
 .tune-section > .hsv-form {{ margin-top: var(--s-2); }}
 .hsv-subtitle {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub); }}
+.detection-identity {{ display: flex; align-items: center; gap: var(--s-2);
+    padding: 6px 0 var(--s-2); border-bottom: 1px solid var(--border-l);
+    margin-bottom: var(--s-2); }}
+.identity-tag {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em;
+    text-transform: uppercase; padding: 4px 10px; border-radius: var(--r);
+    border: 1px solid var(--border-base); }}
+.identity-pure {{ color: var(--passed, var(--ink)); border-color: var(--passed, var(--ink)); }}
+.identity-modified {{ color: var(--ink); border-color: var(--ink);
+    background: var(--surface); }}
+.identity-custom {{ color: var(--sub); border-color: var(--border-base); }}
+.detection-section {{ border-top: 1px solid var(--border-l); padding-top: var(--s-2);
+    margin-top: var(--s-2); }}
+.detection-section:first-of-type {{ border-top: 0; padding-top: 0; margin-top: 0; }}
+.detection-apply-status {{ font-family: var(--mono); font-size: 10px;
+    color: var(--sub); margin-left: var(--s-2); align-self: center; }}
 .shape-row {{ display: grid; grid-template-columns: 60px minmax(0, 1fr) 56px; gap: var(--s-2); align-items: center; }}
 .shape-label {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em; text-transform: uppercase; color: var(--sub); }}
 .shape-row input[type="range"] {{ width: 100%; margin: 0; accent-color: var(--ink); }}
