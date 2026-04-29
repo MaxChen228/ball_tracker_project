@@ -161,7 +161,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 getSyncAnchorTimestampS: { [weak self] in self?.syncCoordinator.lastSyncAnchorTimestampS },
                 currentCaptureTelemetry: { [weak self] fps in
                     self?.currentCaptureTelemetry(targetFps: fps)
-                        ?? ServerUploader.CaptureTelemetry(width_px: 0, height_px: 0, target_fps: fps, applied_fps: 0, format_fov_deg: nil, format_index: nil, is_video_binned: nil, tracking_exposure_cap: nil, applied_max_exposure_s: nil)
                 },
                 startCapture: { [weak self] fps in self?.startCapture(at: fps) },
                 resetDetectionState: { [weak self] in self?.resetBallDetectionState() },
@@ -355,7 +354,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         captureTelemetryLock.unlock()
     }
 
-    private func currentCaptureTelemetry(targetFps: Double) -> ServerUploader.CaptureTelemetry {
+    private func currentCaptureTelemetry(targetFps: Double) -> ServerUploader.CaptureTelemetry? {
         captureTelemetryLock.lock()
         defer { captureTelemetryLock.unlock() }
         let appliedTelemetry = CameraCaptureRuntime.AppliedTelemetry(
@@ -511,7 +510,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 setCurrentSessionId: { [weak self] in self?.currentSessionId = $0 },
                 setCurrentSessionPaths: { [weak self] in self?.currentSessionPaths = $0 },
                 getCurrentTargetFps: { [weak self] in self?.currentTargetFps() ?? 60 },
-                getCurrentCaptureHeight: { [weak self] in self?.captureRuntime.currentCaptureHeight ?? AppSettings.captureHeightFixed },
+                getCurrentCaptureHeight: { [weak self] in self?.captureRuntime.currentCaptureHeight },
                 getSyncId: { [weak self] in self?.syncCoordinator.lastSyncId },
                 getSyncAnchorTimestampS: { [weak self] in self?.syncCoordinator.lastSyncAnchorTimestampS },
                 getChirpSnapshot: { [weak self] in self?.captureRuntime.chirpSnapshot() },
