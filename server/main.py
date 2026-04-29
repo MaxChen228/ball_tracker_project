@@ -418,9 +418,9 @@ def _build_status_response() -> dict[str, Any]:
         },
         "candidate_selector_tuning": {
             "r_px_expected": state.candidate_selector_tuning().r_px_expected,
-            "w_area": state.candidate_selector_tuning().w_area,
-            "w_dist": state.candidate_selector_tuning().w_dist,
-            "dist_cost_sat_radii": state.candidate_selector_tuning().dist_cost_sat_radii,
+            "w_size": state.candidate_selector_tuning().w_size,
+            "w_aspect": state.candidate_selector_tuning().w_aspect,
+            "w_fill": state.candidate_selector_tuning().w_fill,
         },
         # Mutual-sync context. `sync.id` is the sole dedupe key the phone
         # uses to decide whether a fresh `sync_run` command has arrived
@@ -639,9 +639,9 @@ def events_index() -> HTMLResponse:
             },
             candidate_selector_tuning={
                 "r_px_expected": state.candidate_selector_tuning().r_px_expected,
-                "w_area": state.candidate_selector_tuning().w_area,
-                "w_dist": state.candidate_selector_tuning().w_dist,
-                "dist_cost_sat_radii": state.candidate_selector_tuning().dist_cost_sat_radii,
+                "w_size": state.candidate_selector_tuning().w_size,
+                "w_aspect": state.candidate_selector_tuning().w_aspect,
+                "w_fill": state.candidate_selector_tuning().w_fill,
             },
             sync=sync_run.to_dict() if sync_run is not None else None,
             sync_cooldown_remaining_s=state._sync.sync_cooldown_remaining_s(),

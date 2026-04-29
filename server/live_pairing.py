@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import logging
-import math
 import threading
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates
+from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates  # noqa: F401  (Candidate kept for callers; unused here)
 from schemas import FramePayload, TriangulatedPoint
 
 logger = logging.getLogger("ball_tracker")
@@ -61,12 +60,6 @@ class LivePairingSession:
     # state.ingest_live_frame; reused across the 8 ms pair loop so the
     # hot path skips per-frame pitch construction + SVD extrinsics.
     camera_poses: dict[str, CameraPose] = field(default_factory=dict)
-    # Per-cam temporal prior state for candidate selection. Mirrors the
-    # equal-velocity straight-line model in pipeline.detect_pitch — reset
-    # to None on a miss so we don't extrapolate from a stale anchor.
-    last_position: dict[str, tuple[float, float]] = field(default_factory=dict)
-    last_velocity: dict[str, tuple[float, float]] = field(default_factory=dict)
-    last_timestamp_s: dict[str, float] = field(default_factory=dict)
     # Selector tuning, refreshed by state.ingest_live_frame from the
     # dashboard-controlled `state.candidate_selector_tuning()` on every
     # ingest. Defaults so a session built outside that call (tests) still
@@ -86,40 +79,27 @@ class LivePairingSession:
         self._lock = threading.RLock()
 
     def _resolve_candidates(self, cam: str, frame: FramePayload) -> FramePayload:
-        """Pick the winning candidate using the temporal prior. Empty
-        candidate list → no detection; px/py = None, ball_detected=False.
+        """Pick the winning candidate using the shape-prior selector.
+        Empty candidate list → no detection; px/py = None,
+        ball_detected=False.
 
         Stamps `cost` on every BlobCandidate so the viewer can render
         non-winners ranked by selector cost without re-running the
         selector at view time (which would diverge from "cost actually
-        used to pick winner" if dashboard tuning changed)."""
+        used to pick winner" if dashboard tuning changed).
+
+        iOS-sourced candidates currently lack `aspect`/`fill` (legacy
+        wire schema). The shape cost treats those Nones as neutral on
+        their respective axes — see candidate_selector module docstring.
+        """
         cands = frame.candidates
         if not cands:
             return frame.model_copy(update={"px": None, "py": None, "ball_detected": False})
-        prev_pos = self.last_position.get(cam)
-        prev_vel = self.last_velocity.get(cam)
-        prev_t = self.last_timestamp_s.get(cam)
-        dt = (
-            frame.timestamp_s - prev_t
-            if prev_t is not None and math.isfinite(prev_t) else None
-        )
-        # Re-normalize area_score against this frame's batch — producer
-        # may have computed it against a different denominator.
-        max_area = max(c.area for c in cands) or 1
         selector_in = [
-            Candidate(cx=c.px, cy=c.py, area=c.area, area_score=c.area / max_area)
+            Candidate(cx=c.px, cy=c.py, area=c.area, aspect=c.aspect, fill=c.fill)
             for c in cands
         ]
-        costs = score_candidates(
-            selector_in,
-            prev_position=prev_pos,
-            prev_velocity=prev_vel,
-            dt=dt,
-            r_px_expected=self.tuning.r_px_expected,
-            w_area=self.tuning.w_area,
-            w_dist=self.tuning.w_dist,
-            dist_cost_sat_radii=self.tuning.dist_cost_sat_radii,
-        )
+        costs = score_candidates(selector_in, self.tuning)
         winner_idx = min(range(len(costs)), key=lambda i: costs[i])
         winner = cands[winner_idx]
         cands_with_cost = [
@@ -132,24 +112,6 @@ class LivePairingSession:
             "py": winner.py,
             "ball_detected": True,
         })
-
-    def _update_temporal_prior(self, cam: str, frame: FramePayload) -> None:
-        if not frame.ball_detected or frame.px is None or frame.py is None:
-            self.last_position.pop(cam, None)
-            self.last_velocity.pop(cam, None)
-            self.last_timestamp_s.pop(cam, None)
-            return
-        prev_pos = self.last_position.get(cam)
-        prev_t = self.last_timestamp_s.get(cam)
-        if prev_pos is not None and prev_t is not None:
-            dt_seen = frame.timestamp_s - prev_t
-            if dt_seen > 0:
-                self.last_velocity[cam] = (
-                    (frame.px - prev_pos[0]) / dt_seen,
-                    (frame.py - prev_pos[1]) / dt_seen,
-                )
-        self.last_position[cam] = (frame.px, frame.py)
-        self.last_timestamp_s[cam] = frame.timestamp_s
 
     def ingest(
         self,
@@ -170,10 +132,9 @@ class LivePairingSession:
         only the dt comparison is anchor-shifted, so downstream persistence
         and triangulation see the original values."""
         with self._lock:
-            # Apply temporal-prior candidate selection BEFORE buffering, so
+            # Apply shape-prior candidate selection BEFORE buffering, so
             # downstream pairing + persistence see a single resolved (px, py).
             frame = self._resolve_candidates(cam, frame)
-            self._update_temporal_prior(cam, frame)
             buf = self.buffers.setdefault(cam, deque())
             buf.append(frame)
             self.frames_by_cam.setdefault(cam, []).append(frame)
