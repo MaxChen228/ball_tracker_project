@@ -81,10 +81,9 @@ def find_detection_index(
     ``tol`` seconds, walking back from the binary-search hit if it lands
     on a not-detected entry.
 
-    Mirrors the viewer's `_drawDetectionForPath` algorithm: chain_filter
-    `rejected_jump` runs and server_post frame gaps both leave sequential
-    `det=False` rows. Without the left-scan, scrubbing across a gap blanks
-    the dot and at 240 fps reads as flicker.
+    Mirrors the viewer's `_drawDetectionForPath` algorithm: server_post
+    frame gaps leave sequential `det=False` rows. Without the left-scan,
+    scrubbing across a gap blanks the dot and at 240 fps reads as flicker.
     """
     n = len(ts)
     if n == 0 or len(det) != n:

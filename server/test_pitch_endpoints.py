@@ -233,11 +233,8 @@ def test_post_pitch_anchorless_single_camera_keeps_rays(tmp_path):
     assert r.json()["error"] is None
     assert r.json()["triangulated_points"] == 0
 
-    # include_rejected=true: single-frame fixture trips chain_filter's
-    # min_run_len → rejected_flicker, which the wire payload hides by
-    # default. Building a 10-frame fixture just to satisfy the filter
-    # would obscure the actual thing under test (monocular ray render).
-    scene = client.get(f"/reconstruction/{sid(502)}?include_rejected=true").json()
+    # Reconstruction always emits every ray now that chain_filter is gone.
+    scene = client.get(f"/reconstruction/{sid(502)}").json()
     assert len(scene["cameras"]) == 1
     assert len(scene["rays"]) == 1
     assert scene["triangulated"] == []

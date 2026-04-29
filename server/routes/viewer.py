@@ -187,11 +187,6 @@ def _stream(frames, rel_anchor, *, include_candidates: bool) -> dict[str, list]:
         # index. Array index alone hides drops/throttle gaps; frame_index
         # tells you which physical frame the detection came from.
         "frame_index": [int(f.frame_index) for f in ordered],
-        # chain_filter verdict (None for non-detection frames or live
-        # path which doesn't run chain_filter). Null distinguished from
-        # "kept" so the viewer can show "uncategorised" vs "actively
-        # validated" — important for live which never runs the filter.
-        "filter_status": [f.filter_status for f in ordered],
     }
     if include_candidates:
         # Each frame's value is a list of {px,py,area,area_score,cost}
@@ -296,14 +291,9 @@ def results_for_session(session_id: str) -> SessionResult:
 
 
 @router.get("/reconstruction/{session_id}")
-def reconstruction(session_id: str, include_rejected: bool = False) -> dict[str, Any]:
-    # Wire payload defaults to hiding chain-filter rejects to match the
-    # viewer's default render. `include_rejected=true` flips both flicker
-    # and jump rays back into the response — used by reprocess CLI dumps
-    # and tests that want to assert on raw monocular detections without
-    # building a 10-frame fixture just to satisfy `min_run_len`.
+def reconstruction(session_id: str) -> dict[str, Any]:
     scene = _scene_for_session(session_id)
-    return scene.to_dict(include_rejected=include_rejected)
+    return scene.to_dict()
 
 
 @router.get("/viewer/{session_id}", response_class=HTMLResponse)

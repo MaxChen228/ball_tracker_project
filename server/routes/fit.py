@@ -18,9 +18,18 @@ _VALID_PATHS = ("server_post", "live")
 @router.get("/fit/{session_id}", response_class=HTMLResponse)
 def fit_page(
     session_id: str,
-    path: str = Query("server_post"),
+    path: str | None = Query(None),
 ) -> HTMLResponse:
-    if path not in _VALID_PATHS:
+    """Render the multi-segment fit page for a session.
+
+    Path selection rules (no silent fallback — explicit auto-pick):
+      - `?path=` omitted → pick `server_post` if it has triangulated
+        points, else `live` if it has, else 404
+      - `?path=<value>` with `<value>` not in `_VALID_PATHS` → 422
+      - `?path=<value>` with no triangulated points on `<value>` → 404
+        with the available paths spelled out so the user can switch
+    """
+    if path is not None and path not in _VALID_PATHS:
         raise HTTPException(422, f"path must be one of {_VALID_PATHS}")
 
     from main import state
@@ -30,11 +39,18 @@ def fit_page(
     if result is None:
         raise HTTPException(404, f"session {session_id} not found")
 
-    pts_in = result.triangulated_by_path.get(path, [])
-    available = sorted(
-        p for p in _VALID_PATHS
+    available = [
+        p for p in _VALID_PATHS  # _VALID_PATHS order = (server_post, live)
         if result.triangulated_by_path.get(p)
-    )
+    ]
+    if path is None:
+        if not available:
+            raise HTTPException(
+                404,
+                f"session {session_id} has no triangulated points on any path",
+            )
+        path = available[0]
+    pts_in = result.triangulated_by_path.get(path, [])
     if not pts_in:
         if available:
             raise HTTPException(

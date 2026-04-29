@@ -27,7 +27,6 @@ from schemas import (
     _DEFAULT_PATHS,
 )
 from candidate_selector import CandidateSelectorTuning
-from chain_filter import ChainFilterParams, annotate as chain_filter_annotate
 from detection import HSVRange, ShapeGate
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
@@ -170,7 +169,6 @@ class State:
         self._hsv_path = data_dir / "hsv_range.json"
         self._shape_gate_path = data_dir / "shape_gate.json"
         self._candidate_selector_tuning_path = data_dir / "candidate_selector_tuning.json"
-        self._chain_filter_params_path = data_dir / "chain_filter_params.json"
         self._session_meta_path = data_dir / "session_meta.json"
         self._pitch_dir.mkdir(parents=True, exist_ok=True)
         self._result_dir.mkdir(parents=True, exist_ok=True)
@@ -220,7 +218,6 @@ class State:
         self._hsv_range = self._load_hsv_range_from_disk()
         self._shape_gate = self._load_shape_gate_from_disk()
         self._candidate_selector_tuning = self._load_candidate_selector_tuning_from_disk()
-        self._chain_filter_params = self._load_chain_filter_params_from_disk()
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
         # Runtime tunables pushed from the dashboard, hot-applied on the
@@ -337,11 +334,6 @@ class State:
             except Exception as e:
                 logger.warning("skip corrupt pitch file %s: %s", path.name, e)
                 continue
-            # Annotate pre-filter-era pitches (filter_status=None everywhere)
-            # so the viewer can render ghost-mode on historical sessions
-            # without a reprocess_sessions run.
-            chain_filter_annotate(pitch.frames_live, self._chain_filter_params)
-            chain_filter_annotate(pitch.frames_server_post, self._chain_filter_params)
             # Backfill `created_at` for legacy pitches written before the
             # field shipped: prefer the file's mtime (real upload moment) so
             # historical sessions group under the day they actually happened
@@ -483,33 +475,6 @@ class State:
             indent=2,
         )
         self._atomic_write(self._candidate_selector_tuning_path, payload)
-
-    def _load_chain_filter_params_from_disk(self) -> ChainFilterParams:
-        path = self._chain_filter_params_path
-        if not path.exists():
-            return ChainFilterParams()
-        try:
-            obj = json.loads(path.read_text())
-            return ChainFilterParams(
-                max_frame_gap=int(obj["max_frame_gap"]),
-                max_jump_px=float(obj["max_jump_px"]),
-                min_run_len=int(obj["min_run_len"]),
-            )
-        except Exception as e:
-            logger.warning("skip corrupt chain_filter_params %s: %s", path, e)
-            return ChainFilterParams()
-
-    def _persist_chain_filter_params_locked(self) -> None:
-        p = self._chain_filter_params
-        payload = json.dumps(
-            {
-                "max_frame_gap": p.max_frame_gap,
-                "max_jump_px": p.max_jump_px,
-                "min_run_len": p.min_run_len,
-            },
-            indent=2,
-        )
-        self._atomic_write(self._chain_filter_params_path, payload)
 
     def _calibration_path(self, camera_id: str) -> Path:
         return self._calibration_store.path(camera_id)
@@ -707,7 +672,6 @@ class State:
             return self.get(session_id)
         merged = existing.model_copy(deep=True)
         merged.frames_live = list(live_frames)
-        chain_filter_annotate(merged.frames_live, self._chain_filter_params)
         return self.record(merged)
 
     def flush_live_frames_for_session(self, session_id: str) -> None:
@@ -832,11 +796,6 @@ class State:
                 merged.created_at = self._time_fn()
             if not merged.frames_live and live_frames:
                 merged.frames_live = list(live_frames)
-            # Annotate whichever buckets we just touched. Safe to re-run:
-            # annotate sorts + rewrites filter_status from scratch each time,
-            # so late-arriving frames get a fresh verdict alongside the old.
-            chain_filter_annotate(merged.frames_live, self._chain_filter_params)
-            chain_filter_annotate(merged.frames_server_post, self._chain_filter_params)
             pitch = merged
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
             # Drive the session state machine forward — any upload arriving
@@ -1237,16 +1196,6 @@ class State:
             self._candidate_selector_tuning = tuning
             self._persist_candidate_selector_tuning_locked()
             return self._candidate_selector_tuning
-
-    def chain_filter_params(self) -> ChainFilterParams:
-        with self._lock:
-            return self._chain_filter_params
-
-    def set_chain_filter_params(self, params: ChainFilterParams) -> ChainFilterParams:
-        with self._lock:
-            self._chain_filter_params = params
-            self._persist_chain_filter_params_locked()
-            return self._chain_filter_params
 
     def set_shape_gate(self, shape_gate: ShapeGate) -> ShapeGate:
         with self._lock:

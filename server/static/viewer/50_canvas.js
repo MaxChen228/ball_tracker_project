@@ -21,9 +21,9 @@
     }
     let idx = (ts[hi] <= currentT) ? hi : lo;
     const tol = 0.010;
-    // chain_filter rejected_jump / server_post frame gaps leave runs of
-    // det=false. Without left-scan the dot blanks across the gap; walk
-    // back to the nearest detected frame still within tol so it sticks.
+    // server_post frame gaps leave runs of det=false. Without left-scan
+    // the dot blanks across the gap; walk back to the nearest detected
+    // frame still within tol so it sticks.
     while (idx >= 0 && !det[idx] && (currentT - ts[idx]) <= tol) idx--;
     if (idx < 0 || !det[idx] || (currentT - ts[idx]) > tol) return;
     const px = pxArr[idx], py = pyArr[idx];
@@ -73,9 +73,8 @@
   }
 
   // Plain floor lookup (no det back-walk): BLOBS draws every candidate the
-  // selector saw on the matched frame, regardless of whether the winner
-  // was kept or rejected by chain_filter downstream. The winner-layer's
-  // back-walk to skip det=false frames doesn't apply here.
+  // selector saw on the matched frame. The winner-layer's back-walk to
+  // skip det=false frames doesn't apply here.
   function _findClosestFrameIdx(ts, currentT, tol) {
     if (!ts.length || currentT < ts[0] - tol) return -1;
     let lo = 0, hi = ts.length - 1;
