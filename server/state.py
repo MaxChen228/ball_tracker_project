@@ -890,7 +890,18 @@ class State:
 
     def get(self, session_id: str) -> SessionResult | None:
         with self._lock:
-            return self.results.get(session_id)
+            cached = self.results.get(session_id)
+            has_live = session_id in self._live_pairings
+        if cached is not None:
+            return cached
+        # Per-frame rebuild was retired in the WS frame loop (paid 50-200×
+        # disk writes per pitch for no UI gain). The viewer / dashboard
+        # still expects a partial result mid-stream; build one on demand
+        # against the current live snapshot. Returns None for unknown
+        # sessions exactly like the old behaviour.
+        if not has_live:
+            return None
+        return session_results.rebuild_result_for_session(self, session_id)
 
     def store_result(self, result: SessionResult) -> None:
         # Same delete-during-write race as record() (see "Race note 2"
