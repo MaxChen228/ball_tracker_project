@@ -741,7 +741,7 @@ async def _run_auto_calibration(
     state.record_calibration_last_solve(
         camera_id,
         LastSolveRecord(
-            solved_at=state._time_fn(),
+            solved_at=state.now(),
             marker_ids=list(result.detected_ids),
             reproj_px=reproj_px,
             n_extended_used=n_extended,

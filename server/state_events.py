@@ -49,7 +49,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
 
     events: list[dict[str, Any]] = []
     for sid, cams_present, n_ball_frames_by_path, cam_capture_telemetry, result, created_at, is_live_only in snapshots:
-        trashed = state._processing.is_trashed(sid)
+        trashed = state.processing.is_trashed(sid)
         if bucket == "active" and trashed:
             continue
         if bucket == "trash" and not trashed:
@@ -65,7 +65,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
         mean_res, duration = _point_cloud_summary(authority_points)
         mode = _legacy_mode_label(state, sid)
         path_status = _path_status_pills(result, n_ball_frames_by_path, is_live_only)
-        processing_state, processing_resumable = state._processing.session_summary(sid)
+        processing_state, processing_resumable = state.processing.session_summary(sid)
 
         events.append(
             {
@@ -103,7 +103,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                 # Latest server_post background-task error per cam. Cleared
                 # on the next successful run. Empty dict = no pending
                 # failure. Surfaced as an inline chip on the events row.
-                "server_post_errors": state._processing.errors_for(sid),
+                "server_post_errors": state.processing.errors_for(sid),
             }
         )
 

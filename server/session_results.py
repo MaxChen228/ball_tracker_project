@@ -166,13 +166,13 @@ def empty_result_for_session(
     camera_b_received: bool,
 ) -> SessionResult:
     """Lock-free pure constructor — do not wrap the call in `state._lock`;
-    the only state read is `state._time_fn`, which is an injectable
+    the only state read is `state.now()`, which is an injectable
     callable."""
     return SessionResult(
         session_id=session_id,
         camera_a_received=camera_a_received,
         camera_b_received=camera_b_received,
-        solved_at=state._time_fn(),
+        solved_at=state.now(),
     )
 
 

@@ -113,7 +113,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 # false, making the LED flicker for a cam whose reported
                 # id doesn't match the active expected id.
                 _ws_snap = device_ws.snapshot().get(camera_id)
-                _now = state._time_fn()
+                _now = state.now()
                 _expected = state._sync.expected_sync_id_snapshot().get(camera_id)
                 _d_snapshot = state.device_snapshot(camera_id)
                 _gated = _gated_time_synced(_d_snapshot, _expected, _now)
@@ -158,9 +158,14 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                     ball_detected=bool(cands_payload),
                     candidates=cands_payload,
                 )
-                session_id = str(msg.get("sid") or "")
-                if not session_id:
-                    continue
+                # Schema-strict: missing/empty `sid` is a wire-format
+                # bug, not a runtime fallback. Raise loud — iOS lockstep
+                # guarantees this field on every frame post-arm, and a
+                # silent skip used to mask "phone never received arm"
+                # symptoms by quietly dropping all subsequent frames.
+                if "sid" not in msg or not msg["sid"]:
+                    raise ValueError("frame message missing required 'sid'")
+                session_id = str(msg["sid"])
                 new_points, counts, resolved_frame = await asyncio.to_thread(
                     state.ingest_live_frame,
                     camera_id,
@@ -224,26 +229,30 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 # demand if it lands mid-stream (state.get).
                 continue
             if mtype == "cycle_end":
-                session_id = str(msg.get("sid") or "")
+                # Schema-strict: cycle_end without sid is a wire bug.
+                # Loud raise rather than silent skip (was: `if session_id:`
+                # which masked the symptom).
+                if "sid" not in msg or not msg["sid"]:
+                    raise ValueError("cycle_end message missing required 'sid'")
+                session_id = str(msg["sid"])
                 reason = msg.get("reason")
-                if session_id:
-                    await asyncio.to_thread(state.mark_live_path_ended, camera_id, session_id, reason)
-                    persisted = await asyncio.to_thread(state.persist_live_frames, camera_id, session_id)
-                    if persisted is not None:
-                        result = persisted
-                    else:
-                        result = await asyncio.to_thread(session_results.rebuild_result_for_session, state, session_id)
-                        await asyncio.to_thread(state.store_result, result)
-                    await sse_hub.broadcast(
-                        "path_completed",
-                        {
-                            "sid": session_id,
-                            "path": DetectionPath.live.value,
-                            "cam": camera_id,
-                            "reason": reason,
-                            "point_count": len(result.triangulated_by_path.get(DetectionPath.live.value, [])),
-                        },
-                    )
+                await asyncio.to_thread(state.mark_live_path_ended, camera_id, session_id, reason)
+                persisted = await asyncio.to_thread(state.persist_live_frames, camera_id, session_id)
+                if persisted is not None:
+                    result = persisted
+                else:
+                    result = await asyncio.to_thread(session_results.rebuild_result_for_session, state, session_id)
+                    await asyncio.to_thread(state.store_result, result)
+                await sse_hub.broadcast(
+                    "path_completed",
+                    {
+                        "sid": session_id,
+                        "path": DetectionPath.live.value,
+                        "cam": camera_id,
+                        "reason": reason,
+                        "point_count": len(result.triangulated_by_path.get(DetectionPath.live.value, [])),
+                    },
+                )
                 continue
     except WebSocketDisconnect:
         pass

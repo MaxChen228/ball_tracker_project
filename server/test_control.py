@@ -863,7 +863,7 @@ def test_sessions_cancel_and_run_server_post_json_api(tmp_path):
     pitch.paths = [main.DetectionPath.server_post.value]
     main.state.record(pitch)
     (main.state.video_dir / f"session_{sid(34)}_A.mov").write_bytes(b"fake mov")
-    main.state._processing.mark_server_post_queued(sid(34), "A")
+    main.state.processing.mark_server_post_queued(sid(34), "A")
 
     cancel = client.post(
         f"/sessions/{sid(34)}/cancel_processing",
@@ -893,7 +893,7 @@ def _arm_minimal_session_for_run_server_post(session_id: str) -> None:
     pitch.paths = [main.DetectionPath.server_post.value]
     main.state.record(pitch)
     (main.state.video_dir / f"session_{session_id}_A.mov").write_bytes(b"fake mov")
-    main.state._processing.mark_server_post_queued(session_id, "A")
+    main.state.processing.mark_server_post_queued(session_id, "A")
 
 
 def test_run_server_post_missing_source_field_returns_400(tmp_path):
