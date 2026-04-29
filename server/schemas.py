@@ -119,6 +119,34 @@ class FramePayload(BaseModel):
     ball_detected: bool
 
 
+class HSVRangePayload(BaseModel):
+    """Wire mirror of `detection.HSVRange`. Stamped onto `PitchPayload`
+    at detection time (server_post run + /pitch ingest of live frames)
+    so reprocess / viewer always see the exact HSV bounds the cost basis
+    was computed under, regardless of later disk edits."""
+    h_min: int
+    h_max: int
+    s_min: int
+    s_max: int
+    v_min: int
+    v_max: int
+
+
+class ShapeGatePayload(BaseModel):
+    """Wire mirror of `detection.ShapeGate`. Frozen per pitch alongside
+    `HSVRangePayload`."""
+    aspect_min: float
+    fill_min: float
+
+
+class CandidateSelectorTuningPayload(BaseModel):
+    """Wire mirror of `candidate_selector.CandidateSelectorTuning`. Frozen
+    per pitch so the selector cost stamped on each `BlobCandidate.cost`
+    can be reproduced exactly during reprocess."""
+    w_aspect: float
+    w_fill: float
+
+
 class CaptureTelemetryPayload(BaseModel):
     """Actual capture conditions observed on-device for one uploaded pitch.
 
@@ -201,6 +229,18 @@ class PitchPayload(BaseModel):
     # server_post run. Viewer surfaces "last run X ago" next to the
     # Rerun-server button.
     server_post_ran_at: float | None = None
+    # Frozen snapshot of the detection config in effect at the moment
+    # detection ran for this pitch. Mirrors the per-session
+    # `PairingTuning` snapshot stamped on `SessionResult` (cd87995):
+    # `reprocess_sessions.py` reads these first so a later dashboard
+    # edit to `data/hsv_range.json` (or shape_gate / selector tuning)
+    # cannot retroactively change the cost basis used to score blobs
+    # in a previously-recorded pitch. None on legacy pitches written
+    # before this stamping landed; the offline reprocess script logs a
+    # warning and falls back to current disk config in that case.
+    hsv_range_used: HSVRangePayload | None = None
+    shape_gate_used: ShapeGatePayload | None = None
+    candidate_selector_tuning_used: CandidateSelectorTuningPayload | None = None
 
 
 class TriangulatedPoint(BaseModel):
@@ -265,6 +305,15 @@ class SessionResult(BaseModel):
     # Viewer reads it for the Gap slider's initial position; sibling of
     # `cost_threshold` in the per-session tuning strip.
     gap_threshold_m: float | None = None
+    # Mirror of the per-pitch frozen detection config (`PitchPayload.*_used`).
+    # Aggregated from A+B at result-build time using "A wins, fall back to
+    # B on missing"; a divergence (A and B were detected under different
+    # config because operator edited mid-cycle) is logged as a warning but
+    # does not raise — diagnostic noise, not a crashable condition. None on
+    # legacy results / when neither pitch carried a frozen snapshot.
+    hsv_range_used: HSVRangePayload | None = None
+    shape_gate_used: ShapeGatePayload | None = None
+    candidate_selector_tuning_used: CandidateSelectorTuningPayload | None = None
 
 
 
