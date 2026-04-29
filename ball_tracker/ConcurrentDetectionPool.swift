@@ -7,10 +7,16 @@ import Foundation
 /// The class is **named** `ConcurrentDetectionPool` for historical
 /// continuity but is no longer concurrent: full-frame HSV +
 /// connected-components on a 1080p sample is ~15 ms/frame, so 240 fps
-/// × 15 ms = 3.6 s/wall-s — well above one P-core's 1.0 s budget but
-/// fine because (a) iOS only WS-streams every Nth frame in practice
-/// and (b) we just drop overflow on `maxBacklog` rather than blocking
-/// capture.
+/// × 15 ms = 3.6 s/wall-s — well above one P-core's 1.0 s budget. The
+/// producer (`CameraViewController.dispatchDetection`) does NOT
+/// throttle — every captured sample is enqueued. Effective detection
+/// rate is therefore one core's throughput ≈ 1 / 0.015 ≈ 66
+/// detections/s, with the remaining ~174 fps dropping at
+/// `enqueue` when `inFlightCount >= maxBacklog`. The dashboard surfaces
+/// `droppedFrameCount` so the operator can see this. 66 Hz of full-
+/// frame distractor-immune detection beats 240 Hz of ROI-locked
+/// detection that misses the ball entirely (s_97655fc6 was the wakeup
+/// call).
 ///
 /// Pre-PR: this pool wrapped `BTStatefulBallDetector` which kept an ROI
 /// around the previous hit, cutting cost to ~3 ms when the ball stayed

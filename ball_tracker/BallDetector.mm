@@ -423,12 +423,11 @@ static bool mapPixelBufferToBGR(
                                         aspectMin:(double)aspectMin
                                           fillMin:(double)fillMin
 {
-    // thread_local scratch: a leftover from when the stateless path was
-    // dispatched onto a concurrent worker pool. Post-Phase-3 the live
-    // path uses BTStatefulBallDetector on a serial queue, but this
-    // stateless variant is still callable from anywhere (tests, parity
-    // fixtures), so per-thread scratch keeps it allocator-cheap on
-    // whichever thread happens to call.
+    // thread_local scratch: live path now calls this stateless class
+    // method from `ConcurrentDetectionPool`'s single serial worker
+    // (post "drop ROI tracking" commit), and tests call it from
+    // arbitrary threads. Per-thread scratch keeps it allocator-cheap
+    // on whichever thread happens to call without sharing state.
     thread_local CVScratch scratch;
     if (!mapPixelBufferToBGR(pixelBuffer, scratch.bgr)) { return nil; }
 

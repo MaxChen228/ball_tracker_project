@@ -34,8 +34,10 @@ NS_ASSUME_NONNULL_BEGIN
 ///
 /// `BTBallDetector` is the stateless per-frame path (no background model,
 /// no ROI tracking), used by the live detection pipeline's concurrent pool
-/// (`ConcurrentDetectionPool`). For a single-threaded stateful pipeline
-/// (ROI tracking across frames), use `BTStatefulBallDetector` instead.
+/// (`ConcurrentDetectionPool`). `BTStatefulBallDetector` below was the
+/// previous live-path detector; it's retained for unit-test coverage but
+/// has no production caller — see commit "ios: drop ROI tracking" for
+/// the reasoning (static distractors locked the ROI for seconds).
 @interface BTBallDetector : NSObject
 
 /// Run detection with the default HSV range.
