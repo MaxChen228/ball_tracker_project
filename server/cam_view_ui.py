@@ -803,11 +803,20 @@ def render_cam_view(
             f'<input type="range" min="0" max="100" step="1" value="{int(default_opacity)}" aria-label="Overlay opacity">'
             "</span>"
         )
+    # When preview is off we deliberately omit the <img>: an empty src
+    # resolves to the document URL in some browsers (broken-icon flash)
+    # and the polling gate would still hammer /camera/.../preview at 5 Hz
+    # producing 404s every 200 ms. Canvas overlay still fills the box via
+    # absolute-positioning + the .cam-view container's 16:9 aspect-ratio.
+    img_html = (
+        f'<img data-cam-img="{cam}" src="{html.escape(preview_src)}" alt="preview {cam}">'
+        if preview_src else ""
+    )
     return (
         f'<div class="cam-view" data-cam-view="{cam}" '
         f'data-layers="{layers_csv}" data-layers-on="{layers_on_csv}" '
         f'data-default-opacity="{int(default_opacity)}">'
-        f'<img data-cam-img="{cam}" src="{html.escape(preview_src)}" alt="preview {cam}">'
+        f'{img_html}'
         f'<canvas data-cam-canvas="{cam}"></canvas>'
         f'<div class="cam-view-badges">'
         f'<span class="cam-view-badge cam-id">{label}</span>'
