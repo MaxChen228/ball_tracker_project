@@ -195,6 +195,10 @@ class SessionResult(BaseModel):
     # `ballistic_by_path` / `ballistic_live` / `ballistic_server_post` /
     # `peak_z_m` / `ballistic_speed_mph`. Tolerate them on load — a single
     # rebuild of the session strips them on next write.
+    # TODO: drop this once all `server/data/results/session_*.json` have
+    # been rewritten via `rebuild_result_for_session`. CLAUDE.md forbids
+    # backwards-compat in experimental phase; this is the explicit
+    # transitional exception.
     model_config = ConfigDict(extra="ignore")
     session_id: str
     camera_a_received: bool

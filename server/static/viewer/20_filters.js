@@ -3,62 +3,16 @@
     const r = (p && typeof p.residual_m === "number") ? p.residual_m : 0;
     return r <= residualCapM;
   }
-  // RANSAC ballistic outlier rejection. Spatial-isolation k-NN failed when
-  // multiple outliers clustered (each outlier becomes the others' nearest
-  // neighbour → looks "non-isolated", inversion bug). RANSAC uses the
-  // strong physical prior of g=9.81 instead: sample 4 random points, fit a
-  // ballistic, count how many of the rest land within `κ · scale` of the
-  // curve, repeat. Outliers can't conspire to land on a parabola of the
-  // right curvature, so the inlier-maximising sample wins. ~150 iters at
-  // p=0.30 outliers gives >99% chance of hitting an all-clean sample.
-  // Scale = median of the smallest 50% of distances (robust to outliers in
-  // the unsampled population, won't collapse to zero on synthetic perfect
-  // points). Slider κ controls inlier band tightness.
-  function applyFitResidualFilter(pts) {
-    if (!Number.isFinite(fitResKappa) || pts.length < 6) return pts;
-    const ITERS = 150;
-    const N = pts.length;
-    let bestIdx = null;
-    let bestScale = Infinity;
-    for (let it = 0; it < ITERS; it++) {
-      const idx = new Set();
-      while (idx.size < 4) idx.add(Math.floor(Math.random() * N));
-      const sample = [...idx].map(i => pts[i]);
-      sample.sort((a, b) => a.t_rel_s - b.t_rel_s);
-      const fit = _OVL.ballisticFit(sample);
-      if (!fit) continue;
-      const dists = new Array(N);
-      for (let k = 0; k < N; k++) {
-        const q = fit.evaluate(pts[k].t_rel_s);
-        const dx = pts[k].x - q.x, dy = pts[k].y - q.y, dz = pts[k].z - q.z;
-        dists[k] = Math.sqrt(dx*dx + dy*dy + dz*dz);
-      }
-      const sorted = dists.slice().sort((a, b) => a - b);
-      const scale = Math.max(sorted[Math.max(0, Math.floor(N / 2) - 1)], 0.01);
-      const thresh = fitResKappa * scale;
-      const inliers = [];
-      for (let k = 0; k < N; k++) if (dists[k] <= thresh) inliers.push(k);
-      if (
-        bestIdx === null ||
-        inliers.length > bestIdx.length ||
-        (inliers.length === bestIdx.length && scale < bestScale)
-      ) {
-        bestIdx = inliers;
-        bestScale = scale;
-      }
-    }
-    if (!bestIdx || bestIdx.length < 4 || bestIdx.length === N) return pts;
-    return bestIdx.map(i => pts[i]);
-  }
-  // Run both filters on a path's full point list; returns the filtered,
-  // time-sorted array. Caller passes cutoff for playback clipping.
+  // Filter a path's point list by residual cap + playback cutoff and
+  // return the time-sorted result. Multi-segment outlier rejection lives
+  // server-side at /fit/{sid} now; viewer trace stays raw-ish so the
+  // operator can spot residual-survived garbage with their own eyes.
   function filteredTrajectory(rawPts, cutoff) {
     if (!rawPts || !rawPts.length) return [];
-    const residualKept = rawPts
+    return rawPts
       .filter(p => p.t_rel_s <= cutoff && passResidualFilter(p))
       .slice()
       .sort((a, b) => a.t_rel_s - b.t_rel_s);
-    return applyFitResidualFilter(residualKept);
   }
   function hasPathForLayer(layer, path) {
     if (layer === "traj") return HAS_TRAJ_PATH[path];

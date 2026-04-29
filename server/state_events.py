@@ -62,7 +62,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
         error = result.error if result is not None else None
 
         status = _status_label(cams_present, n_triangulated, error)
-        _peak_z, mean_res, duration = _point_cloud_summary(authority_points)
+        mean_res, duration = _point_cloud_summary(authority_points)
         mode = _legacy_mode_label(state, sid)
         path_status = _path_status_pills(result, n_ball_frames_by_path)
         processing_state, processing_resumable = state._processing.session_summary(sid)
@@ -214,17 +214,15 @@ def _status_label(cams_present: list[str], n_triangulated: int, error: str | Non
 
 def _point_cloud_summary(
     authority_points: list,
-) -> tuple[float | None, float | None, float | None]:
+) -> tuple[float | None, float | None]:
     if not authority_points:
-        return None, None, None
-    zs = [p.z_m for p in authority_points]
-    peak_z = float(max(zs))
+        return None, None
     mean_res = float(
         sum(p.residual_m for p in authority_points) / len(authority_points)
     )
     ts = [p.t_rel_s for p in authority_points]
     duration = float(ts[-1] - ts[0])
-    return peak_z, mean_res, duration
+    return mean_res, duration
 
 
 def _legacy_mode_label(state: "State", sid: str) -> str:

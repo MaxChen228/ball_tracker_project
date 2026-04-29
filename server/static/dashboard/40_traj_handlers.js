@@ -27,48 +27,6 @@
       repaintCanvas();
     });
   }
-  // Speed overlay: shared with viewer via window.BallTrackerOverlays.
-  const _speedToggle = document.getElementById('dash-speed-toggle');
-  if (_speedToggle) {
-    _speedToggle.checked = _OVL.speedVisible();
-    _speedToggle.addEventListener('change', () => {
-      _OVL.setSpeedVisible(_speedToggle.checked);
-      repaintCanvas();
-    });
-  }
-  // Fit overlay: shared with viewer via window.BallTrackerOverlays.
-  // Source pills pick which trajectory bucket the fit reads from —
-  // svr = selected event's /results points (server_post triangulation),
-  // live = current armed session's WS-streamed live points.
-  const _fitToggle = document.getElementById('dash-fit-toggle');
-  const _fitSourceGroup = document.querySelector('.fit-filter-bar .layer-source-group');
-  function _syncDashFitSourceDormant() {
-    if (_fitSourceGroup) _fitSourceGroup.classList.toggle('is-off', !_OVL.fitVisible());
-  }
-  if (_fitToggle) {
-    _fitToggle.checked = _OVL.fitVisible();
-    _syncDashFitSourceDormant();
-    _fitToggle.addEventListener('change', () => {
-      _OVL.setFitVisible(_fitToggle.checked);
-      _syncDashFitSourceDormant();
-      repaintCanvas();
-    });
-  }
-  function paintDashFitSourcePills() {
-    const cur = _OVL.fitSource();
-    document.querySelectorAll('.ff-src-pill').forEach(btn => {
-      btn.setAttribute('aria-pressed', btn.dataset.src === cur ? 'true' : 'false');
-    });
-  }
-  paintDashFitSourcePills();
-  document.querySelectorAll('.ff-src-pill').forEach(btn => {
-    btn.addEventListener('click', () => {
-      _OVL.setFitSource(btn.dataset.src);
-      paintDashFitSourcePills();
-      if (_OVL.fitVisible()) repaintCanvas();
-    });
-  });
-
   if (eventsBox) eventsBox.addEventListener('change', (e) => {
     const cb = e.target.closest('input[data-traj-sid]');
     if (!cb) return;
