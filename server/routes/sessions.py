@@ -222,10 +222,18 @@ async def sessions_recompute(request: Request, session_id: str):
             detail="cost_threshold out of range [0, 1]",
         )
 
+    # Existence check matches `state.store_result`'s own guard:
+    # a session is "alive" iff it has a pitch entry, a result entry, or
+    # a live pairing buffer. Live-only WS sessions before persist_live_frames
+    # flush only live in `_live_pairings` — so checking `pitches` alone
+    # would 404 a still-active live session.
     with state._lock:
-        a = state.pitches.get(("A", session_id))
-        b = state.pitches.get(("B", session_id))
-    if a is None and b is None:
+        known = (
+            any(s == session_id for _, s in state.pitches)
+            or session_id in state.results
+            or session_id in state._live_pairings
+        )
+    if not known:
         raise HTTPException(status_code=404, detail=f"session {session_id} not found")
 
     new_result = recompute_result_for_session(
