@@ -76,7 +76,7 @@ class LivePairingSession:
     # and viewer trust it, no downstream re-filter.
     pairing_tuning: PairingTuning = field(default_factory=PairingTuning.default)
     # HSV / shape-gate snapshot frozen at first ingest_live_frame of this
-    # session, atomically with `tuning` and `pairing_tuning` above. None
+    # session, atomically with `pairing_tuning` above. None
     # before the first ingest (e.g. arm_session pre-creates the session but
     # no WS live frame has flowed yet — server_post-only flow) and when the
     # session was constructed entirely outside ingest_live_frame (tests /

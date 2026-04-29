@@ -1477,7 +1477,7 @@ class State:
             live frame has flowed yet (e.g. server_post-only flow where
             iOS never streams live frames between arm and /pitch upload).
 
-        Returns the frozen triple when first-ingest stamping has run; this
+        Returns the frozen pair when first-ingest stamping has run; this
         is the dashboard-armed live-streaming production path. Callers must
         treat None as "no frozen snapshot — fall back to current state",
         not as an invariant violation: server_post-only is a real flow.

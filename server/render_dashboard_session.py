@@ -36,23 +36,21 @@ def _render_hsv_axis_row(axis: str, upper: int, lo: int, hi: int) -> str:
     )
 
 
-def _render_shape_or_selector_row(
+def _render_shape_row(
     *,
     name: str,
     label: str,
     hint: str,
     val: float,
-    data_attr: str,
 ) -> str:
-    """Shared 0..1 slider+number pair. `data_attr` distinguishes which
-    JS handler binds (`shape` or `cs`)."""
+    """0..1 slider+number pair for the shape-gate card."""
     slider_val = int(round(val * 100))
     return (
         f'<label class="shape-row" title="{html.escape(hint)}">'
         f'<span class="shape-label">{html.escape(label)}</span>'
-        f'<input type="range" min="0" max="100" step="1" value="{slider_val}" data-{data_attr}-range="{name}">'
+        f'<input type="range" min="0" max="100" step="1" value="{slider_val}" data-shape-range="{name}">'
         f'<input class="hsv-num" type="number" step="0.01" min="0" max="1" name="{name}" '
-        f'value="{val:.2f}" data-{data_attr}-number="{name}">'
+        f'value="{val:.2f}" data-shape-number="{name}">'
         '</label>'
     )
 
@@ -74,7 +72,6 @@ def _render_hsv_body(
     cfg = detection_config or {}
     hsv = cfg.get("hsv") or {}
     sg = cfg.get("shape_gate") or {}
-    sel = cfg.get("selector") or {}
     preset_name = cfg.get("preset")
     modified_fields = cfg.get("modified_fields") or []
 
@@ -83,8 +80,6 @@ def _render_hsv_body(
     v_lo, v_hi = int(hsv.get("v_min", 90)), int(hsv.get("v_max", 255))
     aspect_min = float(sg.get("aspect_min", 0.70))
     fill_min = float(sg.get("fill_min", 0.55))
-    w_aspect = float(sel.get("w_aspect", 0.6))
-    w_fill = float(sel.get("w_fill", 0.4))
 
     # Identity header ------------------------------------------------
     if preset_name is None:
@@ -125,12 +120,7 @@ def _render_hsv_body(
             f'data-s-min="{d["s_min"]}" data-s-max="{d["s_max"]}" '
             f'data-v-min="{d["v_min"]}" data-v-max="{d["v_max"]}" '
             f'data-aspect-min="{p.shape_gate.aspect_min:.2f}" '
-            f'data-fill-min="{p.shape_gate.fill_min:.2f}" '
-            # Selector weights are hardcoded `_W_ASPECT` / `_W_FILL`
-            # constants; phase 4 of the retirement strips these data-*
-            # attrs and the matching JS that reads them.
-            f'data-w-aspect="0.60" '
-            f'data-w-fill="0.40">'
+            f'data-fill-min="{p.shape_gate.fill_min:.2f}">'
             f'{html.escape(p.label)}</button>'
         )
     preset_buttons = "".join(_preset_button(name) for name in PRESETS)
@@ -151,45 +141,29 @@ def _render_hsv_body(
         '<div class="detection-section">'
         '<div class="hsv-subtitle">Shape gate</div>'
         '<div class="hsv-grid">'
-        + _render_shape_or_selector_row(
+        + _render_shape_row(
             name="aspect_min", label="ASPECT",
             hint="min(w,h)/max(w,h) — 1.0 = perfect square bbox. Lower lets elongated blobs through.",
-            val=aspect_min, data_attr="shape",
+            val=aspect_min,
         )
-        + _render_shape_or_selector_row(
+        + _render_shape_row(
             name="fill_min", label="FILL",
             hint="area / (w*h) — π/4 ≈ 0.785 theoretical; real balls measure 0.63-0.70. Lower accepts partial occlusion.",
-            val=fill_min, data_attr="shape",
-        )
-        + '</div></div>'
-    )
-    selector_block = (
-        '<div class="detection-section">'
-        '<div class="hsv-subtitle">Selector (shape-prior)</div>'
-        '<div class="hsv-grid">'
-        + _render_shape_or_selector_row(
-            name="w_aspect", label="W_ASPECT",
-            hint="Weight on (1 - aspect) penalty. Perfectly square (round) blob → 0.",
-            val=w_aspect, data_attr="cs",
-        )
-        + _render_shape_or_selector_row(
-            name="w_fill", label="W_FILL",
-            hint="Weight on |fill - 0.68| penalty. 0.68 is the empirical median fill for the project ball.",
-            val=w_fill, data_attr="cs",
+            val=fill_min,
         )
         + '</div></div>'
     )
 
     # Single Apply button at the bottom drives a JS fetch to
-    # /detection/config carrying the full triple. No per-section
-    # Apply: phase 3 collapses three sub-button-presses into one.
+    # /detection/config carrying the (HSV, shape_gate) pair. No
+    # per-section Apply: phase 3 collapses sub-button-presses into one.
     return (
         f'{identity_html}'
         '<div class="hsv-presets">'
         f'{preset_buttons}'
         '</div>'
         '<form id="detection-config-form" class="hsv-form" data-detection-config-form>'
-        f'{hsv_block}{shape_block}{selector_block}'
+        f'{hsv_block}{shape_block}'
         '<div class="hsv-actions">'
         '<button class="btn" type="submit" data-detection-apply>Apply detection config</button>'
         '<span class="detection-apply-status" data-detection-apply-status></span>'
