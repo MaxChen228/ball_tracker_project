@@ -134,7 +134,16 @@ async def pitch(
         if payload_obj.image_height_px is None:
             payload_obj.image_height_px = cal_snap.image_height_px
 
-    payload_paths = session_results.normalize_paths(payload_obj.paths) or session_results.paths_for_pitch(state, payload_obj)
+    # Explicit branch instead of `normalize_paths(...) or paths_for_pitch(...)`:
+    # the `or` form quietly fell through to inferred paths whenever the
+    # client sent a non-empty list that happened to filter down to an
+    # empty set after normalize (e.g. all entries were unrecognised).
+    # That silent substitution masked schema bugs.
+    normalized_paths = session_results.normalize_paths(payload_obj.paths)
+    if normalized_paths:
+        payload_paths = normalized_paths
+    else:
+        payload_paths = session_results.paths_for_pitch(state, payload_obj)
     payload_obj.paths = sorted(p.value for p in payload_paths)
     has_video = video is not None and (video.filename or video.size)
     has_frames = bool(payload_obj.frames_live) or bool(payload_obj.frames_server_post)
@@ -206,22 +215,29 @@ async def pitch(
 
     result = await asyncio.to_thread(state.record, payload_obj)
 
-    ball_frames = sum(
-        1
-        for f in (
-            payload_obj.frames_server_post
-            or payload_obj.frames_live
-        )
-        if f.ball_detected
-    )
+    # Explicit source selection for log line. Old `or` fallback hid
+    # which bucket the count came from — operator reading the log saw
+    # `frames=240 ball=12` with no way to tell if those 12 were the
+    # iOS live detector's count or server_post's, biasing all post-hoc
+    # delta investigations.
+    if payload_obj.frames_server_post:
+        log_frames = payload_obj.frames_server_post
+        log_source = "server_post"
+    elif payload_obj.frames_live:
+        log_frames = payload_obj.frames_live
+        log_source = "live"
+    else:
+        log_frames = []
+        log_source = "none"
+    ball_frames = sum(1 for f in log_frames if f.ball_detected)
     logger.info(
-        "pitch camera=%s session=%s clip=%s frames=%d ball=%d detected_on=%s triangulated=%d%s paths=%s",
+        "pitch camera=%s session=%s clip=%s source=%s frames=%d ball=%d triangulated=%d%s paths=%s",
         payload_obj.camera_id,
         payload_obj.session_id,
         f"{clip_info['bytes']}B" if clip_info else "none",
-        len(payload_obj.frames_server_post or payload_obj.frames_live),
+        log_source,
+        len(log_frames),
         ball_frames,
-        "live" if payload_obj.frames_live else "skipped",
         len(result.points),
         f" err={result.error}" if result.error else "",
         payload_obj.paths,
@@ -262,7 +278,7 @@ async def _run_server_detection(
     import main as _main
     state = _main.state
     detect_pitch = _main.detect_pitch
-    proc = state._processing
+    proc = state.processing
     sid = pitch.session_id
     cam = pitch.camera_id
 
@@ -390,7 +406,7 @@ async def _run_server_detection(
     # Stamp the wall-clock for this cam's just-completed run so the
     # SessionResult rebuild picks it up via max(A, B). Only set on
     # success — cancellation / errors above return before this line.
-    pitch.server_post_ran_at = state._time_fn()
+    pitch.server_post_ran_at = state.now()
     # Overwrite the live-side stamp with what server_post actually used
     # for this run — server_post is the authoritative cost basis once it
     # has run, since reprocess will read from `frames_server_post`.
