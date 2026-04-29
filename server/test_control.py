@@ -1275,6 +1275,11 @@ def test_setup_page_renders_all_config_surfaces():
     # paints with preview off by default (operator opts in via PREVIEW
     # button) so we assert the canvas overlay is present instead.
     assert 'data-cam-canvas="A"' in body
+    # SSR `data-cam-id` lets renderDevices's first JS tick adopt the
+    # existing rows and go straight to surgical patch — without it,
+    # every page load flashes (SSR paint → JS innerHTML rebuild).
+    assert 'data-cam-id="A"' in body
+    assert 'data-cam-id="B"' in body
     assert 'data-preview-cam="A"' in body  # PREVIEW button still present
     assert 'data-preview-cam="B"' in body
     assert 'BallTrackerCamView' in body
