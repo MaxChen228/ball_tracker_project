@@ -505,6 +505,20 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .ev-pipe.err {{ color: var(--failed); border-color: var(--failed);
                  background: var(--failed-bg); }}
 .ev-pipe.err b {{ color: var(--failed); opacity: 1; }}
+/* In-flight live session: pulsing dot to signal frames are still
+   arriving over WS; counter `b` keeps tabular-nums so the changing
+   digit doesn't reflow the chip. */
+.ev-pipe.streaming {{ color: var(--accent, #2c7be5);
+                       border-color: var(--accent, #2c7be5);
+                       animation: ev-pipe-pulse 1.4s ease-in-out infinite; }}
+.ev-pipe.streaming b {{ color: var(--accent, #2c7be5); opacity: 1; }}
+/* Armed but no frame yet — placeholder dim, no animation. Distinct
+   from "-" (never ran) so the operator sees the session exists. */
+.ev-pipe.armed {{ color: var(--sub); border-style: dashed; opacity: 0.75; }}
+@keyframes ev-pipe-pulse {{
+  0%,100% {{ opacity: 1; }}
+  50%     {{ opacity: 0.55; }}
+}}
 
 .ev-action-form {{ margin: 0; }}
 .ev-btn {{ background: transparent; border: 1px solid var(--border-base);

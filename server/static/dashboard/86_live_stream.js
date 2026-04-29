@@ -8,6 +8,28 @@
   // polling refills the row's authoritative counts.
   const serverPostProgress = new Map();
 
+  // ~1 Hz throttle for frame_count → /events refetch so a bursty WS
+  // stream (10–60 Hz per cam) doesn't hammer the list endpoint.
+  let _streamingEventsTickAt = 0;
+  let _streamingEventsTickPending = null;
+  function _scheduleStreamingEventsTick() {
+    if (typeof tickEvents !== 'function') return;
+    const now = Date.now();
+    const since = now - _streamingEventsTickAt;
+    const flush = () => {
+      _streamingEventsTickAt = Date.now();
+      _streamingEventsTickPending = null;
+      _lastEvKey = null;
+      tickEvents();
+    };
+    if (since >= 1000) {
+      flush();
+      return;
+    }
+    if (_streamingEventsTickPending !== null) return;
+    _streamingEventsTickPending = setTimeout(flush, 1000 - since);
+  }
+
   function initLiveStream() {
     if (!window.EventSource) return;
     const es = new EventSource('/stream');
@@ -35,14 +57,29 @@
         // moments of the new cycle.
         repaintCanvas();
         playCue('armed');
+        // Surface the new session as a "streaming" placeholder card
+        // immediately. Without this the row only appears after the next
+        // 15 s /events poll or after the phone uploads /pitch — neither
+        // matches the operator's mental model that arming creates the
+        // session.
+        if (typeof tickEvents === 'function') {
+          _lastEvKey = null;
+          tickEvents();
+        }
       } catch (_) {}
     });
     es.addEventListener('frame_count', (evt) => {
       try {
         const data = JSON.parse(evt.data);
-        if (!currentLiveSession || currentLiveSession.session_id !== data.sid) return;
-        currentLiveSession.frame_counts = currentLiveSession.frame_counts || {};
-        currentLiveSession.frame_counts[data.cam] = Number(data.count || 0);
+        if (currentLiveSession && currentLiveSession.session_id === data.sid) {
+          currentLiveSession.frame_counts = currentLiveSession.frame_counts || {};
+          currentLiveSession.frame_counts[data.cam] = Number(data.count || 0);
+        }
+        // Refetch /events so the streaming row's L-chip count ticks up.
+        // Throttled to ~1 Hz: frame_count fires per cam at the WS frame
+        // rate (~10–60 Hz) but the events list only needs a coarse
+        // refresh to feel live.
+        _scheduleStreamingEventsTick();
       } catch (_) {}
     });
     es.addEventListener('path_completed', (evt) => {

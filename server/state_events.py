@@ -48,7 +48,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
     snapshots = _snapshot_sessions_locked(state)
 
     events: list[dict[str, Any]] = []
-    for sid, cams_present, n_ball_frames_by_path, cam_capture_telemetry, result, created_at in snapshots:
+    for sid, cams_present, n_ball_frames_by_path, cam_capture_telemetry, result, created_at, is_live_only in snapshots:
         trashed = state._processing.is_trashed(sid)
         if bucket == "active" and trashed:
             continue
@@ -61,10 +61,10 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
         n_triangulated = len(authority_points) if result is not None else 0
         error = result.error if result is not None else None
 
-        status = _status_label(cams_present, n_triangulated, error)
+        status = _status_label(cams_present, n_triangulated, error, is_live_only)
         mean_res, duration = _point_cloud_summary(authority_points)
         mode = _legacy_mode_label(state, sid)
-        path_status = _path_status_pills(result, n_ball_frames_by_path)
+        path_status = _path_status_pills(result, n_ball_frames_by_path, is_live_only)
         processing_state, processing_resumable = state._processing.session_summary(sid)
 
         events.append(
@@ -136,16 +136,32 @@ def _snapshot_sessions_locked(
         dict[str, CaptureTelemetryPayload | None],
         SessionResult | None,
         float | None,
+        bool,
     ]
 ]:
     """Grab everything we need from in-memory state under one lock acquisition.
+
+    Returns one snapshot per session_id present in any of:
+      * `state.pitches` — fully ingested (post-/pitch upload)
+      * `state._live_pairings` — live frames buffered, /pitch not yet posted
+      * `state._current_session` — armed but no live frame has landed yet
+        (still surfaces an empty placeholder row in the events list)
+
+    The trailing bool flag (`is_live_only`) tells the renderer the row is
+    an in-flight session (no pitch JSON on disk yet) so it can paint a
+    streaming placeholder instead of "—".
 
     Every subsequent step (file stats, summary derivation) runs outside the
     lock so the 5 s dashboard tick can't stall /pitch handlers that mutate
     the pitches/results maps.
     """
     with state._lock:
-        sessions = sorted({sid for _, sid in state.pitches.keys()})
+        pitched_sids = {sid for _, sid in state.pitches.keys()}
+        live_sids = set(state._live_pairings.keys())
+        armed = state._current_session
+        if armed is not None and armed.ended_at is None:
+            live_sids.add(armed.id)
+        all_sids = sorted(pitched_sids | live_sids)
         snapshots: list[
             tuple[
                 str,
@@ -154,9 +170,11 @@ def _snapshot_sessions_locked(
                 dict[str, CaptureTelemetryPayload | None],
                 SessionResult | None,
                 float | None,
+                bool,
             ]
         ] = []
-        for sid in sessions:
+        for sid in all_sids:
+            is_pitched = sid in pitched_sids
             cams_present = sorted(cam for (cam, s) in state.pitches.keys() if s == sid)
             n_ball_frames_by_path: dict[str, dict[str, int]] = {
                 path: {} for path, _ in _PATH_TO_FRAMES_ATTR
@@ -175,8 +193,33 @@ def _snapshot_sessions_locked(
                 cam: state.pitches[(cam, sid)].capture_telemetry
                 for cam in cams_present
             }
-            # Earliest arrival across A/B is the moment the session "happened".
-            session_created_at = min(created_candidates) if created_candidates else None
+            # Live-only / partially-flushed sessions: merge buffered live
+            # frame counts so the row reflects what's already streaming
+            # in via WS, even before persist_live_frames flushes to disk.
+            live = state._live_pairings.get(sid)
+            if live is not None:
+                live_counts = live.frame_counts_snapshot()
+                for cam_id, n in live_counts.items():
+                    if n <= 0:
+                        continue
+                    if cam_id not in cams_present:
+                        cams_present = sorted({*cams_present, cam_id})
+                    # Merge: pitched live count is the source of truth once
+                    # the pitch JSON lands; until then the WS buffer count
+                    # drives the row. Disk count >= buffer count after flush
+                    # because the buffer is a strict subset.
+                    existing = n_ball_frames_by_path[DetectionPath.live.value].get(cam_id, 0)
+                    n_ball_frames_by_path[DetectionPath.live.value][cam_id] = max(existing, n)
+            # `created_at` resolution order:
+            #   1. earliest pitch.created_at (post-upload truth)
+            #   2. armed/ended Session.started_at (pre-upload, in-memory)
+            sess = state._lookup_session_locked(sid)
+            if created_candidates:
+                session_created_at = min(created_candidates)
+            elif sess is not None:
+                session_created_at = sess.started_at
+            else:
+                session_created_at = None
             snapshots.append(
                 (
                     sid,
@@ -185,6 +228,7 @@ def _snapshot_sessions_locked(
                     cam_capture_telemetry,
                     state.results.get(sid),
                     session_created_at,
+                    not is_pitched,
                 )
             )
     return snapshots
@@ -202,9 +246,19 @@ def _latest_pitch_mtime(state: "State", cams_present: list[str], sid: str) -> fl
     return latest
 
 
-def _status_label(cams_present: list[str], n_triangulated: int, error: str | None) -> str:
+def _status_label(
+    cams_present: list[str],
+    n_triangulated: int,
+    error: str | None,
+    is_live_only: bool = False,
+) -> str:
     if error:
         return "error"
+    if is_live_only:
+        # Pitch JSON not yet on disk — session is either armed waiting for
+        # the first frame, or actively streaming. Renderer treats this as
+        # a placeholder and animates accordingly.
+        return "streaming"
     if len(cams_present) >= 2 and n_triangulated > 0:
         return "paired"
     if len(cams_present) >= 2:
@@ -235,23 +289,30 @@ def _legacy_mode_label(state: "State", sid: str) -> str:
 def _path_status_pills(
     result: SessionResult | None,
     n_ball_frames_by_path: dict[str, dict[str, int]],
+    is_live_only: bool = False,
 ) -> dict[str, str]:
     """Per-pipeline health pill. Resolves in this order (strongest wins):
 
     1. "done" if result.paths_completed includes it (triangulated on a
        paired session, or explicit mono-session finalization),
-    2. "done" if any camera produced ≥1 detected frame on that pipeline —
+    2. "streaming" for live path on an in-flight (live-only) session —
+       frames are arriving over WS but persist hasn't run; renderer
+       animates the L chip to signal liveness without faking "done".
+    3. "done" if any camera produced ≥1 detected frame on that pipeline —
        live-only single-camera runs ship no triangulation but still count
        as "that pipeline executed", which is what the user wants to see in
        the events list,
-    3. "error" if abort_reasons has an entry for this pipeline,
-    4. "-" (never ran / empty).
+    4. "error" if abort_reasons has an entry for this pipeline,
+    5. "-" (never ran / empty).
     """
 
     def pill(path_value: str, abort_prefix: str | None = None) -> str:
         if result is not None and path_value in result.paths_completed:
             return "done"
-        if any(c > 0 for c in n_ball_frames_by_path.get(path_value, {}).values()):
+        has_any = any(c > 0 for c in n_ball_frames_by_path.get(path_value, {}).values())
+        if is_live_only and path_value == DetectionPath.live.value:
+            return "streaming" if has_any else "armed"
+        if has_any:
             return "done"
         if result is not None:
             if path_value in result.abort_reasons:
