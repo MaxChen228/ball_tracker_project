@@ -12,7 +12,7 @@ final class LiveFrameDispatcherTests: XCTestCase {
     // derived from `candidates.isEmpty` on the FramePayload itself.
     private func makeFrame(index: Int = 0, detected: Bool = true) -> ServerUploader.FramePayload {
         let candidates: [ServerUploader.BlobCandidate] = detected
-            ? [ServerUploader.BlobCandidate(px: 320.0, py: 240.0, area: 100, area_score: 1.0)]
+            ? [ServerUploader.BlobCandidate(px: 320.0, py: 240.0, area: 100, area_score: 1.0, aspect: 0.95, fill: 0.7)]
             : []
         return ServerUploader.FramePayload(
             frame_index: index,

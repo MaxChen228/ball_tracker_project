@@ -143,13 +143,43 @@ final class CameraCommandRouter {
             // mutations on sessionQueue with pauseAndCaptureHighResStill,
             // which is the most plausible reproduction of the prior
             // "delegate silently never fires" failure mode. Guard at the
-            // top of the handler so missing optional fields atomic-drop
-            // the whole settings update — never apply paths/exposure/hsv
-            // half-way before bailing out.
+            // top of the handler so missing server-required scaffolding
+            // fields (device_time_synced + preview_requested +
+            // calibration_frame_requested — all three written
+            // unconditionally by main.py:510 alongside hsv_range and
+            // shape_gate which are gated below) atomic-drop the whole
+            // settings update — never apply paths/exposure/hsv half-way
+            // before bailing out. Detection-critical hsv_range and
+            // shape_gate get the same atomic-drop treatment further down;
+            // the remaining tunables (chirp / heartbeat / exposure / etc.)
+            // stay opt-in so legacy / partial pushes don't break.
             guard let previewRequested = message["preview_requested"] as? Bool,
                   let calFrameRequested = message["calibration_frame_requested"] as? Bool
             else {
                 commandLog.error("ws settings missing preview_requested/calibration_frame_requested cam=\(camId, privacy: .public)")
+                return
+            }
+            // Detection-critical fail-loud: hsv_range and shape_gate are
+            // unconditionally written by the server and define the
+            // detection contract (PR #93 alignment scorecard). Missing or
+            // malformed → atomic-drop the whole settings update; do not
+            // silently keep stale local values.
+            guard let hsvDict = message["hsv_range"] as? [String: Any],
+                  let hsvHMin = hsvDict["h_min"] as? Int,
+                  let hsvHMax = hsvDict["h_max"] as? Int,
+                  let hsvSMin = hsvDict["s_min"] as? Int,
+                  let hsvSMax = hsvDict["s_max"] as? Int,
+                  let hsvVMin = hsvDict["v_min"] as? Int,
+                  let hsvVMax = hsvDict["v_max"] as? Int
+            else {
+                commandLog.error("ws settings missing/malformed hsv_range cam=\(camId, privacy: .public)")
+                return
+            }
+            guard let gateDict = message["shape_gate"] as? [String: Any],
+                  let gateAspectMin = gateDict["aspect_min"] as? Double,
+                  let gateFillMin = gateDict["fill_min"] as? Double
+            else {
+                commandLog.error("ws settings missing/malformed shape_gate cam=\(camId, privacy: .public)")
                 return
             }
             let pushedTimeSyncId = message["device_time_sync_id"] as? String
@@ -161,34 +191,23 @@ final class CameraCommandRouter {
             if let interval = message["heartbeat_interval_s"] as? Double {
                 deps.heartbeatIntervalDidPush(interval)
             }
-            if let hsv = message["hsv_range"] as? [String: Any],
-               let hMin = hsv["h_min"] as? Int,
-               let hMax = hsv["h_max"] as? Int,
-               let sMin = hsv["s_min"] as? Int,
-               let sMax = hsv["s_max"] as? Int,
-               let vMin = hsv["v_min"] as? Int,
-               let vMax = hsv["v_max"] as? Int {
-                deps.hsvRangeDidPush(
-                    ServerUploader.HSVRangePayload(
-                        h_min: hMin,
-                        h_max: hMax,
-                        s_min: sMin,
-                        s_max: sMax,
-                        v_min: vMin,
-                        v_max: vMax
-                    )
+            // hsv_range / shape_gate validated up-front; apply unconditionally.
+            deps.hsvRangeDidPush(
+                ServerUploader.HSVRangePayload(
+                    h_min: hsvHMin,
+                    h_max: hsvHMax,
+                    s_min: hsvSMin,
+                    s_max: hsvSMax,
+                    v_min: hsvVMin,
+                    v_max: hsvVMax
                 )
-            }
-            if let gate = message["shape_gate"] as? [String: Any],
-               let aspectMin = gate["aspect_min"] as? Double,
-               let fillMin = gate["fill_min"] as? Double {
-                deps.shapeGateDidPush(
-                    ServerUploader.ShapeGatePayload(
-                        aspect_min: aspectMin,
-                        fill_min: fillMin
-                    )
+            )
+            deps.shapeGateDidPush(
+                ServerUploader.ShapeGatePayload(
+                    aspect_min: gateAspectMin,
+                    fill_min: gateFillMin
                 )
-            }
+            )
             if let capStr = message["tracking_exposure_cap"] as? String {
                 if calIdle {
                     deps.handleTrackingExposureCap(capStr)
