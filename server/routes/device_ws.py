@@ -203,9 +203,14 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                             "t_rel_s": point.t_rel_s,
                         },
                     )
-                if new_points:
-                    result = await asyncio.to_thread(session_results.rebuild_result_for_session, state, session_id)
-                    await asyncio.to_thread(state.store_result, result)
+                # Per-frame rebuild + atomic JSON write was removed: each
+                # detection went through fit_ballistic_ransac (since
+                # retired) + a disk write, hammering both CPU and disk
+                # 50-200×/pitch for no UI gain. Streaming clients already
+                # see incremental updates via the `point` SSE event above;
+                # the authoritative SessionResult is rebuilt at cycle_end
+                # (see below) and viewer GET /results/{sid} rebuilds on
+                # demand if it lands mid-stream (state.get).
                 continue
             if mtype == "cycle_end":
                 session_id = str(msg.get("sid") or "")

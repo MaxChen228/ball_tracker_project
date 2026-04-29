@@ -740,6 +740,33 @@ def test_store_result_skips_live_only_session_after_delete(tmp_path):
     assert not (tmp_path / "results" / f"session_{sid(902)}.json").exists()
 
 
+def test_state_get_rebuilds_lazily_for_live_only_session(tmp_path):
+    """Per-frame rebuild was retired from the WS frame loop; mid-stream
+    GET /results/{sid} (which calls state.get) must still return a
+    fresh result by rebuilding against the current live snapshot
+    instead of a 404."""
+    from live_pairing import LivePairingSession
+    s = main.State(data_dir=tmp_path)
+    # Live-only session: in `_live_pairings`, NOT yet in `results`.
+    s._live_pairings[sid(950)] = LivePairingSession(sid(950))
+    assert sid(950) not in s.results
+
+    r = s.get(sid(950))
+    assert r is not None, (
+        "state.get must lazy-rebuild for an active live session — otherwise "
+        "viewer mid-stream sees stale 404 once per-frame publish is gone"
+    )
+    assert r.session_id == sid(950)
+
+
+def test_state_get_returns_none_for_unknown_session(tmp_path):
+    """state.get must still return None for sessions with no live data
+    AND no published result — the lazy rebuild path is gated on
+    `_live_pairings` membership, so it doesn't resurrect ghosts."""
+    s = main.State(data_dir=tmp_path)
+    assert s.get(sid(951)) is None
+
+
 def test_sessions_delete_html_form_redirects():
     client = TestClient(app)
     main.state.record(_minimal_pitch("A", session_id=sid(2)))
