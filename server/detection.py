@@ -17,6 +17,7 @@ arc when the ball is close to the camera).
 """
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import os
@@ -26,6 +27,20 @@ import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+# Cached np.uint8 bounds for a given (h_min, s_min, v_min) / (h_max, s_max, v_max)
+# tuple. Production hits at most a few distinct ranges (one preset at a time);
+# the cache stops cv2.inRange from re-allocating two 3-byte uint8 arrays on
+# every frame inside the offline batch reprocess loop.
+@functools.lru_cache(maxsize=32)
+def _hsv_bounds(
+    h_min: int, h_max: int, s_min: int, s_max: int, v_min: int, v_max: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    return (
+        np.array([h_min, s_min, v_min], dtype=np.uint8),
+        np.array([h_max, s_max, v_max], dtype=np.uint8),
+    )
 
 
 @dataclass(frozen=True)
@@ -64,10 +79,10 @@ class HSVRange:
             return cls.default()
 
     def lo(self) -> np.ndarray:
-        return np.array([self.h_min, self.s_min, self.v_min], dtype=np.uint8)
+        return _hsv_bounds(self.h_min, self.h_max, self.s_min, self.s_max, self.v_min, self.v_max)[0]
 
     def hi(self) -> np.ndarray:
-        return np.array([self.h_max, self.s_max, self.v_max], dtype=np.uint8)
+        return _hsv_bounds(self.h_min, self.h_max, self.s_min, self.s_max, self.v_min, self.v_max)[1]
 
 
 # Minimum / maximum area (in pixels) a candidate blob must have. 1080p

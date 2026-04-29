@@ -179,26 +179,27 @@ def _stream(frames, rel_anchor, *, include_candidates: bool) -> dict[str, list]:
     can opt out.
     """
     ordered = sorted(frames, key=lambda f: f.timestamp_s)
-    out: dict[str, list] = {
-        "t_rel_s": [float(f.timestamp_s - rel_anchor) for f in ordered],
-        "detected": [bool(f.ball_detected) for f in ordered],
-        "px": [float(f.px) if f.px is not None else None for f in ordered],
-        "py": [float(f.py) if f.py is not None else None for f in ordered],
-        # Per-frame metadata so the viewer can show the *real* source-
-        # frame number (iOS capture-queue index for live, PyAV decode
-        # order for server_post) alongside the timestamp-sort array
-        # index. Array index alone hides drops/throttle gaps; frame_index
-        # tells you which physical frame the detection came from.
-        "frame_index": [int(f.frame_index) for f in ordered],
-    }
-    if include_candidates:
-        # Each frame's value is a list of {px,py,area,area_score,cost}
-        # dicts in the order `live_pairing._resolve_candidates` saw them.
-        # `cost` is the selector cost stamped at decision time (None on
-        # legacy JSONs persisted before cost-persistence landed; viewer
-        # falls back to area-asc sort).
-        out["candidates"] = [
-            [
+    # Single pass instead of 5-6 separate list comprehensions. `frame_index`
+    # is the *real* source-frame number (iOS capture-queue index for live,
+    # PyAV decode order for server_post) — array index alone hides drops /
+    # throttle gaps. `candidates` (when included) carries the cost-stamped
+    # blob list `live_pairing._resolve_candidates` saw; `cost` may be None
+    # on legacy JSONs persisted before cost-persistence landed (viewer
+    # falls back to area-asc sort).
+    t_rel: list[float] = []
+    detected: list[bool] = []
+    px: list[float | None] = []
+    py: list[float | None] = []
+    fidx: list[int] = []
+    cands: list[list[dict[str, Any]]] = []
+    for f in ordered:
+        t_rel.append(float(f.timestamp_s - rel_anchor))
+        detected.append(bool(f.ball_detected))
+        px.append(float(f.px) if f.px is not None else None)
+        py.append(float(f.py) if f.py is not None else None)
+        fidx.append(int(f.frame_index))
+        if include_candidates:
+            cands.append([
                 {
                     "px": float(c.px),
                     "py": float(c.py),
@@ -207,9 +208,16 @@ def _stream(frames, rel_anchor, *, include_candidates: bool) -> dict[str, list]:
                     "cost": float(c.cost) if c.cost is not None else None,
                 }
                 for c in (f.candidates or [])
-            ]
-            for f in ordered
-        ]
+            ])
+    out: dict[str, list] = {
+        "t_rel_s": t_rel,
+        "detected": detected,
+        "px": px,
+        "py": py,
+        "frame_index": fidx,
+    }
+    if include_candidates:
+        out["candidates"] = cands
     return out
 
 
