@@ -22,10 +22,12 @@ def render_setup_html(
     calibration_last_ts: dict[str, float] | None = None,
     markers_count: int = 0,
     preview_requested: dict[str, bool] | None = None,
+    calibration_buffers: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     del markers_count
     devices = devices or []
     calibrations = calibrations or []
+    calibration_buffers = calibration_buffers or {}
 
     return (
         "<!DOCTYPE html>"
@@ -49,7 +51,12 @@ def render_setup_html(
         '</section>'
         '<div class="card">'
         '<h2 class="card-title">Devices &middot; Calibration</h2>'
-        f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested, compare_mode="toggle")}</div>'
+        f'<div id="devices-body">{_render_device_rows(devices, calibrations, calibration_last_ts, preview_requested, compare_mode="toggle", calibration_buffers=calibration_buffers)}</div>'
+        '<div class="reset-rig-row">'
+        '<button type="button" class="btn small danger" data-reset-rig="1" '
+        'title="Wipes all calibrations + extended markers + buffers. ChArUco intrinsics survive.">'
+        'Reset rig</button>'
+        '</div>'
         "</div>"
         "</main>"
         f"<script>{CAM_VIEW_RUNTIME_JS}</script>"

@@ -54,6 +54,62 @@ def _render_battery_chip(
     )
 
 
+def _render_buffer_block(
+    cam_id: str, buf: dict[str, object] | None, is_calibrated: bool,
+) -> str:
+    """Per-cam buffer state strip: marker ids list + reproj badge.
+
+    Empty state when buf is None / count==0:
+    - calibrated cam: shows "✓ calibrated" + reproj badge if last_reproj_px set
+    - uncalibrated: shows nothing (the [Calibrate] button is the affordance)
+
+    Active accumulation: "累積中: [0,1,5] (3/5)" + reproj badge if last solve
+    happened.
+
+    Reproj badge color thresholds (matches PHYSICS_LAB palette):
+    - <5 px → ok (green)
+    - 5-15 px → warn (gold/amber)
+    - >15 px → bad (red) — only seen on solve_failed where buffer kept
+    """
+    count = int(buf["count"]) if buf else 0
+    ids: list[int] = list(buf["marker_ids"]) if buf else []
+    reproj = buf.get("last_reproj_px") if buf else None
+    failure_count = int(buf["failure_count"]) if buf else 0
+
+    parts: list[str] = []
+    if count > 0:
+        ids_str = "[" + ", ".join(str(i) for i in ids) + "]"
+        parts.append(
+            f'<span class="buffer-progress">accum {html.escape(ids_str)} '
+            f'<strong>({count}/5)</strong></span>'
+        )
+    elif is_calibrated:
+        parts.append('<span class="buffer-progress idle">✓ calibrated</span>')
+
+    if isinstance(reproj, (int, float)):
+        if reproj < 5.0:
+            badge_cls = "ok"
+        elif reproj < 15.0:
+            badge_cls = "warn"
+        else:
+            badge_cls = "bad"
+        parts.append(
+            f'<span class="reproj-badge {badge_cls}" '
+            f'title="last solve reprojection error">'
+            f'reproj <strong>{reproj:.1f}</strong> px</span>'
+        )
+
+    if failure_count > 0:
+        parts.append(
+            f'<span class="buffer-fail" title="consecutive solve failures">'
+            f'failed {failure_count}/3</span>'
+        )
+
+    if not parts:
+        return ""
+    return f'<div class="buffer-block" data-cam="{html.escape(cam_id)}">{"".join(parts)}</div>'
+
+
 def _render_device_rows(
     devices: list[dict[str, object]],
     calibrations: list[str],
@@ -62,6 +118,7 @@ def _render_device_rows(
     compare_mode: str = "toggle",
     cam_view_layers: tuple[str, ...] = ("plate", "axes"),
     cam_view_layers_on: tuple[str, ...] = ("plate", "axes"),
+    calibration_buffers: dict[str, dict[str, object]] | None = None,
 ) -> str:
     """Merged Devices card row — status + per-cam calibration actions +
     per-cam preview toggle + inline MJPEG panel. JS will replace within
@@ -70,6 +127,7 @@ def _render_device_rows(
     calibrated = set(calibrations)
     calibration_last_ts = calibration_last_ts or {}
     preview_requested = preview_requested or {}
+    calibration_buffers = calibration_buffers or {}
 
     def render_row(cam_id: str) -> str:
         dev = device_by_id.get(cam_id)
@@ -96,9 +154,30 @@ def _render_device_rows(
         else:
             cal_label = "pending" if online else "offline"
         disabled_attr = "" if online else " disabled"
+        buf = calibration_buffers.get(cam_id) or {}
+        buf_count = int(buf.get("count", 0))
+        # Button label reflects state:
+        #   empty + calibrated → "Re-calibrate" (one-click full redo from scratch)
+        #   empty + uncalibrated → "Calibrate"
+        #   non-empty buffer → "Calibrate (n/5)" so operator sees progress
+        if buf_count > 0:
+            cal_btn_label = f"Calibrate ({buf_count}/5)"
+        elif is_cal:
+            cal_btn_label = "Re-calibrate"
+        else:
+            cal_btn_label = "Calibrate"
         auto_cal_btn = (
             f'<button type="button" class="btn small" '
-            f'data-auto-cal="{html.escape(cam_id)}"{disabled_attr}>Run auto-cal</button>'
+            f'data-auto-cal="{html.escape(cam_id)}"{disabled_attr}>'
+            f'{html.escape(cal_btn_label)}</button>'
+        )
+        # Clear button only when buffer has something to clear; idempotent
+        # against an empty buffer but the button shouldn't be a no-op
+        # affordance.
+        clear_btn = (
+            f'<button type="button" class="btn small secondary" '
+            f'data-clear-buffer="{html.escape(cam_id)}"{disabled_attr}>Clear</button>'
+            if buf_count > 0 else ""
         )
         preview_btn = (
             f'<button type="button" class="btn small preview-btn{" active" if preview_on else ""}" '
@@ -127,6 +206,7 @@ def _render_device_rows(
             str(battery_state) if isinstance(battery_state, str) else None,
             online,
         )
+        buffer_block = _render_buffer_block(cam_id, buf, is_cal)
         return (
             f'<div class="device">'
             f'<div class="device-head">'
@@ -139,7 +219,8 @@ def _render_device_rows(
             f'</div>'
             f'<div class="chip-col">{battery_chip}<span class="chip {chip_cls}">{chip_label}</span></div>'
             f'</div>'
-            f'<div class="device-actions">{preview_btn}{auto_cal_btn}</div>'
+            f"{buffer_block}"
+            f'<div class="device-actions">{preview_btn}{auto_cal_btn}{clear_btn}</div>'
             f"{compare_block}"
             f"</div>"
         )

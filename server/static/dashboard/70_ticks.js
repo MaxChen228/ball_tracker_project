@@ -13,6 +13,7 @@
       currentPreviewRequested = s.preview_requested || {};
       currentSyncCommands = s.sync_commands || {};
       currentAutoCalibration = s.auto_calibration || { active: {}, last: {} };
+      currentCalibrationBuffers = s.calibration_buffers || {};
       renderDevices({
         devices: s.devices || [],
         calibrations: currentCalibrations || [],
@@ -20,6 +21,7 @@
         sync_commands: currentSyncCommands,
         calibration_last_ts: currentCalibrationLastTs || {},
         auto_calibration: currentAutoCalibration,
+        calibration_buffers: currentCalibrationBuffers,
       });
       renderSession(s);
     } catch (e) { /* silent retry next tick */ }
@@ -48,6 +50,7 @@
         sync_commands: currentSyncCommands,
         calibration_last_ts: currentCalibrationLastTs,
         auto_calibration: currentAutoCalibration,
+        calibration_buffers: currentCalibrationBuffers || {},
       });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations });
       // Push per-camera reprojection metadata into BallTrackerCamView.

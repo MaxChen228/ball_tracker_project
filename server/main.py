@@ -459,6 +459,11 @@ def _build_status_response() -> dict[str, Any]:
             cam: True for cam in state.requested_calibration_frame_ids()
         },
         "auto_calibration": state.auto_cal_status(),
+        # Per-cam multi-frame accumulation buffer state. Dashboard reads
+        # this to render the (n/5) marker count + last reproj badge so
+        # operators can see whether they need another [Calibrate] press
+        # or hit Clear to start over.
+        "calibration_buffers": state.all_calibration_buffer_summaries(),
         "live_session": state.live_session_summary(),
         "ws_devices": {
             cam: {
@@ -703,6 +708,7 @@ def setup_page() -> HTMLResponse:
             },
             markers_count=len(state._marker_registry.all_records()),
             preview_requested=state._preview.requested_map(),
+            calibration_buffers=state.all_calibration_buffer_summaries(),
         )
     )
 
