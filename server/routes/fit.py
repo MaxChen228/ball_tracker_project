@@ -35,6 +35,17 @@ def fit_page(
         p for p in _VALID_PATHS
         if result.triangulated_by_path.get(p)
     )
+    if not pts_in:
+        if available:
+            raise HTTPException(
+                404,
+                f"session {session_id} has no triangulated points on path "
+                f"'{path}'; available: {','.join(available)}",
+            )
+        raise HTTPException(
+            404,
+            f"session {session_id} has no triangulated points on any path",
+        )
 
     scene = _scene_for_session(session_id)
     segments, pts_sorted, kept_mask = find_segments(pts_in)

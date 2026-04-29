@@ -124,15 +124,6 @@ class Scene:
     # camera scenes still draw one trace per phone.
     ground_traces: dict[str, list[dict[str, float]]] = field(default_factory=dict)
     ground_traces_live: dict[str, list[dict[str, float]]] = field(default_factory=dict)
-    # Per-detection-path sampled ballistic-fit curves. Each entry is a list
-    # of `(t_rel_s, x, y, z)` tuples spanning the path's inlier time range,
-    # sampled uniformly at `n_samples=100`. Populated only when the
-    # corresponding `SessionResult.ballistic_by_path[path]` fit exists
-    # AND the path has enough inliers (no silent fallback — absent means
-    # fit was skipped).
-    ballistic_curves: dict[str, list[tuple[float, float, float, float]]] = field(
-        default_factory=dict
-    )
 
     def to_dict(self, *, include_rejected: bool = False) -> dict[str, Any]:
         # Viewer's default render hides chain-filter rejects, so excluding
@@ -158,10 +149,6 @@ class Scene:
             },
             "ground_traces_live": {
                 cam: list(trace) for cam, trace in self.ground_traces_live.items()
-            },
-            "ballistic_curves": {
-                path: [list(pt) for pt in curve]
-                for path, curve in self.ballistic_curves.items()
             },
         }
 
@@ -411,56 +398,6 @@ def build_scene(
             for path, pts in triangulated_by_path.items()
             if pts
         }
-
-    # Per-path ballistic-fit curves. Uses the persisted `params` on each
-    # BallisticSummary (shape 3×3, rows = x/y/z, cols = [p0, v0, a]) so
-    # we can sample the fitted trajectory without re-running RANSAC.
-    # The t_min/t_max span is derived from the inlier points' t_rel_s,
-    # so the curve only extends across the segment the fit was validated
-    # on. N<7 inliers → explicit skip, no silent fallback.
-    if session_result is not None and session_result.ballistic_by_path and triangulated_by_path:
-        from ballistic_fit import BallisticFit, sample_trajectory
-
-        for path_value, summary in session_result.ballistic_by_path.items():
-            pts = triangulated_by_path.get(path_value)
-            if not pts:
-                continue
-            if len(summary.inlier_indices) < 7:
-                continue
-            if not summary.params or len(summary.params) != 3:
-                # Legacy summary from before `params` was persisted; can't
-                # sample without refit. Skip explicitly.
-                continue
-            inlier_ts = [
-                pts[i].t_rel_s
-                for i in summary.inlier_indices
-                if 0 <= i < len(pts)
-            ]
-            if len(inlier_ts) < 7:
-                continue
-            t_min = float(min(inlier_ts))
-            t_max = float(max(inlier_ts))
-            if t_max <= t_min:
-                continue
-            params_np = np.asarray(summary.params, dtype=float)
-            if params_np.shape != (3, 3):
-                continue
-            fit_shim = BallisticFit(
-                params=params_np,
-                inlier_indices=list(summary.inlier_indices),
-                residuals_m=[],
-                release_point_m=tuple(summary.release_point_m),
-                release_velocity_mps=tuple(summary.release_velocity_mps),
-                speed_mph=summary.speed_mph,
-                g_fit=summary.g_fit,
-                n_inliers=summary.n_inliers,
-                n_total=summary.n_total,
-                t0_s=summary.t0_s,
-                rmse_m=summary.rmse_m,
-                g_mode=summary.g_mode,
-            )
-            curve = sample_trajectory(fit_shim, n_samples=100, t_min=t_min, t_max=t_max)
-            scene.ballistic_curves[path_value] = curve
 
     return scene
 
