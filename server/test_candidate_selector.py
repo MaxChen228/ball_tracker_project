@@ -9,14 +9,10 @@ import numpy as np
 
 from candidate_selector import (
     Candidate,
-    CandidateSelectorTuning,
     score_candidates,
     select_best_candidate,
 )
 from detection import HSVRange, detect_ball, detect_ball_with_candidates
-
-
-_T = CandidateSelectorTuning.default()
 
 
 def _yg() -> tuple[int, int, int]:
@@ -26,20 +22,20 @@ def _yg() -> tuple[int, int, int]:
 
 
 def test_empty_returns_none():
-    assert select_best_candidate([], _T) is None
+    assert select_best_candidate([]) is None
 
 
 def test_score_candidates_empty_returns_empty():
-    assert score_candidates([], _T) == []
+    assert score_candidates([]) == []
 
 
 def test_ideal_candidate_has_zero_cost():
     """A blob at aspect=1.0 (perfectly square bbox) and fill=0.68
     (project-ball median) is the ideal-shape point — both penalties
-    evaluate to zero, so total cost is exactly 0 regardless of
-    weight tuning. Locks the ideal-point invariant directly."""
+    evaluate to zero, so total cost is exactly 0. Locks the
+    ideal-point invariant directly."""
     ideal = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68)
-    assert score_candidates([ideal], _T) == [0.0]
+    assert score_candidates([ideal]) == [0.0]
 
 
 def test_size_does_not_affect_cost():
@@ -47,7 +43,7 @@ def test_size_does_not_affect_cost():
     has no effect. A blob 10× larger costs exactly the same."""
     small = Candidate(cx=0, cy=0, area=20, aspect=1.0, fill=0.68)
     big = Candidate(cx=0, cy=0, area=10000, aspect=1.0, fill=0.68)
-    costs = score_candidates([small, big], _T)
+    costs = score_candidates([small, big])
     assert costs[0] == costs[1]
 
 
@@ -55,7 +51,7 @@ def test_aspect_prior_prefers_round():
     """Equal fill, perfectly round beats oblong."""
     round_ = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68)
     oblong = Candidate(cx=0, cy=0, area=452, aspect=0.6, fill=0.68)
-    assert select_best_candidate([round_, oblong], _T) is round_
+    assert select_best_candidate([round_, oblong]) is round_
 
 
 def test_fill_prior_prefers_typical():
@@ -63,7 +59,7 @@ def test_fill_prior_prefers_typical():
     far from it."""
     typical = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68)
     too_dense = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=1.0)
-    assert select_best_candidate([typical, too_dense], _T) is typical
+    assert select_best_candidate([typical, too_dense]) is typical
 
 
 def test_unknown_aspect_fill_is_neutral():
@@ -73,7 +69,7 @@ def test_unknown_aspect_fill_is_neutral():
     so argmin tie-break (first index) decides."""
     a = Candidate(cx=0, cy=0, area=452, aspect=None, fill=None)
     b = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68)
-    costs = score_candidates([a, b], _T)
+    costs = score_candidates([a, b])
     # `a` reduces to 0 + 0 (both axes neutral). `b` is also at the
     # ideal aspect=1 / fill=0.68, so its cost is also 0. Equal.
     assert abs(costs[0] - costs[1]) < 1e-9
@@ -86,7 +82,7 @@ def test_costs_in_unit_interval():
         Candidate(cx=0, cy=0, area=20, aspect=0.5, fill=0.0),
         Candidate(cx=0, cy=0, area=8000, aspect=0.6, fill=1.0),
     ]
-    for c in score_candidates(cands, _T):
+    for c in score_candidates(cands):
         assert 0.0 <= c <= 1.0
 
 
@@ -98,9 +94,9 @@ def test_select_best_equals_argmin_score():
         Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68),
         Candidate(cx=0, cy=0, area=50, aspect=0.7, fill=0.45),
     ]
-    costs = score_candidates(cands, _T)
+    costs = score_candidates(cands)
     argmin = min(range(len(costs)), key=lambda i: costs[i])
-    assert select_best_candidate(cands, _T) is cands[argmin]
+    assert select_best_candidate(cands) is cands[argmin]
 
 
 # --- end-to-end on a synthetic frame ---

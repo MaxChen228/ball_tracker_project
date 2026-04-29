@@ -141,7 +141,6 @@ def detect_ball_with_candidates(
     hsv_range: HSVRange,
     *,
     shape_gate: ShapeGate | None = None,
-    selector_tuning: "CandidateSelectorTuning | None" = None,
 ) -> tuple["BlobCandidate | None", "list[BlobCandidate]"]:
     """HSV → CC → shape gate → shape-prior selector. Returns
     `(winner_or_None, scored_blobs)` where `scored_blobs` is every
@@ -154,7 +153,7 @@ def detect_ball_with_candidates(
     decision: if any candidate exists, the lowest-cost one is the winner.
     Selector is track-independent — no `prev_position` plumbing.
     """
-    from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates
+    from candidate_selector import Candidate, score_candidates
     from schemas import BlobCandidate
 
     if frame_bgr is None or frame_bgr.size == 0:
@@ -170,8 +169,6 @@ def detect_ball_with_candidates(
     )
     if num_labels <= 1:
         return None, []
-
-    tuning = selector_tuning if selector_tuning is not None else CandidateSelectorTuning.default()
 
     # survivors and shape_stats append in lockstep within the same loop
     # iteration — order is locked. The downstream `scored` comprehension
@@ -202,7 +199,7 @@ def detect_ball_with_candidates(
     if not survivors:
         return None, []
     max_area_batch = max(c.area for c in survivors)
-    costs = score_candidates(survivors, tuning)
+    costs = score_candidates(survivors)
     blobs = [
         BlobCandidate(
             px=c.cx, py=c.cy, area=c.area,
@@ -221,7 +218,6 @@ def detect_ball(
     hsv_range: HSVRange,
     *,
     shape_gate: ShapeGate | None = None,
-    selector_tuning: "CandidateSelectorTuning | None" = None,
 ) -> tuple[float, float] | None:
     """Thin wrapper around `detect_ball_with_candidates` for callers that
     only want the winner centroid. Returns `(px, py)` or `None`."""
@@ -229,7 +225,6 @@ def detect_ball(
         frame_bgr,
         hsv_range,
         shape_gate=shape_gate,
-        selector_tuning=selector_tuning,
     )
     if winner is None:
         return None

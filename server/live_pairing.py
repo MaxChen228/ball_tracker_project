@@ -122,7 +122,7 @@ class LivePairingSession:
             Candidate(cx=c.px, cy=c.py, area=c.area, aspect=c.aspect, fill=c.fill)
             for c in cands
         ]
-        costs = score_candidates(selector_in, self.tuning)
+        costs = score_candidates(selector_in)
         winner_idx = min(range(len(costs)), key=lambda i: costs[i])
         winner = cands[winner_idx]
         cands_with_cost = [
