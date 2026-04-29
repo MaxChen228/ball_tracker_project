@@ -58,13 +58,6 @@
       known_markers: state.known_marker_ids || { plate: [], extended: [] },
     });
     if (key === _lastDevKey) return;
-    // Hover-suppression: if the operator is currently hovering anywhere
-    // inside #devices-body, defer this repaint. innerHTML rebuild
-    // destroys the hovered DOM element → the browser drops :hover →
-    // flicker. Defer by NOT updating _lastDevKey so the next tick will
-    // see the diff again and re-evaluate. A repaint that misses one
-    // tick still reflects state within ≤1s on the next idle tick.
-    if (devicesBox && devicesBox.matches(':hover')) return;
     _lastDevKey = key;
     _origRenderDevices(state);
   };
