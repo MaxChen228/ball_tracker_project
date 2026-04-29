@@ -1053,12 +1053,18 @@ class State:
         with self._lock:
             return self._marker_accumulators.summary(camera_id)
 
-    def calibration_buffer_for_solve(self, camera_id: str):
-        """Return live MarkerAccumulator (after GC) so the route can read
-        accumulated markers + record solve result. Caller must not hold
-        the lock while solving — return references, not copies."""
+    def calibration_buffer_snapshot_for_solve(
+        self, camera_id: str,
+    ) -> list[tuple[int, Any]]:
+        """Snapshot accumulator markers under the lock so the solver can
+        iterate safely OUTSIDE the lock. Returns `[(marker_id, _AccumulatedMarker), …]`
+        in insertion order. A concurrent `accumulate_calibration_markers`
+        call on the same cam would mutate the dict mid-iteration of the
+        live ref (raises `RuntimeError: dictionary changed size`); the
+        snapshot eliminates that race window."""
         with self._lock:
-            return self._marker_accumulators.get(camera_id)
+            buf = self._marker_accumulators.get(camera_id)
+            return list(buf.markers.items())
 
     def record_calibration_solve_result(
         self,
@@ -1072,6 +1078,12 @@ class State:
             self._marker_accumulators.record_solve_result(
                 camera_id, reproj_px=reproj_px, ok=ok, status=status,
             )
+
+    def record_calibration_last_solve(self, camera_id: str, record) -> None:
+        """Persist the metadata of a successful solve so the dashboard
+        can surface "last calibrated N min ago" continuously."""
+        with self._lock:
+            self._marker_accumulators.record_last_solve(camera_id, record)
 
     def clear_calibration_buffer(self, camera_id: str) -> bool:
         with self._lock:

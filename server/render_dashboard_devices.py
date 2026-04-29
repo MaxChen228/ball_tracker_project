@@ -54,60 +54,199 @@ def _render_battery_chip(
     )
 
 
-def _render_buffer_block(
-    cam_id: str, buf: dict[str, object] | None, is_calibrated: bool,
+def _reproj_class(reproj: float | None) -> str | None:
+    """PHYSICS_LAB palette: <5 ok / <15 warn / ≥15 bad. None → no badge."""
+    if not isinstance(reproj, (int, float)):
+        return None
+    if reproj < 5.0:
+        return "ok"
+    if reproj < 15.0:
+        return "warn"
+    return "bad"
+
+
+def _fmt_age(age_s: float) -> str:
+    if age_s < 60:
+        return f"{int(age_s)}s ago"
+    if age_s < 3600:
+        return f"{int(age_s / 60)}m ago"
+    if age_s < 86400:
+        return f"{int(age_s / 3600)}h ago"
+    return f"{int(age_s / 86400)}d ago"
+
+
+def _render_marker_chip(
+    marker_id: int, *, kind: str, state_cls: str,
 ) -> str:
-    """Per-cam buffer state strip: marker ids list + reproj badge.
+    """One marker pill: id label + plate/extended kind + state color.
+    `state_cls` ∈ {"used", "buffer", "missing"} drives the color."""
+    return (
+        f'<span class="marker-chip {state_cls} {kind}" '
+        f'title="{kind} marker {marker_id} · {state_cls}">'
+        f'{marker_id}</span>'
+    )
 
-    Empty state when buf is None / count==0:
-    - calibrated cam: shows "✓ calibrated" + reproj badge if last_reproj_px set
-    - uncalibrated: shows nothing (the [Calibrate] button is the affordance)
 
-    Active accumulation: "累積中: [0,1,5] (3/5)" + reproj badge if last solve
-    happened.
+def _render_marker_coverage(
+    plate_ids: list[int],
+    extended_ids: list[int],
+    last_solve_ids: set[int],
+    buffer_ids: set[int],
+) -> str:
+    """Marker coverage map for a single cam.
 
-    Reproj badge color thresholds (matches PHYSICS_LAB palette):
-    - <5 px → ok (green)
-    - 5-15 px → warn (gold/amber)
-    - >15 px → bad (red) — only seen on solve_failed where buffer kept
+    Each known marker appears as a chip colored by state:
+      - used: id was in the last successful solve → green
+      - buffer: id is in the current accumulation buffer (not yet solved) → blue
+      - missing: known but never used by this cam → gray
+
+    Operator-facing first-principles question this answers: "which
+    markers does the rig have, and which has my cam seen?"
     """
-    count = int(buf["count"]) if buf else 0
-    ids: list[int] = list(buf["marker_ids"]) if buf else []
-    reproj = buf.get("last_reproj_px") if buf else None
-    failure_count = int(buf["failure_count"]) if buf else 0
+    if not plate_ids and not extended_ids:
+        return ""
+
+    def _chip(mid: int, kind: str) -> str:
+        if mid in last_solve_ids and mid not in buffer_ids:
+            return _render_marker_chip(mid, kind=kind, state_cls="used")
+        if mid in buffer_ids:
+            return _render_marker_chip(mid, kind=kind, state_cls="buffer")
+        return _render_marker_chip(mid, kind=kind, state_cls="missing")
+
+    plate_html = "".join(_chip(mid, "plate") for mid in plate_ids)
+    ext_html = "".join(_chip(mid, "extended") for mid in extended_ids)
+    sections = [
+        f'<div class="marker-row"><span class="marker-row-label">PLATE</span>{plate_html}</div>'
+    ]
+    if extended_ids:
+        sections.append(
+            f'<div class="marker-row"><span class="marker-row-label">EXT</span>{ext_html}</div>'
+        )
+    return f'<div class="marker-coverage">{"".join(sections)}</div>'
+
+
+def _render_buffer_block(
+    cam_id: str,
+    buf: dict[str, object] | None,
+    is_calibrated: bool,
+    *,
+    plate_ids: list[int],
+    extended_ids: list[int],
+    now: float,
+) -> str:
+    """Per-cam calibration info panel.
+
+    Layout (top → bottom):
+      1. Status line: phase + age (always-visible last calibrated time)
+      2. Active accumulation strip: ids + (n/5) when buffer non-empty
+      3. Last successful solve: marker count + reproj + delta vs prior
+      4. Failure counter (when failure_count > 0)
+      5. Marker coverage map (plate + extended chips, color-coded)
+
+    Designed so an operator can see "what state am I in" and
+    "what's already been done" without re-running calibration.
+    Persists across buffer clears via `last_solve` field on the buffer
+    summary (see state_calibration.MarkerAccumulatorStore.summary)."""
+    count = int(buf.get("count", 0)) if buf else 0
+    buffer_id_list: list[int] = list(buf.get("marker_ids", [])) if buf else []
+    failure_count = int(buf.get("failure_count", 0)) if buf else 0
+    last_solve_dict = (buf or {}).get("last_solve") if buf else None
+    last_reproj = buf.get("last_reproj_px") if buf else None
 
     parts: list[str] = []
+
+    # 1. Status line
     if count > 0:
-        ids_str = "[" + ", ".join(str(i) for i in ids) + "]"
+        ready = bool(buf.get("ready", False))
+        cls = "ready" if ready else "accumulating"
+        label = "READY TO SOLVE" if ready else f"ACCUMULATING {count}/5"
+        parts.append(f'<div class="cal-status {cls}">{label}</div>')
+    elif is_calibrated and last_solve_dict:
+        age = now - float(last_solve_dict["solved_at"])
         parts.append(
-            f'<span class="buffer-progress">accum {html.escape(ids_str)} '
-            f'<strong>({count}/5)</strong></span>'
+            f'<div class="cal-status calibrated">CALIBRATED · '
+            f'{html.escape(_fmt_age(age))}</div>'
         )
     elif is_calibrated:
-        parts.append('<span class="buffer-progress idle">✓ calibrated</span>')
+        parts.append('<div class="cal-status calibrated">CALIBRATED</div>')
+    else:
+        parts.append('<div class="cal-status uncalibrated">NOT CALIBRATED</div>')
 
-    if isinstance(reproj, (int, float)):
-        if reproj < 5.0:
-            badge_cls = "ok"
-        elif reproj < 15.0:
-            badge_cls = "warn"
-        else:
-            badge_cls = "bad"
+    # 2. Active accumulation
+    if count > 0:
+        ids_str = "[" + ", ".join(str(i) for i in buffer_id_list) + "]"
         parts.append(
-            f'<span class="reproj-badge {badge_cls}" '
-            f'title="last solve reprojection error">'
-            f'reproj <strong>{reproj:.1f}</strong> px</span>'
+            f'<div class="cal-line accum">'
+            f'<span class="cal-line-label">accum</span>'
+            f'<span class="cal-line-value">{html.escape(ids_str)}</span>'
+            f'</div>'
         )
 
+    # 3. Last successful solve summary
+    if last_solve_dict:
+        ls_ids = list(last_solve_dict.get("marker_ids") or [])
+        ls_reproj = last_solve_dict.get("reproj_px")
+        ls_solver = last_solve_dict.get("solver") or "?"
+        ls_n_ext = int(last_solve_dict.get("n_extended_used") or 0)
+        delta_pos = last_solve_dict.get("delta_position_cm")
+        delta_ang = last_solve_dict.get("delta_angle_deg")
+
+        n_total = len(ls_ids)
+        n_plate = n_total - ls_n_ext
+        breakdown = f"{n_plate} plate"
+        if ls_n_ext > 0:
+            breakdown += f" + {ls_n_ext} ext"
+        parts.append(
+            f'<div class="cal-line last-solve">'
+            f'<span class="cal-line-label">last</span>'
+            f'<span class="cal-line-value">'
+            f'{n_total} markers ({html.escape(breakdown)}) · '
+            f'{html.escape(ls_solver)}</span>'
+            f'</div>'
+        )
+
+        meta_parts: list[str] = []
+        rcls = _reproj_class(ls_reproj)
+        if rcls is not None:
+            meta_parts.append(
+                f'<span class="reproj-badge {rcls}" '
+                f'title="last solve reprojection error">'
+                f'reproj <strong>{ls_reproj:.1f}</strong> px</span>'
+            )
+        if isinstance(delta_pos, (int, float)) and isinstance(delta_ang, (int, float)):
+            meta_parts.append(
+                f'<span class="cal-delta" '
+                f'title="movement vs previous calibration">'
+                f'Δ <strong>{delta_pos:.1f}</strong> cm / '
+                f'<strong>{delta_ang:.2f}</strong>°</span>'
+            )
+        if meta_parts:
+            parts.append(f'<div class="cal-meta">{"".join(meta_parts)}</div>')
+
+    # 4. Failure counter (only relevant when buffer kept after a bad solve)
     if failure_count > 0:
+        rcls = _reproj_class(last_reproj)
+        reproj_str = (
+            f"reproj {last_reproj:.1f} px"
+            if isinstance(last_reproj, (int, float)) else ""
+        )
         parts.append(
-            f'<span class="buffer-fail" title="consecutive solve failures">'
-            f'failed {failure_count}/3</span>'
+            f'<div class="cal-line cal-fail">'
+            f'<span class="cal-line-label">failed</span>'
+            f'<span class="cal-line-value">'
+            f'{failure_count}/3 consecutive · {html.escape(reproj_str)}'
+            f'</span></div>'
         )
 
-    if not parts:
-        return ""
-    return f'<div class="buffer-block" data-cam="{html.escape(cam_id)}">{"".join(parts)}</div>'
+    # 5. Marker coverage map
+    last_solve_set = (
+        set(last_solve_dict.get("marker_ids") or []) if last_solve_dict else set()
+    )
+    parts.append(_render_marker_coverage(
+        plate_ids, extended_ids, last_solve_set, set(buffer_id_list),
+    ))
+
+    return f'<div class="cal-panel" data-cam="{html.escape(cam_id)}">{"".join(parts)}</div>'
 
 
 def _render_device_rows(
@@ -119,6 +258,7 @@ def _render_device_rows(
     cam_view_layers: tuple[str, ...] = ("plate", "axes"),
     cam_view_layers_on: tuple[str, ...] = ("plate", "axes"),
     calibration_buffers: dict[str, dict[str, object]] | None = None,
+    known_marker_ids: dict[str, list[int]] | None = None,
 ) -> str:
     """Merged Devices card row — status + per-cam calibration actions +
     per-cam preview toggle + inline MJPEG panel. JS will replace within
@@ -128,6 +268,10 @@ def _render_device_rows(
     calibration_last_ts = calibration_last_ts or {}
     preview_requested = preview_requested or {}
     calibration_buffers = calibration_buffers or {}
+    known_marker_ids = known_marker_ids or {}
+    plate_marker_ids = list(known_marker_ids.get("plate") or [])
+    extended_marker_ids = list(known_marker_ids.get("extended") or [])
+    now = _time.time()
 
     def render_row(cam_id: str) -> str:
         dev = device_by_id.get(cam_id)
@@ -206,7 +350,12 @@ def _render_device_rows(
             str(battery_state) if isinstance(battery_state, str) else None,
             online,
         )
-        buffer_block = _render_buffer_block(cam_id, buf, is_cal)
+        buffer_block = _render_buffer_block(
+            cam_id, buf, is_cal,
+            plate_ids=plate_marker_ids,
+            extended_ids=extended_marker_ids,
+            now=now,
+        )
         return (
             f'<div class="device">'
             f'<div class="device-head">'
