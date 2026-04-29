@@ -65,30 +65,17 @@
     return lo;
   }
   // Translate one camAtFrameByPath entry into (mark glyph, status key).
-  // Status key drives the CSS class on each surface: timeline label uses
-  // `.fl-det-${...}` (PHYSICS_LAB ink palette), per-cam HUD uses
-  // `.hud-mark-${...}` (dark-bg overlay palette). Verdict logic centralised
-  // here so the two surfaces can never drift in interpretation.
-  //   ✓ kept       — chain_filter validated detection
-  //   ✓ unscored   — detected but no chain_filter ran (live path normal)
-  //   F flicker    — chain_filter rejected_flicker (chain too short)
-  //   J jump       — chain_filter rejected_jump   (ray broke max_jump_px)
-  //   · no         — non-detection
+  // chain_filter is gone — segmenter handles outliers downstream — so
+  // the timeline label / HUD only distinguishes detected vs not.
+  //   ✓ detected
+  //   · no
   function frameVerdict(entry) {
     if (!entry || !entry.detected) return ["·", "no"];
-    switch (entry.filter_status) {
-      case "rejected_flicker": return ["F", "flicker"];
-      case "rejected_jump":    return ["J", "jump"];
-      case "kept":             return ["✓", "kept"];
-      default:                 return ["✓", "unscored"];
-    }
+    return ["✓", "kept"];
   }
   const FL_DET_CLS = {
     no: "fl-det fl-det-no",
-    flicker: "fl-det fl-det-warn",
-    jump: "fl-det fl-det-bad",
     kept: "fl-det",
-    unscored: "fl-det fl-det-unscored",
   };
   function renderFrameLabel() {
     const v = String(currentFrame);

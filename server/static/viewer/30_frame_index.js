@@ -2,7 +2,6 @@
     const f = frameMap[cam];
     const ts = f.t_rel_s, det = f.detected;
     const fidx = f.frame_index || [];
-    const fstat = f.filter_status || [];
     const out = new Array(TOTAL_FRAMES).fill(null);
     if (!ts.length) return out;
     const tol = 0.010;
@@ -23,7 +22,6 @@
         t: ts[j],
         detected: !!det[j],
         frame_index: fidx[j] ?? null,
-        filter_status: fstat[j] ?? null,
       };
     }
     return out;

@@ -217,8 +217,8 @@ def render_viewer_html(
     else:
         action_html = ""
     fit_link_html = (
-        f'<a class="fit-link" href="/fit/{ctx.session_id}?path=server_post"'
-        f' title="Independent fit page — multi-segment ballistic extraction">'
+        f'<a class="fit-link" href="/fit/{ctx.session_id}"'
+        f' title="Independent fit page — multi-segment ballistic extraction (auto-picks server_post / live)">'
         f'Fit&nbsp;&rarr;</a>'
     )
     progress_html = (
@@ -621,9 +621,6 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .vid-media .vid-hud .hud-fidx {{ color:#9b948b; font-size:9px; }}
   .vid-media .vid-hud .hud-mark {{ font-weight:600; }}
   .vid-media .vid-hud .hud-mark-kept {{ color:#7eb8a8; }}
-  .vid-media .vid-hud .hud-mark-unscored {{ color:#7eb8a8; opacity:0.6; }}
-  .vid-media .vid-hud .hud-mark-flicker {{ color:#e3b66f; }}
-  .vid-media .vid-hud .hud-mark-jump {{ color:#e08177; }}
   .vid-media .vid-hud .hud-mark-no {{ color:#6e6863; font-weight:400; }}
   .plate-overlay-real {{ position:absolute; inset:0; width:100%; height:100%;
     pointer-events:none; z-index:1; }}
@@ -724,9 +721,6 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .tl-row .frame-label .fl-cell-blank {{ color:var(--sub); font-weight:400; }}
   .tl-row .frame-label .fl-det {{ color:var(--contra); font-weight:600; }}
   .tl-row .frame-label .fl-det-no {{ color:var(--sub); font-weight:400; }}
-  .tl-row .frame-label .fl-det-warn {{ color:var(--pending); font-weight:600; }}
-  .tl-row .frame-label .fl-det-bad {{ color:var(--dev); font-weight:600; }}
-  .tl-row .frame-label .fl-det-unscored {{ opacity:0.55; }}
   .tl-row .frame-label .fl-fidx {{ color:var(--sub); font-size:9px;
     letter-spacing:0; padding:0 1px; }}
   #frame-input {{ width:58px; font:inherit; font-size:10px; background:var(--bg);

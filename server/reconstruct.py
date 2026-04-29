@@ -95,13 +95,6 @@ class Ray:
     # can see where the two streams disagree — the diff reflects H.264
     # vs BGRA input asymmetry, not algorithm differences.
     source: str = "server"
-    # Chain-filter verdict for the frame this ray came from. "kept" / None
-    # render normally; "rejected_flicker" / "rejected_jump" are drawn in
-    # ghost mode (dim + colored) so the viewer can show what was filtered
-    # without losing the info. None means the filter never ran (shouldn't
-    # happen once state.py annotates on load, but the viewer treats it as
-    # "kept" for backward compatibility).
-    filter_status: str | None = None
 
 
 @dataclass
@@ -125,21 +118,11 @@ class Scene:
     ground_traces: dict[str, list[dict[str, float]]] = field(default_factory=dict)
     ground_traces_live: dict[str, list[dict[str, float]]] = field(default_factory=dict)
 
-    def to_dict(self, *, include_rejected: bool = False) -> dict[str, Any]:
-        # Viewer's default render hides chain-filter rejects, so excluding
-        # them at the wire layer trims ~30% of the payload (rays dominate
-        # large sessions) without changing what the user sees. Callers that
-        # need every ray (e.g. reprocess CLI / forensic dumps) pass
-        # `include_rejected=True`.
-        rejected = {"rejected_flicker", "rejected_jump"}
-        if include_rejected:
-            rays_out = [vars(r) for r in self.rays]
-        else:
-            rays_out = [vars(r) for r in self.rays if r.filter_status not in rejected]
+    def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "cameras": [vars(c) for c in self.cameras],
-            "rays": rays_out,
+            "rays": [vars(r) for r in self.rays],
             "triangulated": list(self.triangulated),
             "triangulated_by_path": {
                 path: list(pts) for path, pts in self.triangulated_by_path.items()
@@ -229,7 +212,6 @@ def _rays_and_trace_for_source(
             )
             endpoint = C + viz_len * d_world
         t_rel = float(f.timestamp_s - anchor)
-        status = getattr(f, "filter_status", None)
         rays.append(
             Ray(
                 camera_id=cam_id,
@@ -238,7 +220,6 @@ def _rays_and_trace_for_source(
                 origin=C.tolist(),
                 endpoint=endpoint.tolist(),
                 source=source,
-                filter_status=status,
             )
         )
         if ground_within_radius:
@@ -248,7 +229,6 @@ def _rays_and_trace_for_source(
                     "x": float(ground[0]),
                     "y": float(ground[1]),
                     "z": float(ground[2]),
-                    "filter_status": status,
                 }
             )
     trace.sort(key=lambda p: p["t_rel_s"])

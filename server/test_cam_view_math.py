@@ -105,7 +105,7 @@ def test_find_detection_returns_exact_match():
 
 
 def test_find_detection_left_scan_walks_back_through_gap():
-    """Phase 1a regression: chain_filter rejected_jump leaves a run of
+    """Phase 1a regression: server_post frame gaps leave a run of
     det=False between two detected frames; binary search lands inside
     the gap, but the dot should stick to the prior detected sample
     rather than blank out."""

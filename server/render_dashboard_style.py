@@ -506,16 +506,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                  background: var(--failed-bg); }}
 .ev-pipe.err b {{ color: var(--failed); opacity: 1; }}
 
-.ev-metrics {{ display: flex; gap: 10px; flex: 1 1 auto; flex-wrap: wrap;
-               row-gap: 2px; padding-left: 4px;
-               border-left: 1px solid var(--border-l); margin-left: 2px; }}
-.ev-metrics:empty {{ display: none; border-left: 0; padding-left: 0; }}
-.ev-metric {{ font-family: var(--mono); font-size: 10px; color: var(--sub);
-              letter-spacing: 0.02em; white-space: nowrap;
-              font-variant-numeric: tabular-nums; }}
-.ev-metric i {{ font-style: normal; font-weight: 600; color: var(--ink);
-                margin-right: 2px; }}
-
 .ev-action-form {{ margin: 0; }}
 .ev-btn {{ background: transparent; border: 1px solid var(--border-base);
             color: var(--sub); font-family: var(--mono); font-size: 9px;
@@ -646,18 +636,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-src-pill[disabled] {{ opacity: 0.35; cursor: not-allowed; }}
 .fit-filter-bar .ff-checkbox {{ display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }}
 .fit-filter-bar .ff-checkbox input {{ accent-color: var(--ink); cursor: pointer; }}
-.fit-filter-bar .layer-source-group {{ display: inline-flex; margin-left: 6px;
-    border: 1px solid var(--border-base); border-radius: 2px; overflow: hidden; }}
-/* Source pills go dormant when Fit checkbox is off. Stronger than plain
-   opacity: drop saturation so the pressed-state black bg fades to grey,
-   and gate pointer-events so a click can't silently change the dormant
-   source. Pressed state still tracks the user's choice. */
-.fit-filter-bar .layer-source-group.is-off {{
-  opacity: 0.4; filter: saturate(0.15); pointer-events: none;
-}}
-.fit-filter-bar .layer-source-group .ff-src-pill {{ border: 0; border-radius: 0;
-    border-left: 1px solid var(--border-base); padding: 2px 6px; font-size: 9px; }}
-.fit-filter-bar .layer-source-group .ff-src-pill:first-child {{ border-left: 0; }}
 
 /* --- Replay playback bar (bottom-center, hidden when mode=inspect) --- */
 .playback-bar {{ position: absolute; left: 50%; bottom: var(--s-4); transform: translateX(-50%);

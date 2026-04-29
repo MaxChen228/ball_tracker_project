@@ -272,7 +272,6 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
             should_cancel=lambda: proc.should_cancel_server_post_job(sid, cam),
             shape_gate=state.shape_gate(),
             selector_tuning=state.candidate_selector_tuning(),
-            chain_filter_params=state.chain_filter_params(),
             progress=on_progress,
         )
     except ProcessingCanceled:

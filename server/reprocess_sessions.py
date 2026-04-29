@@ -18,7 +18,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from chain_filter import ChainFilterParams
 from detection import HSVRange, ShapeGate
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pipeline import detect_pitch
@@ -34,7 +33,6 @@ CAL_DIR = DATA_DIR / "calibrations"
 HSV_PATH = DATA_DIR / "hsv_range.json"
 SHAPE_GATE_PATH = DATA_DIR / "shape_gate.json"
 CANDIDATE_SELECTOR_TUNING_PATH = DATA_DIR / "candidate_selector_tuning.json"
-CHAIN_FILTER_PARAMS_PATH = DATA_DIR / "chain_filter_params.json"
 
 VIDEO_EXTS = (".mov", ".mp4", ".m4v")
 
@@ -84,19 +82,6 @@ def load_candidate_selector_tuning() -> "CandidateSelectorTuning":
         t.r_px_expected, t.w_area, t.w_dist, t.dist_cost_sat_radii,
     )
     return t
-
-
-def load_chain_filter_params() -> ChainFilterParams:
-    if not CHAIN_FILTER_PARAMS_PATH.exists():
-        return ChainFilterParams()
-    obj = json.loads(CHAIN_FILTER_PARAMS_PATH.read_text())
-    p = ChainFilterParams(
-        max_frame_gap=int(obj["max_frame_gap"]),
-        max_jump_px=float(obj["max_jump_px"]),
-        min_run_len=int(obj["min_run_len"]),
-    )
-    logger.info("chain_filter gap=%d jump=%.0f run=%d", p.max_frame_gap, p.max_jump_px, p.min_run_len)
-    return p
 
 
 def load_calibrations() -> dict[str, CalibrationSnapshot]:
@@ -150,7 +135,7 @@ def select_pitch_files(args: argparse.Namespace) -> list[Path]:
     return paths
 
 
-def rerun_detection(pitch_path: Path, hsv: HSVRange, shape_gate: ShapeGate, selector_tuning, chain_filter_params: ChainFilterParams, dry_run: bool) -> PitchPayload | None:
+def rerun_detection(pitch_path: Path, hsv: HSVRange, shape_gate: ShapeGate, selector_tuning, dry_run: bool) -> PitchPayload | None:
     pitch = PitchPayload.model_validate_json(pitch_path.read_text())
     video = find_video(pitch.session_id, pitch.camera_id)
     if video is None:
@@ -163,7 +148,6 @@ def rerun_detection(pitch_path: Path, hsv: HSVRange, shape_gate: ShapeGate, sele
         hsv_range=hsv,
         shape_gate=shape_gate,
         selector_tuning=selector_tuning,
-        chain_filter_params=chain_filter_params,
     )
     new_hits = sum(1 for f in frames if f.px is not None)
     logger.info(
@@ -232,7 +216,6 @@ def main() -> None:
     hsv = load_hsv()
     shape_gate = load_shape_gate()
     selector_tuning = load_candidate_selector_tuning()
-    chain_filter_params = load_chain_filter_params()
     calibrations = load_calibrations()
 
     pitch_paths = select_pitch_files(args)
@@ -244,7 +227,7 @@ def main() -> None:
     by_session: dict[str, dict[str, PitchPayload]] = {}
     for path in pitch_paths:
         logger.info("redetect %s", path.name)
-        pitch = rerun_detection(path, hsv, shape_gate, selector_tuning, chain_filter_params, args.dry_run)
+        pitch = rerun_detection(path, hsv, shape_gate, selector_tuning, args.dry_run)
         if pitch is not None:
             by_session.setdefault(pitch.session_id, {})[pitch.camera_id] = pitch
 

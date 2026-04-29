@@ -82,6 +82,12 @@ class FramePayload(BaseModel):
     contract any more — the iPhone uploads only the MOV + metadata; server
     synthesises one `FramePayload` per decoded video frame. px/py come from
     server detection; triangulation uses the pixel+distortion path."""
+    # Persisted JSONs from before chain_filter was removed carry the
+    # `filter_status` field on every frame. Tolerate it on load.
+    # TODO: drop this once all `server/data/pitches/*.json` have been
+    # rewritten on next live ingest. Same transitional exception as the
+    # SessionResult one.
+    model_config = ConfigDict(extra="ignore")
     frame_index: int
     timestamp_s: float
     px: float | None = None
@@ -94,12 +100,6 @@ class FramePayload(BaseModel):
     # sort when cost is missing.
     candidates: list[BlobCandidate] | None = None
     ball_detected: bool
-    # Post-detection chain filter verdict. None = not yet scored (raw
-    # upload / live frame pre-finalization). "kept" survives all gates;
-    # "rejected_flicker" = chain was too short (min_run_len); "rejected_jump"
-    # = chain broke because the ray direction jumped past max_jump_px. Set
-    # only on frames where ball_detected is True — non-detections stay None.
-    filter_status: Literal["kept", "rejected_flicker", "rejected_jump"] | None = None
 
 
 class CaptureTelemetryPayload(BaseModel):
