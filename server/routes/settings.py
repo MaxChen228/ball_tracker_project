@@ -7,6 +7,11 @@ from fastapi.responses import RedirectResponse
 
 from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate
+from detection_config import (
+    DetectionConfig,
+    modified_fields as _modified_fields,
+    to_dict as _detection_config_to_dict,
+)
 from presets import PRESETS as _HSV_PRESETS
 from schemas import TrackingExposureCapMode
 
@@ -172,6 +177,104 @@ async def detection_candidate_selector(request: Request):
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return payload
+
+
+@router.get("/detection/config")
+async def detection_config_get():
+    """Return the full detection-config triple plus preset identity and
+    the list of fields that diverge from the bound preset (empty when
+    preset-pure or `preset` is None / custom). The dashboard's phase 3
+    unified card calls this on render to populate the identity header
+    ("Active: blue_ball · modified") and the per-section sliders.
+    """
+    from main import state
+
+    cfg = state.detection_config()
+    return {
+        **_detection_config_to_dict(cfg),
+        "modified_fields": _modified_fields(cfg),
+    }
+
+
+@router.post("/detection/config")
+async def detection_config_post(request: Request):
+    """Atomic update of the full detection-config triple.
+
+    Body (JSON) — all required, no per-field defaulting (per CLAUDE.md
+    no-silent-fallback):
+      - `hsv`: `{h_min, h_max, s_min, s_max, v_min, v_max}` (uint8 range)
+      - `shape_gate`: `{aspect_min, fill_min}` (each ∈ [0, 1])
+      - `selector`: `{w_aspect, w_fill}` (each ∈ [0, 1])
+      - `preset`: optional string. If supplied AND non-null, the
+        triple MUST exactly match `presets.PRESETS[preset]` — otherwise
+        the operator's "I'm setting blue_ball" claim is contradicted by
+        their values, which is exactly the silent-drift failure mode
+        this redesign exists to prevent. Caller can pass `preset=null`
+        explicitly to mean "custom config".
+
+    Persists atomically to `data/detection_config.json` and pushes the
+    new config to all connected cameras over WS in a single broadcast
+    (vs the legacy three-endpoint dance which fired three pushes for
+    one logical edit).
+    """
+    from main import state, device_ws, _settings_message_for
+
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    for key in ("hsv", "shape_gate", "selector"):
+        if key not in body:
+            raise HTTPException(
+                status_code=400,
+                detail=f"missing required field '{key}'",
+            )
+    hsv = _validated_hsv_range(body["hsv"])
+    gate = _validated_shape_gate(body["shape_gate"])
+    selector = _validated_candidate_selector_tuning(body["selector"])
+
+    preset_name = body.get("preset")
+    if preset_name is not None:
+        if not isinstance(preset_name, str):
+            raise HTTPException(
+                status_code=400,
+                detail="'preset' must be a string or null",
+            )
+        if preset_name not in _HSV_PRESETS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown preset: {preset_name!r} (known: {sorted(_HSV_PRESETS)})",
+            )
+        # Identity claim must match the actual values — anything else
+        # is the kind of silent drift the unified-config redesign is
+        # built to prevent. Operator-facing UI computes the diff client-
+        # side and either submits matching values or sets preset=null.
+        ref = _HSV_PRESETS[preset_name]
+        if hsv != ref.hsv or gate != ref.shape_gate or selector != ref.selector:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"preset='{preset_name}' but supplied triple differs from "
+                    f"PRESETS[{preset_name!r}]. Either submit values matching "
+                    "the preset exactly, or pass preset=null for custom."
+                ),
+            )
+
+    cfg = DetectionConfig(
+        hsv=hsv,
+        shape_gate=gate,
+        selector=selector,
+        preset=preset_name,
+        last_applied_at=state._time_fn(),
+    )
+    applied = state.set_detection_config(cfg)
+    await device_ws.broadcast(
+        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
+    )
+    return {
+        "ok": True,
+        **_detection_config_to_dict(applied),
+        "modified_fields": _modified_fields(applied),
+    }
 
 
 @router.post("/settings/chirp_threshold")

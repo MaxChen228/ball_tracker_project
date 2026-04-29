@@ -109,8 +109,12 @@ def test_detection_hsv_post_persists_and_surfaces_on_status(tmp_path, monkeypatc
         follow_redirects=False,
     )
     assert r.status_code == 303
-    persisted = _json.loads((tmp_path / "hsv_range.json").read_text())
-    assert persisted == {
+    # Phase 2 of unified-config redesign: the triple now lives in a
+    # single `detection_config.json`. Editing one section drops preset
+    # binding (since the resulting config no longer matches any named
+    # preset by definition) and stamps `last_applied_at`.
+    persisted = _json.loads((tmp_path / "detection_config.json").read_text())
+    assert persisted["hsv"] == {
         "h_min": 25,
         "h_max": 55,
         "s_min": 90,
@@ -118,6 +122,8 @@ def test_detection_hsv_post_persists_and_surfaces_on_status(tmp_path, monkeypatc
         "v_min": 90,
         "v_max": 255,
     }
+    assert persisted["preset"] is None
+    assert isinstance(persisted["last_applied_at"], (int, float))
 
 
 def test_detection_hsv_rejects_invalid_values(tmp_path, monkeypatch):

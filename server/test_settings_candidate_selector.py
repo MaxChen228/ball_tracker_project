@@ -32,9 +32,12 @@ def test_candidate_selector_post_persists_and_surfaces_on_status(tmp_path, monke
     # Surfaces on /status.
     assert client.get("/status").json()["candidate_selector_tuning"] == body
 
-    # Persisted to disk.
-    persisted = _json.loads((tmp_path / "candidate_selector_tuning.json").read_text())
-    assert persisted == {"w_aspect": 0.7, "w_fill": 0.3}
+    # Persisted to disk inside the unified detection_config.json
+    # (phase 2 of unified-config redesign — selector lives alongside
+    # HSV + shape_gate in a single atomic file).
+    persisted = _json.loads((tmp_path / "detection_config.json").read_text())
+    assert persisted["selector"] == {"w_aspect": 0.7, "w_fill": 0.3}
+    assert persisted["preset"] is None  # editing a sub-knob clears preset binding
 
     # Form push (HTML caller) redirects 303.
     r = client.post(

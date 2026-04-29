@@ -28,6 +28,11 @@ from schemas import (
 )
 from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate
+from detection_config import (
+    DetectionConfig,
+    load_or_migrate as _detection_config_load_or_migrate,
+    persist as _detection_config_persist,
+)
 from pairing_tuning import PairingTuning
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
@@ -169,9 +174,15 @@ class State:
         self._result_dir = data_dir / "results"
         self._video_dir = data_dir / "videos"
         self._calibration_dir = data_dir / "calibrations"
-        self._hsv_path = data_dir / "hsv_range.json"
-        self._shape_gate_path = data_dir / "shape_gate.json"
-        self._candidate_selector_tuning_path = data_dir / "candidate_selector_tuning.json"
+        # Phase 2 of unified-config redesign: the detection triple
+        # (HSV + shape gate + selector) lives in a single
+        # `detection_config.json`. Boot reads/migrates from the legacy
+        # three-file layout (hsv_range.json + shape_gate.json +
+        # candidate_selector_tuning.json) on first start, then deletes
+        # the legacy files. The three legacy paths are no longer kept
+        # as instance attrs — anything that needs them goes through
+        # `_detection_config` in memory or the unified file on disk.
+        self._detection_config_path = data_dir / "detection_config.json"
         self._pairing_tuning_path = data_dir / "pairing_tuning.json"
         self._session_meta_path = data_dir / "session_meta.json"
         self._pitch_dir.mkdir(parents=True, exist_ok=True)
@@ -216,9 +227,10 @@ class State:
             self._device_intrinsics_dir,
             atomic_write=self._atomic_write,
         )
-        self._hsv_range = self._load_hsv_range_from_disk()
-        self._shape_gate = self._load_shape_gate_from_disk()
-        self._candidate_selector_tuning = self._load_candidate_selector_tuning_from_disk()
+        self._detection_config: DetectionConfig = _detection_config_load_or_migrate(
+            data_dir,
+            atomic_write=self._atomic_write,
+        )
         self._pairing_tuning = self._load_pairing_tuning_from_disk()
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
@@ -434,91 +446,15 @@ class State:
         )
         self._atomic_write(self._session_meta_path, payload)
 
-    def _load_hsv_range_from_disk(self) -> HSVRange:
-        path = self._hsv_path
-        if not path.exists():
-            return HSVRange.default()
-        try:
-            obj = json.loads(path.read_text())
-            return HSVRange(
-                h_min=int(obj["h_min"]),
-                h_max=int(obj["h_max"]),
-                s_min=int(obj["s_min"]),
-                s_max=int(obj["s_max"]),
-                v_min=int(obj["v_min"]),
-                v_max=int(obj["v_max"]),
-            )
-        except Exception as e:
-            logger.warning("skip corrupt hsv_range %s: %s", path, e)
-            return HSVRange.default()
-
-    def _persist_hsv_range_locked(self) -> None:
-        payload = json.dumps(
-            {
-                "h_min": self._hsv_range.h_min,
-                "h_max": self._hsv_range.h_max,
-                "s_min": self._hsv_range.s_min,
-                "s_max": self._hsv_range.s_max,
-                "v_min": self._hsv_range.v_min,
-                "v_max": self._hsv_range.v_max,
-            },
-            indent=2,
+    def _persist_detection_config_locked(self) -> None:
+        """Caller owns `self._lock`. Single-file atomic write replacing
+        the previous three independent persisters; ensures the triple
+        cannot half-update on a partial-failure path."""
+        _detection_config_persist(
+            self._detection_config,
+            self._data_dir,
+            atomic_write=self._atomic_write,
         )
-        self._atomic_write(self._hsv_path, payload)
-
-    def _load_shape_gate_from_disk(self) -> ShapeGate:
-        path = self._shape_gate_path
-        if not path.exists():
-            return ShapeGate.default()
-        try:
-            obj = json.loads(path.read_text())
-            return ShapeGate(
-                aspect_min=float(obj["aspect_min"]),
-                fill_min=float(obj["fill_min"]),
-            )
-        except Exception as e:
-            logger.warning("skip corrupt shape_gate %s: %s", path, e)
-            return ShapeGate.default()
-
-    def _persist_shape_gate_locked(self) -> None:
-        payload = json.dumps(
-            {
-                "aspect_min": self._shape_gate.aspect_min,
-                "fill_min": self._shape_gate.fill_min,
-            },
-            indent=2,
-        )
-        self._atomic_write(self._shape_gate_path, payload)
-
-    def _load_candidate_selector_tuning_from_disk(self) -> CandidateSelectorTuning:
-        path = self._candidate_selector_tuning_path
-        if not path.exists():
-            return CandidateSelectorTuning.default()
-        try:
-            obj = json.loads(path.read_text())
-            # Old persisted files carry r_px_expected / w_size from the
-            # size_pen era; those keys are silently dropped here (the
-            # cost function no longer reads area). Missing w_aspect /
-            # w_fill → class defaults.
-            d = CandidateSelectorTuning.default()
-            return CandidateSelectorTuning(
-                w_aspect=float(obj.get("w_aspect", d.w_aspect)),
-                w_fill=float(obj.get("w_fill", d.w_fill)),
-            )
-        except Exception as e:
-            logger.warning("skip corrupt candidate_selector_tuning %s: %s", path, e)
-            return CandidateSelectorTuning.default()
-
-    def _persist_candidate_selector_tuning_locked(self) -> None:
-        t = self._candidate_selector_tuning
-        payload = json.dumps(
-            {
-                "w_aspect": t.w_aspect,
-                "w_fill": t.w_fill,
-            },
-            indent=2,
-        )
-        self._atomic_write(self._candidate_selector_tuning_path, payload)
 
     def _load_pairing_tuning_from_disk(self) -> PairingTuning:
         path = self._pairing_tuning_path
@@ -630,10 +566,10 @@ class State:
             # LivePairingSession. Subsequent ingests see the four fields
             # already set and skip the block.
             if live.hsv_range_used is None:
-                live.tuning = self._candidate_selector_tuning
+                live.tuning = self._detection_config.selector
                 live.pairing_tuning = self._pairing_tuning
-                live.hsv_range_used = self._hsv_range
-                live.shape_gate_used = self._shape_gate
+                live.hsv_range_used = self._detection_config.hsv
+                live.shape_gate_used = self._detection_config.shape_gate
             cal_a = self._calibration_store.get("A")
             cal_b = self._calibration_store.get("B")
             dev_a = self._device_registry.get("A")
@@ -1452,10 +1388,10 @@ class State:
                 # test-bypass-arm path (build LivePairingSession inline,
                 # call ingest directly) still gets stamped on first frame.
                 live = LivePairingSession(session.id)
-                live.tuning = self._candidate_selector_tuning
+                live.tuning = self._detection_config.selector
                 live.pairing_tuning = self._pairing_tuning
-                live.hsv_range_used = self._hsv_range
-                live.shape_gate_used = self._shape_gate
+                live.hsv_range_used = self._detection_config.hsv
+                live.shape_gate_used = self._detection_config.shape_gate
                 self._live_pairings[session.id] = live
                 self._current_session = session
                 self._sync.clear_time_sync_intent_locked()
@@ -1467,31 +1403,70 @@ class State:
         with self._lock:
             return set(self._runtime_settings.default_paths)
 
+    def detection_config(self) -> DetectionConfig:
+        """Atomic snapshot of the full detection-config triple + preset
+        identity. Phase 2 of the unified-config redesign — earlier
+        callers reached for hsv_range() / shape_gate() / selector()
+        independently and risked seeing values from different write
+        epochs if the three setters were called interleaved by another
+        thread."""
+        with self._lock:
+            return self._detection_config
+
+    def set_detection_config(
+        self,
+        cfg: DetectionConfig,
+    ) -> DetectionConfig:
+        """Atomic single-write replacement for the legacy three setters.
+        Caller owns `cfg.last_applied_at` (typically `_time_fn()` at
+        call site). The new endpoint `POST /detection/config` calls
+        this directly; the legacy per-section endpoints route through
+        `set_hsv_range` / `set_shape_gate` / `set_candidate_selector_tuning`
+        below, which forward here with `preset=None` (editing one
+        sub-knob means leaving the named preset)."""
+        with self._lock:
+            self._detection_config = cfg
+            self._persist_detection_config_locked()
+            return self._detection_config
+
     def hsv_range(self) -> HSVRange:
         with self._lock:
-            return self._hsv_range
+            return self._detection_config.hsv
 
     def set_hsv_range(self, hsv_range: HSVRange) -> HSVRange:
+        """Legacy single-section setter. Editing HSV alone clears the
+        preset binding — the resulting config no longer matches any
+        named preset by definition. Phase 3 retires this in favor of
+        `set_detection_config(triple, preset=...)` from a unified
+        Apply button."""
         with self._lock:
-            self._hsv_range = hsv_range
-            self._persist_hsv_range_locked()
-            return self._hsv_range
+            self._detection_config = self._detection_config.with_(
+                hsv=hsv_range,
+                preset=None,
+                last_applied_at=self._time_fn(),
+            )
+            self._persist_detection_config_locked()
+            return self._detection_config.hsv
 
     def shape_gate(self) -> ShapeGate:
         with self._lock:
-            return self._shape_gate
+            return self._detection_config.shape_gate
 
     def candidate_selector_tuning(self) -> CandidateSelectorTuning:
         with self._lock:
-            return self._candidate_selector_tuning
+            return self._detection_config.selector
 
     def set_candidate_selector_tuning(
         self, tuning: CandidateSelectorTuning
     ) -> CandidateSelectorTuning:
         with self._lock:
-            self._candidate_selector_tuning = tuning
-            self._persist_candidate_selector_tuning_locked()
-            return self._candidate_selector_tuning
+            self._detection_config = self._detection_config.with_(
+                selector=tuning,
+                preset=None,
+                last_applied_at=self._time_fn(),
+            )
+            self._persist_detection_config_locked()
+            return self._detection_config.selector
 
     def pairing_tuning(self) -> PairingTuning:
         with self._lock:
@@ -1535,9 +1510,13 @@ class State:
 
     def set_shape_gate(self, shape_gate: ShapeGate) -> ShapeGate:
         with self._lock:
-            self._shape_gate = shape_gate
-            self._persist_shape_gate_locked()
-            return self._shape_gate
+            self._detection_config = self._detection_config.with_(
+                shape_gate=shape_gate,
+                preset=None,
+                last_applied_at=self._time_fn(),
+            )
+            self._persist_detection_config_locked()
+            return self._detection_config.shape_gate
 
     def set_default_paths(self, paths: set[DetectionPath]) -> set[DetectionPath]:
         with self._lock:
