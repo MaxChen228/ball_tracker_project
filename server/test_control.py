@@ -1128,23 +1128,24 @@ def test_dashboard_no_longer_renders_detection_path_picker():
 
 
 def test_dashboard_renders_unified_detection_config_card():
-    """Phase 3 of unified-config redesign: single form, single Apply,
-    identity header. The legacy three Apply buttons are gone — the JS
-    handler in `static/dashboard/15_hsv_controls.js` POSTs the full
-    triple to `/detection/config` on a single submit."""
+    """Single form, single Apply, identity header — the JS handler in
+    `static/dashboard/15_hsv_controls.js` POSTs the (HSV, shape_gate)
+    pair to `/detection/config` on a single submit. Selector cost
+    weights are no longer presented (locked as `_W_ASPECT` / `_W_FILL`
+    constants in `candidate_selector.py`)."""
     client = TestClient(app)
     body = client.get("/").text
     assert 'id="hsv-body"' in body
     assert 'id="detection-config-form"' in body
-    # Identity header element + the new preset-button data attrs
-    # (which now also carry shape_gate / selector values for one-click
-    # full-triple loads).
+    # Identity header element + preset-button data attrs that carry
+    # shape_gate values for one-click loads.
     assert 'class="detection-identity"' in body
     assert 'data-hsv-preset="tennis"' in body
     assert 'data-hsv-preset="blue_ball"' in body
     assert 'data-aspect-min=' in body
-    assert 'data-w-aspect=' in body
-    # Legacy per-section Apply forms must be absent.
+    # Selector data attrs and per-section Apply forms must be absent.
+    assert 'data-w-aspect=' not in body
+    assert 'data-w-fill=' not in body
     assert 'action="/detection/hsv"' not in body
     assert 'action="/detection/shape_gate"' not in body
     assert 'action="/detection/candidate_selector"' not in body

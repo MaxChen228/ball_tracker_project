@@ -2,10 +2,10 @@
 //
 // One form, one Apply button, atomic POST to /detection/config. Sliders
 // edit local form state only — they no longer hit the server on every
-// drag. Preset buttons load a preset's full triple (HSV + shape gate +
-// selector) into the form, but DO NOT apply server-side until the
-// operator clicks Apply. Reset-to-preset is a server-side snap that
-// also reloads the page so the SSR identity header refreshes.
+// drag. Preset buttons load a preset's HSV + shape gate values into
+// the form, but DO NOT apply server-side until the operator clicks
+// Apply. Reset-to-preset is a server-side snap that also reloads the
+// page so the SSR identity header refreshes.
 
   function _syncHSVField(form, key, value) {
     const range = form.querySelector(`[data-hsv-range="${key}"]`);
@@ -14,9 +14,9 @@
     if (num) num.value = String(value);
   }
 
-  function _syncShapeOrSelector(form, attr, key, value01) {
-    const range = form.querySelector(`[data-${attr}-range="${key}"]`);
-    const num = form.querySelector(`[data-${attr}-number="${key}"]`);
+  function _syncShape(form, key, value01) {
+    const range = form.querySelector(`[data-shape-range="${key}"]`);
+    const num = form.querySelector(`[data-shape-number="${key}"]`);
     const v = Math.max(0, Math.min(1, Number(value01) || 0));
     if (range) range.value = String(Math.round(v * 100));
     if (num) num.value = v.toFixed(2);
@@ -48,11 +48,6 @@
     return { aspect_min: get('aspect_min'), fill_min: get('fill_min') };
   }
 
-  function _readSelector(form) {
-    const get = (k) => Number(form.querySelector(`[data-cs-number="${k}"]`).value);
-    return { w_aspect: get('w_aspect'), w_fill: get('w_fill') };
-  }
-
   function initDetectionConfigControls() {
     const form = document.getElementById('detection-config-form');
     if (!form) return;
@@ -75,33 +70,19 @@
     // Shape-gate slider (0..100) <-> number (0..1).
     form.querySelectorAll('[data-shape-range]').forEach((slider) => {
       slider.addEventListener('input', () => {
-        _syncShapeOrSelector(form, 'shape', slider.dataset.shapeRange, Number(slider.value) / 100);
+        _syncShape(form,slider.dataset.shapeRange, Number(slider.value) / 100);
         _clearPendingPreset(form);
       });
     });
     form.querySelectorAll('[data-shape-number]').forEach((num) => {
       num.addEventListener('input', () => {
-        _syncShapeOrSelector(form, 'shape', num.dataset.shapeNumber, Number(num.value));
+        _syncShape(form,num.dataset.shapeNumber, Number(num.value));
         _clearPendingPreset(form);
       });
     });
 
-    // Selector slider <-> number.
-    form.querySelectorAll('[data-cs-range]').forEach((slider) => {
-      slider.addEventListener('input', () => {
-        _syncShapeOrSelector(form, 'cs', slider.dataset.csRange, Number(slider.value) / 100);
-        _clearPendingPreset(form);
-      });
-    });
-    form.querySelectorAll('[data-cs-number]').forEach((num) => {
-      num.addEventListener('input', () => {
-        _syncShapeOrSelector(form, 'cs', num.dataset.csNumber, Number(num.value));
-        _clearPendingPreset(form);
-      });
-    });
-
-    // Preset button: load full triple values into the form. Does NOT
-    // apply server-side — operator confirms with Apply.
+    // Preset button: load HSV + shape-gate values into the form. Does
+    // NOT apply server-side — operator confirms with Apply.
     document.querySelectorAll('[data-hsv-preset]').forEach((btn) => {
       btn.addEventListener('click', () => {
         _syncHSVField(form, 'h_min', btn.dataset.hMin);
@@ -110,10 +91,8 @@
         _syncHSVField(form, 's_max', btn.dataset.sMax);
         _syncHSVField(form, 'v_min', btn.dataset.vMin);
         _syncHSVField(form, 'v_max', btn.dataset.vMax);
-        _syncShapeOrSelector(form, 'shape', 'aspect_min', btn.dataset.aspectMin);
-        _syncShapeOrSelector(form, 'shape', 'fill_min', btn.dataset.fillMin);
-        _syncShapeOrSelector(form, 'cs', 'w_aspect', btn.dataset.wAspect);
-        _syncShapeOrSelector(form, 'cs', 'w_fill', btn.dataset.wFill);
+        _syncShape(form,'aspect_min', btn.dataset.aspectMin);
+        _syncShape(form,'fill_min', btn.dataset.fillMin);
         // Stash the chosen preset name so Apply can claim identity.
         form.dataset.pendingPreset = btn.dataset.hsvPreset;
       });
@@ -130,7 +109,6 @@
       const body = {
         hsv: _readHSV(form),
         shape_gate: _readShape(form),
-        selector: _readSelector(form),
         preset: presetClaim,
       };
       if (status) status.textContent = '…';

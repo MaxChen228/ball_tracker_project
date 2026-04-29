@@ -37,8 +37,9 @@ extension ServerUploader {
 
     /// One blob that survived area+aspect+fill on the live path. Mirrors
     /// `server/schemas.BlobCandidate`. The server's `live_pairing` runs
-    /// `candidate_selector.select_best_candidate` over this list using a
-    /// shape-prior cost (size + aspect + fill) before triangulation.
+    /// `candidate_selector.score_candidates` over this list using a
+    /// shape-prior cost (`_W_ASPECT`·aspect_pen + `_W_FILL`·fill_pen,
+    /// both module constants) before triangulation.
     ///
     /// `aspect` (min(w,h)/max(w,h)) and `fill` (area/(w*h)) are
     /// scale-invariant geometric stats — they survive the ball flying
