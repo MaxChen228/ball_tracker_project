@@ -413,21 +413,27 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // Coordinator is in .capturing here (set by consumeCalibrationFrameCaptureRequest).
         // Runtime owns the rollback-to-240fps internally; on completion
         // (success OR timeout) it has already restored activeFormat.
-        runtime.pauseAndCaptureHighResStill { jpeg, size in
+        runtime.pauseAndCaptureHighResStill { result in
             coord.markCalIdle()
-            guard let jpeg = jpeg else {
+            guard let result = result else {
                 log.error("calibration frame: high-res capture failed cam=\(cam, privacy: .public)")
                 return
             }
-            log.info("calibration frame: \(Int(size.width))x\(Int(size.height)) bytes=\(jpeg.count)")
+            let jpeg = result.jpeg
+            log.info("calibration frame: \(Int(result.size.width))x\(Int(result.size.height)) bytes=\(jpeg.count) photo_fov=\(String(format: "%.3f", result.photoFovDeg)) video_fov=\(String(format: "%.3f", result.videoFovDeg))")
             // Late-arrival POST guard: if the cycle was rolled back via
             // failure path we already returned above. Successful jpeg
             // path here always proceeds.
-            let path = "/camera/\(cam)/calibration_frame"
+            // FOVs go in the URL so the existing raw-JPEG body path stays
+            // unchanged. Server uses photo_fov_deg as the K basis for the
+            // 12 MP solve, then rebuilds K + H in video_fov_deg basis for
+            // canonical 1920×1080 storage (the live MOV's basis).
+            let path = "/camera/\(cam)/calibration_frame" +
+                "?photo_fov_deg=\(result.photoFovDeg)&video_fov_deg=\(result.videoFovDeg)"
             let uploadStart = Date()
-            uploader.postRawJPEG(path: path, jpeg: jpeg) { result in
+            uploader.postRawJPEG(path: path, jpeg: jpeg) { uploadResult in
                 let elapsedMs = Int(Date().timeIntervalSince(uploadStart) * 1000)
-                switch result {
+                switch uploadResult {
                 case .success:
                     log.info("calibration frame upload ok cam=\(cam, privacy: .public) bytes=\(jpeg.count) elapsed_ms=\(elapsedMs)")
                 case .failure(let err):
@@ -826,9 +832,17 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // frame for ClipRecorder; `.timeSyncWaiting` is mic-centric and
         // the preview encode would compete for CPU. Outside those two
         // states the capture queue is otherwise idle.
+        //
+        // Also drop preview during a calibration cycle: while the photo
+        // format is active (4:3 71.286° FOV vs the standby 16:9 73.828°
+        // FOV) the same scene fills more of the frame → dashboard sees
+        // a brief "zoom-in" jolt right before snapping back. Operator
+        // experience is cleaner if preview just freezes for the ~2s
+        // capture window.
         if captureQueueTransportCoordinator.isPreviewRequested
             && snap.state != .recording
-            && snap.state != .timeSyncWaiting {
+            && snap.state != .timeSyncWaiting
+            && !captureQueueTransportCoordinator.hasPendingCalibrationFrameCaptureRequest {
             captureQueueTransportCoordinator.pushPreviewFrame(pixelBuffer)
         }
         if captureQueueTransportCoordinator.consumeCalibrationFrameCaptureRequest(whileIn: snap.state) {

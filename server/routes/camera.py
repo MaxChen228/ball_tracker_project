@@ -20,7 +20,23 @@ def _validate_camera_id_or_422(camera_id: str) -> None:
 
 
 @router.post("/camera/{camera_id}/calibration_frame")
-async def camera_calibration_frame(camera_id: str, request: Request) -> dict[str, Any]:
+async def camera_calibration_frame(
+    camera_id: str,
+    request: Request,
+    photo_fov_deg: float | None = None,
+    video_fov_deg: float | None = None,
+) -> dict[str, Any]:
+    """Receive a one-shot full-resolution calibration JPEG from iOS.
+
+    `photo_fov_deg` / `video_fov_deg` are query params reporting the FOVs
+    of the photo format the JPEG was captured in (typically 12 MP) and
+    the video format that drives live MOV capture (typically 1080p
+    binned). They differ on iPhone main cams because the binned video
+    format crops the sensor differently from the full-frame photo
+    format. Server uses photo_fov_deg as the K basis for the 12 MP
+    solve, then rebuilds K + H in video_fov_deg basis for canonical
+    1920×1080 storage so the dashboard overlay aligns with the live
+    1080p preview, not the brief 12 MP capture window."""
     from main import state
     _validate_camera_id_or_422(camera_id)
     if not state.is_calibration_frame_requested(camera_id):
@@ -38,7 +54,11 @@ async def camera_calibration_frame(camera_id: str, request: Request) -> dict[str
         raise HTTPException(status_code=422, detail="empty body")
     if len(body) > 16 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="calibration frame too large")
-    state.store_calibration_frame(camera_id, bytes(body))
+    state.store_calibration_frame(
+        camera_id, bytes(body),
+        photo_fov_deg=photo_fov_deg,
+        video_fov_deg=video_fov_deg,
+    )
     return {"ok": True, "bytes": len(body)}
 
 

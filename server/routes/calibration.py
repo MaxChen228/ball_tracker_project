@@ -323,8 +323,7 @@ async def _await_calibration_frame(camera_id: str, *, timeout_s: float = 2.0) ->
     for _ in range(loops):
         got = state.consume_calibration_frame(camera_id)
         if got is not None:
-            jpeg_bytes, _ts = got
-            return jpeg_bytes
+            return got.jpeg_bytes
         await asyncio.sleep(0.1)
     raise HTTPException(
         status_code=408,
@@ -771,7 +770,7 @@ async def _run_auto_calibration(
     state.request_calibration_frame(camera_id)
     await device_ws.send(camera_id, _settings_message_for(camera_id))
     poll_start = asyncio.get_event_loop().time()
-    got: tuple[bytes, float] | None = None
+    got = None
     for _ in range(int(round(frame_timeout_s / 0.1))):
         got = state.consume_calibration_frame(camera_id)
         if got is not None:
@@ -793,7 +792,9 @@ async def _run_auto_calibration(
                 "is online, awake, and running the current build"
             ),
         )
-    jpeg_bytes, _ts = got
+    jpeg_bytes = got.jpeg_bytes
+    photo_fov_deg = got.photo_fov_deg
+    video_fov_deg = got.video_fov_deg
     if track_run:
         state.append_auto_cal_event(
             camera_id,
@@ -801,8 +802,15 @@ async def _run_auto_calibration(
             data={
                 "bytes": len(jpeg_bytes),
                 "poll_s": round(asyncio.get_event_loop().time() - poll_start, 2),
+                "photo_fov_deg": photo_fov_deg,
+                "video_fov_deg": video_fov_deg,
             },
         )
+    # Operator-supplied h_fov_deg (?h_fov_deg=...) wins over the
+    # iOS-reported photo FOV — explicit override path for debugging.
+    # Otherwise prefer the photo format's FOV since this JPEG was
+    # captured in the photo basis (12 MP).
+    solve_fov_deg = h_fov_deg if h_fov_deg is not None else photo_fov_deg
     arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
     bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if bgr is None:
@@ -829,7 +837,7 @@ async def _run_auto_calibration(
         )
 
     intrinsics, prior = _derive_auto_cal_intrinsics(
-        camera_id, w_img=w_img, h_img=h_img, h_fov_deg=h_fov_deg,
+        camera_id, w_img=w_img, h_img=h_img, h_fov_deg=solve_fov_deg,
     )
     if track_run:
         charuco_src = state.device_intrinsics_for_camera(camera_id)
@@ -979,12 +987,76 @@ async def _run_auto_calibration(
             "frame_image_size": (w_img, h_img),
         }
 
-    # Rescale K + H from detection basis (cropped frame) down to the
-    # canonical 1920×1080 standby video grid before storing. Pure 16:9→
-    # 16:9 linear scale; sx==sy to float epsilon. Keeps snapshot dims
-    # decoupled from whatever resolution the calibration JPEG happened
-    # to arrive at (1080p preview, 12 MP cropped, etc).
-    if (w_img, h_img) != (_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H):
+    # Rebuild K + H in the canonical 1920×1080 live-video basis.
+    #
+    # Detection runs at the 12 MP photo format's basis (4032×2268 after
+    # AR crop); pitch-time triangulation runs at 1920×1080 video format.
+    # Those two formats DON'T share a FOV on iPhone main cams — the
+    # binned video format crops the sensor differently from the
+    # full-frame photo format. A linear K rescale (the previous code
+    # path) silently mismatches the FOVs → reprojection looks fine in
+    # the brief 12 MP capture window but drifts after rollback to 1080p
+    # (operator sees overlay shift the moment preview returns).
+    #
+    # Correct path: solve produced (R_wc, t_wc) consistent with K_solve
+    # at the photo basis. Those are basis-independent (physical pose).
+    # Distortion coefficients live in normalized image coords (after
+    # K^-1) and survive the basis swap. Build K_video from the live
+    # video FOV at 1920×1080, then H_video = K_video × [r1 r2 t].
+    if video_fov_deg is not None and (w_img, h_img) != (_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H):
+        # Recover physical pose from the photo-basis solve.
+        K_solve = build_K(
+            intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy,
+        ).astype(np.float64)
+        H_solve = np.array(result.homography_row_major, dtype=np.float64).reshape(3, 3)
+        R_wc, t_wc = recover_extrinsics(K_solve, H_solve)
+
+        # Build K_video from the live video format's FOV. cx/cy land at
+        # canonical image center — the live video format's principal
+        # point is sensor-physical and ~ centered for iPhone main cams.
+        video_fov_rad = float(np.radians(video_fov_deg))
+        fx_v, fy_v, cx_v, cy_v = derive_fov_intrinsics(
+            _CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H, video_fov_rad,
+        )
+        intrinsics = IntrinsicsPayload(
+            fx=fx_v, fy=fy_v, cx=cx_v, cy=cy_v,
+            distortion=intrinsics.distortion,  # lens property; basis-invariant
+        )
+
+        # H_video = K_video × [r1 | r2 | t] — Zhang's planar homography
+        # rebuilt in the live basis.
+        K_video = build_K(fx_v, fy_v, cx_v, cy_v).astype(np.float64)
+        rt_planar = np.column_stack((R_wc[:, 0], R_wc[:, 1], t_wc.reshape(3)))
+        H_video = K_video @ rt_planar
+        # Normalize h33 → 1 to match storage convention.
+        if abs(H_video[2, 2]) > 1e-12:
+            H_video = H_video / H_video[2, 2]
+
+        from calibration_solver import CalibrationSolveResult
+        result = CalibrationSolveResult(
+            homography_row_major=H_video.flatten().tolist(),
+            detected_ids=result.detected_ids,
+            missing_ids=result.missing_ids,
+            image_width_px=_CANONICAL_SNAPSHOT_W,
+            image_height_px=_CANONICAL_SNAPSHOT_H,
+        )
+        if track_run:
+            state.append_auto_cal_event(
+                camera_id,
+                "canonical_rebuild",
+                data={
+                    "src": [w_img, h_img],
+                    "dst": [_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H],
+                    "photo_fov_deg": photo_fov_deg,
+                    "video_fov_deg": video_fov_deg,
+                    "fx_video": round(fx_v, 2),
+                    "fy_video": round(fy_v, 2),
+                },
+            )
+    elif (w_img, h_img) != (_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H):
+        # Fallback path when iOS didn't report video_fov_deg (old client
+        # or test harness). Linear rescale — preserves the old behavior.
+        # Logged so it's obvious this fallback fired.
         sx = _CANONICAL_SNAPSHOT_W / w_img
         sy = _CANONICAL_SNAPSHOT_H / h_img
         intrinsics = _scale_intrinsics(intrinsics, sx, sy)
@@ -1000,12 +1072,14 @@ async def _run_auto_calibration(
         if track_run:
             state.append_auto_cal_event(
                 camera_id,
-                "canonical_rescale",
+                "canonical_rescale_legacy",
+                level="warn",
                 data={
                     "src": [w_img, h_img],
                     "dst": [_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H],
                     "sx": round(sx, 4),
                     "sy": round(sy, 4),
+                    "reason": "video_fov_deg missing from iOS upload",
                 },
             )
 
