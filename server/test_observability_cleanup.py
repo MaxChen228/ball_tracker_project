@@ -34,18 +34,20 @@ def _frame(i: int) -> FramePayload:
 
 
 def test_live_ray_missing_calibration_dedup_logs(tmp_path, caplog):
-    """live_ray_for_frame should record the missing cam in session state
+    """live_rays_for_frame should record the missing cam in session state
     every frame (for /events surfacing) but log the warning only once
-    per (session, cam) pair — no log flood at 60 Hz."""
+    per (session, cam) pair — no log flood at 60 Hz. Returns an empty
+    list (not None) post fan-out: callers iterate so [] is the correct
+    "nothing to broadcast" sentinel."""
     state = State(data_dir=tmp_path)
     sid = "s_deadbeef"
 
     with caplog.at_level(logging.WARNING, logger="state"):
-        ray1 = state.live_ray_for_frame("A", sid, _frame(0))
-        ray2 = state.live_ray_for_frame("A", sid, _frame(1))
-        ray3 = state.live_ray_for_frame("A", sid, _frame(2))
+        ray1 = state.live_rays_for_frame("A", sid, _frame(0))
+        ray2 = state.live_rays_for_frame("A", sid, _frame(1))
+        ray3 = state.live_rays_for_frame("A", sid, _frame(2))
 
-    assert ray1 is None and ray2 is None and ray3 is None
+    assert ray1 == [] and ray2 == [] and ray3 == []
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "no calibration" in r.getMessage()]
     assert len(warnings) == 1, f"expected single warn-once, got {len(warnings)}"
     assert state.live_missing_calibration_for(sid) == ["A"]
@@ -53,8 +55,8 @@ def test_live_ray_missing_calibration_dedup_logs(tmp_path, caplog):
     # A second cam on the same session triggers its own single warning.
     with caplog.at_level(logging.WARNING, logger="state"):
         caplog.clear()
-        state.live_ray_for_frame("B", sid, _frame(3))
-        state.live_ray_for_frame("B", sid, _frame(4))
+        state.live_rays_for_frame("B", sid, _frame(3))
+        state.live_rays_for_frame("B", sid, _frame(4))
     warnings_b = [r for r in caplog.records if r.levelno == logging.WARNING and "no calibration" in r.getMessage()]
     assert len(warnings_b) == 1
     assert state.live_missing_calibration_for(sid) == ["A", "B"]
@@ -93,8 +95,8 @@ def test_reset_and_delete_clear_observability_state(tmp_path):
     sid1 = "s_11111111"
     sid2 = "s_22222222"
 
-    state.live_ray_for_frame("A", sid1, _frame(0))
-    state.live_ray_for_frame("B", sid2, _frame(0))
+    state.live_rays_for_frame("A", sid1, _frame(0))
+    state.live_rays_for_frame("B", sid2, _frame(0))
     state._processing.record_error(sid1, "A", "boom")
     state._processing.record_error(sid2, "B", "kaboom")
 
@@ -108,7 +110,7 @@ def test_reset_and_delete_clear_observability_state(tmp_path):
     # A second live_ray call for sid1's cam should re-populate the set —
     # the per-(sid,cam) dedupe key must have been dropped too, so the
     # cam shows up again on /events if the operator re-arms the sid.
-    state.live_ray_for_frame("A", sid1, _frame(0))
+    state.live_rays_for_frame("A", sid1, _frame(0))
     assert state.live_missing_calibration_for(sid1) == ["A"]
 
     # reset() wipes everything.

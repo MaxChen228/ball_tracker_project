@@ -88,42 +88,38 @@ def video_cell_html(
     cam_view_attrs = ""
     toolbar_html = ""
     if entry is not None:
-        # Layer matrix: 2 (path: live / svr) × 2 (type: winner / cands)
-        # plus PLATE + AXES calibration overlays. Toolbar groups WIN +
-        # CAND together per path so the operator's mental model is "show
-        # me live winner and its candidates" rather than four
-        # independent toggles. PLATE on by default; LIVE WIN/CAND on
-        # (current rig path); SVR WIN/CAND off (legacy / live-only
-        # sessions have no svr data — opt-in via Run server first).
-        # data-no-badges opts out of the runtime's status/calibration/RMS
-        # badge slot — viewer surfaces those signals through its own
-        # vid-head label, no .cam-view-badges container in the DOM.
+        # Layers: PLATE + AXES (calibration overlays) + one BLOBS layer
+        # per detection path. Pre-fan-out the toolbar carried a WIN
+        # (winner-dot) layer per path on top of BLOBS — that's gone:
+        # fan-out triangulation has no single winner, every shape-gate
+        # candidate gets its own ray + 3D point, and the cost_threshold
+        # slider in the viewer header controls which candidates render
+        # across canvas BLOBS + 3D rays + 3D points. Keeping a "winner"
+        # toggle would only redraw the lowest-cost candidate as a dot
+        # already drawn as a BLOBS ring — pure noise.
         cam_view_attrs = (
             f' data-cam-view="{cam}"'
             ' data-no-badges'
-            ' data-layers="plate,axes,detection_live,detection_blobs_live,detection_svr,detection_blobs_svr"'
-            ' data-layers-on="plate,detection_live,detection_blobs_live"'
+            ' data-layers="plate,axes,detection_blobs_live,detection_blobs_svr"'
+            ' data-layers-on="plate,detection_blobs_live"'
             ' data-default-opacity="65"'
         )
-        # Path-grouped toolbar. Each path group = label + WIN chip + CAND
-        # chip; chips inherit the path's color tier (cam color for live,
-        # ACCENT for svr) so the operator can read at a glance which
-        # winner corresponds to which cands. CAND visibility is gated by
-        # the session-level cost_threshold slider in the viewer header
-        # (see `session_cost_threshold_strip_html`), no per-cam K knob.
+        # Path-grouped toolbar: LIVE / SVR each get a single BLOBS chip
+        # because there is no winner-vs-cands distinction anymore.
+        # BLOBS visibility is gated by the session-level cost_threshold
+        # slider in the viewer header (see
+        # `session_cost_threshold_strip_html`).
         toolbar_html = (
             '<div class="cam-view-toolbar">'
             '<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>'
             '<button type="button" class="cv-layer" data-layer="axes">AXES</button>'
             '<span class="cv-path-group" data-path="live">'
             '<span class="cv-path-lbl">LIVE</span>'
-            '<button type="button" class="cv-layer on" data-layer="detection_live">WIN</button>'
-            '<button type="button" class="cv-layer on" data-layer="detection_blobs_live">CAND</button>'
+            '<button type="button" class="cv-layer on" data-layer="detection_blobs_live">BLOBS</button>'
             '</span>'
             '<span class="cv-path-group" data-path="svr">'
             '<span class="cv-path-lbl">SVR</span>'
-            '<button type="button" class="cv-layer" data-layer="detection_svr">WIN</button>'
-            '<button type="button" class="cv-layer" data-layer="detection_blobs_svr">CAND</button>'
+            '<button type="button" class="cv-layer" data-layer="detection_blobs_svr">BLOBS</button>'
             '</span>'
             '<span class="cv-opacity">OVL'
             '<input type="range" min="0" max="100" step="1" value="65" aria-label="Overlay opacity">'

@@ -167,8 +167,8 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                     session_id,
                     frame,
                 )
-                ray = await asyncio.to_thread(
-                    state.live_ray_for_frame,
+                rays = await asyncio.to_thread(
+                    state.live_rays_for_frame,
                     camera_id,
                     session_id,
                     resolved_frame,
@@ -182,7 +182,11 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                         "count": counts.get(camera_id, 0),
                     },
                 )
-                if ray is not None:
+                # Fan-out: one SSE 'ray' event per candidate so the
+                # dashboard 3D scene can apply the same cost-threshold
+                # filter as the post-pitch viewer. Pre-fan-out we
+                # emitted only the winner-dot ray here.
+                for ray in rays:
                     await sse_hub.broadcast(
                         "ray",
                         {
@@ -194,6 +198,8 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                             "origin": ray.origin,
                             "endpoint": ray.endpoint,
                             "source": ray.source,
+                            "cand_idx": ray.cand_idx,
+                            "cost": ray.cost,
                         },
                     )
                 for point in new_points:

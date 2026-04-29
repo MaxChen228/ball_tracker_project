@@ -132,9 +132,7 @@
   // Phase 6: virtual reprojection is now drawn as canvas layers on
   // BallTrackerCamView, painted on top of the real video. plate +
   // axes come from the runtime; viewer registers two extra layers
-  // (detection_live / detection_svr) that draw the per-frame ball
-  // detection blob from each pipeline. Currentframe lookup closes
-  // over the viewer's `currentT` clock.
-  //
-  // Algorithm mirrors cam_view_math.find_detection_index — keep both
-  // halves in sync (binary search + left-scan-on-gap + tol gate).
+  // (detection_blobs_live / detection_blobs_svr) that draw every
+  // shape-gate-passing candidate ring on the matched frame, gated by
+  // the session-level cost_threshold slider. Currentframe lookup
+  // closes over the viewer's `currentT` clock.

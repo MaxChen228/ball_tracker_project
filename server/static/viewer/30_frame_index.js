@@ -54,29 +54,52 @@
   frameTotal.textContent = String(TOTAL_FRAMES - 1);
   function ballDetectedRaysUpTo(rays, t) {
     const xs = [], ys = [], zs = [];
+    const passes = (typeof window._candPassesThreshold === 'function')
+      ? window._candPassesThreshold
+      : (() => true);
     for (const r of rays) {
       if (r.t_rel_s > t) continue;
+      // Same cost-threshold gate as playback mode + BLOBS overlay so
+      // every layer that exposes candidate-level data filters
+      // identically. Without this the cumulative ALL view would render
+      // every fan-out ray regardless of slider position.
+      if (!passes({cost: r.cost})) continue;
       xs.push(r.origin[0], r.endpoint[0], null);
       ys.push(r.origin[1], r.endpoint[1], null);
       zs.push(r.origin[2], r.endpoint[2], null);
     }
     return {xs, ys, zs};
   }
-  // Playback: pick the single ray closest to currentT (within tol) rather
-  // than the cumulative fan. Keeps the scene readable as an instantaneous
-  // snapshot tied to the bottom player.
+  // Playback: snap to the single matched frame (the ray timestamp closest
+  // to currentT within tol), then emit EVERY candidate ray at that
+  // timestamp that passes the cost-threshold filter. Pre-fan-out this
+  // returned a single best ray; with fan-out triangulation each frame
+  // carries up to ~7 candidate rays and the operator wants to see them
+  // all so the cost-threshold slider has visible effect on the 3D scene.
   function raysAtT(rays, t, tol) {
-    let best = null, bestDt = Infinity;
+    let bestT = null, bestDt = Infinity;
     for (const r of rays) {
       const dt = Math.abs(r.t_rel_s - t);
-      if (dt <= tol && dt < bestDt) { best = r; bestDt = dt; }
+      if (dt <= tol && dt < bestDt) { bestT = r.t_rel_s; bestDt = dt; }
     }
-    if (!best) return {xs: [], ys: [], zs: []};
-    return {
-      xs: [best.origin[0], best.endpoint[0], null],
-      ys: [best.origin[1], best.endpoint[1], null],
-      zs: [best.origin[2], best.endpoint[2], null],
-    };
+    if (bestT === null) return {xs: [], ys: [], zs: []};
+    const passes = (typeof window._candPassesThreshold === 'function')
+      ? window._candPassesThreshold
+      : (() => true);
+    const xs = [], ys = [], zs = [];
+    for (const r of rays) {
+      // Match the frame by timestamp identity rather than dt < tol so a
+      // rapid-fire camera with two distinct frames inside `tol` doesn't
+      // bleed each other's candidate rays into the scene.
+      if (r.t_rel_s !== bestT) continue;
+      // r.cost may be null on legacy rays; match _candPassesThreshold's
+      // semantics (null = unconditional pass).
+      if (!passes({cost: r.cost})) continue;
+      xs.push(r.origin[0], r.endpoint[0], null);
+      ys.push(r.origin[1], r.endpoint[1], null);
+      zs.push(r.origin[2], r.endpoint[2], null);
+    }
+    return {xs, ys, zs};
   }
   // Camera diamond + 3-axis triad is data the user should be able to hide
   // in lock-step with that camera's ray pills. When every path for a given
