@@ -29,9 +29,12 @@ PRESETS: dict[str, Preset] = {
     "tennis": Preset(
         name="tennis",
         label="Tennis",
-        # Yellow-green tennis ball; matches HSVRange.default() so headless
-        # boot without `data/hsv_range.json` lands here.
-        hsv=HSVRange(h_min=25, h_max=55, s_min=90, s_max=255, v_min=90, v_max=255),
+        # Bound to `HSVRange.default()` rather than redeclared so the two
+        # cannot drift if the default is ever retuned. (`HSVRange.default`
+        # is the headless-boot fallback when `data/hsv_range.json` is
+        # absent; "tennis preset" and "default" are conceptually the
+        # same thing — yellow-green tennis ball.)
+        hsv=HSVRange.default(),
     ),
     "blue_ball": Preset(
         name="blue_ball",
