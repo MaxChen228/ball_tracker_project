@@ -578,6 +578,57 @@ def test_viewer_page_context_computes_single_cam_layout_and_video_cells():
     assert ctx.videos_flex == "1 1 0"
 
 
+def test_viewer_page_renders_run_server_post_source_dropdown():
+    """Phase 3: viewer's "Rerun server" form must expose a <select>
+    so the operator can pick live / frozen / preset:<name> per request.
+    Pre-phase-3 the form had only a hidden source=live, which made
+    research compares require disk mutation. This guards the
+    affordance against regression — if someone refactors the form
+    back to a single hidden input, this test fails."""
+    import render_scene
+    from viewer_page import render_viewer_html
+
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(740)
+    scene = build_scene(
+        session_id,
+        {"A": _pitch("A", 740, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))},
+        triangulated=None,
+    )
+    health = {
+        "session_id": session_id,
+        "cameras": {
+            "A": {"received": True, "calibrated": True, "time_synced": True, "n_frames": 1, "n_detected": 1},
+            "B": {"received": False, "calibrated": False, "time_synced": False, "n_frames": 0, "n_detected": 0},
+        },
+        "triangulated_count": 0,
+        "error": None,
+        "duration_s": 0.0,
+        "received_at": None,
+        # camera_only flips can_run_server True so the action form
+        # actually renders (otherwise action_html is empty).
+        "mode": "camera_only",
+    }
+    videos = [
+        ("A", "/videos/session_x_A.mov", 0.0, 240.0, {"t_rel_s": [0.0], "detected": [True]}),
+    ]
+
+    html = render_viewer_html(scene, videos, health, build_figure=render_scene._build_figure)
+
+    # Form posts to the right endpoint.
+    assert f'action="/sessions/{session_id}/run_server_post"' in html
+    # Dropdown exists with all three source flavors.
+    assert '<select class="action-select" name="source"' in html
+    assert '<option value="live" selected>' in html
+    assert '<option value="frozen">' in html
+    # Both presets surface in the dropdown — not just one — so the
+    # operator can compare without disk mutation.
+    assert 'value="preset:tennis"' in html
+    assert 'value="preset:blue_ball"' in html
+    # No leftover hidden source from the phase-2 placeholder.
+    assert '<input type="hidden" name="source"' not in html
+
+
 def test_failure_strip_html_prefers_earliest_blocking_reason():
     health = {
         "cameras": {
