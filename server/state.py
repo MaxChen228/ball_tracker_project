@@ -274,6 +274,10 @@ class State:
         # / /events so the operator sees a reason for a silent live path
         # instead of having to tail the server log.
         self._live_missing_cal: dict[str, set[str]] = {}
+        # Per (session_id, camera_id) dedupe set for the missing-sync-anchor
+        # info log. Mirrors `_live_missing_cal_logged` so each cam/session
+        # logs exactly once until the next reset/clear.
+        self._live_missing_sync_logged: set[tuple[str, str]] = set()
         # Dedupe key for the warn-once-per-cam-session log below.
         self._live_missing_cal_logged: set[tuple[str, str]] = set()
         # Sessions whose live frame buffer needs to be flushed to disk.
@@ -304,6 +308,39 @@ class State:
     @property
     def video_dir(self) -> Path:
         return self._video_dir
+
+    @property
+    def processing(self) -> "SessionProcessingState":
+        """Public accessor for the session-processing coordinator.
+
+        Exposed as a `@property` (not a method) because it returns the
+        SessionProcessingState facade — a stable reference whose own
+        threadsafety/locking lives inside the coordinator, so callers
+        treat it as a fixed object: `state.processing.foo(...)`.
+
+        Routes call this directly for server_post job lifecycle, error
+        recording, and trash queries — no proxy methods on State for
+        those, keep this read-only attribute access. Compatible with the
+        existing facade: SessionProcessingState owns its own internal
+        bookkeeping; state-lock interactions still go through the
+        coordinator's `attach`-bound reference, so concurrent calls
+        respect the same `_lock` invariants the legacy `_processing`
+        path relied on."""
+        return self._processing
+
+    def now(self) -> float:
+        """Public accessor for the injectable wall-clock used across
+        State (`_time_fn`).
+
+        Exposed as a **method** (not a `@property`) because each call
+        must return a *fresh* float — wall-clock advances every
+        invocation. Always call as `state.now()`; writing
+        `if state.now > x:` would compare a bound-method object to a
+        float and silently always be truthy. Routes / helpers should
+        call this rather than poking `state._time_fn` directly so test
+        fixtures that override the clock keep flowing through one entry
+        point."""
+        return self._time_fn()
 
     def save_clip(
         self, camera_id: str, session_id: str, data: bytes, ext: str = "mov"
@@ -705,8 +742,9 @@ class State:
 
         Stereo live points still require A/B pairing and a shared time
         anchor. A monocular ray only needs that camera's calibration;
-        if the phone has no sync anchor, use the frame index as an
-        approximate relative clock so hover/color values stay small.
+        if the phone has no sync anchor, returns [] (mirrors the
+        no-calibration path; emits a one-time info log per cam/session
+        for operator visibility).
         """
         with self._lock:
             cal = self._calibration_store.get(camera_id)
@@ -717,6 +755,14 @@ class State:
                 should_log = log_key not in self._live_missing_cal_logged
                 if should_log:
                     self._live_missing_cal_logged.add(log_key)
+            sync_log_key = (session_id, camera_id)
+            should_log_sync = (
+                cal is not None
+                and (dev is None or dev.sync_anchor_timestamp_s is None)
+                and sync_log_key not in self._live_missing_sync_logged
+            )
+            if should_log_sync:
+                self._live_missing_sync_logged.add(sync_log_key)
         if cal is None:
             if should_log:
                 logger.warning(
@@ -726,11 +772,24 @@ class State:
                     session_id,
                 )
             return []
-        anchor = (
-            dev.sync_anchor_timestamp_s
-            if dev is not None and dev.sync_anchor_timestamp_s is not None
-            else frame.timestamp_s - (float(frame.frame_index) / 240.0)
-        )
+        # Silent fallback removed: the previous code synthesised an
+        # anchor from `frame.timestamp_s - frame_index/240` when the
+        # device had no sync anchor on file. That produced rays whose
+        # `t_rel_s` looked plausible but was actually decoupled from
+        # mutual-sync clock — they would rendr in the dashboard 3D scene
+        # alongside genuinely time-aligned rays and the operator had no
+        # way to tell. Mirror the no-calibration path: drop silently
+        # (one-time info log per cam/session) instead of fabricating a clock.
+        if dev is None or dev.sync_anchor_timestamp_s is None:
+            if should_log_sync:
+                logger.info(
+                    "live_rays_for_frame: cam=%s session=%s has no sync anchor — "
+                    "live rays dropped until chirp/mutual sync completes",
+                    camera_id,
+                    session_id,
+                )
+            return []
+        anchor = dev.sync_anchor_timestamp_s
         return rays_for_frame(
             camera_id=camera_id,
             frame=frame,
@@ -1632,7 +1691,7 @@ class State:
             return self._processing.trash_count()
 
     # server_post lifecycle moved to SessionProcessingState — call
-    # `state._processing.{mark_server_post_queued, start_server_post_job,
+    # `state.processing.{mark_server_post_queued, start_server_post_job,
     # should_cancel_server_post_job, finish_server_post_job, record_error,
     # clear_error, errors_for, cancel_processing, run_server_post,
     # session_summary, session_candidates, find_video_for}` directly from
@@ -1794,6 +1853,9 @@ class State:
             self._live_missing_cal_logged = {
                 key for key in self._live_missing_cal_logged if key[0] != session_id
             }
+            self._live_missing_sync_logged = {
+                key for key in self._live_missing_sync_logged if key[0] != session_id
+            }
             if any(s.id == session_id for s in self._recently_ended_sessions):
                 # `deque` has no `remove_if`; rebuild preserving order/maxlen.
                 kept = [s for s in self._recently_ended_sessions if s.id != session_id]
@@ -1832,6 +1894,7 @@ class State:
             self._processing.clear()
             self._live_missing_cal.clear()
             self._live_missing_cal_logged.clear()
+            self._live_missing_sync_logged.clear()
             self._persist_session_meta_locked()
             if purge_disk:
                 for path in self._pitch_dir.glob("session_*.json*"):

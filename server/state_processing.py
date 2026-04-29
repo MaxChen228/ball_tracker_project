@@ -1,7 +1,7 @@
 """Server-side post-processing (MOV decode + HSV detect + annotate)
 lifecycle + trash state. Split out of `state.py` so `State` focuses on
 the in-memory pitch/session data model and routes can reach directly
-into a purpose-built coordinator via `state._processing.X`.
+into a purpose-built coordinator via `state.processing.X`.
 
 Ownership invariants:
 - `State.pitches` / `State._video_dir` are read-only to this coordinator.
@@ -130,7 +130,7 @@ class SessionProcessingState:
         return queued
 
     # ---- Session-scoped helpers (need State + lock) ------------------
-    # These are the methods routes/* now call directly via state._processing.
+    # These are the methods routes/* now call directly via state.processing.
 
     def _require_owner(self) -> tuple["State", Lock]:
         if self._owner is None or self._lock is None:

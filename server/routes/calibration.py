@@ -29,6 +29,13 @@ from schemas import CalibrationSnapshot
 router = APIRouter()
 logger = logging.getLogger("ball_tracker")
 
+# Strong references for fire-and-forget background tasks. asyncio only
+# holds a weak ref to the task it returns from `create_task`, so without
+# this set a sufficiently quick GC cycle can collect the task mid-run
+# and silently cancel auto-calibration. See PEP-discussion notes around
+# `asyncio.create_task` GC for the canonical bug pattern.
+_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+
 
 @router.post("/calibration")
 async def post_calibration(snapshot: CalibrationSnapshot) -> dict[str, Any]:
@@ -282,7 +289,9 @@ async def calibration_auto_start(
                 detail=f"{type(e).__name__}: {e}",
             )
 
-    asyncio.create_task(_runner())
+    task = asyncio.create_task(_runner())
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
     return {"ok": True, "camera_id": camera_id, "run_id": run.id}
 
 
