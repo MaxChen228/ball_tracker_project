@@ -219,7 +219,15 @@
     const master = masterVideo;
     const off = offsetByCam[master.dataset.cam] ?? 0;
     const onFrame = (_now, metadata) => {
-      if (shouldIgnoreVideoFeedback()) { master.requestVideoFrameCallback(onFrame); return; }
+      // While paused (operator stepping manually), seek-completion frame
+      // callbacks deliver mediaTime at the *actual* decoded frame — which
+      // may be a keyframe before the requested target if the GOP is large
+      // (240fps H.264 commonly is). Letting that path call setFrame would
+      // snap currentFrame back to the keyframe, producing the "rewind"
+      // symptom that shouldIgnoreVideoFeedback's 180ms window doesn't
+      // catch when the seek itself takes longer. RVFC sync is only useful
+      // during playback; gate accordingly.
+      if (master.paused || shouldIgnoreVideoFeedback()) { master.requestVideoFrameCallback(onFrame); return; }
       const mediaT = (metadata && typeof metadata.mediaTime === "number") ? metadata.mediaTime : master.currentTime;
       const t = mediaT + off;
       syncFollowerVideosToMaster(t);
