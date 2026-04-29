@@ -22,7 +22,7 @@ For the per-iPhone-model 240 fps capture format breakdown, see
 cd server
 uv run uvicorn main:app --host 0.0.0.0 --port 8765   # run (prints LAN IP → paste into iPhone Settings)
 uv run pytest                                        # all tests (server + viewer)
-uv run pytest test_server.py::test_triangulate_sweeps_ball_path   # single test
+uv run pytest test_triangulation_math.py::test_triangulate_sweeps_ball_path   # single test
 uv run python reprocess_sessions.py --since today                 # re-run detection + triangulation with current hsv_range.json over today's MOVs (also --session s_xxxx / --all / --dry-run)
 ```
 
