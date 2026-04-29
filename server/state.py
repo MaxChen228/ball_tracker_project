@@ -670,7 +670,11 @@ class State:
         # (px/py picked by the shape-prior selector); hand it back so
         # callers (WS handler → live_rays_for_frame) work off the resolved
         # version, not the raw inbound.
-        resolved = live.latest_frame_for(camera_id) or frame
+        resolved = live.latest_frame_for(camera_id)
+        if resolved is None:
+            raise RuntimeError(
+                f"ingest_live_frame: live buffer empty after ingest cam={camera_id} sid={session_id}"
+            )
         return created, live.frame_counts_snapshot(), resolved
 
     def live_rays_for_frame(
