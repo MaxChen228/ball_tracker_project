@@ -323,8 +323,9 @@ def triangulate_cycle(
     filters by `tuning.cost_threshold` + `tuning.gap_threshold_m`, and
     emits all survivors. Requires intrinsics + homography on both
     cameras. Default tuning (`PairingTuning.default()`) emits every
-    shape-gate-passed candidate (cost_threshold=1.0) and aligns the gap
-    gate with segmenter (0.20m)."""
+    shape-gate-passed candidate (cost_threshold=1.0) and caps the
+    skew-line residual at 0.20m — sole authority for residual culling
+    (segmenter and viewer trust this gate, no re-filter downstream)."""
     if a.intrinsics is None or a.homography is None:
         raise ValueError("camera A missing calibration (run Calibrate in iPhone app)")
     if b.intrinsics is None or b.homography is None:
