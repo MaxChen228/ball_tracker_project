@@ -100,7 +100,7 @@ final class CameraCommandRouterTests: XCTestCase {
                 handleTrackingExposureCap: { cap in
                     self.guarded { self.exposureCapPushes.append(cap) }
                 },
-                currentCaptureHeight: { self.guarded { self.captureHeight } },
+                currentCaptureHeight: { Optional(self.guarded { self.captureHeight }) },
                 applyServerCaptureHeight: { h in
                     self.guarded {
                         self.captureHeightApplied.append(h)

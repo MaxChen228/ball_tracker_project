@@ -3,13 +3,6 @@ import UIKit
 
 @main
 struct ball_trackerApp: App {
-    init() {
-        // Strip any stale UserDefaults keys left over from pre-Phase-1
-        // builds (intrinsics / runtime knobs / capture mode etc. that
-        // are now server-owned). Idempotent; no-op on fresh installs.
-        AppSettingsStore.purgeLegacyKeys()
-    }
-
     var body: some Scene {
         WindowGroup {
             RootView()
