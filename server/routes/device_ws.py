@@ -164,7 +164,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 # silent skip used to mask "phone never received arm"
                 # symptoms by quietly dropping all subsequent frames.
                 if "sid" not in msg or not msg["sid"]:
-                    raise ValueError("frame message missing required 'sid'")
+                    raise ValueError(f"frame message missing required 'sid' (cam={camera_id})")
                 session_id = str(msg["sid"])
                 new_points, counts, resolved_frame = await asyncio.to_thread(
                     state.ingest_live_frame,
@@ -233,7 +233,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 # Loud raise rather than silent skip (was: `if session_id:`
                 # which masked the symptom).
                 if "sid" not in msg or not msg["sid"]:
-                    raise ValueError("cycle_end message missing required 'sid'")
+                    raise ValueError(f"cycle_end message missing required 'sid' (cam={camera_id})")
                 session_id = str(msg["sid"])
                 reason = msg.get("reason")
                 await asyncio.to_thread(state.mark_live_path_ended, camera_id, session_id, reason)
