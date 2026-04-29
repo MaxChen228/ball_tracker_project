@@ -50,7 +50,13 @@ final class CameraTransportCoordinator: NSObject {
         let setCurrentSessionId: (String?) -> Void
         let setCurrentSessionPaths: (Set<ServerUploader.DetectionPath>) -> Void
         let getCurrentTargetFps: () -> Double
-        let getCurrentCaptureHeight: () -> Int
+        /// Returns the live capture height in pixels, or `nil` when the
+        /// runtime hasn't initialised yet (VC torn down). Caller is the WS
+        /// `capture_height_px` drift check — if we don't know our current
+        /// height, we skip the drift comparison rather than substituting
+        /// the compile-time fixed default (which would silently mask real
+        /// drift between server-pushed and on-device value).
+        let getCurrentCaptureHeight: () -> Int?
         let getSyncId: () -> String?
         let getSyncAnchorTimestampS: () -> Double?
         let getChirpSnapshot: () -> AudioChirpDetector.Snapshot?
@@ -308,7 +314,7 @@ final class CameraTransportCoordinator: NSObject {
                     self.applyPushedTrackingExposureCap(cap)
                 },
                 currentCaptureHeight: { [weak self] in
-                    self?.dependencies.getCurrentCaptureHeight() ?? AppSettings.captureHeightFixed
+                    self?.dependencies.getCurrentCaptureHeight()
                 },
                 applyServerCaptureHeight: { [weak self] height in
                     self?.dependencies.applyServerCaptureHeight(height)
