@@ -66,7 +66,15 @@ final class ClipRecorder {
 
     /// Open the writer. Must be called before any `append`. Uses H.264 so the
     /// server side (OpenCV / FFmpeg) can decode without special builds.
-    func prepare(width: Int, height: Int) throws {
+    ///
+    /// The compression-properties block matters: without
+    /// `AVVideoExpectedSourceFrameRateKey` the H.264 encoder plans for ~30 fps
+    /// and starves at 240 fps — a 4.9 s recording came back with 4 frames in
+    /// the MOV (s_aafda0a8) because the input pipeline back-pressured on
+    /// `isReadyForMoreMediaData` and dropped ~99% of samples. Setting
+    /// `expected = 240` plus a fat 50 Mbps bitrate budget lets the hardware
+    /// encoder allocate a wide enough sliding window to actually keep up.
+    func prepare(width: Int, height: Int, expectedFps: Int) throws {
         try? FileManager.default.removeItem(at: outputURL)
         let w: AVAssetWriter
         do {
@@ -75,12 +83,18 @@ final class ClipRecorder {
             log.error("clip writer init failed error=\(error.localizedDescription, privacy: .public)")
             throw error
         }
+        let compression: [String: Any] = [
+            AVVideoAverageBitRateKey: 50_000_000,
+            AVVideoExpectedSourceFrameRateKey: expectedFps,
+            AVVideoMaxKeyFrameIntervalKey: expectedFps,
+        ]
         let input = AVAssetWriterInput(
             mediaType: .video,
             outputSettings: [
                 AVVideoCodecKey: AVVideoCodecType.h264,
                 AVVideoWidthKey: width,
                 AVVideoHeightKey: height,
+                AVVideoCompressionPropertiesKey: compression,
             ]
         )
         input.expectsMediaDataInRealTime = true
@@ -98,7 +112,7 @@ final class ClipRecorder {
             firstSamplePTS = nil
             lifecycle = .idle
         }
-        log.info("clip writer prepared width=\(width) height=\(height)")
+        log.info("clip writer prepared width=\(width) height=\(height) fps=\(expectedFps)")
     }
 
     /// Append one frame. The first appended sample's PTS becomes the writer
