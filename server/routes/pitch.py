@@ -12,14 +12,44 @@ from pydantic import ValidationError
 import session_results
 from pipeline import ProcessingCanceled
 from schemas import (
+    CandidateSelectorTuningPayload,
     DetectionPath,
+    HSVRangePayload,
     PitchPayload,
     SessionResult,
+    ShapeGatePayload,
 )
 from video import probe_dims, probe_frame_count
 
 router = APIRouter()
 logger = logging.getLogger("ball_tracker")
+
+
+def _stamp_detection_config(
+    pitch: PitchPayload,
+    *,
+    hsv_range,
+    shape_gate,
+    selector_tuning,
+) -> None:
+    """Freeze the detection-time config onto the pitch so reprocess can
+    reproduce exactly which HSV / shape-gate / selector-cost basis was
+    in effect when this pitch's candidates were scored. Mirrors the
+    cd87995 PairingTuning-on-SessionResult pattern. Idempotent — callers
+    can stamp on every state.record() and the wire shape stays stable."""
+    pitch.hsv_range_used = HSVRangePayload(
+        h_min=hsv_range.h_min, h_max=hsv_range.h_max,
+        s_min=hsv_range.s_min, s_max=hsv_range.s_max,
+        v_min=hsv_range.v_min, v_max=hsv_range.v_max,
+    )
+    pitch.shape_gate_used = ShapeGatePayload(
+        aspect_min=shape_gate.aspect_min,
+        fill_min=shape_gate.fill_min,
+    )
+    pitch.candidate_selector_tuning_used = CandidateSelectorTuningPayload(
+        w_aspect=selector_tuning.w_aspect,
+        w_fill=selector_tuning.w_fill,
+    )
 
 
 def _summarize_result(result: SessionResult) -> dict[str, Any]:
@@ -147,6 +177,26 @@ async def pitch(
                 payload_obj.image_height_px = mh
 
         payload_obj.frames_server_post = []
+
+    # Freeze detection config onto the pitch BEFORE first persist. For
+    # live frames the iPhone-side detector snapshot is unobservable from
+    # here, so we stamp the values the live session was frozen to at
+    # first ingest (BLOCK B); when no live session exists yet (test
+    # fixture, replay) fall back to state's current snapshot. The
+    # server_post path overwrites these later in `_run_server_detection`
+    # with the snapshot it actually called `detect_pitch` with.
+    with state._lock:
+        live_session = state._live_pairings.get(payload_obj.session_id)
+        hsv_used = (live_session.hsv_range_used if live_session and live_session.hsv_range_used else state._hsv_range)
+        gate_used = (live_session.shape_gate_used if live_session and live_session.shape_gate_used else state._shape_gate)
+        tuning_used = (live_session.tuning if live_session is not None else state._candidate_selector_tuning)
+    _stamp_detection_config(
+        payload_obj,
+        hsv_range=hsv_used,
+        shape_gate=gate_used,
+        selector_tuning=tuning_used,
+    )
+
     result = await asyncio.to_thread(state.record, payload_obj)
 
     ball_frames = sum(
@@ -263,15 +313,22 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
         {"sid": sid, "cam": cam, "frames_done": 0, "frames_total": frames_total},
     )
 
+    # Snapshot once and reuse for both the actual call and the stamp,
+    # so the persisted `*_used` values cannot drift from what was
+    # passed to detect_pitch (e.g. operator edits config between the
+    # two reads).
+    hsv_used = state.hsv_range()
+    gate_used = state.shape_gate()
+    tuning_used = state.candidate_selector_tuning()
     try:
         frames = await asyncio.to_thread(
             detect_pitch,
             clip_path,
             pitch.video_start_pts_s,
-            hsv_range=state.hsv_range(),
+            hsv_range=hsv_used,
             should_cancel=lambda: proc.should_cancel_server_post_job(sid, cam),
-            shape_gate=state.shape_gate(),
-            selector_tuning=state.candidate_selector_tuning(),
+            shape_gate=gate_used,
+            selector_tuning=tuning_used,
             progress=on_progress,
         )
     except ProcessingCanceled:
@@ -302,6 +359,15 @@ async def _run_server_detection(clip_path: Path, pitch: PitchPayload) -> None:
     # SessionResult rebuild picks it up via max(A, B). Only set on
     # success — cancellation / errors above return before this line.
     pitch.server_post_ran_at = state._time_fn()
+    # Overwrite the live-side stamp with what server_post actually used
+    # for this run — server_post is the authoritative cost basis once it
+    # has run, since reprocess will read from `frames_server_post`.
+    _stamp_detection_config(
+        pitch,
+        hsv_range=hsv_used,
+        shape_gate=gate_used,
+        selector_tuning=tuning_used,
+    )
     try:
         await asyncio.to_thread(state.record, pitch)
     except Exception as exc:

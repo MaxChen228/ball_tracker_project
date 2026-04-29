@@ -15,6 +15,7 @@ the process will deadlock.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from detection_paths import (
@@ -36,6 +37,33 @@ from schemas import (
 if TYPE_CHECKING:
     from pairing_tuning import PairingTuning
     from state import State
+
+
+logger = logging.getLogger(__name__)
+
+
+def _stamp_frozen_config_on_result(
+    result: SessionResult,
+    a: PitchPayload | None,
+    b: PitchPayload | None,
+) -> None:
+    """Mirror the per-pitch frozen detection config onto the SessionResult.
+    Divergence (A and B carry different values because operator edited
+    `data/hsv_range.json` mid-cycle) is logged as a warning but does not
+    raise — diagnostic, not crashable. A wins, fall back to B."""
+    for field_name in (
+        "hsv_range_used",
+        "shape_gate_used",
+        "candidate_selector_tuning_used",
+    ):
+        va = getattr(a, field_name) if a is not None else None
+        vb = getattr(b, field_name) if b is not None else None
+        if va is not None and vb is not None and va != vb:
+            logger.warning(
+                "session %s A/B %s diverged — stamping A onto result",
+                result.session_id, field_name,
+            )
+        setattr(result, field_name, va if va is not None else vb)
 
 
 def triangulate_pair(
@@ -259,6 +287,7 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             result.aborted = True
         elif a is not None and b is not None:
             result.error = "no detection completed"
+    _stamp_frozen_config_on_result(result, a, b)
     return result
 
 
@@ -369,6 +398,7 @@ def recompute_result_for_session(
             result.aborted = True
         elif a is not None and b is not None:
             result.error = "no detection completed"
+    _stamp_frozen_config_on_result(result, a, b)
     return result
 
 

@@ -578,11 +578,23 @@ class State:
         frame: FramePayload,
     ) -> tuple[list[TriangulatedPoint], dict[str, int], FramePayload]:
         with self._lock:
+            new_session = session_id not in self._live_pairings
             live = self._live_pairings.setdefault(session_id, LivePairingSession(session_id))
-            # Refresh selector + pairing tuning every ingest so dashboard
-            # slider changes apply on the next frame without a session reset.
-            live.tuning = self._candidate_selector_tuning
-            live.pairing_tuning = self._pairing_tuning
+            # Freeze selector + pairing tuning at first ingest, mirroring
+            # the cd87995 PairingTuning-on-SessionResult contract: a session's
+            # cost basis is decided at arm time and cannot shift mid-cycle.
+            # Dashboard slider edits during an active session land on the
+            # NEXT session, not the one currently ingesting frames — without
+            # this freeze, frame N+1 can score under a different prior than
+            # frame N and the per-frame `cost` field on persisted candidates
+            # becomes meaningless. Also stamps the HSV / shape-gate snapshot
+            # used by the iOS-side detector for this session so the same
+            # values flow onto `PitchPayload.*_used` when /pitch persists.
+            if new_session:
+                live.tuning = self._candidate_selector_tuning
+                live.pairing_tuning = self._pairing_tuning
+                live.hsv_range_used = self._hsv_range
+                live.shape_gate_used = self._shape_gate
             cal_a = self._calibration_store.get("A")
             cal_b = self._calibration_store.get("B")
             dev_a = self._device_registry.get("A")
