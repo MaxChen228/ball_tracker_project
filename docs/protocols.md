@@ -9,7 +9,7 @@
 
 ## Payload contract
 
-`POST /pitch` is `multipart/form-data`. The `payload` part is always required; the `video` part is required only when the payload declares `server_post` in its `paths` (see `routes/pitch.py::_requires_video`). Calibration data at `data/calibrations/<camera_id>.json` is the **single source of truth** for intrinsics / homography / image dims — iOS no longer echoes them on uploads (Phase 1 decoupling).
+`POST /pitch` is `multipart/form-data`. The `payload` part is always required. `video` is technically optional in the handler — `routes/pitch.py` accepts a frame-only payload as long as the JSON ships a non-empty `frames_live` / `frames_server_post` (this is the test path); 422 fires only when **both** `video` and `frames_*` are missing. **In production every real iOS upload ships the MOV** (post-PR61 `ClipRecorder` is unconditional). Calibration data at `data/calibrations/<camera_id>.json` is the **single source of truth** for intrinsics / homography / image dims — iOS no longer echoes them on uploads (Phase 1 decoupling).
 
 - **`payload`** (`application/json`) — encoded `ServerUploader.PitchPayload` ↔ `main.PitchPayload`:
 

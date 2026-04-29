@@ -762,9 +762,9 @@ class State:
         triangulate the session.
 
         Lock discipline: the critical section is kept tight. Disk I/O and
-        NumPy triangulation happen OUTSIDE `self._lock` so heartbeats and
-        status polls don't block on a slow disk or a millisecond-scale
-        triangulation run.
+        NumPy triangulation happen OUTSIDE `self._lock` so WS heartbeats
+        and dashboard `/status` reads don't block on a slow disk or a
+        millisecond-scale triangulation run.
 
         Race note: two simultaneous A+B uploads for the same session can
         each observe the other inside their own critical section and both
@@ -811,8 +811,8 @@ class State:
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
             # Drive the session state machine forward — any upload arriving
             # while armed disarms the session (one-shot pattern). The other
-            # camera, if it was also recording, gets "disarm" on its next
-            # /status poll and cleans up.
+            # camera, if it was also recording, gets "disarm" on the next
+            # WS settings push and cleans up.
             self._register_upload_in_session_locked(pitch)
 
         # --- Outside the lock: write pitch JSON. Filename is unique per
@@ -1437,7 +1437,9 @@ class State:
 
     def commands_for_devices(self) -> dict[str, str]:
         """Derive per-device commands from the current session state. The
-        iPhone reads `commands[self.camera_id]` on each /status poll:
+        iPhone receives its slot via WS push (`/ws/device/{cam}` on hello
+        and on every settings broadcast); `/status` mirrors the same map
+        for dashboard observability:
           - "sync_run" if a mutual-sync run is active AND this phone has
             not yet posted its report for that run (preempts arm/disarm —
             guarded by `start_sync` to be mutually exclusive with an
