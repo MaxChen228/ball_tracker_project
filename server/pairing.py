@@ -288,12 +288,20 @@ def triangulate_cycle(
     results: list[TriangulatedPoint] = []
 
     if items_a and items_b:
+        # `_frame_items` already sorts by t_rel, so we can binary-search
+        # for each A frame's nearest B in O(log N) instead of the
+        # full-array O(N) argmin scan. Same answer because the closest
+        # element in a sorted array is always the searchsorted insertion
+        # neighbour or its predecessor.
         b_times = np.array([x[0] for x in items_b])
+        n_b = len(b_times)
         dist_a = a.intrinsics.distortion
         dist_b = b.intrinsics.distortion
 
         for t_rel, px_a, py_a in items_a:
-            idx = int(np.argmin(np.abs(b_times - t_rel)))
+            ins = int(np.searchsorted(b_times, t_rel))
+            cands = [i for i in (ins - 1, ins) if 0 <= i < n_b]
+            idx = min(cands, key=lambda i: abs(b_times[i] - t_rel))
             dt = float(b_times[idx] - t_rel)
             if abs(dt) > _MAX_DT_S:
                 drop_outside_window += 1
