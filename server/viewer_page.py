@@ -35,7 +35,7 @@ from render_scene_theme import (
 from viewer_fragments import (
     failure_strip_html,
     health_nav_strip_html,
-    session_cost_threshold_strip_html,
+    session_tuning_strip_html,
     video_cell_html,
 )
 
@@ -62,6 +62,7 @@ class ViewerPageContext:
     health_failure_html: str
     session_tuning_html: str
     cost_threshold: float | None
+    gap_threshold_m: float | None
     video_cells_html: str
     session_id: str
     server_post_ran: bool
@@ -76,6 +77,7 @@ def build_viewer_page_context(
     *,
     build_figure,
     cost_threshold: float | None = None,
+    gap_threshold_m: float | None = None,
 ) -> ViewerPageContext:
     fig = build_figure(scene)
     fig_json = _json.loads(fig.to_json())
@@ -170,10 +172,11 @@ def build_viewer_page_context(
         layout_mode=layout_mode,
         health_strip_html=health_nav_strip_html(health),
         health_failure_html=failure_strip_html(health),
-        session_tuning_html=session_cost_threshold_strip_html(
-            cost_threshold, scene.session_id,
+        session_tuning_html=session_tuning_strip_html(
+            cost_threshold, gap_threshold_m, scene.session_id,
         ),
         cost_threshold=cost_threshold,
+        gap_threshold_m=gap_threshold_m,
         video_cells_html=video_cells,
         session_id=scene.session_id,
         server_post_ran=server_post_ran,
@@ -217,6 +220,7 @@ def render_viewer_html(
     *,
     build_figure,
     cost_threshold: float | None = None,
+    gap_threshold_m: float | None = None,
 ) -> str:
     ctx = build_viewer_page_context(
         scene,
@@ -224,6 +228,7 @@ def render_viewer_html(
         health,
         build_figure=build_figure,
         cost_threshold=cost_threshold,
+        gap_threshold_m=gap_threshold_m,
     )
     if ctx.can_run_server:
         # Operator may rerun after tweaking HSV / shape gate / selector;
@@ -315,12 +320,6 @@ def render_viewer_html(
               <span class="layer-name"><span class="swatch" data-cam="B"></span>Rays B</span>
               <button type="button" class="layer-pill" data-layer="camB" data-path="live" aria-pressed="true">live</button>
               <button type="button" class="layer-pill" data-layer="camB" data-path="server_post" aria-pressed="true">svr</button>
-            </span>
-            <span class="layer-divider" aria-hidden="true"></span>
-            <span class="layer-group" data-layer="residual" id="residual-filter-group" title="Drop triangulated points whose ray-midpoint residual exceeds this threshold. Real ball pairs sit at sub-cm residual; static-target false pairs blow up to metres.">
-              <span class="layer-name">Residual</span>
-              <input type="range" id="residual-filter-slider" min="0" max="200" step="1" value="200" aria-label="Residual filter threshold (cm)">
-              <span id="residual-filter-readout" class="readout">off</span>
             </span>
             <span class="layer-divider" aria-hidden="true"></span>
             <span class="layer-group" data-layer="strike-zone" title="Toggle the strike-zone wireframe in the 3D scene. Default on.">
@@ -415,15 +414,22 @@ def render_viewer_html(
 }}</script>
 <script>
 window.VIEWER_INITIAL_COST_THRESHOLD = {1.0 if ctx.cost_threshold is None else float(ctx.cost_threshold)};
-window._applyCostThreshold = function(btn) {{
-  const v = parseFloat(document.querySelector('[data-session-cost-threshold]').value);
+// Initial gap in METRES (None → 2.0m = effectively off; route's max).
+// 50_canvas.js converts to client-side residualCapM (Infinity when ≥ 2.0).
+window.VIEWER_INITIAL_GAP_THRESHOLD_M = {2.0 if ctx.gap_threshold_m is None else float(ctx.gap_threshold_m)};
+window._applyTuning = function(btn) {{
+  const cost = parseFloat(document.querySelector('[data-session-cost-threshold]').value);
+  // Slider value is centimetres (0–200); ship metres to the route. 200 = 2.0m
+  // = the route's max ("off" semantically — every cartesian pair survives
+  // the gap gate, so what you Apply matches what the slider shows).
+  const gap_m = parseFloat(document.querySelector('[data-session-gap-threshold]').value) / 100;
   const sid = btn.getAttribute('data-session-id');
   btn.disabled = true;
   btn.textContent = 'Recomputing…';
   fetch('/sessions/' + encodeURIComponent(sid) + '/recompute', {{
     method: 'POST',
     headers: {{ 'Content-Type': 'application/json' }},
-    body: JSON.stringify({{ cost_threshold: v }}),
+    body: JSON.stringify({{ cost_threshold: cost, gap_threshold_m: gap_m }}),
   }}).then(function(r) {{
     if (!r.ok) throw new Error('HTTP ' + r.status);
     // Simplest reload — full re-render with fresh SessionResult.

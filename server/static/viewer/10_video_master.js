@@ -74,13 +74,19 @@
     server_post: (TRAJ_BY_PATH.server_post || []).length > 0
       || (SCENE.triangulated || []).length > 0,
   };
-  // --- Triangulation residual filter ---
-  // Drop points whose ray-midpoint gap exceeds this cap (m). Real ball
-  // pairs sit sub-cm; static-target false pairs blow up to metres.
-  // Default off (Infinity) and persists to localStorage.
-  const RESIDUAL_FILTER_KEY = "ball_tracker_viewer_residual_cap_cm";
-  let residualCapM = Infinity;
-  try {
-    const saved = parseFloat(localStorage.getItem(RESIDUAL_FILTER_KEY));
-    if (Number.isFinite(saved) && saved >= 0 && saved < 200) residualCapM = saved / 100;
-  } catch (_e) { /* ignore */ }
+  // --- Triangulation residual filter (client-side preview) ---
+  // Sibling of cost_threshold: drops points whose ray-midpoint gap
+  // exceeds this cap (m) at draw time. Sole authoritative knob is the
+  // per-session SessionResult.gap_threshold_m, server-injected as
+  // VIEWER_INITIAL_GAP_THRESHOLD_M (metres). The header strip's Gap
+  // slider drives `_setGapThreshold` (50_canvas.js) which mutates
+  // `residualCapM` for the live preview; Apply triggers recompute and
+  // a reload reseeds from the new SessionResult.
+  // 2.0m (the route's max) is the "off" semantic — every cartesian pair
+  // already passed the 2.0m gate at pairing time, so no client-side
+  // filtering is needed at that setting (Infinity short-circuits the
+  // residual predicate in 20_filters.js).
+  let residualCapM = (typeof window.VIEWER_INITIAL_GAP_THRESHOLD_M === "number"
+    && window.VIEWER_INITIAL_GAP_THRESHOLD_M < 2.0)
+    ? window.VIEWER_INITIAL_GAP_THRESHOLD_M
+    : Infinity;

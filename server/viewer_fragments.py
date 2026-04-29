@@ -109,7 +109,7 @@ def video_cell_html(
         # because there is no winner-vs-cands distinction anymore.
         # BLOBS visibility is gated by the session-level cost_threshold
         # slider in the viewer header (see
-        # `session_cost_threshold_strip_html`).
+        # `session_tuning_strip_html`).
         toolbar_html = (
             '<div class="cam-view-toolbar">'
             '<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>'
@@ -140,39 +140,65 @@ def video_cell_html(
     )
 
 
-def session_cost_threshold_strip_html(
-    cost_threshold: float | None, session_id: str,
+def session_tuning_strip_html(
+    cost_threshold: float | None,
+    gap_threshold_m: float | None,
+    session_id: str,
 ) -> str:
-    """Per-session cost_threshold slider for the viewer's nav bar.
+    """Per-session pairing-tuning sliders (cost + gap) for the viewer's
+    nav bar.
 
-    Drag = client-side preview only (filter blobs + 3D points by
-    `cost > threshold`). Apply = POST /sessions/{sid}/recompute with
-    the chosen value, server reruns pairing + segmenter on existing
-    candidates and overwrites SessionResult. Initial value is
-    `SessionResult.cost_threshold` (None → 1.0 = "no filter") which the
-    server injected onto the page.
+    Cost slider: drag = client-side preview (filter blobs + 3D points by
+    `cost > threshold`). Initial value is `SessionResult.cost_threshold`
+    (None → 1.0 = "no filter").
+
+    Gap slider: drag = client-side preview (hide triangulated points
+    whose `residual_m > threshold`). Range 0–200cm, "200" reads as
+    "off" (Infinity client-side; sent as 2.0m to the route). Initial
+    value is `SessionResult.gap_threshold_m * 100` (None → 200 = off).
+
+    Apply = POST /sessions/{sid}/recompute with both values, server
+    reruns pairing + segmenter on existing candidates and overwrites
+    SessionResult.
 
     `session_id` is interpolated into the Apply handler's URL — the
     pattern is `^s_[0-9a-f]{4,32}$` (validated server-side too) so no
     HTML injection here, but escaping anyway is cheap.
     """
-    initial = 1.0 if cost_threshold is None else float(cost_threshold)
+    cost_initial = 1.0 if cost_threshold is None else float(cost_threshold)
+    # Slider value is centimetres for human readability; 200 = "off".
+    gap_initial_cm = 200 if gap_threshold_m is None else min(
+        200, max(0, round(float(gap_threshold_m) * 100))
+    )
+    gap_readout = "off" if gap_initial_cm >= 200 else f"≤ {gap_initial_cm} cm"
     sid_attr = html.escape(session_id, quote=True)
     return (
         '<div class="session-tuning" role="group" '
-        'aria-label="Per-session selector cost threshold">'
+        'aria-label="Per-session pairing tuning (cost + gap)">'
+        # --- Cost slider ---
         '<label class="st-label">Cost ≤</label>'
         '<input type="range" min="0" max="1" step="0.01" '
-        f'value="{initial:.2f}" data-session-cost-threshold '
+        f'value="{cost_initial:.2f}" data-session-cost-threshold '
         'aria-label="cost threshold" '
         'oninput="window._setCostThreshold && window._setCostThreshold(this.value); '
         'document.querySelector(\'[data-session-cost-value]\').textContent = '
         '(+this.value).toFixed(2); '
         'document.querySelector(\'[data-session-recompute]\').disabled = false;">'
-        f'<span class="st-value" data-session-cost-value>{initial:.2f}</span>'
+        f'<span class="st-value" data-session-cost-value>{cost_initial:.2f}</span>'
+        # --- Gap slider (skew-line residual cap, sibling of cost) ---
+        '<label class="st-label">Gap ≤</label>'
+        '<input type="range" min="0" max="200" step="1" '
+        f'value="{gap_initial_cm}" data-session-gap-threshold '
+        'aria-label="gap threshold (cm)" '
+        'oninput="window._setGapThreshold && window._setGapThreshold(this.value); '
+        'document.querySelector(\'[data-session-gap-value]\').textContent = '
+        '(+this.value >= 200 ? \'off\' : \'≤ \' + (+this.value) + \' cm\'); '
+        'document.querySelector(\'[data-session-recompute]\').disabled = false;">'
+        f'<span class="st-value" data-session-gap-value>{gap_readout}</span>'
+        # --- Apply button (sends both values) ---
         '<button type="button" class="st-apply" data-session-recompute disabled '
         f'data-session-id="{sid_attr}" '
-        'onclick="window._applyCostThreshold && window._applyCostThreshold(this);">'
+        'onclick="window._applyTuning && window._applyTuning(this);">'
         'Apply</button>'
         '</div>'
     )
