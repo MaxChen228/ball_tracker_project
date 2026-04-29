@@ -95,6 +95,19 @@ class CalibrationStore:
     def get(self, camera_id: str) -> CalibrationSnapshot | None:
         return self._items.get(camera_id)
 
+    def clear(self) -> int:
+        """Wipe in-memory + on-disk calibration JSONs. Returns count
+        removed. Used by the dashboard 'Reset rig' affordance for full
+        re-setup; routine recalibration goes through `set()` per cam."""
+        n = len(self._items)
+        for cam in list(self._items.keys()):
+            try:
+                self.path(cam).unlink(missing_ok=True)
+            except OSError:
+                logger.exception("failed to remove calibration JSON for %s", cam)
+        self._items.clear()
+        return n
+
 
 def scale_intrinsics_to(
     intrinsics: IntrinsicsPayload,
@@ -416,3 +429,171 @@ class AutoCalibrationRunStore:
         active = {cam: run.to_dict() for cam, run in self._active.items()}
         last = {cam: run.to_dict() for cam, run in self._last.items()}
         return {"active": active, "last": last}
+
+
+# Multi-frame calibration accumulation. Each press of dashboard
+# [Calibrate Cam X] captures one frame, detects markers, unions the
+# (id → image_pts) pairs into a per-cam buffer. When ≥ MIN_MARKERS_FOR_SOLVE
+# distinct ids accumulate, the route attempts a solve; success clears
+# the buffer + writes the snapshot, failure (reproj > REPROJ_FAIL_PX)
+# keeps the buffer + counts as a failure. After MAX_FAILURES consecutive
+# bad solves or BUFFER_STALE_S of no new frame, the buffer auto-clears
+# so stale state never permanently jams the cam.
+MIN_MARKERS_FOR_SOLVE = 5
+REPROJ_FAIL_PX = 20.0
+MAX_FAILURES = 3
+BUFFER_STALE_S = 300.0  # 5 min
+
+
+@dataclass
+class _AccumulatedMarker:
+    """Per-marker last-write-wins entry: image points + their world coords.
+
+    image_corners: shape (4, 2) — ArUco marker's 4 corners in pixel space.
+    world_points: shape (4, 3) — same 4 corners in world frame (z=0 for
+    plate-plane markers, real z for extended 3D markers). Stored alongside
+    so the solver doesn't need to re-resolve world coords later — plate
+    vs extended membership might race against operator edits.
+    last_seen_at: timestamp of the frame this came from.
+    """
+    image_corners: Any  # np.ndarray (4, 2)
+    world_points: Any   # np.ndarray (4, 3)
+    last_seen_at: float
+
+
+@dataclass
+class MarkerAccumulator:
+    markers: dict[int, _AccumulatedMarker] = field(default_factory=dict)
+    failure_count: int = 0
+    last_frame_at: float | None = None
+    last_solved_at: float | None = None
+    last_reproj_px: float | None = None
+    last_solve_status: str | None = None  # "ok" | "reproj_too_high" | "solver_error"
+
+    def is_stale(self, *, now: float) -> bool:
+        if self.last_frame_at is None:
+            return False
+        return now - self.last_frame_at > BUFFER_STALE_S
+
+    def is_exhausted(self) -> bool:
+        return self.failure_count >= MAX_FAILURES
+
+    def ready_to_solve(self) -> bool:
+        return len(self.markers) >= MIN_MARKERS_FOR_SOLVE
+
+    def to_summary(self) -> dict[str, Any]:
+        return {
+            "marker_ids": sorted(self.markers.keys()),
+            "count": len(self.markers),
+            "ready": self.ready_to_solve(),
+            "failure_count": self.failure_count,
+            "last_frame_at": self.last_frame_at,
+            "last_solved_at": self.last_solved_at,
+            "last_reproj_px": self.last_reproj_px,
+            "last_solve_status": self.last_solve_status,
+        }
+
+
+class MarkerAccumulatorStore:
+    """Per-camera marker accumulators for multi-frame auto-calibration.
+
+    Methods are thread-safe under the caller's lock — `State` holds
+    `_lock` around all access. The store itself is a thin map; the
+    solve-and-persist policy lives in `routes/calibration.py`.
+
+    Auto-stale gate runs lazily on read: any buffer that hasn't seen
+    a frame in BUFFER_STALE_S, or that has exhausted MAX_FAILURES
+    consecutive bad solves, is cleared the next time it's accessed.
+    """
+
+    def __init__(self, *, time_fn: Callable[[], float]) -> None:
+        self._time_fn = time_fn
+        self._buffers: dict[str, MarkerAccumulator] = {}
+
+    def _gc(self, camera_id: str) -> None:
+        buf = self._buffers.get(camera_id)
+        if buf is None:
+            return
+        now = self._time_fn()
+        if buf.is_stale(now=now) or buf.is_exhausted():
+            self._buffers.pop(camera_id, None)
+
+    def get(self, camera_id: str) -> MarkerAccumulator:
+        """Return the live accumulator (creating an empty one if needed).
+        GC runs first so callers always get a fresh-or-cleared state."""
+        self._gc(camera_id)
+        buf = self._buffers.get(camera_id)
+        if buf is None:
+            buf = MarkerAccumulator()
+            self._buffers[camera_id] = buf
+        return buf
+
+    def summary(self, camera_id: str) -> dict[str, Any]:
+        self._gc(camera_id)
+        buf = self._buffers.get(camera_id)
+        if buf is None:
+            return MarkerAccumulator().to_summary()
+        return buf.to_summary()
+
+    def all_summaries(self) -> dict[str, dict[str, Any]]:
+        for cam in list(self._buffers.keys()):
+            self._gc(cam)
+        return {cam: buf.to_summary() for cam, buf in self._buffers.items()}
+
+    def accumulate(
+        self,
+        camera_id: str,
+        markers: dict[int, tuple[Any, Any]],
+    ) -> tuple[list[int], list[int]]:
+        """Union new (id → (image_corners, world_points)) entries into the
+        buffer. Last-write-wins per id (camera shouldn't move between
+        captures, but if it did the operator should hit Clear).
+
+        Returns (newly_added_ids, all_ids_after).
+        """
+        buf = self.get(camera_id)
+        now = self._time_fn()
+        new_ids: list[int] = []
+        for mid, (img_corners, world_pts) in markers.items():
+            if mid not in buf.markers:
+                new_ids.append(mid)
+            buf.markers[mid] = _AccumulatedMarker(
+                image_corners=img_corners,
+                world_points=world_pts,
+                last_seen_at=now,
+            )
+        buf.last_frame_at = now
+        return new_ids, sorted(buf.markers.keys())
+
+    def record_solve_result(
+        self,
+        camera_id: str,
+        *,
+        reproj_px: float | None,
+        ok: bool,
+        status: str,
+    ) -> None:
+        """Update solve metadata; on success clear the buffer (operator
+        succeeded — start fresh). On failure keep markers, increment
+        failure_count so the GC eventually nukes a permanently-bad buffer."""
+        buf = self._buffers.get(camera_id)
+        if buf is None:
+            return
+        now = self._time_fn()
+        buf.last_solved_at = now
+        buf.last_reproj_px = reproj_px
+        buf.last_solve_status = status
+        if ok:
+            self._buffers.pop(camera_id, None)
+        else:
+            buf.failure_count += 1
+            if buf.is_exhausted():
+                self._buffers.pop(camera_id, None)
+
+    def clear(self, camera_id: str) -> bool:
+        return self._buffers.pop(camera_id, None) is not None
+
+    def clear_all(self) -> int:
+        n = len(self._buffers)
+        self._buffers.clear()
+        return n
