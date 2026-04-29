@@ -90,7 +90,6 @@
     // renderDevices paints the final state. /status tick will reconcile.
     if (enabled) currentPreviewRequested[cam] = true;
     else delete currentPreviewRequested[cam];
-    _lastDevKey = null;
     if (currentDevices !== null || currentCalibrations !== null) {
       renderDevices({
         devices: currentDevices || [],
@@ -100,13 +99,12 @@
         sync_commands: currentSyncCommands,
         calibration_last_ts: currentCalibrationLastTs || {},
         auto_calibration: currentAutoCalibration,
-        calibration_buffers: currentCalibrationBuffers || {},
+        calibration_last_solves: currentCalibrationLastSolves || {},
         known_marker_ids: currentKnownMarkerIds || { plate: [], extended: [] },
       });
     }
     const clearPending = () => {
       pendingPreviewMutations.delete(cam);
-      _lastDevKey = null;
       if (currentDevices !== null || currentCalibrations !== null) {
         renderDevices({
           devices: currentDevices || [],
@@ -116,6 +114,8 @@
           sync_commands: currentSyncCommands,
           calibration_last_ts: currentCalibrationLastTs || {},
           auto_calibration: currentAutoCalibration,
+          calibration_last_solves: currentCalibrationLastSolves || {},
+          known_marker_ids: currentKnownMarkerIds || { plate: [], extended: [] },
         });
       }
     };

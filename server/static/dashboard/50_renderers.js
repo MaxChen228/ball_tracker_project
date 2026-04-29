@@ -63,6 +63,247 @@
     }
   }
 
+  // Surgical render: full innerHTML on first paint or when the cam set
+  // changes; field-level patching on subsequent ticks so button DOM
+  // nodes survive (preserving :hover state across periodic state ticks).
+  // Hover flicker root cause: each `innerHTML = ` destroys every button,
+  // and the browser's :hover doesn't re-fire until the next mousemove.
+  let _lastCamSetKey = null;
+
+  function fmtAgeShort(s) {
+    if (s < 60) return Math.floor(s) + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+  }
+  function hhmm(ts) {
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    return d.toTimeString().slice(0, 5);
+  }
+  function ageTxt(ts) {
+    if (!ts) return '';
+    const s = Math.max(0, Date.now() / 1000 - ts);
+    return fmtAgeShort(s);
+  }
+
+  function _calPanelHTML(cam, isCal, lastSolve, knownMarkers) {
+    const parts = [];
+    // 1. Status header
+    if (isCal && lastSolve) {
+      const age = (Date.now() / 1000) - Number(lastSolve.solved_at);
+      parts.push('<div class="cal-status calibrated">CALIBRATED · ' +
+                 esc(fmtAgeShort(age)) + '</div>');
+    } else if (isCal) {
+      parts.push('<div class="cal-status calibrated">CALIBRATED</div>');
+    } else {
+      parts.push('<div class="cal-status uncalibrated">NOT CALIBRATED</div>');
+    }
+    // 2. Last-solve summary
+    if (lastSolve) {
+      const lsIds = Array.isArray(lastSolve.marker_ids) ? lastSolve.marker_ids : [];
+      const lsReproj = (typeof lastSolve.reproj_px === 'number') ? lastSolve.reproj_px : null;
+      const lsSolver = lastSolve.solver || '?';
+      const lsExt = Number(lastSolve.n_extended_used || 0);
+      const lsTotal = lsIds.length;
+      const lsPlate = lsTotal - lsExt;
+      let breakdown = lsPlate + ' plate';
+      if (lsExt > 0) breakdown += ' + ' + lsExt + ' ext';
+      parts.push('<div class="cal-line last-solve"><span class="cal-line-label">last</span>' +
+                 '<span class="cal-line-value">' + lsTotal + ' markers (' +
+                 esc(breakdown) + ') · ' + esc(lsSolver) + '</span></div>');
+      const metaParts = [];
+      if (typeof lsReproj === 'number') {
+        metaParts.push('<span class="reproj-badge" title="reprojection error vs 20 px hard limit">' +
+                       'reproj <strong>' + lsReproj.toFixed(1) + '</strong> / 20 px</span>');
+      }
+      const dPos = lastSolve.delta_position_cm;
+      const dAng = lastSolve.delta_angle_deg;
+      if (typeof dPos === 'number' && typeof dAng === 'number') {
+        metaParts.push('<span class="cal-delta" title="movement vs previous calibration">Δ <strong>' +
+                       dPos.toFixed(1) + '</strong> cm / <strong>' + dAng.toFixed(2) + '</strong>°</span>');
+      }
+      if (metaParts.length > 0) {
+        parts.push('<div class="cal-meta">' + metaParts.join('') + '</div>');
+      }
+    }
+    // 3. Marker coverage
+    const platePool = Array.isArray(knownMarkers.plate) ? knownMarkers.plate : [];
+    const extPool = Array.isArray(knownMarkers.extended) ? knownMarkers.extended : [];
+    if (platePool.length > 0 || extPool.length > 0) {
+      const lastIds = new Set((lastSolve && lastSolve.marker_ids) || []);
+      function chipFor(mid, kind) {
+        const cls = lastIds.has(mid) ? 'used' : 'missing';
+        return '<span class="marker-chip ' + cls + ' ' + kind +
+               '" title="' + kind + ' marker ' + mid + ' · ' + cls + '">' +
+               mid + '</span>';
+      }
+      const plateChips = platePool.map(m => chipFor(m, 'plate')).join('');
+      let coverHTML = '<div class="marker-coverage">' +
+        '<div class="marker-row"><span class="marker-row-label">PLATE</span>' +
+        plateChips + '</div>';
+      if (extPool.length > 0) {
+        const extChips = extPool.map(m => chipFor(m, 'extended')).join('');
+        coverHTML += '<div class="marker-row"><span class="marker-row-label">EXT</span>' +
+                     extChips + '</div>';
+      }
+      coverHTML += '</div>';
+      parts.push(coverHTML);
+    }
+    return parts.join('');
+  }
+
+  // Build a full row's HTML used for first paint / cam-set rebuild.
+  function _buildRowHTML(cam, fields) {
+    const { online, deviceRecord, isCal, previewOn, previewBusy, autoRun,
+            autoLast, syncDot, syncLabel, calDot, calLabel,
+            autoDot, autoLabel, syncLedCls, syncId, shortSid,
+            previewDisabled, autoCalDisabled, calBtnLabel,
+            initialSrc, lastSolve, knownMarkers } = fields;
+    const previewBtnLabel = previewBusy
+      ? (previewOn ? 'PREVIEW ON…' : 'PREVIEW…')
+      : (previewOn ? 'PREVIEW ON' : 'PREVIEW');
+    const previewBtn = `<button type="button" class="btn small preview-btn${previewOn ? ' active' : ''}" ` +
+      `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}" ` +
+      `${previewDisabled ? 'disabled' : ''}>${previewBtnLabel}</button>`;
+    const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}" ${autoCalDisabled ? 'disabled' : ''}>` +
+      `${esc(calBtnLabel)}</button>`;
+    const autoLogBtn = (autoLast && autoLast.status === 'failed')
+      ? `<button type="button" class="btn small secondary" data-auto-cal-log="${esc(cam)}" title="Copy full auto-cal log to clipboard for debugging">Copy log</button>`
+      : '';
+    const calPanel = '<div class="cal-panel" data-cam="' + esc(cam) + '">' +
+                     _calPanelHTML(cam, isCal, lastSolve, knownMarkers) + '</div>';
+    const camViewSrc = previewOn ? initialSrc : '';
+    const imgTag = previewOn
+      ? `<img data-cam-img="${esc(cam)}" src="${camViewSrc}" alt="preview ${esc(cam)}">`
+      : '';
+    const camViewBlock =
+      `<div class="cam-view${previewOn ? '' : ' is-offline'}" data-cam-view="${esc(cam)}" ` +
+      `data-layers="plate,axes" data-layers-on="plate" data-default-opacity="70">` +
+      `${imgTag}` +
+      `<canvas data-cam-canvas="${esc(cam)}"></canvas>` +
+      `<div class="cam-view-badges">` +
+        `<span class="cam-view-badge cam-id">Cam ${esc(cam)}</span>` +
+      `</div>` +
+      `<div class="cam-view-toolbar">` +
+        `<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>` +
+        `<button type="button" class="cv-layer" data-layer="axes">AXES</button>` +
+        `<span class="cv-opacity">OVL` +
+          `<input type="range" min="0" max="100" step="1" value="70" aria-label="Overlay opacity">` +
+        `</span>` +
+      `</div>` +
+      `<div class="cam-view-extra"></div>` +
+      `</div>`;
+    const syncIdTxt = (fields.timeSynced && syncId)
+      ? `<span class="sync-id-chip" title="${esc(syncId)}">·${esc(shortSid)}</span>`
+      : '';
+    return `
+      <div class="device" data-cam-id="${esc(cam)}">
+        <div class="device-head">
+          <span class="sync-led ${syncLedCls}" title="time sync · ${esc(syncLabel)}"></span>
+          <div class="id">${esc(cam)}</div>
+          <div class="sub">
+            <span class="item ${syncDot}"><span class="dot ${syncDot}"></span>time sync · ${esc(syncLabel)}${syncIdTxt}</span>
+            <span class="item ${calDot}"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>
+            <span class="item ${autoDot}" title="${esc(autoLabel)}"><span class="dot ${autoDot}"></span>auto-cal · ${esc(autoLabel)}</span>
+          </div>
+          <div class="chip-col">${batteryChip(deviceRecord, online)}${statusChip(cam, online, isCal)}</div>
+        </div>
+        ${calPanel}
+        <div class="device-actions">${previewBtn}${autoCalBtn}${autoLogBtn}</div>
+        ${camViewBlock}
+      </div>`;
+  }
+
+  // Patch one cam's row in place. Buttons keep their DOM nodes so :hover
+  // survives the tick. cal-panel + .sub + .chip-col use innerHTML
+  // (no buttons inside). Cam-view <img> is added/removed surgically.
+  function _patchRow(rowEl, cam, fields) {
+    const { online, deviceRecord, isCal, previewOn, previewBusy, autoLast,
+            syncDot, syncLabel, calDot, calLabel,
+            autoDot, autoLabel, syncLedCls, syncId, shortSid, timeSynced,
+            previewDisabled, autoCalDisabled, calBtnLabel,
+            initialSrc, lastSolve, knownMarkers } = fields;
+
+    const led = rowEl.querySelector('.sync-led');
+    if (led) {
+      led.className = 'sync-led ' + syncLedCls;
+      led.setAttribute('title', 'time sync · ' + syncLabel);
+    }
+    const sub = rowEl.querySelector('.sub');
+    if (sub) {
+      const syncIdTxt = (timeSynced && syncId)
+        ? `<span class="sync-id-chip" title="${esc(syncId)}">·${esc(shortSid)}</span>`
+        : '';
+      sub.innerHTML =
+        `<span class="item ${syncDot}"><span class="dot ${syncDot}"></span>time sync · ${esc(syncLabel)}${syncIdTxt}</span>` +
+        `<span class="item ${calDot}"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>` +
+        `<span class="item ${autoDot}" title="${esc(autoLabel)}"><span class="dot ${autoDot}"></span>auto-cal · ${esc(autoLabel)}</span>`;
+    }
+    const chipCol = rowEl.querySelector('.chip-col');
+    if (chipCol) {
+      chipCol.innerHTML = batteryChip(deviceRecord, online) + statusChip(cam, online, isCal);
+    }
+    const calPanel = rowEl.querySelector('.cal-panel');
+    if (calPanel) {
+      calPanel.innerHTML = _calPanelHTML(cam, isCal, lastSolve, knownMarkers);
+    }
+    // Buttons: patch attributes / text in place, preserve node identity.
+    const previewBtn = rowEl.querySelector('button[data-preview-cam]');
+    if (previewBtn) {
+      previewBtn.classList.toggle('active', previewOn);
+      previewBtn.dataset.previewEnabled = previewOn ? '1' : '0';
+      previewBtn.disabled = !!previewDisabled;
+      previewBtn.textContent = previewBusy
+        ? (previewOn ? 'PREVIEW ON…' : 'PREVIEW…')
+        : (previewOn ? 'PREVIEW ON' : 'PREVIEW');
+    }
+    const autoCalBtn = rowEl.querySelector('button[data-auto-cal]');
+    if (autoCalBtn) {
+      autoCalBtn.disabled = !!autoCalDisabled;
+      autoCalBtn.textContent = calBtnLabel;
+    }
+    // Auto-log button appears/disappears based on autoLast.status. If the
+    // node exists but should be gone, drop it; if missing but should be
+    // present, append it after autoCalBtn.
+    const actions = rowEl.querySelector('.device-actions');
+    const wantLog = !!(autoLast && autoLast.status === 'failed');
+    let logBtn = actions && actions.querySelector('button[data-auto-cal-log]');
+    if (wantLog && !logBtn && actions) {
+      logBtn = document.createElement('button');
+      logBtn.type = 'button';
+      logBtn.className = 'btn small secondary';
+      logBtn.dataset.autoCalLog = cam;
+      logBtn.title = 'Copy full auto-cal log to clipboard for debugging';
+      logBtn.textContent = 'Copy log';
+      actions.appendChild(logBtn);
+    } else if (!wantLog && logBtn) {
+      logBtn.remove();
+    }
+    // Cam-view <img>: drop / restore based on previewOn. Empty src would
+    // resolve to the document URL in some browsers (broken-icon flash);
+    // also gates the polling loop in cam_view_ui's startPreviewPolling.
+    const camView = rowEl.querySelector('.cam-view');
+    if (camView) {
+      camView.classList.toggle('is-offline', !previewOn);
+      let img = camView.querySelector('img[data-cam-img]');
+      if (previewOn) {
+        if (!img) {
+          img = document.createElement('img');
+          img.dataset.camImg = cam;
+          img.alt = 'preview ' + cam;
+          img.src = initialSrc;
+          // Keep <img> as the FIRST child so canvas overlay stays on top.
+          camView.insertBefore(img, camView.firstChild);
+        } else if (initialSrc && img.src !== initialSrc) {
+          img.src = initialSrc;
+        }
+      } else if (img) {
+        img.remove();
+      }
+    }
+  }
+
   function renderDevices(state) {
     if (!devicesBox) return;
     const devByCam = new Map((state.devices || []).map(d => [d.camera_id, d]));
@@ -73,22 +314,11 @@
     const calLastTs = state.calibration_last_ts || {};
     const autoCalActive = (state.auto_calibration && state.auto_calibration.active) || {};
     const autoCalLast = (state.auto_calibration && state.auto_calibration.last) || {};
-    const calBuffers = state.calibration_buffers || {};
-    function hhmm(ts) {
-      if (!ts) return '';
-      const d = new Date(ts * 1000);
-      return d.toTimeString().slice(0, 5);
-    }
-    function ageTxt(ts) {
-      if (!ts) return '';
-      const s = Math.max(0, Date.now() / 1000 - ts);
-      if (s < 60) return Math.floor(s) + 's ago';
-      if (s < 3600) return Math.floor(s / 60) + 'm ago';
-      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-      return Math.floor(s / 86400) + 'd ago';
-    }
+    const lastSolves = state.calibration_last_solves || {};
+    const knownMarkers = state.known_marker_ids || { plate: [], extended: [] };
 
-    function row(cam, deviceRecord) {
+    function fieldsFor(cam) {
+      const deviceRecord = devByCam.get(cam) || null;
       const online = !!deviceRecord;
       const timeSynced = !!(deviceRecord && deviceRecord.time_synced);
       const pending = !!syncPending[cam];
@@ -98,6 +328,7 @@
       const lastTs = calLastTs[cam];
       const autoRun = autoCalActive[cam] || null;
       const autoLast = autoCalLast[cam] || null;
+      const lastSolve = lastSolves[cam] || null;
       const calDot = isCal ? 'ok' : (online ? 'warn' : 'bad');
       const syncDot = !online ? 'bad' : (pending ? 'warn' : (timeSynced ? 'ok' : 'warn'));
       const autoDot = autoRun ? 'warn'
@@ -107,165 +338,25 @@
       const calLabel = (isCal && lastTs) ? ('last ' + hhmm(lastTs) + ' (' + ageTxt(lastTs) + ')')
                      : (!online ? 'offline' : (isCal ? 'calibrated' : 'pending'));
       const autoLabel = autoCalLabel(autoRun, autoLast, online);
+      const syncLedCls = !online ? 'offline'
+                        : pending ? 'listening'
+                        : timeSynced ? 'synced'
+                        : 'waiting';
+      const syncId = deviceRecord && deviceRecord.time_sync_id;
+      const shortSid = syncId ? (syncId.length > 8 ? syncId.slice(-6) : syncId.replace(/^sy_/, '')) : '';
       const previewDisabled = previewBusy || !online;
       const autoCalDisabled = !!autoRun || !online;
-      const previewBtn = (`<button type="button" class="btn small preview-btn${previewOn ? ' active' : ''}" ` +
-        `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}" ` +
-        `${previewDisabled ? 'disabled' : ''}>` +
-        `${previewBusy ? (previewOn ? 'PREVIEW ON…' : 'PREVIEW…') : (previewOn ? 'PREVIEW ON' : 'PREVIEW')}</button>`);
-      // Calibration info panel. Five tiers:
-      //   1. Status header (uncalibrated / accumulating / ready / calibrated)
-      //   2. Active accumulation strip (when buffer non-empty)
-      //   3. Last successful solve summary (persists across buffer clears)
-      //   4. Failure counter (when failure_count > 0)
-      //   5. Marker coverage map (plate + extended chips, color-coded)
-      // First-principles operator UX: see what state am I in, what's
-      // already been done, what markers are covered — without re-running.
-      const buf = calBuffers[cam] || {};
-      const bufCount = Number(buf.count || 0);
-      const bufIds = Array.isArray(buf.marker_ids) ? buf.marker_ids : [];
-      const bufReady = !!buf.ready;
-      const bufReproj = (typeof buf.last_reproj_px === 'number') ? buf.last_reproj_px : null;
-      const bufFails = Number(buf.failure_count || 0);
-      const lastSolve = buf.last_solve || null;
-
-      let calBtnLabel;
-      if (autoRun) calBtnLabel = autoCalButtonLabel(autoRun);
-      else if (bufCount > 0) calBtnLabel = 'Calibrate (' + bufCount + '/5)';
-      else if (isCal) calBtnLabel = 'Re-calibrate';
-      else calBtnLabel = 'Calibrate';
-      const autoCalBtn = `<button type="button" class="btn small" data-auto-cal="${esc(cam)}" ${autoCalDisabled ? 'disabled' : ''}>` +
-        `${esc(calBtnLabel)}</button>`;
-      const clearBtn = (bufCount > 0)
-        ? `<button type="button" class="btn small secondary" data-clear-buffer="${esc(cam)}">Clear</button>`
-        : '';
-
-      function reprojClass(r) {
-        if (typeof r !== 'number') return null;
-        if (r < 5) return 'ok';
-        if (r < 15) return 'warn';
-        return 'bad';
-      }
-      function fmtAge(s) {
-        if (s < 60) return Math.floor(s) + 's ago';
-        if (s < 3600) return Math.floor(s / 60) + 'm ago';
-        if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-        return Math.floor(s / 86400) + 'd ago';
-      }
-      const calParts = [];
-      // Tier 1: status
-      let statusLabel, statusCls;
-      if (bufCount > 0) {
-        if (bufReady) { statusLabel = 'READY TO SOLVE'; statusCls = 'ready'; }
-        else { statusLabel = 'ACCUMULATING ' + bufCount + '/5'; statusCls = 'accumulating'; }
-      } else if (isCal && lastSolve) {
-        const age = (Date.now() / 1000) - Number(lastSolve.solved_at);
-        statusLabel = 'CALIBRATED · ' + fmtAge(age);
-        statusCls = 'calibrated';
-      } else if (isCal) {
-        statusLabel = 'CALIBRATED';
-        statusCls = 'calibrated';
-      } else {
-        statusLabel = 'NOT CALIBRATED';
-        statusCls = 'uncalibrated';
-      }
-      calParts.push('<div class="cal-status ' + statusCls + '">' +
-                    esc(statusLabel) + '</div>');
-      // Tier 2: active accumulation
-      if (bufCount > 0) {
-        calParts.push('<div class="cal-line accum"><span class="cal-line-label">accum</span>' +
-                      '<span class="cal-line-value">[' + bufIds.join(', ') + ']</span></div>');
-      }
-      // Tier 3: last successful solve
-      if (lastSolve) {
-        const lsIds = Array.isArray(lastSolve.marker_ids) ? lastSolve.marker_ids : [];
-        const lsReproj = (typeof lastSolve.reproj_px === 'number') ? lastSolve.reproj_px : null;
-        const lsSolver = lastSolve.solver || '?';
-        const lsExt = Number(lastSolve.n_extended_used || 0);
-        const lsTotal = lsIds.length;
-        const lsPlate = lsTotal - lsExt;
-        let breakdown = lsPlate + ' plate';
-        if (lsExt > 0) breakdown += ' + ' + lsExt + ' ext';
-        calParts.push('<div class="cal-line last-solve"><span class="cal-line-label">last</span>' +
-                      '<span class="cal-line-value">' + lsTotal + ' markers (' +
-                      esc(breakdown) + ') · ' + esc(lsSolver) + '</span></div>');
-        const metaParts = [];
-        const rcls = reprojClass(lsReproj);
-        if (rcls) {
-          metaParts.push('<span class="reproj-badge ' + rcls + '" title="last solve reprojection error">' +
-                         'reproj <strong>' + lsReproj.toFixed(1) + '</strong> px</span>');
-        }
-        const dPos = lastSolve.delta_position_cm;
-        const dAng = lastSolve.delta_angle_deg;
-        if (typeof dPos === 'number' && typeof dAng === 'number') {
-          metaParts.push('<span class="cal-delta" title="movement vs previous calibration">Δ <strong>' +
-                         dPos.toFixed(1) + '</strong> cm / <strong>' + dAng.toFixed(2) + '</strong>°</span>');
-        }
-        if (metaParts.length > 0) {
-          calParts.push('<div class="cal-meta">' + metaParts.join('') + '</div>');
-        }
-      }
-      // Tier 4: failure counter
-      if (bufFails > 0) {
-        const reprojStr = (typeof bufReproj === 'number')
-          ? 'reproj ' + bufReproj.toFixed(1) + ' px' : '';
-        calParts.push('<div class="cal-line cal-fail"><span class="cal-line-label">failed</span>' +
-                      '<span class="cal-line-value">' + bufFails + '/3 consecutive · ' +
-                      esc(reprojStr) + '</span></div>');
-      }
-      // Tier 5: marker coverage
-      const km = (state.known_marker_ids) || { plate: [], extended: [] };
-      const platePool = Array.isArray(km.plate) ? km.plate : [];
-      const extPool = Array.isArray(km.extended) ? km.extended : [];
-      if (platePool.length > 0 || extPool.length > 0) {
-        const lastIds = new Set((lastSolve && lastSolve.marker_ids) || []);
-        const bufSet = new Set(bufIds);
-        function chipFor(mid, kind) {
-          let cls;
-          if (lastIds.has(mid) && !bufSet.has(mid)) cls = 'used';
-          else if (bufSet.has(mid)) cls = 'buffer';
-          else cls = 'missing';
-          return '<span class="marker-chip ' + cls + ' ' + kind +
-                 '" title="' + kind + ' marker ' + mid + ' · ' + cls + '">' +
-                 mid + '</span>';
-        }
-        const plateChips = platePool.map(m => chipFor(m, 'plate')).join('');
-        let coverHTML = '<div class="marker-coverage">' +
-          '<div class="marker-row"><span class="marker-row-label">PLATE</span>' +
-          plateChips + '</div>';
-        if (extPool.length > 0) {
-          const extChips = extPool.map(m => chipFor(m, 'extended')).join('');
-          coverHTML += '<div class="marker-row"><span class="marker-row-label">EXT</span>' +
-                       extChips + '</div>';
-        }
-        coverHTML += '</div>';
-        calParts.push(coverHTML);
-      }
-      const bufferBlock = '<div class="cal-panel" data-cam="' + esc(cam) + '">' +
-                          calParts.join('') + '</div>';
-      const autoLogBtn = (autoLast && autoLast.status === 'failed')
-        ? `<button type="button" class="btn small secondary" data-auto-cal-log="${esc(cam)}" title="Copy full auto-cal log to clipboard for debugging">Copy log</button>`
-        : '';
-      // Always render the panel so the row height stays stable; off
-      // state shows a black placeholder. When on, the tickPreviewImages
-      // loop (see below) cache-busts the <img src>.
-      // Only hit the preview endpoint when actually watching — otherwise
-      // the browser eagerly fetches the <img> src on every render and
-      // spams 404s for cams with preview off.
-      //
-      // Don't cache-bust every renderDevices tick: that made each
-      // /status tick re-fetch the same frame. Carry the previous src
-      // forward unless (a) preview just flipped on/off, or (b) the
-      // last refresh is older than the _PREVIEW_REFRESH_MIN_MS budget.
-      // tickPreviewImages (74_preview_poll.js) still owns the real
-      // refresh cadence.
+      const calBtnLabel = autoRun
+        ? autoCalButtonLabel(autoRun)
+        : (isCal ? 'Recalibrate' : 'Calibrate');
+      // Cache-busted preview src reuses the per-cam memo so a state tick
+      // doesn't force a fresh fetch every time. tickPreviewImages owns
+      // the actual refresh cadence.
       const prevState = _previewRenderState.get(cam);
-      const prevOn = prevState && prevState.on;
       const nowMs = Date.now();
       let initialSrc = '';
       if (previewOn) {
-        if (!prevState || prevOn !== true
-            || !prevState.src
+        if (!prevState || prevState.on !== true || !prevState.src
             || (nowMs - (prevState.t || 0) > _PREVIEW_REFRESH_MIN_MS)) {
           initialSrc = '/camera/' + encodeURIComponent(cam) + '/preview?t=' + nowMs;
           _previewRenderState.set(cam, { on: true, src: initialSrc, t: nowMs });
@@ -275,64 +366,38 @@
       } else {
         _previewRenderState.set(cam, { on: false, src: '', t: nowMs });
       }
-      // Merged single-pane cam-view: real MJPEG as base, virtual
-      // reprojection drawn as semi-transparent canvas overlay. plate is
-      // default-on; axes is a toggleable secondary layer. Empty src when
-      // preview is off so the browser doesn't hammer a 404 endpoint.
-      const camViewSrc = previewOn ? initialSrc : '';
-      const camViewBlock =
-        `<div class="cam-view${previewOn ? '' : ' is-offline'}" data-cam-view="${esc(cam)}" ` +
-        `data-layers="plate,axes" data-layers-on="plate" data-default-opacity="70">` +
-        `<img data-cam-img="${esc(cam)}" src="${camViewSrc}" alt="preview ${esc(cam)}">` +
-        `<canvas data-cam-canvas="${esc(cam)}"></canvas>` +
-        `<div class="cam-view-badges">` +
-          `<span class="cam-view-badge cam-id">Cam ${esc(cam)}</span>` +
-        `</div>` +
-        `<div class="cam-view-toolbar">` +
-          `<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>` +
-          `<button type="button" class="cv-layer" data-layer="axes">AXES</button>` +
-          `<span class="cv-opacity">OVL` +
-            `<input type="range" min="0" max="100" step="1" value="70" aria-label="Overlay opacity">` +
-          `</span>` +
-        `</div>` +
-        `<div class="cam-view-extra"></div>` +
-        `</div>`;
-      const syncLedCls = !online ? 'offline'
-                        : pending ? 'listening'
-                        : timeSynced ? 'synced'
-                        : 'waiting';
-      const syncId = deviceRecord && deviceRecord.time_sync_id;
-      const shortSid = syncId ? (syncId.length > 8 ? syncId.slice(-6) : syncId.replace(/^sy_/, '')) : '';
-      const syncIdTxt = (timeSynced && syncId)
-        ? `<span class="sync-id-chip" title="${esc(syncId)}">·${esc(shortSid)}</span>`
-        : '';
-      return `
-        <div class="device">
-          <div class="device-head">
-            <span class="sync-led ${syncLedCls}" title="time sync · ${esc(syncLabel)}"></span>
-            <div class="id">${esc(cam)}</div>
-            <div class="sub">
-              <span class="item ${syncDot}"><span class="dot ${syncDot}"></span>time sync · ${esc(syncLabel)}${syncIdTxt}</span>
-              <span class="item ${calDot}"><span class="dot ${calDot}"></span>pose · ${esc(calLabel)}</span>
-              <span class="item ${autoDot}" title="${esc(autoLabel)}"><span class="dot ${autoDot}"></span>auto-cal · ${esc(autoLabel)}</span>
-            </div>
-            <div class="chip-col">${batteryChip(deviceRecord, online)}${statusChip(cam, online, isCal)}</div>
-          </div>
-          ${bufferBlock}
-          <div class="device-actions">${previewBtn}${autoCalBtn}${clearBtn}${autoLogBtn}</div>
-          ${camViewBlock}
-        </div>`;
+      return {
+        online, deviceRecord, timeSynced, isCal, previewOn, previewBusy,
+        autoRun, autoLast, lastSolve, calDot, syncDot, autoDot,
+        syncLabel, calLabel, autoLabel, syncLedCls, syncId, shortSid,
+        previewDisabled, autoCalDisabled, calBtnLabel, initialSrc,
+        knownMarkers,
+      };
     }
 
-    const rows = EXPECTED.map(cam => row(cam, devByCam.get(cam))).join('');
-    const extras = (state.devices || [])
-      .filter(d => !EXPECTED.includes(d.camera_id))
-      .map(d => row(d.camera_id, d)).join('');
-    devicesBox.innerHTML = `<div class="devices-grid">${rows + extras}</div>`;
-    // The innerHTML rebuild above destroys every cam-view DOM element.
-    // BallTrackerCamView.mountAll re-mounts on the fresh DOM (preserves
-    // user-toggled layer + opacity state internally, see Phase 1).
-    if (window.BallTrackerCamView) window.BallTrackerCamView.mountAll();
+    const expectedCams = EXPECTED.slice();
+    const extraCams = (state.devices || [])
+      .map(d => d.camera_id)
+      .filter(c => !EXPECTED.includes(c));
+    const camList = expectedCams.concat(extraCams);
+    const camSetKey = camList.join(',');
+
+    if (_lastCamSetKey !== camSetKey) {
+      // Cam set changed (or first paint) — full innerHTML build. The
+      // SSR HTML on first paint is replaced here, but that's a one-shot
+      // operation; subsequent ticks go through _patchRow and never
+      // rebuild button DOM, so :hover survives.
+      const rows = camList.map(cam => _buildRowHTML(cam, fieldsFor(cam))).join('');
+      devicesBox.innerHTML = `<div class="devices-grid">${rows}</div>`;
+      _lastCamSetKey = camSetKey;
+      if (window.BallTrackerCamView) window.BallTrackerCamView.mountAll();
+    } else {
+      for (const cam of camList) {
+        const rowEl = devicesBox.querySelector('.device[data-cam-id="' + cam + '"]');
+        if (!rowEl) continue;
+        _patchRow(rowEl, cam, fieldsFor(cam));
+      }
+    }
     // Push online status + RMS extras for every rendered cam (EXPECTED A/B
     // plus any extra cams that registered with non-A/B ids). Calibration
     // truth is derived inside the runtime from setMeta payload — don't

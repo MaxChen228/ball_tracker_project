@@ -315,10 +315,10 @@
     } else {
       currentDevices = list;
     }
-    // renderDevices still has a diff key; reset it so the patched
-    // device list repaints. renderSession does its own surgical
-    // patching now and ignores _lastSessKey / _lastNavKey.
-    _lastDevKey = null;
+    // renderDevices is surgical-patch now (per-row field updates); the
+    // SSE-triggered repaint just patches the affected cam's chips +
+    // panel without rebuilding button DOM. Forwarding cached
+    // last_solves + known markers keeps the cal-panel content stable.
     renderDevices({
       devices: currentDevices,
       calibrations: currentCalibrations || [],
@@ -326,12 +326,7 @@
       sync_commands: currentSyncCommands,
       calibration_last_ts: currentCalibrationLastTs || {},
       auto_calibration: currentAutoCalibration,
-      // Forward the cached calibration buffer + known marker IDs so a
-      // SSE-triggered repaint doesn't drop the cal-panel + marker
-      // coverage chips. Without these, the diff key sees empty pools,
-      // marker chips collapse, then next tickStatus restores them —
-      // that's the "auto-expand/collapse" flicker on board IDs.
-      calibration_buffers: currentCalibrationBuffers || {},
+      calibration_last_solves: currentCalibrationLastSolves || {},
       known_marker_ids: currentKnownMarkerIds || { plate: [], extended: [] },
     });
     renderSession({
