@@ -29,7 +29,7 @@ is only reachable here.
 ### FOV is 73.83°
 
 ✅ **Shipped.** The server's fallback FOV prior is now `1.2885 rad ≈ 73.828°`
-(`server/routes/calibration.py:_IPHONE_MAIN_CAM_HFOV_RAD`). Historical context
+(`server/calibration_auto.py:51` — `_IPHONE_MAIN_CAM_HFOV_RAD`). Historical context
 preserved below for git-blame archaeology.
 
 The dump says 73.828° for every 1920x1080 16:9 format except a 120 fps

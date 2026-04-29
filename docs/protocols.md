@@ -52,7 +52,7 @@ Pushed on connect, on every `hello` from the phone, and on every dashboard-drive
 type: "settings"
 camera_id: str                       # echo of the {cam} in the URL (server-side cross-check)
 paths: list[str]                     # default DetectionPath set for newly-armed sessions (always {"live"} post-Phase-1)
-hsv_range: {hMin,hMax,sMin,sMax,vMin,vMax}  # from data/hsv_range.json (POST /detection/hsv)
+hsv_range: {h_min,h_max,s_min,s_max,v_min,v_max}  # from data/hsv_range.json (POST /detection/hsv)
 shape_gate: {aspect_min, fill_min}   # from data/shape_gate.json (POST /detection/shape_gate)
 chirp_detect_threshold: float        # matched-filter cutoff for legacy chirp-listener path; data/chirp_detect_threshold.json
 mutual_sync_threshold: float         # cutoff for the two-device mutual-sync coordinator; data/mutual_sync_threshold.json
@@ -97,7 +97,24 @@ emit_at_s: float                     # session-clock PTS at which this cam shoul
 record_duration_s: float             # how long iOS records audio for matched-filter analysis
 ```
 
-(There is no `type: "sync_command"` push to iOS — `sync_command` is the in-server bookkeeping name for the same intent. iOS only receives the resolved `sync_run` shape above.)
+#### `type: "sync_command"` — chirp time-sync trigger
+
+Pushed by `routes/sync.py::start_sync` (line 225) when an operator triggers a chirp time-sync run from the dashboard. Each cam in the dispatched set gets one push with its own `sync_command_id`. iOS handles it in `ball_tracker/CameraCommandRouter.swift:91` (`case "sync_command"`): the cam latches the id, starts audio capture for matched-filter chirp detection, and reports the detected PTS back via the next `heartbeat` (`time_sync_id` + `sync_anchor_timestamp_s`). Distinct from `sync_run` above, which is the late-join push for the **mutual-sync coordinator** (a separate two-device flow); the chirp single-shot path goes through `sync_command`.
+
+```
+type: "sync_command"
+command: str                         # currently always "start"
+sync_command_id: str                 # server-minted run id; iOS echoes it back as time_sync_id
+```
+
+#### `type: "calibration_updated"` — peer cam re-calibrated
+
+Pushed by `routes/calibration.py::_handle_calibration_completed` (line 55) to **every other cam** after a successful auto-calibration of one cam. Lets the remaining cam(s) refresh any cross-cam state (e.g. dashboard preview hints) without polling. Handled in `ball_tracker/CameraCommandRouter.swift:127` (`case "calibration_updated"`).
+
+```
+type: "calibration_updated"
+cam: str                             # camera_id of the cam that was just (re-)calibrated
+```
 
 ### iOS → Server
 
@@ -164,6 +181,6 @@ reason: str | null                   # free-form ("timeout", "user_stop", etc.) 
 ### Operator audit checklist (when changing wire shapes)
 
 Per project memory `feedback_ws_only_means_check_all_command_paths`, after any WS schema edit grep for every send/receive site:
-- Server → iOS sends: `_settings_message_for`, `_arm_message_for`, `_disarm_message_for`, the inline `sync_run` dict in `routes/device_ws.py::ws_device`.
+- Server → iOS sends: `_settings_message_for`, `_arm_message_for`, `_disarm_message_for`, the inline `sync_run` dict in `routes/device_ws.py::ws_device`, the `sync_command` push in `routes/sync.py::start_sync` (line 225), and the `calibration_updated` push in `routes/calibration.py::_handle_calibration_completed` (line 55).
 - iOS → server receivers: the four `if mtype == "..."` branches in `routes/device_ws.py::ws_device` (`hello` / `heartbeat` / `frame` / `cycle_end`).
 - iOS encoders: `ball_tracker/ServerUploader.swift` Codable structs **and** `ball_tracker/LiveFrameDispatcher.swift` hand-encoded dict (the dispatch-queue path that bypasses Codable — abfa422 was the bug where this was forgotten).
