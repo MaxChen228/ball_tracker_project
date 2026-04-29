@@ -11,13 +11,12 @@ emits all survivors. Two thresholds gate which survive:
   geometry decide" — operator's stated intent).
 - `gap_threshold_m` — skew-line residual (closest distance between the two
   camera rays) of the triangulated point. `gap > threshold` is dropped.
-  Default 0.20m, intentionally aligned with `segmenter.find_segments`'s
-  `residual_max_m=0.20` so the same physics gate that eats outliers in
-  the ballistic fit also gates the triangulation cloud.
-
-`server/dry_run_shape.py` and `server/dry_run_multi_ray.py` use 0.30m for
-research artefacts — the looser value is for offline exploration, not the
-production gate. Keep them out of sync deliberately.
+  Default 0.20m. **Sole authority for residual culling**: segmenter and
+  the viewer's per-session Gap slider both read what pairing emitted and
+  do not re-filter. Operators tune it per session via the viewer header
+  strip's "Gap ≤" slider → POST /sessions/{sid}/recompute, which writes
+  `SessionResult.gap_threshold_m` and reruns pairing on the persisted
+  candidates.
 """
 from __future__ import annotations
 
