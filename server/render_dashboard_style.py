@@ -168,6 +168,7 @@ _CSS = f"""
 .hsv-form {{ display: flex; flex-direction: column; gap: var(--s-3); }}
 .hsv-presets {{ display: flex; gap: var(--s-2); flex-wrap: wrap; }}
 .hsv-grid {{ display: flex; flex-direction: column; gap: var(--s-2); }}
+.hsv-hint {{ font-size: 10px; color: var(--sub); padding: 2px 0 2px 28px; line-height: 1.4; }}
 .hsv-row {{ display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: var(--s-2); align-items: start; }}
 .hsv-label {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub); padding-top: 8px; }}
 .hsv-pair {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-2); }}
