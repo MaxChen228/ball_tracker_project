@@ -56,8 +56,6 @@
       n: e.n_triangulated,
       pc: pbcStr,
       d: e.duration_s != null ? Number(e.duration_s).toFixed(2) : null,
-      z: e.peak_z_m != null ? Number(e.peak_z_m).toFixed(2) : null,
-      mph: e.ballistic_speed_mph != null ? Number(e.ballistic_speed_mph).toFixed(1) : null,
       pr: e.processing_state || '-',
       st: e.server_post_ts || null,
       b: currentEventsBucket,
@@ -145,12 +143,7 @@
       ${_pipeChip('S', srvStatus, pathCounts.server_post, pipeTitles.server_post, e.session_id, inFlight)}
     </div>`;
 
-    const metricBits = [];
-    if (triangulated > 0) metricBits.push(`<span class="ev-metric"><i>${triangulated}</i>pts</span>`);
-    if (e.duration_s != null) metricBits.push(`<span class="ev-metric"><i>${Number(e.duration_s).toFixed(2)}</i>s</span>`);
-    if (e.peak_z_m != null) metricBits.push(`<span class="ev-metric"><i>${Number(e.peak_z_m).toFixed(2)}</i>m</span>`);
-    if (e.ballistic_speed_mph != null) metricBits.push(`<span class="ev-metric"><i>${Number(e.ballistic_speed_mph).toFixed(1)}</i>mph</span>`);
-    const metricsHtml = metricBits.length ? `<div class="ev-metrics">${metricBits.join('')}</div>` : '';
+    const metricsHtml = '';
 
     // --- row3: actions ---
     const actBits = [];

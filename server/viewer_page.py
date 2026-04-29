@@ -258,8 +258,6 @@ def render_viewer_html(
         <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
         <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
       </div>
-      <div id="fit-info" class="fit-info" hidden aria-live="polite"></div>
-      <div id="speed-bars" class="speed-bars" hidden aria-label="Per-segment speed"></div>
     </div>
     <div class="col-resizer" id="col-resizer" role="separator" aria-orientation="vertical" aria-label="Resize 3D scene vs cameras" tabindex="0" title="Drag to resize"></div>
     <div class="videos-col">{ctx.video_cells_html}</div>
@@ -292,28 +290,7 @@ def render_viewer_html(
               <input type="range" id="residual-filter-slider" min="0" max="200" step="1" value="200" aria-label="Residual filter threshold (cm)">
               <span id="residual-filter-readout" class="readout">off</span>
             </span>
-            <span class="layer-group" data-layer="fitres" id="fitres-filter-group" title="Spatial isolation outlier rejection. For each triangulated point, compute the mean distance to its 3 nearest neighbours in 3D — cluster points sit a few cm apart, isolated outliers sit ≥ 1 m away. Reject points whose isolation > median + κ·MAD. κ = slider value; off = no rejection. Does NOT fit a curve first, so it survives the LSQ leverage problem where one outlier warps the fit.">
-              <span class="layer-name">Outlier</span>
-              <input type="range" id="fitres-filter-slider" min="10" max="60" step="1" value="60" aria-label="Outlier rejection (κ · MAD; 60 = off)">
-              <span id="fitres-filter-readout" class="readout">off</span>
-            </span>
             <span class="layer-divider" aria-hidden="true"></span>
-            <span class="layer-group" data-layer="fit" title="Overlay a ballistic fit curve (per-axis quadratic, gravity free) on the filtered points. Same overlay flag as the dashboard.">
-              <label class="layer-checkbox">
-                <input type="checkbox" id="fit-toggle">
-                <span class="layer-name">Fit</span>
-              </label>
-              <span class="layer-source-group" role="group" aria-label="Fit source pipeline">
-                <button id="fit-src-svr" class="fit-src-pill" type="button" data-src="server_post" aria-pressed="true" title="Fit using server_post triangulated points">svr</button>
-                <button id="fit-src-live" class="fit-src-pill" type="button" data-src="live" aria-pressed="false" title="Fit using live triangulated points">live</button>
-              </span>
-            </span>
-            <span class="layer-group" data-layer="speed" title="Colour each trajectory segment by instantaneous speed (m/s). Adds a colorbar and a per-segment 2D bar chart below the scene.">
-              <label class="layer-checkbox">
-                <input type="checkbox" id="speed-toggle">
-                <span class="layer-name">Speed</span>
-              </label>
-            </span>
             <span class="layer-group" data-layer="strike-zone" title="Toggle the strike-zone wireframe in the 3D scene. Default on.">
               <label class="layer-checkbox">
                 <input type="checkbox" id="strike-zone-toggle" checked>
@@ -694,8 +671,7 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .layer-toggles .layer-group {{ display:inline-flex; align-items:center; gap:6px;
     padding:3px 8px; height:26px; box-sizing:border-box;
     border:1px solid var(--border-base); border-radius:var(--r); background:var(--surface); }}
-  .layer-toggles .layer-group[data-layer="residual"],
-  .layer-toggles .layer-group[data-layer="fitres"] {{ border-color:var(--ink-light, #7a756c); }}
+  .layer-toggles .layer-group[data-layer="residual"] {{ border-color:var(--ink-light, #7a756c); }}
   .layer-toggles .layer-name {{ font-size:10px; letter-spacing:0.1em; color:var(--ink); text-transform:uppercase;
     display:inline-flex; align-items:center; gap:4px; font-weight:500; }}
   .layer-toggles .layer-name .swatch {{ width:8px; height:8px; display:inline-block; border:1px solid rgba(0,0,0,0.12); }}
@@ -812,41 +788,6 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
   .scene-col .scene-views .view-preset + .view-preset {{ border-left:1px solid var(--border-l); }}
   .scene-col .scene-views .view-preset:hover {{ color:var(--ink); }}
   .scene-col .scene-views .view-preset.active {{ background:var(--ink); color:var(--surface); }}
-  .layer-source-group {{ display:inline-flex; align-items:center; margin-left:6px; height:100%;
-    border:1px solid var(--border-base); border-radius:var(--r); overflow:hidden; }}
-  /* Source pills go dormant when Fit is off — picking svr/live without
-     a visible Fit overlay does nothing user-observable. Stronger than
-     plain opacity: drop saturation so the pressed-state black bg fades
-     to grey, and gate pointer-events so a click can't silently change
-     the dormant source. Pressed state still tracks the user's choice
-     so re-enabling Fit shows them what they had. */
-  .layer-source-group.is-off {{ opacity:0.4; filter:saturate(0.15); pointer-events:none; }}
-  .fit-src-pill {{ padding:2px 8px; font-family:var(--mono); font-size:9px;
-    letter-spacing:0.06em; background:var(--surface); border:0; color:var(--sub);
-    cursor:pointer; line-height:1; }}
-  .fit-src-pill[aria-pressed="true"] {{ background:var(--ink); color:var(--surface); }}
-  .fit-src-pill + .fit-src-pill {{ border-left:1px solid var(--border-base); }}
-  .fit-src-pill[disabled] {{ opacity:0.35; cursor:not-allowed; }}
-  .scene-col .fit-info {{ position:absolute; top:54px; right:var(--s-3); z-index:6;
-    background:var(--surface); border:1px solid var(--border-base); border-radius:var(--r);
-    padding:8px 12px; font:inherit; font-size:11px; line-height:1.55; color:var(--ink);
-    min-width:220px; max-width:300px; pointer-events:none; }}
-  .scene-col .fit-info[hidden] {{ display:none; }}
-  .scene-col .fit-info .fit-row {{ display:flex; justify-content:space-between; gap:var(--s-3);
-    font-variant-numeric:tabular-nums; }}
-  .scene-col .fit-info .fit-row .k {{ color:var(--sub); letter-spacing:0.04em; }}
-  .scene-col .fit-info .fit-row .v {{ font-weight:500; }}
-  .scene-col .fit-info h4 {{ margin:0 0 6px 0; font:inherit; font-size:10px; letter-spacing:0.1em;
-    text-transform:uppercase; color:var(--sub); font-weight:500; }}
-  .scene-col .fit-info .fit-warn {{ color:#A7372A; font-size:10px; margin-top:6px; }}
-  .scene-col .speed-bars {{ position:absolute; left:var(--s-3); right:var(--s-3); bottom:var(--s-3);
-    height:120px; z-index:3; background:var(--surface); border:1px solid var(--border-base);
-    border-radius:var(--r); padding:4px 8px; pointer-events:none; }}
-  /* Re-enable hover/click ONLY for the Plotly chart inside, so the
-     bottom 120 px of the 3D scene still accepts orbit drags everywhere
-     except directly over a bar. */
-  .scene-col .speed-bars > .js-plotly-plot {{ pointer-events:auto; }}
-  .scene-col .speed-bars[hidden] {{ display:none; }}
   .hint-btn {{ font:inherit; font-size:12px; padding:0; width:26px; height:26px; border:1px solid var(--border-base);
     background:var(--surface); color:var(--sub); border-radius:50%; cursor:pointer; margin-left:auto;
     min-width:auto; font-weight:600; letter-spacing:0; display:inline-flex; align-items:center; justify-content:center; }}
@@ -871,7 +812,6 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
     .strip-note {{ padding-left:48px; }}
     .scene-col .scene-toolbar {{ top:10px; right:8px; }}
     .scene-col .scene-views {{ top:10px; left:8px; }}
-    .scene-col .fit-info {{ top:48px; }}
   }}
 """
 

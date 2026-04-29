@@ -71,8 +71,6 @@
         st: e.server_post_ts || null,
         pc: pbcStr,
         d: e.duration_s != null ? Number(e.duration_s).toFixed(2) : null,
-        z: e.peak_z_m != null ? Number(e.peak_z_m).toFixed(2) : null,
-        mph: e.speed_mph != null ? Number(e.speed_mph).toFixed(1) : null,
       };
     }));
     if (key === _lastEvKey) return;

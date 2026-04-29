@@ -32,11 +32,9 @@ def _summarize_result(result: SessionResult) -> dict[str, Any]:
     }
     if result.points:
         residuals = [p.residual_m for p in result.points]
-        zs = [p.z_m for p in result.points]
         ts = [p.t_rel_s for p in result.points]
         summary["mean_residual_m"] = float(np.mean(residuals))
         summary["max_residual_m"] = float(np.max(residuals))
-        summary["peak_z_m"] = float(max(zs))
         summary["duration_s"] = float(ts[-1] - ts[0])
     return summary
 

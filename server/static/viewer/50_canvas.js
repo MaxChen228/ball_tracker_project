@@ -164,24 +164,17 @@
     Plotly.react(sceneDiv, [...staticFiltered, ...buildDynamicTraces(cutoff, playback)], LAYOUT, {displayModeBar: false, responsive: true});
     // Plate overlay is now part of the cam-view 'plate' layer painted
     // onto the canvas overlay above the video — no separate SVG path.
-    // virtual canvases + speed-bars are NOT called here on purpose. Both
-    // are scheduled on their own RAF (scheduleVirtualDraw /
-    // scheduleSpeedBarsDraw) so a heavy Plotly.react redraw can't stall
-    // the cheap canvas2D paints. During playback the virtual cameras
-    // need to stay locked to the video clock, even when the 3D scene
-    // drops a frame.
+    // virtual canvases are NOT called here on purpose. They schedule on
+    // their own RAF (scheduleVirtualDraw) so a heavy Plotly.react redraw
+    // can't stall the cheap canvas2D paints — virtual cameras need to
+    // stay locked to the video clock during playback even if the 3D
+    // scene drops a frame.
   }
-  let speedBarsRaf = null;
   function scheduleVirtualDraw() {
     if (virtualDrawRaf !== null) return;
     virtualDrawRaf = requestAnimationFrame(() => { virtualDrawRaf = null; drawVirtuals(); });
   }
-  function scheduleSpeedBarsDraw() {
-    if (speedBarsRaf !== null) return;
-    if (typeof _renderSpeedBars !== "function") return;
-    speedBarsRaf = requestAnimationFrame(() => { speedBarsRaf = null; _renderSpeedBars(); });
-  }
-  // Fans out to all three paint paths. Each owns its own RAF, so the
+  // Fans out to both paint paths. Each owns its own RAF, so the
   // expensive Plotly.react can't block the cheap canvas2D paints — but
   // every existing `scheduleSceneDraw()` callsite still triggers a
   // full coherent update without rewriting them. In playback mode
@@ -192,7 +185,6 @@
       sceneDrawRaf = requestAnimationFrame(() => { sceneDrawRaf = null; drawScene(); });
     }
     scheduleVirtualDraw();
-    if (_OVL.speedVisible()) scheduleSpeedBarsDraw();
   }
   // BallTrackerCamView's per-cam ResizeObserver handles canvas reflow
   // automatically; no need for a window resize listener here.

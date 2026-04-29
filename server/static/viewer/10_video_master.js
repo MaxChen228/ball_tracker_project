@@ -79,29 +79,13 @@
     server_post: (TRAJ_BY_PATH.server_post || []).length > 0
       || (SCENE.triangulated || []).length > 0,
   };
-  // --- Triangulation filters ---
-  // Residual: drop points whose ray-midpoint gap exceeds this cap (m).
-  //   Real ball pairs sit sub-cm; static-target false pairs blow up to m.
-  // FitRes: RANSAC-lite. Run ballistic LSQ on residual-survivors, drop
-  //   any point whose 3D distance to the fit curve > k × RMSE, then
-  //   re-fit once. k is the slider value. Catches outliers that residual
-  //   missed (e.g. two moving false targets triangulating with low gap
-  //   but to a physically impossible location). Symmetric in time so
-  //   head/tail are not privileged.
-  // Both default "off" (residual = Infinity, fitres k = Infinity) and
-  // persist to localStorage.
+  // --- Triangulation residual filter ---
+  // Drop points whose ray-midpoint gap exceeds this cap (m). Real ball
+  // pairs sit sub-cm; static-target false pairs blow up to metres.
+  // Default off (Infinity) and persists to localStorage.
   const RESIDUAL_FILTER_KEY = "ball_tracker_viewer_residual_cap_cm";
-  const FITRES_FILTER_KEY = "ball_tracker_viewer_fitres_kappa";
   let residualCapM = Infinity;
-  let fitResKappa = Infinity;
-  // Fit visibility + source live in shared overlay state (window.BallTrackerOverlays)
-  // so dashboard and viewer stay in lock-step. No local copies — read fresh
-  // each time so cross-tab edits to localStorage are picked up on next draw.
   try {
     const saved = parseFloat(localStorage.getItem(RESIDUAL_FILTER_KEY));
     if (Number.isFinite(saved) && saved >= 0 && saved < 200) residualCapM = saved / 100;
-  } catch (_e) { /* ignore */ }
-  try {
-    const saved = parseFloat(localStorage.getItem(FITRES_FILTER_KEY));
-    if (Number.isFinite(saved) && saved >= 1.0 && saved < 6.0) fitResKappa = saved;
   } catch (_e) { /* ignore */ }

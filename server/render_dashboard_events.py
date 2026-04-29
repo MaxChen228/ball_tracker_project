@@ -47,7 +47,6 @@ def _render_card(e: dict[str, Any]) -> str:
     swatch_html = _swatch_html(sid, n_tri > 0)
     statuses_html = _statuses_html(e)
     pipes_html = _pipes_html(e)
-    metrics_html = _metrics_html(e, n_tri)
     actions_html = _actions_html(e, sid, processing_state, trashed)
 
     row1 = (
@@ -60,8 +59,8 @@ def _render_card(e: dict[str, Any]) -> str:
         f'</div>'
     )
     row2 = (
-        f'<div class="ev-row2">{pipes_html}{metrics_html}</div>'
-        if (pipes_html or metrics_html) else ""
+        f'<div class="ev-row2">{pipes_html}</div>'
+        if pipes_html else ""
     )
     row3 = (
         f'<div class="ev-row3">{actions_html}</div>'
@@ -156,22 +155,6 @@ def _pipes_html(e: dict[str, Any]) -> str:
                    path_counts.get("server_post"), _PIPE_TITLES["server_post"]),
     ]
     return f'<div class="ev-pipes">{"".join(bits)}</div>'
-
-
-def _metrics_html(e: dict[str, Any], n_tri: int) -> str:
-    bits: list[str] = []
-    if n_tri > 0:
-        bits.append(f'<span class="ev-metric"><i>{n_tri}</i>pts</span>')
-    duration = e.get("duration_s")
-    if duration is not None:
-        bits.append(f'<span class="ev-metric"><i>{duration:.2f}</i>s</span>')
-    peak_z = e.get("peak_z_m")
-    if peak_z is not None:
-        bits.append(f'<span class="ev-metric"><i>{peak_z:.2f}</i>m</span>')
-    mph = e.get("ballistic_speed_mph")
-    if mph is not None:
-        bits.append(f'<span class="ev-metric"><i>{mph:.1f}</i>mph</span>')
-    return f'<div class="ev-metrics">{"".join(bits)}</div>' if bits else ""
 
 
 def _actions_html(e: dict[str, Any], sid: str,

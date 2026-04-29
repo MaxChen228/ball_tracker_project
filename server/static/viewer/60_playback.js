@@ -152,14 +152,13 @@
     renderHuds();
     renderDetectionStrip();
     if (seekVideos) syncVideosToT(currentT);
-    // Schedule all three independent paint paths. Each owns its own RAF
+    // Schedule both independent paint paths. Each owns its own RAF
     // dedup so a heavy Plotly.react can't block the canvas2D virtual cam
     // paints — they fall behind only when the JS event loop itself stalls
     // (in which case so does the video, and the operator wouldn't perceive
     // a sync glitch). In "all" mode the scene doesn't depend on currentT,
-    // so skip the expensive scene redraw — virtual + speed-bars still tick.
+    // so skip the expensive scene redraw — virtual cameras still tick.
     scheduleVirtualDraw();
-    if (_OVL.speedVisible()) scheduleSpeedBarsDraw();
     if (mode === "playback") scheduleSceneDraw();
   }
   let virtualRAF = null;
