@@ -17,6 +17,7 @@ from calibration_solver import (
     detect_all_markers_in_dict,
     solve_homography_from_world_map,
 )
+from pairing import _scale_homography, _scale_intrinsics
 from schemas import CalibrationSnapshot, DeviceIntrinsics, IntrinsicsPayload
 from triangulate import build_K, camera_center_world, recover_extrinsics, triangulate_rays, undistorted_ray_cam
 
@@ -30,6 +31,44 @@ logger = logging.getLogger("ball_tracker")
 # rather than the historical 65° guess (which over-estimated fx by ~14%).
 # See MEMORY: reference_iphone_camera_formats.md.
 _IPHONE_MAIN_CAM_HFOV_RAD = 1.2885  # 73.828° measured
+
+# Canonical snapshot dims. ArUco may detect at higher resolution (e.g.
+# 12 MP photo capture cropped to 4032×2268), but the snapshot is always
+# stored at standby video grid so live-path CameraPose construction +
+# pitch-time pairing.scale_pitch_to_video_dims see a consistent basis.
+# 720p path is handled at consume-time in state.ingest_live_frame.
+_CANONICAL_SNAPSHOT_W = 1920
+_CANONICAL_SNAPSHOT_H = 1080
+
+
+def _center_crop_to_aspect(
+    bgr: np.ndarray, target_ar: float, *, tol: float = 0.01,
+) -> tuple[np.ndarray, int]:
+    """Center-crop top/bottom (or left/right) so the image matches `target_ar`.
+
+    Used at auto-calibration entry to convert iPhone 4:3 12 MP stills to
+    the rig's 16:9 video basis BEFORE running ArUco. Without this the
+    snapshot would carry 4:3 dims through pairing's pure-scale path,
+    which can't represent the true 4:3↔16:9 sensor crop and silently
+    misplaces fy/cy at pitch time.
+
+    Returns (cropped_bgr, dy_offset). `dy_offset` is the pixel offset of
+    the cropped region's top edge relative to the source image; 0 when
+    no crop was needed (within tolerance).
+    """
+    h, w = bgr.shape[:2]
+    src_ar = w / h
+    if abs(src_ar - target_ar) / target_ar <= tol:
+        return bgr, 0
+    if src_ar < target_ar:
+        # Source too tall (e.g. 4:3 → 16:9). Crop top + bottom.
+        new_h = int(round(w / target_ar))
+        dy = (h - new_h) // 2
+        return bgr[dy : dy + new_h, :, :].copy(), dy
+    # Source too wide. Crop left + right.
+    new_w = int(round(h * target_ar))
+    dx = (w - new_w) // 2
+    return bgr[:, dx : dx + new_w, :].copy(), 0
 
 
 @router.post("/calibration")
@@ -664,7 +703,12 @@ async def _run_auto_calibration(
     device_ws = _main.device_ws
     _settings_message_for = _main._settings_message_for
 
-    frame_timeout_s = 5.0
+    # iOS may briefly stop the AVCaptureSession to swap activeFormat
+    # to a 12 MP photo format, capture a still, and swap back to 240 fps.
+    # Worst-case budget: ~1.5 s swap-out + ~0.8 s 12 MP capture + ~1.5 s
+    # swap-back + ~0.4 s upload of a 3-5 MB JPEG ≈ p95 4-5 s. 10 s gives
+    # comfortable headroom; old 5 s ceiling was too tight for the new path.
+    frame_timeout_s = 10.0
     # Hard ceiling — anything worse than this means the solver latched
     # onto garbage (wrong marker correspondences, degenerate geometry) and
     # shipping it would poison downstream triangulation silently.
@@ -732,7 +776,21 @@ async def _run_auto_calibration(
                 data={"bytes": len(jpeg_bytes)},
             )
         raise HTTPException(status_code=422, detail="calibration frame is not a decodable JPEG")
+    src_h, src_w = bgr.shape[:2]
+    # Center-crop 4:3 12 MP stills to 16:9 BEFORE detection so every
+    # downstream basis (intrinsics, H, snapshot, live, pitch) lives in
+    # the rig's video aspect ratio. pairing._scale_* can't represent
+    # the 4:3→16:9 sensor crop as a pure linear scale, so doing the
+    # crop here is the only way to keep the snapshot consistent with
+    # what the MOV path will see at pitch time.
+    bgr, crop_dy = _center_crop_to_aspect(bgr, 16.0 / 9.0, tol=0.01)
     h_img, w_img = bgr.shape[:2]
+    if track_run and (w_img, h_img) != (src_w, src_h):
+        state.append_auto_cal_event(
+            camera_id,
+            "ar_crop",
+            data={"src": [src_w, src_h], "dst": [w_img, h_img], "dy": crop_dy},
+        )
 
     intrinsics, prior = _derive_auto_cal_intrinsics(
         camera_id, w_img=w_img, h_img=h_img, h_fov_deg=h_fov_deg,
@@ -817,17 +875,48 @@ async def _run_auto_calibration(
             ),
         )
 
+    # Rescale K + H from detection basis (cropped frame) down to the
+    # canonical 1920×1080 standby video grid before storing. Pure 16:9→
+    # 16:9 linear scale; sx==sy to float epsilon. Keeps snapshot dims
+    # decoupled from whatever resolution the calibration JPEG happened
+    # to arrive at (1080p preview, 12 MP cropped, etc).
+    if (w_img, h_img) != (_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H):
+        sx = _CANONICAL_SNAPSHOT_W / w_img
+        sy = _CANONICAL_SNAPSHOT_H / h_img
+        intrinsics = _scale_intrinsics(intrinsics, sx, sy)
+        canonical_h = _scale_homography(result.homography_row_major, sx, sy)
+        from calibration_solver import CalibrationSolveResult
+        result = CalibrationSolveResult(
+            homography_row_major=canonical_h,
+            detected_ids=result.detected_ids,
+            missing_ids=result.missing_ids,
+            image_width_px=_CANONICAL_SNAPSHOT_W,
+            image_height_px=_CANONICAL_SNAPSHOT_H,
+        )
+        if track_run:
+            state.append_auto_cal_event(
+                camera_id,
+                "canonical_rescale",
+                data={
+                    "src": [w_img, h_img],
+                    "dst": [_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H],
+                    "sx": round(sx, 4),
+                    "sy": round(sy, 4),
+                },
+            )
+
     center_new, forward_new = _pose_from_homography(
         intrinsics, result.homography_row_major,
     )
     delta_pos_cm = None
     delta_ang_deg = None
     if prior is not None:
-        prior_intrinsics, _ = _derive_auto_cal_intrinsics(
-            camera_id, w_img=w_img, h_img=h_img, h_fov_deg=None,
-        )
+        # Use prior.intrinsics directly — prior.intrinsics + prior.homography
+        # are self-consistent within the prior's own basis. Re-deriving via
+        # _derive_auto_cal_intrinsics would pick up whatever ChArUco K is
+        # currently on file, which may have been swapped between cal runs.
         center_old, forward_old = _pose_from_homography(
-            prior_intrinsics, prior.homography,
+            prior.intrinsics, prior.homography,
         )
         delta_pos_cm = float(np.linalg.norm(center_new - center_old) * 100.0)
         delta_ang_deg = float(

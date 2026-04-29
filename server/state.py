@@ -490,9 +490,17 @@ class State:
         Validates K/H/dims self-consistency before storing — an earlier bug
         mixed 1080p intrinsics with 480p homography which silently produced
         garbage extrinsics downstream. Catching it at the boundary saves
-        hours of "why is Cam A at Z=0.66m" debugging."""
+        hours of "why is Cam A at Z=0.66m" debugging.
+
+        Invalidates any cached `CameraPose` on active live sessions so the
+        next `ingest_live_frame` rebuilds K/R/C from the new snapshot. The
+        cached pose's `image_wh` would otherwise still match (canonical
+        1920×1080 doesn't change across recals) and the live triangulation
+        would silently keep using the stale calibration."""
         with self._lock:
             self._calibration_store.set(snapshot)
+            for live in self._live_pairings.values():
+                live.update_camera_pose(snapshot.camera_id, None)
 
     def calibrations(self) -> dict[str, CalibrationSnapshot]:
         with self._lock:
@@ -550,6 +558,11 @@ class State:
             dev_a = self._device_registry.get("A")
             dev_b = self._device_registry.get("B")
             session_obj = self._lookup_session_locked(session_id)
+            # Snapshot runtime capture height under the same lock that
+            # protects every other runtime-settings read in this class
+            # (the State docstring at L128-135 names this invariant).
+            # Used below to scale snap K + H to actual live frame dims.
+            live_h = self._runtime_settings.capture_height_px
 
         # Each iPhone's `frame.timestamp_s` is its own mach-absolute clock
         # (seconds since device boot), so the two cameras' raw timestamps
@@ -564,26 +577,41 @@ class State:
 
         # Populate / refresh the per-cam cached pose on the live session
         # so triangulate_live can skip the PitchPayload/scale path and go
-        # straight to the ray math. Intrinsics come from the same
-        # snapshot the scale path would have seen, so scale factor is
-        # unity — no loss of accuracy. Done once per cam per session;
-        # re-keyed if the snapshot rotates (dims change).
+        # straight to the ray math.
+        #
+        # The snapshot is stored at canonical 1920×1080 by auto-cal, but
+        # the iPhone may stream live BGRA frames at either 1080p or 720p
+        # depending on operator's `capture_height_px` setting. Pre-scale
+        # K + H to the actual live frame grid here so triangulate_live_pair
+        # consumes a K/H pair that matches frame.px/frame.py basis.
+        # Without this, 720p standby silently produces 1.5× off live rays.
         from live_pairing import CameraPose as _CameraPose
-        from pairing import _camera_pose as _build_pose
+        from pairing import _camera_pose as _build_pose, _scale_homography, _scale_intrinsics
+
+        live_w = (live_h * 16) // 9
+        live_dims = (live_w, live_h)
 
         for cam, cal in (("A", cal_a), ("B", cal_b)):
             if cal is None:
                 live.update_camera_pose(cam, None)
                 continue
-            dims = (cal.image_width_px, cal.image_height_px)
             existing = live.camera_pose(cam)
-            if existing is not None and existing.image_wh == dims:
+            if existing is not None and existing.image_wh == live_dims:
                 continue
-            K, R, _t, C = _build_pose(cal.intrinsics, list(cal.homography))
+            snap_dims = (cal.image_width_px, cal.image_height_px)
+            if snap_dims != live_dims:
+                sx = live_dims[0] / snap_dims[0]
+                sy = live_dims[1] / snap_dims[1]
+                live_intr = _scale_intrinsics(cal.intrinsics, sx, sy)
+                live_h_flat = _scale_homography(list(cal.homography), sx, sy)
+            else:
+                live_intr = cal.intrinsics
+                live_h_flat = list(cal.homography)
+            K, R, _t, C = _build_pose(live_intr, live_h_flat)
             live.update_camera_pose(cam, _CameraPose(
                 K=K, R=R, C=C,
-                dist=cal.intrinsics.distortion,
-                image_wh=dims,
+                dist=live_intr.distortion,
+                image_wh=live_dims,
             ))
 
         def triangulate_live(cam: str, first: FramePayload, second: FramePayload) -> TriangulatedPoint | None:

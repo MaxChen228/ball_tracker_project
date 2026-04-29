@@ -30,8 +30,8 @@ final class CameraCommandRouter {
         let resetPreviewUploader: () -> Void
         let startStandbyCapture: () -> Void
         let stopCapture: () -> Void
-        let isCalibrationFrameCaptureArmed: () -> Bool
-        let setCalibrationFrameCaptureArmed: (Bool) -> Void
+        let getCalCaptureState: () -> CalCaptureState
+        let armCalibrationCapture: () -> Bool
     }
 
     private let deps: Dependencies
@@ -56,8 +56,22 @@ final class CameraCommandRouter {
             status: type == "arm" ? "ARMED (\(message["sid"] as? String ?? "-"))" : "IDLE"
         )
 
+        // Settings handlers that touch AVCaptureDevice.lockForConfiguration
+        // (capture-height swap, tracking exposure cap) MUST NOT run while
+        // a calibration capture cycle is mid-swap, otherwise two parallel
+        // activeFormat swaps interleave on sessionQueue and either deadlock
+        // or leave activeFormat in an inconsistent state — the suspected
+        // root cause of the prior 12 MP swap revert. sync_run starts an
+        // audio chirp window; chirp detection is dead while the AV session
+        // is stopped for the swap, so reject it for the same reason.
+        let calIdle = deps.getCalCaptureState() == .idle
+
         switch type {
         case "sync_run":
+            guard calIdle else {
+                commandLog.warning("ws sync_run dropped: calibration capture in flight (state=\(String(describing: self.deps.getCalCaptureState()), privacy: .public))")
+                return
+            }
             if let sid = message["sync_id"] as? String {
                 let emitAtS = (message["emit_at_s"] as? [Double]) ?? [0.3]
                 let recordDurationS = (message["record_duration_s"] as? Double) ?? 3.0
@@ -86,7 +100,14 @@ final class CameraCommandRouter {
             }
             applyPushedPaths(message["paths"] as? [String])
             if let capStr = message["tracking_exposure_cap"] as? String {
-                deps.handleTrackingExposureCap(capStr)
+                if calIdle {
+                    deps.handleTrackingExposureCap(capStr)
+                } else {
+                    // Same lock-conflict vector as the settings-path gate;
+                    // arm-time exposure cap also calls lockForConfiguration
+                    // and would race against an in-flight calibration swap.
+                    commandLog.warning("ws arm tracking_exposure_cap dropped: calibration capture in flight")
+                }
             }
             DispatchQueue.main.async {
                 self.deps.refreshModeLabel()
@@ -142,16 +163,34 @@ final class CameraCommandRouter {
                 )
             }
             if let capStr = message["tracking_exposure_cap"] as? String {
-                deps.handleTrackingExposureCap(capStr)
+                if calIdle {
+                    deps.handleTrackingExposureCap(capStr)
+                } else {
+                    commandLog.warning("ws tracking_exposure_cap dropped: calibration capture in flight")
+                }
             }
             if let pushedH = message["capture_height_px"] as? Int,
                pushedH != deps.currentCaptureHeight() {
-                DispatchQueue.main.async {
-                    guard self.deps.getState() == .standby else { return }
-                    self.deps.applyServerCaptureHeight(pushedH)
+                if calIdle {
+                    DispatchQueue.main.async {
+                        guard self.deps.getState() == .standby else { return }
+                        self.deps.applyServerCaptureHeight(pushedH)
+                    }
+                } else {
+                    commandLog.warning("ws capture_height_px=\(pushedH) dropped: calibration capture in flight")
                 }
             }
-            applyPreviewRequest(message["preview_requested"] as? Bool ?? false)
+            // Preview-request handler stops/starts AVCaptureSession via
+            // startStandbyCapture / stopCapture. A toggle landing while a
+            // calibration cycle is mid-swap would interleave session
+            // mutations on sessionQueue with pauseAndCaptureHighResStill,
+            // which is the most plausible reproduction of the prior
+            // "delegate silently never fires" failure mode.
+            if calIdle {
+                applyPreviewRequest(message["preview_requested"] as? Bool ?? false)
+            } else {
+                commandLog.warning("ws preview_requested dropped: calibration capture in flight")
+            }
             applyCalibrationFrameRequest(message["calibration_frame_requested"] as? Bool ?? false)
             DispatchQueue.main.async { self.deps.refreshModeLabel() }
         default:
@@ -184,10 +223,16 @@ final class CameraCommandRouter {
     }
 
     private func applyCalibrationFrameRequest(_ requested: Bool) {
-        guard requested,
-              !deps.isCalibrationFrameCaptureArmed(),
-              deps.getState() != .recording else { return }
-        deps.setCalibrationFrameCaptureArmed(true)
+        guard requested else { return }
+        // armCalibrationCapture enforces:
+        //   - calCaptureState == .idle (no double-arm during in-flight swap)
+        //   - state ∉ {.recording, .timeSyncWaiting} (defense in depth with
+        //     consume-time check; arm-time block is the cleanest UX since
+        //     the operator gets a single rejection point per request)
+        guard deps.armCalibrationCapture() else {
+            commandLog.warning("ws calibration_frame_requested rejected: state=\(String(describing: self.deps.getCalCaptureState()), privacy: .public) appState=\(String(describing: self.deps.getState()), privacy: .public)")
+            return
+        }
         if deps.getState() == .standby && !deps.isPreviewRequested() {
             deps.startStandbyCapture()
         }

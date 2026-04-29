@@ -1154,6 +1154,99 @@ def test_session_timeout_flushes_live_frames(tmp_path):
     assert stored["B"].frames_live[0].frame_index == 7
 
 
+def test_set_calibration_invalidates_cached_live_camera_pose(tmp_path):
+    """Re-running auto-calibration must invalidate any cached `CameraPose`
+    on active live sessions. Pre-canonical-storage the dim change served as
+    the natural invalidation signal; now that snapshots are always stored
+    at canonical 1920×1080, snap_dims won't change across recals so the
+    cache hit (`existing.image_wh == live_dims`) would silently keep using
+    the stale K. Regression test for the live-pose cache-staleness bug."""
+    from schemas import BlobCandidate
+    s = main.State(data_dir=tmp_path)
+    s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+    s.heartbeat("B", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+    s.arm_session(paths={main.DetectionPath.live})
+    session_id = s.current_session().id
+
+    initial_K = main.IntrinsicsPayload(fx=1500.0, fy=1500.0, cx=960.0, cy=540.0)
+    s.set_calibration(main.CalibrationSnapshot(
+        camera_id="A",
+        intrinsics=initial_K,
+        homography=[1.0, 0.0, 100.0, 0.0, 1.0, 200.0, 0.0, 0.0, 1.0],
+        image_width_px=1920, image_height_px=1080,
+    ))
+
+    # First ingest populates the per-cam cached pose with the initial K.
+    s.ingest_live_frame("A", session_id, main.FramePayload(
+        frame_index=1, timestamp_s=0.0, ball_detected=True,
+        candidates=[BlobCandidate(px=100.0, py=100.0, area=50, area_score=1.0)],
+    ))
+    pairing_a = s._live_pairings[session_id]
+    pose_initial = pairing_a.camera_pose("A")
+    assert pose_initial is not None
+    assert pose_initial.K[0, 0] == 1500.0  # fx of initial calibration
+
+    # Operator re-runs auto-cal → new K, same canonical 1920×1080 dims.
+    new_K = main.IntrinsicsPayload(fx=2000.0, fy=2000.0, cx=960.0, cy=540.0)
+    s.set_calibration(main.CalibrationSnapshot(
+        camera_id="A",
+        intrinsics=new_K,
+        homography=[1.0, 0.0, 100.0, 0.0, 1.0, 200.0, 0.0, 0.0, 1.0],
+        image_width_px=1920, image_height_px=1080,
+    ))
+
+    # Next ingest must rebuild the pose with the new K — pre-fix this
+    # silently kept the stale K because cached.image_wh == live_dims.
+    s.ingest_live_frame("A", session_id, main.FramePayload(
+        frame_index=2, timestamp_s=0.005, ball_detected=True,
+        candidates=[BlobCandidate(px=100.0, py=100.0, area=50, area_score=1.0)],
+    ))
+    pose_after = pairing_a.camera_pose("A")
+    assert pose_after is not None
+    assert pose_after.K[0, 0] == 2000.0, (
+        f"live CameraPose K not refreshed after set_calibration: "
+        f"got fx={pose_after.K[0, 0]}, expected 2000.0"
+    )
+
+
+def test_ingest_live_frame_scales_K_to_720p_when_runtime_capture_height_is_720(tmp_path):
+    """Operator switches capture_height_px to 720p (state_runtime allows it).
+    Snapshot stays at canonical 1920×1080 but live BGRA frames arrive at
+    1280×720. ingest_live_frame must scale K + H down to 720p basis before
+    building CameraPose; without this, live triangulation rays diverge by
+    1.5× from where the ball actually is. This is the direct Bug C target."""
+    from schemas import BlobCandidate
+    s = main.State(data_dir=tmp_path)
+    s.set_capture_height_px(720)
+    s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+    s.heartbeat("B", time_synced=True, time_sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0)
+    s.arm_session(paths={main.DetectionPath.live})
+    session_id = s.current_session().id
+
+    snap_K = main.IntrinsicsPayload(fx=1500.0, fy=1500.0, cx=960.0, cy=540.0)
+    s.set_calibration(main.CalibrationSnapshot(
+        camera_id="A",
+        intrinsics=snap_K,
+        homography=[1.0, 0.0, 100.0, 0.0, 1.0, 200.0, 0.0, 0.0, 1.0],
+        image_width_px=1920, image_height_px=1080,
+    ))
+
+    s.ingest_live_frame("A", session_id, main.FramePayload(
+        frame_index=1, timestamp_s=0.0, ball_detected=True,
+        candidates=[BlobCandidate(px=100.0, py=100.0, area=50, area_score=1.0)],
+    ))
+    pose = s._live_pairings[session_id].camera_pose("A")
+    assert pose is not None
+    # 1920×1080 → 1280×720 is pure 0.667× linear scale (16:9→16:9).
+    # Pre-fix the cached pose used snap K verbatim → fx=1500. Post-fix
+    # fx is scaled to 1500*(1280/1920)=1000.
+    assert pose.image_wh == (1280, 720)
+    assert abs(pose.K[0, 0] - 1000.0) < 1e-6, f"fx not scaled to 720p basis: {pose.K[0, 0]}"
+    assert abs(pose.K[1, 1] - 1000.0) < 1e-6, f"fy not scaled to 720p basis: {pose.K[1, 1]}"
+    assert abs(pose.K[0, 2] - 640.0) < 1e-6, f"cx not scaled to 720p basis: {pose.K[0, 2]}"
+    assert abs(pose.K[1, 2] - 360.0) < 1e-6, f"cy not scaled to 720p basis: {pose.K[1, 2]}"
+
+
 def test_setup_page_wires_auto_calibration_status_into_device_renders():
     client = TestClient(app)
     r = client.get("/setup")
