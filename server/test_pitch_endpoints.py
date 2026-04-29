@@ -54,9 +54,13 @@ def test_post_pitch_with_video_triangulates_server_side(tmp_path):
     assert body2["triangulated_points"] == 0
 
     # Operator triggers server-post detection on the events row.
-    run = client.post(f"/sessions/{session_id}/run_server_post")
+    run = client.post(
+        f"/sessions/{session_id}/run_server_post",
+        data={"source": "live"},
+    )
     assert run.status_code == 200, run.text
     assert run.json()["queued"] == 2
+    assert run.json()["source"] == "live"
 
     # The server detected pixel can be sub-pixel off from ground truth
     # due to connected-components centroid quantisation, so allow a small
@@ -307,7 +311,10 @@ def test_nonzero_distortion_recovers_true_point_via_mov(tmp_path):
     r2 = _post_pitch(client, body_b, mov_b)
     assert r2.status_code == 200, r2.text
     # Operator-triggered server-post detection drives triangulation.
-    run = client.post(f"/sessions/{session_id}/run_server_post")
+    run = client.post(
+        f"/sessions/{session_id}/run_server_post",
+        data={"source": "live"},
+    )
     assert run.status_code == 200, run.text
     result_points = client.get(f"/results/{session_id}").json()["points"]
     assert len(result_points) >= 1
