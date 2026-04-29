@@ -1271,7 +1271,9 @@ def test_setup_page_renders_all_config_surfaces():
     # side-by-side [preview-panel] + [virt-cell] panels.
     assert 'data-cam-view="A"' in body
     assert 'data-cam-view="B"' in body
-    assert 'data-cam-img="A"' in body
+    # `<img data-cam-img>` only renders when preview is enabled — `/setup`
+    # paints with preview off by default (operator opts in via PREVIEW
+    # button) so we assert the canvas overlay is present instead.
     assert 'data-cam-canvas="A"' in body
     assert 'data-preview-cam="A"' in body  # PREVIEW button still present
     assert 'data-preview-cam="B"' in body
@@ -1306,7 +1308,8 @@ def test_markers_page_renders_workspace():
     # preview, click hit-tests via BallTrackerCamView.onCanvasClick.
     assert 'data-cam-view="A"' in body
     assert 'data-cam-view="B"' in body
-    assert 'data-cam-img="A"' in body
+    # Markers page also paints with preview off by default — assert canvas
+    # overlay only; `<img data-cam-img>` only when PREVIEW is on.
     assert 'data-cam-canvas="A"' in body
     # marker_footprints must be one of the toggleable layers + on by default.
     assert 'data-layer="marker_footprints"' in body

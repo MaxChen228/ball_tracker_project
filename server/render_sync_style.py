@@ -107,8 +107,6 @@ _SYNC_CSS = """
 .cal-status { font-weight: 700; letter-spacing: 0.12em; font-size: 10px;
               text-transform: uppercase; }
 .cal-status.uncalibrated { color: var(--sub); }
-.cal-status.accumulating { color: var(--warn); }
-.cal-status.ready { color: var(--passed); }
 .cal-status.calibrated { color: var(--passed); }
 .cal-line { display: flex; gap: var(--s-2); align-items: baseline;
             line-height: 1.4; }
@@ -116,22 +114,16 @@ _SYNC_CSS = """
                   text-transform: uppercase; font-size: 9px;
                   letter-spacing: 0.12em; }
 .cal-line-value { color: var(--ink); }
-.cal-line.cal-fail .cal-line-value { color: var(--failed); }
 .cal-meta { display: flex; gap: var(--s-2); flex-wrap: wrap; align-items: center; }
 .reproj-badge { padding: 2px 8px; border-radius: 4px;
-                border: 1px solid; font-size: 10px; }
-.reproj-badge.ok { color: var(--passed); border-color: var(--passed);
-                   background: var(--passed-bg); }
-.reproj-badge.warn { color: var(--warn); border-color: var(--warn);
-                     background: var(--warn-bg); }
-.reproj-badge.bad { color: var(--failed); border-color: var(--failed);
-                    background: var(--failed-bg); }
+                color: var(--ink);
+                border: 1px solid var(--border-base);
+                font-size: 10px; }
 .cal-delta { color: var(--sub); font-size: 10px;
              padding: 2px 8px; border-radius: 4px;
              border: 1px solid var(--border-base); }
 /* Marker coverage map — chips for plate (0-8) + extended ids, color
-   by state: green = used in last solve, blue = in current buffer,
-   gray = known but never used by this cam. */
+   by state: green = used in last solve, gray = known but never used. */
 .marker-coverage { display: flex; flex-direction: column;
                    gap: var(--s-1); margin-top: var(--s-1);
                    padding-top: var(--s-1);
@@ -146,8 +138,6 @@ _SYNC_CSS = """
                font-weight: 600; }
 .marker-chip.used { color: var(--passed); border-color: var(--passed);
                     background: var(--passed-bg); }
-.marker-chip.buffer { color: var(--accent); border-color: var(--accent);
-                      background: rgba(0,0,0,0.04); }
 .marker-chip.missing { color: var(--sub); border-color: var(--border-base);
                        background: transparent; opacity: 0.55; }
 .marker-chip.extended { font-style: italic; }

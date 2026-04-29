@@ -719,15 +719,7 @@ def setup_page() -> HTMLResponse:
             },
             markers_count=len(state._marker_registry.all_records()),
             preview_requested=state._preview.requested_map(),
-            # Phase-1 façade: phase 2 retires the buffer-shaped SSR
-            # parameter in favor of the flat last_solves dict. For now we
-            # wrap the new last-solve summaries in the legacy {last_solve:
-            # ...} shape so render_dashboard_devices keeps painting until
-            # the panel is redesigned.
-            calibration_buffers={
-                cam: {"last_solve": ls}
-                for cam, ls in state.all_calibration_last_solves().items()
-            },
+            calibration_last_solves=state.all_calibration_last_solves(),
             known_marker_ids={
                 "plate": sorted(PLATE_MARKER_WORLD.keys()),
                 "extended": sorted(
