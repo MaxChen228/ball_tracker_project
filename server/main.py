@@ -462,8 +462,22 @@ def _build_status_response() -> dict[str, Any]:
         # Per-cam multi-frame accumulation buffer state. Dashboard reads
         # this to render the (n/5) marker count + last reproj badge so
         # operators can see whether they need another [Calibrate] press
-        # or hit Clear to start over.
+        # or hit Clear to start over. `last_solve` field on each entry
+        # surfaces the persistent metadata of the most recent successful
+        # solve so the operator keeps seeing "last calibrated N min ago,
+        # markers […]" after the buffer empties on success.
         "calibration_buffers": state.all_calibration_buffer_summaries(),
+        # Universe of marker IDs the operator can possibly use for
+        # calibration: plate (0-8 fixed) + extended (operator-managed
+        # registry). Dashboard uses this to render the coverage map
+        # (green = used in last solve, blue = in current buffer, gray
+        # = known but never seen by this cam).
+        "known_marker_ids": {
+            "plate": sorted(PLATE_MARKER_WORLD.keys()),
+            "extended": sorted(
+                rec.marker_id for rec in state._marker_registry.all_records()
+            ),
+        },
         "live_session": state.live_session_summary(),
         "ws_devices": {
             cam: {
@@ -709,6 +723,12 @@ def setup_page() -> HTMLResponse:
             markers_count=len(state._marker_registry.all_records()),
             preview_requested=state._preview.requested_map(),
             calibration_buffers=state.all_calibration_buffer_summaries(),
+            known_marker_ids={
+                "plate": sorted(PLATE_MARKER_WORLD.keys()),
+                "extended": sorted(
+                    rec.marker_id for rec in state._marker_registry.all_records()
+                ),
+            },
         )
     )
 

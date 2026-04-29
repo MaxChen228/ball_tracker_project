@@ -517,6 +517,46 @@ class MarkerAccumulator:
         }
 
 
+@dataclass
+class LastSolveRecord:
+    """Persistent per-cam record of the most recent SUCCESSFUL solve.
+    Survives buffer clears so the dashboard can keep showing operators
+    "what was last calibrated" even when the buffer is empty.
+
+    First-principles UX rationale: after a successful calibration the
+    accumulator is wiped (clean slate for the next run), but the operator
+    still wants to see "this pose was set N min ago using markers
+    [0..8] with reproj 7.9 px" — without that, the dashboard looks
+    identical to a never-calibrated cam.
+
+    Reset on `reset_rig()` (rig geometry changed → previous record
+    no longer meaningful)."""
+    solved_at: float
+    marker_ids: list[int]            # ids that contributed to the solve
+    reproj_px: float | None
+    n_extended_used: int             # ids beyond plate (0-8)
+    photo_fov_deg: float | None      # capture-time photo format FOV
+    video_fov_deg: float | None      # storage-time video format FOV
+    solver: str                      # "planar_homography" | "pnp_pose"
+    fx_video: float                  # stored fx (1080p basis)
+    delta_position_cm: float | None  # vs previous solve, None on first
+    delta_angle_deg: float | None    # vs previous solve, None on first
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "solved_at": self.solved_at,
+            "marker_ids": list(self.marker_ids),
+            "reproj_px": self.reproj_px,
+            "n_extended_used": self.n_extended_used,
+            "photo_fov_deg": self.photo_fov_deg,
+            "video_fov_deg": self.video_fov_deg,
+            "solver": self.solver,
+            "fx_video": self.fx_video,
+            "delta_position_cm": self.delta_position_cm,
+            "delta_angle_deg": self.delta_angle_deg,
+        }
+
+
 class MarkerAccumulatorStore:
     """Per-camera marker accumulators for multi-frame auto-calibration.
 
@@ -527,11 +567,16 @@ class MarkerAccumulatorStore:
     Auto-stale gate runs lazily on read: any buffer that hasn't seen
     a frame in BUFFER_STALE_S, or that has exhausted MAX_FAILURES
     consecutive bad solves, is cleared the next time it's accessed.
+
+    `_last_solve` survives buffer clears so the dashboard can show
+    "last calibrated N min ago using markers […]" persistently —
+    operator's UX continuity. Cleared only on `reset_rig()`.
     """
 
     def __init__(self, *, time_fn: Callable[[], float]) -> None:
         self._time_fn = time_fn
         self._buffers: dict[str, MarkerAccumulator] = {}
+        self._last_solve: dict[str, LastSolveRecord] = {}
 
     def _gc(self, camera_id: str) -> None:
         buf = self._buffers.get(camera_id)
@@ -554,14 +599,29 @@ class MarkerAccumulatorStore:
     def summary(self, camera_id: str) -> dict[str, Any]:
         self._gc(camera_id)
         buf = self._buffers.get(camera_id)
-        if buf is None:
-            return MarkerAccumulator().to_summary()
-        return buf.to_summary()
+        body = buf.to_summary() if buf is not None else MarkerAccumulator().to_summary()
+        # Persistent last-solve record (survives buffer clears).
+        last = self._last_solve.get(camera_id)
+        body["last_solve"] = last.to_dict() if last is not None else None
+        return body
 
     def all_summaries(self) -> dict[str, dict[str, Any]]:
         for cam in list(self._buffers.keys()):
             self._gc(cam)
-        return {cam: buf.to_summary() for cam, buf in self._buffers.items()}
+        cams = set(self._buffers.keys()) | set(self._last_solve.keys())
+        out: dict[str, dict[str, Any]] = {}
+        for cam in cams:
+            out[cam] = self.summary(cam)
+        return out
+
+    def record_last_solve(self, camera_id: str, record: LastSolveRecord) -> None:
+        """Persist the metadata of a successful solve. Called from the
+        route AFTER the snapshot has been written so this record always
+        reflects "what's currently on disk for this cam"."""
+        self._last_solve[camera_id] = record
+
+    def get_last_solve(self, camera_id: str) -> LastSolveRecord | None:
+        return self._last_solve.get(camera_id)
 
     def accumulate(
         self,
@@ -614,9 +674,16 @@ class MarkerAccumulatorStore:
                 self._buffers.pop(camera_id, None)
 
     def clear(self, camera_id: str) -> bool:
+        """Drop the live buffer for `camera_id`. Does NOT touch the
+        persistent last-solve record — operator's [Clear] only resets
+        the in-progress accumulation, the prior calibration history
+        is still meaningful."""
         return self._buffers.pop(camera_id, None) is not None
 
     def clear_all(self) -> int:
+        """Used by reset_rig: wipes every cam's buffer AND last-solve
+        record (rig geometry changed, prior calibration is invalid)."""
         n = len(self._buffers)
         self._buffers.clear()
+        self._last_solve.clear()
         return n

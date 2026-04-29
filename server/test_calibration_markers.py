@@ -131,16 +131,20 @@ def _render_aruco_scene_3d(
 def _seed_calibration_frame(
     camera_id: str, jpeg: bytes,
     *,
-    photo_fov_deg: float | None = None,
-    video_fov_deg: float | None = None,
+    photo_fov_deg: float = 73.828,
+    video_fov_deg: float = 73.828,
 ) -> None:
     """Simulate an iPhone pushing a native-resolution calibration JPEG.
     Bypasses the request/TTL handshake — the polling loop in
     /calibration/auto finds the cached frame on its first iteration.
 
-    `photo_fov_deg` / `video_fov_deg` mirror the new iOS upload flow
-    (FOVs of the 12 MP photo format and the 1080p video format). When
-    omitted the legacy linear-rescale path is exercised."""
+    `photo_fov_deg` / `video_fov_deg` mirror the iOS upload flow (FOVs
+    of the 12 MP photo format and the 1080p video format). Defaults to
+    73.828° / 73.828° — the iPhone 1080p video FOV used as both bases
+    for synthetic fixtures already rendered at 1920×1080 (rebuild block
+    short-circuits when input dim == canonical dim, so FOVs don't
+    matter). 4:3 12 MP fixtures need an explicit photo_fov_deg=71.286
+    to exercise the FOV-split rebuild path."""
     main.state.store_calibration_frame(
         camera_id, jpeg,
         photo_fov_deg=photo_fov_deg,
@@ -193,7 +197,12 @@ def test_calibration_auto_crops_4_3_input_and_rescales_to_canonical_16_9(
         image_size=(4032, 3024),
         scale_px_per_m=1500.0,  # keeps plate markers within central 16:9 band
     )
-    _seed_calibration_frame("A", _jpeg_encode(bgr_4_3))
+    _seed_calibration_frame(
+        "A", _jpeg_encode(bgr_4_3),
+        # Synthetic 4:3 frame — fake iPhone main cam FOVs so the
+        # rebuild branch fires (different photo vs video FOV).
+        photo_fov_deg=71.286, video_fov_deg=73.828,
+    )
 
     r = client.post("/calibration/auto/A?h_fov_deg=73.828")
     assert r.status_code == 200, r.text
@@ -254,6 +263,71 @@ def test_calibration_auto_returns_accumulating_when_too_few_markers(tmp_path, mo
     assert sorted(body["buffer_summary"]["marker_ids"]) == [0, 1, 5]
     # No snapshot written — buffer accumulates instead.
     assert not (tmp_path / "calibrations" / "A.json").exists()
+
+
+def test_calibration_auto_rebuild_uses_video_fov_for_stored_K(
+    tmp_path, monkeypatch,
+):
+    """Solve runs in 12 MP photo basis (FOV X°), but stored K must
+    describe the 1080p video basis (FOV Y°). Verifies fx ≈ 1920 / (2 ·
+    tan(video_fov / 2)) — i.e. the rebuild block actually uses
+    `video_fov_deg`, not the photo FOV linearly rescaled."""
+    import math
+
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    from calibration_solver import PLATE_MARKER_WORLD
+    bgr_4_3, _H = _render_aruco_scene(
+        PLATE_MARKER_WORLD, image_size=(4032, 3024), scale_px_per_m=1500.0,
+    )
+    photo_fov = 71.286   # iPhone 12 MP photo format FOV
+    video_fov = 73.828   # iPhone 1080p video format FOV
+    _seed_calibration_frame(
+        "A", _jpeg_encode(bgr_4_3),
+        photo_fov_deg=photo_fov, video_fov_deg=video_fov,
+    )
+
+    r = client.post("/calibration/auto/A?h_fov_deg=" + str(photo_fov))
+    assert r.status_code == 200, r.text
+
+    snap = (tmp_path / "calibrations" / "A.json").read_text()
+    import json
+    K = json.loads(snap)["intrinsics"]
+    expected_fx = 1920 / (2 * math.tan(math.radians(video_fov / 2)))
+    # The rebuild path derives fx purely from FOV at canonical dim, so
+    # the stored fx should match this exactly (within float epsilon).
+    # If we accidentally used photo_fov, fx would land near
+    # 1920/(2·tan(35.643°)) ≈ 1338, not the expected ~1278.
+    assert abs(K["fx"] - expected_fx) < 0.5, (
+        f"stored fx={K['fx']:.2f} but expected {expected_fx:.2f} "
+        f"from video_fov_deg={video_fov}"
+    )
+    assert abs(K["cx"] - 960.0) < 0.5
+    assert abs(K["cy"] - 540.0) < 0.5
+
+
+def test_calibration_auto_rejects_missing_video_fov_deg(tmp_path, monkeypatch):
+    """Missing video_fov_deg means upload is malformed (old client or
+    missing query param). Per project no-back-compat policy, server
+    surfaces 422 instead of silently linear-rescaling K."""
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    from calibration_solver import PLATE_MARKER_WORLD
+    bgr_4_3, _H = _render_aruco_scene(
+        PLATE_MARKER_WORLD, image_size=(4032, 3024), scale_px_per_m=1500.0,
+    )
+    # Bypass the FOV defaults — explicitly store with video_fov_deg=None
+    # to mimic an old iOS client.
+    main.state.store_calibration_frame(
+        "A", _jpeg_encode(bgr_4_3),
+        photo_fov_deg=71.286, video_fov_deg=None,
+    )
+
+    r = client.post("/calibration/auto/A?h_fov_deg=71.286")
+    assert r.status_code == 422
+    assert "video_fov_deg" in r.json()["detail"]
 
 
 def test_calibration_auto_returns_408_when_no_frame_delivered(tmp_path, monkeypatch):
@@ -431,7 +505,7 @@ def test_setup_page_renders_buffer_state_and_reset_rig_button(tmp_path, monkeypa
     assert r.status_code == 200
     body = r.text
     # Buffer block surfaces the (3/5) progress for cam A.
-    assert 'class="buffer-block"' in body
+    assert 'class="cal-panel"' in body
     assert "(3/5)" in body
     # Reset rig button is present with confirm-handling JS hook.
     assert 'data-reset-rig="1"' in body

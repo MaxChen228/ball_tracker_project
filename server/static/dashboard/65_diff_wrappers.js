@@ -8,6 +8,7 @@
   let currentCalibrationLastTs = {};
   let currentAutoCalibration = { active: {}, last: {} };
   let currentCalibrationBuffers = {};
+  let currentKnownMarkerIds = { plate: [], extended: [] };
   let currentEventsBucket = 'active';
   const pendingPreviewMutations = new Set();
 
@@ -40,18 +41,30 @@
       last_ts: state.calibration_last_ts || {},
       sync_pending: Object.keys(state.sync_commands || {}).sort(),
       auto_calibration: state.auto_calibration || { active: {}, last: {} },
-      // Repaint when buffer count / reproj / failure_count flips so the
-      // operator sees the (n/5) progress + reproj badge update without
-      // a manual reload.
+      // Repaint when buffer count / reproj / failure_count / last_solve
+      // identity flips so the operator sees the (n/5) progress + reproj
+      // badge + last-solve breakdown update without a manual reload.
+      // last_solve.solved_at is the identity (changes only on a NEW
+      // successful solve) — including it triggers exactly one repaint
+      // when calibration completes.
       cal_buffers: Object.fromEntries(
         Object.entries(state.calibration_buffers || {}).map(([cam, b]) => [cam, {
           c: b.count || 0,
           r: (typeof b.last_reproj_px === 'number') ? Math.round(b.last_reproj_px * 10) / 10 : null,
           f: b.failure_count || 0,
+          ls: b.last_solve ? b.last_solve.solved_at : null,
         }])
       ),
+      known_markers: state.known_marker_ids || { plate: [], extended: [] },
     });
     if (key === _lastDevKey) return;
+    // Hover-suppression: if the operator is currently hovering anywhere
+    // inside #devices-body, defer this repaint. innerHTML rebuild
+    // destroys the hovered DOM element → the browser drops :hover →
+    // flicker. Defer by NOT updating _lastDevKey so the next tick will
+    // see the diff again and re-evaluate. A repaint that misses one
+    // tick still reflects state within ≤1s on the next idle tick.
+    if (devicesBox && devicesBox.matches(':hover')) return;
     _lastDevKey = key;
     _origRenderDevices(state);
   };

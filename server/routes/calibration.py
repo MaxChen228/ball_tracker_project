@@ -18,7 +18,6 @@ from calibration_solver import (
     detect_all_markers_in_dict,
     solve_homography_from_world_map,
 )
-from pairing import _scale_homography, _scale_intrinsics
 from schemas import CalibrationSnapshot, DeviceIntrinsics, IntrinsicsPayload
 from triangulate import build_K, camera_center_world, recover_extrinsics, triangulate_rays, undistorted_ray_cam
 
@@ -937,12 +936,14 @@ async def _run_auto_calibration(
             summary=f"Solving from {len(all_ids)} accumulated markers",
         )
 
-    # Solve from the buffer, not just this frame's markers. Each entry's
-    # cached image_corners is what we feed the existing solver.
-    buf = state.calibration_buffer_for_solve(camera_id)
+    # Solve from the buffer, not just this frame's markers. Snapshot the
+    # markers under State._lock so a concurrent [Calibrate] press
+    # mutating the dict doesn't trigger
+    # `RuntimeError: dictionary changed size during iteration` here.
+    buffered_markers = state.calibration_buffer_snapshot_for_solve(camera_id)
     detected_buffered = [
         _DetectedMarker(id=mid, corners=entry.image_corners)
-        for mid, entry in buf.markers.items()
+        for mid, entry in buffered_markers
     ]
     result, solver, pnp_detected_ids = _solve_auto_cal_solution(
         detected_buffered, intrinsics=intrinsics, image_size=(w_img, h_img),
@@ -993,17 +994,27 @@ async def _run_auto_calibration(
     # AR crop); pitch-time triangulation runs at 1920×1080 video format.
     # Those two formats DON'T share a FOV on iPhone main cams — the
     # binned video format crops the sensor differently from the
-    # full-frame photo format. A linear K rescale (the previous code
-    # path) silently mismatches the FOVs → reprojection looks fine in
-    # the brief 12 MP capture window but drifts after rollback to 1080p
-    # (operator sees overlay shift the moment preview returns).
+    # full-frame photo format. A linear K rescale would silently
+    # mismatch the FOVs → overlay aligns in the 12 MP capture window
+    # then drifts after rollback to 1080p.
     #
-    # Correct path: solve produced (R_wc, t_wc) consistent with K_solve
-    # at the photo basis. Those are basis-independent (physical pose).
+    # The solve produced (R_wc, t_wc) consistent with K_solve at the
+    # photo basis. Those are basis-independent (physical pose).
     # Distortion coefficients live in normalized image coords (after
-    # K^-1) and survive the basis swap. Build K_video from the live
+    # K^-1) and survive the basis swap. We build K_video from the live
     # video FOV at 1920×1080, then H_video = K_video × [r1 r2 t].
-    if video_fov_deg is not None and (w_img, h_img) != (_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H):
+    if video_fov_deg is None:
+        # Project rule: experimental phase = lockstep iOS+server, no
+        # back-compat. Old iOS clients can't realistically exist here;
+        # missing video_fov_deg means the upload is malformed.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "calibration_frame upload is missing video_fov_deg — "
+                "iOS client too old; rebuild and reinstall."
+            ),
+        )
+    if (w_img, h_img) != (_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H):
         # Recover physical pose from the photo-basis solve.
         K_solve = build_K(
             intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy,
@@ -1028,7 +1039,10 @@ async def _run_auto_calibration(
         K_video = build_K(fx_v, fy_v, cx_v, cy_v).astype(np.float64)
         rt_planar = np.column_stack((R_wc[:, 0], R_wc[:, 1], t_wc.reshape(3)))
         H_video = K_video @ rt_planar
-        # Normalize h33 → 1 to match storage convention.
+        # Normalize h33 → 1 to match storage convention. h33 = K row 3 ·
+        # [r1 r2 t] col 3 = t_z; recover_extrinsics already rejects
+        # near-zero t_z (cam on plate plane), so this guard is defensive
+        # against numerical drift only.
         if abs(H_video[2, 2]) > 1e-12:
             H_video = H_video / H_video[2, 2]
 
@@ -1051,35 +1065,6 @@ async def _run_auto_calibration(
                     "video_fov_deg": video_fov_deg,
                     "fx_video": round(fx_v, 2),
                     "fy_video": round(fy_v, 2),
-                },
-            )
-    elif (w_img, h_img) != (_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H):
-        # Fallback path when iOS didn't report video_fov_deg (old client
-        # or test harness). Linear rescale — preserves the old behavior.
-        # Logged so it's obvious this fallback fired.
-        sx = _CANONICAL_SNAPSHOT_W / w_img
-        sy = _CANONICAL_SNAPSHOT_H / h_img
-        intrinsics = _scale_intrinsics(intrinsics, sx, sy)
-        canonical_h = _scale_homography(result.homography_row_major, sx, sy)
-        from calibration_solver import CalibrationSolveResult
-        result = CalibrationSolveResult(
-            homography_row_major=canonical_h,
-            detected_ids=result.detected_ids,
-            missing_ids=result.missing_ids,
-            image_width_px=_CANONICAL_SNAPSHOT_W,
-            image_height_px=_CANONICAL_SNAPSHOT_H,
-        )
-        if track_run:
-            state.append_auto_cal_event(
-                camera_id,
-                "canonical_rescale_legacy",
-                level="warn",
-                data={
-                    "src": [w_img, h_img],
-                    "dst": [_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H],
-                    "sx": round(sx, 4),
-                    "sy": round(sy, 4),
-                    "reason": "video_fov_deg missing from iOS upload",
                 },
             )
 
@@ -1106,6 +1091,28 @@ async def _run_auto_calibration(
     # the caller can write the snapshot from this dict.
     state.record_calibration_solve_result(
         camera_id, reproj_px=reproj_px, ok=True, status="ok",
+    )
+    # Persistent last-solve record — dashboard reads this to keep
+    # showing "last calibrated N min ago, used markers […]" after
+    # the buffer empties on success. Operator's UX continuity.
+    from state_calibration import LastSolveRecord
+    n_extended = sum(
+        1 for mid in result.detected_ids if mid not in PLATE_MARKER_WORLD
+    )
+    state.record_calibration_last_solve(
+        camera_id,
+        LastSolveRecord(
+            solved_at=state._time_fn(),
+            marker_ids=list(result.detected_ids),
+            reproj_px=reproj_px,
+            n_extended_used=n_extended,
+            photo_fov_deg=photo_fov_deg,
+            video_fov_deg=video_fov_deg,
+            solver=solver,
+            fx_video=intrinsics.fx,
+            delta_position_cm=delta_pos_cm,
+            delta_angle_deg=delta_ang_deg,
+        ),
     )
     return {
         "phase": "solve_ok",

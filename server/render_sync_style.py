@@ -92,29 +92,65 @@ _SYNC_CSS = """
 .device-actions { display: flex; gap: var(--s-2); margin-top: var(--s-2);
                   margin-bottom: var(--s-2); flex-wrap: wrap; }
 .preview-btn.active { background: var(--ink); color: var(--surface); }
-/* Multi-frame accumulation buffer state strip — sits between the
-   device-head (status chips) and the device-actions (buttons) so
-   operators see "where am I in the calibration sequence" before
-   choosing which button to press. */
-.buffer-block { display: flex; gap: var(--s-2); flex-wrap: wrap;
-                align-items: center; margin: var(--s-2) 0;
-                padding: var(--s-1) var(--s-2);
-                font-family: var(--mono); font-size: 11px;
-                letter-spacing: 0.06em;
-                background: var(--surface-hover); border: 1px solid var(--border-base);
-                border-radius: 6px; }
-.buffer-block .buffer-progress { color: var(--ink); }
-.buffer-block .buffer-progress.idle { color: var(--passed); }
-.buffer-block .buffer-progress strong { font-weight: 600; }
-.buffer-block .reproj-badge { padding: 2px 8px; border-radius: 4px;
-                              border: 1px solid; }
-.buffer-block .reproj-badge.ok { color: var(--passed); border-color: var(--passed);
-                                 background: var(--passed-bg); }
-.buffer-block .reproj-badge.warn { color: var(--warn); border-color: var(--warn);
-                                   background: var(--warn-bg); }
-.buffer-block .reproj-badge.bad { color: var(--failed); border-color: var(--failed);
-                                  background: var(--failed-bg); }
-.buffer-block .buffer-fail { color: var(--failed); font-weight: 600; }
+/* Calibration info panel — sits between device-head and device-actions.
+   Multi-line: status header + active accumulation + last-solve summary
+   + failure counter + marker coverage map. Designed so an operator can
+   answer "what state is this cam in?" and "what was last calibrated?"
+   without scrolling or re-running the action. */
+.cal-panel { display: flex; flex-direction: column; gap: var(--s-1);
+             margin: var(--s-2) 0; padding: var(--s-2);
+             background: var(--surface-hover);
+             border: 1px solid var(--border-base);
+             border-radius: 6px;
+             font-family: var(--mono); font-size: 11px;
+             letter-spacing: 0.06em; }
+.cal-status { font-weight: 700; letter-spacing: 0.12em; font-size: 10px;
+              text-transform: uppercase; }
+.cal-status.uncalibrated { color: var(--sub); }
+.cal-status.accumulating { color: var(--warn); }
+.cal-status.ready { color: var(--passed); }
+.cal-status.calibrated { color: var(--passed); }
+.cal-line { display: flex; gap: var(--s-2); align-items: baseline;
+            line-height: 1.4; }
+.cal-line-label { color: var(--sub); min-width: 36px;
+                  text-transform: uppercase; font-size: 9px;
+                  letter-spacing: 0.12em; }
+.cal-line-value { color: var(--ink); }
+.cal-line.cal-fail .cal-line-value { color: var(--failed); }
+.cal-meta { display: flex; gap: var(--s-2); flex-wrap: wrap; align-items: center; }
+.reproj-badge { padding: 2px 8px; border-radius: 4px;
+                border: 1px solid; font-size: 10px; }
+.reproj-badge.ok { color: var(--passed); border-color: var(--passed);
+                   background: var(--passed-bg); }
+.reproj-badge.warn { color: var(--warn); border-color: var(--warn);
+                     background: var(--warn-bg); }
+.reproj-badge.bad { color: var(--failed); border-color: var(--failed);
+                    background: var(--failed-bg); }
+.cal-delta { color: var(--sub); font-size: 10px;
+             padding: 2px 8px; border-radius: 4px;
+             border: 1px solid var(--border-base); }
+/* Marker coverage map — chips for plate (0-8) + extended ids, color
+   by state: green = used in last solve, blue = in current buffer,
+   gray = known but never used by this cam. */
+.marker-coverage { display: flex; flex-direction: column;
+                   gap: var(--s-1); margin-top: var(--s-1);
+                   padding-top: var(--s-1);
+                   border-top: 1px dashed var(--border-base); }
+.marker-row { display: flex; gap: 4px; align-items: center;
+              flex-wrap: wrap; }
+.marker-row-label { color: var(--sub); font-size: 9px;
+                    letter-spacing: 0.12em; min-width: 36px; }
+.marker-chip { display: inline-block; min-width: 22px; padding: 2px 6px;
+               border-radius: 3px; border: 1px solid;
+               text-align: center; font-size: 10px;
+               font-weight: 600; }
+.marker-chip.used { color: var(--passed); border-color: var(--passed);
+                    background: var(--passed-bg); }
+.marker-chip.buffer { color: var(--accent); border-color: var(--accent);
+                      background: rgba(0,0,0,0.04); }
+.marker-chip.missing { color: var(--sub); border-color: var(--border-base);
+                       background: transparent; opacity: 0.55; }
+.marker-chip.extended { font-style: italic; }
 /* Reset rig — destructive affordance at the bottom of the devices card.
    Same .danger styling as other destructive buttons (delete intrinsics). */
 .reset-rig-row { display: flex; justify-content: flex-end;

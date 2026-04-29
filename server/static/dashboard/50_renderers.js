@@ -113,14 +113,22 @@
         `data-preview-cam="${esc(cam)}" data-preview-enabled="${previewOn ? 1 : 0}" ` +
         `${previewDisabled ? 'disabled' : ''}>` +
         `${previewBusy ? (previewOn ? 'PREVIEW ON…' : 'PREVIEW…') : (previewOn ? 'PREVIEW ON' : 'PREVIEW')}</button>`);
-      // Multi-frame accumulation buffer state. Drives both the
-      // [Calibrate]/[Re-calibrate] label and the optional [Clear] button
-      // visibility. Empty buf object {} means no accumulation in flight.
+      // Calibration info panel. Five tiers:
+      //   1. Status header (uncalibrated / accumulating / ready / calibrated)
+      //   2. Active accumulation strip (when buffer non-empty)
+      //   3. Last successful solve summary (persists across buffer clears)
+      //   4. Failure counter (when failure_count > 0)
+      //   5. Marker coverage map (plate + extended chips, color-coded)
+      // First-principles operator UX: see what state am I in, what's
+      // already been done, what markers are covered — without re-running.
       const buf = calBuffers[cam] || {};
       const bufCount = Number(buf.count || 0);
       const bufIds = Array.isArray(buf.marker_ids) ? buf.marker_ids : [];
+      const bufReady = !!buf.ready;
       const bufReproj = (typeof buf.last_reproj_px === 'number') ? buf.last_reproj_px : null;
       const bufFails = Number(buf.failure_count || 0);
+      const lastSolve = buf.last_solve || null;
+
       let calBtnLabel;
       if (autoRun) calBtnLabel = autoCalButtonLabel(autoRun);
       else if (bufCount > 0) calBtnLabel = 'Calibrate (' + bufCount + '/5)';
@@ -131,29 +139,110 @@
       const clearBtn = (bufCount > 0)
         ? `<button type="button" class="btn small secondary" data-clear-buffer="${esc(cam)}">Clear</button>`
         : '';
-      // Buffer state strip — sits between device-head and device-actions
-      // so operators see "where am I" before choosing the next button.
-      let bufferBlock = '';
-      const bufParts = [];
+
+      function reprojClass(r) {
+        if (typeof r !== 'number') return null;
+        if (r < 5) return 'ok';
+        if (r < 15) return 'warn';
+        return 'bad';
+      }
+      function fmtAge(s) {
+        if (s < 60) return Math.floor(s) + 's ago';
+        if (s < 3600) return Math.floor(s / 60) + 'm ago';
+        if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+        return Math.floor(s / 86400) + 'd ago';
+      }
+      const calParts = [];
+      // Tier 1: status
+      let statusLabel, statusCls;
       if (bufCount > 0) {
-        bufParts.push('<span class="buffer-progress">accum [' + bufIds.join(', ') +
-                      '] <strong>(' + bufCount + '/5)</strong></span>');
+        if (bufReady) { statusLabel = 'READY TO SOLVE'; statusCls = 'ready'; }
+        else { statusLabel = 'ACCUMULATING ' + bufCount + '/5'; statusCls = 'accumulating'; }
+      } else if (isCal && lastSolve) {
+        const age = (Date.now() / 1000) - Number(lastSolve.solved_at);
+        statusLabel = 'CALIBRATED · ' + fmtAge(age);
+        statusCls = 'calibrated';
       } else if (isCal) {
-        bufParts.push('<span class="buffer-progress idle">✓ calibrated</span>');
+        statusLabel = 'CALIBRATED';
+        statusCls = 'calibrated';
+      } else {
+        statusLabel = 'NOT CALIBRATED';
+        statusCls = 'uncalibrated';
       }
-      if (bufReproj !== null) {
-        const bcls = bufReproj < 5 ? 'ok' : bufReproj < 15 ? 'warn' : 'bad';
-        bufParts.push('<span class="reproj-badge ' + bcls +
-                      '" title="last solve reprojection error">reproj <strong>' +
-                      bufReproj.toFixed(1) + '</strong> px</span>');
+      calParts.push('<div class="cal-status ' + statusCls + '">' +
+                    esc(statusLabel) + '</div>');
+      // Tier 2: active accumulation
+      if (bufCount > 0) {
+        calParts.push('<div class="cal-line accum"><span class="cal-line-label">accum</span>' +
+                      '<span class="cal-line-value">[' + bufIds.join(', ') + ']</span></div>');
       }
+      // Tier 3: last successful solve
+      if (lastSolve) {
+        const lsIds = Array.isArray(lastSolve.marker_ids) ? lastSolve.marker_ids : [];
+        const lsReproj = (typeof lastSolve.reproj_px === 'number') ? lastSolve.reproj_px : null;
+        const lsSolver = lastSolve.solver || '?';
+        const lsExt = Number(lastSolve.n_extended_used || 0);
+        const lsTotal = lsIds.length;
+        const lsPlate = lsTotal - lsExt;
+        let breakdown = lsPlate + ' plate';
+        if (lsExt > 0) breakdown += ' + ' + lsExt + ' ext';
+        calParts.push('<div class="cal-line last-solve"><span class="cal-line-label">last</span>' +
+                      '<span class="cal-line-value">' + lsTotal + ' markers (' +
+                      esc(breakdown) + ') · ' + esc(lsSolver) + '</span></div>');
+        const metaParts = [];
+        const rcls = reprojClass(lsReproj);
+        if (rcls) {
+          metaParts.push('<span class="reproj-badge ' + rcls + '" title="last solve reprojection error">' +
+                         'reproj <strong>' + lsReproj.toFixed(1) + '</strong> px</span>');
+        }
+        const dPos = lastSolve.delta_position_cm;
+        const dAng = lastSolve.delta_angle_deg;
+        if (typeof dPos === 'number' && typeof dAng === 'number') {
+          metaParts.push('<span class="cal-delta" title="movement vs previous calibration">Δ <strong>' +
+                         dPos.toFixed(1) + '</strong> cm / <strong>' + dAng.toFixed(2) + '</strong>°</span>');
+        }
+        if (metaParts.length > 0) {
+          calParts.push('<div class="cal-meta">' + metaParts.join('') + '</div>');
+        }
+      }
+      // Tier 4: failure counter
       if (bufFails > 0) {
-        bufParts.push('<span class="buffer-fail">failed ' + bufFails + '/3</span>');
+        const reprojStr = (typeof bufReproj === 'number')
+          ? 'reproj ' + bufReproj.toFixed(1) + ' px' : '';
+        calParts.push('<div class="cal-line cal-fail"><span class="cal-line-label">failed</span>' +
+                      '<span class="cal-line-value">' + bufFails + '/3 consecutive · ' +
+                      esc(reprojStr) + '</span></div>');
       }
-      if (bufParts.length > 0) {
-        bufferBlock = '<div class="buffer-block" data-cam="' + esc(cam) + '">' +
-                      bufParts.join('') + '</div>';
+      // Tier 5: marker coverage
+      const km = (state.known_marker_ids) || { plate: [], extended: [] };
+      const platePool = Array.isArray(km.plate) ? km.plate : [];
+      const extPool = Array.isArray(km.extended) ? km.extended : [];
+      if (platePool.length > 0 || extPool.length > 0) {
+        const lastIds = new Set((lastSolve && lastSolve.marker_ids) || []);
+        const bufSet = new Set(bufIds);
+        function chipFor(mid, kind) {
+          let cls;
+          if (lastIds.has(mid) && !bufSet.has(mid)) cls = 'used';
+          else if (bufSet.has(mid)) cls = 'buffer';
+          else cls = 'missing';
+          return '<span class="marker-chip ' + cls + ' ' + kind +
+                 '" title="' + kind + ' marker ' + mid + ' · ' + cls + '">' +
+                 mid + '</span>';
+        }
+        const plateChips = platePool.map(m => chipFor(m, 'plate')).join('');
+        let coverHTML = '<div class="marker-coverage">' +
+          '<div class="marker-row"><span class="marker-row-label">PLATE</span>' +
+          plateChips + '</div>';
+        if (extPool.length > 0) {
+          const extChips = extPool.map(m => chipFor(m, 'extended')).join('');
+          coverHTML += '<div class="marker-row"><span class="marker-row-label">EXT</span>' +
+                       extChips + '</div>';
+        }
+        coverHTML += '</div>';
+        calParts.push(coverHTML);
       }
+      const bufferBlock = '<div class="cal-panel" data-cam="' + esc(cam) + '">' +
+                          calParts.join('') + '</div>';
       const autoLogBtn = (autoLast && autoLast.status === 'failed')
         ? `<button type="button" class="btn small secondary" data-auto-cal-log="${esc(cam)}" title="Copy full auto-cal log to clipboard for debugging">Copy log</button>`
         : '';
