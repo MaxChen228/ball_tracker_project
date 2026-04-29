@@ -101,7 +101,7 @@ _SYNC_CSS = """
                 padding: var(--s-1) var(--s-2);
                 font-family: var(--mono); font-size: 11px;
                 letter-spacing: 0.06em;
-                background: var(--surface-deep); border: 1px solid var(--border-base);
+                background: var(--surface-hover); border: 1px solid var(--border-base);
                 border-radius: 6px; }
 .buffer-block .buffer-progress { color: var(--ink); }
 .buffer-block .buffer-progress.idle { color: var(--passed); }
@@ -125,7 +125,7 @@ _SYNC_CSS = """
 .btn.small.danger:hover { background: var(--failed-bg); }
 .btn.small.secondary { color: var(--sub); border-color: var(--border-base);
                        background: transparent; }
-.btn.small.secondary:hover { background: var(--surface-deep); }
+.btn.small.secondary:hover { background: var(--surface-hover); }
 .tuning-status {
   min-height: 18px;
   margin-bottom: var(--s-2);
