@@ -7,7 +7,6 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 import session_results
-from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate
 from presets import PRESETS
 from schemas import DetectionPath, PitchPayload, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
@@ -37,21 +36,9 @@ def _resolve_detection_config(
     source: str,
     pitch: PitchPayload,
     state,
-) -> tuple[HSVRange, ShapeGate, CandidateSelectorTuning, str]:
-    # Selector tuning is no longer dynamic — weights live as
-    # `_W_ASPECT` / `_W_FILL` constants in `candidate_selector`. This
-    # function still returns a `CandidateSelectorTuning` instance because
-    # downstream callers (routes/pitch.py, reprocess) stamp it onto
-    # `pitch.candidate_selector_tuning_used` until phase 3 of the
-    # selector retirement removes that field from the wire/freeze schema.
-    selector = CandidateSelectorTuning.default()
+) -> tuple[HSVRange, ShapeGate, str]:
     if source == "live":
-        return (
-            state.hsv_range(),
-            state.shape_gate(),
-            selector,
-            "live",
-        )
+        return (state.hsv_range(), state.shape_gate(), "live")
     if source == "frozen":
         if (
             pitch.hsv_range_used is None
@@ -68,7 +55,6 @@ def _resolve_detection_config(
         return (
             HSVRange(**pitch.hsv_range_used.model_dump()),
             ShapeGate(**pitch.shape_gate_used.model_dump()),
-            selector,
             "frozen",
         )
     if source.startswith("preset:"):
@@ -79,12 +65,7 @@ def _resolve_detection_config(
                 detail=f"unknown preset: {name!r} (known: {sorted(PRESETS)})",
             )
         preset = PRESETS[name]
-        return (
-            preset.hsv,
-            preset.shape_gate,
-            selector,
-            source,
-        )
+        return (preset.hsv, preset.shape_gate, source)
     raise HTTPException(
         status_code=400,
         detail=(
@@ -320,7 +301,7 @@ async def _enqueue_server_post(
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
-    resolved_by_cam: dict[str, tuple[HSVRange, ShapeGate, CandidateSelectorTuning, str]] = {}
+    resolved_by_cam: dict[str, tuple[HSVRange, ShapeGate, str]] = {}
     for cam, pitch, _clip_path in candidates:
         resolved_by_cam[cam] = _resolve_detection_config(source, pitch, state)
     queued = state.processing.resume_processing(session_id)
@@ -333,14 +314,13 @@ async def _enqueue_server_post(
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
     for clip_path, pitch in queued:
-        hsv, gate, tuning, label = resolved_by_cam[pitch.camera_id]
+        hsv, gate, label = resolved_by_cam[pitch.camera_id]
         background_tasks.add_task(
             _run_server_detection,
             clip_path,
             pitch,
             hsv_range=hsv,
             shape_gate=gate,
-            selector_tuning=tuning,
             config_label=label,
         )
     if _wants_html(request):

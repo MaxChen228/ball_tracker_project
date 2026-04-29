@@ -2,28 +2,27 @@
 defaults to **current** `data/*.json` so the operator's tuning workflow
 ("I tweaked HSV, rerun this session, see if it improves") works as
 expected. Opt-in `--use-frozen-snapshot` reuses the per-pitch frozen
-detection-config snapshot (`PitchPayload.{hsv_range_used, shape_gate_used,
-candidate_selector_tuning_used}`) for reproducibility audits — falling
-back to disk for legacy pitches that pre-date the stamp, with a logged
-warning per missing field.
+detection-config snapshot (`PitchPayload.{hsv_range_used, shape_gate_used}`)
+for reproducibility audits — falling back to disk for legacy pitches
+that pre-date the stamp, with a logged warning per missing field.
 
 The frozen stamps themselves are always preserved on disk (re-stamped at
 the end of every detection run with whatever config was actually used),
 so the "what was X originally detected with" question stays answerable
 even when default reprocess overwrites the run.
+
+Selector cost weights (`_W_ASPECT` / `_W_FILL`) are now module
+constants in `candidate_selector.py` rather than a runtime tunable, so
+they're not part of the freeze schema.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate
 from schemas import (
-    CandidateSelectorTuningPayload,
     HSVRangePayload,
     PitchPayload,
     ShapeGatePayload,
@@ -34,7 +33,6 @@ def _make_pitch(
     *,
     hsv_used: HSVRangePayload | None,
     gate_used: ShapeGatePayload | None,
-    tuning_used: CandidateSelectorTuningPayload | None,
 ) -> PitchPayload:
     return PitchPayload(
         camera_id="A",
@@ -43,7 +41,6 @@ def _make_pitch(
         video_start_pts_s=0.0,
         hsv_range_used=hsv_used,
         shape_gate_used=gate_used,
-        candidate_selector_tuning_used=tuning_used,
     )
 
 
@@ -74,8 +71,7 @@ def test_rerun_detection_default_uses_current_disk_config(tmp_path, monkeypatch)
     # Pitch was originally frozen under X
     frozen_hsv = HSVRangePayload(h_min=10, h_max=20, s_min=30, s_max=40, v_min=50, v_max=60)
     frozen_gate = ShapeGatePayload(aspect_min=0.61, fill_min=0.62)
-    frozen_tuning = CandidateSelectorTuningPayload(w_aspect=0.71, w_fill=0.29)
-    pitch = _make_pitch(hsv_used=frozen_hsv, gate_used=frozen_gate, tuning_used=frozen_tuning)
+    pitch = _make_pitch(hsv_used=frozen_hsv, gate_used=frozen_gate)
     pitch_path = tmp_path / "pitches" / "session_s_abcd1234_A.json"
     _write_pitch(pitch_path, pitch)
 
@@ -87,10 +83,9 @@ def test_rerun_detection_default_uses_current_disk_config(tmp_path, monkeypatch)
     # "Current disk" config — Y. Different from X.
     current_hsv = HSVRange(h_min=100, h_max=110, s_min=120, s_max=130, v_min=140, v_max=150)
     current_gate = ShapeGate(aspect_min=0.99, fill_min=0.99)
-    current_tuning = CandidateSelectorTuning(w_aspect=0.01, w_fill=0.99)
 
     R.rerun_detection(
-        pitch_path, current_hsv, current_gate, current_tuning,
+        pitch_path, current_hsv, current_gate,
         dry_run=True,
     )
 
@@ -100,8 +95,6 @@ def test_rerun_detection_default_uses_current_disk_config(tmp_path, monkeypatch)
     assert kw["hsv_range"].h_min == 100 and kw["hsv_range"].h_max == 110
     assert kw["shape_gate"].aspect_min == pytest.approx(0.99)
     assert kw["shape_gate"].fill_min == pytest.approx(0.99)
-    assert kw["selector_tuning"].w_aspect == pytest.approx(0.01)
-    assert kw["selector_tuning"].w_fill == pytest.approx(0.99)
 
 
 def test_rerun_detection_use_frozen_snapshot_replays_original(tmp_path, monkeypatch):
@@ -111,8 +104,7 @@ def test_rerun_detection_use_frozen_snapshot_replays_original(tmp_path, monkeypa
 
     frozen_hsv = HSVRangePayload(h_min=10, h_max=20, s_min=30, s_max=40, v_min=50, v_max=60)
     frozen_gate = ShapeGatePayload(aspect_min=0.61, fill_min=0.62)
-    frozen_tuning = CandidateSelectorTuningPayload(w_aspect=0.71, w_fill=0.29)
-    pitch = _make_pitch(hsv_used=frozen_hsv, gate_used=frozen_gate, tuning_used=frozen_tuning)
+    pitch = _make_pitch(hsv_used=frozen_hsv, gate_used=frozen_gate)
     pitch_path = tmp_path / "pitches" / "session_s_abcd1234_A.json"
     _write_pitch(pitch_path, pitch)
 
@@ -122,10 +114,9 @@ def test_rerun_detection_use_frozen_snapshot_replays_original(tmp_path, monkeypa
 
     current_hsv = HSVRange(h_min=100, h_max=110, s_min=120, s_max=130, v_min=140, v_max=150)
     current_gate = ShapeGate(aspect_min=0.99, fill_min=0.99)
-    current_tuning = CandidateSelectorTuning(w_aspect=0.01, w_fill=0.99)
 
     R.rerun_detection(
-        pitch_path, current_hsv, current_gate, current_tuning,
+        pitch_path, current_hsv, current_gate,
         dry_run=True,
         use_frozen_snapshot=True,
     )
@@ -136,8 +127,6 @@ def test_rerun_detection_use_frozen_snapshot_replays_original(tmp_path, monkeypa
     assert kw["hsv_range"].s_min == 30 and kw["hsv_range"].v_max == 60
     assert kw["shape_gate"].aspect_min == pytest.approx(0.61)
     assert kw["shape_gate"].fill_min == pytest.approx(0.62)
-    assert kw["selector_tuning"].w_aspect == pytest.approx(0.71)
-    assert kw["selector_tuning"].w_fill == pytest.approx(0.29)
 
 
 def test_rerun_detection_use_frozen_snapshot_legacy_falls_back_with_warning(
@@ -151,7 +140,7 @@ def test_rerun_detection_use_frozen_snapshot_legacy_falls_back_with_warning(
 
     import reprocess_sessions as R
 
-    pitch = _make_pitch(hsv_used=None, gate_used=None, tuning_used=None)
+    pitch = _make_pitch(hsv_used=None, gate_used=None)
     pitch_path = tmp_path / "pitches" / "session_s_legacy01_A.json"
     _write_pitch(pitch_path, pitch)
 
@@ -161,11 +150,10 @@ def test_rerun_detection_use_frozen_snapshot_legacy_falls_back_with_warning(
 
     current_hsv = HSVRange(h_min=100, h_max=110, s_min=120, s_max=130, v_min=140, v_max=150)
     current_gate = ShapeGate(aspect_min=0.99, fill_min=0.99)
-    current_tuning = CandidateSelectorTuning(w_aspect=0.01, w_fill=0.99)
 
     with caplog.at_level(logging.WARNING, logger="reprocess"):
         R.rerun_detection(
-            pitch_path, current_hsv, current_gate, current_tuning,
+            pitch_path, current_hsv, current_gate,
             dry_run=True,
             use_frozen_snapshot=True,
         )
@@ -174,12 +162,10 @@ def test_rerun_detection_use_frozen_snapshot_legacy_falls_back_with_warning(
     # Fell back to current disk — Y wins.
     assert kw["hsv_range"].h_min == 100
     assert kw["shape_gate"].fill_min == pytest.approx(0.99)
-    assert kw["selector_tuning"].w_aspect == pytest.approx(0.01)
-    # All three legacy-fallback warnings fired.
+    # Both legacy-fallback warnings fired.
     msgs = " ".join(r.message for r in caplog.records)
     assert "lacks hsv_range_used" in msgs
     assert "lacks shape_gate_used" in msgs
-    assert "lacks candidate_selector_tuning_used" in msgs
 
 
 def test_rerun_detection_stamps_used_values_back_on_legacy(tmp_path, monkeypatch):
@@ -187,7 +173,7 @@ def test_rerun_detection_stamps_used_values_back_on_legacy(tmp_path, monkeypatch
     stamped back so the next reprocess can honour the freeze."""
     import reprocess_sessions as R
 
-    pitch = _make_pitch(hsv_used=None, gate_used=None, tuning_used=None)
+    pitch = _make_pitch(hsv_used=None, gate_used=None)
     pitch_path = tmp_path / "pitches" / "session_s_legacy02_A.json"
     _write_pitch(pitch_path, pitch)
 
@@ -197,10 +183,9 @@ def test_rerun_detection_stamps_used_values_back_on_legacy(tmp_path, monkeypatch
 
     current_hsv = HSVRange(h_min=42, h_max=43, s_min=44, s_max=45, v_min=46, v_max=47)
     current_gate = ShapeGate(aspect_min=0.55, fill_min=0.66)
-    current_tuning = CandidateSelectorTuning(w_aspect=0.5, w_fill=0.5)
 
     R.rerun_detection(
-        pitch_path, current_hsv, current_gate, current_tuning,
+        pitch_path, current_hsv, current_gate,
         dry_run=False,  # write back so we can re-read
     )
 
@@ -210,5 +195,3 @@ def test_rerun_detection_stamps_used_values_back_on_legacy(tmp_path, monkeypatch
     assert written.hsv_range_used.h_min == 42
     assert written.shape_gate_used is not None
     assert written.shape_gate_used.aspect_min == pytest.approx(0.55)
-    assert written.candidate_selector_tuning_used is not None
-    assert written.candidate_selector_tuning_used.w_aspect == pytest.approx(0.5)

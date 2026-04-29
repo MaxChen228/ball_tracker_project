@@ -10,11 +10,9 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import ValidationError
 
 import session_results
-from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate
 from pipeline import ProcessingCanceled
 from schemas import (
-    CandidateSelectorTuningPayload,
     DetectionPath,
     HSVRangePayload,
     PitchPayload,
@@ -32,13 +30,17 @@ def _stamp_detection_config(
     *,
     hsv_range,
     shape_gate,
-    selector_tuning,
 ) -> None:
     """Freeze the detection-time config onto the pitch so reprocess can
-    reproduce exactly which HSV / shape-gate / selector-cost basis was
-    in effect when this pitch's candidates were scored. Mirrors the
-    cd87995 PairingTuning-on-SessionResult pattern. Idempotent — callers
-    can stamp on every state.record() and the wire shape stays stable."""
+    reproduce exactly which HSV / shape-gate basis was in effect when
+    this pitch's candidates were scored. Mirrors the cd87995
+    PairingTuning-on-SessionResult pattern. Idempotent — callers can
+    stamp on every state.record() and the wire shape stays stable.
+
+    Selector cost weights are no longer freezable: they're hardcoded
+    `_W_ASPECT` / `_W_FILL` constants in `candidate_selector`, so a
+    pitch's cost basis is fully determined by the (HSV, shape_gate)
+    pair plus the constants."""
     pitch.hsv_range_used = HSVRangePayload(
         h_min=hsv_range.h_min, h_max=hsv_range.h_max,
         s_min=hsv_range.s_min, s_max=hsv_range.s_max,
@@ -47,10 +49,6 @@ def _stamp_detection_config(
     pitch.shape_gate_used = ShapeGatePayload(
         aspect_min=shape_gate.aspect_min,
         fill_min=shape_gate.fill_min,
-    )
-    pitch.candidate_selector_tuning_used = CandidateSelectorTuningPayload(
-        w_aspect=selector_tuning.w_aspect,
-        w_fill=selector_tuning.w_fill,
     )
 
 
@@ -193,8 +191,8 @@ async def pitch(
     # live frames the iPhone-side detector snapshot is unobservable from
     # here, so we stamp the values the live session was frozen to at
     # first ingest. When the dashboard-armed live-streaming path ran,
-    # state.live_session_frozen_config returns the atomic triple stamped
-    # by ingest_live_frame. When no live frame ever streamed (test fixture
+    # state.live_session_frozen_config returns the atomic (HSV, shape_gate)
+    # pair stamped by ingest_live_frame. When no live frame ever streamed (test fixture
     # or server_post-only flow), it returns None and we fall back atomically
     # to the current state snapshot. The server_post path overwrites these
     # later in `_run_server_detection` with the snapshot it actually called
@@ -205,16 +203,10 @@ async def pitch(
     else:
         hsv_used = state.hsv_range()
         gate_used = state.shape_gate()
-    # Selector weights are now `_W_ASPECT` / `_W_FILL` constants; phase 3
-    # of the retirement removes the `candidate_selector_tuning_used`
-    # field from the wire schema and `_stamp_detection_config` will
-    # stop taking it.
-    tuning_used = CandidateSelectorTuning.default()
     _stamp_detection_config(
         payload_obj,
         hsv_range=hsv_used,
         shape_gate=gate_used,
-        selector_tuning=tuning_used,
     )
 
     result = await asyncio.to_thread(state.record, payload_obj)
@@ -260,7 +252,6 @@ async def _run_server_detection(
     *,
     hsv_range: "HSVRange",
     shape_gate: "ShapeGate",
-    selector_tuning: "CandidateSelectorTuning",
     config_label: str,
 ) -> None:
     """Background task: decode the MOV, run HSV detection, annotate, then
@@ -269,15 +260,14 @@ async def _run_server_detection(
     session + on-device points immediately, and this task backfills the
     server-side trace 8-20 s later.
 
-    The detection config triple (`hsv_range` / `shape_gate` /
-    `selector_tuning`) is resolved by the caller — `_enqueue_server_post`
-    in `routes/sessions.py` based on the `source` request field. We
-    receive an already-resolved triple so this background task never
-    reads from `state` mid-run; that decoupling is what lets the operator
-    trigger a `preset:blue_ball` reprocess without disturbing the live
-    dashboard config (and concurrent live-streaming sessions). The
-    `config_label` ('live' / 'frozen' / 'preset:<name>') is for log
-    provenance only.
+    The detection config pair (`hsv_range` / `shape_gate`) is resolved by
+    the caller — `_enqueue_server_post` in `routes/sessions.py` based on
+    the `source` request field. We receive an already-resolved pair so
+    this background task never reads from `state` mid-run; that
+    decoupling is what lets the operator trigger a `preset:blue_ball`
+    reprocess without disturbing the live dashboard config (and
+    concurrent live-streaming sessions). The `config_label`
+    ('live' / 'frozen' / 'preset:<name>') is for log provenance only.
     """
     import main as _main
     state = _main.state
@@ -359,7 +349,7 @@ async def _run_server_detection(
         {"sid": sid, "cam": cam, "frames_done": 0, "frames_total": frames_total},
     )
 
-    # The triple was resolved at request time by
+    # The pair was resolved at request time by
     # `_resolve_detection_config` — never re-read from state here, since
     # the operator's choice (`preset:blue_ball`, `frozen`, ...) must be
     # honored regardless of any concurrent dashboard edit. The persisted
@@ -367,7 +357,6 @@ async def _run_server_detection(
     # later reprocess can reproduce this run from frozen snapshot alone.
     hsv_used = hsv_range
     gate_used = shape_gate
-    tuning_used = selector_tuning
     logger.info(
         "background detection start session=%s cam=%s config=%s hsv=%r",
         sid, cam, config_label, hsv_used,
@@ -380,7 +369,6 @@ async def _run_server_detection(
             hsv_range=hsv_used,
             should_cancel=lambda: proc.should_cancel_server_post_job(sid, cam),
             shape_gate=gate_used,
-            selector_tuning=tuning_used,
             progress=on_progress,
         )
     except ProcessingCanceled:
@@ -418,7 +406,6 @@ async def _run_server_detection(
         pitch,
         hsv_range=hsv_used,
         shape_gate=gate_used,
-        selector_tuning=tuning_used,
     )
     try:
         await asyncio.to_thread(state.record, pitch)

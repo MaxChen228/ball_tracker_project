@@ -137,14 +137,6 @@ class ShapeGatePayload(BaseModel):
     fill_min: float
 
 
-class CandidateSelectorTuningPayload(BaseModel):
-    """Wire mirror of `candidate_selector.CandidateSelectorTuning`. Frozen
-    per pitch so the selector cost stamped on each `BlobCandidate.cost`
-    can be reproduced exactly during reprocess."""
-    w_aspect: float
-    w_fill: float
-
-
 class CaptureTelemetryPayload(BaseModel):
     """Actual capture conditions observed on-device for one uploaded pitch.
 
@@ -231,14 +223,16 @@ class PitchPayload(BaseModel):
     # detection ran for this pitch. Mirrors the per-session
     # `PairingTuning` snapshot stamped on `SessionResult` (cd87995):
     # `reprocess_sessions.py` reads these first so a later dashboard
-    # edit to `data/hsv_range.json` (or shape_gate / selector tuning)
-    # cannot retroactively change the cost basis used to score blobs
-    # in a previously-recorded pitch. None on legacy pitches written
-    # before this stamping landed; the offline reprocess script logs a
-    # warning and falls back to current disk config in that case.
+    # edit to `data/hsv_range.json` (or shape_gate) cannot retroactively
+    # change the cost basis used to score blobs in a previously-
+    # recorded pitch. None on legacy pitches written before this
+    # stamping landed; the offline reprocess script logs a warning and
+    # falls back to current disk config in that case. Selector cost
+    # weights are no longer part of this snapshot — they live as
+    # `_W_ASPECT` / `_W_FILL` constants in `candidate_selector` rather
+    # than a runtime tunable.
     hsv_range_used: HSVRangePayload | None = None
     shape_gate_used: ShapeGatePayload | None = None
-    candidate_selector_tuning_used: CandidateSelectorTuningPayload | None = None
 
 
 class TriangulatedPoint(BaseModel):
@@ -311,7 +305,6 @@ class SessionResult(BaseModel):
     # legacy results / when neither pitch carried a frozen snapshot.
     hsv_range_used: HSVRangePayload | None = None
     shape_gate_used: ShapeGatePayload | None = None
-    candidate_selector_tuning_used: CandidateSelectorTuningPayload | None = None
 
 
 

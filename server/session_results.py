@@ -45,7 +45,6 @@ logger = logging.getLogger(__name__)
 _FROZEN_USED_FIELDS = (
     "hsv_range_used",
     "shape_gate_used",
-    "candidate_selector_tuning_used",
 )
 
 

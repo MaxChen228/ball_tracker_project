@@ -25,7 +25,6 @@ from pairing_tuning import PairingTuning
 from pipeline import detect_pitch
 from schemas import (
     CalibrationSnapshot,
-    CandidateSelectorTuningPayload,
     HSVRangePayload,
     PitchPayload,
     SessionResult,
@@ -41,7 +40,6 @@ RESULT_DIR = DATA_DIR / "results"
 CAL_DIR = DATA_DIR / "calibrations"
 HSV_PATH = DATA_DIR / "hsv_range.json"
 SHAPE_GATE_PATH = DATA_DIR / "shape_gate.json"
-CANDIDATE_SELECTOR_TUNING_PATH = DATA_DIR / "candidate_selector_tuning.json"
 PAIRING_TUNING_PATH = DATA_DIR / "pairing_tuning.json"
 
 VIDEO_EXTS = (".mov", ".mp4", ".m4v")
@@ -74,20 +72,6 @@ def load_shape_gate() -> ShapeGate:
     )
     logger.info("shape_gate aspect>=%.2f fill>=%.2f", gate.aspect_min, gate.fill_min)
     return gate
-
-
-def load_candidate_selector_tuning() -> "CandidateSelectorTuning":
-    from candidate_selector import CandidateSelectorTuning
-    if not CANDIDATE_SELECTOR_TUNING_PATH.exists():
-        return CandidateSelectorTuning.default()
-    obj = json.loads(CANDIDATE_SELECTOR_TUNING_PATH.read_text())
-    d = CandidateSelectorTuning.default()
-    t = CandidateSelectorTuning(
-        w_aspect=float(obj.get("w_aspect", d.w_aspect)),
-        w_fill=float(obj.get("w_fill", d.w_fill)),
-    )
-    logger.info("selector wA=%.2f wF=%.2f", t.w_aspect, t.w_fill)
-    return t
 
 
 def load_calibrations() -> dict[str, CalibrationSnapshot]:
@@ -145,7 +129,6 @@ def rerun_detection(
     pitch_path: Path,
     hsv: HSVRange,
     shape_gate: ShapeGate,
-    selector_tuning,
     dry_run: bool,
     *,
     use_frozen_snapshot: bool = False,
@@ -172,9 +155,8 @@ def rerun_detection(
         return None
 
     if not use_frozen_snapshot:
-        hsv_eff, gate_eff, tuning_eff = hsv, shape_gate, selector_tuning
+        hsv_eff, gate_eff = hsv, shape_gate
     else:
-        from candidate_selector import CandidateSelectorTuning
         if pitch.hsv_range_used is not None:
             p = pitch.hsv_range_used
             hsv_eff = HSVRange(
@@ -199,17 +181,6 @@ def rerun_detection(
                 pitch.session_id, pitch.camera_id,
             )
             gate_eff = shape_gate
-        if pitch.candidate_selector_tuning_used is not None:
-            tuning_eff = CandidateSelectorTuning(
-                w_aspect=pitch.candidate_selector_tuning_used.w_aspect,
-                w_fill=pitch.candidate_selector_tuning_used.w_fill,
-            )
-        else:
-            logger.warning(
-                "  %s/%s legacy pitch lacks candidate_selector_tuning_used — using current disk config",
-                pitch.session_id, pitch.camera_id,
-            )
-            tuning_eff = selector_tuning
 
     old_hits = sum(1 for f in pitch.frames_server_post if f.px is not None)
     frames = detect_pitch(
@@ -217,7 +188,6 @@ def rerun_detection(
         video_start_pts_s=pitch.video_start_pts_s,
         hsv_range=hsv_eff,
         shape_gate=gate_eff,
-        selector_tuning=tuning_eff,
     )
     new_hits = sum(1 for f in frames if f.px is not None)
     logger.info(
@@ -233,9 +203,6 @@ def rerun_detection(
     )
     pitch.shape_gate_used = ShapeGatePayload(
         aspect_min=gate_eff.aspect_min, fill_min=gate_eff.fill_min,
-    )
-    pitch.candidate_selector_tuning_used = CandidateSelectorTuningPayload(
-        w_aspect=tuning_eff.w_aspect, w_fill=tuning_eff.w_fill,
     )
     if not dry_run:
         atomic_write(pitch_path, pitch.model_dump_json())
@@ -291,7 +258,6 @@ def triangulate_session(
     used = session_results.aggregate_pitch_used_configs(a, b, sid)
     result.hsv_range_used = used["hsv_range_used"]
     result.shape_gate_used = used["shape_gate_used"]
-    result.candidate_selector_tuning_used = used["candidate_selector_tuning_used"]
     if a is None or b is None:
         logger.info("  %s — solo (%s only); skipping triangulation",
                     sid, "A" if a else "B")
@@ -343,10 +309,10 @@ def main() -> None:
         "--use-frozen-snapshot",
         action="store_true",
         help="reuse the per-pitch frozen detection-config snapshot "
-             "(pitch.{hsv,shape_gate,selector_tuning}_used) instead of "
-             "current data/*.json values. For reproducibility audits — "
-             "default behavior is to pick up your current disk config so "
-             "tuning workflows actually see new results.",
+             "(pitch.{hsv,shape_gate}_used) instead of current "
+             "data/*.json values. For reproducibility audits — default "
+             "behavior is to pick up your current disk config so tuning "
+             "workflows actually see new results.",
     )
     args = ap.parse_args()
 
@@ -354,7 +320,6 @@ def main() -> None:
 
     hsv = load_hsv()
     shape_gate = load_shape_gate()
-    selector_tuning = load_candidate_selector_tuning()
     pairing_tuning = load_pairing_tuning()
     calibrations = load_calibrations()
 
@@ -368,7 +333,7 @@ def main() -> None:
     for path in pitch_paths:
         logger.info("redetect %s", path.name)
         pitch = rerun_detection(
-            path, hsv, shape_gate, selector_tuning, args.dry_run,
+            path, hsv, shape_gate, args.dry_run,
             use_frozen_snapshot=args.use_frozen_snapshot,
         )
         if pitch is not None:
