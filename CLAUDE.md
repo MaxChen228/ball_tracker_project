@@ -293,8 +293,8 @@ User goal：iOS live = production，server detection = oracle / debug。
 - 2026-04-29 收緊：h 從 100-130 縮到 105-112 過濾背景藍
 - **v_min 必須 ≥ 40**：球下半進陰影 V 會掉到 80 以下；v_min 抬高會讓近相機
   的球只剩高光環、mask 變扁、aspect gate 砍掉（s_cc0dcaa5 reprocess 對比為證）
-- preset key 字串散在兩處：`render_dashboard_session.py::_HSV_PRESETS`、
-  `routes/settings.py::_HSV_PRESETS` — 改 preset 兩處要同步。
+- preset 註冊單一 source：`server/presets.py::PRESETS`。
+  `render_dashboard_session.py` / `routes/settings.py` 都從這裡 import；
   `test_control.py` 只持有字串 assertion，不是 source of truth
 - `detection.py` docstring 寫「default 是黃綠網球」是歷史 fallback，不要
   改
