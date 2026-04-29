@@ -106,7 +106,12 @@ def score_candidates(
     tuning: CandidateSelectorTuning,
 ) -> list[float]:
     """Return one cost per candidate, in input order. Lower is more
-    ball-like. Empty input → empty output."""
+    ball-like. Empty input → empty output.
+
+    Caller invariant: every candidate has `area > 0`. Production callers
+    enforce this via `MIN_AREA = 15` in `detection.py`; direct unit-test
+    callers must pass positive areas (size_pen uses `log2(area / r²)`
+    and would raise `ValueError` on `area=0`)."""
     if not candidates:
         return []
     expected_area = math.pi * tuning.r_px_expected * tuning.r_px_expected

@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates  # noqa: F401  (Candidate kept for callers; unused here)
+from candidate_selector import Candidate, CandidateSelectorTuning, score_candidates
 from schemas import FramePayload, TriangulatedPoint
 
 logger = logging.getLogger("ball_tracker")
@@ -68,8 +68,8 @@ class LivePairingSession:
 
     def __post_init__(self) -> None:
         # Internal mutex covering buffers / frames_by_cam / frame_counts /
-        # triangulated / paired_frame_ids / camera_poses / temporal-prior
-        # dicts / completed_cameras / abort_reasons. Two ingest threads
+        # triangulated / paired_frame_ids / camera_poses /
+        # completed_cameras / abort_reasons. Two ingest threads
         # (one per cam WS) call into this object concurrently; State holds
         # its own lock only across the lookup, so mutation here MUST
         # serialise itself. RLock because `ingest()` holds the lock while
