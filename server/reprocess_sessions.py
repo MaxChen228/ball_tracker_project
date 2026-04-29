@@ -18,6 +18,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import session_results
 from detection import HSVRange, ShapeGate
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pairing_tuning import PairingTuning
@@ -288,21 +289,13 @@ def triangulate_session(
     # Mirror the pitch-level frozen config onto the result so the viewer
     # tuning strip / future audit can answer "what HSV / shape-gate /
     # selector tuning produced these points?" without reading the pitch
-    # JSON. Divergence policy: A wins, fall back to B; warn (don't raise)
-    # when A and B disagree — operator mid-cycle slider edit is
-    # diagnostic, not crashable.
-    def _pick_used(field_name: str):
-        va = getattr(a, field_name) if a is not None else None
-        vb = getattr(b, field_name) if b is not None else None
-        if va is not None and vb is not None and va != vb:
-            logger.warning(
-                "  %s A/B %s diverged (operator edited config mid-cycle?) — using A",
-                sid, field_name,
-            )
-        return va if va is not None else vb
-    result.hsv_range_used = _pick_used("hsv_range_used")
-    result.shape_gate_used = _pick_used("shape_gate_used")
-    result.candidate_selector_tuning_used = _pick_used("candidate_selector_tuning_used")
+    # JSON. Aggregation policy (A-wins, fall-back-to-B, warn on divergence)
+    # is shared with `session_results.aggregate_pitch_used_configs` so the
+    # online rebuild and offline reprocess paths can never silently disagree.
+    used = session_results.aggregate_pitch_used_configs(a, b, sid)
+    result.hsv_range_used = used["hsv_range_used"]
+    result.shape_gate_used = used["shape_gate_used"]
+    result.candidate_selector_tuning_used = used["candidate_selector_tuning_used"]
     if a is None or b is None:
         logger.info("  %s — solo (%s only); skipping triangulation",
                     sid, "A" if a else "B")

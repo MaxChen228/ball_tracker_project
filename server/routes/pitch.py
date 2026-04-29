@@ -181,15 +181,20 @@ async def pitch(
     # Freeze detection config onto the pitch BEFORE first persist. For
     # live frames the iPhone-side detector snapshot is unobservable from
     # here, so we stamp the values the live session was frozen to at
-    # first ingest (BLOCK B); when no live session exists yet (test
-    # fixture, replay) fall back to state's current snapshot. The
-    # server_post path overwrites these later in `_run_server_detection`
-    # with the snapshot it actually called `detect_pitch` with.
-    with state._lock:
-        live_session = state._live_pairings.get(payload_obj.session_id)
-        hsv_used = (live_session.hsv_range_used if live_session and live_session.hsv_range_used else state._hsv_range)
-        gate_used = (live_session.shape_gate_used if live_session and live_session.shape_gate_used else state._shape_gate)
-        tuning_used = (live_session.tuning if live_session is not None else state._candidate_selector_tuning)
+    # first ingest. When the dashboard-armed live-streaming path ran,
+    # state.live_session_frozen_config returns the atomic triple stamped
+    # by ingest_live_frame. When no live frame ever streamed (test fixture
+    # or server_post-only flow), it returns None and we fall back atomically
+    # to the current state snapshot. The server_post path overwrites these
+    # later in `_run_server_detection` with the snapshot it actually called
+    # `detect_pitch` with.
+    frozen = state.live_session_frozen_config(payload_obj.session_id)
+    if frozen is not None:
+        hsv_used, gate_used, tuning_used = frozen
+    else:
+        hsv_used = state.hsv_range()
+        gate_used = state.shape_gate()
+        tuning_used = state.candidate_selector_tuning()
     _stamp_detection_config(
         payload_obj,
         hsv_range=hsv_used,

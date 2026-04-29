@@ -42,28 +42,50 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_FROZEN_USED_FIELDS = (
+    "hsv_range_used",
+    "shape_gate_used",
+    "candidate_selector_tuning_used",
+)
+
+
+def aggregate_pitch_used_configs(
+    a: PitchPayload | None,
+    b: PitchPayload | None,
+    sid: str,
+) -> dict[str, object | None]:
+    """Aggregate the per-pitch frozen `*_used` fields into a single mapping.
+    Divergence (A and B carry different values because operator edited the
+    config mid-cycle) is logged as a warning but does not raise — diagnostic,
+    not crashable. Policy: A wins, fall back to B. Shared by `rebuild_result`
+    here and by `reprocess_sessions._build_session_result` so both paths
+    enforce the same A-wins-B-fallback policy and emit identical warnings.
+    """
+    out: dict[str, object | None] = {}
+    for field_name in _FROZEN_USED_FIELDS:
+        va = getattr(a, field_name) if a is not None else None
+        vb = getattr(b, field_name) if b is not None else None
+        if va is not None and vb is not None and va != vb:
+            logger.warning(
+                "session %s A/B %s diverged (operator edited config "
+                "mid-cycle?) — using A", sid, field_name,
+            )
+        out[field_name] = va if va is not None else vb
+    return out
+
+
 def _stamp_frozen_config_on_result(
     result: SessionResult,
     a: PitchPayload | None,
     b: PitchPayload | None,
 ) -> None:
     """Mirror the per-pitch frozen detection config onto the SessionResult.
-    Divergence (A and B carry different values because operator edited
-    `data/hsv_range.json` mid-cycle) is logged as a warning but does not
-    raise — diagnostic, not crashable. A wins, fall back to B."""
-    for field_name in (
-        "hsv_range_used",
-        "shape_gate_used",
-        "candidate_selector_tuning_used",
-    ):
-        va = getattr(a, field_name) if a is not None else None
-        vb = getattr(b, field_name) if b is not None else None
-        if va is not None and vb is not None and va != vb:
-            logger.warning(
-                "session %s A/B %s diverged — stamping A onto result",
-                result.session_id, field_name,
-            )
-        setattr(result, field_name, va if va is not None else vb)
+    Thin wrapper around `aggregate_pitch_used_configs` that does the
+    setattr loop; the aggregation policy lives in the helper so reprocess
+    and rebuild share one source of truth."""
+    used = aggregate_pitch_used_configs(a, b, result.session_id)
+    for field_name, value in used.items():
+        setattr(result, field_name, value)
 
 
 def triangulate_pair(

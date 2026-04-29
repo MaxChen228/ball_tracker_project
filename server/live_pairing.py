@@ -80,11 +80,13 @@ class LivePairingSession:
     # /sessions/{sid}/recompute) is the sole residual gate — segmenter
     # and viewer trust it, no downstream re-filter.
     pairing_tuning: PairingTuning = field(default_factory=PairingTuning.default)
-    # HSV / shape-gate snapshot frozen at first ingest of this session
-    # (state.ingest_live_frame). None when the session was constructed
-    # outside that path (tests / direct LivePairingSession()); stamping
-    # in routes/pitch.py treats None as "fall back to state's current
-    # snapshot" so test fixtures still produce a usable PitchPayload.
+    # HSV / shape-gate snapshot frozen at first ingest_live_frame of this
+    # session, atomically with `tuning` and `pairing_tuning` above. None
+    # before the first ingest (e.g. arm_session pre-creates the session but
+    # no WS live frame has flowed yet — server_post-only flow) and when the
+    # session was constructed entirely outside ingest_live_frame (tests /
+    # direct LivePairingSession()). state.live_session_frozen_config returns
+    # None for both cases so /pitch falls back atomically to current state.
     hsv_range_used: HSVRange | None = None
     shape_gate_used: ShapeGate | None = None
 
