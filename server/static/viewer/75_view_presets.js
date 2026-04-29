@@ -21,12 +21,24 @@
   // after a snap clears the active pill via plotly_relayouting so the
   // UI honestly reflects "no longer pinned".
 
+  // Every preset's `center` is locked to the strike-zone centroid so the
+  // box stays at the visual middle of the frame regardless of which view
+  // the operator picks. Strike zone (server/render_scene_theme.py):
+  //   X = 0 (plate centre), Y = (0 + 0.432) / 2 = 0.216,
+  //   Z = (0.46 + 1.06) / 2 = 0.76
+  // For the four orthogonal views eye is shifted from the centre along
+  // exactly one axis so the orthogonal projection reads cleanly; ISO
+  // sits diagonally with up=+Z. Eye magnitudes are in data-space (the
+  // figure uses aspectmode="data") — ~2 m gives a comfortable orbit
+  // distance whether the trajectory is short batting-cage or long
+  // pitcher-mound.
+  const SZC = { x: 0, y: 0.216, z: 0.76 };
   const VIEW_PRESETS = {
-    iso:     { eye: {x: 1.5,  y: 1.5,  z: 1.0}, up: {x: 0, y: 0, z: 1}, center: {x: 0, y: 0.2, z: 0.3} },
-    catch:   { eye: {x: 0,    y: -1.8, z: 0.4}, up: {x: 0, y: 0, z: 1}, center: {x: 0, y: 0.5, z: 0.4} },
-    side:    { eye: {x: -1.8, y: 0.5,  z: 0.4}, up: {x: 0, y: 0, z: 1}, center: {x: 0, y: 0.5, z: 0.4} },
-    top:     { eye: {x: 0,    y: 0.5,  z: 2.0}, up: {x: 0, y: 1, z: 0}, center: {x: 0, y: 0.5, z: 0.0} },
-    pitcher: { eye: {x: 0,    y: 2.5,  z: 0.5}, up: {x: 0, y: 0, z: 1}, center: {x: 0, y: 0.0, z: 0.3} },
+    iso:     { eye: {x: SZC.x + 1.6, y: SZC.y + 1.6, z: SZC.z + 0.8}, up: {x: 0, y: 0, z: 1}, center: SZC },
+    catch:   { eye: {x: SZC.x,        y: SZC.y - 2.2, z: SZC.z      }, up: {x: 0, y: 0, z: 1}, center: SZC },
+    side:    { eye: {x: SZC.x - 2.2, y: SZC.y,        z: SZC.z      }, up: {x: 0, y: 0, z: 1}, center: SZC },
+    top:     { eye: {x: SZC.x,        y: SZC.y,        z: SZC.z + 2.5}, up: {x: 0, y: 1, z: 0}, center: SZC },
+    pitcher: { eye: {x: SZC.x,        y: SZC.y + 2.5, z: SZC.z      }, up: {x: 0, y: 0, z: 1}, center: SZC },
   };
 
   const viewBtns = Array.from(document.querySelectorAll(".view-preset[data-view]"));
