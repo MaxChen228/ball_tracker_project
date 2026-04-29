@@ -74,9 +74,10 @@ class LivePairingSession:
     tuning: CandidateSelectorTuning = field(default_factory=CandidateSelectorTuning.default)
     # Triangulation fan-out tuning (cost + gap thresholds), refreshed by
     # state.ingest_live_frame on every ingest. Default lets every shape-
-    # gate-passed candidate through (cost=1.0); gap_threshold_m=0.20m is
-    # the sole residual gate (segmenter and viewer trust it, no
-    # downstream re-filter).
+    # gate-passed candidate through (cost=1.0); `PairingTuning.gap_threshold_m`
+    # (default 0.20m, per-session override via the viewer's Gap slider →
+    # /sessions/{sid}/recompute) is the sole residual gate — segmenter
+    # and viewer trust it, no downstream re-filter.
     pairing_tuning: PairingTuning = field(default_factory=PairingTuning.default)
 
     def __post_init__(self) -> None:
