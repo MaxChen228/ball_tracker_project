@@ -22,7 +22,7 @@ final class CameraCommandRouter {
         let hsvRangeDidPush: (ServerUploader.HSVRangePayload) -> Void
         let shapeGateDidPush: (ServerUploader.ShapeGatePayload) -> Void
         let handleTrackingExposureCap: (String) -> Void
-        let currentCaptureHeight: () -> Int
+        let currentCaptureHeight: () -> Int?
         let applyServerCaptureHeight: (Int) -> Void
         let isPreviewRequested: () -> Bool
         let setPreviewRequested: (Bool) -> Void
@@ -196,15 +196,21 @@ final class CameraCommandRouter {
                     commandLog.warning("ws tracking_exposure_cap dropped: calibration capture in flight")
                 }
             }
-            if let pushedH = message["capture_height_px"] as? Int,
-               pushedH != deps.currentCaptureHeight() {
-                if calIdle {
-                    DispatchQueue.main.async {
-                        guard self.deps.getState() == .standby else { return }
-                        self.deps.applyServerCaptureHeight(pushedH)
+            if let pushedH = message["capture_height_px"] as? Int {
+                // Skip the drift check entirely when we can't read our own
+                // current height — substituting `AppSettings.captureHeightFixed`
+                // would silently mask real drift between server and device.
+                if let currentH = deps.currentCaptureHeight(), pushedH != currentH {
+                    if calIdle {
+                        DispatchQueue.main.async {
+                            guard self.deps.getState() == .standby else { return }
+                            self.deps.applyServerCaptureHeight(pushedH)
+                        }
+                    } else {
+                        commandLog.warning("ws capture_height_px=\(pushedH) dropped: calibration capture in flight")
                     }
-                } else {
-                    commandLog.warning("ws capture_height_px=\(pushedH) dropped: calibration capture in flight")
+                } else if deps.currentCaptureHeight() == nil {
+                    commandLog.warning("ws capture_height_px=\(pushedH) dropped: current capture height unavailable")
                 }
             }
             if calIdle {

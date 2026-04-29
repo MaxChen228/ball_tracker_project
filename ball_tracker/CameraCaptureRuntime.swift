@@ -287,22 +287,41 @@ final class CameraCaptureRuntime {
         chirpDetector?.lastSnapshot
     }
 
+    /// Build a capture-telemetry snapshot for the recording payload.
+    ///
+    /// Returns `nil` when we don't yet have real numbers — either no frame
+    /// has reached `captureOutput` (latest dims are 0) or the AVCaptureDevice
+    /// callback hasn't published an `AppliedTelemetry` yet. Callers must
+    /// skip emitting a telemetry record in that case rather than fabricating
+    /// a zero-filled one (silent fallbacks pollute downstream analysis).
     func currentCaptureTelemetry(
         latestImageWidth: Int,
         latestImageHeight: Int,
         targetFps: Double,
         appliedTelemetry: AppliedTelemetry?
-    ) -> ServerUploader.CaptureTelemetry {
-        ServerUploader.CaptureTelemetry(
-            width_px: latestImageWidth > 0 ? latestImageWidth : (appliedTelemetry?.widthPx ?? 0),
-            height_px: latestImageHeight > 0 ? latestImageHeight : (appliedTelemetry?.heightPx ?? 0),
+    ) -> ServerUploader.CaptureTelemetry? {
+        guard let appliedTelemetry else { return nil }
+        let widthPx: Int
+        let heightPx: Int
+        if latestImageWidth > 0 && latestImageHeight > 0 {
+            widthPx = latestImageWidth
+            heightPx = latestImageHeight
+        } else if appliedTelemetry.widthPx > 0 && appliedTelemetry.heightPx > 0 {
+            widthPx = appliedTelemetry.widthPx
+            heightPx = appliedTelemetry.heightPx
+        } else {
+            return nil
+        }
+        return ServerUploader.CaptureTelemetry(
+            width_px: widthPx,
+            height_px: heightPx,
             target_fps: targetFps,
-            applied_fps: appliedTelemetry?.appliedFps ?? 0,
-            format_fov_deg: appliedTelemetry?.formatFovDeg,
-            format_index: appliedTelemetry?.formatIndex,
-            is_video_binned: appliedTelemetry?.isVideoBinned,
+            applied_fps: appliedTelemetry.appliedFps,
+            format_fov_deg: appliedTelemetry.formatFovDeg,
+            format_index: appliedTelemetry.formatIndex,
+            is_video_binned: appliedTelemetry.isVideoBinned,
             tracking_exposure_cap: trackingExposureCapMode.rawValue,
-            applied_max_exposure_s: appliedTelemetry?.appliedMaxExposureS
+            applied_max_exposure_s: appliedTelemetry.appliedMaxExposureS
         )
     }
 
