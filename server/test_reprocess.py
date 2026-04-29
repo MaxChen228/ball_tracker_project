@@ -1,15 +1,16 @@
-"""Reprocess-freeze contract: the offline `reprocess_sessions.py` script
-MUST honour the per-pitch frozen detection-config snapshot
-(`PitchPayload.{hsv_range_used, shape_gate_used,
-candidate_selector_tuning_used}`) and only fall back to current disk
-config on legacy pitches lacking the stamp — except when
-`--use-current-config` is passed, which forces the current values.
+"""Reprocess two-mode contract: the offline `reprocess_sessions.py` script
+defaults to **current** `data/*.json` so the operator's tuning workflow
+("I tweaked HSV, rerun this session, see if it improves") works as
+expected. Opt-in `--use-frozen-snapshot` reuses the per-pitch frozen
+detection-config snapshot (`PitchPayload.{hsv_range_used, shape_gate_used,
+candidate_selector_tuning_used}`) for reproducibility audits — falling
+back to disk for legacy pitches that pre-date the stamp, with a logged
+warning per missing field.
 
-Without this contract, an operator dragging the dashboard sliders on
-2026-04-29 would retroactively change the cost basis of a session
-recorded on 2026-03-15 the next time anyone reprocessed it. That breaks
-the "frozen at detection time" invariant the cd87995 PairingTuning fix
-established for triangulation tuning.
+The frozen stamps themselves are always preserved on disk (re-stamped at
+the end of every detection run with whatever config was actually used),
+so the "what was X originally detected with" question stays answerable
+even when default reprocess overwrites the run.
 """
 from __future__ import annotations
 
@@ -63,13 +64,14 @@ def _capture_detect_pitch_args():
     return fake_detect_pitch, captured
 
 
-def test_rerun_detection_uses_frozen_snapshot_over_current_disk(tmp_path, monkeypatch):
-    """The discriminating test: pitch was originally detected under
-    HSV/gate/tuning X; current disk holds Y. Reprocess MUST call
-    detect_pitch with X, not Y."""
+def test_rerun_detection_default_uses_current_disk_config(tmp_path, monkeypatch):
+    """The discriminating test for the operator's tuning workflow:
+    pitch was originally detected under HSV/gate/tuning X; operator
+    edited disk to Y; default reprocess MUST call detect_pitch with Y
+    (so the tweak shows up in the rerun), not X."""
     import reprocess_sessions as R
 
-    # Pitch frozen under X
+    # Pitch was originally frozen under X
     frozen_hsv = HSVRangePayload(h_min=10, h_max=20, s_min=30, s_max=40, v_min=50, v_max=60)
     frozen_gate = ShapeGatePayload(aspect_min=0.61, fill_min=0.62)
     frozen_tuning = CandidateSelectorTuningPayload(w_aspect=0.71, w_fill=0.29)
@@ -94,57 +96,17 @@ def test_rerun_detection_uses_frozen_snapshot_over_current_disk(tmp_path, monkey
 
     assert len(captured) == 1
     kw = captured[0]
-    # Frozen X must win, not current Y.
-    assert kw["hsv_range"].h_min == 10 and kw["hsv_range"].h_max == 20
-    assert kw["hsv_range"].s_min == 30 and kw["hsv_range"].v_max == 60
-    assert kw["shape_gate"].aspect_min == pytest.approx(0.61)
-    assert kw["shape_gate"].fill_min == pytest.approx(0.62)
-    assert kw["selector_tuning"].w_aspect == pytest.approx(0.71)
-    assert kw["selector_tuning"].w_fill == pytest.approx(0.29)
-
-
-def test_rerun_detection_legacy_pitch_falls_back_to_current_with_warning(
-    tmp_path, monkeypatch, caplog,
-):
-    """Legacy pitch (no `*_used` stamps) MUST fall back to disk values
-    AND log a warning on each missing field."""
-    import logging
-
-    import reprocess_sessions as R
-
-    pitch = _make_pitch(hsv_used=None, gate_used=None, tuning_used=None)
-    pitch_path = tmp_path / "pitches" / "session_s_legacy01_A.json"
-    _write_pitch(pitch_path, pitch)
-
-    monkeypatch.setattr(R, "find_video", lambda sid, cam: tmp_path / "fake.mov")
-    fake_dp, captured = _capture_detect_pitch_args()
-    monkeypatch.setattr(R, "detect_pitch", fake_dp)
-
-    current_hsv = HSVRange(h_min=100, h_max=110, s_min=120, s_max=130, v_min=140, v_max=150)
-    current_gate = ShapeGate(aspect_min=0.99, fill_min=0.99)
-    current_tuning = CandidateSelectorTuning(w_aspect=0.01, w_fill=0.99)
-
-    with caplog.at_level(logging.WARNING, logger="reprocess"):
-        R.rerun_detection(
-            pitch_path, current_hsv, current_gate, current_tuning,
-            dry_run=True,
-        )
-
-    kw = captured[0]
-    # Fell back to current disk — Y wins.
-    assert kw["hsv_range"].h_min == 100
+    # Default = current disk Y wins, not frozen X.
+    assert kw["hsv_range"].h_min == 100 and kw["hsv_range"].h_max == 110
+    assert kw["shape_gate"].aspect_min == pytest.approx(0.99)
     assert kw["shape_gate"].fill_min == pytest.approx(0.99)
     assert kw["selector_tuning"].w_aspect == pytest.approx(0.01)
-    # All three legacy-fallback warnings fired.
-    msgs = " ".join(r.message for r in caplog.records)
-    assert "lacks hsv_range_used" in msgs
-    assert "lacks shape_gate_used" in msgs
-    assert "lacks candidate_selector_tuning_used" in msgs
+    assert kw["selector_tuning"].w_fill == pytest.approx(0.99)
 
 
-def test_rerun_detection_use_current_config_overrides_freeze(tmp_path, monkeypatch):
-    """`--use-current-config=True` MUST bypass the frozen snapshot even
-    when present, and call detect_pitch with the disk values."""
+def test_rerun_detection_use_frozen_snapshot_replays_original(tmp_path, monkeypatch):
+    """For the reproducibility-audit case: pitch frozen under X, disk
+    holds Y, `use_frozen_snapshot=True` MUST replay X (ignore disk)."""
     import reprocess_sessions as R
 
     frozen_hsv = HSVRangePayload(h_min=10, h_max=20, s_min=30, s_max=40, v_min=50, v_max=60)
@@ -165,14 +127,59 @@ def test_rerun_detection_use_current_config_overrides_freeze(tmp_path, monkeypat
     R.rerun_detection(
         pitch_path, current_hsv, current_gate, current_tuning,
         dry_run=True,
-        use_current_config=True,
+        use_frozen_snapshot=True,
     )
 
     kw = captured[0]
-    # Forced override — disk Y wins, not frozen X.
-    assert kw["hsv_range"].h_min == 100 and kw["hsv_range"].h_max == 110
-    assert kw["shape_gate"].aspect_min == pytest.approx(0.99)
+    # Frozen X wins, not current Y.
+    assert kw["hsv_range"].h_min == 10 and kw["hsv_range"].h_max == 20
+    assert kw["hsv_range"].s_min == 30 and kw["hsv_range"].v_max == 60
+    assert kw["shape_gate"].aspect_min == pytest.approx(0.61)
+    assert kw["shape_gate"].fill_min == pytest.approx(0.62)
+    assert kw["selector_tuning"].w_aspect == pytest.approx(0.71)
+    assert kw["selector_tuning"].w_fill == pytest.approx(0.29)
+
+
+def test_rerun_detection_use_frozen_snapshot_legacy_falls_back_with_warning(
+    tmp_path, monkeypatch, caplog,
+):
+    """When `use_frozen_snapshot=True` but pitch lacks `*_used` stamps
+    (legacy from before the freeze landed), MUST fall back to disk
+    values AND log a warning on each missing field so the operator
+    knows the rerun isn't an unambiguous historical reproduction."""
+    import logging
+
+    import reprocess_sessions as R
+
+    pitch = _make_pitch(hsv_used=None, gate_used=None, tuning_used=None)
+    pitch_path = tmp_path / "pitches" / "session_s_legacy01_A.json"
+    _write_pitch(pitch_path, pitch)
+
+    monkeypatch.setattr(R, "find_video", lambda sid, cam: tmp_path / "fake.mov")
+    fake_dp, captured = _capture_detect_pitch_args()
+    monkeypatch.setattr(R, "detect_pitch", fake_dp)
+
+    current_hsv = HSVRange(h_min=100, h_max=110, s_min=120, s_max=130, v_min=140, v_max=150)
+    current_gate = ShapeGate(aspect_min=0.99, fill_min=0.99)
+    current_tuning = CandidateSelectorTuning(w_aspect=0.01, w_fill=0.99)
+
+    with caplog.at_level(logging.WARNING, logger="reprocess"):
+        R.rerun_detection(
+            pitch_path, current_hsv, current_gate, current_tuning,
+            dry_run=True,
+            use_frozen_snapshot=True,
+        )
+
+    kw = captured[0]
+    # Fell back to current disk — Y wins.
+    assert kw["hsv_range"].h_min == 100
+    assert kw["shape_gate"].fill_min == pytest.approx(0.99)
     assert kw["selector_tuning"].w_aspect == pytest.approx(0.01)
+    # All three legacy-fallback warnings fired.
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "lacks hsv_range_used" in msgs
+    assert "lacks shape_gate_used" in msgs
+    assert "lacks candidate_selector_tuning_used" in msgs
 
 
 def test_rerun_detection_stamps_used_values_back_on_legacy(tmp_path, monkeypatch):

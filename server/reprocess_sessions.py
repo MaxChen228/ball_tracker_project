@@ -148,34 +148,30 @@ def rerun_detection(
     selector_tuning,
     dry_run: bool,
     *,
-    use_current_config: bool = False,
+    use_frozen_snapshot: bool = False,
 ) -> PitchPayload | None:
     """Re-run server-side detection on one persisted pitch.
 
-    Preference order for the detection config:
-      1. `use_current_config=True` — caller forced "use disk values"
-         (the `--use-current-config` debug flag). Bypasses the freeze.
-      2. `pitch.{hsv_range_used, shape_gate_used,
-         candidate_selector_tuning_used}` — stamped at original
-         detection time (server_post / live ingest). Reprocess MUST
-         honour this so an offline rerun reproduces the original cost
-         basis byte-for-byte even if the dashboard has since edited
-         `data/hsv_range.json` etc.
-      3. Disk values passed in by the caller — fallback for legacy
-         pitches written before the stamp landed. Logged as a warning
-         so the operator knows reprocess isn't reproducing an
-         unambiguous historical run.
+    Default: use **current** disk config (`data/hsv_range.json` etc.) —
+    matches the operator's tuning workflow ("I tweaked HSV, rerun this
+    session and see if it improves"). The freshly-used values are
+    stamped back onto the pitch so `pitch.*_used` always reflects the
+    config of the most recent detection run.
 
-    The freshly-used values are stamped back onto the pitch on every
-    successful run, so a legacy pitch reprocessed once is no longer
-    legacy."""
+    Opt-in `use_frozen_snapshot=True` (CLI: `--use-frozen-snapshot`):
+    re-use the values stamped on the pitch by the original detection
+    run. For reproducibility audits — answers "what would the original
+    live/server_post run have produced if I rebuilt from scratch?"
+    Falls back to disk for legacy pitches that pre-date the stamp,
+    logging a warning so the operator knows that rerun isn't an
+    unambiguous historical reproduction."""
     pitch = PitchPayload.model_validate_json(pitch_path.read_text())
     video = find_video(pitch.session_id, pitch.camera_id)
     if video is None:
         logger.warning("  skip %s/%s — no MOV", pitch.session_id, pitch.camera_id)
         return None
 
-    if use_current_config:
+    if not use_frozen_snapshot:
         hsv_eff, gate_eff, tuning_eff = hsv, shape_gate, selector_tuning
     else:
         from candidate_selector import CandidateSelectorTuning
@@ -344,11 +340,13 @@ def main() -> None:
     g.add_argument("--all", action="store_true", help="process every pitch JSON")
     ap.add_argument("--dry-run", action="store_true", help="detect+triangulate but don't overwrite JSONs")
     ap.add_argument(
-        "--use-current-config",
+        "--use-frozen-snapshot",
         action="store_true",
-        help="ignore pitch.{hsv,shape_gate,selector_tuning}_used frozen "
-             "snapshots and force current data/*.json values. Debug-only — "
-             "loses byte-for-byte reproducibility of the original detection.",
+        help="reuse the per-pitch frozen detection-config snapshot "
+             "(pitch.{hsv,shape_gate,selector_tuning}_used) instead of "
+             "current data/*.json values. For reproducibility audits — "
+             "default behavior is to pick up your current disk config so "
+             "tuning workflows actually see new results.",
     )
     args = ap.parse_args()
 
@@ -371,7 +369,7 @@ def main() -> None:
         logger.info("redetect %s", path.name)
         pitch = rerun_detection(
             path, hsv, shape_gate, selector_tuning, args.dry_run,
-            use_current_config=args.use_current_config,
+            use_frozen_snapshot=args.use_frozen_snapshot,
         )
         if pitch is not None:
             by_session.setdefault(pitch.session_id, {})[pitch.camera_id] = pitch

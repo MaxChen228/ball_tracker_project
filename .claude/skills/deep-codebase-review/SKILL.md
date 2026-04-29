@@ -1,196 +1,231 @@
 ---
 name: deep-codebase-review
-description: 深度 codebase audit 工作流。派 5-8 個並行 agent 各自掃一個 domain（race / silent fallback / dead code / 過時文檔 / 效能 / 結構債），每個 agent 必產 file:line + 修法草稿。彙整成 BLOCK/NIT 排名表，BLOCK 自動派 fix worker 修，NIT 條列給使用者點選。當使用者要求「找技術債 / 找 bug / review codebase / 深度 audit」時觸發。
+description: 深度 codebase audit + fix + review + consolidate 工作流。三階段全並行（audit agent 找問題 → fix worker 修 → reviewer 驗），每階段都並行不串行，主線禁止 idle 等待。彙整成 BLOCK/NIT 表，BLOCK 自動修 + per-branch deep review + cross-cutting integration review，全綠後 consolidate 開單一 PR。當使用者要求「找技術債 / 找 bug / review codebase / 深度 audit」時觸發。
 ---
 
 # Deep Codebase Review
 
-## 何時用此 skill
+## 何時用
 
-使用者明確要求「找問題 / 找 bug / 找技術債 / review / audit / 深度檢查 codebase」時觸發。**不**用於：寫新功能、單檔修改、純諮詢。
+使用者明確要求「找問題 / 找 bug / 找技術債 / review / audit / 深度檢查」時觸發。**不**用於：寫新功能、單檔修改、純諮詢。
 
-## 核心設計原則（從歷次失敗 retrospective 固化）
+## 核心原則（從歷次 retro 固化）
 
-1. **Audit 並行、Review 串行**。並行只在「找未知問題」階段有意義。Review 階段用單一 meta-reviewer 跑一次測試 + 看全部 diff，省 N× 成本。
-2. **Audit agent 必產 patch 草稿**，不只 findings。下游 fix worker 直接 `git apply`，省一輪重讀 code。
-3. **Worktree 隔離強制 `pwd` 驗證**。歷次經驗 30%+ worker 會漂移到 parent worktree。Prompt 必含 absolute rule。
-4. **BLOCK 自動修，NIT 才上交**。User 授權 batch 後不該被技術細節打擾。
-5. **大 task 拆小**。預估 >20 分鐘 wall-clock 的 worker 強制拆。
+1. **三階段全並行**。Audit / fix / review 每階段都派並行 agent。**禁止**用「單一 meta-reviewer」取代 per-branch reviewer — 實測會漏關鍵 BLOCK（曾因此漏一條 dead-code path BLOCK，整個 fix 退回上一輪 PR 的 fix）。
+2. **Reviewer ≥ worker**。每個 fix branch ≥ 1 個 deep reviewer（從第一性原理到細節）+ 1 個 cross-cutting integration reviewer。Follow-up fix 也要 follow-up reviewer。
+3. **主線禁 idle**。派出 background agent 後的下一個動作必須是「主線盤點還能做什麼獨立工作」（PR body / memory update / 下個 reviewer prompt 預寫），**不能是「等」**。idle 等待是並行架構最大失分項。
+4. **Audit agent 必產 patch 草稿**，不只 findings。下游 fix worker 直接 reference patch，省一輪 root-cause 重判。
+5. **Worker 必驗 entry point**，不盲抄 audit 草稿。Audit 可能漏關鍵呼叫處（曾因 worker 沒 grep `arm_session` 預創 LivePairingSession 的位置，把 freeze 邏輯放錯地方變 dead code，浪費 FX 一輪）。
+6. **決策快**。BLOCK > 5 / contrarian / strategic refactor 自決，不寫 thinking 權衡段落。User 已授權 batch 就是不要被打擾。
+7. **ABSOLUTE RULES** 每個 agent prompt 必含：`pwd` 驗 worktree、relative path、commit→push→回報 branch、不停下等確認、不開 PR（coordinator 統一開）。
 
-## 步驟
+## 流程
 
-### 1. 範圍協商（最多 1 輪 question，沒有就跳過）
+### Phase 1 — 範圍協商（≤1 round，可跳）
 
-如果使用者沒指定 domain，問一次最多 4 個選項（multiSelect）：
-- 並行 / 同步問題（race / lock / silent fallback）
-- 死碼 / facade 過度抽象
-- 過時文檔（CLAUDE.md / 註解 / docstring drift）
-- 效能 hotspot
-- 結構債 / 拆分提案
+User 沒指定 domain 就問一次最多 4 個選項（multiSelect）：race / silent fallback、dead code / over-abstraction、stale docs、perf hotspot、structural debt。User 授權「全開」或不答 → default 5 domain 全跑（再加 alignment / domain-specific 若 conversation context 已暗示焦點）。
 
-如果使用者授權「全開」或不回答，default 5 個 domain 全跑。
+### Phase 2 — 派 audit agent（5-8 個並行）
 
-### 2. 派並行 audit agent（一 domain 一 agent，5-8 個）
+`subagent_type: general-purpose`、`isolation: worktree`、`run_in_background: true`、`model: opus`（per memory rule）。
 
-每個 agent 用 `Agent` tool，`subagent_type: "general-purpose"`，`isolation: "worktree"`，`run_in_background: true`。
-
-**Prompt 模板（必逐字包含「ABSOLUTE RULES」段）**：
+**Audit prompt 模板**：
 
 ```
-你是 ball_tracker_project 的 [DOMAIN] 稽核 agent。**只 audit + 寫 patch 草稿，不 commit、不 push、不開 PR**。
+你是 [project] 的 [DOMAIN] 稽核 agent。**只 audit + 寫 patch 草稿，不 commit/push/PR**。
 
-## ABSOLUTE RULES（違反即視為 bug）
-1. 第一個動作必須是 `pwd` 並回報路徑。確認在 worktree 內、不在 parent。
-2. 所有 Read / Edit / Write 用 relative path（`server/state.py`），**禁止** absolute path（`/Users/.../server/state.py`）。
-3. 不修任何檔案；只產 findings + unified-diff patch 草稿。
-4. 最終 message 必須含「Findings」+「Proposed Patch」兩段。
+## ABSOLUTE RULES
+1. `pwd` 第一個動作。確認在 worktree 內。
+2. Read/Edit/Write 用 relative path，禁 absolute。
+3. 不修檔；只產 findings + unified-diff patch。
+4. Final message 含「Findings / Proposed Patches / Contrarian view」三段。
 
 ## Setup
-```
+pwd
 git fetch origin
-git checkout origin/main  # detached HEAD 即可，不需 branch
-```
+git checkout origin/main
 
-## 你的 domain 範圍
-[DOMAIN-SPECIFIC SCOPE：列出要看哪些檔、grep 哪些 pattern]
+## 範圍
+[列要看哪些檔、grep 哪些 pattern、特別懷疑哪些 hot spot]
 
-## 輸出格式（嚴格遵守）
+## 輸出格式
 # [DOMAIN] findings
-
 ## BLOCK 級
-| file:line | 問題 | 證據（grep 結果 / log） |
-
+| file:line | 問題 | 證據 |
 ## NIT 級
 | file:line | 問題 |
-
-## Proposed Patches（unified diff 格式）
-```diff
---- a/server/foo.py
-+++ b/server/foo.py
-@@ -X,Y +X,Y @@
--old line
-+new line
-```
-（每個 BLOCK 至少給一份；NIT 可選）
-
+## Proposed Patches
+```diff ... ```
 ## Contrarian view
-- 哪些第一眼看似問題實際應該保留：[]
-
-完成後 final message 直接貼上面格式。
+- 看似問題實應保留：[...]
 ```
 
-### 3. 等所有 agent 回來，彙整成總表
+### Phase 3 — 彙整 + 仲裁
 
-格式：
+Audit agent 全回後，coordinator 自己做：
 
-```
-| # | domain | severity | file:line | 問題 | patch 已就緒？ |
-|---|---|---|---|---|---|
-| 1 | race | BLOCK | live_pairing.py:79 | ... | yes |
-| 2 | silent fallback | BLOCK | state.py:785 | ... | yes |
-| 3 | dead code | NIT | state.py:298 | ... | yes |
-| ... contrarian ... |
-```
+- 跨 agent **去重**（同檔同 line BLOCK 合併）
+- **仲裁衝突**（A agent 想刪 X comment，B agent contrarian 想留 — 用 user goal 判斷誰對）
+- 採納 contrarian 把高成本低收益 BLOCK **降級** NIT（如「LAN 單機效能微優化」）
+- 自決派工策略：BLOCK 怎麼分組、哪些合併同一 worker（避免同檔 merge conflict）、哪些獨立
 
-### 4. User checkpoint（最小化 round-trip）
+**禁止問 user**：是否照做 / 優先序 / commit message。**只**問：要動 origin push、砍 user-facing feature、cross-file strategic refactor 三類。
 
-**只**對下列三類問 user：
-- BLOCK 數量超過 5 條時，問是否分批處理還是一次到底
-- Contrarian view 列表（不做的判斷需要 user 認可）
-- 任何「需要跨檔大重構」的 NIT（譬如「拆分 state.py」這種 strategic 決定）
+### Phase 4 — 派 fix worker（按 BLOCK 分組並行）
 
-**不**問 user：是否照做、優先序、commit message wording。授權 batch 模式 = 全做、自己決定。
+每 BLOCK 一個 worker，或同 domain 多 BLOCK 合一個 worker（例：silent-fallback 三條 = 一 worker；calibration.py split 一條 = 一 worker）。同檔 BLOCK 合併避免 merge conflict。
 
-### 5. 派 fix worker（每個 BLOCK 一個 worker，並行）
-
-**只對 BLOCK 派**。NIT 集中由一個 worker 處理（節省 dispatch overhead）。
-
-每個 fix worker：
-- `isolation: "worktree"`
-- `run_in_background: true`
-- Prompt 內含 audit agent 已產的 patch 草稿
-- 預估 >20 分鐘的 task 強制拆成 2 個並行 worker
-
-**Fix worker prompt 模板**：
+**Fix worker prompt 必含**：
 
 ```
-## ABSOLUTE RULES（同 audit）
-1. `pwd` first
-2. Relative paths only
-3. 最後動作必須是：git add → commit → push → 回報 `Branch: <name>`
-4. 不開 PR（coordinator 統一開 ONE PR）
+## ABSOLUTE RULES（同 audit + 三條額外）
+- `pwd` first
+- Relative paths only
+- 最後 git add → commit → push → 回報 `Branch: <name>`，不開 PR
+- 不停下等使用者確認，blocker 自己診斷自己修
+- worktree 沒 push = 工作消失（auto-cleanup）
+- 禁跑 iOS test（per memory），只 xcodebuild build
 
 ## Setup
-```
-pwd  # confirm worktree
+pwd
 git fetch origin
-git checkout -b claude/audit-fix-[DOMAIN]-[N] origin/main
-```
+git checkout -b claude/audit-fix-[DOMAIN] origin/main
 
-## 你的任務
-[FROM AUDIT FINDINGS：file:line + 描述]
+## 任務（BLOCK list + audit 草稿 patch）
+[FROM AUDIT]
 
-## 候選 patch（audit agent 已草擬）
-```diff
-[PASTE PATCH DRAFT]
-```
-
-驗證 patch 對齊當前 origin/main HEAD（line 可能漂）。可改 patch，但邏輯保持。
+## 必驗 entry point（防呆 — 不要盲抄草稿）
+在動 patch 前先 grep 確認 audit 草稿 touch 對位置：
+- [grep 命令 #1]：例 grep -n "arm_session\|LivePairingSession" server/state.py
+- [grep 命令 #2]：...
+若 grep 結果跟 audit 描述不符，先確認 root cause、再動 patch。
 
 ## 驗證
 cd server && uv run pytest -x
 
-全綠才能 push。失敗 → debug → 不要直接砍 test。
-
 ## 完成
-git add -A && git commit -m "..." && git push -u origin claude/audit-fix-[DOMAIN]-[N]
-最後 message：`Branch: claude/audit-fix-[DOMAIN]-[N]` 或失敗原因。
+git add -A && git commit -m "..." && git push -u origin claude/audit-fix-[DOMAIN]
+最後 message 以 `Branch: claude/audit-fix-[DOMAIN]` 結尾。
 ```
 
-### 6. 串行 meta-review（單一 agent）
+**派工同時主線立刻動**：開始草擬 reviewer prompt 模板（共用骨架）、PR body 大綱、memory update list。**不要 idle**。
 
-所有 fix branch push 後，**派 1 個** meta-reviewer agent，**不**為每個 branch 各派一個。
+### Phase 5 — Reviewer 並行（≥ worker count）
 
-Meta-reviewer prompt：
-- 拿到所有 fix branch list
-- `git fetch origin && git checkout origin/main`
-- 對每個 branch 跑 `git diff origin/main..origin/<branch>` 看 diff
-- 跑一次全套 test on each（或一次合到 staging branch 跑）
-- 輸出統一表：`| branch | verdict | issues |`
-- BLOCK issue 自動派 follow-up fix worker；NIT 寫在報告
+Worker 完成通知到時，**立刻**派該 branch 的 reviewer，**不要批次等**（worker 完成時間錯開，等批次 = 等最慢）。
 
-預估省 70-80% reviewer wall-clock vs 並行 N 個 reviewer。
+每 fix branch 1 個 deep reviewer。額外派 1 個 cross-cutting integration reviewer 等 ≥3 條 fix branch push 後啟動（不必等全到）。
 
-### 7. Consolidate（單一 step，自己做或派 1 個 agent）
+**Deep reviewer prompt 模板**（每 branch 只填差異）：
 
-- 從 origin/main 開 `claude/audit-batch-<date>` branch
-- 依序 `git merge --no-ff origin/<each-fix-branch>`
-- ort strategy 通常 auto-merge 過；遇衝突 stop + report user
-- `cd server && uv run pytest -x`
-- `git push -u origin claude/audit-batch-<date>`
-- `gh pr create` with body 列出所有改動 + verification 結果
+```
+你是 [project] 的 deep reviewer，審 `claude/audit-fix-[DOMAIN]`。不寫程式 / 不 commit。
 
-### 8. 收尾報告
+## ABSOLUTE RULES
+- `pwd` first
+- Relative path only
+- 不修檔/不 commit/不 push
+- 禁跑 iOS test，只 xcodebuild build
 
-對 user 列：
-- BLOCK 修了幾個（PR 列表）
-- NIT 列表 + 哪些已順手修哪些待之後
-- Contrarian 留下的判斷
-- 預估技術債整體變化（LOC / 風險面下降）
+## Setup
+git fetch origin
+git checkout origin/claude/audit-fix-[DOMAIN]
+git diff origin/main..HEAD --stat
+git diff origin/main..HEAD
 
-## 反模式（明確禁止）
+## Context（fix 預期解什麼 BLOCK）
+[從 audit + worker self-report 摘要]
 
-- ❌ 把 review 階段也並行 N 個 agent（重複跑 N× tests，token + wall-clock 浪費）
-- ❌ Audit agent 只給 findings 沒給 patch 草稿（fix worker 重做一遍 root cause 分析）
-- ❌ Worker prompt 沒寫 `pwd` 強制檢查（worktree 漂移會發生）
-- ❌ BLOCK issue 上交 user 詢問「要不要修」（user 已授權 batch）
-- ❌ 派一個 25 分鐘的 mega-task（無進度可見、無法早停、final 回報不可信）
+## 審查維度（必逐項覆蓋）
+A. 第一性原理：fix 真治本？同類問題還有漏網嗎（grep 全 codebase）
+B. 設計合理性：副作用、邊界 case
+C. Regression：自跑 pytest 不只信 worker 自報、找有沒有「test silent fallback 還在」的反向 assert
+D. 細節：error message actionable、log level、無 lazy import in hot loop
+E. 測試：worker 加了哪些 test、缺什麼 regression test
+F. Contrarian：有沒有引入新 silent fallback / 把 transient 變 crash
+
+## 輸出
+# Review of [branch]
+## Verdict: APPROVE / APPROVE-WITH-NITS / REQUEST-CHANGES
+## A-F 逐項評論
+## BLOCK issues
+## NIT issues
+```
+
+**Cross-cutting reviewer prompt** 額外加：
+
+```
+## 範圍：跨 branch 整合面
+- Merge dry-run（每對 branch + cumulative）找 conflict
+- 跨 branch state 同檔不同 hunk 邏輯交叉檢查
+- 整合後新 silent fallback grep
+- User goal scorecard（algorithm / pixel / payload 三層各 close 嗎）
+- 重複 / 不一致（多 branch 都動同一份 doc 等）
+- 推薦 merge 順序
+
+## 輸出
+- BLOCK pre-merge 必修
+- 推薦 merge order
+- 是否可開單一 PR consolidate
+```
+
+**Reviewer 找到 BLOCK** → coordinator 立刻派 FX (follow-up fix) 在原 branch 上加 commit，**FX 也要派 R-FX 驗證**。FX 不能略過 review。
+
+### Phase 6 — Consolidate
+
+Cross-cutting reviewer APPROVE 後，coordinator 一次做：
+
+```
+git checkout -b claude/audit-batch-<date> origin/main
+# 按 cross-cutting reviewer 推薦順序 cumulative merge
+git merge --no-ff -m "merge: [domain]" origin/claude/audit-fix-[domain]
+# ... 每條一次
+cd server && uv run pytest -x
+git push -u origin claude/audit-batch-<date>
+```
+
+### Phase 7 — NIT batch
+
+從 R1...Rn + cross-cutting reviewer 累積的 NIT 一次處理。**派 W8 在 consolidate branch 上 fix**（不在 origin/main 上開新 branch — 避免再一次 merge）。W8 也派 R-FINAL 驗。
+
+### Phase 8 — Open PR + 收尾報告
+
+```
+gh pr create --title "..." --body "..."
+```
+
+PR body 包含：BLOCK 修了幾個（list）/ NIT 修了哪些 / Contrarian 留下的判斷 / Cross-cutting reviewer scorecard / 預估技術債變化（LOC delta / 風險面下降）。
+
+**Memory update 在這階段（或更早）並行排程**：派一個 memory-update agent 改過時條目、新增 audit outcome 條目。可以在 Phase 6 consolidate 時就派出，不用等 PR open。
+
+## 反模式（按嚴重度）
+
+1. ❌ **派工後主線 idle 等待** — 最嚴重。每次 background dispatch 後 coordinator 必須立刻盤點獨立副線（草擬下個 prompt / 寫 PR body / 更新 memory），idle = 並行架構失敗
+2. ❌ **單一 meta-reviewer 取代 per-branch reviewer** — 實測漏關鍵 BLOCK（dead-code path、entry point 錯配）
+3. ❌ **Audit agent 只給 findings 沒 patch 草稿** — fix worker 重做 root cause
+4. ❌ **Worker 盲抄 audit 草稿不驗 entry point** — 曾因此把 freeze 邏輯放在 dead code path
+5. ❌ **Follow-up fix 不派 reviewer** — 違反 reviewer ≥ worker 規則
+6. ❌ **Worker prompt 沒寫 `pwd` 強制檢查** — worktree 漂移會發生（30%+ 機率）
+7. ❌ **BLOCK 上交 user 問「要不要修」** — user 已授權 batch
+8. ❌ **小決策寫 thinking 權衡段** — obvious 直接做（reviewer 看到 BLOCK 就派 FX，不要寫 200 字權衡）
+9. ❌ **派一個 25 分鐘 mega-task** — 無進度可見、無法早停
+
+## User checkpoint 標準（嚴格收斂）
+
+**只**問 user：
+
+- 要 push origin / force push（destructive）
+- 要砍 user-facing feature
+- Cross-file strategic refactor（如「state.py 1700 行要不要拆」）
+
+**自決**（不問 user）：分批策略、commit message、contrarian 採納、reviewer 找到的 BLOCK 派 FX、merge 順序、NIT 哪些做哪些放。
 
 ## 結束條件
 
 下列任一即視為完成：
-- All BLOCK 已修 + 1 個 consolidate PR 開出 + tests 全綠
-- User 主動中止
-- 出現 review agent 無法解決的 BLOCK 且超過 3 次 retry（升級給 user）
 
-完成後在 final message 貼 PR URL + 總計改動表。
+- All BLOCK 修完（含 follow-up FX）+ all per-branch reviewer APPROVE/APPROVE-WITH-NITS + cross-cutting reviewer APPROVE-CONSOLIDATION + 1 個 consolidate PR 開出 + tests 全綠
+- User 主動中止
+- 同一 BLOCK retry > 3 次（升級 user）
+
+完成後 final message 貼 PR URL + BLOCK 修復總計表 + NIT 處理狀態 + cross-cutting scorecard。
