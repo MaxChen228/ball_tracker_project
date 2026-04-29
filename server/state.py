@@ -608,7 +608,7 @@ class State:
 
         created = live.ingest(camera_id, frame, triangulate_live, anchors=anchors)
         # The frame stored by live.ingest is the candidate-resolved one
-        # (px/py picked by the temporal-prior selector); hand it back so
+        # (px/py picked by the shape-prior selector); hand it back so
         # callers (WS handler → live_ray_for_frame) work off the resolved
         # version, not the raw inbound.
         resolved = live.latest_frame_for(camera_id) or frame
