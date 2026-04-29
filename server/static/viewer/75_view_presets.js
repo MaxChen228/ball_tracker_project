@@ -65,4 +65,18 @@
   // active pill — the camera is no longer pinned. plotly_relayouting
   // fires throughout the drag, so the chip clears the moment the
   // operator starts moving.
-  sceneDiv.on("plotly_relayouting", () => { if (!suppressClear) clearActiveView(); });
+  //
+  // Plotly only attaches `.on` to the graph div after the first
+  // react/newPlot, but this file runs at file-order 75 — before
+  // scheduleSceneDraw() in 99_end.js. A synchronous `.on()` here would
+  // throw, break the surrounding IIFE, and take STRIP_CAMS in
+  // 80_strip.js with it via temporal-dead-zone fallout — leaving the
+  // entire scene blank. Retry per-frame until Plotly's event API lands.
+  function _hookRelayouting() {
+    if (typeof sceneDiv.on !== "function") {
+      requestAnimationFrame(_hookRelayouting);
+      return;
+    }
+    sceneDiv.on("plotly_relayouting", () => { if (!suppressClear) clearActiveView(); });
+  }
+  _hookRelayouting();
