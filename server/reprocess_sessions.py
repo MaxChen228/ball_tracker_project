@@ -20,6 +20,7 @@ from pathlib import Path
 
 from detection import HSVRange, ShapeGate
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
+from pairing_tuning import PairingTuning
 from pipeline import detect_pitch
 from schemas import CalibrationSnapshot, PitchPayload, SessionResult
 
@@ -33,6 +34,7 @@ CAL_DIR = DATA_DIR / "calibrations"
 HSV_PATH = DATA_DIR / "hsv_range.json"
 SHAPE_GATE_PATH = DATA_DIR / "shape_gate.json"
 CANDIDATE_SELECTOR_TUNING_PATH = DATA_DIR / "candidate_selector_tuning.json"
+PAIRING_TUNING_PATH = DATA_DIR / "pairing_tuning.json"
 
 VIDEO_EXTS = (".mov", ".mp4", ".m4v")
 
@@ -156,18 +158,45 @@ def rerun_detection(pitch_path: Path, hsv: HSVRange, shape_gate: ShapeGate, sele
     return pitch
 
 
+def load_pairing_tuning() -> PairingTuning:
+    """Mirror of `state._load_pairing_tuning_from_disk` for the offline
+    script. Falls back to `PairingTuning.default()` when the dashboard
+    has never written the file."""
+    if not PAIRING_TUNING_PATH.exists():
+        d = PairingTuning.default()
+        logger.info("no pairing_tuning.json — using default cost=%.2f gap=%.2fm",
+                    d.cost_threshold, d.gap_threshold_m)
+        return d
+    obj = json.loads(PAIRING_TUNING_PATH.read_text())
+    d = PairingTuning.default()
+    t = PairingTuning(
+        cost_threshold=float(obj.get("cost_threshold", d.cost_threshold)),
+        gap_threshold_m=float(obj.get("gap_threshold_m", d.gap_threshold_m)),
+    )
+    logger.info("pairing_tuning cost=%.2f gap=%.2fm",
+                t.cost_threshold, t.gap_threshold_m)
+    return t
+
+
 def triangulate_session(
     sid: str,
     pitches: dict[str, PitchPayload],
     calibrations: dict[str, CalibrationSnapshot],
+    pairing_tuning: PairingTuning,
     dry_run: bool,
 ) -> None:
     a = pitches.get("A")
     b = pitches.get("B")
+    # Stamp the active tuning onto the result so the viewer's per-session
+    # Cost / Gap sliders re-init at the values that produced the points.
+    # Without this they'd show "off" and an Apply would silently overwrite
+    # the result with whatever the user happened to drag the sliders to.
     result = SessionResult(
         session_id=sid,
         camera_a_received=a is not None,
         camera_b_received=b is not None,
+        cost_threshold=pairing_tuning.cost_threshold,
+        gap_threshold_m=pairing_tuning.gap_threshold_m,
     )
     if a is None or b is None:
         logger.info("  %s — solo (%s only); skipping triangulation",
@@ -183,7 +212,9 @@ def triangulate_session(
 
     if a.frames_server_post and b.frames_server_post:
         try:
-            result.points = triangulate_cycle(scale(a), scale(b), source="server")
+            result.points = triangulate_cycle(
+                scale(a), scale(b), source="server", tuning=pairing_tuning,
+            )
         except Exception as e:
             result.error = f"{type(e).__name__}: {e}"
 
@@ -212,6 +243,7 @@ def main() -> None:
     hsv = load_hsv()
     shape_gate = load_shape_gate()
     selector_tuning = load_candidate_selector_tuning()
+    pairing_tuning = load_pairing_tuning()
     calibrations = load_calibrations()
 
     pitch_paths = select_pitch_files(args)
@@ -237,7 +269,7 @@ def main() -> None:
             counterpart = PITCH_DIR / f"session_{sid}_{cam}.json"
             if counterpart.exists():
                 cams[cam] = PitchPayload.model_validate_json(counterpart.read_text())
-        triangulate_session(sid, cams, calibrations, args.dry_run)
+        triangulate_session(sid, cams, calibrations, pairing_tuning, args.dry_run)
 
     logger.info("done.")
 
