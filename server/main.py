@@ -209,6 +209,7 @@ from routes import sync as _sync_routes
 from routes import viewer as _viewer_routes
 from routes import pitch as _pitch_routes
 from routes import calibration as _calibration_routes
+from routes import calibration_intrinsics as _calibration_intrinsics_routes
 from routes import device_ws as _device_ws_routes
 from routes import fit as _fit_routes
 app.include_router(_markers_routes.router)
@@ -219,14 +220,16 @@ app.include_router(_sync_routes.router)
 app.include_router(_viewer_routes.router)
 app.include_router(_pitch_routes.router)
 app.include_router(_calibration_routes.router)
+app.include_router(_calibration_intrinsics_routes.router)
 app.include_router(_device_ws_routes.router)
 app.include_router(_fit_routes.router)
 from routes.camera import _validate_camera_id_or_422
 from routes.sessions import _SESSION_ID_RE
 from routes.viewer import _build_viewer_health, _find_clip_on_disk, _scene_for_session
 from routes.pitch import _summarize_result, _run_server_detection
-from routes.calibration import (
-    _all_marker_world_xyz, _await_calibration_frame, _decode_calibration_jpeg,
+from routes.calibration import _await_calibration_frame
+from calibration_auto import (
+    _all_marker_world_xyz, _decode_calibration_jpeg,
     _derive_auto_cal_intrinsics, _marker_camera_pose, _pose_from_homography,
     _reprojection_error_px, _residual_bucket, _run_auto_calibration,
     _solve_auto_cal_solution, _solve_pnp_homography, _triangulate_marker_candidates,
