@@ -105,6 +105,98 @@ def test_recompute_rejects_out_of_range(tmp_path, monkeypatch):
     assert r.status_code == 400
 
 
+def test_recompute_persists_both_thresholds(tmp_path, monkeypatch):
+    """Per-session sibling of cost_threshold: gap_threshold_m must round-trip
+    through the recompute body and surface on SessionResult / GET /results."""
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    sid = "s_bbbb1002"
+    _seed_session(main.state, sid)
+    client = TestClient(main.app)
+
+    r = client.post(
+        f"/sessions/{sid}/recompute",
+        json={"cost_threshold": 0.45, "gap_threshold_m": 0.08},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()["result"]
+    assert body["cost_threshold"] == pytest.approx(0.45)
+    assert body["gap_threshold_m"] == pytest.approx(0.08)
+
+    g = client.get(f"/results/{sid}")
+    assert g.status_code == 200
+    assert g.json()["gap_threshold_m"] == pytest.approx(0.08)
+
+
+def test_recompute_omitted_gap_falls_back_to_state_default(tmp_path, monkeypatch):
+    """Body without gap_threshold_m → route resolves it from
+    state.pairing_tuning() and stamps it on the result so the viewer slider
+    can re-init from a concrete value (not None)."""
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    sid = "s_bbbb1003"
+    _seed_session(main.state, sid)
+    client = TestClient(main.app)
+
+    expected_gap = main.state.pairing_tuning().gap_threshold_m
+    r = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": 1.0})
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["gap_threshold_m"] == pytest.approx(expected_gap)
+
+
+def test_recompute_rejects_out_of_range_gap(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    sid = "s_cccc1004"
+    _seed_session(main.state, sid)
+    client = TestClient(main.app)
+
+    for bad in (-0.01, 2.5):
+        r = client.post(
+            f"/sessions/{sid}/recompute",
+            json={"cost_threshold": 0.5, "gap_threshold_m": bad},
+        )
+        assert r.status_code == 400, f"expected 400 for gap={bad}: {r.text}"
+
+    r = client.post(
+        f"/sessions/{sid}/recompute",
+        json={"cost_threshold": 0.5, "gap_threshold_m": "garbage"},
+    )
+    assert r.status_code == 400
+
+
+def test_recompute_tighter_gap_drops_more_points(tmp_path, monkeypatch):
+    """Lowering gap_threshold_m at recompute must produce strictly fewer
+    triangulated points (the cartesian fan-out's far-skew survivors get
+    pruned). Mirrors the cost-axis test but along the residual axis."""
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    sid = "s_dddd1005"
+    _seed_session(main.state, sid)
+    client = TestClient(main.app)
+
+    # Wide gap → all cost-passed pairs survive.
+    r1 = client.post(
+        f"/sessions/{sid}/recompute",
+        json={"cost_threshold": 1.0, "gap_threshold_m": 2.0},
+    )
+    assert r1.status_code == 200, r1.text
+    n_loose = sum(
+        len(v) for v in r1.json()["result"]["triangulated_by_path"].values()
+    )
+
+    # Tight gap → only the well-aligned pair(s) survive.
+    r2 = client.post(
+        f"/sessions/{sid}/recompute",
+        json={"cost_threshold": 1.0, "gap_threshold_m": 0.005},
+    )
+    assert r2.status_code == 200
+    n_tight = sum(
+        len(v) for v in r2.json()["result"]["triangulated_by_path"].values()
+    )
+    assert n_tight < n_loose, (n_loose, n_tight)
+
+
 def test_recompute_unknown_session_returns_404(tmp_path, monkeypatch):
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))

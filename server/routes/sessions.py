@@ -198,12 +198,18 @@ async def _enqueue_server_post(
 @router.post("/sessions/{session_id}/recompute")
 async def sessions_recompute(request: Request, session_id: str):
     """Re-run pairing fan-out + segmenter on this session's already-
-    detected frames using a per-session `cost_threshold` override. No
-    MOV decode, no HSV — candidates are read from the persisted
-    `frames_live` / `frames_server_post` directly. Sub-second on a
-    typical session.
+    detected frames using per-session `cost_threshold` + `gap_threshold_m`
+    overrides. No MOV decode, no HSV — candidates are read from the
+    persisted `frames_live` / `frames_server_post` directly. Sub-second
+    on a typical session.
 
-    Body (JSON): `{"cost_threshold": 0.45}`. Range [0, 1].
+    Body (JSON):
+      - `cost_threshold` (required): float in [0, 1].
+      - `gap_threshold_m` (optional): float in [0, 2.0] — skew-line
+        residual cap, metres. Omitted → falls back to the global
+        `state.pairing_tuning().gap_threshold_m`. The viewer's tuning
+        strip always sends both; the optional path is a transitional
+        courtesy for callers that haven't migrated.
     """
     from main import state
     from session_results import recompute_result_for_session
@@ -221,6 +227,19 @@ async def sessions_recompute(request: Request, session_id: str):
             status_code=400,
             detail="cost_threshold out of range [0, 1]",
         )
+    raw_gap = body.get("gap_threshold_m")
+    if raw_gap is None:
+        gap_threshold_m = state.pairing_tuning().gap_threshold_m
+    else:
+        try:
+            gap_threshold_m = float(raw_gap)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="invalid 'gap_threshold_m'")
+        if not 0.0 <= gap_threshold_m <= 2.0:
+            raise HTTPException(
+                status_code=400,
+                detail="gap_threshold_m out of range [0, 2.0]",
+            )
 
     # Existence check matches `state.store_result`'s own guard:
     # a session is "alive" iff it has a pitch entry, a result entry, or
@@ -237,7 +256,9 @@ async def sessions_recompute(request: Request, session_id: str):
         raise HTTPException(status_code=404, detail=f"session {session_id} not found")
 
     new_result = recompute_result_for_session(
-        state, session_id, cost_threshold=cost_threshold,
+        state, session_id,
+        cost_threshold=cost_threshold,
+        gap_threshold_m=gap_threshold_m,
     )
     state.store_result(new_result)
     return {"ok": True, "result": new_result.model_dump()}
