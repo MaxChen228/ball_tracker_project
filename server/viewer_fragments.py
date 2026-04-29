@@ -34,13 +34,14 @@ def video_cell_html(
             )
         # Reserve a 16:9 (or calibration-aspect) box so the cell takes the
         # same internal footprint as a populated cell — avoids the page
-        # shifting once the MOV upload lands. Aspect inherits from the
-        # base `.vid-media` rule; `.vid-media.empty` adds the dashed
-        # border + centred message.
+        # shifting once the MOV upload lands. Without an aspect-ratio
+        # the absolutely-positioned `.vid-media` collapses inside the
+        # flex `.vid-frame` and the placeholder ends up a thin strip;
+        # 16:9 is the safe default (matches 1920x1080 capture).
         if image_width_px and image_height_px:
             media_style = f' style="aspect-ratio:{image_width_px}/{image_height_px}"'
         else:
-            media_style = ""
+            media_style = ' style="aspect-ratio:16/9"'
         body = (
             f'<div class="vid-frame">'
             f'<div class="vid-media empty"{media_style}>'
