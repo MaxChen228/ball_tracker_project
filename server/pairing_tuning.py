@@ -17,6 +17,11 @@ emits all survivors. Two thresholds gate which survive:
   strip's "Gap ≤" slider → POST /sessions/{sid}/recompute, which writes
   `SessionResult.gap_threshold_m` and reruns pairing on the persisted
   candidates.
+
+`server/dry_run_shape.py` and `server/dry_run_multi_ray.py` hard-code
+`GAP_MAX=0.30` for offline research artefacts — looser than production
+on purpose. Don't tidy them into this default; the looseness is the
+point of the offline tools.
 """
 from __future__ import annotations
 
