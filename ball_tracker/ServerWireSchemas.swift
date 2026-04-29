@@ -1,14 +1,5 @@
 import Foundation
 
-// Wire-format types shared across iOS↔server boundary. Kept in
-// `extension ServerUploader` so the original `ServerUploader.PitchPayload`
-// / `ServerUploader.DetectionPath` namespacing across ~50 call sites
-// stays valid — the only change is which file these definitions live in.
-//
-// CLAUDE.md flags wire schemas as one of the load-bearing alignment axes
-// (PR #93 “iOS↔server alignment scorecard”), so giving them a dedicated
-// file makes diffs against `server/schemas.py` easier to spot.
-
 extension ServerUploader {
     struct HSVRangePayload: Codable, Equatable {
         let h_min: Int

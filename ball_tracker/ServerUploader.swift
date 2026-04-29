@@ -13,13 +13,6 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "netwo
 ///                  detection is the sole data path; no detection runs on
 ///                  the phone any more)
 final class ServerUploader: @unchecked Sendable {
-    // Wire-format Codable types (HSVRangePayload, ShapeGatePayload,
-    // DetectionPath, BlobCandidate, FramePayload, CaptureTelemetry,
-    // PitchPayload, PitchUploadResponse, DeviceSocketEvent,
-    // TrackingExposureCapMode) live in ServerWireSchemas.swift as a
-    // `extension ServerUploader { ... }` so the original namespacing
-    // (`ServerUploader.PitchPayload` etc.) stays valid across call sites.
-
     struct ServerConfig {
         var serverIP: String = "192.168.1.100"
         var serverPort: Int = 8765
