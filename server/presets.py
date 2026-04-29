@@ -1,21 +1,20 @@
-"""Single source of truth for HSV detection presets.
+"""Single source of truth for detection presets.
 
-Historically two independent `_HSV_PRESETS` dicts existed (one in
-`routes/settings.py` typed as `HSVRange`, another in
-`render_dashboard_session.py` as plain dicts). They drifted in style
-and risked drifting in values. This module is the canonical registry
-— both consumers (apply-preset endpoint, dashboard preset buttons)
-import from here.
-
-A "preset" today is HSV-only. ShapeGate / CandidateSelectorTuning are
-independent runtime knobs without preset semantics; if that changes,
-extend `Preset` to carry the full triple.
+A preset bundles the **full detection-config triple** — HSVRange +
+ShapeGate + CandidateSelectorTuning — so switching presets is a single
+atomic operation that produces a reproducible config, and a frozen
+pitch can be tagged with the preset that generated it. Earlier the
+preset only carried HSV; shape_gate / selector were silently inherited
+from current state during a `source=preset:NAME` reprocess, which
+defeated the whole point of "rerun s_xxx with blue_ball" being
+disk-independent.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from detection import HSVRange
+from candidate_selector import CandidateSelectorTuning
+from detection import HSVRange, ShapeGate
 
 
 @dataclass(frozen=True)
@@ -23,18 +22,19 @@ class Preset:
     name: str
     label: str
     hsv: HSVRange
+    shape_gate: ShapeGate
+    selector: CandidateSelectorTuning
 
 
 PRESETS: dict[str, Preset] = {
     "tennis": Preset(
         name="tennis",
         label="Tennis",
-        # Bound to `HSVRange.default()` rather than redeclared so the two
-        # cannot drift if the default is ever retuned. (`HSVRange.default`
-        # is the headless-boot fallback when `data/hsv_range.json` is
-        # absent; "tennis preset" and "default" are conceptually the
-        # same thing — yellow-green tennis ball.)
+        # All three bound to module defaults so retuning a default
+        # auto-propagates to the preset and there's no drift to chase.
         hsv=HSVRange.default(),
+        shape_gate=ShapeGate.default(),
+        selector=CandidateSelectorTuning.default(),
     ),
     "blue_ball": Preset(
         name="blue_ball",
@@ -44,6 +44,16 @@ PRESETS: dict[str, Preset] = {
         # because the ball's shaded underside drops to V~80 and lifting
         # v_min carves the mask into a crescent that fails aspect.
         hsv=HSVRange(h_min=105, h_max=112, s_min=140, s_max=255, v_min=40, v_max=255),
+        # Tighter aspect (0.75 vs default 0.70): the project ball is
+        # rounder than a tennis ball — minimal motion blur ellipsing on
+        # the rig — so we can afford a stricter circularity floor that
+        # rejects more clutter (0.63-0.70 fill range observed at p50;
+        # see CLAUDE.md tuning baselines).
+        shape_gate=ShapeGate(aspect_min=0.75, fill_min=0.55),
+        # Same selector weights as default — there's no rationale to
+        # weight aspect/fill differently for the blue ball; the cost
+        # function operates on already-normalized residuals.
+        selector=CandidateSelectorTuning.default(),
     ),
 }
 

@@ -26,10 +26,13 @@ _SESSION_ID_RE = re.compile(r"^s_[0-9a-f]{4,32}$")
 #   that an algorithm change didn't shift results. Fails fast (409) if any
 #   queued pitch lacks one of the three frozen fields (legacy pitch from
 #   before PR #93 stamping landed).
-# - "preset:<name>": canonical HSV preset from `presets.PRESETS`. Shape gate
-#   and selector tuning still come from current state, since presets are
-#   HSV-only today. Does NOT mutate disk — research compares run cleanly
-#   without disturbing the live dashboard config.
+# - "preset:<name>": canonical preset from `presets.PRESETS`. The preset
+#   carries its own shape_gate + selector (Phase 1 of the unified-config
+#   redesign — earlier the preset only carried HSV and shape_gate /
+#   selector silently inherited from state, which defeated the
+#   "research-compare without disk mutation" property because a
+#   concurrent dashboard slider edit could change the cost basis
+#   mid-reprocess). Does NOT mutate disk.
 def _resolve_detection_config(
     source: str,
     pitch: PitchPayload,
@@ -69,10 +72,11 @@ def _resolve_detection_config(
                 status_code=400,
                 detail=f"unknown preset: {name!r} (known: {sorted(PRESETS)})",
             )
+        preset = PRESETS[name]
         return (
-            PRESETS[name].hsv,
-            state.shape_gate(),
-            state.candidate_selector_tuning(),
+            preset.hsv,
+            preset.shape_gate,
+            preset.selector,
             source,
         )
     raise HTTPException(
