@@ -30,37 +30,15 @@
     }
   });
 
-  // [Clear] — drop the per-cam accumulator buffer. Operator presses
-  // this when they know the cam or board moved between [Calibrate]
-  // presses (buffer state is no longer aligned with the scene).
-  // Idempotent on already-empty buffers; tickStatus refreshes the row.
-  document.addEventListener('click', async (e) => {
-    const btn = e.target.closest('[data-clear-buffer]');
-    if (!btn) return;
-    if (btn.disabled) return;
-    const cam = btn.dataset.clearBuffer;
-    btn.disabled = true;
-    const orig = btn.textContent;
-    btn.textContent = 'Clearing…';
-    try {
-      await fetch('/calibration/buffer/clear/' + encodeURIComponent(cam),
-                  { method: 'POST' });
-      tickStatus();
-    } finally {
-      btn.disabled = false;
-      btn.textContent = orig;
-    }
-  });
-
   // [Reset rig] — full re-setup affordance. Wipes calibrations +
-  // extended markers + accumulator buffers. Behind a confirm so a
+  // extended markers + last-solve records. Behind a confirm so a
   // misclick doesn't nuke a working rig.
   document.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-reset-rig]');
     if (!btn) return;
     if (btn.disabled) return;
     const ok = window.confirm(
-      'Reset rig?\n\nThis wipes all calibrations + extended markers + accumulator buffers ' +
+      'Reset rig?\n\nThis wipes all calibrations + extended markers + last-solve records ' +
       'across both cams. Per-device ChArUco intrinsics survive.\n\nProceed?'
     );
     if (!ok) return;

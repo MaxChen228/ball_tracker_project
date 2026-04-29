@@ -13,7 +13,7 @@
       currentPreviewRequested = s.preview_requested || {};
       currentSyncCommands = s.sync_commands || {};
       currentAutoCalibration = s.auto_calibration || { active: {}, last: {} };
-      currentCalibrationBuffers = s.calibration_buffers || {};
+      currentCalibrationLastSolves = s.calibration_last_solves || {};
       currentKnownMarkerIds = s.known_marker_ids || { plate: [], extended: [] };
       renderDevices({
         devices: s.devices || [],
@@ -22,7 +22,7 @@
         sync_commands: currentSyncCommands,
         calibration_last_ts: currentCalibrationLastTs || {},
         auto_calibration: currentAutoCalibration,
-        calibration_buffers: currentCalibrationBuffers,
+        calibration_last_solves: currentCalibrationLastSolves,
         known_marker_ids: currentKnownMarkerIds,
       });
       renderSession(s);
@@ -52,7 +52,7 @@
         sync_commands: currentSyncCommands,
         calibration_last_ts: currentCalibrationLastTs,
         auto_calibration: currentAutoCalibration,
-        calibration_buffers: currentCalibrationBuffers || {},
+        calibration_last_solves: currentCalibrationLastSolves || {},
         known_marker_ids: currentKnownMarkerIds || { plate: [], extended: [] },
       });
       renderSession({ devices: currentDevices || [], session: currentSession, calibrations: currentCalibrations });
