@@ -33,6 +33,15 @@ def test_score_candidates_empty_returns_empty():
     assert score_candidates([], _T) == []
 
 
+def test_ideal_candidate_has_zero_cost():
+    """A blob at aspect=1.0 (perfectly square bbox) and fill=0.68
+    (project-ball median) is the ideal-shape point — both penalties
+    evaluate to zero, so total cost is exactly 0 regardless of
+    weight tuning. Locks the ideal-point invariant directly."""
+    ideal = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68)
+    assert score_candidates([ideal], _T) == [0.0]
+
+
 def test_size_does_not_affect_cost():
     """Selector is scale-invariant: holding aspect/fill equal, area
     has no effect. A blob 10× larger costs exactly the same."""
