@@ -392,7 +392,7 @@ def render_viewer_html(
         <tr><td>Space</td><td>Play / pause</td></tr>
         <tr><td>, &nbsp;.</td><td>Prev / next frame</td></tr>
         <tr><td>Shift+, &nbsp;.</td><td>&plusmn;10 frames</td></tr>
-        <tr><td>&larr; &nbsp;&rarr;</td><td>&plusmn;0.5 second</td></tr>
+        <tr><td>&larr; &nbsp;&rarr;</td><td>Prev / next frame</td></tr>
         <tr><td>Home / End</td><td>First / last frame</td></tr>
         <tr><td>D &nbsp;F</td><td>Prev / next ball-detected frame</td></tr>
         <tr><td>1 &ndash; 5</td><td>Speed presets</td></tr>
