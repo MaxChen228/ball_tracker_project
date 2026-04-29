@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime as _datetime
 import json as _json
+import re
 from pathlib import Path
 
 import html as _html
@@ -530,7 +531,7 @@ window._applyTuning = function(btn) {{
 </body></html>"""
 
 
-_VIEWER_CSS_PATH = Path(__file__).parent / "static" / "viewer" / "viewer.css"
+_VIEWER_STATIC_DIR = Path(__file__).parent / "static" / "viewer"
 
 
 def _resolve_viewer_css_template() -> str:
@@ -540,13 +541,25 @@ def _resolve_viewer_css_template() -> str:
     f-string fields, so resolve via `str.replace`. The remaining
     `{SCENE_FLEX}` / `{VIDEOS_FLEX}` slots are filled per-page in
     `_viewer_css`."""
-    css = _VIEWER_CSS_PATH.read_text(encoding="utf-8")
+    css = (_VIEWER_STATIC_DIR / "viewer.css").read_text(encoding="utf-8")
     css = css.replace("{BG}", _BG).replace("{SURFACE}", _SURFACE)
     css = css.replace("{INK}", _INK).replace("{SUB}", _SUB)
     css = css.replace("{BORDER_BASE}", _BORDER_BASE).replace("{BORDER_L}", _BORDER_L)
     css = css.replace("{CONTRA}", _CONTRA).replace("{DUAL}", _DUAL)
     css = css.replace("{DEV}", _DEV).replace("{ACCENT}", _ACCENT)
     css = css.replace("{OK}", _OK).replace("{PENDING}", _PENDING)
+    # Catch any placeholder we forgot to wire up — failure mode is silent
+    # otherwise (browser ignores invalid CSS, dashboard renders unstyled).
+    # Mirrors the 2026-04-22 dashboard incident where an unresolved
+    # `{PLATE_WORLD_JS}` token blew up the IIFE in runtime; here the
+    # symptom would be even quieter, so fail loud at module load instead.
+    leftover = re.findall(r"\{[A-Z_]+\}", css)
+    per_call = {"{SCENE_FLEX}", "{VIDEOS_FLEX}"}
+    unresolved = [t for t in leftover if t not in per_call]
+    if unresolved:
+        raise RuntimeError(
+            f"viewer.css has unresolved placeholders: {sorted(set(unresolved))}"
+        )
     return css
 
 
@@ -560,11 +573,6 @@ def _viewer_css(scene_flex: str, videos_flex: str) -> str:
             .replace("{SCENE_FLEX}", scene_flex)
             .replace("{VIDEOS_FLEX}", videos_flex)
     )
-
-
-
-
-_VIEWER_STATIC_DIR = Path(__file__).parent / "static" / "viewer"
 
 
 def _resolve_viewer_js_template() -> str:
