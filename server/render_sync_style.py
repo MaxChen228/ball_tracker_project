@@ -4,7 +4,7 @@ from __future__ import annotations
 # Sync-page-only additions on top of the shared _CSS: a single-column
 # main-area (no sidebar), the trace plot container sizing, and the nav
 # link + sync-chip styles introduced here (mirrored into the dashboard's
-# nav via render_dashboard.py so the link can be rendered there too).
+# nav via render_dashboard_page.py so the link can be rendered there too).
 _SYNC_CSS = """
 .main-sync {
   max-width: 1100px; margin: 0 auto;
