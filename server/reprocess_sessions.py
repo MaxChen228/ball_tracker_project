@@ -18,11 +18,19 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import session_results
 from detection import HSVRange, ShapeGate
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pairing_tuning import PairingTuning
 from pipeline import detect_pitch
-from schemas import CalibrationSnapshot, PitchPayload, SessionResult
+from schemas import (
+    CalibrationSnapshot,
+    CandidateSelectorTuningPayload,
+    HSVRangePayload,
+    PitchPayload,
+    SessionResult,
+    ShapeGatePayload,
+)
 
 logger = logging.getLogger("reprocess")
 
@@ -133,19 +141,83 @@ def select_pitch_files(args: argparse.Namespace) -> list[Path]:
     return paths
 
 
-def rerun_detection(pitch_path: Path, hsv: HSVRange, shape_gate: ShapeGate, selector_tuning, dry_run: bool) -> PitchPayload | None:
+def rerun_detection(
+    pitch_path: Path,
+    hsv: HSVRange,
+    shape_gate: ShapeGate,
+    selector_tuning,
+    dry_run: bool,
+    *,
+    use_frozen_snapshot: bool = False,
+) -> PitchPayload | None:
+    """Re-run server-side detection on one persisted pitch.
+
+    Default: use **current** disk config (`data/hsv_range.json` etc.) —
+    matches the operator's tuning workflow ("I tweaked HSV, rerun this
+    session and see if it improves"). The freshly-used values are
+    stamped back onto the pitch so `pitch.*_used` always reflects the
+    config of the most recent detection run.
+
+    Opt-in `use_frozen_snapshot=True` (CLI: `--use-frozen-snapshot`):
+    re-use the values stamped on the pitch by the original detection
+    run. For reproducibility audits — answers "what would the original
+    live/server_post run have produced if I rebuilt from scratch?"
+    Falls back to disk for legacy pitches that pre-date the stamp,
+    logging a warning so the operator knows that rerun isn't an
+    unambiguous historical reproduction."""
     pitch = PitchPayload.model_validate_json(pitch_path.read_text())
     video = find_video(pitch.session_id, pitch.camera_id)
     if video is None:
         logger.warning("  skip %s/%s — no MOV", pitch.session_id, pitch.camera_id)
         return None
+
+    if not use_frozen_snapshot:
+        hsv_eff, gate_eff, tuning_eff = hsv, shape_gate, selector_tuning
+    else:
+        from candidate_selector import CandidateSelectorTuning
+        if pitch.hsv_range_used is not None:
+            p = pitch.hsv_range_used
+            hsv_eff = HSVRange(
+                h_min=p.h_min, h_max=p.h_max,
+                s_min=p.s_min, s_max=p.s_max,
+                v_min=p.v_min, v_max=p.v_max,
+            )
+        else:
+            logger.warning(
+                "  %s/%s legacy pitch lacks hsv_range_used — using current disk config",
+                pitch.session_id, pitch.camera_id,
+            )
+            hsv_eff = hsv
+        if pitch.shape_gate_used is not None:
+            gate_eff = ShapeGate(
+                aspect_min=pitch.shape_gate_used.aspect_min,
+                fill_min=pitch.shape_gate_used.fill_min,
+            )
+        else:
+            logger.warning(
+                "  %s/%s legacy pitch lacks shape_gate_used — using current disk config",
+                pitch.session_id, pitch.camera_id,
+            )
+            gate_eff = shape_gate
+        if pitch.candidate_selector_tuning_used is not None:
+            tuning_eff = CandidateSelectorTuning(
+                w_aspect=pitch.candidate_selector_tuning_used.w_aspect,
+                w_fill=pitch.candidate_selector_tuning_used.w_fill,
+            )
+        else:
+            logger.warning(
+                "  %s/%s legacy pitch lacks candidate_selector_tuning_used — using current disk config",
+                pitch.session_id, pitch.camera_id,
+            )
+            tuning_eff = selector_tuning
+
     old_hits = sum(1 for f in pitch.frames_server_post if f.px is not None)
     frames = detect_pitch(
         video_path=video,
         video_start_pts_s=pitch.video_start_pts_s,
-        hsv_range=hsv,
-        shape_gate=shape_gate,
-        selector_tuning=selector_tuning,
+        hsv_range=hsv_eff,
+        shape_gate=gate_eff,
+        selector_tuning=tuning_eff,
     )
     new_hits = sum(1 for f in frames if f.px is not None)
     logger.info(
@@ -153,6 +225,18 @@ def rerun_detection(pitch_path: Path, hsv: HSVRange, shape_gate: ShapeGate, sele
         pitch.session_id, pitch.camera_id, len(frames), old_hits, new_hits,
     )
     pitch.frames_server_post = frames
+    # Re-stamp with the values just used so legacy pitches stop being legacy.
+    pitch.hsv_range_used = HSVRangePayload(
+        h_min=hsv_eff.h_min, h_max=hsv_eff.h_max,
+        s_min=hsv_eff.s_min, s_max=hsv_eff.s_max,
+        v_min=hsv_eff.v_min, v_max=hsv_eff.v_max,
+    )
+    pitch.shape_gate_used = ShapeGatePayload(
+        aspect_min=gate_eff.aspect_min, fill_min=gate_eff.fill_min,
+    )
+    pitch.candidate_selector_tuning_used = CandidateSelectorTuningPayload(
+        w_aspect=tuning_eff.w_aspect, w_fill=tuning_eff.w_fill,
+    )
     if not dry_run:
         atomic_write(pitch_path, pitch.model_dump_json())
     return pitch
@@ -198,6 +282,16 @@ def triangulate_session(
         cost_threshold=pairing_tuning.cost_threshold,
         gap_threshold_m=pairing_tuning.gap_threshold_m,
     )
+    # Mirror the pitch-level frozen config onto the result so the viewer
+    # tuning strip / future audit can answer "what HSV / shape-gate /
+    # selector tuning produced these points?" without reading the pitch
+    # JSON. Aggregation policy (A-wins, fall-back-to-B, warn on divergence)
+    # is shared with `session_results.aggregate_pitch_used_configs` so the
+    # online rebuild and offline reprocess paths can never silently disagree.
+    used = session_results.aggregate_pitch_used_configs(a, b, sid)
+    result.hsv_range_used = used["hsv_range_used"]
+    result.shape_gate_used = used["shape_gate_used"]
+    result.candidate_selector_tuning_used = used["candidate_selector_tuning_used"]
     if a is None or b is None:
         logger.info("  %s — solo (%s only); skipping triangulation",
                     sid, "A" if a else "B")
@@ -245,6 +339,15 @@ def main() -> None:
     g.add_argument("--session", nargs="+", help="explicit session IDs (s_xxxx or xxxx)")
     g.add_argument("--all", action="store_true", help="process every pitch JSON")
     ap.add_argument("--dry-run", action="store_true", help="detect+triangulate but don't overwrite JSONs")
+    ap.add_argument(
+        "--use-frozen-snapshot",
+        action="store_true",
+        help="reuse the per-pitch frozen detection-config snapshot "
+             "(pitch.{hsv,shape_gate,selector_tuning}_used) instead of "
+             "current data/*.json values. For reproducibility audits — "
+             "default behavior is to pick up your current disk config so "
+             "tuning workflows actually see new results.",
+    )
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -264,7 +367,10 @@ def main() -> None:
     by_session: dict[str, dict[str, PitchPayload]] = {}
     for path in pitch_paths:
         logger.info("redetect %s", path.name)
-        pitch = rerun_detection(path, hsv, shape_gate, selector_tuning, args.dry_run)
+        pitch = rerun_detection(
+            path, hsv, shape_gate, selector_tuning, args.dry_run,
+            use_frozen_snapshot=args.use_frozen_snapshot,
+        )
         if pitch is not None:
             by_session.setdefault(pitch.session_id, {})[pitch.camera_id] = pitch
 

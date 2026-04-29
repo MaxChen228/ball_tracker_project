@@ -2,7 +2,6 @@
 
 #import <opencv2/opencv2.h>
 #import <opencv2/imgproc.hpp>
-#import <opencv2/video/background_segm.hpp>
 
 #import <algorithm>
 #import <mach/mach_time.h>
@@ -33,11 +32,6 @@ static const int kMaxAreaPx = 150000;
 // 0.60 floor was clipping real hits on tennis-ball rotations.
 static const double kMinAspect = 0.70;
 static const double kMinFill = 0.55;
-
-// ROI tracking parameters (stateful detector only).
-static const int kROIRadiusMultiplier = 3;     // crop = lastRadius × this, both sides
-static const int kROIMinSide = 256;            // never crop tighter than 256×256
-static const int kROIMaxConsecutiveMisses = 10; // reset tracking after N misses
 
 // ---------------------------------------------------------------------------
 // Timing harness. Off in release; on in DEBUG. Reports median over the last
@@ -80,7 +74,6 @@ static double machToMs(uint64_t delta) {
 }
 
 static TimingRing gStatelessTiming;
-static TimingRing gStatefulTiming;
 static dispatch_once_t gTimingLogOnce;
 
 static void reportIfDue(TimingRing &ring, const char *tag) {
@@ -469,235 +462,6 @@ static bool mapPixelBufferToBGR(
         /*outLargestW=*/nullptr, /*outLargestH=*/nullptr
     );
     return cands;
-}
-
-@end
-
-// MARK: - BTStatefulBallDetector
-
-@implementation BTStatefulBallDetector {
-    int _hMin, _hMax, _sMin, _sMax, _vMin, _vMax;
-    double _aspectMin, _fillMin;
-    CVScratch _scratch;
-
-    // ROI tracking state
-    bool _hasPrev;
-    cv::Point2f _lastHitCenter;
-    float _lastHitRadius;
-    int _consecutiveMisses;
-}
-
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        _hMin = kDefaultHMin; _hMax = kDefaultHMax;
-        _sMin = kDefaultSMin; _sMax = kDefaultSMax;
-        _vMin = kDefaultVMin; _vMax = kDefaultVMax;
-        _aspectMin = kMinAspect; _fillMin = kMinFill;
-        _hasPrev = false;
-        _lastHitCenter = cv::Point2f(0, 0);
-        _lastHitRadius = 0;
-        _consecutiveMisses = 0;
-    }
-    return self;
-}
-
-- (void)setHMin:(int)hMin hMax:(int)hMax
-           sMin:(int)sMin sMax:(int)sMax
-           vMin:(int)vMin vMax:(int)vMax {
-    _hMin = hMin; _hMax = hMax;
-    _sMin = sMin; _sMax = sMax;
-    _vMin = vMin; _vMax = vMax;
-}
-
-- (void)setAspectMin:(double)aspectMin fillMin:(double)fillMin {
-    _aspectMin = aspectMin;
-    _fillMin = fillMin;
-}
-
-- (void)resetTracking {
-    _hasPrev = false;
-    _consecutiveMisses = 0;
-    _lastHitRadius = 0;
-}
-
-- (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer {
-    if (!mapPixelBufferToBGR(pixelBuffer, _scratch.bgr)) { return nil; }
-
-    BTBallDetection *result = nil;
-    @try {
-        result = [self detectInBGR:_scratch.bgr];
-    } @catch (NSException *e) {
-        NSLog(@"BallDetector: exception during detection: %@", e);
-        result = nil;
-    }
-    return result;
-}
-
-- (nullable BTBallDetection *)detectInBGR:(const cv::Mat &)bgr {
-    const int W = bgr.cols;
-    const int H = bgr.rows;
-
-#if BT_DETECTOR_TIMING
-    double hsvMs = 0, ccMs = 0;
-#endif
-
-    // --- ROI pass, if we have a prior hit ------------------------------
-    if (_hasPrev && _lastHitRadius > 0.0f) {
-        int side = std::max(kROIMinSide, (int)std::ceil(2.0f * kROIRadiusMultiplier * _lastHitRadius));
-        int half = side / 2;
-        int x0 = std::max(0, (int)std::round(_lastHitCenter.x) - half);
-        int y0 = std::max(0, (int)std::round(_lastHitCenter.y) - half);
-        int x1 = std::min(W, x0 + side);
-        int y1 = std::min(H, y0 + side);
-        // re-snap left/top if we clipped against the right/bottom
-        x0 = std::max(0, x1 - side);
-        y0 = std::max(0, y1 - side);
-        if (x1 > x0 && y1 > y0) {
-            cv::Rect roi(x0, y0, x1 - x0, y1 - y0);
-            cv::Mat crop = bgr(roi);
-            int bestW = 0, bestH = 0;
-            BTBallDetection *hit = detectBallCoreScratch(
-                crop, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
-                _aspectMin, _fillMin,
-                _scratch, /*offsetX=*/(double)x0, /*offsetY=*/(double)y0,
-                &bestW, &bestH
-#if BT_DETECTOR_TIMING
-                , &hsvMs, &ccMs
-#endif
-            );
-            if (hit) {
-                _lastHitCenter = cv::Point2f((float)hit.px, (float)hit.py);
-                _lastHitRadius = 0.5f * (float)std::max(bestW, bestH);
-                _consecutiveMisses = 0;
-#if BT_DETECTOR_TIMING
-                gStatefulTiming.add(hsvMs, ccMs);
-                reportIfDue(gStatefulTiming, "stateful-roi");
-#endif
-                return hit;
-            }
-            // ROI miss — announce the fallback loudly (per project rule:
-            // NO silent fallbacks). Full-frame retry follows below.
-            NSLog(@"BallDetector: ROI miss at (%.1f,%.1f r=%.1f), falling back to full frame",
-                  _lastHitCenter.x, _lastHitCenter.y, _lastHitRadius);
-        }
-    }
-
-    // --- Full-frame pass -----------------------------------------------
-    int bestW = 0, bestH = 0;
-    BTBallDetection *hit = detectBallCoreScratch(
-        bgr, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
-        _aspectMin, _fillMin,
-        _scratch, /*offsetX=*/0, /*offsetY=*/0,
-        &bestW, &bestH
-#if BT_DETECTOR_TIMING
-        , &hsvMs, &ccMs
-#endif
-    );
-#if BT_DETECTOR_TIMING
-    gStatefulTiming.add(hsvMs, ccMs);
-    reportIfDue(gStatefulTiming, "stateful-full");
-#endif
-    if (hit) {
-        _lastHitCenter = cv::Point2f((float)hit.px, (float)hit.py);
-        _lastHitRadius = 0.5f * (float)std::max(bestW, bestH);
-        _hasPrev = true;
-        _consecutiveMisses = 0;
-        return hit;
-    }
-
-    // Full-frame miss too — bump miss counter; drop tracking after N.
-    _consecutiveMisses++;
-    if (_consecutiveMisses >= kROIMaxConsecutiveMisses) {
-        if (_hasPrev) {
-            NSLog(@"BallDetector: %d consecutive misses, dropping ROI tracking",
-                  _consecutiveMisses);
-        }
-        _hasPrev = false;
-        _lastHitRadius = 0;
-    }
-    return nil;
-}
-
-- (NSArray<BTBallDetection *> *)detectAllCandidatesInPixelBuffer:(CVPixelBufferRef)pixelBuffer {
-    if (!mapPixelBufferToBGR(pixelBuffer, _scratch.bgr)) { return @[]; }
-
-    NSArray<BTBallDetection *> *result = @[];
-    @try {
-        result = [self detectAllCandidatesInBGR:_scratch.bgr];
-    } @catch (NSException *e) {
-        NSLog(@"BallDetector: exception during multi-candidate detection: %@", e);
-        result = @[];
-    }
-    return result;
-}
-
-- (NSArray<BTBallDetection *> *)detectAllCandidatesInBGR:(const cv::Mat &)bgr {
-    const int W = bgr.cols;
-    const int H = bgr.rows;
-
-    // --- ROI pass, if we have a prior hit ------------------------------
-    if (_hasPrev && _lastHitRadius > 0.0f) {
-        int side = std::max(kROIMinSide, (int)std::ceil(2.0f * kROIRadiusMultiplier * _lastHitRadius));
-        int half = side / 2;
-        int x0 = std::max(0, (int)std::round(_lastHitCenter.x) - half);
-        int y0 = std::max(0, (int)std::round(_lastHitCenter.y) - half);
-        int x1 = std::min(W, x0 + side);
-        int y1 = std::min(H, y0 + side);
-        x0 = std::max(0, x1 - side);
-        y0 = std::max(0, y1 - side);
-        if (x1 > x0 && y1 > y0) {
-            cv::Rect roi(x0, y0, x1 - x0, y1 - y0);
-            cv::Mat crop = bgr(roi);
-            int largestW = 0, largestH = 0;
-            NSArray<BTBallDetection *> *cands = detectAllCandidatesScratch(
-                crop, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
-                _aspectMin, _fillMin,
-                _scratch,
-                /*offsetX=*/(double)x0, /*offsetY=*/(double)y0,
-                &largestW, &largestH
-            );
-            if (cands.count > 0) {
-                BTBallDetection *largest = cands.firstObject;
-                _lastHitCenter = cv::Point2f((float)largest.px, (float)largest.py);
-                _lastHitRadius = 0.5f * (float)std::max(largestW, largestH);
-                _consecutiveMisses = 0;
-                return cands;
-            }
-            // ROI miss — same loud fallback as the single-best path.
-            NSLog(@"BallDetector: ROI miss (multi) at (%.1f,%.1f r=%.1f), falling back to full frame",
-                  _lastHitCenter.x, _lastHitCenter.y, _lastHitRadius);
-        }
-    }
-
-    // --- Full-frame pass -----------------------------------------------
-    int largestW = 0, largestH = 0;
-    NSArray<BTBallDetection *> *cands = detectAllCandidatesScratch(
-        bgr, _hMin, _hMax, _sMin, _sMax, _vMin, _vMax,
-        _aspectMin, _fillMin,
-        _scratch,
-        /*offsetX=*/0.0, /*offsetY=*/0.0,
-        &largestW, &largestH
-    );
-    if (cands.count > 0) {
-        BTBallDetection *largest = cands.firstObject;
-        _lastHitCenter = cv::Point2f((float)largest.px, (float)largest.py);
-        _lastHitRadius = 0.5f * (float)std::max(largestW, largestH);
-        _hasPrev = true;
-        _consecutiveMisses = 0;
-        return cands;
-    }
-
-    _consecutiveMisses++;
-    if (_consecutiveMisses >= kROIMaxConsecutiveMisses) {
-        if (_hasPrev) {
-            NSLog(@"BallDetector: %d consecutive misses (multi), dropping ROI tracking",
-                  _consecutiveMisses);
-        }
-        _hasPrev = false;
-        _lastHitRadius = 0;
-    }
-    return @[];
 }
 
 @end

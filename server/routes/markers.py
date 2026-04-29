@@ -133,13 +133,12 @@ async def markers_scan(
     camera_a_id: str = "A",
     camera_b_id: str = "B",
 ) -> dict[str, Any]:
-    # Helpers stay in routes.calibration: _await_calibration_frame and
-    # _decode_calibration_jpeg are also used by /calibration/auto/*, and
-    # _triangulate_marker_candidates is reused by the auto-cal solver.
-    # Importing them here keeps a single source of truth without
-    # duplicating logic.
-    from routes.calibration import (
-        _await_calibration_frame,
+    # `_await_calibration_frame` is the FastAPI-wrapped frame-fetch
+    # helper that lives next to the route handlers. The pure
+    # numpy/CV helpers (`_decode_calibration_jpeg`,
+    # `_triangulate_marker_candidates`) live in `calibration_auto`.
+    from routes.calibration import _await_calibration_frame
+    from calibration_auto import (
         _decode_calibration_jpeg,
         _triangulate_marker_candidates,
     )

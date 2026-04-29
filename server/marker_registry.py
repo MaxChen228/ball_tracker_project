@@ -8,11 +8,14 @@ plane.
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from pathlib import Path
 from threading import Lock
 
 from schemas import MarkerRecord
+
+logger = logging.getLogger(__name__)
 
 
 class MarkerRegistryDB:
@@ -31,11 +34,19 @@ class MarkerRegistryDB:
             try:
                 raw_obj = json.loads(self._path.read_text())
             except Exception:
+                logger.exception(
+                    "MarkerRegistryDB: failed to parse %s — starting empty",
+                    self._path,
+                )
                 raw_obj = None
         elif self._legacy_path.exists():
             try:
                 raw_obj = json.loads(self._legacy_path.read_text())
             except Exception:
+                logger.exception(
+                    "MarkerRegistryDB: failed to parse legacy %s — starting empty",
+                    self._legacy_path,
+                )
                 raw_obj = None
         if raw_obj is None:
             return

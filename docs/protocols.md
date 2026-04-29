@@ -21,8 +21,10 @@
   video_start_pts_s: float                        # abs PTS of first MOV frame (session clock)
   video_fps: float
   frames_live: list[FramePayload] | null          # populated only on recovery paths; normally arrives over WS
-                                                  # FramePayload.candidates: list[BlobCandidate] is the Phase B wire shape;
-                                                  # px/py/area get filled in by the server's candidate selector, not by iOS.
+                                                  # FramePayload.candidates: list[BlobCandidate] is the Phase B wire shape.
+                                                  # iOS ships px/py/area/area_score/aspect/fill directly (post-abfa422);
+                                                  # server stamps `cost` in live_pairing._resolve_candidates after the
+                                                  # shape-prior selector runs.
   local_recording_index: int?                     # device-local debug counter; server ignores
   ```
 
@@ -35,3 +37,133 @@
 Pairing is by **`session_id` alone** (server-minted via `POST /sessions/arm`). iPhones never generate pairing identifiers.
 
 Triangulation requires **both** cameras to have `intrinsics` and `homography` present AND `sync_anchor_timestamp_s` non-null — if any is missing, `SessionResult.error` is set and triangulation is skipped (raw payload + MOV are still persisted for forensics).
+
+## WebSocket messages — `/ws/device/{cam}`
+
+The phone holds one WS connection per camera for the lifetime of its app session. Inbound (server→iOS) carries control commands; outbound (iOS→server) carries liveness + the live frame stream. Handler: `server/routes/device_ws.py::ws_device`. Send helper: `server/ws.py::DeviceSocketManager.send` (logs cam id + message type on every drop so silent failures are auditable). Every message is a JSON object with a `type` discriminator.
+
+### Server → iOS
+
+#### `type: "settings"` — full runtime knob snapshot
+
+Pushed on connect, on every `hello` from the phone, and on every dashboard-driven knob change. Source: `main.py::_settings_message_for`. iOS treats this as the authoritative replacement for everything in this list — no merge.
+
+```
+type: "settings"
+camera_id: str                       # echo of the {cam} in the URL (server-side cross-check)
+paths: list[str]                     # default DetectionPath set for newly-armed sessions (always {"live"} post-Phase-1)
+hsv_range: {hMin,hMax,sMin,sMax,vMin,vMax}  # from data/hsv_range.json (POST /detection/hsv)
+shape_gate: {aspect_min, fill_min}   # from data/shape_gate.json (POST /detection/shape_gate)
+chirp_detect_threshold: float        # matched-filter cutoff for legacy chirp-listener path; data/chirp_detect_threshold.json
+mutual_sync_threshold: float         # cutoff for the two-device mutual-sync coordinator; data/mutual_sync_threshold.json
+heartbeat_interval_s: float          # cadence iOS uses for upstream {type:"heartbeat"} (state.heartbeat_interval_s)
+tracking_exposure_cap: str           # TrackingExposureCapMode enum value (e.g. "auto"/"capped_2ms"); data/tracking_exposure_cap.json
+capture_height_px: int               # 1080 / 720 etc. — iOS picks the matching 240 fps format; data/capture_height.json
+preview_requested: bool              # True while the dashboard's Preview-on toggle is held for this cam
+calibration_frame_requested: bool    # True while /calibration/auto is awaiting a single still from this cam
+device_time_synced: bool             # mirrors the gated time_synced bit /status reports for this cam
+device_time_sync_id: str | null      # last time_sync_id the server expects from this cam (chirp run id)
+```
+
+#### `type: "arm"` — start an armed session
+
+Pushed when an operator hits **Arm** in the dashboard, and re-pushed on reconnect if a session is already armed. Source: `main.py::_arm_message_for`.
+
+```
+type: "arm"
+sid: str                             # server-minted session id (^s_[0-9a-f]{4,32}$)
+paths: list[str]                     # snapshotted Session.paths (sorted) — always ["live"] at arm time
+max_duration_s: float                # auto-disarm timeout; iOS displays + uses for its own watchdog
+tracking_exposure_cap: str           # exposure cap value at arm-time; iOS applies before the first frame
+```
+
+#### `type: "disarm"` — stop the session
+
+Pushed on operator Stop, on `max_duration_s` timeout, or on auto-end after the first MOV upload. Source: `main.py::_disarm_message_for`.
+
+```
+type: "disarm"
+sid: str                             # matches the sid that was previously armed
+```
+
+#### `type: "sync_run"` — late-join a mutual-sync run
+
+Pushed in `routes/device_ws.py::ws_device` only at connect-time, when a mutual-sync run is already active and this cam hasn't reported yet. The standard sync flow uses out-of-band coordination (HTTP `/sync/*` + the dashboard); this push exists so a cam reconnecting mid-run doesn't sit idle until the run times out. Fields are pulled from `state.sync_params()`.
+
+```
+type: "sync_run"
+sync_id: str                         # the active sync run id
+emit_at_s: float                     # session-clock PTS at which this cam should emit its chirp (A vs B)
+record_duration_s: float             # how long iOS records audio for matched-filter analysis
+```
+
+(There is no `type: "sync_command"` push to iOS — `sync_command` is the in-server bookkeeping name for the same intent. iOS only receives the resolved `sync_run` shape above.)
+
+### iOS → Server
+
+All inbound messages are JSON; `device_ws.note_seen` updates the cam's last-seen timestamp on every recognised message. Unknown `type` values are silently dropped (no `or fallback` — they just skip every branch).
+
+#### `type: "hello"` — connection greeting
+
+Sent right after the WS opens. Server uses it to confirm the cam's identity / battery / sync state. Server replies with a fresh `settings` push (so iOS doesn't have to remember the bootstrap settings if it reconnects).
+
+```
+type: "hello"
+time_sync_id: str | null             # last chirp run id this cam latched
+sync_anchor_timestamp_s: float | null # PTS of the chirp peak on the cam's session clock
+battery_level: float | null          # 0..1; null if UIDevice monitoring is off (-1 maps to null)
+battery_state: str | null            # "unknown" / "unplugged" / "charging" / "full"
+device_id: str | null                # identifierForVendor UUID (or "unknown-<uuid>" fallback); ≤ 64 chars
+device_model: str | null             # sysctl hw.machine ("iPhone15,3" etc.); ≤ 32 chars
+```
+
+#### `type: "heartbeat"` — periodic liveness + telemetry
+
+Sent every `heartbeat_interval_s` (≈ 1 Hz). Same identity/battery/sync fields as `hello`, plus optional `sync_telemetry` for the mutual-sync coordinator. Server fans out a `device_heartbeat` SSE so the dashboard updates without waiting for the 5 s `/status` poll.
+
+```
+type: "heartbeat"
+time_sync_id, sync_anchor_timestamp_s, battery_level, battery_state, device_id, device_model
+                                     # same shapes as `hello`
+sync_telemetry: {…} | absent         # opaque to this doc; consumed by state._sync.record_sync_telemetry
+```
+
+#### `type: "frame"` — one detected frame
+
+Sent at capture rate (240 Hz on the binned 240 fps formats) while the session is armed. iOS bypasses pydantic validation server-side (`model_construct`), so missing keys raise loud `KeyError` — the lockstep failure mode for an iOS build that doesn't match the schema. Required keys:
+
+```
+type: "frame"
+i: int                               # frame_index (monotonic per-camera)
+ts: float                            # timestamp_s on iOS session clock
+sid: str                             # session id; empty/missing → frame is silently dropped (no fallback)
+candidates: list[{
+    px: float,                       # blob centroid X in pixels
+    py: float,                       # blob centroid Y in pixels
+    area: int,                       # CC stat area in pixels
+    area_score: float,               # area / max_area_in_batch on the producing side
+                                     #   — kept for the viewer BLOBS-overlay sort fallback
+                                     #   — NOT a selector-cost input (see candidate_selector.py)
+    aspect: float,                   # min(w,h)/max(w,h) of the CC bounding box; required since shape-prior selector landed
+    fill: float,                     # area / (w*h) of the CC bounding box; required since shape-prior selector landed
+}]
+```
+
+`cost` is **server-stamped**, not iOS-shipped: `live_pairing._resolve_candidates` runs the shape-prior selector (`w_aspect·aspect_pen + w_fill·fill_pen`, frame-local — no temporal state, no `area_score` term) and copies the resulting cost onto every candidate before persistence. Empty `candidates` list → frame is buffered but `ball_detected=False` and no triangulation runs.
+
+#### `type: "cycle_end"` — path completion signal
+
+Sent when iOS finishes its end of the live path (session timeout, user stop, error). Server marks the live path ended for this cam and either persists the WS-buffered frames or rebuilds the SessionResult from already-persisted state.
+
+```
+type: "cycle_end"
+sid: str                             # session id
+reason: str | null                   # free-form ("timeout", "user_stop", etc.) — stored on the path status pill
+```
+
+### Operator audit checklist (when changing wire shapes)
+
+Per project memory `feedback_ws_only_means_check_all_command_paths`, after any WS schema edit grep for every send/receive site:
+- Server → iOS sends: `_settings_message_for`, `_arm_message_for`, `_disarm_message_for`, the inline `sync_run` dict in `routes/device_ws.py::ws_device`.
+- iOS → server receivers: the four `if mtype == "..."` branches in `routes/device_ws.py::ws_device` (`hello` / `heartbeat` / `frame` / `cycle_end`).
+- iOS encoders: `ball_tracker/ServerUploader.swift` Codable structs **and** `ball_tracker/LiveFrameDispatcher.swift` hand-encoded dict (the dispatch-queue path that bypasses Codable — abfa422 was the bug where this was forgotten).

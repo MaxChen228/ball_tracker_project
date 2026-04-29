@@ -579,10 +579,24 @@ class State:
     ) -> tuple[list[TriangulatedPoint], dict[str, int], FramePayload]:
         with self._lock:
             live = self._live_pairings.setdefault(session_id, LivePairingSession(session_id))
-            # Refresh selector + pairing tuning every ingest so dashboard
-            # slider changes apply on the next frame without a session reset.
-            live.tuning = self._candidate_selector_tuning
-            live.pairing_tuning = self._pairing_tuning
+            # Freeze selector + pairing tuning + hsv/shape on the FIRST real
+            # frame seen by this LivePairingSession. Mirrors the cd87995
+            # PairingTuning-on-SessionResult contract: a session's cost basis
+            # is decided at arm time and cannot shift mid-cycle. Dashboard
+            # slider edits during an active session land on the NEXT session.
+            #
+            # Idempotent: arm_session pre-creates LivePairingSession (so a
+            # `session_id not in dict` check would never fire on the dashboard
+            # path), and tests that bypass arm hit the setdefault above. The
+            # `hsv_range_used is None` freshness check covers both: stamp
+            # exactly once on first ingest regardless of who created the
+            # LivePairingSession. Subsequent ingests see the four fields
+            # already set and skip the block.
+            if live.hsv_range_used is None:
+                live.tuning = self._candidate_selector_tuning
+                live.pairing_tuning = self._pairing_tuning
+                live.hsv_range_used = self._hsv_range
+                live.shape_gate_used = self._shape_gate
             cal_a = self._calibration_store.get("A")
             cal_b = self._calibration_store.get("B")
             dev_a = self._device_registry.get("A")
@@ -670,7 +684,11 @@ class State:
         # (px/py picked by the shape-prior selector); hand it back so
         # callers (WS handler → live_rays_for_frame) work off the resolved
         # version, not the raw inbound.
-        resolved = live.latest_frame_for(camera_id) or frame
+        resolved = live.latest_frame_for(camera_id)
+        if resolved is None:
+            raise RuntimeError(
+                f"ingest_live_frame: live buffer empty after ingest cam={camera_id} sid={session_id}"
+            )
         return created, live.frame_counts_snapshot(), resolved
 
     def live_rays_for_frame(
@@ -1367,7 +1385,19 @@ class State:
                     tracking_exposure_cap=self._runtime_settings.tracking_exposure_cap,
                     sync_id=self._common_time_sync_id_locked(now),
                 )
-                self._live_pairings[session.id] = LivePairingSession(session.id)
+                # Pre-create LivePairingSession AND stamp the frozen
+                # detection config NOW, at arm time — not at first ingest.
+                # The R7-fixed contract: a slider drag between arm and
+                # first WS frame must NOT poison the session. ingest_live_frame
+                # below has a `live.hsv_range_used is None` guard so the
+                # test-bypass-arm path (build LivePairingSession inline,
+                # call ingest directly) still gets stamped on first frame.
+                live = LivePairingSession(session.id)
+                live.tuning = self._candidate_selector_tuning
+                live.pairing_tuning = self._pairing_tuning
+                live.hsv_range_used = self._hsv_range
+                live.shape_gate_used = self._shape_gate
+                self._live_pairings[session.id] = live
                 self._current_session = session
                 self._sync.clear_time_sync_intent_locked()
                 cur = session
@@ -1413,6 +1443,36 @@ class State:
             self._pairing_tuning = tuning
             self._persist_pairing_tuning_locked()
             return self._pairing_tuning
+
+    def live_session_frozen_config(
+        self, session_id: str
+    ) -> tuple[HSVRange, ShapeGate, CandidateSelectorTuning] | None:
+        """Public accessor for the (hsv_range, shape_gate, selector_tuning)
+        triple frozen onto a LivePairingSession at first ingest_live_frame.
+
+        Returns None when:
+          - no LivePairingSession exists for `session_id` (test fixture
+            / replay path that POSTed /pitch without arming + ingesting), OR
+          - the LivePairingSession was pre-created by arm_session but no
+            live frame has flowed yet (e.g. server_post-only flow where
+            iOS never streams live frames between arm and /pitch upload).
+
+        Returns the frozen triple when first-ingest stamping has run; this
+        is the dashboard-armed live-streaming production path. Callers must
+        treat None as "no frozen snapshot — fall back to current state",
+        not as an invariant violation: server_post-only is a real flow.
+        """
+        with self._lock:
+            live = self._live_pairings.get(session_id)
+            if live is None:
+                return None
+            if live.hsv_range_used is None or live.shape_gate_used is None:
+                return None
+            return (
+                live.hsv_range_used,
+                live.shape_gate_used,
+                live.tuning,
+            )
 
     def set_shape_gate(self, shape_gate: ShapeGate) -> ShapeGate:
         with self._lock:
