@@ -72,11 +72,17 @@ final class CameraCommandRouter {
                 commandLog.warning("ws sync_run dropped: calibration capture in flight (state=\(String(describing: self.deps.getCalCaptureState()), privacy: .public))")
                 return
             }
-            guard let sid = message["sync_id"] as? String,
-                  let emitAtS = message["emit_at_s"] as? [Double],
-                  let recordDurationS = message["record_duration_s"] as? Double
-            else {
-                commandLog.error("ws sync_run missing required fields sid=\(message["sync_id"] as? String ?? "-", privacy: .public)")
+            guard let sid = message["sync_id"] as? String else {
+                commandLog.error("ws sync_run missing required field sync_id")
+                return
+            }
+            var missing: [String] = []
+            let emitAtS = message["emit_at_s"] as? [Double]
+            let recordDurationS = message["record_duration_s"] as? Double
+            if emitAtS == nil { missing.append("emit_at_s") }
+            if recordDurationS == nil { missing.append("record_duration_s") }
+            guard let emitAtS, let recordDurationS, missing.isEmpty else {
+                commandLog.error("ws sync_run sid=\(sid, privacy: .public) missing required fields: \(missing.joined(separator: ","), privacy: .public)")
                 return
             }
             DispatchQueue.main.async {
@@ -125,8 +131,25 @@ final class CameraCommandRouter {
             )
             DispatchQueue.main.async { self.deps.healthMonitor.probeNow() }
         case "settings":
+            let camId = message["camera_id"] as? String ?? "unknown"
+            // server lockstep: main.py:510 unconditionally writes device_time_synced (default false). Missing key = schema drift, drop the whole settings update.
             guard let pushedTimeSync = message["device_time_synced"] as? Bool else {
-                commandLog.error("ws settings missing device_time_synced")
+                commandLog.error("ws settings missing device_time_synced cam=\(camId, privacy: .public)")
+                return
+            }
+            // Preview-request handler stops/starts AVCaptureSession via
+            // startStandbyCapture / stopCapture. A toggle landing while a
+            // calibration cycle is mid-swap would interleave session
+            // mutations on sessionQueue with pauseAndCaptureHighResStill,
+            // which is the most plausible reproduction of the prior
+            // "delegate silently never fires" failure mode. Guard at the
+            // top of the handler so missing optional fields atomic-drop
+            // the whole settings update — never apply paths/exposure/hsv
+            // half-way before bailing out.
+            guard let previewRequested = message["preview_requested"] as? Bool,
+                  let calFrameRequested = message["calibration_frame_requested"] as? Bool
+            else {
+                commandLog.error("ws settings missing preview_requested/calibration_frame_requested cam=\(camId, privacy: .public)")
                 return
             }
             let pushedTimeSyncId = message["device_time_sync_id"] as? String
@@ -183,18 +206,6 @@ final class CameraCommandRouter {
                 } else {
                     commandLog.warning("ws capture_height_px=\(pushedH) dropped: calibration capture in flight")
                 }
-            }
-            // Preview-request handler stops/starts AVCaptureSession via
-            // startStandbyCapture / stopCapture. A toggle landing while a
-            // calibration cycle is mid-swap would interleave session
-            // mutations on sessionQueue with pauseAndCaptureHighResStill,
-            // which is the most plausible reproduction of the prior
-            // "delegate silently never fires" failure mode.
-            guard let previewRequested = message["preview_requested"] as? Bool,
-                  let calFrameRequested = message["calibration_frame_requested"] as? Bool
-            else {
-                commandLog.error("ws settings missing preview_requested/calibration_frame_requested")
-                return
             }
             if calIdle {
                 applyPreviewRequest(previewRequested)
