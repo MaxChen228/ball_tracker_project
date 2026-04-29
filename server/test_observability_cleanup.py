@@ -13,9 +13,9 @@ from state import State
 
 
 def test_intrinsics_rejects_legacy_fz_alias():
-    """The fz→fy alias was removed after `scripts/migrate_fz_to_fy.py`
-    rewrote all persisted JSON. A raw `fz` key now fails validation
-    instead of silently aliasing — migration is mandatory."""
+    """The fz→fy alias was removed (migration script retired 2026-04-29
+    after rewriting all persisted JSON). A raw `fz` key now fails
+    validation instead of silently aliasing — migration is mandatory."""
     legacy = {"fx": 1000.0, "fz": 1100.0, "cx": 960.0, "cy": 540.0}
     with pytest.raises(ValidationError):
         IntrinsicsPayload.model_validate(legacy)

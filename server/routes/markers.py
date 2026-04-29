@@ -100,6 +100,8 @@ def markers_clear() -> dict[str, Any]:
 
 @router.post("/calibration/markers/register/{camera_id}")
 async def calibration_markers_register_legacy(camera_id: str) -> dict[str, Any]:
+    # Note: server/static/dashboard/82_markers.js:11 still POSTs here — keep
+    # this 409 sentinel so the dashboard surfaces a clear error. Do not remove.
     raise HTTPException(
         status_code=409,
         detail="single-camera marker registration was removed; use /markers and scan with both cameras",

@@ -47,10 +47,8 @@ _SYNC_ID_PATTERN = r"^sy_[0-9a-f]{4,32}$"
 
 
 class IntrinsicsPayload(BaseModel):
-    # Legacy `fz` alias was retired after `scripts/migrate_fz_to_fy.py`
-    # rewrote all persisted JSON in place. Any on-disk record still
-    # carrying `fz` would now fail to load — re-run the migration or
-    # re-save via /calibration.
+    # Legacy `fz` alias was retired (migration script removed 2026-04-29).
+    # On-disk records must use `fy`; any stale `fz` record will fail to load.
     fx: float
     fy: float
     cx: float

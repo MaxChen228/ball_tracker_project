@@ -430,9 +430,9 @@ CAM_VIEW_RUNTIME_JS = (
     const canvas = root.querySelector('[data-cam-canvas]');
     if (!canvas) return;
     const meta = camMeta.get(camId);
-    // skipBuiltins: cam-view runtime owns plate + principal-point as
-    // toggleable layers. Otherwise drawVirtualBase double-paints them.
-    const base = drawVirtualBase(canvas, meta, { background: 'transparent', skipBuiltins: true });
+    // drawVirtualBase only sets up canvas surface; plate + principal-point
+    // are painted by toggleable layer renderers below.
+    const base = drawVirtualBase(canvas, meta, { background: 'transparent' });
     if (!base) return;
     const { ctx, sx, sy } = base;
     const layers = ensureLayerState(camId);
