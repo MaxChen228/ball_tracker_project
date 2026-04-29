@@ -7,14 +7,10 @@ from fastapi.responses import RedirectResponse
 
 from candidate_selector import CandidateSelectorTuning
 from detection import HSVRange, ShapeGate
+from presets import PRESETS as _HSV_PRESETS
 from schemas import TrackingExposureCapMode
 
 router = APIRouter()
-
-_HSV_PRESETS = {
-    "tennis": HSVRange.default(),
-    "blue_ball": HSVRange(h_min=105, h_max=112, s_min=140, s_max=255, v_min=40, v_max=255),
-}
 
 
 def _validated_hsv_range(values: dict[str, object]) -> HSVRange:
@@ -61,7 +57,7 @@ async def detection_hsv(request: Request):
         if isinstance(preset, str) and preset in _HSV_PRESETS and not any(
             key in body for key in ("h_min", "h_max", "s_min", "s_max", "v_min", "v_max")
         ):
-            hsv = _HSV_PRESETS[preset]
+            hsv = _HSV_PRESETS[preset].hsv
         else:
             hsv = _validated_hsv_range(body)
     else:
@@ -70,7 +66,7 @@ async def detection_hsv(request: Request):
         if isinstance(preset, str) and preset in _HSV_PRESETS and not any(
             form.get(key) is not None for key in ("h_min", "h_max", "s_min", "s_max", "v_min", "v_max")
         ):
-            hsv = _HSV_PRESETS[preset]
+            hsv = _HSV_PRESETS[preset].hsv
         else:
             hsv = _validated_hsv_range({key: form.get(key) for key in ("h_min", "h_max", "s_min", "s_max", "v_min", "v_max")})
 
