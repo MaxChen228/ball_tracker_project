@@ -72,12 +72,15 @@ final class CameraCommandRouter {
                 commandLog.warning("ws sync_run dropped: calibration capture in flight (state=\(String(describing: self.deps.getCalCaptureState()), privacy: .public))")
                 return
             }
-            if let sid = message["sync_id"] as? String {
-                let emitAtS = (message["emit_at_s"] as? [Double]) ?? [0.3]
-                let recordDurationS = (message["record_duration_s"] as? Double) ?? 3.0
-                DispatchQueue.main.async {
-                    self.deps.applyMutualSync(sid, emitAtS, recordDurationS)
-                }
+            guard let sid = message["sync_id"] as? String,
+                  let emitAtS = message["emit_at_s"] as? [Double],
+                  let recordDurationS = message["record_duration_s"] as? Double
+            else {
+                commandLog.error("ws sync_run missing required fields sid=\(message["sync_id"] as? String ?? "-", privacy: .public)")
+                return
+            }
+            DispatchQueue.main.async {
+                self.deps.applyMutualSync(sid, emitAtS, recordDurationS)
             }
         case "sync_command":
             if let cmd = message["command"] as? String, cmd == "start" {
@@ -122,7 +125,10 @@ final class CameraCommandRouter {
             )
             DispatchQueue.main.async { self.deps.healthMonitor.probeNow() }
         case "settings":
-            let pushedTimeSync = message["device_time_synced"] as? Bool ?? false
+            guard let pushedTimeSync = message["device_time_synced"] as? Bool else {
+                commandLog.error("ws settings missing device_time_synced")
+                return
+            }
             let pushedTimeSyncId = message["device_time_sync_id"] as? String
             deps.updateTimeSyncServerState(pushedTimeSync, pushedTimeSyncId)
             applyPushedPaths(message["paths"] as? [String])
@@ -151,10 +157,8 @@ final class CameraCommandRouter {
                 )
             }
             if let gate = message["shape_gate"] as? [String: Any],
-               let aspectMin = (gate["aspect_min"] as? Double)
-                    ?? (gate["aspect_min"] as? Int).map(Double.init),
-               let fillMin = (gate["fill_min"] as? Double)
-                    ?? (gate["fill_min"] as? Int).map(Double.init) {
+               let aspectMin = gate["aspect_min"] as? Double,
+               let fillMin = gate["fill_min"] as? Double {
                 deps.shapeGateDidPush(
                     ServerUploader.ShapeGatePayload(
                         aspect_min: aspectMin,
@@ -186,12 +190,18 @@ final class CameraCommandRouter {
             // mutations on sessionQueue with pauseAndCaptureHighResStill,
             // which is the most plausible reproduction of the prior
             // "delegate silently never fires" failure mode.
+            guard let previewRequested = message["preview_requested"] as? Bool,
+                  let calFrameRequested = message["calibration_frame_requested"] as? Bool
+            else {
+                commandLog.error("ws settings missing preview_requested/calibration_frame_requested")
+                return
+            }
             if calIdle {
-                applyPreviewRequest(message["preview_requested"] as? Bool ?? false)
+                applyPreviewRequest(previewRequested)
             } else {
                 commandLog.warning("ws preview_requested dropped: calibration capture in flight")
             }
-            applyCalibrationFrameRequest(message["calibration_frame_requested"] as? Bool ?? false)
+            applyCalibrationFrameRequest(calFrameRequested)
             DispatchQueue.main.async { self.deps.refreshModeLabel() }
         default:
             break
