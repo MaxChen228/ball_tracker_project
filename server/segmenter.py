@@ -84,7 +84,6 @@ def _predict(p0: np.ndarray, v0: np.ndarray, t_anchor: float, t: float) -> np.nd
 def find_segments(
     points: list,
     *,
-    residual_max_m: float = 0.20,
     min_seg_len: int = 5,
     v_min_mps: float = 5.0,
     v_max_mps: float = 60.0,
@@ -94,19 +93,21 @@ def find_segments(
     gate_b: float = 0.10,
     max_consec_misses: int = 3,
     min_displacement_m: float = 0.30,
-) -> tuple[list[Segment], np.ndarray, np.ndarray]:
+) -> tuple[list[Segment], np.ndarray]:
     """Run multi-segment ballistic extraction.
 
     Args:
         points: iterable of objects with attributes
             (t_rel_s, x_m, y_m, z_m, residual_m). Order doesn't matter.
+            Caller is responsible for residual filtering — pairing's
+            `gap_threshold_m` gate (per-session via PairingTuning) is
+            the single source of truth for skew-line residual culling;
+            segmenter trusts everything it receives.
 
     Returns:
-        (segments, pts_sorted, kept_mask)
-            pts_sorted: (M, 5) [t, x, y, z, residual] of the
-              residual-survived & time-sorted set used internally.
-            kept_mask: boolean (N,) over the original input order; True
-              for points that passed residual gate.
+        (segments, pts_sorted)
+            pts_sorted: (M, 5) [t, x, y, z, residual] of the time-sorted
+              input set used internally.
     """
     raw_full = np.array(
         [[p.t_rel_s, p.x_m, p.y_m, p.z_m, p.residual_m] for p in points],
@@ -114,24 +115,17 @@ def find_segments(
     )
     n_in = raw_full.shape[0]
     if n_in == 0:
-        return [], np.zeros((0, 5)), np.zeros(0, dtype=bool)
+        return [], np.zeros((0, 5))
 
-    # No timestamp-twin collapse. The earlier code averaged position
-    # across same-timestamp rows under the assumption they were multiple
-    # noisy estimates of ONE physical object (peer-frame fan-out only).
-    # Multi-candidate fan-out introduces twins that are different
-    # physical objects (real ball + distractor that happened to clear
-    # the gap threshold) — averaging contaminates position; min-residual
-    # cluster member would survive the 20cm gate based on a meaningless
-    # mean. The grow loop's RMSE gate (`gate_r0_m`, `gate_b`) is the
-    # correct outlier filter in the fan-out world: it walks ballistic
-    # predictions point-by-point, skipping candidates that don't fit.
-    # Running with the raw cloud is ~9× more input points (typical fan-
-    # out factor) but `_grow_segment` is numpy-fast.
-    kept_mask = raw_full[:, 4] < residual_max_m
-    survivor_idx = np.where(kept_mask)[0]
-    if survivor_idx.size < min_seg_len:
-        return [], np.zeros((0, 5)), kept_mask
+    # No timestamp-twin collapse. Multi-candidate fan-out introduces
+    # twins that are different physical objects (real ball + distractor
+    # that happened to clear pairing's gap gate); averaging contaminates
+    # position. The grow loop's RMSE gate (`gate_r0_m`, `gate_b`) is the
+    # correct outlier filter in the fan-out world — it walks ballistic
+    # predictions point-by-point and skips candidates that don't fit.
+    survivor_idx = np.arange(n_in)
+    if n_in < min_seg_len:
+        return [], np.zeros((0, 5))
 
     survivor = raw_full[survivor_idx]
     sort_perm = np.argsort(survivor[:, 0], kind="stable")
@@ -145,7 +139,7 @@ def find_segments(
     dts_all = np.diff(pts[:, 0])
     dts_pos = dts_all[dts_all > 0]
     if dts_pos.size == 0:
-        return [], pts, kept_mask
+        return [], pts
     frame_interval = float(np.median(dts_pos))
     seed_dt_max = frame_interval * seed_dt_max_factor
     grow_dt_max = frame_interval * grow_dt_max_factor
@@ -202,7 +196,7 @@ def find_segments(
     segments = _merge_compatible_segments(
         segments, pts, back_to_orig=back_to_orig, gate_r0=gate_r0_m,
     )
-    return segments, pts, kept_mask
+    return segments, pts
 
 
 def _merge_compatible_segments(

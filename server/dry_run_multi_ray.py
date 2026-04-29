@@ -104,7 +104,7 @@ def run_segmenter(raw_pts):
     pts = [_Pt(p["t_rel_s"], p["x_m"], p["y_m"], p["z_m"], p["residual_m"]) for p in raw_pts]
     if not pts:
         return [], pts
-    segs, _kept, _sorted = find_segments(pts)
+    segs, _sorted = find_segments(pts)
     return segs, pts
 
 
@@ -121,15 +121,14 @@ def render_html(sid: str, path: str, label: str, raw_pts, scene, out_path: Path)
     if not pts:
         out_path.write_text(f"<h1>{sid} {path} {label}: no points</h1>")
         return
-    segs, pts_sorted, kept_mask = find_segments(pts)
-    fig = build_fit_figure(scene, pts, pts_sorted, kept_mask, segs)
+    segs, pts_sorted = find_segments(pts)
+    fig = build_fit_figure(scene, pts, pts_sorted, segs)
     fig_html = fig.to_html(include_plotlyjs="cdn", full_html=False)
     html = render_fit_html(
         session_id=f"{sid} [{label}]",
         path=path,
         available_paths=[path],
         n_input=len(pts),
-        n_kept=int(kept_mask.sum()) if kept_mask.size else 0,
         segments=segs,
         fig_html=fig_html,
     )

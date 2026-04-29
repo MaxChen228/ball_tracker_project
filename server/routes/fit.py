@@ -64,9 +64,9 @@ def fit_page(
         )
 
     scene = _scene_for_session(session_id)
-    segments, pts_sorted, kept_mask = find_segments(pts_in)
+    segments, pts_sorted = find_segments(pts_in)
 
-    fig = build_fit_figure(scene, pts_in, pts_sorted, kept_mask, segments)
+    fig = build_fit_figure(scene, pts_in, pts_sorted, segments)
     fig_html = fig.to_html(include_plotlyjs="cdn", full_html=False)
 
     html = render_fit_html(
@@ -74,7 +74,6 @@ def fit_page(
         path=path,
         available_paths=available or [path],
         n_input=len(pts_in),
-        n_kept=int(kept_mask.sum()) if kept_mask.size else 0,
         segments=segments,
         fig_html=fig_html,
     )
