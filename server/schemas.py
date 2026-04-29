@@ -190,6 +190,13 @@ class PitchPayload(BaseModel):
     # backfills missing values from the pitch JSON's mtime so legacy files
     # carry a sensible date instead of "now".
     created_at: float | None = None
+    # Wall-clock unix timestamp of the most recent successful server_post
+    # detection run for this cam. Set by `routes.pitch._run_server_detection`
+    # right before `state.record(pitch)` after the MOV decode + HSV pass
+    # succeeds. None on legacy pitches and on pitches that never had
+    # server_post run. Viewer surfaces "last run X ago" next to the
+    # Rerun-server button.
+    server_post_ran_at: float | None = None
 
 
 class TriangulatedPoint(BaseModel):
@@ -217,6 +224,11 @@ class SessionResult(BaseModel):
     camera_a_received: bool
     camera_b_received: bool
     solved_at: float | None = None
+    # Latest successful server_post run timestamp across both cams.
+    # Aggregated from `PitchPayload.server_post_ran_at` (max of A/B) at
+    # rebuild time. None when no server_post job has ever completed for
+    # this session. Drives the viewer's Rerun button label / age stamp.
+    server_post_ran_at: float | None = None
     triangulated: list[TriangulatedPoint] = []
     triangulated_by_path: dict[str, list[TriangulatedPoint]] = Field(default_factory=dict)
     frame_counts_by_path: dict[str, dict[str, int]] = Field(default_factory=dict)

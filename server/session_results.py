@@ -132,6 +132,15 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         camera_a_received=a is not None,
         camera_b_received=b is not None,
     )
+    # Aggregate the two cams' last-run timestamps — the more recent one
+    # wins so a partial rerun (only one cam's MOV reprocessed) still
+    # advances the session's "last server_post" age.
+    server_post_ts = [
+        p.server_post_ran_at for p in (a, b)
+        if p is not None and p.server_post_ran_at is not None
+    ]
+    if server_post_ts:
+        result.server_post_ran_at = max(server_post_ts)
 
     candidate_paths: set[DetectionPath] = set()
     if session_obj is not None:
