@@ -305,6 +305,26 @@ class State:
     def video_dir(self) -> Path:
         return self._video_dir
 
+    @property
+    def processing(self) -> "SessionProcessingState":
+        """Public accessor for the session-processing coordinator.
+        Routes call this directly for server_post job lifecycle, error
+        recording, and trash queries — no proxy methods on State for
+        those, keep this read-only attribute access. Compatible with the
+        existing facade: SessionProcessingState owns its own internal
+        bookkeeping; state-lock interactions still go through the
+        coordinator's `attach`-bound reference, so concurrent calls
+        respect the same `_lock` invariants the legacy `_processing`
+        path relied on."""
+        return self._processing
+
+    def now(self) -> float:
+        """Public accessor for the injectable wall-clock used across
+        State (`_time_fn`). Routes / helpers should call this rather
+        than poking `state._time_fn` directly so test fixtures that
+        override the clock keep flowing through one entry point."""
+        return self._time_fn()
+
     def save_clip(
         self, camera_id: str, session_id: str, data: bytes, ext: str = "mov"
     ) -> Path:
@@ -726,11 +746,17 @@ class State:
                     session_id,
                 )
             return []
-        anchor = (
-            dev.sync_anchor_timestamp_s
-            if dev is not None and dev.sync_anchor_timestamp_s is not None
-            else frame.timestamp_s - (float(frame.frame_index) / 240.0)
-        )
+        # Silent fallback removed: the previous code synthesised an
+        # anchor from `frame.timestamp_s - frame_index/240` when the
+        # device had no sync anchor on file. That produced rays whose
+        # `t_rel_s` looked plausible but was actually decoupled from
+        # mutual-sync clock — they would rendr in the dashboard 3D scene
+        # alongside genuinely time-aligned rays and the operator had no
+        # way to tell. Mirror the no-calibration path: drop silently
+        # (after an info log) instead of fabricating a clock.
+        if dev is None or dev.sync_anchor_timestamp_s is None:
+            return []
+        anchor = dev.sync_anchor_timestamp_s
         return rays_for_frame(
             camera_id=camera_id,
             frame=frame,
@@ -1632,7 +1658,7 @@ class State:
             return self._processing.trash_count()
 
     # server_post lifecycle moved to SessionProcessingState — call
-    # `state._processing.{mark_server_post_queued, start_server_post_job,
+    # `state.processing.{mark_server_post_queued, start_server_post_job,
     # should_cancel_server_post_job, finish_server_post_job, record_error,
     # clear_error, errors_for, cancel_processing, run_server_post,
     # session_summary, session_candidates, find_video_for}` directly from
