@@ -212,11 +212,20 @@ def triangulate_session(
 
     if a.frames_server_post and b.frames_server_post:
         try:
-            result.points = triangulate_cycle(
+            pts = triangulate_cycle(
                 scale(a), scale(b), source="server", tuning=pairing_tuning,
             )
         except Exception as e:
             result.error = f"{type(e).__name__}: {e}"
+        else:
+            # Mirror session_results.rebuild_result_for_session's authority
+            # contract: viewer reads `triangulated` (per-path map plus the
+            # winner picked by server_post→live precedence). `points` is
+            # the legacy field; keep it in sync so older readers still work.
+            result.triangulated_by_path["server_post"] = pts
+            result.paths_completed.add("server_post")
+            result.triangulated = pts
+            result.points = list(pts)
 
     n = len(result.points)
     logger.info(
