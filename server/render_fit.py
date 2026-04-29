@@ -220,7 +220,7 @@ def build_fit_figure(
                 marker=dict(size=5, color=color),
                 name=(
                     f"seg{i} pts ({len(seg.indices)}, "
-                    f"{seg.speed_mph:.1f} mph, rmse={seg.rmse_m*100:.1f}cm)"
+                    f"{seg.speed_kph:.1f} kph, rmse={seg.rmse_m*100:.1f}cm)"
                 ),
                 hovertemplate=f"seg{i} t=%{{text:.3f}}s<extra></extra>",
                 text=sub[:, 0] - t0,
@@ -308,7 +308,7 @@ def render_fit_html(
     for i, s in enumerate(segments):
         rows.append(
             f"<tr><td>{i}</td><td>{len(s.indices)}</td>"
-            f"<td>{s.speed_mph:.1f}</td>"
+            f"<td>{s.speed_kph:.1f}</td>"
             f"<td>{s.rmse_m*100:.1f}</td>"
             f"<td>{s.t_start:.3f}</td>"
             f"<td>{s.t_end - s.t_start:.3f}</td></tr>"
@@ -393,7 +393,7 @@ html, body {{ margin: 0; padding: 0; height: 100%;
   <div id="fit-canvas">{fig_html}</div>
   <div class="seg-table">
     <table>
-      <thead><tr><th>#</th><th>n_pts</th><th>mph</th><th>rmse (cm)</th>
+      <thead><tr><th>#</th><th>n_pts</th><th>kph</th><th>rmse (cm)</th>
         <th>t_start (s)</th><th>duration (s)</th></tr></thead>
       <tbody>{''.join(rows)}</tbody>
     </table>
