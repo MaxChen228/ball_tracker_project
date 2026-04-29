@@ -161,6 +161,64 @@ def test_calibration_auto_writes_snapshot_from_calibration_frame(tmp_path, monke
     assert (tmp_path / "calibrations" / "A.json").exists()
 
 
+def test_calibration_auto_crops_4_3_input_and_rescales_to_canonical_16_9(
+    tmp_path, monkeypatch
+):
+    """iPhone 12 MP photo capture is 4032×3024 (4:3). Server must:
+      1. Center-crop top/bottom to 4032×2268 (16:9 detection basis).
+      2. Run ArUco + solve H on the cropped frame.
+      3. Rescale K + H down to canonical 1920×1080 before storing.
+    Snapshot dims must always be 1920×1080 regardless of input resolution
+    so live-path CameraPose + pitch-time pairing scaling stay consistent.
+    """
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+
+    from calibration_solver import PLATE_MARKER_WORLD
+    bgr_4_3, _H = _render_aruco_scene(
+        PLATE_MARKER_WORLD,
+        image_size=(4032, 3024),
+        scale_px_per_m=1500.0,  # keeps plate markers within central 16:9 band
+    )
+    _seed_calibration_frame("A", _jpeg_encode(bgr_4_3))
+
+    r = client.post("/calibration/auto/A?h_fov_deg=73.828")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Canonical storage basis — independent of input 4032×3024.
+    assert body["image_width_px"] == 1920
+    assert body["image_height_px"] == 1080
+    assert sorted(body["detected_ids"]) == sorted(PLATE_MARKER_WORLD.keys())
+
+    # Snapshot file on disk must also be at canonical dims (downstream
+    # consumers — live CameraPose, pairing, viewer — read it directly).
+    import json as _json
+    snap = _json.loads((tmp_path / "calibrations" / "A.json").read_text())
+    assert snap["image_width_px"] == 1920
+    assert snap["image_height_px"] == 1080
+    # Principal point should land near image centre after rescale; the
+    # 4:3→16:9 crop shifted cy by 378 px in detection basis, then a
+    # 0.476× linear rescale to 1080p brings (cx,cy) to (~960, ~540).
+    assert 900 < snap["intrinsics"]["cx"] < 1020
+    assert 480 < snap["intrinsics"]["cy"] < 600
+
+    # H content check: project plate origin (X=0, Y=0) through the stored
+    # canonical homography. With the synthetic scene's center_px at the
+    # image centre of the 4032×3024 source, plate origin maps to image
+    # centre in detection basis (4032×2268 cropped) → after 0.476× scale
+    # to canonical 1920×1080, plate origin should land within a few px of
+    # (960, 540). This catches buggy _scale_homography (e.g. forgetting
+    # h33 normalisation) that cx/cy bound asserts would miss.
+    H_canonical = np.array(snap["homography"], dtype=np.float64).reshape(3, 3)
+    plate_origin = np.array([0.0, 0.0, 1.0])
+    proj = H_canonical @ plate_origin
+    assert abs(proj[2]) > 1e-9, "H projects plate origin to point at infinity"
+    u = proj[0] / proj[2]
+    v = proj[1] / proj[2]
+    assert abs(u - 960.0) < 5.0, f"plate origin u={u} not near canonical centre 960"
+    assert abs(v - 540.0) < 5.0, f"plate origin v={v} not near canonical centre 540"
+
+
 def test_calibration_auto_returns_422_when_too_few_markers(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(app)
@@ -183,7 +241,7 @@ def test_calibration_auto_returns_408_when_no_frame_delivered(tmp_path, monkeypa
     client = TestClient(app)
     r = client.post("/calibration/auto/A")
     assert r.status_code == 408, r.text
-    assert "within 5 s" in r.json()["detail"].lower()
+    assert "within 10 s" in r.json()["detail"].lower()
 
 
 def test_calibration_auto_uses_pose_solver_when_3d_markers_available(tmp_path, monkeypatch):
