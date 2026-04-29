@@ -100,6 +100,8 @@
         sync_commands: currentSyncCommands,
         calibration_last_ts: currentCalibrationLastTs || {},
         auto_calibration: currentAutoCalibration,
+        calibration_buffers: currentCalibrationBuffers || {},
+        known_marker_ids: currentKnownMarkerIds || { plate: [], extended: [] },
       });
     }
     const clearPending = () => {
