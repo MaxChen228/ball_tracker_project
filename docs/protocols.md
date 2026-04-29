@@ -166,7 +166,7 @@ candidates: list[{
 }]
 ```
 
-`cost` is **server-stamped**, not iOS-shipped: `live_pairing._resolve_candidates` runs the shape-prior selector (`w_aspect·aspect_pen + w_fill·fill_pen`, frame-local — no temporal state, no `area_score` term) and copies the resulting cost onto every candidate before persistence. Empty `candidates` list → frame is buffered but `ball_detected=False` and no triangulation runs.
+`cost` is **server-stamped**, not iOS-shipped: `live_pairing._resolve_candidates` runs the shape-prior selector (`_W_ASPECT·aspect_pen + _W_FILL·fill_pen`, frame-local — no temporal state, no `area_score` term; weights are module constants in `server/candidate_selector.py`, not a runtime tunable) and copies the resulting cost onto every candidate before persistence. Empty `candidates` list → frame is buffered but `ball_detected=False` and no triangulation runs.
 
 #### `type: "cycle_end"` — path completion signal
 
