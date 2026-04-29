@@ -6,7 +6,7 @@
   // ring + 3D ray + 3D point, gated only by the cost_threshold slider.
   // Operator opens the BLOBS layer to see candidates the selector saw on
   // each frame. The session-level cost_threshold slider in the viewer
-  // header (see `session_cost_threshold_strip_html`) controls which
+  // header (see `session_tuning_strip_html`) controls which
   // candidates are drawn: cost ≤ threshold = show, cost > threshold =
   // hide. The same threshold value is what the recompute endpoint will
   // apply when the operator clicks Apply.
@@ -38,6 +38,20 @@
   // hook used by 60_session_tuning.js.
   window._setCostThreshold = _setCostThreshold;
   window._getCostThreshold = _getCostThreshold;
+
+  // Sibling of cost: drag preview for the Gap slider in the same header
+  // strip. Mutates `residualCapM` (declared in 10_video_master.js, shared
+  // IIFE scope) so 20_filters.js's residual predicate sees the new cap on
+  // next redraw. Slider value is centimetres (0–200); 200 = "off"
+  // (Infinity, short-circuits the filter to a no-op).
+  function _setGapThreshold(v_cm) {
+    const cm = parseFloat(v_cm);
+    residualCapM = (Number.isFinite(cm) && cm < 200) ? cm / 100 : Infinity;
+    if (typeof scheduleSceneDraw === 'function') scheduleSceneDraw();
+  }
+  function _getGapThresholdM() { return residualCapM; }
+  window._setGapThreshold = _setGapThreshold;
+  window._getGapThresholdM = _getGapThresholdM;
   // Expose so 30_frame_index.js's raysAtT can apply the same predicate
   // as the BLOBS canvas overlay — single source of truth for "passing".
   window._candPassesThreshold = _candPassesThreshold;

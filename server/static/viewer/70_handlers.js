@@ -125,34 +125,6 @@
     }
   }
   paintLayerPills();
-  // --- Residual filter slider ---
-  const residualSlider = document.getElementById("residual-filter-slider");
-  const residualReadout = document.getElementById("residual-filter-readout");
-  function paintResidualReadout() {
-    if (!residualReadout) return;
-    if (!Number.isFinite(residualCapM)) residualReadout.textContent = "off";
-    else residualReadout.textContent = `≤ ${(residualCapM * 100).toFixed(0)} cm`;
-  }
-  if (residualSlider) {
-    if (Number.isFinite(residualCapM)) {
-      residualSlider.value = String(Math.min(200, Math.round(residualCapM * 100)));
-    } else {
-      residualSlider.value = "200";
-    }
-    paintResidualReadout();
-    residualSlider.addEventListener("input", () => {
-      const cm = parseFloat(residualSlider.value);
-      if (!Number.isFinite(cm) || cm >= 200) {
-        residualCapM = Infinity;
-        try { localStorage.removeItem(RESIDUAL_FILTER_KEY); } catch (_e) {}
-      } else {
-        residualCapM = cm / 100;
-        try { localStorage.setItem(RESIDUAL_FILTER_KEY, String(cm)); } catch (_e) {}
-      }
-      paintResidualReadout();
-      scheduleSceneDraw();
-    });
-  }
   // --- Strike-zone visibility toggle ---
   const _szToggle = document.getElementById("strike-zone-toggle");
   if (_szToggle) {

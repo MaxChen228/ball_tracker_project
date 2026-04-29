@@ -50,6 +50,7 @@ def render_viewer_html(
     health: dict,
     *,
     cost_threshold: float | None = None,
+    gap_threshold_m: float | None = None,
 ) -> str:
     from viewer_page import render_viewer_html as _render_viewer_html
 
@@ -59,6 +60,7 @@ def render_viewer_html(
         health,
         build_figure=_build_figure,
         cost_threshold=cost_threshold,
+        gap_threshold_m=gap_threshold_m,
     )
 
 
