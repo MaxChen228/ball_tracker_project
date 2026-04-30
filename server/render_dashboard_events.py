@@ -18,6 +18,11 @@ from typing import Any
 
 
 def _render_events_body(events: list[dict[str, Any]]) -> str:
+    """Group sessions by `created_day` into collapsible folds. Each day
+    gets its own `event-day-group` (collapse key `dash:event-day:<day>`),
+    so toggling the day header folds the whole day's cards together. The
+    JS path in `60_events_render.js` mirrors this DOM shape so live
+    poll/SSE updates land in the right group."""
     if not events:
         return '<div class="events-empty">No sessions received yet.</div>'
     parts: list[str] = []
@@ -25,12 +30,20 @@ def _render_events_body(events: list[dict[str, Any]]) -> str:
     for e in events:
         day = e.get("created_day") or "—"
         if day != last_day:
+            if last_day is not None:
+                parts.append("</div></div>")
+            day_esc = html.escape(day)
             parts.append(
-                f'<div class="event-day" data-day="{html.escape(day)}">'
-                f'{html.escape(day)}</div>'
+                f'<div class="event-day-group" '
+                f'data-collapsible-key="dash:event-day:{day_esc}">'
+                f'<div class="event-day" data-collapsible-header '
+                f'data-day="{day_esc}">{day_esc}</div>'
+                '<div class="event-day-body" data-collapsible-body>'
             )
             last_day = day
         parts.append(_render_card(e))
+    if last_day is not None:
+        parts.append("</div></div>")
     return "".join(parts)
 
 
