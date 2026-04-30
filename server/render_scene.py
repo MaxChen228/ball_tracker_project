@@ -31,6 +31,7 @@ def render_viewer_html(
     presets,
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
+    segments: list | None = None,
 ) -> str:
     from viewer_page import render_viewer_html as _render_viewer_html
 
@@ -42,6 +43,7 @@ def render_viewer_html(
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         presets=presets,
+        segments=segments or [],
     )
 
 
