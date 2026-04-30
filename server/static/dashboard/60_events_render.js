@@ -62,7 +62,9 @@
       s: e.status,
       pl: ps.live || '-', ps: ps.server_post || '-',
       n: e.n_triangulated,
-      ns: e.n_segments,
+      ns: e.n_segments_by_path
+        ? `${Number(e.n_segments_by_path.live || 0)}.${Number(e.n_segments_by_path.server_post || 0)}`
+        : '',
       pc: pbcStr,
       d: e.duration_s != null ? Number(e.duration_s).toFixed(2) : null,
       pr: e.processing_state || '-',
@@ -155,8 +157,12 @@
     const liveStatus = pathStatus.live || '-';
     const srvStatus = pathStatus.server_post || '-';
     const inFlight = typeof serverPostProgress !== 'undefined' && serverPostProgress.has(e.session_id);
-    const nSeg = Number(e.n_segments || 0);
-    const segChip = `<span class="ev-segs${nSeg === 0 ? ' zero' : ''}" title="Ballistic fit segments">SEG <b>${nSeg}</b></span>`;
+    const segByPath = e.n_segments_by_path || {};
+    const segLive = Number(segByPath.live || 0);
+    const segSrv = Number(segByPath.server_post || 0);
+    const segZero = segLive === 0 && segSrv === 0;
+    const segTitle = `Ballistic fit segments · live:${segLive}, server_post:${segSrv}`;
+    const segChip = `<span class="ev-segs${segZero ? ' zero' : ''}" title="${esc(segTitle)}">SEG <b>${segLive}&middot;${segSrv}</b></span>`;
     const pipesHtml = `<div class="ev-pipes">
       ${_pipeChip('L', liveStatus, pathCounts.live, pipeTitles.live, e.session_id, false)}
       ${_pipeChip('S', srvStatus, pathCounts.server_post, pipeTitles.server_post, e.session_id, inFlight)}

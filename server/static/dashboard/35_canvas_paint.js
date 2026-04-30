@@ -115,11 +115,18 @@
     if (!root) return;
     const completed = entry && entry.paths_completed instanceof Set
       ? entry.paths_completed : new Set();
+    const segsByPath = (entry && entry.segments_by_path) || {};
     const buttons = root.querySelectorAll('[data-fit-path]');
     for (const btn of buttons) {
       const path = btn.dataset.fitPath;
       const ok = entry ? completed.has(path) : true;
       btn.disabled = !ok;
+      const countEl = btn.querySelector('[data-fit-path-count]');
+      if (countEl) {
+        const segs = segsByPath[path];
+        const n = Array.isArray(segs) ? segs.length : 0;
+        countEl.textContent = entry ? String(n) : '';
+      }
     }
     if (!entry) return;
     let active = fitPathMode();

@@ -59,7 +59,13 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
         created_day, created_hm = _format_local(created_at)
         authority_points = result.triangulated if result is not None else []
         n_triangulated = len(authority_points) if result is not None else 0
-        n_segments = len(result.segments) if result is not None else 0
+        n_segments_by_path: dict[str, int] = {
+            DetectionPath.live.value: 0,
+            DetectionPath.server_post.value: 0,
+        }
+        if result is not None:
+            for path, segs in (result.segments_by_path or {}).items():
+                n_segments_by_path[path] = len(segs)
         error = result.error if result is not None else None
 
         status = _status_label(cams_present, n_triangulated, error, is_live_only)
@@ -83,9 +89,8 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                 # Per-pipeline counts (live / server_post). Legacy flat name
                 # kept for older consumers.
                 "n_ball_frames_by_path": n_ball_frames_by_path,
-                "n_ball_frames": n_ball_frames_by_path[DetectionPath.server_post.value],
                 "n_triangulated": n_triangulated,
-                "n_segments": n_segments,
+                "n_segments_by_path": n_segments_by_path,
                 "mean_residual_m": mean_res,
                 "duration_s": duration,
                 "capture_telemetry": {

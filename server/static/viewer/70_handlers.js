@@ -100,12 +100,18 @@
   function paintLayerPills() {
     const pathGroup = layerToggles.querySelector("[data-path-group]");
     if (pathGroup) {
+      const segsByPath = SEGMENTS_BY_PATH || {};
       for (const pill of pathGroup.querySelectorAll(".layer-pill")) {
         const path = pill.dataset.path;
         const applicable = HAS_PATH[path] || HAS_TRAJ_PATH[path];
         pill.hidden = !applicable;
         pill.setAttribute("aria-checked",
           (applicable && currentPath() === path) ? "true" : "false");
+        const countEl = pill.querySelector("[data-path-count]");
+        if (countEl) {
+          const segs = segsByPath[path];
+          countEl.textContent = Array.isArray(segs) ? String(segs.length) : "0";
+        }
       }
     }
     for (const cb of layerToggles.querySelectorAll(".layer-checkbox[data-layer]")) {

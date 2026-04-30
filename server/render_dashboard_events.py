@@ -165,14 +165,19 @@ def _pipes_html(e: dict[str, Any]) -> str:
     """Live + server detection pipe chips, plus segment count."""
     path_status = e.get("path_status") or {}
     path_counts = e.get("n_ball_frames_by_path") or {}
-    n_seg = int(e.get("n_segments") or 0)
+    seg_by_path = e.get("n_segments_by_path") or {}
+    seg_live = int(seg_by_path.get("live") or 0)
+    seg_srv = int(seg_by_path.get("server_post") or 0)
+    seg_zero = (seg_live == 0 and seg_srv == 0)
+    seg_title = f"Ballistic fit segments · live:{seg_live}, server_post:{seg_srv}"
     bits = [
         _pipe_chip("L", path_status.get("live", "-"),
                    path_counts.get("live"), _PIPE_TITLES["live"]),
         _pipe_chip("S", path_status.get("server_post", "-"),
                    path_counts.get("server_post"), _PIPE_TITLES["server_post"]),
-        f'<span class="ev-segs{" zero" if n_seg == 0 else ""}"'
-        f' title="Ballistic fit segments">SEG <b>{n_seg}</b></span>',
+        f'<span class="ev-segs{" zero" if seg_zero else ""}"'
+        f' title="{html.escape(seg_title)}">SEG '
+        f'<b>{seg_live}&middot;{seg_srv}</b></span>',
     ]
     return f'<div class="ev-pipes">{"".join(bits)}</div>'
 

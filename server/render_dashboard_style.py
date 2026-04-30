@@ -822,6 +822,10 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-path + .ff-path {{ border-left-width: 0; }}
 .fit-filter-bar .ff-path.active {{ background: var(--ink); color: var(--surface); border-color: var(--ink); }}
 .fit-filter-bar .ff-path[disabled] {{ opacity: 0.35; cursor: not-allowed; }}
+.fit-filter-bar .ff-path-count {{ font-variant-numeric: tabular-nums;
+                                   margin-left: 5px; opacity: 0.75;
+                                   font-weight: 600; }}
+.fit-filter-bar .ff-path-count:empty {{ display: none; }}
 
 /* --- Mini-slider — shared between dashboard fit-filter-bar + viewer
    layer-toggles. PT (point-size), LW (fit linewidth), EXT (fit dashed

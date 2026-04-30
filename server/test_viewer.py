@@ -1350,7 +1350,6 @@ def test_events_endpoint_lists_sessions_latest_first():
         "live": {"A": 0, "B": 0},
         "server_post": {"A": 1, "B": 1},
     }
-    assert evt_810["n_ball_frames"] == {"A": 1, "B": 1}
     assert evt_810["n_triangulated"] == 1
     # server_post ran and produced detections → "done"; live
     # never ran on this fixture → "-".

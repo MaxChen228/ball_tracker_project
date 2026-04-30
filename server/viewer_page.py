@@ -410,8 +410,8 @@ def render_viewer_html(
             <span class="layer-toggles" id="layer-toggles" aria-label="Layer visibility">
             <span class="layer-group" data-path-group role="radiogroup" aria-label="Active path">
               <span class="layer-name">Path</span>
-              <button type="button" class="layer-pill" data-path="live" role="radio" aria-checked="false">live</button>
-              <button type="button" class="layer-pill" data-path="server_post" role="radio" aria-checked="true">svr</button>
+              <button type="button" class="layer-pill" data-path="live" role="radio" aria-checked="false"><span class="layer-pill-label">live</span><span class="layer-pill-count" data-path-count="live"></span></button>
+              <button type="button" class="layer-pill" data-path="server_post" role="radio" aria-checked="false"><span class="layer-pill-label">svr</span><span class="layer-pill-count" data-path-count="server_post"></span></button>
             </span>
             <span class="layer-divider" aria-hidden="true"></span>
             <span class="layer-group" data-layer-group="rays">
