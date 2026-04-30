@@ -32,11 +32,6 @@ Endpoints:
                                        Triggers the "disarm" echo window so
                                        phones flush the in-progress recording
                                        and upload the cycle.
-  POST /sessions/clear              — dashboard: drop the last-ended
-                                       session pointer so the session
-                                       card on / goes blank. No-op (409
-                                       for JSON callers) when already
-                                       idle with no prior session.
   GET  /chirp.wav                   — reference sync chirp for 時間校正
   GET  /events                      — one row per session: cameras, status,
                                        counts, received_at, triangulation

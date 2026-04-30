@@ -485,12 +485,18 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
               margin-top: 8px; }}
 .event-day:first-child {{ margin-top: 0; }}
 
+/* Whole row is the dashboard-3D-load click target (40_traj_handlers.js).
+   .selected highlights the active overlay; only the explicit "→ viewer"
+   link and any in-row form/button escape the row click. */
 .event-item {{ padding: 8px var(--s-1);
                border-top: 1px solid var(--border-l);
-               transition: background 0.12s ease; min-width: 0; }}
+               transition: background 0.12s ease; min-width: 0;
+               cursor: pointer; }}
 .event-item:first-child,
 .event-day + .event-item {{ border-top: 0; }}
 .event-item:hover {{ background: var(--surface-hover); }}
+.event-item.selected {{ background: var(--surface-2); }}
+.event-item.selected:hover {{ background: var(--surface-hover); }}
 
 .ev-row1, .ev-row2, .ev-row3 {{ display: flex; align-items: center;
                                 gap: 8px; min-width: 0; flex-wrap: wrap;
@@ -503,23 +509,26 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
             color: var(--ink); letter-spacing: 0.02em;
             font-variant-numeric: tabular-nums; flex: 0 0 auto; }}
 .ev-sid  {{ font-family: var(--mono); font-size: 11px; color: var(--sub);
-            letter-spacing: 0.04em; text-decoration: none; flex: 0 0 auto;
+            letter-spacing: 0.04em; flex: 0 0 auto;
             white-space: nowrap; }}
-.ev-sid:hover {{ color: var(--ink); }}
 
-/* Trajectory toggle — coloured dot mirrors Plotly trace tint. Click goes
-   to the checkbox; the wrapping <label> stops propagation in JS so the
-   <a class="ev-sid"> on the same row doesn't navigate on toggle. */
-.traj-toggle {{ flex: 0 0 auto; display: flex; align-items: center;
-                gap: 4px; cursor: pointer; user-select: none; }}
-.traj-toggle input[type=checkbox] {{ position: absolute; opacity: 0;
-                                      pointer-events: none; }}
-.traj-toggle .swatch,
+.ev-viewer-link {{ font-family: var(--mono); font-size: 10px;
+                   letter-spacing: 0.06em; color: var(--sub);
+                   text-decoration: none; flex: 0 0 auto;
+                   padding: 2px 6px; border: 1px solid var(--border-base);
+                   border-radius: var(--r); }}
+.ev-viewer-link:hover {{ color: var(--ink); border-color: var(--ink); }}
+
+/* Has-traj indicator. Pure visual — the row itself is the click target
+   (40_traj_handlers.js). Selected rows get a filled dot; unselected
+   rows with traj show as outline; rows without traj show .swatch-empty. */
+.swatch,
 .swatch-empty {{ width: 12px; height: 12px; border-radius: 50%;
-                  border: 1px solid rgba(0,0,0,0.18);
-                  display: inline-block; flex: 0 0 auto;
-                  background: var(--surface-2); }}
-.swatch-empty {{ background: transparent; opacity: 0.45; }}
+                 border: 1px solid var(--accent, #C0392B);
+                 display: inline-block; flex: 0 0 auto;
+                 background: transparent; }}
+.swatch-empty {{ border-color: rgba(0,0,0,0.18); opacity: 0.45; }}
+.swatch.selected {{ background: var(--accent, #C0392B); }}
 
 .ev-statuses {{ display: flex; gap: 4px; flex: 0 0 auto;
                 justify-content: flex-end; }}

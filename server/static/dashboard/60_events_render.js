@@ -29,6 +29,11 @@
     if (existingClassName && existingClassName.indexOf('flash-done') !== -1) {
       cls.push('flash-done');
     }
+    // Selected = currently loaded into dashboard 3D scene. Drives the
+    // .event-item.selected background tint + the swatch fill.
+    if (selectedTrajIds.has(e.session_id)) {
+      cls.push('selected');
+    }
     return cls.join(' ');
   }
 
@@ -61,6 +66,9 @@
       b: currentEventsBucket,
       hm: e.created_hm || '',
       sp,
+      // Selected state drives the swatch fill — must be in the diff key,
+      // otherwise toggling selection doesn't repaint the swatch.
+      sel: selectedTrajIds.has(e.session_id) ? 1 : 0,
     });
   }
 
@@ -107,15 +115,16 @@
       server_post: 'Server — HSV detection on decoded MOV',
     };
 
-    // --- swatch (row1 leading) ---
+    // --- swatch (row1 leading) — pure has-traj indicator. The whole row
+    // is the click target for "load this fit into dashboard 3D"
+    // (40_traj_handlers.js); the swatch is no longer an interactive
+    // checkbox proxy. Selected sessions get a filled dot, unselected
+    // sessions an outline; rows without triangulation get the pale dash.
     const hasTraj = triangulated > 0;
+    const isSelected = selectedTrajIds.has(e.session_id);
     const color = hasTraj ? trajColorFor(e.session_id) : '';
-    const checked = selectedTrajIds.has(e.session_id) ? 'checked' : '';
     const swatch = hasTraj
-      ? `<label class="traj-toggle" title="Overlay trajectory on canvas">
-           <input type="checkbox" data-traj-sid="${sid}" ${checked}>
-           <span class="swatch" style="background:${color}"></span>
-         </label>`
+      ? `<span class="swatch${isSelected ? ' selected' : ''}" style="border-color:${color};${isSelected ? `background:${color};` : ''}" aria-hidden="true"></span>`
       : `<span class="swatch swatch-empty" aria-hidden="true"></span>`;
 
     // --- row1 right: status chips ---
@@ -164,13 +173,18 @@
     }
     const actionsHtml = actBits.length ? `<div class="ev-row3">${actBits.join('')}</div>` : '';
 
+    // Whole row is the dashboard-3D-load click target. The viewer link is
+    // a small secondary affordance on row 1 right side; clicks on it (and
+    // on action <form>s in row 3) are stopPropagation'd in 40_traj_handlers
+    // so they don't double as a row click.
     return `
       <div class="ev-row1">
         ${swatch}
         <span class="ev-time">${hm}</span>
-        <a class="ev-sid" href="/viewer/${sid}">${sid}</a>
+        <span class="ev-sid">${sid}</span>
         <span class="ev-spacer"></span>
         ${statusesHtml}
+        <a class="ev-viewer-link" href="/viewer/${sid}" title="Open in viewer">→ viewer</a>
       </div>
       <div class="ev-row2">${pipesHtml}${metricsHtml}</div>
       ${actionsHtml}`;

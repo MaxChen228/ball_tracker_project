@@ -53,9 +53,10 @@ def _render_card(e: dict[str, Any]) -> str:
         f'<div class="ev-row1">'
         f'{swatch_html}'
         f'<span class="ev-time">{hm}</span>'
-        f'<a class="ev-sid" href="/viewer/{sid}">{sid}</a>'
+        f'<span class="ev-sid">{sid}</span>'
         f'<span class="ev-spacer"></span>'
         f'{statuses_html}'
+        f'<a class="ev-viewer-link" href="/viewer/{sid}" title="Open in viewer">→ viewer</a>'
         f'</div>'
     )
     row2 = (
@@ -74,13 +75,11 @@ def _render_card(e: dict[str, Any]) -> str:
 
 
 def _swatch_html(sid: str, has_traj: bool) -> str:
+    """Pure has-traj indicator. SSR ships unselected; the JS layer flips
+    the `.selected` class on next render (after operator clicks the row)."""
+    del sid  # selection state is client-side only on first paint
     if has_traj:
-        return (
-            '<label class="traj-toggle" title="Overlay trajectory on canvas">'
-            f'<input type="checkbox" data-traj-sid="{sid}">'
-            '<span class="swatch"></span>'
-            '</label>'
-        )
+        return '<span class="swatch" aria-hidden="true"></span>'
     return '<span class="swatch swatch-empty" aria-hidden="true"></span>'
 
 

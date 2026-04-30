@@ -1,11 +1,5 @@
-// === events bucket + traj toggle handlers ===
+// === events bucket + traj row-click handlers ===
 
-  // Delegated change handler — event list re-renders on every tick, so we
-  // can't rebind per-checkbox. Capture click on the wrapping <label> to
-  // prevent the event-row <a> from swallowing the toggle.
-  if (eventsBox) eventsBox.addEventListener('click', (e) => {
-    if (e.target.closest('.traj-toggle')) e.stopPropagation();
-  });
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-events-bucket]');
     if (!btn) return;
@@ -27,22 +21,22 @@
       repaintCanvas();
     });
   }
-  if (eventsBox) eventsBox.addEventListener('change', (e) => {
-    const cb = e.target.closest('input[data-traj-sid]');
-    if (!cb) return;
-    const sid = cb.dataset.trajSid;
-    // Single-select preview: clicking one row always replaces the
-    // selection (clicking again on the same row deselects). Multi-select
-    // was retired with the dashboard 3D refactor — the scene shows one
-    // pitch's fit + speed at a time; viewer.html owns scrub-overlay UX.
-    if (cb.checked) {
+  // Row click = "load this fit into dashboard 3D". Single-select toggle:
+  // clicking the same row deselects. Multi-overlay was retired with the
+  // dashboard 3D refactor — the scene shows one pitch at a time; viewer
+  // owns scrub-overlay UX. Clicks on the explicit "→ viewer" link or any
+  // <button> / action <form> in row 3 must NOT trigger row selection.
+  if (eventsBox) eventsBox.addEventListener('click', (e) => {
+    if (e.target.closest('.ev-viewer-link')) return;
+    if (e.target.closest('.ev-action-form, button')) return;
+    const row = e.target.closest('.event-item[data-sid]');
+    if (!row) return;
+    const sid = row.dataset.sid;
+    if (selectedTrajIds.has(sid)) {
+      selectedTrajIds.delete(sid);
+    } else {
       selectedTrajIds.clear();
       selectedTrajIds.add(sid);
-      eventsBox.querySelectorAll('input[data-traj-sid]').forEach(other => {
-        if (other !== cb) other.checked = false;
-      });
-    } else {
-      selectedTrajIds.delete(sid);
     }
     persistTrajSelection();
     repaintCanvas();

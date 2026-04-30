@@ -92,8 +92,8 @@
       const events = await r.json();
       currentEvents = events;
       // Prune selection for sessions the user deleted server-side so the
-      // canvas doesn't keep painting a phantom trajectory whose checkbox
-      // no longer exists.
+      // canvas doesn't keep painting a phantom trajectory whose row no
+      // longer exists.
       const liveIds = new Set(events.map(e => e.session_id));
       let pruned = false;
       for (const sid of [...selectedTrajIds]) {
