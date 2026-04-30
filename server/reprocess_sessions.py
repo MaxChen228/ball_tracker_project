@@ -254,6 +254,7 @@ def triangulate_session(
     used = session_results.aggregate_pitch_used_configs(a, b, sid)
     result.hsv_range_used = used["hsv_range_used"]
     result.shape_gate_used = used["shape_gate_used"]
+    result.live_preset_name = used["live_preset_name"]
     if a is None or b is None:
         logger.info("  %s — solo (%s only); skipping triangulation",
                     sid, "A" if a else "B")

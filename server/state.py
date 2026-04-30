@@ -592,6 +592,7 @@ class State:
                 live.pairing_tuning = self._pairing_tuning
                 live.hsv_range_used = self._detection_config.hsv
                 live.shape_gate_used = self._detection_config.shape_gate
+                live.live_preset_name = self._detection_config.preset
             cal_a = self._calibration_store.get("A")
             cal_b = self._calibration_store.get("B")
             dev_a = self._device_registry.get("A")
@@ -1429,6 +1430,7 @@ class State:
                 live.pairing_tuning = self._pairing_tuning
                 live.hsv_range_used = self._detection_config.hsv
                 live.shape_gate_used = self._detection_config.shape_gate
+                live.live_preset_name = self._detection_config.preset
                 self._live_pairings[session.id] = live
                 self._current_session = session
                 self._sync.clear_time_sync_intent_locked()
@@ -1566,6 +1568,18 @@ class State:
                 live.hsv_range_used,
                 live.shape_gate_used,
             )
+
+    def live_session_preset_name(self, session_id: str) -> str | None:
+        """Public accessor for the active preset name frozen onto a
+        LivePairingSession at arm time (or first ingest fallback).
+        Sibling of `live_session_frozen_config`. Returns None when no
+        LivePairingSession exists for the id, or when the session was
+        armed before preset-stamping landed (legacy fixture path)."""
+        with self._lock:
+            live = self._live_pairings.get(session_id)
+            if live is None:
+                return None
+            return live.live_preset_name
 
     def set_shape_gate(self, shape_gate: ShapeGate) -> ShapeGate:
         with self._lock:

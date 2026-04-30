@@ -84,6 +84,16 @@ class LivePairingSession:
     # None for both cases so /pitch falls back atomically to current state.
     hsv_range_used: HSVRange | None = None
     shape_gate_used: ShapeGate | None = None
+    # Active preset filename at the moment this session was armed (or
+    # at first ingest when arm pre-stamping was bypassed by a test
+    # fixture / direct-construct path). Carries through to
+    # `PitchPayload.live_preset_name` and onto `SessionResult.live_preset_name`,
+    # so the events list / viewer can render `Live: <name>` chips that
+    # point back at a real on-disk preset file even if the operator has
+    # since switched the dashboard active preset to something else.
+    # None on legacy paths that pre-date arm-time preset stamping; the
+    # dashboard renders such chips as `Live: —` with no popover.
+    live_preset_name: str | None = None
 
     def __post_init__(self) -> None:
         # Internal mutex covering buffers / frames_by_cam / frame_counts /

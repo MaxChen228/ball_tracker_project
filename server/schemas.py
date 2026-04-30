@@ -224,6 +224,14 @@ class PitchPayload(BaseModel):
     # than a runtime tunable.
     hsv_range_used: HSVRangePayload | None = None
     shape_gate_used: ShapeGatePayload | None = None
+    # Active preset filename at the moment this pitch's live session was
+    # armed. New writes always populate (read from
+    # `state.live_session_preset_name`); None on legacy on-disk pitch
+    # JSONs predating arm-time preset stamping. Sibling of
+    # `hsv_range_used` / `shape_gate_used` — those carry the raw config
+    # values for `reprocess --use-frozen-snapshot` reproduction; this
+    # carries the on-disk preset identity for events-list rendering.
+    live_preset_name: str | None = None
 
 
 class TriangulatedPoint(BaseModel):
@@ -315,6 +323,19 @@ class SessionResult(BaseModel):
     # legacy results / when neither pitch carried a frozen snapshot.
     hsv_range_used: HSVRangePayload | None = None
     shape_gate_used: ShapeGatePayload | None = None
+    # Preset filename frozen onto the live session at arm time
+    # (aggregated A-wins-B-fallback from per-pitch `live_preset_name`).
+    # None on legacy results / sessions armed before preset stamping.
+    # Drives the events-list `Live: <name>` chip; the popover resolves
+    # H/S/V values by reading `data/presets/<name>.json` at render time
+    # (or shows `(deleted)` faded if the file no longer exists).
+    live_preset_name: str | None = None
+    # Preset filename selected on the most recent
+    # `POST /sessions/{sid}/run_server_post` for this session. None when
+    # server_post has never been run, or when the session predates
+    # named-preset rerun. Re-running with a different preset overwrites
+    # — there is no history of past server_post preset choices.
+    server_post_preset_name: str | None = None
     # Multi-segment ballistic fit. Populated by `find_segments` at result
     # build / recompute time so dashboard + viewer can paint fit curves +
     # speed badges without running the segmenter at view time. Empty list
