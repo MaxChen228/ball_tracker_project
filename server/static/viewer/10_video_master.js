@@ -55,19 +55,6 @@
       || Object.keys(SCENE.ground_traces || {}).length > 0
       || (SCENE.triangulated || []).length > 0,
   };
-  // Per-cam applicability: single-camera sessions must not light up the
-  // other cam's pills as dead buttons. Falls back to HAS_PATH for any cam
-  // we don't enumerate here.
-  const HAS_PATH_PER_CAM = {};
-  for (const cam of ["A", "B"]) {
-    const raySrc = (p) => (SCENE.rays || []).some(r => r.camera_id === cam && sourceToPath(r.source || "server") === p);
-    HAS_PATH_PER_CAM[cam] = {
-      live: camsWithFramesByPath.live.includes(cam) || raySrc("live"),
-      server_post: camsWithFramesByPath.server_post.includes(cam)
-        || !!(SCENE.ground_traces && SCENE.ground_traces[cam])
-        || raySrc("server_post"),
-    };
-  }
   const TRAJ_BY_PATH = SCENE.triangulated_by_path || {};
   const HAS_TRAJ_PATH = {
     live: (TRAJ_BY_PATH.live || []).length > 0,
