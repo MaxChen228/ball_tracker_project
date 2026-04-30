@@ -1,8 +1,4 @@
-"""Scene builder + Plotly viewer + events-index tests.
-
-Kept separate from test_server.py so the viewer dependency (plotly) only
-loads for these tests; the core server tests keep their fast import cost.
-"""
+"""Scene builder + Three.js viewer + events-index tests."""
 from __future__ import annotations
 
 import json as _json
@@ -234,9 +230,10 @@ def test_build_scene_all_upward_rays_still_render():
 
 def test_build_scene_clamps_rays_beyond_max_render_dist():
     """Near-horizontal rays hit the plate plane tens of metres out; the
-    scene clamps the endpoint to `_MAX_RENDER_DIST_M` so Plotly's auto-
-    fit axis doesn't include the far intersection. Ground-trace entry is
-    suppressed because a "landing point" at the clamp boundary would lie."""
+    scene clamps the endpoint to `_MAX_RENDER_DIST_M` so the Three.js
+    auto-fit camera bounds don't include the far intersection. Ground-
+    trace entry is suppressed because a "landing point" at the clamp
+    boundary would lie."""
     from reconstruct import _MAX_RENDER_DIST_M
 
     K, (R_a, t_a, C_a, H_a), _ = _make_rig()
@@ -313,6 +310,144 @@ def test_build_scene_two_cameras_attaches_triangulated_points():
     )
 
 
+def test_build_scene_stamps_seg_idx_on_triangulated_when_session_result_has_segments():
+    """`scene.triangulated[i]['seg_idx']` is the canonical wire field viewer
+    + dashboard read for per-point colour bucketing. Regression guard: the
+    stamping must use SegmentRecord.original_indices on the *unfiltered*
+    list (so render-dist-dropped points don't shift indices) and survive
+    the render-dist filter on the surviving list (positions 0..N-1 in the
+    output dict array correspond to seg_idx_for[k] where k is the *pre-
+    filter* index)."""
+    from schemas import SegmentRecord, SessionResult
+
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    P_path = np.array([[0.1, 0.3, 1.0], [0.2, 0.5, 1.2], [0.3, 0.7, 1.4]])
+    pa = _pitch("A", 11, K, R_a, t_a, H_a, P_path)
+    pb = _pitch("B", 11, K, R_b, t_b, H_b, P_path)
+    tri = [
+        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6)
+        for i, P in enumerate(P_path)
+    ]
+    # Two segments: [0, 1] in seg 0, [2] in seg 1.
+    segs = [
+        SegmentRecord(
+            indices=[0, 1], original_indices=[0, 1],
+            p0=[0.1, 0.3, 1.0], v0=[0.0, 0.0, 0.0],
+            t_anchor=0.0, t_start=0.0, t_end=1 / 240.0,
+            rmse_m=0.0, speed_kph=0.0,
+        ),
+        SegmentRecord(
+            indices=[0], original_indices=[2],
+            p0=[0.3, 0.7, 1.4], v0=[0.0, 0.0, 0.0],
+            t_anchor=2 / 240.0, t_start=2 / 240.0, t_end=2 / 240.0,
+            rmse_m=0.0, speed_kph=0.0,
+        ),
+    ]
+    result = SessionResult(
+        session_id=sid(11),
+        camera_a_received=True,
+        camera_b_received=True,
+        points=tri,
+        triangulated=tri,
+        segments=segs,
+    )
+    scene = build_scene(sid(11), {"A": pa, "B": pb}, triangulated=tri, session_result=result)
+
+    assert len(scene.triangulated) == 3
+    assert scene.triangulated[0]["seg_idx"] == 0
+    assert scene.triangulated[1]["seg_idx"] == 0
+    assert scene.triangulated[2]["seg_idx"] == 1
+
+
+def test_build_scene_stamps_seg_idx_minus_one_for_out_of_segment_points():
+    """Points the segmenter rejected (no SegmentRecord references them)
+    must ship `seg_idx == -1` so the viewer renders them with the outlier
+    colour, not as silently classified into a stale segment."""
+    from schemas import SegmentRecord, SessionResult
+
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    P_path = np.array([[0.1, 0.3, 1.0], [0.2, 0.5, 1.2]])
+    pa = _pitch("A", 12, K, R_a, t_a, H_a, P_path)
+    pb = _pitch("B", 12, K, R_b, t_b, H_b, P_path)
+    tri = [
+        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6)
+        for i, P in enumerate(P_path)
+    ]
+    # Segment claims only index 0 — point 1 is an outlier.
+    segs = [SegmentRecord(
+        indices=[0], original_indices=[0],
+        p0=[0.1, 0.3, 1.0], v0=[0.0, 0.0, 0.0],
+        t_anchor=0.0, t_start=0.0, t_end=0.0,
+        rmse_m=0.0, speed_kph=0.0,
+    )]
+    result = SessionResult(
+        session_id=sid(12),
+        camera_a_received=True,
+        camera_b_received=True,
+        points=tri,
+        triangulated=tri,
+        segments=segs,
+    )
+    scene = build_scene(sid(12), {"A": pa, "B": pb}, triangulated=tri, session_result=result)
+
+    assert scene.triangulated[0]["seg_idx"] == 0
+    assert scene.triangulated[1]["seg_idx"] == -1
+
+
+def test_build_scene_seg_idx_survives_render_distance_filter():
+    """When `_pts_to_dicts` drops a point beyond _MAX_RENDER_DIST_M, the
+    surviving points keep their PRE-FILTER seg_idx — i.e. the i-th
+    surviving dict's seg_idx is correct even though i no longer matches
+    the index in the input list."""
+    from schemas import SegmentRecord, SessionResult
+
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    P_path = np.array([[0.1, 0.3, 1.0], [0.2, 0.5, 1.2]])
+    pa = _pitch("A", 13, K, R_a, t_a, H_a, P_path)
+    pb = _pitch("B", 13, K, R_b, t_b, H_b, P_path)
+    tri = [
+        main.TriangulatedPoint(t_rel_s=0.00, x_m=0.1, y_m=0.3, z_m=1.0, residual_m=1e-6),
+        main.TriangulatedPoint(t_rel_s=0.01, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6),  # >10m, dropped
+        main.TriangulatedPoint(t_rel_s=0.02, x_m=0.2, y_m=0.5, z_m=1.2, residual_m=1e-6),
+    ]
+    # Three segments, one per point (extreme case — index 1 is the dropped one).
+    segs = [
+        SegmentRecord(
+            indices=[0], original_indices=[0],
+            p0=[0.1, 0.3, 1.0], v0=[0.0, 0.0, 0.0],
+            t_anchor=0.0, t_start=0.0, t_end=0.0,
+            rmse_m=0.0, speed_kph=0.0,
+        ),
+        SegmentRecord(
+            indices=[0], original_indices=[1],
+            p0=[0.0, 0.0, 0.0], v0=[0.0, 0.0, 0.0],
+            t_anchor=0.01, t_start=0.01, t_end=0.01,
+            rmse_m=0.0, speed_kph=0.0,
+        ),
+        SegmentRecord(
+            indices=[0], original_indices=[2],
+            p0=[0.2, 0.5, 1.2], v0=[0.0, 0.0, 0.0],
+            t_anchor=0.02, t_start=0.02, t_end=0.02,
+            rmse_m=0.0, speed_kph=0.0,
+        ),
+    ]
+    result = SessionResult(
+        session_id=sid(13),
+        camera_a_received=True,
+        camera_b_received=True,
+        points=tri,
+        triangulated=tri,
+        segments=segs,
+    )
+    scene = build_scene(sid(13), {"A": pa, "B": pb}, triangulated=tri, session_result=result)
+
+    # Two surviving points (index 1 was dropped). Their seg_idx must be 0
+    # and 2 — NOT 0 and 1 (which is what enumerate-on-output would give).
+    assert len(scene.triangulated) == 2
+    assert scene.triangulated[0]["seg_idx"] == 0
+    assert scene.triangulated[1]["seg_idx"] == 2
+
+
 def test_scene_to_dict_is_json_serialisable():
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
@@ -359,7 +494,11 @@ def test_reconstruction_endpoint_unknown_session_returns_404():
     assert r.status_code == 404
 
 
-def test_viewer_endpoint_returns_plotly_html():
+def test_viewer_endpoint_returns_threejs_html():
+    """Viewer page renders 200 HTML with the Three.js scene runtime
+    boot markers. Replaces the legacy `assert "plotly" in body` check
+    that passed only because comments in the JS bundle still contained
+    the word — the runtime contract is BallTrackerScene, not Plotly."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(702)
     pitch = _pitch("A", 702, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
@@ -369,8 +508,9 @@ def test_viewer_endpoint_returns_plotly_html():
     r = client.get(f"/viewer/{session_id}")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
-    body = r.text.lower()
-    assert "plotly" in body
+    body = r.text
+    assert "BallTrackerScene" in body
+    assert "viewer_layers.js" in body
     assert session_id in body
 
 
@@ -529,8 +669,8 @@ def test_viewer_health_banner_flags_missing_time_sync():
 
 def test_viewer_embeds_scene_data_and_mode_toggle():
     """Viewer serialises the scene (ground_traces + rays) inline so JS
-    can rebuild the Plotly traces under a time filter, and exposes the
-    [ALL] / [PLAYBACK] toggle."""
+    can rebuild the Three.js layers under a time filter, and exposes
+    the [ALL] / [PLAYBACK] toggle."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(709)
     _record_pitch(_pitch("A", 709, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -711,6 +851,13 @@ def test_viewer_ships_interactive_diagnostic_widgets():
     assert 'class="strip-legend"' in body
     assert 'id="hint-overlay"' in body
     assert 'id="hint-btn"' in body
+    # Trajectory point-size slider is now mounted on the layer-toggles
+    # row — same shared component the dashboard uses. Confirm both the
+    # container id and the slider+readout hooks are wired so the click
+    # handler in 70_handlers.js can find them.
+    assert 'id="viewer-point-size"' in body
+    assert 'data-point-size-slider' in body
+    assert 'data-point-size-readout' in body
     # Three.js scene runtime owns the default camera (ISO preset baked
     # into PRESETS in scene_runtime.js); the inline JSON theme block
     # carries the strike-zone centroid so any consumer reading the

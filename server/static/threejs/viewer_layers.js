@@ -21,17 +21,24 @@
 // responsiveness above 60 fps even on the iPad.
 
 import * as THREE from "three";
-
-const SEG_PALETTE = [
-  0xE45756, 0x4C78A8, 0x54A24B, 0xF58518,
-  0xB279A2, 0x72B7B2, 0xFF9DA6, 0x9D755D,
-];
+import {
+  SEG_PALETTE,
+  POINTS_OUTLIER,
+  POINT_SIZE_M_DEFAULT,
+  POINT_SIZE_OUTLIER_RATIO,
+  pointsCloud,
+  readPersistedPointSizeM,
+  writePersistedPointSizeM,
+  applyPointSizeToGroup,
+} from "./points_layer.js";
 
 const ACCENT_SVR = 0xC0392B;
 const TRAJ_LIVE = 0x4A6B8C;
 const G_Z = -9.81;
-// Same ±tol as Plotly-era raysAtT — a single decoded frame's worth.
+// Same ±tol as raysAtT in the previous implementation — a single decoded
+// frame's worth.
 const PLAYBACK_RAY_TOL = 0.010;
+
 
 const PATH_LIVE = "live";
 const PATH_SVR = "server_post";
@@ -125,6 +132,10 @@ class ViewerLayers {
       throw new Error("setupViewerLayers: opts.layerVisibility is required");
     }
     this.layerVisibility = opts.layerVisibility;
+    // Restored from the cross-page localStorage key on construction;
+    // dashboard writes the same key, so a slider tweak on either page
+    // carries to the other on next load.
+    this._pointSize = readPersistedPointSizeM();
 
     // --- one-time cameras + ground traces + fit curves ---
     this._buildCameras();
@@ -339,24 +350,47 @@ class ViewerLayers {
     }
     if (raysGroup.children.length) this.scene.addLayer("viewer_rays", raysGroup);
 
-    // Trajectories
+    // Trajectories — points (not lines) so each detected ball position
+    // is individually visible and the operator can read clustering /
+    // outliers at a glance. Matches dashboard's "Show points" rendering
+    // (PointsMaterial + sizeAttenuation true → world-space size that
+    // shrinks with camera distance like a real sphere).
+    const sizeM = this._pointSize;
     if (this._isVisible("traj", PATH_SVR)) {
-      const svrPts = (this.TRAJ_BY_PATH.server_post && this.TRAJ_BY_PATH.server_post.length)
-        ? this.TRAJ_BY_PATH.server_post : (this.SCENE.triangulated || []);
-      const filtered = svrPts.filter((p) => p.t_rel_s <= cutoff && residualPasses(p));
-      if (filtered.length) {
-        const buf = new Float32Array(filtered.length * 3);
-        for (let i = 0; i < filtered.length; ++i) {
-          buf[i * 3 + 0] = filtered[i].x;
-          buf[i * 3 + 1] = filtered[i].y;
-          buf[i * 3 + 2] = filtered[i].z;
-        }
+      // Use scene.triangulated (sorted + render-dist-filtered + each
+      // point stamped with `seg_idx` by reconstruct.py) — server is the
+      // single source of truth for index→segment classification. We do
+      // NOT classify client-side from SegmentRecord.original_indices:
+      // those index into the pre-filter sorted points list which is
+      // not what TRAJ_BY_PATH.server_post (unsorted!) ships.
+      const svrAll = this.SCENE.triangulated || [];
+      const buckets = new Map();  // segIdx | "out" -> [points]
+      let lastVisible = null;
+      for (let i = 0; i < svrAll.length; ++i) {
+        const p = svrAll[i];
+        if (p.t_rel_s > cutoff) continue;
+        if (!residualPasses(p)) continue;
+        const k = (typeof p.seg_idx === "number") ? p.seg_idx : -1;
+        const key = k === -1 ? "out" : String(k);
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(p);
+        lastVisible = p;
+      }
+      if (buckets.size) {
         const group = new THREE.Group();
         group.name = "viewer_traj_svr";
-        group.add(lineFromBuffer(buf, ACCENT_SVR));
-        if (playback) {
-          const head = filtered[filtered.length - 1];
-          group.add(pointMarker([head.x, head.y, head.z], ACCENT_SVR, 0.030));
+        for (const [key, pts] of buckets) {
+          const isOut = key === "out";
+          const color = isOut ? POINTS_OUTLIER : SEG_PALETTE[Number(key) % SEG_PALETTE.length];
+          group.add(pointsCloud(pts, color, isOut ? sizeM * POINT_SIZE_OUTLIER_RATIO : sizeM, {
+            opacity: isOut ? 0.55 : 1.0,
+            isOutlier: isOut,
+          }));
+        }
+        if (playback && lastVisible) {
+          // Head sphere — "current ball position at t" affordance, sized
+          // a bit larger than the cloud so it reads as the active marker.
+          group.add(pointMarker([lastVisible.x, lastVisible.y, lastVisible.z], ACCENT_SVR, sizeM * 1.6));
         }
         this.scene.addLayer("viewer_traj_svr", group);
       }
@@ -364,18 +398,14 @@ class ViewerLayers {
     if (this._isVisible("traj", PATH_LIVE)) {
       const livePts = (this.TRAJ_BY_PATH.live || []).filter((p) => p.t_rel_s <= cutoff && residualPasses(p));
       if (livePts.length) {
-        const buf = new Float32Array(livePts.length * 3);
-        for (let i = 0; i < livePts.length; ++i) {
-          buf[i * 3 + 0] = livePts[i].x;
-          buf[i * 3 + 1] = livePts[i].y;
-          buf[i * 3 + 2] = livePts[i].z;
-        }
         const group = new THREE.Group();
         group.name = "viewer_traj_live";
-        group.add(lineFromBuffer(buf, TRAJ_LIVE, { opacity: 0.7 }));
+        // Live trail has no per-point segment classification (live
+        // pipeline does not run the segmenter). Single accent colour.
+        group.add(pointsCloud(livePts, TRAJ_LIVE, sizeM, { opacity: 0.85 }));
         if (playback) {
           const head = livePts[livePts.length - 1];
-          group.add(pointMarker([head.x, head.y, head.z], TRAJ_LIVE, 0.024));
+          group.add(pointMarker([head.x, head.y, head.z], TRAJ_LIVE, sizeM * 1.4));
         }
         this.scene.addLayer("viewer_traj_live", group);
       }
@@ -399,6 +429,19 @@ class ViewerLayers {
   }
 
   // ---- public API ----
+  // Mutate trajectory point spheres live (PointsMaterial.size in world
+  // metres). Walks the two trajectory layers; no geometry rebuild.
+  setPointSize(sizeM) {
+    if (!Number.isFinite(sizeM)) return;
+    this._pointSize = sizeM;
+    writePersistedPointSizeM(sizeM);
+    for (const name of ["viewer_traj_svr", "viewer_traj_live"]) {
+      const layer = this.scene.getLayer && this.scene.getLayer(name);
+      applyPointSizeToGroup(layer, sizeM);
+    }
+  }
+  pointSizeM() { return this._pointSize; }
+
   setT(t, mode) {
     this.t = t;
     if (mode != null && mode !== this.mode) {
@@ -483,5 +526,26 @@ export function setupViewerLayers(scene, opts) {
   window.BallTrackerViewerScene = layers;
   const toolbar = document.querySelector(".scene-views");
   if (toolbar) scene.bindViewToolbar(toolbar);
+  // Slider seed + bind here, not in the classic IIFE — by the time
+  // setupViewerLayers runs the layers controller is mounted, so the
+  // initial DOM value can reflect the persisted size loud-and-correct
+  // instead of silently displaying the Python-rendered default while
+  // the materials use a different size from localStorage.
+  bindViewerPointSizeSlider(layers, "#viewer-point-size");
   return layers;
+}
+
+function bindViewerPointSizeSlider(layers, containerSel) {
+  const slider = document.querySelector(`${containerSel} [data-point-size-slider]`);
+  const readout = document.querySelector(`${containerSel} [data-point-size-readout]`);
+  if (!slider) return;
+  const seed = layers.pointSizeM();
+  slider.value = String(seed);
+  if (readout) readout.textContent = `${Math.round(seed * 1000)} mm`;
+  slider.addEventListener("input", () => {
+    const v = parseFloat(slider.value);
+    if (!Number.isFinite(v)) return;
+    if (readout) readout.textContent = `${Math.round(v * 1000)} mm`;
+    layers.setPointSize(v);
+  });
 }
