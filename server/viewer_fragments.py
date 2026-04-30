@@ -117,17 +117,18 @@ def video_cell_html(
 def cam_view_shared_toolbar_html() -> str:
     """Shared 2D-overlay control bar for both cam panels. Click handlers
     in 70_handlers.js fan setLayer / setOpacity calls out to every cam
-    that has cam-view mounted, keeping A and B in sync. Initial pressed
-    state mirrors the per-cell `data-layers-on` seed (plate +
-    detection_blobs_live)."""
+    that has cam-view mounted, keeping A and B in sync. PLATE and AXES
+    are independent on/off pills; BLOBS is a single-select segmented
+    control (live ⇆ svr, never both — operator looks at one path at a
+    time so colour can stay reserved for cam identity)."""
     return (
         '<div class="cam-view-shared-toolbar" data-cam-view-shared>'
         '<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>'
         '<button type="button" class="cv-layer" data-layer="axes">AXES</button>'
-        '<span class="cv-path-group" data-path="live">'
+        '<span class="cv-path-group" data-blobs-group role="radiogroup" aria-label="Blobs path">'
         '<span class="cv-path-lbl">BLOBS</span>'
-        '<button type="button" class="cv-layer on" data-layer="detection_blobs_live">live</button>'
-        '<button type="button" class="cv-layer" data-layer="detection_blobs_svr">svr</button>'
+        '<button type="button" class="cv-layer on" data-layer="detection_blobs_live" role="radio" aria-checked="true">live</button>'
+        '<button type="button" class="cv-layer" data-layer="detection_blobs_svr" role="radio" aria-checked="false">svr</button>'
         '</span>'
         '<span class="cv-opacity">OVL'
         '<input type="range" min="0" max="100" step="1" value="65" aria-label="Overlay opacity">'

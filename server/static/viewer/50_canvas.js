@@ -155,19 +155,16 @@
 
   if (window.BallTrackerCamView) {
     // Two BLOBS layers — one per path — so the shared toolbar's
-    // LIVE / SVR pills can toggle each independently. Path-encoded
-    // ring colour matches the 3D scene's existing convention
-    // (TRAJ_LIVE=#4A6B8C blue, ACCENT_SVR=#C0392B red in
-    // viewer_layers.js); inverting it here would mis-cue every
-    // BOTH-mode session — operator sees red=svr in the 3D fit head
-    // marker but red=live in the 2D ring.
-    const _BLOB_LIVE = '#4A6B8C';
-    const _BLOB_SVR = '#C0392B';
+    // single-select BLOBS group can flip the runtime between them.
+    // Ring colour: cam-encoded for live (matches 3D ray cam-colour
+    // convention), single accent for svr. Operator sees one path at a
+    // time so colour stays in the cam-identity channel, not stolen for
+    // path identity.
     window.BallTrackerCamView.registerLayer('detection_blobs_live', function (ctx, sx, sy, cam) {
-      _drawBlobsForPath(ctx, sx, sy, cam, 'live', _BLOB_LIVE);
+      _drawBlobsForPath(ctx, sx, sy, cam, 'live', colorForCamPath(cam.camera_id, 'live'));
     });
     window.BallTrackerCamView.registerLayer('detection_blobs_svr', function (ctx, sx, sy, cam) {
-      _drawBlobsForPath(ctx, sx, sy, cam, 'server_post', _BLOB_SVR);
+      _drawBlobsForPath(ctx, sx, sy, cam, 'server_post', ACCENT);
     });
     for (const c of (SCENE.cameras || [])) {
       if (c.fx == null || c.R_wc == null || c.t_wc == null

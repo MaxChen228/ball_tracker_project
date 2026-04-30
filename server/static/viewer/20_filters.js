@@ -4,33 +4,36 @@
   // rebuild. Single source of truth, no per-IIFE function copy.)
   function hasPathForLayer(layer, path) {
     if (layer === "traj") return HAS_TRAJ_PATH[path];
-    if (layer === "rays") return HAS_PATH[path];
     return HAS_PATH[path];
   }
-  // v4 schema: per-cam ray groups (camA/camB) collapsed into a single
-  // `rays` group (cam already encoded by ray colour, not by toggle), and
-  // a top-level `fit` boolean for the segmenter overlay. Old v3 maps are
-  // not migrated — users get fresh defaults on first load post-upgrade.
-  const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility_v4";
+  // v5 schema: `traj` / `rays` / `blobs` are single-select strings
+  // (one path at a time, never BOTH). Operator looks at one pipeline
+  // at a time — keeping the colour channel free for segment / cam
+  // identity rather than burning it on path identity. `fit` stays a
+  // boolean; STRIKE ZONE is its own checkbox elsewhere. Old v4 maps
+  // (object shape) are not migrated.
+  const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility_v5";
+  function _defaultPath(layer) {
+    if (layer === "traj") {
+      return HAS_TRAJ_PATH.server_post ? "server_post"
+        : (HAS_TRAJ_PATH.live ? "live" : "server_post");
+    }
+    return HAS_PATH.server_post ? "server_post"
+      : (HAS_PATH.live ? "live" : "server_post");
+  }
   const layerVisibility = {
-    traj: { live: HAS_TRAJ_PATH.live, server_post: HAS_TRAJ_PATH.server_post },
-    rays: { live: HAS_PATH.live, server_post: HAS_PATH.server_post },
+    traj: _defaultPath("traj"),
+    rays: _defaultPath("rays"),
+    blobs: _defaultPath("blobs"),
     fit: true,
   };
   try {
     const saved = JSON.parse(localStorage.getItem(LAYER_VIS_KEY) || "null");
     if (saved && typeof saved === "object") {
-      for (const k of ["traj", "rays"]) {
-        if (saved[k]) {
-          for (const path of PATHS) {
-            if (typeof saved[k][path] === "boolean") {
-              // Clamp restored prefs to what's applicable: a stale
-              // "traj.live=true" from a session that had live data must
-              // not resurrect a non-existent toggle on a server-only sid.
-              const applicable = hasPathForLayer(k, path);
-              layerVisibility[k][path] = saved[k][path] && applicable;
-            }
-          }
+      for (const k of ["traj", "rays", "blobs"]) {
+        const v = saved[k];
+        if ((v === "live" || v === "server_post") && hasPathForLayer(k, v)) {
+          layerVisibility[k] = v;
         }
       }
       if (typeof saved.fit === "boolean") layerVisibility.fit = saved.fit;
@@ -41,7 +44,7 @@
   }
   function isLayerVisible(layer, path) {
     if (layer === "fit") return !!layerVisibility.fit;
-    return !!(layerVisibility[layer] && layerVisibility[layer][path]);
+    return layerVisibility[layer] === path;
   }
   // Flat cams-present views used by the frame scrubber / label renderer.
   // Build the scrubber's discrete time positions per camera, preferring the

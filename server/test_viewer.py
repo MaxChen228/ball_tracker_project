@@ -1001,11 +1001,13 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
     assert not hasattr(ctx, "static_traces_json")
 
 
-def test_viewer_layer_visibility_v4_schema():
-    """v4 collapses camA/camB into a single `rays` group (cam already
-    encoded by ray colour) and adds a top-level `fit` boolean. Old v3
-    artifacts (HAS_PATH_PER_CAM, camA/camB layer keys) must be gone so
-    a stale localStorage entry can't keep them alive."""
+def test_viewer_layer_visibility_v5_schema():
+    """v5: TRAJ / RAYS / BLOBS each become a single-select segmented
+    control (one path at a time, never BOTH) — operator looks at one
+    pipeline at a time so colour stays reserved for cam / segment
+    identity. layerVisibility values are strings, not nested objects.
+    Old v3 / v4 artifacts must be gone so stale localStorage can't
+    resurrect them."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(723)
     _record_pitch(_pitch("A", 723, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -1014,16 +1016,18 @@ def test_viewer_layer_visibility_v4_schema():
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
     assert "function hasPathForLayer" in body
-    assert "ball_tracker_viewer_layer_visibility_v4" in body
+    assert "ball_tracker_viewer_layer_visibility_v5" in body
     assert 'data-layer="rays"' in body
     assert 'data-layer="fit"' in body
+    assert 'data-single-select' in body
     assert 'id="fit-layer-toggle"' in body
-    # v3 artifacts must be gone so a stale localStorage entry can't
-    # keep them alive.
+    # v3 / v4 artifacts must be gone so a stale localStorage entry
+    # can't keep them alive.
     assert "HAS_PATH_PER_CAM" not in body
     assert 'data-layer="camA"' not in body
     assert 'data-layer="camB"' not in body
     assert "_layer_visibility_v3" not in body
+    assert "_layer_visibility_v4" not in body
 
 
 def test_viewer_strip_reserves_dual_ab_subtracks_per_pipeline():
@@ -1448,7 +1452,8 @@ def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
     bar = cam_view_shared_toolbar_html()
     assert 'data-layer="detection_blobs_live"' in bar
     assert 'data-layer="detection_blobs_svr"' in bar
-    assert 'class="cv-path-group" data-path="live"' in bar
+    assert 'data-blobs-group' in bar
+    assert 'role="radiogroup"' in bar
     # Winner-dot / K slider relics from the pre-v4 era.
     assert 'data-layer="detection_live"' not in body
     assert 'data-layer="detection_svr"' not in body
