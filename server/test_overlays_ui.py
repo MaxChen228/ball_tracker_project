@@ -107,7 +107,10 @@ def test_viewer_overlay_controls_in_layer_toggles():
     body = TestClient(app).get(f"/viewer/{session_id}").text
 
     assert '<input type="checkbox" id="strike-zone-toggle"' in body
-    assert '<input type="checkbox" id="fit-layer-toggle"' in body
+    # v6: fit is a layer-checkbox keyed by data-layer="fit"; the legacy
+    # id="fit-layer-toggle" is gone.
+    assert 'data-layer="fit"' in body
+    assert 'id="fit-layer-toggle"' not in body
     assert 'id="speed-toggle"' not in body
     assert 'id="fit-src-svr"' not in body
     assert 'id="fit-src-live"' not in body

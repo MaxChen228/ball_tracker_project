@@ -154,17 +154,15 @@
   }
 
   if (window.BallTrackerCamView) {
-    // Two BLOBS layers — one per path — so the shared toolbar's
-    // single-select BLOBS group can flip the runtime between them.
+    // Single BLOBS layer; the data path comes from the global PATH
+    // selector via currentPath(). Cam-view runtime owns the on/off
+    // boolean per cam; toolbar handler flips PATH → calls redrawAll.
     // Ring colour: cam-encoded for live (matches 3D ray cam-colour
-    // convention), single accent for svr. Operator sees one path at a
-    // time so colour stays in the cam-identity channel, not stolen for
-    // path identity.
-    window.BallTrackerCamView.registerLayer('detection_blobs_live', function (ctx, sx, sy, cam) {
-      _drawBlobsForPath(ctx, sx, sy, cam, 'live', colorForCamPath(cam.camera_id, 'live'));
-    });
-    window.BallTrackerCamView.registerLayer('detection_blobs_svr', function (ctx, sx, sy, cam) {
-      _drawBlobsForPath(ctx, sx, sy, cam, 'server_post', ACCENT);
+    // convention), single accent for svr.
+    window.BallTrackerCamView.registerLayer('detection_blobs', function (ctx, sx, sy, cam) {
+      const path = currentPath();
+      const color = path === 'live' ? colorForCamPath(cam.camera_id, 'live') : ACCENT;
+      _drawBlobsForPath(ctx, sx, sy, cam, path, color);
     });
     for (const c of (SCENE.cameras || [])) {
       if (c.fx == null || c.R_wc == null || c.t_wc == null

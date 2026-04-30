@@ -761,8 +761,7 @@ _LAYER_LABELS = {
     "marker_footprints": "MARKERS",
     "ball_crosshair": "BALL",
     "reproj_check": "REPROJ",
-    "detection_blobs_live": "BLOBS",
-    "detection_blobs_svr": "BLOBS",
+    "detection_blobs": "BLOBS",
 }
 
 

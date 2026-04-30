@@ -122,11 +122,11 @@ class ViewerLayers {
     this.fallbackColor = opts.fallbackColor || 0x999999;
     this.t = opts.tInitial ?? 0;
     this.mode = opts.mode || "all";  // "all" | "playback"
-    // Layer visibility — matches 20_filters.js v5 schema:
-    //   { traj: "live"|"server_post", rays: same, blobs: same, fit: bool }
-    // Single-select per group: operator looks at one path at a time so
-    // colour can stay reserved for cam identity (A red / B blue) and
-    // segment identity (SEG_PALETTE), not burned on path identity.
+    // Layer visibility — matches 20_filters.js v6 schema:
+    //   { path: "live"|"server_post", rays: bool, traj: bool, fit: bool, blobs: bool }
+    // One global path drives the data source for every enabled layer;
+    // per-layer booleans compose freely on top. Operator's mental model:
+    // "I'm looking at the SVR pipeline, show me rays + fit on top."
     // Caller MUST provide it (the IIFE's `window.VIEWER_DATA.layerVisibility`
     // ships the localStorage-restored map). Falling back to a default
     // here would mask an init-order regression — fail loud per CLAUDE.md.
@@ -185,15 +185,19 @@ class ViewerLayers {
     this._applyCameraVisibility();
   }
 
+  _currentPath() { return this.layerVisibility.path; }
+  _layerOn(layer) { return !!this.layerVisibility[layer]; }
+  // True iff the layer's enable flag is on AND its data subset matches the
+  // global path. Layers with no path discrimination (fit) ignore `path`.
   _isVisible(layer, path) {
-    if (layer === "fit") return !!this.layerVisibility.fit;
-    return this.layerVisibility[layer] === path;
+    if (layer === "fit") return this._layerOn("fit");
+    if (!this._layerOn(layer)) return false;
+    return path === this._currentPath();
   }
 
   _applyCameraVisibility() {
     if (!this._cameraGroup) return;
-    // v5: rays is single-select string, never empty — cam diamonds
-    // always visible as static reference markers.
+    // Cam diamonds are static reference markers — always visible.
     for (const cg of this._cameraGroup.children) {
       cg.visible = true;
     }
@@ -260,7 +264,7 @@ class ViewerLayers {
     // SSE-driven setSessionData path (which tears down + rebuilds fit
     // curves) would reset visibility to true regardless of the operator's
     // checkbox state.
-    this._fitGroup.visible = !!this.layerVisibility.fit;
+    this._fitGroup.visible = this._layerOn("fit");
     this._applyFitActiveHighlight();
   }
 
@@ -473,28 +477,36 @@ class ViewerLayers {
     this._applyFitActiveHighlight();
   }
 
-  // Single-select swap: set the chosen path for `layer` (traj / rays)
-  // and refresh the affected dynamic layers. Fit is a boolean
-  // checkbox on its own surface — see `setFitVisibility`.
-  setLayerSelection(layer, path) {
+  // Switch the global PATH (live / server_post). Every visible layer is
+  // re-driven from the new data source; ground projection follows rays.
+  setPath(path) {
     if (path !== "live" && path !== "server_post") {
-      throw new Error(`setLayerSelection: invalid path '${path}'`);
+      throw new Error(`setPath: invalid path '${path}'`);
     }
-    this.layerVisibility[layer] = path;
-    if (layer === "rays") {
+    if (this.layerVisibility.path === path) return;
+    this.layerVisibility.path = path;
+    this._applyGroundVisibility();
+    this._rebuildDynamic();
+  }
+
+  // Toggle a single boolean layer (rays / traj / fit / blobs).
+  setLayerEnabled(layer, enabled) {
+    if (!(layer in this.layerVisibility) || layer === "path") {
+      throw new Error(`setLayerEnabled: unknown boolean layer '${layer}'`);
+    }
+    this.layerVisibility[layer] = !!enabled;
+    if (layer === "fit") {
+      if (this._fitGroup) this._fitGroup.visible = this._layerOn("fit");
+      // Active-fit-marker is dynamic; flush so toggle takes effect now.
+      this._rebuildDynamic();
+    } else if (layer === "rays") {
       this._applyGroundVisibility();
       this._rebuildDynamic();
     } else if (layer === "traj") {
       this._rebuildDynamic();
     }
-  }
-
-  setFitVisibility(visible) {
-    this.layerVisibility.fit = !!visible;
-    if (this._fitGroup) this._fitGroup.visible = !!visible;
-    // Active-fit-marker is a dynamic layer rebuilt on setT — flush it
-    // now so the operator sees fit hide instantly, not on next scrub.
-    this._rebuildDynamic();
+    // `blobs` is owned by the 2D canvas (50_canvas.js); it reads
+    // currentPath() / isLayerEnabled('blobs') from the IIFE itself.
   }
 
 

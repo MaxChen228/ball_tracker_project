@@ -93,45 +93,29 @@
   // on screen — otherwise the note is noise.
   const multiNote = document.getElementById("strip-note-multi");
   if (multiNote) multiNote.hidden = visibleStripCount < 2;
+  // Paint global PATH segmented control + per-layer enable checkboxes.
+  // PATH pills carry data-path; layer checkboxes carry data-layer +
+  // boolean state on `aria-checked`. Both are persisted via the v6
+  // localStorage map; mount-time call here syncs DOM ←─ persisted state.
   function paintLayerPills() {
-    const pills = layerToggles.querySelectorAll(".layer-pill");
-    for (const pill of pills) {
-      const layer = pill.dataset.layer;
-      const path = pill.dataset.path;
-      const applicable = hasPathForLayer(layer, path);
-      if (!applicable) {
-        pill.hidden = true;
-        pill.setAttribute("aria-checked", "false");
-        continue;
+    const pathGroup = layerToggles.querySelector("[data-path-group]");
+    if (pathGroup) {
+      for (const pill of pathGroup.querySelectorAll(".layer-pill")) {
+        const path = pill.dataset.path;
+        const applicable = HAS_PATH[path] || HAS_TRAJ_PATH[path];
+        pill.hidden = !applicable;
+        pill.setAttribute("aria-checked",
+          (applicable && currentPath() === path) ? "true" : "false");
       }
-      pill.hidden = false;
-      pill.setAttribute("aria-checked", isLayerVisible(layer, path) ? "true" : "false");
     }
-    // Fold groups whose pills are all hidden. Skip checkbox-style
-    // groups (fit, strike-zone) which have no .layer-pill children.
-    for (const group of layerToggles.querySelectorAll(".layer-group")) {
-      if (group.querySelector(".layer-checkbox")) continue;
-      const anyPill = group.querySelector(".layer-pill:not([hidden])");
-      group.hidden = !anyPill;
+    for (const cb of layerToggles.querySelectorAll(".layer-checkbox[data-layer]")) {
+      const layer = cb.dataset.layer;
+      if (layer === "fit" || layer === "rays" || layer === "traj") {
+        cb.checked = isLayerEnabled(layer);
+      }
     }
   }
   paintLayerPills();
-  // --- Fit-curve visibility toggle ---
-  // Sibling of strike-zone: a top-level boolean (no live/svr split, since
-  // the segmenter currently runs on a single authoritative path per
-  // session). When dual-segmenter lands, `layerVisibility.fit` flips to
-  // a {live, server_post} pair like rays/traj.
-  const _fitToggle = document.getElementById("fit-layer-toggle");
-  if (_fitToggle) {
-    _fitToggle.checked = !!layerVisibility.fit;
-    _fitToggle.addEventListener("change", () => {
-      layerVisibility.fit = !!_fitToggle.checked;
-      persistLayerVisibility();
-      if (window.BallTrackerViewerScene) {
-        window.BallTrackerViewerScene.setFitVisibility(layerVisibility.fit);
-      }
-    });
-  }
   // --- Strike-zone visibility toggle ---
   // Three.js scene runtime owns the wireframe + fill mesh group.
   // Checkbox flips the shared localStorage flag (so dashboard sees
@@ -152,57 +136,58 @@
   // touches the DOM `window.BallTrackerViewerScene` is mounted. Doing
   // the bind here would race (this classic IIFE runs first, layers
   // controller still undefined).
+  // Global PATH selector — single click on a path pill flips the active
+  // path; every enabled layer (rays/traj/fit/blobs) re-drives from the
+  // new data source. Re-clicking the active pill is a no-op (we don't
+  // expose a "no path" state — turning a layer off goes through its own
+  // checkbox).
   layerToggles.addEventListener("click", (e) => {
-    const pill = e.target.closest(".layer-pill");
+    const pill = e.target.closest(".layer-pill[data-path]");
     if (!pill || pill.hidden || pill.disabled) return;
-    const layer = pill.dataset.layer;
     const path = pill.dataset.path;
-    // Single-select: clicking the active pill is a no-op (we don't
-    // expose a "no path" state here — operator who wants to hide rays
-    // entirely uses the FIT checkbox / scene mode toggles, not this
-    // group). Clicking the inactive pill switches selection.
-    if (layerVisibility[layer] === path) return;
-    layerVisibility[layer] = path;
+    if (currentPath() === path) return;
+    layerVisibility.path = path;
     persistLayerVisibility();
     paintLayerPills();
     if (window.BallTrackerViewerScene) {
-      window.BallTrackerViewerScene.setLayerSelection(layer, path);
+      window.BallTrackerViewerScene.setPath(path);
     }
+    if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();
     renderDetectionStrip();
   });
+  // Per-layer enable checkboxes (rays / traj / fit). One handler reads
+  // data-layer and forwards to setLayerEnabled. BLOBS lives on the
+  // shared 2D toolbar and goes through its own handler below.
+  layerToggles.addEventListener("change", (e) => {
+    const cb = e.target.closest(".layer-checkbox[data-layer]");
+    if (!cb) return;
+    const layer = cb.dataset.layer;
+    if (layer !== "rays" && layer !== "traj" && layer !== "fit") return;
+    layerVisibility[layer] = !!cb.checked;
+    persistLayerVisibility();
+    if (window.BallTrackerViewerScene) {
+      window.BallTrackerViewerScene.setLayerEnabled(layer, !!cb.checked);
+    }
+  });
   // --- Shared 2D-overlay toolbar ---
-  // Per-cam toolbars retired in v4. The shared bar fans toggle clicks
-  // out to every cam-view mount via BallTrackerCamView.setLayer; the
-  // runtime keeps per-cam layer state internally but operator never
-  // wants A and B set differently here (left/right placement already
-  // encodes the cam axis).
+  // Per-cam toolbars retired in v4; the shared bar fans toggle clicks
+  // out to every cam-view mount via BallTrackerCamView.setLayer. BLOBS
+  // is a single boolean (data path = global PATH selector).
   const sharedBar = document.querySelector("[data-cam-view-shared]");
   if (sharedBar) {
     const camIds = ["A", "B"];
-    const blobsGroup = sharedBar.querySelector("[data-blobs-group]");
     sharedBar.addEventListener("click", (e) => {
       const btn = e.target.closest(".cv-layer");
       if (!btn || !window.BallTrackerCamView) return;
       const key = btn.dataset.layer;
-      // BLOBS is single-select (live ⇆ svr): clicking active = no-op,
-      // clicking inactive switches selection AND turns the sibling
-      // pill off. PLATE / AXES are independent on/off pills.
-      if (blobsGroup && blobsGroup.contains(btn)) {
-        if (btn.classList.contains("on")) return;
-        for (const sibling of blobsGroup.querySelectorAll(".cv-layer")) {
-          const sKey = sibling.dataset.layer;
-          const isPicked = sibling === btn;
-          sibling.classList.toggle("on", isPicked);
-          sibling.setAttribute("aria-checked", isPicked ? "true" : "false");
-          for (const c of camIds) window.BallTrackerCamView.setLayer(c, sKey, isPicked);
-        }
-        layerVisibility.blobs = key === "detection_blobs_live" ? "live" : "server_post";
-        persistLayerVisibility();
-        return;
-      }
       const next = !btn.classList.contains("on");
       btn.classList.toggle("on", next);
+      btn.setAttribute("aria-checked", next ? "true" : "false");
       for (const c of camIds) window.BallTrackerCamView.setLayer(c, key, next);
+      if (key === "detection_blobs") {
+        layerVisibility.blobs = next;
+        persistLayerVisibility();
+      }
     });
     const ovl = sharedBar.querySelector(".cv-opacity input[type=range]");
     if (ovl) {
@@ -211,24 +196,16 @@
         for (const c of camIds) window.BallTrackerCamView.setOpacity(c, ovl.value);
       });
     }
-    // Sync persisted blobs selection on mount: HTML seeds live=on, but
-    // localStorage may say svr. Push both states down to the cam-view
-    // runtime so its per-cam layer map matches what the shared bar
-    // shows — without this, an svr-persisted session boots with the
-    // svr pill highlighted but the runtime still drawing live blobs.
-    if (blobsGroup && window.BallTrackerCamView) {
-      const liveOn = layerVisibility.blobs === "live";
-      const liveBtn = blobsGroup.querySelector('[data-layer="detection_blobs_live"]');
-      const svrBtn = blobsGroup.querySelector('[data-layer="detection_blobs_svr"]');
-      if (liveBtn && svrBtn) {
-        liveBtn.classList.toggle("on", liveOn);
-        liveBtn.setAttribute("aria-checked", liveOn ? "true" : "false");
-        svrBtn.classList.toggle("on", !liveOn);
-        svrBtn.setAttribute("aria-checked", !liveOn ? "true" : "false");
+    // Mount-time sync: push persisted BLOBS state to runtime + button.
+    if (window.BallTrackerCamView) {
+      const blobsBtn = sharedBar.querySelector('[data-layer="detection_blobs"]');
+      const blobsOn = isLayerEnabled("blobs");
+      if (blobsBtn) {
+        blobsBtn.classList.toggle("on", blobsOn);
+        blobsBtn.setAttribute("aria-checked", blobsOn ? "true" : "false");
       }
       for (const c of camIds) {
-        window.BallTrackerCamView.setLayer(c, "detection_blobs_live", liveOn);
-        window.BallTrackerCamView.setLayer(c, "detection_blobs_svr", !liveOn);
+        window.BallTrackerCamView.setLayer(c, "detection_blobs", blobsOn);
       }
     }
   }

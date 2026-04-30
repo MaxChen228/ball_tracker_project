@@ -16,9 +16,11 @@ from palette import (
     _SURFACE,
 )
 
-# Module-local: a translucent ink for ghost / overlay traces. Lives here
-# (not in palette.py) because no other module shares it.
-_INK_40 = "rgba(42, 37, 32, 0.4)"
+# Module-local: dim ink for the up-axis on camera triads + world Z axis.
+# Was previously `rgba(42,37,32,0.4)` but THREE.Color drops alpha (warning
+# in console, render was opaque anyway). Kept as hex; if a true translucent
+# axis is wanted, set `transparent:true, opacity:X` on the line material.
+_INK_40 = _INK
 
 # Chain-filter ghost-mode colors. Rejected detections stay drawn but in
 # these distinct hues so operators can see what the filter removed and

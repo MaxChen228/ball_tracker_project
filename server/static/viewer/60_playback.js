@@ -175,18 +175,15 @@
   function pauseAllPlayback() { vids.forEach(v => v.pause()); resetVideoPlaybackRates(); stopVirtualClock(); }
   function stepFrames(delta) { beginTimelineInteraction(); setFrame(currentFrame + delta); }
   function jumpDetection(dir) {
-    // Step to the next frame where *any* currently-visible pipeline reports
-    // a detection. Respecting the pills means the hotkey follows what the
-    // operator is actually looking at: hide LIVE and D/F will skip through
-    // svr+post only.
+    // Step to the next frame where the currently-selected PATH reports a
+    // detection on any cam. Hotkey follows the global PATH selector so
+    // SVR-mode skips through server_post detections only.
+    const path = currentPath();
     let i = currentFrame + dir;
     while (i >= 0 && i < TOTAL_FRAMES) {
-      for (const path of PATHS) {
-        for (const cam of camsWithFramesByPath[path]) {
-          if (!isLayerVisible(`cam${cam}`, path)) continue;
-          const e = camAtFrameByPath[path][cam][i];
-          if (e && e.detected) { beginTimelineInteraction(); setFrame(i); return; }
-        }
+      for (const cam of camsWithFramesByPath[path]) {
+        const e = camAtFrameByPath[path][cam][i];
+        if (e && e.detected) { beginTimelineInteraction(); setFrame(i); return; }
       }
       i += dir;
     }
