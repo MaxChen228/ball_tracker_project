@@ -242,7 +242,6 @@ def _config_pill_html(
             f'<span class="cfg-pill missing" title="{html.escape(label)}: not set">'
             f'<span class="cfg-label">{html.escape(label)}</span>'
             f'<span class="cfg-tag">—</span>'
-            f'<span class="cfg-detail">no preset stamped</span>'
             f'</span>'
         )
 
@@ -258,22 +257,14 @@ def _config_pill_html(
             f'<span class="cfg-pill missing" '
             f'title="{html.escape(label)}: preset {html.escape(preset_name)} no longer on disk">'
             f'<span class="cfg-label">{html.escape(label)}</span>'
-            f'<span class="cfg-tag">{html.escape(preset_name)}</span>'
-            f'<span class="cfg-detail">(deleted)</span>'
+            f'<span class="cfg-tag">{html.escape(preset_name)} (deleted)</span>'
             f'</span>'
         )
 
-    h = p.hsv
-    g = p.shape_gate
-    detail = (
-        f"H {h.h_min}-{h.h_max} · S {h.s_min}-{h.s_max} · V {h.v_min}-{h.v_max} · "
-        f"asp≥{g.aspect_min:.2f} fill≥{g.fill_min:.2f}"
-    )
     return (
-        f'<span class="cfg-pill ok" title="{html.escape(p.label)} — {html.escape(detail)}">'
+        f'<span class="cfg-pill ok" title="{html.escape(p.label)}">'
         f'<span class="cfg-label">{html.escape(label)}</span>'
         f'<span class="cfg-tag">{html.escape(preset_name)}</span>'
-        f'<span class="cfg-detail">{html.escape(detail)}</span>'
         f'</span>'
     )
 
