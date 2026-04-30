@@ -91,7 +91,10 @@ def test_viewer_layers_use_role_based_not_path_based_colors():
     assert "function colorForCamPath" not in text
     assert "function colorForCamera" in text
     assert "const FIT_ACCENT = 0xC0392B;" in text
-    assert "const TRAJ_LIVE = FIT_ACCENT;" in text
+    assert 'group.name = "viewer_traj";' in text
+    assert 'viewer_traj_live' not in text
+    assert 'viewer_traj_svr' not in text
+    assert "const authorityPts = this.SCENE.triangulated || [];" in text
 
 
 def test_scene_theme_is_json_safe():
