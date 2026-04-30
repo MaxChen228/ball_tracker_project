@@ -107,17 +107,33 @@
       pill.hidden = false;
       pill.setAttribute("aria-pressed", isLayerVisible(layer, path) ? "true" : "false");
     }
-    for (const sw of layerToggles.querySelectorAll(".layer-name .swatch")) {
-      sw.style.background = colorForCamPath(sw.dataset.cam, "server_post");
-    }
-    // If every pill in a group is hidden, fold the group too — otherwise you
-    // get a dangling "Traj" label with nothing under it.
+    // If every pill in a group is hidden, fold the group too. The fit
+    // group has no pills (checkbox-style) — querySelector('.layer-pill')
+    // returns null so it would always fold. Skip groups whose name maps
+    // to the fit checkbox layer.
     for (const group of layerToggles.querySelectorAll(".layer-group")) {
+      if (group.dataset.layer === "fit") continue;
       const anyPill = group.querySelector(".layer-pill:not([hidden])");
       group.hidden = !anyPill;
     }
   }
   paintLayerPills();
+  // --- Fit-curve visibility toggle ---
+  // Sibling of strike-zone: a top-level boolean (no live/svr split, since
+  // the segmenter currently runs on a single authoritative path per
+  // session). When dual-segmenter lands, `layerVisibility.fit` flips to
+  // a {live, server_post} pair like rays/traj.
+  const _fitToggle = document.getElementById("fit-toggle");
+  if (_fitToggle) {
+    _fitToggle.checked = !!layerVisibility.fit;
+    _fitToggle.addEventListener("change", () => {
+      layerVisibility.fit = !!_fitToggle.checked;
+      persistLayerVisibility();
+      if (window.BallTrackerViewerScene) {
+        window.BallTrackerViewerScene.setFitVisibility(layerVisibility.fit);
+      }
+    });
+  }
   // --- Strike-zone visibility toggle ---
   // Three.js scene runtime owns the wireframe + fill mesh group.
   // Checkbox flips the shared localStorage flag (so dashboard sees

@@ -348,15 +348,16 @@ def render_viewer_html(
               <button type="button" class="layer-pill" data-layer="traj" data-path="live" aria-pressed="false">live</button>
               <button type="button" class="layer-pill" data-layer="traj" data-path="server_post" aria-pressed="true">svr</button>
             </span>
-            <span class="layer-group" data-layer="camA">
-              <span class="layer-name"><span class="swatch" data-cam="A"></span>Rays A</span>
-              <button type="button" class="layer-pill" data-layer="camA" data-path="live" aria-pressed="true">live</button>
-              <button type="button" class="layer-pill" data-layer="camA" data-path="server_post" aria-pressed="true">svr</button>
+            <span class="layer-group" data-layer="rays">
+              <span class="layer-name">Rays</span>
+              <button type="button" class="layer-pill" data-layer="rays" data-path="live" aria-pressed="true">live</button>
+              <button type="button" class="layer-pill" data-layer="rays" data-path="server_post" aria-pressed="true">svr</button>
             </span>
-            <span class="layer-group" data-layer="camB">
-              <span class="layer-name"><span class="swatch" data-cam="B"></span>Rays B</span>
-              <button type="button" class="layer-pill" data-layer="camB" data-path="live" aria-pressed="true">live</button>
-              <button type="button" class="layer-pill" data-layer="camB" data-path="server_post" aria-pressed="true">svr</button>
+            <span class="layer-group" data-layer="fit">
+              <label class="layer-checkbox">
+                <input type="checkbox" id="fit-toggle" checked>
+                <span class="layer-name">Fit</span>
+              </label>
             </span>
             <span class="layer-divider" aria-hidden="true"></span>
             <span class="layer-group" data-layer="strike-zone" title="Toggle the strike-zone wireframe in the 3D scene. Default on.">

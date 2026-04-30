@@ -122,9 +122,11 @@ class ViewerLayers {
     this.fallbackColor = opts.fallbackColor || 0x999999;
     this.t = opts.tInitial ?? 0;
     this.mode = opts.mode || "all";  // "all" | "playback"
-    // Per-(cam | traj, path) visibility — nested shape matching the
-    // legacy IIFE's 20_filters.js `layerVisibility`:
-    //   { camA: { live, server_post }, camB: { ... }, traj: { ... } }
+    // Layer visibility — matches 20_filters.js v4 schema:
+    //   { traj: {live, server_post}, rays: {live, server_post}, fit: bool }
+    // Cam-pose / ground projection visibility is derived from `rays`
+    // (any path on → cam visible) since the operator no longer
+    // distinguishes A vs B at the toggle level.
     // Caller MUST provide it (the IIFE's `window.VIEWER_DATA.layerVisibility`
     // ships the localStorage-restored map). Falling back to a default
     // here would mask an init-order regression — fail loud per CLAUDE.md.
@@ -184,15 +186,17 @@ class ViewerLayers {
   }
 
   _isVisible(layer, path) {
+    if (layer === "fit") return !!this.layerVisibility.fit;
     return !!(this.layerVisibility[layer] && this.layerVisibility[layer][path]);
   }
 
   _applyCameraVisibility() {
     if (!this._cameraGroup) return;
+    // Cam diamond visible iff any rays path is on. Per-cam toggling was
+    // retired in v4 — operator distinguishes A/B by ray colour, not by
+    // hiding one cam's pose anchor.
+    const anyOn = PATHS.some((p) => this._isVisible("rays", p));
     for (const cg of this._cameraGroup.children) {
-      const camId = cg.name.replace(/^cam_/, "");
-      // Visible iff any of this cam's pipeline pills is on.
-      const anyOn = PATHS.some((p) => this._isVisible(`cam${camId}`, p));
       cg.visible = anyOn;
     }
   }
@@ -230,9 +234,9 @@ class ViewerLayers {
   _applyGroundVisibility() {
     if (!this._groundGroup) return;
     for (const line of this._groundGroup.children) {
-      const { cam, path } = line.userData || {};
-      if (!cam || !path) continue;
-      line.visible = this._isVisible(`cam${cam}`, path);
+      const { path } = line.userData || {};
+      if (!path) continue;
+      line.visible = this._isVisible("rays", path);
     }
   }
 
@@ -251,6 +255,11 @@ class ViewerLayers {
     }
     this.scene.addLayer("viewer_fit_curves", group);
     this._fitGroup = group;
+    // Honour the persisted fit toggle on (re)build — without this, the
+    // SSE-driven setSessionData path (which tears down + rebuilds fit
+    // curves) would reset visibility to true regardless of the operator's
+    // checkbox state.
+    this._fitGroup.visible = !!this.layerVisibility.fit;
     this._applyFitActiveHighlight();
   }
 
@@ -310,7 +319,7 @@ class ViewerLayers {
       // exactly the silent-fallback class CLAUDE.md forbids.
       if (typeof r.t_rel_s !== "number" || !Number.isFinite(r.t_rel_s)) continue;
       const path = r.source === "live" ? PATH_LIVE : PATH_SVR;
-      if (!this._isVisible(`cam${r.camera_id}`, path)) continue;
+      if (!this._isVisible("rays", path)) continue;
       const key = `${r.camera_id}|${path}`;
       let arr = raysByKey.get(key);
       if (!arr) { arr = []; raysByKey.set(key, arr); }
@@ -417,7 +426,7 @@ class ViewerLayers {
     }
 
     // Active fit-segment marker (the "predicted ball position at this t").
-    if (playback) {
+    if (playback && this._isVisible("fit")) {
       const segs = Array.isArray(this.SEGMENTS) ? this.SEGMENTS : [];
       for (let i = 0; i < segs.length; ++i) {
         const seg = segs[i];
@@ -464,18 +473,26 @@ class ViewerLayers {
   }
 
   // Toggle a single (layer, path) flag and refresh affected layers.
-  // `layer` matches the IIFE's nested visibility shape: 'camA' / 'camB'
-  // / 'traj'. Path is 'live' or 'server_post'.
+  // `layer` is 'traj' or 'rays'. Path is 'live' or 'server_post'. Fit is
+  // a boolean toggle on its own surface — see `setFitVisibility`.
   setLayerVisibility(layer, path, visible) {
     if (!this.layerVisibility[layer]) this.layerVisibility[layer] = {};
     this.layerVisibility[layer][path] = !!visible;
-    if (layer.startsWith("cam")) {
+    if (layer === "rays") {
       this._applyCameraVisibility();
       this._applyGroundVisibility();
       this._rebuildDynamic();
     } else if (layer === "traj") {
       this._rebuildDynamic();
     }
+  }
+
+  setFitVisibility(visible) {
+    this.layerVisibility.fit = !!visible;
+    if (this._fitGroup) this._fitGroup.visible = !!visible;
+    // Active-fit-marker is a dynamic layer rebuilt on setT — flush it
+    // now so the operator sees fit hide instantly, not on next scrub.
+    this._rebuildDynamic();
   }
 
   // Sync the entire visibility map at once (used after a localStorage

@@ -93,10 +93,10 @@ def test_viewer_injects_overlays_runtime():
 
 
 def test_viewer_overlay_controls_in_layer_toggles():
-    """Strike-zone toggle must be in the layer-toggles strip. The legacy
-    Fit / Speed checkboxes + svr/live source pills are gone (multi-segment
-    fit is now persisted on SessionResult.segments); guard against
-    accidental restoration."""
+    """Strike-zone + fit toggles live in the layer-toggles strip. The
+    legacy Speed checkbox + svr/live source pills are gone (multi-segment
+    fit now lives on SessionResult.segments and the segmenter runs on a
+    single authoritative path); guard against accidental restoration."""
     import numpy as np
     from conftest import sid
     from test_viewer import _make_rig, _pitch, _record_pitch
@@ -107,7 +107,7 @@ def test_viewer_overlay_controls_in_layer_toggles():
     body = TestClient(app).get(f"/viewer/{session_id}").text
 
     assert '<input type="checkbox" id="strike-zone-toggle"' in body
-    assert 'id="fit-toggle"' not in body
+    assert '<input type="checkbox" id="fit-toggle"' in body
     assert 'id="speed-toggle"' not in body
     assert 'id="fit-src-svr"' not in body
     assert 'id="fit-src-live"' not in body

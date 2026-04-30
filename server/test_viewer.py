@@ -1001,7 +1001,11 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
     assert not hasattr(ctx, "static_traces_json")
 
 
-def test_viewer_has_path_is_per_camera_not_global():
+def test_viewer_layer_visibility_v4_schema():
+    """v4 collapses camA/camB into a single `rays` group (cam already
+    encoded by ray colour) and adds a top-level `fit` boolean. Old v3
+    artifacts (HAS_PATH_PER_CAM, camA/camB layer keys) must be gone so
+    a stale localStorage entry can't keep them alive."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(723)
     _record_pitch(_pitch("A", 723, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -1009,11 +1013,17 @@ def test_viewer_has_path_is_per_camera_not_global():
 
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
-    assert "const HAS_PATH_PER_CAM = {}" in body
     assert "function hasPathForLayer" in body
-    assert "hasPathForLayer(layer, path)" in body
-    assert "HAS_PATH_PER_CAM.A.live" in body
-    assert "HAS_PATH_PER_CAM.B.live" in body
+    assert "ball_tracker_viewer_layer_visibility_v4" in body
+    assert 'data-layer="rays"' in body
+    assert 'data-layer="fit"' in body
+    assert 'id="fit-toggle"' in body
+    # v3 artifacts must be gone so a stale localStorage entry can't
+    # keep them alive.
+    assert "HAS_PATH_PER_CAM" not in body
+    assert 'data-layer="camA"' not in body
+    assert 'data-layer="camB"' not in body
+    assert "_layer_visibility_v3" not in body
 
 
 def test_viewer_strip_reserves_dual_ab_subtracks_per_pipeline():
