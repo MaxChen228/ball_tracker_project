@@ -40,19 +40,24 @@ from render_scene_theme import (
     _SURFACE,
     _WORLD_AXIS_LEN_M,
 )
+from strike_zone import (
+    DEFAULT_BATTER_HEIGHT_CM,
+    strike_zone_geometry_for_height,
+)
 
 
 _VENDOR_DIR = Path(__file__).parent / "static" / "threejs" / "vendor"
 _RUNTIME_DIR = Path(__file__).parent / "static" / "threejs"
 
 
-def scene_theme() -> dict:
+def scene_theme(strike_zone: dict | None = None) -> dict:
     """Constants the JS scene needs to render the static layers.
 
     Strike zone, plate, ground extent, axis lengths, colours. JSON-safe
     primitives only — JS reads via `JSON.parse(textContent)` on a
     `<script type="application/json">` block injected by the page
     renderer."""
+    sz = strike_zone or strike_zone_geometry_for_height(DEFAULT_BATTER_HEIGHT_CM).to_dict()
     return {
         "colors": {
             "bg": _BG,
@@ -77,13 +82,23 @@ def scene_theme() -> dict:
             "y": list(_PLATE_Y),
         },
         "strike_zone": {
-            "x_half_m": _STRIKE_ZONE_X_HALF_M,
-            "y_front_m": _STRIKE_ZONE_Y_FRONT_M,
-            "y_back_m": _STRIKE_ZONE_Y_BACK_M,
-            "z_bottom_m": _STRIKE_ZONE_Z_BOTTOM_M,
-            "z_top_m": _STRIKE_ZONE_Z_TOP_M,
+            "batter_height_cm": int(sz["batter_height_cm"]),
+            "x_half_m": float(sz["x_half_m"]),
+            "y_front_m": float(sz["y_front_m"]),
+            "y_back_m": float(sz["y_back_m"]),
+            "z_bottom_m": float(sz["z_bottom_m"]),
+            "z_top_m": float(sz["z_top_m"]),
+            "z_height_m": float(sz["z_height_m"]),
+            "front_face": sz["front_face"],
+            "back_face": sz["back_face"],
+            "connectors": sz["connectors"],
+            "front_grid": sz["front_grid"],
             "fill_opacity": _STRIKE_ZONE_FILL_OPACITY,
             "line_width": _STRIKE_ZONE_LINE_WIDTH,
+            "front_opacity": 0.95,
+            "back_opacity": 0.40,
+            "connector_opacity": 0.30,
+            "grid_opacity": 0.72,
         },
         "axes": {
             "world_len_m": _WORLD_AXIS_LEN_M,
@@ -93,12 +108,12 @@ def scene_theme() -> dict:
     }
 
 
-def scene_theme_json() -> str:
+def scene_theme_json(strike_zone: dict | None = None) -> str:
     """Serialise `scene_theme()` for embedding in a `<script>` block."""
-    return _json.dumps(scene_theme())
+    return _json.dumps(scene_theme(strike_zone))
 
 
-def scene_runtime_html(*, container_id: str = "scene") -> str:
+def scene_runtime_html(*, container_id: str = "scene", strike_zone: dict | None = None) -> str:
     """Return the HTML fragment that boots the Three.js scene runtime.
 
     Includes:
@@ -110,7 +125,7 @@ def scene_runtime_html(*, container_id: str = "scene") -> str:
     The scene mounts itself onto an element with ``id=container_id``;
     the caller is responsible for placing that element in the page DOM.
     """
-    theme = scene_theme_json().replace("</", "<\\/")
+    theme = scene_theme_json(strike_zone).replace("</", "<\\/")
     return (
         '<script type="importmap">'
         '{"imports":{"three":"/static/threejs/vendor/three.module.min.js",'
