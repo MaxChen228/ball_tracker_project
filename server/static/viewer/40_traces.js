@@ -123,8 +123,84 @@
         }
       }
     }
+    // --- fit curves: one trace per persisted SegmentRecord -----------
+    // Always rendered (no per-cam toggle) — fit is whole-pitch, not
+    // per-camera. Active segment (currentT in [t_start, t_end]) renders
+    // brighter; inactive segments fade so multi-bounce events stay
+    // legible without dominating. `_VIEWER_SEG_PALETTE` mirrors render_fit.
+    if (Array.isArray(SEGMENTS) && SEGMENTS.length) {
+      const G_Z = -9.81;
+      const N = 64;
+      for (let i = 0; i < SEGMENTS.length; ++i) {
+        const seg = SEGMENTS[i];
+        const color = _VIEWER_SEG_PALETTE[i % _VIEWER_SEG_PALETTE.length];
+        const xs = [], ys = [], zs = [];
+        for (let k = 0; k < N; ++k) {
+          const t = seg.t_start + (seg.t_end - seg.t_start) * (k / (N - 1));
+          const tau = t - seg.t_anchor;
+          xs.push(seg.p0[0] + seg.v0[0] * tau);
+          ys.push(seg.p0[1] + seg.v0[1] * tau);
+          zs.push(seg.p0[2] + seg.v0[2] * tau + 0.5 * G_Z * tau * tau);
+        }
+        const isActive = playback && currentT >= seg.t_start - 1e-3 && currentT <= seg.t_end + 1e-3;
+        out.push({
+          type: "scatter3d", x: xs, y: ys, z: zs,
+          mode: "lines",
+          line: { color, width: isActive ? 6 : 4, dash: "dash" },
+          opacity: isActive ? 1.0 : 0.55,
+          name: `seg${i} fit (${seg.speed_kph.toFixed(1)} kph)`,
+          hovertemplate: `seg${i}<br>speed=${seg.speed_kph.toFixed(1)} kph<br>rmse=${(seg.rmse_m * 100).toFixed(1)} cm<extra></extra>`,
+        });
+        // During playback, a marker on the curve at currentT helps the
+        // operator see "ball position predicted by fit at this video
+        // time". Outside the segment's time range, skipped.
+        if (isActive) {
+          const tau = currentT - seg.t_anchor;
+          const px = seg.p0[0] + seg.v0[0] * tau;
+          const py = seg.p0[1] + seg.v0[1] * tau;
+          const pz = seg.p0[2] + seg.v0[2] * tau + 0.5 * G_Z * tau * tau;
+          out.push({
+            type: "scatter3d", x: [px], y: [py], z: [pz],
+            mode: "markers",
+            marker: { size: 9, color, symbol: "circle", line: { color: "#2A2520", width: 1 } },
+            hoverinfo: "skip", showlegend: false,
+          });
+        }
+      }
+    }
     return out;
   }
+
+  // Mirrors render_fit._SEG_PALETTE so dashboard / viewer / fit page all
+  // colour seg0 the same red, seg1 the same blue, etc.
+  const _VIEWER_SEG_PALETTE = [
+    "#E45756", "#4C78A8", "#54A24B", "#F58518",
+    "#B279A2", "#72B7B2", "#FF9DA6", "#9D755D",
+  ];
+
+  // Pick the segment whose [t_start, t_end] contains `t`, or the nearest
+  // one (by absolute distance to its midpoint) when no segment is active.
+  // Returns -1 when SEGMENTS is empty.
+  function activeSegmentIndex(t) {
+    if (!SEGMENTS.length) return -1;
+    for (let i = 0; i < SEGMENTS.length; ++i) {
+      const s = SEGMENTS[i];
+      if (t >= s.t_start && t <= s.t_end) return i;
+    }
+    // Nearest segment by midpoint distance — operator scrubbed before
+    // release or after follow-through; show segment 0's release speed
+    // as a sane default rather than blanking the badge.
+    let best = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < SEGMENTS.length; ++i) {
+      const s = SEGMENTS[i];
+      const mid = 0.5 * (s.t_start + s.t_end);
+      const d = Math.abs(t - mid);
+      if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return best;
+  }
+
   {PLATE_WORLD_JS}
   {PROJECTION_JS}
   {DRAW_VIRTUAL_BASE_JS}

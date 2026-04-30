@@ -52,6 +52,7 @@ class ViewerPageContext:
     camera_colors_json: str
     fallback_color_json: str
     accent_color_json: str
+    segments_json: str
     # Camera diamond + axis geometry is rendered dynamically from JS (see
     # `camMarkerTracesFor` in the viewer) so it follows the per-pipeline
     # pills. These constants mirror render_scene_theme so the dashboard's
@@ -82,6 +83,7 @@ def build_viewer_page_context(
     build_figure,
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
+    segments: list | None = None,
 ) -> ViewerPageContext:
     fig = build_figure(scene)
     fig_json = _json.loads(fig.to_json())
@@ -143,6 +145,13 @@ def build_viewer_page_context(
     # of A/B). None when nothing has run yet for this session.
     server_post_ran_at = health.get("server_post_ran_at")
 
+    seg_dicts: list[dict] = []
+    for s in (segments or []):
+        if hasattr(s, "model_dump"):
+            seg_dicts.append(s.model_dump())
+        else:
+            seg_dicts.append(dict(s))
+
     return ViewerPageContext(
         scene_json=_json.dumps(scene.to_dict()),
         layout_json=layout_json,
@@ -150,6 +159,7 @@ def build_viewer_page_context(
         camera_colors_json=_json.dumps(_CAMERA_COLORS),
         fallback_color_json=_json.dumps(_FALLBACK_CAMERA_COLOR),
         accent_color_json=_json.dumps(_ACCENT),
+        segments_json=_json.dumps(seg_dicts),
         scene_theme_json=_json.dumps(
             {
                 "cam_axis_len_m": _CAMERA_AXIS_LEN_M,
@@ -226,6 +236,7 @@ def render_viewer_html(
     presets: list[Preset],
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
+    segments: list | None = None,
 ) -> str:
     ctx = build_viewer_page_context(
         scene,
@@ -234,6 +245,7 @@ def render_viewer_html(
         build_figure=build_figure,
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
+        segments=segments or [],
     )
     if ctx.can_run_server:
         # Operator may rerun after tweaking HSV / shape gate / selector;
@@ -314,6 +326,11 @@ def render_viewer_html(
   {ctx.health_failure_html}
   <div class="work" data-mode="{ctx.layout_mode}">
     <div class="scene-col">
+      <div class="latest-pitch-badge" id="viewer-speed-badge" hidden>
+        <span class="lpb-speed" id="viewer-lpb-speed">—</span>
+        <span class="lpb-units">kph</span>
+        <span class="lpb-meta" id="viewer-lpb-meta"></span>
+      </div>
       <div id="scene"></div>
       <div class="scene-views" role="toolbar" aria-label="Camera presets">
         <button class="view-preset active" type="button" data-view="iso" title="Isometric overview (default)">ISO</button>
@@ -441,6 +458,7 @@ def render_viewer_html(
   "accent_color": {ctx.accent_color_json},
   "scene_theme": {ctx.scene_theme_json},
   "videos": {ctx.videos_json},
+  "segments": {ctx.segments_json},
   "has_triangulated": {str(ctx.has_triangulated).lower()}
 }}</script>
 <script>
