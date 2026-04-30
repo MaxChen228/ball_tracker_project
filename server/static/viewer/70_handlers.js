@@ -182,12 +182,16 @@
     sharedBar.addEventListener("click", (e) => {
       const btn = e.target.closest(".cv-layer");
       if (!btn) return;
+      // Symmetric with the opacity slider below: bail before mutating
+      // visible state if the runtime isn't mounted, so the .on class
+      // can't lie about layer state. cam-view runtime mounts during
+      // page load so the only window where this fires is a redraw
+      // race that's harmless to drop.
+      if (!window.BallTrackerCamView) return;
       const key = btn.dataset.layer;
       const next = !btn.classList.contains("on");
       btn.classList.toggle("on", next);
-      if (window.BallTrackerCamView) {
-        for (const c of camIds) window.BallTrackerCamView.setLayer(c, key, next);
-      }
+      for (const c of camIds) window.BallTrackerCamView.setLayer(c, key, next);
     });
     const ovl = sharedBar.querySelector(".cv-opacity input[type=range]");
     if (ovl) {
