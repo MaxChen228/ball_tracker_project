@@ -39,8 +39,12 @@
 
   function resultHasRenderableFit(result) {
     if (!result) return false;
-    if (Array.isArray(result.segments) && result.segments.length) return true;
-    if (Array.isArray(result.points) && result.points.length) return true;
+    const segs = result.segments_by_path || {};
+    const pts = result.points_by_path || {};
+    for (const path of _FIT_PATHS) {
+      if (Array.isArray(segs[path]) && segs[path].length) return true;
+      if (Array.isArray(pts[path]) && pts[path].length) return true;
+    }
     return false;
   }
 
@@ -50,12 +54,13 @@
       const r = await fetch(`/results/${encodeURIComponent(sid)}`, { cache: 'no-store' });
       if (!r.ok) return null;
       const data = await r.json();
+      // Server pre-sorts `points` by t_rel_s in stamp_segments_on_result
+      // so `SegmentRecord.original_indices` indexes into a time-sorted
+      // list — do NOT re-sort here, that would invalidate the contract.
       const entry = {
-        // Server pre-sorts `points` by t_rel_s in stamp_segments_on_result
-        // so `SegmentRecord.original_indices` indexes into a time-sorted
-        // list — do NOT re-sort here, that would invalidate the contract.
-        points: data.points || [],
-        segments: Array.isArray(data.segments) ? data.segments : [],
+        points_by_path: data.triangulated_by_path || {},
+        segments_by_path: data.segments_by_path || {},
+        paths_completed: new Set(Array.isArray(data.paths_completed) ? data.paths_completed : []),
         // None on legacy SessionResult predating recompute → null here.
         // Filter logic treats null as "no mask" (all points pass).
         cost_threshold: data.cost_threshold == null ? null : Number(data.cost_threshold),
@@ -66,24 +71,70 @@
     } catch { return null; }
   }
 
-  // Patch the cached `sid` entry from a `fit` SSE event payload.
-  // Recompute (Apply) and cycle_end both broadcast `{segments,
-  // cost_threshold, gap_threshold_m}`; thresholds need to land in the
-  // cache so the next repaint applies the new client-side mask over
-  // `points`. `points` itself is invariant under recompute (pairing
-  // emits the full set regardless of tuning post Phase 1-5).
-  function patchTrajResult(sid, payload) {
-    const entry = trajCache.get(sid);
-    if (!entry) return;
-    if (Array.isArray(payload.segments)) entry.segments = payload.segments;
-    if ('cost_threshold' in payload) {
-      entry.cost_threshold = payload.cost_threshold == null
-        ? null : Number(payload.cost_threshold);
+  // SSE `fit` payload only carries the authority-path segments (server
+  // emits one bucket: server_post if it just finished, else live). Drop
+  // the cache entry so the next repaint refetches `/results/{sid}`,
+  // which carries the full by-path surface — keeps live + server_post
+  // segments coherent without us needing to guess which bucket the
+  // payload belongs to.
+  function patchTrajResult(sid, _payload) {
+    trajCache.delete(sid);
+  }
+
+  // ---- fit path mode (live | server_post) ----
+  const _FIT_PATHS = ['live', 'server_post'];
+  const _FIT_PATH_KEY = 'ball_tracker_dashboard_fit_path';
+  let _fitPathMode = (() => {
+    try {
+      const v = localStorage.getItem(_FIT_PATH_KEY);
+      return _FIT_PATHS.includes(v) ? v : 'live';
+    } catch { return 'live'; }
+  })();
+  function fitPathMode() { return _fitPathMode; }
+  function setFitPathMode(v) {
+    if (!_FIT_PATHS.includes(v)) return;
+    _fitPathMode = v;
+    try { localStorage.setItem(_FIT_PATH_KEY, v); } catch {}
+  }
+
+  // Resolve which path an entry should display under. Honours the
+  // operator's selected mode when that path completed, otherwise demotes
+  // to whichever path is actually available. Pill-disabled UI prevents
+  // the user from selecting an unavailable path; this fallback only
+  // fires across session switches where the previous selection no
+  // longer applies. Returns null when no path has any data.
+  function pickPathForEntry(entry) {
+    if (!entry) return null;
+    const completed = entry.paths_completed || new Set();
+    if (completed.has(_fitPathMode)) return _fitPathMode;
+    for (const p of _FIT_PATHS) if (completed.has(p)) return p;
+    // paths_completed missing on legacy results — fall back to whichever
+    // bucket actually has data.
+    const segs = entry.segments_by_path || {};
+    const pts = entry.points_by_path || {};
+    for (const p of _FIT_PATHS) {
+      if ((Array.isArray(segs[p]) && segs[p].length)
+          || (Array.isArray(pts[p]) && pts[p].length)) return p;
     }
-    if ('gap_threshold_m' in payload) {
-      entry.gap_threshold_m = payload.gap_threshold_m == null
-        ? null : Number(payload.gap_threshold_m);
-    }
+    return null;
+  }
+
+  // Build the `applyFit` payload for the currently active path. Shape
+  // matches the legacy single-path entry the dashboard layer expects:
+  // `{ points, segments, cost_threshold, gap_threshold_m }`.
+  function resolvedFitView(entry) {
+    if (!entry) return null;
+    const path = pickPathForEntry(entry);
+    if (!path) return null;
+    const segs = (entry.segments_by_path && entry.segments_by_path[path]) || [];
+    const pts = (entry.points_by_path && entry.points_by_path[path]) || [];
+    return {
+      path,
+      points: pts,
+      segments: segs,
+      cost_threshold: entry.cost_threshold,
+      gap_threshold_m: entry.gap_threshold_m,
+    };
   }
 
   // Show-points toggle (default OFF). Persisted in localStorage so the

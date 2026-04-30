@@ -610,6 +610,14 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 /* Armed but no frame yet — placeholder dim, no animation. Distinct
    from "-" (never ran) so the operator sees the session exists. */
 .ev-pipe.armed {{ color: var(--sub); border-style: dashed; opacity: 0.75; }}
+.ev-segs {{ font-family: var(--mono); font-size: 10px; line-height: 1;
+            padding: 3px 7px; border: 1px solid var(--border-base);
+            border-radius: var(--r); color: var(--sub);
+            letter-spacing: 0.04em; white-space: nowrap;
+            font-variant-numeric: tabular-nums; }}
+.ev-segs b {{ font-weight: 600; color: var(--sub-strong, var(--ink));
+              margin-left: 5px; opacity: 0.85; }}
+.ev-segs.zero {{ opacity: 0.55; }}
 @keyframes ev-pipe-pulse {{
   0%,100% {{ opacity: 1; }}
   50%     {{ opacity: 0.55; }}
@@ -804,6 +812,16 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-src-pill[disabled] {{ opacity: 0.35; cursor: not-allowed; }}
 .fit-filter-bar .ff-checkbox {{ display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }}
 .fit-filter-bar .ff-checkbox input {{ accent-color: var(--ink); cursor: pointer; }}
+.fit-filter-bar .ff-path-toggle {{ display: inline-flex; gap: 0; }}
+.fit-filter-bar .ff-path {{ font: inherit; font-size: 10px; letter-spacing: 0.08em;
+                            padding: 2px 8px; background: transparent; color: var(--sub);
+                            border: 1px solid var(--border-base); border-radius: 0;
+                            cursor: pointer; text-transform: uppercase; font-weight: 500; }}
+.fit-filter-bar .ff-path:first-child {{ border-top-left-radius: 2px; border-bottom-left-radius: 2px; }}
+.fit-filter-bar .ff-path:last-child {{ border-top-right-radius: 2px; border-bottom-right-radius: 2px; }}
+.fit-filter-bar .ff-path + .ff-path {{ border-left-width: 0; }}
+.fit-filter-bar .ff-path.active {{ background: var(--ink); color: var(--surface); border-color: var(--ink); }}
+.fit-filter-bar .ff-path[disabled] {{ opacity: 0.35; cursor: not-allowed; }}
 
 /* --- Point-size slider — shared between dashboard fit-filter-bar +
    viewer layer-toggles. Style hooks via data-point-size-slider attr so
