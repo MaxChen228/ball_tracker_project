@@ -614,9 +614,11 @@ def test_viewer_page_uses_cam_view_with_detection_layers():
     # them or the operator gets two redundant toggles.
     assert 'data-layer="detection_live"' not in body
     assert 'data-layer="detection_svr"' not in body
-    # Single shared BLOBS group with live+svr pills inside (v4: shared
-    # 2D toolbar replaced per-cam path groups).
-    assert 'class="cv-path-group" data-path="live"' in body
+    # v5: shared BLOBS group is single-select segmented control
+    # (data-blobs-group, role=radiogroup) — not the per-cam path
+    # groups the legacy markup carried.
+    assert 'data-blobs-group' in body
+    assert 'role="radiogroup"' in body
     # Only the BLOBS layers are registered now.
     assert "registerLayer('detection_blobs_live'" in body
     assert "registerLayer('detection_blobs_svr'" in body

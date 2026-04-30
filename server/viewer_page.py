@@ -370,15 +370,15 @@ def render_viewer_html(
              title="Strip colors: A detected (orange) · B detected (brown) · missed (grey) · no frame (pale) · chirp anchor (accent)"
              role="group" aria-label="Layer visibility + filters">
           <span class="layer-toggles" id="layer-toggles" aria-label="Layer visibility">
-            <span class="layer-group" data-layer="traj">
+            <span class="layer-group" data-layer="traj" data-single-select role="radiogroup" aria-label="Trajectory path">
               <span class="layer-name">Traj</span>
-              <button type="button" class="layer-pill" data-layer="traj" data-path="live" aria-pressed="false">live</button>
-              <button type="button" class="layer-pill" data-layer="traj" data-path="server_post" aria-pressed="true">svr</button>
+              <button type="button" class="layer-pill" data-layer="traj" data-path="live" role="radio" aria-checked="false">live</button>
+              <button type="button" class="layer-pill" data-layer="traj" data-path="server_post" role="radio" aria-checked="true">svr</button>
             </span>
-            <span class="layer-group" data-layer="rays">
+            <span class="layer-group" data-layer="rays" data-single-select role="radiogroup" aria-label="Rays path">
               <span class="layer-name">Rays</span>
-              <button type="button" class="layer-pill" data-layer="rays" data-path="live" aria-pressed="true">live</button>
-              <button type="button" class="layer-pill" data-layer="rays" data-path="server_post" aria-pressed="true">svr</button>
+              <button type="button" class="layer-pill" data-layer="rays" data-path="live" role="radio" aria-checked="false">live</button>
+              <button type="button" class="layer-pill" data-layer="rays" data-path="server_post" role="radio" aria-checked="true">svr</button>
             </span>
             <span class="layer-group" data-layer="fit">
               <label class="layer-checkbox">

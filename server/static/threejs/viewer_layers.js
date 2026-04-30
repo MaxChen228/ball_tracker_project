@@ -74,27 +74,11 @@ function lineSegmentsFromPairs(pairs, color, opts = {}) {
   }
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.BufferAttribute(buf, 3));
-  let lines;
-  if (opts.dashed) {
-    lines = new THREE.LineSegments(geom, new THREE.LineDashedMaterial({
-      color: new THREE.Color(color),
-      transparent: opts.opacity != null,
-      opacity: opts.opacity ?? 1.0,
-      dashSize: 0.04,
-      gapSize: 0.025,
-    }));
-    // LineDashedMaterial requires per-vertex distance attribute or
-    // every segment renders as a solid line — silent visual fallback,
-    // exactly the trap to avoid.
-    lines.computeLineDistances();
-  } else {
-    lines = new THREE.LineSegments(geom, new THREE.LineBasicMaterial({
-      color: new THREE.Color(color),
-      transparent: opts.opacity != null,
-      opacity: opts.opacity ?? 1.0,
-    }));
-  }
-  return lines;
+  return new THREE.LineSegments(geom, new THREE.LineBasicMaterial({
+    color: new THREE.Color(color),
+    transparent: opts.opacity != null,
+    opacity: opts.opacity ?? 1.0,
+  }));
 }
 
 function pointMarker(p, color, radius = 0.030) {
@@ -138,11 +122,11 @@ class ViewerLayers {
     this.fallbackColor = opts.fallbackColor || 0x999999;
     this.t = opts.tInitial ?? 0;
     this.mode = opts.mode || "all";  // "all" | "playback"
-    // Layer visibility — matches 20_filters.js v4 schema:
-    //   { traj: {live, server_post}, rays: {live, server_post}, fit: bool }
-    // Cam-pose / ground projection visibility is derived from `rays`
-    // (any path on → cam visible) since the operator no longer
-    // distinguishes A vs B at the toggle level.
+    // Layer visibility — matches 20_filters.js v5 schema:
+    //   { traj: "live"|"server_post", rays: same, blobs: same, fit: bool }
+    // Single-select per group: operator looks at one path at a time so
+    // colour can stay reserved for cam identity (A red / B blue) and
+    // segment identity (SEG_PALETTE), not burned on path identity.
     // Caller MUST provide it (the IIFE's `window.VIEWER_DATA.layerVisibility`
     // ships the localStorage-restored map). Falling back to a default
     // here would mask an init-order regression — fail loud per CLAUDE.md.
@@ -203,17 +187,15 @@ class ViewerLayers {
 
   _isVisible(layer, path) {
     if (layer === "fit") return !!this.layerVisibility.fit;
-    return !!(this.layerVisibility[layer] && this.layerVisibility[layer][path]);
+    return this.layerVisibility[layer] === path;
   }
 
   _applyCameraVisibility() {
     if (!this._cameraGroup) return;
-    // Cam diamond visible iff any rays path is on. Per-cam toggling was
-    // retired in v4 — operator distinguishes A/B by ray colour, not by
-    // hiding one cam's pose anchor.
-    const anyOn = PATHS.some((p) => this._isVisible("rays", p));
+    // v5: rays is single-select string, never empty — cam diamonds
+    // always visible as static reference markers.
     for (const cg of this._cameraGroup.children) {
-      cg.visible = anyOn;
+      cg.visible = true;
     }
   }
 
@@ -252,6 +234,9 @@ class ViewerLayers {
     for (const line of this._groundGroup.children) {
       const { path } = line.userData || {};
       if (!path) continue;
+      // Ground projection follows the rays selection — operator looking
+      // at server_post rays expects to see only server_post ground
+      // tracks, not a confusing live+svr overlay.
       line.visible = this._isVisible("rays", path);
     }
   }
@@ -373,13 +358,7 @@ class ViewerLayers {
       }
       if (!pairs.length) continue;
       const opacity = playback ? 0.95 : 0.55;
-      // BOTH-mode encoding: live rays dashed, svr rays solid. Cam axis
-      // (A red / B blue) stays in the colour channel; path axis moves to
-      // line style so the two channels don't fight when both pills are on.
-      raysGroup.add(lineSegmentsFromPairs(pairs, color, {
-        opacity,
-        dashed: path === PATH_LIVE,
-      }));
+      raysGroup.add(lineSegmentsFromPairs(pairs, color, { opacity }));
     }
     if (raysGroup.children.length) this.scene.addLayer("viewer_rays", raysGroup);
 
@@ -389,11 +368,6 @@ class ViewerLayers {
     // (PointsMaterial + sizeAttenuation true → world-space size that
     // shrinks with camera distance like a real sphere).
     const sizeM = this._pointSize;
-    // BOTH-mode α attenuation: when LIVE + SVR traj are both on, push
-    // svr to the back (α=0.45) and keep live up front. live is the
-    // production pipeline, svr is the debug oracle — operator wants
-    // live emphasised when comparing.
-    const trajBoth = this._isVisible("traj", PATH_LIVE) && this._isVisible("traj", PATH_SVR);
     if (this._isVisible("traj", PATH_SVR)) {
       // Use scene.triangulated (sorted + render-dist-filtered + each
       // point stamped with `seg_idx` by reconstruct.py) — server is the
@@ -421,15 +395,8 @@ class ViewerLayers {
         for (const [key, pts] of buckets) {
           const isOut = key === "out";
           const color = isOut ? POINTS_OUTLIER : SEG_PALETTE[Number(key) % SEG_PALETTE.length];
-          const baseOpacity = isOut ? 0.55 : 1.0;
-          // Skip the trajBoth multiplier on outliers — 0.55 × 0.45 = 0.25
-          // is below the visibility floor on the dark scene background,
-          // and the whole reason outliers render at all is to let the
-          // operator see what got rejected. Only attenuate the inlier
-          // cloud (the bright SEG_PALETTE buckets) when BOTH visible.
-          const opacity = (trajBoth && !isOut) ? baseOpacity * 0.45 : baseOpacity;
           group.add(pointsCloud(pts, color, isOut ? sizeM * POINT_SIZE_OUTLIER_RATIO : sizeM, {
-            opacity,
+            opacity: isOut ? 0.55 : 1.0,
             isOutlier: isOut,
           }));
         }
@@ -450,8 +417,6 @@ class ViewerLayers {
         group.name = "viewer_traj_live";
         // Live trail has no per-point segment classification (live
         // pipeline does not run the segmenter). Single accent colour.
-        // BOTH-mode: keep live α=0.85 baseline (already lower than the
-        // svr cloud's 1.0); svr drops to 0.45 to push it back instead.
         group.add(pointsCloud(livePts, TRAJ_LIVE, sizeM, { opacity: 0.85 }));
         if (playback) {
           const head = livePts[livePts.length - 1];
@@ -508,14 +473,15 @@ class ViewerLayers {
     this._applyFitActiveHighlight();
   }
 
-  // Toggle a single (layer, path) flag and refresh affected layers.
-  // `layer` is 'traj' or 'rays'. Path is 'live' or 'server_post'. Fit is
-  // a boolean toggle on its own surface — see `setFitVisibility`.
-  setLayerVisibility(layer, path, visible) {
-    if (!this.layerVisibility[layer]) this.layerVisibility[layer] = {};
-    this.layerVisibility[layer][path] = !!visible;
+  // Single-select swap: set the chosen path for `layer` (traj / rays)
+  // and refresh the affected dynamic layers. Fit is a boolean
+  // checkbox on its own surface — see `setFitVisibility`.
+  setLayerSelection(layer, path) {
+    if (path !== "live" && path !== "server_post") {
+      throw new Error(`setLayerSelection: invalid path '${path}'`);
+    }
+    this.layerVisibility[layer] = path;
     if (layer === "rays") {
-      this._applyCameraVisibility();
       this._applyGroundVisibility();
       this._rebuildDynamic();
     } else if (layer === "traj") {
@@ -531,14 +497,6 @@ class ViewerLayers {
     this._rebuildDynamic();
   }
 
-  // Sync the entire visibility map at once (used after a localStorage
-  // restore in 20_filters.js or a bulk panel update).
-  syncVisibility(layerVisibility) {
-    this.layerVisibility = layerVisibility;
-    this._applyCameraVisibility();
-    this._applyGroundVisibility();
-    this._rebuildDynamic();
-  }
 
   // Patch in the freshly-recomputed SessionResult after the operator
   // hit Apply on the per-session tuning strip. Avoids a full page

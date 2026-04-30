@@ -174,9 +174,9 @@
     background:var(--bg); }
   #scene { position:absolute; inset:0; }
   .videos-col { flex:{VIDEOS_FLEX}; min-width:320px; display:grid;
-    grid-template-rows:1fr 1fr; gap:1px;
+    grid-template-rows:auto 1fr 1fr; gap:1px;
     background:var(--border-base); }
-  .work[data-mode="single-cam"] .videos-col { grid-template-rows:1fr; }
+  .work[data-mode="single-cam"] .videos-col { grid-template-rows:auto 1fr; }
   .work[data-mode="single-cam"] .videos-col { min-width:280px; }
   .col-resizer { flex:0 0 6px; cursor:col-resize; position:relative;
     background:var(--border-base);
@@ -296,7 +296,8 @@
     background:transparent; color:var(--sub); border:1px solid var(--border-base); border-radius:2px;
     cursor:pointer; text-transform:uppercase; line-height:1;
     transition:background 0.12s, color 0.12s, border-color 0.12s; }
-  .layer-toggles .layer-pill[aria-pressed="true"] { background:var(--ink); color:var(--surface); border-color:var(--ink); }
+  .layer-toggles .layer-pill[aria-pressed="true"],
+  .layer-toggles .layer-pill[aria-checked="true"] { background:var(--ink); color:var(--surface); border-color:var(--ink); }
   .layer-toggles .layer-pill:hover { border-color:var(--ink); }
   .layer-toggles .layer-pill[hidden] { display:none; }
   .layer-toggles .layer-checkbox { display:inline-flex; align-items:center; gap:5px; cursor:pointer; height:100%; }
