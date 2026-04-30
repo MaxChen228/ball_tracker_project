@@ -133,6 +133,27 @@
       }
     });
   }
+  // --- Trajectory point-size slider ---
+  // Same persisted localStorage key as the dashboard slider; viewer
+  // ViewerLayers seeds from it on construction. Drag-input pushes the
+  // new size to PointsMaterial directly, no rebuild — slider feels live.
+  const _ptSizeSlider = document.querySelector("#viewer-point-size [data-point-size-slider]");
+  const _ptSizeReadout = document.querySelector("#viewer-point-size [data-point-size-readout]");
+  if (_ptSizeSlider) {
+    if (window.BallTrackerViewerScene) {
+      const seed = window.BallTrackerViewerScene.pointSizeM();
+      _ptSizeSlider.value = String(seed);
+      if (_ptSizeReadout) _ptSizeReadout.textContent = `${Math.round(seed * 1000)} mm`;
+    }
+    _ptSizeSlider.addEventListener("input", () => {
+      const v = parseFloat(_ptSizeSlider.value);
+      if (!Number.isFinite(v)) return;
+      if (_ptSizeReadout) _ptSizeReadout.textContent = `${Math.round(v * 1000)} mm`;
+      if (window.BallTrackerViewerScene) {
+        window.BallTrackerViewerScene.setPointSize(v);
+      }
+    });
+  }
   layerToggles.addEventListener("click", (e) => {
     const pill = e.target.closest(".layer-pill");
     if (!pill || pill.hidden || pill.disabled) return;

@@ -259,6 +259,14 @@ class BallTrackerScene {
     this._dynamicLayers.delete(name);
   }
 
+  // Returns the THREE.Object3D that backs a registered dynamic layer,
+  // or null if the layer isn't mounted (caller must tolerate "not yet
+  // built" — e.g. point-size slider firing before applyFit lands).
+  getLayer(name) {
+    const entry = this._dynamicLayers.get(name);
+    return entry ? entry.group : null;
+  }
+
   setLayerVisible(name, visible) {
     // built-in static layers: strike_zone, ground, plate, plate_outline, world_axes
     const staticLayer = this._staticRoot.getObjectByName(name);

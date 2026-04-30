@@ -68,6 +68,28 @@
       }
     });
   }
+  // Point-size slider — instant world-space mutation of the fit_points
+  // PointsMaterial (no geometry rebuild). Persisted to a localStorage
+  // key shared with the viewer so a tweak here carries over.
+  const _ptSizeSlider = document.querySelector('#dash-point-size [data-point-size-slider]');
+  const _ptSizeReadout = document.querySelector('#dash-point-size [data-point-size-readout]');
+  if (_ptSizeSlider) {
+    // Seed initial position from the layer's persisted size (the boot
+    // path on dashboard_layers.js already restored from localStorage).
+    if (window.BallTrackerDashboardScene) {
+      const seed = window.BallTrackerDashboardScene.pointSizeM();
+      _ptSizeSlider.value = String(seed);
+      if (_ptSizeReadout) _ptSizeReadout.textContent = `${Math.round(seed * 1000)} mm`;
+    }
+    _ptSizeSlider.addEventListener('input', () => {
+      const v = parseFloat(_ptSizeSlider.value);
+      if (!Number.isFinite(v)) return;
+      if (_ptSizeReadout) _ptSizeReadout.textContent = `${Math.round(v * 1000)} mm`;
+      if (window.BallTrackerDashboardScene) {
+        window.BallTrackerDashboardScene.setPointSize(v);
+      }
+    });
+  }
   // 5-view camera presets (ISO/CATCH/SIDE/TOP/PITCHER) — Three.js scene
   // owns the toolbar binding via `BallTrackerScene.bindViewToolbar()`,
   // which the dashboard_layers.js boot script invokes on mount. No

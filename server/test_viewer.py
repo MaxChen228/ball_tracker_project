@@ -849,6 +849,13 @@ def test_viewer_ships_interactive_diagnostic_widgets():
     assert 'class="strip-legend"' in body
     assert 'id="hint-overlay"' in body
     assert 'id="hint-btn"' in body
+    # Trajectory point-size slider is now mounted on the layer-toggles
+    # row — same shared component the dashboard uses. Confirm both the
+    # container id and the slider+readout hooks are wired so the click
+    # handler in 70_handlers.js can find them.
+    assert 'id="viewer-point-size"' in body
+    assert 'data-point-size-slider' in body
+    assert 'data-point-size-readout' in body
     # Three.js scene runtime owns the default camera (ISO preset baked
     # into PRESETS in scene_runtime.js); the inline JSON theme block
     # carries the strike-zone centroid so any consumer reading the

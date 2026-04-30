@@ -10,6 +10,8 @@ modules until the runtime API stabilises.
 """
 from __future__ import annotations
 
+from scene_runtime import point_size_slider_html
+
 
 def render_dashboard_html(
     *,
@@ -123,6 +125,7 @@ def render_dashboard_html(
         '      <span class="ff-name">Show points</span>'
         '    </label>'
         '  </span>'
+        f'  <span class="ff-cell">{point_size_slider_html(slot_id="dash-point-size")}</span>'
         '</div>'
         '<div class="latest-pitch-badge" id="latest-pitch-badge" hidden>'
         '  <span class="lpb-speed" id="lpb-speed">—</span>'

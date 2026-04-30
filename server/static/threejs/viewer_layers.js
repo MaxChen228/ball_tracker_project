@@ -21,22 +21,19 @@
 // responsiveness above 60 fps even on the iPad.
 
 import * as THREE from "three";
-
-const SEG_PALETTE = [
-  0xE45756, 0x4C78A8, 0x54A24B, 0xF58518,
-  0xB279A2, 0x72B7B2, 0xFF9DA6, 0x9D755D,
-];
+import {
+  SEG_PALETTE,
+  POINTS_OUTLIER,
+  POINT_SIZE_M_DEFAULT,
+  POINT_SIZE_OUTLIER_RATIO,
+  pointsCloud,
+  readPersistedPointSizeM,
+  writePersistedPointSizeM,
+  applyPointSizeToGroup,
+} from "./points_layer.js";
 
 const ACCENT_SVR = 0xC0392B;
 const TRAJ_LIVE = 0x4A6B8C;
-// Match dashboard_layers.js's POINTS_OUTLIER — out-of-segment raw points
-// share the same muted brown across both surfaces.
-const POINTS_OUTLIER = 0x4A3E24;
-// Default world-space radius (metres) for trajectory points. Wired to a
-// runtime slider in phase 2 — for phase 1 it lives as a const so the
-// visual matches dashboard's hardcoded 0.018m. Outliers render at 67%.
-const POINT_SIZE_M_DEFAULT = 0.018;
-const POINT_SIZE_OUTLIER_RATIO = 0.67;
 const G_Z = -9.81;
 // Same ±tol as raysAtT in the previous implementation — a single decoded
 // frame's worth.
@@ -92,31 +89,6 @@ function pointMarker(p, color, radius = 0.030) {
   return m;
 }
 
-// Bulk-render `pts` (each {x,y,z}) as a single THREE.Points object.
-// `sizeM` is the world-space size (sizeAttenuation=true makes it scale
-// with camera distance like a physical sphere — the operator reads
-// it as "diameter at this point"). One Points per bucket keeps the
-// draw-call count proportional to segment count, not point count.
-function pointsCloud(pts, color, sizeM, opts = {}) {
-  const buf = new Float32Array(pts.length * 3);
-  for (let i = 0; i < pts.length; ++i) {
-    buf[i * 3 + 0] = pts[i].x;
-    buf[i * 3 + 1] = pts[i].y;
-    buf[i * 3 + 2] = pts[i].z;
-  }
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute("position", new THREE.BufferAttribute(buf, 3));
-  const opacity = opts.opacity ?? 1.0;
-  const mat = new THREE.PointsMaterial({
-    color: new THREE.Color(color),
-    size: sizeM,
-    sizeAttenuation: true,
-    transparent: opacity < 1.0,
-    opacity,
-  });
-  return new THREE.Points(geom, mat);
-}
-
 function sampleSegmentCurve(seg, n) {
   const out = new Float32Array(n * 3);
   const t0 = seg.t_start, t1 = seg.t_end, ta = seg.t_anchor;
@@ -160,9 +132,10 @@ class ViewerLayers {
       throw new Error("setupViewerLayers: opts.layerVisibility is required");
     }
     this.layerVisibility = opts.layerVisibility;
-    // Phase 1 ships a constant default point size; phase 2 wires this
-    // to a runtime slider + shared localStorage with the dashboard.
-    this._pointSize = POINT_SIZE_M_DEFAULT;
+    // Restored from the cross-page localStorage key on construction;
+    // dashboard writes the same key, so a slider tweak on either page
+    // carries to the other on next load.
+    this._pointSize = readPersistedPointSizeM();
 
     // --- one-time cameras + ground traces + fit curves ---
     this._buildCameras();
@@ -382,7 +355,7 @@ class ViewerLayers {
     // outliers at a glance. Matches dashboard's "Show points" rendering
     // (PointsMaterial + sizeAttenuation true → world-space size that
     // shrinks with camera distance like a real sphere).
-    const sizeM = this._pointSizeM();
+    const sizeM = this._pointSize;
     if (this._isVisible("traj", PATH_SVR)) {
       // Use scene.triangulated (sorted + render-dist-filtered + each
       // point stamped with `seg_idx` by reconstruct.py) — server is the
@@ -454,11 +427,20 @@ class ViewerLayers {
     }
   }
 
-  _pointSizeM() {
-    return this._pointSize;
-  }
-
   // ---- public API ----
+  // Mutate trajectory point spheres live (PointsMaterial.size in world
+  // metres). Walks the two trajectory layers; no geometry rebuild.
+  setPointSize(sizeM) {
+    if (!Number.isFinite(sizeM)) return;
+    this._pointSize = sizeM;
+    writePersistedPointSizeM(sizeM);
+    for (const name of ["viewer_traj_svr", "viewer_traj_live"]) {
+      const layer = this.scene.getLayer && this.scene.getLayer(name);
+      applyPointSizeToGroup(layer, sizeM, POINTS_OUTLIER);
+    }
+  }
+  pointSizeM() { return this._pointSize; }
+
   setT(t, mode) {
     this.t = t;
     if (mode != null && mode !== this.mode) {

@@ -151,6 +151,47 @@ def view_presets_toolbar_html(*, default_view: str = "iso") -> str:
     return "".join(parts)
 
 
+# Slider bounds — keep in lockstep with `static/threejs/points_layer.js`
+# constants (POINT_SIZE_M_MIN/MAX/STEP/DEFAULT). Duplicated here because
+# the server renders the <input> element and the client mutates the
+# material; two sources of truth would silently desync after a tuning
+# change. Test asserts they match.
+POINT_SIZE_M_MIN = 0.005
+POINT_SIZE_M_MAX = 0.040
+POINT_SIZE_M_STEP = 0.001
+POINT_SIZE_M_DEFAULT = 0.018
+
+
+def point_size_slider_html(*, slot_id: str = "scene-point-size") -> str:
+    """Range slider for trajectory point world-space size.
+
+    Both dashboard and viewer mount this. The page-specific boot script
+    binds `change`/`input` to `BallTrackerScene.setPointSize(metres)` (or
+    the per-page layer module's setPointSize). localStorage key is shared
+    (`ball_tracker_point_size_m`), so a tweak on either page carries to
+    the other on next load.
+
+    Container `<span>` carries the slot id so multiple instances on one
+    page don't share an id (currently impossible — one canvas per page —
+    but cheap insurance against future regressions).
+    """
+    return (
+        f'<span class="point-size-slider" id="{slot_id}" '
+        f'title="Point size — world-space metres (sphere stays this size '
+        f'in 3D regardless of camera distance)">'
+        f'<span class="ps-name">PT</span>'
+        f'<input type="range" '
+        f'min="{POINT_SIZE_M_MIN:.3f}" '
+        f'max="{POINT_SIZE_M_MAX:.3f}" '
+        f'step="{POINT_SIZE_M_STEP:.3f}" '
+        f'value="{POINT_SIZE_M_DEFAULT:.3f}" '
+        f'data-point-size-slider>'
+        f'<span class="ps-readout" data-point-size-readout>'
+        f'{int(round(POINT_SIZE_M_DEFAULT * 1000))} mm</span>'
+        f'</span>'
+    )
+
+
 def assert_scene_runtime_present(html: str) -> None:
     """Sanity-check that a rendered page actually injected the runtime.
 

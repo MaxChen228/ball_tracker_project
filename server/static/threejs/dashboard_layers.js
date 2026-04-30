@@ -28,17 +28,25 @@
 // fires (1-5 s later, by which time this module has mounted).
 
 import * as THREE from "three";
-
-const SEG_PALETTE = [
-  0xE45756, 0x4C78A8, 0x54A24B, 0xF58518,
-  0xB279A2, 0x72B7B2, 0xFF9DA6, 0x9D755D,
-];
+import {
+  SEG_PALETTE,
+  POINTS_OUTLIER,
+  POINT_SIZE_M_DEFAULT,
+  POINT_SIZE_OUTLIER_RATIO,
+  classifyPointsBySegment,
+  pointsCloud,
+  readPersistedPointSizeM,
+  writePersistedPointSizeM,
+  applyPointSizeToGroup,
+} from "./points_layer.js";
 
 // Visual constants for the dashboard's accent palette. Match the
 // previous Plotly-era values in 20_trajectory.js so the on-screen
 // colour vocabulary doesn't drift mid-migration.
 const FIT_ACCENT = 0xC0392B;
-const POINTS_OUTLIER = new THREE.Color(0x4A3E24);
+// Cached THREE.Color object reused for the dashed-line raw-path
+// fallback (no segments). points_layer.js owns the canonical hex.
+const POINTS_OUTLIER_COLOR = new THREE.Color(POINTS_OUTLIER);
 const G_Z = -9.81;
 const ARROW_LEN_M = 0.3;
 
@@ -56,20 +64,6 @@ function sampleSegmentCurve(seg, n) {
     out[i * 3 + 2] = p0[2] + v0[2] * tau + 0.5 * G_Z * tau * tau;
   }
   return out;
-}
-
-// Bucket points by which segment claimed them (segments[i].original_indices
-// indexes into the points list). Returns parallel arrays. Out-of-segment
-// points get `byPoint[i] === -1`.
-function classifyPointsBySegment(points, segments) {
-  const byPoint = new Array(points.length).fill(-1);
-  for (let i = 0; i < segments.length; ++i) {
-    const oi = segments[i].original_indices || [];
-    for (const k of oi) {
-      if (k >= 0 && k < byPoint.length) byPoint[k] = i;
-    }
-  }
-  return byPoint;
 }
 
 // Build a Line geometry from a flat XYZ Float32Array.
@@ -139,6 +133,9 @@ class DashboardLayers {
     // throwing again. A separate persistent group; cleared only on
     // an explicit reset (next arm starts streaming fresh trail data).
     this._ghostLineGroup = null;
+    // World-space size of fit_points spheres. Restored from the cross-
+    // page localStorage key on construction; writes via setPointSize.
+    this._pointSize = readPersistedPointSizeM();
   }
 
   // ---- camera markers (per-camera diamond + axis triad) ----
@@ -204,6 +201,17 @@ class DashboardLayers {
   }
   showPointsEnabled() { return this._showPoints; }
 
+  // Mutate fit_points sphere size live (PointsMaterial.size in world
+  // metres). No geometry rebuild — slider drag stays smooth.
+  setPointSize(sizeM) {
+    if (!Number.isFinite(sizeM)) return;
+    this._pointSize = sizeM;
+    writePersistedPointSizeM(sizeM);
+    const layer = this.scene.getLayer && this.scene.getLayer("fit_points");
+    applyPointSizeToGroup(layer, sizeM, POINTS_OUTLIER);
+  }
+  pointSizeM() { return this._pointSize; }
+
   _removeFitLayers() {
     this.scene.removeLayer("fit_curves");
     this.scene.removeLayer("fit_release");
@@ -257,35 +265,27 @@ class DashboardLayers {
     if (this._showPoints && points.length) {
       const pointsGroup = new THREE.Group();
       pointsGroup.name = "fit_points";
-      const byPoint = classifyPointsBySegment(points, segments);
+      // Normalise dashboard's `{x_m,y_m,z_m}` shape to `{x,y,z}` once,
+      // so the shared pointsCloud helper has a single contract with
+      // viewer (which already speaks `{x,y,z}`).
+      const xyz = points.map((p) => ({ x: p.x_m, y: p.y_m, z: p.z_m }));
+      const byPoint = classifyPointsBySegment(xyz, segments);
       // Bucket points by segment so each bucket renders as one
       // Points object — fewer draw calls than per-point Mesh.
       const buckets = new Map();
-      for (let i = 0; i < points.length; ++i) {
+      for (let i = 0; i < xyz.length; ++i) {
         const k = byPoint[i];
         const key = k === -1 ? "out" : String(k);
         if (!buckets.has(key)) buckets.set(key, []);
-        buckets.get(key).push(points[i]);
+        buckets.get(key).push(xyz[i]);
       }
+      const sizeM = this._pointSize;
       for (const [key, pts] of buckets) {
         const isOut = key === "out";
-        const color = isOut ? POINTS_OUTLIER : new THREE.Color(SEG_PALETTE[Number(key) % SEG_PALETTE.length]);
-        const buf = new Float32Array(pts.length * 3);
-        for (let i = 0; i < pts.length; ++i) {
-          buf[i * 3 + 0] = pts[i].x_m;
-          buf[i * 3 + 1] = pts[i].y_m;
-          buf[i * 3 + 2] = pts[i].z_m;
-        }
-        const geom = new THREE.BufferGeometry();
-        geom.setAttribute("position", new THREE.BufferAttribute(buf, 3));
-        const mat = new THREE.PointsMaterial({
-          color,
-          size: isOut ? 0.012 : 0.018,
-          sizeAttenuation: true,
-          transparent: isOut,
+        const color = isOut ? POINTS_OUTLIER : SEG_PALETTE[Number(key) % SEG_PALETTE.length];
+        pointsGroup.add(pointsCloud(pts, color, isOut ? sizeM * POINT_SIZE_OUTLIER_RATIO : sizeM, {
           opacity: isOut ? 0.55 : 1.0,
-        });
-        pointsGroup.add(new THREE.Points(geom, mat));
+        }));
       }
       this.scene.addLayer("fit_points", pointsGroup);
     }
@@ -301,7 +301,7 @@ class DashboardLayers {
         buf[i * 3 + 1] = points[i].y_m;
         buf[i * 3 + 2] = points[i].z_m;
       }
-      const line = lineFromBuffer(buf, POINTS_OUTLIER, { transparent: true, opacity: 0.55 });
+      const line = lineFromBuffer(buf, POINTS_OUTLIER_COLOR, { transparent: true, opacity: 0.55 });
       const group = new THREE.Group();
       group.name = "fit_raw_path";
       group.add(line);

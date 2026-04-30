@@ -702,6 +702,19 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-checkbox {{ display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }}
 .fit-filter-bar .ff-checkbox input {{ accent-color: var(--ink); cursor: pointer; }}
 
+/* --- Point-size slider — shared between dashboard fit-filter-bar +
+   viewer layer-toggles. Style hooks via data-point-size-slider attr so
+   layout containers can scope without renaming. */
+.point-size-slider {{ display: inline-flex; align-items: center; gap: 6px;
+                      font-family: var(--mono); font-size: 10px;
+                      letter-spacing: 0.08em; color: var(--ink); }}
+.point-size-slider .ps-name {{ text-transform: uppercase; font-weight: 500; }}
+.point-size-slider input[type="range"] {{ width: 80px; height: 14px;
+                                          accent-color: var(--ink); }}
+.point-size-slider .ps-readout {{ color: var(--sub); min-width: 44px;
+                                  text-align: right;
+                                  font-variant-numeric: tabular-nums; }}
+
 @media (max-width: 1100px) {{
   .nav {{ padding-left: 16px; padding-right: 16px; }}
   .nav-main {{ grid-template-columns: 1fr; }}
