@@ -21,8 +21,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
 // Strike zone centroid (mid-front-back × X=0 × mid-Z) — the focus
-// point for every preset. Matches `view_presets_runtime.py`'s SZC
-// for the deprecated Plotly path (will be retired in phase 4).
+// point for every preset.
 const SZC = { x: 0, y: 0.216, z: 0.76 };
 
 // Five fixed camera presets. Eye is in world metres (no normalisation

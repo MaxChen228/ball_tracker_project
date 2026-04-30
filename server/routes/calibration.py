@@ -76,10 +76,8 @@ def calibration_state() -> dict[str, Any]:
     (`scene.cameras` is the list the Three.js dashboard reads to
     place per-camera diamonds + axis triads) plus the per-camera
     image dims + last-touched timestamps for the devices panel.
-
-    The Plotly-era `plot` + `plot_etag` fields were retired with the
-    Three.js migration — the dashboard reads the camera list directly
-    and rebuilds the layer when its JSON signature changes.
+    The dashboard short-circuits the layer rebuild on a JSON
+    signature of the camera tuple list — no server-issued etag.
     """
     import main as _main
     state = _main.state

@@ -48,16 +48,14 @@ from viewer_fragments import (
 @dataclass(frozen=True)
 class ViewerPageContext:
     scene_json: str
-    layout_json: str
-    static_traces_json: str
     camera_colors_json: str
     fallback_color_json: str
     accent_color_json: str
     segments_json: str
-    # Camera diamond + axis geometry is rendered dynamically from JS (see
-    # `camMarkerTracesFor` in the viewer) so it follows the per-pipeline
-    # pills. These constants mirror render_scene_theme so the dashboard's
-    # static figure and the viewer's dynamic figure agree on sizes/colors.
+    # Camera diamond + axis geometry is rendered by the Three.js viewer
+    # layers module (`static/threejs/viewer_layers.js`) using these
+    # constants, mirroring render_scene_theme so dashboard + viewer
+    # agree on sizes/colours.
     scene_theme_json: str
     videos_json: str
     has_triangulated: bool
@@ -153,8 +151,6 @@ def build_viewer_page_context(
 
     return ViewerPageContext(
         scene_json=_json.dumps(scene.to_dict()),
-        layout_json=_json.dumps({}),
-        static_traces_json=_json.dumps([]),
         camera_colors_json=_json.dumps(_CAMERA_COLORS),
         fallback_color_json=_json.dumps(_FALLBACK_CAMERA_COLOR),
         accent_color_json=_json.dumps(_ACCENT),
@@ -442,8 +438,6 @@ def render_viewer_html(
 </div>
 <script id="viewer-data" type="application/json">{{
   "scene": {ctx.scene_json},
-  "layout": {ctx.layout_json},
-  "static_traces": {ctx.static_traces_json},
   "camera_colors": {ctx.camera_colors_json},
   "fallback_color": {ctx.fallback_color_json},
   "accent_color": {ctx.accent_color_json},

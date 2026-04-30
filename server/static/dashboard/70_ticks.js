@@ -29,12 +29,10 @@
     } catch (e) { /* silent retry next tick */ }
   }
 
-  // Three.js dashboard reads `payload.scene.cameras` directly to build
-  // per-camera markers in the 3D scene; the legacy `payload.plot` /
-  // `plot_etag` short-circuit is gone with the Plotly path. Tracking
-  // a "last seen camera count" is enough to skip the rebuild when the
-  // calibration set hasn't changed (cameras are static after auto-cal
-  // until the operator re-runs); no etag needed.
+  // Skip the per-camera-marker rebuild when the JSON signature of the
+  // camera tuple list hasn't changed. Cameras are static after
+  // auto-cal until the operator re-runs, so this short-circuits the
+  // disposeObject / new-Group churn on every 5 s tick.
   let lastCameraSig = null;
   async function tickCalibration() {
     try {
