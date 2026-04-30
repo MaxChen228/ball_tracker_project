@@ -45,6 +45,11 @@ VIDEO_EXTS = (".mov", ".mp4", ".m4v")
 
 
 def load_detection_config() -> tuple[HSVRange, ShapeGate]:
+    # On a fresh-empty data/ (no detection_config.json, no legacy split files
+    # to migrate), `load_or_migrate` returns its hardcoded Tennis default
+    # without writing anything. The INFO log below surfaces "preset=tennis"
+    # so the operator can spot it — not a silent fallback. Real workflow
+    # always has a config on disk because the running server seeds it.
     cfg = load_or_migrate(DATA_DIR, atomic_write=atomic_write)
     hsv = HSVRange(
         h_min=cfg.hsv.h_min, h_max=cfg.hsv.h_max,
@@ -318,14 +323,23 @@ def main() -> None:
     if not pitch_paths:
         return
 
-    # group by session, re-detect each pitch
+    # group by session, re-detect each pitch. Per-file try/except so a
+    # single corrupt MOV / unreadable JSON doesn't abort the whole batch
+    # (NIT N2 from phase-3 review). Failures are tallied + reported at end
+    # so they're loud, not silent.
     by_session: dict[str, dict[str, PitchPayload]] = {}
+    failures: list[tuple[str, str]] = []
     for path in pitch_paths:
         logger.info("redetect %s", path.name)
-        pitch = rerun_detection(
-            path, hsv, shape_gate, args.dry_run,
-            use_frozen_snapshot=args.use_frozen_snapshot,
-        )
+        try:
+            pitch = rerun_detection(
+                path, hsv, shape_gate, args.dry_run,
+                use_frozen_snapshot=args.use_frozen_snapshot,
+            )
+        except Exception as e:
+            logger.error("FAIL %s: %s", path.name, e)
+            failures.append((path.name, str(e)[:200]))
+            continue
         if pitch is not None:
             by_session.setdefault(pitch.session_id, {})[pitch.camera_id] = pitch
 
@@ -341,6 +355,10 @@ def main() -> None:
                 cams[cam] = PitchPayload.model_validate_json(counterpart.read_text())
         triangulate_session(sid, cams, calibrations, pairing_tuning, args.dry_run)
 
+    if failures:
+        logger.error("%d pitch file(s) failed to reprocess:", len(failures))
+        for name, err in failures:
+            logger.error("  %s — %s", name, err)
     logger.info("done.")
 
 
