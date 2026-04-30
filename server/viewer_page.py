@@ -10,6 +10,7 @@ import html as _html
 
 from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
+from scene_runtime import view_presets_toolbar_html
 from presets import Preset
 from reconstruct import Scene
 from render_compare import (
@@ -80,18 +81,16 @@ def build_viewer_page_context(
     videos: list[tuple[str, str, float, float, dict[str, list]]],
     health: dict,
     *,
-    build_figure,
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
     segments: list | None = None,
 ) -> ViewerPageContext:
-    fig = build_figure(scene)
-    fig_json = _json.loads(fig.to_json())
-    layout_json = _json.dumps(fig_json.get("layout", {}))
-    static_traces = [
-        t for t in fig_json.get("data", [])
-        if not (t.get("meta") or {}).get("trace_kind")
-    ]
+    # Pre-Three.js this used a Plotly `build_figure(scene)` callable to
+    # extract the static trace list + layout block; the viewer JS then
+    # composed `[...static, ...dynamic]` for `Plotly.react`. Three.js
+    # builds its static layers (ground / plate / strike zone / world
+    # axes) client-side from the JSON theme payload — no server-side
+    # trace extraction needed.
     has_triangulated = bool(scene.triangulated)
     # Default split is 50/50 so both halves read equally; operators who
     # want more scene or more camera grid drag the #col-resizer (persisted
@@ -154,8 +153,8 @@ def build_viewer_page_context(
 
     return ViewerPageContext(
         scene_json=_json.dumps(scene.to_dict()),
-        layout_json=layout_json,
-        static_traces_json=_json.dumps(static_traces),
+        layout_json=_json.dumps({}),
+        static_traces_json=_json.dumps([]),
         camera_colors_json=_json.dumps(_CAMERA_COLORS),
         fallback_color_json=_json.dumps(_FALLBACK_CAMERA_COLOR),
         accent_color_json=_json.dumps(_ACCENT),
@@ -232,7 +231,6 @@ def render_viewer_html(
     videos: list[tuple[str, str, float, float, dict[str, list]]],
     health: dict,
     *,
-    build_figure,
     presets: list[Preset],
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
@@ -242,7 +240,6 @@ def render_viewer_html(
         scene,
         videos,
         health,
-        build_figure=build_figure,
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         segments=[] if segments is None else segments,
@@ -299,10 +296,16 @@ def render_viewer_html(
         '<span class="srv-progress" id="srv-progress" hidden'
         ' aria-live="polite"></span>'
     )
+    # Three.js scene runtime injection — importmap + theme JSON +
+    # boot module that mounts the scene onto `#scene` and sets up the
+    # viewer-specific layers. Polled mount with bounded retry (matches
+    # dashboard) so a WebGL failure surfaces instead of hanging.
+    from scene_runtime import scene_runtime_html as _scene_runtime_html
+    scene_runtime_fragment = _scene_runtime_html(container_id="scene")
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><title>Session {scene.session_id}</title>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+{scene_runtime_fragment}
 <style>
 {_viewer_css(ctx.scene_flex, ctx.videos_flex)}
 {_VIEWER_CAM_VIEW_OVERRIDES}
@@ -326,13 +329,7 @@ def render_viewer_html(
         <span class="lpb-meta" id="viewer-lpb-meta"></span>
       </div>
       <div id="scene"></div>
-      <div class="scene-views" role="toolbar" aria-label="Camera presets">
-        <button class="view-preset active" type="button" data-view="iso" title="Isometric overview (default)">ISO</button>
-        <button class="view-preset" type="button" data-view="catch" title="Catcher's view — strike zone front-on (X/Z plane)">CATCH</button>
-        <button class="view-preset" type="button" data-view="side" title="1B-side view — trajectory arc (Y/Z plane)">SIDE</button>
-        <button class="view-preset" type="button" data-view="top" title="Top-down — horizontal break (X/Y plane)">TOP</button>
-        <button class="view-preset" type="button" data-view="pitcher" title="Pitcher's view — looking back at catcher">PITCHER</button>
-      </div>
+      {view_presets_toolbar_html()}
       <div class="scene-toolbar" role="toolbar" aria-label="Scene controls">
         <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
         <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
@@ -490,6 +487,47 @@ window._applyTuning = function(btn) {{
 </script>
 <script>
 {CAM_VIEW_RUNTIME_JS}
+</script>
+<script type="module">
+import {{ setupViewerLayers }} from "/static/threejs/viewer_layers.js";
+// Bounded poll for the scene runtime to mount, mirroring the
+// dashboard's boot pattern. The viewer-specific layer module
+// reads `window.VIEWER_DATA` (set below by the IIFE) for the
+// scene/segments/traj payload.
+let _attempts = 0;
+function _hookup() {{
+  if (window.BallTrackerScene && window.VIEWER_DATA) {{
+    const d = window.VIEWER_DATA;
+    setupViewerLayers(window.BallTrackerScene, {{
+      SCENE: d.SCENE,
+      SEGMENTS: d.SEGMENTS,
+      TRAJ_BY_PATH: d.TRAJ_BY_PATH,
+      HAS_TRIANGULATED: d.HAS_TRIANGULATED,
+      fallbackColor: d.FALLBACK_COLOR,
+      tInitial: d.tMin || 0,
+      mode: 'all',
+      layerVisibility: d.layerVisibility,
+    }});
+    return;
+  }}
+  if (++_attempts > 50) {{
+    const root = document.getElementById('scene');
+    const sceneOk = !!window.BallTrackerScene;
+    const dataOk = !!window.VIEWER_DATA;
+    const reason = !sceneOk && !dataOk
+      ? "neither BallTrackerScene nor VIEWER_DATA appeared"
+      : !sceneOk ? "BallTrackerScene runtime never mounted (WebGL context issue?)"
+      : "VIEWER_DATA never set (classic IIFE failed mid-init?)";
+    if (root) root.innerHTML =
+      "<div style=\\"padding:24px;font-family:monospace;color:#C0392B;\\">"
+      + "3D scene failed to mount — " + reason + ". "
+      + "Check the browser console for the actual error.</div>";
+    console.error('Viewer scene mount failed:', reason);
+    return;
+  }}
+  setTimeout(_hookup, 50);
+}}
+_hookup();
 </script>
 <script>
 {_viewer_js()}

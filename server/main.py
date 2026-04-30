@@ -32,11 +32,6 @@ Endpoints:
                                        Triggers the "disarm" echo window so
                                        phones flush the in-progress recording
                                        and upload the cycle.
-  POST /sessions/clear              — dashboard: drop the last-ended
-                                       session pointer so the session
-                                       card on / goes blank. No-op (409
-                                       for JSON callers) when already
-                                       idle with no prior session.
   GET  /chirp.wav                   — reference sync chirp for 時間校正
   GET  /events                      — one row per session: cameras, status,
                                        counts, received_at, triangulation
@@ -79,6 +74,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 # Re-exports so `from main import PitchPayload, ...` keeps working for the
@@ -200,6 +196,30 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ball_tracker server", lifespan=lifespan)
+
+# `/static/` serves the vendored Three.js ESM bundle + the shared
+# scene runtime module loaded by the dashboard and viewer pages.
+# Pre-Three.js the dashboard inlined every JS file as a `<script>`
+# block; Three.js needs an importmap pointing at real URLs (ESM
+# specifiers can't be resolved against inlined modules), so JS that
+# participates in the importmap chain has to live on disk under
+# /static/. The legacy inline-script pages keep their old shape;
+# we don't migrate those.
+_STATIC_ROOT = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=_STATIC_ROOT), name="static")
+
+# Boot-time invariant: the vendored Three.js + OrbitControls + scene
+# runtime must be on disk. Without these the dashboard's 3D scene
+# fails to mount silently (script tags 404, page renders blank
+# canvas). Fail loud at boot so deployment misconfigurations surface
+# immediately rather than at first request.
+from scene_runtime import vendor_files_present as _scene_vendor_present
+if not _scene_vendor_present():
+    raise RuntimeError(
+        "scene_runtime vendor files missing — expected three.module.min.js, "
+        "OrbitControls.js, and scene_runtime.js under server/static/threejs/. "
+        "Re-run the vendor download or check the worktree state."
+    )
 
 from routes import markers as _markers_routes
 from routes import settings as _settings_routes

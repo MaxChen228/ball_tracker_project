@@ -322,14 +322,6 @@ def _render_session_body(
 
     sync_leds = _sync_led_html("A") + _sync_led_html("B")
 
-    clear_btn = ""
-    if not armed and session and session.get("id"):
-        clear_btn = (
-            '<form class="inline" method="POST" action="/sessions/clear">'
-            '<button class="btn" type="submit">Clear</button>'
-            "</form>"
-        )
-
     gate_row = ""
     if not armed and missing:
         gate_row = (
@@ -345,7 +337,7 @@ def _render_session_body(
         )
     return (
         f'<div class="session-head">{chip_html}{sid_html}</div>'
-        f'<div class="session-actions">{arm_btn}{stop_btn}{clear_btn}</div>'
+        f'<div class="session-actions">{arm_btn}{stop_btn}</div>'
         f"{gate_row}"
         '<div class="card-subtitle">Time Sync</div>'
         f'<div class="session-actions">{sync_trigger_btn}{sync_leds}</div>'

@@ -48,7 +48,8 @@
         };
         livePointStore.set(data.sid, []);
         liveRayStore.set(data.sid, new Map());
-        liveTraceIdx = -1;
+        // (liveTraceIdx tracking retired with the Plotly extendTraces fast
+        // path; Three.js BufferGeometry rebuild on append is fast enough.)
         // Ghost trail is deliberately preserved across arm — it'll stay
         // rendered until a real point for the new session lands, at which
         // point liveTraces() stops emitting it (the new session trace
@@ -244,12 +245,21 @@
         // Auto-select latest pitch when no row is currently checked.
         // Doesn't override an explicit operator selection — they may be
         // mid-investigation on an older pitch.
-        if (selectedTrajIds.size === 0) {
+        const selectionChanged = selectedTrajIds.size === 0;
+        if (selectionChanged) {
           selectedTrajIds.add(data.sid);
           persistTrajSelection();
         }
         repaintCanvas();
         updateLatestPitchBadge();
+        // If we auto-selected a new sid, rerender events so the row
+        // visually highlights without waiting for the next 5-s tick.
+        // Bust the wrapper key (selection isn't in its diff key).
+        if (selectionChanged && typeof renderEvents === 'function'
+            && Array.isArray(currentEvents)) {
+          _lastEvKey = null;
+          renderEvents(currentEvents);
+        }
       } catch (_) {}
     });
     es.addEventListener('session_ended', (evt) => {
@@ -261,14 +271,19 @@
           if (Array.isArray(data.paths_completed)) {
             currentLiveSession.paths_completed = data.paths_completed;
           }
-          // Retain the trail reference for ghost preview on the next arm.
-          // Clear currentLiveSession after a short delay so the active card
-          // stays visible briefly with its final counters.
+          // Promote the live trail to a faded "ghost" layer so the
+          // operator can confirm framing matches the last pitch's
+          // trail before throwing again. The ghost persists until
+          // the next arm cycle's first point lands (handled in
+          // applyLive when sid flips). Card stays visible briefly
+          // with its final counters via the 3 s setTimeout below.
           lastEndedLiveSid = data.sid;
+          if (window.BallTrackerDashboardScene) {
+            window.BallTrackerDashboardScene.promoteLiveToGhost();
+          }
           setTimeout(() => {
             if (currentLiveSession && currentLiveSession.session_id === data.sid && !currentLiveSession.armed) {
               currentLiveSession = null;
-              liveTraceIdx = -1;
               repaintCanvas();
             }
           }, 3000);

@@ -75,7 +75,6 @@
         <form class="inline" method="POST" action="/sessions/stop">
           <button class="btn danger" type="submit" data-role="stop-btn">Stop</button>
         </form>
-        <span data-role="clear-slot"></span>
       </div>
       <div class="arm-gate" data-role="gate" hidden>
         <span class="gate-label" data-role="gate-label"></span>
@@ -99,7 +98,6 @@
       armForm: $('[data-role=arm-form]'),
       armBtn: $('[data-role=arm-btn]'),
       stopBtn: $('[data-role=stop-btn]'),
-      clearSlot: $('[data-role=clear-slot]'),
       gate: $('[data-role=gate]'),
       gateLabel: $('[data-role=gate-label]'),
       gateText: $('[data-role=gate-text]'),
@@ -177,15 +175,6 @@
       if (dom.armBtn.title !== armTitle) dom.armBtn.title = armTitle;
       // stop button
       if (dom.stopBtn.disabled !== !armed) dom.stopBtn.disabled = !armed;
-      // clear button (only shown when an ended session is still cached)
-      const wantClear = !armed && !!(s && s.id);
-      const hasClear = !!dom.clearSlot.firstChild;
-      if (wantClear && !hasClear) {
-        dom.clearSlot.innerHTML = '<form class="inline" method="POST" action="/sessions/clear">'
-          + '<button class="btn" type="submit">Clear</button></form>';
-      } else if (!wantClear && hasClear) {
-        dom.clearSlot.innerHTML = '';
-      }
       // gate row (blockers > warnings > hidden)
       if (!armed && blockers.length) {
         dom.gate.hidden = false;

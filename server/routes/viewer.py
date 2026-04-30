@@ -310,7 +310,7 @@ def reconstruction(session_id: str) -> dict[str, Any]:
 @router.get("/viewer/{session_id}", response_class=HTMLResponse)
 def viewer(session_id: str) -> HTMLResponse:
     from main import state
-    from render_scene import render_viewer_html
+    from viewer_page import render_viewer_html
     scene = _scene_for_session(session_id)
     videos_with_offsets = _videos_for_session(session_id)
     health = _build_viewer_health(session_id)

@@ -12,7 +12,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-import render_scene
 import schemas
 from conftest import sid
 from main import app
@@ -570,7 +569,7 @@ def test_viewer_page_context_computes_single_cam_layout_and_video_cells():
         ("A", "/videos/session_x_A.mov", 0.0, 240.0, {"t_rel_s": [0.0], "detected": [True]}),
     ]
 
-    ctx = build_viewer_page_context(scene, videos, health, build_figure=render_scene._build_figure)
+    ctx = build_viewer_page_context(scene, videos, health)
 
     assert ctx.layout_mode == "single-cam"
     assert 'data-cam="A"' in ctx.video_cells_html
@@ -586,7 +585,6 @@ def test_viewer_page_renders_run_server_post_source_dropdown():
     affordance against regression — if someone refactors the form
     back to a single hidden input, this test fails."""
     import main as _main
-    import render_scene
     from viewer_page import render_viewer_html
 
     K, (R_a, t_a, _, H_a), _ = _make_rig()
@@ -616,7 +614,6 @@ def test_viewer_page_renders_run_server_post_source_dropdown():
 
     html = render_viewer_html(
         scene, videos, health,
-        build_figure=render_scene._build_figure,
         presets=_main.state.list_presets(),
     )
 
@@ -676,10 +673,12 @@ def test_viewer_ships_interactive_diagnostic_widgets():
     assert 'class="strip-legend"' in body
     assert 'id="hint-overlay"' in body
     assert 'id="hint-btn"' in body
-    # Default 3D camera baked into the figure layout so the ISO preset
-    # has a known target. _build_figure ships scene.camera; assert one of
-    # its keys lands in the inline JSON blob.
-    assert '"camera"' in body
+    # Three.js scene runtime owns the default camera (ISO preset baked
+    # into PRESETS in scene_runtime.js); the inline JSON theme block
+    # carries the strike-zone centroid so any consumer reading the
+    # theme can derive lookAt. Sanity-check the runtime injection.
+    assert "BallTrackerScene" in body
+    assert '"strike_zone"' in body
     # The cheat sheet calls out the actual shortcuts so the operator
     # learns them on first hover.
     assert "Play / pause" in body
@@ -730,7 +729,6 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
     was how the viewer ended up framed on just the plate, missing the
     rays fanning out from a camera 1.7 m overhead."""
     from viewer_page import build_viewer_page_context
-    import render_scene
     from reconstruct import Scene, CameraView
 
     K, (R_a, t_a, _, H_a), _ = _make_rig()
@@ -740,13 +738,17 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
 
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
-    # Generator + gate both live in the JS blob.
-    assert "function camMarkerTracesFor" in body
-    assert "function cameraIsAnyPathVisible" in body
-    assert "for (const t of camMarkerTracesFor(c)) out.push(t)" in body
-    # Scene theme constants flow through DATA, not hard-coded.
+    # Three.js viewer scene owns camera-marker construction (in
+    # `static/threejs/viewer_layers.js`), so the legacy Plotly-era
+    # `camMarkerTracesFor` / `cameraIsAnyPathVisible` strings are
+    # gone. The contract that survives: `SCENE.cameras` ships in the
+    # viewer-data JSON, layerVisibility nested shape ships too, and
+    # the Three.js setupViewerLayers boot script reads them on mount.
     assert '"scene_theme"' in body
-    assert "SCENE_THEME.cam_fwd_len_m" in body
+    assert "viewer_layers.js" in body
+    assert "setupViewerLayers" in body
+    assert "SCENE: d.SCENE" in body
+    assert "layerVisibility: d.layerVisibility" in body
 
     # STATIC must NOT carry a camera trace — that would double-draw the
     # diamond (once static, once dynamic) and pin camera visibility to
@@ -774,7 +776,7 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
         },
         "session_id": session_id, "triangulated_count": 0,         "error": None, "duration_s": None, "received_at": None, "mode": "camera_only",
     }
-    ctx = build_viewer_page_context(scene, [], health, build_figure=render_scene._build_figure)
+    ctx = build_viewer_page_context(scene, [], health)
     import json as _json
     static_list = _json.loads(ctx.static_traces_json)
     for trace in static_list:
@@ -815,7 +817,9 @@ def test_viewer_strip_reserves_dual_ab_subtracks_per_pipeline():
 
 def test_viewer_locks_layout_to_viewport_without_page_scroll():
     """The viewer should fit in a single viewport: body scrolling is
-    disabled and the root container owns a fixed 100vh layout."""
+    disabled and the root container owns a fixed 100vh layout. The
+    transport timeline is a fixed-position bottom dock (NOT a grid row),
+    so the grid only carries 3 rows: nav / failure-strip / work."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(712)
     _record_pitch(_pitch("A", 712, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -824,8 +828,12 @@ def test_viewer_locks_layout_to_viewport_without_page_scroll():
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
     assert "overflow:hidden" in body
-    assert "grid-template-rows:52px auto minmax(0, 1fr) auto" in body
+    assert "grid-template-rows:auto auto minmax(0, 1fr)" in body
     assert "height:100vh" in body
+    # Sticky-bottom dock contract: timeline pinned to viewport bottom,
+    # .viewer reserves matching padding via the --timeline-h CSS var.
+    assert ".timeline { position:fixed" in body
+    assert "padding-bottom:var(--timeline-h" in body
 
 
 def test_viewer_scrubber_uses_manual_seek_guards_and_keyboard_stepper():

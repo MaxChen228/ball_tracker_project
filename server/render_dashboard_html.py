@@ -1,4 +1,13 @@
-"""HTML shell assembly for the dashboard document."""
+"""HTML shell assembly for the dashboard document.
+
+Phase 2 of the 3D migration: the Plotly CDN is gone and the 3D scene
+boots via Three.js (`scene_runtime_html` in the head, plus a
+module-type boot script that imports `dashboard_layers.js` after the
+scene is mounted). The legacy classic-script IIFE (overlays / cam_view
+/ dashboard_js) still loads as inline `<script>` blocks — those don't
+participate in the importmap chain and don't need to migrate to
+modules until the runtime API stabilises.
+"""
 from __future__ import annotations
 
 
@@ -12,6 +21,8 @@ def render_dashboard_html(
     intrinsics_html: str,
     events_html: str,
     scene_div: str,
+    scene_runtime_html: str,
+    view_presets_toolbar_html: str,
     overlays_js: str,
     cam_view_js: str,
     dashboard_js: str,
@@ -26,7 +37,41 @@ def render_dashboard_html(
         "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">"
         "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
         "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
-        "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
+        # Three.js scene runtime — importmap + theme JSON + boot module.
+        # Loaded as a module so `import` statements resolve via the
+        # importmap. Modules defer until after classic scripts finish,
+        # so the inline IIFE bundle below runs first; the IIFE accesses
+        # `window.BallTrackerScene` / `BallTrackerDashboardScene` lazily
+        # at use-time, treating absence as "not ready, retry next tick".
+        f"{scene_runtime_html}"
+        # Dashboard-specific layer module — wires camera markers, fit
+        # curves, points, live trail. Module is loaded AFTER the scene
+        # runtime mounts (importmap-resolved), exposes its API via
+        # `window.BallTrackerDashboardScene`.
+        '<script type="module">'
+        'import { setupDashboardLayers } from "/static/threejs/dashboard_layers.js";'
+        # Bounded poll for scene mount: WebGL context creation can fail
+        # (no GPU / driver issue / too many contexts), in which case
+        # `mountScene` throws and `window.BallTrackerScene` never lands.
+        # Cap retries at 2.5 s (50 × 50 ms) and surface a visible error
+        # in #scene-root so the operator knows the 3D pipeline failed
+        # rather than waiting forever for a scene that will never appear.
+        'let _attempts = 0;'
+        'function _hookup() {'
+        '  if (window.BallTrackerScene) { setupDashboardLayers(window.BallTrackerScene); return; }'
+        '  if (++_attempts > 50) {'
+        '    const root = document.getElementById("scene-root");'
+        '    if (root) root.innerHTML = '
+        '      "<div style=\\"padding:24px;font-family:monospace;color:#C0392B;\\">"'
+        '      + "3D scene failed to mount — likely a WebGL context issue. "'
+        '      + "Check the browser console for the actual error.</div>";'
+        '    console.error("BallTrackerScene never mounted after 2.5 s of polling");'
+        '    return;'
+        '  }'
+        '  setTimeout(_hookup, 50);'
+        '}'
+        '_hookup();'
+        '</script>'
         f"<style>{css}</style>"
         "</head><body data-page=\"dashboard\">"
         f"{nav_html}"
@@ -64,7 +109,7 @@ def render_dashboard_html(
         '  <span class="degraded-icon">⚠</span>'
         '  <span data-degraded-body>Live stream degraded.</span>'
         '</div>'
-        '<div class="canvas-hint">Drag to rotate</div>'
+        f'{view_presets_toolbar_html}'
         '<div class="fit-filter-bar" role="group" aria-label="Canvas filters">'
         '  <span class="ff-cell" title="Toggle the strike-zone wireframe in the 3D canvas. Default on. Same overlay flag as the viewer.">'
         '    <label class="ff-checkbox">'

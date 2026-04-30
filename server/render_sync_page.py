@@ -40,7 +40,6 @@ def render_setup_html(
         "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">"
         "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
         "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
-        "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
         f"<style>{_CSS}{_SYNC_CSS}</style>"
         "</head><body data-page=\"setup\">"
         f'{_render_app_nav("setup", devices, session, calibrations, None, sync_cooldown_remaining_s)}'
@@ -89,7 +88,6 @@ def render_sync_html(
         "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">"
         "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
         "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
-        "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
         f"<style>{_CSS}{_SYNC_CSS}</style>"
         "</head><body data-page=\"sync\">"
         f'{_render_app_nav("sync", devices, session, calibrations, sync, sync_cooldown_remaining_s)}'

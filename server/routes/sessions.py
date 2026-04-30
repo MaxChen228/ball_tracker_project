@@ -180,17 +180,6 @@ async def sessions_stop(request: Request):
     return {"ok": True, "session": ended.to_dict()}
 
 
-@router.post("/sessions/clear")
-async def sessions_clear(request: Request):
-    from main import state, _wants_html
-    cleared = state.clear_last_ended_session()
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    if not cleared:
-        raise HTTPException(status_code=409, detail="nothing to clear")
-    return {"ok": True}
-
-
 @router.post("/sessions/{session_id}/delete")
 async def sessions_delete(request: Request, session_id: str):
     from main import state, _wants_html

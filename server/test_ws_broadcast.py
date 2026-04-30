@@ -403,17 +403,19 @@ def test_heartbeat_emits_device_heartbeat_sse(monkeypatch):
     assert "last_seen_at" in hb[0]
 
 
-def test_calibration_state_exposes_plot_etag():
-    """/calibration/state returns a stable plot_etag that differs across
-    distinct plot payloads (so the dashboard can short-circuit the
-    client-side JSON.stringify digest)."""
+def test_calibration_state_returns_camera_list_for_threejs_dashboard():
+    """/calibration/state ships the raw scene + per-camera image dims +
+    last-touched timestamps. The Plotly-era `plot` + `plot_etag` fields
+    were retired with the Three.js migration — the dashboard reads
+    `scene.cameras` directly and short-circuits on the JSON.stringify
+    of the camera tuple list, not a server-issued etag."""
     client = TestClient(app)
     r = client.get("/calibration/state")
     assert r.status_code == 200
     body = r.json()
-    assert "plot_etag" in body
-    etag = body["plot_etag"]
-    assert isinstance(etag, str) and len(etag) == 16
-    # Re-fetch: same calibrations → same etag (deterministic).
-    r2 = client.get("/calibration/state")
-    assert r2.json()["plot_etag"] == etag
+    assert "calibrations" in body
+    assert "scene" in body
+    assert "cameras" in body["scene"]
+    # Plotly-era leakage is gone.
+    assert "plot" not in body
+    assert "plot_etag" not in body

@@ -29,12 +29,13 @@
     } catch (e) { /* silent retry next tick */ }
   }
 
-  // ETag of the last basePlot we repainted from. Server computes a
-  // sha1[:16] of the plot subtree in /calibration/state; we short-circuit
-  // the client-side JSON.stringify over full Plotly trace data. Falls
-  // back to the (inline) full-JSON digest when the server response
-  // lacks plot_etag (older server build).
-  let lastBasePlotEtag = null;
+  // Three.js dashboard reads `payload.scene.cameras` directly to build
+  // per-camera markers in the 3D scene; the legacy `payload.plot` /
+  // `plot_etag` short-circuit is gone with the Plotly path. Tracking
+  // a "last seen camera count" is enough to skip the rebuild when the
+  // calibration set hasn't changed (cameras are static after auto-cal
+  // until the operator re-runs); no etag needed.
+  let lastCameraSig = null;
   async function tickCalibration() {
     try {
       const r = await fetch('/calibration/state', { cache: 'no-store' });
@@ -60,9 +61,10 @@
       // The runtime owns paint scheduling + clears absent cams to the
       // uncalibrated badge so the operator sees calibration drop-off
       // immediately on /, /setup, /markers.
+      const cams = (payload.scene || {}).cameras || [];
       if (window.BallTrackerCamView) {
         const live = new Set();
-        for (const c of ((payload.scene || {}).cameras || [])) {
+        for (const c of cams) {
           window.BallTrackerCamView.setMeta(c.camera_id, c);
           live.add(c.camera_id);
         }
@@ -70,15 +72,17 @@
           if (!live.has(cam)) window.BallTrackerCamView.setMeta(cam, null);
         }
       }
-      // Main 3D canvas lives only on `/`. Don't gate the metadata update
-      // above on sceneRoot — `/setup` still needs virt canvases drawn.
-      if (payload.plot && sceneRoot && window.Plotly) {
-        const etag = payload.plot_etag
-          || ('inline:' + JSON.stringify(payload.plot).length);
-        if (etag !== lastBasePlotEtag || basePlot === null) {
-          lastBasePlotEtag = etag;
-          basePlot = payload.plot;
-          repaintCanvas();
+      // Push camera markers into the Three.js scene if mounted.
+      // Re-applying when nothing changed costs ~0 (same Group rebuild
+      // for 0-2 cameras) but the signature short-circuit avoids the
+      // disposeObject/rebuild every 5 s when nothing's changed.
+      if (window.BallTrackerDashboardScene) {
+        const sig = JSON.stringify(cams.map(c => [
+          c.camera_id, c.center_world, c.axis_forward_world, c.axis_right_world, c.axis_up_world,
+        ]));
+        if (sig !== lastCameraSig) {
+          lastCameraSig = sig;
+          window.BallTrackerDashboardScene.applyCameras(cams);
         }
       }
     } catch (e) { /* silent */ }
@@ -92,8 +96,8 @@
       const events = await r.json();
       currentEvents = events;
       // Prune selection for sessions the user deleted server-side so the
-      // canvas doesn't keep painting a phantom trajectory whose checkbox
-      // no longer exists.
+      // canvas doesn't keep painting a phantom trajectory whose row no
+      // longer exists.
       const liveIds = new Set(events.map(e => e.session_id));
       let pruned = false;
       for (const sid of [...selectedTrajIds]) {

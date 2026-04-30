@@ -81,12 +81,22 @@
     return (currentT - ts[idx]) <= tol ? idx : -1;
   }
 
+  // 4.17 ms = one frame interval at 240 fps. A wider tol pulls blobs
+  // from neighbouring frames during scrub / play, producing the visible
+  // "blob mask is one frame ahead/behind the video" symptom — most
+  // obvious when the ball is moving fast and inter-frame displacement
+  // exceeds the ball radius. The previous 10 ms tol covered ±2 frames
+  // worth, more than enough to drift visibly. The half-frame buffer
+  // (4.17 / 2 ≈ 2.1 ms either side of currentT) is the largest
+  // sub-frame quantization we should accept; anything beyond is an
+  // off-by-one frame mismatch worth reporting as "no blob this frame".
+  const _BLOB_FRAME_TOL_S = 1.0 / 240;
   function _drawBlobsForPath(ctx, sx, sy, cam, path, color) {
     const f = framesByPath[path] && framesByPath[path][cam.camera_id];
     if (!f) return;
     const ts = f.t_rel_s || [], cands = f.candidates || [];
     if (!ts.length || !cands.length) return;
-    const idx = _findClosestFrameIdx(ts, currentT, 0.010);
+    const idx = _findClosestFrameIdx(ts, currentT, _BLOB_FRAME_TOL_S);
     if (idx < 0) return;
     const frameCands = cands[idx] || [];
     if (!frameCands.length) return;
@@ -136,23 +146,15 @@
     if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();
   }
   function drawScene() {
-    const playback = mode !== "all";
-    const cutoff = playback ? currentT : Infinity;
-    // Strike-zone toggle: filter the wireframe + fill traces out of
-    // STATIC when the user unticks the box. Default ON, persisted in
-    // localStorage so the choice survives page reload.
-    const showZone = strikeZoneVisible();
-    const staticFiltered = showZone
-      ? STATIC
-      : STATIC.filter(t => !((t.meta || {}).feature === "strike_zone"));
-    Plotly.react(sceneDiv, [...staticFiltered, ...buildDynamicTraces(cutoff, playback)], LAYOUT, {displayModeBar: false, responsive: true});
-    // Plate overlay is now part of the cam-view 'plate' layer painted
-    // onto the canvas overlay above the video — no separate SVG path.
-    // virtual canvases are NOT called here on purpose. They schedule on
-    // their own RAF (scheduleVirtualDraw) so a heavy Plotly.react redraw
-    // can't stall the cheap canvas2D paints — virtual cameras need to
-    // stay locked to the video clock during playback even if the 3D
-    // scene drops a frame.
+    // Three.js viewer scene owns the entire 3D pipeline now. Push the
+    // current time + mode into the layer module; it rebuilds only the
+    // t-dependent layers (rays / traj / fit marker), leaving cameras,
+    // ground traces, and fit curves untouched. Strike-zone visibility
+    // goes through the scene runtime's `setLayerVisible` (not a trace
+    // filter) — see strike-zone toggle handler below.
+    if (window.BallTrackerViewerScene) {
+      window.BallTrackerViewerScene.setT(currentT, mode);
+    }
   }
   function scheduleVirtualDraw() {
     if (virtualDrawRaf !== null) return;

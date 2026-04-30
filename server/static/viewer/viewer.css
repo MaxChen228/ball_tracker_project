@@ -14,11 +14,23 @@
   html, body { margin:0; padding:0; height:100%; overflow:hidden;
     background:var(--bg); color:var(--ink); font-family:var(--sans);
     font-weight:300; line-height:1.6; -webkit-font-smoothing:antialiased; }
-  .viewer { display:grid; grid-template-rows:52px auto minmax(0, 1fr) auto;
-    height:100vh; min-height:0; overflow:hidden; }
-  .nav { height:52px; flex:0 0 52px; background:var(--surface);
+  /* Three-row grid (nav / failure-strip / work). The transport timeline
+     is NOT a grid row — it floats as a fixed-position dock at the
+     viewport bottom (see `.timeline` below). `.viewer` reserves equal
+     bottom padding via `--timeline-h` (set by JS once the dock measures
+     itself) so nothing under .work hides under the dock.
+     First grid track is `auto` (not fixed 52 px) so the nav can wrap
+     to a second line on dense sessions (cam pills + session-tuning +
+     RERUN SERVER + timestamps + back link easily exceed a single row
+     ~1500 px wide) without leaking content above the bar — the prior
+     fix forced single-line + ellipsis but that just hid information. */
+  .viewer { display:grid; grid-template-rows:auto auto minmax(0, 1fr);
+    height:100vh; min-height:0; overflow:hidden;
+    padding-bottom:var(--timeline-h, 80px); }
+  .nav { min-height:52px; background:var(--surface);
     border-bottom:1px solid var(--border-base); display:flex;
-    align-items:center; padding:0 var(--s-5); gap:var(--s-4); }
+    align-items:center; flex-wrap:wrap; row-gap:var(--s-2);
+    padding:var(--s-2) var(--s-5); gap:var(--s-4); }
   .nav .brand { font-family:var(--mono); font-weight:700; font-size:14px;
     letter-spacing:0.16em; color:var(--ink); }
   .nav .brand .dot { display:inline-block; width:7px; height:7px;
@@ -58,10 +70,13 @@
   .nav .action-ts { font-family:var(--mono); font-size:10px;
     color:var(--sub); white-space:nowrap; font-variant-numeric:tabular-nums;
     letter-spacing:0.04em; }
+  /* The strip can wrap internally (cam pills + meta + duration); the
+     parent .nav now also wraps (flex-wrap:wrap above) so wrapped lines
+     stay inside the bar instead of overflowing above it. */
   .health-strip { flex:1 1 auto; min-width:0; display:flex;
     align-items:center; gap:var(--s-3); flex-wrap:wrap;
     font-family:var(--mono); font-size:11px; color:var(--sub);
-    letter-spacing:0.04em; overflow:hidden; }
+    letter-spacing:0.04em; }
   .session-tuning { display:inline-flex; align-items:center; gap:6px;
     padding:3px 8px; border:1px solid var(--border-base);
     border-radius:var(--r); background:var(--surface);
@@ -137,7 +152,10 @@
     background:rgba(192, 57, 43, 0.06); display:flex;
     align-items:center; gap:var(--s-2); }
   .fail-strip .icon { font-weight:700; }
-  .work { flex:1 1 auto; display:flex; min-height:0;
+  /* `.work` is a grid child of `.viewer`; height comes from the parent's
+     `minmax(0, 1fr)` row. The inner `display:flex` splits scene-col vs
+     videos-col horizontally. */
+  .work { display:flex; min-height:0;
     border-bottom:1px solid var(--border-base); }
   .scene-col { flex:{SCENE_FLEX}; min-width:280px; position:relative;
     background:var(--bg); }
@@ -214,9 +232,20 @@
     border-radius:var(--r); }
   .vid-media.empty .vid-empty-msg { color:var(--sub); font-family:var(--mono);
     font-size:11px; letter-spacing:0.12em; text-transform:uppercase; }
-  .timeline { flex:0 0 auto; background:var(--surface); display:flex;
+  /* Transport dock — fixed to viewport bottom regardless of .work
+     content. Pre-fix the timeline was a grid row; in `layout_mode='empty'`
+     scenarios where neither cam had uploaded its MOV, the videos-col
+     collapsed to tiny pills and the whole layout drifted upward, leaving
+     the timeline floating mid-page with vast empty area below. Pinning
+     it to bottom decouples transport position from .work content state.
+     `.viewer` reserves matching bottom padding via the `--timeline-h`
+     CSS var (measured + set by JS on first paint + ResizeObserver). */
+  .timeline { position:fixed; left:0; right:0; bottom:0; z-index:30;
+    background:var(--surface); display:flex;
     flex-direction:column; gap:var(--s-2); padding:var(--s-2) var(--s-5);
-    font-family:var(--mono); font-size:12px; color:var(--sub); position:relative; }
+    font-family:var(--mono); font-size:12px; color:var(--sub);
+    border-top:1px solid var(--border-base);
+    box-shadow:0 -1px 4px rgba(0,0,0,0.04); }
   .tl-row { display:flex; align-items:center; gap:10px; }
   .scrubber-wrap { flex:1 1 auto; display:flex; flex-direction:column;
     gap:3px; min-width:0; }
