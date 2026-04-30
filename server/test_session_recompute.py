@@ -103,6 +103,36 @@ def test_recompute_persists_cost_threshold(tmp_path, monkeypatch):
     assert g.json()["cost_threshold"] == pytest.approx(0.45)
 
 
+def test_recompute_broadcasts_fit_with_cause(tmp_path, monkeypatch):
+    """Recompute path of the fit-broadcast contract — cycle_end /
+    server_post are covered in test_ws_broadcast / test_pitch_endpoints
+    respectively. The viewer's SSE handler skips `cause == 'recompute'`
+    to avoid double-applying the scene (the inline /recompute response
+    handler already patches it), so the field MUST land on the wire."""
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    sid = "s_eeee0004"
+    _seed_session(main.state, sid)
+
+    events: list[tuple[str, dict]] = []
+
+    class _CaptureHub:
+        async def broadcast(self, event: str, data: dict) -> None:
+            events.append((event, data))
+
+    monkeypatch.setattr(main, "sse_hub", _CaptureHub())
+    client = TestClient(main.app)
+    r = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": 0.6})
+    assert r.status_code == 200
+    fit_events = [d for n, d in events if n == "fit" and d.get("sid") == sid]
+    assert len(fit_events) == 1
+    fe = fit_events[0]
+    assert fe["cause"] == "recompute"
+    assert "segments" in fe
+    assert "cost_threshold" in fe
+    assert "gap_threshold_m" in fe
+
+
 def test_recompute_rejects_out_of_range(tmp_path, monkeypatch):
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
