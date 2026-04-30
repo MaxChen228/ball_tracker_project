@@ -11,7 +11,7 @@ import pytest
 def test_pairing_tuning_default_values():
     from pairing_tuning import PairingTuning
     t = PairingTuning.default()
-    assert t.cost_threshold == 1.0
+    assert t.cost_threshold == 0.5
     assert t.gap_threshold_m == 0.20
 
 

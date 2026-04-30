@@ -180,7 +180,7 @@ def view_presets_toolbar_html(*, default_view: str = "iso") -> str:
 # material; two sources of truth would silently desync after a tuning
 # change. Test asserts they match.
 POINT_SIZE_M_MIN = 0.005
-POINT_SIZE_M_MAX = 0.040
+POINT_SIZE_M_MAX = 0.150
 POINT_SIZE_M_STEP = 0.001
 POINT_SIZE_M_DEFAULT = 0.018
 

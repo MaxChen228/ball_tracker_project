@@ -313,6 +313,8 @@ def render_viewer_html(
     segments: list | None = None,
     segments_by_path: dict[str, list] | None = None,
 ) -> str:
+    from pairing_tuning import PairingTuning
+    _pt_default = PairingTuning.default()
     ctx = build_viewer_page_context(
         scene,
         videos,
@@ -533,11 +535,12 @@ def render_viewer_html(
   "has_triangulated": {str(ctx.has_triangulated).lower()}
 }}</script>
 <script>
-window.VIEWER_INITIAL_COST_THRESHOLD = {1.0 if ctx.cost_threshold is None else float(ctx.cost_threshold)};
-// Initial gap in METRES (None → 2.0m = slider max). 50_canvas.js
-// converts to client-side residualCapM as a finite metres value;
-// the slider's 200cm position is just `2.0m`, no Infinity special case.
-window.VIEWER_INITIAL_GAP_THRESHOLD_M = {2.0 if ctx.gap_threshold_m is None else float(ctx.gap_threshold_m)};
+window.VIEWER_INITIAL_COST_THRESHOLD = {float(_pt_default.cost_threshold) if ctx.cost_threshold is None else float(ctx.cost_threshold)};
+// Initial gap in METRES (None → PairingTuning.default().gap_threshold_m).
+// 50_canvas.js converts to client-side residualCapM as a finite metres
+// value; the slider's 200cm position is just `2.0m`, no Infinity special
+// case.
+window.VIEWER_INITIAL_GAP_THRESHOLD_M = {float(_pt_default.gap_threshold_m) if ctx.gap_threshold_m is None else float(ctx.gap_threshold_m)};
 window._applyTuning = function(btn) {{
   const costInput = document.querySelector('[data-session-cost-threshold]');
   const gapInput = document.querySelector('[data-session-gap-threshold]');

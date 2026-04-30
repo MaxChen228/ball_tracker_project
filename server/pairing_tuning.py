@@ -16,12 +16,16 @@ operator filter; that conflation is now decoupled.
 
 - `cost_threshold` — selector cost cap (semantically `max(cost_a, cost_b)
   ≤ threshold`). The viewer slider hides points client-side; segmenter
-  ignores them on Apply. Default 1.0 = "emit everything the shape gate
-  let through". Slider range 0–1 covers the production cost band.
+  ignores them on Apply. Default 0.5 — empirically a good balance for
+  this rig: drops the noisy tail of the cost distribution while keeping
+  enough points for clean segments. Slider range 0–1 covers the
+  production cost band; drag to 1.0 to see every emitted point.
 - `gap_threshold_m` — skew-line residual (closest distance between the
   two camera rays) cap. Same semantics: viewer hides, segmenter ignores.
-  Default 0.20 m. Slider range 0–200 cm; 200 cm is at-or-above the
-  emit ceiling so dragging there reveals every emitted point.
+  Default 0.20 m (20 cm) — the empirical floor below which residual
+  filtering starts cutting real flight points (see CLAUDE.md). Slider
+  range 0–200 cm; 200 cm is at-or-above the emit ceiling so dragging
+  there reveals every emitted point.
 
 `server/dry_run_shape.py` and `server/dry_run_multi_ray.py` hard-code
 `GAP_MAX=0.30` for offline research artefacts — looser than production
@@ -46,6 +50,6 @@ class PairingTuning:
     @classmethod
     def default(cls) -> "PairingTuning":
         return cls(
-            cost_threshold=1.0,
+            cost_threshold=0.5,
             gap_threshold_m=0.20,
         )

@@ -24,7 +24,7 @@ export const POINT_SIZE_M_DEFAULT = 0.018;
 // Slider bounds — covers "barely visible at 5m camera distance" up to
 // "obviously a baseball at 1m". Step 0.001 keeps the slider tactile.
 export const POINT_SIZE_M_MIN = 0.005;
-export const POINT_SIZE_M_MAX = 0.040;
+export const POINT_SIZE_M_MAX = 0.150;
 export const POINT_SIZE_M_STEP = 0.001;
 // Outlier points render smaller + more transparent so the eye reads
 // in-segment points as primary. 0.67 = dashboard's 0.012/0.018 ratio.
