@@ -1,11 +1,21 @@
-// === Detection-config card (phase 3 of unified-config redesign) ===
+// === Detection-config card — preset-only model ===
 //
-// One form, one Apply button, atomic POST to /detection/config. Sliders
-// edit local form state only — they no longer hit the server on every
-// drag. Preset buttons load a preset's HSV + shape gate values into
-// the form, but DO NOT apply server-side until the operator clicks
-// Apply. Reset-to-preset is a server-side snap that also reloads the
-// page so the SSR identity header refreshes.
+// Mental model: preset files are the only source of truth for detection
+// config. Slider drags are local UI state; they never touch the server
+// until the operator presses Apply, and Apply *always* means "save as
+// new preset". There is no anonymous "live custom config" — saving a
+// new preset atomically writes the file and switches the live active
+// preset to it.
+//
+// Path summary (post-redesign):
+//   - Slider drag           → local <input> updates only, form marked dirty
+//   - Apply                 → POST /presets {name, label, hsv, shape_gate}
+//                             (server saves + switches active; 409 on
+//                              duplicate name → operator picks again)
+//   - Click preset button   → POST /presets/active {name}  (pure switch)
+//   - Manage modal Use      → POST /presets/active {name}
+//   - Manage modal Duplicate→ POST /presets {…} on the source's values
+//   - Manage modal Delete   → DELETE /presets/{name} (409 if active)
 
   function _syncHSVField(form, key, value) {
     const range = form.querySelector(`[data-hsv-range="${key}"]`);
@@ -22,16 +32,12 @@
     if (num) num.value = v.toFixed(2);
   }
 
-  // Manual slider/number edit clears any pending preset-identity claim
-  // — once the operator nudges a value, the form no longer matches the
-  // preset they clicked, so Apply must send preset=null (custom).
-  // Without this, a click-Tennis → drag-h_min → Apply request would
-  // claim preset=tennis with non-tennis values, get rejected by the
-  // server's strict identity validation (400), and the operator has
-  // to click the same Apply again. Drop the claim eagerly for a clean
-  // single-click recovery.
-  function _clearPendingPreset(form) {
-    delete form.dataset.pendingPreset;
+  // Slider drag marks the form dirty (for visual cues; styling is the
+  // caller's concern). Apply reads from the form regardless — there is
+  // no "claim preset identity" path anymore, since Apply always saves
+  // a fresh file.
+  function _markDirty(form) {
+    form.dataset.dirty = '1';
   }
 
   function _readHSV(form) {
@@ -52,128 +58,91 @@
     const form = document.getElementById('detection-config-form');
     if (!form) return;
 
-    // HSV slider <-> number two-way bind. Manual edit clears any
-    // pending preset-identity claim (see _clearPendingPreset).
+    // HSV slider <-> number two-way bind. Drag marks the form dirty so
+    // Apply / Save-as-new can be distinguished from a fresh page load.
     form.querySelectorAll('[data-hsv-range]').forEach((input) => {
       input.addEventListener('input', () => {
         _syncHSVField(form, input.dataset.hsvRange, input.value);
-        _clearPendingPreset(form);
+        _markDirty(form);
       });
     });
     form.querySelectorAll('[data-hsv-number]').forEach((input) => {
       input.addEventListener('input', () => {
         _syncHSVField(form, input.dataset.hsvNumber, input.value);
-        _clearPendingPreset(form);
+        _markDirty(form);
       });
     });
 
     // Shape-gate slider (0..100) <-> number (0..1).
     form.querySelectorAll('[data-shape-range]').forEach((slider) => {
       slider.addEventListener('input', () => {
-        _syncShape(form,slider.dataset.shapeRange, Number(slider.value) / 100);
-        _clearPendingPreset(form);
+        _syncShape(form, slider.dataset.shapeRange, Number(slider.value) / 100);
+        _markDirty(form);
       });
     });
     form.querySelectorAll('[data-shape-number]').forEach((num) => {
       num.addEventListener('input', () => {
-        _syncShape(form,num.dataset.shapeNumber, Number(num.value));
-        _clearPendingPreset(form);
+        _syncShape(form, num.dataset.shapeNumber, Number(num.value));
+        _markDirty(form);
       });
     });
 
-    // Preset button: load HSV + shape-gate values into the form. Does
-    // NOT apply server-side — operator confirms with Apply.
-    document.querySelectorAll('[data-hsv-preset]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        _syncHSVField(form, 'h_min', btn.dataset.hMin);
-        _syncHSVField(form, 'h_max', btn.dataset.hMax);
-        _syncHSVField(form, 's_min', btn.dataset.sMin);
-        _syncHSVField(form, 's_max', btn.dataset.sMax);
-        _syncHSVField(form, 'v_min', btn.dataset.vMin);
-        _syncHSVField(form, 'v_max', btn.dataset.vMax);
-        _syncShape(form,'aspect_min', btn.dataset.aspectMin);
-        _syncShape(form,'fill_min', btn.dataset.fillMin);
-        // Stash the chosen preset name so Apply can claim identity.
-        form.dataset.pendingPreset = btn.dataset.hsvPreset;
-      });
-    });
-
-    // Apply button: POST /detection/config with the full triple. The
-    // identity claim (`preset`) is only sent if the operator just
-    // clicked a preset button and hasn't dragged anything since —
-    // otherwise we send `preset: null` and the server records custom.
-    form.addEventListener('submit', async (evt) => {
-      evt.preventDefault();
-      const status = form.querySelector('[data-detection-apply-status]');
-      const presetClaim = form.dataset.pendingPreset || null;
-      const body = {
-        hsv: _readHSV(form),
-        shape_gate: _readShape(form),
-        preset: presetClaim,
-      };
-      if (status) status.textContent = '…';
-      try {
-        const r = await fetch('/detection/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        if (!r.ok) {
-          const t = await r.text();
-          if (status) status.textContent = `error: ${t.slice(0, 200)}`;
-          return;
-        }
-        // Clear pending preset claim so subsequent Apply (after manual
-        // edits) defaults back to `preset: null`.
-        delete form.dataset.pendingPreset;
-        // Reload so the SSR identity header re-renders against the
-        // new state (active preset / modified flag / etc.).
-        window.location.reload();
-      } catch (e) {
-        if (status) status.textContent = `network error: ${e}`;
-      }
-    });
-
-    // Reset-to-preset button (only present when current state has
-    // modified_fields, see render_dashboard_session._render_hsv_body).
-    // Errors surface in the same status node as Apply so a failed
-    // reset doesn't silently no-op.
     const status = form.querySelector('[data-detection-apply-status]');
+
+    // Preset row buttons — clicking one switches active immediately.
+    // Server snaps the live config to that preset's values + broadcasts
+    // WS settings; the page reload re-renders sliders against the new
+    // active state.
+    document.querySelectorAll('[data-hsv-preset]').forEach((btn) => {
+      btn.addEventListener('click', () => _switchActive(btn.dataset.hsvPreset, status));
+    });
+
+    // Apply = Save as new preset. Slider values land on disk under a
+    // fresh name; the server-side POST /presets handler switches active
+    // on success so the form re-renders against the just-saved values.
+    form.addEventListener('submit', (evt) => {
+      evt.preventDefault();
+      _saveAsNew(form, status);
+    });
+
+    // Defensive reset button (rendered only when the renderer detects
+    // values diverge from the active preset — reachable today only via
+    // direct curl POST /detection/config since the dashboard UI never
+    // produces modified state). Treat as "snap back to canonical
+    // values for this preset name".
     document.querySelectorAll('[data-detection-reset-preset]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const presetName = btn.dataset.detectionResetPreset;
-        if (status) status.textContent = '…';
-        try {
-          const r = await fetch('/detection/config/reset_to_preset', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ preset: presetName }),
-          });
-          if (!r.ok) {
-            const t = await r.text();
-            if (status) status.textContent = `reset error: ${t.slice(0, 200)}`;
-            return;
-          }
-          window.location.reload();
-        } catch (e) {
-          if (status) status.textContent = `network error: ${e}`;
-        }
-      });
+      btn.addEventListener('click', () => _switchActive(btn.dataset.detectionResetPreset, status));
     });
 
     _initPresetLibraryControls(form, status);
   }
 
-  // ===== Preset library (phase 3) =====
-  // Save-as-new / Manage modal / per-row Use / Duplicate / Delete.
-  // The modal is SSR'd by `_render_manage_modal` and toggled via the
-  // native <dialog> element. All actions reload the page on success
-  // so the SSR identity header re-renders against the new state.
+  // ===== Endpoint helpers =============================================
+
+  async function _switchActive(name, status) {
+    if (status) status.textContent = '…';
+    try {
+      const r = await fetch('/presets/active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        if (status) status.textContent = `switch error: ${t.slice(0, 200)}`;
+        return;
+      }
+      window.location.reload();
+    } catch (e) {
+      if (status) status.textContent = `network error: ${e}`;
+    }
+  }
 
   function _slugFromPrompt(suggestion) {
     // POST /presets validates the slug server-side; this is just a
     // client-side hint to nudge operators toward a valid value before
-    // a round-trip. The server is the source of truth.
+    // a round-trip. The server is the source of truth for both slug
+    // shape and uniqueness.
     const raw = window.prompt(
       'Preset slug (filename, [a-z0-9_]{1,32}):',
       suggestion,
@@ -200,6 +169,14 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
+      if (r.status === 409) {
+        // Duplicate name — surface the message verbatim and let the
+        // operator pick a different slug. No automatic retry; doing so
+        // would silently overwrite the operator's prior name choice.
+        const t = await r.text();
+        if (status) status.textContent = `duplicate name: ${t.slice(0, 200)}`;
+        return;
+      }
       if (!r.ok) {
         const t = await r.text();
         if (status) status.textContent = `save error: ${t.slice(0, 200)}`;
@@ -217,14 +194,12 @@
   }
 
   async function _useFromLibrary(name, modal) {
-    // Same path as the main reset-to-preset button — server snaps live
-    // config to the named preset's values atomically.
     _setModalStatus(modal, '…');
     try {
-      const r = await fetch('/detection/config/reset_to_preset', {
+      const r = await fetch('/presets/active', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preset: name }),
+        body: JSON.stringify({ name }),
       });
       if (!r.ok) {
         const t = await r.text();
@@ -283,6 +258,14 @@
       const r = await fetch(`/presets/${encodeURIComponent(name)}`, {
         method: 'DELETE',
       });
+      if (r.status === 409) {
+        // Active preset — surface the message and prompt the operator
+        // to switch active first. Deleting the active would leave the
+        // detection config dangling; the route enforces the invariant.
+        const t = await r.text();
+        _setModalStatus(modal, `cannot delete active: ${t.slice(0, 200)}`);
+        return;
+      }
       if (!r.ok) {
         const t = await r.text();
         _setModalStatus(modal, `delete error: ${t.slice(0, 200)}`);
@@ -299,8 +282,6 @@
     if (saveBtn) {
       saveBtn.addEventListener('click', () => _saveAsNew(form, status));
     }
-    // Both call sites pass a string (suggestion = '' for save-as-new,
-    // `${name}_copy` for duplicate); _slugFromPrompt forwards directly.
     const modal = document.getElementById('preset-manage-modal');
     const manageBtn = document.querySelector('[data-preset-manage]');
     if (manageBtn && modal && typeof modal.showModal === 'function') {
