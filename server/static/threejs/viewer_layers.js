@@ -438,6 +438,44 @@ class ViewerLayers {
     this._applyGroundVisibility();
     this._rebuildDynamic();
   }
+
+  // Patch in the freshly-recomputed SessionResult after the operator
+  // hit Apply on the per-session tuning strip. Avoids a full page
+  // reload (which re-buffers video, resets scrubber, drops localStorage
+  // layer-visibility state). Caller is `_applyTuning` in viewer_page.py.
+  //
+  // `payload` carries SessionResult.model_dump() shape — `points` /
+  // `triangulated_by_path` are lists of TriangulatedPoint dicts with
+  // `{x_m, y_m, z_m, ...}` keys, but the viewer's scene/TRAJ_BY_PATH
+  // expects `{x, y, z, ...}` (matches what reconstruct._pts_to_dicts
+  // emits at first-load time). Convert here so the rest of the viewer
+  // sees identical shapes regardless of how it learned the data.
+  setSessionData(payload) {
+    if (!payload || typeof payload !== "object") {
+      throw new Error("setSessionData: missing payload");
+    }
+    const toSceneDict = (p) => ({
+      t_rel_s: p.t_rel_s,
+      x: p.x_m,
+      y: p.y_m,
+      z: p.z_m,
+      residual_m: p.residual_m,
+    });
+    const points = Array.isArray(payload.points) ? payload.points : [];
+    this.SCENE.triangulated = points.map(toSceneDict);
+    const tbp = payload.triangulated_by_path || {};
+    const newTrajByPath = {};
+    for (const key of Object.keys(tbp)) {
+      newTrajByPath[key] = (tbp[key] || []).map(toSceneDict);
+    }
+    this.TRAJ_BY_PATH = newTrajByPath;
+    this.SEGMENTS = Array.isArray(payload.segments) ? payload.segments : [];
+    this.HAS_TRIANGULATED = this.SCENE.triangulated.length > 0;
+    // Fit curves are static-rebuilt from segments; tear down + rebuild.
+    this.scene.removeLayer("viewer_fit_curves");
+    this._buildFitCurves();
+    this._rebuildDynamic();
+  }
 }
 
 export function setupViewerLayers(scene, opts) {

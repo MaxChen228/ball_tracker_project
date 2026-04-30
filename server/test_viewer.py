@@ -577,6 +577,43 @@ def test_viewer_page_context_computes_single_cam_layout_and_video_cells():
     assert ctx.videos_flex == "1 1 0"
 
 
+def test_apply_tuning_patches_in_place_no_reload():
+    """`_applyTuning` must NOT call `window.location.reload` after a
+    successful POST; it must feed the response into the Three.js scene
+    via `setSessionData`. Full-page reload would re-buffer video and
+    drop scrubber / layer-visibility state — operators tune iteratively
+    and can't afford that lag."""
+    import main as _main
+    from viewer_page import render_viewer_html
+    from reconstruct import Scene
+
+    session_id = sid(800)
+    scene = Scene(session_id=session_id)
+    health = {
+        "cameras": {
+            "A": {"received": False, "calibrated": False, "time_synced": False,
+                  "n_frames": 0, "n_detected": 0, "capture_telemetry": None},
+            "B": {"received": False, "calibrated": False, "time_synced": False,
+                  "n_frames": 0, "n_detected": 0, "capture_telemetry": None},
+        },
+        "session_id": session_id, "triangulated_count": 0, "error": None,
+        "duration_s": None, "received_at": None, "mode": "armed",
+    }
+    body = render_viewer_html(
+        scene, [], health,
+        presets=_main.state.list_presets(),
+        pairing_effective_gap_m=0.20,
+    )
+    # The Apply handler is the patch-in-place path now. Reload is gone.
+    assert "_applyTuning" in body
+    assert "window.location.reload" not in body
+    assert "setSessionData" in body
+    # And it still ships both axes to the route (regression guard from
+    # the previous round).
+    assert "cost_threshold: cost" in body
+    assert "gap_threshold_m: gap_m" in body
+
+
 def test_viewer_page_renders_run_server_post_source_dropdown():
     """Phase 3: viewer's "Rerun server" form must expose a <select>
     so the operator can pick live / frozen / preset:<name> per request.
