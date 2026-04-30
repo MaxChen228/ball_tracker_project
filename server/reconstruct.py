@@ -425,6 +425,14 @@ def build_scene(
                 "y": float(p.y_m),
                 "z": float(p.z_m),
                 "residual_m": float(p.residual_m),
+                # cost_a / cost_b ship as the source candidates' selector
+                # cost so the viewer's `_passCostFilterPoint` can mask the
+                # 3D point cloud + trajectory layer the same way the BLOBS
+                # overlay's `_candPassesThreshold` masks 2D candidates.
+                # null when the source candidate was the px/py-synthesized
+                # legacy fallback (legacy JSON without `candidates`).
+                "cost_a": (None if p.cost_a is None else float(p.cost_a)),
+                "cost_b": (None if p.cost_b is None else float(p.cost_b)),
             }
             if seg_idx_for is not None and 0 <= k < len(seg_idx_for):
                 d["seg_idx"] = int(seg_idx_for[k])

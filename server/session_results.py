@@ -315,9 +315,55 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
     return result
 
 
+def _passes_stamped_filter(
+    p: TriangulatedPoint,
+    *,
+    cost_threshold: float,
+    gap_threshold_m: float,
+) -> bool:
+    """Stamped-tuning filter applied to TriangulatedPoint before segmenter
+    consumption (and mirrored client-side by the viewer's `Cost ≤` /
+    `Gap ≤` slider mask). A point passes when:
+      - `residual_m ≤ gap_threshold_m`, AND
+      - `max(cost_a, cost_b) ≤ cost_threshold` (None costs treated as
+        "no info" → pass; matches the JS `_passCostFilter` legacy
+        fall-through semantics).
+    """
+    if p.residual_m > gap_threshold_m:
+        return False
+    cost_max = -1.0
+    if p.cost_a is not None:
+        cost_max = max(cost_max, p.cost_a)
+    if p.cost_b is not None:
+        cost_max = max(cost_max, p.cost_b)
+    if cost_max < 0:
+        return True  # both costs None → no cost info → pass
+    return cost_max <= cost_threshold
+
+
+def _apply_stamped_filter(
+    pts: list[TriangulatedPoint],
+    *,
+    cost_threshold: float,
+    gap_threshold_m: float,
+) -> list[TriangulatedPoint]:
+    return [p for p in pts if _passes_stamped_filter(
+        p, cost_threshold=cost_threshold, gap_threshold_m=gap_threshold_m,
+    )]
+
+
 def stamp_segments_on_result(result: SessionResult) -> None:
-    """Run `find_segments` on the chosen authoritative path's points and
-    write `result.segments`. Idempotent — overwrites whatever was there.
+    """Run `find_segments` on the stamped-filter SUBSET of the authoritative
+    path's points and write `result.segments`. Idempotent — overwrites
+    whatever was there.
+
+    Architecture: `result.triangulated` / `result.points` /
+    `result.triangulated_by_path` carry the FULL emitted set (every
+    candidate pair under pairing's absolute emit ceiling). The segmenter
+    runs against the operator's stamped subset
+    (`cost_threshold` / `gap_threshold_m` from `SessionResult`); the
+    viewer slider mirrors the same predicate client-side. This decouples
+    "what the operator sees" from "what gets fit".
 
     Sorts `result.triangulated` (and `result.points`, which mirrors it)
     by `t_rel_s` BEFORE running the segmenter so `Segment.original_indices`
@@ -325,6 +371,13 @@ def stamp_segments_on_result(result: SessionResult) -> None:
     `_classifyPointsBySegment` (dashboard 30_traces.js) silently
     mis-buckets points whenever the upstream pairing emits non-time-
     sorted output.
+
+    `result.cost_threshold` / `gap_threshold_m` may be None on a freshly-
+    armed session that has not yet been stamped — in that case fall back
+    to the operator's saved global default (`PairingTuning.default()`),
+    which is also the value the viewer's slider initializes to. This is
+    NOT a silent fallback: the global default is itself an explicit
+    operator-set value (or the documented module default 1.0 / 0.20).
 
     Empty `triangulated` ⇒ empty segments (no log noise; "nothing to fit"
     is not an error)."""
@@ -334,8 +387,33 @@ def stamp_segments_on_result(result: SessionResult) -> None:
     result.triangulated = sorted(result.triangulated, key=lambda p: p.t_rel_s)
     if result.points:
         result.points = sorted(result.points, key=lambda p: p.t_rel_s)
-    segs, _pts_sorted = find_segments(result.triangulated)
-    result.segments = [_segment_record_from_segment(s) for s in segs]
+    if result.cost_threshold is None or result.gap_threshold_m is None:
+        from pairing_tuning import PairingTuning
+        defaults = PairingTuning.default()
+        cost = result.cost_threshold if result.cost_threshold is not None else defaults.cost_threshold
+        gap = result.gap_threshold_m if result.gap_threshold_m is not None else defaults.gap_threshold_m
+    else:
+        cost = result.cost_threshold
+        gap = result.gap_threshold_m
+    # Build the fit input as a subset of the time-sorted full list, with a
+    # parallel index map so segmenter outputs `original_indices` keyed
+    # to the FULL list (what the viewer's `_classifyPointsBySegment`
+    # consumes — it indexes into `result.triangulated`, not the filter
+    # subset).
+    fit_input: list[TriangulatedPoint] = []
+    fit_to_full: list[int] = []
+    for full_idx, p in enumerate(result.triangulated):
+        if _passes_stamped_filter(p, cost_threshold=cost, gap_threshold_m=gap):
+            fit_input.append(p)
+            fit_to_full.append(full_idx)
+    segs, _pts_sorted = find_segments(fit_input)
+    records: list[SegmentRecord] = []
+    for s in segs:
+        rec = _segment_record_from_segment(s)
+        # Remap original_indices from filter-subset space → full-list space.
+        rec.original_indices = [fit_to_full[i] for i in rec.original_indices]
+        records.append(rec)
+    result.segments = records
 
 
 def _segment_record_from_segment(seg: Segment) -> SegmentRecord:

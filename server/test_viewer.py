@@ -216,7 +216,7 @@ def test_build_scene_all_upward_rays_still_render():
     P_up = np.array([0.0, 0.2, 3.0])  # all frames point upward
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([P_up]))
     tri = [
-        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6)
+        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6, cost_a=None, cost_b=None)
     ]
 
     scene = build_scene(sid(1), {"A": pitch}, triangulated=tri)
@@ -260,8 +260,8 @@ def test_build_scene_skips_triangulated_beyond_max_render_dist():
     pa = _pitch("A", 9, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 9, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6),   # in
-        main.TriangulatedPoint(t_rel_s=0.1, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6),  # out
+        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6, cost_a=None, cost_b=None),   # in
+        main.TriangulatedPoint(t_rel_s=0.1, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6, cost_a=None, cost_b=None),  # out
     ]
     scene = build_scene(sid(9), {"A": pa, "B": pb}, triangulated=tri)
 
@@ -294,6 +294,7 @@ def test_build_scene_two_cameras_attaches_triangulated_points():
             t_rel_s=i / 240.0,
             x_m=P[0], y_m=P[1], z_m=P[2],
             residual_m=1e-6,
+            cost_a=None, cost_b=None,
         )
         for i, P in enumerate(P_path)
     ]
@@ -308,6 +309,35 @@ def test_build_scene_two_cameras_attaches_triangulated_points():
         P_path[0].tolist(),
         atol=1e-6,
     )
+
+
+def test_build_scene_ships_cost_a_and_cost_b_on_triangulated_dicts():
+    """The viewer's `_passCostFilterPoint` (50_canvas.js) reads cost_a /
+    cost_b off each `scene.triangulated[i]` dict to mask the 3D point
+    cloud + trajectory layer in sync with the BLOBS overlay's
+    `_candPassesThreshold`. Regression guard: the wire payload from
+    `_pts_to_dicts` must include both fields, even when the source
+    TriangulatedPoint carried `None` (legacy fixture path)."""
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    P_path = np.array([[0.1, 0.3, 1.0]])
+    pa = _pitch("A", 14, K, R_a, t_a, H_a, P_path)
+    pb = _pitch("B", 14, K, R_b, t_b, H_b, P_path)
+    tri = [
+        main.TriangulatedPoint(
+            t_rel_s=0.0, x_m=0.1, y_m=0.3, z_m=1.0, residual_m=1e-6,
+            cost_a=0.25, cost_b=0.40,
+        ),
+        main.TriangulatedPoint(
+            t_rel_s=0.01, x_m=0.2, y_m=0.5, z_m=1.2, residual_m=1e-6,
+            cost_a=None, cost_b=None,
+        ),
+    ]
+    scene = build_scene(sid(14), {"A": pa, "B": pb}, triangulated=tri)
+    assert len(scene.triangulated) == 2
+    assert scene.triangulated[0]["cost_a"] == pytest.approx(0.25)
+    assert scene.triangulated[0]["cost_b"] == pytest.approx(0.40)
+    assert scene.triangulated[1]["cost_a"] is None
+    assert scene.triangulated[1]["cost_b"] is None
 
 
 def test_build_scene_stamps_seg_idx_on_triangulated_when_session_result_has_segments():
@@ -325,7 +355,7 @@ def test_build_scene_stamps_seg_idx_on_triangulated_when_session_result_has_segm
     pa = _pitch("A", 11, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 11, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6)
+        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6, cost_a=None, cost_b=None)
         for i, P in enumerate(P_path)
     ]
     # Two segments: [0, 1] in seg 0, [2] in seg 1.
@@ -370,7 +400,7 @@ def test_build_scene_stamps_seg_idx_minus_one_for_out_of_segment_points():
     pa = _pitch("A", 12, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 12, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6)
+        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6, cost_a=None, cost_b=None)
         for i, P in enumerate(P_path)
     ]
     # Segment claims only index 0 — point 1 is an outlier.
@@ -406,9 +436,9 @@ def test_build_scene_seg_idx_survives_render_distance_filter():
     pa = _pitch("A", 13, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 13, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=0.00, x_m=0.1, y_m=0.3, z_m=1.0, residual_m=1e-6),
-        main.TriangulatedPoint(t_rel_s=0.01, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6),  # >10m, dropped
-        main.TriangulatedPoint(t_rel_s=0.02, x_m=0.2, y_m=0.5, z_m=1.2, residual_m=1e-6),
+        main.TriangulatedPoint(t_rel_s=0.00, x_m=0.1, y_m=0.3, z_m=1.0, residual_m=1e-6, cost_a=None, cost_b=None),
+        main.TriangulatedPoint(t_rel_s=0.01, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6, cost_a=None, cost_b=None),  # >10m, dropped
+        main.TriangulatedPoint(t_rel_s=0.02, x_m=0.2, y_m=0.5, z_m=1.2, residual_m=1e-6, cost_a=None, cost_b=None),
     ]
     # Three segments, one per point (extreme case — index 1 is the dropped one).
     segs = [
@@ -1016,7 +1046,8 @@ def test_viewer_locks_layout_to_viewport_without_page_scroll():
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
     assert "overflow:hidden" in body
-    assert "grid-template-rows:auto auto minmax(0, 1fr)" in body
+    # Three auto rows: nav, nav-tuning, health-failure banner.
+    assert "grid-template-rows:auto auto auto minmax(0, 1fr)" in body
     assert "height:100vh" in body
     # Sticky-bottom dock contract: timeline pinned to viewport bottom,
     # .viewer reserves matching padding via the --timeline-h CSS var.

@@ -30,6 +30,25 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_DT_S = 1.0 / 120.0
 _MAX_DT_S = float(os.environ.get("BALL_TRACKER_MAX_DT_S", _DEFAULT_MAX_DT_S))
 
+# Emit-side absolute ceilings — disk/memory protection only, NOT operator-
+# tunable. Pairing fan-out emits every (cand_a, cand_b) combination whose
+# triangulation-time selector cost and skew-line gap fall under these
+# ceilings. Cost stays in the structural shape band (BlobCandidate.cost
+# is bounded by the selector's max weighted sum; > 5 is a hard rejection
+# that should not be revivable client-side); gap > 5 m means the two
+# camera rays do not see the same physical object (residual tens of
+# pixels in image space) and the resulting "point" is geometric noise
+# beyond any plausible operator slider.
+#
+# `PairingTuning.cost_threshold` / `gap_threshold_m` are the OPERATOR-
+# TUNABLE per-session filters applied DOWNSTREAM (segmenter input, viewer
+# slider). They do NOT gate emit. The viewer renders the full emitted set
+# and the slider filters client-side; Apply re-runs the segmenter on the
+# stamped subset. Pre-this-PR architecture conflated emit gate with
+# operator filter; that conflation is what this ceiling decouples.
+_EMIT_GAP_CEILING_M = 5.0
+_EMIT_COST_CEILING = 5.0
+
 
 def _scale_intrinsics(intr: IntrinsicsPayload, sx: float, sy: float) -> IntrinsicsPayload:
     # Pixel-unit quantities scale with resolution; radial/tangential
@@ -239,19 +258,24 @@ def triangulate_live_pair(
     if not cands_a or not cands_b:
         return []
 
+    # NOTE: emit gates are absolute ceilings, NOT tuning-driven. The
+    # `tuning` argument is retained on the signature for downstream
+    # callers (segmenter / viewer slider stamp), but emit is decoupled
+    # from per-session tuning so the persisted point set is the full
+    # data the slider can reveal. See `_EMIT_*_CEILING` docstring.
     out: list[TriangulatedPoint] = []
     for ca_idx, ca in enumerate(cands_a):
-        if ca.cost is not None and ca.cost > tuning.cost_threshold:
+        if ca.cost is not None and ca.cost > _EMIT_COST_CEILING:
             continue
         d_a_cam = _ray_for_frame(ca.px, ca.py, pose_a.K, pose_a.dist)
         d_a_world = pose_a.R.T @ d_a_cam
         for cb_idx, cb in enumerate(cands_b):
-            if cb.cost is not None and cb.cost > tuning.cost_threshold:
+            if cb.cost is not None and cb.cost > _EMIT_COST_CEILING:
                 continue
             d_b_cam = _ray_for_frame(cb.px, cb.py, pose_b.K, pose_b.dist)
             d_b_world = pose_b.R.T @ d_b_cam
             P, gap = triangulate_rays(pose_a.C, d_a_world, pose_b.C, d_b_world)
-            if P is None or gap > tuning.gap_threshold_m:
+            if P is None or gap > _EMIT_GAP_CEILING_M:
                 continue
             out.append(TriangulatedPoint(
                 t_rel_s=t_rel,
@@ -261,6 +285,8 @@ def triangulate_live_pair(
                 residual_m=gap,
                 source_a_cand_idx=ca_idx,
                 source_b_cand_idx=cb_idx,
+                cost_a=ca.cost,
+                cost_b=cb.cost,
             ))
     return out
 
@@ -319,13 +345,16 @@ def triangulate_cycle(
 ) -> list[TriangulatedPoint]:
     """Pair A and B frames within an 8 ms window of anchor-relative time
     and run multi-candidate fan-out triangulation. Each matched frame
-    pair iterates every (A.candidates × B.candidates) combination,
-    filters by `tuning.cost_threshold` + `tuning.gap_threshold_m`, and
-    emits all survivors. Requires intrinsics + homography on both
-    cameras. Default tuning (`PairingTuning.default()`) emits every
-    shape-gate-passed candidate (cost_threshold=1.0) and caps the
-    skew-line residual at 0.20m — sole authority for residual culling
-    (segmenter and viewer trust this gate, no re-filter downstream)."""
+    pair iterates every (A.candidates × B.candidates) combination and
+    emits every survivor whose selector cost and skew-line gap are under
+    the absolute emit ceilings (`_EMIT_COST_CEILING` / `_EMIT_GAP_CEILING_M`).
+    Requires intrinsics + homography on both cameras.
+
+    `tuning` is retained on the signature for downstream stamping
+    (`SessionResult.cost_threshold` / `gap_threshold_m` snapshot the
+    operator's chosen filter at apply time) but does NOT gate emit. The
+    persisted set is the full emitted set; viewer slider filters client-
+    side and Apply re-runs the segmenter on the stamped subset."""
     if a.intrinsics is None or a.homography is None:
         raise ValueError("camera A missing calibration (run Calibrate in iPhone app)")
     if b.intrinsics is None or b.homography is None:
@@ -372,13 +401,13 @@ def triangulate_cycle(
             cands_a = _frame_candidates(frame_a)
             cands_b = _frame_candidates(frame_b)
             for ca_idx, ca in enumerate(cands_a):
-                if ca.cost is not None and ca.cost > tuning.cost_threshold:
+                if ca.cost is not None and ca.cost > _EMIT_COST_CEILING:
                     drop_cost += 1
                     continue
                 d_a_cam = _ray_for_frame(ca.px, ca.py, K_a, dist_a)
                 d_a_world = R_a.T @ d_a_cam
                 for cb_idx, cb in enumerate(cands_b):
-                    if cb.cost is not None and cb.cost > tuning.cost_threshold:
+                    if cb.cost is not None and cb.cost > _EMIT_COST_CEILING:
                         drop_cost += 1
                         continue
                     d_b_cam = _ray_for_frame(cb.px, cb.py, K_b, dist_b)
@@ -387,7 +416,7 @@ def triangulate_cycle(
                     if P is None:
                         drop_near_parallel += 1
                         continue
-                    if gap > tuning.gap_threshold_m:
+                    if gap > _EMIT_GAP_CEILING_M:
                         drop_gap += 1
                         continue
                     results.append(TriangulatedPoint(
@@ -398,14 +427,16 @@ def triangulate_cycle(
                         residual_m=gap,
                         source_a_cand_idx=ca_idx,
                         source_b_cand_idx=cb_idx,
+                        cost_a=ca.cost,
+                        cost_b=cb.cost,
                     ))
 
     logger.info(
         "pairing cycle complete session_id=%s source=%s frames_in_a=%d frames_in_b=%d "
         "points_out=%d drop_outside_window=%d drop_near_parallel=%d "
-        "drop_gap=%d drop_cost=%d max_dt=%.6f cost_thr=%.3f gap_thr=%.3f",
+        "drop_gap=%d drop_cost=%d max_dt=%.6f cost_ceil=%.3f gap_ceil=%.3f",
         a.session_id, source, len(items_a), len(items_b), len(results),
         drop_outside_window, drop_near_parallel, drop_gap, drop_cost,
-        _MAX_DT_S, tuning.cost_threshold, tuning.gap_threshold_m,
+        _MAX_DT_S, _EMIT_COST_CEILING, _EMIT_GAP_CEILING_M,
     )
     return results

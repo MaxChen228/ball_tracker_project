@@ -48,6 +48,18 @@ If the live config's `preset` field references a preset that has been deleted, t
 
 For sharing or backup, `cp -r server/data/presets ~/somewhere` is sufficient — each file is self-contained. There is no inter-file dependency.
 
+## Per-session tuning sliders (viewer)
+
+Each session's viewer header has a dedicated tuning row beneath the main nav with two sliders + an Apply button:
+
+- **Cost ≤** (0–1): hides triangulated points whose `max(cost_a, cost_b)` exceeds the cap. The slider operates on the **persisted full set** of points pairing emitted; dragging is a pure client-side mask, no server round-trip.
+- **Gap ≤** (0–200 cm): hides points whose skew-line residual `residual_m` exceeds the cap. Same client-side mask.
+- **Apply**: persists both stamped values to `SessionResult.cost_threshold` / `gap_threshold_m` and re-runs the segmenter against the stamped subset (`POST /sessions/{sid}/recompute`). Pairing does NOT re-run; the persisted point set is invariant. Sub-second on typical sessions.
+
+Architecture: pairing emits the full geometrically-plausible set under absolute ceilings (`gap < 5 m`, `cost < 5`) at arm/disarm time. The viewer renders the full set; the slider masks. Apply changes which points the **fit** sees, not which points exist on disk. So you can drag Cost ≤ from 0.2 → 1.0 and see masked points reappear instantly without losing them; the only thing Apply persists is the segmenter's filter input.
+
+The sliders never change pairing emit, so a stamped (cost=0.05, gap=0.01) cannot lose data — re-drag to loose values + Apply restores everything. For cases where you actually want fewer emitted points (disk pressure), the absolute ceilings live in `server/pairing.py::_EMIT_*_CEILING` and require a server restart.
+
 ## Degraded / fallback modes
 
 - **No 時間校正 before arm**: `sync_anchor_timestamp_s` uploads as `null`. Server skips detection + triangulation and flags the session `error="no time sync"`. Re-run 時間校正 and re-arm.
