@@ -739,7 +739,7 @@ def test_viewer_page_context_computes_single_cam_layout_and_video_cells():
         ("A", "/videos/session_x_A.mov", 0.0, 240.0, {"t_rel_s": [0.0], "detected": [True]}),
     ]
 
-    ctx = build_viewer_page_context(scene, videos, health, pairing_effective_gap_m=0.20)
+    ctx = build_viewer_page_context(scene, videos, health)
 
     assert ctx.layout_mode == "single-cam"
     assert 'data-cam="A"' in ctx.video_cells_html
@@ -771,8 +771,7 @@ def test_apply_tuning_patches_in_place_no_reload():
     }
     body = render_viewer_html(
         scene, [], health,
-        presets=_main.state.list_presets(),
-        pairing_effective_gap_m=0.20,
+        presets=_main.state.list_presets()
     )
     # The Apply handler is the patch-in-place path now. Reload is gone.
     assert "_applyTuning" in body
@@ -821,8 +820,7 @@ def test_viewer_page_renders_run_server_post_source_dropdown():
 
     html = render_viewer_html(
         scene, videos, health,
-        presets=_main.state.list_presets(),
-        pairing_effective_gap_m=0.20,
+        presets=_main.state.list_presets()
     )
 
     # Form posts to the right endpoint.
@@ -996,7 +994,7 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
     # any "static traces" list to leak a camera trace into. Sanity:
     # the scene itself ships through `scene_json` (the runtime reads
     # `data.scene.cameras`), and no `static_traces_json` field exists.
-    ctx = build_viewer_page_context(scene, [], health, pairing_effective_gap_m=0.20)
+    ctx = build_viewer_page_context(scene, [], health)
     import json as _json
     parsed_scene = _json.loads(ctx.scene_json)
     assert any(c.get("camera_id") == "A" for c in parsed_scene.get("cameras", []))

@@ -9,9 +9,7 @@ from viewer_fragments import session_tuning_strip_html
 
 
 def test_strip_renders_with_defaults_when_thresholds_are_none():
-    # `pairing_effective_gap_m=0.20` is the project default
-    # (PairingTuning.default().gap_threshold_m).
-    body = session_tuning_strip_html(None, None, "s_dead00f1", 0.20)
+    body = session_tuning_strip_html(None, None, "s_dead00f1")
     assert 'class="session-tuning"' in body
     assert 'data-session-cost-threshold' in body
     assert 'data-session-gap-threshold' in body
@@ -24,14 +22,6 @@ def test_strip_renders_with_defaults_when_thresholds_are_none():
     # No more "off" magic word — readout always speaks centimetres.
     assert '>off<' not in body
     assert '≤ 200 cm' in body
-    # Pairing-cap tick wrapper carries the cap as an explicit cm
-    # data-attribute so the oninput handler can compare against it.
-    assert 'data-pairing-cap-cm="20"' in body
-    assert '--gap-cap-pct: 10.0000%' in body
-    # Default seed (gap=200cm) is past the pairing cap (20cm) → warn
-    # surfaces visibly (no `hidden` attr on the warn span).
-    assert re.search(r'data-session-gap-warn[^>]*>', body) is not None
-    assert re.search(r'data-session-gap-warn\s+hidden', body) is None
     # Apply button starts disabled (only enabled after operator drags).
     assert 'disabled' in body
     # Session id interpolated into the apply handler.
@@ -39,48 +29,52 @@ def test_strip_renders_with_defaults_when_thresholds_are_none():
 
 
 def test_strip_renders_with_persisted_thresholds():
-    # 0.45 cost + 0.08m gap → "8 cm" readout, tight enough to be inside
-    # the 20cm pairing cap → warn hidden.
-    body = session_tuning_strip_html(0.45, 0.08, "s_face00ab", 0.20)
+    body = session_tuning_strip_html(0.45, 0.08, "s_face00ab")
     assert 'value="0.45"' in body
     assert '>0.45<' in body
     # gap_threshold_m=0.08 → 8cm initial
     assert 'value="8"' in body
     assert '≤ 8 cm' in body
     assert 'data-session-id="s_face00ab"' in body
-    # 8cm ≤ 20cm cap → warn span has the `hidden` attribute.
-    assert re.search(r'data-session-gap-warn[^>]*\shidden', body) is not None
 
 
 def test_strip_clamps_gap_above_route_max_to_slider_max():
     # Defensive: even if a future tuning ships gap > 2.0m (route max),
     # strip should clamp the slider to 200cm instead of rendering an
     # invalid `value="500"`.
-    body = session_tuning_strip_html(None, 5.0, "s_aabb00cc", 0.20)
+    body = session_tuning_strip_html(None, 5.0, "s_aabb00cc")
     assert 'value="200"' in body
     assert '≤ 200 cm' in body
     assert '>off<' not in body
 
 
 def test_strip_renders_floor_gap_at_zero():
-    body = session_tuning_strip_html(None, 0.0, "s_aabb00cd", 0.20)
+    body = session_tuning_strip_html(None, 0.0, "s_aabb00cd")
     # 0m → 0cm slider position. Readout shows "≤ 0 cm" — same
     # template as every other position, no special-cased word.
     assert 'value="0"' in body
     assert '≤ 0 cm' in body
 
 
-def test_strip_pairing_cap_tick_position_tracks_input():
-    # Cap = 0.50m → 50cm → 25% of the 200cm slider track.
-    body = session_tuning_strip_html(None, None, "s_aabb00ce", 0.50)
-    assert 'data-pairing-cap-cm="50"' in body
-    assert '--gap-cap-pct: 25.0000%' in body
+def test_strip_has_no_pairing_cap_artifacts():
+    """Post-Phase-1-5 (pairing emits full set), the slider has NO
+    pairing-cap tick / overflow shade / "Apply needed" warn — both
+    sliders are pure client-side masks. Guard against accidental
+    re-introduction."""
+    body = session_tuning_strip_html(None, None, "s_aabb00cc")
+    assert 'st-gap-tick' not in body
+    assert 'st-gap-track' not in body
+    assert 'st-gap-warn' not in body
+    assert 'data-session-gap-warn' not in body
+    assert 'data-pairing-cap-cm' not in body
+    assert '--gap-cap-pct' not in body
+    assert 'past pairing cap' not in body
 
 
 def test_strip_escapes_session_id_attr():
     """Session id pattern restricts to hex (^s_[0-9a-f]{4,32}$) but
     escape anyway — defense in depth."""
-    body = session_tuning_strip_html(None, None, 's_aabb00cc', 0.20)
+    body = session_tuning_strip_html(None, None, 's_aabb00cc')
     assert '<script>' not in body
     assert 'onerror' not in body
     # Both range inputs are well-formed.
@@ -95,7 +89,7 @@ def test_strip_escapes_session_id_attr():
 
 
 def test_strip_apply_handler_uses_unified_window_global():
-    body = session_tuning_strip_html(None, None, "s_aabb00cc", 0.20)
+    body = session_tuning_strip_html(None, None, "s_aabb00cc")
     # oninput handlers invoke the per-axis preview hooks.
     assert 'window._setCostThreshold' in body
     assert 'window._setGapThreshold' in body
