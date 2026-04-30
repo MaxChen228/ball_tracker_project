@@ -33,19 +33,23 @@ VIEW_PRESETS_RUNTIME_JS: str = r"""
   // Z = (0.46 + 1.06) / 2.
   const SZC = { x: 0, y: 0.216, z: 0.76 };
 
-  // CATCH / PITCHER lift eye.z by 0.4 m above SZC.z so the sight line
-  // tilts ~12° down toward home plate (z=0). Keeping eye.z == center.z
-  // (the previous setup) drew a horizontal line that pushed the plate
-  // out of the default Plotly vertical FOV — visually "the catcher's
-  // view doesn't show home plate", which is the bug this fixes.
-  // ISO sits diagonally; SIDE shifts only along X; TOP looks straight
-  // down with up=+Y so pitcher reads "north".
+  // All presets use perspective. Tried orthographic for the four
+  // orthogonal views — Plotly's ortho + aspectmode='data' interaction
+  // shrank the scene to a tiny corner of the canvas (couldn't reproduce
+  // a clean ortho fit without hand-coded aspectratio). Perspective with
+  // tight eye magnitudes (2.2 m for orthogonal views, 1.6 m for ISO)
+  // gives a serviceable approximation of a flat projection at this
+  // working scale (~3 m bbox). CATCH / PITCHER eye.z lifted +0.4 m
+  // above SZC.z so the sight line tilts ~10° down toward home plate
+  // (z=0); without this the plate falls below the default vertical FOV
+  // and reads as "catcher's view doesn't show the plate". TOP looks
+  // straight down with up=+Y so pitcher reads "north".
   const PRESETS = {
     iso:     { eye: {x: SZC.x + 1.6, y: SZC.y + 1.6, z: SZC.z + 0.8}, up: {x: 0, y: 0, z: 1}, center: SZC },
     catch:   { eye: {x: SZC.x,        y: SZC.y - 2.2, z: SZC.z + 0.4}, up: {x: 0, y: 0, z: 1}, center: SZC },
     side:    { eye: {x: SZC.x - 2.2, y: SZC.y,        z: SZC.z       }, up: {x: 0, y: 0, z: 1}, center: SZC },
     top:     { eye: {x: SZC.x,        y: SZC.y,        z: SZC.z + 2.5}, up: {x: 0, y: 1, z: 0}, center: SZC },
-    pitcher: { eye: {x: SZC.x,        y: SZC.y + 2.5, z: SZC.z + 0.4}, up: {x: 0, y: 0, z: 1}, center: SZC },
+    pitcher: { eye: {x: SZC.x,        y: SZC.y + 2.2, z: SZC.z + 0.4}, up: {x: 0, y: 0, z: 1}, center: SZC },
   };
   NS.PRESETS = PRESETS;
 

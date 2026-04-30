@@ -255,12 +255,9 @@
         entry = { el, key };
         _eventRowCache.set(sid, entry);
       } else if (entry.key !== key) {
-        // Preserve the live checkbox state across re-render so a user
-        // mid-click isn't reset by an events tick. innerHTML swap is
-        // safe: the delegated change handler (40_traj_handlers.js)
-        // rebinds via event delegation. Pass the current className so
-        // _eventRowClasses can preserve transient SSE-driven classes
-        // like .flash-done that aren't derived from event data.
+        // Preserve transient SSE-driven classes (.flash-done) by passing
+        // current className into _eventRowClasses; innerHTML swap is
+        // safe because the row click handler is delegated.
         entry.el.className = _eventRowClasses(e, entry.el.className);
         entry.el.innerHTML = _eventRowHtml(e);
         entry.key = key;

@@ -52,18 +52,15 @@ def render_events_index_html(
 
     scene = build_calibration_scene(state.calibrations())
     fig = _build_figure(scene)
-    # aspectmode="data" matches the viewer so the X/Y/Z grid reads with
-    # equal metric scale on both surfaces. The previous manual 1:1:0.45
-    # ratio squashed the Z axis to make the calibration preview look
-    # "flatter" than reality — viewer was always honest about the geometry,
-    # dashboard was lying. Drop the lie. Range hints stay as a fallback
-    # bbox for the empty-state preview before any rays/fits land.
+    # aspectmode='data' matches the viewer (real metric X:Y:Z scale).
+    # The viewer uses this in its default and the strike zone reads at
+    # natural proportions there. Dashboard mirrors that — same render
+    # path, same look. No explicit ranges: Plotly auto-fits the data
+    # bbox (ground plane ±_GROUND_HALF_EXTENT_M, strike zone, world
+    # axes); empty-state still has the ground plane to anchor the bbox.
     fig.update_layout(
         title=None,
         margin=dict(l=0, r=0, t=8, b=0),
-        scene_xaxis_range=[-6.0, 6.0],
-        scene_yaxis_range=[-6.0, 6.0],
-        scene_zaxis_range=[-0.2, 3.5],
         scene_aspectmode="data",
         scene_uirevision="dashboard-canvas",
     )

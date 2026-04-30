@@ -89,9 +89,6 @@ def calibration_state() -> dict[str, Any]:
     fig = _build_figure(scene)
     fig.update_layout(
         title=None, margin=dict(l=0, r=0, t=8, b=0),
-        scene_xaxis_range=[-6.0, 6.0],
-        scene_yaxis_range=[-6.0, 6.0],
-        scene_zaxis_range=[-0.2, 3.5],
         scene_aspectmode="data",
         scene_uirevision="dashboard-canvas",
     )

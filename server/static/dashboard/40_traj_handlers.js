@@ -42,10 +42,12 @@
     repaintCanvas();
     updateLatestPitchBadge();
     // Repaint rows so the clicked row picks up `.selected` (background
-    // tint) and its swatch flips to filled. Without this the diff-key
-    // includes `sel` but only the next 5-s tickEvents fires renderEvents,
-    // leaving 5 s of "I clicked but nothing visibly happened" — the 3D
-    // canvas + speed badge update instantly but the events column lags.
+    // tint) and its swatch flips to filled. Bust `_lastEvKey` first:
+    // the renderEvents wrapper in 65_diff_wrappers.js short-circuits
+    // when event data hasn't changed, but selection state isn't part
+    // of its key — without this bust the wrapper swallows the call and
+    // the user waits 5 s for the next tickEvents to repaint.
+    _lastEvKey = null;
     if (typeof renderEvents === 'function' && Array.isArray(currentEvents)) {
       renderEvents(currentEvents);
     }

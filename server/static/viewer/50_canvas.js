@@ -81,12 +81,22 @@
     return (currentT - ts[idx]) <= tol ? idx : -1;
   }
 
+  // 4.17 ms = one frame interval at 240 fps. A wider tol pulls blobs
+  // from neighbouring frames during scrub / play, producing the visible
+  // "blob mask is one frame ahead/behind the video" symptom — most
+  // obvious when the ball is moving fast and inter-frame displacement
+  // exceeds the ball radius. The previous 10 ms tol covered ±2 frames
+  // worth, more than enough to drift visibly. The half-frame buffer
+  // (4.17 / 2 ≈ 2.1 ms either side of currentT) is the largest
+  // sub-frame quantization we should accept; anything beyond is an
+  // off-by-one frame mismatch worth reporting as "no blob this frame".
+  const _BLOB_FRAME_TOL_S = 1.0 / 240;
   function _drawBlobsForPath(ctx, sx, sy, cam, path, color) {
     const f = framesByPath[path] && framesByPath[path][cam.camera_id];
     if (!f) return;
     const ts = f.t_rel_s || [], cands = f.candidates || [];
     if (!ts.length || !cands.length) return;
-    const idx = _findClosestFrameIdx(ts, currentT, 0.010);
+    const idx = _findClosestFrameIdx(ts, currentT, _BLOB_FRAME_TOL_S);
     if (idx < 0) return;
     const frameCands = cands[idx] || [];
     if (!frameCands.length) return;

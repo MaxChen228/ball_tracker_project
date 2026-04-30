@@ -77,26 +77,22 @@ def default_scene_block(
     return block
 
 
-def default_legend() -> dict:
-    return dict(
-        itemsizing="constant",
-        bgcolor=_SURFACE,
-        bordercolor=_BORDER_BASE,
-        borderwidth=1,
-        font=dict(family="JetBrains Mono, monospace", size=10, color=_INK),
-        orientation="h",
-        x=0.0, xanchor="left",
-        y=-0.02, yanchor="top",
-    )
-
-
 def default_layout_kwargs(*, scene: dict | None = None) -> dict:
-    """Top-level `update_layout(**kw)` shared by all 3D pages."""
+    """Top-level `update_layout(**kw)` shared by all 3D pages.
+
+    Legend is disabled globally: the speed badge already reports the
+    canonical fit info ("44.1 KPH | 3 segs · rmse 1.9cm") at higher
+    visual weight, and Plotly's default bottom-left legend placement
+    overlaps the badge. With multi-segment fits emitting one trace per
+    segment, the legend is also visually noisy — operators don't read
+    "seg0 fit (44.1 kph)" rows when the badge surfaces the active
+    segment in larger type.
+    """
     kw: dict = dict(
         paper_bgcolor=_BG,
         plot_bgcolor=_BG,
         margin=dict(l=0, r=0, t=8, b=0),
-        legend=default_legend(),
+        showlegend=False,
         font=dict(family="Noto Sans TC, sans-serif", color=_INK),
     )
     if scene is not None:

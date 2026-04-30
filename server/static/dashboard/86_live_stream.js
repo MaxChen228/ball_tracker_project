@@ -253,8 +253,10 @@
         updateLatestPitchBadge();
         // If we auto-selected a new sid, rerender events so the row
         // visually highlights without waiting for the next 5-s tick.
+        // Bust the wrapper key (selection isn't in its diff key).
         if (selectionChanged && typeof renderEvents === 'function'
             && Array.isArray(currentEvents)) {
+          _lastEvKey = null;
           renderEvents(currentEvents);
         }
       } catch (_) {}
