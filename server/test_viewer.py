@@ -216,7 +216,7 @@ def test_build_scene_all_upward_rays_still_render():
     P_up = np.array([0.0, 0.2, 3.0])  # all frames point upward
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([P_up]))
     tri = [
-        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6)
+        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6, cost_a=None, cost_b=None)
     ]
 
     scene = build_scene(sid(1), {"A": pitch}, triangulated=tri)
@@ -260,8 +260,8 @@ def test_build_scene_skips_triangulated_beyond_max_render_dist():
     pa = _pitch("A", 9, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 9, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6),   # in
-        main.TriangulatedPoint(t_rel_s=0.1, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6),  # out
+        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6, cost_a=None, cost_b=None),   # in
+        main.TriangulatedPoint(t_rel_s=0.1, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6, cost_a=None, cost_b=None),  # out
     ]
     scene = build_scene(sid(9), {"A": pa, "B": pb}, triangulated=tri)
 
@@ -294,6 +294,7 @@ def test_build_scene_two_cameras_attaches_triangulated_points():
             t_rel_s=i / 240.0,
             x_m=P[0], y_m=P[1], z_m=P[2],
             residual_m=1e-6,
+            cost_a=None, cost_b=None,
         )
         for i, P in enumerate(P_path)
     ]
@@ -325,7 +326,7 @@ def test_build_scene_stamps_seg_idx_on_triangulated_when_session_result_has_segm
     pa = _pitch("A", 11, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 11, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6)
+        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6, cost_a=None, cost_b=None)
         for i, P in enumerate(P_path)
     ]
     # Two segments: [0, 1] in seg 0, [2] in seg 1.
@@ -370,7 +371,7 @@ def test_build_scene_stamps_seg_idx_minus_one_for_out_of_segment_points():
     pa = _pitch("A", 12, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 12, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6)
+        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6, cost_a=None, cost_b=None)
         for i, P in enumerate(P_path)
     ]
     # Segment claims only index 0 — point 1 is an outlier.
@@ -406,9 +407,9 @@ def test_build_scene_seg_idx_survives_render_distance_filter():
     pa = _pitch("A", 13, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 13, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=0.00, x_m=0.1, y_m=0.3, z_m=1.0, residual_m=1e-6),
-        main.TriangulatedPoint(t_rel_s=0.01, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6),  # >10m, dropped
-        main.TriangulatedPoint(t_rel_s=0.02, x_m=0.2, y_m=0.5, z_m=1.2, residual_m=1e-6),
+        main.TriangulatedPoint(t_rel_s=0.00, x_m=0.1, y_m=0.3, z_m=1.0, residual_m=1e-6, cost_a=None, cost_b=None),
+        main.TriangulatedPoint(t_rel_s=0.01, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6, cost_a=None, cost_b=None),  # >10m, dropped
+        main.TriangulatedPoint(t_rel_s=0.02, x_m=0.2, y_m=0.5, z_m=1.2, residual_m=1e-6, cost_a=None, cost_b=None),
     ]
     # Three segments, one per point (extreme case — index 1 is the dropped one).
     segs = [

@@ -261,6 +261,8 @@ def triangulate_live_pair(
                 residual_m=gap,
                 source_a_cand_idx=ca_idx,
                 source_b_cand_idx=cb_idx,
+                cost_a=ca.cost,
+                cost_b=cb.cost,
             ))
     return out
 
@@ -398,6 +400,8 @@ def triangulate_cycle(
                         residual_m=gap,
                         source_a_cand_idx=ca_idx,
                         source_b_cand_idx=cb_idx,
+                        cost_a=ca.cost,
+                        cost_b=cb.cost,
                     ))
 
     logger.info(
