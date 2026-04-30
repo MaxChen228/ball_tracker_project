@@ -90,10 +90,6 @@ def test_run_server_post_broadcasts_fit_with_thresholds(tmp_path, monkeypatch):
         async def broadcast(self, event: str, data: dict) -> None:
             events.append((event, data))
 
-        async def subscribe(self):
-            if False:
-                yield ""
-
     monkeypatch.setattr(main, "sse_hub", _CaptureHub())
 
     client = TestClient(app)
@@ -109,10 +105,13 @@ def test_run_server_post_broadcasts_fit_with_thresholds(tmp_path, monkeypatch):
     assert run.status_code == 200, run.text
 
     fit_events = [data for name, data in events if name == "fit" and data.get("sid") == session_id]
-    # Two cams → two fit broadcasts (one per `state.record` rebuild).
-    assert len(fit_events) >= 2, f"expected ≥2 fit events, got {events}"
+    # Two cams → exactly two fit broadcasts (one per state.record rebuild).
+    # Tighter than ≥2 to catch a future regression that wires fit into a
+    # second site (e.g. broadcast_done) without removing this one.
+    assert len(fit_events) == 2, f"expected exactly 2 fit events, got {events}"
     for fe in fit_events:
-        assert "segments" in fe and isinstance(fe["segments"], list)
+        assert fe["cause"] == "server_post"
+        assert isinstance(fe["segments"], list)
         assert "cost_threshold" in fe
         assert "gap_threshold_m" in fe
 

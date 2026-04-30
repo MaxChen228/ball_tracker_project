@@ -409,6 +409,7 @@ async def sessions_recompute(request: Request, session_id: str):
         "fit",
         {
             "sid": session_id,
+            "cause": "recompute",
             "segments": [s.model_dump() for s in new_result.segments],
             "cost_threshold": new_result.cost_threshold,
             "gap_threshold_m": new_result.gap_threshold_m,

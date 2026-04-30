@@ -178,6 +178,7 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
     fit_events = [data for name, data in events if name == "fit" and data.get("sid") == session_id]
     assert fit_events, f"expected at least one fit event, got {events}"
     for fe in fit_events:
+        assert fe["cause"] == "cycle_end"
         assert fe["segments"] == []
         # Both threshold fields must ship on every fit event so dashboard
         # can refresh its client-side mask without a /results round-trip.
