@@ -40,7 +40,7 @@ from schemas import SyncReport, SyncTraceSample
 
 # Cadence at which we emit trace samples to the /sync debug plot.
 # 30 Hz matches what AudioSyncDetector.swift used to publish so the
-# existing Plotly traces look identical to the operator.
+# existing traces look identical to the operator.
 _TRACE_HOP_S: float = 1.0 / 30.0
 
 
