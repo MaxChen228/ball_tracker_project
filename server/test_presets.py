@@ -247,18 +247,16 @@ def test_dashboard_marks_active_preset_in_manage_modal(tmp_path, monkeypatch):
     ))
     client = TestClient(main.app)
     body = client.get("/").text
-    # The current marker appears on the blue_ball row, not on tennis.
+    # `presets.list_presets` returns slugs sorted, so blue_ball precedes
+    # tennis in the modal table. The current marker must sit before the
+    # tennis row; if it appears after, it's been attached to the wrong
+    # preset.
     blue_idx = body.index('data-preset-use="blue_ball"')
     tennis_idx = body.index('data-preset-use="tennis"')
+    assert blue_idx < tennis_idx
     star = body.find("★ current")
     assert star != -1
-    # The star is closer to whichever row it belongs to. Validate by
-    # bracketing — the star sits within the same <tr> as blue_ball,
-    # which is rendered before tennis (sorted alphabetically).
-    if blue_idx < tennis_idx:
-        assert star < tennis_idx
-    else:
-        assert star < blue_idx
+    assert star < tennis_idx
 
 
 def test_dashboard_renders_after_creating_custom_preset(tmp_path, monkeypatch):

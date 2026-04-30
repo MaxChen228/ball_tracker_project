@@ -23,7 +23,7 @@ cd server
 uv run uvicorn main:app --host 0.0.0.0 --port 8765   # run (prints LAN IP → paste into iPhone Settings)
 uv run pytest                                        # all tests (server + viewer)
 uv run pytest test_triangulation_math.py::test_triangulate_sweeps_ball_path   # single test
-uv run python reprocess_sessions.py --since today                 # re-run detection + triangulation with current hsv_range.json over today's MOVs (also --session s_xxxx / --all / --dry-run)
+uv run python reprocess_sessions.py --since today                 # re-run detection + triangulation with current data/detection_config.json over today's MOVs (also --session s_xxxx / --all / --dry-run; --use-frozen-snapshot replays each pitch's *_used config)
 ```
 
 ### iOS
@@ -32,6 +32,21 @@ Open `ball_tracker.xcodeproj` in Xcode. The app needs a **physical device** (cam
 
 Agents must NOT run iOS tests via xcodebuild — see [ios.md](ios.md) for the
 rule.
+
+## Preset library
+
+Detection presets live as JSON files under `server/data/presets/<slug>.json` (the directory is gitignored alongside the rest of `server/data/`). Built-in seeds `tennis.json` and `blue_ball.json` are written by the server on first boot if they don't exist; restoring a built-in after edit/delete is `rm server/data/presets/<slug>.json` + restart.
+
+Operator workflow lives entirely on the dashboard's **DETECTION CONFIG** card:
+
+- **Switch presets** — click a preset button (e.g. `Blue ball`) to load its values into the form, then `APPLY DETECTION CONFIG`. The identity tag updates to the chosen preset.
+- **Edit & save as new** — drag sliders to taste, click `+ Save as new`, supply a slug (`[a-z0-9_]{1,32}`) and an operator-facing label. The new preset is on disk before the prompt closes.
+- **Manage** — click `Manage…` to open the library list; per row you get `Use` (snap live config to that preset), `Duplicate` (prompt for a new slug+label, copy the values), `Delete` (unlink the file). The currently-bound preset is marked `★ current`.
+- **Reset to preset** — appears only when the live config is bound to a preset but has been edited (`identity-modified`); snaps back to the canonical values.
+
+If the live config's `preset` field references a preset that has been deleted, the identity tag turns red and reads `<slug> (preset deleted)`. The dashboard does not silently re-bind; the next Apply records `preset=null` (custom).
+
+For sharing or backup, `cp -r server/data/presets ~/somewhere` is sufficient — each file is self-contained. There is no inter-file dependency.
 
 ## Degraded / fallback modes
 

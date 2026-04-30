@@ -319,14 +319,19 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
 
 ### HSV 範圍（OpenCV 0-179 hue space）
 
-`data/hsv_range.json` 預設 **h 105-112 / s 140-255 / v 40-255**。
+live config（`data/detection_config.json`）的 blue_ball-pure 值是
+**h 105-112 / s 140-255 / v 40-255**，由 `data/presets/blue_ball.json`
+seed 寫入並可被操作員從 dashboard `Manage…` 改寫。
 
 - 2026-04-29 收緊：h 從 100-130 縮到 105-112 過濾背景藍
 - **v_min 必須 ≥ 40**：球下半進陰影 V 會掉到 80 以下；v_min 抬高會讓近相機
   的球只剩高光環、mask 變扁、aspect gate 砍掉（s_cc0dcaa5 reprocess 對比為證）
-- preset 註冊單一 source：`server/presets.py::PRESETS`。
-  `render_dashboard_session.py` / `routes/settings.py` 都從這裡 import；
-  `test_control.py` 只持有字串 assertion，不是 source of truth
+- preset library 是磁碟驅動：`data/presets/<slug>.json` 每個檔一個 preset。
+  `presets.py` 只持有 `_BUILTIN_SEEDS` 種子值（tennis / blue_ball），boot
+  時若檔案不存在才寫入；既有檔案永遠不被覆蓋。要還原內建 → `rm` + 重啟
+- 操作員建立的自訂 preset 走 dashboard `[+ Save as new]` / `[Manage…]`，
+  不要改 source code；CRUD endpoints `GET/POST/PUT/DELETE /presets` 已
+  曝露完整 surface
 - `detection.py` docstring 寫「default 是黃綠網球」是歷史 fallback，不要
   改
 
