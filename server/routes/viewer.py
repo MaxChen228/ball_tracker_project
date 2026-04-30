@@ -159,6 +159,16 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         "server_post_ran_at": (
             result.server_post_ran_at if result is not None else None
         ),
+        # Preset filenames for the per-session CFG strip in the viewer
+        # nav. Both nullable: `live_preset_name` is None on legacy
+        # sessions armed before preset-stamping; `server_post_preset_name`
+        # is None until the operator first runs server_post.
+        "live_preset_name": (
+            result.live_preset_name if result is not None else None
+        ),
+        "server_post_preset_name": (
+            result.server_post_preset_name if result is not None else None
+        ),
     }
 
 

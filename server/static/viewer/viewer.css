@@ -122,6 +122,29 @@
     0%,100% { opacity:1; }
     50%     { opacity:0.55; }
   }
+  /* Per-session config strip — visible "Live used X / Svr used Y"
+     pills alongside the recompute-tuning row. Each pill shows the
+     preset filename + a compact HSV+gate detail so operator can read
+     what each pipeline actually ran without round-tripping through
+     the dashboard. `.missing` greys out stale references (deleted
+     preset / unset). */
+  .config-strip { display:flex; align-items:center; gap:var(--s-2);
+    padding:3px 10px; border:1px solid var(--border-base);
+    border-radius:var(--r); background:var(--surface);
+    font-family:var(--mono); font-size:10px; color:var(--sub);
+    letter-spacing:0.04em; flex:0 1 auto; min-width:0; overflow:hidden; }
+  .config-strip .cfg-head { flex:0 0 auto; font-size:9px; letter-spacing:0.14em;
+    text-transform:uppercase; color:var(--sub); }
+  .config-strip .cfg-pill { display:inline-flex; align-items:center; gap:6px;
+    min-width:0; padding:3px 8px; border:1px solid var(--border-base);
+    border-radius:var(--r); background:var(--bg); }
+  .config-strip .cfg-pill.ok { border-color:var(--ok, var(--accent)); }
+  .config-strip .cfg-pill.missing { opacity:0.72; }
+  .config-strip .cfg-label { flex:0 0 auto; font-size:9px; letter-spacing:0.12em;
+    text-transform:uppercase; color:var(--sub); }
+  .config-strip .cfg-tag { flex:0 0 auto; color:var(--ink); font-weight:500; }
+  .config-strip .cfg-detail { min-width:0; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; color:var(--ink-light, var(--sub)); }
   .health-strip .hs-tri { display:inline-flex; align-items:baseline; gap:4px;
     padding:3px 8px; border:1px solid var(--accent); border-radius:var(--r);
     background:var(--surface); }
@@ -270,10 +293,42 @@
      CSS var (measured + set by JS on first paint + ResizeObserver). */
   .timeline { position:fixed; left:0; right:0; bottom:0; z-index:30;
     background:var(--surface); display:flex;
-    flex-direction:column; gap:var(--s-2); padding:var(--s-2) var(--s-5);
+    flex-direction:column; gap:var(--s-2); padding:0 var(--s-5) var(--s-2);
     font-family:var(--mono); font-size:12px; color:var(--sub);
     border-top:1px solid var(--border-base);
-    box-shadow:0 -1px 4px rgba(0,0,0,0.04); }
+    box-shadow:0 -1px 4px rgba(0,0,0,0.04);
+    height:var(--timeline-user-h, auto);
+    min-height:120px; max-height:70vh;
+    overflow:hidden; }
+  /* Vertical resize handle pinned to the top edge of .timeline. Mirrors
+     `.col-resizer` styling so the two read as a coherent pair. Drag
+     handler in 70_handlers.js writes `--timeline-user-h` on .timeline
+     and persists to localStorage. */
+  .tl-resizer { flex:0 0 6px; cursor:row-resize; position:relative;
+    background:var(--border-base);
+    transition:background 0.12s; user-select:none; touch-action:none; }
+  .tl-resizer::before { content:""; position:absolute; top:2px; bottom:2px;
+    left:50%; width:28px; transform:translateX(-50%);
+    border-top:1px solid var(--sub); border-bottom:1px solid var(--sub);
+    opacity:0.45; transition:opacity 0.12s; }
+  .tl-resizer:hover, .tl-resizer.dragging { background:var(--ink); }
+  .tl-resizer:hover::before, .tl-resizer.dragging::before { opacity:0; }
+  .tl-resizer:focus-visible { outline:2px solid var(--ink); outline-offset:-2px; }
+  body.tl-resizing { cursor:row-resize; user-select:none; }
+  body.tl-resizing * { cursor:row-resize !important; }
+  /* When the user has dragged the timeline taller, the LIVE / SVR strip
+     rows flex to fill the extra vertical space and their canvases
+     stretch to match. `.timeline.is-resized` is added by the drag
+     handler (and on mount when localStorage has a saved height) so the
+     default compact layout is preserved when no user height is set. */
+  .timeline.is-resized { overflow:auto; }
+  .timeline.is-resized .scrubber-wrap { flex:1 1 auto; min-height:0;
+    display:flex; flex-direction:column; }
+  .timeline.is-resized #strip-row-live,
+  .timeline.is-resized #strip-row-server-post { flex:1 1 0; min-height:0; }
+  .timeline.is-resized #strip-row-live canvas.strip-canvas,
+  .timeline.is-resized #strip-row-server-post canvas.strip-canvas {
+    height:100%; min-height:32px; }
   .tl-row { display:flex; align-items:center; gap:10px; }
   .scrubber-wrap { flex:1 1 auto; display:flex; flex-direction:column;
     gap:3px; min-width:0; }

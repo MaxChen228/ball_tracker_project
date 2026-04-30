@@ -12,6 +12,8 @@ from scene_runtime import (
     fit_extension_seconds_slider_html,
     fit_line_width_slider_html,
     layer_chip_with_popover_html,
+    line_width_slider_html,
+    opacity_slider_html,
     point_size_slider_html,
     view_presets_toolbar_html,
 )
@@ -41,7 +43,7 @@ from render_scene_theme import (
     _SURFACE,
 )
 from viewer_fragments import (
-    cam_view_shared_toolbar_html,
+    detection_config_strip_html,
     failure_strip_html,
     health_nav_strip_html,
     session_tuning_strip_html,
@@ -70,6 +72,7 @@ class ViewerPageContext:
     health_strip_html: str
     health_failure_html: str
     session_tuning_html: str
+    config_strip_html: str
     cost_threshold: float | None
     gap_threshold_m: float | None
     video_cells_html: str
@@ -210,6 +213,10 @@ def build_viewer_page_context(
         session_tuning_html=session_tuning_strip_html(
             cost_threshold, gap_threshold_m, scene.session_id,
         ),
+        config_strip_html=detection_config_strip_html(
+            health.get("live_preset_name"),
+            health.get("server_post_preset_name"),
+        ),
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         video_cells_html=video_cells,
@@ -264,40 +271,6 @@ _VIEWER_CAM_VIEW_OVERRIDES = (
 .vid-cell[data-cam-view] canvas[data-cam-canvas] {
   position: absolute; inset: 0; width: 100%; height: 100%; display: block;
 }
-.cam-view-shared-toolbar {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  margin-bottom: var(--s-2, 6px);
-  padding: 5px 8px;
-  background: var(--surface, #FCFBFA);
-  border: 1px solid var(--border-base, #DBD6CD);
-  border-radius: var(--r, 4px);
-}
-.cam-view-shared-toolbar .cv-layer {
-  font: inherit; font-size: 9px; letter-spacing: 0.08em;
-  padding: 3px 8px; background: transparent;
-  color: var(--sub, #7a756c);
-  border: 1px solid var(--border-base, #DBD6CD); border-radius: 2px;
-  cursor: pointer; text-transform: uppercase;
-}
-.cam-view-shared-toolbar .cv-layer.on {
-  background: var(--ink, #2A2520); color: #F8F7F4;
-  border-color: var(--ink, #2A2520);
-}
-.cam-view-shared-toolbar .cv-path-group {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 2px 6px;
-  border: 1px solid var(--border-base, #DBD6CD); border-radius: 3px;
-}
-.cam-view-shared-toolbar .cv-path-lbl {
-  font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--sub, #7a756c); font-weight: 500;
-}
-.cam-view-shared-toolbar .cv-opacity {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--sub, #7a756c);
-}
-.cam-view-shared-toolbar .cv-opacity input[type=range] { width: 80px; }
 """
 )
 
@@ -399,6 +372,7 @@ def render_viewer_html(
   </div>
   <div class="nav-tuning" role="region" aria-label="Per-session pairing tuning">
     {ctx.session_tuning_html}
+    {ctx.config_strip_html}
   </div>
   {ctx.health_failure_html}
   <div class="work" data-mode="{ctx.layout_mode}">
@@ -417,9 +391,10 @@ def render_viewer_html(
       </div>
     </div>
     <div class="col-resizer" id="col-resizer" role="separator" aria-orientation="vertical" aria-label="Resize 3D scene vs cameras" tabindex="0" title="Drag to resize"></div>
-    <div class="videos-col">{cam_view_shared_toolbar_html()}{ctx.video_cells_html}</div>
+    <div class="videos-col">{ctx.video_cells_html}</div>
   </div>
   <div class="timeline">
+    <div class="tl-resizer" id="tl-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize timeline panel" tabindex="0" title="Drag to resize"></div>
     <div class="tl-row">
       <div class="scrubber-wrap">
         <div class="strip-legend"
@@ -432,12 +407,18 @@ def render_viewer_html(
               <button type="button" class="layer-pill" data-path="server_post" role="radio" aria-checked="false"><span class="layer-pill-label">svr</span><span class="layer-pill-count" data-path-count="server_post"></span></button>
             </span>
             <span class="layer-divider" aria-hidden="true"></span>
-            <span class="layer-group" data-layer-group="rays">
-              <label class="layer-checkbox">
-                <input type="checkbox" class="layer-checkbox" data-layer="rays" checked>
-                <span class="layer-name">Rays</span>
-              </label>
-            </span>
+            {layer_chip_with_popover_html(
+                group_key="rays",
+                label="Rays",
+                layer_data_attr="rays",
+                checked=True,
+                popover_id="viewer-rays-popover",
+                title="3D rays — click ▾ for opacity / line width",
+                popover_inner_html=(
+                    opacity_slider_html(layer="rays", default_pct=70)
+                    + line_width_slider_html(layer="rays", default_px=1.5)
+                ),
+            )}
             {layer_chip_with_popover_html(
                 group_key="traj",
                 label="Traj",
@@ -457,6 +438,43 @@ def render_viewer_html(
                 popover_inner_html=(
                     fit_line_width_slider_html(slot_id="viewer-fit-line-width")
                     + fit_extension_seconds_slider_html(slot_id="viewer-fit-extension")
+                ),
+            )}
+            <span class="layer-divider" aria-hidden="true"></span>
+            {layer_chip_with_popover_html(
+                group_key="plate",
+                label="Plate",
+                layer_data_attr="plate",
+                checked=True,
+                popover_id="viewer-plate-popover",
+                title="Plate outline overlay on cam canvases — click ▾ for opacity / line width",
+                popover_inner_html=(
+                    opacity_slider_html(layer="plate", default_pct=85)
+                    + line_width_slider_html(layer="plate", default_px=1.6)
+                ),
+            )}
+            {layer_chip_with_popover_html(
+                group_key="axes",
+                label="Axes",
+                layer_data_attr="axes",
+                checked=False,
+                popover_id="viewer-axes-popover",
+                title="World axes overlay on cam canvases — click ▾ for opacity / line width",
+                popover_inner_html=(
+                    opacity_slider_html(layer="axes", default_pct=85)
+                    + line_width_slider_html(layer="axes", default_px=1.6)
+                ),
+            )}
+            {layer_chip_with_popover_html(
+                group_key="blobs",
+                label="Blobs",
+                layer_data_attr="detection_blobs",
+                checked=True,
+                popover_id="viewer-blobs-popover",
+                title="Detection blobs on cam canvases — click ▾ for opacity / line width",
+                popover_inner_html=(
+                    opacity_slider_html(layer="detection_blobs", default_pct=80)
+                    + line_width_slider_html(layer="detection_blobs", default_px=1.5)
                 ),
             )}
             <span class="layer-divider" aria-hidden="true"></span>
