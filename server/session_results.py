@@ -29,10 +29,12 @@ from schemas import (
     DetectionPath,
     FramePayload,
     PitchPayload,
+    SegmentRecord,
     SessionResult,
     TriangulatedPoint,
     _DEFAULT_PATHS,
 )
+from segmenter import Segment, find_segments
 
 if TYPE_CHECKING:
     from pairing_tuning import PairingTuning
@@ -309,7 +311,38 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         elif a is not None and b is not None:
             result.error = "no detection completed"
     _stamp_frozen_config_on_result(result, a, b)
+    stamp_segments_on_result(result)
     return result
+
+
+def stamp_segments_on_result(result: SessionResult) -> None:
+    """Run `find_segments` on the chosen authoritative path's points and
+    write `result.segments`. Idempotent — overwrites whatever was there.
+
+    Segments are pure visualisation data derived from `result.triangulated`
+    (the authoritative path's points); they do not need to be re-derivable
+    from disk on next rebuild because the rebuild always recomputes them.
+    Empty `triangulated` ⇒ empty segments (no log noise; "I have nothing
+    to fit" is not an error)."""
+    if not result.triangulated:
+        result.segments = []
+        return
+    segs, _pts_sorted = find_segments(result.triangulated)
+    result.segments = [_segment_record_from_segment(s) for s in segs]
+
+
+def _segment_record_from_segment(seg: Segment) -> SegmentRecord:
+    return SegmentRecord(
+        indices=list(seg.indices),
+        original_indices=list(seg.original_indices),
+        p0=[float(x) for x in seg.p0.tolist()],
+        v0=[float(x) for x in seg.v0.tolist()],
+        t_anchor=float(seg.t_anchor),
+        t_start=float(seg.t_start),
+        t_end=float(seg.t_end),
+        rmse_m=float(seg.rmse_m),
+        speed_kph=float(seg.speed_kph),
+    )
 
 
 def recompute_result_for_session(
@@ -420,6 +453,7 @@ def recompute_result_for_session(
         elif a is not None and b is not None:
             result.error = "no detection completed"
     _stamp_frozen_config_on_result(result, a, b)
+    stamp_segments_on_result(result)
     return result
 
 
@@ -435,6 +469,7 @@ __all__ = [
     "rebuild_result_for_session",
     "recompute_result_for_session",
     "session_sync_id_locked",
+    "stamp_segments_on_result",
     "triangulate_pair",
     "validate_pair_sync",
 ]
