@@ -252,7 +252,6 @@ async def _run_server_detection(
     *,
     hsv_range: "HSVRange",
     shape_gate: "ShapeGate",
-    config_label: str,
 ) -> None:
     """Background task: decode the MOV, run HSV detection, annotate, then
     re-record the pitch so `result.points` (and the annotated MP4) land on
@@ -261,13 +260,11 @@ async def _run_server_detection(
     server-side trace 8-20 s later.
 
     The detection config pair (`hsv_range` / `shape_gate`) is resolved by
-    the caller — `_enqueue_server_post` in `routes/sessions.py` based on
-    the `source` request field. We receive an already-resolved pair so
-    this background task never reads from `state` mid-run; that
-    decoupling is what lets the operator trigger a `preset:blue_ball`
-    reprocess without disturbing the live dashboard config (and
-    concurrent live-streaming sessions). The `config_label`
-    ('live' / 'frozen' / 'preset:<name>') is for log provenance only.
+    the caller (`_enqueue_server_post`) from `state.hsv_range()` /
+    `state.shape_gate()` — the dashboard's single source of truth — so
+    this background task never re-reads `state` mid-run. The pair is
+    captured at request time so a concurrent dashboard slider edit can't
+    contaminate an already-queued reprocess.
     """
     import main as _main
     state = _main.state
@@ -358,8 +355,8 @@ async def _run_server_detection(
     hsv_used = hsv_range
     gate_used = shape_gate
     logger.info(
-        "background detection start session=%s cam=%s config=%s hsv=%r",
-        sid, cam, config_label, hsv_used,
+        "background detection start session=%s cam=%s hsv=%r",
+        sid, cam, hsv_used,
     )
     try:
         frames = await asyncio.to_thread(

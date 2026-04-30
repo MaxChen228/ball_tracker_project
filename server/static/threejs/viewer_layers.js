@@ -36,6 +36,7 @@ import {
   readPersistedPointSizeM,
   writePersistedPointSizeM,
   applyPointSizeToGroup,
+  classifyPointsBySegment,
 } from "./points_layer.js";
 
 const FIT_ACCENT = 0xC0392B;
@@ -513,33 +514,47 @@ class ViewerLayers {
     if (!payload || typeof payload !== "object") {
       throw new Error("setSessionData: missing payload");
     }
+    // First-load (page render) ships scene dicts with `seg_idx` already
+    // stamped by `reconstruct._pts_to_dicts`. Recompute / refetch ships
+    // raw `SessionResult.model_dump()` where the field doesn't exist —
+    // `seg_idx` lives on the scene-dict transport, not on the persisted
+    // model. Reclassify here against the just-supplied segments so
+    // `_rebuildDynamic`'s seg_idx → palette bucketing stays correct
+    // across the recompute roundtrip. Without this every point falls
+    // into the `"out"` bucket and renders POINTS_OUTLIER (gray).
     const toSceneDict = (p) => ({
       t_rel_s: p.t_rel_s,
       x: p.x_m,
       y: p.y_m,
       z: p.z_m,
       residual_m: p.residual_m,
-      // cost_a / cost_b ride along so _passCostFilterPoint can mask
-      // freshly-loaded data the same way it masks server-rendered DATA.scene.
-      // seg_idx is stamped client-side from `payload.segments` /
-      // `_classifyPointsBySegment`; pass through if a server-rendered
-      // payload already has it (legacy SSE path).
       cost_a: (p.cost_a == null ? null : p.cost_a),
       cost_b: (p.cost_b == null ? null : p.cost_b),
-      seg_idx: (typeof p.seg_idx === "number" ? p.seg_idx : undefined),
+      seg_idx: undefined,  // filled in below
     });
+    const stampSegIdx = (dicts, segments) => {
+      const idx = classifyPointsBySegment(dicts, segments || []);
+      for (let i = 0; i < dicts.length; ++i) {
+        if (idx[i] !== -1) dicts[i].seg_idx = idx[i];
+      }
+    };
+    const segments = Array.isArray(payload.segments) ? payload.segments : [];
+    const segmentsByPath = payload.segments_by_path || {};
     const points = Array.isArray(payload.points) ? payload.points : [];
-    this.SCENE.triangulated = points.map(toSceneDict);
+    const sceneDicts = points.map(toSceneDict);
+    stampSegIdx(sceneDicts, segments);
+    this.SCENE.triangulated = sceneDicts;
     const tbp = payload.triangulated_by_path || {};
     const newTrajByPath = {};
     for (const key of Object.keys(tbp)) {
-      newTrajByPath[key] = (tbp[key] || []).map(toSceneDict);
+      const pathDicts = (tbp[key] || []).map(toSceneDict);
+      stampSegIdx(pathDicts, segmentsByPath[key] || []);
+      newTrajByPath[key] = pathDicts;
     }
     this.TRAJ_BY_PATH = newTrajByPath;
-    this.SEGMENTS = Array.isArray(payload.segments) ? payload.segments : [];
-    this.SEGMENTS_BY_PATH = payload.segments_by_path || {};
+    this.SEGMENTS = segments;
+    this.SEGMENTS_BY_PATH = segmentsByPath;
     this.HAS_TRIANGULATED = this.SCENE.triangulated.length > 0;
-    // Fit curves are static-rebuilt from segments; tear down + rebuild.
     this.scene.removeLayer("viewer_fit_curves");
     this._buildFitCurves();
     this._rebuildDynamic();

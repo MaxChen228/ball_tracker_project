@@ -747,13 +747,40 @@ def test_viewer_page_context_computes_single_cam_layout_and_video_cells():
     assert ctx.videos_flex == "1 1 0"
 
 
+def test_viewer_layers_reclassifies_points_after_setSessionData():
+    """Regression: `SessionResult.points` / `triangulated_by_path` are
+    raw `TriangulatedPoint.model_dump()` dicts — they have no `seg_idx`
+    field (that field is only stamped on first-load scene dicts by
+    `reconstruct._pts_to_dicts`). After a recompute / SSE refetch
+    `setSessionData` MUST re-derive `seg_idx` from `payload.segments`
+    via `classifyPointsBySegment`; otherwise every point falls into
+    the `out` bucket and renders as POINTS_OUTLIER (gray).
+
+    Symptom this guards: operator clicks Apply; segments change; all
+    points turn gray; F5 reload restores colour."""
+    from pathlib import Path
+    src = Path(__file__).parent / "static" / "threejs" / "viewer_layers.js"
+    text = src.read_text()
+    assert "classifyPointsBySegment" in text, (
+        "viewer_layers.js must import classifyPointsBySegment to re-derive "
+        "seg_idx after setSessionData (the recompute response carries no "
+        "seg_idx field)"
+    )
+    # Stamp call must run inside setSessionData, not just at import time.
+    setSessionData_idx = text.index("setSessionData(payload)")
+    classify_idx = text.index("classifyPointsBySegment(", setSessionData_idx)
+    assert classify_idx > setSessionData_idx, (
+        "classifyPointsBySegment must be called inside setSessionData, "
+        "not only at module top-level / first-load"
+    )
+
+
 def test_apply_tuning_patches_in_place_no_reload():
     """`_applyTuning` must NOT call `window.location.reload` after a
     successful POST; it must feed the response into the Three.js scene
     via `setSessionData`. Full-page reload would re-buffer video and
     drop scrubber / layer-visibility state — operators tune iteratively
     and can't afford that lag."""
-    import main as _main
     from viewer_page import render_viewer_html
     from reconstruct import Scene
 
@@ -769,10 +796,7 @@ def test_apply_tuning_patches_in_place_no_reload():
         "session_id": session_id, "triangulated_count": 0, "error": None,
         "duration_s": None, "received_at": None, "mode": "armed",
     }
-    body = render_viewer_html(
-        scene, [], health,
-        presets=_main.state.list_presets()
-    )
+    body = render_viewer_html(scene, [], health)
     # The Apply handler is the patch-in-place path now. Reload is gone.
     assert "_applyTuning" in body
     assert "window.location.reload" not in body
@@ -781,16 +805,25 @@ def test_apply_tuning_patches_in_place_no_reload():
     # the previous round).
     assert "cost_threshold: cost" in body
     assert "gap_threshold_m: gap_m" in body
+    # Recompute UX: in-flight guard + visual state. Without these the
+    # operator sees no feedback on a sub-second recompute and a slider
+    # wiggle mid-flight re-enables the button.
+    assert "recomputing" in body            # css class added during fetch
+    assert "btn.dataset.recomputing" in body
+    assert "costInput.disabled = true" in body
+    assert "gapInput.disabled = true" in body
+    # After fetch resolves, the slider DOM + tick label are reseeded
+    # from the server response so the operator sees what was actually
+    # applied (not their drag position).
+    assert "costInput.value = r.cost_threshold.toFixed(2)" in body
+    assert "gapInput.value = String(cm)" in body
 
 
-def test_viewer_page_renders_run_server_post_source_dropdown():
-    """Phase 3: viewer's "Rerun server" form must expose a <select>
-    so the operator can pick live / frozen / preset:<name> per request.
-    Pre-phase-3 the form had only a hidden source=live, which made
-    research compares require disk mutation. This guards the
-    affordance against regression — if someone refactors the form
-    back to a single hidden input, this test fails."""
-    import main as _main
+def test_viewer_page_run_server_post_form_has_no_source_picker():
+    """Detection config has a single source of truth — the dashboard's
+    current HSV + shape_gate. The "Rerun server" form must NOT carry
+    any source selector (no <select>, no hidden input); hitting the
+    endpoint always uses dashboard config."""
     from viewer_page import render_viewer_html
 
     K, (R_a, t_a, _, H_a), _ = _make_rig()
@@ -818,26 +851,13 @@ def test_viewer_page_renders_run_server_post_source_dropdown():
         ("A", "/videos/session_x_A.mov", 0.0, 240.0, {"t_rel_s": [0.0], "detected": [True]}),
     ]
 
-    html = render_viewer_html(
-        scene, videos, health,
-        presets=_main.state.list_presets()
-    )
+    html = render_viewer_html(scene, videos, health)
 
-    # Form posts to the right endpoint.
     assert f'action="/sessions/{session_id}/run_server_post"' in html
-    # Dropdown exists with all three source flavors. Two substring
-    # checks instead of one ordered-attribute slug so a trivial
-    # name=/class= reorder won't false-fail.
-    assert '<select ' in html
-    assert 'name="source"' in html
-    assert 'class="action-select"' in html
-    assert '<option value="live" selected>' in html
-    assert '<option value="frozen">' in html
-    # Both presets surface in the dropdown — not just one — so the
-    # operator can compare without disk mutation.
-    assert 'value="preset:tennis"' in html
-    assert 'value="preset:blue_ball"' in html
-    # No leftover hidden source from the phase-2 placeholder.
+    assert '<select ' not in html
+    assert 'name="source"' not in html
+    assert 'class="action-select"' not in html
+    assert 'value="preset:' not in html
     assert '<input type="hidden" name="source"' not in html
 
 
@@ -1028,24 +1048,6 @@ def test_viewer_layer_visibility_v6_schema():
     assert "setFitVisibility" not in body
     assert "SEGMENTS_BY_PATH" in body
     assert "segments_by_path" in body
-
-
-def test_viewer_config_strip_ships_css_for_cfg_pills():
-    """Regression: the nav-tuning config strip (`CFG LIVE ... SVR ...`)
-    needs dedicated CSS. Without it the HTML still renders, but the
-    spans collapse into a raw `CFGLIVE...` text blob in the top bar."""
-    K, (R_a, t_a, _, H_a), _ = _make_rig()
-    session_id = sid(724)
-    _record_pitch(_pitch("A", 724, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
-    main.state.save_clip("A", session_id, b"clip", "mov")
-
-    body = TestClient(app).get(f"/viewer/{session_id}").text
-    assert ".config-strip" in body
-    assert ".config-strip .cfg-pill" in body
-    assert ".config-strip .cfg-detail" in body
-    assert 'class="config-strip"' in body
-    assert 'class="cfg-head"' in body
-    assert 'class="cfg-pill' in body
 
 
 def test_viewer_path_click_does_not_pre_mutate_layer_visibility():

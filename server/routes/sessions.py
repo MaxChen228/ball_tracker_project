@@ -7,105 +7,18 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 import session_results
-from detection import HSVRange, ShapeGate
-from schemas import DetectionPath, PitchPayload, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
+from schemas import DetectionPath, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
 
 router = APIRouter()
 
 _SESSION_ID_RE = re.compile(r"^s_[0-9a-f]{4,32}$")
 
 
-# Detection config sources accepted by /sessions/{sid}/run_server_post.
-# - "live": current dashboard config (state.hsv_range() / shape_gate() / ...).
-#   Mutating effect on subsequent live sessions; used for re-running with
-#   the operator's just-tuned values.
-# - "frozen": the per-pitch frozen snapshot (`pitch.*_used`). Reproduces the
-#   exact config detection ran with originally — required for sanity-checking
-#   that an algorithm change didn't shift results. Fails fast (409) if any
-#   queued pitch lacks one of the three frozen fields (legacy pitch from
-#   before PR #93 stamping landed).
-# - "preset:<name>": canonical preset loaded from `data/presets/<name>.json`.
-#   The preset carries its own shape_gate (Phase 1 of the unified-config
-#   redesign — earlier the preset only carried HSV and shape_gate
-#   silently inherited from state, which defeated the "research-compare
-#   without disk mutation" property because a concurrent dashboard
-#   slider edit could change the cost basis mid-reprocess). Does NOT
-#   mutate the live `detection_config.json`.
-def _resolve_detection_config(
-    source: str,
-    pitch: PitchPayload,
-    state,
-) -> tuple[HSVRange, ShapeGate, str]:
-    if source == "live":
-        return (state.hsv_range(), state.shape_gate(), "live")
-    if source == "frozen":
-        if (
-            pitch.hsv_range_used is None
-            or pitch.shape_gate_used is None
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"frozen config unavailable for cam={pitch.camera_id}: "
-                    "pitch lacks one or more *_used fields (likely a pitch "
-                    "recorded before PR #93 stamping landed)"
-                ),
-            )
-        return (
-            HSVRange(**pitch.hsv_range_used.model_dump()),
-            ShapeGate(**pitch.shape_gate_used.model_dump()),
-            "frozen",
-        )
-    if source.startswith("preset:"):
-        name = source.split(":", 1)[1]
-        try:
-            preset = state.load_preset(name)
-        except KeyError:
-            known = sorted(p.name for p in state.list_presets())
-            raise HTTPException(
-                status_code=400,
-                detail=f"unknown preset: {name!r} (known: {known})",
-            )
-        return (preset.hsv, preset.shape_gate, source)
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            f"unknown 'source': {source!r}. "
-            "Accepted: 'live' | 'frozen' | 'preset:<name>'."
-        ),
-    )
-
-
-async def _read_source_field(request: Request) -> str:
-    """Pull the required `source` field from either JSON or form body.
-    Per CLAUDE.md (no silent fallback): missing/blank → HTTP 400 rather
-    than implicitly defaulting. Callers (viewer form, events row) submit
-    `source=live` explicitly."""
-    ctype = request.headers.get("content-type", "").lower()
-    raw: object = None
-    if "application/json" in ctype:
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
-        if isinstance(body, dict):
-            raw = body.get("source")
-    else:
-        try:
-            form = await request.form()
-        except Exception:
-            form = None
-        if form is not None:
-            raw = form.get("source")
-    if not isinstance(raw, str) or not raw.strip():
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "missing required field 'source' "
-                "(one of: 'live' | 'frozen' | 'preset:<name>')"
-            ),
-        )
-    return raw.strip()
+# Detection config has a single source of truth: the dashboard's current
+# HSV + shape_gate (state.hsv_range() / state.shape_gate()). Both pipelines
+# (iOS live, server_post) read from it. There is no per-pitch "frozen
+# replay" or "preset substitute" path on this endpoint — operators switch
+# preset / hand-tune via the dashboard HSV card and rerun.
 
 
 @router.post("/sessions/arm")
@@ -257,15 +170,12 @@ async def sessions_run_server_post(
     background_tasks: BackgroundTasks,
 ):
     """Operator-triggered: run server-side HSV detection against every
-    camera's archived MOV for this session. Replaces the old "arm with
-    server_post checked" auto-flow now that MOVs are always recorded and
-    the detection cost is paid only when the operator asks for it.
+    camera's archived MOV for this session, using the dashboard's current
+    HSV + shape_gate. Replaces the old "arm with server_post checked"
+    auto-flow now that MOVs are always recorded and the detection cost is
+    paid only when the operator asks for it.
 
-    Body (form or JSON) — required:
-      - `source`: one of `live` | `frozen` | `preset:<name>`. See
-        `_resolve_detection_config` for semantics. No default — every
-        caller (viewer form, events row, JSON API) must specify
-        explicitly to keep research provenance auditable.
+    No body required — config is always read from `state` at request time.
     """
     return await _enqueue_server_post(request, session_id, background_tasks)
 
@@ -280,44 +190,25 @@ async def _enqueue_server_post(
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=422, detail="invalid session_id")
-    source = await _read_source_field(request)
-    # Pre-flight resolve BEFORE `resume_processing` (which transitions
-    # job states to "queued"). Order matters: if `source=frozen` and any
-    # cam lacks a snapshot, raising mid-loop AFTER resume_processing
-    # would leave the cam(s) already-transitioned stuck in "queued"
-    # state with no BackgroundTask backing them — a zombie chip on
-    # /events that no future operator action can clear. Pre-flight reads
-    # candidates non-mutatingly via `session_candidates`, validates the
-    # whole set, then commits with `resume_processing`. The pitches we
-    # peek at here are the same instances `resume_processing` deep-copies
-    # for hand-off; the *_used fields we read are immutable post-/pitch
-    # ingest so the peek-then-copy is safe.
     candidates = state.processing.session_candidates(session_id)
     if not candidates:
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
-    resolved_by_cam: dict[str, tuple[HSVRange, ShapeGate, str]] = {}
-    for cam, pitch, _clip_path in candidates:
-        resolved_by_cam[cam] = _resolve_detection_config(source, pitch, state)
+    hsv = state.hsv_range()
+    gate = state.shape_gate()
     queued = state.processing.resume_processing(session_id)
     if not queued:
-        # `session_candidates` saw something but `resume_processing`
-        # found nothing transitionable (already running / finished).
-        # 409 matches the previous semantics; resolved_by_cam is
-        # discarded with no side effects.
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
     for clip_path, pitch in queued:
-        hsv, gate, label = resolved_by_cam[pitch.camera_id]
         background_tasks.add_task(
             _run_server_detection,
             clip_path,
             pitch,
             hsv_range=hsv,
             shape_gate=gate,
-            config_label=label,
         )
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
@@ -325,7 +216,6 @@ async def _enqueue_server_post(
         "ok": True,
         "session_id": session_id,
         "queued": len(queued),
-        "source": source,
     }
 
 

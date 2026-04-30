@@ -59,6 +59,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
         created_day, created_hm = _format_local(created_at)
         authority_points = result.triangulated if result is not None else []
         n_triangulated = len(authority_points) if result is not None else 0
+        n_segments = len(result.segments) if result is not None else 0
         error = result.error if result is not None else None
 
         status = _status_label(cams_present, n_triangulated, error, is_live_only)
@@ -84,6 +85,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                 "n_ball_frames_by_path": n_ball_frames_by_path,
                 "n_ball_frames": n_ball_frames_by_path[DetectionPath.server_post.value],
                 "n_triangulated": n_triangulated,
+                "n_segments": n_segments,
                 "mean_residual_m": mean_res,
                 "duration_s": duration,
                 "capture_telemetry": {

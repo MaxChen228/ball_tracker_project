@@ -47,8 +47,6 @@ logger = logging.getLogger(__name__)
 _FROZEN_USED_FIELDS = (
     "hsv_range_used",
     "shape_gate_used",
-    "live_config_used",
-    "server_post_config_used",
 )
 
 
