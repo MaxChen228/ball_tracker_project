@@ -171,12 +171,14 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
     assert any(name == "point" and data["sid"] == session_id and abs(data["x"] - P_true[0]) < 1e-6 for name, data in events)
     assert any(name == "path_completed" and data["sid"] == session_id and data["cam"] == "A" for name, data in events)
     assert any(name == "path_completed" and data["sid"] == session_id and data["point_count"] == 1 for name, data in events)
-    # `fit` SSE is broadcast at cycle_end regardless of segment count (one
-    # point cannot form a segment, but the event still fires with an empty
-    # `segments` list — dashboard handler clears any previous fit visual).
+    # `fit` SSE is broadcast on every cycle_end (per-cam, since rebuild
+    # may produce different segments after the second cam reports).
+    # One point cannot form a segment so segments is always empty here;
+    # we assert at least one event arrives and all of them carry [].
     fit_events = [data for name, data in events if name == "fit" and data.get("sid") == session_id]
-    assert len(fit_events) == 1, f"expected exactly one fit event, got {fit_events}"
-    assert fit_events[0]["segments"] == []
+    assert fit_events, f"expected at least one fit event, got {events}"
+    for fe in fit_events:
+        assert fe["segments"] == []
 
 
 def test_stamp_segments_on_result_populates_segments_for_ballistic_input():
