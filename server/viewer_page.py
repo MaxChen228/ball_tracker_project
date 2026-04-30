@@ -10,7 +10,7 @@ import html as _html
 
 from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
-from presets import PRESETS
+from presets import Preset
 from reconstruct import Scene
 from render_compare import (
     DRAW_VIRTUAL_BASE_JS,
@@ -225,6 +225,7 @@ def render_viewer_html(
     build_figure,
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
+    presets: list[Preset] | None = None,
 ) -> str:
     ctx = build_viewer_page_context(
         scene,
@@ -252,19 +253,18 @@ def render_viewer_html(
         # config (mutating effect — same as the events row "Run srv"
         # button); 'frozen' replays the per-pitch *_used snapshot for
         # bit-exact reproduction (409 if any cam in the session lacks
-        # the snapshot, e.g. pre-PR #93 pitches); 'preset:<name>' uses
-        # the canonical HSV from `presets.PRESETS` without touching
-        # disk — the research-compare path. Default selection is
-        # 'live' so a casual operator click matches today's behavior.
-        # Defensive escape: today's labels ("Tennis" / "Blue ball") are
-        # safe, but `presets.PRESETS` is the single registry for future
-        # presets — a label introduced later containing `<`/`&`/`"`
-        # would inject without this. Same defensive posture as the
-        # dashboard preset buttons (`render_dashboard_session.py`).
+        # the snapshot, e.g. pre-PR #93 pitches); 'preset:<name>' loads
+        # the named preset from `data/presets/<name>.json` without
+        # touching the live config — the research-compare path. Default
+        # selection is 'live' so a casual operator click matches today's
+        # behavior.
+        # Defensive escape: built-in labels ("Tennis" / "Blue ball") are
+        # safe, but operator-created presets can carry arbitrary labels
+        # — a label containing `<`/`&`/`"` would inject without escape.
         preset_options = "".join(
-            f'<option value="preset:{_html.escape(name)}">'
-            f'Preset: {_html.escape(preset.label)}</option>'
-            for name, preset in PRESETS.items()
+            f'<option value="preset:{_html.escape(p.name)}">'
+            f'Preset: {_html.escape(p.label)}</option>'
+            for p in (presets or [])
         )
         action_html = (
             f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post" class="action-form">'

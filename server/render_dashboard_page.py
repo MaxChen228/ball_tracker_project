@@ -66,7 +66,7 @@ def render_events_index_html(
     session_html = _render_session_body(
         session, devices, calibrations, arm_readiness
     )
-    hsv_html = _render_hsv_body(detection_config)
+    hsv_html = _render_hsv_body(detection_config, state.list_presets())
     tuning_html = _render_tuning_body(
         heartbeat_interval_s=heartbeat_interval_s,
         tracking_exposure_cap=tracking_exposure_cap,

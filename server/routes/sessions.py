@@ -8,7 +8,6 @@ from fastapi.responses import RedirectResponse
 
 import session_results
 from detection import HSVRange, ShapeGate
-from presets import PRESETS
 from schemas import DetectionPath, PitchPayload, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
 
 router = APIRouter()
@@ -25,13 +24,13 @@ _SESSION_ID_RE = re.compile(r"^s_[0-9a-f]{4,32}$")
 #   that an algorithm change didn't shift results. Fails fast (409) if any
 #   queued pitch lacks one of the three frozen fields (legacy pitch from
 #   before PR #93 stamping landed).
-# - "preset:<name>": canonical preset from `presets.PRESETS`. The preset
-#   carries its own shape_gate + selector (Phase 1 of the unified-config
-#   redesign — earlier the preset only carried HSV and shape_gate /
-#   selector silently inherited from state, which defeated the
-#   "research-compare without disk mutation" property because a
-#   concurrent dashboard slider edit could change the cost basis
-#   mid-reprocess). Does NOT mutate disk.
+# - "preset:<name>": canonical preset loaded from `data/presets/<name>.json`.
+#   The preset carries its own shape_gate (Phase 1 of the unified-config
+#   redesign — earlier the preset only carried HSV and shape_gate
+#   silently inherited from state, which defeated the "research-compare
+#   without disk mutation" property because a concurrent dashboard
+#   slider edit could change the cost basis mid-reprocess). Does NOT
+#   mutate the live `detection_config.json`.
 def _resolve_detection_config(
     source: str,
     pitch: PitchPayload,
@@ -59,12 +58,14 @@ def _resolve_detection_config(
         )
     if source.startswith("preset:"):
         name = source.split(":", 1)[1]
-        if name not in PRESETS:
+        try:
+            preset = state.load_preset(name)
+        except KeyError:
+            known = sorted(p.name for p in state.list_presets())
             raise HTTPException(
                 status_code=400,
-                detail=f"unknown preset: {name!r} (known: {sorted(PRESETS)})",
+                detail=f"unknown preset: {name!r} (known: {known})",
             )
-        preset = PRESETS[name]
         return (preset.hsv, preset.shape_gate, source)
     raise HTTPException(
         status_code=400,

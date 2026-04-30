@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import html
 
-from presets import PRESETS, hsv_as_dict
+from presets import Preset, hsv_as_dict
 
 
 _MODE_LABELS = {
@@ -57,6 +57,7 @@ def _render_shape_row(
 
 def _render_hsv_body(
     detection_config: dict[str, object] | None,
+    presets: list[Preset] | None = None,
 ) -> str:
     """Phase 3 of unified-config redesign: single form, single Apply,
     identity header. The previous three-form / three-Apply layout is
@@ -74,6 +75,7 @@ def _render_hsv_body(
     sg = cfg.get("shape_gate") or {}
     preset_name = cfg.get("preset")
     modified_fields = cfg.get("modified_fields") or []
+    presets_by_name = {p.name: p for p in (presets or [])}
 
     h_lo, h_hi = int(hsv.get("h_min", 25)), int(hsv.get("h_max", 55))
     s_lo, s_hi = int(hsv.get("s_min", 90)), int(hsv.get("s_max", 255))
@@ -86,10 +88,10 @@ def _render_hsv_body(
         identity_label = "Custom"
         identity_class = "identity-custom"
     elif modified_fields:
-        identity_label = f"{PRESETS[preset_name].label} · modified ({len(modified_fields)})"
+        identity_label = f"{presets_by_name[preset_name].label} · modified ({len(modified_fields)})"
         identity_class = "identity-modified"
     else:
-        identity_label = f"{PRESETS[preset_name].label}"
+        identity_label = f"{presets_by_name[preset_name].label}"
         identity_class = "identity-pure"
 
     reset_btn = ""
@@ -98,7 +100,7 @@ def _render_hsv_body(
         reset_btn = (
             f'<button type="button" class="btn small" '
             f'data-detection-reset-preset="{html.escape(preset_name)}" '
-            f'title="Snap back to {html.escape(PRESETS[preset_name].label)} preset values">'
+            f'title="Snap back to {html.escape(presets_by_name[preset_name].label)} preset values">'
             'Reset to preset</button>'
         )
 
@@ -110,12 +112,11 @@ def _render_hsv_body(
     )
 
     # Preset picker --------------------------------------------------
-    def _preset_button(name: str) -> str:
-        p = PRESETS[name]
+    def _preset_button(p: Preset) -> str:
         d = hsv_as_dict(p)
-        active = " active" if name == preset_name and not modified_fields else ""
+        active = " active" if p.name == preset_name and not modified_fields else ""
         return (
-            f'<button type="button" class="btn small secondary{active}" data-hsv-preset="{html.escape(name)}" '
+            f'<button type="button" class="btn small secondary{active}" data-hsv-preset="{html.escape(p.name)}" '
             f'data-h-min="{d["h_min"]}" data-h-max="{d["h_max"]}" '
             f'data-s-min="{d["s_min"]}" data-s-max="{d["s_max"]}" '
             f'data-v-min="{d["v_min"]}" data-v-max="{d["v_max"]}" '
@@ -123,7 +124,7 @@ def _render_hsv_body(
             f'data-fill-min="{p.shape_gate.fill_min:.2f}">'
             f'{html.escape(p.label)}</button>'
         )
-    preset_buttons = "".join(_preset_button(name) for name in PRESETS)
+    preset_buttons = "".join(_preset_button(p) for p in (presets or []))
 
     # Sub-section markup --------------------------------------------
     hsv_block = (
