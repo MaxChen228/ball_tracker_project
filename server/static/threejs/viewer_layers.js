@@ -8,8 +8,7 @@
 //                   rays up to `cutoff`; in "playback" mode show only
 //                   rays at `currentT` (within tol).
 //   - ground:       per-cam ground projection trace per path
-//   - traj_svr:     3D server_post trajectory line + head marker
-//   - traj_live:    3D live trajectory line + head marker
+//   - traj:         one authority trajectory cloud + head marker
 //   - fit_<i>:      one fit-segment parabola per SegmentRecord, with
 //                   active-segment highlight + a marker on the curve at
 //                   `currentT` during playback
@@ -21,11 +20,12 @@
 // responsiveness above 60 fps even on the iPad.
 //
 // Colour semantics are intentionally role-based, not path-based:
-// PATH already selects which pipeline's geometry is visible, so the 3D
-// scene does NOT spend hue on "live vs svr". This keeps viewer visually
-// aligned with dashboard:
-//   - fit curves / server_post points: segment palette
-//   - live trajectory: dashboard live accent
+// viewer 3D aligns to dashboard by always rendering the SessionResult's
+// single authority surface (`result.points` / `SCENE.triangulated`).
+// PATH still switches rays / ground / 2D overlays, but 3D traj + fit do
+// not pivot with PATH:
+//   - authority trajectory / fit curves: segment palette
+//   - active head marker: dashboard accent
 //   - rays / ground traces: stable per-camera colours
 
 import * as THREE from "three";
@@ -41,7 +41,6 @@ import {
 } from "./points_layer.js";
 
 const FIT_ACCENT = 0xC0392B;
-const TRAJ_LIVE = FIT_ACCENT;
 const G_Z = -9.81;
 // Same ±tol as raysAtT in the previous implementation — a single decoded
 // frame's worth.
@@ -127,9 +126,8 @@ class ViewerLayers {
     this.mode = opts.mode || "all";  // "all" | "playback"
     // Layer visibility — matches 20_filters.js v6 schema:
     //   { path: "live"|"server_post", rays: bool, traj: bool, fit: bool, blobs: bool }
-    // One global path drives the data source for every enabled layer;
-    // per-layer booleans compose freely on top. Operator's mental model:
-    // "I'm looking at the SVR pipeline, show me rays + fit on top."
+    // PATH now drives rays / ground / 2D overlays only. 3D traj + fit are
+    // authority-surface views that stay aligned with dashboard.
     // Caller MUST provide it (the IIFE's `window.VIEWER_DATA.layerVisibility`
     // ships the localStorage-restored map). Falling back to a default
     // here would mask an init-order regression — fail loud per CLAUDE.md.
@@ -191,9 +189,11 @@ class ViewerLayers {
   _currentPath() { return this.layerVisibility.path; }
   _layerOn(layer) { return !!this.layerVisibility[layer]; }
   // True iff the layer's enable flag is on AND its data subset matches the
-  // global path. Layers with no path discrimination (fit) ignore `path`.
+  // global path. `fit` and `traj` are authority-only 3D layers and ignore
+  // PATH so viewer can match dashboard's selected-session scene.
   _isVisible(layer, path) {
     if (layer === "fit") return this._layerOn("fit");
+    if (layer === "traj") return this._layerOn("traj");
     if (!this._layerOn(layer)) return false;
     return path === this._currentPath();
   }
@@ -293,8 +293,7 @@ class ViewerLayers {
   // ---- t-dependent rays / traj / fit marker ----
   _rebuildDynamic() {
     this.scene.removeLayer("viewer_rays");
-    this.scene.removeLayer("viewer_traj_svr");
-    this.scene.removeLayer("viewer_traj_live");
+    this.scene.removeLayer("viewer_traj");
     this.scene.removeLayer("viewer_fit_marker");
 
     const playback = this.mode === "playback";
@@ -375,18 +374,15 @@ class ViewerLayers {
     // (PointsMaterial + sizeAttenuation true → world-space size that
     // shrinks with camera distance like a real sphere).
     const sizeM = this._pointSize;
-    if (this._isVisible("traj", PATH_SVR)) {
-      // Use scene.triangulated (sorted + render-dist-filtered + each
-      // point stamped with `seg_idx` by reconstruct.py) — server is the
-      // single source of truth for index→segment classification. We do
-      // NOT classify client-side from SegmentRecord.original_indices:
-      // those index into the pre-filter sorted points list which is
-      // not what TRAJ_BY_PATH.server_post (unsorted!) ships.
-      const svrAll = this.SCENE.triangulated || [];
+    if (this._isVisible("traj")) {
+      // Authority trajectory = the same single result surface dashboard
+      // renders for a selected session. SessionResult construction
+      // already chooses server_post when present, otherwise live.
+      const authorityPts = this.SCENE.triangulated || [];
       const buckets = new Map();  // segIdx | "out" -> [points]
       let lastVisible = null;
-      for (let i = 0; i < svrAll.length; ++i) {
-        const p = svrAll[i];
+      for (let i = 0; i < authorityPts.length; ++i) {
+        const p = authorityPts[i];
         if (p.t_rel_s > cutoff) continue;
         if (!residualPasses(p)) continue;
         if (!costPassesPoint(p)) continue;
@@ -398,7 +394,7 @@ class ViewerLayers {
       }
       if (buckets.size) {
         const group = new THREE.Group();
-        group.name = "viewer_traj_svr";
+        group.name = "viewer_traj";
         for (const [key, pts] of buckets) {
           const isOut = key === "out";
           const color = isOut ? POINTS_OUTLIER : SEG_PALETTE[Number(key) % SEG_PALETTE.length];
@@ -408,28 +404,9 @@ class ViewerLayers {
           }));
         }
         if (playback && lastVisible) {
-          // Head sphere — "current ball position at t" affordance, sized
-          // a bit larger than the cloud so it reads as the active marker.
           group.add(pointMarker([lastVisible.x, lastVisible.y, lastVisible.z], FIT_ACCENT, sizeM * 1.6));
         }
-        this.scene.addLayer("viewer_traj_svr", group);
-      }
-    }
-    if (this._isVisible("traj", PATH_LIVE)) {
-      const livePts = (this.TRAJ_BY_PATH.live || []).filter(
-        (p) => p.t_rel_s <= cutoff && residualPasses(p) && costPassesPoint(p)
-      );
-      if (livePts.length) {
-        const group = new THREE.Group();
-        group.name = "viewer_traj_live";
-        // Live trail has no per-point segment classification (live
-        // pipeline does not run the segmenter). Single accent colour.
-        group.add(pointsCloud(livePts, TRAJ_LIVE, sizeM, { opacity: 0.85 }));
-        if (playback) {
-          const head = livePts[livePts.length - 1];
-          group.add(pointMarker([head.x, head.y, head.z], TRAJ_LIVE, sizeM * 1.4));
-        }
-        this.scene.addLayer("viewer_traj_live", group);
+        this.scene.addLayer("viewer_traj", group);
       }
     }
 
@@ -457,7 +434,7 @@ class ViewerLayers {
     if (!Number.isFinite(sizeM)) return;
     this._pointSize = sizeM;
     writePersistedPointSizeM(sizeM);
-    for (const name of ["viewer_traj_svr", "viewer_traj_live"]) {
+    for (const name of ["viewer_traj"]) {
       const layer = this.scene.getLayer && this.scene.getLayer(name);
       applyPointSizeToGroup(layer, sizeM);
     }
@@ -480,8 +457,9 @@ class ViewerLayers {
     this._applyFitActiveHighlight();
   }
 
-  // Switch the global PATH (live / server_post). Every visible layer is
-  // re-driven from the new data source; ground projection follows rays.
+  // Switch the global PATH (live / server_post). Rays / ground / 2D
+  // overlays re-drive from the new data source; 3D traj + fit stay on
+  // the authority surface so viewer matches dashboard.
   // No same-path early-return: the IIFE's `layerVisibility` map is the
   // SAME object reference as `this.layerVisibility`, so a caller pre-
   // writing the field (legacy pattern) would make the guard fire and
