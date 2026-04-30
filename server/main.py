@@ -212,6 +212,7 @@ from routes import calibration as _calibration_routes
 from routes import calibration_intrinsics as _calibration_intrinsics_routes
 from routes import device_ws as _device_ws_routes
 from routes import fit as _fit_routes
+from routes import presets as _presets_routes
 app.include_router(_markers_routes.router)
 app.include_router(_settings_routes.router)
 app.include_router(_camera_routes.router)
@@ -223,6 +224,7 @@ app.include_router(_calibration_routes.router)
 app.include_router(_calibration_intrinsics_routes.router)
 app.include_router(_device_ws_routes.router)
 app.include_router(_fit_routes.router)
+app.include_router(_presets_routes.router)
 from routes.camera import _validate_camera_id_or_422
 from routes.sessions import _SESSION_ID_RE
 from routes.viewer import _build_viewer_health, _find_clip_on_disk, _scene_for_session

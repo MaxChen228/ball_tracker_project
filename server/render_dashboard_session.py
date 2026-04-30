@@ -57,7 +57,7 @@ def _render_shape_row(
 
 def _render_hsv_body(
     detection_config: dict[str, object] | None,
-    presets: list[Preset] | None = None,
+    presets: list[Preset],
 ) -> str:
     """Phase 3 of unified-config redesign: single form, single Apply,
     identity header. The previous three-form / three-Apply layout is
@@ -75,7 +75,7 @@ def _render_hsv_body(
     sg = cfg.get("shape_gate") or {}
     preset_name = cfg.get("preset")
     modified_fields = cfg.get("modified_fields") or []
-    presets_by_name = {p.name: p for p in (presets or [])}
+    presets_by_name = {p.name: p for p in presets}
 
     h_lo, h_hi = int(hsv.get("h_min", 25)), int(hsv.get("h_max", 55))
     s_lo, s_hi = int(hsv.get("s_min", 90)), int(hsv.get("s_max", 255))
@@ -84,9 +84,22 @@ def _render_hsv_body(
     fill_min = float(sg.get("fill_min", 0.55))
 
     # Identity header ------------------------------------------------
+    # Four states:
+    #   custom       — preset is None
+    #   pure         — preset matches a known preset, no modifications
+    #   modified     — preset matches a known preset, but values differ
+    #   deleted      — preset name is set but the on-disk preset has
+    #                  been deleted (operator removed it via DELETE
+    #                  /presets/<name>). The next `set_detection_config`
+    #                  clears the dangling reference; until then the
+    #                  header signals the broken identity instead of
+    #                  silently dropping it.
     if preset_name is None:
         identity_label = "Custom"
         identity_class = "identity-custom"
+    elif preset_name not in presets_by_name:
+        identity_label = f"{preset_name} (preset deleted)"
+        identity_class = "identity-deleted"
     elif modified_fields:
         identity_label = f"{presets_by_name[preset_name].label} · modified ({len(modified_fields)})"
         identity_class = "identity-modified"
@@ -95,8 +108,13 @@ def _render_hsv_body(
         identity_class = "identity-pure"
 
     reset_btn = ""
-    if preset_name is not None and modified_fields:
-        # Only show reset when there's something to revert to.
+    if (
+        preset_name is not None
+        and preset_name in presets_by_name
+        and modified_fields
+    ):
+        # Only show reset when there's something to revert to. A
+        # dangling reference has no target → no reset affordance.
         reset_btn = (
             f'<button type="button" class="btn small" '
             f'data-detection-reset-preset="{html.escape(preset_name)}" '
@@ -124,7 +142,7 @@ def _render_hsv_body(
             f'data-fill-min="{p.shape_gate.fill_min:.2f}">'
             f'{html.escape(p.label)}</button>'
         )
-    preset_buttons = "".join(_preset_button(p) for p in (presets or []))
+    preset_buttons = "".join(_preset_button(p) for p in presets)
 
     # Sub-section markup --------------------------------------------
     hsv_block = (

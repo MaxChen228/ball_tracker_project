@@ -223,9 +223,9 @@ def render_viewer_html(
     health: dict,
     *,
     build_figure,
+    presets: list[Preset],
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
-    presets: list[Preset] | None = None,
 ) -> str:
     ctx = build_viewer_page_context(
         scene,
@@ -264,7 +264,7 @@ def render_viewer_html(
         preset_options = "".join(
             f'<option value="preset:{_html.escape(p.name)}">'
             f'Preset: {_html.escape(p.label)}</option>'
-            for p in (presets or [])
+            for p in presets
         )
         action_html = (
             f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post" class="action-form">'

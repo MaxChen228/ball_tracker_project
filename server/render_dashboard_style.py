@@ -201,6 +201,7 @@ _CSS = f"""
 .identity-modified {{ color: var(--ink); border-color: var(--ink);
     background: var(--surface); }}
 .identity-custom {{ color: var(--sub); border-color: var(--border-base); }}
+.identity-deleted {{ color: var(--danger, #c0392b); border-color: var(--danger, #c0392b); }}
 .detection-section {{ border-top: 1px solid var(--border-l); padding-top: var(--s-2);
     margin-top: var(--s-2); }}
 .detection-section:first-of-type {{ border-top: 0; padding-top: 0; margin-top: 0; }}
