@@ -38,6 +38,7 @@ from render_scene_theme import (
     _SURFACE,
 )
 from viewer_fragments import (
+    cam_view_shared_toolbar_html,
     failure_strip_html,
     health_nav_strip_html,
     session_tuning_strip_html,
@@ -210,14 +211,40 @@ _VIEWER_CAM_VIEW_OVERRIDES = (
 .vid-cell[data-cam-view] canvas[data-cam-canvas] {
   position: absolute; inset: 0; width: 100%; height: 100%; display: block;
 }
-.vid-cell[data-cam-view] .cam-view-toolbar {
-  margin-top: var(--s-2, 6px);
+.cam-view-shared-toolbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-bottom: var(--s-2, 6px);
   padding: 5px 8px;
   background: var(--surface, #FCFBFA);
   border: 1px solid var(--border-base, #DBD6CD);
   border-radius: var(--r, 4px);
-  flex-wrap: wrap;
 }
+.cam-view-shared-toolbar .cv-layer {
+  font: inherit; font-size: 9px; letter-spacing: 0.08em;
+  padding: 3px 8px; background: transparent;
+  color: var(--sub, #7a756c);
+  border: 1px solid var(--border-base, #DBD6CD); border-radius: 2px;
+  cursor: pointer; text-transform: uppercase;
+}
+.cam-view-shared-toolbar .cv-layer.on {
+  background: var(--ink, #2A2520); color: #F8F7F4;
+  border-color: var(--ink, #2A2520);
+}
+.cam-view-shared-toolbar .cv-path-group {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-base, #DBD6CD); border-radius: 3px;
+}
+.cam-view-shared-toolbar .cv-path-lbl {
+  font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--sub, #7a756c); font-weight: 500;
+}
+.cam-view-shared-toolbar .cv-opacity {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--sub, #7a756c);
+}
+.cam-view-shared-toolbar .cv-opacity input[type=range] { width: 80px; }
 """
 )
 
@@ -334,7 +361,7 @@ def render_viewer_html(
       </div>
     </div>
     <div class="col-resizer" id="col-resizer" role="separator" aria-orientation="vertical" aria-label="Resize 3D scene vs cameras" tabindex="0" title="Drag to resize"></div>
-    <div class="videos-col">{ctx.video_cells_html}</div>
+    <div class="videos-col">{cam_view_shared_toolbar_html()}{ctx.video_cells_html}</div>
   </div>
   <div class="timeline">
     <div class="tl-row">
@@ -355,7 +382,7 @@ def render_viewer_html(
             </span>
             <span class="layer-group" data-layer="fit">
               <label class="layer-checkbox">
-                <input type="checkbox" id="fit-toggle" checked>
+                <input type="checkbox" id="fit-layer-toggle" checked>
                 <span class="layer-name">Fit</span>
               </label>
             </span>

@@ -614,9 +614,9 @@ def test_viewer_page_uses_cam_view_with_detection_layers():
     # them or the operator gets two redundant toggles.
     assert 'data-layer="detection_live"' not in body
     assert 'data-layer="detection_svr"' not in body
-    # Path-grouped chips (LIVE: BLOBS ; SVR: BLOBS).
+    # Single shared BLOBS group with live+svr pills inside (v4: shared
+    # 2D toolbar replaced per-cam path groups).
     assert 'class="cv-path-group" data-path="live"' in body
-    assert 'class="cv-path-group" data-path="svr"' in body
     # Only the BLOBS layers are registered now.
     assert "registerLayer('detection_blobs_live'" in body
     assert "registerLayer('detection_blobs_svr'" in body
