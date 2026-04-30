@@ -220,7 +220,7 @@ _CSS = f"""
     border-bottom: 1px solid var(--border-l); }}
 .preset-table td {{ padding: 6px 8px; border-bottom: 1px solid var(--border-l); vertical-align: middle; }}
 .preset-table code {{ font-family: var(--mono); font-size: 11px; color: var(--ink); }}
-.preset-current-tag {{ font-family: var(--mono); font-size: 9px; color: var(--accent, var(--ink)); margin-left: 4px; }}
+.preset-current-tag {{ font-family: var(--mono); font-size: 9px; color: var(--accent); margin-left: 4px; }}
 .preset-actions {{ display: flex; gap: 4px; justify-content: flex-end; }}
 .preset-empty {{ color: var(--sub); padding: 12px; text-align: center; }}
 .detection-section {{ border-top: 1px solid var(--border-l); padding-top: var(--s-2);

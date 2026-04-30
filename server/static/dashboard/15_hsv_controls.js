@@ -176,7 +176,7 @@
     // a round-trip. The server is the source of truth.
     const raw = window.prompt(
       'Preset slug (filename, [a-z0-9_]{1,32}):',
-      suggestion || '',
+      suggestion,
     );
     if (raw === null) return null;
     return raw.trim();
@@ -299,6 +299,8 @@
     if (saveBtn) {
       saveBtn.addEventListener('click', () => _saveAsNew(form, status));
     }
+    // Both call sites pass a string (suggestion = '' for save-as-new,
+    // `${name}_copy` for duplicate); _slugFromPrompt forwards directly.
     const modal = document.getElementById('preset-manage-modal');
     const manageBtn = document.querySelector('[data-preset-manage]');
     if (manageBtn && modal && typeof modal.showModal === 'function') {

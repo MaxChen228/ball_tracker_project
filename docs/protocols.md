@@ -52,8 +52,8 @@ Pushed on connect, on every `hello` from the phone, and on every dashboard-drive
 type: "settings"
 camera_id: str                       # echo of the {cam} in the URL (server-side cross-check)
 paths: list[str]                     # default DetectionPath set for newly-armed sessions (always {"live"} post-Phase-1)
-hsv_range: {h_min,h_max,s_min,s_max,v_min,v_max}  # from data/hsv_range.json (POST /detection/hsv)
-shape_gate: {aspect_min, fill_min}   # from data/shape_gate.json (POST /detection/shape_gate)
+hsv_range: {h_min,h_max,s_min,s_max,v_min,v_max}  # from data/detection_config.json (POST /detection/config)
+shape_gate: {aspect_min, fill_min}   # from data/detection_config.json (POST /detection/config)
 chirp_detect_threshold: float        # matched-filter cutoff for legacy chirp-listener path; data/chirp_detect_threshold.json
 mutual_sync_threshold: float         # cutoff for the two-device mutual-sync coordinator; data/mutual_sync_threshold.json
 heartbeat_interval_s: float          # cadence iOS uses for upstream {type:"heartbeat"} (state.heartbeat_interval_s)
