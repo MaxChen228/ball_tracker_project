@@ -35,6 +35,10 @@
     const row = e.target.closest('.event-item[data-sid]');
     if (!row) return;
     const sid = row.dataset.sid;
+    const ev = (Array.isArray(currentEvents) ? currentEvents.find(x => x && x.session_id === sid) : null);
+    if (ev && Number(ev.n_triangulated || 0) <= 0) {
+      return;
+    }
     if (selectedTrajIds.has(sid)) {
       selectedTrajIds.delete(sid);
     } else {

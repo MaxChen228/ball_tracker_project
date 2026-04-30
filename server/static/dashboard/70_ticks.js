@@ -100,7 +100,8 @@
       const liveIds = new Set(events.map(e => e.session_id));
       let pruned = false;
       for (const sid of [...selectedTrajIds]) {
-        if (!liveIds.has(sid)) {
+        const ev = events.find(e => e.session_id === sid);
+        if (!liveIds.has(sid) || !ev || Number(ev.n_triangulated || 0) <= 0) {
           selectedTrajIds.delete(sid);
           trajCache.delete(sid);
           pruned = true;
@@ -108,5 +109,8 @@
       }
       if (pruned) { persistTrajSelection(); repaintCanvas(); }
       renderEvents(events);
+      if (selectedTrajIds.size && !canvasFirstPaintDone) {
+        repaintCanvas();
+      }
     } catch (e) { /* silent */ }
   }

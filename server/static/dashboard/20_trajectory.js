@@ -37,6 +37,13 @@
     return _PITCH_FIT_COLOR;
   }
 
+  function resultHasRenderableFit(result) {
+    if (!result) return false;
+    if (Array.isArray(result.segments) && result.segments.length) return true;
+    if (Array.isArray(result.points) && result.points.length) return true;
+    return false;
+  }
+
   async function ensureTrajLoaded(sid) {
     if (trajCache.has(sid)) return trajCache.get(sid);
     try {

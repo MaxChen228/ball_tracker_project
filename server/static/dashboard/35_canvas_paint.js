@@ -39,6 +39,17 @@
     await Promise.all([...selectedTrajIds].map(sid => ensureTrajLoaded(sid)));
     const sid = [...selectedTrajIds][0] || null;
     const result = sid ? trajCache.get(sid) : null;
+    if (sid && !resultHasRenderableFit(result)) {
+      selectedTrajIds.delete(sid);
+      persistTrajSelection();
+      layers.applyFit(null, null);
+      if (typeof renderEvents === 'function' && Array.isArray(currentEvents)) {
+        _lastEvKey = null;
+        renderEvents(currentEvents);
+      }
+      updateLatestPitchBadge();
+      return;
+    }
     layers.applyFit(sid, result);
     // Live session — pulls live trail + per-cam rays from the
     // `livePointStore` / `liveRayStore` maps that the WS frame
@@ -56,6 +67,13 @@
     canvasFirstPaintDone = true;
     updateLatestPitchBadge();
   }
+
+  // Expose a stable hook for the module-side scene boot script.
+  // `repaintCanvas` itself lives inside the dashboard IIFE, so a
+  // `type="module"` script cannot see it by lexical scope. The boot
+  // script calls this once after `setupDashboardLayers(...)` so a
+  // selection restored from localStorage is rehydrated immediately.
+  window.BallTrackerDashboardRepaint = repaintCanvas;
 
   // Refresh the speed badge overlay above the 3D canvas. Reads the
   // currently-selected sid's segments from `trajCache` and shows the

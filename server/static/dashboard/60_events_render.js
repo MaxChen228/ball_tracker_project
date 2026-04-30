@@ -34,6 +34,9 @@
     if (selectedTrajIds.has(e.session_id)) {
       cls.push('selected');
     }
+    if (Number(e.n_triangulated || 0) <= 0) {
+      cls.push('no-fit');
+    }
     return cls.join(' ');
   }
 
@@ -178,7 +181,7 @@
     // on action <form>s in row 3) are stopPropagation'd in 40_traj_handlers
     // so they don't double as a row click.
     return `
-      <div class="ev-row1">
+      <div class="ev-row1" title="${hasTraj ? 'Load fit into dashboard 3D scene' : 'No renderable fit for dashboard 3D'}">
         ${swatch}
         <span class="ev-time">${hm}</span>
         <span class="ev-sid">${sid}</span>
@@ -308,4 +311,3 @@
       _eventDayCache.delete(day);
     }
   }
-

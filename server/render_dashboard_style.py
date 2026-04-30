@@ -528,12 +528,23 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
    link and any in-row form/button escape the row click. */
 .event-item {{ padding: 8px var(--s-1);
                border-top: 1px solid var(--border-l);
-               transition: background 0.12s ease; min-width: 0;
+               transition: background 0.12s ease, border-color 0.12s ease,
+                           box-shadow 0.12s ease, transform 0.12s ease;
+               min-width: 0;
                cursor: pointer; }}
 .event-day-body > .event-item:first-child {{ border-top: 0; }}
 .event-item:hover {{ background: var(--surface-hover); }}
-.event-item.selected {{ background: var(--surface-2); }}
-.event-item.selected:hover {{ background: var(--surface-hover); }}
+.event-item.selected {{
+  background: rgba(192, 57, 43, 0.08);
+  border-left: 3px solid var(--accent, #C0392B);
+  padding-left: calc(var(--s-1) - 3px);
+  box-shadow: inset 0 0 0 1px rgba(192, 57, 43, 0.18);
+}}
+.event-item.selected:hover {{
+  background: rgba(192, 57, 43, 0.12);
+}}
+.event-item.no-fit {{ opacity: 0.72; }}
+.event-item.no-fit .ev-row1 {{ cursor: default; }}
 
 .ev-row1, .ev-row2, .ev-row3 {{ display: flex; align-items: center;
                                 gap: 8px; min-width: 0; flex-wrap: wrap;
@@ -566,6 +577,8 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                  background: transparent; }}
 .swatch-empty {{ border-color: rgba(0,0,0,0.18); opacity: 0.45; }}
 .swatch.selected {{ background: var(--accent, #C0392B); }}
+.event-item.selected .ev-sid {{ color: var(--ink); font-weight: 600; }}
+.event-item.selected .ev-time {{ color: var(--accent, #C0392B); }}
 
 .ev-statuses {{ display: flex; gap: 4px; flex: 0 0 auto;
                 justify-content: flex-end; }}
