@@ -479,11 +479,15 @@ class ViewerLayers {
 
   // Switch the global PATH (live / server_post). Every visible layer is
   // re-driven from the new data source; ground projection follows rays.
+  // No same-path early-return: the IIFE's `layerVisibility` map is the
+  // SAME object reference as `this.layerVisibility`, so a caller pre-
+  // writing the field (legacy pattern) would make the guard fire and
+  // skip the rebuild. Caller-side dedup belongs in the click handler,
+  // not here. Idempotent rebuild is cheap.
   setPath(path) {
     if (path !== "live" && path !== "server_post") {
       throw new Error(`setPath: invalid path '${path}'`);
     }
-    if (this.layerVisibility.path === path) return;
     this.layerVisibility.path = path;
     this._applyGroundVisibility();
     this._rebuildDynamic();

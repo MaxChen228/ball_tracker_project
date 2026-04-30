@@ -11,6 +11,7 @@ from detection_config import (
     to_dict as _detection_config_to_dict,
 )
 from schemas import TrackingExposureCapMode
+from strike_zone import strike_zone_geometry_for_height
 
 router = APIRouter()
 
@@ -367,3 +368,30 @@ async def settings_capture_height(request: Request):
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "value": applied}
+
+
+@router.post("/settings/strike_zone")
+async def settings_strike_zone(request: Request):
+    from main import state, _wants_html
+
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json()
+        height_raw = body.get("height_cm")
+    else:
+        form = await request.form()
+        height_raw = form.get("height_cm")
+    if height_raw is None:
+        raise HTTPException(status_code=400, detail="missing 'height_cm'")
+    try:
+        height_cm = int(height_raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid 'height_cm'")
+    try:
+        applied = state.set_batter_height_cm(height_cm)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    strike_zone = strike_zone_geometry_for_height(applied).to_dict()
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    return {"ok": True, "strike_zone": strike_zone}

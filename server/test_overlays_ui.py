@@ -90,6 +90,7 @@ def test_viewer_injects_overlays_runtime():
     r = client.get(f"/viewer/{session_id}")
     assert r.status_code == 200
     assert_overlays_present(r.text)
+    assert '"batter_height_cm": 175' in r.text
 
 
 def test_viewer_overlay_controls_in_layer_toggles():
@@ -117,6 +118,20 @@ def test_viewer_overlay_controls_in_layer_toggles():
     assert 'id="speed-bars"' not in body
 
 
+def test_viewer_scene_uses_current_strike_zone_setting(tmp_path, monkeypatch):
+    import numpy as np
+    from conftest import sid
+    from test_viewer import _make_rig, _pitch, _record_pitch
+
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    main.state.set_batter_height_cm(190)
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(99003)
+    _record_pitch(_pitch("A", 99003, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    body = TestClient(app).get(f"/viewer/{session_id}").text
+    assert '"batter_height_cm": 190' in body
+
+
 def test_dashboard_overlay_controls_present():
     """Dashboard's overlay control surface keeps the strike-zone toggle.
     Fit / Speed / svr-live source pills are gone."""
@@ -127,3 +142,13 @@ def test_dashboard_overlay_controls_present():
     assert 'id="dash-speed-toggle"' not in body
     assert 'id="dash-src-svr"' not in body
     assert 'id="dash-src-live"' not in body
+
+
+def test_dashboard_strike_zone_card_present():
+    main.state.reset()
+    body = TestClient(app).get("/").text
+    assert 'data-collapsible-key="dash:card:strike-zone"' in body
+    assert 'data-strike-zone-form' in body
+    assert 'data-strike-zone-range' in body
+    assert 'data-strike-zone-number' in body
+    assert 'data-strike-zone-apply' in body

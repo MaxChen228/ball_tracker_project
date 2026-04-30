@@ -12,6 +12,10 @@ from schemas import (
     _DEFAULT_PATHS,
     _DEFAULT_TRACKING_EXPOSURE_CAP_MODE,
 )
+from strike_zone import (
+    DEFAULT_BATTER_HEIGHT_CM,
+    validate_batter_height_cm,
+)
 
 logger = logging.getLogger("ball_tracker")
 
@@ -57,6 +61,7 @@ class RuntimeSettingsStore:
         self.sync_params: SyncParams = SyncParams()
         self.tracking_exposure_cap: TrackingExposureCapMode = _DEFAULT_TRACKING_EXPOSURE_CAP_MODE
         self.capture_height_px: int = 1080
+        self.batter_height_cm: int = DEFAULT_BATTER_HEIGHT_CM
         self.load()
 
     def load(self) -> None:
@@ -85,6 +90,14 @@ class RuntimeSettingsStore:
                 self.tracking_exposure_cap = TrackingExposureCapMode(tec)
             except ValueError:
                 pass
+        sz = obj.get("strike_zone")
+        if isinstance(sz, dict):
+            raw_height = sz.get("batter_height_cm")
+            if isinstance(raw_height, int):
+                try:
+                    self.batter_height_cm = validate_batter_height_cm(raw_height)
+                except ValueError:
+                    pass
         paths = obj.get("default_paths")
         if isinstance(paths, list):
             parsed: set[DetectionPath] = set()
@@ -114,6 +127,9 @@ class RuntimeSettingsStore:
                 "heartbeat_interval_s": self.heartbeat_interval_s,
                 "capture_height_px": self.capture_height_px,
                 "tracking_exposure_cap": self.tracking_exposure_cap.value,
+                "strike_zone": {
+                    "batter_height_cm": self.batter_height_cm,
+                },
                 "default_paths": sorted(p.value for p in self.default_paths),
             },
             indent=2,
@@ -165,6 +181,11 @@ class RuntimeSettingsStore:
         self.tracking_exposure_cap = mode
         self.persist()
         return mode
+
+    def set_batter_height_cm(self, value: int) -> int:
+        self.batter_height_cm = validate_batter_height_cm(value)
+        self.persist()
+        return self.batter_height_cm
 
     def _validated_threshold(self, value: float) -> float:
         if not isinstance(value, (int, float)):

@@ -26,6 +26,7 @@
         known_marker_ids: currentKnownMarkerIds,
       });
       renderSession(s);
+      if (typeof renderStrikeZone === 'function') renderStrikeZone(s);
     } catch (e) { /* silent retry next tick */ }
   }
 

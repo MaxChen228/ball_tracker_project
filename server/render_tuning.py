@@ -106,3 +106,41 @@ def _render_tuning_body(
             for _ in (0,)
         )
     )
+
+
+def _render_strike_zone_body(strike_zone: dict | None) -> str:
+    zone = strike_zone or {}
+    height_cm = int(zone.get("batter_height_cm", 175))
+    z_bottom_m = float(zone.get("z_bottom_m", 0.46))
+    z_top_m = float(zone.get("z_top_m", 1.06))
+    z_height_m = float(zone.get("z_height_m", z_top_m - z_bottom_m))
+    width_m = float(zone.get("x_half_m", 0.216)) * 2.0
+    depth_m = float(zone.get("y_back_m", 0.432)) - float(zone.get("y_front_m", 0.0))
+    return (
+        '<form class="strike-zone-form" id="strike-zone-form" data-strike-zone-form>'
+        '<div class="tuning-row">'
+        '<span class="tuning-label">Batter height</span>'
+        f'<input type="range" min="120" max="220" step="1" value="{height_cm}" '
+        'name="height_cm" data-strike-zone-range>'
+        f'<input type="number" min="120" max="220" step="1" value="{height_cm}" '
+        'name="height_cm" data-strike-zone-number>'
+        '<span class="tuning-unit">cm</span>'
+        '</div>'
+        '<div class="strike-zone-summary" data-strike-zone-summary>'
+        '<div class="strike-zone-summary-row">'
+        f'<span><span class="k">Bottom</span><span class="v" data-strike-zone-bottom>{z_bottom_m:.3f} m</span></span>'
+        f'<span><span class="k">Top</span><span class="v" data-strike-zone-top>{z_top_m:.3f} m</span></span>'
+        f'<span><span class="k">Height</span><span class="v" data-strike-zone-height>{z_height_m:.3f} m</span></span>'
+        '</div>'
+        '<div class="strike-zone-summary-row">'
+        f'<span><span class="k">Width</span><span class="v" data-strike-zone-width>{width_m:.3f} m</span></span>'
+        f'<span><span class="k">Depth</span><span class="v" data-strike-zone-depth>{depth_m:.3f} m</span></span>'
+        '</div>'
+        '</div>'
+        '<div class="strike-zone-note">Single-height proxy for 3D display only; not per-batter biomechanical measurement.</div>'
+        '<div class="hsv-actions">'
+        '<button class="btn" type="submit" data-strike-zone-apply>Apply strike zone</button>'
+        '<span class="detection-apply-status" data-strike-zone-status></span>'
+        '</div>'
+        '</form>'
+    )

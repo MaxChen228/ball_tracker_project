@@ -265,6 +265,15 @@ def test_runtime_settings_restored_from_disk_on_state_init(tmp_path):
     assert s.chirp_detect_threshold() == pytest.approx(0.42)
     assert s.heartbeat_interval_s() == pytest.approx(7.5)
     assert s.tracking_exposure_cap().value == "shutter_1000"
+    assert s.batter_height_cm() == 175
+
+    (tmp_path / "runtime_settings.json").write_text(
+        _json.dumps({
+            "strike_zone": {"batter_height_cm": 190},
+        })
+    )
+    s_zone = main.State(data_dir=tmp_path)
+    assert s_zone.batter_height_cm() == 190
 
     # Out-of-range values on disk are ignored, defaults retained.
     (tmp_path / "runtime_settings.json").write_text(
@@ -273,6 +282,54 @@ def test_runtime_settings_restored_from_disk_on_state_init(tmp_path):
     s2 = main.State(data_dir=tmp_path)
     assert s2.chirp_detect_threshold() == pytest.approx(0.18)
     assert s2.heartbeat_interval_s() == pytest.approx(1.0)
+
+
+def test_strike_zone_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+
+    r = client.get("/status")
+    assert r.status_code == 200
+    assert r.json()["strike_zone"]["batter_height_cm"] == 175
+    assert r.json()["strike_zone"]["z_bottom_m"] == pytest.approx(0.46)
+    assert r.json()["strike_zone"]["z_top_m"] == pytest.approx(1.06)
+
+    r = client.post("/settings/strike_zone", json={"height_cm": 190})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["strike_zone"]["batter_height_cm"] == 190
+    assert body["strike_zone"]["z_bottom_m"] == pytest.approx(0.46 * 190 / 175)
+    assert body["strike_zone"]["z_top_m"] == pytest.approx(1.06 * 190 / 175)
+
+    status = client.get("/status").json()["strike_zone"]
+    assert status["batter_height_cm"] == 190
+    assert status["z_height_m"] == pytest.approx(status["z_top_m"] - status["z_bottom_m"])
+
+    r = client.post(
+        "/settings/strike_zone",
+        data={"height_cm": "180"},
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert main.state.batter_height_cm() == 180
+
+    persisted = _json.loads((tmp_path / "runtime_settings.json").read_text())
+    assert persisted["strike_zone"]["batter_height_cm"] == 180
+
+
+def test_strike_zone_rejects_invalid_height(tmp_path, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+    for bad in (0, 119, 221, 999):
+        r = client.post("/settings/strike_zone", json={"height_cm": bad})
+        assert r.status_code == 400, f"expected 400 for {bad}"
+    assert main.state.batter_height_cm() == 175
+    with pytest.raises(ValueError):
+        main.state.set_batter_height_cm(119)
 
 
 # ---------------------------- Phase 4a · live preview -------------------------

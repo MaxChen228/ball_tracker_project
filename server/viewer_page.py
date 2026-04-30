@@ -297,6 +297,7 @@ def render_viewer_html(
     videos: list[tuple[str, str, float, float, dict[str, list]]],
     health: dict,
     *,
+    strike_zone: dict | None = None,
     presets: list[Preset],
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
@@ -367,7 +368,10 @@ def render_viewer_html(
     # viewer-specific layers. Polled mount with bounded retry (matches
     # dashboard) so a WebGL failure surfaces instead of hanging.
     from scene_runtime import scene_runtime_html as _scene_runtime_html
-    scene_runtime_fragment = _scene_runtime_html(container_id="scene")
+    scene_runtime_fragment = _scene_runtime_html(
+        container_id="scene",
+        strike_zone=strike_zone,
+    )
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><title>Session {scene.session_id}</title>

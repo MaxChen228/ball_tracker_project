@@ -479,6 +479,7 @@ def _build_status_response() -> dict[str, Any]:
         # currently-applied value — only while in .standby so an armed clip
         # is never disrupted mid-recording.
         "capture_height_px": state.capture_height_px(),
+        "strike_zone": state.strike_zone().to_dict(),
         # Per-camera live-preview request flags (Phase 4a). Dashboard
         # renders a toggle per Devices row from this map; iPhones read
         # their own flag off the WS settings payload (separate sibling field,
@@ -687,6 +688,7 @@ def events_index() -> HTMLResponse:
             heartbeat_interval_s=state.heartbeat_interval_s(),
             tracking_exposure_cap=state.tracking_exposure_cap().value,
             capture_height_px=state.capture_height_px(),
+            strike_zone=state.strike_zone().to_dict(),
             calibration_last_ts={
                 cam: p.stat().st_mtime
                 for cam in state.calibrations().keys()
