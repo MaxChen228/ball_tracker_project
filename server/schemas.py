@@ -70,11 +70,7 @@ class BlobCandidate(BaseModel):
     slider can filter cheap distractors. `area_score` is
     area / max_area_in_batch on the producing side; kept for the
     viewer's BLOBS overlay sort fallback."""
-    # Old JSONs written before aspect/fill persistence omit those fields;
-    # tolerate on load. New code paths always populate them.
-    # TODO: drop extra="ignore" once historical pitches/*.json are
-    # all rewritten by reprocess_sessions.
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
     px: float
     py: float
     area: int
@@ -97,12 +93,7 @@ class FramePayload(BaseModel):
     contract any more — the iPhone uploads only the MOV + metadata; server
     synthesises one `FramePayload` per decoded video frame. px/py come from
     server detection; triangulation uses the pixel+distortion path."""
-    # Persisted JSONs from before chain_filter was removed carry the
-    # `filter_status` field on every frame. Tolerate it on load.
-    # TODO: drop this once all `server/data/pitches/*.json` have been
-    # rewritten on next live ingest. Same transitional exception as the
-    # SessionResult one.
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
     frame_index: int
     timestamp_s: float
     px: float | None = None
@@ -236,11 +227,7 @@ class PitchPayload(BaseModel):
 
 
 class TriangulatedPoint(BaseModel):
-    # Persisted JSONs from before the multi-candidate fan-out landed don't
-    # carry the source candidate indices. Tolerate them on load — viewer's
-    # cost-threshold preview falls back to "no client-side filter possible"
-    # for legacy points (still server-recomputable via /sessions/{sid}/recompute).
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
     t_rel_s: float
     x_m: float
     y_m: float
@@ -259,15 +246,7 @@ class SessionResult(BaseModel):
     """One armed-session's triangulation result. Replaces the old
     `CycleResult` now that "cycle" is a per-device recording-window concept
     and the pitch unit is server-level "session"."""
-    # Persisted JSONs from before the multi-segment fit migration carry
-    # `ballistic_by_path` / `ballistic_live` / `ballistic_server_post` /
-    # `peak_z_m` / `ballistic_speed_mph`. Tolerate them on load — a single
-    # rebuild of the session strips them on next write.
-    # TODO: drop this once all `server/data/results/session_*.json` have
-    # been rewritten via `rebuild_result_for_session`. CLAUDE.md forbids
-    # backwards-compat in experimental phase; this is the explicit
-    # transitional exception.
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
     session_id: str
     camera_a_received: bool
     camera_b_received: bool
