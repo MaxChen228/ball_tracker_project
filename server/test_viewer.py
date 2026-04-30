@@ -1055,9 +1055,11 @@ def test_viewer_pending_overlay_idle_session_hidden():
     main.state.save_clip("A", session_id, b"clip", "mov")
 
     body = TestClient(app).get(f"/viewer/{session_id}").text
-    assert 'id="scene-pending-overlay"' in body
-    # Idle → hidden attribute present.
-    assert 'id="scene-pending-overlay" hidden' in body or 'id="scene-pending-overlay"\n           hidden' in body
+    overlay_start = body.index('id="scene-pending-overlay"')
+    overlay_chunk = body[overlay_start:overlay_start + 200]
+    # Idle → `hidden` attribute present on the overlay element.
+    assert " hidden" in overlay_chunk
+    assert 'role="status"' in overlay_chunk
     assert "Decoding MOV" in body
     # SSE wiring is present (server_post_progress / server_post_done).
     assert "server_post_progress" in body

@@ -211,6 +211,33 @@ def build_viewer_page_context(
     )
 
 
+def _pending_overlay_html(processing_state: str | None) -> str:
+    """Server-detection pending overlay. Pre-seeded visible when the
+    operator opens the viewer mid-decode (state.processing.session_summary
+    returned 'queued' / 'processing'); the SSE handler in the inline
+    `<script>` block keeps it in sync afterwards."""
+    visible = processing_state in ("queued", "processing")
+    hidden_attr = "" if visible else " hidden"
+    title = (
+        "Queued — server detection"
+        if processing_state == "queued"
+        else "Decoding MOV…"
+    )
+    counts_seed = (
+        "waiting for first frame…"
+        if processing_state == "processing"
+        else ""
+    )
+    return (
+        f'<div class="scene-pending-overlay" id="scene-pending-overlay"'
+        f'{hidden_attr} role="status" aria-live="polite">'
+        f'<div class="spo-title">{title}</div>'
+        f'<div class="spo-counts" id="scene-pending-counts">{counts_seed}</div>'
+        f'<div class="spo-hint">Server detection running. Page will refresh on completion.</div>'
+        f'</div>'
+    )
+
+
 # Phase 6: viewer's vid-cell uses cam-view via data-cam-view (no
 # .cam-view class — viewer owns its own video + cell layout). These
 # rules glue the runtime canvas onto the existing .vid-media and
@@ -370,13 +397,7 @@ def render_viewer_html(
         <span class="lpb-meta" id="viewer-lpb-meta"></span>
       </div>
       <div id="scene"></div>
-      <div class="scene-pending-overlay" id="scene-pending-overlay"
-           {"" if ctx.processing_state in ("queued", "processing") else "hidden"}
-           role="status" aria-live="polite">
-        <div class="spo-title">{("Queued — server detection" if ctx.processing_state == "queued" else "Decoding MOV…")}</div>
-        <div class="spo-counts" id="scene-pending-counts">{"waiting for first frame…" if ctx.processing_state == "processing" else ""}</div>
-        <div class="spo-hint">Server detection running. Page will refresh on completion.</div>
-      </div>
+      {_pending_overlay_html(ctx.processing_state)}
       {view_presets_toolbar_html()}
       <div class="scene-toolbar" role="toolbar" aria-label="Scene controls">
         <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
