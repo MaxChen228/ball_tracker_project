@@ -1043,6 +1043,38 @@ class State:
                 return
             self.results[sid] = result
 
+    def stamp_server_post_preset_name(
+        self, session_id: str, preset_name: str
+    ) -> SessionResult:
+        """Set `result.server_post_preset_name = preset_name` on the
+        in-memory SessionResult and persist. Called from
+        `_run_server_detection` after each cam's detection completes;
+        both cams of a session always run with the same preset choice
+        (the request body locks it), so last-writer-wins is a no-op.
+
+        Raises KeyError if the session has no result yet — the caller
+        always invokes this after `state.record(pitch)` returned a
+        rebuilt result, so this would only fire on a delete-during-write
+        race; treat as a no-op to match `record`'s "session deleted"
+        guards.
+        """
+        with self._lock:
+            existing = self.results.get(session_id)
+        if existing is None:
+            logger.info(
+                "stamp_server_post_preset_name: session %s missing — likely "
+                "deleted during server_post run; skipping",
+                session_id,
+            )
+            return SessionResult(
+                session_id=session_id,
+                camera_a_received=False,
+                camera_b_received=False,
+            )
+        updated = existing.model_copy(update={"server_post_preset_name": preset_name})
+        self.store_result(updated)
+        return updated
+
     def pitches_for_session(self, session_id: str) -> dict[str, PitchPayload]:
         """Snapshot of all pitches currently stored for `session_id`, keyed
         by camera_id. Returns an empty dict if the session has not been

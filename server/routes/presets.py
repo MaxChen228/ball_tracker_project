@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from detection import HSVRange, ShapeGate
+from detection_config import DetectionConfig
 from presets import Preset, validate_slug
 
 router = APIRouter()
@@ -160,51 +161,105 @@ def presets_get(name: str) -> dict[str, Any]:
 
 @router.post("/presets")
 async def presets_create(request: Request) -> dict[str, Any]:
-    """Create a new preset. 409 if a preset with that slug already
-    exists (use PUT to overwrite). Body fields all required."""
-    from main import state
+    """Create a new preset and atomically switch the live detection
+    config to it. 409 if a preset with that slug already exists — preset
+    files are immutable by name in the new model (the dashboard's Apply
+    button = "Save as new"); rename if you want to update.
+
+    Side effect: on success, the active `detection_config.preset` is
+    set to the newly-saved name and the WS settings broadcast goes out
+    so iOS sees the new HSV/shape_gate immediately. Body fields all
+    required."""
+    from main import state, device_ws, _settings_message_for
 
     body = await request.json()
     preset = _read_preset_body(body, name_from_url=None)
     if state.preset_exists(preset.name):
         raise HTTPException(
             status_code=409,
-            detail=f"preset already exists: {preset.name!r} (use PUT to overwrite)",
+            detail=(
+                f"preset already exists: {preset.name!r} — preset filenames "
+                f"are immutable; choose a different name or delete the "
+                f"existing one first"
+            ),
         )
     state.save_preset(preset)
+    cfg = DetectionConfig(
+        hsv=preset.hsv,
+        shape_gate=preset.shape_gate,
+        preset=preset.name,
+        last_applied_at=None,
+    )
+    state.set_detection_config(cfg)
+    await device_ws.broadcast(
+        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
+    )
     return _preset_to_wire(preset)
 
 
-@router.put("/presets/{name}")
-async def presets_replace(name: str, request: Request) -> dict[str, Any]:
-    """Overwrite an existing preset. Slug comes from URL; `name` in body
-    is optional but if present must match. PUT must target an existing
-    preset (404 if missing) — creation goes through POST so the
-    operator can never accidentally upsert under the wrong slug."""
-    from main import state
+@router.post("/presets/active")
+async def presets_set_active(request: Request) -> dict[str, Any]:
+    """Pure switch of the active preset — no file write. Loads the
+    named preset's HSV+shape_gate from disk and snaps the live
+    `DetectionConfig` to it, then broadcasts WS settings to every
+    online camera. Used by the dashboard preset dropdown when the
+    operator switches between already-saved presets without touching
+    the sliders.
 
-    if not state.preset_exists(name):
+    Body (JSON or form): `name` — required, must be an existing slug
+    on disk. 404 on unknown name."""
+    from main import state, device_ws, _settings_message_for
+
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json() if await request.body() else {}
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="body must be a JSON object")
+        name = body.get("name")
+    else:
+        form = await request.form()
+        name = form.get("name")
+    if not isinstance(name, str) or not name:
+        raise HTTPException(status_code=400, detail="missing required field 'name'")
+    try:
+        p = state.load_preset(name)
+    except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown preset: {name!r}")
-    body = await request.json()
-    preset = _read_preset_body(body, name_from_url=name)
-    state.save_preset(preset)
-    return _preset_to_wire(preset)
+    cfg = DetectionConfig(
+        hsv=p.hsv,
+        shape_gate=p.shape_gate,
+        preset=name,
+        last_applied_at=None,
+    )
+    state.set_detection_config(cfg)
+    await device_ws.broadcast(
+        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
+    )
+    return {"ok": True, "active": name}
 
 
 @router.delete("/presets/{name}")
 def presets_delete(name: str) -> dict[str, Any]:
-    """Unlink a preset file. Returns 404 if the preset doesn't exist.
+    """Unlink a preset file. Returns 404 if the preset doesn't exist;
+    409 if the preset is currently the active one (operator must switch
+    active to a different preset first via `POST /presets/active`).
     Built-in seeds (tennis, blue_ball) are deletable — restart will
     re-seed any built-in whose file is missing.
 
-    A preset that is currently bound as the live `detection_config.json`
-    `preset` field becomes a dangling reference; the dashboard surfaces
-    that state visually and the next `set_detection_config` clears it.
-    No server-side cascade — keeping the in-memory `preset` string
-    untouched preserves operator intent ("I last claimed blue_ball")
-    until they explicitly Apply a new config.
+    Sessions whose `live_preset_name` / `server_post_preset_name`
+    references the deleted preset render the chip with a "(deleted)"
+    suffix at the dashboard / viewer; the underlying detection results
+    on disk are untouched.
     """
     from main import state
+    if state.detection_config().preset == name:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"preset {name!r} is currently active — switch active to "
+                f"another preset first via POST /presets/active"
+            ),
+        )
     try:
         state.delete_preset(name)
     except KeyError:

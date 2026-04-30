@@ -264,6 +264,7 @@ async def _run_server_detection(
     *,
     hsv_range: "HSVRange",
     shape_gate: "ShapeGate",
+    preset_name: str,
 ) -> None:
     """Background task: decode the MOV, run HSV detection, annotate, then
     re-record the pitch so `result.points` (and the annotated MP4) land on
@@ -271,12 +272,12 @@ async def _run_server_detection(
     session + on-device points immediately, and this task backfills the
     server-side trace 8-20 s later.
 
-    The detection config pair (`hsv_range` / `shape_gate`) is resolved by
-    the caller (`_enqueue_server_post`) from `state.hsv_range()` /
-    `state.shape_gate()` — the dashboard's single source of truth — so
-    this background task never re-reads `state` mid-run. The pair is
-    captured at request time so a concurrent dashboard slider edit can't
-    contaminate an already-queued reprocess.
+    The detection config pair (`hsv_range` / `shape_gate`) and its
+    `preset_name` identity are resolved by the caller
+    (`_enqueue_server_post`) by loading the operator-chosen preset file
+    at request time — this background task never re-reads state mid-run.
+    `preset_name` is stamped onto `SessionResult.server_post_preset_name`
+    after detection completes.
     """
     import main as _main
     state = _main.state
@@ -432,6 +433,13 @@ async def _run_server_detection(
             sid, cam, exc,
         )
         return
+    # Stamp the preset name onto the just-rebuilt SessionResult. Both
+    # cams of a given session run with the same preset_name (the request
+    # body locks it for both), so last-writer-wins on this field is a
+    # no-op idempotent overwrite.
+    result = await asyncio.to_thread(
+        state.stamp_server_post_preset_name, sid, preset_name
+    )
 
     ball = sum(1 for f in frames if f.ball_detected)
     logger.info(

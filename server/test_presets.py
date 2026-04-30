@@ -77,14 +77,28 @@ def test_create_preset_persists_to_disk(tmp_path, monkeypatch):
 
 
 def test_create_preset_rejects_duplicate_name(tmp_path, monkeypatch):
-    """Built-in `tennis` already exists at boot — create must 409,
-    not silently overwrite. Use PUT to overwrite."""
+    """Built-in `tennis` already exists at boot — create must 409, not
+    silently overwrite. Preset filenames are immutable in the new
+    model; operator must pick a fresh name to save tweaked values."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
     body = {**_BODY_VALID, "name": "tennis"}
     r = client.post("/presets", json=body)
     assert r.status_code == 409, r.text
-    assert "already exists" in r.json()["detail"]
+    assert "immutable" in r.json()["detail"]
+
+
+def test_create_preset_switches_active_to_new(tmp_path, monkeypatch):
+    """`POST /presets` is the dashboard Apply path: save + auto-switch.
+    The newly-created preset becomes the active one so the operator
+    sees their just-applied values bound by name on the next render."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    # Default boot active is `tennis` — confirm before swap.
+    assert main.state.detection_config().preset == "tennis"
+    r = client.post("/presets", json=_BODY_VALID)
+    assert r.status_code == 200, r.text
+    assert main.state.detection_config().preset == "indoor_overcast"
 
 
 def test_create_preset_rejects_invalid_slug(tmp_path, monkeypatch):
@@ -119,49 +133,39 @@ def test_create_preset_rejects_invalid_hsv_bounds(tmp_path, monkeypatch):
     assert "h_min" in r.json()["detail"]
 
 
-# ----- replace (PUT) -------------------------------------------------
+# ----- set active ----------------------------------------------------
 
 
-def test_put_preset_overwrites_existing(tmp_path, monkeypatch):
+def test_set_active_preset_switches_without_writing(tmp_path, monkeypatch):
+    """Pure switch: `POST /presets/active` only loads the preset's
+    values and binds the live `DetectionConfig` to it. No new file is
+    written — the dashboard preset dropdown calls this when the
+    operator selects an existing preset."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    body = {
-        "label": "Tennis (relabeled)",
-        "hsv": {"h_min": 30, "h_max": 60, "s_min": 100, "s_max": 255, "v_min": 100, "v_max": 255},
-        "shape_gate": {"aspect_min": 0.65, "fill_min": 0.55},
-    }
-    r = client.put("/presets/tennis", json=body)
+    assert main.state.detection_config().preset == "tennis"
+    r = client.post("/presets/active", json={"name": "blue_ball"})
     assert r.status_code == 200, r.text
-    assert r.json()["label"] == "Tennis (relabeled)"
-    # GET reflects the change.
-    r = client.get("/presets/tennis")
-    assert r.json()["hsv"]["h_min"] == 30
+    assert r.json() == {"ok": True, "active": "blue_ball"}
+    assert main.state.detection_config().preset == "blue_ball"
+    # Sliders snap to blue_ball's values.
+    bb = main.state.load_preset("blue_ball")
+    assert main.state.hsv_range() == bb.hsv
+    assert main.state.shape_gate() == bb.shape_gate
 
 
-def test_put_preset_404_when_missing(tmp_path, monkeypatch):
+def test_set_active_preset_rejects_unknown_name(tmp_path, monkeypatch):
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    body = {
-        "label": "ghost",
-        "hsv": {"h_min": 0, "h_max": 1, "s_min": 0, "s_max": 1, "v_min": 0, "v_max": 1},
-        "shape_gate": {"aspect_min": 0.0, "fill_min": 0.0},
-    }
-    r = client.put("/presets/no_such", json=body)
+    r = client.post("/presets/active", json={"name": "no_such"})
     assert r.status_code == 404, r.text
 
 
-def test_put_preset_rejects_body_name_disagreement(tmp_path, monkeypatch):
+def test_set_active_preset_rejects_missing_name(tmp_path, monkeypatch):
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    body = {
-        "name": "blue_ball",  # disagrees with URL
-        "label": "Tennis",
-        "hsv": {"h_min": 25, "h_max": 55, "s_min": 90, "s_max": 255, "v_min": 90, "v_max": 255},
-        "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
-    }
-    r = client.put("/presets/tennis", json=body)
+    r = client.post("/presets/active", json={})
     assert r.status_code == 400, r.text
-    assert "URL is canonical" in r.json()["detail"]
 
 
 # ----- delete --------------------------------------------------------
@@ -182,6 +186,26 @@ def test_delete_unknown_preset_returns_404(tmp_path, monkeypatch):
     client = TestClient(main.app)
     r = client.delete("/presets/no_such")
     assert r.status_code == 404
+
+
+def test_delete_active_preset_returns_409(tmp_path, monkeypatch):
+    """Active preset can never be left dangling at the route layer —
+    operator must switch active first via POST /presets/active. The
+    state-level `delete_preset` accepts the unlink (used by the
+    dangling-reference renderer test) but the HTTP route enforces the
+    invariant."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    # Default active is `tennis`.
+    assert main.state.detection_config().preset == "tennis"
+    r = client.delete("/presets/tennis")
+    assert r.status_code == 409, r.text
+    assert "currently active" in r.json()["detail"]
+    # Switching active first releases the lock.
+    r = client.post("/presets/active", json={"name": "blue_ball"})
+    assert r.status_code == 200, r.text
+    r = client.delete("/presets/tennis")
+    assert r.status_code == 200, r.text
 
 
 # ----- dangling preset reference in dashboard -----------------------

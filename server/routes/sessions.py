@@ -14,11 +14,11 @@ router = APIRouter()
 _SESSION_ID_RE = re.compile(r"^s_[0-9a-f]{4,32}$")
 
 
-# Detection config has a single source of truth: the dashboard's current
-# HSV + shape_gate (state.hsv_range() / state.shape_gate()). Both pipelines
-# (iOS live, server_post) read from it. There is no per-pitch "frozen
-# replay" or "preset substitute" path on this endpoint — operators switch
-# preset / hand-tune via the dashboard HSV card and rerun.
+# `run_server_post` now picks a preset by name from the request body.
+# This is the single mechanism for "re-detect this session under config
+# X": operator chooses an on-disk preset, server loads it, detect runs.
+# There is no implicit "use whatever the dashboard slider currently
+# shows" — Live and server_post detection are independent choices.
 
 
 @router.post("/sessions/arm")
@@ -170,12 +170,17 @@ async def sessions_run_server_post(
     background_tasks: BackgroundTasks,
 ):
     """Operator-triggered: run server-side HSV detection against every
-    camera's archived MOV for this session, using the dashboard's current
-    HSV + shape_gate. Replaces the old "arm with server_post checked"
-    auto-flow now that MOVs are always recorded and the detection cost is
-    paid only when the operator asks for it.
+    camera's archived MOV for this session, using the named preset from
+    the request body.
 
-    No body required — config is always read from `state` at request time.
+    Body (JSON or form): `preset_name` — required, must be an existing
+    preset slug under `data/presets/`. The named preset's HSV +
+    shape_gate is loaded into the background detection job; the
+    operator's dashboard active preset is irrelevant to this run. The
+    chosen `preset_name` is recorded onto the resulting
+    `SessionResult.server_post_preset_name`; re-running with a
+    different preset overwrites both the detection results and that
+    field.
     """
     return await _enqueue_server_post(request, session_id, background_tasks)
 
@@ -190,13 +195,29 @@ async def _enqueue_server_post(
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=422, detail="invalid session_id")
+    ctype = request.headers.get("content-type", "").lower()
+    if "application/json" in ctype:
+        body = await request.json() if await request.body() else {}
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="body must be a JSON object")
+        preset_name = body.get("preset_name")
+    else:
+        form = await request.form()
+        preset_name = form.get("preset_name")
+    if not isinstance(preset_name, str) or not preset_name:
+        raise HTTPException(
+            status_code=422,
+            detail="missing required field 'preset_name'",
+        )
+    try:
+        preset = state.load_preset(preset_name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown preset: {preset_name!r}")
     candidates = state.processing.session_candidates(session_id)
     if not candidates:
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
-    hsv = state.hsv_range()
-    gate = state.shape_gate()
     queued = state.processing.resume_processing(session_id)
     if not queued:
         if _wants_html(request):
@@ -207,8 +228,9 @@ async def _enqueue_server_post(
             _run_server_detection,
             clip_path,
             pitch,
-            hsv_range=hsv,
-            shape_gate=gate,
+            hsv_range=preset.hsv,
+            shape_gate=preset.shape_gate,
+            preset_name=preset_name,
         )
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
@@ -216,6 +238,7 @@ async def _enqueue_server_post(
         "ok": True,
         "session_id": session_id,
         "queued": len(queued),
+        "preset_name": preset_name,
     }
 
 
