@@ -22,7 +22,11 @@
   const _PITCH_GHOST_COLOR = 'rgba(192, 57, 43, 0.20)';
   const _PITCH_POINTS_COLOR = 'rgba(74, 62, 36, 0.55)';
 
-  const trajCache = new Map();       // sid -> {points, segments}
+  // sid -> { points, segments, cost_threshold, gap_threshold_m }
+  // Thresholds drive the dashboard's client-side mask over `points`
+  // (pairing emits the full set; cost/gap are pure overlay filters,
+  // mirroring the viewer's slider behaviour).
+  const trajCache = new Map();
 
   function persistTrajSelection() {
     try { localStorage.setItem(TRAJ_STORAGE_KEY, JSON.stringify([...selectedTrajIds])); }
@@ -45,18 +49,34 @@
         // list — do NOT re-sort here, that would invalidate the contract.
         points: data.points || [],
         segments: Array.isArray(data.segments) ? data.segments : [],
+        // None on legacy SessionResult predating recompute → null here.
+        // Filter logic treats null as "no mask" (all points pass).
+        cost_threshold: data.cost_threshold == null ? null : Number(data.cost_threshold),
+        gap_threshold_m: data.gap_threshold_m == null ? null : Number(data.gap_threshold_m),
       };
       trajCache.set(sid, entry);
       return entry;
     } catch { return null; }
   }
 
-  // Patch in a fresh segments array for `sid` — used by the `fit` SSE
-  // handler so a recompute / cycle_end push refreshes the cache without
-  // refetching /results.
-  function patchTrajSegments(sid, segments) {
+  // Patch the cached `sid` entry from a `fit` SSE event payload.
+  // Recompute (Apply) and cycle_end both broadcast `{segments,
+  // cost_threshold, gap_threshold_m}`; thresholds need to land in the
+  // cache so the next repaint applies the new client-side mask over
+  // `points`. `points` itself is invariant under recompute (pairing
+  // emits the full set regardless of tuning post Phase 1-5).
+  function patchTrajResult(sid, payload) {
     const entry = trajCache.get(sid);
-    if (entry) entry.segments = Array.isArray(segments) ? segments : [];
+    if (!entry) return;
+    if (Array.isArray(payload.segments)) entry.segments = payload.segments;
+    if ('cost_threshold' in payload) {
+      entry.cost_threshold = payload.cost_threshold == null
+        ? null : Number(payload.cost_threshold);
+    }
+    if ('gap_threshold_m' in payload) {
+      entry.gap_threshold_m = payload.gap_threshold_m == null
+        ? null : Number(payload.gap_threshold_m);
+    }
   }
 
   // Show-points toggle (default OFF). Persisted in localStorage so the

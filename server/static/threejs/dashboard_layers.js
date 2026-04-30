@@ -50,6 +50,41 @@ const POINTS_OUTLIER_COLOR = new THREE.Color(POINTS_OUTLIER);
 const G_Z = -9.81;
 const ARROW_LEN_M = 0.3;
 
+// Build a boolean keep-mask aligned with `points` from per-session
+// cost/gap thresholds. Mirrors viewer's `_passCostFilterPoint` semantics:
+// null / non-finite threshold = "no mask" (point passes); both null
+// candidates on a point also pass (legacy / live-only points may not
+// carry per-camera cost yet). `points[i].cost_a/cost_b/residual_m`
+// are wire fields persisted on TriangulatedPoint.
+function _buildPointKeepMask(points, costThreshold, gapThresholdM) {
+  const costMax = (costThreshold == null || !Number.isFinite(costThreshold))
+    ? null : Number(costThreshold);
+  const gapMax = (gapThresholdM == null || !Number.isFinite(gapThresholdM))
+    ? null : Number(gapThresholdM);
+  const n = points.length;
+  if (costMax === null && gapMax === null) {
+    const m = new Array(n);
+    for (let i = 0; i < n; ++i) m[i] = true;
+    return m;
+  }
+  const m = new Array(n);
+  for (let i = 0; i < n; ++i) {
+    const p = points[i];
+    let pass = true;
+    if (gapMax !== null && Number.isFinite(p.residual_m) && p.residual_m > gapMax) {
+      pass = false;
+    }
+    if (pass && costMax !== null) {
+      let mc = -1;
+      if (p.cost_a != null && Number.isFinite(p.cost_a)) mc = Math.max(mc, p.cost_a);
+      if (p.cost_b != null && Number.isFinite(p.cost_b)) mc = Math.max(mc, p.cost_b);
+      if (mc >= 0 && mc > costMax) pass = false;
+    }
+    m[i] = pass;
+  }
+  return m;
+}
+
 // Sample a parabolic fit segment into N world-space points.
 // `seg` is a SegmentRecord: { p0, v0, t_anchor, t_start, t_end }.
 function sampleSegmentCurve(seg, n) {
@@ -171,8 +206,11 @@ class DashboardLayers {
   }
 
   // ---- fit (selected session) ----
-  // `result` is a SessionResult-shaped object: { points: [{x_m,y_m,z_m,t_rel_s}, ...], segments: [SegmentRecord, ...] }.
-  // Pass `null` for either argument to clear (e.g. row deselect).
+  // `result` is a SessionResult-shaped object: { points, segments,
+  // cost_threshold, gap_threshold_m }. `points` is the FULL triangulated
+  // set (pairing emits everything; thresholds are operator masks set
+  // via the viewer's Apply button). null thresholds → no client-side
+  // mask. Pass `null` for either argument to clear (e.g. row deselect).
   applyFit(sid, result) {
     if (!sid || !result) {
       // Drop selection AND cached payload so a subsequent applyFit
@@ -229,6 +267,14 @@ class DashboardLayers {
     }
     const segments = Array.isArray(result.segments) ? result.segments : [];
     const points = result.points || [];
+    // Pairing emits the full triangulated set; cost/gap on the result
+    // are the operator's per-session mask (set via the viewer's Apply
+    // button → POST /sessions/<sid>/recompute → SSE `fit`). Build a
+    // boolean keep-mask aligned with `points` so the segment-bucket
+    // pass below stays correct (`SegmentRecord.original_indices`
+    // indexes into the full `points` list — pre-filtering would break
+    // that contract). null threshold → all-true mask.
+    const keep = _buildPointKeepMask(points, result.cost_threshold, result.gap_threshold_m);
 
     // --- fit curves ---
     const curveGroup = new THREE.Group();
@@ -269,11 +315,13 @@ class DashboardLayers {
       // so the shared pointsCloud helper has a single contract with
       // viewer (which already speaks `{x,y,z}`).
       const xyz = points.map((p) => ({ x: p.x_m, y: p.y_m, z: p.z_m }));
+      // Classify on the FULL list — `SegmentRecord.original_indices`
+      // are full-list indices. Then skip masked-out points in the
+      // bucketing pass below.
       const byPoint = classifyPointsBySegment(xyz, segments);
-      // Bucket points by segment so each bucket renders as one
-      // Points object — fewer draw calls than per-point Mesh.
       const buckets = new Map();
       for (let i = 0; i < xyz.length; ++i) {
+        if (!keep[i]) continue;
         const k = byPoint[i];
         const key = k === -1 ? "out" : String(k);
         if (!buckets.has(key)) buckets.set(key, []);
@@ -296,11 +344,19 @@ class DashboardLayers {
     // a thin dashed line so the operator sees the shape rather than an
     // empty scene. Same intent as the Plotly-era branch.
     if (!segments.length && !this._showPoints && points.length) {
-      const buf = new Float32Array(points.length * 3);
+      // Apply the same client-side mask to the fallback line — operator
+      // tightening cost/gap on a session that never produced segments
+      // should still see the cleaned-up shape.
+      const kept = [];
       for (let i = 0; i < points.length; ++i) {
-        buf[i * 3 + 0] = points[i].x_m;
-        buf[i * 3 + 1] = points[i].y_m;
-        buf[i * 3 + 2] = points[i].z_m;
+        if (keep[i]) kept.push(points[i]);
+      }
+      if (!kept.length) return;
+      const buf = new Float32Array(kept.length * 3);
+      for (let i = 0; i < kept.length; ++i) {
+        buf[i * 3 + 0] = kept[i].x_m;
+        buf[i * 3 + 1] = kept[i].y_m;
+        buf[i * 3 + 2] = kept[i].z_m;
       }
       const line = lineFromBuffer(buf, POINTS_OUTLIER_COLOR, { transparent: true, opacity: 0.55 });
       const group = new THREE.Group();

@@ -401,11 +401,17 @@ async def sessions_recompute(request: Request, session_id: str):
     # dashboard / viewer fit visuals) need to refresh too. Broadcast the
     # same `fit` event the cycle_end path uses; dashboard listens
     # blindly for the active session id and patches its scene.
+    # Ship the per-session thresholds alongside segments so dashboard /
+    # viewer caches that maintain a client-side mask over `result.points`
+    # (full triangulated set; pairing emits everything post Phase 1-5)
+    # know the new gate without an extra `/results/<sid>` round-trip.
     await sse_hub.broadcast(
         "fit",
         {
             "sid": session_id,
             "segments": [s.model_dump() for s in new_result.segments],
+            "cost_threshold": new_result.cost_threshold,
+            "gap_threshold_m": new_result.gap_threshold_m,
         },
     )
     return {"ok": True, "result": new_result.model_dump()}

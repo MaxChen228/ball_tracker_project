@@ -179,6 +179,13 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
     assert fit_events, f"expected at least one fit event, got {events}"
     for fe in fit_events:
         assert fe["segments"] == []
+        # Both threshold fields must ship on every fit event so dashboard
+        # can refresh its client-side mask without a /results round-trip.
+        # cycle_end fits before any operator Apply mirror SessionResult's
+        # default-None state — the keys must still be present so the
+        # client's `'cost_threshold' in payload` patch path triggers.
+        assert "cost_threshold" in fe
+        assert "gap_threshold_m" in fe
 
 
 def test_stamp_segments_on_result_populates_segments_for_ballistic_input():
