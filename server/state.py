@@ -24,7 +24,6 @@ from schemas import (
     TrackingExposureCapMode,
     TriangulatedPoint,
     _DEFAULT_SESSION_TIMEOUT_S,
-    _DEFAULT_PATHS,
 )
 from detection import HSVRange, ShapeGate
 from detection_config import (
@@ -1380,7 +1379,23 @@ class State:
             if self._current_session is not None:
                 cur = self._current_session
             else:
-                chosen_paths = set(paths or self._runtime_settings.default_paths or _DEFAULT_PATHS)
+                # Distinguish "caller passed None (defer to runtime)" from
+                # "caller passed an explicit set". Empty set is rejected —
+                # arming a session with zero detection paths is nonsensical
+                # (CLAUDE.md no-silent-fallback: prefer raise over a hidden
+                # `_DEFAULT_PATHS` default that masks the misuse).
+                if paths is None:
+                    chosen_paths = set(self._runtime_settings.default_paths)
+                else:
+                    chosen_paths = set(paths)
+                if not chosen_paths:
+                    raise RuntimeError(
+                        "arm_session: no detection paths chosen. Caller "
+                        "passed an empty set OR runtime_settings."
+                        "default_paths is empty (which is unreachable "
+                        "under normal init — runtime_settings file is "
+                        "likely corrupt)."
+                    )
                 session = Session(
                     id=_new_session_id(),
                     started_at=now,

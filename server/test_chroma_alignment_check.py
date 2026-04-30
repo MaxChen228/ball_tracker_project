@@ -165,19 +165,22 @@ def test_synthetic_deep_blue_hue_invariant():
     )
 
 
-def test_synthetic_red_safety_within_measured_bound():
-    """Red_safety is the worst-case swatch in our synthetic table. Pin
-    the current measurement so a future BT.709 numpy-impl regression
-    doesn't silently widen the offset. Bounds are ~2× current measured
-    values (|Δh|=3, |Δv|=10 at commit 781009f)."""
+def test_synthetic_red_safety_pinned_to_measurement():
+    """Red_safety is the worst-case swatch in our synthetic table. Exact
+    pin (not a bound) — same anchor pattern as `deep_blue` so a slow
+    drift 3 → 4 → 5 cannot creep through. Values are the measurement at
+    commit 781009f (Δh=-3, Δs=+3, Δv=-10). If matrix coefficients
+    intentionally change, re-run `chroma_alignment_check.py --synthetic`
+    and update both this pin and CLAUDE.md scorecard."""
     rows = mod.synthetic_table()
     red = next((r for r in rows if r["name"] == "red_safety"), None)
     assert red is not None
-    assert abs(red["d_h"]) <= 5, (
-        f"red_safety ΔH={red['d_h']} exceeds bound 5 — "
-        f"BT.709 matrix likely drifted from canonical coefficients."
+    assert (red["d_h"], red["d_s"], red["d_v"]) == (-3, 3, -10), (
+        f"red_safety synthetic delta drifted from pinned (-3, +3, -10) to "
+        f"({red['d_h']:+d}, {red['d_s']:+d}, {red['d_v']:+d}) — re-run "
+        f"`uv run python chroma_alignment_check.py --synthetic` and verify "
+        f"on a real session before updating this pin."
     )
-    assert abs(red["d_v"]) <= 15, f"red_safety ΔV={red['d_v']} exceeds bound 15"
 
 
 _MIN_SAFE_HUE_WIDTH_OPENCV_UNITS = 6
@@ -185,10 +188,11 @@ _MIN_SAFE_HUE_WIDTH_OPENCV_UNITS = 6
 
 def test_all_builtin_presets_have_safe_hue_width():
     """Empirical p95 |Δh| = 3 OpenCV units between BT.601 (iOS) and
-    BT.709 (server). A preset narrower than ~6 units risks losing the
-    margin that makes the matrix mismatch operationally invisible —
-    i.e. the same physical ball would gate-pass under one matrix and
-    fail under the other.
+    BT.709 (server). Floor is set at 6 (= 2× p95) — a preset narrower
+    than that risks losing the margin that makes the matrix mismatch
+    operationally invisible. Note: blue_ball currently has h-width=7,
+    so it sits 1 unit above the floor — any tightening of blue_ball
+    will trip this test, which is the intended early-warning behavior.
 
     If you legitimately need a narrow preset (e.g. neon yellow that
     only occupies 3 hue units), either (a) widen by relaxing the
