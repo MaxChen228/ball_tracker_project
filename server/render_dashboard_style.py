@@ -33,7 +33,7 @@ _DASHBOARD_NAV_OVERRIDES_CSS = """
 .nav .status-context { font-size: 10px; letter-spacing: 0.08em; color: var(--sub); }
 
 /* Dashboard pins the layout to the viewport (no document scroll) so the
-   canvas can host the fixed-height Plotly scene. The shared body uses
+   canvas can host the fixed-height Three.js scene. The shared body uses
    `min-height: 100vh` for /markers + /sync where the sidebar grows. */
 .layout { height: 100vh; box-sizing: border-box; overflow: hidden; }
 """

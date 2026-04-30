@@ -1,8 +1,4 @@
-"""Scene builder + Plotly viewer + events-index tests.
-
-Kept separate from test_server.py so the viewer dependency (plotly) only
-loads for these tests; the core server tests keep their fast import cost.
-"""
+"""Scene builder + Three.js viewer + events-index tests."""
 from __future__ import annotations
 
 import json as _json
@@ -234,9 +230,10 @@ def test_build_scene_all_upward_rays_still_render():
 
 def test_build_scene_clamps_rays_beyond_max_render_dist():
     """Near-horizontal rays hit the plate plane tens of metres out; the
-    scene clamps the endpoint to `_MAX_RENDER_DIST_M` so Plotly's auto-
-    fit axis doesn't include the far intersection. Ground-trace entry is
-    suppressed because a "landing point" at the clamp boundary would lie."""
+    scene clamps the endpoint to `_MAX_RENDER_DIST_M` so the Three.js
+    auto-fit camera bounds don't include the far intersection. Ground-
+    trace entry is suppressed because a "landing point" at the clamp
+    boundary would lie."""
     from reconstruct import _MAX_RENDER_DIST_M
 
     K, (R_a, t_a, C_a, H_a), _ = _make_rig()
@@ -497,7 +494,11 @@ def test_reconstruction_endpoint_unknown_session_returns_404():
     assert r.status_code == 404
 
 
-def test_viewer_endpoint_returns_plotly_html():
+def test_viewer_endpoint_returns_threejs_html():
+    """Viewer page renders 200 HTML with the Three.js scene runtime
+    boot markers. Replaces the legacy `assert "plotly" in body` check
+    that passed only because comments in the JS bundle still contained
+    the word — the runtime contract is BallTrackerScene, not Plotly."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(702)
     pitch = _pitch("A", 702, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
@@ -507,8 +508,9 @@ def test_viewer_endpoint_returns_plotly_html():
     r = client.get(f"/viewer/{session_id}")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
-    body = r.text.lower()
-    assert "plotly" in body
+    body = r.text
+    assert "BallTrackerScene" in body
+    assert "viewer_layers.js" in body
     assert session_id in body
 
 
@@ -667,8 +669,8 @@ def test_viewer_health_banner_flags_missing_time_sync():
 
 def test_viewer_embeds_scene_data_and_mode_toggle():
     """Viewer serialises the scene (ground_traces + rays) inline so JS
-    can rebuild the Plotly traces under a time filter, and exposes the
-    [ALL] / [PLAYBACK] toggle."""
+    can rebuild the Three.js layers under a time filter, and exposes
+    the [ALL] / [PLAYBACK] toggle."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(709)
     _record_pitch(_pitch("A", 709, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
