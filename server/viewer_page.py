@@ -370,24 +370,32 @@ def render_viewer_html(
              title="Strip colors: A detected (orange) · B detected (brown) · missed (grey) · no frame (pale) · chirp anchor (accent)"
              role="group" aria-label="Layer visibility + filters">
           <span class="layer-toggles" id="layer-toggles" aria-label="Layer visibility">
-            <span class="layer-group" data-layer="traj" data-single-select role="radiogroup" aria-label="Trajectory path">
-              <span class="layer-name">Traj</span>
-              <button type="button" class="layer-pill" data-layer="traj" data-path="live" role="radio" aria-checked="false">live</button>
-              <button type="button" class="layer-pill" data-layer="traj" data-path="server_post" role="radio" aria-checked="true">svr</button>
+            <span class="layer-group" data-path-group role="radiogroup" aria-label="Active path">
+              <span class="layer-name">Path</span>
+              <button type="button" class="layer-pill" data-path="live" role="radio" aria-checked="false">live</button>
+              <button type="button" class="layer-pill" data-path="server_post" role="radio" aria-checked="true">svr</button>
             </span>
-            <span class="layer-group" data-layer="rays" data-single-select role="radiogroup" aria-label="Rays path">
-              <span class="layer-name">Rays</span>
-              <button type="button" class="layer-pill" data-layer="rays" data-path="live" role="radio" aria-checked="false">live</button>
-              <button type="button" class="layer-pill" data-layer="rays" data-path="server_post" role="radio" aria-checked="true">svr</button>
-            </span>
-            <span class="layer-group" data-layer="fit">
+            <span class="layer-divider" aria-hidden="true"></span>
+            <span class="layer-group" data-layer-group="rays">
               <label class="layer-checkbox">
-                <input type="checkbox" id="fit-layer-toggle" checked>
+                <input type="checkbox" class="layer-checkbox" data-layer="rays" checked>
+                <span class="layer-name">Rays</span>
+              </label>
+            </span>
+            <span class="layer-group" data-layer-group="traj">
+              <label class="layer-checkbox">
+                <input type="checkbox" class="layer-checkbox" data-layer="traj" checked>
+                <span class="layer-name">Traj</span>
+              </label>
+            </span>
+            <span class="layer-group" data-layer-group="fit">
+              <label class="layer-checkbox">
+                <input type="checkbox" class="layer-checkbox" data-layer="fit" checked>
                 <span class="layer-name">Fit</span>
               </label>
             </span>
             <span class="layer-divider" aria-hidden="true"></span>
-            <span class="layer-group" data-layer="strike-zone" title="Toggle the strike-zone wireframe in the 3D scene. Default on.">
+            <span class="layer-group" data-layer-group="strike-zone" title="Toggle the strike-zone wireframe in the 3D scene. Default on.">
               <label class="layer-checkbox">
                 <input type="checkbox" id="strike-zone-toggle" checked>
                 <span class="layer-name">Strike zone</span>

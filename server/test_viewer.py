@@ -899,15 +899,11 @@ def test_viewer_ships_interactive_diagnostic_widgets():
 
 
 def test_viewer_virtual_detection_follows_per_camera_ray_toggle():
-    """Phase 6: per-pipeline detection overlay is now drawn as the two
-    BallTrackerCamView BLOBS layers (`detection_blobs_live` /
-    `detection_blobs_svr`) on top of each per-cam video. The vid-cell
-    renders LIVE BLOBS + SVR BLOBS pills in its cam-view-toolbar so the
-    operator can toggle each pipeline's overlay independently. Pre
-    fan-out there was also a winner-dot layer per path
-    (`detection_live` / `detection_svr`) — that's been removed because
-    fan-out triangulation has no winner concept and the dot was just
-    redrawing the lowest-cost candidate already shown by BLOBS."""
+    """v6: detection overlay is a single BLOBS layer registered with the
+    cam-view runtime (`detection_blobs`). Its data path comes from the
+    global PATH selector on the 3D toolbar — operator picks live/svr
+    once and both A/B cam panels follow. Winner-dot layers were retired
+    when fan-out triangulation killed the winner concept."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(714)
     _record_pitch(_pitch("A", 714, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -915,21 +911,17 @@ def test_viewer_virtual_detection_follows_per_camera_ray_toggle():
 
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
-    # Both BLOBS layers are registered with the runtime.
-    assert "registerLayer('detection_blobs_live'" in body
-    assert "registerLayer('detection_blobs_svr'" in body
-    # Winner-dot layers are GONE — fan-out triangulation killed the
-    # winner concept; `_drawDetectionForPath` and its registrations
-    # were removed in the same change.
+    # Single BLOBS layer registered with the runtime.
+    assert "registerLayer('detection_blobs'" in body
+    # Old per-path BLOBS layers are gone — superseded by global PATH.
+    assert "registerLayer('detection_blobs_live'" not in body
+    assert "registerLayer('detection_blobs_svr'" not in body
+    # Winner-dot layers stay GONE.
     assert "registerLayer('detection_live'" not in body
     assert "registerLayer('detection_svr'" not in body
-    assert 'data-layer="detection_live"' not in body
-    assert 'data-layer="detection_svr"' not in body
-    # Per-cam toolbar exposes the LIVE / SVR BLOBS pills.
-    assert 'data-layer="detection_blobs_live"' in body
-    assert 'data-layer="detection_blobs_svr"' in body
-    # The per-cam canvas + viewer's currentT scrubber is what drives the
-    # blob's frame lookup; still must reference both pipelines by name.
+    # Shared toolbar exposes the single BLOBS pill.
+    assert 'data-layer="detection_blobs"' in body
+    # Both pipelines still referenced (currentPath dispatch).
     assert "'live'" in body or '"live"' in body
     assert "'server_post'" in body or '"server_post"' in body
 
@@ -1001,13 +993,12 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
     assert not hasattr(ctx, "static_traces_json")
 
 
-def test_viewer_layer_visibility_v5_schema():
-    """v5: TRAJ / RAYS / BLOBS each become a single-select segmented
-    control (one path at a time, never BOTH) — operator looks at one
-    pipeline at a time so colour stays reserved for cam / segment
-    identity. layerVisibility values are strings, not nested objects.
-    Old v3 / v4 artifacts must be gone so stale localStorage can't
-    resurrect them."""
+def test_viewer_layer_visibility_v6_schema():
+    """v6: one global PATH single-select segmented control drives the
+    data source for every enabled layer; per-layer booleans (rays /
+    traj / fit / blobs) compose freely on top. Persisted under
+    ball_tracker_viewer_layer_visibility_v6. Old v3 / v4 / v5 artifacts
+    must be gone so stale localStorage can't resurrect them."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(723)
     _record_pitch(_pitch("A", 723, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -1015,19 +1006,26 @@ def test_viewer_layer_visibility_v5_schema():
 
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
-    assert "function hasPathForLayer" in body
-    assert "ball_tracker_viewer_layer_visibility_v5" in body
+    assert "ball_tracker_viewer_layer_visibility_v6" in body
+    assert "data-path-group" in body
+    assert 'data-path="live"' in body
+    assert 'data-path="server_post"' in body
     assert 'data-layer="rays"' in body
+    assert 'data-layer="traj"' in body
     assert 'data-layer="fit"' in body
-    assert 'data-single-select' in body
-    assert 'id="fit-layer-toggle"' in body
-    # v3 / v4 artifacts must be gone so a stale localStorage entry
-    # can't keep them alive.
+    assert "function currentPath" in body
+    assert "function isLayerEnabled" in body
+    # Old artifacts must be gone.
     assert "HAS_PATH_PER_CAM" not in body
     assert 'data-layer="camA"' not in body
     assert 'data-layer="camB"' not in body
     assert "_layer_visibility_v3" not in body
     assert "_layer_visibility_v4" not in body
+    assert "_layer_visibility_v5" not in body
+    assert "data-single-select" not in body
+    assert 'id="fit-layer-toggle"' not in body
+    assert "setLayerSelection" not in body
+    assert "setFitVisibility" not in body
 
 
 def test_viewer_strip_reserves_dual_ab_subtracks_per_pipeline():
@@ -1438,22 +1436,20 @@ def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
         cx=960.0,
         cy=540.0,
     )
-    assert (
-        'data-layers="plate,axes,'
-        'detection_blobs_live,detection_blobs_svr"'
-    ) in body
-    assert 'data-layers-on="plate,detection_blobs_live"' in body
+    assert 'data-layers="plate,axes,detection_blobs"' in body
+    assert 'data-layers-on="plate,detection_blobs"' in body
     # No per-cam toolbar inside the cell anymore.
     assert "cam-view-toolbar" not in body
     assert 'class="cv-path-group"' not in body
     assert 'class="cv-opacity"' not in body
-    assert 'data-layer="detection_blobs_live"' not in body
-    # Shared toolbar carries the BLOBS pills, OVL slider, etc.
+    assert 'data-layer="detection_blobs"' not in body
+    # Shared toolbar carries the single BLOBS pill + OVL slider.
     bar = cam_view_shared_toolbar_html()
-    assert 'data-layer="detection_blobs_live"' in bar
-    assert 'data-layer="detection_blobs_svr"' in bar
-    assert 'data-blobs-group' in bar
-    assert 'role="radiogroup"' in bar
+    assert 'data-layer="detection_blobs"' in bar
+    # v5 split-path BLOBS markup is gone.
+    assert 'data-layer="detection_blobs_live"' not in bar
+    assert 'data-layer="detection_blobs_svr"' not in bar
+    assert 'data-blobs-group' not in bar
     # Winner-dot / K slider relics from the pre-v4 era.
     assert 'data-layer="detection_live"' not in body
     assert 'data-layer="detection_svr"' not in body

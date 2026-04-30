@@ -6,45 +6,47 @@
     if (layer === "traj") return HAS_TRAJ_PATH[path];
     return HAS_PATH[path];
   }
-  // v5 schema: `traj` / `rays` / `blobs` are single-select strings
-  // (one path at a time, never BOTH). Operator looks at one pipeline
-  // at a time — keeping the colour channel free for segment / cam
-  // identity rather than burning it on path identity. `fit` stays a
-  // boolean; STRIKE ZONE is its own checkbox elsewhere. Old v4 maps
-  // (object shape) are not migrated.
-  const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility_v5";
-  function _defaultPath(layer) {
-    if (layer === "traj") {
-      return HAS_TRAJ_PATH.server_post ? "server_post"
-        : (HAS_TRAJ_PATH.live ? "live" : "server_post");
-    }
-    return HAS_PATH.server_post ? "server_post"
-      : (HAS_PATH.live ? "live" : "server_post");
+  // v6 schema: a single global `path` (live / server_post) drives the
+  // data source for every layer the operator turns on. Each layer has
+  // its own boolean enable flag. Mental model: "I'm looking at the
+  // SVR pipeline, show me rays + fit on top of blobs." Path is one
+  // exclusive choice; layer toggles compose freely on top.
+  const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility_v6";
+  function _defaultPath() {
+    if (HAS_PATH.server_post || HAS_TRAJ_PATH.server_post) return "server_post";
+    if (HAS_PATH.live || HAS_TRAJ_PATH.live) return "live";
+    return "server_post";
   }
   const layerVisibility = {
-    traj: _defaultPath("traj"),
-    rays: _defaultPath("rays"),
-    blobs: _defaultPath("blobs"),
+    path: _defaultPath(),
+    rays: true,
+    traj: true,
     fit: true,
+    blobs: true,
   };
   try {
     const saved = JSON.parse(localStorage.getItem(LAYER_VIS_KEY) || "null");
     if (saved && typeof saved === "object") {
-      for (const k of ["traj", "rays", "blobs"]) {
-        const v = saved[k];
-        if ((v === "live" || v === "server_post") && hasPathForLayer(k, v)) {
-          layerVisibility[k] = v;
-        }
+      if (saved.path === "live" || saved.path === "server_post") {
+        layerVisibility.path = saved.path;
       }
-      if (typeof saved.fit === "boolean") layerVisibility.fit = saved.fit;
+      for (const k of ["rays", "traj", "fit", "blobs"]) {
+        if (typeof saved[k] === "boolean") layerVisibility[k] = saved[k];
+      }
     }
   } catch {}
   function persistLayerVisibility() {
     try { localStorage.setItem(LAYER_VIS_KEY, JSON.stringify(layerVisibility)); } catch {}
   }
-  function isLayerVisible(layer, path) {
-    if (layer === "fit") return !!layerVisibility.fit;
-    return layerVisibility[layer] === path;
+  function currentPath() { return layerVisibility.path; }
+  function isLayerEnabled(layer) {
+    if (!(layer in layerVisibility)) {
+      throw new Error("isLayerEnabled: unknown layer " + layer);
+    }
+    if (layer === "path") {
+      throw new Error("isLayerEnabled: 'path' is not a boolean layer; use currentPath()");
+    }
+    return !!layerVisibility[layer];
   }
   // Flat cams-present views used by the frame scrubber / label renderer.
   // Build the scrubber's discrete time positions per camera, preferring the

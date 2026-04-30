@@ -563,14 +563,10 @@ def test_markers_page_drops_legacy_svg_marker_overlay():
 
 
 def test_viewer_page_uses_cam_view_with_detection_layers():
-    """Phase 6: /viewer migrated to merged cam-view substrate. Each cam's
+    """v6: /viewer migrated to merged cam-view substrate. Each cam's
     vid-cell carries data-cam-view + a canvas overlay; the runtime
-    registers BLOBS layers (detection_blobs_live / detection_blobs_svr)
-    that draw every shape-gate-passing candidate ring on the matched
-    frame. Per-cam toolbar exposes PLATE / AXES / LIVE BLOBS / SVR
-    BLOBS pills so the operator can toggle each overlay independently
-    — half-transparent over the real video. Pre-fan-out there was also
-    a winner-dot layer per path; that's gone now (no winner concept)."""
+    registers a single BLOBS layer (`detection_blobs`) whose data path
+    follows the global PATH selector on the 3D toolbar."""
     from fastapi.testclient import TestClient
     import main
     from main import app
@@ -596,32 +592,25 @@ def test_viewer_page_uses_cam_view_with_detection_layers():
     # Layer set: PLATE + AXES calibration overlays + one BLOBS layer per
     # detection path. Default-on: PLATE + LIVE BLOBS. SVR off (legacy /
     # live-only sessions have no svr data; opt-in via Run server).
-    assert (
-        'data-layers="plate,axes,'
-        'detection_blobs_live,detection_blobs_svr"'
-    ) in body
-    assert 'data-layers-on="plate,detection_blobs_live"' in body
+    assert 'data-layers="plate,axes,detection_blobs"' in body
+    assert 'data-layers-on="plate,detection_blobs"' in body
     # Default opacity 65 — half-transparent overlay over the real video.
     assert 'data-default-opacity="65"' in body
-    # Per-cam toolbar pills for all four toggleable layers.
-    for layer in (
-        "plate", "axes",
-        "detection_blobs_live",
-        "detection_blobs_svr",
-    ):
+    # Toolbar pills for the three toggleable shared layers.
+    for layer in ("plate", "axes", "detection_blobs"):
         assert f'data-layer="{layer}"' in body
-    # Winner-dot layers gone post fan-out — the toolbar must not surface
-    # them or the operator gets two redundant toggles.
+    # Winner-dot layers gone post fan-out.
     assert 'data-layer="detection_live"' not in body
     assert 'data-layer="detection_svr"' not in body
-    # v5: shared BLOBS group is single-select segmented control
-    # (data-blobs-group, role=radiogroup) — not the per-cam path
-    # groups the legacy markup carried.
-    assert 'data-blobs-group' in body
-    assert 'role="radiogroup"' in body
-    # Only the BLOBS layers are registered now.
-    assert "registerLayer('detection_blobs_live'" in body
-    assert "registerLayer('detection_blobs_svr'" in body
+    # v5 split-path BLOBS markup must be gone — single BLOBS chip now,
+    # data path follows global PATH selector on the 3D toolbar.
+    assert 'data-layer="detection_blobs_live"' not in body
+    assert 'data-layer="detection_blobs_svr"' not in body
+    assert 'data-blobs-group' not in body
+    # Single BLOBS layer registered now.
+    assert "registerLayer('detection_blobs'" in body
+    assert "registerLayer('detection_blobs_live'" not in body
+    assert "registerLayer('detection_blobs_svr'" not in body
     assert "registerLayer('detection_live'" not in body
     assert "registerLayer('detection_svr'" not in body
     # K slider replaced by session-header cost_threshold slider — the
