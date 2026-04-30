@@ -485,12 +485,18 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
               margin-top: 8px; }}
 .event-day:first-child {{ margin-top: 0; }}
 
+/* Whole row is the dashboard-3D-load click target (40_traj_handlers.js).
+   .selected highlights the active overlay; only the explicit "→ viewer"
+   link and any in-row form/button escape the row click. */
 .event-item {{ padding: 8px var(--s-1);
                border-top: 1px solid var(--border-l);
-               transition: background 0.12s ease; min-width: 0; }}
+               transition: background 0.12s ease; min-width: 0;
+               cursor: pointer; }}
 .event-item:first-child,
 .event-day + .event-item {{ border-top: 0; }}
 .event-item:hover {{ background: var(--surface-hover); }}
+.event-item.selected {{ background: var(--surface-2); }}
+.event-item.selected:hover {{ background: var(--surface-hover); }}
 
 .ev-row1, .ev-row2, .ev-row3 {{ display: flex; align-items: center;
                                 gap: 8px; min-width: 0; flex-wrap: wrap;
@@ -503,23 +509,26 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
             color: var(--ink); letter-spacing: 0.02em;
             font-variant-numeric: tabular-nums; flex: 0 0 auto; }}
 .ev-sid  {{ font-family: var(--mono); font-size: 11px; color: var(--sub);
-            letter-spacing: 0.04em; text-decoration: none; flex: 0 0 auto;
+            letter-spacing: 0.04em; flex: 0 0 auto;
             white-space: nowrap; }}
-.ev-sid:hover {{ color: var(--ink); }}
 
-/* Trajectory toggle — coloured dot mirrors Plotly trace tint. Click goes
-   to the checkbox; the wrapping <label> stops propagation in JS so the
-   <a class="ev-sid"> on the same row doesn't navigate on toggle. */
-.traj-toggle {{ flex: 0 0 auto; display: flex; align-items: center;
-                gap: 4px; cursor: pointer; user-select: none; }}
-.traj-toggle input[type=checkbox] {{ position: absolute; opacity: 0;
-                                      pointer-events: none; }}
-.traj-toggle .swatch,
+.ev-viewer-link {{ font-family: var(--mono); font-size: 10px;
+                   letter-spacing: 0.06em; color: var(--sub);
+                   text-decoration: none; flex: 0 0 auto;
+                   padding: 2px 6px; border: 1px solid var(--border-base);
+                   border-radius: var(--r); }}
+.ev-viewer-link:hover {{ color: var(--ink); border-color: var(--ink); }}
+
+/* Has-traj indicator. Pure visual — the row itself is the click target
+   (40_traj_handlers.js). Selected rows get a filled dot; unselected
+   rows with traj show as outline; rows without traj show .swatch-empty. */
+.swatch,
 .swatch-empty {{ width: 12px; height: 12px; border-radius: 50%;
-                  border: 1px solid rgba(0,0,0,0.18);
-                  display: inline-block; flex: 0 0 auto;
-                  background: var(--surface-2); }}
-.swatch-empty {{ background: transparent; opacity: 0.45; }}
+                 border: 1px solid var(--accent, #C0392B);
+                 display: inline-block; flex: 0 0 auto;
+                 background: transparent; }}
+.swatch-empty {{ border-color: rgba(0,0,0,0.18); opacity: 0.45; }}
+.swatch.selected {{ background: var(--accent, #C0392B); }}
 
 .ev-statuses {{ display: flex; gap: 4px; flex: 0 0 auto;
                 justify-content: flex-end; }}
@@ -625,13 +634,22 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .intrinsics-upload-status.ok {{ color:var(--passed); }}
 .intrinsics-upload-status.err {{ color:var(--failed); }}
 
-/* --- Canvas overlay hint --- moved to bottom-left to free the top row for
-   the mode toggle + Plotly's modebar. */
-.canvas-hint {{ position: absolute; left: var(--s-4); bottom: var(--s-4); z-index: 5;
-                font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
-                text-transform: uppercase; color: var(--sub);
-                background: var(--surface); border: 1px solid var(--border-l);
-                border-radius: var(--r); padding: var(--s-1) var(--s-2); pointer-events: none; }}
+/* --- View-preset toolbar (ISO/CATCH/SIDE/TOP/PITCHER) — pinned top-left
+   over the 3D scene. Mirrors viewer's `.scene-col .scene-views` styling
+   so the two surfaces read identically. */
+.scene-views {{ position: absolute; top: var(--s-4); left: var(--s-4); z-index: 6;
+                display: inline-flex; align-items: stretch; flex-wrap: nowrap;
+                white-space: nowrap; border: 1px solid var(--border-base);
+                border-radius: var(--r); overflow: hidden; background: var(--surface); }}
+.scene-views .view-preset {{ padding: 5px 10px; border: none; background: transparent;
+                              color: var(--sub); cursor: pointer; min-width: auto;
+                              border-radius: 0; font: inherit;
+                              font-family: var(--mono); font-size: 10px;
+                              letter-spacing: 0.12em; text-transform: uppercase;
+                              font-weight: 500; line-height: 1; }}
+.scene-views .view-preset + .view-preset {{ border-left: 1px solid var(--border-l); }}
+.scene-views .view-preset:hover {{ color: var(--ink); }}
+.scene-views .view-preset.active {{ background: var(--ink); color: var(--surface); }}
 
 /* --- Canvas mode toggle — top-left so it can't collide with Plotly's
    modebar (camera/home/reset axes buttons), which always sits top-right
@@ -643,8 +661,9 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                     font-family: var(--mono); font-size: 11px; color: var(--failed);
                     letter-spacing: 0.04em; max-width: 80%; }}
 .degraded-banner .degraded-icon {{ font-size: 14px; }}
-/* --- Latest pitch speed badge (top-left, pinned over scene-root) --- */
-.latest-pitch-badge {{ position: absolute; left: var(--s-4); top: var(--s-4); z-index: 6;
+/* --- Latest pitch speed badge — pinned bottom-left of scene-root.
+   Top-left is the view-preset toolbar (mirrors viewer layout). */
+.latest-pitch-badge {{ position: absolute; left: var(--s-4); bottom: var(--s-4); z-index: 6;
                        display: inline-flex; align-items: baseline; gap: 6px;
                        background: var(--surface); border: 1px solid var(--border-base);
                        border-radius: var(--r); padding: 6px var(--s-3);

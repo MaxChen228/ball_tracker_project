@@ -1,9 +1,17 @@
-"""Dashboard page-level orchestration."""
+"""Dashboard page-level orchestration.
+
+Phase 2 of the Plotly → Three.js 3D migration ships this file in a
+hybrid state: the dashboard now renders its 3D scene via Three.js
+(`scene_runtime.html()` + `static/threejs/dashboard_layers.js`),
+but the legacy `render_scene._build_figure` Plotly path is still
+imported by `routes/calibration.py` for the auto-cal preview that
+phase 4 will retire. Don't add new dependencies on `render_scene` —
+new dashboard work goes through the Three.js modules.
+"""
 from __future__ import annotations
 
 from typing import Any
 
-from reconstruct import build_calibration_scene
 from render_dashboard_client import _JS_TEMPLATE
 from render_dashboard_events import _render_events_body
 from render_dashboard_html import render_dashboard_html as _render_dashboard_html
@@ -12,7 +20,7 @@ from render_dashboard_session import _render_hsv_body, _render_session_body
 from render_dashboard_style import _CSS
 from cam_view_ui import CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
-from render_scene import _build_figure
+from scene_runtime import scene_runtime_html, view_presets_toolbar_html
 from render_shared import _render_app_nav
 from render_tuning import _render_tuning_body
 
@@ -46,19 +54,13 @@ def render_events_index_html(
 
     from main import state  # local import: avoid circular at module load time
 
-    scene = build_calibration_scene(state.calibrations())
-    fig = _build_figure(scene)
-    fig.update_layout(
-        title=None,
-        margin=dict(l=0, r=0, t=8, b=0),
-        scene_xaxis_range=[-6.0, 6.0],
-        scene_yaxis_range=[-6.0, 6.0],
-        scene_zaxis_range=[-0.2, 3.5],
-        scene_aspectmode="manual",
-        scene_aspectratio=dict(x=1.0, y=1.0, z=0.45),
-        scene_uirevision="dashboard-canvas",
-    )
-    scene_div = fig.to_html(include_plotlyjs=False, full_html=False, div_id="scene-root")
+    # Three.js scene mounts onto an empty `#scene-root` div. The
+    # static layers (ground / plate / strike zone / world axes) are
+    # built client-side from the theme JSON; per-camera markers are
+    # populated by the dashboard's `tickCalibration` poll. No
+    # server-side figure to ship — dashboard 3D is fully reactive.
+    scene_div = '<div id="scene-root" data-bt-scene></div>'
+    scene_runtime_fragment = scene_runtime_html(container_id="scene-root")
 
     nav_html = _render_app_nav(
         "dashboard", devices, session, calibrations, sync, sync_cooldown_remaining_s, arm_readiness
@@ -108,6 +110,8 @@ def render_events_index_html(
         intrinsics_html=intrinsics_html,
         events_html=events_html,
         scene_div=scene_div,
+        scene_runtime_html=scene_runtime_fragment,
+        view_presets_toolbar_html=view_presets_toolbar_html(),
         overlays_js=OVERLAYS_RUNTIME_JS,
         cam_view_js=CAM_VIEW_RUNTIME_JS,
         dashboard_js=_JS_TEMPLATE,

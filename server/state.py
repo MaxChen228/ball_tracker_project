@@ -1755,19 +1755,6 @@ class State:
                 session_armed=current is not None,
             )
 
-    def clear_last_ended_session(self) -> bool:
-        """Drop the recently-ended sessions ring so the dashboard's
-        session card goes blank again. No-op (returns False) when a
-        session is currently armed or there's nothing to clear — the
-        ring is strictly a dashboard-idle-state concern."""
-        with self._lock:
-            if self._current_session is not None and self._current_session.ended_at is None:
-                return False
-            if not self._recently_ended_sessions:
-                return False
-            self._recently_ended_sessions.clear()
-            return True
-
     def _register_upload_in_session_locked(self, pitch: PitchPayload) -> None:
         """Called from `record()` while the state lock is held. Appends
         the camera to the session's uploads_received list so the events
@@ -1790,7 +1777,7 @@ class State:
         armed session if any, otherwise the most recently ended one (so
         the iPhone sees session.armed == False during the disarm echo
         window, and the dashboard can keep the session id visible until
-        the operator hits Clear)."""
+        the next arm replaces it)."""
         current = self.current_session()
         if current is not None:
             return current

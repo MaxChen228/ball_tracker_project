@@ -1,11 +1,5 @@
-// === events bucket + traj toggle handlers ===
+// === events bucket + traj row-click handlers ===
 
-  // Delegated change handler — event list re-renders on every tick, so we
-  // can't rebind per-checkbox. Capture click on the wrapping <label> to
-  // prevent the event-row <a> from swallowing the toggle.
-  if (eventsBox) eventsBox.addEventListener('click', (e) => {
-    if (e.target.closest('.traj-toggle')) e.stopPropagation();
-  });
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-events-bucket]');
     if (!btn) return;
@@ -16,46 +10,65 @@
     });
     tickEvents();
   });
-  // Strike-zone toggle: server-rendered traces stay in basePlot; the
-  // checkbox flips a localStorage flag and forces a repaint, which
-  // filters the strike-zone traces in or out at composition time.
+  // Strike-zone toggle: Three.js scene runtime owns the wireframe + fill
+  // group. Checkbox flips the shared localStorage flag (so the viewer
+  // sees the same default on next mount) AND calls into the scene's
+  // setLayerVisible API for an instant in-place toggle.
   const _szToggle = document.getElementById('dash-strike-zone-toggle');
   if (_szToggle) {
     _szToggle.checked = strikeZoneVisible();
     _szToggle.addEventListener('change', () => {
       setStrikeZoneVisible(_szToggle.checked);
-      repaintCanvas();
+      if (window.BallTrackerScene) {
+        window.BallTrackerScene.setLayerVisible('strike_zone', _szToggle.checked);
+      }
     });
   }
-  if (eventsBox) eventsBox.addEventListener('change', (e) => {
-    const cb = e.target.closest('input[data-traj-sid]');
-    if (!cb) return;
-    const sid = cb.dataset.trajSid;
-    // Single-select preview: clicking one row always replaces the
-    // selection (clicking again on the same row deselects). Multi-select
-    // was retired with the dashboard 3D refactor — the scene shows one
-    // pitch's fit + speed at a time; viewer.html owns scrub-overlay UX.
-    if (cb.checked) {
+  // Row click = "load this fit into dashboard 3D". Single-select toggle:
+  // clicking the same row deselects. Multi-overlay was retired with the
+  // dashboard 3D refactor — the scene shows one pitch at a time; viewer
+  // owns scrub-overlay UX. Clicks on the explicit "→ viewer" link or any
+  // <button> / action <form> in row 3 must NOT trigger row selection.
+  if (eventsBox) eventsBox.addEventListener('click', (e) => {
+    if (e.target.closest('.ev-viewer-link')) return;
+    if (e.target.closest('.ev-action-form, button')) return;
+    const row = e.target.closest('.event-item[data-sid]');
+    if (!row) return;
+    const sid = row.dataset.sid;
+    if (selectedTrajIds.has(sid)) {
+      selectedTrajIds.delete(sid);
+    } else {
       selectedTrajIds.clear();
       selectedTrajIds.add(sid);
-      eventsBox.querySelectorAll('input[data-traj-sid]').forEach(other => {
-        if (other !== cb) other.checked = false;
-      });
-    } else {
-      selectedTrajIds.delete(sid);
     }
     persistTrajSelection();
     repaintCanvas();
     updateLatestPitchBadge();
+    // Repaint rows so the clicked row picks up `.selected` (background
+    // tint) and its swatch flips to filled. Bust `_lastEvKey` first:
+    // the renderEvents wrapper in 65_diff_wrappers.js short-circuits
+    // when event data hasn't changed, but selection state isn't part
+    // of its key — without this bust the wrapper swallows the call and
+    // the user waits 5 s for the next tickEvents to repaint.
+    _lastEvKey = null;
+    if (typeof renderEvents === 'function' && Array.isArray(currentEvents)) {
+      renderEvents(currentEvents);
+    }
   });
   // Show-points toggle — surfaces raw triangulated points coloured by
-  // segment under the fit curves. Default off; reading is instantaneous
-  // once toggled on (data is already cached on `trajCache`).
+  // segment under the fit curves. Default off. Scene rebuild is local
+  // to the fit_points layer; no full repaint needed.
   const _showPointsToggle = document.getElementById('dash-show-points-toggle');
   if (_showPointsToggle) {
     _showPointsToggle.checked = showPointsEnabled();
     _showPointsToggle.addEventListener('change', () => {
       setShowPoints(_showPointsToggle.checked);
-      repaintCanvas();
+      if (window.BallTrackerDashboardScene) {
+        window.BallTrackerDashboardScene.setShowPoints(_showPointsToggle.checked);
+      }
     });
   }
+  // 5-view camera presets (ISO/CATCH/SIDE/TOP/PITCHER) — Three.js scene
+  // owns the toolbar binding via `BallTrackerScene.bindViewToolbar()`,
+  // which the dashboard_layers.js boot script invokes on mount. No
+  // wiring needed here.

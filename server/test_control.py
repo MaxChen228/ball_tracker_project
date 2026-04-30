@@ -534,25 +534,6 @@ def test_delete_clears_last_ended_session_pointer(tmp_path):
     assert s.session_snapshot() is None
 
 
-def test_clear_last_ended_session(tmp_path):
-    s = main.State(data_dir=tmp_path)
-    s.arm_session()
-    s.stop_session()
-    assert s.session_snapshot() is not None
-
-    assert s.clear_last_ended_session() is True
-    assert s.session_snapshot() is None
-    # Second call is a no-op.
-    assert s.clear_last_ended_session() is False
-
-
-def test_clear_refuses_while_armed(tmp_path):
-    s = main.State(data_dir=tmp_path)
-    s.arm_session()
-    assert s.clear_last_ended_session() is False
-    assert s.session_snapshot() is not None
-
-
 def test_lookup_session_locked_finds_through_recently_ended_ring(tmp_path):
     """Late frames from cam A draining its detection backlog after disarm
     must still resolve back to session A even when the operator has already
@@ -620,32 +601,6 @@ def test_delete_session_removes_target_from_ring_only(tmp_path):
     assert s._most_recent_ended_session_locked() is b
     # Ring rebuild preserved B without accidentally collapsing both.
     assert len(s._recently_ended_sessions) == 1
-
-
-def test_sessions_clear_html_redirect():
-    main.state.reset()
-    main.state.arm_session()
-    main.state.stop_session()
-
-    client = TestClient(app)
-    r = client.post(
-        "/sessions/clear",
-        headers={"Accept": "text/html"},
-        follow_redirects=False,
-    )
-    assert r.status_code == 303
-    assert r.headers["location"] == "/"
-    assert main.state.session_snapshot() is None
-
-
-def test_sessions_clear_json_409_when_nothing_to_clear():
-    main.state.reset()
-    client = TestClient(app)
-    r = client.post(
-        "/sessions/clear",
-        headers={"Accept": "application/json"},
-    )
-    assert r.status_code == 409
 
 
 def test_delete_refuses_armed_session(tmp_path):
