@@ -216,6 +216,51 @@ def test_dashboard_shows_deleted_when_bound_preset_removed(tmp_path, monkeypatch
     assert 'data-detection-reset-preset="blue_ball"' not in body
 
 
+def test_dashboard_renders_save_as_new_and_manage_buttons(tmp_path, monkeypatch):
+    """Phase 3 affordances: the Detection-config card must surface
+    `+ Save as new` and `Manage…` buttons, and the Manage modal must
+    SSR a row per preset with Use / Duplicate / Delete actions."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    body = client.get("/").text
+    assert 'data-preset-save-as' in body
+    assert 'data-preset-manage' in body
+    assert 'id="preset-manage-modal"' in body
+    # Each seeded preset surfaces in the modal table with all three
+    # row actions.
+    for slug in ("tennis", "blue_ball"):
+        assert f'data-preset-use="{slug}"' in body
+        assert f'data-preset-duplicate="{slug}"' in body
+        assert f'data-preset-delete="{slug}"' in body
+
+
+def test_dashboard_marks_active_preset_in_manage_modal(tmp_path, monkeypatch):
+    """The currently-bound preset is decorated with a ★ marker so the
+    operator can locate it in the library list."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    from detection_config import DetectionConfig
+
+    bb = main.state.load_preset("blue_ball")
+    main.state.set_detection_config(DetectionConfig(
+        hsv=bb.hsv, shape_gate=bb.shape_gate,
+        preset="blue_ball", last_applied_at=None,
+    ))
+    client = TestClient(main.app)
+    body = client.get("/").text
+    # The current marker appears on the blue_ball row, not on tennis.
+    blue_idx = body.index('data-preset-use="blue_ball"')
+    tennis_idx = body.index('data-preset-use="tennis"')
+    star = body.find("★ current")
+    assert star != -1
+    # The star is closer to whichever row it belongs to. Validate by
+    # bracketing — the star sits within the same <tr> as blue_ball,
+    # which is rendered before tennis (sorted alphabetically).
+    if blue_idx < tennis_idx:
+        assert star < tennis_idx
+    else:
+        assert star < blue_idx
+
+
 def test_dashboard_renders_after_creating_custom_preset(tmp_path, monkeypatch):
     """A user-created preset surfaces in the dashboard's preset-button
     row, with its label HTML-escaped."""

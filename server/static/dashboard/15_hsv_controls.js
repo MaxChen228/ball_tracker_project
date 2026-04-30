@@ -160,4 +160,161 @@
         }
       });
     });
+
+    _initPresetLibraryControls(form, status);
+  }
+
+  // ===== Preset library (phase 3) =====
+  // Save-as-new / Manage modal / per-row Use / Duplicate / Delete.
+  // The modal is SSR'd by `_render_manage_modal` and toggled via the
+  // native <dialog> element. All actions reload the page on success
+  // so the SSR identity header re-renders against the new state.
+
+  function _slugFromPrompt(suggestion) {
+    // POST /presets validates the slug server-side; this is just a
+    // client-side hint to nudge operators toward a valid value before
+    // a round-trip. The server is the source of truth.
+    const raw = window.prompt(
+      'Preset slug (filename, [a-z0-9_]{1,32}):',
+      suggestion || '',
+    );
+    if (raw === null) return null;
+    return raw.trim();
+  }
+
+  async function _saveAsNew(form, status) {
+    const slug = _slugFromPrompt('');
+    if (!slug) return;
+    const label = window.prompt('Operator-facing label:', slug);
+    if (label === null) return;
+    const body = {
+      name: slug,
+      label: label,
+      hsv: _readHSV(form),
+      shape_gate: _readShape(form),
+    };
+    if (status) status.textContent = '…';
+    try {
+      const r = await fetch('/presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        if (status) status.textContent = `save error: ${t.slice(0, 200)}`;
+        return;
+      }
+      window.location.reload();
+    } catch (e) {
+      if (status) status.textContent = `network error: ${e}`;
+    }
+  }
+
+  function _setModalStatus(modal, msg) {
+    const el = modal.querySelector('[data-preset-modal-status]');
+    if (el) el.textContent = msg;
+  }
+
+  async function _useFromLibrary(name, modal) {
+    // Same path as the main reset-to-preset button — server snaps live
+    // config to the named preset's values atomically.
+    _setModalStatus(modal, '…');
+    try {
+      const r = await fetch('/detection/config/reset_to_preset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset: name }),
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        _setModalStatus(modal, `use error: ${t.slice(0, 200)}`);
+        return;
+      }
+      window.location.reload();
+    } catch (e) {
+      _setModalStatus(modal, `network error: ${e}`);
+    }
+  }
+
+  async function _duplicate(name, modal) {
+    const slug = _slugFromPrompt(`${name}_copy`);
+    if (!slug) return;
+    _setModalStatus(modal, '…');
+    try {
+      // Read source preset, then POST a new file under the new slug.
+      // No server-side duplicate endpoint — keeping the API surface
+      // small; the round-trip cost is one extra GET per duplicate.
+      const src = await fetch(`/presets/${encodeURIComponent(name)}`);
+      if (!src.ok) {
+        _setModalStatus(modal, `read error: ${src.status}`);
+        return;
+      }
+      const srcBody = await src.json();
+      const label = window.prompt('Label for the duplicate:', `${srcBody.label} (copy)`);
+      if (label === null) return;
+      const r = await fetch('/presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: slug,
+          label: label,
+          hsv: srcBody.hsv,
+          shape_gate: srcBody.shape_gate,
+        }),
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        _setModalStatus(modal, `duplicate error: ${t.slice(0, 200)}`);
+        return;
+      }
+      window.location.reload();
+    } catch (e) {
+      _setModalStatus(modal, `network error: ${e}`);
+    }
+  }
+
+  async function _deletePreset(name, modal) {
+    if (!window.confirm(`Delete preset "${name}"? Built-in seeds re-create on restart.`)) {
+      return;
+    }
+    _setModalStatus(modal, '…');
+    try {
+      const r = await fetch(`/presets/${encodeURIComponent(name)}`, {
+        method: 'DELETE',
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        _setModalStatus(modal, `delete error: ${t.slice(0, 200)}`);
+        return;
+      }
+      window.location.reload();
+    } catch (e) {
+      _setModalStatus(modal, `network error: ${e}`);
+    }
+  }
+
+  function _initPresetLibraryControls(form, status) {
+    const saveBtn = document.querySelector('[data-preset-save-as]');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', () => _saveAsNew(form, status));
+    }
+    const modal = document.getElementById('preset-manage-modal');
+    const manageBtn = document.querySelector('[data-preset-manage]');
+    if (manageBtn && modal && typeof modal.showModal === 'function') {
+      manageBtn.addEventListener('click', () => modal.showModal());
+    }
+    if (modal) {
+      const closeBtn = modal.querySelector('[data-preset-modal-close]');
+      if (closeBtn) closeBtn.addEventListener('click', () => modal.close());
+      modal.querySelectorAll('[data-preset-use]').forEach((b) => {
+        b.addEventListener('click', () => _useFromLibrary(b.dataset.presetUse, modal));
+      });
+      modal.querySelectorAll('[data-preset-duplicate]').forEach((b) => {
+        b.addEventListener('click', () => _duplicate(b.dataset.presetDuplicate, modal));
+      });
+      modal.querySelectorAll('[data-preset-delete]').forEach((b) => {
+        b.addEventListener('click', () => _deletePreset(b.dataset.presetDelete, modal));
+      });
+    }
   }

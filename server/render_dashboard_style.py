@@ -201,7 +201,28 @@ _CSS = f"""
 .identity-modified {{ color: var(--ink); border-color: var(--ink);
     background: var(--surface); }}
 .identity-custom {{ color: var(--sub); border-color: var(--border-base); }}
-.identity-deleted {{ color: var(--danger, #c0392b); border-color: var(--danger, #c0392b); }}
+.identity-deleted {{ color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }}
+.hsv-library-actions {{ display: flex; gap: var(--s-2); margin-top: var(--s-2); padding-top: var(--s-2);
+    border-top: 1px solid var(--border-l); }}
+.preset-modal {{ width: min(680px, 92vw); padding: var(--s-3);
+    border: 1px solid var(--border-base); border-radius: var(--r);
+    background: var(--surface); color: var(--ink); }}
+.preset-modal::backdrop {{ background: rgba(0,0,0,0.4); }}
+.preset-modal-head {{ display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: var(--s-2); }}
+.preset-modal-head h3 {{ margin: 0; font-family: var(--mono); font-size: 13px;
+    text-transform: uppercase; letter-spacing: 0.10em; color: var(--ink); }}
+.preset-modal-status {{ font-family: var(--mono); font-size: 10px;
+    color: var(--sub); margin-top: var(--s-2); min-height: 1.2em; }}
+.preset-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+.preset-table th {{ text-align: left; padding: 6px 8px; font-family: var(--mono);
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.10em; color: var(--sub);
+    border-bottom: 1px solid var(--border-l); }}
+.preset-table td {{ padding: 6px 8px; border-bottom: 1px solid var(--border-l); vertical-align: middle; }}
+.preset-table code {{ font-family: var(--mono); font-size: 11px; color: var(--ink); }}
+.preset-current-tag {{ font-family: var(--mono); font-size: 9px; color: var(--accent, var(--ink)); margin-left: 4px; }}
+.preset-actions {{ display: flex; gap: 4px; justify-content: flex-end; }}
+.preset-empty {{ color: var(--sub); padding: 12px; text-align: center; }}
 .detection-section {{ border-top: 1px solid var(--border-l); padding-top: var(--s-2);
     margin-top: var(--s-2); }}
 .detection-section:first-of-type {{ border-top: 0; padding-top: 0; margin-top: 0; }}
