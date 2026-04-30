@@ -455,16 +455,16 @@ def render_viewer_html(
           <input id="scrubber" class="strip-canvas" type="range" min="0" max="1" value="0" step="1" />
         </div>
         <div class="strip-row" id="strip-row-live" hidden
-             title="LIVE — iOS on-device detection streamed over WS while the session was armed. Runs on raw BGRA frames pre-encode; earliest signal available.">
+             title="LIVE — iOS on-device detection streamed over WS while the session was armed. Runs on raw BGRA frames pre-encode; earliest signal available. Top two bands = cam A / cam B per-frame detection; bottom band = ballistic fit segments (SegmentRecord t_start..t_end), coloured by the same palette as the 3D fit curves.">
           <span class="strip-label">LIVE</span>
-          <span class="strip-sublabels" aria-hidden="true"><span>A</span><span>B</span></span>
-          <canvas id="detection-canvas-live" class="strip-canvas" height="28" aria-hidden="true"></canvas>
+          <span class="strip-sublabels" aria-hidden="true"><span>A</span><span>B</span><span>S</span></span>
+          <canvas id="detection-canvas-live" class="strip-canvas" height="32" aria-hidden="true"></canvas>
         </div>
         <div class="strip-row" id="strip-row-server-post" hidden
-             title="SVR — server-side detection on the H.264-decoded MOV. Independent from the iOS paths; H.264 quantization typically costs a few frames at detection edges.">
+             title="SVR — server-side detection on the H.264-decoded MOV. Independent from the iOS paths; H.264 quantization typically costs a few frames at detection edges. Top two bands = cam A / cam B per-frame detection; bottom band = fit segments for this path.">
           <span class="strip-label">SVR</span>
-          <span class="strip-sublabels" aria-hidden="true"><span>A</span><span>B</span></span>
-          <canvas id="detection-canvas-server-post" class="strip-canvas" height="28" aria-hidden="true"></canvas>
+          <span class="strip-sublabels" aria-hidden="true"><span>A</span><span>B</span><span>S</span></span>
+          <canvas id="detection-canvas-server-post" class="strip-canvas" height="32" aria-hidden="true"></canvas>
         </div>
         <div class="strip-note" id="strip-note-multi" hidden></div>
       </div>

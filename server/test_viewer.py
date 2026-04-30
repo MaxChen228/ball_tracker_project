@@ -917,6 +917,13 @@ def test_viewer_ships_interactive_diagnostic_widgets():
     assert 'data-popover-target="viewer-fit-popover"' in body
     assert 'id="viewer-traj-popover"' in body
     assert 'id="viewer-fit-popover"' in body
+    # Detection strip rows stack 3 sub-bands (A · B · S) — segments
+    # render in the bottom S band so live/svr fit segments line up with
+    # the same row's per-cam detection densities. Canvas height bumped
+    # 28→32 to give the SEG band 8 px without crushing A/B.
+    assert body.count('<span>A</span><span>B</span><span>S</span>') == 2
+    assert 'id="detection-canvas-live" class="strip-canvas" height="32"' in body
+    assert 'id="detection-canvas-server-post" class="strip-canvas" height="32"' in body
     # Three.js scene runtime owns the default camera (ISO preset baked
     # into PRESETS in scene_runtime.js); the inline JSON theme block
     # carries the strike-zone centroid so any consumer reading the
@@ -1094,7 +1101,12 @@ def test_viewer_path_click_does_not_pre_mutate_layer_visibility():
     assert "layerVisibility.path = path" not in pre
 
 
-def test_viewer_strip_reserves_dual_ab_subtracks_per_pipeline():
+def test_viewer_strip_reserves_three_subtracks_per_pipeline():
+    """Each strip row stacks three sub-bands: cam A · cam B · SEG. The
+    SEG band carries fit-segment time ranges (SegmentRecord t_start..
+    t_end) for the same path as that row's detection columns, so live
+    fit segments line up with live A/B and svr fit segments line up
+    with svr A/B."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(722)
     _record_pitch(_pitch("A", 722, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -1105,8 +1117,15 @@ def test_viewer_strip_reserves_dual_ab_subtracks_per_pipeline():
     assert 'const STRIP_CAMS = ["A", "B"]' in body
     assert "drawStripInto(STRIP_ROWS[path].canvas, camAtFrameByPath[path], path)" in body
     for canvas_id in ("detection-canvas-live", "detection-canvas-server-post"):
-        assert f'id="{canvas_id}" class="strip-canvas" height="28"' in body
+        assert f'id="{canvas_id}" class="strip-canvas" height="32"' in body
     assert body.count('<span class="strip-sublabels"') == 2
+    # All three sub-band labels are emitted in order (A then B then S),
+    # once per row, twice total.
+    assert body.count('<span>A</span><span>B</span><span>S</span>') == 2
+    # Lane-aware overlap handling lives in 80_strip.js — assignSegmentLanes
+    # is the function the SEG band relies on. Drift would silently break
+    # the overlapping-segs case.
+    assert "function assignSegmentLanes" in body
 
 
 def test_viewer_pending_overlay_idle_session_hidden():
@@ -1574,3 +1593,27 @@ def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
     assert '>CAND<' not in body
     assert 'class="cv-blobs-k"' not in body
     assert 'window._setCandTopK' not in body
+
+
+def test_seg_palette_strip_iife_matches_points_layer_js():
+    """80_strip.js (classic IIFE bundle) carries a hard-coded copy of
+    SEG_PALETTE because it can't import the ESM points_layer.js. The
+    two lists must stay in lockstep — drift would silently mis-colour
+    the strip's SEG band relative to the 3D fit curves and traj points,
+    breaking the operator's mental model that "this orange band on the
+    strip = this orange parabola in 3D"."""
+    import re
+    from pathlib import Path
+    root = Path(main.__file__).parent / "static"
+    pl_text = (root / "threejs" / "points_layer.js").read_text()
+    strip_text = (root / "viewer" / "80_strip.js").read_text()
+    pl_block = re.search(r"export const SEG_PALETTE\s*=\s*\[([^\]]+)\]", pl_text)
+    strip_block = re.search(r"const SEG_PALETTE_HEX\s*=\s*\[([^\]]+)\]", strip_text)
+    assert pl_block, "points_layer.js: no `export const SEG_PALETTE = [...]` block"
+    assert strip_block, "80_strip.js: no `const SEG_PALETTE_HEX = [...]` block"
+    pl_hex = re.findall(r"0x[0-9A-Fa-f]{6}", pl_block.group(1))
+    strip_hex = re.findall(r"0x[0-9A-Fa-f]{6}", strip_block.group(1))
+    assert pl_hex == strip_hex, (
+        f"SEG_PALETTE drift: points_layer.js={pl_hex}, 80_strip.js={strip_hex}. "
+        f"Update both files in lockstep."
+    )
