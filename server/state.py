@@ -30,6 +30,7 @@ from detection import HSVRange, ShapeGate
 from detection_config import (
     DetectionConfig,
     load_or_migrate as _detection_config_load_or_migrate,
+    modified_fields as _detection_config_modified_fields,
     persist as _detection_config_persist,
 )
 from pairing_tuning import PairingTuning
@@ -1490,8 +1491,7 @@ class State:
         _presets.delete_preset(self._data_dir, name)
 
     def modified_fields_for(self, cfg: DetectionConfig) -> list[str]:
-        from detection_config import modified_fields as _modified_fields
-        return _modified_fields(cfg, data_dir=self._data_dir)
+        return _detection_config_modified_fields(cfg, data_dir=self._data_dir)
 
     def set_pairing_tuning(self, tuning: PairingTuning) -> PairingTuning:
         with self._lock:

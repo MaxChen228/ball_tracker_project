@@ -49,9 +49,9 @@ def render_viewer_html(
     videos: list[tuple[str, str, float, float, dict[str, list]]],
     health: dict,
     *,
+    presets,
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
-    presets=None,
 ) -> str:
     from viewer_page import render_viewer_html as _render_viewer_html
 
