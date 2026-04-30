@@ -21,7 +21,7 @@
      itself) so nothing under .work hides under the dock. */
   .viewer { display:grid; grid-template-rows:52px auto minmax(0, 1fr);
     height:100vh; min-height:0; overflow:hidden;
-    padding-bottom:var(--timeline-h, 200px); }
+    padding-bottom:var(--timeline-h, 80px); }
   .nav { height:52px; flex:0 0 52px; background:var(--surface);
     border-bottom:1px solid var(--border-base); display:flex;
     align-items:center; padding:0 var(--s-5); gap:var(--s-4); }
@@ -143,7 +143,10 @@
     background:rgba(192, 57, 43, 0.06); display:flex;
     align-items:center; gap:var(--s-2); }
   .fail-strip .icon { font-weight:700; }
-  .work { flex:1 1 auto; display:flex; min-height:0;
+  /* `.work` is a grid child of `.viewer`; height comes from the parent's
+     `minmax(0, 1fr)` row. The inner `display:flex` splits scene-col vs
+     videos-col horizontally. */
+  .work { display:flex; min-height:0;
     border-bottom:1px solid var(--border-base); }
   .scene-col { flex:{SCENE_FLEX}; min-width:280px; position:relative;
     background:var(--bg); }
