@@ -277,6 +277,11 @@
     const sel = document.getElementById('intrinsics-target');
     const id = sel && sel.value ? sel.value : '';
     if (!id) return { id: '', source: 'select', role: null };
+    // Only Online optgroup <option>s carry `data-role`. A pick from
+    // Known (offline) deliberately has no role context — that device
+    // isn't currently bound to A or B, so the `charuco-role-X`
+    // source_label auto-tag would be misleading. role=null skips
+    // the tag (matches the manual-field path; consistent by design).
     const opt = sel.options[sel.selectedIndex];
     const role = (opt && opt.dataset && opt.dataset.role) || null;
     return { id, source: 'select', role };

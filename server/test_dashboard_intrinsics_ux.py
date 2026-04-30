@@ -8,7 +8,14 @@ won't catch it on first load and the operator gets a half-rendered
 state until the first /calibration/intrinsics tick lands."""
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from render_dashboard_intrinsics import _render_intrinsics_body
+from routes.calibration_intrinsics import _DEVICE_ID_RE
+
+
+_INTRINSICS_JS = Path(__file__).parent / "static" / "dashboard" / "84_intrinsics.js"
 
 
 def test_pairing_section_always_emits_both_roles_even_when_no_devices_online():
@@ -121,32 +128,50 @@ def test_upload_section_has_manual_device_id_text_field():
 
 def test_upload_static_block_preserves_file_input_and_button():
     """The upload <input type=file> + <button id="intrinsics-upload-btn">
-    must NOT live inside #intrinsics-dynamic — the JS polling code
-    replaces that block wholesale and a reattached file input loses
-    its FileList (browsers don't carry FileList across nodes)."""
+    + manual device_id field must NOT live inside #intrinsics-dynamic —
+    the JS polling code replaces that block wholesale and a reattached
+    file input loses its FileList (browsers don't carry FileList across
+    nodes). Split on the upload section's opening tag (it's the first
+    sibling after #intrinsics-dynamic closes) for a stable boundary."""
     html = _render_intrinsics_body(records=[], online_roles={})
-    dyn_start = html.index('id="intrinsics-dynamic"')
-    dyn_end = html.index("</div>", html.index('class="intrinsics-pair', dyn_start))
-    # Walk to the close of #intrinsics-dynamic by counting nested divs.
-    depth = 0
-    cursor = dyn_start
-    while cursor < len(html):
-        next_open = html.find("<div", cursor + 1)
-        next_close = html.find("</div>", cursor + 1)
-        if next_close == -1:
-            break
-        if next_open != -1 and next_open < next_close:
-            depth += 1
-            cursor = next_open
-            continue
-        if depth == 0:
-            dyn_end = next_close
-            break
-        depth -= 1
-        cursor = next_close
-    dyn_block = html[dyn_start:dyn_end]
-    static_block = html[dyn_end:]
-    assert 'id="intrinsics-file"' in static_block
-    assert 'id="intrinsics-upload-btn"' in static_block
-    assert 'id="intrinsics-file"' not in dyn_block
-    assert 'id="intrinsics-upload-btn"' not in dyn_block
+    split_at = html.index('<div class="intrinsics-upload">')
+    dyn_block = html[: split_at]
+    static_block = html[split_at:]
+    for hook in ('id="intrinsics-file"', 'id="intrinsics-upload-btn"',
+                 'id="intrinsics-target-manual"'):
+        assert hook in static_block, f"{hook} missing from upload section"
+        assert hook not in dyn_block, f"{hook} leaked into #intrinsics-dynamic"
+
+
+def test_js_manual_device_id_regex_matches_server_regex():
+    """The JS pre-flight regex (`_MANUAL_DEVICE_ID_RE` in 84_intrinsics.js)
+    must be byte-identical to `_DEVICE_ID_RE.pattern` in the server route.
+    A drift here = the client accepts ids the server then rejects with
+    400, surfacing as a confusing upload failure instead of a fast-fail."""
+    js_text = _INTRINSICS_JS.read_text(encoding="utf-8")
+    m = re.search(r"_MANUAL_DEVICE_ID_RE\s*=\s*/(.+?)/\s*;", js_text)
+    assert m, "_MANUAL_DEVICE_ID_RE literal not found in 84_intrinsics.js"
+    js_pattern = m.group(1)
+    assert js_pattern == _DEVICE_ID_RE.pattern, (
+        f"JS pattern {js_pattern!r} drifted from server "
+        f"{_DEVICE_ID_RE.pattern!r}"
+    )
+
+
+def test_js_renderer_carries_section_label_and_chip_strings():
+    """SSR-only Python tests can't reach the JS renderer; a regex-grep
+    over `84_intrinsics.js` for the strings the SSR also emits is the
+    cheapest way to catch the obvious shape drift without a JS runtime.
+    If the JS replaces 'Pairing' with 'Cameras' or drops the optgroup
+    labels, this trips before the operator notices."""
+    js = _INTRINSICS_JS.read_text(encoding="utf-8")
+    for marker in (
+        "Pairing", "Records",
+        '"Online"', '"Known (offline)"',
+        "cal ✓", "cal ?",
+        "used as ",
+        "intrinsics-pair offline",
+        "intrinsics-pair legacy",
+        "intrinsics-pair online",
+    ):
+        assert marker in js, f"JS renderer missing {marker!r}"
