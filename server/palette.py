@@ -28,7 +28,7 @@ _ACCENT = "#E6B300"
 
 # Status hues used by the scene/viewer renderers; the dashboard CSS uses
 # the var(--passed)/var(--warn) wash variants instead, but the raw hexes
-# still live here so the Plotly layer can reach them without depending
-# on the dashboard stylesheet.
+# still live here so the Three.js scene layer can reach them without
+# depending on the dashboard stylesheet.
 _OK = "#3D7B5F"
 _PENDING = "#D49A1F"

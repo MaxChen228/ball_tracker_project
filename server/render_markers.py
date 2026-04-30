@@ -877,6 +877,14 @@ def render_markers_html(
         "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">"
         "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
         "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
+        # /markers spatial view is a 3D scatter (candidates + stored + known)
+        # with click-to-select that the dashboard/viewer 3D refactor (Three.js)
+        # didn't port. PR #96 dropped the CDN here under the wrong assumption
+        # this page had no 3D scene — _MARKERS_JS still calls Plotly.react +
+        # plotEl.on('plotly_click', ...). Keep the CDN until /markers is
+        # migrated to Three.js too; dashboard 3D scene is independent and the
+        # two surfaces don't share a runtime.
+        "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
         f"<style>{_CSS}{CAM_VIEW_FULL_CSS}{_MARKERS_CSS}</style>"
         "</head><body data-page=\"markers\">"
         f'{_render_app_nav("markers", devices, session, calibrations)}'

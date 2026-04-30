@@ -1,10 +1,10 @@
 """Shared overlay UI primitives for dashboard `/` and viewer `/viewer/{sid}`.
 
-The dashboard and viewer both render the same Plotly 3D scene. Anything
-that toggles a visual layer on top of that scene — currently only the
-strike-zone wireframe — needs identical behaviour on both surfaces (same
-localStorage key, same trace meta predicate). Centralising the JS
-runtime here keeps the two pages in lock-step.
+The dashboard and viewer both render the same Three.js 3D scene.
+Anything that toggles a visual layer on top of that scene — currently
+only the strike-zone wireframe — needs identical behaviour on both
+surfaces (same localStorage key, same scene-layer name). Centralising
+the JS runtime here keeps the two pages in lock-step.
 
 Inject ``OVERLAYS_RUNTIME_JS`` as its own ``<script>`` block BEFORE each
 page's main script. It exposes ``window.BallTrackerOverlays`` with
