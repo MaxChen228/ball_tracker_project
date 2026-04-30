@@ -42,11 +42,16 @@
   // Sibling of cost: drag preview for the Gap slider in the same header
   // strip. Mutates `residualCapM` (declared in 10_video_master.js, shared
   // IIFE scope) so `_passResidualFilter` sees the new cap on next redraw.
-  // Slider value is centimetres (0–200); 200 = Infinity (short-circuits
-  // the filter to a no-op).
+  // Slider value is centimetres (0–200), converted to metres. 200cm =
+  // 2.0m, which is also the route's max — no Infinity special case, the
+  // residual cap is always a finite metres value (matches the wire
+  // semantics of `gap_threshold_m`).
   function _setGapThreshold(v_cm) {
     const cm = parseFloat(v_cm);
-    residualCapM = (Number.isFinite(cm) && cm < 200) ? cm / 100 : Infinity;
+    if (!Number.isFinite(cm)) {
+      throw new Error("_setGapThreshold: non-numeric slider value " + v_cm);
+    }
+    residualCapM = cm / 100;
     if (typeof scheduleSceneDraw === 'function') scheduleSceneDraw();
   }
   function _getGapThresholdM() { return residualCapM; }
@@ -54,12 +59,10 @@
   window._getGapThresholdM = _getGapThresholdM;
   // Residual predicate used by the Three.js trajectory rebuild
   // (viewer_layers.js). Closes over `residualCapM` so callers don't need
-  // to read it. Infinity short-circuits to "pass everything"; finite
-  // caps compare ≤. Points with non-numeric / missing residual_m are
-  // treated as residual=0 (legacy fall-through, matches what the
-  // Plotly-era 20_filters.js did).
+  // to read it. Points with non-numeric / missing residual_m are treated
+  // as residual=0 (legacy fall-through; matches what the Plotly-era
+  // 20_filters.js did).
   function _passResidualFilter(p) {
-    if (!Number.isFinite(residualCapM)) return true;
     const r = (p && typeof p.residual_m === "number") ? p.residual_m : 0;
     return r <= residualCapM;
   }

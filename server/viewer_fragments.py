@@ -144,18 +144,25 @@ def session_tuning_strip_html(
     cost_threshold: float | None,
     gap_threshold_m: float | None,
     session_id: str,
+    pairing_effective_gap_m: float,
 ) -> str:
     """Per-session pairing-tuning sliders (cost + gap) for the viewer's
     nav bar.
 
-    Cost slider: drag = client-side preview (filter blobs + 3D points by
+    Cost slider: drag = client-side preview (filter blobs + 3D rays by
     `cost > threshold`). Initial value is `SessionResult.cost_threshold`
     (None → 1.0 = "no filter").
 
     Gap slider: drag = client-side preview (hide triangulated points
-    whose `residual_m > threshold`). Range 0–200cm, "200" reads as
-    "off" (Infinity client-side; sent as 2.0m to the route). Initial
-    value is `SessionResult.gap_threshold_m * 100` (None → 200 = off).
+    whose `residual_m > threshold`). Range 0–200cm. Initial value is
+    `SessionResult.gap_threshold_m * 100` (None → 200cm).
+
+    `pairing_effective_gap_m` is the *current* `PairingTuning.gap_threshold_m`
+    on disk (typically 0.20m). The slider track renders a tick at this
+    position and greys out the segment to its right: dragging looser
+    than the pairing cap can never reveal new points (those points were
+    already dropped at pairing time on disk), so the visual tells the
+    operator "to see more, you need Apply, not drag".
 
     Apply = POST /sessions/{sid}/recompute with both values, server
     reruns pairing + segmenter on existing candidates and overwrites
@@ -166,11 +173,17 @@ def session_tuning_strip_html(
     HTML injection here, but escaping anyway is cheap.
     """
     cost_initial = 1.0 if cost_threshold is None else float(cost_threshold)
-    # Slider value is centimetres for human readability; 200 = "off".
+    # Slider value is centimetres for human readability. No "off" magic —
+    # 200cm is just the maximum, and the readout reads "≤ 200 cm" there
+    # like every other position. The previous "off" label conflated two
+    # things: client-side residual cap is genuinely Infinity at 200, but
+    # pairing-time gap was *not* off (it was whatever pairing_effective_gap_m
+    # below holds). Removing the word kills that ambiguity.
     gap_initial_cm = 200 if gap_threshold_m is None else min(
         200, max(0, round(float(gap_threshold_m) * 100))
     )
-    gap_readout = "off" if gap_initial_cm >= 200 else f"≤ {gap_initial_cm} cm"
+    cap_cm = max(0, min(200, round(float(pairing_effective_gap_m) * 100)))
+    cap_pct = cap_cm / 200 * 100
     sid_attr = html.escape(session_id, quote=True)
     return (
         '<div class="session-tuning" role="group" '
@@ -187,14 +200,29 @@ def session_tuning_strip_html(
         f'<span class="st-value" data-session-cost-value>{cost_initial:.2f}</span>'
         # --- Gap slider (skew-line residual cap, sibling of cost) ---
         '<label class="st-label">Gap ≤</label>'
+        # Wrapper holds the slider + the pairing-cap tick + the "no
+        # effect past here" overflow shade. Inline custom properties
+        # drive the CSS so a future cap change is one attribute mutate
+        # away — no JS needed for the tick to reposition.
+        f'<span class="st-gap-track" '
+        f'style="--gap-cap-pct: {cap_pct:.4f}%; --gap-cap-cm: {cap_cm};" '
+        f'data-pairing-cap-cm="{cap_cm}">'
         '<input type="range" min="0" max="200" step="1" '
         f'value="{gap_initial_cm}" data-session-gap-threshold '
         'aria-label="gap threshold (cm)" '
         'oninput="window._setGapThreshold && window._setGapThreshold(this.value); '
         'document.querySelector(\'[data-session-gap-value]\').textContent = '
-        '(+this.value >= 200 ? \'off\' : \'≤ \' + (+this.value) + \' cm\'); '
+        '\'≤ \' + (+this.value) + \' cm\'; '
+        'document.querySelector(\'[data-session-gap-warn]\').hidden = '
+        '+this.value <= +this.closest(\'.st-gap-track\').dataset.pairingCapCm; '
         'document.querySelector(\'[data-session-recompute]\').disabled = false;">'
-        f'<span class="st-value" data-session-gap-value>{gap_readout}</span>'
+        '<span class="st-gap-tick" aria-hidden="true"></span>'
+        '</span>'
+        f'<span class="st-value" data-session-gap-value>≤ {gap_initial_cm} cm</span>'
+        '<span class="st-gap-warn" data-session-gap-warn '
+        f'role="note"{" hidden" if gap_initial_cm <= cap_cm else ""}>'
+        '⚠ past pairing cap — Apply needed to add points'
+        '</span>'
         # --- Apply button (sends both values) ---
         '<button type="button" class="st-apply" data-session-recompute disabled '
         f'data-session-id="{sid_attr}" '

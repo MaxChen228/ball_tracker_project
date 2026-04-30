@@ -316,16 +316,22 @@ def viewer(session_id: str) -> HTMLResponse:
     health = _build_viewer_health(session_id)
     # Per-session pairing-tuning for the viewer header strip. Both fields
     # are None on legacy SessionResult (predates the recompute endpoint) →
-    # session_tuning_strip_html shows 1.0 / "off" (= no filter on either
-    # axis).
+    # session_tuning_strip_html seeds 1.0 / 200cm (= no client-side filter
+    # on either axis).
     result = state.get(session_id)
     cost_threshold = result.cost_threshold if result is not None else None
     gap_threshold_m = result.gap_threshold_m if result is not None else None
     segments = list(result.segments) if result is not None else []
+    # Current global PairingTuning gap drives the slider's "pairing cap"
+    # tick + grey overflow shade: dragging past this point can't reveal
+    # new triangulated points (those were dropped at pairing time on
+    # disk), so the UI marks the boundary explicitly.
+    pairing_effective_gap_m = float(state.pairing_tuning().gap_threshold_m)
     return HTMLResponse(render_viewer_html(
         scene, videos_with_offsets, health,
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
+        pairing_effective_gap_m=pairing_effective_gap_m,
         presets=state.list_presets(),
         segments=segments,
     ))
