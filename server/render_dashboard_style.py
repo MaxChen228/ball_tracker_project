@@ -462,6 +462,25 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
               max-height: 240px; overflow-y: auto;
               white-space: pre; word-break: normal; }}
 
+/* --- Collapsibles (data-collapsible-key / -header / -body, see
+   static/dashboard/05_collapsibles.js). Generic primitive: chevron on
+   header, body hides on data-collapsed="true". Card variant tightens
+   the title's bottom border when folded so it doesn't read as a
+   floating header above empty space. */
+[data-collapsible-key] [data-collapsible-header] {{
+  cursor: pointer; user-select: none;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s-2); }}
+[data-collapsible-key] [data-collapsible-header]::after {{
+  content: "▾"; font-size: 10px; color: var(--sub);
+  transition: transform 0.15s ease; flex: 0 0 auto; }}
+[data-collapsible-key][data-collapsed="true"] [data-collapsible-header]::after {{
+  transform: rotate(-90deg); }}
+[data-collapsible-key][data-collapsed="true"] [data-collapsible-body] {{
+  display: none; }}
+.card[data-collapsible-key][data-collapsed="true"] > .card-title {{
+  border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }}
+
 /* --- Events list (redesigned). 3-line card per session, lines 2/3
    collapse when empty. Line 1 = identity + status. Line 2 = pipe chips
    + metrics (wraps cleanly if it overflows the sidebar). Line 3 =
@@ -478,12 +497,16 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                   padding:4px 8px; border-radius:var(--r); cursor:pointer; }}
 .events-filter.active {{ background:var(--ink); color:var(--surface); border-color:var(--ink); }}
 
+.event-day-group + .event-day-group {{ margin-top: 0; }}
 .event-day {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
               text-transform: uppercase; color: var(--sub);
               padding: 10px var(--s-1) 4px;
               border-bottom: 1px solid var(--border-l);
               margin-top: 8px; }}
-.event-day:first-child {{ margin-top: 0; }}
+.event-day-group:first-child > .event-day {{ margin-top: 0; }}
+/* Group is collapsible — header gets a chevron, body folds. The chevron
+   crowds the right edge so reserve a bit of trailing padding. */
+.event-day-group > .event-day[data-collapsible-header] {{ padding-right: var(--s-3); }}
 
 /* Whole row is the dashboard-3D-load click target (40_traj_handlers.js).
    .selected highlights the active overlay; only the explicit "→ viewer"
@@ -493,7 +516,7 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                transition: background 0.12s ease; min-width: 0;
                cursor: pointer; }}
 .event-item:first-child,
-.event-day + .event-item {{ border-top: 0; }}
+.event-day-body > .event-item:first-child {{ border-top: 0; }}
 .event-item:hover {{ background: var(--surface-hover); }}
 .event-item.selected {{ background: var(--surface-2); }}
 .event-item.selected:hover {{ background: var(--surface-hover); }}
