@@ -203,21 +203,11 @@ def session_tuning_strip_html(
 def detection_config_strip_html(configs: dict[str, Any]) -> str:
     live = configs.get("live") or {}
     server_post = configs.get("server_post") or {}
-    same = (
-        bool(live.get("available"))
-        and bool(server_post.get("available"))
-        and live.get("detail") == server_post.get("detail")
-        and live.get("tag") == server_post.get("tag")
-    )
-    compare = "same" if same else (
-        "diff" if live.get("available") and server_post.get("available") else "partial"
-    )
     return (
         '<div class="config-strip" role="status" aria-label="Detection config used">'
         '<span class="cfg-head">CFG</span>'
         f'{_config_pill_html("LIVE", live)}'
         f'{_config_pill_html("SVR", server_post)}'
-        f'<span class="cfg-compare {compare}">{html.escape(compare)}</span>'
         '</div>'
     )
 
@@ -228,16 +218,10 @@ def _config_pill_html(label: str, cfg: dict[str, Any]) -> str:
     tag = cfg.get("tag") or "n/a"
     detail = cfg.get("detail") or "unavailable"
     title = cfg.get("title") or detail
-    source = cfg.get("source")
-    source_html = (
-        f'<span class="cfg-source">{html.escape(str(source))}</span>'
-        if source else ""
-    )
     return (
         f'<span class="cfg-pill {klass}" title="{html.escape(str(title))}">'
         f'<span class="cfg-label">{html.escape(label)}</span>'
         f'<span class="cfg-tag">{html.escape(str(tag))}</span>'
-        f'{source_html}'
         f'<span class="cfg-detail">{html.escape(str(detail))}</span>'
         f'</span>'
     )
