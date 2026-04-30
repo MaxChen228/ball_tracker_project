@@ -464,9 +464,9 @@ window.VIEWER_INITIAL_GAP_THRESHOLD_M = {2.0 if ctx.gap_threshold_m is None else
 window.VIEWER_PAIRING_EFFECTIVE_GAP_M = {float(ctx.pairing_effective_gap_m)};
 window._applyTuning = function(btn) {{
   const cost = parseFloat(document.querySelector('[data-session-cost-threshold]').value);
-  // Slider value is centimetres (0–200); ship metres to the route. 200 = 2.0m
-  // = the route's max ("off" semantically — every cartesian pair survives
-  // the gap gate, so what you Apply matches what the slider shows).
+  // Slider value is centimetres (0–200); ship metres to the route.
+  // 200cm = 2.0m = the route's max — every cartesian pair survives the
+  // gap gate at that setting.
   const gap_m = parseFloat(document.querySelector('[data-session-gap-threshold]').value) / 100;
   const sid = btn.getAttribute('data-session-id');
   btn.disabled = true;
@@ -477,9 +477,33 @@ window._applyTuning = function(btn) {{
     body: JSON.stringify({{ cost_threshold: cost, gap_threshold_m: gap_m }}),
   }}).then(function(r) {{
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    // Simplest reload — full re-render with fresh SessionResult.
-    // Future optimization: patch in place via the new result JSON.
-    window.location.reload();
+    return r.json();
+  }}).then(function(body) {{
+    // Patch in place: feed the fresh SessionResult to the Three.js
+    // scene + refresh the slider's stored "initial" values so a
+    // subsequent Apply diff measures from this new baseline. No reload
+    // → video keeps buffer / scrubber state / layer-visibility map.
+    if (!body || !body.result) throw new Error('recompute response missing `result`');
+    const r = body.result;
+    if (!window.BallTrackerViewerScene) {{
+      throw new Error('Three.js viewer scene not mounted — cannot patch');
+    }}
+    window.BallTrackerViewerScene.setSessionData({{
+      points: r.points || [],
+      triangulated_by_path: r.triangulated_by_path || {{}},
+      segments: r.segments || [],
+    }});
+    // Reseed the window globals + DOM so a subsequent drag preview
+    // starts from the now-persisted baseline (matches what a reload
+    // would have produced).
+    if (typeof r.cost_threshold === 'number') {{
+      window.VIEWER_INITIAL_COST_THRESHOLD = r.cost_threshold;
+    }}
+    if (typeof r.gap_threshold_m === 'number') {{
+      window.VIEWER_INITIAL_GAP_THRESHOLD_M = r.gap_threshold_m;
+    }}
+    btn.textContent = 'Apply';
+    btn.disabled = true;
   }}).catch(function(err) {{
     btn.disabled = false;
     btn.textContent = 'Apply';
