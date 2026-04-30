@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 # Conservative: SCREAMING_SNAKE_CASE only (`{FOO_BAR}`), >= 2 chars
 # starting with letter or underscore. JS object literals (`{ key: ... }`,
 # `{x, y}`) and lower-case tokens are intentionally excluded.
@@ -72,9 +74,6 @@ def test_viewer_js_template_has_no_unresolved_placeholders() -> None:
 
     leaks = _find_placeholders(_VIEWER_JS_TEMPLATE)
     assert not leaks, _FIX_HINT_VIEWER.format(name=leaks[0].strip("{}"))
-
-
-import pytest
 
 
 # `/`, `/sync`, `/setup`, `/markers` each go through their own render_*

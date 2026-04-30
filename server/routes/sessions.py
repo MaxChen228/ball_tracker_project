@@ -120,7 +120,13 @@ async def sessions_arm(
         body = await request.json()
         raw_paths = body.get("paths")
         if isinstance(raw_paths, list):
-            requested_paths = session_results.normalize_paths(raw_paths)
+            normalized = session_results.normalize_paths(raw_paths)
+            # Empty list, or a list of unknown values that `normalize_paths`
+            # silently drops, is treated as "no caller preference" and falls
+            # back to runtime defaults — matches the pre-NIT-batch behaviour
+            # at the HTTP boundary (`arm_session` itself stays strict and
+            # rejects an explicit empty set as misuse).
+            requested_paths = normalized if normalized else None
     readiness = _arm_readiness()
     if not readiness.get("ready"):
         if _wants_html(request):
