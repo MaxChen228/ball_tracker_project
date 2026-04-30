@@ -1,7 +1,7 @@
 """Offline re-run of HSV detection + triangulation over already-recorded
-sessions. Reads the current `data/hsv_range.json`, iterates pitch JSONs
-paired with their stored MOVs, re-runs `detect_pitch`, rewrites the pitch
-JSON, and re-triangulates sessions where both A and B are present.
+sessions. Reads the current `data/detection_config.json`, iterates pitch
+JSONs paired with their stored MOVs, re-runs `detect_pitch`, rewrites the
+pitch JSON, and re-triangulates sessions where both A and B are present.
 
 Usage:
     uv run python reprocess_sessions.py --since today
@@ -20,6 +20,7 @@ from pathlib import Path
 
 import session_results
 from detection import HSVRange, ShapeGate
+from detection_config import load_or_migrate
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pairing_tuning import PairingTuning
 from pipeline import detect_pitch
@@ -38,40 +39,30 @@ PITCH_DIR = DATA_DIR / "pitches"
 VIDEO_DIR = DATA_DIR / "videos"
 RESULT_DIR = DATA_DIR / "results"
 CAL_DIR = DATA_DIR / "calibrations"
-HSV_PATH = DATA_DIR / "hsv_range.json"
-SHAPE_GATE_PATH = DATA_DIR / "shape_gate.json"
 PAIRING_TUNING_PATH = DATA_DIR / "pairing_tuning.json"
 
 VIDEO_EXTS = (".mov", ".mp4", ".m4v")
 
 
-def load_hsv() -> HSVRange:
-    if not HSV_PATH.exists():
-        logger.warning("no hsv_range.json — using default")
-        return HSVRange.default()
-    obj = json.loads(HSV_PATH.read_text())
-    rng = HSVRange(
-        h_min=int(obj["h_min"]), h_max=int(obj["h_max"]),
-        s_min=int(obj["s_min"]), s_max=int(obj["s_max"]),
-        v_min=int(obj["v_min"]), v_max=int(obj["v_max"]),
+def load_detection_config() -> tuple[HSVRange, ShapeGate]:
+    cfg = load_or_migrate(DATA_DIR, atomic_write=atomic_write)
+    hsv = HSVRange(
+        h_min=cfg.hsv.h_min, h_max=cfg.hsv.h_max,
+        s_min=cfg.hsv.s_min, s_max=cfg.hsv.s_max,
+        v_min=cfg.hsv.v_min, v_max=cfg.hsv.v_max,
     )
-    logger.info(
-        "hsv h[%d-%d] s[%d-%d] v[%d-%d]",
-        rng.h_min, rng.h_max, rng.s_min, rng.s_max, rng.v_min, rng.v_max,
-    )
-    return rng
-
-
-def load_shape_gate() -> ShapeGate:
-    if not SHAPE_GATE_PATH.exists():
-        return ShapeGate.default()
-    obj = json.loads(SHAPE_GATE_PATH.read_text())
     gate = ShapeGate(
-        aspect_min=float(obj["aspect_min"]),
-        fill_min=float(obj["fill_min"]),
+        aspect_min=cfg.shape_gate.aspect_min,
+        fill_min=cfg.shape_gate.fill_min,
     )
-    logger.info("shape_gate aspect>=%.2f fill>=%.2f", gate.aspect_min, gate.fill_min)
-    return gate
+    label = cfg.preset or "custom"
+    logger.info(
+        "detection_config preset=%s hsv h[%d-%d] s[%d-%d] v[%d-%d] aspect>=%.2f fill>=%.2f",
+        label,
+        hsv.h_min, hsv.h_max, hsv.s_min, hsv.s_max, hsv.v_min, hsv.v_max,
+        gate.aspect_min, gate.fill_min,
+    )
+    return hsv, gate
 
 
 def load_calibrations() -> dict[str, CalibrationSnapshot]:
@@ -318,8 +309,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    hsv = load_hsv()
-    shape_gate = load_shape_gate()
+    hsv, shape_gate = load_detection_config()
     pairing_tuning = load_pairing_tuning()
     calibrations = load_calibrations()
 
