@@ -171,6 +171,48 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
     assert any(name == "point" and data["sid"] == session_id and abs(data["x"] - P_true[0]) < 1e-6 for name, data in events)
     assert any(name == "path_completed" and data["sid"] == session_id and data["cam"] == "A" for name, data in events)
     assert any(name == "path_completed" and data["sid"] == session_id and data["point_count"] == 1 for name, data in events)
+    # `fit` SSE is broadcast at cycle_end regardless of segment count (one
+    # point cannot form a segment, but the event still fires with an empty
+    # `segments` list — dashboard handler clears any previous fit visual).
+    fit_events = [data for name, data in events if name == "fit" and data.get("sid") == session_id]
+    assert len(fit_events) == 1, f"expected exactly one fit event, got {fit_events}"
+    assert fit_events[0]["segments"] == []
+
+
+def test_stamp_segments_on_result_populates_segments_for_ballistic_input():
+    """`stamp_segments_on_result` runs `find_segments` on the chosen
+    authoritative path's points and writes `result.segments`. With ≥
+    `min_seg_len` (5) points falling on a clean ballistic curve the
+    segmenter must produce exactly one segment with the correct speed."""
+    import numpy as np
+    from schemas import SessionResult, TriangulatedPoint
+    from session_results import stamp_segments_on_result
+
+    # Synthetic 50 fps trajectory: 30 m/s release, 5° upward, no spin.
+    G = np.array([0.0, 0.0, -9.81])
+    p0 = np.array([0.0, 0.0, 1.8])
+    v0 = np.array([0.0, 30.0 * np.cos(np.deg2rad(5.0)), 30.0 * np.sin(np.deg2rad(5.0))])
+    pts = []
+    for i in range(20):
+        t = i * 0.02
+        pos = p0 + v0 * t + 0.5 * G * t * t
+        pts.append(TriangulatedPoint(
+            t_rel_s=t, x_m=float(pos[0]), y_m=float(pos[1]), z_m=float(pos[2]),
+            residual_m=0.001,
+        ))
+    result = SessionResult(
+        session_id="s_seg_test",
+        camera_a_received=True,
+        camera_b_received=True,
+        triangulated=pts,
+    )
+    stamp_segments_on_result(result)
+    assert len(result.segments) == 1, [s.model_dump() for s in result.segments]
+    seg = result.segments[0]
+    assert abs(seg.speed_kph - 30.0 * 3.6) < 0.5
+    assert seg.rmse_m < 0.01
+    assert seg.t_start == 0.0
+    assert abs(seg.t_end - 19 * 0.02) < 1e-9
 
 
 def test_live_websocket_single_camera_no_sync_anchor_drops_rays(monkeypatch):

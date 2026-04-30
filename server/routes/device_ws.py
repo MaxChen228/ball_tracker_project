@@ -253,6 +253,18 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                         "point_count": len(result.triangulated_by_path.get(DetectionPath.live.value, [])),
                     },
                 )
+                # Dashboard listens for `fit` to paint the latest pitch's
+                # ballistic curve + speed badge the instant the last cam
+                # reports cycle_end. Rebuild already ran find_segments
+                # (see session_results._stamp_segments_on_result) so we
+                # just forward the persisted SegmentRecord list here.
+                await sse_hub.broadcast(
+                    "fit",
+                    {
+                        "sid": session_id,
+                        "segments": [s.model_dump() for s in result.segments],
+                    },
+                )
                 continue
     except WebSocketDisconnect:
         pass
