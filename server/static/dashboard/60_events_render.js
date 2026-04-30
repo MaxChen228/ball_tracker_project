@@ -171,12 +171,15 @@
 
     const metricsHtml = '';
 
+    // --- row2 (cont'd): preset CFG strip ---
+    const cfgHtml = _cfgStripHtml(e);
+
     // --- row3: actions ---
     const actBits = [];
     if (e.processing_state === 'queued' || e.processing_state === 'processing') {
       actBits.push(_formBtn(`/sessions/${sid}/cancel_processing`, 'Cancel', 'warn'));
     } else if (!trashed && srvStatus !== 'done') {
-      actBits.push(_formBtn(`/sessions/${sid}/run_server_post`, 'Run srv', 'ok'));
+      actBits.push(_runSrvForm(sid));
     }
     if (trashed) {
       actBits.push(_formBtn(`/sessions/${sid}/restore`, 'Restore', 'ok'));
@@ -199,8 +202,65 @@
         ${statusesHtml}
         <a class="ev-viewer-link" href="/viewer/${sid}" title="Open in viewer">→ viewer</a>
       </div>
-      <div class="ev-row2">${pipesHtml}${metricsHtml}</div>
+      <div class="ev-row2">${pipesHtml}${metricsHtml}${cfgHtml}</div>
       ${actionsHtml}`;
+  }
+
+  // Module-scope preset cache. Initialised on boot via _refreshPresetsCache;
+  // refreshed on every events tick start so a freshly-saved preset surfaces
+  // in the Run-srv dropdown without a page reload (the SSR path picks it
+  // up automatically; this keeps the JS-rendered rows in sync). The
+  // /presets endpoint is dirt-cheap (a single os.listdir + N file reads;
+  // every render path already calls it on each render).
+  let _presetsCache = [];
+  let _activePresetCache = null;
+  async function _refreshPresetsCache() {
+    try {
+      const [pr, st] = await Promise.all([
+        fetch('/presets', { cache: 'no-store' }),
+        fetch('/status', { cache: 'no-store' }),
+      ]);
+      if (pr.ok) _presetsCache = (await pr.json()).presets || [];
+      if (st.ok) _activePresetCache = (await st.json()).active_preset_name || null;
+    } catch (_) { /* silent — renderer falls back gracefully on empty cache */ }
+  }
+  if (typeof window !== 'undefined') {
+    _refreshPresetsCache();
+    window.__refreshPresetsCache = _refreshPresetsCache;
+  }
+
+  function _cfgStripHtml(e) {
+    const liveName = e.live_preset_name || null;
+    const srvName = e.server_post_preset_name || null;
+    if (liveName === null && srvName === null) return '';
+    const known = new Map(_presetsCache.map(p => [p.name, p]));
+    const chip = (label, name) => {
+      if (name === null) {
+        return `<span class="ev-cfg-chip none" title="${esc(label)}: not set">${esc(label)} <b>—</b></span>`;
+      }
+      const p = known.get(name);
+      if (!p) {
+        return `<span class="ev-cfg-chip deleted" title="${esc(label)}: preset ${esc(name)} no longer on disk">${esc(label)} <b>${esc(name)}</b> <i>(deleted)</i></span>`;
+      }
+      const h = p.hsv;
+      const g = p.shape_gate;
+      const tip = `H ${h.h_min}-${h.h_max} · S ${h.s_min}-${h.s_max} · V ${h.v_min}-${h.v_max} · asp≥${g.aspect_min.toFixed(2)} fill≥${g.fill_min.toFixed(2)}`;
+      return `<span class="ev-cfg-chip" title="${esc(p.label)} — ${esc(tip)}">${esc(label)} <b>${esc(name)}</b></span>`;
+    };
+    return `<div class="ev-cfg-strip">${chip('Live', liveName)}${chip('Svr', srvName)}</div>`;
+  }
+
+  function _runSrvForm(sid) {
+    const opts = _presetsCache.map(p => {
+      const sel = (p.name === _activePresetCache) ? ' selected' : '';
+      return `<option value="${esc(p.name)}"${sel}>${esc(p.label)} (${esc(p.name)})</option>`;
+    }).join('');
+    return (
+      `<form class="ev-action-form" method="POST" action="/sessions/${sid}/run_server_post">` +
+      `<select class="ev-cfg-select" name="preset_name" title="Detection preset to run server-side">${opts}</select>` +
+      `<button class="ev-btn ok" type="submit">Run srv</button>` +
+      `</form>`
+    );
   }
 
   function _formBtn(action, label, variant, confirm, title) {
