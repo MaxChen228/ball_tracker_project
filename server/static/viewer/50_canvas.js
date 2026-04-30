@@ -156,12 +156,13 @@
   if (window.BallTrackerCamView) {
     // Two BLOBS layers — one per path — so the shared toolbar's
     // LIVE / SVR pills can toggle each independently. Path-encoded
-    // ring colour (live red, svr blue) — cam axis is already encoded
-    // by panel position (CAM A panel above CAM B), so the BOTH-mode
-    // overlay reads as "red is what production saw, blue is what the
-    // oracle saw" without colour fighting cam identity.
-    const _BLOB_LIVE = '#C0392B';
-    const _BLOB_SVR = '#4A6B8C';
+    // ring colour matches the 3D scene's existing convention
+    // (TRAJ_LIVE=#4A6B8C blue, ACCENT_SVR=#C0392B red in
+    // viewer_layers.js); inverting it here would mis-cue every
+    // BOTH-mode session — operator sees red=svr in the 3D fit head
+    // marker but red=live in the 2D ring.
+    const _BLOB_LIVE = '#4A6B8C';
+    const _BLOB_SVR = '#C0392B';
     window.BallTrackerCamView.registerLayer('detection_blobs_live', function (ctx, sx, sy, cam) {
       _drawBlobsForPath(ctx, sx, sy, cam, 'live', _BLOB_LIVE);
     });
