@@ -82,6 +82,18 @@ def test_static_mount_serves_scene_runtime():
     assert "setStrikeZone(next)" in text
 
 
+def test_viewer_layers_use_role_based_not_path_based_colors():
+    """Viewer 3D should visually align with dashboard: PATH chooses the
+    geometry source, while hue encodes scene role. Guard against
+    restoring the old per-path colour table in viewer_layers.js."""
+    text = (_RUNTIME_DIR / "viewer_layers.js").read_text()
+    assert "const PATH_COLORS =" not in text
+    assert "function colorForCamPath" not in text
+    assert "function colorForCamera" in text
+    assert "const FIT_ACCENT = 0xC0392B;" in text
+    assert "const TRAJ_LIVE = FIT_ACCENT;" in text
+
+
 def test_scene_theme_is_json_safe():
     """`scene_theme()` is consumed via JSON.parse(textContent) on a
     `<script type=application/json>` block. Every value must be
