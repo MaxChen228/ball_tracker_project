@@ -64,10 +64,15 @@
   .nav .action-ts { font-family:var(--mono); font-size:10px;
     color:var(--sub); white-space:nowrap; font-variant-numeric:tabular-nums;
     letter-spacing:0.04em; }
+  /* Strip used to wrap to a 2nd line when nav was tight (cam pills +
+     n-tri counter + meta + duration overflowed ~400 px), then `.nav`'s
+     `align-items:center` centred the 90 px-tall stack within the 52 px
+     row, leaking the top line ABOVE the nav. Force nowrap + ellipsis
+     so the stack stays exactly one line tall regardless of content. */
   .health-strip { flex:1 1 auto; min-width:0; display:flex;
-    align-items:center; gap:var(--s-3); flex-wrap:wrap;
+    align-items:center; gap:var(--s-3); flex-wrap:nowrap;
     font-family:var(--mono); font-size:11px; color:var(--sub);
-    letter-spacing:0.04em; overflow:hidden; }
+    letter-spacing:0.04em; overflow:hidden; white-space:nowrap; }
   .session-tuning { display:inline-flex; align-items:center; gap:6px;
     padding:3px 8px; border:1px solid var(--border-base);
     border-radius:var(--r); background:var(--surface);
@@ -100,7 +105,7 @@
   .health-strip .hs-meta .hs-dur { font-variant-numeric:tabular-nums; }
   .health-strip .hs-meta > span + span::before { content:"·"; margin-right:6px;
     color:var(--border-base); }
-  .health-strip .hs-cams { display:inline-flex; gap:var(--s-2); flex-wrap:wrap; }
+  .health-strip .hs-cams { display:inline-flex; gap:var(--s-2); flex-wrap:nowrap; }
   .health-strip .hs-cam { display:inline-flex; align-items:center; gap:6px;
     padding:2px 6px; border:1px solid var(--border-base); border-radius:var(--r);
     background:var(--bg); }
