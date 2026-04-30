@@ -247,7 +247,7 @@ class ViewerLayers {
         const color = colorForCamera(cam, this.scene.theme, this.fallbackColor);
         const opacity = this.HAS_TRIANGULATED ? 0.40 : 0.55;
         const line = lineFromBuffer(buf, color, { opacity });
-        line.userData = { cam, path, ts: trace.map((p) => p.t_rel_s) };
+        line.userData = { cam, path };
         line.name = `ground_${cam}_${path}`;
         group.add(line);
       }
@@ -257,15 +257,34 @@ class ViewerLayers {
     this._applyGroundVisibility();
   }
 
+  // Visibility for the ground projection layer.
+  //
+  // Mode-dependent semantics — *not* a simple rays-toggle proxy:
+  //
+  //   "all" mode: show the cumulative monocular ground trail per (cam,
+  //     path), gated by the rays toggle + path. This is the "where has
+  //     each camera's line-of-sight been pointing" reference plane.
+  //
+  //   "playback" mode: hide entirely. Each ray's `endpoint` is already
+  //     clamped to the ray↔z=0 intersection (server: reconstruct.py
+  //     `endpoint = ground` when within MAX_RENDER_DIST), so the rays
+  //     layer at currentT already paints the per-frame ground hit. A
+  //     separate ground polyline would just reconnect the *same* points
+  //     across all frames as a chained trail — which visually reads as
+  //     "thin filament trajectory on z=0", indistinguishable from a
+  //     genuine ball-on-ground path. Operators keep mistaking it for a
+  //     bug. Drop the redundancy in playback; the cumulative trail is
+  //     what "all" mode is for.
+  //
+  // Cheap on every setT — only mutates `.visible` flags, no geometry
+  // touch.
   _applyGroundVisibility() {
     if (!this._groundGroup) return;
+    const playback = this.mode === "playback";
     for (const line of this._groundGroup.children) {
       const { path } = line.userData || {};
       if (!path) continue;
-      // Ground projection follows the rays selection — operator looking
-      // at server_post rays expects to see only server_post ground
-      // tracks, not a confusing live+svr overlay.
-      line.visible = this._isVisible("rays", path);
+      line.visible = !playback && this._isVisible("rays", path);
     }
   }
 
@@ -488,6 +507,7 @@ class ViewerLayers {
     }
     this._rebuildDynamic();
     this._applyFitActiveHighlight();
+    this._applyGroundVisibility();
   }
 
   setMode(mode) {
@@ -495,6 +515,7 @@ class ViewerLayers {
     this.mode = mode;
     this._rebuildDynamic();
     this._applyFitActiveHighlight();
+    this._applyGroundVisibility();
   }
 
   // Switch the global PATH (live / server_post). The whole viewer data
