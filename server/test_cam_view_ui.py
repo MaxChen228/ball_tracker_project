@@ -235,7 +235,12 @@ def test_built_in_layer_renderers_registered():
     """plate + axes must be available out of the box — every page uses them."""
     js = CAM_VIEW_RUNTIME_JS
     assert "layerRenderers.set('plate'" in js
-    assert "layerRenderers.set('axes', drawAxesLayer)" in js
+    # `axes` is registered via a wrapper that forwards to `drawAxesLayer`
+    # so the chip popover sliders (opacity / line width) take effect; the
+    # legacy direct `layerRenderers.set('axes', drawAxesLayer)` form is
+    # gone post-PR.
+    assert "layerRenderers.set('axes'" in js
+    assert "drawAxesLayer(ctx, sx, sy, cam" in js
 
 
 def test_drawvirtualbase_does_not_paint_builtin_plate():

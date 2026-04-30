@@ -260,6 +260,44 @@ def fit_extension_seconds_slider_html(*, slot_id: str) -> str:
     )
 
 
+def opacity_slider_html(*, layer: str, default_pct: int = 100) -> str:
+    """0-100 opacity slider for a viewer layer chip popover.
+
+    The slider carries a per-layer data-attribute (`data-layer-opacity`)
+    so a single layer-toggles handler can dispatch by layer key. Default
+    100% so chips that don't need to dim default to "fully visible";
+    callers can pass `default_pct=65` to mirror the legacy OVL slider."""
+    return (
+        f'<span class="mini-slider opacity-slider" '
+        f'title="{layer} opacity">'
+        f'<span class="ms-name">α</span>'
+        f'<input type="range" min="0" max="100" step="1" '
+        f'value="{int(default_pct)}" '
+        f'data-layer-opacity="{layer}">'
+        f'<span class="ms-readout" data-layer-opacity-readout="{layer}">'
+        f'{int(default_pct)}%</span>'
+        f'</span>'
+    )
+
+
+def line_width_slider_html(*, layer: str, default_px: float = 1.5,
+                           min_px: float = 0.5, max_px: float = 4.0,
+                           step_px: float = 0.1) -> str:
+    """Per-layer line-width slider in screen-space pixels."""
+    return (
+        f'<span class="mini-slider line-width-slider" '
+        f'title="{layer} line width — screen-space pixels">'
+        f'<span class="ms-name">LW</span>'
+        f'<input type="range" '
+        f'min="{min_px:.1f}" max="{max_px:.1f}" step="{step_px:.1f}" '
+        f'value="{default_px:.1f}" '
+        f'data-layer-line-width="{layer}">'
+        f'<span class="ms-readout" data-layer-line-width-readout="{layer}">'
+        f'{default_px:.1f} px</span>'
+        f'</span>'
+    )
+
+
 def layer_chip_with_popover_html(
     *,
     group_key: str,

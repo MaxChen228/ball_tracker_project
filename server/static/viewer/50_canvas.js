@@ -125,7 +125,7 @@
   // sub-frame quantization we should accept; anything beyond is an
   // off-by-one frame mismatch worth reporting as "no blob this frame".
   const _BLOB_FRAME_TOL_S = 1.0 / 240;
-  function _drawBlobsForPath(ctx, sx, sy, cam, path, color) {
+  function _drawBlobsForPath(ctx, sx, sy, cam, path, color, cfg) {
     const f = framesByPath[path] && framesByPath[path][cam.camera_id];
     if (!f) return;
     const ts = f.t_rel_s || [], cands = f.candidates || [];
@@ -140,17 +140,20 @@
     // overlay matches what's in the 3D point cloud at this threshold.
     const passing = frameCands.filter(_candPassesThreshold);
     if (!passing.length) return;
-    // Solid ring at ~80% alpha so the BLOBS layer reads through the OVL
-    // canvas-opacity slider (default 65%, often dialled lower).
-    ctx.strokeStyle = (typeof color === 'string' && color.length === 7 && color[0] === '#')
-      ? color + 'CC'  // ~80% alpha
-      : color;
-    ctx.lineWidth = 1.5;
+    // Solid ring; opacity comes from cfg.opacity via globalAlpha (so
+    // the blobs popover slider drives it directly), line width from
+    // cfg.lineWidth. Pre-cfg the renderer baked an 80% alpha hex tail
+    // onto the colour string — moved into globalAlpha now.
+    ctx.save();
+    if (cfg && Number.isFinite(cfg.opacity)) ctx.globalAlpha = cfg.opacity;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = (cfg && Number.isFinite(cfg.lineWidth)) ? cfg.lineWidth : 1.5;
     for (const c of passing) {
       ctx.beginPath();
       ctx.arc(c.px * sx, c.py * sy, 4, 0, Math.PI * 2);
       ctx.stroke();
     }
+    ctx.restore();
   }
 
   if (window.BallTrackerCamView) {
@@ -159,10 +162,10 @@
     // boolean per cam; toolbar handler flips PATH → calls redrawAll.
     // Ring colour: cam-encoded for live (matches 3D ray cam-colour
     // convention), single accent for svr.
-    window.BallTrackerCamView.registerLayer('detection_blobs', function (ctx, sx, sy, cam) {
+    window.BallTrackerCamView.registerLayer('detection_blobs', function (ctx, sx, sy, cam, _extras, cfg) {
       const path = currentPath();
       const color = path === 'live' ? colorForCamPath(cam.camera_id, 'live') : ACCENT;
-      _drawBlobsForPath(ctx, sx, sy, cam, path, color);
+      _drawBlobsForPath(ctx, sx, sy, cam, path, color, cfg);
     });
     for (const c of (SCENE.cameras || [])) {
       if (c.fx == null || c.R_wc == null || c.t_wc == null

@@ -11,11 +11,12 @@
   // sessions (e.g. live-only A-only) so the operator can see "B is silent"
   // instead of misreading a full-width A track as both cams.
   const STRIP_CAMS = ["A", "B"];
-  // Sub-band proportions (numerator out of 32 total px in the canvas height).
-  // A and B each get 12px; the SEG band gets 8px so it reads as a
-  // secondary annotation layer rather than competing with detection density.
-  const SEG_BAND_FRAC_A = 12 / 32;
-  const SEG_BAND_FRAC_B = 12 / 32;
+  // A / B / SEG share strip height equally. Earlier 12/12/8 split made the
+  // SEG band feel cramped when the operator dragged the timeline taller.
+  // Equal thirds scale cleanly with `.timeline.is-resized` (canvas height
+  // grows with the panel).
+  const SEG_BAND_FRAC_A = 1 / 3;
+  const SEG_BAND_FRAC_B = 1 / 3;
   // Mirror of points_layer.js SEG_PALETTE — duplicated here because the
   // classic IIFE bundle doesn't share an importmap with the ESM layer
   // modules. test_viewer.py asserts the two lists stay in lockstep.
@@ -87,9 +88,8 @@
     if (!W || !H) return;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, W, H);
-    // 3 sub-bands stacked: A · B · SEG. Heights are derived from the
-    // 12/12/8 frac so a future canvas-height bump doesn't desync band
-    // proportions silently.
+    // 3 sub-bands stacked: A · B · SEG, equal thirds of the canvas
+    // height. SEG is the residual so floor() rounding never leaks pixels.
     const aH = Math.floor(H * SEG_BAND_FRAC_A);
     const bH = Math.floor(H * SEG_BAND_FRAC_B);
     const sH = H - aH - bH;
@@ -272,3 +272,6 @@
   // Wire interactions once per page-load; idempotent guard inside.
   // Called from 99_end.js boot tail.
   window._wireSegStripInteractions = wireSegStripInteractions;
+  // Public hook so the timeline-resizer drag handler can re-fit canvas
+  // backing-store px after the strip rows change CSS height.
+  window._resizeDetectionCanvas = resizeDetectionCanvas;

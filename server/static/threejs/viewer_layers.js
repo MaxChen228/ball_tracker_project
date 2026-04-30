@@ -87,10 +87,16 @@ function lineSegmentsFromPairs(pairs, color, opts = {}) {
   }
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.BufferAttribute(buf, 3));
+  // LineBasicMaterial.linewidth is widely capped at 1px on WebGL desktops;
+  // we still set it so platforms that honor it (e.g. Firefox) render the
+  // user's chosen weight. For guaranteed thick rays we'd need a Line2
+  // migration (see fit_curves_layer.js); deferred until rays themselves
+  // change layout.
   return new THREE.LineSegments(geom, new THREE.LineBasicMaterial({
     color: new THREE.Color(color),
-    transparent: opts.opacity != null,
+    transparent: true,
     opacity: opts.opacity ?? 1.0,
+    linewidth: opts.lineWidth ?? 1.0,
   }));
 }
 
@@ -141,6 +147,11 @@ class ViewerLayers {
     // extension padding in seconds). Persisted across pages.
     this._fitLineWidth = readPersistedFitLineWidth();
     this._fitExtensionSec = readPersistedFitExtensionSeconds();
+    // Rays display tunables. Opacity 0..1, linewidth in px. Earlier
+    // hardcoded 0.95 / 0.55 mode-dependent opacity is gone — operator
+    // controls a single value via the Rays popover.
+    this._raysOpacity = 0.7;
+    this._raysLineWidth = 1.5;
 
     // --- one-time cameras + ground traces + fit curves ---
     this._buildCameras();
@@ -402,8 +413,10 @@ class ViewerLayers {
         }
       }
       if (!pairs.length) continue;
-      const opacity = playback ? 0.95 : 0.55;
-      raysGroup.add(lineSegmentsFromPairs(pairs, color, { opacity }));
+      raysGroup.add(lineSegmentsFromPairs(pairs, color, {
+        opacity: this._raysOpacity,
+        lineWidth: this._raysLineWidth,
+      }));
     }
     if (raysGroup.children.length) this.scene.addLayer("viewer_rays", raysGroup);
 
@@ -490,6 +503,41 @@ class ViewerLayers {
     }
   }
   fitLineWidthPx() { return this._fitLineWidth; }
+
+  // Rays display tunables. Both mutate the cached value and walk the
+  // currently-mounted viewer_rays group so changes show without a
+  // dynamic-rebuild round trip; `_rebuildDynamic` rebuilds rays from
+  // scratch on next setT/setMode and re-reads the cached values.
+  setRaysOpacity(opacity) {
+    if (!Number.isFinite(opacity)) return;
+    this._raysOpacity = Math.max(0, Math.min(1, opacity));
+    const layer = this.scene.getLayer && this.scene.getLayer("viewer_rays");
+    if (layer) {
+      layer.traverse((obj) => {
+        if (obj.material && obj.material.opacity !== undefined) {
+          obj.material.transparent = true;
+          obj.material.opacity = this._raysOpacity;
+          obj.material.needsUpdate = true;
+        }
+      });
+    }
+  }
+  raysOpacity() { return this._raysOpacity; }
+
+  setRaysLineWidth(px) {
+    if (!Number.isFinite(px)) return;
+    this._raysLineWidth = Math.max(0.5, px);
+    const layer = this.scene.getLayer && this.scene.getLayer("viewer_rays");
+    if (layer) {
+      layer.traverse((obj) => {
+        if (obj.material && "linewidth" in obj.material) {
+          obj.material.linewidth = this._raysLineWidth;
+          obj.material.needsUpdate = true;
+        }
+      });
+    }
+  }
+  raysLineWidthPx() { return this._raysLineWidth; }
 
   setFitExtensionSeconds(sec) {
     if (!Number.isFinite(sec)) return;
