@@ -33,6 +33,7 @@ from detection_config import (
     persist as _detection_config_persist,
 )
 from pairing_tuning import PairingTuning
+import presets as _presets
 from preview import PreviewBuffer
 from marker_registry import MarkerRegistryDB
 from live_pairing import LivePairingSession
@@ -228,6 +229,12 @@ class State:
             self._device_intrinsics_dir,
             atomic_write=self._atomic_write,
         )
+        # Preset library is disk-backed (`data/presets/<name>.json`).
+        # Seed built-in tennis / blue_ball files if missing — must run
+        # before `_detection_config_load_or_migrate` because that loader
+        # falls through to `tennis` as the boot default and reads it
+        # from disk.
+        _presets.seed_builtins(data_dir, atomic_write=self._atomic_write)
         self._detection_config: DetectionConfig = _detection_config_load_or_migrate(
             data_dir,
             atomic_write=self._atomic_write,
@@ -1457,6 +1464,34 @@ class State:
     def pairing_tuning(self) -> PairingTuning:
         with self._lock:
             return self._pairing_tuning
+
+    # ---- preset library accessors --------------------------------------
+    # Thin pass-throughs to the disk-backed `presets` module. Endpoint
+    # handlers go through these so callers don't reach into `_data_dir`
+    # directly. No locking — the preset filesystem is independent of
+    # the `_lock`-guarded in-memory state, and `_atomic_write` is
+    # collision-safe by itself (unique tmp suffix per call).
+
+    def list_presets(self):
+        return _presets.list_presets(self._data_dir)
+
+    def load_preset(self, name: str):
+        return _presets.load_preset(self._data_dir, name)
+
+    def preset_exists(self, name: str) -> bool:
+        return _presets.preset_exists(self._data_dir, name)
+
+    def save_preset(self, preset) -> None:
+        _presets.save_preset(
+            self._data_dir, preset, atomic_write=self._atomic_write
+        )
+
+    def delete_preset(self, name: str) -> None:
+        _presets.delete_preset(self._data_dir, name)
+
+    def modified_fields_for(self, cfg: DetectionConfig) -> list[str]:
+        from detection_config import modified_fields as _modified_fields
+        return _modified_fields(cfg, data_dir=self._data_dir)
 
     def set_pairing_tuning(self, tuning: PairingTuning) -> PairingTuning:
         with self._lock:

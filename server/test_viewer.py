@@ -585,6 +585,7 @@ def test_viewer_page_renders_run_server_post_source_dropdown():
     research compares require disk mutation. This guards the
     affordance against regression — if someone refactors the form
     back to a single hidden input, this test fails."""
+    import main as _main
     import render_scene
     from viewer_page import render_viewer_html
 
@@ -613,7 +614,11 @@ def test_viewer_page_renders_run_server_post_source_dropdown():
         ("A", "/videos/session_x_A.mov", 0.0, 240.0, {"t_rel_s": [0.0], "detected": [True]}),
     ]
 
-    html = render_viewer_html(scene, videos, health, build_figure=render_scene._build_figure)
+    html = render_viewer_html(
+        scene, videos, health,
+        build_figure=render_scene._build_figure,
+        presets=_main.state.list_presets(),
+    )
 
     # Form posts to the right endpoint.
     assert f'action="/sessions/{session_id}/run_server_post"' in html

@@ -1015,25 +1015,31 @@ def test_resolve_detection_config_preset_uses_preset_shape():
     reprocess. (Selector cost weights are now `_W_ASPECT` / `_W_FILL`
     constants — no leak path remains.)"""
     from detection import ShapeGate
-    from presets import PRESETS
     from routes.sessions import _resolve_detection_config
 
-    # Build a fake state whose shape_gate deliberately disagrees with
-    # every preset, so a leak from state would be observable as the
-    # wrong value coming back.
+    # Wrap the autouse-fresh `main.state` so its on-disk preset library
+    # is reachable, but override `shape_gate()` to a value disagreeing
+    # with every preset so a leak from state would be observable.
     class _FakeState:
+        def __init__(self, real):
+            self._real = real
         def hsv_range(self):
-            return PRESETS["tennis"].hsv  # irrelevant for this test
+            return self._real.load_preset("tennis").hsv  # irrelevant for this test
         def shape_gate(self):
             return ShapeGate(aspect_min=0.01, fill_min=0.01)
+        def load_preset(self, name):
+            return self._real.load_preset(name)
+        def list_presets(self):
+            return self._real.list_presets()
 
     fake_pitch = _minimal_pitch("A", session_id=sid(41))
+    fake_state = _FakeState(main.state)
 
     for preset_name in ("tennis", "blue_ball"):
         hsv, gate, label = _resolve_detection_config(
-            f"preset:{preset_name}", fake_pitch, _FakeState()
+            f"preset:{preset_name}", fake_pitch, fake_state
         )
-        preset = PRESETS[preset_name]
+        preset = main.state.load_preset(preset_name)
         assert hsv == preset.hsv
         assert gate == preset.shape_gate, (
             f"preset:{preset_name} leaked shape_gate from state instead of "

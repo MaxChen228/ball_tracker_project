@@ -325,6 +325,7 @@ def viewer(session_id: str) -> HTMLResponse:
         scene, videos_with_offsets, health,
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
+        presets=state.list_presets(),
     ))
 
 

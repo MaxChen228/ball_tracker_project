@@ -228,7 +228,6 @@ from routes.sessions import _SESSION_ID_RE
 from routes.viewer import _build_viewer_health, _find_clip_on_disk, _scene_for_session
 from routes.pitch import _summarize_result, _run_server_detection
 from detection_config import (
-    modified_fields as _detection_config_modified_fields,
     to_dict as _detection_config_to_dict,
 )
 from routes.calibration import _await_calibration_frame
@@ -241,7 +240,7 @@ def _detection_config_view(state) -> dict:
     cfg = state.detection_config()
     return {
         **_detection_config_to_dict(cfg),
-        "modified_fields": _detection_config_modified_fields(cfg),
+        "modified_fields": state.modified_fields_for(cfg),
     }
 from calibration_auto import (
     _all_marker_world_xyz, _decode_calibration_jpeg,

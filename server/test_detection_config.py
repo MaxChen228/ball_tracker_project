@@ -39,11 +39,13 @@ def test_boot_with_no_files_lands_on_tennis_default(tmp_path, monkeypatch):
     main = _fresh_main(tmp_path, monkeypatch)
     cfg = main.state.detection_config()
     assert cfg.preset == "tennis"
-    from presets import PRESETS
-    tennis = PRESETS["tennis"]
+    tennis = main.state.load_preset("tennis")
     assert cfg.hsv == tennis.hsv
     assert cfg.shape_gate == tennis.shape_gate
-    # Default config is in-memory only — no disk write yet.
+    # Default detection_config is in-memory only — no disk write yet.
+    # (The preset library's tennis seed file IS written at boot, but
+    # `detection_config.json` only persists on first explicit
+    # set_detection_config.)
     assert not (tmp_path / "detection_config.json").exists()
 
 
@@ -131,9 +133,8 @@ def test_get_detection_config_returns_view_with_modified_fields(tmp_path, monkey
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
     from detection_config import DetectionConfig
-    from presets import PRESETS
 
-    bb = PRESETS["blue_ball"]
+    bb = main.state.load_preset("blue_ball")
     main.state.set_detection_config(DetectionConfig(
         hsv=bb.hsv, shape_gate=bb.shape_gate,
         preset="blue_ball", last_applied_at=12345.0,
@@ -185,8 +186,7 @@ def test_post_detection_config_rejects_preset_value_mismatch(tmp_path, monkeypat
     the redesign exists to prevent."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    from presets import PRESETS
-    bb = PRESETS["blue_ball"]
+    bb = main.state.load_preset("blue_ball")
     body = {
         "hsv": {
             "h_min": bb.hsv.h_min, "h_max": bb.hsv.h_max,
@@ -237,10 +237,9 @@ def test_set_hsv_range_alone_clears_preset_binding(tmp_path, monkeypatch):
     main = _fresh_main(tmp_path, monkeypatch)
     from detection import HSVRange
     from detection_config import DetectionConfig
-    from presets import PRESETS
 
     # Start preset-pure on blue_ball.
-    bb = PRESETS["blue_ball"]
+    bb = main.state.load_preset("blue_ball")
     main.state.set_detection_config(DetectionConfig(
         hsv=bb.hsv, shape_gate=bb.shape_gate,
         preset="blue_ball", last_applied_at=None,
@@ -265,7 +264,6 @@ def test_reset_to_preset_endpoint_restores_preset_purity(tmp_path, monkeypatch):
     main = _fresh_main(tmp_path, monkeypatch)
     from detection_config import DetectionConfig
     from detection import HSVRange, ShapeGate
-    from presets import PRESETS
 
     # Start with a custom config (preset=None).
     main.state.set_detection_config(DetectionConfig(
@@ -279,7 +277,7 @@ def test_reset_to_preset_endpoint_restores_preset_purity(tmp_path, monkeypatch):
     r = client.post("/detection/config/reset_to_preset", json={"preset": "blue_ball"})
     assert r.status_code == 200, r.text
     body = r.json()
-    bb = PRESETS["blue_ball"]
+    bb = main.state.load_preset("blue_ball")
     assert body["preset"] == "blue_ball"
     assert body["modified_fields"] == []
     assert main.state.hsv_range() == bb.hsv

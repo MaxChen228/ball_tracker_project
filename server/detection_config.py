@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Callable
 
 from detection import HSVRange, ShapeGate
-from presets import PRESETS
+from presets import load_preset, preset_exists
 
 logger = logging.getLogger("ball_tracker")
 
@@ -138,18 +138,20 @@ def from_dict(d: dict) -> DetectionConfig:
     )
 
 
-def modified_fields(cfg: DetectionConfig) -> list[str]:
-    """If `cfg.preset` is set, return the dotted paths within the triple
-    that differ from `PRESETS[cfg.preset]`. Empty list = preset-pure;
-    non-empty = "modified" indicator on the dashboard.
+def modified_fields(cfg: DetectionConfig, *, data_dir: Path) -> list[str]:
+    """If `cfg.preset` is set, return the dotted paths within the pair
+    that differ from the on-disk preset of that name. Empty list =
+    preset-pure; non-empty = "modified" indicator on the dashboard.
 
     If `cfg.preset` is None (custom), return empty list — no preset to
     diff against. The dashboard shows "custom" rather than "modified"
-    for that state.
+    for that state. If `cfg.preset` references a preset that no longer
+    exists on disk (operator deleted it), also returns empty list — the
+    UI surfaces "deleted" via a separate identity branch.
     """
-    if cfg.preset is None or cfg.preset not in PRESETS:
+    if cfg.preset is None or not preset_exists(data_dir, cfg.preset):
         return []
-    base = PRESETS[cfg.preset]
+    base = load_preset(data_dir, cfg.preset)
     diff: list[str] = []
     if cfg.hsv != base.hsv:
         for k, v in _hsv_to_dict(cfg.hsv).items():
@@ -171,12 +173,13 @@ _LEGACY_SHAPE_GATE_FILENAME = "shape_gate.json"
 _LEGACY_SELECTOR_FILENAME = "candidate_selector_tuning.json"
 
 
-def _default_config() -> DetectionConfig:
+def _default_config(data_dir: Path) -> DetectionConfig:
     """Boot default when neither the new file nor any legacy file exists.
     Tennis preset is the canonical default — `HSVRange.default()` /
-    `ShapeGate.default()` are bound to its values via the preset
-    registry, so this is the self-consistent zero state."""
-    p = PRESETS["tennis"]
+    `ShapeGate.default()` are bound to its seed values, so this is the
+    self-consistent zero state. Caller (`load_or_migrate`) must ensure
+    `seed_builtins` has run so the tennis preset is on disk."""
+    p = load_preset(data_dir, "tennis")
     return DetectionConfig(
         hsv=p.hsv,
         shape_gate=p.shape_gate,
@@ -286,7 +289,7 @@ def load_or_migrate(
         )
         return legacy
 
-    return _default_config()
+    return _default_config(data_dir)
 
 
 def persist(

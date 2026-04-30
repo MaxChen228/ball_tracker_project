@@ -8,10 +8,8 @@ from fastapi.responses import RedirectResponse
 from detection import HSVRange, ShapeGate
 from detection_config import (
     DetectionConfig,
-    modified_fields as _modified_fields,
     to_dict as _detection_config_to_dict,
 )
-from presets import PRESETS as _HSV_PRESETS
 from schemas import TrackingExposureCapMode
 
 router = APIRouter()
@@ -74,9 +72,9 @@ async def detection_config_reset_to_preset(request: Request):
     a known good config without manually typing back the six HSV ints
     + four float thresholds.
 
-    Body (JSON or form): `preset` — required, must be a key in
-    `presets.PRESETS`. `preset=null` is rejected (custom configs
-    aren't reachable by name).
+    Body (JSON or form): `preset` — required, must be a slug present in
+    `data/presets/`. `preset=null` is rejected (custom configs aren't
+    reachable by name).
     """
     from main import state, device_ws, _settings_message_for, _wants_html
 
@@ -94,12 +92,14 @@ async def detection_config_reset_to_preset(request: Request):
             status_code=400,
             detail="missing required field 'preset' (preset name to reset to)",
         )
-    if preset_name not in _HSV_PRESETS:
+    try:
+        p = state.load_preset(preset_name)
+    except KeyError:
+        known = sorted(pp.name for pp in state.list_presets())
         raise HTTPException(
             status_code=400,
-            detail=f"unknown preset: {preset_name!r} (known: {sorted(_HSV_PRESETS)})",
+            detail=f"unknown preset: {preset_name!r} (known: {known})",
         )
-    p = _HSV_PRESETS[preset_name]
     # `last_applied_at=None` here — `state.set_detection_config` stamps
     # the actual write epoch under the lock, so any pre-stamp would be
     # overwritten anyway.
@@ -118,7 +118,7 @@ async def detection_config_reset_to_preset(request: Request):
     return {
         "ok": True,
         **_detection_config_to_dict(applied),
-        "modified_fields": _modified_fields(applied),
+        "modified_fields": state.modified_fields_for(applied),
     }
 
 
@@ -135,7 +135,7 @@ async def detection_config_get():
     cfg = state.detection_config()
     return {
         **_detection_config_to_dict(cfg),
-        "modified_fields": _modified_fields(cfg),
+        "modified_fields": state.modified_fields_for(cfg),
     }
 
 
@@ -148,11 +148,11 @@ async def detection_config_post(request: Request):
       - `hsv`: `{h_min, h_max, s_min, s_max, v_min, v_max}` (uint8 range)
       - `shape_gate`: `{aspect_min, fill_min}` (each ∈ [0, 1])
       - `preset`: optional string. If supplied AND non-null, the
-        pair MUST exactly match `presets.PRESETS[preset]` — otherwise
-        the operator's "I'm setting blue_ball" claim is contradicted by
-        their values, which is exactly the silent-drift failure mode
-        this redesign exists to prevent. Caller can pass `preset=null`
-        explicitly to mean "custom config".
+        pair MUST exactly match the on-disk preset of that name —
+        otherwise the operator's "I'm setting blue_ball" claim is
+        contradicted by their values, which is exactly the silent-drift
+        failure mode this redesign exists to prevent. Caller can pass
+        `preset=null` explicitly to mean "custom config".
 
     Persists atomically to `data/detection_config.json` and pushes the
     new config to all connected cameras over WS in a single broadcast
@@ -180,23 +180,26 @@ async def detection_config_post(request: Request):
                 status_code=400,
                 detail="'preset' must be a string or null",
             )
-        if preset_name not in _HSV_PRESETS:
+        try:
+            ref = state.load_preset(preset_name)
+        except KeyError:
+            known = sorted(pp.name for pp in state.list_presets())
             raise HTTPException(
                 status_code=400,
-                detail=f"unknown preset: {preset_name!r} (known: {sorted(_HSV_PRESETS)})",
+                detail=f"unknown preset: {preset_name!r} (known: {known})",
             )
         # Identity claim must match the actual values — anything else
         # is the kind of silent drift the unified-config redesign is
         # built to prevent. Operator-facing UI computes the diff client-
         # side and either submits matching values or sets preset=null.
-        ref = _HSV_PRESETS[preset_name]
         if hsv != ref.hsv or gate != ref.shape_gate:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"preset='{preset_name}' but supplied pair differs from "
-                    f"PRESETS[{preset_name!r}]. Either submit values matching "
-                    "the preset exactly, or pass preset=null for custom."
+                    f"the on-disk preset {preset_name!r}. Either submit "
+                    "values matching the preset exactly, or pass "
+                    "preset=null for custom."
                 ),
             )
 
@@ -213,7 +216,7 @@ async def detection_config_post(request: Request):
     return {
         "ok": True,
         **_detection_config_to_dict(applied),
-        "modified_fields": _modified_fields(applied),
+        "modified_fields": state.modified_fields_for(applied),
     }
 
 
