@@ -40,11 +40,11 @@ on that axis. Production captures populate both fields — None only
 appears on historical pitch JSONs that predate aspect/fill persistence.
 
 Weights `_W_ASPECT` / `_W_FILL` were a runtime tunable
-(`CandidateSelectorTuning`) until the selector retirement: pairing's
-default `cost_threshold = 1.0` equals max possible cost, so the cost
-gate never fired at default; the only downstream effect was the
-monocular ground-trace winner. Locked as constants now; change
-requires a code edit + restart.
+(`CandidateSelectorTuning`) until the selector retirement. Locked as
+constants now; change requires a code edit + restart. The slider's
+0–1 range represents the full theoretical cost band (1.0 = "every
+emitted point survives"); production default is 0.5 (see
+`pairing_tuning.PairingTuning.default()`).
 """
 from __future__ import annotations
 

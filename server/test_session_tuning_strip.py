@@ -14,14 +14,14 @@ def test_strip_renders_with_defaults_when_thresholds_are_none():
     assert 'data-session-cost-threshold' in body
     assert 'data-session-gap-threshold' in body
     assert 'data-session-recompute' in body
-    # Cost: None → 1.0 (no filter) shown as initial.
-    assert 'value="1.00"' in body
-    assert '>1.00<' in body  # st-value display for cost
-    # Gap: None → 200cm shown as initial.
-    assert 'value="200"' in body
+    # Cost: None → PairingTuning.default().cost_threshold (0.5) shown.
+    assert 'value="0.50"' in body
+    assert '>0.50<' in body  # st-value display for cost
+    # Gap: None → PairingTuning.default().gap_threshold_m (0.20m → 20cm).
+    assert 'value="20"' in body
     # No more "off" magic word — readout always speaks centimetres.
     assert '>off<' not in body
-    assert '≤ 200 cm' in body
+    assert '≤ 20 cm' in body
     # Apply button starts disabled (only enabled after operator drags).
     assert 'disabled' in body
     # Session id interpolated into the apply handler.

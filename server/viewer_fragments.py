@@ -148,11 +148,12 @@ def session_tuning_strip_html(
 
     Cost slider: drag = client-side preview (filter blobs + 3D rays by
     `cost > threshold`). Initial value is `SessionResult.cost_threshold`
-    (None → 1.0 = "no filter").
+    (None → `PairingTuning.default().cost_threshold`).
 
     Gap slider: drag = client-side preview (hide triangulated points
     whose `residual_m > threshold`). Range 0–200cm. Initial value is
-    `SessionResult.gap_threshold_m * 100` (None → 200cm).
+    `SessionResult.gap_threshold_m * 100` (None →
+    `PairingTuning.default().gap_threshold_m * 100`).
 
     Apply = POST /sessions/{sid}/recompute with both values, server
     re-runs the segmenter on the already-emitted point set filtered by
@@ -162,9 +163,13 @@ def session_tuning_strip_html(
     pattern is `^s_[0-9a-f]{4,32}$` (validated server-side too) so no
     HTML injection here, but escaping anyway is cheap.
     """
-    cost_initial = 1.0 if cost_threshold is None else float(cost_threshold)
-    gap_initial_cm = 200 if gap_threshold_m is None else min(
-        200, max(0, round(float(gap_threshold_m) * 100))
+    from pairing_tuning import PairingTuning
+    _pt_default = PairingTuning.default()
+    cost_initial = float(_pt_default.cost_threshold) if cost_threshold is None else float(cost_threshold)
+    gap_initial_cm = (
+        round(_pt_default.gap_threshold_m * 100)
+        if gap_threshold_m is None
+        else min(200, max(0, round(float(gap_threshold_m) * 100)))
     )
     sid_attr = html.escape(session_id, quote=True)
     return (
