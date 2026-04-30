@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from presets import Preset
 from schemas import DetectionConfigSnapshotPayload, PitchPayload, SessionResult
 
 
@@ -67,19 +68,43 @@ def config_snapshots_for_session(
     }
 
 
-def snapshot_summary(snapshot: DetectionConfigSnapshotPayload | None) -> dict[str, Any]:
+def _match_preset(
+    snapshot: DetectionConfigSnapshotPayload,
+    presets: list[Preset],
+) -> str | None:
+    """Resolve which on-disk preset (if any) the snapshot's HSV+shape_gate
+    pair corresponds to. Disk is the authority for preset identity — a
+    snapshot stamped with `preset='tennis'` whose values were later edited
+    away from the on-disk `tennis.json` is no longer that preset."""
+    hsv = snapshot.hsv_range
+    gate = snapshot.shape_gate
+    for p in presets:
+        if (
+            p.hsv.h_min == hsv.h_min and p.hsv.h_max == hsv.h_max
+            and p.hsv.s_min == hsv.s_min and p.hsv.s_max == hsv.s_max
+            and p.hsv.v_min == hsv.v_min and p.hsv.v_max == hsv.v_max
+            and p.shape_gate.aspect_min == gate.aspect_min
+            and p.shape_gate.fill_min == gate.fill_min
+        ):
+            return p.name
+    return None
+
+
+def snapshot_summary(
+    snapshot: DetectionConfigSnapshotPayload | None,
+    presets: list[Preset] | None = None,
+) -> dict[str, Any]:
     if snapshot is None:
         return {
             "available": False,
             "tag": "n/a",
             "detail": "unavailable",
             "title": "Detection config unavailable for this source.",
-            "source": None,
         }
     hsv = snapshot.hsv_range
     gate = snapshot.shape_gate
-    source = snapshot.source
-    tag = snapshot.preset or source
+    matched = _match_preset(snapshot, presets or [])
+    tag = matched or "custom"
     detail = (
         f"h{hsv.h_min}-{hsv.h_max} s{hsv.s_min}-{hsv.s_max} "
         f"v{hsv.v_min}-{hsv.v_max} a>={gate.aspect_min:.2f} f>={gate.fill_min:.2f}"
@@ -90,5 +115,4 @@ def snapshot_summary(snapshot: DetectionConfigSnapshotPayload | None) -> dict[st
         "tag": tag,
         "detail": detail,
         "title": title,
-        "source": source,
     }

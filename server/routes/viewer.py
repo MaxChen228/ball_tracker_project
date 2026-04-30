@@ -150,6 +150,7 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
     else:
         mode = "live_only"
     cfgs = config_snapshots_for_session(result, pitches)
+    presets = state.list_presets()
     return {
         "session_id": session_id,
         "cameras": cams,
@@ -162,8 +163,8 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
             result.server_post_ran_at if result is not None else None
         ),
         "config_snapshots": {
-            "live": snapshot_summary(cfgs["live"]),
-            "server_post": snapshot_summary(cfgs["server_post"]),
+            "live": snapshot_summary(cfgs["live"], presets),
+            "server_post": snapshot_summary(cfgs["server_post"], presets),
         },
     }
 

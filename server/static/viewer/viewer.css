@@ -122,16 +122,8 @@
   .config-strip .cfg-label { flex:0 0 auto; font-size:9px; letter-spacing:0.12em;
     text-transform:uppercase; color:var(--sub); }
   .config-strip .cfg-tag { flex:0 0 auto; color:var(--ink); font-weight:500; }
-  .config-strip .cfg-source { flex:0 0 auto; color:var(--sub);
-    font-size:9px; letter-spacing:0.08em; }
   .config-strip .cfg-detail { min-width:0; overflow:hidden; text-overflow:ellipsis;
     white-space:nowrap; color:var(--ink-light); }
-  .config-strip .cfg-compare { flex:0 0 auto; padding:2px 6px;
-    border:1px solid var(--border-base); border-radius:var(--r);
-    font-size:9px; letter-spacing:0.12em; text-transform:uppercase; }
-  .config-strip .cfg-compare.same { border-color:var(--ok); color:var(--ok); }
-  .config-strip .cfg-compare.diff { border-color:var(--pending); color:var(--ink); }
-  .config-strip .cfg-compare.partial { color:var(--sub); }
   .health-strip .hs-tri { display:inline-flex; align-items:baseline; gap:4px;
     padding:3px 8px; border:1px solid var(--accent); border-radius:var(--r);
     background:var(--surface); }
