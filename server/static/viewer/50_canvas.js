@@ -169,6 +169,37 @@
       sceneDrawRaf = requestAnimationFrame(() => { sceneDrawRaf = null; drawScene(); });
     }
     scheduleVirtualDraw();
+    updateSpeedBadge();
+  }
+
+  // Reflect the active SegmentRecord's release speed in the speed badge
+  // pinned bottom-left of #scene. Active segment is the one whose
+  // [t_start, t_end] contains `currentT`; in "all" mode (no scrubber
+  // active) we fall back to segment 0. Hidden when SEGMENTS is empty
+  // (e.g. session predates segments persistence and migration script
+  // hasn't been run, or the segmenter found nothing).
+  function updateSpeedBadge() {
+    const badge = document.getElementById("viewer-speed-badge");
+    if (!badge) return;
+    if (!Array.isArray(SEGMENTS) || !SEGMENTS.length) {
+      badge.hidden = true;
+      return;
+    }
+    const playback = mode !== "all";
+    const idx = playback ? activeSegmentIndex(currentT) : 0;
+    const seg = SEGMENTS[idx >= 0 ? idx : 0];
+    badge.hidden = false;
+    const speedEl = document.getElementById("viewer-lpb-speed");
+    const metaEl = document.getElementById("viewer-lpb-meta");
+    if (speedEl) speedEl.textContent = seg.speed_kph.toFixed(1);
+    const isActiveByTime = playback
+      && currentT >= seg.t_start - 1e-3
+      && currentT <= seg.t_end + 1e-3;
+    const tag = isActiveByTime ? "live" : (playback ? "nearest" : "release");
+    const extra = SEGMENTS.length > 1
+      ? `seg${idx} · ${tag} · ${SEGMENTS.length} segs`
+      : `${tag} · rmse ${(seg.rmse_m * 100).toFixed(1)}cm`;
+    if (metaEl) metaEl.textContent = extra;
   }
   // BallTrackerCamView's per-cam ResizeObserver handles canvas reflow
   // automatically; no need for a window resize listener here.

@@ -283,6 +283,12 @@ def triangulate_session(
             result.triangulated = pts
             result.points = list(pts)
 
+    # Run the segmenter so reprocessed results carry the same
+    # `segments` payload as the live cycle_end / recompute paths.
+    # `stamp_segments_on_result` is idempotent and safe on empty
+    # `triangulated`.
+    session_results.stamp_segments_on_result(result)
+
     n = len(result.points)
     logger.info(
         "  %s  triangulated %d pts%s",

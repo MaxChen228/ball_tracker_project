@@ -242,6 +242,24 @@ class TriangulatedPoint(BaseModel):
     source_b_cand_idx: int | None = None
 
 
+class SegmentRecord(BaseModel):
+    """Persisted form of a `segmenter.Segment`. Stored on `SessionResult`
+    so the dashboard / viewer can render fit curves + speed badges
+    without re-running the segmenter at view time. Sample curves are
+    NOT persisted — clients reconstruct via p0 + v0·τ + ½·G·τ², which
+    is trivial and lets viewers sample at arbitrary t (not just 80
+    points)."""
+    indices: list[int]
+    original_indices: list[int]
+    p0: list[float]
+    v0: list[float]
+    t_anchor: float
+    t_start: float
+    t_end: float
+    rmse_m: float
+    speed_kph: float
+
+
 class SessionResult(BaseModel):
     """One armed-session's triangulation result. Replaces the old
     `CycleResult` now that "cycle" is a per-device recording-window concept
@@ -284,8 +302,12 @@ class SessionResult(BaseModel):
     # legacy results / when neither pitch carried a frozen snapshot.
     hsv_range_used: HSVRangePayload | None = None
     shape_gate_used: ShapeGatePayload | None = None
-
-
+    # Multi-segment ballistic fit. Populated by `find_segments` at result
+    # build / recompute time so dashboard + viewer can paint fit curves +
+    # speed badges without running the segmenter at view time. Empty list
+    # = no segments found (too few points, or pure noise). Sample curves
+    # are NOT persisted — clients reconstruct from p0/v0/t_anchor.
+    segments: list[SegmentRecord] = []
 
 
 

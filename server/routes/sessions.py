@@ -400,10 +400,23 @@ async def sessions_recompute(request: Request, session_id: str):
     if not known:
         raise HTTPException(status_code=404, detail=f"session {session_id} not found")
 
+    from main import sse_hub
+
     new_result = recompute_result_for_session(
         state, session_id,
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
     )
     state.store_result(new_result)
+    # Recompute changed `triangulated` ⇒ segments (and therefore the
+    # dashboard / viewer fit visuals) need to refresh too. Broadcast the
+    # same `fit` event the cycle_end path uses; dashboard listens
+    # blindly for the active session id and patches its scene.
+    await sse_hub.broadcast(
+        "fit",
+        {
+            "sid": session_id,
+            "segments": [s.model_dump() for s in new_result.segments],
+        },
+    )
     return {"ok": True, "result": new_result.model_dump()}

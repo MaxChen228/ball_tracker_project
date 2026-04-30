@@ -28,8 +28,7 @@
   // ------ Keyboard shortcuts --------------------------------------------
   // Deliberately NOT including Space for Arm/Stop — operator typically
   // has a ball in-hand when near the phone and accidentally hitting
-  // Space on a tablet keyboard while moving is a real footgun. Space
-  // stays bound to replay play/pause (existing behavior).
+  // Space on a tablet keyboard while moving is a real footgun.
   document.addEventListener('keydown', (e) => {
     // Ignore when user is typing in an input / textarea
     const t = e.target;

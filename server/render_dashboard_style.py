@@ -643,18 +643,22 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                     font-family: var(--mono); font-size: 11px; color: var(--failed);
                     letter-spacing: 0.04em; max-width: 80%; }}
 .degraded-banner .degraded-icon {{ font-size: 14px; }}
-.canvas-mode-toggle {{ position: absolute; left: var(--s-4); top: var(--s-4); z-index: 6;
-                       display: inline-flex; gap: 0; font-family: var(--mono); font-size: 10px;
-                       letter-spacing: 0.12em; text-transform: uppercase;
-                       border: 1px solid var(--border-base); border-radius: var(--r);
-                       overflow: hidden; background: var(--surface); }}
-.canvas-mode-toggle button {{ background: transparent; color: var(--sub); border: 0;
-                              padding: var(--s-1) var(--s-3); cursor: pointer;
-                              font: inherit; letter-spacing: inherit; text-transform: inherit;
-                              transition: color 0.15s, background 0.15s; }}
-.canvas-mode-toggle button + button {{ border-left: 1px solid var(--border-base); }}
-.canvas-mode-toggle button:hover {{ color: var(--ink); }}
-.canvas-mode-toggle button.active {{ background: var(--ink); color: var(--surface); }}
+/* --- Latest pitch speed badge (top-left, pinned over scene-root) --- */
+.latest-pitch-badge {{ position: absolute; left: var(--s-4); top: var(--s-4); z-index: 6;
+                       display: inline-flex; align-items: baseline; gap: 6px;
+                       background: var(--surface); border: 1px solid var(--border-base);
+                       border-radius: var(--r); padding: 6px var(--s-3);
+                       font-family: var(--mono); color: var(--ink);
+                       box-shadow: 0 1px 2px rgba(0,0,0,0.08); }}
+.latest-pitch-badge[hidden] {{ display: none; }}
+.latest-pitch-badge .lpb-speed {{ font-size: 28px; font-weight: 600;
+                                  font-variant-numeric: tabular-nums;
+                                  letter-spacing: 0.02em; line-height: 1; }}
+.latest-pitch-badge .lpb-units {{ font-size: 11px; color: var(--sub);
+                                  letter-spacing: 0.12em; text-transform: uppercase; }}
+.latest-pitch-badge .lpb-meta {{ font-size: 10px; color: var(--sub);
+                                 letter-spacing: 0.06em; padding-left: 6px;
+                                 border-left: 1px solid var(--border-base); margin-left: 4px; }}
 
 /* --- Fit filter bar (bottom-right; top-right is Plotly modebar) --- */
 .fit-filter-bar {{ position: absolute; right: var(--s-4); bottom: var(--s-4); z-index: 6;
@@ -678,29 +682,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-checkbox {{ display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }}
 .fit-filter-bar .ff-checkbox input {{ accent-color: var(--ink); cursor: pointer; }}
 
-/* --- Replay playback bar (bottom-center, hidden when mode=inspect) --- */
-.playback-bar {{ position: absolute; left: 50%; bottom: var(--s-4); transform: translateX(-50%);
-                 z-index: 6; display: none; align-items: center; gap: var(--s-3);
-                 background: var(--surface); border: 1px solid var(--border-base);
-                 border-radius: var(--r); padding: var(--s-2) var(--s-3);
-                 font-family: var(--mono); font-size: 11px; color: var(--ink);
-                 min-width: 480px; max-width: 70%; }}
-.playback-bar.show {{ display: inline-flex; }}
-.playback-bar .playpause {{ background: var(--ink); color: var(--surface); border: 0;
-                            width: 28px; height: 22px; border-radius: var(--r);
-                            cursor: pointer; font: inherit; font-size: 10px; }}
-.playback-bar .playpause:hover {{ opacity: 0.85; }}
-.playback-bar input[type="range"] {{ flex: 1; accent-color: var(--ink); }}
-.playback-bar .time {{ color: var(--sub); font-size: 10px; letter-spacing: 0.08em;
-                       min-width: 88px; text-align: right; }}
-.playback-bar .speed {{ display: inline-flex; border: 1px solid var(--border-base);
-                        border-radius: var(--r); overflow: hidden; }}
-.playback-bar .speed button {{ background: transparent; border: 0; padding: 2px 8px;
-                               font: inherit; font-size: 10px; color: var(--sub); cursor: pointer; }}
-.playback-bar .speed button + button {{ border-left: 1px solid var(--border-base); }}
-.playback-bar .speed button.active {{ background: var(--ink); color: var(--surface); }}
-.playback-bar .empty {{ color: var(--sub); font-size: 10px; letter-spacing: 0.10em;
-                        text-transform: uppercase; }}
 @media (max-width: 1100px) {{
   .nav {{ padding-left: 16px; padding-right: 16px; }}
   .nav-main {{ grid-template-columns: 1fr; }}
