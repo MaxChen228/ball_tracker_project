@@ -257,39 +257,6 @@ def test_set_hsv_range_alone_clears_preset_binding(tmp_path, monkeypatch):
     assert cfg.shape_gate == bb.shape_gate
 
 
-def test_reset_to_preset_endpoint_restores_preset_purity(tmp_path, monkeypatch):
-    """`POST /detection/config/reset_to_preset` snaps the live triple
-    to the named preset's canonical values and re-binds preset identity
-    in one atomic operation."""
-    main = _fresh_main(tmp_path, monkeypatch)
-    from detection_config import DetectionConfig
-    from detection import HSVRange, ShapeGate
-
-    # Start with a custom config (preset=None).
-    main.state.set_detection_config(DetectionConfig(
-        hsv=HSVRange(h_min=1, h_max=2, s_min=3, s_max=4, v_min=5, v_max=6),
-        shape_gate=ShapeGate(aspect_min=0.1, fill_min=0.1),
-        preset=None,
-        last_applied_at=None,
-    ))
-
-    client = TestClient(main.app)
-    r = client.post("/detection/config/reset_to_preset", json={"preset": "blue_ball"})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    bb = main.state.load_preset("blue_ball")
-    assert body["preset"] == "blue_ball"
-    assert body["modified_fields"] == []
-    assert main.state.hsv_range() == bb.hsv
-    assert main.state.shape_gate() == bb.shape_gate
-
-
-def test_reset_to_preset_rejects_unknown_or_missing(tmp_path, monkeypatch):
-    main = _fresh_main(tmp_path, monkeypatch)
-    client = TestClient(main.app)
-    r = client.post("/detection/config/reset_to_preset", json={"preset": "no_such"})
-    assert r.status_code == 400, r.text
-    assert "no_such" in r.json()["detail"]
-    r = client.post("/detection/config/reset_to_preset", json={})
-    assert r.status_code == 400, r.text
-    assert "preset" in r.json()["detail"]
+# `POST /detection/config/reset_to_preset` retired — coverage moved to
+# `test_presets.py::test_set_active_preset_*`, which exercises the
+# replacement endpoint `POST /presets/active` end-to-end.

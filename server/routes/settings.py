@@ -65,64 +65,6 @@ def _validated_shape_gate(values: dict[str, object]) -> ShapeGate:
     return ShapeGate(aspect_min=aspect_min, fill_min=fill_min)
 
 
-@router.post("/detection/config/reset_to_preset")
-async def detection_config_reset_to_preset(request: Request):
-    """Snap the live detection-config triple to a named preset's
-    canonical values. Used by the dashboard's "Reset to preset" button
-    when the operator wants to abandon a tuning session and return to
-    a known good config without manually typing back the six HSV ints
-    + four float thresholds.
-
-    Body (JSON or form): `preset` — required, must be a slug present in
-    `data/presets/`. `preset=null` is rejected (custom configs aren't
-    reachable by name).
-    """
-    from main import state, device_ws, _settings_message_for, _wants_html
-
-    ctype = request.headers.get("content-type", "").lower()
-    if "application/json" in ctype:
-        body = await request.json() if await request.body() else {}
-        if not isinstance(body, dict):
-            raise HTTPException(status_code=400, detail="body must be a JSON object")
-        preset_name = body.get("preset")
-    else:
-        form = await request.form()
-        preset_name = form.get("preset")
-    if not isinstance(preset_name, str) or not preset_name:
-        raise HTTPException(
-            status_code=400,
-            detail="missing required field 'preset' (preset name to reset to)",
-        )
-    try:
-        p = state.load_preset(preset_name)
-    except KeyError:
-        known = sorted(pp.name for pp in state.list_presets())
-        raise HTTPException(
-            status_code=400,
-            detail=f"unknown preset: {preset_name!r} (known: {known})",
-        )
-    # `last_applied_at=None` here — `state.set_detection_config` stamps
-    # the actual write epoch under the lock, so any pre-stamp would be
-    # overwritten anyway.
-    cfg = DetectionConfig(
-        hsv=p.hsv,
-        shape_gate=p.shape_gate,
-        preset=preset_name,
-        last_applied_at=None,
-    )
-    applied = state.set_detection_config(cfg)
-    await device_ws.broadcast(
-        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
-    )
-    if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
-    return {
-        "ok": True,
-        **_detection_config_to_dict(applied),
-        "modified_fields": state.modified_fields_for(applied),
-    }
-
-
 @router.get("/detection/config")
 async def detection_config_get():
     """Return the full detection-config pair plus preset identity and
