@@ -227,6 +227,31 @@
         }
       } catch (_) {}
     });
+    es.addEventListener('fit', (evt) => {
+      // Server emits `fit` on cycle_end + recompute. Payload carries
+      // the SegmentRecord list as it was just persisted on SessionResult.
+      // Patch the trajectory cache (so a subsequent repaint paints the
+      // refreshed fit visuals) + auto-select this session if nothing is
+      // currently selected — the operator's mental model is "I just
+      // threw a ball, I want to see it" without clicking events list.
+      try {
+        const data = JSON.parse(evt.data);
+        if (!data || !data.sid) return;
+        const segs = Array.isArray(data.segments) ? data.segments : [];
+        if (typeof patchTrajSegments === 'function') {
+          patchTrajSegments(data.sid, segs);
+        }
+        // Auto-select latest pitch when no row is currently checked.
+        // Doesn't override an explicit operator selection — they may be
+        // mid-investigation on an older pitch.
+        if (selectedTrajIds.size === 0) {
+          selectedTrajIds.add(data.sid);
+          persistTrajSelection();
+        }
+        repaintCanvas();
+        updateLatestPitchBadge();
+      } catch (_) {}
+    });
     es.addEventListener('session_ended', (evt) => {
       try {
         const data = JSON.parse(evt.data);

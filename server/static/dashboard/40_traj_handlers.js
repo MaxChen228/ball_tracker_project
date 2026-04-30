@@ -33,24 +33,29 @@
     const sid = cb.dataset.trajSid;
     // Single-select preview: clicking one row always replaces the
     // selection (clicking again on the same row deselects). Multi-select
-    // was confusing when replays had different durations and made the
-    // canvas too busy when several sessions overlapped in space.
+    // was retired with the dashboard 3D refactor — the scene shows one
+    // pitch's fit + speed at a time; viewer.html owns scrub-overlay UX.
     if (cb.checked) {
       selectedTrajIds.clear();
       selectedTrajIds.add(sid);
-      // Uncheck every other checkbox in the events list so the DOM
-      // reflects the one-at-a-time invariant without waiting for the
-      // next events tick to re-render.
       eventsBox.querySelectorAll('input[data-traj-sid]').forEach(other => {
         if (other !== cb) other.checked = false;
       });
-      // Reset playhead so the new selection starts from t=0 rather
-      // than wherever the previous pitch was mid-animation.
-      playheadFrac = 0.0;
     } else {
       selectedTrajIds.delete(sid);
     }
     persistTrajSelection();
-    if (canvasMode === 'replay') updateTimeReadout();
     repaintCanvas();
+    updateLatestPitchBadge();
   });
+  // Show-points toggle — surfaces raw triangulated points coloured by
+  // segment under the fit curves. Default off; reading is instantaneous
+  // once toggled on (data is already cached on `trajCache`).
+  const _showPointsToggle = document.getElementById('dash-show-points-toggle');
+  if (_showPointsToggle) {
+    _showPointsToggle.checked = showPointsEnabled();
+    _showPointsToggle.addEventListener('change', () => {
+      setShowPoints(_showPointsToggle.checked);
+      repaintCanvas();
+    });
+  }
