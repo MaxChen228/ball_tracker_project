@@ -178,6 +178,32 @@ sid: str                             # session id
 reason: str | null                   # free-form ("timeout", "user_stop", etc.) — stored on the path status pill
 ```
 
+## Server → dashboard / viewer SSE — `/stream`
+
+Server emits SSE events for state-change broadcasts. Listeners in
+`server/static/dashboard/86_live_stream.js` handle `session_armed`,
+`frame_count`, `ray`, `point`, `path_completed`, `session_ended`,
+`device_status`, `device_heartbeat`, `calibration_changed`, and `fit`.
+
+#### `event: fit`
+
+Broadcast on (a) every WS `cycle_end` after the SessionResult rebuild
+that updated `result.segments`, and (b) the `POST /sessions/{sid}/recompute`
+route after `state.store_result(new_result)` lands. Dashboard auto-selects
+the carried sid when nothing is currently selected, patches its trajectory
+cache's `segments` array, and repaints the latest-pitch fit visuals (curves
++ release arrows + speed badge).
+
+```
+event: fit
+data: {
+  "sid": str,
+  "segments": [SegmentRecord, ...]   # may be empty (1-point sessions, pure noise)
+}
+```
+
+`SegmentRecord` matches `server/schemas.py` exactly: `(indices, original_indices, p0[3], v0[3], t_anchor, t_start, t_end, rmse_m, speed_kph)`. Sample curves are NOT carried — clients reconstruct via `p0 + v0·τ + ½·G·τ²`.
+
 ### Operator audit checklist (when changing wire shapes)
 
 Per project memory `feedback_ws_only_means_check_all_command_paths`, after any WS schema edit grep for every send/receive site:

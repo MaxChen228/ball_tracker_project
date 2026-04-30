@@ -43,6 +43,13 @@
   };
   const VIDEO_META = DATA.videos || [];
   const HAS_TRIANGULATED = DATA.has_triangulated;
+  // SegmentRecord[] — persisted by session_results.stamp_segments_on_result
+  // at session build / recompute. Used by buildDynamicTraces to draw fit
+  // curves alongside rays + ground traces, and by `updateSpeedBadge` to
+  // surface the active segment's release speed under the master video
+  // clock. Mutable so the `fit` SSE handler can patch in a fresh array
+  // after a recompute without reloading the page.
+  let SEGMENTS = Array.isArray(DATA.segments) ? DATA.segments : [];
   const sceneDiv = document.getElementById("scene");
   const playBtn = document.getElementById("play-btn");
   const scrubber = document.getElementById("scrubber");

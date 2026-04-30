@@ -48,7 +48,7 @@
     for (const sid of selectedTrajIds) {
       const result = trajCache.get(sid);
       if (!result) continue;
-      extraTraces.push(...trajTracesFor(sid, result, trajColorFor(sid)));
+      extraTraces.push(...pitchTracesFor(sid, result));
     }
     extraTraces.push(...liveTraces());
     if (cachedLayout === null) {
@@ -94,6 +94,33 @@
       }
     }
     canvasFirstPaintDone = true;
+    updateLatestPitchBadge();
+  }
+
+  // Refresh the speed badge overlay above the 3D canvas. Reads the
+  // currently-selected sid's segments from `trajCache` and shows the
+  // first segment's speed (operators throw single-segment pitches; a
+  // bouncing ball produces multi-segment but the release speed lives
+  // on segment 0). Hidden when no fit data is available.
+  function updateLatestPitchBadge() {
+    const badge = document.getElementById('latest-pitch-badge');
+    if (!badge) return;
+    const speedEl = document.getElementById('lpb-speed');
+    const metaEl = document.getElementById('lpb-meta');
+    const sid = [...selectedTrajIds][0] || null;
+    const entry = sid ? trajCache.get(sid) : null;
+    const segs = entry && Array.isArray(entry.segments) ? entry.segments : [];
+    if (!sid || !segs.length) {
+      badge.hidden = true;
+      return;
+    }
+    const seg = segs[0];
+    badge.hidden = false;
+    if (speedEl) speedEl.textContent = seg.speed_kph.toFixed(1);
+    const extra = segs.length > 1
+      ? `${segs.length} segs · rmse ${(seg.rmse_m * 100).toFixed(1)}cm`
+      : `rmse ${(seg.rmse_m * 100).toFixed(1)}cm`;
+    if (metaEl) metaEl.textContent = extra;
   }
 
   // Plotly's built-in 3D wheel-zoom is tuned for mouse wheels and feels

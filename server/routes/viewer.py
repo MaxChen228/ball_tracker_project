@@ -321,11 +321,13 @@ def viewer(session_id: str) -> HTMLResponse:
     result = state.get(session_id)
     cost_threshold = result.cost_threshold if result is not None else None
     gap_threshold_m = result.gap_threshold_m if result is not None else None
+    segments = list(result.segments) if result is not None else []
     return HTMLResponse(render_viewer_html(
         scene, videos_with_offsets, health,
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         presets=state.list_presets(),
+        segments=segments,
     ))
 
 

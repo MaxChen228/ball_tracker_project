@@ -29,10 +29,12 @@ from schemas import (
     DetectionPath,
     FramePayload,
     PitchPayload,
+    SegmentRecord,
     SessionResult,
     TriangulatedPoint,
     _DEFAULT_PATHS,
 )
+from segmenter import Segment, find_segments
 
 if TYPE_CHECKING:
     from pairing_tuning import PairingTuning
@@ -309,7 +311,45 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         elif a is not None and b is not None:
             result.error = "no detection completed"
     _stamp_frozen_config_on_result(result, a, b)
+    stamp_segments_on_result(result)
     return result
+
+
+def stamp_segments_on_result(result: SessionResult) -> None:
+    """Run `find_segments` on the chosen authoritative path's points and
+    write `result.segments`. Idempotent — overwrites whatever was there.
+
+    Sorts `result.triangulated` (and `result.points`, which mirrors it)
+    by `t_rel_s` BEFORE running the segmenter so `Segment.original_indices`
+    is a stable index into a time-sorted list. Without this, the client's
+    `_classifyPointsBySegment` (dashboard 30_traces.js) silently
+    mis-buckets points whenever the upstream pairing emits non-time-
+    sorted output.
+
+    Empty `triangulated` ⇒ empty segments (no log noise; "nothing to fit"
+    is not an error)."""
+    if not result.triangulated:
+        result.segments = []
+        return
+    result.triangulated = sorted(result.triangulated, key=lambda p: p.t_rel_s)
+    if result.points:
+        result.points = sorted(result.points, key=lambda p: p.t_rel_s)
+    segs, _pts_sorted = find_segments(result.triangulated)
+    result.segments = [_segment_record_from_segment(s) for s in segs]
+
+
+def _segment_record_from_segment(seg: Segment) -> SegmentRecord:
+    return SegmentRecord(
+        indices=list(seg.indices),
+        original_indices=list(seg.original_indices),
+        p0=seg.p0.tolist(),
+        v0=seg.v0.tolist(),
+        t_anchor=float(seg.t_anchor),
+        t_start=float(seg.t_start),
+        t_end=float(seg.t_end),
+        rmse_m=float(seg.rmse_m),
+        speed_kph=float(seg.speed_kph),
+    )
 
 
 def recompute_result_for_session(
@@ -420,6 +460,7 @@ def recompute_result_for_session(
         elif a is not None and b is not None:
             result.error = "no detection completed"
     _stamp_frozen_config_on_result(result, a, b)
+    stamp_segments_on_result(result)
     return result
 
 
@@ -435,6 +476,7 @@ __all__ = [
     "rebuild_result_for_session",
     "recompute_result_for_session",
     "session_sync_id_locked",
+    "stamp_segments_on_result",
     "triangulate_pair",
     "validate_pair_sync",
 ]

@@ -4,9 +4,11 @@
     return r <= residualCapM;
   }
   // Filter a path's point list by residual cap + playback cutoff and
-  // return the time-sorted result. Multi-segment outlier rejection lives
-  // server-side at /fit/{sid} now; viewer trace stays raw-ish so the
-  // operator can spot residual-survived garbage with their own eyes.
+  // return the time-sorted result. Multi-segment outlier rejection
+  // lives server-side in segmenter.find_segments (run at SessionResult
+  // build time, persisted on result.segments); viewer trace stays
+  // raw-ish so the operator can spot residual-survived garbage with
+  // their own eyes.
   function filteredTrajectory(rawPts, cutoff) {
     if (!rawPts || !rawPts.length) return [];
     return rawPts

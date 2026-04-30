@@ -28,7 +28,6 @@ from triangulate import (
     undistorted_ray_cam,
 )
 from segmenter import find_segments
-from render_fit import build_fit_figure, render_fit_html
 
 DATA = Path(__file__).parent / "data"
 DT_MAX = 0.006   # ±6 ms → covers one 240 fps frame jitter
@@ -116,43 +115,6 @@ def report(label, raw_pts):
               f"rmse={s.rmse_m * 100:5.1f}cm t=[{s.t_start:.3f},{s.t_end:.3f}]")
 
 
-def render_html(sid: str, path: str, label: str, raw_pts, scene, out_path: Path):
-    pts = [_Pt(p["t_rel_s"], p["x_m"], p["y_m"], p["z_m"], p["residual_m"]) for p in raw_pts]
-    if not pts:
-        out_path.write_text(f"<h1>{sid} {path} {label}: no points</h1>")
-        return
-    segs, pts_sorted = find_segments(pts)
-    fig = build_fit_figure(scene, pts, pts_sorted, segs)
-    fig_html = fig.to_html(include_plotlyjs="cdn", full_html=False)
-    html = render_fit_html(
-        session_id=f"{sid} [{label}]",
-        path=path,
-        available_paths=[path],
-        n_input=len(pts),
-        segments=segs,
-        fig_html=fig_html,
-    )
-    out_path.write_text(html)
-    print(f"    wrote {out_path}")
-
-
-def _scene_for(sid: str):
-    """Build a Scene without going through main.state — load pitches +
-    SessionResult directly from disk."""
-    from reconstruct import build_scene
-    from schemas import FramePayload, PitchPayload, SessionResult
-
-    pitches = {}
-    for cam in "AB":
-        raw = (DATA / "pitches" / f"session_{sid}_{cam}.json").read_text()
-        pitches[cam] = PitchPayload.model_validate_json(raw)
-    result_raw = (DATA / "results" / f"session_{sid}.json").read_text()
-    result = SessionResult.model_validate_json(result_raw)
-    triangulated = result.points
-    tbp = result.triangulated_by_path
-    return build_scene(sid, pitches, triangulated, tbp, session_result=result)
-
-
 def run(sid: str, path: str):
     print(f"\n=== {sid} path={path} ===")
     da, db = load_cam(sid, "A"), load_cam(sid, "B")
@@ -183,14 +145,9 @@ def run(sid: str, path: str):
     pts_multi = pair_and_triangulate(rays_a_all, Ca, rays_b_all, Cb)
     report("multi-ray", pts_multi)
 
-    if path == "server_post":
-        out_dir = Path("/tmp/dry_run_fit")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        scene = _scene_for(sid)
-        render_html(sid, path, "winner-only", pts_base, scene,
-                    out_dir / f"{sid}_{path}_winner.html")
-        render_html(sid, path, "multi-ray", pts_multi, scene,
-                    out_dir / f"{sid}_{path}_multi.html")
+    # HTML output retired — segment summaries above are sufficient for
+    # offline pairing-tuning research; visualisation lives on the
+    # dashboard / viewer pages now (SessionResult.segments wire path).
 
 
 if __name__ == "__main__":
