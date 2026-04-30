@@ -115,11 +115,16 @@ class ViewerLayers {
     this.fallbackColor = opts.fallbackColor || 0x999999;
     this.t = opts.tInitial ?? 0;
     this.mode = opts.mode || "all";  // "all" | "playback"
-    // Per-(cam, path) and (traj, path) visibility — booleans.
-    // Keys: `cam<id>_<path>`, `traj_<path>`. Defaults: rays/ground all
-    // on, traj svr on / live off (matches the SSR `<button aria-pressed>`
-    // initial state baked into viewer_page.py).
-    this.layerVisibility = opts.layerVisibility || {};
+    // Per-(cam | traj, path) visibility — nested shape matching the
+    // legacy IIFE's 20_filters.js `layerVisibility`:
+    //   { camA: { live, server_post }, camB: { ... }, traj: { ... } }
+    // Defaults follow SSR `<button aria-pressed>` initial state baked
+    // into viewer_page.py.
+    this.layerVisibility = opts.layerVisibility || {
+      camA: { live: true, server_post: true },
+      camB: { live: true, server_post: true },
+      traj: { live: false, server_post: true },
+    };
 
     // --- one-time cameras + ground traces + fit curves ---
     this._buildCameras();
@@ -167,12 +172,16 @@ class ViewerLayers {
     this._applyCameraVisibility();
   }
 
+  _isVisible(layer, path) {
+    return !!(this.layerVisibility[layer] && this.layerVisibility[layer][path]);
+  }
+
   _applyCameraVisibility() {
     if (!this._cameraGroup) return;
     for (const cg of this._cameraGroup.children) {
       const camId = cg.name.replace(/^cam_/, "");
       // Visible iff any of this cam's pipeline pills is on.
-      const anyOn = PATHS.some((p) => !!this.layerVisibility[`cam${camId}_${p}`]);
+      const anyOn = PATHS.some((p) => this._isVisible(`cam${camId}`, p));
       cg.visible = anyOn;
     }
   }
@@ -212,7 +221,7 @@ class ViewerLayers {
     for (const line of this._groundGroup.children) {
       const { cam, path } = line.userData || {};
       if (!cam || !path) continue;
-      line.visible = !!this.layerVisibility[`cam${cam}_${path}`];
+      line.visible = this._isVisible(`cam${cam}`, path);
     }
   }
 
@@ -268,8 +277,7 @@ class ViewerLayers {
     const raysByKey = new Map();
     for (const r of (this.SCENE.rays || [])) {
       const path = r.source === "live" ? PATH_LIVE : PATH_SVR;
-      const camKey = `cam${r.camera_id}_${path}`;
-      if (!this.layerVisibility[camKey]) continue;
+      if (!this._isVisible(`cam${r.camera_id}`, path)) continue;
       const key = `${r.camera_id}|${path}`;
       let arr = raysByKey.get(key);
       if (!arr) { arr = []; raysByKey.set(key, arr); }
@@ -310,7 +318,7 @@ class ViewerLayers {
     if (raysGroup.children.length) this.scene.addLayer("viewer_rays", raysGroup);
 
     // Trajectories
-    if (this.layerVisibility[`traj_${PATH_SVR}`]) {
+    if (this._isVisible("traj", PATH_SVR)) {
       const svrPts = (this.TRAJ_BY_PATH.server_post && this.TRAJ_BY_PATH.server_post.length)
         ? this.TRAJ_BY_PATH.server_post : (this.SCENE.triangulated || []);
       const filtered = svrPts.filter((p) => p.t_rel_s <= cutoff);
@@ -331,7 +339,7 @@ class ViewerLayers {
         this.scene.addLayer("viewer_traj_svr", group);
       }
     }
-    if (this.layerVisibility[`traj_${PATH_LIVE}`]) {
+    if (this._isVisible("traj", PATH_LIVE)) {
       const livePts = (this.TRAJ_BY_PATH.live || []).filter((p) => p.t_rel_s <= cutoff);
       if (livePts.length) {
         const buf = new Float32Array(livePts.length * 3);
@@ -385,21 +393,25 @@ class ViewerLayers {
     this._applyFitActiveHighlight();
   }
 
-  setLayerVisibility(key, visible) {
-    this.layerVisibility[key] = !!visible;
-    if (key.startsWith("cam") && key.includes("_")) {
+  // Toggle a single (layer, path) flag and refresh affected layers.
+  // `layer` matches the IIFE's nested visibility shape: 'camA' / 'camB'
+  // / 'traj'. Path is 'live' or 'server_post'.
+  setLayerVisibility(layer, path, visible) {
+    if (!this.layerVisibility[layer]) this.layerVisibility[layer] = {};
+    this.layerVisibility[layer][path] = !!visible;
+    if (layer.startsWith("cam")) {
       this._applyCameraVisibility();
       this._applyGroundVisibility();
-      // Rays depend on per-cam-path key directly; trigger rebuild.
       this._rebuildDynamic();
-    } else if (key.startsWith("traj_")) {
+    } else if (layer === "traj") {
       this._rebuildDynamic();
     }
   }
 
-  // Bulk update (used by initial mount + panel reset).
-  setAllVisibility(map) {
-    this.layerVisibility = { ...this.layerVisibility, ...map };
+  // Sync the entire visibility map at once (used after a localStorage
+  // restore in 20_filters.js or a bulk panel update).
+  syncVisibility(layerVisibility) {
+    this.layerVisibility = layerVisibility;
     this._applyCameraVisibility();
     this._applyGroundVisibility();
     this._rebuildDynamic();

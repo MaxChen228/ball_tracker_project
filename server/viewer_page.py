@@ -10,7 +10,7 @@ import html as _html
 
 from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
-from view_presets_runtime import VIEW_PRESETS_RUNTIME_JS, view_presets_toolbar_html
+from view_presets_runtime import view_presets_toolbar_html
 from presets import Preset
 from reconstruct import Scene
 from render_compare import (
@@ -300,10 +300,16 @@ def render_viewer_html(
         '<span class="srv-progress" id="srv-progress" hidden'
         ' aria-live="polite"></span>'
     )
+    # Three.js scene runtime injection — importmap + theme JSON +
+    # boot module that mounts the scene onto `#scene` and sets up the
+    # viewer-specific layers. Polled mount with bounded retry (matches
+    # dashboard) so a WebGL failure surfaces instead of hanging.
+    from scene_runtime import scene_runtime_html as _scene_runtime_html
+    scene_runtime_fragment = _scene_runtime_html(container_id="scene")
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><title>Session {scene.session_id}</title>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+{scene_runtime_fragment}
 <style>
 {_viewer_css(ctx.scene_flex, ctx.videos_flex)}
 {_VIEWER_CAM_VIEW_OVERRIDES}
@@ -486,8 +492,40 @@ window._applyTuning = function(btn) {{
 <script>
 {CAM_VIEW_RUNTIME_JS}
 </script>
-<script>
-{VIEW_PRESETS_RUNTIME_JS}
+<script type="module">
+import {{ setupViewerLayers }} from "/static/threejs/viewer_layers.js";
+// Bounded poll for the scene runtime to mount, mirroring the
+// dashboard's boot pattern. The viewer-specific layer module
+// reads `window.VIEWER_DATA` (set below by the IIFE) for the
+// scene/segments/traj payload.
+let _attempts = 0;
+function _hookup() {{
+  if (window.BallTrackerScene && window.VIEWER_DATA) {{
+    const d = window.VIEWER_DATA;
+    setupViewerLayers(window.BallTrackerScene, {{
+      SCENE: d.SCENE,
+      SEGMENTS: d.SEGMENTS,
+      TRAJ_BY_PATH: d.TRAJ_BY_PATH,
+      HAS_TRIANGULATED: d.HAS_TRIANGULATED,
+      fallbackColor: d.FALLBACK_COLOR,
+      tInitial: d.tMin || 0,
+      mode: 'all',
+      layerVisibility: d.layerVisibility,
+    }});
+    return;
+  }}
+  if (++_attempts > 50) {{
+    const root = document.getElementById('scene');
+    if (root) root.innerHTML =
+      "<div style=\\"padding:24px;font-family:monospace;color:#C0392B;\\">"
+      + "3D scene failed to mount — likely a WebGL context issue. "
+      + "Check the browser console for the actual error.</div>";
+    console.error('Viewer scene never mounted after 2.5 s of polling');
+    return;
+  }}
+  setTimeout(_hookup, 50);
+}}
+_hookup();
 </script>
 <script>
 {_viewer_js()}

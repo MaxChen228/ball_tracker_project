@@ -14,7 +14,9 @@
       const clamped = Math.max(0.15, Math.min(0.85, frac));
       sceneCol.style.flex = `${clamped} 1 0`;
       videosCol.style.flex = `${1 - clamped} 1 0`;
-      try { Plotly.Plots.resize(sceneDiv); } catch (_) {}
+      // Three.js scene runtime watches its container via ResizeObserver
+      // and re-renders on layout change — no explicit Plotly.Plots.resize
+      // call needed.
     }
     try {
       const saved = parseFloat(localStorage.getItem(STORE_KEY));
@@ -54,7 +56,6 @@
       try { localStorage.removeItem(STORE_KEY); } catch (_) {}
       sceneCol.style.flex = "";
       videosCol.style.flex = "";
-      try { Plotly.Plots.resize(sceneDiv); } catch (_) {}
     });
     resizer.addEventListener("keydown", (e) => {
       const rect = work.getBoundingClientRect();
@@ -64,17 +65,9 @@
       if (e.key === "ArrowLeft") { e.preventDefault(); applyFrac(frac - step); }
       else if (e.key === "ArrowRight") { e.preventDefault(); applyFrac(frac + step); }
     });
-    window.addEventListener("resize", () => { try { Plotly.Plots.resize(sceneDiv); } catch (_) {} });
   })();
-  sceneDiv.addEventListener("wheel", (e) => {
-    if (!sceneDiv._fullLayout || !sceneDiv._fullLayout.scene) return;
-    const cam = sceneDiv._fullLayout.scene.camera;
-    if (!cam || !cam.eye) return;
-    e.preventDefault();
-    const mag = Math.min(0.5, Math.sqrt(Math.abs(e.deltaY)) * 0.04);
-    const factor = e.deltaY > 0 ? (1 + mag) : (1 - mag);
-    Plotly.relayout(sceneDiv, { "scene.camera.eye": { x: cam.eye.x * factor, y: cam.eye.y * factor, z: cam.eye.z * factor } });
-  }, { passive: false });
+  // Three.js OrbitControls handles wheel zoom natively (smooth dolly
+  // along camera-to-target axis); no custom wheel hack needed.
   function setHintOpen(open) { hintOverlay.classList.toggle("open", open); hintBtn.classList.toggle("open", open); hintBtn.setAttribute("aria-expanded", open ? "true" : "false"); }
   hintBtn.addEventListener("click", () => { setHintOpen(!hintOverlay.classList.contains("open")); });
   // One strip-row per pipeline, each hidden until we have data for it. Row
@@ -126,12 +119,18 @@
   }
   paintLayerPills();
   // --- Strike-zone visibility toggle ---
+  // Three.js scene runtime owns the wireframe + fill mesh group.
+  // Checkbox flips the shared localStorage flag (so dashboard sees
+  // the same default on next mount) AND calls into the scene's
+  // setLayerVisible API for an instant in-place toggle.
   const _szToggle = document.getElementById("strike-zone-toggle");
   if (_szToggle) {
     _szToggle.checked = strikeZoneVisible();
     _szToggle.addEventListener("change", () => {
       setStrikeZoneVisible(_szToggle.checked);
-      scheduleSceneDraw();
+      if (window.BallTrackerScene) {
+        window.BallTrackerScene.setLayerVisible("strike_zone", _szToggle.checked);
+      }
     });
   }
   layerToggles.addEventListener("click", (e) => {
@@ -139,14 +138,13 @@
     if (!pill || pill.hidden || pill.disabled) return;
     const layer = pill.dataset.layer;
     const path = pill.dataset.path;
-    // Refuse to turn off the last visible pipeline *within a cam group* —
-    // an all-off group would just remove that camera entirely, which is
-    // redundant with hiding the group and confusing as a click result.
     const group = layerVisibility[layer];
     if (!group) return;
     group[path] = !group[path];
     persistLayerVisibility();
     paintLayerPills();
-    drawScene();
+    if (window.BallTrackerViewerScene) {
+      window.BallTrackerViewerScene.setLayerVisibility(layer, path, group[path]);
+    }
     renderDetectionStrip();
   });

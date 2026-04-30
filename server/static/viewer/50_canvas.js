@@ -146,23 +146,15 @@
     if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();
   }
   function drawScene() {
-    const playback = mode !== "all";
-    const cutoff = playback ? currentT : Infinity;
-    // Strike-zone toggle: filter the wireframe + fill traces out of
-    // STATIC when the user unticks the box. Default ON, persisted in
-    // localStorage so the choice survives page reload.
-    const showZone = strikeZoneVisible();
-    const staticFiltered = showZone
-      ? STATIC
-      : STATIC.filter(t => !((t.meta || {}).feature === "strike_zone"));
-    Plotly.react(sceneDiv, [...staticFiltered, ...buildDynamicTraces(cutoff, playback)], LAYOUT, {displayModeBar: false, responsive: true});
-    // Plate overlay is now part of the cam-view 'plate' layer painted
-    // onto the canvas overlay above the video — no separate SVG path.
-    // virtual canvases are NOT called here on purpose. They schedule on
-    // their own RAF (scheduleVirtualDraw) so a heavy Plotly.react redraw
-    // can't stall the cheap canvas2D paints — virtual cameras need to
-    // stay locked to the video clock during playback even if the 3D
-    // scene drops a frame.
+    // Three.js viewer scene owns the entire 3D pipeline now. Push the
+    // current time + mode into the layer module; it rebuilds only the
+    // t-dependent layers (rays / traj / fit marker), leaving cameras,
+    // ground traces, and fit curves untouched. Strike-zone visibility
+    // goes through the scene runtime's `setLayerVisible` (not a trace
+    // filter) — see strike-zone toggle handler below.
+    if (window.BallTrackerViewerScene) {
+      window.BallTrackerViewerScene.setT(currentT, mode);
+    }
   }
   function scheduleVirtualDraw() {
     if (virtualDrawRaf !== null) return;

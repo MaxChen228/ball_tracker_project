@@ -1,3 +1,18 @@
+  // Expose the data the Three.js viewer-layers module needs. It runs
+  // in a separate `<script type="module">` block (deferred until after
+  // this classic IIFE finishes parsing); its boot-poll waits for both
+  // `BallTrackerScene` and `VIEWER_DATA` before calling
+  // `setupViewerLayers`. No race because classic IIFE runs first.
+  window.VIEWER_DATA = {
+    SCENE: SCENE,
+    SEGMENTS: SEGMENTS,
+    TRAJ_BY_PATH: TRAJ_BY_PATH,
+    HAS_TRIANGULATED: HAS_TRIANGULATED,
+    FALLBACK_COLOR: FALLBACK,
+    tMin: tMin,
+    layerVisibility: layerVisibility,
+  };
+
   setFrame(0, { seekVideos: true });
   scheduleSceneDraw();
   updatePlayBtnLabel();

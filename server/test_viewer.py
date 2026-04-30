@@ -740,13 +740,17 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
 
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
-    # Generator + gate both live in the JS blob.
-    assert "function camMarkerTracesFor" in body
-    assert "function cameraIsAnyPathVisible" in body
-    assert "for (const t of camMarkerTracesFor(c)) out.push(t)" in body
-    # Scene theme constants flow through DATA, not hard-coded.
+    # Three.js viewer scene owns camera-marker construction (in
+    # `static/threejs/viewer_layers.js`), so the legacy Plotly-era
+    # `camMarkerTracesFor` / `cameraIsAnyPathVisible` strings are
+    # gone. The contract that survives: `SCENE.cameras` ships in the
+    # viewer-data JSON, layerVisibility nested shape ships too, and
+    # the Three.js setupViewerLayers boot script reads them on mount.
     assert '"scene_theme"' in body
-    assert "SCENE_THEME.cam_fwd_len_m" in body
+    assert "viewer_layers.js" in body
+    assert "setupViewerLayers" in body
+    assert "SCENE: d.SCENE" in body
+    assert "layerVisibility: d.layerVisibility" in body
 
     # STATIC must NOT carry a camera trace — that would double-draw the
     # diamond (once static, once dynamic) and pin camera visibility to
