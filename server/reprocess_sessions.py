@@ -289,7 +289,7 @@ def triangulate_session(
 
     # Run the segmenter so reprocessed results carry the same
     # `segments` payload as the live cycle_end / recompute paths.
-    # `_stamp_segments_on_result` is idempotent and safe on empty
+    # `stamp_segments_on_result` is idempotent and safe on empty
     # `triangulated`.
     session_results.stamp_segments_on_result(result)
 

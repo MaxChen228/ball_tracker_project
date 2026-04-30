@@ -335,8 +335,8 @@ def _segment_record_from_segment(seg: Segment) -> SegmentRecord:
     return SegmentRecord(
         indices=list(seg.indices),
         original_indices=list(seg.original_indices),
-        p0=[float(x) for x in seg.p0.tolist()],
-        v0=[float(x) for x in seg.v0.tolist()],
+        p0=seg.p0.tolist(),
+        v0=seg.v0.tolist(),
         t_anchor=float(seg.t_anchor),
         t_start=float(seg.t_start),
         t_end=float(seg.t_end),
