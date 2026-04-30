@@ -424,18 +424,27 @@ async def _run_server_detection(
         "background detection complete session=%s cam=%s frames=%d ball=%d",
         sid, cam, len(frames), ball,
     )
-    # Mirror cycle_end / recompute: after the SessionResult is rebuilt
-    # with the freshly persisted server_post frames, broadcast `fit` so
-    # viewer + dashboard repaint the curve and re-apply the cost/gap
-    # client-side mask without waiting for an operator-driven recompute.
-    await sse_hub.broadcast(
-        "fit",
-        {
-            "sid": sid,
-            "segments": [s.model_dump() for s in result.segments],
-            "cost_threshold": result.cost_threshold,
-            "gap_threshold_m": result.gap_threshold_m,
-        },
-    )
+    # `cause` lets the viewer's SSE handler skip refetch on recompute
+    # (the inline /recompute response handler already patched the scene)
+    # while still firing on cycle_end / server_post.
+    # Wrapped like `broadcast_done` so a broadcast failure can't strand
+    # the proc job state — leaking a stuck job is worse than dropping
+    # one repaint event.
+    try:
+        await sse_hub.broadcast(
+            "fit",
+            {
+                "sid": sid,
+                "cause": "server_post",
+                "segments": [s.model_dump() for s in result.segments],
+                "cost_threshold": result.cost_threshold,
+                "gap_threshold_m": result.gap_threshold_m,
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "fit broadcast failed sid=%s cam=%s err=%s",
+            sid, cam, exc,
+        )
     await broadcast_done("ok", len(frames))
     proc.finish_server_post_job(sid, cam, canceled=False)

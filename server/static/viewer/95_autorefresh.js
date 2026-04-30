@@ -20,11 +20,13 @@
     if (!SID) return;
 
     let lastSig = null;
-    // 85_sse_fit.js dispatches this after a successful in-place patch
-    // (cycle_end / server-post / Apply via SSE). Reset baseline so the
-    // next /events diff records the new row sig instead of triggering
-    // location.reload(); the viewer's scrubber + video buffer survive.
-    window.addEventListener('viewer:fit-applied', () => { lastSig = null; });
+    // Bumped on every viewer:fit-applied. tick() captures it pre-fetch
+    // and drops the result if a fit landed mid-fetch — otherwise tick
+    // would record a stale (pre-rebuild) sig as the new baseline, and
+    // the *next* tick would diff fresh-vs-stale and reload despite
+    // 85_sse_fit having already patched the scene.
+    let fitGeneration = 0;
+    window.addEventListener('viewer:fit-applied', () => { fitGeneration++; });
     async function fetchRow(bucket) {
       try {
         const r = await fetch(`/events?bucket=${bucket}`, { cache: 'no-store' });
@@ -36,11 +38,15 @@
       }
     }
     async function tick() {
+      const seenGen = fitGeneration;
       // Trash sessions are still viewable — fall back to the trash
       // bucket so refresh keeps working after the operator deletes.
       let row = await fetchRow('active');
       if (!row) row = await fetchRow('trash');
       if (!row) return;
+      // Fit landed during fetch — drop this (potentially pre-rebuild)
+      // row. Next tick will see the post-rebuild sig as ground truth.
+      if (fitGeneration !== seenGen) return;
       const sig = JSON.stringify({
         mode: row.mode,
         received_at: row.received_at,
