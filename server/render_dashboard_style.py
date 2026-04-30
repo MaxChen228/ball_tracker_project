@@ -600,10 +600,45 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
   100% {{ background: transparent; }}
 }}
 
-/* --- Intrinsics (ChArUco) card --- */
-.intrinsics-roles {{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:var(--s-2); }}
-.intrinsics-list {{ display:flex; flex-direction:column; gap:6px;
-                    margin-bottom:var(--s-2); }}
+/* --- Intrinsics (ChArUco) card ---
+   Three sections: Pairing (current Cam A/B → device, always shows both
+   roles), Records (device_id-keyed persistent list), Upload (target
+   picker + file input). Each section gets its own title strip so the
+   operator can tell at a glance which concern they're acting on. */
+.intrinsics-section + .intrinsics-section {{ margin-top: var(--s-3); }}
+.intrinsics-section-title {{ font-family: var(--mono); font-size: 10px;
+                              letter-spacing: 0.14em; text-transform: uppercase;
+                              color: var(--sub); margin-bottom: var(--s-2);
+                              padding-bottom: 2px;
+                              border-bottom: 1px solid var(--border-l); }}
+.intrinsics-pairing {{ display: flex; flex-direction: column; gap: 4px; }}
+.intrinsics-pair {{ display: flex; align-items: center; gap: 6px;
+                    font-family: var(--mono); font-size: 11px;
+                    padding: 4px 6px; border-radius: var(--r);
+                    background: var(--surface); }}
+.intrinsics-pair.offline {{ background: rgba(122, 117, 108, 0.08);
+                            color: var(--sub); }}
+.intrinsics-pair.legacy {{ background: rgba(230, 145, 40, 0.10); }}
+.intrinsics-pair .pair-role {{ font-weight: 600; color: var(--ink);
+                               letter-spacing: 0.04em; min-width: 44px; }}
+.intrinsics-pair .pair-arrow {{ color: var(--sub); }}
+.intrinsics-pair .pair-id {{ font-weight: 500; color: var(--ink); }}
+.intrinsics-pair .pair-model {{ font-size: 10px; color: var(--sub); }}
+.intrinsics-pair .pair-state {{ font-size: 10px; letter-spacing: 0.10em;
+                                text-transform: uppercase; }}
+.intrinsics-pair .chip.small {{ margin-left: auto; }}
+
+.chip.used-as {{ font-weight: 500; letter-spacing: 0.10em; }}
+
+.intrinsics-empty {{ font-family: var(--mono); font-size: 10px;
+                     color: var(--sub); padding: var(--s-2);
+                     border: 1px dashed var(--border-base);
+                     border-radius: var(--r); line-height: 1.5; }}
+.intrinsics-empty code {{ background: var(--surface-2);
+                          padding: 1px 5px; border-radius: 3px;
+                          font-size: 10px; }}
+
+.intrinsics-list {{ display:flex; flex-direction:column; gap:6px; }}
 .intrinsics-row {{ border:1px solid var(--border-base); border-radius:var(--r);
                    padding:var(--s-2); background:var(--surface); }}
 .intrinsics-row-top {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
@@ -619,14 +654,32 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .intrinsics-row-top .btn.danger:hover {{ background:var(--failed-bg); }}
 .intrinsics-row-sub {{ margin-top:4px; font-family:var(--mono); font-size:10px;
                        color:var(--sub); letter-spacing:0.02em; }}
-.intrinsics-upload {{ border-top:1px dashed var(--border-base);
-                      padding-top:var(--s-2); }}
+.intrinsics-upload {{ margin-top: var(--s-3); padding-top: var(--s-2);
+                      border-top: 1px dashed var(--border-base); }}
+.intrinsics-upload .intrinsics-section-title {{ border-bottom: 0;
+                                                margin-bottom: var(--s-1);
+                                                padding-bottom: 0; }}
 .intrinsics-upload-row {{ display:flex; gap:6px; align-items:center;
-                          flex-wrap:wrap; }}
-.intrinsics-upload-row select {{ font-family:var(--mono); font-size:10px;
-                                  padding:3px 6px; border:1px solid var(--border-base);
-                                  border-radius:var(--r); background:var(--surface);
-                                  color:var(--ink); }}
+                          flex-wrap:wrap; margin-top: 4px; }}
+.intrinsics-upload-row .upload-field {{ display: flex; align-items: center;
+                                         gap: 6px; flex: 1 1 auto;
+                                         min-width: 0; }}
+.intrinsics-upload-row .upload-field-label {{ font-family: var(--mono);
+                                               font-size: 9px;
+                                               letter-spacing: 0.10em;
+                                               text-transform: uppercase;
+                                               color: var(--sub);
+                                               min-width: 64px; }}
+.intrinsics-upload-row select,
+.intrinsics-upload-row input[type=text] {{ font-family:var(--mono); font-size:10px;
+                                            padding:3px 6px;
+                                            border:1px solid var(--border-base);
+                                            border-radius:var(--r);
+                                            background:var(--surface);
+                                            color:var(--ink); flex: 1 1 auto;
+                                            min-width: 0; }}
+.intrinsics-upload-row input[type=text]::placeholder {{ color: var(--sub);
+                                                         opacity: 0.7; }}
 .intrinsics-upload-row input[type=file] {{ font-family:var(--mono); font-size:9px;
                                             color:var(--sub); }}
 .intrinsics-upload-status {{ margin-top:6px; font-family:var(--mono); font-size:10px;
