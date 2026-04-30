@@ -776,13 +776,16 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
         },
         "session_id": session_id, "triangulated_count": 0,         "error": None, "duration_s": None, "received_at": None, "mode": "camera_only",
     }
+    # Camera markers are built client-side by `static/threejs/viewer_layers.js`
+    # from `SCENE.cameras`; the server-side context no longer carries
+    # any "static traces" list to leak a camera trace into. Sanity:
+    # the scene itself ships through `scene_json` (the runtime reads
+    # `data.scene.cameras`), and no `static_traces_json` field exists.
     ctx = build_viewer_page_context(scene, [], health)
     import json as _json
-    static_list = _json.loads(ctx.static_traces_json)
-    for trace in static_list:
-        meta = trace.get("meta") or {}
-        assert meta.get("trace_kind") != "camera", "camera trace leaked into STATIC"
-        assert meta.get("trace_kind") != "camera_axis", "camera axis trace leaked into STATIC"
+    parsed_scene = _json.loads(ctx.scene_json)
+    assert any(c.get("camera_id") == "A" for c in parsed_scene.get("cameras", []))
+    assert not hasattr(ctx, "static_traces_json")
 
 
 def test_viewer_has_path_is_per_camera_not_global():

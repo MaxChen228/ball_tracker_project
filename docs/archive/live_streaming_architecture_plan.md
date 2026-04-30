@@ -1,5 +1,7 @@
 # Live Streaming Architecture — 完整重構計劃
 
+> **Archived**. References to `render_scene.py` / `render_dashboard.py` etc. are pre-Three.js-migration; those modules have been retired. Kept as historical context only.
+>
 > **Status**: Partially landed — core `live` path is in production (WS frame streaming via `live_pairing.py`, `state.ingest_live_frame`, iOS `LiveFrameDispatcher`, viewer 三管道獨立 UI). Remaining items in this doc (dashboard live trajectory overlay, latency budget auditing, full SSE broadcast) are not yet shipped.
 > **Author**: Max0228 + Claude
 > **Date**: 2026-04-21 (status updated 2026-04-23)

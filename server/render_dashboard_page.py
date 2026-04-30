@@ -1,12 +1,9 @@
 """Dashboard page-level orchestration.
 
-Phase 2 of the Plotly → Three.js 3D migration ships this file in a
-hybrid state: the dashboard now renders its 3D scene via Three.js
-(`scene_runtime.html()` + `static/threejs/dashboard_layers.js`),
-but the legacy `render_scene._build_figure` Plotly path is still
-imported by `routes/calibration.py` for the auto-cal preview that
-phase 4 will retire. Don't add new dependencies on `render_scene` —
-new dashboard work goes through the Three.js modules.
+Renders the dashboard shell + Three.js 3D scene. Static layers
+(ground / plate / strike zone / world axes) are built client-side
+from the JSON theme in `scene_runtime.py`; per-camera markers + fit
+curves + live trail are managed by `static/threejs/dashboard_layers.js`.
 """
 from __future__ import annotations
 

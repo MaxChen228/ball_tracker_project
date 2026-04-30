@@ -6,11 +6,6 @@ world axes) directly from a JSON payload that this module emits. Doing
 this in Python rather than hardcoding the constants in JS keeps a
 single source of truth (`render_scene_theme.py`) — the same values
 that drive trace colours, strike zone bounds, etc.
-
-The Plotly-era 3D pipeline (`render_scene.py`, `render_scene_static.py`,
-`render_scene_layout.py`) is being retired alongside this migration.
-Until phase 4 cleanup ships, those modules still exist for the
-calibration auto-cal preview path; new code should import from here.
 """
 from __future__ import annotations
 

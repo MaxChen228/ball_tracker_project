@@ -1,14 +1,12 @@
 (() => {
   const DATA = JSON.parse(document.getElementById("viewer-data").textContent);
   const SCENE = DATA.scene;
-  const STATIC = DATA.static_traces || [];
   // Strike-zone visibility — shared with dashboard via
   // window.BallTrackerOverlays (server/overlays_ui.py). One key, one
   // implementation, two surfaces.
   const _OVL = window.BallTrackerOverlays;
   const strikeZoneVisible = _OVL.strikeZoneVisible;
   const setStrikeZoneVisible = _OVL.setStrikeZoneVisible;
-  const LAYOUT = DATA.layout;
   const CAM_COLOR = DATA.camera_colors || {};
   const FALLBACK = DATA.fallback_color;
   const ACCENT = DATA.accent_color;
@@ -66,9 +64,6 @@
   const speedGroup = document.getElementById("speed-group");
   const hintBtn = document.getElementById("hint-btn");
   const hintOverlay = document.getElementById("hint-overlay");
-  const DEFAULT_CAMERA = (LAYOUT && LAYOUT.scene && LAYOUT.scene.camera)
-    ? JSON.parse(JSON.stringify(LAYOUT.scene.camera))
-    : {eye: {x: 1.5, y: 1.5, z: 1.0}, up: {x: 0, y: 0, z: 1}, center: {x: 0, y: 0.2, z: 0.3}};
   const vids = Array.from(document.querySelectorAll("video[data-cam]"));
   const offsetByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.t_rel_offset_s]));
   const fpsByCam = Object.fromEntries(VIDEO_META.map(v => [v.camera_id, v.fps]));
