@@ -20,14 +20,21 @@ _COLLAPSIBLE_CARDS = (
 
 
 def test_dashboard_sidebar_cards_carry_collapsible_attrs():
+    """Each card must carry the key on the OUTER `.card` (not the inner
+    body that polling replaces) AND have header + body sentinels nested
+    within. Anchoring on the exact outer-wrapper substring catches both
+    classes of regression — a refactor that drops the attribute and one
+    that moves it to the inner body div."""
     html = TestClient(app).get("/").text
     for key, title in _COLLAPSIBLE_CARDS:
-        assert f'data-collapsible-key="{key}"' in html, f"missing key for {title!r}"
-    # Header + body sentinels exist (one per card minimum). Count >= 3
-    # avoids tying the assertion to events-list internals which also
-    # carry these attributes once a session has been recorded.
-    assert html.count('data-collapsible-header') >= 3
-    assert html.count('data-collapsible-body') >= 3
+        outer = f'<div class="card" data-collapsible-key="{key}">'
+        assert html.count(outer) == 1, f"missing outer card wrapper for {title!r}"
+        block_start = html.index(outer)
+        next_card = html.find('<div class="card"', block_start + len(outer))
+        block_end = next_card if next_card >= 0 else html.find("</aside>", block_start)
+        block = html[block_start:block_end]
+        assert "data-collapsible-header" in block, f"header missing inside {title!r} card"
+        assert "data-collapsible-body" in block, f"body missing inside {title!r} card"
 
 
 def test_events_body_groups_each_day_with_collapsible_attrs():

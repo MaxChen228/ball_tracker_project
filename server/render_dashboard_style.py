@@ -497,13 +497,15 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                   padding:4px 8px; border-radius:var(--r); cursor:pointer; }}
 .events-filter.active {{ background:var(--ink); color:var(--surface); border-color:var(--ink); }}
 
-.event-day-group + .event-day-group {{ margin-top: 0; }}
 .event-day {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
               text-transform: uppercase; color: var(--sub);
               padding: 10px var(--s-1) 4px;
               border-bottom: 1px solid var(--border-l);
               margin-top: 8px; }}
-.event-day-group:first-child > .event-day {{ margin-top: 0; }}
+/* `margin-top` lives on the inner `.event-day` header, not the outer
+   group, so spacing rules between groups must reach the header. */
+.event-day-group:first-child > .event-day,
+.event-day-group + .event-day-group > .event-day {{ margin-top: 0; }}
 /* Group is collapsible — header gets a chevron, body folds. The chevron
    crowds the right edge so reserve a bit of trailing padding. */
 .event-day-group > .event-day[data-collapsible-header] {{ padding-right: var(--s-3); }}
@@ -515,7 +517,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                border-top: 1px solid var(--border-l);
                transition: background 0.12s ease; min-width: 0;
                cursor: pointer; }}
-.event-item:first-child,
 .event-day-body > .event-item:first-child {{ border-top: 0; }}
 .event-item:hover {{ background: var(--surface-hover); }}
 .event-item.selected {{ background: var(--surface-2); }}
