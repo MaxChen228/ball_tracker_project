@@ -10,6 +10,7 @@ import html as _html
 
 from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
+from view_presets_runtime import VIEW_PRESETS_RUNTIME_JS
 from presets import Preset
 from reconstruct import Scene
 from render_compare import (
@@ -490,6 +491,9 @@ window._applyTuning = function(btn) {{
 </script>
 <script>
 {CAM_VIEW_RUNTIME_JS}
+</script>
+<script>
+{VIEW_PRESETS_RUNTIME_JS}
 </script>
 <script>
 {_viewer_js()}

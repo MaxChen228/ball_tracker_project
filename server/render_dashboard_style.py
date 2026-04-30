@@ -634,13 +634,22 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .intrinsics-upload-status.ok {{ color:var(--passed); }}
 .intrinsics-upload-status.err {{ color:var(--failed); }}
 
-/* --- Canvas overlay hint --- moved to bottom-left to free the top row for
-   the mode toggle + Plotly's modebar. */
-.canvas-hint {{ position: absolute; left: var(--s-4); bottom: var(--s-4); z-index: 5;
-                font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
-                text-transform: uppercase; color: var(--sub);
-                background: var(--surface); border: 1px solid var(--border-l);
-                border-radius: var(--r); padding: var(--s-1) var(--s-2); pointer-events: none; }}
+/* --- View-preset toolbar (ISO/CATCH/SIDE/TOP/PITCHER) — pinned top-left
+   over the 3D scene. Mirrors viewer's `.scene-col .scene-views` styling
+   so the two surfaces read identically. */
+.scene-views {{ position: absolute; top: var(--s-4); left: var(--s-4); z-index: 6;
+                display: inline-flex; align-items: stretch; flex-wrap: nowrap;
+                white-space: nowrap; border: 1px solid var(--border-base);
+                border-radius: var(--r); overflow: hidden; background: var(--surface); }}
+.scene-views .view-preset {{ padding: 5px 10px; border: none; background: transparent;
+                              color: var(--sub); cursor: pointer; min-width: auto;
+                              border-radius: 0; font: inherit;
+                              font-family: var(--mono); font-size: 10px;
+                              letter-spacing: 0.12em; text-transform: uppercase;
+                              font-weight: 500; line-height: 1; }}
+.scene-views .view-preset + .view-preset {{ border-left: 1px solid var(--border-l); }}
+.scene-views .view-preset:hover {{ color: var(--ink); }}
+.scene-views .view-preset.active {{ background: var(--ink); color: var(--surface); }}
 
 /* --- Canvas mode toggle — top-left so it can't collide with Plotly's
    modebar (camera/home/reset axes buttons), which always sits top-right
@@ -652,8 +661,9 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                     font-family: var(--mono); font-size: 11px; color: var(--failed);
                     letter-spacing: 0.04em; max-width: 80%; }}
 .degraded-banner .degraded-icon {{ font-size: 14px; }}
-/* --- Latest pitch speed badge (top-left, pinned over scene-root) --- */
-.latest-pitch-badge {{ position: absolute; left: var(--s-4); top: var(--s-4); z-index: 6;
+/* --- Latest pitch speed badge — pinned bottom-left of scene-root.
+   Top-left is the view-preset toolbar (mirrors viewer layout). */
+.latest-pitch-badge {{ position: absolute; left: var(--s-4); bottom: var(--s-4); z-index: 6;
                        display: inline-flex; align-items: baseline; gap: 6px;
                        background: var(--surface); border: 1px solid var(--border-base);
                        border-radius: var(--r); padding: 6px var(--s-3);

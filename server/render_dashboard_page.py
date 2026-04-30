@@ -12,6 +12,10 @@ from render_dashboard_session import _render_hsv_body, _render_session_body
 from render_dashboard_style import _CSS
 from cam_view_ui import CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
+from view_presets_runtime import (
+    VIEW_PRESETS_RUNTIME_JS,
+    view_presets_toolbar_html,
+)
 from render_scene import _build_figure
 from render_shared import _render_app_nav
 from render_tuning import _render_tuning_body
@@ -48,14 +52,19 @@ def render_events_index_html(
 
     scene = build_calibration_scene(state.calibrations())
     fig = _build_figure(scene)
+    # aspectmode="data" matches the viewer so the X/Y/Z grid reads with
+    # equal metric scale on both surfaces. The previous manual 1:1:0.45
+    # ratio squashed the Z axis to make the calibration preview look
+    # "flatter" than reality — viewer was always honest about the geometry,
+    # dashboard was lying. Drop the lie. Range hints stay as a fallback
+    # bbox for the empty-state preview before any rays/fits land.
     fig.update_layout(
         title=None,
         margin=dict(l=0, r=0, t=8, b=0),
         scene_xaxis_range=[-6.0, 6.0],
         scene_yaxis_range=[-6.0, 6.0],
         scene_zaxis_range=[-0.2, 3.5],
-        scene_aspectmode="manual",
-        scene_aspectratio=dict(x=1.0, y=1.0, z=0.45),
+        scene_aspectmode="data",
         scene_uirevision="dashboard-canvas",
     )
     scene_div = fig.to_html(include_plotlyjs=False, full_html=False, div_id="scene-root")
@@ -108,8 +117,10 @@ def render_events_index_html(
         intrinsics_html=intrinsics_html,
         events_html=events_html,
         scene_div=scene_div,
+        view_presets_toolbar_html=view_presets_toolbar_html(),
         overlays_js=OVERLAYS_RUNTIME_JS,
         cam_view_js=CAM_VIEW_RUNTIME_JS,
+        view_presets_js=VIEW_PRESETS_RUNTIME_JS,
         dashboard_js=_JS_TEMPLATE,
         trash_count=trash_count,
     )

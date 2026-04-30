@@ -53,3 +53,11 @@
       repaintCanvas();
     });
   }
+  // 5-view camera presets (ISO/CATCH/SIDE/TOP/PITCHER) shared with the
+  // viewer via window.BallTrackerViewPresets. The runtime hooks
+  // plotly_relayouting itself, retrying until Plotly's event API is
+  // attached — safe to call before the first Plotly.react.
+  if (window.BallTrackerViewPresets && sceneRoot) {
+    const _viewToolbar = document.querySelector('.scene-views');
+    if (_viewToolbar) window.BallTrackerViewPresets.bind(sceneRoot, _viewToolbar);
+  }

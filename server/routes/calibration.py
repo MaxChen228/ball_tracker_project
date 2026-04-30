@@ -92,8 +92,7 @@ def calibration_state() -> dict[str, Any]:
         scene_xaxis_range=[-6.0, 6.0],
         scene_yaxis_range=[-6.0, 6.0],
         scene_zaxis_range=[-0.2, 3.5],
-        scene_aspectmode="manual",
-        scene_aspectratio=dict(x=1.0, y=1.0, z=0.45),
+        scene_aspectmode="data",
         scene_uirevision="dashboard-canvas",
     )
     fig_json = json.loads(fig.to_json())

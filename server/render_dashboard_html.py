@@ -12,8 +12,10 @@ def render_dashboard_html(
     intrinsics_html: str,
     events_html: str,
     scene_div: str,
+    view_presets_toolbar_html: str,
     overlays_js: str,
     cam_view_js: str,
+    view_presets_js: str,
     dashboard_js: str,
     trash_count: int,
 ) -> str:
@@ -64,7 +66,7 @@ def render_dashboard_html(
         '  <span class="degraded-icon">⚠</span>'
         '  <span data-degraded-body>Live stream degraded.</span>'
         '</div>'
-        '<div class="canvas-hint">Drag to rotate</div>'
+        f'{view_presets_toolbar_html}'
         '<div class="fit-filter-bar" role="group" aria-label="Canvas filters">'
         '  <span class="ff-cell" title="Toggle the strike-zone wireframe in the 3D canvas. Default on. Same overlay flag as the viewer.">'
         '    <label class="ff-checkbox">'
@@ -89,6 +91,7 @@ def render_dashboard_html(
         "</div>"
         f"<script>{overlays_js}</script>"
         f"<script>{cam_view_js}</script>"
+        f"<script>{view_presets_js}</script>"
         f"<script>{dashboard_js}</script>"
         "</body></html>"
     )
