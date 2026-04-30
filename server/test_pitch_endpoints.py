@@ -54,7 +54,10 @@ def test_post_pitch_with_video_triangulates_server_side(tmp_path):
     assert body2["triangulated_points"] == 0
 
     # Operator triggers server-post detection on the events row.
-    run = client.post(f"/sessions/{session_id}/run_server_post")
+    run = client.post(
+        f"/sessions/{session_id}/run_server_post",
+        json={"preset_name": "tennis"},
+    )
     assert run.status_code == 200, run.text
     assert run.json()["queued"] == 2
 
@@ -94,7 +97,10 @@ def test_run_server_post_broadcasts_fit_with_thresholds(tmp_path, monkeypatch):
 
     assert _post_pitch(client, _base_payload("A", session_id, K, H_a), mov_a).status_code == 200
     assert _post_pitch(client, _base_payload("B", session_id, K, H_b), mov_b).status_code == 200
-    run = client.post(f"/sessions/{session_id}/run_server_post")
+    run = client.post(
+        f"/sessions/{session_id}/run_server_post",
+        json={"preset_name": "tennis"},
+    )
     assert run.status_code == 200, run.text
 
     fit_events = [data for name, data in events if name == "fit" and data.get("sid") == session_id]
@@ -347,7 +353,10 @@ def test_nonzero_distortion_recovers_true_point_via_mov(tmp_path):
     r2 = _post_pitch(client, body_b, mov_b)
     assert r2.status_code == 200, r2.text
     # Operator-triggered server-post detection drives triangulation.
-    run = client.post(f"/sessions/{session_id}/run_server_post")
+    run = client.post(
+        f"/sessions/{session_id}/run_server_post",
+        json={"preset_name": "tennis"},
+    )
     assert run.status_code == 200, run.text
     result_points = client.get(f"/results/{session_id}").json()["points"]
     assert len(result_points) >= 1

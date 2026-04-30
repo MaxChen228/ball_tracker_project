@@ -830,10 +830,12 @@ def test_sessions_cancel_and_run_server_post_json_api(tmp_path):
     resume = client.post(
         f"/sessions/{sid(34)}/run_server_post",
         headers={"Accept": "application/json"},
+        json={"preset_name": "tennis"},
     )
     assert resume.status_code == 200
     assert resume.json()["ok"] is True
     assert resume.json()["queued"] == 1
+    assert resume.json()["preset_name"] == "tennis"
 
 
 def _arm_minimal_session_for_run_server_post(session_id: str) -> None:
@@ -847,24 +849,49 @@ def _arm_minimal_session_for_run_server_post(session_id: str) -> None:
     main.state.processing.mark_server_post_queued(session_id, "A")
 
 
-def test_run_server_post_uses_dashboard_config(tmp_path):
-    """Detection config has a single source of truth — the dashboard's
-    current HSV + shape_gate. The endpoint takes no `source` field; the
-    pair captured at request time is whatever `state.hsv_range()` /
-    `state.shape_gate()` return then."""
+def test_run_server_post_resolves_preset_by_name(tmp_path):
+    """Operator picks a named preset on the rerun dropdown; server loads
+    that preset's HSV+shape_gate and runs detection. Body's `preset_name`
+    is required (no implicit "use dashboard active") and is reflected in
+    the response so the dashboard can confirm what shipped."""
     client = TestClient(app)
     _arm_minimal_session_for_run_server_post(sid(35))
     r = client.post(
         f"/sessions/{sid(35)}/run_server_post",
         headers={"Accept": "application/json"},
+        json={"preset_name": "tennis"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["ok"] is True
     assert body["queued"] == 1
-    # No source field on the response — config provenance is "dashboard
-    # at request time", not a per-call selector.
-    assert "source" not in body
+    assert body["preset_name"] == "tennis"
+
+
+def test_run_server_post_rejects_missing_preset_name(tmp_path):
+    """422 when the operator submits no `preset_name`. The endpoint has
+    no implicit fallback to dashboard config — picker selection is
+    mandatory, mirroring the rerun dropdown."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(36))
+    r = client.post(
+        f"/sessions/{sid(36)}/run_server_post",
+        headers={"Accept": "application/json"},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_run_server_post_rejects_unknown_preset_name(tmp_path):
+    """404 when the named preset does not exist on disk. Catches a stale
+    rerun dropdown that was rendered before the preset was deleted."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(37))
+    r = client.post(
+        f"/sessions/{sid(37)}/run_server_post",
+        headers={"Accept": "application/json"},
+        json={"preset_name": "no_such_preset"},
+    )
+    assert r.status_code == 404, r.text
 
 
 def test_sessions_delete_json_returns_404_for_unknown():

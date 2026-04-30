@@ -73,9 +73,11 @@ def test_dashboard_drives_mode_one_end_to_end(tmp_path):
     run = client.post(
         f"/sessions/{session_id}/run_server_post",
         headers={"Accept": "application/json"},
+        json={"preset_name": "tennis"},
     )
     assert run.status_code == 200, run.text
     assert run.json()["queued"] == 2
+    assert run.json()["preset_name"] == "tennis"
     # Background jobs finish during the TestClient drain that follows.
     assert len(client.get(f"/results/{session_id}").json()["points"]) >= 1
 
