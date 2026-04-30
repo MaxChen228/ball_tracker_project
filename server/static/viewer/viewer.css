@@ -24,7 +24,7 @@
      RERUN SERVER + timestamps + back link easily exceed a single row
      ~1500 px wide) without leaking content above the bar — the prior
      fix forced single-line + ellipsis but that just hid information. */
-  .viewer { display:grid; grid-template-rows:auto auto minmax(0, 1fr);
+  .viewer { display:grid; grid-template-rows:auto auto auto minmax(0, 1fr);
     height:100vh; min-height:0; overflow:hidden;
     padding-bottom:var(--timeline-h, 80px); }
   .nav { min-height:52px; background:var(--surface);
@@ -77,14 +77,27 @@
     align-items:center; gap:var(--s-3); flex-wrap:wrap;
     font-family:var(--mono); font-size:11px; color:var(--sub);
     letter-spacing:0.04em; }
-  .session-tuning { display:inline-flex; align-items:center; gap:6px;
-    padding:3px 8px; border:1px solid var(--border-base);
+  /* Tuning bar: dedicated row beneath .nav so cost+gap sliders get the
+     full row width to themselves and don't reflow when the action chips
+     change in width. The strip itself stays an inline-flex group; the
+     parent .nav-tuning is the row container. */
+  .nav-tuning { display:flex; align-items:center; gap:var(--s-3);
+    padding:var(--s-2) var(--s-5);
+    background:var(--surface);
+    border-bottom:1px solid var(--border-base); }
+  .session-tuning { display:flex; align-items:center; gap:var(--s-3);
+    padding:3px 10px; border:1px solid var(--border-base);
     border-radius:var(--r); background:var(--surface);
     font-family:var(--mono); font-size:11px; color:var(--sub);
-    letter-spacing:0.04em; flex:0 0 auto; }
+    letter-spacing:0.04em; flex:1 1 auto; min-width:0; }
   .session-tuning .st-label { font-size:9px; letter-spacing:0.1em;
-    text-transform:uppercase; }
-  .session-tuning input[type=range] { width:80px; accent-color:var(--accent); }
+    text-transform:uppercase; flex:0 0 auto; }
+  /* Sliders share the row's free width 50/50 (each "half" wraps the
+     slider plus the gap-track + warn span; flex:1 ensures balance even
+     when warn is hidden). Drag precision now scales with viewport
+     instead of the prior fixed 80 px. */
+  .session-tuning input[type=range] { flex:1 1 auto; min-width:120px;
+    width:auto; accent-color:var(--accent); }
   .session-tuning .st-value { font-variant-numeric:tabular-nums;
     font-size:11px; color:var(--ink); min-width:32px; text-align:right; }
   .session-tuning .st-apply { padding:2px 8px; font:inherit;
@@ -99,8 +112,8 @@
      the right (where dragging looser cannot reveal new points; only
      Apply can re-pair on disk). `--gap-cap-pct` is the tick's `left:`
      coordinate as a percentage of the slider's full width. */
-  .session-tuning .st-gap-track { position:relative; display:inline-block;
-    line-height:0; }
+  .session-tuning .st-gap-track { position:relative; display:flex;
+    flex:1 1 auto; min-width:0; line-height:0; }
   .session-tuning .st-gap-track input[type=range] { display:block; }
   .session-tuning .st-gap-tick { position:absolute; top:50%; left:var(--gap-cap-pct);
     width:1px; height:14px; transform:translate(-50%, -50%);

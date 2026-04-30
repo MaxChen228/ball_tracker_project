@@ -240,6 +240,19 @@ class TriangulatedPoint(BaseModel):
     # bypassed the fan-out path.
     source_a_cand_idx: int | None = None
     source_b_cand_idx: int | None = None
+    # Selector cost of the source A / B candidates that contributed this
+    # point. Stamped at emit time so the viewer's cost slider can filter
+    # the 3D point cloud / trajectory client-side without reverse-looking
+    # up `(cam, frame, cand_idx)` against the candidate table. None when
+    # the source candidate was synthesized from a resolved (px, py) winner
+    # without per-candidate cost (legacy fixtures and the `_frame_candidates`
+    # px/py fallback path).
+    #
+    # Required (no default) — every caller must explicitly think about
+    # whether cost is available. Per CLAUDE.md, new fields are required
+    # rather than silently default-None.
+    cost_a: float | None
+    cost_b: float | None
 
 
 class SegmentRecord(BaseModel):

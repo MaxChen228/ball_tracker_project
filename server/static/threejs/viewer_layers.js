@@ -293,8 +293,10 @@ class ViewerLayers {
     // is picked up on the next rebuild but not mid-loop.
     const candPasses = window._candPassesThreshold;
     const residualPasses = window._passResidualFilter;
-    if (typeof candPasses !== "function" || typeof residualPasses !== "function") {
-      throw new Error("viewer init order broken: _candPassesThreshold / _passResidualFilter not on window");
+    const costPassesPoint = window._passCostFilterPoint;
+    if (typeof candPasses !== "function" || typeof residualPasses !== "function"
+        || typeof costPassesPoint !== "function") {
+      throw new Error("viewer init order broken: _candPassesThreshold / _passResidualFilter / _passCostFilterPoint not on window");
     }
 
     // Rays — group by (cam, path). All rays at currentT (within tol)
@@ -370,6 +372,7 @@ class ViewerLayers {
         const p = svrAll[i];
         if (p.t_rel_s > cutoff) continue;
         if (!residualPasses(p)) continue;
+        if (!costPassesPoint(p)) continue;
         const k = (typeof p.seg_idx === "number") ? p.seg_idx : -1;
         const key = k === -1 ? "out" : String(k);
         if (!buckets.has(key)) buckets.set(key, []);
@@ -396,7 +399,9 @@ class ViewerLayers {
       }
     }
     if (this._isVisible("traj", PATH_LIVE)) {
-      const livePts = (this.TRAJ_BY_PATH.live || []).filter((p) => p.t_rel_s <= cutoff && residualPasses(p));
+      const livePts = (this.TRAJ_BY_PATH.live || []).filter(
+        (p) => p.t_rel_s <= cutoff && residualPasses(p) && costPassesPoint(p)
+      );
       if (livePts.length) {
         const group = new THREE.Group();
         group.name = "viewer_traj_live";
@@ -503,6 +508,14 @@ class ViewerLayers {
       y: p.y_m,
       z: p.z_m,
       residual_m: p.residual_m,
+      // cost_a / cost_b ride along so _passCostFilterPoint can mask
+      // freshly-loaded data the same way it masks server-rendered DATA.scene.
+      // seg_idx is stamped client-side from `payload.segments` /
+      // `_classifyPointsBySegment`; pass through if a server-rendered
+      // payload already has it (legacy SSE path).
+      cost_a: (p.cost_a == null ? null : p.cost_a),
+      cost_b: (p.cost_b == null ? null : p.cost_b),
+      seg_idx: (typeof p.seg_idx === "number" ? p.seg_idx : undefined),
     });
     const points = Array.isArray(payload.points) ? payload.points : [];
     this.SCENE.triangulated = points.map(toSceneDict);

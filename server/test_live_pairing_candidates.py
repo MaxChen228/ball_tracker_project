@@ -138,6 +138,7 @@ def _make_point(t_rel: float, ca_idx: int, cb_idx: int,
         residual_m=gap,
         source_a_cand_idx=ca_idx,
         source_b_cand_idx=cb_idx,
+        cost_a=None, cost_b=None,
     )
 
 

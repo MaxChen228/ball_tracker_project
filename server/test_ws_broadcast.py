@@ -201,6 +201,7 @@ def test_stamp_segments_on_result_populates_segments_for_ballistic_input():
         pts.append(TriangulatedPoint(
             t_rel_s=t, x_m=float(pos[0]), y_m=float(pos[1]), z_m=float(pos[2]),
             residual_m=0.001,
+            cost_a=None, cost_b=None,
         ))
     result = SessionResult(
         session_id="s_seg_test",

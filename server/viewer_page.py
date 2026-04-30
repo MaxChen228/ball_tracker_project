@@ -317,10 +317,12 @@ def render_viewer_html(
   <div class="nav">
     <span class="brand"><span class="dot"></span>BALL_TRACKER</span>
     {ctx.health_strip_html}
-    {ctx.session_tuning_html}
     {progress_html}
     {action_html}
     <a class="back" href="/">&larr; dashboard</a>
+  </div>
+  <div class="nav-tuning" role="region" aria-label="Per-session pairing tuning">
+    {ctx.session_tuning_html}
   </div>
   {ctx.health_failure_html}
   <div class="work" data-mode="{ctx.layout_mode}">

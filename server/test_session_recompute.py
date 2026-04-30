@@ -48,27 +48,41 @@ def _seed_session(state, session_id: str):
     state.pitches[("B", session_id)] = payload_b
 
 
-def test_recompute_lower_threshold_drops_more_candidates(tmp_path, monkeypatch):
+def test_recompute_emit_invariant_to_stamped_cost(tmp_path, monkeypatch):
+    """Architectural invariant after pairing-full-emit: stamped
+    cost_threshold no longer gates pairing emit. Two recomputes with
+    different stamped costs produce identical `triangulated_by_path`
+    counts; only `segments` (fit input is filtered subset) and the
+    persisted stamped value differ. Each emitted point carries
+    `cost_a`/`cost_b` so the viewer slider can filter client-side."""
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     sid = "s_aaaa0001"
     _seed_session(main.state, sid)
     client = TestClient(main.app)
 
-    # cost_threshold=1.0 → all 4 candidate pairs pass → fan-out cap.
     r1 = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": 1.0})
     assert r1.status_code == 200, r1.text
-    n_loose = sum(
-        len(v) for v in r1.json()["result"]["triangulated_by_path"].values()
-    )
+    by_path_loose = r1.json()["result"]["triangulated_by_path"]
+    n_loose = sum(len(v) for v in by_path_loose.values())
 
-    # cost_threshold=0.2 → only the (0,0) pair (both cost=0.10) passes.
     r2 = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": 0.2})
     assert r2.status_code == 200
-    n_tight = sum(
-        len(v) for v in r2.json()["result"]["triangulated_by_path"].values()
-    )
-    assert n_tight < n_loose
+    by_path_tight = r2.json()["result"]["triangulated_by_path"]
+    n_tight = sum(len(v) for v in by_path_tight.values())
+
+    # Emit count is INVARIANT to stamped cost — full set is persisted.
+    assert n_tight == n_loose, (n_loose, n_tight)
+    # Stamped value still round-trips to SessionResult so viewer slider
+    # initialises correctly.
+    assert r1.json()["result"]["cost_threshold"] == pytest.approx(1.0)
+    assert r2.json()["result"]["cost_threshold"] == pytest.approx(0.2)
+    # Each emitted point carries cost_a/cost_b so client-side filter has
+    # the data it needs.
+    for path_pts in by_path_tight.values():
+        for p in path_pts:
+            assert "cost_a" in p
+            assert "cost_b" in p
 
 
 def test_recompute_persists_cost_threshold(tmp_path, monkeypatch):
@@ -165,17 +179,18 @@ def test_recompute_rejects_out_of_range_gap(tmp_path, monkeypatch):
     assert r.status_code == 400
 
 
-def test_recompute_tighter_gap_drops_more_points(tmp_path, monkeypatch):
-    """Lowering gap_threshold_m at recompute must produce strictly fewer
-    triangulated points (the cartesian fan-out's far-skew survivors get
-    pruned). Mirrors the cost-axis test but along the residual axis."""
+def test_recompute_emit_invariant_to_stamped_gap(tmp_path, monkeypatch):
+    """Sibling of the cost-axis emit-invariance test: stamped
+    gap_threshold_m no longer gates pairing emit. The stamped value
+    persists on SessionResult so the viewer slider can initialise from
+    it; the segmenter and viewer client filter downstream."""
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     sid = "s_dddd1005"
     _seed_session(main.state, sid)
     client = TestClient(main.app)
 
-    # Wide gap → all cost-passed pairs survive.
+    # Wide gap → all pairs flow through emit.
     r1 = client.post(
         f"/sessions/{sid}/recompute",
         json={"cost_threshold": 1.0, "gap_threshold_m": 2.0},
@@ -185,7 +200,10 @@ def test_recompute_tighter_gap_drops_more_points(tmp_path, monkeypatch):
         len(v) for v in r1.json()["result"]["triangulated_by_path"].values()
     )
 
-    # Tight gap → only the well-aligned pair(s) survive.
+    # Tight gap — emit count must still match (gap_threshold_m no longer
+    # gates pairing emit; it's a stamped-filter input the segmenter and
+    # viewer slider apply downstream). The stamped value DOES round-trip
+    # to SessionResult so the viewer header strip re-initialises.
     r2 = client.post(
         f"/sessions/{sid}/recompute",
         json={"cost_threshold": 1.0, "gap_threshold_m": 0.005},
@@ -194,7 +212,83 @@ def test_recompute_tighter_gap_drops_more_points(tmp_path, monkeypatch):
     n_tight = sum(
         len(v) for v in r2.json()["result"]["triangulated_by_path"].values()
     )
-    assert n_tight < n_loose, (n_loose, n_tight)
+    assert n_tight == n_loose, (n_loose, n_tight)
+    assert r2.json()["result"]["gap_threshold_m"] == pytest.approx(0.005)
+
+
+def test_segmenter_filters_input_by_stamped_cost_threshold():
+    """Direct unit-level check that `stamp_segments_on_result` runs the
+    segmenter against the stamped-tuning SUBSET of `result.triangulated`,
+    not the full set. Builds a synthetic ballistic with two candidates
+    per timestamp — a low-cost "real ball" and a high-cost distractor.
+    Tightening cost_threshold to exclude the distractor changes which
+    points the segmenter sees.
+
+    Architectural significance: this is the test that decouples emit
+    (full set persisted) from fit (stamped subset). Without this,
+    raising the cost slider on the viewer would have no effect on the
+    fit segments — defeating the whole "Apply re-runs segmenter" UX.
+    """
+    import numpy as np
+    from session_results import stamp_segments_on_result
+    from schemas import SessionResult, TriangulatedPoint
+
+    # 12 frames of clean ballistic, each with a "real" + "distractor" point.
+    G = np.array([0.0, 0.0, -9.81])
+    p0 = np.array([0.0, 0.0, 1.5])
+    v0 = np.array([0.0, 25.0, 5.0])
+    pts: list[TriangulatedPoint] = []
+    for i in range(12):
+        t = i * (1.0 / 240.0)
+        pos = p0 + v0 * t + 0.5 * G * t * t
+        pts.append(TriangulatedPoint(
+            t_rel_s=t, x_m=float(pos[0]), y_m=float(pos[1]), z_m=float(pos[2]),
+            residual_m=0.001,
+            cost_a=0.10, cost_b=0.10,  # real ball, low cost
+        ))
+        pts.append(TriangulatedPoint(
+            t_rel_s=t, x_m=float(pos[0]) + 5.0, y_m=float(pos[1]),
+            z_m=float(pos[2]),  # distractor 5 m sideways
+            residual_m=0.001,
+            cost_a=0.80, cost_b=0.80,  # distractor, high cost
+        ))
+
+    # Loose cost: distractors flow into segmenter and may produce a fake
+    # second segment / contaminate the fit.
+    loose = SessionResult(
+        session_id="s_seg_loose",
+        camera_a_received=True,
+        camera_b_received=True,
+        triangulated=list(pts),
+        cost_threshold=1.0,
+        gap_threshold_m=0.20,
+    )
+    stamp_segments_on_result(loose)
+
+    # Tight cost: only real-ball points reach segmenter — clean single fit.
+    tight = SessionResult(
+        session_id="s_seg_tight",
+        camera_a_received=True,
+        camera_b_received=True,
+        triangulated=list(pts),
+        cost_threshold=0.20,
+        gap_threshold_m=0.20,
+    )
+    stamp_segments_on_result(tight)
+
+    # Both produce ≥1 segment, but the tight cost excludes 12 distractor
+    # points so the segment(s) cover at most the 12 real points.
+    assert len(tight.segments) >= 1
+    tight_total_indices = sum(len(s.original_indices) for s in tight.segments)
+    assert tight_total_indices <= 12, tight_total_indices
+    # And `original_indices` index back into the FULL list (size 24), so
+    # they must all be < 24 — the remap step in stamp_segments_on_result
+    # correctly translates filter-subset indices to full-list indices.
+    full_n = len(tight.triangulated)
+    assert full_n == 24
+    for s in tight.segments:
+        for idx in s.original_indices:
+            assert 0 <= idx < full_n
 
 
 def test_recompute_unknown_session_returns_404(tmp_path, monkeypatch):
