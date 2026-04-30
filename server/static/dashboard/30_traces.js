@@ -9,7 +9,8 @@
   const isStrikeZoneTrace = _OVL.isStrikeZoneTrace;
 
   // Per-segment palette — distinct from camera A/B colours so coloured
-  // points don't camouflage with rays. Mirrors render_fit._SEG_PALETTE.
+  // points don't camouflage with rays. Shared with viewer
+  // _VIEWER_SEG_PALETTE so seg0 is the same red on every page.
   const _SEG_PALETTE = [
     '#E45756', '#4C78A8', '#54A24B', '#F58518',
     '#B279A2', '#72B7B2', '#FF9DA6', '#9D755D',
@@ -130,14 +131,13 @@
         hovertemplate: 'fit<extra></extra>',
         showlegend: true,
       });
-      // Release point + v0 unit arrow (length = 0.3 m, matches /fit
-      // visual). Single arrow per segment so multi-bounce events read
-      // as "release here, going this way".
-      const vmag = Math.hypot(seg.v0[0], seg.v0[1], seg.v0[2]) || 1e-6;
-      const arrowLen = 0.3;
-      const tipX = seg.p0[0] + seg.v0[0] / vmag * arrowLen;
-      const tipY = seg.p0[1] + seg.v0[1] / vmag * arrowLen;
-      const tipZ = seg.p0[2] + seg.v0[2] / vmag * arrowLen;
+      // Release point + v0 unit arrow (length = 0.3 m). Single arrow per
+      // segment so multi-bounce events read as "release here, going
+      // this way". A degenerate |v0|=0 segment shouldn't survive
+      // segmenter.MIN_DISP / MIN_SPEED gates, so a zero magnitude is a
+      // bug — skip the arrow but keep the release marker so the operator
+      // sees something is wrong rather than the segment vanishing.
+      const vmag = Math.hypot(seg.v0[0], seg.v0[1], seg.v0[2]);
       traces.push({
         type: 'scatter3d',
         mode: 'markers',
@@ -147,17 +147,20 @@
         hoverinfo: 'skip',
         showlegend: false,
       });
-      traces.push({
-        type: 'scatter3d',
-        mode: 'lines',
-        x: [seg.p0[0], tipX],
-        y: [seg.p0[1], tipY],
-        z: [seg.p0[2], tipZ],
-        line: { color, width: 8 },
-        name: `${sid} · seg${i} v0`,
-        hoverinfo: 'skip',
-        showlegend: false,
-      });
+      if (vmag > 0) {
+        const arrowLen = 0.3;
+        traces.push({
+          type: 'scatter3d',
+          mode: 'lines',
+          x: [seg.p0[0], seg.p0[0] + seg.v0[0] / vmag * arrowLen],
+          y: [seg.p0[1], seg.p0[1] + seg.v0[1] / vmag * arrowLen],
+          z: [seg.p0[2], seg.p0[2] + seg.v0[2] / vmag * arrowLen],
+          line: { color, width: 8 },
+          name: `${sid} · seg${i} v0`,
+          hoverinfo: 'skip',
+          showlegend: false,
+        });
+      }
     }
 
     return traces;

@@ -18,8 +18,9 @@ def test_runtime_js_self_check():
     assert "BallTrackerOverlays" in OVERLAYS_RUNTIME_JS
     assert "strikeZoneVisible" in OVERLAYS_RUNTIME_JS
     # The legacy ballistic fit / speed colourbar overlay code is gone
-    # (multi-segment fit moved to /fit/{sid}). Guard against accidental
-    # restoration so the dead client-side math doesn't sediment back in.
+    # (multi-segment fit is now persisted on SessionResult.segments and
+    # rendered server-side). Guard against accidental restoration so the
+    # dead client-side math doesn't sediment back in.
     assert "ballisticFit" not in OVERLAYS_RUNTIME_JS
     assert "speedTraces" not in OVERLAYS_RUNTIME_JS
     assert "computeSpeeds" not in OVERLAYS_RUNTIME_JS
@@ -94,7 +95,8 @@ def test_viewer_injects_overlays_runtime():
 def test_viewer_overlay_controls_in_layer_toggles():
     """Strike-zone toggle must be in the layer-toggles strip. The legacy
     Fit / Speed checkboxes + svr/live source pills are gone (multi-segment
-    fit moved to /fit/{sid}); guard against accidental restoration."""
+    fit is now persisted on SessionResult.segments); guard against
+    accidental restoration."""
     import numpy as np
     from conftest import sid
     from test_viewer import _make_rig, _pitch, _record_pitch

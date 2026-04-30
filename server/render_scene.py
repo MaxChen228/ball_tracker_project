@@ -43,7 +43,7 @@ def render_viewer_html(
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         presets=presets,
-        segments=segments or [],
+        segments=[] if segments is None else segments,
     )
 
 

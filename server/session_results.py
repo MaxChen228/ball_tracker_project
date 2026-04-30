@@ -319,14 +319,21 @@ def stamp_segments_on_result(result: SessionResult) -> None:
     """Run `find_segments` on the chosen authoritative path's points and
     write `result.segments`. Idempotent — overwrites whatever was there.
 
-    Segments are pure visualisation data derived from `result.triangulated`
-    (the authoritative path's points); they do not need to be re-derivable
-    from disk on next rebuild because the rebuild always recomputes them.
-    Empty `triangulated` ⇒ empty segments (no log noise; "I have nothing
-    to fit" is not an error)."""
+    Sorts `result.triangulated` (and `result.points`, which mirrors it)
+    by `t_rel_s` BEFORE running the segmenter so `Segment.original_indices`
+    is a stable index into a time-sorted list. Without this, the client's
+    `_classifyPointsBySegment` (dashboard 30_traces.js) silently
+    mis-buckets points whenever the upstream pairing emits non-time-
+    sorted output.
+
+    Empty `triangulated` ⇒ empty segments (no log noise; "nothing to fit"
+    is not an error)."""
     if not result.triangulated:
         result.segments = []
         return
+    result.triangulated = sorted(result.triangulated, key=lambda p: p.t_rel_s)
+    if result.points:
+        result.points = sorted(result.points, key=lambda p: p.t_rel_s)
     segs, _pts_sorted = find_segments(result.triangulated)
     result.segments = [_segment_record_from_segment(s) for s in segs]
 
