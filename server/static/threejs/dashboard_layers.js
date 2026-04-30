@@ -265,6 +265,12 @@ class DashboardLayers {
       this._removeFitLayers();
       return;
     }
+    // Clear all fit layers before rebuilding. Without this the
+    // conditional groups (`fit_points`, `fit_raw_path`) leak across
+    // rebuilds when their predicate flips ON → OFF — e.g. operator
+    // unticks "Show points" but the cached fit_points group stays
+    // mounted because addLayer is never called for it this pass.
+    this._removeFitLayers();
     const segments = Array.isArray(result.segments) ? result.segments : [];
     const points = result.points || [];
     // Pairing emits the full triangulated set; cost/gap on the result
