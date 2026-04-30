@@ -56,11 +56,7 @@ def _render_intrinsics_body(
             )
         role_chips_html.append(chip)
     if not role_chips_html:
-        role_strip = (
-            '<div class="intrinsics-roles-empty">'
-            "No phones online — heartbeats populate this when a device connects."
-            "</div>"
-        )
+        role_strip = ""
     else:
         role_strip = (
             '<div class="intrinsics-roles">'
@@ -70,13 +66,7 @@ def _render_intrinsics_body(
 
     # Stored records list.
     if not records:
-        records_html = (
-            '<div class="intrinsics-empty">'
-            "No ChArUco records yet. Run "
-            '<code>calibrate_intrinsics.py</code> on the phone\'s shots, '
-            "then upload the resulting JSON below."
-            "</div>"
-        )
+        records_html = ""
     else:
         row_lines: list[str] = []
         for rec in records:
@@ -161,10 +151,6 @@ def _render_intrinsics_body(
         f'{device_select}'
         '<input type="file" id="intrinsics-file" accept=".json,application/json">'
         '<button type="button" class="btn small" id="intrinsics-upload-btn">Upload</button>'
-        '</div>'
-        '<div class="intrinsics-upload-hint">'
-        'Accepts <code>calibrate_intrinsics.py</code> output JSON '
-        '(<code>fx / fy / cx / cy / distortion_coeffs / image_width / image_height</code>).'
         '</div>'
         '<div id="intrinsics-upload-status" class="intrinsics-upload-status"></div>'
         '</div>'
