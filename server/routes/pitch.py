@@ -30,6 +30,7 @@ def _stamp_detection_config(
     *,
     hsv_range,
     shape_gate,
+    preset_name: str | None,
 ) -> None:
     """Freeze the detection-time config onto the pitch so reprocess can
     reproduce exactly which HSV / shape-gate basis was in effect when
@@ -40,7 +41,11 @@ def _stamp_detection_config(
     Selector cost weights are no longer freezable: they're hardcoded
     `_W_ASPECT` / `_W_FILL` constants in `candidate_selector`, so a
     pitch's cost basis is fully determined by the (HSV, shape_gate)
-    pair plus the constants."""
+    pair plus the constants.
+
+    `preset_name` is the active preset filename at arm time (from
+    `state.live_session_preset_name`); None when no live session was
+    pre-stamped (server_post-only flow / test fixture)."""
     pitch.hsv_range_used = HSVRangePayload(
         h_min=hsv_range.h_min, h_max=hsv_range.h_max,
         s_min=hsv_range.s_min, s_max=hsv_range.s_max,
@@ -50,6 +55,7 @@ def _stamp_detection_config(
         aspect_min=shape_gate.aspect_min,
         fill_min=shape_gate.fill_min,
     )
+    pitch.live_preset_name = preset_name
 
 
 def _summarize_result(result: SessionResult) -> dict[str, Any]:
@@ -203,10 +209,16 @@ async def pitch(
     else:
         hsv_used = state.hsv_range()
         gate_used = state.shape_gate()
+    preset_used = state.live_session_preset_name(payload_obj.session_id)
+    if preset_used is None:
+        # No LivePairingSession pre-stamp (test fixture / server_post-only
+        # flow); fall back to the current dashboard active preset name.
+        preset_used = state.detection_config().preset
     _stamp_detection_config(
         payload_obj,
         hsv_range=hsv_used,
         shape_gate=gate_used,
+        preset_name=preset_used,
     )
 
     result = await asyncio.to_thread(state.record, payload_obj)
@@ -399,10 +411,15 @@ async def _run_server_detection(
     # Overwrite the live-side stamp with what server_post actually used
     # for this run — server_post is the authoritative cost basis once it
     # has run, since reprocess will read from `frames_server_post`.
+    # `live_preset_name` is preserved verbatim: it is the arm-time live
+    # identity and never reflects the server_post run's choice (the
+    # server_post preset name is recorded separately on
+    # `SessionResult.server_post_preset_name`).
     _stamp_detection_config(
         pitch,
         hsv_range=hsv_used,
         shape_gate=gate_used,
+        preset_name=pitch.live_preset_name,
     )
     try:
         result = await asyncio.to_thread(state.record, pitch)
