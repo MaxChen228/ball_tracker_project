@@ -38,6 +38,18 @@ import {
   applyPointSizeToGroup,
   classifyPointsBySegment,
 } from "./points_layer.js";
+import {
+  buildFitSegmentLines,
+  applyResolution,
+  applyLineWidth,
+  applyActiveHighlight,
+  setupFitHoverTooltip,
+  bindLayerPopovers,
+  readPersistedFitLineWidth,
+  writePersistedFitLineWidth,
+  readPersistedFitExtensionSeconds,
+  writePersistedFitExtensionSeconds,
+} from "./fit_curves_layer.js";
 
 const FIT_ACCENT = 0xC0392B;
 const G_Z = -9.81;
@@ -90,20 +102,6 @@ function pointMarker(p, color, radius = 0.030) {
   return m;
 }
 
-function sampleSegmentCurve(seg, n) {
-  const out = new Float32Array(n * 3);
-  const t0 = seg.t_start, t1 = seg.t_end, ta = seg.t_anchor;
-  const p0 = seg.p0, v0 = seg.v0;
-  for (let i = 0; i < n; ++i) {
-    const t = t0 + (t1 - t0) * (i / (n - 1));
-    const tau = t - ta;
-    out[i * 3 + 0] = p0[0] + v0[0] * tau;
-    out[i * 3 + 1] = p0[1] + v0[1] * tau;
-    out[i * 3 + 2] = p0[2] + v0[2] * tau + 0.5 * G_Z * tau * tau;
-  }
-  return out;
-}
-
 function evalSegmentAt(seg, t) {
   const tau = t - seg.t_anchor;
   return [
@@ -139,6 +137,10 @@ class ViewerLayers {
     // dashboard writes the same key, so a slider tweak on either page
     // carries to the other on next load.
     this._pointSize = readPersistedPointSizeM();
+    // Fit-curve display tunables (Line2 linewidth in screen-px, dashed
+    // extension padding in seconds). Persisted across pages.
+    this._fitLineWidth = readPersistedFitLineWidth();
+    this._fitExtensionSec = readPersistedFitExtensionSeconds();
 
     // --- one-time cameras + ground traces + fit curves ---
     this._buildCameras();
@@ -146,6 +148,19 @@ class ViewerLayers {
     this._buildFitCurves();
     // --- t-dependent layers (rays / traj / fit marker) ---
     this._rebuildDynamic();
+
+    // Resize listener — Line2 LineMaterial.resolution must follow the
+    // renderer canvas size, otherwise linewidth uniform reads stale
+    // px and the lines render at the wrong width on next paint.
+    this._resizeHandler = () => this._refreshFitResolution();
+    window.addEventListener("resize", this._resizeHandler);
+  }
+
+  _refreshFitResolution() {
+    if (!this._fitGroup) return;
+    const dom = this.scene.renderer && this.scene.renderer.domElement;
+    if (!dom) return;
+    applyResolution(this._fitGroup, new THREE.Vector2(dom.clientWidth, dom.clientHeight));
   }
 
   // ---- camera markers ----
@@ -256,17 +271,21 @@ class ViewerLayers {
 
   // ---- fit curves ----
   _buildFitCurves() {
-    const group = new THREE.Group();
-    group.name = "viewer_fit_curves";
     const segs = this._currentSegments();
-    for (let i = 0; i < segs.length; ++i) {
-      const buf = sampleSegmentCurve(segs[i], 64);
-      const color = SEG_PALETTE[i % SEG_PALETTE.length];
-      const line = lineFromBuffer(buf, color, { opacity: 0.55 });
-      line.userData = { segIdx: i };
-      line.name = `fit_seg_${i}`;
-      group.add(line);
-    }
+    const dom = this.scene.renderer && this.scene.renderer.domElement;
+    const resolution = new THREE.Vector2(
+      dom ? dom.clientWidth : 1,
+      dom ? dom.clientHeight : 1,
+    );
+    const group = buildFitSegmentLines(segs, {
+      groupName: "viewer_fit_curves",
+      palette: (i) => SEG_PALETTE[i % SEG_PALETTE.length],
+      lineWidthPx: this._fitLineWidth,
+      prePadSec: this._fitExtensionSec,
+      postPadSec: this._fitExtensionSec,
+      activeHighlight: true,
+      resolution,
+    });
     this.scene.addLayer("viewer_fit_curves", group);
     this._fitGroup = group;
     // Honour the persisted fit toggle on (re)build — without this, the
@@ -279,21 +298,16 @@ class ViewerLayers {
 
   _applyFitActiveHighlight() {
     if (!this._fitGroup) return;
-    const segs = this._currentSegments();
-    const playback = this.mode === "playback";
-    for (const line of this._fitGroup.children) {
-      const i = line.userData.segIdx;
-      const seg = segs[i];
-      if (!seg) continue;
-      const isActive = playback
-        && this.t >= seg.t_start - 1e-3
-        && this.t <= seg.t_end + 1e-3;
-      // Three.js LineBasicMaterial doesn't support `linewidth > 1` on
-      // most browsers; we encode the active state via opacity instead.
-      line.material.opacity = isActive ? 1.0 : 0.55;
-      line.material.transparent = !isActive;
-      line.material.needsUpdate = true;
-    }
+    // Line2 supports real `linewidth` (the previous LineBasicMaterial
+    // hack of encoding active via opacity is gone); active segment
+    // gets ×1.6 width over the operator-tuned base width.
+    applyActiveHighlight(
+      this._fitGroup,
+      this._currentSegments(),
+      this.t,
+      this.mode,
+      this._fitLineWidth,
+    );
   }
 
   // ---- t-dependent rays / traj / fit marker ----
@@ -444,6 +458,29 @@ class ViewerLayers {
   }
   pointSizeM() { return this._pointSize; }
 
+  // Fit-curve display tunables. `setFitLineWidth` mutates LineMaterial
+  // in place (cheap); `setFitExtensionSeconds` triggers a fit-curves
+  // rebuild because the dashed extension geometry depends on it.
+  setFitLineWidth(px) {
+    if (!Number.isFinite(px)) return;
+    this._fitLineWidth = px;
+    writePersistedFitLineWidth(px);
+    if (this._fitGroup) {
+      applyLineWidth(this._fitGroup, px);
+      this._applyFitActiveHighlight();
+    }
+  }
+  fitLineWidthPx() { return this._fitLineWidth; }
+
+  setFitExtensionSeconds(sec) {
+    if (!Number.isFinite(sec)) return;
+    this._fitExtensionSec = sec;
+    writePersistedFitExtensionSeconds(sec);
+    this.scene.removeLayer("viewer_fit_curves");
+    this._buildFitCurves();
+  }
+  fitExtensionSeconds() { return this._fitExtensionSec; }
+
   setT(t, mode) {
     this.t = t;
     if (mode != null && mode !== this.mode) {
@@ -566,12 +603,28 @@ export function setupViewerLayers(scene, opts) {
   window.BallTrackerViewerScene = layers;
   const toolbar = document.querySelector(".scene-views");
   if (toolbar) scene.bindViewToolbar(toolbar);
+  // Layer-chip popover wiring: chevron buttons toggle the sibling
+  // popover; outside-click + Escape close.
+  bindLayerPopovers(document);
   // Slider seed + bind here, not in the classic IIFE — by the time
   // setupViewerLayers runs the layers controller is mounted, so the
   // initial DOM value can reflect the persisted size loud-and-correct
   // instead of silently displaying the Python-rendered default while
   // the materials use a different size from localStorage.
   bindViewerPointSizeSlider(layers, "#viewer-point-size");
+  bindViewerFitLineWidthSlider(layers, "#viewer-fit-line-width");
+  bindViewerFitExtensionSlider(layers, "#viewer-fit-extension");
+  // Hover tooltip — Raycaster on the fit_curves group, shows
+  // instantaneous |v(t)| in km/h.
+  const tooltipParent = scene.renderer.domElement.parentNode;
+  if (tooltipParent) {
+    setupFitHoverTooltip({
+      scene,
+      fitGroupGetter: () => layers._fitGroup,
+      segmentsFn: () => layers._currentSegments(),
+      tooltipParent,
+    });
+  }
   return layers;
 }
 
@@ -587,5 +640,35 @@ function bindViewerPointSizeSlider(layers, containerSel) {
     if (!Number.isFinite(v)) return;
     if (readout) readout.textContent = `${Math.round(v * 1000)} mm`;
     layers.setPointSize(v);
+  });
+}
+
+function bindViewerFitLineWidthSlider(layers, containerSel) {
+  const slider = document.querySelector(`${containerSel} [data-fit-line-width-slider]`);
+  const readout = document.querySelector(`${containerSel} [data-fit-line-width-readout]`);
+  if (!slider) return;
+  const seed = layers.fitLineWidthPx();
+  slider.value = String(seed);
+  if (readout) readout.textContent = `${seed.toFixed(1)} px`;
+  slider.addEventListener("input", () => {
+    const v = parseFloat(slider.value);
+    if (!Number.isFinite(v)) return;
+    if (readout) readout.textContent = `${v.toFixed(1)} px`;
+    layers.setFitLineWidth(v);
+  });
+}
+
+function bindViewerFitExtensionSlider(layers, containerSel) {
+  const slider = document.querySelector(`${containerSel} [data-fit-extension-slider]`);
+  const readout = document.querySelector(`${containerSel} [data-fit-extension-readout]`);
+  if (!slider) return;
+  const seed = layers.fitExtensionSeconds();
+  slider.value = String(seed);
+  if (readout) readout.textContent = `${Math.round(seed * 1000)} ms`;
+  slider.addEventListener("input", () => {
+    const v = parseFloat(slider.value);
+    if (!Number.isFinite(v)) return;
+    if (readout) readout.textContent = `${Math.round(v * 1000)} ms`;
+    layers.setFitExtensionSeconds(v);
   });
 }

@@ -35,14 +35,40 @@ _RUNTIME_DIR = Path(main.__file__).parent / "static" / "threejs"
 
 
 def test_vendor_files_on_disk():
-    """three.module.min.js + OrbitControls.js + scene_runtime.js must
-    exist. Without them the boot-time invariant in main.py raises and
-    the server fails to start — this test catches the same regression
-    in CI before deploy."""
+    """three.module.min.js + OrbitControls.js + scene_runtime.js + the
+    five Line2 fat-line vendor files must exist. Without them the
+    boot-time invariant in main.py raises and the server fails to
+    start — this test catches the same regression in CI before deploy."""
     assert (_VENDOR_DIR / "three.module.min.js").exists()
     assert (_VENDOR_DIR / "OrbitControls.js").exists()
     assert (_RUNTIME_DIR / "scene_runtime.js").exists()
+    lines_dir = _VENDOR_DIR / "lines"
+    for name in (
+        "Line2.js",
+        "LineSegments2.js",
+        "LineGeometry.js",
+        "LineSegmentsGeometry.js",
+        "LineMaterial.js",
+    ):
+        assert (lines_dir / name).exists(), f"missing vendor/lines/{name}"
     assert vendor_files_present()
+
+
+def test_static_mount_serves_line2_vendor():
+    """Line2 + its dependencies must be reachable via the importmap
+    rewrites in `scene_runtime_html`. The fat-line module tree is what
+    powers the operator-tunable fit-curve linewidth + dashed extension."""
+    client = TestClient(main.app)
+    for name in (
+        "Line2.js",
+        "LineSegments2.js",
+        "LineGeometry.js",
+        "LineSegmentsGeometry.js",
+        "LineMaterial.js",
+    ):
+        r = client.get(f"/static/threejs/vendor/lines/{name}")
+        assert r.status_code == 200, f"vendor/lines/{name} not served"
+        assert "javascript" in r.headers["content-type"].lower()
 
 
 def test_static_mount_serves_three_module():
@@ -134,12 +160,21 @@ def test_scene_theme_covers_runtime_consumers():
 
 def test_scene_runtime_html_contains_importmap_and_payload():
     """The fragment that pages embed must wire (a) importmap so `three`
-    resolves to the vendored ESM bundle, (b) a JSON payload script,
-    and (c) the module-type boot script that mounts the scene."""
+    + the five Line2 fat-line specifiers resolve to the vendored ESM
+    bundles, (b) a JSON payload script, and (c) the module-type boot
+    script that mounts the scene."""
     html = scene_runtime_html(container_id="scene")
     assert '<script type="importmap">' in html
-    assert '"three":"/static/threejs/vendor/three.module.min.js"' in html
-    assert '"three/addons/controls/OrbitControls.js":"/static/threejs/vendor/OrbitControls.js"' in html
+    assert '"three": "/static/threejs/vendor/three.module.min.js"' in html
+    assert '"three/addons/controls/OrbitControls.js": "/static/threejs/vendor/OrbitControls.js"' in html
+    for spec, path in (
+        ("three/addons/lines/Line2.js", "/static/threejs/vendor/lines/Line2.js"),
+        ("three/addons/lines/LineSegments2.js", "/static/threejs/vendor/lines/LineSegments2.js"),
+        ("three/addons/lines/LineGeometry.js", "/static/threejs/vendor/lines/LineGeometry.js"),
+        ("three/addons/lines/LineSegmentsGeometry.js", "/static/threejs/vendor/lines/LineSegmentsGeometry.js"),
+        ("three/addons/lines/LineMaterial.js", "/static/threejs/vendor/lines/LineMaterial.js"),
+    ):
+        assert f'"{spec}": "{path}"' in html, f"importmap missing {spec}"
     assert '<script type="application/json" id="bt-scene-theme">' in html
     assert 'mountScene("scene")' in html
     assert '/static/threejs/scene_runtime.js' in html
@@ -227,6 +262,103 @@ def test_point_size_slider_html_renders_required_hooks():
     assert 'data-point-size-slider' in html
     assert 'data-point-size-readout' in html
     assert 'type="range"' in html
+
+
+def test_fit_line_width_slider_html_renders_required_hooks():
+    """`fit_line_width_slider_html()` ships the LW slider used in the
+    Fit chip popover. Hooks: data-fit-line-width-slider /
+    data-fit-line-width-readout."""
+    from scene_runtime import fit_line_width_slider_html
+    html = fit_line_width_slider_html(slot_id="x-fit-lw")
+    assert 'id="x-fit-lw"' in html
+    assert 'data-fit-line-width-slider' in html
+    assert 'data-fit-line-width-readout' in html
+    assert 'type="range"' in html
+
+
+def test_fit_extension_seconds_slider_html_renders_required_hooks():
+    """`fit_extension_seconds_slider_html()` ships the EXT slider used
+    in the Fit chip popover. Hooks: data-fit-extension-slider /
+    data-fit-extension-readout."""
+    from scene_runtime import fit_extension_seconds_slider_html
+    html = fit_extension_seconds_slider_html(slot_id="x-fit-ext")
+    assert 'id="x-fit-ext"' in html
+    assert 'data-fit-extension-slider' in html
+    assert 'data-fit-extension-readout' in html
+    assert 'type="range"' in html
+
+
+def test_layer_chip_with_popover_html_includes_toggle_and_panel():
+    """`layer_chip_with_popover_html()` is the wrapper used by both
+    dashboard + viewer to render an expandable layer chip. Must ship a
+    chevron toggle with data-popover-target pointing at the popover
+    div, the popover div with matching id + data-popover, and the
+    inner content (caller-supplied)."""
+    from scene_runtime import layer_chip_with_popover_html
+    html = layer_chip_with_popover_html(
+        group_key="traj",
+        label="Traj",
+        layer_data_attr="traj",
+        checked=True,
+        popover_id="x-traj-pop",
+        popover_inner_html='<span class="x-inner">INNER</span>',
+    )
+    assert 'data-layer-group="traj"' in html
+    assert 'data-layer="traj"' in html
+    assert 'data-popover-target="x-traj-pop"' in html
+    assert 'id="x-traj-pop"' in html
+    assert 'data-popover' in html
+    assert 'aria-expanded="false"' in html
+    assert 'class="x-inner"' in html
+
+
+def test_layer_chip_with_popover_supports_checkbox_less_chip():
+    """Dashboard's Fit chip is checkbox-less (fit visibility isn't
+    operator-toggleable on the dashboard). Helper must render a chip
+    with no `<input type=checkbox>` when neither checkbox_id nor
+    layer_data_attr is supplied."""
+    from scene_runtime import layer_chip_with_popover_html
+    html = layer_chip_with_popover_html(
+        group_key="fit",
+        label="Fit",
+        popover_id="x-fit-pop",
+        popover_inner_html="",
+    )
+    assert 'type="checkbox"' not in html
+    assert 'layer-name-only' in html
+    assert 'data-popover-target="x-fit-pop"' in html
+
+
+def test_fit_constants_match_fit_curves_layer_js():
+    """Python helpers render <input min/max/step/value> and the JS
+    fit_curves_layer.js exports parallel constants used to clamp the
+    persisted values on construction. Two sources of truth would
+    silently desync after a tuning change — this test catches that."""
+    import re
+    import scene_runtime as sr
+    js_text = (
+        Path(main.__file__).parent / "static" / "threejs" / "fit_curves_layer.js"
+    ).read_text()
+    for name, py_value in [
+        ("FIT_LINE_WIDTH_PX_MIN", sr.FIT_LINE_WIDTH_PX_MIN),
+        ("FIT_LINE_WIDTH_PX_MAX", sr.FIT_LINE_WIDTH_PX_MAX),
+        ("FIT_LINE_WIDTH_PX_STEP", sr.FIT_LINE_WIDTH_PX_STEP),
+        ("FIT_LINE_WIDTH_PX_DEFAULT", sr.FIT_LINE_WIDTH_PX_DEFAULT),
+        ("FIT_EXTENSION_SEC_MIN", sr.FIT_EXTENSION_SEC_MIN),
+        ("FIT_EXTENSION_SEC_MAX", sr.FIT_EXTENSION_SEC_MAX),
+        ("FIT_EXTENSION_SEC_STEP", sr.FIT_EXTENSION_SEC_STEP),
+        ("FIT_EXTENSION_SEC_DEFAULT", sr.FIT_EXTENSION_SEC_DEFAULT),
+    ]:
+        m = re.search(rf"export const {name}\s*=\s*([0-9.]+)\s*;", js_text)
+        assert m, (
+            f"{name}: no `export const {name} = N;` line in fit_curves_layer.js. "
+            f"Update both `scene_runtime.py` and `static/threejs/fit_curves_layer.js`."
+        )
+        js_value = float(m.group(1))
+        assert js_value == py_value, (
+            f"{name} desync: Python={py_value!r}, JS={js_value!r}. "
+            f"Update both `scene_runtime.py` and `static/threejs/fit_curves_layer.js`."
+        )
 
 
 def test_point_size_constants_match_points_layer_js():

@@ -319,12 +319,46 @@
   .layer-toggles .layer-checkbox input { accent-color:var(--ink); cursor:pointer; width:13px; height:13px; margin:0; vertical-align:middle; }
   .layer-toggles .layer-divider { width:1px; align-self:stretch;
     background:var(--border-base); margin:2px 2px; }
+  .layer-toggles .mini-slider,
   .layer-toggles .point-size-slider { display:inline-flex; align-items:center; gap:6px;
     font-family:var(--mono); font-size:9px; letter-spacing:0.08em; color:var(--ink); }
+  .layer-toggles .mini-slider .ms-name,
   .layer-toggles .point-size-slider .ps-name { text-transform:uppercase; font-weight:500; }
+  .layer-toggles .mini-slider input[type="range"],
   .layer-toggles .point-size-slider input[type="range"] { width:80px; }
+  .layer-toggles .mini-slider .ms-readout,
   .layer-toggles .point-size-slider .ps-readout { color:var(--sub); min-width:44px;
     text-align:right; font-variant-numeric:tabular-nums; }
+  /* Layer-chip popover — chevron + sibling panel containing the per-
+     layer mini-sliders. Positioned absolute relative to the chip. */
+  .layer-toggles .layer-group.has-popover { position:relative; }
+  .layer-toggles .layer-popover-toggle { font:inherit; font-size:10px; line-height:1;
+    padding:0 4px; margin-left:2px;
+    background:transparent; color:var(--sub);
+    border:1px solid transparent; border-radius:2px;
+    cursor:pointer; transition:color 0.12s, border-color 0.12s; }
+  .layer-toggles .layer-popover-toggle:hover { color:var(--ink); }
+  .layer-toggles .layer-popover-toggle.open { color:var(--ink); border-color:var(--border-base); }
+  .layer-toggles .layer-popover { position:absolute; top:calc(100% + 4px); left:0; z-index:50;
+    min-width:160px; padding:8px 10px;
+    background:var(--surface); border:1px solid var(--border-base);
+    border-radius:var(--r);
+    box-shadow:0 4px 12px rgba(0,0,0,0.08);
+    display:flex; flex-direction:column; gap:6px;
+    text-transform:none; }
+  .layer-toggles .layer-popover[hidden] { display:none; }
+  .layer-toggles .layer-popover .mini-slider,
+  .layer-toggles .layer-popover .point-size-slider { width:100%; }
+  /* Fit hover tooltip — placed inside the scene container by
+     setupFitHoverTooltip; transform set inline. */
+  .fit-hover-tooltip { position:absolute; top:0; left:0;
+    pointer-events:none; z-index:30;
+    padding:2px 6px;
+    background:rgba(20,16,12,0.78); color:#fff;
+    font-family:var(--mono); font-size:11px;
+    letter-spacing:0.04em; border-radius:3px;
+    font-variant-numeric:tabular-nums;
+    white-space:nowrap; }
   .layer-toggles input[type="range"] { -webkit-appearance:none; appearance:none;
     width:96px; height:2px; background:var(--border-base); border-radius:2px;
     margin:0; accent-color:var(--ink); cursor:pointer; }

@@ -10,7 +10,12 @@ modules until the runtime API stabilises.
 """
 from __future__ import annotations
 
-from scene_runtime import point_size_slider_html
+from scene_runtime import (
+    fit_extension_seconds_slider_html,
+    fit_line_width_slider_html,
+    layer_chip_with_popover_html,
+    point_size_slider_html,
+)
 
 
 def render_dashboard_html(
@@ -136,13 +141,12 @@ def render_dashboard_html(
         '      <span class="ff-name">Strike zone</span>'
         '    </label>'
         '  </span>'
-        '  <span class="ff-cell" title="Show raw triangulated points coloured by segment under the fit curves. Default off — fit curves alone are usually enough.">'
-        '    <label class="ff-checkbox">'
-        '      <input type="checkbox" id="dash-show-points-toggle">'
-        '      <span class="ff-name">Show points</span>'
-        '    </label>'
+        '  <span class="ff-cell">'
+        f'    {layer_chip_with_popover_html(group_key="traj", label="Show points", checkbox_id="dash-show-points-toggle", checked=False, popover_id="dash-traj-popover", title="Show raw triangulated points coloured by segment under the fit curves. ▾ for point-size slider.", popover_inner_html=point_size_slider_html(slot_id="dash-point-size"))}'
         '  </span>'
-        f'  <span class="ff-cell">{point_size_slider_html(slot_id="dash-point-size")}</span>'
+        '  <span class="ff-cell">'
+        f'    {layer_chip_with_popover_html(group_key="fit", label="Fit", popover_id="dash-fit-popover", title="Fit curve display settings — line width, dashed extension.", popover_inner_html=fit_line_width_slider_html(slot_id="dash-fit-line-width") + fit_extension_seconds_slider_html(slot_id="dash-fit-extension"))}'
+        '  </span>'
         '</div>'
         '<div class="latest-pitch-badge" id="latest-pitch-badge" hidden>'
         '  <span class="lpb-speed" id="lpb-speed">—</span>'

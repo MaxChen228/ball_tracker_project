@@ -823,18 +823,55 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-path.active {{ background: var(--ink); color: var(--surface); border-color: var(--ink); }}
 .fit-filter-bar .ff-path[disabled] {{ opacity: 0.35; cursor: not-allowed; }}
 
-/* --- Point-size slider — shared between dashboard fit-filter-bar +
-   viewer layer-toggles. Style hooks via data-point-size-slider attr so
-   layout containers can scope without renaming. */
-.point-size-slider {{ display: inline-flex; align-items: center; gap: 6px;
+/* --- Mini-slider — shared between dashboard fit-filter-bar + viewer
+   layer-toggles. PT (point-size), LW (fit linewidth), EXT (fit dashed
+   extension). Hooked via data-* attrs so containers scope without
+   renaming. `.point-size-slider` retained as alias for legacy
+   selectors. */
+.mini-slider, .point-size-slider {{ display: inline-flex; align-items: center; gap: 6px;
                       font-family: var(--mono); font-size: 10px;
                       letter-spacing: 0.08em; color: var(--ink); }}
-.point-size-slider .ps-name {{ text-transform: uppercase; font-weight: 500; }}
-.point-size-slider input[type="range"] {{ width: 80px; height: 14px;
+.mini-slider .ms-name, .point-size-slider .ps-name {{ text-transform: uppercase; font-weight: 500; }}
+.mini-slider input[type="range"], .point-size-slider input[type="range"] {{ width: 80px; height: 14px;
                                           accent-color: var(--ink); }}
-.point-size-slider .ps-readout {{ color: var(--sub); min-width: 44px;
+.mini-slider .ms-readout, .point-size-slider .ps-readout {{ color: var(--sub); min-width: 44px;
                                   text-align: right;
                                   font-variant-numeric: tabular-nums; }}
+
+/* --- Layer-chip popover (viewer + dashboard).
+   Chevron toggles a sibling absolute-positioned panel that holds
+   per-layer config sliders (PT for traj, LW/EXT for fit). */
+.layer-group.has-popover {{ position: relative; }}
+.layer-popover-toggle {{ font: inherit; font-size: 10px; line-height: 1;
+                         padding: 0 4px; margin-left: 2px;
+                         background: transparent; color: var(--sub);
+                         border: 1px solid transparent; border-radius: 2px;
+                         cursor: pointer; transition: color 0.12s, border-color 0.12s; }}
+.layer-popover-toggle:hover {{ color: var(--ink); }}
+.layer-popover-toggle.open {{ color: var(--ink); border-color: var(--border-base); }}
+.layer-popover {{ position: absolute; top: calc(100% + 4px); left: 0; z-index: 50;
+                  min-width: 160px; padding: 8px 10px;
+                  background: var(--surface); border: 1px solid var(--border-base);
+                  border-radius: var(--r);
+                  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+                  display: flex; flex-direction: column; gap: 6px; }}
+.layer-popover[hidden] {{ display: none; }}
+.layer-popover .mini-slider, .layer-popover .point-size-slider {{ width: 100%; }}
+.layer-name-only {{ font-size: 10px; letter-spacing: 0.1em; color: var(--ink);
+                    text-transform: uppercase; font-weight: 500;
+                    display: inline-flex; align-items: center; cursor: default; }}
+
+/* --- Fit hover tooltip — overlay div placed inside the scene container.
+   `transform: translate(...)` is set inline by setupFitHoverTooltip so
+   we only need static appearance here. */
+.fit-hover-tooltip {{ position: absolute; top: 0; left: 0;
+                      pointer-events: none; z-index: 30;
+                      padding: 2px 6px;
+                      background: rgba(20, 16, 12, 0.78); color: #fff;
+                      font-family: var(--mono); font-size: 11px;
+                      letter-spacing: 0.04em; border-radius: 3px;
+                      font-variant-numeric: tabular-nums;
+                      white-space: nowrap; }}
 
 @media (max-width: 1100px) {{
   .nav {{ padding-left: 16px; padding-right: 16px; }}

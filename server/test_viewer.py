@@ -899,13 +899,24 @@ def test_viewer_ships_interactive_diagnostic_widgets():
     assert 'class="strip-legend"' in body
     assert 'id="hint-overlay"' in body
     assert 'id="hint-btn"' in body
-    # Trajectory point-size slider is now mounted on the layer-toggles
-    # row — same shared component the dashboard uses. Confirm both the
-    # container id and the slider+readout hooks are wired so the click
-    # handler in 70_handlers.js can find them.
+    # Trajectory point-size slider lives inside the Traj chip's popover
+    # (chevron-expandable panel); fit linewidth + dashed-extension
+    # sliders live inside the Fit chip's popover. Confirm container ids
+    # + data-* hooks the layer modules grep for are present.
     assert 'id="viewer-point-size"' in body
     assert 'data-point-size-slider' in body
     assert 'data-point-size-readout' in body
+    assert 'id="viewer-fit-line-width"' in body
+    assert 'data-fit-line-width-slider' in body
+    assert 'data-fit-line-width-readout' in body
+    assert 'id="viewer-fit-extension"' in body
+    assert 'data-fit-extension-slider' in body
+    assert 'data-fit-extension-readout' in body
+    # Popover scaffolding: chip-popover toggle + sibling popover panel.
+    assert 'data-popover-target="viewer-traj-popover"' in body
+    assert 'data-popover-target="viewer-fit-popover"' in body
+    assert 'id="viewer-traj-popover"' in body
+    assert 'id="viewer-fit-popover"' in body
     # Three.js scene runtime owns the default camera (ISO preset baked
     # into PRESETS in scene_runtime.js); the inline JSON theme block
     # carries the strike-zone centroid so any consumer reading the
