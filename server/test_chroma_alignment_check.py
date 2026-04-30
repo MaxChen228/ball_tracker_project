@@ -134,6 +134,93 @@ def test_synthetic_hue_wrap_handles_red():
     assert -90 <= red[0]["d_h"] <= 90
 
 
+# --- alignment-scorecard regression bounds ----------------------------------
+#
+# These tests pin the empirical findings from the 2026-04-30 pixel-layer
+# closure (commit 781009f). They are NOT pure-math sanity checks like the
+# achromatic ones — they encode the operator-facing claim "BT.601 vs
+# BT.709 mismatch is operationally invisible for our presets". A
+# regression here means either:
+#   (a) someone introduced a preset narrower than the matrix offset can
+#       absorb (Δh p95 = 3 OpenCV units → minimum safe width 6), OR
+#   (b) the BT.709 matrix coefficients drifted (numpy impl bug or
+#       OpenCV bumped its 601 coefficients).
+# Either case requires re-running `chroma_alignment_check.py --session`
+# on a real session before the change merges.
+
+
+def test_synthetic_deep_blue_hue_invariant():
+    """The project ball is deep blue (h≈108-115 in OpenCV space). The
+    alignment scorecard claim "Δh = 0 for deep_blue" anchors the
+    "operationally invisible" finding — if this ever fires, the matrix
+    or the swatch definition has shifted."""
+    rows = mod.synthetic_table()
+    deep_blue = next((r for r in rows if r["name"] == "deep_blue"), None)
+    assert deep_blue is not None, "deep_blue swatch removed — anchors scorecard"
+    assert deep_blue["d_h"] == 0, (
+        f"deep_blue ΔH must remain 0 (matrix invariance for project "
+        f"ball color) — got {deep_blue['d_h']}. If the matrix coefficients "
+        f"changed intentionally, re-run chroma_alignment_check on a real "
+        f"blue-ball session and update CLAUDE.md scorecard accordingly."
+    )
+
+
+def test_synthetic_red_safety_within_measured_bound():
+    """Red_safety is the worst-case swatch in our synthetic table. Pin
+    the current measurement so a future BT.709 numpy-impl regression
+    doesn't silently widen the offset. Bounds are ~2× current measured
+    values (|Δh|=3, |Δv|=10 at commit 781009f)."""
+    rows = mod.synthetic_table()
+    red = next((r for r in rows if r["name"] == "red_safety"), None)
+    assert red is not None
+    assert abs(red["d_h"]) <= 5, (
+        f"red_safety ΔH={red['d_h']} exceeds bound 5 — "
+        f"BT.709 matrix likely drifted from canonical coefficients."
+    )
+    assert abs(red["d_v"]) <= 15, f"red_safety ΔV={red['d_v']} exceeds bound 15"
+
+
+_MIN_SAFE_HUE_WIDTH_OPENCV_UNITS = 6
+
+
+def test_all_builtin_presets_have_safe_hue_width():
+    """Empirical p95 |Δh| = 3 OpenCV units between BT.601 (iOS) and
+    BT.709 (server). A preset narrower than ~6 units risks losing the
+    margin that makes the matrix mismatch operationally invisible —
+    i.e. the same physical ball would gate-pass under one matrix and
+    fail under the other.
+
+    If you legitimately need a narrow preset (e.g. neon yellow that
+    only occupies 3 hue units), either (a) widen by relaxing the
+    floor below at known operator cost, or (b) fix the matrix in
+    BallDetector.mm to BT.709 first. Do NOT silently bypass — see
+    CLAUDE.md alignment-scorecard pixel-layer triggers."""
+    import presets as presets_mod  # type: ignore
+
+    seeds = presets_mod._BUILTIN_SEEDS
+    assert seeds, "no builtin presets — registry empty?"
+    failures: list[str] = []
+    for name, preset in seeds.items():
+        width = preset.hsv.h_max - preset.hsv.h_min
+        if width < _MIN_SAFE_HUE_WIDTH_OPENCV_UNITS:
+            failures.append(
+                f"  - {name}: h[{preset.hsv.h_min},{preset.hsv.h_max}] "
+                f"width={width} < floor={_MIN_SAFE_HUE_WIDTH_OPENCV_UNITS}"
+            )
+    if failures:
+        msg = "preset(s) below safe hue-width floor:\n" + "\n".join(failures)
+        msg += (
+            "\n\nThe BT.601 (iOS) vs BT.709 (server) matrix mismatch "
+            "shifts hue by up to 3 OpenCV units p95 at real ball pixels; "
+            "presets narrower than 6 units lose the margin that keeps the "
+            "mismatch invisible. Re-run `python chroma_alignment_check.py "
+            "--session <sid> --preset <name>` to see the actual gate "
+            "Jaccard, and decide whether to widen the preset or fix the "
+            "matrix first."
+        )
+        raise AssertionError(msg)
+
+
 # --- session statistics -----------------------------------------------------
 
 
