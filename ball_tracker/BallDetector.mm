@@ -293,12 +293,13 @@ static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
 ///
 /// Note on color matrix: cv::cvtColor with `COLOR_YUV2BGR_NV12` uses
 /// BT.601 coefficients; iPhone video capture tags streams as BT.709.
-/// Hue offset on saturated colours is ~3-4 in OpenCV's 0-179 hue
-/// units (~6-8° in 0-360° space) — fine for the blue-ball preset
-/// (h∈[100,130] gives ±15 units margin) but tighter for the `tennis`
-/// preset (h∈[25,55], ±15 units total). Re-validate the tennis preset
-/// before relying on it post-NV12. Switch to libyuv's `H420ToARGB`
-/// for precise BT.709 conversion if that ever matters.
+/// Quantified 2026-04-30 via `server/chroma_alignment_check.py`:
+/// real ball-ROI ΔH ≈ +2 OpenCV units (~4°) p95 = 3, mask Jaccard
+/// vs server-side BT.709 path = 0.974 mean / 0.994 p50 on tennis
+/// preset. Operationally invisible — both presets in use (`tennis`
+/// h∈[25,55], `blue_ball` h∈[105,112]) have enough margin. Switch to
+/// libyuv's `H420ToARGB` only if you introduce a preset narrower than
+/// 6 OpenCV hue units; re-run the tool first.
 static bool mapPixelBufferToBGR(
     CVPixelBufferRef pixelBuffer,
     cv::Mat &out

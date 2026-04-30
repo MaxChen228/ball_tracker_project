@@ -229,20 +229,52 @@ User goal：iOS live = production，server detection = oracle / debug。
 - candidate selector 共用（iOS 送 candidates，server `_resolve_candidates`
   統一排序）
 
-### ❌ Pixel — NOT closed
+### ✅ Pixel — closed (operationally invisible)
 
-- iOS NV12→BGR via `COLOR_YUV2BGR_NV12` hardcode **BT.601**；server
-  H.264 解碼 stream tag 通常 **BT.709** → 估 ~3-4 OpenCV hue units
-  偏移（~6-8°）
-- blue_ball preset h=[105,112] 寬度只 7 units，偏移 = 50% 範圍位移（潛在
-  污染）
-- 加 H.264 DCT quantization 損失
-- **量化工具**：`server/dry_run_live_vs_server.py` 已 ship（PR #93），但
-  只給 centroid Δpx 下游觀測
-- **真要量 chroma 偏移**還要寫第二支：iOS dump NV12 raw + server 同 ts MOV
-  BGR pixel-level channel-wise diff
-- **修法決策**：等量化結果再決定 (a) iOS 換 BT.709 矩陣 vs (b) server
-  libswscale 強制 BT.601 對齊 iOS
+iOS NV12→BGR via `COLOR_YUV2BGR_NV12` hardcode **BT.601**；server H.264
+解碼 stream tag 為 **BT.709**（`colorspace=1`/`color_range=1`，每 MOV
+驗）。2026-04-30 用 `server/chroma_alignment_check.py` 量化收尾：
+
+**Synthetic（純矩陣數學）**：
+
+- deep_blue 投影：Δh=0、Δs=0、Δv=-8 — **藍球 hue 完全不受矩陣選擇影響**，
+  只 V 略低
+- tennis_yellow_green：Δh=+1、Δs=+5、Δv=+11
+- red_safety（飽和紅）：Δh=-3、Δs=+3、Δv=-10
+- 結論：實際使用色 hue 偏移 ≤ 3 OpenCV units（不是當初估的 ~3-4）
+
+**Empirical（真 session 球 ROI）s_55731532（網球）100 frames，
+21×21 ROI**：
+
+- Δh: mean +2.03、p50 +2、p95 |Δ|=3、max 11
+- Δs: mean -4.98、p50 -5
+- Δv: mean +5、p50 +5
+- **Tennis preset gate-mask agreement: per-frame Jaccard mean=0.974
+  p50=0.994 p95=1.000**
+- 切到 BT.709 → 1.9% 現 in-gate 像素掉出、0.2% out-of-gate 像素加入
+  → **detection 行為實質不變**
+
+**結論**：6-8° 偏移估算過於保守。真實 ~4° (2 OpenCV units)，且
+blue_ball/tennis preset 都有足夠 margin 吸收。**不修也沒事**，留著
+BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
+
+**何時回頭看這條**：
+
+- 引入新色 preset，preset 寬度 < 6 OpenCV units 時要重跑 chroma_alignment_check
+  （e.g. 螢光黃單一 hue 範圍 25-30 太窄）
+- iOS 換新 chip 或 OS major upgrade，capture pipeline NV12 細節可能變
+- libswscale 升級可能讓 server-side 變 BT.601 → 立刻 100% 重疊但要驗
+
+### How to apply（pixel layer）
+
+- 只動 HSV preset 不動 capture stack：跑
+  `uv run python server/chroma_alignment_check.py --synthetic` 看新色
+  swatch Δh/Δs/Δv，預期 ≤ 3 OpenCV units
+- 真機驗證：`uv run python server/chroma_alignment_check.py --session <sid>
+  --preset <name>` 看 Jaccard，目標 mean ≥ 0.95
+- 跨裝置 / 鏡頭切換時 hue 偏移突增：第一步重跑這支 tool，第二步看
+  MOV stream tag (`av.open(...).streams.video[0].codec_context.colorspace`)
+  確認沒有第三種 colorspace 偷偷出現
 
 ### ✅ Payload / wire — closed
 
@@ -272,7 +304,6 @@ User goal：iOS live = production，server detection = oracle / debug。
 
 詳見 PR #93 description「Outstanding NITs」段；主要漏掉的：
 
-- pixel 層量化工具升級（pixel-level chroma diff）
 - 三條 silent-fallback regression test 補上
 - `routes/pitch.py` 兩處 `state._processing` / `state._time_fn` 私屬性戳
 - iOS LiveFrameDispatcherTests fixture aspect/fill 補
