@@ -313,6 +313,144 @@ def test_build_scene_two_cameras_attaches_triangulated_points():
     )
 
 
+def test_build_scene_stamps_seg_idx_on_triangulated_when_session_result_has_segments():
+    """`scene.triangulated[i]['seg_idx']` is the canonical wire field viewer
+    + dashboard read for per-point colour bucketing. Regression guard: the
+    stamping must use SegmentRecord.original_indices on the *unfiltered*
+    list (so render-dist-dropped points don't shift indices) and survive
+    the render-dist filter on the surviving list (positions 0..N-1 in the
+    output dict array correspond to seg_idx_for[k] where k is the *pre-
+    filter* index)."""
+    from schemas import SegmentRecord, SessionResult
+
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    P_path = np.array([[0.1, 0.3, 1.0], [0.2, 0.5, 1.2], [0.3, 0.7, 1.4]])
+    pa = _pitch("A", 11, K, R_a, t_a, H_a, P_path)
+    pb = _pitch("B", 11, K, R_b, t_b, H_b, P_path)
+    tri = [
+        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6)
+        for i, P in enumerate(P_path)
+    ]
+    # Two segments: [0, 1] in seg 0, [2] in seg 1.
+    segs = [
+        SegmentRecord(
+            indices=[0, 1], original_indices=[0, 1],
+            p0=[0.1, 0.3, 1.0], v0=[0.0, 0.0, 0.0],
+            t_anchor=0.0, t_start=0.0, t_end=1 / 240.0,
+            rmse_m=0.0, speed_kph=0.0,
+        ),
+        SegmentRecord(
+            indices=[0], original_indices=[2],
+            p0=[0.3, 0.7, 1.4], v0=[0.0, 0.0, 0.0],
+            t_anchor=2 / 240.0, t_start=2 / 240.0, t_end=2 / 240.0,
+            rmse_m=0.0, speed_kph=0.0,
+        ),
+    ]
+    result = SessionResult(
+        session_id=sid(11),
+        camera_a_received=True,
+        camera_b_received=True,
+        points=tri,
+        triangulated=tri,
+        segments=segs,
+    )
+    scene = build_scene(sid(11), {"A": pa, "B": pb}, triangulated=tri, session_result=result)
+
+    assert len(scene.triangulated) == 3
+    assert scene.triangulated[0]["seg_idx"] == 0
+    assert scene.triangulated[1]["seg_idx"] == 0
+    assert scene.triangulated[2]["seg_idx"] == 1
+
+
+def test_build_scene_stamps_seg_idx_minus_one_for_out_of_segment_points():
+    """Points the segmenter rejected (no SegmentRecord references them)
+    must ship `seg_idx == -1` so the viewer renders them with the outlier
+    colour, not as silently classified into a stale segment."""
+    from schemas import SegmentRecord, SessionResult
+
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    P_path = np.array([[0.1, 0.3, 1.0], [0.2, 0.5, 1.2]])
+    pa = _pitch("A", 12, K, R_a, t_a, H_a, P_path)
+    pb = _pitch("B", 12, K, R_b, t_b, H_b, P_path)
+    tri = [
+        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6)
+        for i, P in enumerate(P_path)
+    ]
+    # Segment claims only index 0 — point 1 is an outlier.
+    segs = [SegmentRecord(
+        indices=[0], original_indices=[0],
+        p0=[0.1, 0.3, 1.0], v0=[0.0, 0.0, 0.0],
+        t_anchor=0.0, t_start=0.0, t_end=0.0,
+        rmse_m=0.0, speed_kph=0.0,
+    )]
+    result = SessionResult(
+        session_id=sid(12),
+        camera_a_received=True,
+        camera_b_received=True,
+        points=tri,
+        triangulated=tri,
+        segments=segs,
+    )
+    scene = build_scene(sid(12), {"A": pa, "B": pb}, triangulated=tri, session_result=result)
+
+    assert scene.triangulated[0]["seg_idx"] == 0
+    assert scene.triangulated[1]["seg_idx"] == -1
+
+
+def test_build_scene_seg_idx_survives_render_distance_filter():
+    """When `_pts_to_dicts` drops a point beyond _MAX_RENDER_DIST_M, the
+    surviving points keep their PRE-FILTER seg_idx — i.e. the i-th
+    surviving dict's seg_idx is correct even though i no longer matches
+    the index in the input list."""
+    from schemas import SegmentRecord, SessionResult
+
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    P_path = np.array([[0.1, 0.3, 1.0], [0.2, 0.5, 1.2]])
+    pa = _pitch("A", 13, K, R_a, t_a, H_a, P_path)
+    pb = _pitch("B", 13, K, R_b, t_b, H_b, P_path)
+    tri = [
+        main.TriangulatedPoint(t_rel_s=0.00, x_m=0.1, y_m=0.3, z_m=1.0, residual_m=1e-6),
+        main.TriangulatedPoint(t_rel_s=0.01, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6),  # >10m, dropped
+        main.TriangulatedPoint(t_rel_s=0.02, x_m=0.2, y_m=0.5, z_m=1.2, residual_m=1e-6),
+    ]
+    # Three segments, one per point (extreme case — index 1 is the dropped one).
+    segs = [
+        SegmentRecord(
+            indices=[0], original_indices=[0],
+            p0=[0.1, 0.3, 1.0], v0=[0.0, 0.0, 0.0],
+            t_anchor=0.0, t_start=0.0, t_end=0.0,
+            rmse_m=0.0, speed_kph=0.0,
+        ),
+        SegmentRecord(
+            indices=[0], original_indices=[1],
+            p0=[0.0, 0.0, 0.0], v0=[0.0, 0.0, 0.0],
+            t_anchor=0.01, t_start=0.01, t_end=0.01,
+            rmse_m=0.0, speed_kph=0.0,
+        ),
+        SegmentRecord(
+            indices=[0], original_indices=[2],
+            p0=[0.2, 0.5, 1.2], v0=[0.0, 0.0, 0.0],
+            t_anchor=0.02, t_start=0.02, t_end=0.02,
+            rmse_m=0.0, speed_kph=0.0,
+        ),
+    ]
+    result = SessionResult(
+        session_id=sid(13),
+        camera_a_received=True,
+        camera_b_received=True,
+        points=tri,
+        triangulated=tri,
+        segments=segs,
+    )
+    scene = build_scene(sid(13), {"A": pa, "B": pb}, triangulated=tri, session_result=result)
+
+    # Two surviving points (index 1 was dropped). Their seg_idx must be 0
+    # and 2 — NOT 0 and 1 (which is what enumerate-on-output would give).
+    assert len(scene.triangulated) == 2
+    assert scene.triangulated[0]["seg_idx"] == 0
+    assert scene.triangulated[1]["seg_idx"] == 2
+
+
 def test_scene_to_dict_is_json_serialisable():
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))

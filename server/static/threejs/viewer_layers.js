@@ -42,20 +42,6 @@ const G_Z = -9.81;
 // frame's worth.
 const PLAYBACK_RAY_TOL = 0.010;
 
-// Bucket points by which segment claimed them (segments[i].original_indices
-// indexes into the points list). Returns parallel array; out-of-segment
-// points get -1. Mirror of dashboard_layers.js::classifyPointsBySegment;
-// will be lifted to a shared module in phase 2.
-function classifyPointsBySegment(points, segments) {
-  const byPoint = new Array(points.length).fill(-1);
-  for (let i = 0; i < (segments || []).length; ++i) {
-    const oi = segments[i].original_indices || [];
-    for (const k of oi) {
-      if (k >= 0 && k < byPoint.length) byPoint[k] = i;
-    }
-  }
-  return byPoint;
-}
 
 const PATH_LIVE = "live";
 const PATH_SVR = "server_post";
@@ -398,23 +384,24 @@ class ViewerLayers {
     // shrinks with camera distance like a real sphere).
     const sizeM = this._pointSizeM();
     if (this._isVisible("traj", PATH_SVR)) {
-      const fullSvr = (this.TRAJ_BY_PATH.server_post && this.TRAJ_BY_PATH.server_post.length)
-        ? this.TRAJ_BY_PATH.server_post : (this.SCENE.triangulated || []);
-      // Classify the FULL list before filtering so per-point segment
-      // colour stays consistent with SegmentRecord.original_indices,
-      // which indexes into the unfiltered list. Filtering would shift
-      // indices and randomise colours.
-      const segs = Array.isArray(this.SEGMENTS) ? this.SEGMENTS : [];
-      const byPoint = classifyPointsBySegment(fullSvr, segs);
+      // Use scene.triangulated (sorted + render-dist-filtered + each
+      // point stamped with `seg_idx` by reconstruct.py) — server is the
+      // single source of truth for index→segment classification. We do
+      // NOT classify client-side from SegmentRecord.original_indices:
+      // those index into the pre-filter sorted points list which is
+      // not what TRAJ_BY_PATH.server_post (unsorted!) ships.
+      const svrAll = this.SCENE.triangulated || [];
       const buckets = new Map();  // segIdx | "out" -> [points]
-      for (let i = 0; i < fullSvr.length; ++i) {
-        const p = fullSvr[i];
+      let lastVisible = null;
+      for (let i = 0; i < svrAll.length; ++i) {
+        const p = svrAll[i];
         if (p.t_rel_s > cutoff) continue;
         if (!residualPasses(p)) continue;
-        const k = byPoint[i];
+        const k = (typeof p.seg_idx === "number") ? p.seg_idx : -1;
         const key = k === -1 ? "out" : String(k);
         if (!buckets.has(key)) buckets.set(key, []);
         buckets.get(key).push(p);
+        lastVisible = p;
       }
       if (buckets.size) {
         const group = new THREE.Group();
@@ -426,14 +413,10 @@ class ViewerLayers {
             opacity: isOut ? 0.55 : 1.0,
           }));
         }
-        if (playback) {
-          // Head sphere stays — it's the "current ball position at t"
-          // affordance, distinct from the per-frame point cloud below.
-          const visible = fullSvr.filter((p) => p.t_rel_s <= cutoff && residualPasses(p));
-          if (visible.length) {
-            const head = visible[visible.length - 1];
-            group.add(pointMarker([head.x, head.y, head.z], ACCENT_SVR, sizeM * 1.6));
-          }
+        if (playback && lastVisible) {
+          // Head sphere — "current ball position at t" affordance, sized
+          // a bit larger than the cloud so it reads as the active marker.
+          group.add(pointMarker([lastVisible.x, lastVisible.y, lastVisible.z], ACCENT_SVR, sizeM * 1.6));
         }
         this.scene.addLayer("viewer_traj_svr", group);
       }
