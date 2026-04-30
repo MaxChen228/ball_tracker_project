@@ -168,7 +168,6 @@ _CSS = f"""
 .hsv-form {{ display: flex; flex-direction: column; gap: var(--s-3); }}
 .hsv-presets {{ display: flex; gap: var(--s-2); flex-wrap: wrap; }}
 .hsv-grid {{ display: flex; flex-direction: column; gap: var(--s-2); }}
-.hsv-hint {{ font-size: 10px; color: var(--sub); padding: 2px 0 2px 28px; line-height: 1.4; }}
 .hsv-row {{ display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: var(--s-2); align-items: start; }}
 .hsv-label {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub); padding-top: 8px; }}
 .hsv-pair {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-2); }}
@@ -200,7 +199,6 @@ _CSS = f"""
 .identity-pure {{ color: var(--passed, var(--ink)); border-color: var(--passed, var(--ink)); }}
 .identity-modified {{ color: var(--ink); border-color: var(--ink);
     background: var(--surface); }}
-.identity-custom {{ color: var(--sub); border-color: var(--border-base); }}
 .identity-deleted {{ color: var(--failed); border-color: var(--failed); background: var(--failed-bg); }}
 .hsv-library-actions {{ display: flex; gap: var(--s-2); margin-top: var(--s-2); padding-top: var(--s-2);
     border-top: 1px solid var(--border-l); }}
@@ -595,12 +593,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 
 /* --- Intrinsics (ChArUco) card --- */
 .intrinsics-roles {{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:var(--s-2); }}
-.intrinsics-roles-empty {{ color:var(--sub); font-family:var(--mono); font-size:10px;
-                           letter-spacing:0.08em; margin-bottom:var(--s-2); }}
-.intrinsics-empty {{ color:var(--sub); font-family:var(--mono); font-size:10px;
-                     letter-spacing:0.04em; padding:var(--s-2) 0; }}
-.intrinsics-empty code {{ font-size:10px; background:var(--border-base-bg, transparent);
-                          padding:0 4px; }}
 .intrinsics-list {{ display:flex; flex-direction:column; gap:6px;
                     margin-bottom:var(--s-2); }}
 .intrinsics-row {{ border:1px solid var(--border-base); border-radius:var(--r);
@@ -628,9 +620,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                                   color:var(--ink); }}
 .intrinsics-upload-row input[type=file] {{ font-family:var(--mono); font-size:9px;
                                             color:var(--sub); }}
-.intrinsics-upload-hint {{ margin-top:6px; font-family:var(--mono); font-size:9px;
-                           color:var(--sub); letter-spacing:0.04em; }}
-.intrinsics-upload-hint code {{ font-size:9px; }}
 .intrinsics-upload-status {{ margin-top:6px; font-family:var(--mono); font-size:10px;
                               min-height:14px; }}
 .intrinsics-upload-status.ok {{ color:var(--passed); }}

@@ -130,50 +130,48 @@ def _render_hsv_body(
     fill_min = float(sg.get("fill_min", 0.55))
 
     # Identity header ------------------------------------------------
-    # Four states:
-    #   custom       — preset is None
-    #   pure         — preset matches a known preset, no modifications
-    #   modified     — preset matches a known preset, but values differ
-    #   deleted      — preset name is set but the on-disk preset has
-    #                  been deleted (operator removed it via DELETE
-    #                  /presets/<name>). The next `set_detection_config`
-    #                  clears the dangling reference; until then the
-    #                  header signals the broken identity instead of
-    #                  silently dropping it.
-    if preset_name is None:
-        identity_label = "Custom"
-        identity_class = "identity-custom"
-    elif preset_name not in presets_by_name:
-        identity_label = f"{preset_name} (preset deleted)"
-        identity_class = "identity-deleted"
-    elif modified_fields:
-        identity_label = f"{presets_by_name[preset_name].label} · modified ({len(modified_fields)})"
-        identity_class = "identity-modified"
-    else:
-        identity_label = f"{presets_by_name[preset_name].label}"
-        identity_class = "identity-pure"
+    # Three meaningful states surface a tag; the fourth (custom — no
+    # preset bound) renders nothing because the un-highlighted preset
+    # buttons already convey "not on any preset" and a static "Custom"
+    # pill is just clutter.
+    #   pure     — preset matches a known preset, no modifications
+    #              (preset button shows `.active`)
+    #   modified — preset matches a known preset, values differ;
+    #              tag carries the modified count + Reset button
+    #   deleted  — preset name is set but the on-disk preset has been
+    #              deleted (operator removed it via DELETE /presets/
+    #              <name>). The next `set_detection_config` clears the
+    #              dangling reference; until then the header signals
+    #              the broken identity instead of silently dropping it.
+    identity_html = ""
+    if preset_name is not None:
+        if preset_name not in presets_by_name:
+            identity_label = f"{preset_name} (preset deleted)"
+            identity_class = "identity-deleted"
+        elif modified_fields:
+            identity_label = f"{presets_by_name[preset_name].label} · modified ({len(modified_fields)})"
+            identity_class = "identity-modified"
+        else:
+            identity_label = f"{presets_by_name[preset_name].label}"
+            identity_class = "identity-pure"
 
-    reset_btn = ""
-    if (
-        preset_name is not None
-        and preset_name in presets_by_name
-        and modified_fields
-    ):
-        # Only show reset when there's something to revert to. A
-        # dangling reference has no target → no reset affordance.
-        reset_btn = (
-            f'<button type="button" class="btn small" '
-            f'data-detection-reset-preset="{html.escape(preset_name)}" '
-            f'title="Snap back to {html.escape(presets_by_name[preset_name].label)} preset values">'
-            'Reset to preset</button>'
+        reset_btn = ""
+        if preset_name in presets_by_name and modified_fields:
+            # Only show reset when there's something to revert to. A
+            # dangling reference has no target → no reset affordance.
+            reset_btn = (
+                f'<button type="button" class="btn small" '
+                f'data-detection-reset-preset="{html.escape(preset_name)}" '
+                f'title="Snap back to {html.escape(presets_by_name[preset_name].label)} preset values">'
+                'Reset to preset</button>'
+            )
+
+        identity_html = (
+            '<div class="detection-identity">'
+            f'<span class="identity-tag {identity_class}">{html.escape(identity_label)}</span>'
+            f'{reset_btn}'
+            '</div>'
         )
-
-    identity_html = (
-        '<div class="detection-identity">'
-        f'<span class="identity-tag {identity_class}">{html.escape(identity_label)}</span>'
-        f'{reset_btn}'
-        '</div>'
-    )
 
     # Preset picker --------------------------------------------------
     def _preset_button(p: Preset) -> str:
@@ -196,7 +194,6 @@ def _render_hsv_body(
         '<div class="hsv-subtitle">HSV</div>'
         '<div class="hsv-grid">'
         f'{_render_hsv_axis_row("h", 179, h_lo, h_hi)}'
-        '<div class="hsv-hint">Hue uses OpenCV 0-179 scale (= standard 0-360&deg; &divide; 2). Blue &asymp; 105-125, yellow-green &asymp; 25-55.</div>'
         f'{_render_hsv_axis_row("s", 255, s_lo, s_hi)}'
         f'{_render_hsv_axis_row("v", 255, v_lo, v_hi)}'
         '</div>'
