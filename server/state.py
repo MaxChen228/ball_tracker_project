@@ -389,13 +389,20 @@ class State:
         return self._result_dir / f"session_{session_id}.json"
 
     def _load_from_disk(self) -> None:
+        # Corrupt / schema-incompatible pitch JSONs get logged at ERROR
+        # (was WARNING — masqueraded as benign) so the operator notices
+        # them in stdout. Server still boots so a single bad file doesn't
+        # block startup, but the failure count is reported below to make
+        # silent disappearance of sessions impossible to miss.
         backfill: list[tuple[Path, tuple[str, str]]] = []
+        load_failures: list[tuple[str, str]] = []
         for path in sorted(self._pitch_dir.glob("session_*.json")):
             try:
                 obj = json.loads(path.read_text())
                 pitch = PitchPayload.model_validate(obj)
             except Exception as e:
-                logger.warning("skip corrupt pitch file %s: %s", path.name, e)
+                logger.error("skip corrupt pitch file %s: %s", path.name, e)
+                load_failures.append((path.name, str(e)[:200]))
                 continue
             # Backfill `created_at` for legacy pitches written before the
             # field shipped: prefer the file's mtime (real upload moment) so
@@ -428,6 +435,12 @@ class State:
                 len(self.pitches),
                 len(seen_sessions),
                 self._data_dir,
+            )
+        if load_failures:
+            logger.error(
+                "%d pitch file(s) failed schema validation and were skipped — "
+                "their sessions will not appear in the dashboard event list",
+                len(load_failures),
             )
 
     def _load_session_meta_from_disk(self) -> None:
