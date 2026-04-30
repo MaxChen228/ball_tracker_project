@@ -232,7 +232,7 @@ def test_detect_sync_report_rejects_invalid_role() -> None:
 
 def test_trace_emitted_at_30hz() -> None:
     """Trace should carry samples at ~30 Hz — the cadence the /sync
-    Plotly plot was designed for."""
+    debug plot was designed for."""
     audio = _synth_recording(
         sample_rate=SAMPLE_RATE,
         duration_s=2.0,

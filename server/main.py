@@ -12,7 +12,7 @@ Endpoints:
                                        Idempotent overwrite per camera_id.
   GET  /calibration/state           — dashboard polls this every 5 s; returns
                                        the current per-camera snapshots +
-                                       a ready-to-`Plotly.react` figure spec.
+                                       a Three.js-ready scene spec.
   GET  /status                      — health + online devices + session +
                                        per-camera commands
   POST /pitch                       — ingest one session upload (multipart:
@@ -40,8 +40,8 @@ Endpoints:
   GET  /results/{session_id}        — specific session's SessionResult
   GET  /reconstruction/{session_id} — 3D scene (cameras + rays + optional
                                        triangulated trajectory) as JSON
-  GET  /viewer/{session_id}         — same scene as a self-contained Plotly
-                                       HTML page
+  GET  /viewer/{session_id}         — same scene as a self-contained
+                                       Three.js HTML page
   POST /reset                       — clear all cached state
 
 Pairing key: every PitchPayload carries `session_id` (server-minted via

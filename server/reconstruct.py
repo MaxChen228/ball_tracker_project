@@ -18,9 +18,9 @@ Two-phone scope: the CycleResult's triangulated points are attached as
 a 3D polyline — same `Scene` shape so the viewer renders either mode
 without branching.
 
-The output is a plain-dict `Scene` so the JSON endpoint and the Plotly
-renderer can both consume it without sharing imports with FastAPI /
-Plotly.
+The output is a plain-dict `Scene` so the JSON endpoint and the
+Three.js client renderer can both consume it without leaking
+FastAPI/SciPy types into the wire shape.
 """
 from __future__ import annotations
 
@@ -44,8 +44,8 @@ if TYPE_CHECKING:
 # Maximum render distance from the camera (for rays / ground trace points)
 # or from the world origin (for triangulated points). Anything beyond this
 # is dropped from the scene entirely. Near-horizontal rays otherwise hit
-# the plate plane tens of metres out, which blows up the Plotly auto-range
-# axis and makes the near-field trajectory unreadable.
+# the plate plane tens of metres out, which blows up the auto-fit camera
+# bounds and makes the near-field trajectory unreadable.
 _MAX_RENDER_DIST_M = 10.0
 
 

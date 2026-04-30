@@ -12,7 +12,7 @@ from render_shared import _SHARED_LAYOUT_NAV_CSS, _TOKENS_CSS
 # Four extra status-* rules render the dashboard's editorial nav strip
 # (status-main / status-badge / status-headline / status-context); the
 # .layout override pins the dashboard to the viewport so the canvas
-# can host a fixed-height Plotly scene without document scroll. Both
+# can host a fixed-height Three.js scene without document scroll. Both
 # arrive AFTER _SHARED_LAYOUT_NAV_CSS in the CSS cascade so they win.
 _DASHBOARD_NAV_OVERRIDES_CSS = """
 .nav .status-main { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
@@ -651,9 +651,10 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .scene-views .view-preset:hover {{ color: var(--ink); }}
 .scene-views .view-preset.active {{ background: var(--ink); color: var(--surface); }}
 
-/* --- Canvas mode toggle — top-left so it can't collide with Plotly's
-   modebar (camera/home/reset axes buttons), which always sits top-right
-   and can't be moved without reconstructing Plotly's config. */
+/* --- Canvas mode toggle / degraded banner — pinned positions follow
+   the same top-corner conventions the Plotly era set up; the Three.js
+   scene runtime has no modebar but we keep the fit-filter / view-preset
+   slots where operators expect them. */
 .degraded-banner {{ position: absolute; top: var(--s-3); left: 50%; transform: translateX(-50%);
                     z-index: 8; display: flex; align-items: center; gap: var(--s-2);
                     padding: var(--s-2) var(--s-4); background: var(--failed-bg);
@@ -679,7 +680,7 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                                  letter-spacing: 0.06em; padding-left: 6px;
                                  border-left: 1px solid var(--border-base); margin-left: 4px; }}
 
-/* --- Fit filter bar (bottom-right; top-right is Plotly modebar) --- */
+/* --- Fit filter bar (bottom-right of canvas) --- */
 .fit-filter-bar {{ position: absolute; right: var(--s-4); bottom: var(--s-4); z-index: 6;
                    display: inline-flex; gap: var(--s-2); font-family: var(--mono); font-size: 10px;
                    letter-spacing: 0.08em; background: var(--surface);
