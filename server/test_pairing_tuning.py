@@ -150,9 +150,12 @@ def test_triangulate_cycle_fan_out_emits_multi_points():
         assert 0 <= p.source_b_cand_idx < 2
 
 
-def test_triangulate_cycle_cost_threshold_filters():
-    """cost_threshold=0.2 → only the (0,0) pair (both cost=0.10) survives;
-    other pairs (cost 0.30) are dropped."""
+def test_triangulate_cycle_emit_ignores_tuning_cost_threshold():
+    """Pairing emit is decoupled from PairingTuning.cost_threshold.
+    A tight tuning.cost_threshold no longer drops candidate pairs at
+    emit time — viewer slider + segmenter use the stamped value
+    downstream. All candidate pairs under the absolute emit ceiling
+    flow through regardless of tuning."""
     import test_triangulation_math as ttm
     from schemas import BlobCandidate, FramePayload
     from pairing import triangulate_cycle
@@ -187,15 +190,25 @@ def test_triangulate_cycle_cost_threshold_filters():
         payload_a, payload_b,
         tuning=PairingTuning(cost_threshold=0.2, gap_threshold_m=10.0),
     )
-    # All surviving points must have BOTH cands at cost ≤ 0.2 → ca_idx=0
-    # and cb_idx=0 only.
+    # All four (cand_a × cand_b) pairs are well under the emit cost
+    # ceiling (5.0); tuning's 0.2 must not gate emit. Each emitted
+    # point carries the source cands' costs so a downstream filter
+    # (viewer / segmenter) can reproduce the old "tuning ≤ 0.2" behavior.
+    seen_pairs = {(p.source_a_cand_idx, p.source_b_cand_idx) for p in pts}
+    assert (0, 0) in seen_pairs
+    assert (1, 1) in seen_pairs
     for p in pts:
-        assert p.source_a_cand_idx == 0
-        assert p.source_b_cand_idx == 0
+        if p.source_a_cand_idx == 0:
+            assert p.cost_a == 0.10
+        if p.source_a_cand_idx == 1:
+            assert p.cost_a == 0.30
 
 
-def test_triangulate_cycle_gap_threshold_filters():
-    """Tight gap_threshold drops near-parallel-but-not-coincident pairs."""
+def test_triangulate_cycle_emit_ignores_tuning_gap_threshold():
+    """Pairing emit is decoupled from PairingTuning.gap_threshold_m.
+    A tight tuning gap no longer drops large-residual pairs at emit
+    time; only the absolute `_EMIT_GAP_CEILING_M` does. Loose vs tight
+    tuning produce identical emitted sets."""
     import test_triangulation_math as ttm
     from schemas import BlobCandidate, FramePayload
     from pairing import triangulate_cycle
@@ -206,9 +219,6 @@ def test_triangulate_cycle_gap_threshold_filters():
     )
     fa = payload_a.frames_server_post[0]
     fb = payload_b.frames_server_post[0]
-    # Two A candidates at very different pixels — they triangulate
-    # against B's single candidate at wildly different 3D points,
-    # most with large gap.
     cands_a = [
         BlobCandidate(px=fa.px, py=fa.py, area=100, area_score=1.0,
                       aspect=1.0, fill=0.68, cost=0.10),
@@ -227,14 +237,17 @@ def test_triangulate_cycle_gap_threshold_filters():
         )], ball_detected=True,
     )
 
-    # Loose gap → both A candidates pair through.
     loose = triangulate_cycle(
         payload_a, payload_b,
         tuning=PairingTuning(cost_threshold=1.0, gap_threshold_m=10.0),
     )
-    # Tight gap → at most one (the geometrically-consistent pair).
     tight = triangulate_cycle(
         payload_a, payload_b,
         tuning=PairingTuning(cost_threshold=1.0, gap_threshold_m=0.01),
     )
-    assert len(tight) <= len(loose)
+    # Identical emit — tuning.gap_threshold_m is no longer an emit gate.
+    assert len(tight) == len(loose)
+    # Each emitted point still carries its true geometric residual; a
+    # downstream viewer slider / segmenter filter at 0.01 m would drop
+    # the high-residual pair even though emit kept it.
+    assert any(p.residual_m > 0.01 for p in loose)
