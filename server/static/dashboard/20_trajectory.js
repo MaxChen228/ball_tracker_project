@@ -23,7 +23,6 @@
   const _PITCH_POINTS_COLOR = 'rgba(74, 62, 36, 0.55)';
 
   const trajCache = new Map();       // sid -> {points, segments}
-  let basePlot = null;               // last /calibration/state .plot payload
 
   function persistTrajSelection() {
     try { localStorage.setItem(TRAJ_STORAGE_KEY, JSON.stringify([...selectedTrajIds])); }

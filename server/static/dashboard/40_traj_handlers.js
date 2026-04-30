@@ -10,15 +10,18 @@
     });
     tickEvents();
   });
-  // Strike-zone toggle: server-rendered traces stay in basePlot; the
-  // checkbox flips a localStorage flag and forces a repaint, which
-  // filters the strike-zone traces in or out at composition time.
+  // Strike-zone toggle: Three.js scene runtime owns the wireframe + fill
+  // group. Checkbox flips the shared localStorage flag (so the viewer
+  // sees the same default on next mount) AND calls into the scene's
+  // setLayerVisible API for an instant in-place toggle.
   const _szToggle = document.getElementById('dash-strike-zone-toggle');
   if (_szToggle) {
     _szToggle.checked = strikeZoneVisible();
     _szToggle.addEventListener('change', () => {
       setStrikeZoneVisible(_szToggle.checked);
-      repaintCanvas();
+      if (window.BallTrackerScene) {
+        window.BallTrackerScene.setLayerVisible('strike_zone', _szToggle.checked);
+      }
     });
   }
   // Row click = "load this fit into dashboard 3D". Single-select toggle:
@@ -53,21 +56,19 @@
     }
   });
   // Show-points toggle — surfaces raw triangulated points coloured by
-  // segment under the fit curves. Default off; reading is instantaneous
-  // once toggled on (data is already cached on `trajCache`).
+  // segment under the fit curves. Default off. Scene rebuild is local
+  // to the fit_points layer; no full repaint needed.
   const _showPointsToggle = document.getElementById('dash-show-points-toggle');
   if (_showPointsToggle) {
     _showPointsToggle.checked = showPointsEnabled();
     _showPointsToggle.addEventListener('change', () => {
       setShowPoints(_showPointsToggle.checked);
-      repaintCanvas();
+      if (window.BallTrackerDashboardScene) {
+        window.BallTrackerDashboardScene.setShowPoints(_showPointsToggle.checked);
+      }
     });
   }
-  // 5-view camera presets (ISO/CATCH/SIDE/TOP/PITCHER) shared with the
-  // viewer via window.BallTrackerViewPresets. The runtime hooks
-  // plotly_relayouting itself, retrying until Plotly's event API is
-  // attached — safe to call before the first Plotly.react.
-  if (window.BallTrackerViewPresets && sceneRoot) {
-    const _viewToolbar = document.querySelector('.scene-views');
-    if (_viewToolbar) window.BallTrackerViewPresets.bind(sceneRoot, _viewToolbar);
-  }
+  // 5-view camera presets (ISO/CATCH/SIDE/TOP/PITCHER) — Three.js scene
+  // owns the toolbar binding via `BallTrackerScene.bindViewToolbar()`,
+  // which the dashboard_layers.js boot script invokes on mount. No
+  // wiring needed here.

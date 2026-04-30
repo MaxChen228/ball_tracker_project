@@ -48,7 +48,8 @@
         };
         livePointStore.set(data.sid, []);
         liveRayStore.set(data.sid, new Map());
-        liveTraceIdx = -1;
+        // (liveTraceIdx tracking retired with the Plotly extendTraces fast
+        // path; Three.js BufferGeometry rebuild on append is fast enough.)
         // Ghost trail is deliberately preserved across arm — it'll stay
         // rendered until a real point for the new session lands, at which
         // point liveTraces() stops emitting it (the new session trace
@@ -277,7 +278,8 @@
           setTimeout(() => {
             if (currentLiveSession && currentLiveSession.session_id === data.sid && !currentLiveSession.armed) {
               currentLiveSession = null;
-              liveTraceIdx = -1;
+              // (liveTraceIdx tracking retired with the Plotly extendTraces fast
+        // path; Three.js BufferGeometry rebuild on append is fast enough.)
               repaintCanvas();
             }
           }, 3000);

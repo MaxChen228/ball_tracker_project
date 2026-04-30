@@ -1,4 +1,13 @@
-"""HTML shell assembly for the dashboard document."""
+"""HTML shell assembly for the dashboard document.
+
+Phase 2 of the 3D migration: the Plotly CDN is gone and the 3D scene
+boots via Three.js (`scene_runtime_html` in the head, plus a
+module-type boot script that imports `dashboard_layers.js` after the
+scene is mounted). The legacy classic-script IIFE (overlays / cam_view
+/ dashboard_js) still loads as inline `<script>` blocks — those don't
+participate in the importmap chain and don't need to migrate to
+modules until the runtime API stabilises.
+"""
 from __future__ import annotations
 
 
@@ -12,10 +21,10 @@ def render_dashboard_html(
     intrinsics_html: str,
     events_html: str,
     scene_div: str,
+    scene_runtime_html: str,
     view_presets_toolbar_html: str,
     overlays_js: str,
     cam_view_js: str,
-    view_presets_js: str,
     dashboard_js: str,
     trash_count: int,
 ) -> str:
@@ -28,7 +37,30 @@ def render_dashboard_html(
         "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">"
         "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
         "<link href=\"https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@300;500;700&display=swap\" rel=\"stylesheet\">"
-        "<script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\" charset=\"utf-8\"></script>"
+        # Three.js scene runtime — importmap + theme JSON + boot module.
+        # Loaded as a module so `import` statements resolve via the
+        # importmap. Modules defer until after classic scripts finish,
+        # so the inline IIFE bundle below runs first; the IIFE accesses
+        # `window.BallTrackerScene` / `BallTrackerDashboardScene` lazily
+        # at use-time, treating absence as "not ready, retry next tick".
+        f"{scene_runtime_html}"
+        # Dashboard-specific layer module — wires camera markers, fit
+        # curves, points, live trail. Module is loaded AFTER the scene
+        # runtime mounts (importmap-resolved), exposes its API via
+        # `window.BallTrackerDashboardScene`.
+        '<script type="module">'
+        'import { setupDashboardLayers } from "/static/threejs/dashboard_layers.js";'
+        # Wait for the scene runtime to expose its mounted instance,
+        # then bind the dashboard-specific layers. Polling beats
+        # listening for an event because both modules race for execution
+        # order and an event from the runtime would need to either be
+        # queued or replayed; a 50 ms poll is bounded + simple.
+        'function _hookup() {'
+        '  if (!window.BallTrackerScene) { setTimeout(_hookup, 50); return; }'
+        '  setupDashboardLayers(window.BallTrackerScene);'
+        '}'
+        '_hookup();'
+        '</script>'
         f"<style>{css}</style>"
         "</head><body data-page=\"dashboard\">"
         f"{nav_html}"
@@ -91,7 +123,6 @@ def render_dashboard_html(
         "</div>"
         f"<script>{overlays_js}</script>"
         f"<script>{cam_view_js}</script>"
-        f"<script>{view_presets_js}</script>"
         f"<script>{dashboard_js}</script>"
         "</body></html>"
     )
