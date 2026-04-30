@@ -384,6 +384,26 @@
     border-right:1px solid var(--border-l); font-variant-numeric:tabular-nums; }
   .speed-group button:last-child { border-right:none; }
   .speed-group button.active { background:var(--ink); color:var(--surface); font-weight:500; }
+  /* Server-detection pending overlay — covers the full 3D scene with a
+     translucent panel + live N/M counters per cam while server_post is
+     decoding the MOV. Hidden by default; the SSE handler in viewer_page
+     toggles `hidden` and updates `.spo-counts`. Sits inside .scene-col
+     (which is `position:relative`) so it tracks the resizable column. */
+  .scene-col .scene-pending-overlay { position:absolute; inset:0; z-index:10;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:var(--s-3); background:rgba(248, 245, 238, 0.78);
+    backdrop-filter:blur(2px); -webkit-backdrop-filter:blur(2px);
+    pointer-events:none; }
+  .scene-col .scene-pending-overlay[hidden] { display:none; }
+  .scene-col .scene-pending-overlay .spo-title {
+    font-family:var(--mono); font-size:14px; letter-spacing:0.18em;
+    text-transform:uppercase; color:var(--ink); font-weight:600; }
+  .scene-col .scene-pending-overlay .spo-counts {
+    font-family:var(--mono); font-size:24px; color:var(--ink); font-weight:500;
+    letter-spacing:0.06em; }
+  .scene-col .scene-pending-overlay .spo-hint {
+    font-family:var(--mono); font-size:10px; letter-spacing:0.1em;
+    color:var(--sub); text-transform:uppercase; }
   .scene-col .scene-toolbar { position:absolute; top:var(--s-4); right:var(--s-3); z-index:5;
     display:inline-flex; align-items:stretch; flex-wrap:nowrap; white-space:nowrap;
     border:1px solid var(--border-base);

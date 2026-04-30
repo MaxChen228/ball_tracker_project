@@ -37,7 +37,7 @@
   const PATH_MARKER_SYMBOL = { live: "circle", server_post: "circle" };
   const SCENE_THEME = DATA.scene_theme || {
     cam_axis_len_m: 0.25, cam_fwd_len_m: 0.5,
-    axis_color_right: "#C0392B", axis_color_up: "rgba(42, 37, 32, 0.4)",
+    axis_color_right: "#C0392B", axis_color_up: "#2A2520",
   };
   const VIDEO_META = DATA.videos || [];
   const HAS_TRIANGULATED = DATA.has_triangulated;

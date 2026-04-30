@@ -73,6 +73,12 @@ class ViewerPageContext:
     server_post_ran: bool
     can_run_server: bool
     server_post_ran_at: float | None
+    # Server-detection processing state at render time. None = idle;
+    # "processing" / "queued" / "canceled" mirror state.processing's
+    # session_summary. Drives the pre-seeded scene-pending-overlay so
+    # an operator opening the viewer mid-decode sees the overlay
+    # immediately instead of waiting for the next SSE progress tick.
+    processing_state: str | None
 
 
 def build_viewer_page_context(
@@ -143,6 +149,15 @@ def build_viewer_page_context(
     # of A/B). None when nothing has run yet for this session.
     server_post_ran_at = health.get("server_post_ran_at")
 
+    # Pre-seed processing_state so an operator opening the viewer
+    # mid-decode sees the overlay immediately (don't wait for the next
+    # SSE progress tick). state.processing.session_summary returns
+    # ("processing"|"queued"|"canceled", resumable) or (None, _).
+    from main import state as _global_state
+    processing_state, _resumable = _global_state.processing.session_summary(
+        scene.session_id,
+    )
+
     # SegmentRecord-only contract: callers (route + reprocess) pass
     # SegmentRecord instances. Tests construct them too. No dict
     # affordance — keeps wire shape canonical.
@@ -192,6 +207,34 @@ def build_viewer_page_context(
         server_post_ran=server_post_ran,
         can_run_server=can_run_server,
         server_post_ran_at=server_post_ran_at,
+        processing_state=processing_state,
+    )
+
+
+def _pending_overlay_html(processing_state: str | None) -> str:
+    """Server-detection pending overlay. Pre-seeded visible when the
+    operator opens the viewer mid-decode (state.processing.session_summary
+    returned 'queued' / 'processing'); the SSE handler in the inline
+    `<script>` block keeps it in sync afterwards."""
+    visible = processing_state in ("queued", "processing")
+    hidden_attr = "" if visible else " hidden"
+    title = (
+        "Queued — server detection"
+        if processing_state == "queued"
+        else "Decoding MOV…"
+    )
+    counts_seed = (
+        "waiting for first frame…"
+        if processing_state == "processing"
+        else ""
+    )
+    return (
+        f'<div class="scene-pending-overlay" id="scene-pending-overlay"'
+        f'{hidden_attr} role="status" aria-live="polite">'
+        f'<div class="spo-title">{title}</div>'
+        f'<div class="spo-counts" id="scene-pending-counts">{counts_seed}</div>'
+        f'<div class="spo-hint">Server detection running. Page will refresh on completion.</div>'
+        f'</div>'
     )
 
 
@@ -354,6 +397,7 @@ def render_viewer_html(
         <span class="lpb-meta" id="viewer-lpb-meta"></span>
       </div>
       <div id="scene"></div>
+      {_pending_overlay_html(ctx.processing_state)}
       {view_presets_toolbar_html()}
       <div class="scene-toolbar" role="toolbar" aria-label="Scene controls">
         <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
@@ -370,24 +414,32 @@ def render_viewer_html(
              title="Strip colors: A detected (orange) · B detected (brown) · missed (grey) · no frame (pale) · chirp anchor (accent)"
              role="group" aria-label="Layer visibility + filters">
           <span class="layer-toggles" id="layer-toggles" aria-label="Layer visibility">
-            <span class="layer-group" data-layer="traj" data-single-select role="radiogroup" aria-label="Trajectory path">
-              <span class="layer-name">Traj</span>
-              <button type="button" class="layer-pill" data-layer="traj" data-path="live" role="radio" aria-checked="false">live</button>
-              <button type="button" class="layer-pill" data-layer="traj" data-path="server_post" role="radio" aria-checked="true">svr</button>
+            <span class="layer-group" data-path-group role="radiogroup" aria-label="Active path">
+              <span class="layer-name">Path</span>
+              <button type="button" class="layer-pill" data-path="live" role="radio" aria-checked="false">live</button>
+              <button type="button" class="layer-pill" data-path="server_post" role="radio" aria-checked="true">svr</button>
             </span>
-            <span class="layer-group" data-layer="rays" data-single-select role="radiogroup" aria-label="Rays path">
-              <span class="layer-name">Rays</span>
-              <button type="button" class="layer-pill" data-layer="rays" data-path="live" role="radio" aria-checked="false">live</button>
-              <button type="button" class="layer-pill" data-layer="rays" data-path="server_post" role="radio" aria-checked="true">svr</button>
-            </span>
-            <span class="layer-group" data-layer="fit">
+            <span class="layer-divider" aria-hidden="true"></span>
+            <span class="layer-group" data-layer-group="rays">
               <label class="layer-checkbox">
-                <input type="checkbox" id="fit-layer-toggle" checked>
+                <input type="checkbox" class="layer-checkbox" data-layer="rays" checked>
+                <span class="layer-name">Rays</span>
+              </label>
+            </span>
+            <span class="layer-group" data-layer-group="traj">
+              <label class="layer-checkbox">
+                <input type="checkbox" class="layer-checkbox" data-layer="traj" checked>
+                <span class="layer-name">Traj</span>
+              </label>
+            </span>
+            <span class="layer-group" data-layer-group="fit">
+              <label class="layer-checkbox">
+                <input type="checkbox" class="layer-checkbox" data-layer="fit" checked>
                 <span class="layer-name">Fit</span>
               </label>
             </span>
             <span class="layer-divider" aria-hidden="true"></span>
-            <span class="layer-group" data-layer="strike-zone" title="Toggle the strike-zone wireframe in the 3D scene. Default on.">
+            <span class="layer-group" data-layer-group="strike-zone" title="Toggle the strike-zone wireframe in the 3D scene. Default on.">
               <label class="layer-checkbox">
                 <input type="checkbox" id="strike-zone-toggle" checked>
                 <span class="layer-name">Strike zone</span>
@@ -585,47 +637,58 @@ _hookup();
 </script>
 <script>
 (function() {{
-  if (!window.EventSource) return;
+  if (!window.EventSource) {{
+    throw new Error("viewer SSE init: EventSource missing");
+  }}
   const VIEWER_SID = {_json.dumps(ctx.session_id)};
-  const el = document.getElementById('srv-progress');
-  if (!el) return;
+  const navChip = document.getElementById('srv-progress');
+  const overlay = document.getElementById('scene-pending-overlay');
+  const counts = document.getElementById('scene-pending-counts');
+  if (!navChip || !overlay || !counts) {{
+    throw new Error("viewer SSE init: progress DOM missing");
+  }}
   const slots = {{}};  // cam → {{ done, total }}
   function render() {{
     const cams = Object.keys(slots).sort();
-    if (cams.length === 0) {{ el.hidden = true; el.textContent = ''; return; }}
-    el.hidden = false;
-    el.textContent = cams.map(function(c) {{
+    if (cams.length === 0) {{
+      navChip.hidden = true; navChip.textContent = '';
+      overlay.hidden = true; counts.textContent = '';
+      return;
+    }}
+    const summary = cams.map(function(c) {{
       const s = slots[c];
       const tot = (s.total != null) ? s.total : '?';
-      return 'svr ' + c + ' ' + s.done + '/' + tot;
-    }}).join(' · ');
+      return c + ' ' + s.done + '/' + tot;
+    }}).join('  ·  ');
+    navChip.hidden = false;
+    navChip.textContent = 'svr ' + summary;
+    overlay.hidden = false;
+    counts.textContent = summary;
   }}
   const es = new EventSource('/stream');
   es.addEventListener('server_post_progress', function(evt) {{
-    try {{
-      const d = JSON.parse(evt.data);
-      if (d.sid !== VIEWER_SID) return;
-      slots[d.cam] = {{
-        done: Number(d.frames_done || 0),
-        total: d.frames_total != null ? Number(d.frames_total) : null,
-      }};
-      render();
-    }} catch (_) {{}}
+    const d = JSON.parse(evt.data);
+    if (d.sid !== VIEWER_SID) return;
+    slots[d.cam] = {{
+      done: Number(d.frames_done),
+      total: d.frames_total != null ? Number(d.frames_total) : null,
+    }};
+    render();
   }});
   es.addEventListener('server_post_done', function(evt) {{
-    try {{
-      const d = JSON.parse(evt.data);
-      if (d.sid !== VIEWER_SID) return;
-      delete slots[d.cam];
-      render();
-      // Authoritative refresh once the last cam wraps so the page picks
-      // up the new triangulated points + path_status without a manual
-      // reload. autorefresh.js already polls /events and reload()s on
-      // detected change; we just nudge it forward.
-      if (Object.keys(slots).length === 0) {{
-        setTimeout(function() {{ location.reload(); }}, 800);
-      }}
-    }} catch (_) {{}}
+    const d = JSON.parse(evt.data);
+    if (d.sid !== VIEWER_SID) return;
+    delete slots[d.cam];
+    render();
+    // Authoritative refresh once the last cam wraps so the page picks
+    // up the new triangulated points + path_status without a manual
+    // reload. The fit SSE handler in 85_sse_fit.js patches segments
+    // in place, but server_post finishing also rewrites frames_server_post
+    // which the IIFE seeded at first paint — easier to reload than to
+    // surgically rebuild every per-cam frame index.
+    if (Object.keys(slots).length === 0) {{
+      setTimeout(function() {{ location.reload(); }}, 800);
+    }}
   }});
 }})();
 </script>
