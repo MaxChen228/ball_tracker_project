@@ -124,6 +124,21 @@ class DashboardLayers {
     this._lastLiveSession = null;         // { session_id, ... }
     this._lastLivePoints = [];            // current live session's points
     this._lastLiveRays = new Map();       // cam -> [ray, ...]
+    // Persistent live-trail BufferGeometry — pre-allocated for the
+    // worst-case live session length. iOS streams up to ~240 fps for
+    // a few seconds; 2048 points covers >8 s of detection at 240 Hz
+    // with headroom. WebGL re-uploads only the dirty range via
+    // `setDrawRange` + `attributes.position.needsUpdate`, so we don't
+    // GC-thrash a Float32Array per frame at 240 Hz.
+    this._LIVE_CAP = 2048;
+    this._liveBuf = new Float32Array(this._LIVE_CAP * 3);
+    this._liveCount = 0;
+    this._liveLineGroup = null;  // lazily created on first applyLive
+    // Ghost preview of the *previous* live session — kept alive
+    // between arms so the operator can confirm framing matches before
+    // throwing again. A separate persistent group; cleared only on
+    // an explicit reset (next arm starts streaming fresh trail data).
+    this._ghostLineGroup = null;
   }
 
   // ---- camera markers (per-camera diamond + axis triad) ----
@@ -160,14 +175,23 @@ class DashboardLayers {
 
   // ---- fit (selected session) ----
   // `result` is a SessionResult-shaped object: { points: [{x_m,y_m,z_m,t_rel_s}, ...], segments: [SegmentRecord, ...] }.
-  // Pass `null` to clear.
+  // Pass `null` for either argument to clear (e.g. row deselect).
   applyFit(sid, result) {
+    if (!sid || !result) {
+      // Drop selection AND cached payload so a subsequent applyFit
+      // for the same sid with a fresh result won't fall through to
+      // the stale cache.
+      if (this._currentSid) this._lastResultBySid.delete(this._currentSid);
+      this._currentSid = null;
+      this._removeFitLayers();
+      return;
+    }
     if (sid !== this._currentSid) {
-      // Drop the previous session's layers before drawing the new one.
+      // Switching sessions — drop the previous layers before drawing.
       this._removeFitLayers();
     }
     this._currentSid = sid;
-    if (sid && result) this._lastResultBySid.set(sid, result);
+    this._lastResultBySid.set(sid, result);
     this._rebuildFitLayers();
   }
 
@@ -286,80 +310,155 @@ class DashboardLayers {
   }
 
   // ---- live in-progress session ----
+  // Bulk push: replaces the trail with `points`, replaces the per-cam
+  // rays. Used by tickEvents / SSE handlers that ship full snapshots.
   applyLive({ session, points, raysByCam }) {
+    const newSid = session && session.session_id;
+    const prevSid = this._lastLiveSession && this._lastLiveSession.session_id;
+    if (newSid && newSid !== prevSid) {
+      // New arm cycle — drop ghost and re-anchor live buffer.
+      this.clearGhost();
+      this._liveCount = 0;
+    }
     this._lastLiveSession = session || null;
-    this._lastLivePoints = Array.isArray(points) ? points.slice() : [];
     this._lastLiveRays = raysByCam || new Map();
-    this._rebuildLiveLayers();
+    this._lastLivePoints = Array.isArray(points) ? points.slice() : [];
+    // Repack persistent buffer from the snapshot (cap at _LIVE_CAP).
+    const cap = this._LIVE_CAP;
+    const n = Math.min(this._lastLivePoints.length, cap);
+    for (let i = 0; i < n; ++i) {
+      const p = this._lastLivePoints[i];
+      this._liveBuf[i * 3 + 0] = p.x;
+      this._liveBuf[i * 3 + 1] = p.y;
+      this._liveBuf[i * 3 + 2] = p.z;
+    }
+    this._liveCount = n;
+    this._refreshLiveTrail();
+    this._rebuildLiveRays();
   }
 
-  // Fast path: append a single new point to the live trail without
-  // rebuilding the whole BufferGeometry. Falls back to a full rebuild
-  // when the underlying geometry slot is stale (e.g. session flipped).
+  // Fast-path append: copy XYZ into the persistent buffer's next slot
+  // and bump draw range. No allocation, no GC churn — safe at 240 Hz.
   appendLivePoint(pt) {
     if (!this._lastLiveSession) return;
+    if (this._liveCount >= this._LIVE_CAP) return;  // capped; drop silently is intentional
+    const i = this._liveCount;
+    this._liveBuf[i * 3 + 0] = pt.x;
+    this._liveBuf[i * 3 + 1] = pt.y;
+    this._liveBuf[i * 3 + 2] = pt.z;
+    this._liveCount++;
     this._lastLivePoints.push(pt);
-    // Rebuild the live trail layer. The append is cheap (one geometry,
-    // one material) — no need for the buffer-extension trick that
-    // Plotly.extendTraces required.
-    this._rebuildLiveLayers();
+    this._refreshLiveTrail();
   }
 
-  _rebuildLiveLayers() {
-    this.scene.removeLayer("live_trail");
-    this.scene.removeLayer("live_rays");
-    if (!this._lastLiveSession) return;
-    if (this._lastLivePoints.length) {
-      const pts = this._lastLivePoints;
-      const buf = new Float32Array(pts.length * 3);
-      for (let i = 0; i < pts.length; ++i) {
-        buf[i * 3 + 0] = pts[i].x;
-        buf[i * 3 + 1] = pts[i].y;
-        buf[i * 3 + 2] = pts[i].z;
-      }
-      const trail = lineFromBuffer(buf, FIT_ACCENT);
+  // Lazy-construct + update the persistent live-trail line. No
+  // BufferGeometry rebuild on append — only `setDrawRange` +
+  // `needsUpdate` flag flip, which WebGL re-uploads only the dirty
+  // range.
+  _refreshLiveTrail() {
+    if (!this._lastLiveSession) {
+      this.scene.removeLayer("live_trail");
+      this._liveLineGroup = null;
+      return;
+    }
+    if (!this._liveLineGroup) {
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.BufferAttribute(this._liveBuf, 3));
+      const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(FIT_ACCENT) });
+      const line = new THREE.Line(geom, mat);
       const group = new THREE.Group();
       group.name = "live_trail";
-      group.add(trail);
+      group.add(line);
       this.scene.addLayer("live_trail", group);
+      this._liveLineGroup = group;
     }
-    if (this._lastLiveRays.size) {
-      const raysGroup = new THREE.Group();
-      raysGroup.name = "live_rays";
-      const colors = { A: 0x4A6B8C, B: 0xD35400 };
-      for (const [cam, rays] of this._lastLiveRays) {
-        if (!rays.length) continue;
-        // 2 vertices per ray + null-segment trick is Plotly-specific;
-        // in Three.js use LineSegments where every pair is one segment.
-        const buf = new Float32Array(rays.length * 6);
-        for (let i = 0; i < rays.length; ++i) {
-          const r = rays[i];
-          buf[i * 6 + 0] = r.origin[0];
-          buf[i * 6 + 1] = r.origin[1];
-          buf[i * 6 + 2] = r.origin[2];
-          buf[i * 6 + 3] = r.endpoint[0];
-          buf[i * 6 + 4] = r.endpoint[1];
-          buf[i * 6 + 5] = r.endpoint[2];
-        }
-        const geom = new THREE.BufferGeometry();
-        geom.setAttribute("position", new THREE.BufferAttribute(buf, 3));
-        const mat = new THREE.LineBasicMaterial({
-          color: new THREE.Color(colors[cam] || 0x2A2520),
-          transparent: true,
-          opacity: 0.34,
-        });
-        raysGroup.add(new THREE.LineSegments(geom, mat));
+    const line = this._liveLineGroup.children[0];
+    line.geometry.setDrawRange(0, this._liveCount);
+    line.geometry.attributes.position.needsUpdate = true;
+    // Bound box invalidation so OrbitControls' raycasting (we don't
+    // use it but Three.js may anyway) sees the updated extent.
+    line.geometry.computeBoundingSphere();
+  }
+
+  _rebuildLiveRays() {
+    this.scene.removeLayer("live_rays");
+    if (!this._lastLiveSession || !this._lastLiveRays.size) return;
+    const raysGroup = new THREE.Group();
+    raysGroup.name = "live_rays";
+    const colors = { A: 0x4A6B8C, B: 0xD35400 };
+    for (const [cam, rays] of this._lastLiveRays) {
+      if (!rays.length) continue;
+      const buf = new Float32Array(rays.length * 6);
+      for (let i = 0; i < rays.length; ++i) {
+        const r = rays[i];
+        buf[i * 6 + 0] = r.origin[0];
+        buf[i * 6 + 1] = r.origin[1];
+        buf[i * 6 + 2] = r.origin[2];
+        buf[i * 6 + 3] = r.endpoint[0];
+        buf[i * 6 + 4] = r.endpoint[1];
+        buf[i * 6 + 5] = r.endpoint[2];
       }
-      this.scene.addLayer("live_rays", raysGroup);
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.BufferAttribute(buf, 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: new THREE.Color(colors[cam] || 0x2A2520),
+        transparent: true,
+        opacity: 0.34,
+      });
+      raysGroup.add(new THREE.LineSegments(geom, mat));
     }
+    this.scene.addLayer("live_rays", raysGroup);
+  }
+
+  // Promote the current live trail to a "ghost" layer (between-arm
+  // preview) and clear the live state. The ghost stays visible until
+  // the next arm cycle starts streaming fresh data — clearGhost is
+  // called from applyLive on a session change.
+  promoteLiveToGhost() {
+    if (!this._liveCount || !this._lastLivePoints.length) {
+      this.clearLive();
+      return;
+    }
+    // Snapshot the buffer into a fresh sized Float32Array — the
+    // persistent _liveBuf gets reused for the next session.
+    const n = this._liveCount;
+    const ghostBuf = new Float32Array(n * 3);
+    ghostBuf.set(this._liveBuf.subarray(0, n * 3));
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.BufferAttribute(ghostBuf, 3));
+    const mat = new THREE.LineBasicMaterial({
+      color: new THREE.Color(FIT_ACCENT),
+      transparent: true,
+      opacity: 0.20,
+    });
+    const group = new THREE.Group();
+    group.name = "live_ghost";
+    group.add(new THREE.Line(geom, mat));
+    this.scene.addLayer("live_ghost", group);
+    this._ghostLineGroup = group;
+    this.clearLive();
+  }
+
+  clearGhost() {
+    this.scene.removeLayer("live_ghost");
+    this._ghostLineGroup = null;
   }
 
   clearLive() {
     this._lastLiveSession = null;
-    this._lastLivePoints = [];
     this._lastLiveRays = new Map();
+    this._lastLivePoints = [];
+    this._liveCount = 0;
+    if (this._liveLineGroup) {
+      // Reset draw range so the persistent buffer's stale tail isn't
+      // accidentally rendered on next applyLive.
+      const line = this._liveLineGroup.children[0];
+      line.geometry.setDrawRange(0, 0);
+      line.geometry.attributes.position.needsUpdate = true;
+    }
     this.scene.removeLayer("live_trail");
     this.scene.removeLayer("live_rays");
+    this._liveLineGroup = null;
   }
 }
 

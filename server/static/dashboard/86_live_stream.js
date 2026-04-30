@@ -271,15 +271,19 @@
           if (Array.isArray(data.paths_completed)) {
             currentLiveSession.paths_completed = data.paths_completed;
           }
-          // Retain the trail reference for ghost preview on the next arm.
-          // Clear currentLiveSession after a short delay so the active card
-          // stays visible briefly with its final counters.
+          // Promote the live trail to a faded "ghost" layer so the
+          // operator can confirm framing matches the last pitch's
+          // trail before throwing again. The ghost persists until
+          // the next arm cycle's first point lands (handled in
+          // applyLive when sid flips). Card stays visible briefly
+          // with its final counters via the 3 s setTimeout below.
           lastEndedLiveSid = data.sid;
+          if (window.BallTrackerDashboardScene) {
+            window.BallTrackerDashboardScene.promoteLiveToGhost();
+          }
           setTimeout(() => {
             if (currentLiveSession && currentLiveSession.session_id === data.sid && !currentLiveSession.armed) {
               currentLiveSession = null;
-              // (liveTraceIdx tracking retired with the Plotly extendTraces fast
-        // path; Three.js BufferGeometry rebuild on append is fast enough.)
               repaintCanvas();
             }
           }, 3000);

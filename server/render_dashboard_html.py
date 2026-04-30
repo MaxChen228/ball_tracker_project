@@ -50,14 +50,25 @@ def render_dashboard_html(
         # `window.BallTrackerDashboardScene`.
         '<script type="module">'
         'import { setupDashboardLayers } from "/static/threejs/dashboard_layers.js";'
-        # Wait for the scene runtime to expose its mounted instance,
-        # then bind the dashboard-specific layers. Polling beats
-        # listening for an event because both modules race for execution
-        # order and an event from the runtime would need to either be
-        # queued or replayed; a 50 ms poll is bounded + simple.
+        # Bounded poll for scene mount: WebGL context creation can fail
+        # (no GPU / driver issue / too many contexts), in which case
+        # `mountScene` throws and `window.BallTrackerScene` never lands.
+        # Cap retries at 2.5 s (50 × 50 ms) and surface a visible error
+        # in #scene-root so the operator knows the 3D pipeline failed
+        # rather than waiting forever for a scene that will never appear.
+        'let _attempts = 0;'
         'function _hookup() {'
-        '  if (!window.BallTrackerScene) { setTimeout(_hookup, 50); return; }'
-        '  setupDashboardLayers(window.BallTrackerScene);'
+        '  if (window.BallTrackerScene) { setupDashboardLayers(window.BallTrackerScene); return; }'
+        '  if (++_attempts > 50) {'
+        '    const root = document.getElementById("scene-root");'
+        '    if (root) root.innerHTML = '
+        '      "<div style=\\"padding:24px;font-family:monospace;color:#C0392B;\\">"'
+        '      + "3D scene failed to mount — likely a WebGL context issue. "'
+        '      + "Check the browser console for the actual error.</div>";'
+        '    console.error("BallTrackerScene never mounted after 2.5 s of polling");'
+        '    return;'
+        '  }'
+        '  setTimeout(_hookup, 50);'
         '}'
         '_hookup();'
         '</script>'
