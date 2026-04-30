@@ -238,9 +238,8 @@
       try {
         const data = JSON.parse(evt.data);
         if (!data || !data.sid) return;
-        const segs = Array.isArray(data.segments) ? data.segments : [];
-        if (typeof patchTrajSegments === 'function') {
-          patchTrajSegments(data.sid, segs);
+        if (typeof patchTrajResult === 'function') {
+          patchTrajResult(data.sid, data);
         }
         // Auto-select latest pitch when no row is currently checked.
         // Doesn't override an explicit operator selection — they may be

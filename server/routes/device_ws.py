@@ -263,6 +263,8 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                     {
                         "sid": session_id,
                         "segments": [s.model_dump() for s in result.segments],
+                        "cost_threshold": result.cost_threshold,
+                        "gap_threshold_m": result.gap_threshold_m,
                     },
                 )
                 continue
