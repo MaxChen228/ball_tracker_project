@@ -10,7 +10,7 @@ import html as _html
 
 from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
-from scene_runtime import view_presets_toolbar_html
+from scene_runtime import point_size_slider_html, view_presets_toolbar_html
 from presets import Preset
 from reconstruct import Scene
 from render_compare import (
@@ -369,6 +369,8 @@ def render_viewer_html(
                 <span class="layer-name">Strike zone</span>
               </label>
             </span>
+            <span class="layer-divider" aria-hidden="true"></span>
+            {point_size_slider_html(slot_id="viewer-point-size")}
           </span>
         </div>
         <div class="strip-row strip-row-scrubber">

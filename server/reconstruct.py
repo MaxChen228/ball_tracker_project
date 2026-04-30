@@ -405,21 +405,52 @@ def build_scene(
             if live_trace:
                 scene.ground_traces_live[cam_id] = live_trace
 
-    def _pts_to_dicts(pts):
-        return [
-            {
+    def _pts_to_dicts(pts, seg_idx_for=None):
+        """Convert TriangulatedPoint list to JSON-friendly dicts and drop
+        anything beyond `_MAX_RENDER_DIST_M`. When `seg_idx_for` is provided
+        (parallel array of segment indices, -1 for out-of-segment), stamp
+        each surviving dict with `seg_idx` so viewer/dashboard can colour
+        points by segment without re-running the segmenter or guessing
+        index alignment.
+
+        The render-distance filter changes the surviving list's length, so
+        seg_idx must be looked up by the *pre-filter* index, not enumerate."""
+        out = []
+        for k, p in enumerate(pts):
+            if (p.x_m ** 2 + p.y_m ** 2 + p.z_m ** 2) ** 0.5 > _MAX_RENDER_DIST_M:
+                continue
+            d = {
                 "t_rel_s": float(p.t_rel_s),
                 "x": float(p.x_m),
                 "y": float(p.y_m),
                 "z": float(p.z_m),
                 "residual_m": float(p.residual_m),
             }
-            for p in pts
-            if (p.x_m ** 2 + p.y_m ** 2 + p.z_m ** 2) ** 0.5 <= _MAX_RENDER_DIST_M
-        ]
+            if seg_idx_for is not None and 0 <= k < len(seg_idx_for):
+                d["seg_idx"] = int(seg_idx_for[k])
+            out.append(d)
+        return out
+
+    # Build a parallel seg_idx array indexed against `triangulated` (=
+    # session_result.points, which `stamp_segments_on_result` sorts before
+    # the segmenter runs — so SegmentRecord.original_indices indexes into
+    # this same sorted list). One source of truth: viewer no longer has
+    # to re-derive classification from `original_indices`, eliminating
+    # the index-shift bug when the render-dist filter drops points.
+    seg_idx_for_triangulated: list[int] | None = None
+    if (
+        session_result is not None
+        and session_result.segments
+        and triangulated is not None
+    ):
+        seg_idx_for_triangulated = [-1] * len(triangulated)
+        for seg_i, seg in enumerate(session_result.segments):
+            for k in seg.original_indices:
+                if 0 <= k < len(seg_idx_for_triangulated):
+                    seg_idx_for_triangulated[k] = seg_i
 
     if triangulated:
-        scene.triangulated = _pts_to_dicts(triangulated)
+        scene.triangulated = _pts_to_dicts(triangulated, seg_idx_for_triangulated)
 
     if triangulated_by_path:
         scene.triangulated_by_path = {

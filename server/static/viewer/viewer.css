@@ -309,6 +309,12 @@
   .layer-toggles .layer-checkbox input { accent-color:var(--ink); cursor:pointer; width:13px; height:13px; margin:0; vertical-align:middle; }
   .layer-toggles .layer-divider { width:1px; align-self:stretch;
     background:var(--border-base); margin:2px 2px; }
+  .layer-toggles .point-size-slider { display:inline-flex; align-items:center; gap:6px;
+    font-family:var(--mono); font-size:9px; letter-spacing:0.08em; color:var(--ink); }
+  .layer-toggles .point-size-slider .ps-name { text-transform:uppercase; font-weight:500; }
+  .layer-toggles .point-size-slider input[type="range"] { width:80px; }
+  .layer-toggles .point-size-slider .ps-readout { color:var(--sub); min-width:44px;
+    text-align:right; font-variant-numeric:tabular-nums; }
   .layer-toggles input[type="range"] { -webkit-appearance:none; appearance:none;
     width:96px; height:2px; background:var(--border-base); border-radius:2px;
     margin:0; accent-color:var(--ink); cursor:pointer; }

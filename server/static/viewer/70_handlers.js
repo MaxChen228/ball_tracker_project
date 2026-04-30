@@ -133,6 +133,11 @@
       }
     });
   }
+  // Point-size slider seed + binding lives in viewer_layers.js's
+  // setupViewerLayers — it runs as a deferred ESM, so by the time it
+  // touches the DOM `window.BallTrackerViewerScene` is mounted. Doing
+  // the bind here would race (this classic IIFE runs first, layers
+  // controller still undefined).
   layerToggles.addEventListener("click", (e) => {
     const pill = e.target.closest(".layer-pill");
     if (!pill || pill.hidden || pill.disabled) return;

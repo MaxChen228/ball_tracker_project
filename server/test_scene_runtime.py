@@ -192,3 +192,50 @@ def test_boot_invariant_raises_on_missing_vendor(tmp_path, monkeypatch):
     # subsequent test that imports main.
     monkeypatch.undo()
     importlib.reload(_main_orig)
+
+
+def test_point_size_slider_html_renders_required_hooks():
+    """`point_size_slider_html()` must ship the data-* attrs the page-
+    specific JS click handlers grep for. Hooks: range input with
+    data-point-size-slider, span with data-point-size-readout, and an
+    outer container id that lets the boot script scope its lookup."""
+    from scene_runtime import point_size_slider_html
+    html = point_size_slider_html(slot_id="x-test")
+    assert 'id="x-test"' in html
+    assert 'data-point-size-slider' in html
+    assert 'data-point-size-readout' in html
+    assert 'type="range"' in html
+
+
+def test_point_size_constants_match_points_layer_js():
+    """The Python helper renders <input min/max/step/value> and the JS
+    layer (static/threejs/points_layer.js) reads the same numbers when
+    deciding how to clamp the persisted size on construction. Two
+    sources of truth would silently desync after a tuning change —
+    this test catches that."""
+    from pathlib import Path
+    import scene_runtime as sr
+    js_text = (Path(main.__file__).parent / "static" / "threejs" / "points_layer.js").read_text()
+    # Each Python const has a matching JS export. Source-of-truth check:
+    # the JS literal text must contain the Python value (formatted to a
+    # plain float repr — the JS file uses 0.005, 0.040, etc.).
+    # Parse the JS literal numerically — string match would either false-
+    # match (0.04 substring of 0.0401) or false-fail (Python's repr drops
+    # trailing zeros so 0.040 → "0.04" while the JS source keeps 0.040;).
+    import re
+    for name, py_value in [
+        ("POINT_SIZE_M_MIN", sr.POINT_SIZE_M_MIN),
+        ("POINT_SIZE_M_MAX", sr.POINT_SIZE_M_MAX),
+        ("POINT_SIZE_M_STEP", sr.POINT_SIZE_M_STEP),
+        ("POINT_SIZE_M_DEFAULT", sr.POINT_SIZE_M_DEFAULT),
+    ]:
+        m = re.search(rf"export const {name}\s*=\s*([0-9.]+)\s*;", js_text)
+        assert m, (
+            f"{name}: no `export const {name} = N;` line in points_layer.js. "
+            f"Update both `scene_runtime.py` and `static/threejs/points_layer.js`."
+        )
+        js_value = float(m.group(1))
+        assert js_value == py_value, (
+            f"{name} desync: Python={py_value!r}, JS={js_value!r}. "
+            f"Update both `scene_runtime.py` and `static/threejs/points_layer.js`."
+        )

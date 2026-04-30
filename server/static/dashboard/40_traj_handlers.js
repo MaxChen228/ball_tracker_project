@@ -68,6 +68,11 @@
       }
     });
   }
+  // Point-size slider seed + binding lives in dashboard_layers.js's
+  // setupDashboardLayers — it runs as a deferred ESM after this classic
+  // IIFE so the layer module is mounted by the time it queries the DOM.
+  // Pulling the seed here would race (window.BallTrackerDashboardScene
+  // is undefined when classic scripts run).
   // 5-view camera presets (ISO/CATCH/SIDE/TOP/PITCHER) — Three.js scene
   // owns the toolbar binding via `BallTrackerScene.bindViewToolbar()`,
   // which the dashboard_layers.js boot script invokes on mount. No
