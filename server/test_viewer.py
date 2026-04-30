@@ -815,7 +815,9 @@ def test_viewer_strip_reserves_dual_ab_subtracks_per_pipeline():
 
 def test_viewer_locks_layout_to_viewport_without_page_scroll():
     """The viewer should fit in a single viewport: body scrolling is
-    disabled and the root container owns a fixed 100vh layout."""
+    disabled and the root container owns a fixed 100vh layout. The
+    transport timeline is a fixed-position bottom dock (NOT a grid row),
+    so the grid only carries 3 rows: nav / failure-strip / work."""
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(712)
     _record_pitch(_pitch("A", 712, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
@@ -824,8 +826,12 @@ def test_viewer_locks_layout_to_viewport_without_page_scroll():
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
     assert "overflow:hidden" in body
-    assert "grid-template-rows:52px auto minmax(0, 1fr) auto" in body
+    assert "grid-template-rows:52px auto minmax(0, 1fr)" in body
     assert "height:100vh" in body
+    # Sticky-bottom dock contract: timeline pinned to viewport bottom,
+    # .viewer reserves matching padding via the --timeline-h CSS var.
+    assert ".timeline { position:fixed" in body
+    assert "padding-bottom:var(--timeline-h" in body
 
 
 def test_viewer_scrubber_uses_manual_seek_guards_and_keyboard_stepper():
