@@ -17,12 +17,25 @@
     SEGMENTS = Array.isArray(nextSegments) ? nextSegments : [];
     SEGMENTS_BY_PATH = nextSegmentsByPath || {};
     updateSpeedBadge();
+    // The strip's SEG band reads SEGMENTS_BY_PATH at draw time; without
+    // a redraw here, an SSE `fit` event or post-recompute Apply would
+    // leave stale bands on the timeline until the next scrubber/path
+    // toggle. Repaint both rows so the bands match the new fit.
+    if (typeof renderDetectionStrip === "function") renderDetectionStrip();
   };
 
   setFrame(0, { seekVideos: true });
   scheduleSceneDraw();
   updatePlayBtnLabel();
-  requestAnimationFrame(resizeDetectionCanvas);
+  requestAnimationFrame(() => {
+    resizeDetectionCanvas();
+    // Wire pointer interactions on the SEG band — must happen after the
+    // canvases exist (resize creates the backing-store) so pointermove
+    // hit-tests have something to read.
+    if (typeof window._wireSegStripInteractions === "function") {
+      window._wireSegStripInteractions();
+    }
+  });
 
   // Bottom-dock sizing: the transport timeline is `position:fixed` at the
   // viewport bottom, so .viewer needs `padding-bottom` matching the dock
