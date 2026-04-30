@@ -408,7 +408,7 @@ async def _run_server_detection(
         shape_gate=gate_used,
     )
     try:
-        await asyncio.to_thread(state.record, pitch)
+        result = await asyncio.to_thread(state.record, pitch)
     except Exception as exc:
         await broadcast_done("error", len(frames))
         proc.finish_server_post_job(sid, cam, canceled=False)
@@ -423,6 +423,19 @@ async def _run_server_detection(
     logger.info(
         "background detection complete session=%s cam=%s frames=%d ball=%d",
         sid, cam, len(frames), ball,
+    )
+    # Mirror cycle_end / recompute: after the SessionResult is rebuilt
+    # with the freshly persisted server_post frames, broadcast `fit` so
+    # viewer + dashboard repaint the curve and re-apply the cost/gap
+    # client-side mask without waiting for an operator-driven recompute.
+    await sse_hub.broadcast(
+        "fit",
+        {
+            "sid": sid,
+            "segments": [s.model_dump() for s in result.segments],
+            "cost_threshold": result.cost_threshold,
+            "gap_threshold_m": result.gap_threshold_m,
+        },
     )
     await broadcast_done("ok", len(frames))
     proc.finish_server_post_job(sid, cam, canceled=False)
