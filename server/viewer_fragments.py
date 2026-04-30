@@ -206,6 +206,78 @@ def session_tuning_strip_html(
     )
 
 
+def detection_config_strip_html(
+    live_preset_name: str | None,
+    server_post_preset_name: str | None,
+    *,
+    presets_by_name: dict | None = None,
+) -> str:
+    """Per-session "what config produced this" strip on the viewer nav.
+    Two pills (LIVE / SVR) showing the preset filename plus a compact
+    HSV+gate summary so the operator can see at a glance which config
+    each pipeline ran under without round-tripping through the
+    dashboard. Stale references (preset deleted since the session was
+    recorded) render greyed-out with a `(deleted)` tag.
+
+    `presets_by_name` is an optional pre-built `{name: Preset}` map; if
+    None, the renderer asks `state.load_preset` per pill (cheap — at
+    most two disk reads per viewer render).
+    """
+    return (
+        '<div class="config-strip" role="status" aria-label="Detection config used">'
+        '<span class="cfg-head">CFG</span>'
+        f'{_config_pill_html("LIVE", live_preset_name, presets_by_name)}'
+        f'{_config_pill_html("SVR", server_post_preset_name, presets_by_name)}'
+        '</div>'
+    )
+
+
+def _config_pill_html(
+    label: str,
+    preset_name: str | None,
+    presets_by_name: dict | None,
+) -> str:
+    if preset_name is None:
+        return (
+            f'<span class="cfg-pill missing" title="{html.escape(label)}: not set">'
+            f'<span class="cfg-label">{html.escape(label)}</span>'
+            f'<span class="cfg-tag">—</span>'
+            f'<span class="cfg-detail">no preset stamped</span>'
+            f'</span>'
+        )
+
+    p = (presets_by_name or {}).get(preset_name)
+    if p is None:
+        try:
+            from main import state as _state
+            p = _state.load_preset(preset_name)
+        except KeyError:
+            p = None
+    if p is None:
+        return (
+            f'<span class="cfg-pill missing" '
+            f'title="{html.escape(label)}: preset {html.escape(preset_name)} no longer on disk">'
+            f'<span class="cfg-label">{html.escape(label)}</span>'
+            f'<span class="cfg-tag">{html.escape(preset_name)}</span>'
+            f'<span class="cfg-detail">(deleted)</span>'
+            f'</span>'
+        )
+
+    h = p.hsv
+    g = p.shape_gate
+    detail = (
+        f"H {h.h_min}-{h.h_max} · S {h.s_min}-{h.s_max} · V {h.v_min}-{h.v_max} · "
+        f"asp≥{g.aspect_min:.2f} fill≥{g.fill_min:.2f}"
+    )
+    return (
+        f'<span class="cfg-pill ok" title="{html.escape(p.label)} — {html.escape(detail)}">'
+        f'<span class="cfg-label">{html.escape(label)}</span>'
+        f'<span class="cfg-tag">{html.escape(preset_name)}</span>'
+        f'<span class="cfg-detail">{html.escape(detail)}</span>'
+        f'</span>'
+    )
+
+
 def health_nav_strip_html(health: dict) -> str:
     """Compact per-session status strip for the viewer's nav bar. Replaces
     the legacy `.health` row (hero card + per-cam cards) — same data, ~1/3
