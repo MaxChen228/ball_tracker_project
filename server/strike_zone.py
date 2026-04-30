@@ -7,11 +7,12 @@ DEFAULT_BATTER_HEIGHT_CM = 175
 MIN_BATTER_HEIGHT_CM = 120
 MAX_BATTER_HEIGHT_CM = 220
 
-BASELINE_BATTER_HEIGHT_CM = 175.0
-BASELINE_Z_BOTTOM_M = 0.46
-BASELINE_Z_TOP_M = 1.06
+ABS_BOTTOM_RATIO = 0.270
+ABS_TOP_RATIO = 0.535
+BASELINE_Z_BOTTOM_M = (DEFAULT_BATTER_HEIGHT_CM / 100.0) * ABS_BOTTOM_RATIO
+BASELINE_Z_TOP_M = (DEFAULT_BATTER_HEIGHT_CM / 100.0) * ABS_TOP_RATIO
 
-PLATE_WIDTH_M = 0.432
+PLATE_WIDTH_M = 0.4318
 PLATE_SHOULDER_Y_M = 0.216
 PLATE_TIP_Y_M = 0.432
 
@@ -63,9 +64,9 @@ def validate_batter_height_cm(value: int) -> int:
 
 def strike_zone_geometry_for_height(height_cm: int) -> StrikeZoneGeometry:
     height_cm = validate_batter_height_cm(height_cm)
-    scale = float(height_cm) / BASELINE_BATTER_HEIGHT_CM
-    z_bottom_m = BASELINE_Z_BOTTOM_M * scale
-    z_top_m = BASELINE_Z_TOP_M * scale
+    height_m = float(height_cm) / 100.0
+    z_bottom_m = ABS_BOTTOM_RATIO * height_m
+    z_top_m = ABS_TOP_RATIO * height_m
     z_height_m = z_top_m - z_bottom_m
 
     x_left = -STRIKE_ZONE_X_HALF_M

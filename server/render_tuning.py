@@ -111,10 +111,10 @@ def _render_tuning_body(
 def _render_strike_zone_body(strike_zone: dict | None) -> str:
     zone = strike_zone or {}
     height_cm = int(zone.get("batter_height_cm", 175))
-    z_bottom_m = float(zone.get("z_bottom_m", 0.46))
-    z_top_m = float(zone.get("z_top_m", 1.06))
+    z_bottom_m = float(zone.get("z_bottom_m", 0.4725))
+    z_top_m = float(zone.get("z_top_m", 0.93625))
     z_height_m = float(zone.get("z_height_m", z_top_m - z_bottom_m))
-    width_m = float(zone.get("x_half_m", 0.216)) * 2.0
+    width_m = float(zone.get("x_half_m", 0.2159)) * 2.0
     depth_m = float(zone.get("y_back_m", 0.432)) - float(zone.get("y_front_m", 0.0))
     return (
         '<form class="strike-zone-form" id="strike-zone-form" data-strike-zone-form>'
@@ -137,7 +137,7 @@ def _render_strike_zone_body(strike_zone: dict | None) -> str:
         f'<span><span class="k">Depth</span><span class="v" data-strike-zone-depth>{depth_m:.3f} m</span></span>'
         '</div>'
         '</div>'
-        '<div class="strike-zone-note">Single-height proxy for 3D display only; not per-batter biomechanical measurement.</div>'
+        '<div class="strike-zone-note">ABS-style single-height proxy for 3D display: bottom 27.0% and top 53.5% of standing height.</div>'
         '<div class="hsv-actions">'
         '<button class="btn" type="submit" data-strike-zone-apply>Apply strike zone</button>'
         '<span class="detection-apply-status" data-strike-zone-status></span>'

@@ -292,16 +292,17 @@ def test_strike_zone_post_persists_and_surfaces_on_status(tmp_path, monkeypatch)
     r = client.get("/status")
     assert r.status_code == 200
     assert r.json()["strike_zone"]["batter_height_cm"] == 175
-    assert r.json()["strike_zone"]["z_bottom_m"] == pytest.approx(0.46)
-    assert r.json()["strike_zone"]["z_top_m"] == pytest.approx(1.06)
+    assert r.json()["strike_zone"]["z_bottom_m"] == pytest.approx(0.4725)
+    assert r.json()["strike_zone"]["z_top_m"] == pytest.approx(0.93625)
 
     r = client.post("/settings/strike_zone", json={"height_cm": 190})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["ok"] is True
     assert body["strike_zone"]["batter_height_cm"] == 190
-    assert body["strike_zone"]["z_bottom_m"] == pytest.approx(0.46 * 190 / 175)
-    assert body["strike_zone"]["z_top_m"] == pytest.approx(1.06 * 190 / 175)
+    assert body["strike_zone"]["z_bottom_m"] == pytest.approx(0.270 * 1.90)
+    assert body["strike_zone"]["z_top_m"] == pytest.approx(0.535 * 1.90)
+    assert body["strike_zone"]["x_half_m"] == pytest.approx(0.4318 / 2.0)
 
     status = client.get("/status").json()["strike_zone"]
     assert status["batter_height_cm"] == 190
