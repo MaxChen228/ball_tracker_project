@@ -8,7 +8,13 @@ from pathlib import Path
 
 from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
-from scene_runtime import point_size_slider_html, view_presets_toolbar_html
+from scene_runtime import (
+    fit_extension_seconds_slider_html,
+    fit_line_width_slider_html,
+    layer_chip_with_popover_html,
+    point_size_slider_html,
+    view_presets_toolbar_html,
+)
 from reconstruct import Scene
 from render_compare import (
     DRAW_VIRTUAL_BASE_JS,
@@ -414,18 +420,27 @@ def render_viewer_html(
                 <span class="layer-name">Rays</span>
               </label>
             </span>
-            <span class="layer-group" data-layer-group="traj">
-              <label class="layer-checkbox">
-                <input type="checkbox" class="layer-checkbox" data-layer="traj" checked>
-                <span class="layer-name">Traj</span>
-              </label>
-            </span>
-            <span class="layer-group" data-layer-group="fit">
-              <label class="layer-checkbox">
-                <input type="checkbox" class="layer-checkbox" data-layer="fit" checked>
-                <span class="layer-name">Fit</span>
-              </label>
-            </span>
+            {layer_chip_with_popover_html(
+                group_key="traj",
+                label="Traj",
+                layer_data_attr="traj",
+                checked=True,
+                popover_id="viewer-traj-popover",
+                title="Trajectory points — click ▾ for display settings",
+                popover_inner_html=point_size_slider_html(slot_id="viewer-point-size"),
+            )}
+            {layer_chip_with_popover_html(
+                group_key="fit",
+                label="Fit",
+                layer_data_attr="fit",
+                checked=True,
+                popover_id="viewer-fit-popover",
+                title="Fit curves — click ▾ for display settings (line width, dashed extension)",
+                popover_inner_html=(
+                    fit_line_width_slider_html(slot_id="viewer-fit-line-width")
+                    + fit_extension_seconds_slider_html(slot_id="viewer-fit-extension")
+                ),
+            )}
             <span class="layer-divider" aria-hidden="true"></span>
             <span class="layer-group" data-layer-group="strike-zone" title="Toggle the strike-zone wireframe in the 3D scene. Default on.">
               <label class="layer-checkbox">
@@ -433,8 +448,6 @@ def render_viewer_html(
                 <span class="layer-name">Strike zone</span>
               </label>
             </span>
-            <span class="layer-divider" aria-hidden="true"></span>
-            {point_size_slider_html(slot_id="viewer-point-size")}
           </span>
         </div>
         <div class="strip-row strip-row-scrubber">

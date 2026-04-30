@@ -39,14 +39,22 @@ import {
   writePersistedPointSizeM,
   applyPointSizeToGroup,
 } from "./points_layer.js";
+import {
+  buildFitSegmentLines,
+  applyResolution,
+  applyLineWidth,
+  setupFitHoverTooltip,
+  bindLayerPopovers,
+  readPersistedFitLineWidth,
+  writePersistedFitLineWidth,
+  readPersistedFitExtensionSeconds,
+  writePersistedFitExtensionSeconds,
+} from "./fit_curves_layer.js";
 
 // Visual constants for the dashboard's accent palette. Match the
 // previous Plotly-era values in 20_trajectory.js so the on-screen
 // colour vocabulary doesn't drift mid-migration.
 const FIT_ACCENT = 0xC0392B;
-// Cached THREE.Color object reused for the dashed-line raw-path
-// fallback (no segments). points_layer.js owns the canonical hex.
-const G_Z = -9.81;
 const ARROW_LEN_M = 0.3;
 
 // Build a boolean keep-mask aligned with `points` from per-session
@@ -84,23 +92,9 @@ function _buildPointKeepMask(points, costThreshold, gapThresholdM) {
   return m;
 }
 
-// Sample a parabolic fit segment into N world-space points.
-// `seg` is a SegmentRecord: { p0, v0, t_anchor, t_start, t_end }.
-function sampleSegmentCurve(seg, n) {
-  const out = new Float32Array(n * 3);
-  const t0 = seg.t_start, t1 = seg.t_end, ta = seg.t_anchor;
-  const p0 = seg.p0, v0 = seg.v0;
-  for (let i = 0; i < n; ++i) {
-    const t = t0 + (t1 - t0) * (i / (n - 1));
-    const tau = t - ta;
-    out[i * 3 + 0] = p0[0] + v0[0] * tau;
-    out[i * 3 + 1] = p0[1] + v0[1] * tau;
-    out[i * 3 + 2] = p0[2] + v0[2] * tau + 0.5 * G_Z * tau * tau;
-  }
-  return out;
-}
-
-// Build a Line geometry from a flat XYZ Float32Array.
+// Build a Line geometry from a flat XYZ Float32Array. Used for the
+// camera-axis triads and v0 arrows — fit curves themselves now go
+// through `buildFitSegmentLines` (Line2 fat lines).
 function lineFromBuffer(buf, color, opts = {}) {
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.BufferAttribute(buf, 3));
@@ -170,6 +164,26 @@ class DashboardLayers {
     // World-space size of fit_points spheres. Restored from the cross-
     // page localStorage key on construction; writes via setPointSize.
     this._pointSize = readPersistedPointSizeM();
+    // Fit-curve display tunables (Line2 linewidth in screen-px, dashed
+    // extension padding in seconds). Persisted across pages just like
+    // pointSize.
+    this._fitLineWidth = readPersistedFitLineWidth();
+    this._fitExtensionSec = readPersistedFitExtensionSeconds();
+    // Cached so applyResolution() can re-push it after a canvas resize.
+    this._fitGroup = null;
+    // Resize listener — Line2 LineMaterial.resolution must follow the
+    // renderer or linewidth uniform reads stale screen px and lines
+    // render at default-zero width on next paint.
+    this._resizeHandler = () => this._refreshFitResolution();
+    window.addEventListener("resize", this._resizeHandler);
+  }
+
+  // Push current canvas size into every fit-line LineMaterial.resolution.
+  _refreshFitResolution() {
+    if (!this._fitGroup) return;
+    const dom = this.scene.renderer && this.scene.renderer.domElement;
+    if (!dom) return;
+    applyResolution(this._fitGroup, new THREE.Vector2(dom.clientWidth, dom.clientHeight));
   }
 
   // ---- camera markers (per-camera diamond + axis triad) ----
@@ -249,11 +263,32 @@ class DashboardLayers {
   }
   pointSizeM() { return this._pointSize; }
 
+  // Mutate fit-curve line width live (LineMaterial.linewidth in screen-
+  // space px). O(N) over fit_curves children — no geometry rebuild.
+  setFitLineWidth(px) {
+    if (!Number.isFinite(px)) return;
+    this._fitLineWidth = px;
+    writePersistedFitLineWidth(px);
+    if (this._fitGroup) applyLineWidth(this._fitGroup, px);
+  }
+  fitLineWidthPx() { return this._fitLineWidth; }
+
+  // Dashed extension padding (seconds) — geometry depends on this so a
+  // change triggers a fit-curves rebuild.
+  setFitExtensionSeconds(sec) {
+    if (!Number.isFinite(sec)) return;
+    this._fitExtensionSec = sec;
+    writePersistedFitExtensionSeconds(sec);
+    this._rebuildFitLayers();
+  }
+  fitExtensionSeconds() { return this._fitExtensionSec; }
+
   _removeFitLayers() {
     this.scene.removeLayer("fit_curves");
     this.scene.removeLayer("fit_release");
     this.scene.removeLayer("fit_arrows");
     this.scene.removeLayer("fit_points");
+    this._fitGroup = null;
   }
 
   _rebuildFitLayers() {
@@ -281,8 +316,20 @@ class DashboardLayers {
     const keep = _buildPointKeepMask(points, result.cost_threshold, result.gap_threshold_m);
 
     // --- fit curves ---
-    const curveGroup = new THREE.Group();
-    curveGroup.name = "fit_curves";
+    const dom = this.scene.renderer && this.scene.renderer.domElement;
+    const resolution = new THREE.Vector2(
+      dom ? dom.clientWidth : 1,
+      dom ? dom.clientHeight : 1,
+    );
+    const curveGroup = buildFitSegmentLines(segments, {
+      groupName: "fit_curves",
+      palette: (i) => SEG_PALETTE[i % SEG_PALETTE.length],
+      lineWidthPx: this._fitLineWidth,
+      prePadSec: this._fitExtensionSec,
+      postPadSec: this._fitExtensionSec,
+      resolution,
+    });
+    this._fitGroup = curveGroup;
     const releaseGroup = new THREE.Group();
     releaseGroup.name = "fit_release";
     const arrowGroup = new THREE.Group();
@@ -290,8 +337,6 @@ class DashboardLayers {
     for (let i = 0; i < segments.length; ++i) {
       const seg = segments[i];
       const color = SEG_PALETTE[i % SEG_PALETTE.length];
-      const buf = sampleSegmentCurve(seg, 80);
-      curveGroup.add(lineFromBuffer(buf, color));
       // Release marker at p0.
       releaseGroup.add(releaseMarker(seg.p0, color));
       // v0 arrow if magnitude is non-zero (degenerate segments
@@ -510,14 +555,35 @@ export function setupDashboardLayers(scene) {
   // shared with the viewer (`.scene-views`).
   const toolbar = document.querySelector(".scene-views");
   if (toolbar) scene.bindViewToolbar(toolbar);
-  // Bind the point-size slider here, not in the classic IIFE. Module
-  // mount order: classic <script> runs first (slider is a no-op then
-  // because window.BallTrackerDashboardScene is undefined), THEN this
-  // ESM mounts and reads the persisted size, pushes it to the slider
-  // value + readout, and binds `input` -> setPointSize. Push, not pull
-  // — eliminates the boot race where slider showed 18mm regardless of
-  // the persisted localStorage value.
+  // Layer-chip popover wiring: chevron buttons toggle the sibling
+  // popover; outside-click + Escape close. Done once; idempotent.
+  bindLayerPopovers(document);
+  // Bind sliders here, not in the classic IIFE. Module mount order:
+  // classic <script> runs first (sliders are no-ops then because
+  // window.BallTrackerDashboardScene is undefined), THEN this ESM
+  // mounts and reads the persisted values, pushes them to the slider
+  // values + readouts, and binds `input` -> setX. Push, not pull —
+  // eliminates the boot race where sliders showed Python defaults
+  // regardless of the persisted localStorage value.
   bindPointSizeSlider(layers, "#dash-point-size");
+  bindFitLineWidthSlider(layers, "#dash-fit-line-width");
+  bindFitExtensionSlider(layers, "#dash-fit-extension");
+  // Hover tooltip — Raycaster on the fit_curves group; shows
+  // instantaneous |v(t)| in km/h. Tooltip parent is the renderer's
+  // CSS-positioned ancestor (`#scene-root`), which is already
+  // position-relative-or-absolute by virtue of OrbitControls' filling.
+  const tooltipParent = scene.renderer.domElement.parentNode;
+  if (tooltipParent) {
+    setupFitHoverTooltip({
+      scene,
+      fitGroupGetter: () => layers._fitGroup,
+      segmentsFn: () => {
+        const r = layers._lastResultBySid.get(layers._currentSid);
+        return r && Array.isArray(r.segments) ? r.segments : [];
+      },
+      tooltipParent,
+    });
+  }
   return layers;
 }
 
@@ -533,5 +599,35 @@ function bindPointSizeSlider(layers, containerSel) {
     if (!Number.isFinite(v)) return;
     if (readout) readout.textContent = `${Math.round(v * 1000)} mm`;
     layers.setPointSize(v);
+  });
+}
+
+function bindFitLineWidthSlider(layers, containerSel) {
+  const slider = document.querySelector(`${containerSel} [data-fit-line-width-slider]`);
+  const readout = document.querySelector(`${containerSel} [data-fit-line-width-readout]`);
+  if (!slider) return;
+  const seed = layers.fitLineWidthPx();
+  slider.value = String(seed);
+  if (readout) readout.textContent = `${seed.toFixed(1)} px`;
+  slider.addEventListener("input", () => {
+    const v = parseFloat(slider.value);
+    if (!Number.isFinite(v)) return;
+    if (readout) readout.textContent = `${v.toFixed(1)} px`;
+    layers.setFitLineWidth(v);
+  });
+}
+
+function bindFitExtensionSlider(layers, containerSel) {
+  const slider = document.querySelector(`${containerSel} [data-fit-extension-slider]`);
+  const readout = document.querySelector(`${containerSel} [data-fit-extension-readout]`);
+  if (!slider) return;
+  const seed = layers.fitExtensionSeconds();
+  slider.value = String(seed);
+  if (readout) readout.textContent = `${Math.round(seed * 1000)} ms`;
+  slider.addEventListener("input", () => {
+    const v = parseFloat(slider.value);
+    if (!Number.isFinite(v)) return;
+    if (readout) readout.textContent = `${Math.round(v * 1000)} ms`;
+    layers.setFitExtensionSeconds(v);
   });
 }
