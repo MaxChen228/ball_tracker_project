@@ -292,6 +292,11 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
   重現原始 detection。PR #93 加進去的 `live_config_used` /
   `server_post_config_used` + 對應 `DetectionConfigSnapshotPayload` 已在
   detection-config 簡化時砍掉（從未被任何路徑寫過，dead schema 欄位）
+- 新增 `live_preset_name`（PitchPayload + SessionResult）/
+  `server_post_preset_name`（SessionResult only）— preset 檔名身份，
+  events 列 CFG strip + viewer popover 從這兩個欄位讀。Live 在 arm 時凍結，
+  server_post 在 rerun 時覆蓋。WS settings push 也帶 `active_preset_name`
+  metadata（iOS 只用來 log）
 - iOS 對 server-required WS 欄位拒 schema 漂（atomic-drop guard at handler
   head）
 - WS settings push 12 欄位文件化（[docs/protocols.md](docs/protocols.md)，
@@ -304,10 +309,12 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
 - 要 reproduce 舊 session detection → reprocess 預設行為已是用 disk 當下
   config（commit `0b300a4`，2026-04-29）。要凍結快照重現舊 detection 加
   `--use-frozen-snapshot`（讀 `pitch.*_used`）
-- `/sessions/{sid}/run_server_post` 已退 source picker（live/frozen/preset
-  三選一砍光）— endpoint 永遠用 dashboard 當下 `state.hsv_range()` /
-  `state.shape_gate()`。要換 preset 跑 → dashboard 切 preset 再按 button，
-  不要 server 端找 source-replacement hook
+- `/sessions/{sid}/run_server_post` 吃 `{preset_name: str}` body（required，
+  422 on missing，404 on unknown）。endpoint 載指定 preset 跑 detection，
+  把 preset 名字 stamp 進 `SessionResult.server_post_preset_name`；events 列
+  / viewer 顯示 `Live: <name> | Svr: <name>` chip。re-run 不同 preset 直接
+  覆蓋上次結果（沒有歷史）。dashboard active preset 跟這支無關 —
+  server_post 跟 live 用獨立 preset 選擇
 - 改 wire schema → 同 commit 改 `docs/protocols.md` + iOS 端
   `CameraCommandRouter` guard
 - 動 `state.py` 內共用 state → 用 public accessor（如

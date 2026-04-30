@@ -26,7 +26,10 @@
                                                   # server stamps `cost` in live_pairing._resolve_candidates after the
                                                   # shape-prior selector runs.
   local_recording_index: int?                     # device-local debug counter; server ignores
+  live_preset_name: str | null                    # active preset filename frozen at arm time (mirrored into SessionResult.live_preset_name). Drives the events list / viewer "Live: <name>" chip; null only on legacy on-disk pitches that predate arm-time preset stamping.
   ```
+
+  `SessionResult` adds the matching `live_preset_name` (A-wins-B-fallback aggregate) plus `server_post_preset_name` (the `preset_name` body field of the most recent `POST /sessions/{sid}/run_server_post`; overwritten on rerun, no history). The events list / viewer chip-render `Live: <name> | Svr: <name|—>` from these two; a preset whose file has been deleted under a session degrades to a faded `(deleted)` suffix.
 
   Server-side, `/pitch` looks up the matching `CalibrationSnapshot` from `state.calibrations()` and fills in `intrinsics` / `homography` / `image_width_px` / `image_height_px` BEFORE triangulation and on-disk persistence. **No calibration on file → 422**.
 
@@ -54,6 +57,7 @@ camera_id: str                       # echo of the {cam} in the URL (server-side
 paths: list[str]                     # default DetectionPath set for newly-armed sessions (always {"live"} post-Phase-1)
 hsv_range: {h_min,h_max,s_min,s_max,v_min,v_max}  # from data/detection_config.json (POST /detection/config)
 shape_gate: {aspect_min, fill_min}   # from data/detection_config.json (POST /detection/config)
+active_preset_name: str | null       # currently-bound preset filename (DetectionConfig.preset). Pushed alongside the HSV+shape values so iOS can log preset identity. Pure metadata — iOS does not act on it. Null only when the live config is custom (slider direct-POST path); never null after a /presets or /presets/active call.
 chirp_detect_threshold: float        # matched-filter cutoff for legacy chirp-listener path; data/chirp_detect_threshold.json
 mutual_sync_threshold: float         # cutoff for the two-device mutual-sync coordinator; data/mutual_sync_threshold.json
 heartbeat_interval_s: float          # cadence iOS uses for upstream {type:"heartbeat"} (state.heartbeat_interval_s)
