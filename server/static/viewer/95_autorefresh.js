@@ -20,6 +20,11 @@
     if (!SID) return;
 
     let lastSig = null;
+    // 85_sse_fit.js dispatches this after a successful in-place patch
+    // (cycle_end / server-post / Apply via SSE). Reset baseline so the
+    // next /events diff records the new row sig instead of triggering
+    // location.reload(); the viewer's scrubber + video buffer survive.
+    window.addEventListener('viewer:fit-applied', () => { lastSig = null; });
     async function fetchRow(bucket) {
       try {
         const r = await fetch(`/events?bucket=${bucket}`, { cache: 'no-store' });
