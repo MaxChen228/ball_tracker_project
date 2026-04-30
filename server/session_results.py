@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 _FROZEN_USED_FIELDS = (
     "hsv_range_used",
     "shape_gate_used",
+    "live_config_used",
+    "server_post_config_used",
 )
 
 
@@ -353,9 +355,10 @@ def _apply_stamped_filter(
 
 
 def stamp_segments_on_result(result: SessionResult) -> None:
-    """Run `find_segments` on the stamped-filter SUBSET of the authoritative
-    path's points and write `result.segments`. Idempotent — overwrites
-    whatever was there.
+    """Run `find_segments` on the stamped-filter SUBSET of every available
+    path and write both `result.segments_by_path` and the legacy
+    single-surface `result.segments`. Idempotent — overwrites whatever
+    was there.
 
     Architecture: `result.triangulated` / `result.points` /
     `result.triangulated_by_path` carry the FULL emitted set (every
@@ -365,12 +368,9 @@ def stamp_segments_on_result(result: SessionResult) -> None:
     viewer slider mirrors the same predicate client-side. This decouples
     "what the operator sees" from "what gets fit".
 
-    Sorts `result.triangulated` (and `result.points`, which mirrors it)
-    by `t_rel_s` BEFORE running the segmenter so `Segment.original_indices`
-    is a stable index into a time-sorted list. Without this, the client's
-    `_classifyPointsBySegment` (dashboard 30_traces.js) silently
-    mis-buckets points whenever the upstream pairing emits non-time-
-    sorted output.
+    Sorts every persisted path list by `t_rel_s` BEFORE running the
+    segmenter so `Segment.original_indices` is a stable index into a
+    time-sorted list.
 
     `result.cost_threshold` / `gap_threshold_m` may be None on a freshly-
     armed session that has not yet been stamped — in that case fall back
@@ -379,14 +379,8 @@ def stamp_segments_on_result(result: SessionResult) -> None:
     NOT a silent fallback: the global default is itself an explicit
     operator-set value (or the documented module default 1.0 / 0.20).
 
-    Empty `triangulated` ⇒ empty segments (no log noise; "nothing to fit"
-    is not an error)."""
-    if not result.triangulated:
-        result.segments = []
-        return
-    result.triangulated = sorted(result.triangulated, key=lambda p: p.t_rel_s)
-    if result.points:
-        result.points = sorted(result.points, key=lambda p: p.t_rel_s)
+    Empty `triangulated_by_path` ⇒ empty segments (no log noise;
+    "nothing to fit" is not an error)."""
     if result.cost_threshold is None or result.gap_threshold_m is None:
         from pairing_tuning import PairingTuning
         defaults = PairingTuning.default()
@@ -395,25 +389,55 @@ def stamp_segments_on_result(result: SessionResult) -> None:
     else:
         cost = result.cost_threshold
         gap = result.gap_threshold_m
-    # Build the fit input as a subset of the time-sorted full list, with a
-    # parallel index map so segmenter outputs `original_indices` keyed
-    # to the FULL list (what the viewer's `_classifyPointsBySegment`
-    # consumes — it indexes into `result.triangulated`, not the filter
-    # subset).
-    fit_input: list[TriangulatedPoint] = []
-    fit_to_full: list[int] = []
-    for full_idx, p in enumerate(result.triangulated):
-        if _passes_stamped_filter(p, cost_threshold=cost, gap_threshold_m=gap):
-            fit_input.append(p)
-            fit_to_full.append(full_idx)
-    segs, _pts_sorted = find_segments(fit_input)
-    records: list[SegmentRecord] = []
-    for s in segs:
-        rec = _segment_record_from_segment(s)
-        # Remap original_indices from filter-subset space → full-list space.
-        rec.original_indices = [fit_to_full[i] for i in rec.original_indices]
-        records.append(rec)
-    result.segments = records
+    if not result.triangulated_by_path and result.triangulated:
+        # Legacy/unit-test ingress: older callers still construct a
+        # SessionResult with only `triangulated` populated. At this
+        # internal boundary, project that single surface into the
+        # canonical per-path map so the rest of the function can stay
+        # path-native. Prefer the historical default path = server_post.
+        result.triangulated_by_path = {
+            DetectionPath.server_post.value: list(result.triangulated)
+        }
+
+    path_priority = (
+        DetectionPath.server_post.value,
+        DetectionPath.live.value,
+    )
+    result.segments_by_path = {}
+    for path, pts in list(result.triangulated_by_path.items()):
+        if not pts:
+            continue
+        pts_sorted = sorted(pts, key=lambda p: p.t_rel_s)
+        result.triangulated_by_path[path] = pts_sorted
+        fit_input: list[TriangulatedPoint] = []
+        fit_to_full: list[int] = []
+        for full_idx, p in enumerate(pts_sorted):
+            if _passes_stamped_filter(p, cost_threshold=cost, gap_threshold_m=gap):
+                fit_input.append(p)
+                fit_to_full.append(full_idx)
+        segs, _pts_sorted = find_segments(fit_input)
+        records: list[SegmentRecord] = []
+        for s in segs:
+            rec = _segment_record_from_segment(s)
+            rec.original_indices = [fit_to_full[i] for i in rec.original_indices]
+            records.append(rec)
+        result.segments_by_path[path] = records
+
+    authority_path: str | None = None
+    for path in path_priority:
+        pts = result.triangulated_by_path.get(path) or []
+        if pts:
+            authority_path = path
+            break
+    if authority_path is None:
+        result.triangulated = []
+        result.points = []
+        result.segments = []
+        return
+    authority_pts = result.triangulated_by_path[authority_path]
+    result.triangulated = authority_pts
+    result.points = list(authority_pts)
+    result.segments = list(result.segments_by_path.get(authority_path, []))
 
 
 def _segment_record_from_segment(seg: Segment) -> SegmentRecord:

@@ -215,13 +215,14 @@
   function updateSpeedBadge() {
     const badge = document.getElementById("viewer-speed-badge");
     if (!badge) return;
-    if (!Array.isArray(SEGMENTS) || !SEGMENTS.length) {
+    const segs = currentSegments();
+    if (!Array.isArray(segs) || !segs.length) {
       badge.hidden = true;
       return;
     }
     const playback = mode !== "all";
     const idx = playback ? activeSegmentIndex(currentT) : 0;
-    const seg = SEGMENTS[idx >= 0 ? idx : 0];
+    const seg = segs[idx >= 0 ? idx : 0];
     badge.hidden = false;
     const speedEl = document.getElementById("viewer-lpb-speed");
     const metaEl = document.getElementById("viewer-lpb-meta");
@@ -230,8 +231,8 @@
       && currentT >= seg.t_start - 1e-3
       && currentT <= seg.t_end + 1e-3;
     const tag = isActiveByTime ? "live" : (playback ? "nearest" : "release");
-    const extra = SEGMENTS.length > 1
-      ? `seg${idx} · ${tag} · ${SEGMENTS.length} segs`
+    const extra = segs.length > 1
+      ? `${PATH_LABEL[currentPath()]} seg${idx} · ${tag} · ${segs.length} segs`
       : `${tag} · rmse ${(seg.rmse_m * 100).toFixed(1)}cm`;
     if (metaEl) metaEl.textContent = extra;
   }

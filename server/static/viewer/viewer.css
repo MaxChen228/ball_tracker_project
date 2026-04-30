@@ -107,6 +107,31 @@
   .session-tuning .st-apply:hover:not(:disabled) { background:var(--accent); color:var(--surface); }
   .session-tuning .st-apply:disabled { opacity:0.4; cursor:default;
     border-color:var(--border-base); color:var(--sub); }
+  .config-strip { display:flex; align-items:center; gap:var(--s-2);
+    padding:3px 10px; border:1px solid var(--border-base);
+    border-radius:var(--r); background:var(--surface);
+    font-family:var(--mono); font-size:10px; color:var(--sub);
+    letter-spacing:0.04em; flex:0 1 auto; min-width:0; overflow:hidden; }
+  .config-strip .cfg-head { flex:0 0 auto; font-size:9px; letter-spacing:0.14em;
+    text-transform:uppercase; color:var(--sub); }
+  .config-strip .cfg-pill { display:inline-flex; align-items:center; gap:6px;
+    min-width:0; padding:3px 8px; border:1px solid var(--border-base);
+    border-radius:var(--r); background:var(--bg); }
+  .config-strip .cfg-pill.ok { border-color:var(--ok); }
+  .config-strip .cfg-pill.missing { opacity:0.72; }
+  .config-strip .cfg-label { flex:0 0 auto; font-size:9px; letter-spacing:0.12em;
+    text-transform:uppercase; color:var(--sub); }
+  .config-strip .cfg-tag { flex:0 0 auto; color:var(--ink); font-weight:500; }
+  .config-strip .cfg-source { flex:0 0 auto; color:var(--sub);
+    font-size:9px; letter-spacing:0.08em; }
+  .config-strip .cfg-detail { min-width:0; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; color:var(--ink-light); }
+  .config-strip .cfg-compare { flex:0 0 auto; padding:2px 6px;
+    border:1px solid var(--border-base); border-radius:var(--r);
+    font-size:9px; letter-spacing:0.12em; text-transform:uppercase; }
+  .config-strip .cfg-compare.same { border-color:var(--ok); color:var(--ok); }
+  .config-strip .cfg-compare.diff { border-color:var(--pending); color:var(--ink); }
+  .config-strip .cfg-compare.partial { color:var(--sub); }
   .health-strip .hs-tri { display:inline-flex; align-items:baseline; gap:4px;
     padding:3px 8px; border:1px solid var(--accent); border-radius:var(--r);
     background:var(--surface); }

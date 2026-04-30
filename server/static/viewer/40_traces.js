@@ -8,6 +8,14 @@
   // legacy IIFE still calls — the speed badge in 50_canvas.js
   // (`updateSpeedBadge`) needs `activeSegmentIndex`.
 
+  function currentSegments() {
+    const path = currentPath();
+    const segs = SEGMENTS_BY_PATH && Array.isArray(SEGMENTS_BY_PATH[path])
+      ? SEGMENTS_BY_PATH[path]
+      : [];
+    return segs;
+  }
+
   // Pick the segment whose [t_start, t_end] contains `t`, or the
   // nearest one (by midpoint distance) when no segment is active.
   // Returns -1 on empty SEGMENTS. The "nearest" branch is intentional
@@ -17,15 +25,16 @@
   // in-range, so the operator always sees the marker only when a
   // segment truly covers `currentT`.
   function activeSegmentIndex(t) {
-    if (!SEGMENTS.length) return -1;
-    for (let i = 0; i < SEGMENTS.length; ++i) {
-      const s = SEGMENTS[i];
+    const segs = currentSegments();
+    if (!segs.length) return -1;
+    for (let i = 0; i < segs.length; ++i) {
+      const s = segs[i];
       if (t >= s.t_start && t <= s.t_end) return i;
     }
     let best = 0;
     let bestDist = Infinity;
-    for (let i = 0; i < SEGMENTS.length; ++i) {
-      const s = SEGMENTS[i];
+    for (let i = 0; i < segs.length; ++i) {
+      const s = segs[i];
       const mid = 0.5 * (s.t_start + s.t_end);
       const d = Math.abs(t - mid);
       if (d < bestDist) { bestDist = d; best = i; }

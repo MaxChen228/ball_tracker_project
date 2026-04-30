@@ -6,11 +6,17 @@
   window.VIEWER_DATA = {
     SCENE: SCENE,
     SEGMENTS: SEGMENTS,
+    SEGMENTS_BY_PATH: SEGMENTS_BY_PATH,
     TRAJ_BY_PATH: TRAJ_BY_PATH,
     HAS_TRIANGULATED: HAS_TRIANGULATED,
     FALLBACK_COLOR: FALLBACK,
     tMin: tMin,
     layerVisibility: layerVisibility,
+  };
+  window._viewerPatchSegmentsState = function(nextSegments, nextSegmentsByPath) {
+    SEGMENTS = Array.isArray(nextSegments) ? nextSegments : [];
+    SEGMENTS_BY_PATH = nextSegmentsByPath || {};
+    updateSpeedBadge();
   };
 
   setFrame(0, { seekVideos: true });

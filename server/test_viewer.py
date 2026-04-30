@@ -1026,6 +1026,26 @@ def test_viewer_layer_visibility_v6_schema():
     assert 'id="fit-layer-toggle"' not in body
     assert "setLayerSelection" not in body
     assert "setFitVisibility" not in body
+    assert "SEGMENTS_BY_PATH" in body
+    assert "segments_by_path" in body
+
+
+def test_viewer_config_strip_ships_css_for_cfg_pills():
+    """Regression: the nav-tuning config strip (`CFG LIVE ... SVR ...`)
+    needs dedicated CSS. Without it the HTML still renders, but the
+    spans collapse into a raw `CFGLIVE...` text blob in the top bar."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(724)
+    _record_pitch(_pitch("A", 724, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    body = TestClient(app).get(f"/viewer/{session_id}").text
+    assert ".config-strip" in body
+    assert ".config-strip .cfg-pill" in body
+    assert ".config-strip .cfg-detail" in body
+    assert 'class="config-strip"' in body
+    assert 'class="cfg-head"' in body
+    assert 'class="cfg-pill' in body
 
 
 def test_viewer_path_click_does_not_pre_mutate_layer_visibility():

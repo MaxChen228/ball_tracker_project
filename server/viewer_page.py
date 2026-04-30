@@ -39,6 +39,7 @@ from render_scene_theme import (
 )
 from viewer_fragments import (
     cam_view_shared_toolbar_html,
+    detection_config_strip_html,
     failure_strip_html,
     health_nav_strip_html,
     session_tuning_strip_html,
@@ -53,6 +54,7 @@ class ViewerPageContext:
     fallback_color_json: str
     accent_color_json: str
     segments_json: str
+    segments_by_path_json: str
     # Camera diamond + axis geometry is rendered by the Three.js viewer
     # layers module (`static/threejs/viewer_layers.js`) using these
     # constants, mirroring render_scene_theme so dashboard + viewer
@@ -66,6 +68,7 @@ class ViewerPageContext:
     health_strip_html: str
     health_failure_html: str
     session_tuning_html: str
+    config_strip_html: str
     cost_threshold: float | None
     gap_threshold_m: float | None
     video_cells_html: str
@@ -89,6 +92,7 @@ def build_viewer_page_context(
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
     segments: list | None = None,
+    segments_by_path: dict[str, list] | None = None,
 ) -> ViewerPageContext:
     # Pre-Three.js this used a Plotly `build_figure(scene)` callable to
     # extract the static trace list + layout block; the viewer JS then
@@ -164,6 +168,10 @@ def build_viewer_page_context(
     seg_dicts: list[dict] = [
         s.model_dump() for s in ([] if segments is None else segments)
     ]
+    segs_by_path_dicts: dict[str, list[dict]] = {
+        path: [s.model_dump() for s in segs]
+        for path, segs in (({} if segments_by_path is None else segments_by_path).items())
+    }
 
     return ViewerPageContext(
         scene_json=_json.dumps(scene.to_dict()),
@@ -171,6 +179,7 @@ def build_viewer_page_context(
         fallback_color_json=_json.dumps(_FALLBACK_CAMERA_COLOR),
         accent_color_json=_json.dumps(_ACCENT),
         segments_json=_json.dumps(seg_dicts),
+        segments_by_path_json=_json.dumps(segs_by_path_dicts),
         scene_theme_json=_json.dumps(
             {
                 "cam_axis_len_m": _CAMERA_AXIS_LEN_M,
@@ -199,6 +208,9 @@ def build_viewer_page_context(
         health_failure_html=failure_strip_html(health),
         session_tuning_html=session_tuning_strip_html(
             cost_threshold, gap_threshold_m, scene.session_id,
+        ),
+        config_strip_html=detection_config_strip_html(
+            health.get("config_snapshots") or {}
         ),
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
@@ -302,6 +314,7 @@ def render_viewer_html(
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
     segments: list | None = None,
+    segments_by_path: dict[str, list] | None = None,
 ) -> str:
     ctx = build_viewer_page_context(
         scene,
@@ -310,6 +323,7 @@ def render_viewer_html(
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         segments=[] if segments is None else segments,
+        segments_by_path={} if segments_by_path is None else segments_by_path,
     )
     if ctx.can_run_server:
         # Operator may rerun after tweaking HSV / shape gate / selector;
@@ -391,6 +405,7 @@ def render_viewer_html(
   </div>
   <div class="nav-tuning" role="region" aria-label="Per-session pairing tuning">
     {ctx.session_tuning_html}
+    {ctx.config_strip_html}
   </div>
   {ctx.health_failure_html}
   <div class="work" data-mode="{ctx.layout_mode}">
@@ -417,7 +432,7 @@ def render_viewer_html(
         <div class="strip-legend"
              title="Strip colors: A detected (orange) · B detected (brown) · missed (grey) · no frame (pale) · chirp anchor (accent)"
              role="group" aria-label="Layer visibility + filters">
-          <span class="layer-toggles" id="layer-toggles" aria-label="Layer visibility">
+            <span class="layer-toggles" id="layer-toggles" aria-label="Layer visibility">
             <span class="layer-group" data-path-group role="radiogroup" aria-label="Active path">
               <span class="layer-name">Path</span>
               <button type="button" class="layer-pill" data-path="live" role="radio" aria-checked="false">live</button>
@@ -532,6 +547,7 @@ def render_viewer_html(
   "scene_theme": {ctx.scene_theme_json},
   "videos": {ctx.videos_json},
   "segments": {ctx.segments_json},
+  "segments_by_path": {ctx.segments_by_path_json},
   "has_triangulated": {str(ctx.has_triangulated).lower()}
 }}</script>
 <script>
@@ -570,7 +586,14 @@ window._applyTuning = function(btn) {{
       points: r.points || [],
       triangulated_by_path: r.triangulated_by_path || {{}},
       segments: r.segments || [],
+      segments_by_path: r.segments_by_path || {{}},
     }});
+    if (window._viewerPatchSegmentsState) {{
+      window._viewerPatchSegmentsState(
+        r.segments || [],
+        r.segments_by_path || {{}},
+      );
+    }}
     // Reseed the window globals + DOM so a subsequent drag preview
     // starts from the now-persisted baseline (matches what a reload
     // would have produced).
@@ -608,6 +631,7 @@ function _hookup() {{
     setupViewerLayers(window.BallTrackerScene, {{
       SCENE: d.SCENE,
       SEGMENTS: d.SEGMENTS,
+      SEGMENTS_BY_PATH: d.SEGMENTS_BY_PATH,
       TRAJ_BY_PATH: d.TRAJ_BY_PATH,
       HAS_TRIANGULATED: d.HAS_TRIANGULATED,
       fallbackColor: d.FALLBACK_COLOR,
