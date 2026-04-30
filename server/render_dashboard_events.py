@@ -8,8 +8,9 @@ Card structure (3 visual rows max, row 2/3 collapse when empty):
 
 DOM root keeps `.event-item` + `data-sid` because `86_live_stream.js`
 selects on it for the flash-done SSE animation, and `40_traj_handlers.js`
-delegates clicks on `.traj-toggle`. Internals renamed `.ev-*` so the new
-flexbox layout cannot be confused with the prior CSS-grid one."""
+delegates row clicks on `.event-item[data-sid]` to drive trajectory
+selection. Internals renamed `.ev-*` so the new flexbox layout cannot
+be confused with the prior CSS-grid one."""
 from __future__ import annotations
 
 import html
