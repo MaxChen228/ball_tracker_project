@@ -10,7 +10,7 @@ import html as _html
 
 from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
-from view_presets_runtime import VIEW_PRESETS_RUNTIME_JS
+from view_presets_runtime import VIEW_PRESETS_RUNTIME_JS, view_presets_toolbar_html
 from presets import Preset
 from reconstruct import Scene
 from render_compare import (
@@ -327,13 +327,7 @@ def render_viewer_html(
         <span class="lpb-meta" id="viewer-lpb-meta"></span>
       </div>
       <div id="scene"></div>
-      <div class="scene-views" role="toolbar" aria-label="Camera presets">
-        <button class="view-preset active" type="button" data-view="iso" title="Isometric overview (default)">ISO</button>
-        <button class="view-preset" type="button" data-view="catch" title="Catcher's view — strike zone front-on (X/Z plane)">CATCH</button>
-        <button class="view-preset" type="button" data-view="side" title="1B-side view — trajectory arc (Y/Z plane)">SIDE</button>
-        <button class="view-preset" type="button" data-view="top" title="Top-down — horizontal break (X/Y plane)">TOP</button>
-        <button class="view-preset" type="button" data-view="pitcher" title="Pitcher's view — looking back at catcher">PITCHER</button>
-      </div>
+      {view_presets_toolbar_html()}
       <div class="scene-toolbar" role="toolbar" aria-label="Scene controls">
         <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
         <button id="mode-playback" type="button" role="tab" title="Cut trace at playback time">Playback</button>
