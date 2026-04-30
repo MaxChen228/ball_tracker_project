@@ -623,6 +623,35 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
   50%     {{ opacity: 0.55; }}
 }}
 
+/* CFG strip — preset filename chips on row 2 (`Live: <name> | Svr:
+   <name>`). Mirrors `.ev-pipe` typography so chips line up cleanly
+   alongside L/S/SEG; the title attribute carries the resolved H/S/V
+   values for hover. `.deleted` greys-out a chip whose preset file has
+   been unlinked since the session was recorded. */
+.ev-cfg-strip {{ display: flex; gap: 5px; flex: 0 0 auto; flex-wrap: wrap;
+                  row-gap: 4px; margin-left: 4px; }}
+.ev-cfg-chip {{ font-family: var(--mono); font-size: 10px; line-height: 1;
+                 padding: 3px 7px; border: 1px solid var(--border-base);
+                 border-radius: var(--r); color: var(--sub);
+                 letter-spacing: 0.04em; white-space: nowrap;
+                 font-variant-numeric: tabular-nums; }}
+.ev-cfg-chip b {{ font-weight: 600; color: var(--sub-strong, var(--ink));
+                   margin-left: 5px; opacity: 0.85; }}
+.ev-cfg-chip.none {{ opacity: 0.55; }}
+.ev-cfg-chip.deleted {{ color: var(--failed); border-color: var(--failed);
+                         opacity: 0.7; }}
+.ev-cfg-chip.deleted b {{ color: var(--failed); }}
+.ev-cfg-chip i {{ font-style: italic; opacity: 0.7; margin-left: 4px; }}
+/* Inline preset selector wedged into the Run-srv form — narrow, mono,
+   matches the pipe-chip aesthetic so it doesn't visually overpower the
+   adjacent button. */
+.ev-cfg-select {{ font-family: var(--mono); font-size: 10px;
+                   padding: 3px 6px; border: 1px solid var(--border-base);
+                   border-radius: var(--r); color: var(--ink);
+                   background: var(--surface, #FCFBFA);
+                   max-width: 180px; margin-right: 4px;
+                   letter-spacing: 0.04em; }}
+
 .ev-action-form {{ margin: 0; }}
 .ev-btn {{ background: transparent; border: 1px solid var(--border-base);
             color: var(--sub); font-family: var(--mono); font-size: 9px;

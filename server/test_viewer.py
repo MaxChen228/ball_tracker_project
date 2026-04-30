@@ -819,11 +819,12 @@ def test_apply_tuning_patches_in_place_no_reload():
     assert "gapInput.value = String(cm)" in body
 
 
-def test_viewer_page_run_server_post_form_has_no_source_picker():
-    """Detection config has a single source of truth — the dashboard's
-    current HSV + shape_gate. The "Rerun server" form must NOT carry
-    any source selector (no <select>, no hidden input); hitting the
-    endpoint always uses dashboard config."""
+def test_viewer_page_run_server_post_form_carries_preset_selector():
+    """Operator picks the preset to detect under via an inline <select>
+    on the Run-server form. Default selected option is the dashboard's
+    current active preset; every on-disk preset surfaces as an option
+    so the operator can compare detection across configs without round-
+    tripping through the dashboard HSV card."""
     from viewer_page import render_viewer_html
 
     K, (R_a, t_a, _, H_a), _ = _make_rig()
@@ -843,8 +844,6 @@ def test_viewer_page_run_server_post_form_has_no_source_picker():
         "error": None,
         "duration_s": 0.0,
         "received_at": None,
-        # camera_only flips can_run_server True so the action form
-        # actually renders (otherwise action_html is empty).
         "mode": "camera_only",
     }
     videos = [
@@ -854,11 +853,18 @@ def test_viewer_page_run_server_post_form_has_no_source_picker():
     html = render_viewer_html(scene, videos, health)
 
     assert f'action="/sessions/{session_id}/run_server_post"' in html
-    assert '<select ' not in html
+    # Inline preset picker — name matches the run_server_post body field.
+    assert 'name="preset_name"' in html
+    assert 'class="action-select"' in html
+    # Default boot active is `tennis` (built-in seed); verify it surfaces
+    # as the selected option so the form's default submit hits a known
+    # preset rather than 422'ing on an empty value.
+    assert '<option value="tennis"' in html
+    assert ' selected>' in html
+    # Legacy four-way source picker is gone — no `Live`/`frozen`/`preset:`
+    # prefixed options.
     assert 'name="source"' not in html
-    assert 'class="action-select"' not in html
     assert 'value="preset:' not in html
-    assert '<input type="hidden" name="source"' not in html
 
 
 def test_failure_strip_html_prefers_earliest_blocking_reason():

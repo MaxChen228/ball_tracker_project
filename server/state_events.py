@@ -111,6 +111,19 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                 # on the next successful run. Empty dict = no pending
                 # failure. Surfaced as an inline chip on the events row.
                 "server_post_errors": state.processing.errors_for(sid),
+                # Preset filenames frozen onto the SessionResult: live's
+                # is the active preset at arm time, server_post's is the
+                # operator-chosen preset at the most recent rerun. Both
+                # may be None on legacy sessions / pre-rerun. Drives the
+                # events row's CFG strip; the renderer falls back to "—"
+                # on None and adds a "(deleted)" suffix when the
+                # referenced file no longer exists on disk.
+                "live_preset_name": (
+                    result.live_preset_name if result is not None else None
+                ),
+                "server_post_preset_name": (
+                    result.server_post_preset_name if result is not None else None
+                ),
             }
         )
 

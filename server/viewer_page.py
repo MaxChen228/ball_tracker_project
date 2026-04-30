@@ -338,13 +338,29 @@ def render_viewer_html(
                 f'<span class="action-ts" title="Server detection last completed at {iso}">'
                 f'{iso}</span>'
             )
-        # Single source of detection config: dashboard's current HSV +
-        # shape_gate. Operator switches preset / hand-tunes via the
-        # dashboard HSV card; this button just runs server_post against
-        # whatever the dashboard currently holds. No source picker —
-        # there is only one config in the system.
+        # Operator picks which preset to detect under. Default selection
+        # is the dashboard's current active preset (matches what the iOS
+        # live path is using right now), but the operator can pick any
+        # named preset on disk — the server resolves the file at request
+        # time and stamps the chosen name onto
+        # `SessionResult.server_post_preset_name`. Re-running with a
+        # different preset overwrites both detection results and the
+        # field; there is no per-session history of past server_post
+        # runs.
+        from main import state as _state
+        from html import escape as _esc
+        active = _state.detection_config().preset
+        options = "".join(
+            f'<option value="{_esc(p.name)}"'
+            f'{" selected" if p.name == active else ""}>'
+            f'{_esc(p.label)} ({_esc(p.name)})</option>'
+            for p in _state.list_presets()
+        )
         action_html = (
             f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post" class="action-form">'
+            f'<select class="action-select" name="preset_name" '
+            f'title="Detection preset to run server-side">'
+            f'{options}</select>'
             f'<button class="action" type="submit">{label}</button>'
             f'{ts_html}'
             f'</form>'

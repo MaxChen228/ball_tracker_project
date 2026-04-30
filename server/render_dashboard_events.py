@@ -61,6 +61,7 @@ def _render_card(e: dict[str, Any]) -> str:
     swatch_html = _swatch_html(sid, n_tri > 0)
     statuses_html = _statuses_html(e)
     pipes_html = _pipes_html(e)
+    cfg_html = _cfg_strip_html(e)
     actions_html = _actions_html(e, sid, processing_state, trashed)
 
     row1 = (
@@ -74,7 +75,7 @@ def _render_card(e: dict[str, Any]) -> str:
         f'</div>'
     )
     row2 = (
-        f'<div class="ev-row2">{pipes_html}</div>'
+        f'<div class="ev-row2">{pipes_html}{cfg_html}</div>'
         if pipes_html else ""
     )
     row3 = (
@@ -182,6 +183,52 @@ def _pipes_html(e: dict[str, Any]) -> str:
     return f'<div class="ev-pipes">{"".join(bits)}</div>'
 
 
+def _cfg_strip_html(e: dict[str, Any]) -> str:
+    """Live + server_post preset chips — `Live: <name> | Svr: <name|—>`.
+
+    Resolves the preset on disk to populate the hover popover with the
+    actual H/S/V values. A preset filename that's been deleted out from
+    under the session renders with a "(deleted)" suffix and no popover.
+    """
+    from main import state as _state
+
+    live_name = e.get("live_preset_name")
+    srv_name = e.get("server_post_preset_name")
+    if live_name is None and srv_name is None:
+        return ""
+
+    def _chip(label: str, name: str | None) -> str:
+        if name is None:
+            return (
+                f'<span class="ev-cfg-chip none" title="{html.escape(label)}: not set">'
+                f'{html.escape(label)} <b>—</b></span>'
+            )
+        try:
+            p = _state.load_preset(name)
+        except KeyError:
+            return (
+                f'<span class="ev-cfg-chip deleted" title="{html.escape(label)}: '
+                f'preset {html.escape(name)} no longer on disk">'
+                f'{html.escape(label)} <b>{html.escape(name)}</b> '
+                f'<i>(deleted)</i></span>'
+            )
+        h = p.hsv
+        g = p.shape_gate
+        tip = (
+            f"H {h.h_min}-{h.h_max} · S {h.s_min}-{h.s_max} · V {h.v_min}-{h.v_max} · "
+            f"asp≥{g.aspect_min:.2f} fill≥{g.fill_min:.2f}"
+        )
+        return (
+            f'<span class="ev-cfg-chip" title="{html.escape(p.label)} — {html.escape(tip)}">'
+            f'{html.escape(label)} <b>{html.escape(name)}</b></span>'
+        )
+
+    return (
+        f'<div class="ev-cfg-strip">{_chip("Live", live_name)}'
+        f'{_chip("Svr", srv_name)}</div>'
+    )
+
+
 def _actions_html(e: dict[str, Any], sid: str,
                   processing_state: str, trashed: bool) -> str:
     parts: list[str] = []
@@ -191,11 +238,12 @@ def _actions_html(e: dict[str, Any], sid: str,
     if processing_state in {"queued", "processing"}:
         parts.append(_form_btn(f"/sessions/{sid}/cancel_processing", "Cancel", "warn"))
     elif not trashed and server_status != "done":
-        # server_post always runs against the dashboard's current
-        # detection config — single source of truth, no source picker.
-        parts.append(_form_btn(
-            f"/sessions/{sid}/run_server_post", "Run srv", "ok",
-        ))
+        # Operator picks the preset to detect under via the inline
+        # <select>. Default selection = current dashboard active preset
+        # (usually what the operator just dialled in via Apply on the
+        # HSV card); they can pick any other named preset to compare
+        # detection results. Re-running overwrites the prior result.
+        parts.append(_run_srv_form(sid))
 
     if trashed:
         parts.append(_form_btn(
@@ -212,6 +260,32 @@ def _actions_html(e: dict[str, Any], sid: str,
         ))
 
     return "".join(parts)
+
+
+def _run_srv_form(sid: str) -> str:
+    """`Run srv` button with inline preset selector. Default option is
+    the dashboard's current active preset; operator can pick any
+    on-disk preset to detect under. Submits as
+    application/x-www-form-urlencoded with `preset_name` field, which
+    `routes/sessions._enqueue_server_post` resolves to a Preset object
+    or 404s on unknown name."""
+    from main import state as _state
+
+    active = _state.detection_config().preset
+    options = "".join(
+        f'<option value="{html.escape(p.name)}"'
+        f'{" selected" if p.name == active else ""}>'
+        f'{html.escape(p.label)} ({html.escape(p.name)})</option>'
+        for p in _state.list_presets()
+    )
+    return (
+        f'<form class="ev-action-form" method="POST" '
+        f'action="/sessions/{sid}/run_server_post">'
+        f'<select class="ev-cfg-select" name="preset_name" '
+        f'title="Detection preset to run server-side">{options}</select>'
+        f'<button class="ev-btn ok" type="submit">Run srv</button>'
+        f'</form>'
+    )
 
 
 def _form_btn(action: str, label: str, variant: str,
