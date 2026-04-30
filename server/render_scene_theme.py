@@ -40,9 +40,15 @@ _GHOST_JUMP = "#EF4444"     # red   — "ray direction jumped" past max_jump_px
 _GHOST_OPACITY = 0.25
 _GHOST_LINE_WIDTH = 1.5
 
+# Camera frustum + ray colours. Deliberately not _CONTRA/_DUAL (which are
+# orange + blue) so they don't collide with the timeline's LIVE strip
+# (orange) and SVR strip (blue). Purple + teal-green pair separates
+# camera identity from path identity in viewer scenes.
+_CAMERA_COLOR_A = "#7E5BB0"  # purple
+_CAMERA_COLOR_B = "#2FB39A"  # teal-green
 _CAMERA_COLORS = {
-    "A": _CONTRA,
-    "B": _DUAL,
+    "A": _CAMERA_COLOR_A,
+    "B": _CAMERA_COLOR_B,
 }
 _FALLBACK_CAMERA_COLOR = _SUB
 

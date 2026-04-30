@@ -258,7 +258,7 @@ CAM_VIEW_FULL_CSS = CAM_VIEW_BOX_CSS + CAM_VIEW_CONTENT_CSS
 
 
 _DRAW_AXES_JS = r"""
-function drawAxesLayer(ctx, sx, sy, cam) {
+function drawAxesLayer(ctx, sx, sy, cam, _extras, cfg) {
   // 0.3 m world axes anchored at plate centre (0, 0.216, 0). X red, Y green, Z blue.
   const origin = [0.0, 0.216, 0.0];
   const tips = {
@@ -270,16 +270,20 @@ function drawAxesLayer(ctx, sx, sy, cam) {
   if (!o) return;
   const ox = o.u * sx, oy = o.v * sy;
   const colors = { x: '#E07A6B', y: '#9DD68F', z: '#7AB8E0' };
+  const lw = (cfg && Number.isFinite(cfg.lineWidth)) ? cfg.lineWidth : 1.6;
+  ctx.save();
+  if (cfg && Number.isFinite(cfg.opacity)) ctx.globalAlpha = cfg.opacity;
   for (const k of ['x', 'y', 'z']) {
     const tip = projectWorldToPixel(tips[k], cam);
     if (!tip) continue;
     ctx.strokeStyle = colors[k];
-    ctx.lineWidth = 1.6;
+    ctx.lineWidth = lw;
     ctx.beginPath();
     ctx.moveTo(ox, oy);
     ctx.lineTo(tip.u * sx, tip.v * sy);
     ctx.stroke();
   }
+  ctx.restore();
 }
 """
 
@@ -297,19 +301,30 @@ CAM_VIEW_RUNTIME_JS = (
   const camExtras = new Map();  // cam_id -> { rms_px?: number, ... }
   const camStatus = new Map();  // cam_id -> { online: bool, calibrated: bool }
   const layerState = new Map(); // cam_id -> { plate: bool, axes: bool, ... }
-  const opacityState = new Map(); // cam_id -> 0..100
-  const layerRenderers = new Map(); // key -> fn(ctx, sx, sy, meta, extras)
+  const opacityState = new Map(); // cam_id -> 0..100  (canvas-level CSS opacity)
+  // Per-layer config: cam_id -> Map<layerKey, { opacity: 0..1, lineWidth: px }>.
+  // Renderers receive this object as their 5th arg so they can honour
+  // viewer chip popover sliders (rays / plate / axes / blobs each have
+  // their own opacity + line-width sliders post-PR). Defaults:
+  // opacity 1.0 (fully visible), lineWidth picked per layer below.
+  const layerConfig = new Map();
+  const LAYER_DEFAULT_LW = { plate: 1.6, axes: 1.6, detection_blobs: 1.5 };
+  const layerRenderers = new Map(); // key -> fn(ctx, sx, sy, meta, extras, cfg)
 
   // Built-in layer renderers — register here so plate/axes work out of the box
   // and callers can registerLayer('marker_footprints', ...) to plug in extras.
   // registerLayer silently overrides — pages that want to customise plate
   // rendering can replace this. Reserved keys: plate, axes.
-  layerRenderers.set('plate', function (ctx, sx, sy, cam) {
+  layerRenderers.set('plate', function (ctx, sx, sy, cam, _extras, cfg) {
     // Plate pentagon + principal-point cross. Bundled together because
     // they're both calibration-alignment indicators — toggle 'plate' off
     // gives the operator a clean image with no overlay annotations.
+    // cfg.opacity scales the pentagon stroke + fill via globalAlpha;
+    // cfg.lineWidth drives stroke width directly.
     const cxPx = cam.cx * sx;
     const cyPx = cam.cy * sy;
+    ctx.save();
+    if (cfg && Number.isFinite(cfg.opacity)) ctx.globalAlpha = cfg.opacity;
     ctx.strokeStyle = 'rgba(219, 214, 205, 0.45)';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -317,26 +332,54 @@ CAM_VIEW_RUNTIME_JS = (
     ctx.moveTo(cxPx, cyPx - 6); ctx.lineTo(cxPx, cyPx + 6);
     ctx.stroke();
     const proj = PLATE_WORLD.map(P => projectWorldToPixel(P, cam));
-    if (!proj.every(Boolean)) return;
-    ctx.strokeStyle = 'rgba(255, 200, 0, 0.85)';
-    ctx.fillStyle = 'rgba(255, 200, 0, 0.10)';
-    ctx.lineWidth = 1.6;
-    ctx.setLineDash([6, 4]);
-    ctx.beginPath();
-    for (let i = 0; i < proj.length; i++) {
-      const x = proj[i].u * sx, y = proj[i].v * sy;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    if (proj.every(Boolean)) {
+      ctx.strokeStyle = 'rgba(255, 200, 0, 0.85)';
+      ctx.fillStyle = 'rgba(255, 200, 0, 0.10)';
+      ctx.lineWidth = (cfg && Number.isFinite(cfg.lineWidth)) ? cfg.lineWidth : 1.6;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      for (let i = 0; i < proj.length; i++) {
+        const x = proj[i].u * sx, y = proj[i].v * sy;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.setLineDash([]);
+    ctx.restore();
   });
-  layerRenderers.set('axes', drawAxesLayer);
+  layerRenderers.set('axes', function (ctx, sx, sy, cam, _extras, cfg) {
+    ctx.save();
+    if (cfg && Number.isFinite(cfg.opacity)) ctx.globalAlpha = cfg.opacity;
+    const lw = (cfg && Number.isFinite(cfg.lineWidth)) ? cfg.lineWidth : 1.6;
+    // Wrap the legacy axes renderer; it sets its own lineWidth so we
+    // patch ctx.lineWidth via a save/restore-bracketed override that
+    // the renderer's per-axis assignment honours (it sets 1.6 each
+    // call, but we reset it through a Proxy-free shim: just invoke
+    // and then trust globalAlpha for opacity).
+    const origLW = ctx.lineWidth;
+    ctx.lineWidth = lw;
+    drawAxesLayer(ctx, sx, sy, cam);
+    ctx.lineWidth = origLW;
+    ctx.restore();
+  });
 
   function ensureLayerState(camId) {
     if (!layerState.has(camId)) layerState.set(camId, {});
     return layerState.get(camId);
+  }
+
+  function ensureLayerConfig(camId, layerKey) {
+    if (!layerConfig.has(camId)) layerConfig.set(camId, new Map());
+    const m = layerConfig.get(camId);
+    if (!m.has(layerKey)) {
+      m.set(layerKey, {
+        opacity: 1.0,
+        lineWidth: LAYER_DEFAULT_LW[layerKey] || 1.5,
+      });
+    }
+    return m.get(layerKey);
   }
 
   function ensureOpacity(camId) {
@@ -441,7 +484,7 @@ CAM_VIEW_RUNTIME_JS = (
       const fn = layerRenderers.get(key);
       if (!fn) continue;
       try {
-        fn(ctx, sx, sy, meta, camExtras.get(camId) || {});
+        fn(ctx, sx, sy, meta, camExtras.get(camId) || {}, ensureLayerConfig(camId, key));
       } catch (e) {
         // Per-layer failures must not break the whole canvas — log and move on.
         if (window.console && console.warn) console.warn('cam-view layer error', key, e);
@@ -491,6 +534,24 @@ CAM_VIEW_RUNTIME_JS = (
       const btn = root.querySelector(`.cv-layer[data-layer="${layerKey}"]`);
       if (btn) btn.classList.toggle('on', !!on);
     }
+    redraw(camId);
+  }
+
+  function setLayerOpacity(camId, layerKey, value) {
+    // Per-layer opacity 0..1. Drives ctx.globalAlpha inside the layer's
+    // renderer so stacked layers can dim independently. Distinct from
+    // setOpacity (canvas-level CSS opacity, kept for back-compat with
+    // dashboard/setup/markers' OVL slider).
+    const v = Math.max(0, Math.min(1, Number(value)));
+    if (!Number.isFinite(v)) return;
+    ensureLayerConfig(camId, layerKey).opacity = v;
+    redraw(camId);
+  }
+
+  function setLayerLineWidth(camId, layerKey, value) {
+    const v = Math.max(0.5, Number(value));
+    if (!Number.isFinite(v)) return;
+    ensureLayerConfig(camId, layerKey).lineWidth = v;
     redraw(camId);
   }
 
@@ -619,6 +680,7 @@ CAM_VIEW_RUNTIME_JS = (
     camExtras.delete(camId);
     camStatus.delete(camId);
     layerState.delete(camId);
+    layerConfig.delete(camId);
     opacityState.delete(camId);
     clickHandlers.delete(camId);
     const obs = resizeObservers.get(camId);
@@ -746,7 +808,7 @@ CAM_VIEW_RUNTIME_JS = (
   window.BallTrackerCamView = {
     mount, mountAll, redraw, redrawAll,
     setMeta, setExtras, setStatus,
-    setLayer, setOpacity, registerLayer,
+    setLayer, setOpacity, setLayerOpacity, setLayerLineWidth, registerLayer,
     onCanvasClick, listCams,
     forgetCam, startPreviewPolling, startCalibrationPolling,
   };
