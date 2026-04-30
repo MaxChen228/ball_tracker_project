@@ -18,13 +18,19 @@
      is NOT a grid row — it floats as a fixed-position dock at the
      viewport bottom (see `.timeline` below). `.viewer` reserves equal
      bottom padding via `--timeline-h` (set by JS once the dock measures
-     itself) so nothing under .work hides under the dock. */
-  .viewer { display:grid; grid-template-rows:52px auto minmax(0, 1fr);
+     itself) so nothing under .work hides under the dock.
+     First grid track is `auto` (not fixed 52 px) so the nav can wrap
+     to a second line on dense sessions (cam pills + session-tuning +
+     RERUN SERVER + timestamps + back link easily exceed a single row
+     ~1500 px wide) without leaking content above the bar — the prior
+     fix forced single-line + ellipsis but that just hid information. */
+  .viewer { display:grid; grid-template-rows:auto auto minmax(0, 1fr);
     height:100vh; min-height:0; overflow:hidden;
     padding-bottom:var(--timeline-h, 80px); }
-  .nav { height:52px; flex:0 0 52px; background:var(--surface);
+  .nav { min-height:52px; background:var(--surface);
     border-bottom:1px solid var(--border-base); display:flex;
-    align-items:center; padding:0 var(--s-5); gap:var(--s-4); }
+    align-items:center; flex-wrap:wrap; row-gap:var(--s-2);
+    padding:var(--s-2) var(--s-5); gap:var(--s-4); }
   .nav .brand { font-family:var(--mono); font-weight:700; font-size:14px;
     letter-spacing:0.16em; color:var(--ink); }
   .nav .brand .dot { display:inline-block; width:7px; height:7px;
@@ -64,15 +70,13 @@
   .nav .action-ts { font-family:var(--mono); font-size:10px;
     color:var(--sub); white-space:nowrap; font-variant-numeric:tabular-nums;
     letter-spacing:0.04em; }
-  /* Strip used to wrap to a 2nd line when nav was tight (cam pills +
-     n-tri counter + meta + duration overflowed ~400 px), then `.nav`'s
-     `align-items:center` centred the 90 px-tall stack within the 52 px
-     row, leaking the top line ABOVE the nav. Force nowrap + ellipsis
-     so the stack stays exactly one line tall regardless of content. */
+  /* The strip can wrap internally (cam pills + meta + duration); the
+     parent .nav now also wraps (flex-wrap:wrap above) so wrapped lines
+     stay inside the bar instead of overflowing above it. */
   .health-strip { flex:1 1 auto; min-width:0; display:flex;
-    align-items:center; gap:var(--s-3); flex-wrap:nowrap;
+    align-items:center; gap:var(--s-3); flex-wrap:wrap;
     font-family:var(--mono); font-size:11px; color:var(--sub);
-    letter-spacing:0.04em; overflow:hidden; white-space:nowrap; }
+    letter-spacing:0.04em; }
   .session-tuning { display:inline-flex; align-items:center; gap:6px;
     padding:3px 8px; border:1px solid var(--border-base);
     border-radius:var(--r); background:var(--surface);
@@ -105,7 +109,7 @@
   .health-strip .hs-meta .hs-dur { font-variant-numeric:tabular-nums; }
   .health-strip .hs-meta > span + span::before { content:"·"; margin-right:6px;
     color:var(--border-base); }
-  .health-strip .hs-cams { display:inline-flex; gap:var(--s-2); flex-wrap:nowrap; }
+  .health-strip .hs-cams { display:inline-flex; gap:var(--s-2); flex-wrap:wrap; }
   .health-strip .hs-cam { display:inline-flex; align-items:center; gap:6px;
     padding:2px 6px; border:1px solid var(--border-base); border-radius:var(--r);
     background:var(--bg); }

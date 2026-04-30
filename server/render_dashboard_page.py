@@ -53,11 +53,13 @@ def render_events_index_html(
     scene = build_calibration_scene(state.calibrations())
     fig = _build_figure(scene)
     # aspectmode='data' matches the viewer (real metric X:Y:Z scale).
-    # The viewer uses this in its default and the strike zone reads at
-    # natural proportions there. Dashboard mirrors that — same render
-    # path, same look. No explicit ranges: Plotly auto-fits the data
-    # bbox (ground plane ±_GROUND_HALF_EXTENT_M, strike zone, world
-    # axes); empty-state still has the ground plane to anchor the bbox.
+    # Eye coords in view-presets table interpret as world meters under
+    # 'data' mode (under 'cube'/'manual' Plotly normalises them, which
+    # makes the same eye=(0, -1.98, 1.16) end up as a far-out camera
+    # outside the unit cube and shrank the scene). Strike zone may sit
+    # off-centre when fit segments extend the data bbox asymmetrically,
+    # but the tradeoff is acceptable: scene fills the canvas and metric
+    # ratios stay honest.
     fig.update_layout(
         title=None,
         margin=dict(l=0, r=0, t=8, b=0),

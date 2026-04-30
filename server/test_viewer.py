@@ -826,7 +826,7 @@ def test_viewer_locks_layout_to_viewport_without_page_scroll():
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
     assert "overflow:hidden" in body
-    assert "grid-template-rows:52px auto minmax(0, 1fr)" in body
+    assert "grid-template-rows:auto auto minmax(0, 1fr)" in body
     assert "height:100vh" in body
     # Sticky-bottom dock contract: timeline pinned to viewport bottom,
     # .viewer reserves matching padding via the --timeline-h CSS var.
