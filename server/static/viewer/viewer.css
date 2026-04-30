@@ -27,13 +27,6 @@
     letter-spacing:0.12em; text-transform:uppercase; color:var(--sub);
     text-decoration:none; }
   .nav .back:hover { color:var(--ink); }
-  .nav .fit-link { font-family:var(--mono); font-size:10px;
-    letter-spacing:0.12em; text-transform:uppercase; color:var(--ink);
-    text-decoration:none; padding:5px 10px;
-    border:1px solid var(--border-base); border-radius:var(--r);
-    background:var(--surface);
-    transition:border-color 0.15s, color 0.15s; }
-  .nav .fit-link:hover { border-color:var(--accent); color:var(--accent); }
   .nav .srv-progress { font-family:var(--mono); font-size:10px;
     letter-spacing:0.06em; color:var(--accent);
     padding:3px 8px; border:1px solid var(--accent); border-radius:var(--r);

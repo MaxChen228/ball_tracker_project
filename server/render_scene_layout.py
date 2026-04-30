@@ -1,15 +1,9 @@
 """Shared Plotly layout helpers for 3D scene pages.
 
-Pre-extraction `render_scene._build_figure` and `render_fit.build_fit_figure`
-each carried their own copy of the axis style + layout block. Drift was
-visible: dashboard's default ISO camera (eye=(1.6, 1.816, 1.56),
-center=(0, 0.216, 0.76)) didn't match fit's (eye=(1.5, 1.5, 1.0),
-center=(0, 0.2, 0.3)) so the same strike zone landed in different screen
-positions on the two pages.
-
-Callers can still override `camera` / `aspectmode` per-page; the helper
-just sets sane defaults that match the dashboard's strike-zone-centred
-ISO chip.
+Pre-extraction `render_scene._build_figure` and the now-retired
+`render_fit.build_fit_figure` each carried their own copy of the axis
+style + layout block. Default ISO camera matches the dashboard's
+strike-zone-centred ISO chip; the viewer reuses the same defaults.
 """
 from __future__ import annotations
 

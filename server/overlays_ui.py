@@ -12,8 +12,9 @@ helpers consumers can alias locally.
 
 Older versions also shipped client-side ballistic-fit math
 (``ballisticFit`` / ``fitTraces``) and per-segment speed colouring
-(``speedTraces``). Both are gone — the multi-segment fit lives at
-``/fit/{session_id}`` and supersedes them. Don't restore.
+(``speedTraces``). Both are gone — multi-segment fit is now persisted
+on ``SessionResult.segments`` and rendered by dashboard / viewer
+directly. Don't restore.
 """
 from __future__ import annotations
 

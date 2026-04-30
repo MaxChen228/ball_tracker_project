@@ -1,3 +1,34 @@
+  // Mirrors dashboard 30_traces._SEG_PALETTE so dashboard + viewer
+  // colour seg0 the same red, seg1 the same blue, etc.
+  const _VIEWER_SEG_PALETTE = [
+    "#E45756", "#4C78A8", "#54A24B", "#F58518",
+    "#B279A2", "#72B7B2", "#FF9DA6", "#9D755D",
+  ];
+
+  // Pick the segment whose [t_start, t_end] contains `t`, or the nearest
+  // one (by midpoint distance) when no segment is active. Returns -1 on
+  // empty SEGMENTS. The "nearest" branch is intentional UX, not silent
+  // fallback: scrubbing in the wind-up portion of the video should still
+  // show seg0's release speed rather than blank out — and only the
+  // badge label consumes this fallback (the trace marker block in
+  // buildDynamicTraces gates on isActive in-range).
+  function activeSegmentIndex(t) {
+    if (!SEGMENTS.length) return -1;
+    for (let i = 0; i < SEGMENTS.length; ++i) {
+      const s = SEGMENTS[i];
+      if (t >= s.t_start && t <= s.t_end) return i;
+    }
+    let best = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < SEGMENTS.length; ++i) {
+      const s = SEGMENTS[i];
+      const mid = 0.5 * (s.t_start + s.t_end);
+      const d = Math.abs(t - mid);
+      if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return best;
+  }
+
   function camMarkerTracesFor(c) {
     const color = CAM_COLOR[c.camera_id] || FALLBACK;
     const [cx, cy, cz] = c.center_world;
@@ -127,7 +158,7 @@
     // Always rendered (no per-cam toggle) — fit is whole-pitch, not
     // per-camera. Active segment (currentT in [t_start, t_end]) renders
     // brighter; inactive segments fade so multi-bounce events stay
-    // legible without dominating. `_VIEWER_SEG_PALETTE` mirrors render_fit.
+    // legible without dominating. `_VIEWER_SEG_PALETTE` mirrors dashboard 30_traces.
     if (Array.isArray(SEGMENTS) && SEGMENTS.length) {
       const G_Z = -9.81;
       const N = 64;
@@ -169,36 +200,6 @@
       }
     }
     return out;
-  }
-
-  // Mirrors render_fit._SEG_PALETTE so dashboard / viewer / fit page all
-  // colour seg0 the same red, seg1 the same blue, etc.
-  const _VIEWER_SEG_PALETTE = [
-    "#E45756", "#4C78A8", "#54A24B", "#F58518",
-    "#B279A2", "#72B7B2", "#FF9DA6", "#9D755D",
-  ];
-
-  // Pick the segment whose [t_start, t_end] contains `t`, or the nearest
-  // one (by absolute distance to its midpoint) when no segment is active.
-  // Returns -1 when SEGMENTS is empty.
-  function activeSegmentIndex(t) {
-    if (!SEGMENTS.length) return -1;
-    for (let i = 0; i < SEGMENTS.length; ++i) {
-      const s = SEGMENTS[i];
-      if (t >= s.t_start && t <= s.t_end) return i;
-    }
-    // Nearest segment by midpoint distance — operator scrubbed before
-    // release or after follow-through; show segment 0's release speed
-    // as a sane default rather than blanking the badge.
-    let best = 0;
-    let bestDist = Infinity;
-    for (let i = 0; i < SEGMENTS.length; ++i) {
-      const s = SEGMENTS[i];
-      const mid = 0.5 * (s.t_start + s.t_end);
-      const d = Math.abs(t - mid);
-      if (d < bestDist) { bestDist = d; best = i; }
-    }
-    return best;
   }
 
   {PLATE_WORLD_JS}

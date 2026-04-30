@@ -1,9 +1,9 @@
 """Static scene traces — ground / plate / strike zone / world axes / cameras.
 
 Single source of truth shared by `render_scene._build_figure` (dashboard +
-viewer) and `render_fit.build_fit_figure` (fit page). Pre-extraction these
-~150 lines were duplicated across both modules; visual drift was a real
-risk (e.g. zone colour change in one place, not the other).
+viewer). Pre-extraction these ~150 lines were duplicated across the
+viewer build path and the now-retired fit page; visual drift was a real
+risk (zone colour change in one place, not the other).
 """
 from __future__ import annotations
 

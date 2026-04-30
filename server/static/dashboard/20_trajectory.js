@@ -41,7 +41,10 @@
       if (!r.ok) return null;
       const data = await r.json();
       const entry = {
-        points: (data.points || []).slice().sort((a, b) => a.t_rel_s - b.t_rel_s),
+        // Server pre-sorts `points` by t_rel_s in stamp_segments_on_result
+        // so `SegmentRecord.original_indices` indexes into a time-sorted
+        // list — do NOT re-sort here, that would invalidate the contract.
+        points: data.points || [],
         segments: Array.isArray(data.segments) ? data.segments : [],
       };
       trajCache.set(sid, entry);

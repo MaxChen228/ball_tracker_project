@@ -145,12 +145,12 @@ def build_viewer_page_context(
     # of A/B). None when nothing has run yet for this session.
     server_post_ran_at = health.get("server_post_ran_at")
 
-    seg_dicts: list[dict] = []
-    for s in (segments or []):
-        if hasattr(s, "model_dump"):
-            seg_dicts.append(s.model_dump())
-        else:
-            seg_dicts.append(dict(s))
+    # SegmentRecord-only contract: callers (route + reprocess) pass
+    # SegmentRecord instances. Tests construct them too. No dict
+    # affordance — keeps wire shape canonical.
+    seg_dicts: list[dict] = [
+        s.model_dump() for s in ([] if segments is None else segments)
+    ]
 
     return ViewerPageContext(
         scene_json=_json.dumps(scene.to_dict()),
@@ -245,7 +245,7 @@ def render_viewer_html(
         build_figure=build_figure,
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
-        segments=segments or [],
+        segments=[] if segments is None else segments,
     )
     if ctx.can_run_server:
         # Operator may rerun after tweaking HSV / shape gate / selector;
@@ -295,11 +295,6 @@ def render_viewer_html(
         )
     else:
         action_html = ""
-    fit_link_html = (
-        f'<a class="fit-link" href="/fit/{ctx.session_id}"'
-        f' title="Independent fit page — multi-segment ballistic extraction (auto-picks server_post / live)">'
-        f'Fit&nbsp;&rarr;</a>'
-    )
     progress_html = (
         '<span class="srv-progress" id="srv-progress" hidden'
         ' aria-live="polite"></span>'
@@ -320,7 +315,6 @@ def render_viewer_html(
     {ctx.session_tuning_html}
     {progress_html}
     {action_html}
-    {fit_link_html}
     <a class="back" href="/">&larr; dashboard</a>
   </div>
   {ctx.health_failure_html}
