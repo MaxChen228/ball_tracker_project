@@ -13,9 +13,14 @@
   // exclusive choice; layer toggles compose freely on top.
   const LAYER_VIS_KEY = "ball_tracker_viewer_layer_visibility_v6";
   function _defaultPath() {
+    // server_post is the oracle when it has been run, otherwise fall
+    // back to live so a freshly-thrown / live-only session opens with
+    // a populated 3D scene + strip rather than empty SVR. (See PR #93
+    // alignment scorecard — viewer pill default used to land on SVR
+    // because of legacy `triangulated` aliasing; fixed in 10_video_master.)
     if (HAS_PATH.server_post || HAS_TRAJ_PATH.server_post) return "server_post";
     if (HAS_PATH.live || HAS_TRAJ_PATH.live) return "live";
-    return "server_post";
+    return "live";
   }
   const layerVisibility = {
     path: _defaultPath(),
@@ -35,6 +40,13 @@
       }
     }
   } catch {}
+  // Persisted path may name a pipeline that this session never produced
+  // (e.g. localStorage carries `server_post` from a previous session,
+  // current session is live-only). Fall back to whichever path actually
+  // has data so the viewer doesn't open onto a dead pill.
+  if (!HAS_PATH[layerVisibility.path] && !HAS_TRAJ_PATH[layerVisibility.path]) {
+    layerVisibility.path = _defaultPath();
+  }
   function persistLayerVisibility() {
     try { localStorage.setItem(LAYER_VIS_KEY, JSON.stringify(layerVisibility)); } catch {}
   }

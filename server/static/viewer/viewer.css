@@ -315,6 +315,9 @@
   .layer-toggles .layer-pill[aria-checked="true"] { background:var(--ink); color:var(--surface); border-color:var(--ink); }
   .layer-toggles .layer-pill:hover { border-color:var(--ink); }
   .layer-toggles .layer-pill[hidden] { display:none; }
+  .layer-toggles .layer-pill-count { font-variant-numeric:tabular-nums; margin-left:5px;
+    opacity:0.75; font-weight:600; }
+  .layer-toggles .layer-pill-count:empty { display:none; }
   .layer-toggles .layer-checkbox { display:inline-flex; align-items:center; gap:5px; cursor:pointer; height:100%; }
   .layer-toggles .layer-checkbox input { accent-color:var(--ink); cursor:pointer; width:13px; height:13px; margin:0; vertical-align:middle; }
   .layer-toggles .layer-divider { width:1px; align-self:stretch;

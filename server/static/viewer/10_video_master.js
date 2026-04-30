@@ -48,18 +48,23 @@
   // Did any camera produce rays / points / frames on this pipeline? Used to
   // hide inapplicable pills (so a live-only session doesn't show dead SVR /
   // POST toggles).
+  // Path-presence is path-native: only count a pipeline as "has data"
+  // when its own per-path bucket is populated. The legacy
+  // `SCENE.triangulated` / `SCENE.ground_traces` fallbacks here used to
+  // mark `server_post` as present on live-only sessions (because
+  // `triangulated` is aliased from the authority path, which on a
+  // live-only session IS live), defaulting the viewer into an empty SVR
+  // mode at boot.
   const HAS_PATH = {
     live: camsWithFramesByPath.live.length > 0
       || (SCENE.rays || []).some(r => sourceToPath(r.source || "server") === "live"),
     server_post: camsWithFramesByPath.server_post.length > 0
-      || Object.keys(SCENE.ground_traces || {}).length > 0
-      || (SCENE.triangulated || []).length > 0,
+      || (SCENE.rays || []).some(r => sourceToPath(r.source || "server") === "server_post"),
   };
   const TRAJ_BY_PATH = SCENE.triangulated_by_path || {};
   const HAS_TRAJ_PATH = {
     live: (TRAJ_BY_PATH.live || []).length > 0,
-    server_post: (TRAJ_BY_PATH.server_post || []).length > 0
-      || (SCENE.triangulated || []).length > 0,
+    server_post: (TRAJ_BY_PATH.server_post || []).length > 0,
   };
   // --- Triangulation residual filter (client-side preview) ---
   // Sibling of cost_threshold: drops points whose ray-midpoint gap
