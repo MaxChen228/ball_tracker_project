@@ -1043,6 +1043,56 @@ def test_viewer_strip_reserves_dual_ab_subtracks_per_pipeline():
     assert body.count('<span class="strip-sublabels"') == 2
 
 
+def test_viewer_pending_overlay_idle_session_hidden():
+    """When a session is not currently being processed, the
+    scene-pending-overlay element ships into the DOM with `hidden` so
+    the SSE handler can flip it on later without needing to inject
+    HTML. The SSE listener for `server_post_progress` /
+    `server_post_done` must also be wired."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(901)
+    _record_pitch(_pitch("A", 901, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    body = TestClient(app).get(f"/viewer/{session_id}").text
+    assert 'id="scene-pending-overlay"' in body
+    # Idle → hidden attribute present.
+    assert 'id="scene-pending-overlay" hidden' in body or 'id="scene-pending-overlay"\n           hidden' in body
+    assert "Decoding MOV" in body
+    # SSE wiring is present (server_post_progress / server_post_done).
+    assert "server_post_progress" in body
+    assert "server_post_done" in body
+    # Counts target node lives inside the overlay.
+    assert 'id="scene-pending-counts"' in body
+
+
+def test_viewer_pending_overlay_seeded_when_processing(monkeypatch):
+    """If the operator opens the viewer while server_post is mid-decode
+    (state.processing.session_summary returns 'processing'), the overlay
+    must render WITHOUT the `hidden` attribute so the operator sees it
+    immediately instead of waiting for the next SSE tick."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(902)
+    _record_pitch(_pitch("A", 902, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+    # Force processing summary to return ('processing', True) for this sid.
+    monkeypatch.setattr(
+        main.state.processing,
+        "session_summary",
+        lambda sid: ("processing", True),
+    )
+
+    body = TestClient(app).get(f"/viewer/{session_id}").text
+    # Overlay shipped without `hidden` attr — the rendered tag must
+    # contain the id and role but not the hidden attribute on this
+    # element. Slice the substring around the overlay element.
+    overlay_start = body.index('id="scene-pending-overlay"')
+    overlay_chunk = body[overlay_start:overlay_start + 200]
+    assert "hidden" not in overlay_chunk
+    assert 'role="status"' in overlay_chunk
+    assert "waiting for first frame" in body
+
+
 def test_viewer_locks_layout_to_viewport_without_page_scroll():
     """The viewer should fit in a single viewport: body scrolling is
     disabled and the root container owns a fixed 100vh layout. The
