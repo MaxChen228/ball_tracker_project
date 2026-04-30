@@ -55,6 +55,52 @@ def _render_shape_row(
     )
 
 
+def _render_manage_modal(presets: list[Preset], active_preset: object) -> str:
+    """List-of-presets modal opened by the Manage button. SSR'd into
+    the page and toggled via the native `<dialog>` element so we don't
+    need a JS modal lib. Each row carries `data-*` slug attributes that
+    the JS in 15_hsv_controls.js binds Use / Duplicate / Delete handlers
+    to.
+
+    The currently-bound preset (if any) is marked `★current`. Built-in
+    seeds are deletable — restart re-seeds — so this does not lock
+    them in the UI; that simplification matches CLAUDE.md's "experimental
+    phase" stance over a UX-side readonly affordance.
+    """
+    if not presets:
+        rows = '<tr><td colspan="3" class="preset-empty">No presets — boot seed_builtins should have written tennis + blue_ball; check server log.</td></tr>'
+    else:
+        row_html = []
+        for p in presets:
+            current = "★ current" if p.name == active_preset else ""
+            row_html.append(
+                '<tr>'
+                f'<td><code>{html.escape(p.name)}</code> '
+                f'<span class="preset-current-tag">{current}</span></td>'
+                f'<td>{html.escape(p.label)}</td>'
+                '<td class="preset-actions">'
+                f'<button type="button" class="btn small" data-preset-use="{html.escape(p.name)}">Use</button>'
+                f'<button type="button" class="btn small secondary" data-preset-duplicate="{html.escape(p.name)}">Duplicate</button>'
+                f'<button type="button" class="btn small danger" data-preset-delete="{html.escape(p.name)}">Delete</button>'
+                '</td>'
+                '</tr>'
+            )
+        rows = "".join(row_html)
+    return (
+        '<dialog id="preset-manage-modal" class="preset-modal">'
+        '<div class="preset-modal-head">'
+        '<h3>Preset library</h3>'
+        '<button type="button" class="btn small secondary" data-preset-modal-close>Close</button>'
+        '</div>'
+        '<table class="preset-table">'
+        '<thead><tr><th>Slug</th><th>Label</th><th>Actions</th></tr></thead>'
+        f'<tbody>{rows}</tbody>'
+        '</table>'
+        '<div class="preset-modal-status" data-preset-modal-status></div>'
+        '</dialog>'
+    )
+
+
 def _render_hsv_body(
     detection_config: dict[str, object] | None,
     presets: list[Preset],
@@ -173,6 +219,21 @@ def _render_hsv_body(
         + '</div></div>'
     )
 
+    # "Save as new" + "Manage" — phase 3 of the preset library refactor.
+    # Save-as-new POSTs the current form values under a new slug
+    # (operator supplies name+label via prompt). Manage opens a modal
+    # that lists every preset on disk and exposes Use / Duplicate /
+    # Delete actions per row. Both rely on the JS in 15_hsv_controls.js.
+    library_actions = (
+        '<div class="hsv-library-actions">'
+        '<button type="button" class="btn small" data-preset-save-as>'
+        '+ Save as new</button>'
+        '<button type="button" class="btn small secondary" data-preset-manage>'
+        'Manage…</button>'
+        '</div>'
+    )
+    manage_modal = _render_manage_modal(presets, preset_name)
+
     # Single Apply button at the bottom drives a JS fetch to
     # /detection/config carrying the (HSV, shape_gate) pair. No
     # per-section Apply: phase 3 collapses sub-button-presses into one.
@@ -181,6 +242,8 @@ def _render_hsv_body(
         '<div class="hsv-presets">'
         f'{preset_buttons}'
         '</div>'
+        f'{library_actions}'
+        f'{manage_modal}'
         '<form id="detection-config-form" class="hsv-form" data-detection-config-form>'
         f'{hsv_block}{shape_block}'
         '<div class="hsv-actions">'

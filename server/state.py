@@ -1474,9 +1474,15 @@ class State:
     # collision-safe by itself (unique tmp suffix per call).
 
     def list_presets(self):
+        """All presets sorted by slug. Reads disk on every call (the
+        dashboard render path is the dominant caller; ms-scale)."""
         return _presets.list_presets(self._data_dir)
 
     def load_preset(self, name: str):
+        """Single preset by slug. Raises `KeyError(name)` if the file
+        is missing on disk — endpoint handlers translate to 404; the
+        dashboard renderer's `identity-deleted` branch handles the
+        dangling-reference case before this would be called."""
         return _presets.load_preset(self._data_dir, name)
 
     def preset_exists(self, name: str) -> bool:
@@ -1488,6 +1494,10 @@ class State:
         )
 
     def delete_preset(self, name: str) -> None:
+        """Unlink the preset file. Raises `KeyError(name)` if absent.
+        No cascade on the live `detection_config.preset` reference —
+        the dashboard renderer surfaces the dangling state explicitly
+        and the next `set_detection_config` clears it."""
         _presets.delete_preset(self._data_dir, name)
 
     def modified_fields_for(self, cfg: DetectionConfig) -> list[str]:
