@@ -107,7 +107,7 @@ def test_viewer_overlay_controls_in_layer_toggles():
     body = TestClient(app).get(f"/viewer/{session_id}").text
 
     assert '<input type="checkbox" id="strike-zone-toggle"' in body
-    assert '<input type="checkbox" id="fit-toggle"' in body
+    assert '<input type="checkbox" id="fit-layer-toggle"' in body
     assert 'id="speed-toggle"' not in body
     assert 'id="fit-src-svr"' not in body
     assert 'id="fit-src-live"' not in body

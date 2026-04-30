@@ -107,12 +107,13 @@
       pill.hidden = false;
       pill.setAttribute("aria-pressed", isLayerVisible(layer, path) ? "true" : "false");
     }
-    // If every pill in a group is hidden, fold the group too. The fit
-    // group has no pills (checkbox-style) — querySelector('.layer-pill')
-    // returns null so it would always fold. Skip groups whose name maps
-    // to the fit checkbox layer.
+    // If every pill in a group is hidden, fold the group too. Skip
+    // checkbox-style groups (fit, strike-zone): they have no pills, so
+    // the pill-fold rule would unconditionally hide them — that latent
+    // bug existed pre-v4 for strike-zone but only mattered once `fit`
+    // joined as a second checkbox group and the symptom became visible.
     for (const group of layerToggles.querySelectorAll(".layer-group")) {
-      if (group.dataset.layer === "fit") continue;
+      if (group.querySelector(".layer-checkbox")) continue;
       const anyPill = group.querySelector(".layer-pill:not([hidden])");
       group.hidden = !anyPill;
     }
@@ -123,7 +124,7 @@
   // the segmenter currently runs on a single authoritative path per
   // session). When dual-segmenter lands, `layerVisibility.fit` flips to
   // a {live, server_post} pair like rays/traj.
-  const _fitToggle = document.getElementById("fit-toggle");
+  const _fitToggle = document.getElementById("fit-layer-toggle");
   if (_fitToggle) {
     _fitToggle.checked = !!layerVisibility.fit;
     _fitToggle.addEventListener("change", () => {
@@ -169,3 +170,30 @@
     }
     renderDetectionStrip();
   });
+  // --- Shared 2D-overlay toolbar ---
+  // Per-cam toolbars retired in v4. The shared bar fans toggle clicks
+  // out to every cam-view mount via BallTrackerCamView.setLayer; the
+  // runtime keeps per-cam layer state internally but operator never
+  // wants A and B set differently here (left/right placement already
+  // encodes the cam axis).
+  const sharedBar = document.querySelector("[data-cam-view-shared]");
+  if (sharedBar) {
+    const camIds = ["A", "B"];
+    sharedBar.addEventListener("click", (e) => {
+      const btn = e.target.closest(".cv-layer");
+      if (!btn) return;
+      const key = btn.dataset.layer;
+      const next = !btn.classList.contains("on");
+      btn.classList.toggle("on", next);
+      if (window.BallTrackerCamView) {
+        for (const c of camIds) window.BallTrackerCamView.setLayer(c, key, next);
+      }
+    });
+    const ovl = sharedBar.querySelector(".cv-opacity input[type=range]");
+    if (ovl) {
+      ovl.addEventListener("input", () => {
+        if (!window.BallTrackerCamView) return;
+        for (const c of camIds) window.BallTrackerCamView.setOpacity(c, ovl.value);
+      });
+    }
+  }

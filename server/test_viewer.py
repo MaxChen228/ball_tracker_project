@@ -1017,7 +1017,7 @@ def test_viewer_layer_visibility_v4_schema():
     assert "ball_tracker_viewer_layer_visibility_v4" in body
     assert 'data-layer="rays"' in body
     assert 'data-layer="fit"' in body
-    assert 'id="fit-toggle"' in body
+    assert 'id="fit-layer-toggle"' in body
     # v3 artifacts must be gone so a stale localStorage entry can't
     # keep them alive.
     assert "HAS_PATH_PER_CAM" not in body
@@ -1417,12 +1417,15 @@ def test_stream_legacy_candidates_without_cost_become_null():
 
 def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
     """`video_cell_html` (the SSR builder for each cam pane) declares the
-    layer set (PLATE + AXES + LIVE BLOBS + SVR BLOBS) and renders the
-    path-grouped toolbar (LIVE: BLOBS ; SVR: BLOBS). Pre-fan-out the
-    matrix had a per-path WIN + CAND pair; WIN is gone because fan-out
-    triangulation has no winner. The legacy K slider was replaced by
-    the session-level cost_threshold slider in the viewer header."""
-    from viewer_fragments import video_cell_html
+    layer set (PLATE + AXES + LIVE BLOBS + SVR BLOBS) but no longer
+    embeds a per-cam toolbar — v4 collapsed both cams' toolbars into a
+    single shared bar above the videos column. The cell ships only the
+    cam-view runtime hooks (data-layers / data-layers-on) so the
+    runtime can mount per-cam state from the shared bar's clicks."""
+    from viewer_fragments import (
+        cam_view_shared_toolbar_html,
+        video_cell_html,
+    )
     body = video_cell_html(
         "A",
         ("/videos/example.mov", 0.0),
@@ -1435,18 +1438,21 @@ def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
         'data-layers="plate,axes,'
         'detection_blobs_live,detection_blobs_svr"'
     ) in body
-    # SVR off by default — legacy / live-only sessions have no svr data.
     assert 'data-layers-on="plate,detection_blobs_live"' in body
-    # Path-grouped chips, BLOBS-only.
-    assert 'class="cv-path-group" data-path="live"' in body
-    assert 'class="cv-path-group" data-path="svr"' in body
-    assert 'class="cv-layer on" data-layer="detection_blobs_live">BLOBS' in body
-    assert 'class="cv-layer" data-layer="detection_blobs_svr">BLOBS' in body
-    # Winner-dot layers gone post fan-out.
+    # No per-cam toolbar inside the cell anymore.
+    assert "cam-view-toolbar" not in body
+    assert 'class="cv-path-group"' not in body
+    assert 'class="cv-opacity"' not in body
+    assert 'data-layer="detection_blobs_live"' not in body
+    # Shared toolbar carries the BLOBS pills, OVL slider, etc.
+    bar = cam_view_shared_toolbar_html()
+    assert 'data-layer="detection_blobs_live"' in bar
+    assert 'data-layer="detection_blobs_svr"' in bar
+    assert 'class="cv-path-group" data-path="live"' in bar
+    # Winner-dot / K slider relics from the pre-v4 era.
     assert 'data-layer="detection_live"' not in body
     assert 'data-layer="detection_svr"' not in body
     assert '>WIN<' not in body
     assert '>CAND<' not in body
-    # K slider gone (replaced by viewer-header cost_threshold slider).
     assert 'class="cv-blobs-k"' not in body
     assert 'window._setCandTopK' not in body

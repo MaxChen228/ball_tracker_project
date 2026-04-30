@@ -292,7 +292,6 @@
   .layer-toggles .layer-group[data-layer="residual"] { border-color:var(--ink-light, #7a756c); }
   .layer-toggles .layer-name { font-size:10px; letter-spacing:0.1em; color:var(--ink); text-transform:uppercase;
     display:inline-flex; align-items:center; gap:4px; font-weight:500; }
-  .layer-toggles .layer-name .swatch { width:8px; height:8px; display:inline-block; border:1px solid rgba(0,0,0,0.12); }
   .layer-toggles .layer-pill { font:inherit; font-size:9px; letter-spacing:0.08em; padding:2px 8px;
     background:transparent; color:var(--sub); border:1px solid var(--border-base); border-radius:2px;
     cursor:pointer; text-transform:uppercase; line-height:1;

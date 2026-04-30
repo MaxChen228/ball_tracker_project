@@ -87,45 +87,20 @@ def video_cell_html(
         )
         hint = "synced to chirp"
     cam_view_attrs = ""
-    toolbar_html = ""
     if entry is not None:
         # Layers: PLATE + AXES (calibration overlays) + one BLOBS layer
-        # per detection path. Pre-fan-out the toolbar carried a WIN
-        # (winner-dot) layer per path on top of BLOBS — that's gone:
-        # fan-out triangulation has no single winner, every shape-gate
-        # candidate gets its own ray + 3D point, and the cost_threshold
-        # slider in the viewer header controls which candidates render
-        # across canvas BLOBS + 3D rays + 3D points. Keeping a "winner"
-        # toggle would only redraw the lowest-cost candidate as a dot
-        # already drawn as a BLOBS ring — pure noise.
+        # per detection path. Toolbar lives outside the cell as a single
+        # shared bar above the videos column (see
+        # `cam_view_shared_toolbar_html`); the per-cam toolbar was
+        # retired in v4 because the operator never wanted to set A and B
+        # to different overlay states — left/right physical placement
+        # already encodes the cam axis.
         cam_view_attrs = (
             f' data-cam-view="{cam}"'
             ' data-no-badges'
             ' data-layers="plate,axes,detection_blobs_live,detection_blobs_svr"'
             ' data-layers-on="plate,detection_blobs_live"'
             ' data-default-opacity="65"'
-        )
-        # Path-grouped toolbar: LIVE / SVR each get a single BLOBS chip
-        # because there is no winner-vs-cands distinction anymore.
-        # BLOBS visibility is gated by the session-level cost_threshold
-        # slider in the viewer header (see
-        # `session_tuning_strip_html`).
-        toolbar_html = (
-            '<div class="cam-view-toolbar">'
-            '<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>'
-            '<button type="button" class="cv-layer" data-layer="axes">AXES</button>'
-            '<span class="cv-path-group" data-path="live">'
-            '<span class="cv-path-lbl">LIVE</span>'
-            '<button type="button" class="cv-layer on" data-layer="detection_blobs_live">BLOBS</button>'
-            '</span>'
-            '<span class="cv-path-group" data-path="svr">'
-            '<span class="cv-path-lbl">SVR</span>'
-            '<button type="button" class="cv-layer" data-layer="detection_blobs_svr">BLOBS</button>'
-            '</span>'
-            '<span class="cv-opacity">OVL'
-            '<input type="range" min="0" max="100" step="1" value="65" aria-label="Overlay opacity">'
-            '</span>'
-            '</div>'
         )
     return (
         f'<div class="vid-cell"{cam_view_attrs}>'
@@ -135,8 +110,29 @@ def video_cell_html(
         f'<span class="vid-hint">{hint}</span>'
         f"</div>"
         f"{body}"
-        f"{toolbar_html}"
         f"</div>"
+    )
+
+
+def cam_view_shared_toolbar_html() -> str:
+    """Shared 2D-overlay control bar for both cam panels. Click handlers
+    in 70_handlers.js fan setLayer / setOpacity calls out to every cam
+    that has cam-view mounted, keeping A and B in sync. Initial pressed
+    state mirrors the per-cell `data-layers-on` seed (plate +
+    detection_blobs_live)."""
+    return (
+        '<div class="cam-view-shared-toolbar" data-cam-view-shared>'
+        '<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>'
+        '<button type="button" class="cv-layer" data-layer="axes">AXES</button>'
+        '<span class="cv-path-group" data-path="live">'
+        '<span class="cv-path-lbl">BLOBS</span>'
+        '<button type="button" class="cv-layer on" data-layer="detection_blobs_live">live</button>'
+        '<button type="button" class="cv-layer" data-layer="detection_blobs_svr">svr</button>'
+        '</span>'
+        '<span class="cv-opacity">OVL'
+        '<input type="range" min="0" max="100" step="1" value="65" aria-label="Overlay opacity">'
+        '</span>'
+        '</div>'
     )
 
 
