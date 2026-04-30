@@ -293,8 +293,10 @@ class ViewerLayers {
     // is picked up on the next rebuild but not mid-loop.
     const candPasses = window._candPassesThreshold;
     const residualPasses = window._passResidualFilter;
-    if (typeof candPasses !== "function" || typeof residualPasses !== "function") {
-      throw new Error("viewer init order broken: _candPassesThreshold / _passResidualFilter not on window");
+    const costPassesPoint = window._passCostFilterPoint;
+    if (typeof candPasses !== "function" || typeof residualPasses !== "function"
+        || typeof costPassesPoint !== "function") {
+      throw new Error("viewer init order broken: _candPassesThreshold / _passResidualFilter / _passCostFilterPoint not on window");
     }
 
     // Rays — group by (cam, path). All rays at currentT (within tol)
@@ -370,6 +372,7 @@ class ViewerLayers {
         const p = svrAll[i];
         if (p.t_rel_s > cutoff) continue;
         if (!residualPasses(p)) continue;
+        if (!costPassesPoint(p)) continue;
         const k = (typeof p.seg_idx === "number") ? p.seg_idx : -1;
         const key = k === -1 ? "out" : String(k);
         if (!buckets.has(key)) buckets.set(key, []);
@@ -396,7 +399,9 @@ class ViewerLayers {
       }
     }
     if (this._isVisible("traj", PATH_LIVE)) {
-      const livePts = (this.TRAJ_BY_PATH.live || []).filter((p) => p.t_rel_s <= cutoff && residualPasses(p));
+      const livePts = (this.TRAJ_BY_PATH.live || []).filter(
+        (p) => p.t_rel_s <= cutoff && residualPasses(p) && costPassesPoint(p)
+      );
       if (livePts.length) {
         const group = new THREE.Group();
         group.name = "viewer_traj_live";

@@ -82,6 +82,24 @@
     return c.cost <= _costThreshold;
   }
 
+  // Triangulated-point variant: each persisted point carries `cost_a` and
+  // `cost_b` from its source candidate pair (server schema, post-PR
+  // pairing-full-emit). The point passes when both ends are ≤ threshold.
+  // null / non-numeric on either side means "no cost info" → pass; the
+  // canonical case is the synthesized `_frame_candidates` px/py fallback
+  // path on legacy fixtures. Once Phase 5 retires that fallback this
+  // legacy-pass branch goes away and any null becomes a hard fail.
+  function _passCostFilterPoint(p) {
+    if (!p) return true;
+    const ca = p.cost_a, cb = p.cost_b;
+    let m = -1;
+    if (ca != null && Number.isFinite(ca)) m = Math.max(m, ca);
+    if (cb != null && Number.isFinite(cb)) m = Math.max(m, cb);
+    if (m < 0) return true;  // no cost info on either side
+    return m <= _costThreshold;
+  }
+  window._passCostFilterPoint = _passCostFilterPoint;
+
   // Plain floor lookup: BLOBS draws every candidate on the matched
   // frame; if the frame has no candidates we just render nothing for
   // that instant. No det back-walk because there is no winner-only
