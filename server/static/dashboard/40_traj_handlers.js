@@ -41,6 +41,14 @@
     persistTrajSelection();
     repaintCanvas();
     updateLatestPitchBadge();
+    // Repaint rows so the clicked row picks up `.selected` (background
+    // tint) and its swatch flips to filled. Without this the diff-key
+    // includes `sel` but only the next 5-s tickEvents fires renderEvents,
+    // leaving 5 s of "I clicked but nothing visibly happened" — the 3D
+    // canvas + speed badge update instantly but the events column lags.
+    if (typeof renderEvents === 'function' && Array.isArray(currentEvents)) {
+      renderEvents(currentEvents);
+    }
   });
   // Show-points toggle — surfaces raw triangulated points coloured by
   // segment under the fit curves. Default off; reading is instantaneous

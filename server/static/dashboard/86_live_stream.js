@@ -244,12 +244,19 @@
         // Auto-select latest pitch when no row is currently checked.
         // Doesn't override an explicit operator selection — they may be
         // mid-investigation on an older pitch.
-        if (selectedTrajIds.size === 0) {
+        const selectionChanged = selectedTrajIds.size === 0;
+        if (selectionChanged) {
           selectedTrajIds.add(data.sid);
           persistTrajSelection();
         }
         repaintCanvas();
         updateLatestPitchBadge();
+        // If we auto-selected a new sid, rerender events so the row
+        // visually highlights without waiting for the next 5-s tick.
+        if (selectionChanged && typeof renderEvents === 'function'
+            && Array.isArray(currentEvents)) {
+          renderEvents(currentEvents);
+        }
       } catch (_) {}
     });
     es.addEventListener('session_ended', (evt) => {
