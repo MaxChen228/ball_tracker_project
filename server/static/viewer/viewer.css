@@ -107,24 +107,6 @@
   .session-tuning .st-apply:hover:not(:disabled) { background:var(--accent); color:var(--surface); }
   .session-tuning .st-apply:disabled { opacity:0.4; cursor:default;
     border-color:var(--border-base); color:var(--sub); }
-  /* Gap-track wrapper: holds the range input + a tick at the
-     pairing-time effective cap + a grey overlay shading the segment to
-     the right (where dragging looser cannot reveal new points; only
-     Apply can re-pair on disk). `--gap-cap-pct` is the tick's `left:`
-     coordinate as a percentage of the slider's full width. */
-  .session-tuning .st-gap-track { position:relative; display:flex;
-    flex:1 1 auto; min-width:0; line-height:0; }
-  .session-tuning .st-gap-track input[type=range] { display:block; }
-  .session-tuning .st-gap-tick { position:absolute; top:50%; left:var(--gap-cap-pct);
-    width:1px; height:14px; transform:translate(-50%, -50%);
-    background:var(--accent); pointer-events:none; opacity:0.7; }
-  .session-tuning .st-gap-track::after { content:""; position:absolute;
-    top:50%; left:var(--gap-cap-pct); right:0; height:6px;
-    transform:translateY(-50%); background:var(--ink-40, #C8C0AE);
-    opacity:0.25; pointer-events:none; border-radius:0 3px 3px 0; }
-  .session-tuning .st-gap-warn { font-size:9px; letter-spacing:0.04em;
-    text-transform:none; color:var(--accent); white-space:nowrap; }
-  .session-tuning .st-gap-warn[hidden] { display:none; }
   .health-strip .hs-tri { display:inline-flex; align-items:baseline; gap:4px;
     padding:3px 8px; border:1px solid var(--accent); border-radius:var(--r);
     background:var(--surface); }

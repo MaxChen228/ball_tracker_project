@@ -67,7 +67,6 @@ class ViewerPageContext:
     session_tuning_html: str
     cost_threshold: float | None
     gap_threshold_m: float | None
-    pairing_effective_gap_m: float
     video_cells_html: str
     session_id: str
     server_post_ran: bool
@@ -82,7 +81,6 @@ def build_viewer_page_context(
     *,
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
-    pairing_effective_gap_m: float,
     segments: list | None = None,
 ) -> ViewerPageContext:
     # Pre-Three.js this used a Plotly `build_figure(scene)` callable to
@@ -185,11 +183,9 @@ def build_viewer_page_context(
         health_failure_html=failure_strip_html(health),
         session_tuning_html=session_tuning_strip_html(
             cost_threshold, gap_threshold_m, scene.session_id,
-            pairing_effective_gap_m,
         ),
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
-        pairing_effective_gap_m=pairing_effective_gap_m,
         video_cells_html=video_cells,
         session_id=scene.session_id,
         server_post_ran=server_post_ran,
@@ -234,7 +230,6 @@ def render_viewer_html(
     presets: list[Preset],
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
-    pairing_effective_gap_m: float,
     segments: list | None = None,
 ) -> str:
     ctx = build_viewer_page_context(
@@ -243,7 +238,6 @@ def render_viewer_html(
         health,
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
-        pairing_effective_gap_m=pairing_effective_gap_m,
         segments=[] if segments is None else segments,
     )
     if ctx.can_run_server:
@@ -462,10 +456,6 @@ window.VIEWER_INITIAL_COST_THRESHOLD = {1.0 if ctx.cost_threshold is None else f
 // converts to client-side residualCapM as a finite metres value;
 // the slider's 200cm position is just `2.0m`, no Infinity special case.
 window.VIEWER_INITIAL_GAP_THRESHOLD_M = {2.0 if ctx.gap_threshold_m is None else float(ctx.gap_threshold_m)};
-// Current global PairingTuning gap, used by viewer_layers / docs only.
-// Helps the operator see "drag past this point has no effect on existing
-// triangulated points — only Apply (server recompute) can re-pair".
-window.VIEWER_PAIRING_EFFECTIVE_GAP_M = {float(ctx.pairing_effective_gap_m)};
 window._applyTuning = function(btn) {{
   const cost = parseFloat(document.querySelector('[data-session-cost-threshold]').value);
   // Slider value is centimetres (0–200); ship metres to the route.
