@@ -62,8 +62,8 @@
 
   // Show-points toggle (default OFF). Persisted in localStorage so the
   // operator's preference survives reloads. Surfaces the raw triangulated
-  // points (the same dots the /fit page used to colour by segment) under
-  // the fit curves; useful when a fit looks suspicious and you want to
+  // points coloured by segment under the fit curves; useful when a fit
+  // looks suspicious and you want to
   // see what the segmenter saw.
   const _POINTS_KEY = 'ball_tracker_dashboard_show_points';
   let _showPoints = (() => {
