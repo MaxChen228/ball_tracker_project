@@ -12,7 +12,12 @@ final class LiveFrameDispatcherTests: XCTestCase {
     // derived from `candidates.isEmpty` on the FramePayload itself.
     private func makeFrame(index: Int = 0, detected: Bool = true) -> ServerUploader.FramePayload {
         let candidates: [ServerUploader.BlobCandidate] = detected
-            ? [ServerUploader.BlobCandidate(px: 320.0, py: 240.0, area: 100, area_score: 1.0, aspect: 0.95, fill: 0.7)]
+            // fill = 0.68 matches the empirical median for the project ball
+            // (CLAUDE.md tuning baseline; combined HSV ∧ FG mask, 26 fill_fail
+            // frame sample showed p50=0.68, range 0.63–0.70). The previous
+            // 0.7 fixture was nominally above _MIN_FILL=0.55 but didn't
+            // reflect what production pipelines actually emit.
+            ? [ServerUploader.BlobCandidate(px: 320.0, py: 240.0, area: 100, area_score: 1.0, aspect: 0.95, fill: 0.68)]
             : []
         return ServerUploader.FramePayload(
             frame_index: index,

@@ -74,18 +74,36 @@ def test_viewer_js_template_has_no_unresolved_placeholders() -> None:
     assert not leaks, _FIX_HINT_VIEWER.format(name=leaks[0].strip("{}"))
 
 
-def test_rendered_dashboard_response_has_no_placeholder_leaks() -> None:
-    """End-to-end guard: GET / and assert the rendered HTML carries no
-    SCREAMING_SNAKE placeholders. This catches not only unresolved
-    static-bundle tokens but also any HTML-template-level `.format()`
-    miss in `render_dashboard_*` that left `{FOO}` in the response."""
+import pytest
+
+
+# `/`, `/sync`, `/setup`, `/markers` each go through their own render_*
+# function (events_index, render_sync_html, render_setup_html,
+# render_markers_html) — a placeholder leak in any one would not be
+# caught by testing only `/`. `/viewer/{sid}` and `/fit/{sid}` need real
+# session fixtures and are covered indirectly by `test_viewer.py` /
+# `test_fit.py` rendering tests; their JS template is already covered
+# above by `test_viewer_js_template_has_no_unresolved_placeholders`.
+_RENDERED_HTML_ROUTES = ["/", "/sync", "/setup", "/markers"]
+
+
+@pytest.mark.parametrize("route", _RENDERED_HTML_ROUTES)
+def test_rendered_html_route_has_no_placeholder_leaks(route: str) -> None:
+    """End-to-end guard per dashboard surface. Each route renders via its
+    own template path; this catches unresolved static-bundle tokens AND
+    any HTML-template-level `.format()` miss in the per-page renderer
+    that left `{FOO}` in the response."""
     from fastapi.testclient import TestClient
     import main
     from main import app
 
     main.state.reset()
     with TestClient(app) as client:
-        body = client.get("/").text
-
-    leaks = _find_placeholders(body)
+        resp = client.get(route)
+    assert resp.status_code == 200, (
+        f"GET {route} returned {resp.status_code} — placeholder check needs "
+        f"a 200 response. If the route is gated on state, seed it before this "
+        f"test or move the route out of `_RENDERED_HTML_ROUTES`."
+    )
+    leaks = _find_placeholders(resp.text)
     assert not leaks, _FIX_HINT_RENDERED.format(name=leaks[0].strip("{}"))
