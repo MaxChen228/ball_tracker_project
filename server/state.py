@@ -39,6 +39,7 @@ from marker_registry import MarkerRegistryDB
 from live_pairing import LivePairingSession
 from reconstruct import Ray, rays_for_frame
 from state_runtime import RuntimeSettingsStore, SyncParams
+from strike_zone import StrikeZoneGeometry, strike_zone_geometry_for_height
 from state_calibration import (
     AutoCalibrationRun as _AutoCalibrationRun,
     AutoCalibrationRunStore,
@@ -1627,6 +1628,18 @@ class State:
     def set_tracking_exposure_cap(self, mode: TrackingExposureCapMode) -> TrackingExposureCapMode:
         with self._lock:
             return self._runtime_settings.set_tracking_exposure_cap(mode)
+
+    def batter_height_cm(self) -> int:
+        with self._lock:
+            return self._runtime_settings.batter_height_cm
+
+    def set_batter_height_cm(self, value: int) -> int:
+        with self._lock:
+            return self._runtime_settings.set_batter_height_cm(value)
+
+    def strike_zone(self) -> StrikeZoneGeometry:
+        with self._lock:
+            return strike_zone_geometry_for_height(self._runtime_settings.batter_height_cm)
 
     def stop_session(self) -> Session | None:
         """End the current armed session (operator pressed Stop on the

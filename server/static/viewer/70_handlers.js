@@ -146,12 +146,20 @@
     if (!pill || pill.hidden || pill.disabled) return;
     const path = pill.dataset.path;
     if (currentPath() === path) return;
-    layerVisibility.path = path;
-    persistLayerVisibility();
-    paintLayerPills();
+    // setPath owns the mutation. We must NOT pre-write
+    // `layerVisibility.path` here: the IIFE's `layerVisibility` and the
+    // ViewerLayers controller's `this.layerVisibility` are the same
+    // object reference, so a pre-write would make setPath's
+    // `this.layerVisibility.path === path` early-return fire and the
+    // dynamic rebuild gets skipped entirely. The next slider-drag
+    // rebuild would then "fix" the scene, masking the bug.
     if (window.BallTrackerViewerScene) {
       window.BallTrackerViewerScene.setPath(path);
+    } else {
+      layerVisibility.path = path;  // no scene yet → just persist
     }
+    persistLayerVisibility();
+    paintLayerPills();
     if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();
     renderDetectionStrip();
   });

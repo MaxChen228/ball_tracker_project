@@ -56,6 +56,42 @@ function setStrikeZoneVisiblePersist(on) {
   try { localStorage.setItem(STRIKE_ZONE_KEY, on ? "1" : "0"); } catch (_) {}
 }
 
+function vec3From(p, zOffset = 0) {
+  return new THREE.Vector3(p[0], p[1], p[2] + zOffset);
+}
+
+function closedLine(points, color, opts = {}) {
+  const verts = points.map((p) => vec3From(p, opts.zOffset || 0));
+  if (verts.length) verts.push(verts[0].clone());
+  const geom = new THREE.BufferGeometry().setFromPoints(verts);
+  return new THREE.Line(
+    geom,
+    new THREE.LineBasicMaterial({
+      color: new THREE.Color(color),
+      transparent: true,
+      opacity: opts.opacity ?? 1.0,
+    }),
+  );
+}
+
+function segmentLines(segments, color, opts = {}) {
+  const pairs = [];
+  for (const seg of segments || []) {
+    if (!Array.isArray(seg) || seg.length !== 2) continue;
+    pairs.push(vec3From(seg[0], opts.zOffset || 0));
+    pairs.push(vec3From(seg[1], opts.zOffset || 0));
+  }
+  const geom = new THREE.BufferGeometry().setFromPoints(pairs);
+  return new THREE.LineSegments(
+    geom,
+    new THREE.LineBasicMaterial({
+      color: new THREE.Color(color),
+      transparent: true,
+      opacity: opts.opacity ?? 1.0,
+    }),
+  );
+}
+
 class BallTrackerScene {
   constructor(container, opts = {}) {
     if (!container) throw new Error("BallTrackerScene needs a container element");
@@ -189,34 +225,7 @@ class BallTrackerScene {
     plateOutline.name = "plate_outline";
     root.add(plateOutline);
 
-    // strike zone — wireframe + translucent fill
-    const sz = t.strike_zone;
-    const szWidth = sz.x_half_m * 2;
-    const szDepth = sz.y_back_m - sz.y_front_m;
-    const szHeight = sz.z_top_m - sz.z_bottom_m;
-    const szGeom = new THREE.BoxGeometry(szWidth, szDepth, szHeight);
-    const szFillMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(t.colors.strike_zone),
-      transparent: true,
-      opacity: sz.fill_opacity,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    });
-    const szFill = new THREE.Mesh(szGeom, szFillMat);
-    szFill.position.set(0, (sz.y_front_m + sz.y_back_m) / 2, (sz.z_bottom_m + sz.z_top_m) / 2);
-    szFill.name = "strike_zone_fill";
-    // Wireframe overlay (12 edges of the box) on top of the fill.
-    const szEdges = new THREE.EdgesGeometry(szGeom);
-    const szEdgeMat = new THREE.LineBasicMaterial({
-      color: new THREE.Color(t.colors.strike_zone),
-    });
-    const szWire = new THREE.LineSegments(szEdges, szEdgeMat);
-    szWire.position.copy(szFill.position);
-    szWire.name = "strike_zone_wire";
-    const szGroup = new THREE.Group();
-    szGroup.name = "strike_zone";
-    szGroup.add(szFill);
-    szGroup.add(szWire);
+    const szGroup = this._buildStrikeZoneGroup(t.strike_zone);
     root.add(szGroup);
     this._strikeZoneGroup = szGroup;
 
@@ -242,6 +251,51 @@ class BallTrackerScene {
       axesGroup.add(new THREE.Line(geom, axisMaterials[i]));
     }
     root.add(axesGroup);
+  }
+
+  _buildStrikeZoneGroup(sz) {
+    const color = this.theme.colors.strike_zone;
+    const group = new THREE.Group();
+    group.name = "strike_zone";
+
+    const szWidth = sz.x_half_m * 2;
+    const szDepth = sz.y_back_m - sz.y_front_m;
+    const szHeight = sz.z_top_m - sz.z_bottom_m;
+    const szGeom = new THREE.BoxGeometry(szWidth, szDepth, szHeight);
+    const szFill = new THREE.Mesh(
+      szGeom,
+      new THREE.MeshBasicMaterial({
+        color: new THREE.Color(color),
+        transparent: true,
+        opacity: sz.fill_opacity,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    szFill.position.set(
+      0,
+      (sz.y_front_m + sz.y_back_m) / 2,
+      (sz.z_bottom_m + sz.z_top_m) / 2,
+    );
+    szFill.name = "strike_zone_fill";
+    group.add(szFill);
+
+    const front = closedLine(sz.front_face, color, { opacity: sz.front_opacity, zOffset: 0.001 });
+    front.name = "strike_zone_front";
+    group.add(front);
+
+    const back = closedLine(sz.back_face, color, { opacity: sz.back_opacity, zOffset: 0.001 });
+    back.name = "strike_zone_back";
+    group.add(back);
+
+    const connectors = segmentLines(sz.connectors, color, { opacity: sz.connector_opacity, zOffset: 0.001 });
+    connectors.name = "strike_zone_connectors";
+    group.add(connectors);
+
+    const grid = segmentLines(sz.front_grid, color, { opacity: sz.grid_opacity, zOffset: 0.001 });
+    grid.name = "strike_zone_grid";
+    group.add(grid);
+    return group;
   }
 
   // ---- dynamic layer API ----
@@ -285,6 +339,20 @@ class BallTrackerScene {
   hasLayer(name) {
     return this._dynamicLayers.has(name)
       || !!this._staticRoot.getObjectByName(name);
+  }
+
+  setStrikeZone(next) {
+    if (!next || !this._staticRoot) return;
+    const wasVisible = this._strikeZoneGroup ? this._strikeZoneGroup.visible : strikeZoneVisible();
+    const merged = { ...(this.theme.strike_zone || {}), ...next };
+    if (this._strikeZoneGroup) {
+      this._staticRoot.remove(this._strikeZoneGroup);
+      disposeObject(this._strikeZoneGroup);
+    }
+    this.theme.strike_zone = merged;
+    this._strikeZoneGroup = this._buildStrikeZoneGroup(merged);
+    this._strikeZoneGroup.visible = wasVisible;
+    this._staticRoot.add(this._strikeZoneGroup);
   }
 
   // ---- view preset API ----

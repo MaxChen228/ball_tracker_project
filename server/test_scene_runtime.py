@@ -79,6 +79,7 @@ def test_static_mount_serves_scene_runtime():
     assert "class BallTrackerScene" in text
     assert "export function mountScene" in text
     assert 'import * as THREE from "three"' in text
+    assert "setStrikeZone(next)" in text
 
 
 def test_scene_theme_is_json_safe():
@@ -107,6 +108,10 @@ def test_scene_theme_covers_runtime_consumers():
     assert sz["y_back_m"] > sz["y_front_m"]
     assert sz["z_top_m"] > sz["z_bottom_m"]
     assert 0 < sz["fill_opacity"] < 1
+    assert len(sz["front_face"]) == 4
+    assert len(sz["back_face"]) == 4
+    assert len(sz["connectors"]) == 4
+    assert len(sz["front_grid"]) == 4
     assert theme["axes"]["world_len_m"] > 0
 
 

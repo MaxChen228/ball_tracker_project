@@ -1028,6 +1028,39 @@ def test_viewer_layer_visibility_v6_schema():
     assert "setFitVisibility" not in body
 
 
+def test_viewer_path_click_does_not_pre_mutate_layer_visibility():
+    """Regression: the path-pill click handler MUST NOT pre-write
+    `layerVisibility.path = path` before calling
+    `BallTrackerViewerScene.setPath(path)`. The IIFE's `layerVisibility`
+    object and the layers controller's `this.layerVisibility` share a
+    reference — a pre-write makes any same-path early-return inside
+    setPath fire and the dynamic rebuild gets skipped, leaving the
+    scene stuck on the previous path until the next slider drag
+    happens to trigger an unrelated rebuild.
+
+    Symptom: 'I clicked LIVE/SVR and nothing changed; only when I
+    dragged the gap slider did the points flip.'"""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(803)
+    _record_pitch(_pitch("A", 803, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    body = TestClient(app).get(f"/viewer/{session_id}").text
+    # The handler must call setPath before any local mutation of
+    # `layerVisibility.path`. We can't run JS in TestClient, so assert
+    # ordering on the source: the line `setPath(path)` appears BEFORE
+    # any literal `layerVisibility.path = path` in the click handler
+    # body. (The fallback assignment for "no scene yet" path is fine
+    # because that branch can't reach setPath.)
+    handler = body[body.index("Global PATH selector"):]
+    handler = handler[: handler.index("renderDetectionStrip()")]
+    setpath_at = handler.index(".setPath(path)")
+    # `layerVisibility.path = path` may legally appear AFTER setPath
+    # (no-scene fallback). It must NEVER appear before.
+    pre = handler[:setpath_at]
+    assert "layerVisibility.path = path" not in pre
+
+
 def test_viewer_strip_reserves_dual_ab_subtracks_per_pipeline():
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(722)

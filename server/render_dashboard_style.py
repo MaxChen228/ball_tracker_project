@@ -445,6 +445,19 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .tuning-row input[type="number"]:focus {{ outline: none; border-color: var(--ink); }}
 .tuning-unit {{ font-family: var(--mono); font-size: 10px; color: var(--sub);
                  letter-spacing: 0.08em; min-width: 14px; }}
+.strike-zone-form {{ margin-top: var(--s-2); }}
+.strike-zone-summary {{ margin-top: var(--s-3); display: grid; gap: 8px; }}
+.strike-zone-summary-row {{ display: flex; gap: 10px; flex-wrap: wrap; }}
+.strike-zone-summary-row > span {{ display: inline-flex; gap: 6px; align-items: baseline;
+                                    padding: 4px 8px; border: 1px solid var(--border-l);
+                                    border-radius: var(--r); background: var(--surface-hover); }}
+.strike-zone-summary .k {{ font-family: var(--mono); font-size: 9px;
+                           letter-spacing: 0.10em; text-transform: uppercase;
+                           color: var(--sub); }}
+.strike-zone-summary .v {{ font-family: var(--mono); font-size: 11px;
+                           color: var(--ink); font-variant-numeric: tabular-nums; }}
+.strike-zone-note {{ margin-top: var(--s-3); color: var(--sub); font-size: 11px;
+                      line-height: 1.45; }}
 
 /* Time Sync diagnostic log panel — fixed-height scrollable <pre> with a
    Copy button that writes the visible text to the clipboard. Lines are
