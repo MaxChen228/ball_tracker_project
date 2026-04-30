@@ -162,14 +162,17 @@ def _pipe_chip(label: str, status: str, counts: dict[str, int] | None,
 
 
 def _pipes_html(e: dict[str, Any]) -> str:
-    """Live + server detection pipe chips."""
+    """Live + server detection pipe chips, plus segment count."""
     path_status = e.get("path_status") or {}
     path_counts = e.get("n_ball_frames_by_path") or {}
+    n_seg = int(e.get("n_segments") or 0)
     bits = [
         _pipe_chip("L", path_status.get("live", "-"),
                    path_counts.get("live"), _PIPE_TITLES["live"]),
         _pipe_chip("S", path_status.get("server_post", "-"),
                    path_counts.get("server_post"), _PIPE_TITLES["server_post"]),
+        f'<span class="ev-segs{" zero" if n_seg == 0 else ""}"'
+        f' title="Ballistic fit segments">SEG <b>{n_seg}</b></span>',
     ]
     return f'<div class="ev-pipes">{"".join(bits)}</div>'
 
@@ -183,12 +186,10 @@ def _actions_html(e: dict[str, Any], sid: str,
     if processing_state in {"queued", "processing"}:
         parts.append(_form_btn(f"/sessions/{sid}/cancel_processing", "Cancel", "warn"))
     elif not trashed and server_status != "done":
-        # Events row triggers server_post with the dashboard's current
-        # detection config (`source=live`). Per-preset / frozen reruns
-        # live in the viewer page where the operator picks deliberately.
+        # server_post always runs against the dashboard's current
+        # detection config — single source of truth, no source picker.
         parts.append(_form_btn(
             f"/sessions/{sid}/run_server_post", "Run srv", "ok",
-            hidden={"source": "live"},
         ))
 
     if trashed:

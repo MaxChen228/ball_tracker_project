@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-from typing import Any
 
 from render_scene_theme import (
     _CAMERA_COLORS,
@@ -179,7 +178,8 @@ def session_tuning_strip_html(
         'oninput="window._setCostThreshold && window._setCostThreshold(this.value); '
         'document.querySelector(\'[data-session-cost-value]\').textContent = '
         '(+this.value).toFixed(2); '
-        'document.querySelector(\'[data-session-recompute]\').disabled = false;">'
+        '(function(b){if(b&&!b.dataset.recomputing)b.disabled=false;})'
+        '(document.querySelector(\'[data-session-recompute]\'));">'
         f'<span class="st-value" data-session-cost-value>{cost_initial:.2f}</span>'
         # --- Gap slider (skew-line residual cap, sibling of cost) ---
         '<label class="st-label">Gap ≤</label>'
@@ -189,7 +189,8 @@ def session_tuning_strip_html(
         'oninput="window._setGapThreshold && window._setGapThreshold(this.value); '
         'document.querySelector(\'[data-session-gap-value]\').textContent = '
         '\'≤ \' + (+this.value) + \' cm\'; '
-        'document.querySelector(\'[data-session-recompute]\').disabled = false;">'
+        '(function(b){if(b&&!b.dataset.recomputing)b.disabled=false;})'
+        '(document.querySelector(\'[data-session-recompute]\'));">'
         f'<span class="st-value" data-session-gap-value>≤ {gap_initial_cm} cm</span>'
         # --- Apply button (sends both values) ---
         '<button type="button" class="st-apply" data-session-recompute disabled '
@@ -197,33 +198,6 @@ def session_tuning_strip_html(
         'onclick="window._applyTuning && window._applyTuning(this);">'
         'Apply</button>'
         '</div>'
-    )
-
-
-def detection_config_strip_html(configs: dict[str, Any]) -> str:
-    live = configs.get("live") or {}
-    server_post = configs.get("server_post") or {}
-    return (
-        '<div class="config-strip" role="status" aria-label="Detection config used">'
-        '<span class="cfg-head">CFG</span>'
-        f'{_config_pill_html("LIVE", live)}'
-        f'{_config_pill_html("SVR", server_post)}'
-        '</div>'
-    )
-
-
-def _config_pill_html(label: str, cfg: dict[str, Any]) -> str:
-    available = bool(cfg.get("available"))
-    klass = "ok" if available else "missing"
-    tag = cfg.get("tag") or "n/a"
-    detail = cfg.get("detail") or "unavailable"
-    title = cfg.get("title") or detail
-    return (
-        f'<span class="cfg-pill {klass}" title="{html.escape(str(title))}">'
-        f'<span class="cfg-label">{html.escape(label)}</span>'
-        f'<span class="cfg-tag">{html.escape(str(tag))}</span>'
-        f'<span class="cfg-detail">{html.escape(str(detail))}</span>'
-        f'</span>'
     )
 
 

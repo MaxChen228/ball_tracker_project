@@ -46,7 +46,6 @@ import {
 const FIT_ACCENT = 0xC0392B;
 // Cached THREE.Color object reused for the dashed-line raw-path
 // fallback (no segments). points_layer.js owns the canonical hex.
-const POINTS_OUTLIER_COLOR = new THREE.Color(POINTS_OUTLIER);
 const G_Z = -9.81;
 const ARROW_LEN_M = 0.3;
 
@@ -255,7 +254,6 @@ class DashboardLayers {
     this.scene.removeLayer("fit_release");
     this.scene.removeLayer("fit_arrows");
     this.scene.removeLayer("fit_points");
-    this.scene.removeLayer("fit_raw_path");
   }
 
   _rebuildFitLayers() {
@@ -266,10 +264,10 @@ class DashboardLayers {
       return;
     }
     // Clear all fit layers before rebuilding. Without this the
-    // conditional groups (`fit_points`, `fit_raw_path`) leak across
-    // rebuilds when their predicate flips ON → OFF — e.g. operator
-    // unticks "Show points" but the cached fit_points group stays
-    // mounted because addLayer is never called for it this pass.
+    // conditional `fit_points` group leaks across rebuilds when its
+    // predicate flips ON → OFF — e.g. operator unticks "Show points"
+    // but the cached group stays mounted because addLayer is never
+    // called for it this pass.
     this._removeFitLayers();
     const segments = Array.isArray(result.segments) ? result.segments : [];
     const points = result.points || [];
@@ -345,31 +343,6 @@ class DashboardLayers {
       this.scene.addLayer("fit_points", pointsGroup);
     }
 
-    // --- raw path fallback (no segments) ---
-    // When the segmenter found nothing usable, surface the raw path as
-    // a thin dashed line so the operator sees the shape rather than an
-    // empty scene. Same intent as the Plotly-era branch.
-    if (!segments.length && !this._showPoints && points.length) {
-      // Apply the same client-side mask to the fallback line — operator
-      // tightening cost/gap on a session that never produced segments
-      // should still see the cleaned-up shape.
-      const kept = [];
-      for (let i = 0; i < points.length; ++i) {
-        if (keep[i]) kept.push(points[i]);
-      }
-      if (!kept.length) return;
-      const buf = new Float32Array(kept.length * 3);
-      for (let i = 0; i < kept.length; ++i) {
-        buf[i * 3 + 0] = kept[i].x_m;
-        buf[i * 3 + 1] = kept[i].y_m;
-        buf[i * 3 + 2] = kept[i].z_m;
-      }
-      const line = lineFromBuffer(buf, POINTS_OUTLIER_COLOR, { transparent: true, opacity: 0.55 });
-      const group = new THREE.Group();
-      group.name = "fit_raw_path";
-      group.add(line);
-      this.scene.addLayer("fit_raw_path", group);
-    }
   }
 
   // ---- live in-progress session ----

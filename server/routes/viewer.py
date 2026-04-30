@@ -60,7 +60,6 @@ def _scene_for_session(session_id: str):
 
 def _build_viewer_health(session_id: str) -> dict[str, Any]:
     from main import state
-    from detection_config_display import config_snapshots_for_session, snapshot_summary
     pitches = state.pitches_for_session(session_id)
     result = state.get(session_id)
     def _effective_fps(frames) -> float | None:
@@ -149,8 +148,6 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         mode = "camera_only"
     else:
         mode = "live_only"
-    cfgs = config_snapshots_for_session(result, pitches)
-    presets = state.list_presets()
     return {
         "session_id": session_id,
         "cameras": cams,
@@ -162,10 +159,6 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         "server_post_ran_at": (
             result.server_post_ran_at if result is not None else None
         ),
-        "config_snapshots": {
-            "live": snapshot_summary(cfgs["live"], presets),
-            "server_post": snapshot_summary(cfgs["server_post"], presets),
-        },
     }
 
 
@@ -338,7 +331,6 @@ def viewer(session_id: str) -> HTMLResponse:
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         strike_zone=state.strike_zone().to_dict(),
-        presets=state.list_presets(),
         segments=segments,
         segments_by_path=segments_by_path,
     ))

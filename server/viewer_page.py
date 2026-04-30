@@ -6,12 +6,9 @@ import json as _json
 import re
 from pathlib import Path
 
-import html as _html
-
 from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
 from scene_runtime import point_size_slider_html, view_presets_toolbar_html
-from presets import Preset
 from reconstruct import Scene
 from render_compare import (
     DRAW_VIRTUAL_BASE_JS,
@@ -39,7 +36,6 @@ from render_scene_theme import (
 )
 from viewer_fragments import (
     cam_view_shared_toolbar_html,
-    detection_config_strip_html,
     failure_strip_html,
     health_nav_strip_html,
     session_tuning_strip_html,
@@ -68,7 +64,6 @@ class ViewerPageContext:
     health_strip_html: str
     health_failure_html: str
     session_tuning_html: str
-    config_strip_html: str
     cost_threshold: float | None
     gap_threshold_m: float | None
     video_cells_html: str
@@ -209,9 +204,6 @@ def build_viewer_page_context(
         session_tuning_html=session_tuning_strip_html(
             cost_threshold, gap_threshold_m, scene.session_id,
         ),
-        config_strip_html=detection_config_strip_html(
-            health.get("config_snapshots") or {}
-        ),
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         video_cells_html=video_cells,
@@ -310,7 +302,6 @@ def render_viewer_html(
     health: dict,
     *,
     strike_zone: dict | None = None,
-    presets: list[Preset],
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
     segments: list | None = None,
@@ -339,34 +330,13 @@ def render_viewer_html(
                 f'<span class="action-ts" title="Server detection last completed at {iso}">'
                 f'{iso}</span>'
             )
-        # Detection-config picker: 'live' is the current dashboard
-        # config (mutating effect — same as the events row "Run srv"
-        # button); 'frozen' replays the per-pitch *_used snapshot for
-        # bit-exact reproduction (409 if any cam in the session lacks
-        # the snapshot, e.g. pre-PR #93 pitches); 'preset:<name>' loads
-        # the named preset from `data/presets/<name>.json` without
-        # touching the live config — the research-compare path. Default
-        # selection is 'live' so a casual operator click matches today's
-        # behavior.
-        # Defensive escape: built-in labels ("Tennis" / "Blue ball") are
-        # safe, but operator-created presets can carry arbitrary labels
-        # — a label containing `<`/`&`/`"` would inject without escape.
-        preset_options = "".join(
-            f'<option value="preset:{_html.escape(p.name)}">'
-            f'Preset: {_html.escape(p.label)}</option>'
-            for p in presets
-        )
+        # Single source of detection config: dashboard's current HSV +
+        # shape_gate. Operator switches preset / hand-tunes via the
+        # dashboard HSV card; this button just runs server_post against
+        # whatever the dashboard currently holds. No source picker —
+        # there is only one config in the system.
         action_html = (
             f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post" class="action-form">'
-            f'<select class="action-select" name="source"'
-            f' title="Detection config to run with. \'Live\' = current dashboard config'
-            f' (mutates if you tweak after). \'Frozen\' = the config this pitch was'
-            f' originally detected with. \'Preset\' = canonical HSV without disturbing'
-            f' the live dashboard config — for research compares.">'
-            f'<option value="live" selected>Live (current dashboard config)</option>'
-            f'<option value="frozen">Original (frozen at detection time)</option>'
-            f'{preset_options}'
-            f'</select>'
             f'<button class="action" type="submit">{label}</button>'
             f'{ts_html}'
             f'</form>'
@@ -405,7 +375,6 @@ def render_viewer_html(
   </div>
   <div class="nav-tuning" role="region" aria-label="Per-session pairing tuning">
     {ctx.session_tuning_html}
-    {ctx.config_strip_html}
   </div>
   {ctx.health_failure_html}
   <div class="work" data-mode="{ctx.layout_mode}">
@@ -557,14 +526,26 @@ window.VIEWER_INITIAL_COST_THRESHOLD = {1.0 if ctx.cost_threshold is None else f
 // the slider's 200cm position is just `2.0m`, no Infinity special case.
 window.VIEWER_INITIAL_GAP_THRESHOLD_M = {2.0 if ctx.gap_threshold_m is None else float(ctx.gap_threshold_m)};
 window._applyTuning = function(btn) {{
-  const cost = parseFloat(document.querySelector('[data-session-cost-threshold]').value);
+  const costInput = document.querySelector('[data-session-cost-threshold]');
+  const gapInput = document.querySelector('[data-session-gap-threshold]');
+  const costValueEl = document.querySelector('[data-session-cost-value]');
+  const gapValueEl = document.querySelector('[data-session-gap-value]');
+  const cost = parseFloat(costInput.value);
   // Slider value is centimetres (0–200); ship metres to the route.
   // 200cm = 2.0m = the route's max — every cartesian pair survives the
   // gap gate at that setting.
-  const gap_m = parseFloat(document.querySelector('[data-session-gap-threshold]').value) / 100;
+  const gap_m = parseFloat(gapInput.value) / 100;
   const sid = btn.getAttribute('data-session-id');
+  // In-flight guard: button + sliders disabled together, recomputing
+  // class drives the spinner border. The slider oninput handlers check
+  // data-recomputing before re-enabling the button so a mid-flight
+  // wiggle can't sneak past the disabled state.
   btn.disabled = true;
+  btn.dataset.recomputing = '1';
+  btn.classList.add('recomputing');
   btn.textContent = 'Recomputing…';
+  costInput.disabled = true;
+  gapInput.disabled = true;
   fetch('/sessions/' + encodeURIComponent(sid) + '/recompute', {{
     method: 'POST',
     headers: {{ 'Content-Type': 'application/json' }},
@@ -573,10 +554,6 @@ window._applyTuning = function(btn) {{
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }}).then(function(body) {{
-    // Patch in place: feed the fresh SessionResult to the Three.js
-    // scene + refresh the slider's stored "initial" values so a
-    // subsequent Apply diff measures from this new baseline. No reload
-    // → video keeps buffer / scrubber state / layer-visibility map.
     if (!body || !body.result) throw new Error('recompute response missing `result`');
     const r = body.result;
     if (!window.BallTrackerViewerScene) {{
@@ -594,20 +571,34 @@ window._applyTuning = function(btn) {{
         r.segments_by_path || {{}},
       );
     }}
-    // Reseed the window globals + DOM so a subsequent drag preview
-    // starts from the now-persisted baseline (matches what a reload
-    // would have produced).
+    // Reflect server-persisted values back onto the sliders + tick
+    // labels — operator sees what was actually applied, not whatever
+    // they happened to drag to before clicking. Subsequent drags
+    // diff from this new baseline.
     if (typeof r.cost_threshold === 'number') {{
       window.VIEWER_INITIAL_COST_THRESHOLD = r.cost_threshold;
+      costInput.value = r.cost_threshold.toFixed(2);
+      if (costValueEl) costValueEl.textContent = r.cost_threshold.toFixed(2);
     }}
     if (typeof r.gap_threshold_m === 'number') {{
       window.VIEWER_INITIAL_GAP_THRESHOLD_M = r.gap_threshold_m;
+      const cm = Math.round(r.gap_threshold_m * 100);
+      gapInput.value = String(cm);
+      if (gapValueEl) gapValueEl.textContent = '≤ ' + cm + ' cm';
     }}
     btn.textContent = 'Apply';
     btn.disabled = true;
+    btn.classList.remove('recomputing');
+    delete btn.dataset.recomputing;
+    costInput.disabled = false;
+    gapInput.disabled = false;
   }}).catch(function(err) {{
     btn.disabled = false;
     btn.textContent = 'Apply';
+    btn.classList.remove('recomputing');
+    delete btn.dataset.recomputing;
+    costInput.disabled = false;
+    gapInput.disabled = false;
     alert('Recompute failed: ' + err);
   }});
 }};

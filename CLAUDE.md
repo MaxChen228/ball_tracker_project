@@ -108,6 +108,12 @@ general-purpose / claude-code-guide / 自訂 worker）**一律加** `model:
 - 收到 subagent 摘要後仍要對關鍵結論 file:line 自行驗證
 - 例外：使用者明說「用 Haiku/Sonnet 跑這個」
 
+## pytest 一律 background 跑
+
+`cd server && uv run pytest` 跑完整套要 30+ 秒。任何 pytest 指令（含單一
+test、`-q`、`-x`）一律加 `run_in_background: true`，不要前景等。完成後用
+`tail` 或讀 output_file 取結果。
+
 ## iOS — 禁 xcodebuild test
 
 - **可以**：`xcodebuild -project ball_tracker.xcodeproj -scheme ball_tracker
@@ -281,8 +287,11 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
 - aspect/fill ship 進 WS frame payload（commit abfa422）
 - `frames_live` candidate `{px,py,area,area_score,aspect,fill}`；server
   `_resolve_candidates` 蓋 cost
-- HSV/shape_gate/selector_tuning frozen 進 PitchPayload + SessionResult
-  （PR #93）— reprocess 用 frozen snapshot 重現原始 detection
+- legacy `hsv_range_used` / `shape_gate_used` 欄位仍 stamp 在 PitchPayload +
+  SessionResult — `reprocess_sessions.py --use-frozen-snapshot` 用這兩個欄位
+  重現原始 detection。PR #93 加進去的 `live_config_used` /
+  `server_post_config_used` + 對應 `DetectionConfigSnapshotPayload` 已在
+  detection-config 簡化時砍掉（從未被任何路徑寫過，dead schema 欄位）
 - iOS 對 server-required WS 欄位拒 schema 漂（atomic-drop guard at handler
   head）
 - WS settings push 12 欄位文件化（[docs/protocols.md](docs/protocols.md)，
@@ -295,6 +304,10 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
 - 要 reproduce 舊 session detection → reprocess 預設行為已是用 disk 當下
   config（commit `0b300a4`，2026-04-29）。要凍結快照重現舊 detection 加
   `--use-frozen-snapshot`（讀 `pitch.*_used`）
+- `/sessions/{sid}/run_server_post` 已退 source picker（live/frozen/preset
+  三選一砍光）— endpoint 永遠用 dashboard 當下 `state.hsv_range()` /
+  `state.shape_gate()`。要換 preset 跑 → dashboard 切 preset 再按 button，
+  不要 server 端找 source-replacement hook
 - 改 wire schema → 同 commit 改 `docs/protocols.md` + iOS 端
   `CameraCommandRouter` guard
 - 動 `state.py` 內共用 state → 用 public accessor（如

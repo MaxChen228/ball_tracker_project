@@ -830,19 +830,15 @@ def test_sessions_cancel_and_run_server_post_json_api(tmp_path):
     resume = client.post(
         f"/sessions/{sid(34)}/run_server_post",
         headers={"Accept": "application/json"},
-        json={"source": "live"},
     )
     assert resume.status_code == 200
     assert resume.json()["ok"] is True
     assert resume.json()["queued"] == 1
-    assert resume.json()["source"] == "live"
 
 
 def _arm_minimal_session_for_run_server_post(session_id: str) -> None:
-    """Shared fixture for the /run_server_post body-validation tests below.
-    Records one server_post-pending pitch with a fake MOV so the endpoint
-    has something to enqueue (or, for the negative tests, gets past the
-    `_SESSION_ID_RE` check before failing on the body)."""
+    """Records one server_post-pending pitch with a fake MOV so the endpoint
+    has something to enqueue."""
     pitch = _minimal_pitch("A", session_id=session_id).model_copy(deep=True)
     pitch.frames_server_post = []
     pitch.paths = [main.DetectionPath.server_post.value]
@@ -851,156 +847,24 @@ def _arm_minimal_session_for_run_server_post(session_id: str) -> None:
     main.state.processing.mark_server_post_queued(session_id, "A")
 
 
-def test_run_server_post_missing_source_field_returns_400(tmp_path):
-    """Per CLAUDE.md no-silent-fallback: empty body must NOT default to
-    'live'. Caller must specify source explicitly so research provenance
-    is auditable from the request log alone."""
+def test_run_server_post_uses_dashboard_config(tmp_path):
+    """Detection config has a single source of truth — the dashboard's
+    current HSV + shape_gate. The endpoint takes no `source` field; the
+    pair captured at request time is whatever `state.hsv_range()` /
+    `state.shape_gate()` return then."""
     client = TestClient(app)
     _arm_minimal_session_for_run_server_post(sid(35))
     r = client.post(
         f"/sessions/{sid(35)}/run_server_post",
         headers={"Accept": "application/json"},
     )
-    assert r.status_code == 400, r.text
-    assert "source" in r.json()["detail"]
-
-
-def test_run_server_post_unknown_source_returns_400(tmp_path):
-    client = TestClient(app)
-    _arm_minimal_session_for_run_server_post(sid(36))
-    r = client.post(
-        f"/sessions/{sid(36)}/run_server_post",
-        headers={"Accept": "application/json"},
-        json={"source": "magical_default"},
-    )
-    assert r.status_code == 400, r.text
-    assert "magical_default" in r.json()["detail"]
-
-
-def test_run_server_post_unknown_preset_returns_400(tmp_path):
-    client = TestClient(app)
-    _arm_minimal_session_for_run_server_post(sid(37))
-    r = client.post(
-        f"/sessions/{sid(37)}/run_server_post",
-        headers={"Accept": "application/json"},
-        json={"source": "preset:no_such_preset"},
-    )
-    assert r.status_code == 400, r.text
-    assert "no_such_preset" in r.json()["detail"]
-
-
-def test_run_server_post_frozen_without_snapshot_returns_409(tmp_path):
-    """`source=frozen` requires per-pitch `*_used` snapshots from PR #93
-    stamping. _minimal_pitch is a pre-stamping fixture (no snapshots),
-    so the route must reject — not silently fall back to live."""
-    client = TestClient(app)
-    _arm_minimal_session_for_run_server_post(sid(38))
-    r = client.post(
-        f"/sessions/{sid(38)}/run_server_post",
-        headers={"Accept": "application/json"},
-        json={"source": "frozen"},
-    )
-    assert r.status_code == 409, r.text
-    assert "frozen" in r.json()["detail"]
-
-
-def test_run_server_post_frozen_failure_does_not_zombie_job_state(tmp_path):
-    """Regression for the pre-flight ordering bug caught in phase 2
-    review: if `_resolve_detection_config` raised AFTER
-    `resume_processing` had already mutated job states to "queued",
-    the failed cams stayed stuck in "queued" forever (no
-    BackgroundTask backing them, no operator path to clear). The fix
-    is to validate config resolution against `session_candidates`
-    BEFORE `resume_processing`. This test pins that ordering: the 409
-    must leave the job in its pre-request state so a subsequent
-    `source=live` retry works without `cancel_processing` first."""
-    client = TestClient(app)
-    _arm_minimal_session_for_run_server_post(sid(40))
-    # First: source=frozen must 409 because _minimal_pitch has no
-    # *_used snapshot.
-    r1 = client.post(
-        f"/sessions/{sid(40)}/run_server_post",
-        headers={"Accept": "application/json"},
-        json={"source": "frozen"},
-    )
-    assert r1.status_code == 409, r1.text
-    # Second: a follow-up `source=live` request must succeed without
-    # any intervening cancel. If pre-flight ordering is wrong, the cam
-    # is stuck in "queued" and resume_processing returns nothing → 409
-    # "no resumable processing" instead of 200.
-    r2 = client.post(
-        f"/sessions/{sid(40)}/run_server_post",
-        headers={"Accept": "application/json"},
-        json={"source": "live"},
-    )
-    assert r2.status_code == 200, r2.text
-    assert r2.json()["queued"] == 1
-    assert r2.json()["source"] == "live"
-
-
-def test_run_server_post_preset_blue_ball_enqueues(tmp_path):
-    """`source=preset:blue_ball` should enqueue without mutating disk
-    HSV / shape_gate — the operator's live dashboard config is
-    untouched, satisfying the research-compare workflow this redesign
-    exists for."""
-    client = TestClient(app)
-    _arm_minimal_session_for_run_server_post(sid(39))
-    hsv_before = main.state.hsv_range()
-    sg_before = main.state.shape_gate()
-    r = client.post(
-        f"/sessions/{sid(39)}/run_server_post",
-        headers={"Accept": "application/json"},
-        json={"source": "preset:blue_ball"},
-    )
     assert r.status_code == 200, r.text
-    assert r.json()["queued"] == 1
-    assert r.json()["source"] == "preset:blue_ball"
-    # Sub-knobs untouched — research compare must not drift the
-    # operator's dashboard state on any axis.
-    assert main.state.hsv_range() == hsv_before
-    assert main.state.shape_gate() == sg_before
-
-
-def test_resolve_detection_config_preset_uses_preset_shape():
-    """A preset carries (HSV + shape_gate). Resolving `source=preset:NAME`
-    must return the preset's own shape_gate, **not** the state's current
-    value. Earlier the preset only carried HSV and shape_gate leaked
-    from state, so a concurrent dashboard slider edit on shape_gate
-    would silently shift the cost basis of an in-flight research-compare
-    reprocess. (Selector cost weights are now `_W_ASPECT` / `_W_FILL`
-    constants — no leak path remains.)"""
-    from detection import ShapeGate
-    from routes.sessions import _resolve_detection_config
-
-    # Wrap the autouse-fresh `main.state` so its on-disk preset library
-    # is reachable, but override `shape_gate()` to a value disagreeing
-    # with every preset so a leak from state would be observable.
-    class _FakeState:
-        def __init__(self, real):
-            self._real = real
-        def hsv_range(self):
-            return self._real.load_preset("tennis").hsv  # irrelevant for this test
-        def shape_gate(self):
-            return ShapeGate(aspect_min=0.01, fill_min=0.01)
-        def load_preset(self, name):
-            return self._real.load_preset(name)
-        def list_presets(self):
-            return self._real.list_presets()
-
-    fake_pitch = _minimal_pitch("A", session_id=sid(41))
-    fake_state = _FakeState(main.state)
-
-    for preset_name in ("tennis", "blue_ball"):
-        hsv, gate, label = _resolve_detection_config(
-            f"preset:{preset_name}", fake_pitch, fake_state
-        )
-        preset = main.state.load_preset(preset_name)
-        assert hsv == preset.hsv
-        assert gate == preset.shape_gate, (
-            f"preset:{preset_name} leaked shape_gate from state instead of "
-            f"using the preset's own ({preset.shape_gate})"
-        )
-        assert label == f"preset:{preset_name}"
+    body = r.json()
+    assert body["ok"] is True
+    assert body["queued"] == 1
+    # No source field on the response — config provenance is "dashboard
+    # at request time", not a per-call selector.
+    assert "source" not in body
 
 
 def test_sessions_delete_json_returns_404_for_unknown():
