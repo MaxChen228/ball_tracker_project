@@ -20,6 +20,7 @@ def render_dashboard_html(
     session_html: str,
     hsv_html: str,
     tuning_html: str,
+    strike_zone_html: str,
     intrinsics_html: str,
     events_html: str,
     scene_div: str,
@@ -90,6 +91,10 @@ def render_dashboard_html(
         '<div class="card" data-collapsible-key="dash:card:tuning">'
         '<h2 class="card-title" data-collapsible-header>Capture Tuning</h2>'
         f'<div id="tuning-body" data-collapsible-body>{tuning_html}</div>'
+        "</div>"
+        '<div class="card" data-collapsible-key="dash:card:strike-zone">'
+        '<h2 class="card-title" data-collapsible-header>Strike Zone</h2>'
+        f'<div id="strike-zone-body" data-collapsible-body>{strike_zone_html}</div>'
         "</div>"
         '<div class="card" data-collapsible-key="dash:card:intrinsics">'
         '<h2 class="card-title" data-collapsible-header>Intrinsics (ChArUco)</h2>'

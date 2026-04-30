@@ -19,7 +19,7 @@ from cam_view_ui import CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
 from scene_runtime import scene_runtime_html, view_presets_toolbar_html
 from render_shared import _render_app_nav
-from render_tuning import _render_tuning_body
+from render_tuning import _render_strike_zone_body, _render_tuning_body
 
 
 def render_events_index_html(
@@ -36,6 +36,7 @@ def render_events_index_html(
     heartbeat_interval_s: float = 1.0,
     tracking_exposure_cap: str = "frame_duration",
     capture_height_px: int = 1080,
+    strike_zone: dict[str, Any] | None = None,
     calibration_last_ts: dict[str, float] | None = None,
     extended_markers: list[dict[str, Any]] | None = None,
     preview_requested: dict[str, bool] | None = None,
@@ -57,7 +58,10 @@ def render_events_index_html(
     # populated by the dashboard's `tickCalibration` poll. No
     # server-side figure to ship — dashboard 3D is fully reactive.
     scene_div = '<div id="scene-root" data-bt-scene></div>'
-    scene_runtime_fragment = scene_runtime_html(container_id="scene-root")
+    scene_runtime_fragment = scene_runtime_html(
+        container_id="scene-root",
+        strike_zone=strike_zone,
+    )
 
     nav_html = _render_app_nav(
         "dashboard", devices, session, calibrations, sync, sync_cooldown_remaining_s, arm_readiness
@@ -71,6 +75,7 @@ def render_events_index_html(
         tracking_exposure_cap=tracking_exposure_cap,
         capture_height_px=capture_height_px,
     )
+    strike_zone_html = _render_strike_zone_body(strike_zone)
     events_html = _render_events_body(events)
     # SSR the intrinsics card with whatever we already know. The JS layer
     # refreshes from /calibration/intrinsics on mount + every 5 s so stale
@@ -104,6 +109,7 @@ def render_events_index_html(
         session_html=session_html,
         hsv_html=hsv_html,
         tuning_html=tuning_html,
+        strike_zone_html=strike_zone_html,
         intrinsics_html=intrinsics_html,
         events_html=events_html,
         scene_div=scene_div,
