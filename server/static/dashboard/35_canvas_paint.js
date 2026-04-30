@@ -38,8 +38,10 @@
     // before the first /events tick should still paint immediately.
     await Promise.all([...selectedTrajIds].map(sid => ensureTrajLoaded(sid)));
     const sid = [...selectedTrajIds][0] || null;
-    const result = sid ? trajCache.get(sid) : null;
-    if (sid && !resultHasRenderableFit(result)) {
+    const entry = sid ? trajCache.get(sid) : null;
+    syncPathPillAvailability(entry);
+    const view = entry ? resolvedFitView(entry) : null;
+    if (sid && !resultHasRenderableFit(entry)) {
       selectedTrajIds.delete(sid);
       persistTrajSelection();
       layers.applyFit(null, null);
@@ -50,7 +52,7 @@
       updateLatestPitchBadge();
       return;
     }
-    layers.applyFit(sid, result);
+    layers.applyFit(sid, view);
     // Live session — pulls live trail + per-cam rays from the
     // `livePointStore` / `liveRayStore` maps that the WS frame
     // listener (86_live_stream.js) pushes into.
@@ -87,7 +89,8 @@
     const metaEl = document.getElementById('lpb-meta');
     const sid = [...selectedTrajIds][0] || null;
     const entry = sid ? trajCache.get(sid) : null;
-    const segs = entry && Array.isArray(entry.segments) ? entry.segments : [];
+    const view = entry ? resolvedFitView(entry) : null;
+    const segs = view && Array.isArray(view.segments) ? view.segments : [];
     if (!sid || !segs.length) {
       badge.hidden = true;
       return;
@@ -95,8 +98,41 @@
     const seg = segs[0];
     badge.hidden = false;
     if (speedEl) speedEl.textContent = seg.speed_kph.toFixed(1);
+    const pathTag = view && view.path === 'server_post' ? 'SVR' : 'LIVE';
     const extra = segs.length > 1
-      ? `${segs.length} segs · rmse ${(seg.rmse_m * 100).toFixed(1)}cm`
-      : `rmse ${(seg.rmse_m * 100).toFixed(1)}cm`;
+      ? `${pathTag} · ${segs.length} segs · rmse ${(seg.rmse_m * 100).toFixed(1)}cm`
+      : `${pathTag} · rmse ${(seg.rmse_m * 100).toFixed(1)}cm`;
     if (metaEl) metaEl.textContent = extra;
+  }
+
+  // Mirror the selected entry's `paths_completed` set onto the LIVE/SVR
+  // pill control. Disables the SVR pill until server_post has run for
+  // the selected session, and demotes a stale active selection (e.g.
+  // operator was on SVR for an old session, clicks a fresh live-only
+  // session — pill flips to LIVE rather than silently rendering nothing).
+  function syncPathPillAvailability(entry) {
+    const root = document.querySelector('.ff-path-toggle');
+    if (!root) return;
+    const completed = entry && entry.paths_completed instanceof Set
+      ? entry.paths_completed : new Set();
+    const buttons = root.querySelectorAll('[data-fit-path]');
+    for (const btn of buttons) {
+      const path = btn.dataset.fitPath;
+      const ok = entry ? completed.has(path) : true;
+      btn.disabled = !ok;
+    }
+    if (!entry) return;
+    let active = fitPathMode();
+    if (!completed.has(active)) {
+      const fallback = completed.has('live')
+        ? 'live'
+        : (completed.has('server_post') ? 'server_post' : null);
+      if (fallback && fallback !== active) {
+        setFitPathMode(fallback);
+        active = fallback;
+      }
+    }
+    for (const btn of buttons) {
+      btn.classList.toggle('active', btn.dataset.fitPath === active);
+    }
   }

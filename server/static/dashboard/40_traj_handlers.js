@@ -72,6 +72,29 @@
       }
     });
   }
+  // Fit-path pill — switches the 3D canvas + speed badge between LIVE
+  // (iOS on-device detection) and SVR (server_post offline detection)
+  // for the same SessionResult. Pill disabled state mirrors the selected
+  // session's `paths_completed`; that bookkeeping lives in
+  // syncPathPillAvailability (35_canvas_paint.js), invoked on every
+  // repaint.
+  const _pathToggle = document.querySelector('.ff-path-toggle');
+  if (_pathToggle) {
+    _pathToggle.querySelectorAll('[data-fit-path]').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.fitPath === fitPathMode());
+    });
+    _pathToggle.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-fit-path]');
+      if (!btn || btn.disabled) return;
+      if (btn.dataset.fitPath === fitPathMode()) return;
+      setFitPathMode(btn.dataset.fitPath);
+      _pathToggle.querySelectorAll('[data-fit-path]').forEach(b => {
+        b.classList.toggle('active', b === btn);
+      });
+      repaintCanvas();
+      updateLatestPitchBadge();
+    });
+  }
   // Point-size slider seed + binding lives in dashboard_layers.js's
   // setupDashboardLayers — it runs as a deferred ESM after this classic
   // IIFE so the layer module is mounted by the time it queries the DOM.
