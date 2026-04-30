@@ -31,16 +31,20 @@
         throw new Error("viewer SSE: BallTrackerViewerScene not mounted");
       }
       if (!Array.isArray(result.points) || !result.triangulated_by_path
-          || !Array.isArray(result.segments)) {
+          || !Array.isArray(result.segments) || !result.segments_by_path) {
         throw new Error("viewer SSE: /results payload missing required fields");
       }
       window.BallTrackerViewerScene.setSessionData({
         points: result.points,
         triangulated_by_path: result.triangulated_by_path,
         segments: result.segments,
+        segments_by_path: result.segments_by_path,
       });
-      // `let SEGMENTS` in 00_boot.js was declared mutable for this path.
-      SEGMENTS = result.segments;
-      updateSpeedBadge();
+      if (window._viewerPatchSegmentsState) {
+        window._viewerPatchSegmentsState(
+          result.segments,
+          result.segments_by_path,
+        );
+      }
     });
   }

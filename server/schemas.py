@@ -128,6 +128,22 @@ class ShapeGatePayload(BaseModel):
     fill_min: float
 
 
+class DetectionConfigSnapshotPayload(BaseModel):
+    """Immutable snapshot of one detection-config choice.
+
+    `source` answers "how was this config chosen?" (`live` current dashboard
+    config at arm/ingest time, `frozen` prior snapshot replay, or
+    `preset:<name>` explicit preset rerun). `preset` answers "which named
+    preset identity did the pair correspond to?", independent of how it was
+    selected. A custom slider state therefore carries `preset=None` even when
+    `source='live'`.
+    """
+    source: str
+    preset: str | None = None
+    hsv_range: HSVRangePayload
+    shape_gate: ShapeGatePayload
+
+
 class CaptureTelemetryPayload(BaseModel):
     """Actual capture conditions observed on-device for one uploaded pitch.
 
@@ -224,6 +240,13 @@ class PitchPayload(BaseModel):
     # than a runtime tunable.
     hsv_range_used: HSVRangePayload | None = None
     shape_gate_used: ShapeGatePayload | None = None
+    # Immutable live snapshot taken from the armed session's detection config.
+    # Never overwritten by later server_post reruns; this is the answer to
+    # "what did the live iOS path use at throw time?".
+    live_config_used: DetectionConfigSnapshotPayload | None = None
+    # Immutable snapshot of the most recent successful server_post run for
+    # this camera. None when no server_post has completed yet.
+    server_post_config_used: DetectionConfigSnapshotPayload | None = None
 
 
 class TriangulatedPoint(BaseModel):
@@ -315,12 +338,20 @@ class SessionResult(BaseModel):
     # legacy results / when neither pitch carried a frozen snapshot.
     hsv_range_used: HSVRangePayload | None = None
     shape_gate_used: ShapeGatePayload | None = None
+    # Session-level aggregates of the two per-pitch snapshots above.
+    live_config_used: DetectionConfigSnapshotPayload | None = None
+    server_post_config_used: DetectionConfigSnapshotPayload | None = None
     # Multi-segment ballistic fit. Populated by `find_segments` at result
     # build / recompute time so dashboard + viewer can paint fit curves +
     # speed badges without running the segmenter at view time. Empty list
     # = no segments found (too few points, or pure noise). Sample curves
     # are NOT persisted — clients reconstruct from p0/v0/t_anchor.
     segments: list[SegmentRecord] = []
+    # Per-path fit surfaces. `segments` above remains the legacy single
+    # "active" surface (prefer server_post, else live) for dashboard and
+    # older consumers; viewer PATH switching uses this mapping so live and
+    # server_post each carry their own fit curves / speed badge semantics.
+    segments_by_path: dict[str, list[SegmentRecord]] = Field(default_factory=dict)
 
 
 

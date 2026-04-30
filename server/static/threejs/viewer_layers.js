@@ -20,10 +20,8 @@
 // responsiveness above 60 fps even on the iPad.
 //
 // Colour semantics are intentionally role-based, not path-based:
-// viewer 3D aligns to dashboard by always rendering the SessionResult's
-// single authority surface (`result.points` / `SCENE.triangulated`).
-// PATH still switches rays / ground / 2D overlays, but 3D traj + fit do
-// not pivot with PATH:
+// PATH chooses which detection surface to render, while hue still
+// encodes the scene role:
 //   - authority trajectory / fit curves: segment palette
 //   - active head marker: dashboard accent
 //   - rays / ground traces: stable per-camera colours
@@ -119,6 +117,7 @@ class ViewerLayers {
     this.scene = scene;
     this.SCENE = opts.SCENE;
     this.SEGMENTS = opts.SEGMENTS;
+    this.SEGMENTS_BY_PATH = opts.SEGMENTS_BY_PATH || {};
     this.TRAJ_BY_PATH = opts.TRAJ_BY_PATH || { server_post: [], live: [] };
     this.HAS_TRIANGULATED = opts.HAS_TRIANGULATED || false;
     this.fallbackColor = opts.fallbackColor || 0x999999;
@@ -126,8 +125,8 @@ class ViewerLayers {
     this.mode = opts.mode || "all";  // "all" | "playback"
     // Layer visibility — matches 20_filters.js v6 schema:
     //   { path: "live"|"server_post", rays: bool, traj: bool, fit: bool, blobs: bool }
-    // PATH now drives rays / ground / 2D overlays only. 3D traj + fit are
-    // authority-surface views that stay aligned with dashboard.
+    // PATH drives the whole viewer data surface: rays / ground / 2D
+    // overlays / 3D trajectory / fit all pivot together.
     // Caller MUST provide it (the IIFE's `window.VIEWER_DATA.layerVisibility`
     // ships the localStorage-restored map). Falling back to a default
     // here would mask an init-order regression — fail loud per CLAUDE.md.
@@ -187,14 +186,20 @@ class ViewerLayers {
   }
 
   _currentPath() { return this.layerVisibility.path; }
+  _currentSegments() {
+    const segs = this.SEGMENTS_BY_PATH[this._currentPath()];
+    return Array.isArray(segs) ? segs : [];
+  }
+  _currentTrajectory() {
+    const pts = this.TRAJ_BY_PATH[this._currentPath()];
+    return Array.isArray(pts) ? pts : [];
+  }
   _layerOn(layer) { return !!this.layerVisibility[layer]; }
   // True iff the layer's enable flag is on AND its data subset matches the
-  // global path. `fit` and `traj` are authority-only 3D layers and ignore
-  // PATH so viewer can match dashboard's selected-session scene.
+  // global path.
   _isVisible(layer, path) {
-    if (layer === "fit") return this._layerOn("fit");
-    if (layer === "traj") return this._layerOn("traj");
     if (!this._layerOn(layer)) return false;
+    if (path == null) return true;
     return path === this._currentPath();
   }
 
@@ -252,7 +257,7 @@ class ViewerLayers {
   _buildFitCurves() {
     const group = new THREE.Group();
     group.name = "viewer_fit_curves";
-    const segs = Array.isArray(this.SEGMENTS) ? this.SEGMENTS : [];
+    const segs = this._currentSegments();
     for (let i = 0; i < segs.length; ++i) {
       const buf = sampleSegmentCurve(segs[i], 64);
       const color = SEG_PALETTE[i % SEG_PALETTE.length];
@@ -273,7 +278,7 @@ class ViewerLayers {
 
   _applyFitActiveHighlight() {
     if (!this._fitGroup) return;
-    const segs = Array.isArray(this.SEGMENTS) ? this.SEGMENTS : [];
+    const segs = this._currentSegments();
     const playback = this.mode === "playback";
     for (const line of this._fitGroup.children) {
       const i = line.userData.segIdx;
@@ -375,14 +380,11 @@ class ViewerLayers {
     // shrinks with camera distance like a real sphere).
     const sizeM = this._pointSize;
     if (this._isVisible("traj")) {
-      // Authority trajectory = the same single result surface dashboard
-      // renders for a selected session. SessionResult construction
-      // already chooses server_post when present, otherwise live.
-      const authorityPts = this.SCENE.triangulated || [];
+      const pathPts = this._currentTrajectory();
       const buckets = new Map();  // segIdx | "out" -> [points]
       let lastVisible = null;
-      for (let i = 0; i < authorityPts.length; ++i) {
-        const p = authorityPts[i];
+      for (let i = 0; i < pathPts.length; ++i) {
+        const p = pathPts[i];
         if (p.t_rel_s > cutoff) continue;
         if (!residualPasses(p)) continue;
         if (!costPassesPoint(p)) continue;
@@ -412,7 +414,7 @@ class ViewerLayers {
 
     // Active fit-segment marker (the "predicted ball position at this t").
     if (playback && this._isVisible("fit")) {
-      const segs = Array.isArray(this.SEGMENTS) ? this.SEGMENTS : [];
+      const segs = this._currentSegments();
       for (let i = 0; i < segs.length; ++i) {
         const seg = segs[i];
         if (this.t < seg.t_start - 1e-3 || this.t > seg.t_end + 1e-3) continue;
@@ -457,9 +459,8 @@ class ViewerLayers {
     this._applyFitActiveHighlight();
   }
 
-  // Switch the global PATH (live / server_post). Rays / ground / 2D
-  // overlays re-drive from the new data source; 3D traj + fit stay on
-  // the authority surface so viewer matches dashboard.
+  // Switch the global PATH (live / server_post). The whole viewer data
+  // surface re-drives from the new source, including 3D traj + fit.
   // No same-path early-return: the IIFE's `layerVisibility` map is the
   // SAME object reference as `this.layerVisibility`, so a caller pre-
   // writing the field (legacy pattern) would make the guard fire and
@@ -470,6 +471,8 @@ class ViewerLayers {
       throw new Error(`setPath: invalid path '${path}'`);
     }
     this.layerVisibility.path = path;
+    this.scene.removeLayer("viewer_fit_curves");
+    this._buildFitCurves();
     this._applyGroundVisibility();
     this._rebuildDynamic();
   }
@@ -534,6 +537,7 @@ class ViewerLayers {
     }
     this.TRAJ_BY_PATH = newTrajByPath;
     this.SEGMENTS = Array.isArray(payload.segments) ? payload.segments : [];
+    this.SEGMENTS_BY_PATH = payload.segments_by_path || {};
     this.HAS_TRIANGULATED = this.SCENE.triangulated.length > 0;
     // Fit curves are static-rebuilt from segments; tear down + rebuild.
     this.scene.removeLayer("viewer_fit_curves");

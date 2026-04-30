@@ -60,6 +60,7 @@ def _scene_for_session(session_id: str):
 
 def _build_viewer_health(session_id: str) -> dict[str, Any]:
     from main import state
+    from detection_config_display import config_snapshots_for_session, snapshot_summary
     pitches = state.pitches_for_session(session_id)
     result = state.get(session_id)
     def _effective_fps(frames) -> float | None:
@@ -148,6 +149,7 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         mode = "camera_only"
     else:
         mode = "live_only"
+    cfgs = config_snapshots_for_session(result, pitches)
     return {
         "session_id": session_id,
         "cameras": cams,
@@ -159,6 +161,10 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         "server_post_ran_at": (
             result.server_post_ran_at if result is not None else None
         ),
+        "config_snapshots": {
+            "live": snapshot_summary(cfgs["live"]),
+            "server_post": snapshot_summary(cfgs["server_post"]),
+        },
     }
 
 
@@ -322,6 +328,10 @@ def viewer(session_id: str) -> HTMLResponse:
     cost_threshold = result.cost_threshold if result is not None else None
     gap_threshold_m = result.gap_threshold_m if result is not None else None
     segments = list(result.segments) if result is not None else []
+    segments_by_path = (
+        {k: list(v) for k, v in result.segments_by_path.items()}
+        if result is not None else {}
+    )
     return HTMLResponse(render_viewer_html(
         scene, videos_with_offsets, health,
         cost_threshold=cost_threshold,
@@ -329,6 +339,7 @@ def viewer(session_id: str) -> HTMLResponse:
         strike_zone=state.strike_zone().to_dict(),
         presets=state.list_presets(),
         segments=segments,
+        segments_by_path=segments_by_path,
     ))
 
 

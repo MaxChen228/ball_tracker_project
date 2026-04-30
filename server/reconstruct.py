@@ -446,23 +446,34 @@ def build_scene(
     # to re-derive classification from `original_indices`, eliminating
     # the index-shift bug when the render-dist filter drops points.
     seg_idx_for_triangulated: list[int] | None = None
+    seg_idx_for_by_path: dict[str, list[int]] = {}
     if (
         session_result is not None
-        and session_result.segments
         and triangulated is not None
     ):
-        seg_idx_for_triangulated = [-1] * len(triangulated)
-        for seg_i, seg in enumerate(session_result.segments):
-            for k in seg.original_indices:
-                if 0 <= k < len(seg_idx_for_triangulated):
-                    seg_idx_for_triangulated[k] = seg_i
+        if session_result.segments:
+            seg_idx_for_triangulated = [-1] * len(triangulated)
+            for seg_i, seg in enumerate(session_result.segments):
+                for k in seg.original_indices:
+                    if 0 <= k < len(seg_idx_for_triangulated):
+                        seg_idx_for_triangulated[k] = seg_i
+        for path, pts in (triangulated_by_path or {}).items():
+            segs = (session_result.segments_by_path or {}).get(path) or []
+            if not segs or not pts:
+                continue
+            seg_idx_for = [-1] * len(pts)
+            for seg_i, seg in enumerate(segs):
+                for k in seg.original_indices:
+                    if 0 <= k < len(seg_idx_for):
+                        seg_idx_for[k] = seg_i
+            seg_idx_for_by_path[path] = seg_idx_for
 
     if triangulated:
         scene.triangulated = _pts_to_dicts(triangulated, seg_idx_for_triangulated)
 
     if triangulated_by_path:
         scene.triangulated_by_path = {
-            path: _pts_to_dicts(pts)
+            path: _pts_to_dicts(pts, seg_idx_for_by_path.get(path))
             for path, pts in triangulated_by_path.items()
             if pts
         }
