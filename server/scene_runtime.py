@@ -163,18 +163,9 @@ POINT_SIZE_M_DEFAULT = 0.018
 
 
 def point_size_slider_html(*, slot_id: str = "scene-point-size") -> str:
-    """Range slider for trajectory point world-space size.
-
-    Both dashboard and viewer mount this. The page-specific boot script
-    binds `change`/`input` to `BallTrackerScene.setPointSize(metres)` (or
-    the per-page layer module's setPointSize). localStorage key is shared
-    (`ball_tracker_point_size_m`), so a tweak on either page carries to
-    the other on next load.
-
-    Container `<span>` carries the slot id so multiple instances on one
-    page don't share an id (currently impossible — one canvas per page —
-    but cheap insurance against future regressions).
-    """
+    """Range slider for trajectory point world-space size; layer module's
+    setupX() binds it (push, not pull, to avoid the classic-vs-module
+    boot race). localStorage key shared across dashboard + viewer."""
     return (
         f'<span class="point-size-slider" id="{slot_id}" '
         f'title="Point size — world-space metres (sphere stays this size '

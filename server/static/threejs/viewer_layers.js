@@ -384,6 +384,7 @@ class ViewerLayers {
           const color = isOut ? POINTS_OUTLIER : SEG_PALETTE[Number(key) % SEG_PALETTE.length];
           group.add(pointsCloud(pts, color, isOut ? sizeM * POINT_SIZE_OUTLIER_RATIO : sizeM, {
             opacity: isOut ? 0.55 : 1.0,
+            isOutlier: isOut,
           }));
         }
         if (playback && lastVisible) {
@@ -436,7 +437,7 @@ class ViewerLayers {
     writePersistedPointSizeM(sizeM);
     for (const name of ["viewer_traj_svr", "viewer_traj_live"]) {
       const layer = this.scene.getLayer && this.scene.getLayer(name);
-      applyPointSizeToGroup(layer, sizeM, POINTS_OUTLIER);
+      applyPointSizeToGroup(layer, sizeM);
     }
   }
   pointSizeM() { return this._pointSize; }
@@ -525,5 +526,26 @@ export function setupViewerLayers(scene, opts) {
   window.BallTrackerViewerScene = layers;
   const toolbar = document.querySelector(".scene-views");
   if (toolbar) scene.bindViewToolbar(toolbar);
+  // Slider seed + bind here, not in the classic IIFE — by the time
+  // setupViewerLayers runs the layers controller is mounted, so the
+  // initial DOM value can reflect the persisted size loud-and-correct
+  // instead of silently displaying the Python-rendered default while
+  // the materials use a different size from localStorage.
+  bindViewerPointSizeSlider(layers, "#viewer-point-size");
   return layers;
+}
+
+function bindViewerPointSizeSlider(layers, containerSel) {
+  const slider = document.querySelector(`${containerSel} [data-point-size-slider]`);
+  const readout = document.querySelector(`${containerSel} [data-point-size-readout]`);
+  if (!slider) return;
+  const seed = layers.pointSizeM();
+  slider.value = String(seed);
+  if (readout) readout.textContent = `${Math.round(seed * 1000)} mm`;
+  slider.addEventListener("input", () => {
+    const v = parseFloat(slider.value);
+    if (!Number.isFinite(v)) return;
+    if (readout) readout.textContent = `${Math.round(v * 1000)} mm`;
+    layers.setPointSize(v);
+  });
 }

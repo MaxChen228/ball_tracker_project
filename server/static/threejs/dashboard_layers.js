@@ -208,7 +208,7 @@ class DashboardLayers {
     this._pointSize = sizeM;
     writePersistedPointSizeM(sizeM);
     const layer = this.scene.getLayer && this.scene.getLayer("fit_points");
-    applyPointSizeToGroup(layer, sizeM, POINTS_OUTLIER);
+    applyPointSizeToGroup(layer, sizeM);
   }
   pointSizeM() { return this._pointSize; }
 
@@ -285,6 +285,7 @@ class DashboardLayers {
         const color = isOut ? POINTS_OUTLIER : SEG_PALETTE[Number(key) % SEG_PALETTE.length];
         pointsGroup.add(pointsCloud(pts, color, isOut ? sizeM * POINT_SIZE_OUTLIER_RATIO : sizeM, {
           opacity: isOut ? 0.55 : 1.0,
+          isOutlier: isOut,
         }));
       }
       this.scene.addLayer("fit_points", pointsGroup);
@@ -474,9 +475,28 @@ export function setupDashboardLayers(scene) {
   // shared with the viewer (`.scene-views`).
   const toolbar = document.querySelector(".scene-views");
   if (toolbar) scene.bindViewToolbar(toolbar);
-  // Strike-zone toggle: classic IIFE wires the checkbox listener; here
-  // we just sync the initial visibility from localStorage (the scene
-  // already does this on construction, but the .selected checkbox
-  // state may differ — IIFE's 40_traj_handlers.js re-sets it on mount).
+  // Bind the point-size slider here, not in the classic IIFE. Module
+  // mount order: classic <script> runs first (slider is a no-op then
+  // because window.BallTrackerDashboardScene is undefined), THEN this
+  // ESM mounts and reads the persisted size, pushes it to the slider
+  // value + readout, and binds `input` -> setPointSize. Push, not pull
+  // — eliminates the boot race where slider showed 18mm regardless of
+  // the persisted localStorage value.
+  bindPointSizeSlider(layers, "#dash-point-size");
   return layers;
+}
+
+function bindPointSizeSlider(layers, containerSel) {
+  const slider = document.querySelector(`${containerSel} [data-point-size-slider]`);
+  const readout = document.querySelector(`${containerSel} [data-point-size-readout]`);
+  if (!slider) return;
+  const seed = layers.pointSizeM();
+  slider.value = String(seed);
+  if (readout) readout.textContent = `${Math.round(seed * 1000)} mm`;
+  slider.addEventListener("input", () => {
+    const v = parseFloat(slider.value);
+    if (!Number.isFinite(v)) return;
+    if (readout) readout.textContent = `${Math.round(v * 1000)} mm`;
+    layers.setPointSize(v);
+  });
 }

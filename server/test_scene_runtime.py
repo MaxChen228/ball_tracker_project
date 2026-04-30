@@ -219,13 +219,23 @@ def test_point_size_constants_match_points_layer_js():
     # Each Python const has a matching JS export. Source-of-truth check:
     # the JS literal text must contain the Python value (formatted to a
     # plain float repr — the JS file uses 0.005, 0.040, etc.).
-    for name, value in [
+    # Parse the JS literal numerically — string match would either false-
+    # match (0.04 substring of 0.0401) or false-fail (Python's repr drops
+    # trailing zeros so 0.040 → "0.04" while the JS source keeps 0.040;).
+    import re
+    for name, py_value in [
         ("POINT_SIZE_M_MIN", sr.POINT_SIZE_M_MIN),
         ("POINT_SIZE_M_MAX", sr.POINT_SIZE_M_MAX),
         ("POINT_SIZE_M_STEP", sr.POINT_SIZE_M_STEP),
         ("POINT_SIZE_M_DEFAULT", sr.POINT_SIZE_M_DEFAULT),
     ]:
-        assert f"export const {name} = {value}" in js_text, (
-            f"{name} desync: Python={value!r}, JS literal not found. "
+        m = re.search(rf"export const {name}\s*=\s*([0-9.]+)\s*;", js_text)
+        assert m, (
+            f"{name}: no `export const {name} = N;` line in points_layer.js. "
+            f"Update both `scene_runtime.py` and `static/threejs/points_layer.js`."
+        )
+        js_value = float(m.group(1))
+        assert js_value == py_value, (
+            f"{name} desync: Python={py_value!r}, JS={js_value!r}. "
             f"Update both `scene_runtime.py` and `static/threejs/points_layer.js`."
         )

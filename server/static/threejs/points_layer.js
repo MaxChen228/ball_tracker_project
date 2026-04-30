@@ -50,6 +50,10 @@ export function classifyPointsBySegment(points, segments) {
 
 // Build one THREE.Points object from `pts` (each {x,y,z}). One Points per
 // colour bucket = one draw call per bucket. `sizeM` is world-space radius.
+// Pass `opts.isOutlier = true` so applyPointSizeToGroup can re-shrink
+// outlier buckets when the slider mutates size, without colour-equality
+// hacks (which would break if a SEG_PALETTE entry ever collided with
+// POINTS_OUTLIER).
 export function pointsCloud(pts, color, sizeM, opts = {}) {
   const buf = new Float32Array(pts.length * 3);
   for (let i = 0; i < pts.length; ++i) {
@@ -67,7 +71,9 @@ export function pointsCloud(pts, color, sizeM, opts = {}) {
     transparent: opacity < 1.0,
     opacity,
   });
-  return new THREE.Points(geom, mat);
+  const node = new THREE.Points(geom, mat);
+  node.userData.isOutlier = !!opts.isOutlier;
+  return node;
 }
 
 // Read the persisted size, clamped to slider bounds. Falls through to
@@ -93,17 +99,17 @@ export function writePersistedPointSizeM(sizeM) {
 }
 
 // Walk a Group and mutate every PointsMaterial.size in place. Cheap —
-// no geometry rebuild, slider feels instant while dragging.
-export function applyPointSizeToGroup(group, sizeM, outlierColor = POINTS_OUTLIER) {
+// no geometry rebuild, slider feels instant while dragging. Reads the
+// `userData.isOutlier` tag set by `pointsCloud` to apply the reduced
+// ratio (vs colour-equality, which would silently mis-shrink in-segment
+// points if a future SEG_PALETTE entry collided with POINTS_OUTLIER).
+export function applyPointSizeToGroup(group, sizeM) {
   if (!group) return;
-  const outlierColorObj = new THREE.Color(outlierColor);
   group.traverse((node) => {
     if (!node || !node.isPoints) return;
     const mat = node.material;
     if (!mat || !mat.isPointsMaterial) return;
-    // Outlier buckets render at the reduced ratio. Detect by colour
-    // match — palette colours are all distinct from POINTS_OUTLIER.
-    const isOut = mat.color.equals(outlierColorObj);
+    const isOut = !!(node.userData && node.userData.isOutlier);
     mat.size = isOut ? sizeM * POINT_SIZE_OUTLIER_RATIO : sizeM;
     mat.needsUpdate = true;
   });
