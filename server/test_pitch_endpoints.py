@@ -73,6 +73,50 @@ def test_post_pitch_with_video_triangulates_server_side(tmp_path):
     assert abs(pt["z_m"] - P_true[2]) < 2e-3
 
 
+def test_run_server_post_broadcasts_fit_with_thresholds(tmp_path, monkeypatch):
+    """Each cam's `_run_server_detection` finishes by broadcasting `fit`
+    so viewer + dashboard can repaint the curve and re-apply the
+    cost/gap mask without polling /results. Mirrors the cycle_end /
+    recompute fit contract: payload always carries `cost_threshold` and
+    `gap_threshold_m` keys so the client's `'cost_threshold' in payload`
+    patch path triggers."""
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    P_true = np.array([0.1, 0.3, 1.0])
+    session_id = sid(704)
+
+    events: list[tuple[str, dict]] = []
+
+    class _CaptureHub:
+        async def broadcast(self, event: str, data: dict) -> None:
+            events.append((event, data))
+
+        async def subscribe(self):
+            if False:
+                yield ""
+
+    monkeypatch.setattr(main, "sse_hub", _CaptureHub())
+
+    client = TestClient(app)
+    mov_a = _encode_single_ball_mov(tmp_path, K, R_a, t_a, P_true, filename="a.mov")
+    mov_b = _encode_single_ball_mov(tmp_path, K, R_b, t_b, P_true, filename="b.mov")
+
+    assert _post_pitch(client, _base_payload("A", session_id, K, H_a), mov_a).status_code == 200
+    assert _post_pitch(client, _base_payload("B", session_id, K, H_b), mov_b).status_code == 200
+    run = client.post(
+        f"/sessions/{session_id}/run_server_post",
+        data={"source": "live"},
+    )
+    assert run.status_code == 200, run.text
+
+    fit_events = [data for name, data in events if name == "fit" and data.get("sid") == session_id]
+    # Two cams → two fit broadcasts (one per `state.record` rebuild).
+    assert len(fit_events) >= 2, f"expected ≥2 fit events, got {events}"
+    for fe in fit_events:
+        assert "segments" in fe and isinstance(fe["segments"], list)
+        assert "cost_threshold" in fe
+        assert "gap_threshold_m" in fe
+
+
 def test_post_pitch_without_video_or_frames_returns_422(tmp_path):
     """Mode-one requires a video; mode-two requires frames. Sending neither
     means there's nothing to triangulate — reject up-front instead of
