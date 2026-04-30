@@ -19,6 +19,14 @@
 // layers that depend on t, leaving cameras / fit curves / ground
 // traces alone. Static-vs-dynamic split per layer keeps scrub
 // responsiveness above 60 fps even on the iPad.
+//
+// Colour semantics are intentionally role-based, not path-based:
+// PATH already selects which pipeline's geometry is visible, so the 3D
+// scene does NOT spend hue on "live vs svr". This keeps viewer visually
+// aligned with dashboard:
+//   - fit curves / server_post points: segment palette
+//   - live trajectory: dashboard live accent
+//   - rays / ground traces: stable per-camera colours
 
 import * as THREE from "three";
 import {
@@ -32,8 +40,8 @@ import {
   applyPointSizeToGroup,
 } from "./points_layer.js";
 
-const ACCENT_SVR = 0xC0392B;
-const TRAJ_LIVE = 0x4A6B8C;
+const FIT_ACCENT = 0xC0392B;
+const TRAJ_LIVE = FIT_ACCENT;
 const G_Z = -9.81;
 // Same ±tol as raysAtT in the previous implementation — a single decoded
 // frame's worth.
@@ -44,13 +52,8 @@ const PATH_LIVE = "live";
 const PATH_SVR = "server_post";
 const PATHS = [PATH_LIVE, PATH_SVR];
 
-// Per-(path, cam) colour scheme, mirrors viewer 00_boot.js PATH_COLORS.
-const PATH_COLORS = {
-  [PATH_LIVE]: { A: 0xB8451F, B: 0xE08B5F },
-  [PATH_SVR]:  { A: 0x4A6B8C, B: 0x89A5BD },
-};
-function colorForCamPath(cam, path, fallback) {
-  return (PATH_COLORS[path] && PATH_COLORS[path][cam]) || fallback;
+function colorForCamera(cam, theme, fallback) {
+  return (theme.camera_colors && theme.camera_colors[cam]) || fallback;
 }
 
 function lineFromBuffer(buf, color, opts = {}) {
@@ -220,7 +223,7 @@ class ViewerLayers {
           buf[i * 3 + 1] = trace[i].y;
           buf[i * 3 + 2] = trace[i].z;
         }
-        const color = colorForCamPath(cam, path, this.fallbackColor);
+        const color = colorForCamera(cam, this.scene.theme, this.fallbackColor);
         const opacity = this.HAS_TRIANGULATED ? 0.40 : 0.55;
         const line = lineFromBuffer(buf, color, { opacity });
         line.userData = { cam, path, ts: trace.map((p) => p.t_rel_s) };
@@ -334,7 +337,7 @@ class ViewerLayers {
     raysGroup.name = "viewer_rays";
     for (const [key, rays] of raysByKey) {
       const [cam, path] = key.split("|");
-      const color = colorForCamPath(cam, path, this.fallbackColor);
+      const color = colorForCamera(cam, this.scene.theme, this.fallbackColor);
       let pairs = [];
       if (playback) {
         // Pick rays whose t_rel_s is within tol of currentT — same
@@ -407,7 +410,7 @@ class ViewerLayers {
         if (playback && lastVisible) {
           // Head sphere — "current ball position at t" affordance, sized
           // a bit larger than the cloud so it reads as the active marker.
-          group.add(pointMarker([lastVisible.x, lastVisible.y, lastVisible.z], ACCENT_SVR, sizeM * 1.6));
+          group.add(pointMarker([lastVisible.x, lastVisible.y, lastVisible.z], FIT_ACCENT, sizeM * 1.6));
         }
         this.scene.addLayer("viewer_traj_svr", group);
       }
