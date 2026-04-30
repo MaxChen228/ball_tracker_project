@@ -83,17 +83,17 @@ def render_dashboard_html(
         '<h2 class="card-title">Session</h2>'
         f'<div id="session-body">{session_html}</div>'
         "</div>"
-        '<div class="card">'
-        '<h2 class="card-title">Detection HSV</h2>'
-        f'<div id="hsv-body">{hsv_html}</div>'
+        '<div class="card" data-collapsible-key="dash:card:hsv">'
+        '<h2 class="card-title" data-collapsible-header>Detection HSV</h2>'
+        f'<div id="hsv-body" data-collapsible-body>{hsv_html}</div>'
         "</div>"
-        '<div class="card">'
-        '<h2 class="card-title">Capture Tuning</h2>'
-        f'<div id="tuning-body">{tuning_html}</div>'
+        '<div class="card" data-collapsible-key="dash:card:tuning">'
+        '<h2 class="card-title" data-collapsible-header>Capture Tuning</h2>'
+        f'<div id="tuning-body" data-collapsible-body>{tuning_html}</div>'
         "</div>"
-        '<div class="card">'
-        '<h2 class="card-title">Intrinsics (ChArUco)</h2>'
-        f'<div id="intrinsics-body">{intrinsics_html}</div>'
+        '<div class="card" data-collapsible-key="dash:card:intrinsics">'
+        '<h2 class="card-title" data-collapsible-header>Intrinsics (ChArUco)</h2>'
+        f'<div id="intrinsics-body" data-collapsible-body>{intrinsics_html}</div>'
         "</div>"
         '<div class="card">'
         '<div class="events-toolbar">'

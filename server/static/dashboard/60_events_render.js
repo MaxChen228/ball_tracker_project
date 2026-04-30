@@ -14,7 +14,7 @@
   // delegated change handler, and Plotly tooltips over the trash/cancel
   // buttons jumped whenever the tick arrived even if nothing changed.
   const _eventRowCache = new Map(); // sid -> { el, key }
-  const _eventDayCache = new Map(); // 'YYYY-MM-DD' -> el
+  const _eventDayCache = new Map(); // 'YYYY-MM-DD' -> { groupEl, headerEl, bodyEl }
 
   function _eventRowClasses(e, existingClassName = '') {
     // Drives the row-level visual treatment (e.g. orange pulse while a
@@ -216,13 +216,18 @@
       _eventDayCache.clear();
     }
 
-    // Walk events in (already-sorted) order and emit a `.event-day-header`
-    // whenever the local-tz day flips. Day headers + rows share one DOM
-    // child list so the sequence is `[hdr, row, row, hdr, row, ...]`.
+    // Walk events in (already-sorted) order. Each day owns an
+    // `.event-day-group` wrapper (collapsible) holding `.event-day`
+    // header + `.event-day-body` containing that day's `.event-item`
+    // rows. Group ordering inside `eventsBox` mirrors the SSR markup
+    // from `_render_events_body` so SSR / poll / SSE all share one
+    // DOM shape.
     const liveIds = new Set();
     const liveDays = new Set();
-    let domIndex = 0;
+    let groupIndex = 0;
     let lastDay = null;
+    let currentBody = null;
+    let currentBodyIndex = 0;
     for (let i = 0; i < events.length; i++) {
       const e = events[i];
       const sid = e.session_id;
@@ -230,18 +235,35 @@
       liveIds.add(sid);
       if (day !== lastDay) {
         liveDays.add(day);
-        let dayEl = _eventDayCache.get(day);
-        if (!dayEl) {
-          dayEl = document.createElement('div');
-          dayEl.className = 'event-day';
-          dayEl.dataset.day = day;
-          dayEl.textContent = day;
-          _eventDayCache.set(day, dayEl);
+        let group = _eventDayCache.get(day);
+        if (!group) {
+          const groupEl = document.createElement('div');
+          groupEl.className = 'event-day-group';
+          groupEl.dataset.collapsibleKey = `dash:event-day:${day}`;
+          const headerEl = document.createElement('div');
+          headerEl.className = 'event-day';
+          headerEl.dataset.day = day;
+          headerEl.dataset.collapsibleHeader = '';
+          headerEl.textContent = day;
+          const bodyEl = document.createElement('div');
+          bodyEl.className = 'event-day-body';
+          bodyEl.dataset.collapsibleBody = '';
+          groupEl.appendChild(headerEl);
+          groupEl.appendChild(bodyEl);
+          // Pick up persisted collapse state before the group lands in
+          // the DOM so there's no expanded→collapsed flicker.
+          if (typeof window.applyCollapsibleState === 'function') {
+            window.applyCollapsibleState(groupEl);
+          }
+          group = { groupEl, headerEl, bodyEl };
+          _eventDayCache.set(day, group);
         }
-        if (eventsBox.children[domIndex] !== dayEl) {
-          eventsBox.insertBefore(dayEl, eventsBox.children[domIndex] || null);
+        if (eventsBox.children[groupIndex] !== group.groupEl) {
+          eventsBox.insertBefore(group.groupEl, eventsBox.children[groupIndex] || null);
         }
-        domIndex++;
+        groupIndex++;
+        currentBody = group.bodyEl;
+        currentBodyIndex = 0;
         lastDay = day;
       }
       const key = _eventRowKey(e);
@@ -251,7 +273,7 @@
         el.className = _eventRowClasses(e);
         el.dataset.sid = sid;
         el.innerHTML = _eventRowHtml(e);
-        eventsBox.appendChild(el);
+        currentBody.appendChild(el);
         entry = { el, key };
         _eventRowCache.set(sid, entry);
       } else if (entry.key !== key) {
@@ -262,25 +284,27 @@
         entry.el.innerHTML = _eventRowHtml(e);
         entry.key = key;
       }
-      if (eventsBox.children[domIndex] !== entry.el) {
-        eventsBox.insertBefore(entry.el, eventsBox.children[domIndex] || null);
+      if (currentBody.children[currentBodyIndex] !== entry.el) {
+        currentBody.insertBefore(entry.el, currentBody.children[currentBodyIndex] || null);
       }
-      domIndex++;
+      currentBodyIndex++;
     }
 
     // Remove rows for sessions that dropped off the current bucket view.
     for (const sid of Array.from(_eventRowCache.keys())) {
       if (liveIds.has(sid)) continue;
       const entry = _eventRowCache.get(sid);
-      if (entry && entry.el.parentNode === eventsBox) {
-        eventsBox.removeChild(entry.el);
+      if (entry && entry.el.parentNode) {
+        entry.el.parentNode.removeChild(entry.el);
       }
       _eventRowCache.delete(sid);
     }
     for (const day of Array.from(_eventDayCache.keys())) {
       if (liveDays.has(day)) continue;
-      const el = _eventDayCache.get(day);
-      if (el && el.parentNode === eventsBox) eventsBox.removeChild(el);
+      const group = _eventDayCache.get(day);
+      if (group && group.groupEl.parentNode === eventsBox) {
+        eventsBox.removeChild(group.groupEl);
+      }
       _eventDayCache.delete(day);
     }
   }
