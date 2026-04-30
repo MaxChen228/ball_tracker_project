@@ -272,6 +272,20 @@ class ViewerLayers {
     const playback = this.mode === "playback";
     const cutoff = playback ? this.t : Infinity;
 
+    // Drag-preview predicates from the per-session tuning sliders. Both
+    // are owned by the viewer's IIFE in 50_canvas.js and exposed via
+    // `window` so layer rebuild here can stay decoupled from the slider's
+    // DOM. Loud-fail rather than silent fallback (CLAUDE.md): if either
+    // is missing, viewer init order is broken and the cost/gap sliders
+    // would silently no-op — exactly the regression that motivated this
+    // wiring. Read once per rebuild so a slider mutation between calls
+    // is picked up on the next rebuild but not mid-loop.
+    const candPasses = window._candPassesThreshold;
+    const residualPasses = window._passResidualFilter;
+    if (typeof candPasses !== "function" || typeof residualPasses !== "function") {
+      throw new Error("viewer init order broken: _candPassesThreshold / _passResidualFilter not on window");
+    }
+
     // Rays — group by (cam, path). All rays at currentT (within tol)
     // during playback; all rays up to cutoff in "all" mode.
     const raysByKey = new Map();
@@ -306,6 +320,7 @@ class ViewerLayers {
         if (bestT !== null) {
           for (const r of rays) {
             if (r.t_rel_s !== bestT) continue;
+            if (!candPasses({ cost: r.cost })) continue;
             pairs.push([r.origin[0], r.origin[1], r.origin[2],
                         r.endpoint[0], r.endpoint[1], r.endpoint[2]]);
           }
@@ -313,6 +328,7 @@ class ViewerLayers {
       } else {
         for (const r of rays) {
           if (r.t_rel_s > cutoff) continue;
+          if (!candPasses({ cost: r.cost })) continue;
           pairs.push([r.origin[0], r.origin[1], r.origin[2],
                       r.endpoint[0], r.endpoint[1], r.endpoint[2]]);
         }
@@ -327,7 +343,7 @@ class ViewerLayers {
     if (this._isVisible("traj", PATH_SVR)) {
       const svrPts = (this.TRAJ_BY_PATH.server_post && this.TRAJ_BY_PATH.server_post.length)
         ? this.TRAJ_BY_PATH.server_post : (this.SCENE.triangulated || []);
-      const filtered = svrPts.filter((p) => p.t_rel_s <= cutoff);
+      const filtered = svrPts.filter((p) => p.t_rel_s <= cutoff && residualPasses(p));
       if (filtered.length) {
         const buf = new Float32Array(filtered.length * 3);
         for (let i = 0; i < filtered.length; ++i) {
@@ -346,7 +362,7 @@ class ViewerLayers {
       }
     }
     if (this._isVisible("traj", PATH_LIVE)) {
-      const livePts = (this.TRAJ_BY_PATH.live || []).filter((p) => p.t_rel_s <= cutoff);
+      const livePts = (this.TRAJ_BY_PATH.live || []).filter((p) => p.t_rel_s <= cutoff && residualPasses(p));
       if (livePts.length) {
         const buf = new Float32Array(livePts.length * 3);
         for (let i = 0; i < livePts.length; ++i) {

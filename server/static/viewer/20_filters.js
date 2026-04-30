@@ -1,21 +1,7 @@
-  function passResidualFilter(p) {
-    if (!Number.isFinite(residualCapM)) return true;
-    const r = (p && typeof p.residual_m === "number") ? p.residual_m : 0;
-    return r <= residualCapM;
-  }
-  // Filter a path's point list by residual cap + playback cutoff and
-  // return the time-sorted result. Multi-segment outlier rejection
-  // lives server-side in segmenter.find_segments (run at SessionResult
-  // build time, persisted on result.segments); viewer trace stays
-  // raw-ish so the operator can spot residual-survived garbage with
-  // their own eyes.
-  function filteredTrajectory(rawPts, cutoff) {
-    if (!rawPts || !rawPts.length) return [];
-    return rawPts
-      .filter(p => p.t_rel_s <= cutoff && passResidualFilter(p))
-      .slice()
-      .sort((a, b) => a.t_rel_s - b.t_rel_s);
-  }
+  // (Plotly-era passResidualFilter / filteredTrajectory removed — the
+  // Three.js viewer reads `window._passResidualFilter` exposed from
+  // 50_canvas.js and applies it inline in viewer_layers.js's trajectory
+  // rebuild. Single source of truth, no per-IIFE function copy.)
   function hasPathForLayer(layer, path) {
     if (layer === "traj") return HAS_TRAJ_PATH[path];
     const cam = layer.startsWith("cam") ? layer.slice(3) : null;
