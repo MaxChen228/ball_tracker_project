@@ -153,13 +153,14 @@ def test_theme_json_escape_is_safe_for_inline_script():
     assert "</script>" not in payload
 
 
-def test_boot_invariant_fires_when_vendor_missing(tmp_path, monkeypatch):
-    """If the boot-time check finds the vendor files missing it must
-    raise — the fail-loud contract from CLAUDE.md (silent server-side
-    fallback would let the dashboard mount with a 404 script)."""
-    # Re-import with a fake static dir that has no vendor files.
-    # Easiest: monkeypatch the module-level _VENDOR_DIR / _RUNTIME_DIR
-    # so the helper sees an empty tree.
+def test_vendor_present_helper_detects_missing_files(tmp_path, monkeypatch):
+    """Unit-level guard for the helper that backs the boot-time
+    invariant. The actual `main.py` import-time check that *raises*
+    on missing vendor files runs once per process at module load —
+    can't be re-run inside a test without `importlib.reload(main)`,
+    which would tear down the running app fixture. We test the helper
+    in isolation here; the boot raise is exercised by deployment
+    smoke-testing whenever main.py imports."""
     import scene_runtime as sr
     fake_vendor = tmp_path / "vendor"
     fake_vendor.mkdir()
@@ -167,3 +168,27 @@ def test_boot_invariant_fires_when_vendor_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(sr, "_VENDOR_DIR", fake_vendor)
     monkeypatch.setattr(sr, "_RUNTIME_DIR", fake_runtime)
     assert sr.vendor_files_present() is False
+    # Also confirm the helper returns True under the real paths
+    # (sanity: monkeypatch unwinds and we check the actual on-disk
+    # state matches what the boot check would have seen).
+    monkeypatch.undo()
+    assert sr.vendor_files_present() is True
+
+
+def test_boot_invariant_raises_on_missing_vendor(tmp_path, monkeypatch):
+    """Reload `main` with a patched `vendor_files_present` to actually
+    exercise the boot-time raise path. This is the test that catches
+    a regression where someone swaps the check to a silent log."""
+    import importlib
+    import scene_runtime as sr
+    monkeypatch.setattr(sr, "vendor_files_present", lambda: False)
+    # Re-importing main runs the body again, including the invariant.
+    # Use a fresh import to avoid mutating the module other tests share.
+    import main as _main_orig  # noqa: F401  (ensure original is loaded so undo works)
+    with pytest.raises(RuntimeError, match="scene_runtime vendor files missing"):
+        importlib.reload(_main_orig)
+    # Restore: undo the monkeypatch so the next reload succeeds, then
+    # reload once more to put the real `app` back in place for any
+    # subsequent test that imports main.
+    monkeypatch.undo()
+    importlib.reload(_main_orig)

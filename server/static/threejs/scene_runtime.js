@@ -197,7 +197,7 @@ class BallTrackerScene {
     const szHeight = sz.z_top_m - sz.z_bottom_m;
     const szGeom = new THREE.BoxGeometry(szWidth, szDepth, szHeight);
     const szFillMat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(sz.line_width ? t.colors.strike_zone : t.colors.strike_zone),
+      color: new THREE.Color(t.colors.strike_zone),
       transparent: true,
       opacity: sz.fill_opacity,
       side: THREE.DoubleSide,
