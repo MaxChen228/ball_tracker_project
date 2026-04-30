@@ -508,6 +508,14 @@ class ViewerLayers {
       y: p.y_m,
       z: p.z_m,
       residual_m: p.residual_m,
+      // cost_a / cost_b ride along so _passCostFilterPoint can mask
+      // freshly-loaded data the same way it masks server-rendered DATA.scene.
+      // seg_idx is stamped client-side from `payload.segments` /
+      // `_classifyPointsBySegment`; pass through if a server-rendered
+      // payload already has it (legacy SSE path).
+      cost_a: (p.cost_a == null ? null : p.cost_a),
+      cost_b: (p.cost_b == null ? null : p.cost_b),
+      seg_idx: (typeof p.seg_idx === "number" ? p.seg_idx : undefined),
     });
     const points = Array.isArray(payload.points) ? payload.points : [];
     this.SCENE.triangulated = points.map(toSceneDict);
