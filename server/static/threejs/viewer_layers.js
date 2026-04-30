@@ -422,8 +422,14 @@ class ViewerLayers {
           const isOut = key === "out";
           const color = isOut ? POINTS_OUTLIER : SEG_PALETTE[Number(key) % SEG_PALETTE.length];
           const baseOpacity = isOut ? 0.55 : 1.0;
+          // Skip the trajBoth multiplier on outliers — 0.55 × 0.45 = 0.25
+          // is below the visibility floor on the dark scene background,
+          // and the whole reason outliers render at all is to let the
+          // operator see what got rejected. Only attenuate the inlier
+          // cloud (the bright SEG_PALETTE buckets) when BOTH visible.
+          const opacity = (trajBoth && !isOut) ? baseOpacity * 0.45 : baseOpacity;
           group.add(pointsCloud(pts, color, isOut ? sizeM * POINT_SIZE_OUTLIER_RATIO : sizeM, {
-            opacity: trajBoth ? baseOpacity * 0.45 : baseOpacity,
+            opacity,
             isOutlier: isOut,
           }));
         }
