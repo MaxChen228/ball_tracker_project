@@ -118,13 +118,13 @@ class ViewerLayers {
     // Per-(cam | traj, path) visibility — nested shape matching the
     // legacy IIFE's 20_filters.js `layerVisibility`:
     //   { camA: { live, server_post }, camB: { ... }, traj: { ... } }
-    // Defaults follow SSR `<button aria-pressed>` initial state baked
-    // into viewer_page.py.
-    this.layerVisibility = opts.layerVisibility || {
-      camA: { live: true, server_post: true },
-      camB: { live: true, server_post: true },
-      traj: { live: false, server_post: true },
-    };
+    // Caller MUST provide it (the IIFE's `window.VIEWER_DATA.layerVisibility`
+    // ships the localStorage-restored map). Falling back to a default
+    // here would mask an init-order regression — fail loud per CLAUDE.md.
+    if (!opts.layerVisibility) {
+      throw new Error("setupViewerLayers: opts.layerVisibility is required");
+    }
+    this.layerVisibility = opts.layerVisibility;
 
     // --- one-time cameras + ground traces + fit curves ---
     this._buildCameras();
@@ -276,6 +276,12 @@ class ViewerLayers {
     // during playback; all rays up to cutoff in "all" mode.
     const raysByKey = new Map();
     for (const r of (this.SCENE.rays || [])) {
+      // Explicit null/undefined guard: `r.t_rel_s > Infinity` is false
+      // in JS even for `undefined`, so an unstamped ray would slip
+      // through the all-mode filter while playback's `Math.abs(NaN)`
+      // would silently drop it — paths disagreeing on bad data is
+      // exactly the silent-fallback class CLAUDE.md forbids.
+      if (typeof r.t_rel_s !== "number" || !Number.isFinite(r.t_rel_s)) continue;
       const path = r.source === "live" ? PATH_LIVE : PATH_SVR;
       if (!this._isVisible(`cam${r.camera_id}`, path)) continue;
       const key = `${r.camera_id}|${path}`;

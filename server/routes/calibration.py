@@ -13,8 +13,6 @@ This file is just the thin handler layer:
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
 import re
 from typing import Any
@@ -74,37 +72,21 @@ async def post_calibration(snapshot: CalibrationSnapshot) -> dict[str, Any]:
 
 @router.get("/calibration/state")
 def calibration_state() -> dict[str, Any]:
-    """Dashboard polls this to repaint the canvas whenever a new calibration
-    lands. Returns both the raw scene (so callers can rebuild custom views)
-    and a ready-to-`Plotly.react` figure spec — the dashboard uses the
-    latter so the trace/layout construction stays centralised server-side
-    and the browser only speaks figure JSON."""
+    """Dashboard polls this every 5 s. Returns the raw scene
+    (`scene.cameras` is the list the Three.js dashboard reads to
+    place per-camera diamonds + axis triads) plus the per-camera
+    image dims + last-touched timestamps for the devices panel.
+
+    The Plotly-era `plot` + `plot_etag` fields were retired with the
+    Three.js migration — the dashboard reads the camera list directly
+    and rebuilds the layer when its JSON signature changes.
+    """
     import main as _main
     state = _main.state
     from reconstruct import build_calibration_scene
-    from render_scene import _build_figure
 
     cals = state.calibrations()
     scene = build_calibration_scene(cals)
-    fig = _build_figure(scene)
-    fig.update_layout(
-        title=None, margin=dict(l=0, r=0, t=8, b=0),
-        scene_aspectmode="data",
-        scene_uirevision="dashboard-canvas",
-    )
-    fig_json = json.loads(fig.to_json())
-    # ETag for the plot subtree only. Dashboard compares `plot_etag`
-    # across ticks to short-circuit the expensive `JSON.stringify(plot)`
-    # digest it previously computed client-side. 16 hex chars = 64 bits
-    # of collision resistance — fine given we only diff against the
-    # previous tick's etag (no adversarial setting).
-    plot_payload = {
-        "data": fig_json.get("data", []),
-        "layout": fig_json.get("layout", {}),
-    }
-    plot_etag = hashlib.sha1(
-        json.dumps(plot_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:16]
     def _cal_mtime(cam_id: str) -> float | None:
         p = state._calibration_path(cam_id)
         try:
@@ -122,8 +104,6 @@ def calibration_state() -> dict[str, Any]:
             for cam_id, snap in sorted(cals.items())
         ],
         "scene": scene.to_dict(),
-        "plot": plot_payload,
-        "plot_etag": plot_etag,
     }
 
 

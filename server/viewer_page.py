@@ -10,7 +10,7 @@ import html as _html
 
 from cam_view_ui import CAM_VIEW_CONTENT_CSS, CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
-from view_presets_runtime import view_presets_toolbar_html
+from scene_runtime import view_presets_toolbar_html
 from presets import Preset
 from reconstruct import Scene
 from render_compare import (
@@ -81,18 +81,16 @@ def build_viewer_page_context(
     videos: list[tuple[str, str, float, float, dict[str, list]]],
     health: dict,
     *,
-    build_figure,
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
     segments: list | None = None,
 ) -> ViewerPageContext:
-    fig = build_figure(scene)
-    fig_json = _json.loads(fig.to_json())
-    layout_json = _json.dumps(fig_json.get("layout", {}))
-    static_traces = [
-        t for t in fig_json.get("data", [])
-        if not (t.get("meta") or {}).get("trace_kind")
-    ]
+    # Pre-Three.js this used a Plotly `build_figure(scene)` callable to
+    # extract the static trace list + layout block; the viewer JS then
+    # composed `[...static, ...dynamic]` for `Plotly.react`. Three.js
+    # builds its static layers (ground / plate / strike zone / world
+    # axes) client-side from the JSON theme payload — no server-side
+    # trace extraction needed.
     has_triangulated = bool(scene.triangulated)
     # Default split is 50/50 so both halves read equally; operators who
     # want more scene or more camera grid drag the #col-resizer (persisted
@@ -155,8 +153,8 @@ def build_viewer_page_context(
 
     return ViewerPageContext(
         scene_json=_json.dumps(scene.to_dict()),
-        layout_json=layout_json,
-        static_traces_json=_json.dumps(static_traces),
+        layout_json=_json.dumps({}),
+        static_traces_json=_json.dumps([]),
         camera_colors_json=_json.dumps(_CAMERA_COLORS),
         fallback_color_json=_json.dumps(_FALLBACK_CAMERA_COLOR),
         accent_color_json=_json.dumps(_ACCENT),
@@ -233,7 +231,6 @@ def render_viewer_html(
     videos: list[tuple[str, str, float, float, dict[str, list]]],
     health: dict,
     *,
-    build_figure,
     presets: list[Preset],
     cost_threshold: float | None = None,
     gap_threshold_m: float | None = None,
@@ -243,7 +240,6 @@ def render_viewer_html(
         scene,
         videos,
         health,
-        build_figure=build_figure,
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         segments=[] if segments is None else segments,
@@ -516,11 +512,17 @@ function _hookup() {{
   }}
   if (++_attempts > 50) {{
     const root = document.getElementById('scene');
+    const sceneOk = !!window.BallTrackerScene;
+    const dataOk = !!window.VIEWER_DATA;
+    const reason = !sceneOk && !dataOk
+      ? "neither BallTrackerScene nor VIEWER_DATA appeared"
+      : !sceneOk ? "BallTrackerScene runtime never mounted (WebGL context issue?)"
+      : "VIEWER_DATA never set (classic IIFE failed mid-init?)";
     if (root) root.innerHTML =
       "<div style=\\"padding:24px;font-family:monospace;color:#C0392B;\\">"
-      + "3D scene failed to mount — likely a WebGL context issue. "
+      + "3D scene failed to mount — " + reason + ". "
       + "Check the browser console for the actual error.</div>";
-    console.error('Viewer scene never mounted after 2.5 s of polling');
+    console.error('Viewer scene mount failed:', reason);
     return;
   }}
   setTimeout(_hookup, 50);

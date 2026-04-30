@@ -8,13 +8,6 @@
   // legacy IIFE still calls — the speed badge in 50_canvas.js
   // (`updateSpeedBadge`) needs `activeSegmentIndex`.
 
-  // Mirrors dashboard 30_traces._SEG_PALETTE so dashboard + viewer
-  // colour seg0 the same red, seg1 the same blue, etc.
-  const _VIEWER_SEG_PALETTE = [
-    "#E45756", "#4C78A8", "#54A24B", "#F58518",
-    "#B279A2", "#72B7B2", "#FF9DA6", "#9D755D",
-  ];
-
   // Pick the segment whose [t_start, t_end] contains `t`, or the
   // nearest one (by midpoint distance) when no segment is active.
   // Returns -1 on empty SEGMENTS. The "nearest" branch is intentional

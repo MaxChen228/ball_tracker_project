@@ -129,6 +129,33 @@ def scene_runtime_html(*, container_id: str = "scene") -> str:
     )
 
 
+def view_presets_toolbar_html(*, default_view: str = "iso") -> str:
+    """5-button toolbar for ISO / CATCH / SIDE / TOP / PITCHER.
+
+    Markup only; the Three.js scene runtime (`BallTrackerScene.bindViewToolbar`)
+    wires click → `setView(name)` and clears the active pill on the
+    first user-drag via OrbitControls' `start` event. Default view
+    has the `.active` class so the SSR HTML matches the freshly-mounted
+    scene's preset (ISO).
+    """
+    buttons = [
+        ("iso", "ISO", "Isometric overview (default)"),
+        ("catch", "CATCH", "Catcher's view — strike zone front-on (X/Z plane)"),
+        ("side", "SIDE", "1B-side view — trajectory arc (Y/Z plane)"),
+        ("top", "TOP", "Top-down — horizontal break (X/Y plane)"),
+        ("pitcher", "PITCHER", "Pitcher's view — looking back at catcher"),
+    ]
+    parts = ['<div class="scene-views" role="toolbar" aria-label="Camera presets">']
+    for key, label, title in buttons:
+        cls = "view-preset" + (" active" if key == default_view else "")
+        parts.append(
+            f'<button class="{cls}" type="button" data-view="{key}" '
+            f'title="{title}">{label}</button>'
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def assert_scene_runtime_present(html: str) -> None:
     """Sanity-check that a rendered page actually injected the runtime.
 

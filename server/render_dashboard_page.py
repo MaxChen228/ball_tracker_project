@@ -20,8 +20,7 @@ from render_dashboard_session import _render_hsv_body, _render_session_body
 from render_dashboard_style import _CSS
 from cam_view_ui import CAM_VIEW_RUNTIME_JS
 from overlays_ui import OVERLAYS_RUNTIME_JS
-from scene_runtime import scene_runtime_html
-from view_presets_runtime import view_presets_toolbar_html
+from scene_runtime import scene_runtime_html, view_presets_toolbar_html
 from render_shared import _render_app_nav
 from render_tuning import _render_tuning_body
 
