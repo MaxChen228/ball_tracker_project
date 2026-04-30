@@ -41,9 +41,9 @@
 
   // Sibling of cost: drag preview for the Gap slider in the same header
   // strip. Mutates `residualCapM` (declared in 10_video_master.js, shared
-  // IIFE scope) so 20_filters.js's residual predicate sees the new cap on
-  // next redraw. Slider value is centimetres (0–200); 200 = "off"
-  // (Infinity, short-circuits the filter to a no-op).
+  // IIFE scope) so `_passResidualFilter` sees the new cap on next redraw.
+  // Slider value is centimetres (0–200); 200 = Infinity (short-circuits
+  // the filter to a no-op).
   function _setGapThreshold(v_cm) {
     const cm = parseFloat(v_cm);
     residualCapM = (Number.isFinite(cm) && cm < 200) ? cm / 100 : Infinity;
@@ -52,8 +52,21 @@
   function _getGapThresholdM() { return residualCapM; }
   window._setGapThreshold = _setGapThreshold;
   window._getGapThresholdM = _getGapThresholdM;
-  // Expose so 30_frame_index.js's raysAtT can apply the same predicate
-  // as the BLOBS canvas overlay — single source of truth for "passing".
+  // Residual predicate used by the Three.js trajectory rebuild
+  // (viewer_layers.js). Closes over `residualCapM` so callers don't need
+  // to read it. Infinity short-circuits to "pass everything"; finite
+  // caps compare ≤. Points with non-numeric / missing residual_m are
+  // treated as residual=0 (legacy fall-through, matches what the
+  // Plotly-era 20_filters.js did).
+  function _passResidualFilter(p) {
+    if (!Number.isFinite(residualCapM)) return true;
+    const r = (p && typeof p.residual_m === "number") ? p.residual_m : 0;
+    return r <= residualCapM;
+  }
+  window._passResidualFilter = _passResidualFilter;
+  // Expose so 30_frame_index.js's raysAtT and viewer_layers.js's ray /
+  // trajectory rebuilds can apply the same predicate as the BLOBS canvas
+  // overlay — single source of truth for "passing".
   window._candPassesThreshold = _candPassesThreshold;
 
   // A candidate passes the threshold filter when its cost is ≤ the
