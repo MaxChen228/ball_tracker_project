@@ -74,11 +74,27 @@ function lineSegmentsFromPairs(pairs, color, opts = {}) {
   }
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.BufferAttribute(buf, 3));
-  return new THREE.LineSegments(geom, new THREE.LineBasicMaterial({
-    color: new THREE.Color(color),
-    transparent: opts.opacity != null,
-    opacity: opts.opacity ?? 1.0,
-  }));
+  let lines;
+  if (opts.dashed) {
+    lines = new THREE.LineSegments(geom, new THREE.LineDashedMaterial({
+      color: new THREE.Color(color),
+      transparent: opts.opacity != null,
+      opacity: opts.opacity ?? 1.0,
+      dashSize: 0.04,
+      gapSize: 0.025,
+    }));
+    // LineDashedMaterial requires per-vertex distance attribute or
+    // every segment renders as a solid line — silent visual fallback,
+    // exactly the trap to avoid.
+    lines.computeLineDistances();
+  } else {
+    lines = new THREE.LineSegments(geom, new THREE.LineBasicMaterial({
+      color: new THREE.Color(color),
+      transparent: opts.opacity != null,
+      opacity: opts.opacity ?? 1.0,
+    }));
+  }
+  return lines;
 }
 
 function pointMarker(p, color, radius = 0.030) {
@@ -357,7 +373,13 @@ class ViewerLayers {
       }
       if (!pairs.length) continue;
       const opacity = playback ? 0.95 : 0.55;
-      raysGroup.add(lineSegmentsFromPairs(pairs, color, { opacity }));
+      // BOTH-mode encoding: live rays dashed, svr rays solid. Cam axis
+      // (A red / B blue) stays in the colour channel; path axis moves to
+      // line style so the two channels don't fight when both pills are on.
+      raysGroup.add(lineSegmentsFromPairs(pairs, color, {
+        opacity,
+        dashed: path === PATH_LIVE,
+      }));
     }
     if (raysGroup.children.length) this.scene.addLayer("viewer_rays", raysGroup);
 
@@ -367,6 +389,11 @@ class ViewerLayers {
     // (PointsMaterial + sizeAttenuation true → world-space size that
     // shrinks with camera distance like a real sphere).
     const sizeM = this._pointSize;
+    // BOTH-mode α attenuation: when LIVE + SVR traj are both on, push
+    // svr to the back (α=0.45) and keep live up front. live is the
+    // production pipeline, svr is the debug oracle — operator wants
+    // live emphasised when comparing.
+    const trajBoth = this._isVisible("traj", PATH_LIVE) && this._isVisible("traj", PATH_SVR);
     if (this._isVisible("traj", PATH_SVR)) {
       // Use scene.triangulated (sorted + render-dist-filtered + each
       // point stamped with `seg_idx` by reconstruct.py) — server is the
@@ -394,8 +421,9 @@ class ViewerLayers {
         for (const [key, pts] of buckets) {
           const isOut = key === "out";
           const color = isOut ? POINTS_OUTLIER : SEG_PALETTE[Number(key) % SEG_PALETTE.length];
+          const baseOpacity = isOut ? 0.55 : 1.0;
           group.add(pointsCloud(pts, color, isOut ? sizeM * POINT_SIZE_OUTLIER_RATIO : sizeM, {
-            opacity: isOut ? 0.55 : 1.0,
+            opacity: trajBoth ? baseOpacity * 0.45 : baseOpacity,
             isOutlier: isOut,
           }));
         }
@@ -416,6 +444,8 @@ class ViewerLayers {
         group.name = "viewer_traj_live";
         // Live trail has no per-point segment classification (live
         // pipeline does not run the segmenter). Single accent colour.
+        // BOTH-mode: keep live α=0.85 baseline (already lower than the
+        // svr cloud's 1.0); svr drops to 0.45 to push it back instead.
         group.add(pointsCloud(livePts, TRAJ_LIVE, sizeM, { opacity: 0.85 }));
         if (playback) {
           const head = livePts[livePts.length - 1];

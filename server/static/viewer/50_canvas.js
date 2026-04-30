@@ -154,17 +154,19 @@
   }
 
   if (window.BallTrackerCamView) {
-    // Two BLOBS layers — one per path — so toolbar's LIVE/SVR path groups
-    // can toggle each independently. Color-tier: cam color for live,
-    // ACCENT for svr. There used to be a `detection_live` /
-    // `detection_svr` "winner dot" layer here too; fan-out triangulation
-    // killed the winner concept, so BLOBS is now the only 2D overlay
-    // and the cost_threshold slider is the only knob.
+    // Two BLOBS layers — one per path — so the shared toolbar's
+    // LIVE / SVR pills can toggle each independently. Path-encoded
+    // ring colour (live red, svr blue) — cam axis is already encoded
+    // by panel position (CAM A panel above CAM B), so the BOTH-mode
+    // overlay reads as "red is what production saw, blue is what the
+    // oracle saw" without colour fighting cam identity.
+    const _BLOB_LIVE = '#C0392B';
+    const _BLOB_SVR = '#4A6B8C';
     window.BallTrackerCamView.registerLayer('detection_blobs_live', function (ctx, sx, sy, cam) {
-      _drawBlobsForPath(ctx, sx, sy, cam, 'live', colorForCamPath(cam.camera_id, 'live'));
+      _drawBlobsForPath(ctx, sx, sy, cam, 'live', _BLOB_LIVE);
     });
     window.BallTrackerCamView.registerLayer('detection_blobs_svr', function (ctx, sx, sy, cam) {
-      _drawBlobsForPath(ctx, sx, sy, cam, 'server_post', ACCENT);
+      _drawBlobsForPath(ctx, sx, sy, cam, 'server_post', _BLOB_SVR);
     });
     for (const c of (SCENE.cameras || [])) {
       if (c.fx == null || c.R_wc == null || c.t_wc == null
