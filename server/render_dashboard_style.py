@@ -877,17 +877,24 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                                    font-weight: 600; }}
 .fit-filter-bar .ff-path-count:empty {{ display: none; }}
 
-/* --- Dashboard 3D playback — sidebar marker-only transport. Video sync
-   belongs to /viewer; dashboard playback only scrubs the shared 3D ball
-   marker over the selected path's fitted segments. */
-.dash-playback-card {{ display: flex; flex-direction: column; gap: var(--s-2);
-                       font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; }}
-.dash-playback-card .card-title {{ margin-bottom: var(--s-1); }}
-.dash-playback-card .dp-head {{ display: grid; grid-template-columns: auto auto minmax(0, 1fr);
+/* --- Dashboard 3D playback — canvas transport. Video sync belongs to
+   /viewer; dashboard playback only scrubs the shared 3D ball marker over
+   the selected path's fitted segments. */
+.dash-playback-card {{ position: absolute; left: 50%; bottom: calc(var(--s-4) + 48px);
+                       transform: translateX(-50%); z-index: 7;
+                       width: min(520px, calc(100% - 2 * var(--s-4)));
+                       display: flex; flex-direction: column; gap: var(--s-2);
+                       font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
+                       background: var(--surface); border: 1px solid var(--border-base);
+                       border-radius: var(--r); padding: var(--s-2);
+                       box-shadow: 0 1px 2px rgba(0,0,0,0.08); }}
+.dash-playback-card .dp-head {{ display: grid; grid-template-columns: auto auto auto minmax(0, 1fr);
                                 align-items: center; gap: var(--s-2); }}
+.dash-playback-card .dp-label {{ color: var(--sub); text-transform: uppercase;
+                                  font-weight: 600; white-space: nowrap; }}
 .dash-playback-card .dp-btn,
 .dash-playback-card .dp-rate {{ font: inherit; font-size: 10px; letter-spacing: 0.08em;
-                                 min-height: 28px; padding: 4px 8px;
+                                 min-height: 26px; padding: 4px 8px;
                                  border: 1px solid var(--border-base); border-radius: 2px;
                                  background: transparent; color: var(--sub);
                                  cursor: pointer; text-transform: uppercase; }}
@@ -906,6 +913,10 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                                              border-top-right-radius: 0; border-bottom-right-radius: 0; }}
 .dash-playback-card .dp-rate:last-child {{ border-top-right-radius: 2px; border-bottom-right-radius: 2px;
                                             border-top-left-radius: 0; border-bottom-left-radius: 0; }}
+@media (max-width: 1180px) {{
+  .dash-playback-card {{ left: var(--s-4); right: var(--s-4); width: auto;
+                         transform: none; bottom: calc(var(--s-4) + 54px); }}
+}}
 
 /* --- Mini-slider — shared between dashboard fit-filter-bar + viewer
    layer-toggles. PT (point-size), LW (fit linewidth), EXT (fit dashed
