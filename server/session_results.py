@@ -294,16 +294,22 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             authority = pts
             break
     result.triangulated = authority
-    # Legacy `points` semantics: prefer server_post when present, else
-    # fall back to live. Older consumers (viewer, /events) expect `points`
-    # to hold the session's single result.
+    # Legacy `points` semantics: explicit per-path selection — never
+    # silently substitute live for server_post (or vice versa). Research
+    # phase: a missing path's points must read as empty, not as another
+    # path's results dressed up as the requested path. Consumers
+    # (viewer, /events, dashboard) expect `points` to mirror the path
+    # they triggered; cross-path substitution would corrupt comparisons.
     if DetectionPath.server_post in candidate_paths:
-        legacy_points = result.triangulated_by_path.get(DetectionPath.server_post.value, [])
-    else:
-        legacy_points = (
-            result.triangulated_by_path.get(DetectionPath.live.value)
-            or []
+        legacy_points = result.triangulated_by_path.get(
+            DetectionPath.server_post.value, []
         )
+    elif DetectionPath.live in candidate_paths:
+        legacy_points = result.triangulated_by_path.get(
+            DetectionPath.live.value, []
+        )
+    else:
+        legacy_points = []
     result.points = list(legacy_points)
 
     if not result.triangulated and result.error is None and (a is not None or b is not None):
