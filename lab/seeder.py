@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING
@@ -25,9 +26,11 @@ def _pick_device() -> str:
 class Seeder:
     """Holds a SAM 2 image predictor in memory and turns (frame, point) into a PNG mask."""
 
-    def __init__(self, model_id: str = "facebook/sam2-hiera-tiny") -> None:
+    def __init__(self, model_id: str | None = None) -> None:
         from sam2.sam2_image_predictor import SAM2ImagePredictor
 
+        if model_id is None:
+            model_id = os.environ.get("SAM2_IMAGE_MODEL", "facebook/sam2-hiera-large")
         self.device = _pick_device()
         self.model_id = model_id
         self._predictor: SAM2ImagePredictor = SAM2ImagePredictor.from_pretrained(

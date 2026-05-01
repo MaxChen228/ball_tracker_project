@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 from threading import Lock
 from typing import Iterator
@@ -22,9 +23,11 @@ def _pick_device() -> str:
 class Propagator:
     """Wraps SAM 2 video predictor as a generator yielding (local_frame_idx, mask_png_bytes)."""
 
-    def __init__(self, model_id: str = "facebook/sam2-hiera-tiny") -> None:
+    def __init__(self, model_id: str | None = None) -> None:
         from sam2.build_sam import build_sam2_video_predictor_hf
 
+        if model_id is None:
+            model_id = os.environ.get("SAM2_VIDEO_MODEL", "facebook/sam2-hiera-base-plus")
         self.device = _pick_device()
         self.model_id = model_id
         self._predictor = build_sam2_video_predictor_hf(model_id, device=self.device)
