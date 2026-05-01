@@ -54,17 +54,19 @@ const state = {
   framePrefetchAbort: 0,
   scrubPaintToken: 0,
   frameBitmapAspect: null,
+  warmUpProgress: null,
 };
 
 const FRAME_BITMAP_CACHE_MAX = 800;
 const FRAME_PREFETCH_CONCURRENCY = 4;
+const WARM_UP_CONCURRENCY = 16;
 // Display-only target width for decoded ImageBitmaps. The full-resolution
 // JPG (1920×1080 from a 240fps iPhone clip) costs ~5-8ms per drawImage on
 // M-series, which jams scrubber drag at 60Hz. Decoding to 960px wide cuts
 // drawImage cost ~4×. Server-side frame extraction and SAM2 propagation
 // continue to run on the full-res source MOV — this only affects the
 // browser preview.
-const SCRUB_PREVIEW_MAX_W = 960;
+const SCRUB_PREVIEW_MAX_W = 640;
 
 function clearSeedMask() {
   if (state.seedMaskUrl) URL.revokeObjectURL(state.seedMaskUrl);
@@ -207,8 +209,13 @@ function updateStatus() {
   }
   if (computing) el.statusbar.classList.add("computing");
   else el.statusbar.classList.remove("computing");
-  el.status.textContent =
+  let line =
     `f=${fStr} t=${t.toFixed(3)}s | in=${fmt(state.inFrame)} out=${fmt(state.outFrame)} seed=${fmt(state.seedFrame)} pt=${pt} | status=${statusTag}${state.pendingSeedClick ? " (click to set seed point)" : ""}`;
+  if (state.warmUpProgress) {
+    const { done, total } = state.warmUpProgress;
+    line += ` | warm ${done}/${total}`;
+  }
+  el.status.textContent = line;
 }
 
 function updateMarker(markerEl, frame) {
@@ -659,6 +666,64 @@ async function prefetchFrames(slug) {
     }
   };
   await Promise.all(Array.from({ length: FRAME_PREFETCH_CONCURRENCY }, worker));
+}
+
+// Aggressive warm-up: decode every frame in [in, out] at high concurrency so
+// the user can scrub the full clip with 100% cache hits. After warm-up
+// finishes, falls through to prefetchFrames() for outward expansion.
+async function warmUpClip(slug) {
+  const myToken = ++state.framePrefetchAbort;
+  const lo = state.inFrame;
+  const hi = state.outFrame;
+  if (lo == null || hi == null) return;
+
+  const frames = [];
+  for (let f = lo; f <= hi; f++) {
+    if (!state.frameBitmapCache.has(f)) frames.push(f);
+  }
+  if (!frames.length) {
+    prefetchFrames(slug);
+    return;
+  }
+
+  state.warmUpProgress = { done: 0, total: frames.length };
+  updateStatus();
+
+  const aborted = () =>
+    state.current !== slug || myToken !== state.framePrefetchAbort;
+
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < frames.length) {
+      if (aborted()) return;
+      const f = frames[cursor++];
+      try {
+        const bm = await fetchFrameBitmap(slug, f);
+        if (aborted()) {
+          if (bm && typeof bm.close === "function") bm.close();
+          return;
+        }
+        if (state.frameBitmapCache.has(f)) {
+          if (bm && typeof bm.close === "function") bm.close();
+        } else {
+          state.frameBitmapCache.set(f, bm);
+          enforceFrameCacheLRU();
+        }
+        state.warmUpProgress.done++;
+        updateStatus();
+      } catch (_) {
+        // non-fatal; on-demand fetch will surface real errors
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: WARM_UP_CONCURRENCY }, worker));
+  // Only this invocation may clear progress — if we were superseded, the
+  // newer warmUpClip owns the field.
+  if (myToken === state.framePrefetchAbort) {
+    state.warmUpProgress = null;
+    updateStatus();
+    if (state.current === slug) prefetchFrames(slug);
+  }
 }
 
 function drawClickMarker(x, y) {
@@ -1161,7 +1226,7 @@ async function sendTrim() {
       out_frame: state.outFrame,
     });
     if (!r.ok) showError(`trim failed: HTTP ${r.status}`);
-    else if (state.current) prefetchFrames(state.current);
+    else if (state.current) warmUpClip(state.current);
   } catch (e) {
     showError(`trim failed: ${e}`);
   }
@@ -1361,7 +1426,7 @@ async function fetchPts(slug) {
       console.log(`pts loaded: ${j.pts.length} frames`);
       // Kick off background prefetch over the trimmed range so subsequent
       // scrubbing hits the bitmap cache instead of fetch+decode.
-      if (state.inFrame != null && state.outFrame != null) prefetchFrames(slug);
+      if (state.inFrame != null && state.outFrame != null) warmUpClip(slug);
     }
   } catch (e) {
     showError(`pts fetch failed: ${e}`);
