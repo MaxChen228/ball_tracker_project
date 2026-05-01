@@ -31,11 +31,26 @@ body {
   font-family: monospace;
 }
 
-#item-picker {
+#item-picker, #seed-model, #prop-model {
   background: #0f172a;
   color: #f8fafc;
   border: 1px solid #334155;
   padding: 4px 8px;
+}
+
+#model-info {
+  margin-left: auto;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+#model-info label {
+  font-size: 12px;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 #stage {

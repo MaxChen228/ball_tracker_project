@@ -58,6 +58,8 @@ const el = {
   statusbar: document.getElementById("statusbar"),
   itemSlug: document.getElementById("item-slug"),
   itemPicker: document.getElementById("item-picker"),
+  seedModel: document.getElementById("seed-model"),
+  propModel: document.getElementById("prop-model"),
   btnIn: document.getElementById("btn-in"),
   btnOut: document.getElementById("btn-out"),
   btnSeed: document.getElementById("btn-seed"),
@@ -372,12 +374,52 @@ async function selectSlug(slug) {
   syncFromItem(item);
 }
 
+async function fetchModels() {
+  const r = await fetch(`${API_BASE}/api/models`);
+  if (!r.ok) throw new Error(`/api/models HTTP ${r.status}`);
+  return r.json();
+}
+
+function populateModelPicker(sel, available, active) {
+  sel.innerHTML = "";
+  for (const id of available) {
+    const opt = document.createElement("option");
+    opt.value = id;
+    opt.textContent = id.replace("facebook/sam2-hiera-", "");
+    if (id === active) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+async function setActiveModel(kind, modelId) {
+  const r = await fetch(`${API_BASE}/api/models`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind, model_id: modelId }),
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    showError(`set model failed: HTTP ${r.status} ${text}`);
+    return;
+  }
+  console.log(`active model[${kind}] = ${modelId} (will load on next ${kind === "seed" ? "/seed" : "/propagate"})`);
+}
+
 async function bootstrap() {
   try {
     state.items = await fetchItems();
   } catch (e) {
     showError(String(e));
     return;
+  }
+  try {
+    const models = await fetchModels();
+    populateModelPicker(el.seedModel, models.available, models.active.seed);
+    populateModelPicker(el.propModel, models.available, models.active.prop);
+    el.seedModel.addEventListener("change", () => setActiveModel("seed", el.seedModel.value));
+    el.propModel.addEventListener("change", () => setActiveModel("prop", el.propModel.value));
+  } catch (e) {
+    showError(`models init failed: ${e}`);
   }
   el.itemPicker.innerHTML = "";
   for (const it of state.items) {

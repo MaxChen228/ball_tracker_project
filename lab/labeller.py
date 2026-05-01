@@ -338,15 +338,30 @@ _SEEDER = None
 _PROPAGATOR = None
 _MODEL_LOCK = threading.Lock()
 
+AVAILABLE_MODELS = [
+    "facebook/sam2-hiera-tiny",
+    "facebook/sam2-hiera-small",
+    "facebook/sam2-hiera-base-plus",
+    "facebook/sam2-hiera-large",
+]
+_ACTIVE_MODELS = {
+    "seed": os.environ.get("SAM2_IMAGE_MODEL", "facebook/sam2-hiera-large"),
+    "prop": os.environ.get("SAM2_VIDEO_MODEL", "facebook/sam2-hiera-base-plus"),
+}
+
 
 def get_seeder():
     global _SEEDER
     with _MODEL_LOCK:
+        target = _ACTIVE_MODELS["seed"]
+        if _SEEDER is not None and getattr(_SEEDER, "model_id", None) != target:
+            print(f"[labeller] image predictor model changed → unloading {_SEEDER.model_id}", flush=True)
+            _SEEDER = None
         if _SEEDER is None:
             from lab.seeder import Seeder
-            print("[labeller] loading SAM2 image predictor (sam2-hiera-tiny)...", flush=True)
+            print(f"[labeller] loading SAM2 image predictor ({target})...", flush=True)
             t0 = time.time()
-            _SEEDER = Seeder()
+            _SEEDER = Seeder(model_id=target)
             print(f"[labeller] image predictor ready on {_SEEDER.device} in {time.time()-t0:.1f}s", flush=True)
     return _SEEDER
 
@@ -354,11 +369,15 @@ def get_seeder():
 def get_propagator():
     global _PROPAGATOR
     with _MODEL_LOCK:
+        target = _ACTIVE_MODELS["prop"]
+        if _PROPAGATOR is not None and getattr(_PROPAGATOR, "model_id", None) != target:
+            print(f"[labeller] video predictor model changed → unloading {_PROPAGATOR.model_id}", flush=True)
+            _PROPAGATOR = None
         if _PROPAGATOR is None:
             from lab.propagator import Propagator
-            print("[labeller] loading SAM2 video predictor (sam2-hiera-tiny)...", flush=True)
+            print(f"[labeller] loading SAM2 video predictor ({target})...", flush=True)
             t0 = time.time()
-            _PROPAGATOR = Propagator()
+            _PROPAGATOR = Propagator(model_id=target)
             print(f"[labeller] video predictor ready on {_PROPAGATOR.device} in {time.time()-t0:.1f}s", flush=True)
     return _PROPAGATOR
 
@@ -591,6 +610,16 @@ class Handler(BaseHTTPRequestHandler):
             STORE.scan_sources()
             self._send_json(HTTPStatus.OK, {"items": [self._public_item(it) for it in STORE.list()]})
             return
+        if p == "/api/models":
+            self._send_json(HTTPStatus.OK, {
+                "available": AVAILABLE_MODELS,
+                "active": dict(_ACTIVE_MODELS),
+                "loaded": {
+                    "seed": getattr(_SEEDER, "model_id", None) if _SEEDER else None,
+                    "prop": getattr(_PROPAGATOR, "model_id", None) if _PROPAGATOR else None,
+                },
+            })
+            return
         m = SLUG_RE.match(p)
         if m and m.group(2) == "events":
             self._serve_sse(m.group(1))
@@ -639,6 +668,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         url = urllib.parse.urlparse(self.path)
+        if url.path == "/api/models":
+            body = self._read_json()
+            kind = body["kind"]
+            model_id = body["model_id"]
+            if kind not in ("seed", "prop"):
+                self._send_text(HTTPStatus.BAD_REQUEST, "kind must be 'seed' or 'prop'")
+                return
+            if model_id not in AVAILABLE_MODELS:
+                self._send_text(HTTPStatus.BAD_REQUEST, f"unknown model_id: {model_id}")
+                return
+            with _MODEL_LOCK:
+                _ACTIVE_MODELS[kind] = model_id
+            # Don't pre-load; next /seed or /propagate triggers reload.
+            self._send_json(HTTPStatus.OK, {"ok": True, "active": dict(_ACTIVE_MODELS)})
+            return
         m = SLUG_RE.match(url.path)
         if not m:
             self._send_text(HTTPStatus.NOT_FOUND, f"no route: {url.path}")
