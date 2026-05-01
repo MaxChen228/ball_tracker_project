@@ -15,8 +15,6 @@ Two paths historically masked invariant violations with `or` shims:
 """
 from __future__ import annotations
 
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # 1. session_results.py — explicit per-path selection, no cross-path fallback
@@ -39,64 +37,56 @@ def _make_triangulated_point():
 
 
 def test_legacy_points_no_silent_fallback_to_live_when_server_post_requested():
-    """If candidate_paths includes server_post but server_post produced
-    nothing, `result.points` MUST be empty — not a silent borrow from
-    live. Research invariant: missing path = empty, never a substitution.
+    """If the caller selected server_post for the legacy surface but
+    server_post produced nothing, `result.points` MUST stay empty even
+    after segment stamping sees live points.
     """
-    from schemas import DetectionPath, SessionResult, TriangulatedPoint
+    from schemas import DetectionPath, SessionResult
+    from session_results import stamp_segments_on_result
 
     live_pt = _make_triangulated_point()
-
-    # Inline the relevant slice of rebuild_result_for_session's
-    # legacy-points selection (post-fix). This is the contract under
-    # test; we exercise it directly to avoid a full state-machine
-    # fixture.
-    candidate_paths = {DetectionPath.server_post, DetectionPath.live}
-    triangulated_by_path: dict[str, list[TriangulatedPoint]] = {
+    result = SessionResult(
+        session_id="s_deadbeef",
+        camera_a_received=True,
+        camera_b_received=True,
+    )
+    result.triangulated_by_path = {
         DetectionPath.live.value: [live_pt],
         # server_post entry absent → simulates "server_post never ran /
         # produced no triangulation"
     }
 
-    if DetectionPath.server_post in candidate_paths:
-        legacy_points = triangulated_by_path.get(
-            DetectionPath.server_post.value, []
-        )
-    elif DetectionPath.live in candidate_paths:
-        legacy_points = triangulated_by_path.get(
-            DetectionPath.live.value, []
-        )
-    else:
-        legacy_points = []
+    stamp_segments_on_result(
+        result,
+        legacy_points_path=DetectionPath.server_post,
+    )
 
-    assert legacy_points == [], (
+    assert result.triangulated == [live_pt]
+    assert result.points == [], (
         "server_post requested but missing must yield empty points; "
         "silently borrowing live points would contaminate "
         "live-vs-server_post comparisons."
     )
+    assert result.segments == []
 
 
 def test_legacy_points_uses_live_only_when_server_post_not_requested():
-    from schemas import DetectionPath, TriangulatedPoint
+    from schemas import DetectionPath, SessionResult
+    from session_results import stamp_segments_on_result
 
     live_pt = _make_triangulated_point()
-    candidate_paths = {DetectionPath.live}
-    triangulated_by_path: dict[str, list[TriangulatedPoint]] = {
+    result = SessionResult(
+        session_id="s_deadbeef",
+        camera_a_received=True,
+        camera_b_received=True,
+    )
+    result.triangulated_by_path = {
         DetectionPath.live.value: [live_pt],
     }
 
-    if DetectionPath.server_post in candidate_paths:
-        legacy_points = triangulated_by_path.get(
-            DetectionPath.server_post.value, []
-        )
-    elif DetectionPath.live in candidate_paths:
-        legacy_points = triangulated_by_path.get(
-            DetectionPath.live.value, []
-        )
-    else:
-        legacy_points = []
+    stamp_segments_on_result(result, legacy_points_path=DetectionPath.live)
 
-    assert legacy_points == [live_pt]
+    assert result.points == [live_pt]
 
 
 def test_session_results_module_uses_explicit_branches():
@@ -111,6 +101,10 @@ def test_session_results_module_uses_explicit_branches():
     assert "result.triangulated_by_path.get(DetectionPath.live.value)\n            or []" not in text, (
         "silent fallback `... .get(live) or []` reintroduced — see "
         "CLAUDE.md 'Experimental phase — 禁止 silent fallback'."
+    )
+    assert "or result.triangulated_by_path.get(DetectionPath.live.value" not in text, (
+        "silent server_post→live fallback reintroduced in the recompute "
+        "or segment-stamping path."
     )
 
 
