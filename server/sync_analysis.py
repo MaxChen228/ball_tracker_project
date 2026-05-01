@@ -136,6 +136,18 @@ def build_debug_report(
         except (TypeError, ValueError):
             return 0.0
 
+    def _fp_optional(d: dict, key: str) -> float | None:
+        v = d.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _age_text(age: float | None) -> str:
+        if age is None:
+            return "unknown"
+        return f"{age:.0f}s"
+
     dev_by_cam: dict[str, dict[str, Any]] = {
         d["camera_id"]: d for d in (devices or [])
     }
@@ -177,17 +189,17 @@ def build_debug_report(
                 up = max(_fp(t, "peak_up_peak"), _fp(t, "up_peak"))
                 dn = max(_fp(t, "peak_down_peak"), _fp(t, "down_peak"))
                 cfar_up = _fp(t, "cfar_up_floor")
-                age = _fp(t, "age_s")
+                age = _fp_optional(t, "age_s")
                 clipping = "YES" if inp_peak >= 0.98 else "no"
                 up_margin = up / chirp_threshold if chirp_threshold > 0 else float("inf")
                 dn_margin = dn / chirp_threshold if chirp_threshold > 0 else float("inf")
                 up_v = "PASS" if up >= chirp_threshold else f"FAIL({up_margin:.2f}x)"
                 dn_v = "PASS" if dn >= chirp_threshold else f"FAIL({dn_margin:.2f}x)"
-                stale_flag = "  [STALE]" if age > 20 else ""
+                stale_flag = "  [STALE]" if age is None or age > 20 else ""
                 L.append(
                     f"  Cam {cam}: inp_peak={inp_peak:.3f}  up={up:.4f} {up_v}"
                     f"  dn={dn:.4f} {dn_v}"
-                    f"  cfar_up={cfar_up:.4f}  clip={clipping}  age={age:.0f}s{stale_flag}"
+                    f"  cfar_up={cfar_up:.4f}  clip={clipping}  age={_age_text(age)}{stale_flag}"
                 )
         L.append("")
 
@@ -220,7 +232,7 @@ def build_debug_report(
         for cam in all_cams:
             d = dev_by_cam.get(cam)
             t = telemetry.get(cam, {})
-            age = _fp(t, "age_s")
+            age = _fp_optional(t, "age_s")
             up = max(_fp(t, "peak_up_peak"), _fp(t, "up_peak"))
             dn = max(_fp(t, "peak_down_peak"), _fp(t, "down_peak"))
             best = max(up, dn)
@@ -230,14 +242,14 @@ def build_debug_report(
             actually_synced = d.get("time_synced", False) if d else False
 
             if actually_synced:
-                if age > 10 or best < chirp_threshold:
-                    L.append(f"  [OK]    Cam {cam}: SYNCED (telemetry age={age:.0f}s is from different attempt, ignore peaks)")
+                if age is None or age > 10 or best < chirp_threshold:
+                    L.append(f"  [OK]    Cam {cam}: SYNCED (telemetry age={_age_text(age)} is from different attempt, ignore peaks)")
                 else:
                     L.append(f"  [OK]    Cam {cam}: SYNCED  peak={best:.4f} margin={margin:.2f}x")
                 continue
 
-            if not t or age > 15:
-                L.append(f"  [ERROR] Cam {cam}: NOT SYNCED, no fresh telemetry (age={age:.0f}s)")
+            if not t or age is None or age > 15:
+                L.append(f"  [ERROR] Cam {cam}: NOT SYNCED, no fresh telemetry (age={_age_text(age)})")
                 L.append(f"          → Phone may not have received sync_command, or already back in standby")
                 continue
 
@@ -329,8 +341,13 @@ def build_debug_report(
             cfar_up = _fp(t, "cfar_up_floor")
             cfar_dn = _fp(t, "cfar_down_floor")
             clipping = "YES" if inp_peak >= 0.98 else "no"
-            age = _fp(t, "age_s")
-            age_str = f"  age={age:.0f}s" if age > 2 else ""
+            age = _fp_optional(t, "age_s")
+            if age is None:
+                age_str = "  age=unknown"
+            elif age > 2:
+                age_str = f"  age={age:.0f}s"
+            else:
+                age_str = ""
             L.append(
                 f"  Cam {cam}: inp_rms={inp_rms:.3f}  inp_peak={inp_peak:.3f}"
                 f"  up={up:.4f}  dn={dn:.4f}"
