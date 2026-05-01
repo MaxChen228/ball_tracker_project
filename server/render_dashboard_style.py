@@ -503,6 +503,12 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                  font-style: italic; font-family: var(--mono); }}
 .events-toolbar {{ display:flex; align-items:center; justify-content:space-between;
                    gap:var(--s-2); margin-bottom:var(--s-2); }}
+.events-toolbar-right {{ display:flex; align-items:center; gap:var(--s-2); }}
+.events-search {{ background:var(--surface); border:1px solid var(--border-base);
+                  color:var(--ink); font-family:var(--mono); font-size:11px;
+                  padding:4px 8px; border-radius:var(--r); width:120px;
+                  outline:none; }}
+.events-search:focus {{ border-color:var(--ink); }}
 .events-filters {{ display:flex; gap:6px; }}
 .events-filter {{ background:transparent; border:1px solid var(--border-base);
                   color:var(--sub); font-family:var(--mono); font-size:10px;

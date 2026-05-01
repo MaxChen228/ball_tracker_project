@@ -216,15 +216,12 @@ def _render_hsv_body(
         + '</div></div>'
     )
 
-    # "Save as new" + "Manage" — phase 3 of the preset library refactor.
-    # Save-as-new POSTs the current form values under a new slug
-    # (operator supplies name+label via prompt). Manage opens a modal
-    # that lists every preset on disk and exposes Use / Duplicate /
-    # Delete actions per row. Both rely on the JS in 15_hsv_controls.js.
+    # Manage… opens a modal listing every preset on disk with
+    # Use / Duplicate / Delete actions. The "+ Save as new" button was
+    # consolidated into the bottom Apply button — Apply now prompts for
+    # a name and POSTs /presets directly.
     library_actions = (
         '<div class="hsv-library-actions">'
-        '<button type="button" class="btn small" data-preset-save-as>'
-        '+ Save as new</button>'
         '<button type="button" class="btn small secondary" data-preset-manage>'
         'Manage…</button>'
         '</div>'

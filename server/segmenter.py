@@ -92,7 +92,7 @@ def find_segments(
     gate_r0_m: float = 0.05,
     gate_b: float = 0.10,
     max_consec_misses: int = 3,
-    min_displacement_m: float = 0.30,
+    min_path_length_m: float = 0.30,
 ) -> tuple[list[Segment], np.ndarray]:
     """Run multi-segment ballistic extraction.
 
@@ -173,9 +173,12 @@ def find_segments(
                 pts, used, seg_idx_sorted, p0, v0, t_anchor, rmse, gate_r0_m
             )
             p0, v0, rmse, t_anchor = _refit_pinned(pts, seg_idx_sorted)
-            # Displacement gate AFTER fill-in (now reflects the full set).
-            disp = float(np.linalg.norm(pts[seg_idx_sorted[-1], 1:4] - pts[seg_idx_sorted[0], 1:4]))
-            if disp < min_displacement_m:
+            # Path-length gate AFTER fill-in (sum of consecutive
+            # 3D distances — captures bounces / folded trajectories
+            # that have small start-to-end displacement).
+            xyz = pts[seg_idx_sorted, 1:4]
+            path_len = float(np.sum(np.linalg.norm(np.diff(xyz, axis=0), axis=1)))
+            if path_len < min_path_length_m:
                 used[seg_idx_sorted] = True
                 continue
             used[seg_idx_sorted] = True
