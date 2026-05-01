@@ -17,6 +17,15 @@ const state = {
   doneFrames: new Set(),
   seedMaskUrl: null,
   propMaskUrlByFrame: new Map(),
+  seedComputing: false,
+  seedComputeStartMs: null,
+  propPhase: null,
+  propExpected: 0,
+  propDoneCount: 0,
+  propPhaseElapsed: 0,
+  propDevice: null,
+  propModel: null,
+  propStartMs: null,
   sse: null,
 };
 
@@ -79,8 +88,42 @@ function updateStatus() {
   const t = el.video.currentTime || 0;
   const pt = state.seedPoint ? `(${state.seedPoint[0]},${state.seedPoint[1]})` : "-";
   const fStr = String(f).padStart(4, "0");
+  let statusTag = state.propagateStatus;
+  let computing = false;
+  if (state.seedComputing) {
+    const elapsed = ((performance.now() - state.seedComputeStartMs) / 1000).toFixed(1);
+    statusTag = `seeding... ${elapsed}s (SAM2 image predictor)`;
+    computing = true;
+  } else if (state.propagateStatus === "running") {
+    const phase = state.propPhase || "starting";
+    if (phase === "extracting") {
+      const elapsed = state.propStartMs ? ((performance.now() - state.propStartMs) / 1000).toFixed(1) : "0.0";
+      statusTag = `propagate: extracting frames [${state.propExpected}] ${elapsed}s`;
+    } else if (phase === "extracted") {
+      statusTag = `propagate: extracted ${state.propExpected} frames in ${state.propPhaseElapsed}s, loading model...`;
+    } else if (phase === "model_loading") {
+      statusTag = `propagate: loading SAM2 video predictor...`;
+    } else if (phase === "model_ready") {
+      statusTag = `propagate: model ready (${state.propModel || "?"} on ${state.propDevice || "?"} in ${state.propPhaseElapsed}s)`;
+    } else if (phase === "propagating") {
+      const total = state.propExpected || 1;
+      const done = state.propDoneCount;
+      const elapsedS = state.propStartMs ? (performance.now() - state.propStartMs) / 1000 : 0;
+      const fps = elapsedS > 0 ? (done / elapsedS).toFixed(2) : "?";
+      const etaS = (fps !== "?" && fps > 0) ? Math.max(0, (total - done) / parseFloat(fps)).toFixed(0) : "?";
+      const pct = ((done / total) * 100).toFixed(1);
+      statusTag = `propagate: ${done}/${total} (${pct}%) @ ${fps} fps, ETA ${etaS}s`;
+    } else {
+      statusTag = `propagate: ${phase}`;
+    }
+    computing = true;
+  } else if (state.propagateStatus === "done" && state.propDoneCount > 0) {
+    statusTag = `propagate done: ${state.propDoneCount}/${state.propExpected} frames in ${state.propPhaseElapsed}s`;
+  }
+  if (computing) el.statusbar.classList.add("computing");
+  else el.statusbar.classList.remove("computing");
   el.status.textContent =
-    `f=${fStr} t=${t.toFixed(3)}s | in=${fmt(state.inFrame)} out=${fmt(state.outFrame)} seed=${fmt(state.seedFrame)} pt=${pt} | status=${state.propagateStatus}${state.pendingSeedClick ? " (click to set seed point)" : ""}`;
+    `f=${fStr} t=${t.toFixed(3)}s | in=${fmt(state.inFrame)} out=${fmt(state.outFrame)} seed=${fmt(state.seedFrame)} pt=${pt} | status=${statusTag}${state.pendingSeedClick ? " (click to set seed point)" : ""}`;
 }
 
 function updateMarker(markerEl, frame) {
@@ -341,13 +384,36 @@ function startSse() {
     const maskUrl = payload.mask_url;
     if (typeof frame !== "number" || typeof maskUrl !== "string") return;
     state.propMaskUrlByFrame.set(frame, maskUrl);
+    state.propDoneCount = state.propMaskUrlByFrame.size;
     addDoneFill(frame);
     if (frame === currentFrame()) loadMaskForFrame(frame);
+    updateStatus();
   });
-  es.addEventListener("done", () => {
+  es.addEventListener("phase", (ev) => {
+    let payload;
+    try { payload = JSON.parse(ev.data); } catch (_) { return; }
+    state.propPhase = payload.phase || null;
+    if (typeof payload.expected_frames === "number") state.propExpected = payload.expected_frames;
+    if (typeof payload.elapsed_s === "number") state.propPhaseElapsed = payload.elapsed_s;
+    if (payload.device) state.propDevice = payload.device;
+    if (payload.model) state.propModel = payload.model;
+    console.log("propagate phase", payload);
+    updateStatus();
+  });
+  es.addEventListener("done", (ev) => {
+    let payload = {};
+    try { payload = JSON.parse(ev.data); } catch (_) {}
     state.propagateStatus = "done";
+    state.propPhase = "done";
+    if (typeof payload.elapsed_s === "number") state.propPhaseElapsed = payload.elapsed_s;
+    if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
     updatePropagateBtn();
     updateStatus();
+  });
+  es.addEventListener("error", (ev) => {
+    let payload = {};
+    try { payload = JSON.parse(ev.data); } catch (_) {}
+    if (payload.msg) showError(`propagate: ${payload.msg}`);
   });
   es.onerror = () => {
     // SSE 中斷由瀏覽器自動重連；這裡不假裝成功
@@ -413,6 +479,10 @@ function markSeed() {
 }
 
 async function sendSeed(frameIndex, x, y) {
+  state.seedComputing = true;
+  state.seedComputeStartMs = performance.now();
+  updateStatus();
+  const tickHandle = setInterval(updateStatus, 200);
   try {
     const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(state.current)}/seed`, {
       method: "POST",
@@ -420,7 +490,8 @@ async function sendSeed(frameIndex, x, y) {
       body: JSON.stringify({ frame_index: frameIndex, x, y }),
     });
     if (!r.ok) {
-      showError(`seed failed: HTTP ${r.status}`);
+      const text = await r.text().catch(() => "");
+      showError(`seed failed: HTTP ${r.status} ${text}`);
       return;
     }
     const blob = await r.blob();
@@ -429,28 +500,44 @@ async function sendSeed(frameIndex, x, y) {
     state.seedMaskReady = true;
     if (currentFrame() === frameIndex) loadMaskForFrame(frameIndex);
     updatePropagateBtn();
-    updateStatus();
   } catch (e) {
     showError(`seed failed: ${e}`);
+  } finally {
+    clearInterval(tickHandle);
+    state.seedComputing = false;
+    state.seedComputeStartMs = null;
+    updateStatus();
   }
 }
 
 async function propagate() {
   if (el.btnPropagate.disabled) return;
   state.propagateStatus = "running";
+  state.propPhase = "starting";
+  state.propDoneCount = 0;
+  state.propExpected = (state.outFrame - state.inFrame + 1) || 0;
+  state.propPhaseElapsed = 0;
+  state.propStartMs = performance.now();
   clearDoneFills();
   updatePropagateBtn();
   updateStatus();
+  if (state.propTickHandle) clearInterval(state.propTickHandle);
+  state.propTickHandle = setInterval(updateStatus, 200);
   try {
     const r = await postJson(`/api/items/${encodeURIComponent(state.current)}/propagate`);
     if (!r.ok) {
       state.propagateStatus = "failed";
-      showError(`propagate failed: HTTP ${r.status}`);
+      const text = await r.text().catch(() => "");
+      showError(`propagate failed: HTTP ${r.status} ${text}`);
+      clearInterval(state.propTickHandle);
+      state.propTickHandle = null;
       updatePropagateBtn();
       updateStatus();
     }
   } catch (e) {
     state.propagateStatus = "failed";
+    clearInterval(state.propTickHandle);
+    state.propTickHandle = null;
     showError(`propagate failed: ${e}`);
     updatePropagateBtn();
     updateStatus();
