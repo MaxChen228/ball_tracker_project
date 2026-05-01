@@ -112,13 +112,36 @@ def _render_hsv_body(
 
     `detection_config` is the wire shape returned by
     `GET /detection/config` (so the dashboard can refetch on mount and
-    re-hydrate the same way without an alternative shape). When None
-    or missing fields, falls back to Tennis-preset values so the SSR
-    boot path renders something coherent.
+    re-hydrate the same way without an alternative shape). `None`
+    means "SSR boot has no config payload yet" and renders the
+    canonical tennis defaults. But once a config object exists, every
+    required subsection / field must be present — silently substituting
+    tennis values for a malformed payload would hide schema drift from
+    the operator.
     """
-    cfg = detection_config or {}
-    hsv = cfg.get("hsv") or {}
-    sg = cfg.get("shape_gate") or {}
+    if detection_config is None:
+        cfg: dict[str, object] = {}
+        hsv: dict[str, object] = {}
+        sg: dict[str, object] = {}
+    else:
+        cfg = detection_config
+        if "hsv" not in cfg or "shape_gate" not in cfg:
+            raise KeyError("detection_config missing required 'hsv' or 'shape_gate'")
+        hsv_obj = cfg["hsv"]
+        sg_obj = cfg["shape_gate"]
+        if not isinstance(hsv_obj, dict) or not isinstance(sg_obj, dict):
+            raise TypeError("detection_config 'hsv' and 'shape_gate' must be objects")
+        required_hsv = ("h_min", "h_max", "s_min", "s_max", "v_min", "v_max")
+        required_sg = ("aspect_min", "fill_min")
+        missing_hsv = [k for k in required_hsv if k not in hsv_obj]
+        missing_sg = [k for k in required_sg if k not in sg_obj]
+        if missing_hsv or missing_sg:
+            raise KeyError(
+                "detection_config missing required keys: "
+                + ", ".join([*missing_hsv, *missing_sg])
+            )
+        hsv = hsv_obj
+        sg = sg_obj
     preset_name = cfg.get("preset")
     modified_fields = cfg.get("modified_fields") or []
     presets_by_name = {p.name: p for p in presets}

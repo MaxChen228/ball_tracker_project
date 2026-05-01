@@ -26,10 +26,21 @@
                                                   # server stamps `cost` in live_pairing._resolve_candidates after the
                                                   # shape-prior selector runs.
   local_recording_index: int?                     # device-local debug counter; server ignores
-  live_preset_name: str | null                    # active preset filename frozen at arm time (mirrored into SessionResult.live_preset_name). Drives the events list / viewer "Live: <name>" chip; null only on legacy on-disk pitches that predate arm-time preset stamping.
+  live_config_used: {                             # full arm-time frozen snapshot of the live detector config
+    algorithm_id: str,
+    hsv: {h_min,h_max,s_min,s_max,v_min,v_max},
+    shape_gate: {aspect_min,fill_min},
+    preset_name: str | null                       # null = custom config, non-null = identity claim
+  } | null
+  server_post_config_used: {                      # full snapshot of the most recent server_post rerun that produced frames_server_post
+    algorithm_id: str,
+    hsv: {h_min,h_max,s_min,s_max,v_min,v_max},
+    shape_gate: {aspect_min,fill_min},
+    preset_name: str | null
+  } | null
   ```
 
-  `SessionResult` adds the matching `live_preset_name` (A-wins-B-fallback aggregate) plus `server_post_preset_name` (the `preset_name` body field of the most recent `POST /sessions/{sid}/run_server_post`; overwritten on rerun, no history). The events list / viewer chip-render `Live: <name> | Svr: <name|—>` from these two; a preset whose file has been deleted under a session degrades to a faded `(deleted)` suffix.
+  `SessionResult` mirrors the same `live_config_used` + `server_post_config_used` snapshots with the same A-wins-B-fallback aggregation. The events list / viewer CFG strip renders from these snapshots directly, so custom configs and deleted presets still show the exact frozen HSV + gate values that produced the session.
 
   Server-side, `/pitch` looks up the matching `CalibrationSnapshot` from `state.calibrations()` and fills in `intrinsics` / `homography` / `image_width_px` / `image_height_px` BEFORE triangulation and on-disk persistence. **No calibration on file → 422**.
 
