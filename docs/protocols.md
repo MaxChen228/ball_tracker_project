@@ -50,6 +50,8 @@
 
 Pairing is by **`session_id` alone** (server-minted via `POST /sessions/arm`). iPhones never generate pairing identifiers.
 
+`POST /sessions/arm` may omit `paths`, in which case the operator's runtime default is used. If a JSON body includes `paths`, it must be a non-empty array of known `DetectionPath` values; unknown values and empty arrays return 422 instead of falling back to defaults.
+
 Triangulation requires **both** cameras to have `intrinsics` and `homography` present AND `sync_anchor_timestamp_s` non-null — if any is missing, `SessionResult.error` is set and triangulation is skipped (raw payload + MOV are still persisted for forensics).
 
 ## WebSocket messages — `/ws/device/{cam}`

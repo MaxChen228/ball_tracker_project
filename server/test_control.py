@@ -326,6 +326,32 @@ def test_sessions_arm_stop_json_api():
     assert r2.json()["session"]["armed"] is False
 
 
+def test_sessions_arm_rejects_unknown_detection_paths():
+    client = TestClient(app)
+
+    r = client.post(
+        "/sessions/arm",
+        headers={"Accept": "application/json"},
+        json={"paths": ["bogus"]},
+    )
+
+    assert r.status_code == 422
+    assert "unknown detection paths" in r.json()["detail"]
+
+
+def test_sessions_arm_rejects_empty_detection_paths():
+    client = TestClient(app)
+
+    r = client.post(
+        "/sessions/arm",
+        headers={"Accept": "application/json"},
+        json={"paths": []},
+    )
+
+    assert r.status_code == 422
+    assert r.json()["detail"] == "paths must be non-empty"
+
+
 def test_sessions_stop_returns_409_when_nothing_armed():
     client = TestClient(app)
     r = client.post("/sessions/stop", headers={"Accept": "application/json"})

@@ -20,6 +20,16 @@ _SESSION_ID_RE = re.compile(r"^s_[0-9a-f]{4,32}$")
 # shows" — Live and server_post detection are independent choices.
 
 
+def _unknown_detection_paths(raw_paths: list[object]) -> list[str]:
+    out: list[str] = []
+    for item in raw_paths:
+        try:
+            DetectionPath(str(item))
+        except ValueError:
+            out.append(str(item))
+    return out
+
+
 @router.post("/sessions/arm")
 async def sessions_arm(
     request: Request,
@@ -30,15 +40,17 @@ async def sessions_arm(
     ctype = request.headers.get("content-type", "").lower()
     if "application/json" in ctype:
         body = await request.json()
-        raw_paths = body.get("paths")
-        if isinstance(raw_paths, list):
+        if "paths" in body:
+            raw_paths = body["paths"]
+            if not isinstance(raw_paths, list):
+                raise HTTPException(status_code=422, detail="paths must be an array")
+            unknown = _unknown_detection_paths(raw_paths)
+            if unknown:
+                raise HTTPException(status_code=422, detail=f"unknown detection paths: {unknown}")
             normalized = session_results.normalize_paths(raw_paths)
-            # Empty list, or a list of unknown values that `normalize_paths`
-            # silently drops, is treated as "no caller preference" and falls
-            # back to runtime defaults — matches the pre-NIT-batch behaviour
-            # at the HTTP boundary (`arm_session` itself stays strict and
-            # rejects an explicit empty set as misuse).
-            requested_paths = normalized if normalized else None
+            if not normalized:
+                raise HTTPException(status_code=422, detail="paths must be non-empty")
+            requested_paths = normalized
     readiness = _arm_readiness()
     if not readiness.get("ready"):
         if _wants_html(request):
