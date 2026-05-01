@@ -30,9 +30,9 @@ async def sync_start(request: Request) -> dict[str, Any]:
         status_code = _SYNC_START_STATUS_FOR_REASON.get(reason, 409)
         raise HTTPException(status_code=status_code, detail={"ok": False, "error": reason})
     assert run is not None
-    state._sync.reset_sync_telemetry_peaks(None)
+    state.sync.reset_sync_telemetry_peaks(None)
     online_cams = list(state.online_devices())
-    state._sync.set_expected_sync_id([d.camera_id for d in online_cams], run.id)
+    state.sync.set_expected_sync_id([d.camera_id for d in online_cams], run.id)
     params = state.sync_params()
     per_cam = {
         cam.camera_id: {
@@ -114,7 +114,7 @@ async def sync_audio_upload(
         debug["psr_self"], debug["psr_other"],
         report.t_self_s or 0.0, report.t_from_other_s or 0.0,
     )
-    run_after, result, reason = state._sync.record_sync_report(report)
+    run_after, result, reason = state.sync.record_sync_report(report)
     if reason == "no_sync":
         raise HTTPException(status_code=409, detail={"ok": False, "error": "no_sync"})
     if reason == "stale_sync_id":
@@ -145,7 +145,7 @@ async def sync_audio_upload(
 @router.post("/sync/report")
 async def sync_report(report: SyncReport) -> dict[str, Any]:
     from main import state
-    run_after, result, reason = state._sync.record_sync_report(report)
+    run_after, result, reason = state.sync.record_sync_report(report)
     if reason == "no_sync":
         raise HTTPException(status_code=409, detail={"ok": False, "error": "no_sync"})
     if reason == "stale_sync_id":
@@ -162,9 +162,9 @@ async def sync_report(report: SyncReport) -> dict[str, Any]:
 def sync_debug_export() -> Response:
     from main import state, _build_device_status_rows
     from sync_analysis import build_debug_report
-    last = state._sync.last_sync_result()
-    logs = state._sync.sync_logs(limit=60)
-    telem = state._sync.sync_telemetry_snapshot()
+    last = state.sync.last_sync_result()
+    logs = state.sync.sync_logs(limit=60)
+    telem = state.sync.sync_telemetry_snapshot()
     devices = _build_device_status_rows()
     report = build_debug_report(
         last_sync=last.model_dump() if last is not None else None,
@@ -180,21 +180,21 @@ def sync_debug_export() -> Response:
 @router.get("/sync/state")
 def sync_state(log_limit: int = 200) -> dict[str, Any]:
     from main import state
-    run = state._sync.current_sync()
-    last = state._sync.last_sync_result()
-    logs = state._sync.sync_logs(limit=log_limit)
+    run = state.sync.current_sync()
+    last = state.sync.last_sync_result()
+    logs = state.sync.sync_logs(limit=log_limit)
     return {
         "sync": run.to_dict() if run is not None else None,
         "last_sync": last.model_dump() if last is not None else None,
-        "cooldown_remaining_s": state._sync.sync_cooldown_remaining_s(),
+        "cooldown_remaining_s": state.sync.sync_cooldown_remaining_s(),
         "logs": [entry.model_dump() for entry in logs],
-        "telemetry": state._sync.sync_telemetry_snapshot(),
+        "telemetry": state.sync.sync_telemetry_snapshot(),
     }
 
 
 @router.post("/sync/trigger")
 async def sync_trigger(request: Request) -> Any:
-    from main import state, device_ws, _wants_html
+    from main import state, device_ws
     ctype = request.headers.get("content-type", "").lower()
     is_form = "application/x-www-form-urlencoded" in ctype or "multipart/form-data" in ctype
     camera_ids: list[str] | None = None
@@ -215,12 +215,12 @@ async def sync_trigger(request: Request) -> Any:
         if raw is not None:
             camera_ids = [c for c in (str(raw).replace(",", " ").split()) if c]
     dispatched = state.trigger_sync_command(camera_ids)
-    state._sync.reset_sync_telemetry_peaks(dispatched if dispatched else None)
-    state._sync.clear_last_sync_result()
-    pending_ids = state._sync.pending_sync_command_ids()
+    state.sync.reset_sync_telemetry_peaks(dispatched if dispatched else None)
+    state.sync.clear_last_sync_result()
+    pending_ids = state.sync.pending_sync_command_ids()
     for cam, sid in pending_ids.items():
         if cam in dispatched:
-            state._sync.set_expected_sync_id([cam], sid)
+            state.sync.set_expected_sync_id([cam], sid)
     ws_messages = {
         cam: {"type": "sync_command", "command": "start", "sync_command_id": sid}
         for cam, sid in pending_ids.items()
@@ -236,7 +236,7 @@ async def sync_trigger(request: Request) -> Any:
 @router.post("/sync/claim")
 def sync_claim() -> dict[str, Any]:
     from main import state
-    intent = state._sync.claim_time_sync_intent()
+    intent = state.sync.claim_time_sync_intent()
     return {
         "ok": True,
         "sync_id": intent.id,
@@ -248,7 +248,7 @@ def sync_claim() -> dict[str, Any]:
 @router.post("/sync/log")
 async def sync_log_post(body: SyncLogBody) -> dict[str, Any]:
     from main import state
-    state._sync.log_sync_event(source=body.camera_id, event=body.event, detail=body.detail)
+    state.sync.log_sync_event(source=body.camera_id, event=body.event, detail=body.detail)
     return {"ok": True}
 
 

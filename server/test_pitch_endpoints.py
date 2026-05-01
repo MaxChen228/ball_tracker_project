@@ -20,7 +20,6 @@ from _test_helpers import (
     _make_scene,
     _post_pitch,
     _project_pixels,
-    _seed_ready_stereo,
 )
 
 
