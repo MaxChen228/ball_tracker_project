@@ -173,6 +173,26 @@ body {
 .item-card.active .item-card-delete { display: block; }
 .item-card-delete:hover { color: #ef4444; }
 
+.item-card-progress {
+  margin-top: 4px;
+  height: 3px;
+  background: #0f172a;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.item-card-progress-fill {
+  height: 100%;
+  background: #f59e0b;
+  width: 0;
+  transition: width 0.5s linear;
+}
+.item-card-progress-label {
+  font-size: 10px;
+  color: #f59e0b;
+  margin-top: 2px;
+  font-family: monospace;
+}
+
 #work-area {
   flex: 1;
   display: flex;

@@ -476,8 +476,6 @@ def _recover_crashed_propagations() -> None:
         print(f"[labeller] recovered {len(recovered)} crashed propagations: {recovered}", flush=True)
 
 
-_recover_crashed_propagations()
-
 # Queue state — one global queue runner thread; cancel flag is set by user.
 _QUEUE_LOCK = threading.Lock()
 _QUEUE_THREAD: threading.Thread | None = None
@@ -603,6 +601,8 @@ def run_propagate(slug: str) -> None:
         "phase": "propagating", "expected_frames": expected, "seed_frame": seed_f,
     })
     t_prop = time.time()
+    last_queue_pub = 0.0
+    frames_emitted = 0
     try:
         for local_idx, mask_png in prop.propagate(fdir, seed_local, (seed_p[0], seed_p[1])):
             # Translate SAM 2's local sequential idx back to the canonical source
@@ -615,6 +615,19 @@ def run_propagate(slug: str) -> None:
                 "frame": source_idx,
                 "mask_url": f"/mask/{slug}/{source_idx:05d}.png",
             })
+            frames_emitted += 1
+            # Throttle queue-channel progress to ~1 update / 1.5s. SAM 2 emits
+            # forward+reverse so the total can exceed `expected` by ~1 (seed
+            # frame visited twice); cap the displayed total accordingly.
+            if _QUEUE_CURRENT == slug:
+                now = time.time()
+                if now - last_queue_pub >= 1.5:
+                    last_queue_pub = now
+                    snap = _queue_snapshot()
+                    snap["frame_done"] = frames_emitted
+                    snap["frame_total"] = expected * 2  # forward + reverse
+                    snap["elapsed_s"] = round(now - t_prop, 2)
+                    BUS.publish("__queue__", "queue", snap)
     except Exception as e:
         BUS.publish(slug, "error", {"msg": f"propagate failed: {e}"})
         STORE.update(slug, propagate_status="failed")
@@ -1023,6 +1036,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     STORE.scan_sources()
+    _recover_crashed_propagations()
     port = int(os.environ.get("LABELLER_PORT", "8876"))
     addr = ("127.0.0.1", port)
     server = ThreadingHTTPServer(addr, Handler)

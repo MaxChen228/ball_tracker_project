@@ -1019,6 +1019,25 @@ function renderSidebar() {
     });
     card.appendChild(nameDiv);
     card.appendChild(metaDiv);
+    if (state.queueSnapshot.current === it.slug) {
+      const bar = document.createElement("div");
+      bar.className = "item-card-progress";
+      const fill = document.createElement("div");
+      fill.className = "item-card-progress-fill";
+      const snap = state.queueSnapshot;
+      const pct = snap.frame_total > 0
+        ? Math.min(100, (snap.frame_done / snap.frame_total) * 100)
+        : 0;
+      fill.style.width = `${pct.toFixed(1)}%`;
+      bar.appendChild(fill);
+      const label = document.createElement("div");
+      label.className = "item-card-progress-label";
+      label.textContent = snap.frame_total > 0
+        ? `${snap.frame_done}/${snap.frame_total}`
+        : "starting…";
+      card.appendChild(bar);
+      card.appendChild(label);
+    }
     card.appendChild(delBtn);
     card.addEventListener("click", () => {
       if (state.current === it.slug) return;
@@ -1080,12 +1099,17 @@ async function toggleQueue() {
 }
 
 function applyQueueSnapshot(snap) {
+  // Backend always emits {running, current, done, ready, total}; frame_done/
+  // frame_total/elapsed_s only present during active propagation.
   state.queueSnapshot = {
-    running: !!snap.running,
-    current: snap.current ?? null,
-    done: snap.done ?? 0,
-    ready: snap.ready ?? 0,
-    total: snap.total ?? 0,
+    running: snap.running,
+    current: snap.current,
+    done: snap.done,
+    ready: snap.ready,
+    total: snap.total,
+    frame_done: snap.frame_done ?? 0,
+    frame_total: snap.frame_total ?? 0,
+    elapsed_s: snap.elapsed_s ?? 0,
   };
   state.queueRunning = state.queueSnapshot.running;
   updateQueueButton();
