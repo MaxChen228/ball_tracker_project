@@ -825,26 +825,24 @@ async function rehydrateMasks(slug) {
   }
 }
 
-async function togglePlay() {
+function togglePlay() {
   if (state.scrubMode) {
     const tbl = state.ptsTable;
     const f = state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0;
     const targetT = tbl ? tbl[f] : null;
     if (targetT == null) return;
-    // Wait for the seek to actually land before play(), otherwise play()
-    // may resolve while the decoder is still backfilling and the user sees
-    // either the old frame or a black flash.
+    // Seek + play synchronously inside the user-gesture handler. Any await
+    // before play() consumes the autoplay-policy token; Chrome silently
+    // ignores the play() that follows and the video stays paused.
     if (Math.abs(el.video.currentTime - targetT) > 0.005) {
-      const seekDone = new Promise((res) => {
-        el.video.addEventListener("seeked", res, { once: true });
-      });
       el.video.currentTime = targetT;
-      await Promise.race([seekDone, new Promise((r) => setTimeout(r, 250))]);
     }
-    state.lastDisplayedMediaTime = el.video.currentTime;
+    state.lastDisplayedMediaTime = targetT;
     exitScrubMode();
-    try { await el.video.play(); }
-    catch (e) { console.warn("play failed", e); enterScrubMode(); }
+    el.video.play().catch((e) => {
+      console.warn("play failed", e);
+      enterScrubMode();
+    });
   } else {
     el.video.pause();
     const f = currentFrame();
