@@ -11,7 +11,7 @@ import main
 import schemas
 from conftest import sid
 from main import app
-from reconstruct import Scene, build_scene
+from reconstruct import build_scene
 from viewer_fragments import failure_strip_html
 from viewer_page import build_viewer_page_context
 
@@ -1395,7 +1395,7 @@ def test_events_path_status_marks_live_done_on_frame_existence_not_triangulation
     frames in the viewer — previously this showed "-" and made live-only
     work look like a silent failure."""
     import main
-    from schemas import PitchPayload, FramePayload, IntrinsicsPayload
+    from schemas import FramePayload
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(815)
     # Build a pitch whose frames_live carries two detected frames and no

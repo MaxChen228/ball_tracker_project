@@ -247,9 +247,15 @@ final class CameraCommandRouter {
     private func applyPushedPaths(_ rawPaths: [String]?) {
         guard let rawPaths else { return }
         let parsed = Set(rawPaths.compactMap(ServerUploader.DetectionPath.init(rawValue:)))
-        if !parsed.isEmpty {
-            deps.setCurrentSessionPaths(parsed)
+        guard !parsed.isEmpty else {
+            commandLog.error("ws paths schema drift: rawPaths=\(rawPaths, privacy: .public) — atomic-drop")
+            return
         }
+        guard parsed.count == rawPaths.count else {
+            commandLog.error("ws paths partial-unknown rawPaths=\(rawPaths, privacy: .public) parsed=\(parsed.count) — atomic-drop")
+            return
+        }
+        deps.setCurrentSessionPaths(parsed)
     }
 
     private func applyPreviewRequest(_ requested: Bool) {

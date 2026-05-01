@@ -222,6 +222,7 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         candidate_paths.add(DetectionPath.live)
     if not candidate_paths:
         candidate_paths = set(_DEFAULT_PATHS)
+    legacy_points_path = _legacy_points_path(candidate_paths)
 
     if live is not None:
         with live._lock:
@@ -253,8 +254,8 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         # so persisted `frames_live` can still drive the live trajectory.
         if path == DetectionPath.live and live is not None:
             continue
-        frames_a = get_path_frames(state, a, path) if a is not None else []
-        frames_b = get_path_frames(state, b, path) if b is not None else []
+        frames_a = get_path_frames(a, path) if a is not None else []
+        frames_b = get_path_frames(b, path) if b is not None else []
         frame_counts: dict[str, int] = {}
         if a is not None and frames_a:
             frame_counts["A"] = len(frames_a)
@@ -269,8 +270,8 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             try:
                 pts = triangulate_pair(
                     state,
-                    pitch_with_path_frames(state, a, path),
-                    pitch_with_path_frames(state, b, path),
+                    pitch_with_path_frames(a, path),
+                    pitch_with_path_frames(b, path),
                     source="server",
                 )
             except Exception as exc:
@@ -294,17 +295,6 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             authority = pts
             break
     result.triangulated = authority
-    # Legacy `points` semantics: prefer server_post when present, else
-    # fall back to live. Older consumers (viewer, /events) expect `points`
-    # to hold the session's single result.
-    if DetectionPath.server_post in candidate_paths:
-        legacy_points = result.triangulated_by_path.get(DetectionPath.server_post.value, [])
-    else:
-        legacy_points = (
-            result.triangulated_by_path.get(DetectionPath.live.value)
-            or []
-        )
-    result.points = list(legacy_points)
 
     if not result.triangulated and result.error is None and (a is not None or b is not None):
         if result.abort_reasons:
@@ -312,7 +302,7 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         elif a is not None and b is not None:
             result.error = "no detection completed"
     _stamp_frozen_config_on_result(result, a, b)
-    stamp_segments_on_result(result)
+    stamp_segments_on_result(result, legacy_points_path=legacy_points_path)
     return result
 
 
@@ -353,19 +343,42 @@ def _apply_stamped_filter(
     )]
 
 
-def stamp_segments_on_result(result: SessionResult) -> None:
+def _legacy_points_path(candidate_paths: set[DetectionPath]) -> DetectionPath | None:
+    """Path used by legacy `result.points` / `result.segments`.
+
+    Explicit branch order is intentional: if server_post was requested but
+    produced no points, the legacy surface must be empty instead of silently
+    substituting live. That keeps live-vs-server_post comparisons honest.
+    """
+    if DetectionPath.server_post in candidate_paths:
+        return DetectionPath.server_post
+    if DetectionPath.live in candidate_paths:
+        return DetectionPath.live
+    return None
+
+
+def stamp_segments_on_result(
+    result: SessionResult,
+    *,
+    legacy_points_path: DetectionPath | None = None,
+) -> None:
     """Run `find_segments` on the stamped-filter SUBSET of every available
     path and write both `result.segments_by_path` and the legacy
     single-surface `result.segments`. Idempotent — overwrites whatever
     was there.
 
-    Architecture: `result.triangulated` / `result.points` /
-    `result.triangulated_by_path` carry the FULL emitted set (every
+    Architecture: `result.triangulated` / `result.triangulated_by_path`
+    carry the FULL emitted set (every
     candidate pair under pairing's absolute emit ceiling). The segmenter
     runs against the operator's stamped subset
     (`cost_threshold` / `gap_threshold_m` from `SessionResult`); the
     viewer slider mirrors the same predicate client-side. This decouples
     "what the operator sees" from "what gets fit".
+
+    `result.points` / `result.segments` follow `legacy_points_path` when
+    the caller supplies one; this prevents a missing server_post surface from
+    silently substituting live points after `rebuild_result_for_session`
+    already selected the no-fallback legacy path.
 
     Sorts every persisted path list by `t_rel_s` BEFORE running the
     segmenter so `Segment.original_indices` is a stable index into a
@@ -435,8 +448,13 @@ def stamp_segments_on_result(result: SessionResult) -> None:
         return
     authority_pts = result.triangulated_by_path[authority_path]
     result.triangulated = authority_pts
-    result.points = list(authority_pts)
-    result.segments = list(result.segments_by_path.get(authority_path, []))
+    legacy_path = (
+        legacy_points_path.value
+        if legacy_points_path is not None
+        else authority_path
+    )
+    result.points = list(result.triangulated_by_path.get(legacy_path, []))
+    result.segments = list(result.segments_by_path.get(legacy_path, []))
 
 
 def _segment_record_from_segment(seg: Segment) -> SegmentRecord:
@@ -512,6 +530,7 @@ def recompute_result_for_session(
             candidate_paths.add(DetectionPath.server_post)
         if pitch.frames_live:
             candidate_paths.add(DetectionPath.live)
+    legacy_points_path = _legacy_points_path(candidate_paths)
 
     sync_error = None
     if a is not None and b is not None:
@@ -521,8 +540,8 @@ def recompute_result_for_session(
 
     if a is not None and b is not None and sync_error is None:
         for path in sorted(candidate_paths, key=lambda p: p.value):
-            frames_a = get_path_frames(state, a, path)
-            frames_b = get_path_frames(state, b, path)
+            frames_a = get_path_frames(a, path)
+            frames_b = get_path_frames(b, path)
             if not frames_a or not frames_b:
                 continue
             result.frame_counts_by_path[path.value] = {
@@ -532,8 +551,8 @@ def recompute_result_for_session(
             try:
                 pts = triangulate_pair(
                     state,
-                    pitch_with_path_frames(state, a, path),
-                    pitch_with_path_frames(state, b, path),
+                    pitch_with_path_frames(a, path),
+                    pitch_with_path_frames(b, path),
                     source="server",
                     tuning=tuning,
                 )
@@ -550,10 +569,6 @@ def recompute_result_for_session(
             authority = pts
             break
     result.triangulated = authority
-    result.points = list(
-        result.triangulated_by_path.get(DetectionPath.server_post.value, [])
-        or result.triangulated_by_path.get(DetectionPath.live.value, [])
-    )
 
     if not result.triangulated and result.error is None and (a is not None or b is not None):
         if result.abort_reasons:
@@ -561,7 +576,7 @@ def recompute_result_for_session(
         elif a is not None and b is not None:
             result.error = "no detection completed"
     _stamp_frozen_config_on_result(result, a, b)
-    stamp_segments_on_result(result)
+    stamp_segments_on_result(result, legacy_points_path=legacy_points_path)
     return result
 
 

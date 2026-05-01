@@ -51,81 +51,38 @@ identifiers.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 import socket
-import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
-from typing import Any, Callable
+from typing import Any
 
-import numpy as np
 from fastapi import (
-    BackgroundTasks,
     FastAPI,
-    File,
-    Form,
-    HTTPException,
     Request,
-    UploadFile,
 )
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import ValidationError
 
 # Re-exports so `from main import PitchPayload, ...` keeps working for the
 # existing test suite and any downstream tooling. New callers should import
 # from the split modules directly (schemas / pairing / chirp / render_*).
 from schemas import (
-    CalibrationSnapshot,
-    CaptureTelemetryPayload,
-    DetectionPath,
-    Device,
-    FramePayload,
-    IntrinsicsPayload,
-    MarkerBatchUpsertRequest,
-    MarkerDraft,
-    MarkerRecord,
-    MarkerUpdateRequest,
-    PitchPayload,
+    CalibrationSnapshot,  # noqa: F401  (re-export for tests / reconstruct.py)
+    DetectionPath,  # noqa: F401
+    FramePayload,  # noqa: F401
+    IntrinsicsPayload,  # noqa: F401
+    MarkerRecord,  # noqa: F401
+    PitchPayload,  # noqa: F401
     Session,
-    SessionResult,
-    SyncLogBody,
-    SyncLogEntry,
-    SyncReport,
-    SyncResult,
-    SyncRun,
-    TrackingExposureCapMode,
-    TriangulatedPoint,
-    _DEFAULT_TRACKING_EXPOSURE_CAP_MODE,
-    _DEFAULT_SESSION_TIMEOUT_S,
-    _DEFAULT_PATHS,
+    TriangulatedPoint,  # noqa: F401
 )
-from collections import deque
-from pairing import scale_pitch_to_video_dims, triangulate_cycle
-from pipeline import ProcessingCanceled, detect_pitch
-from video import probe_dims
+from pipeline import detect_pitch  # noqa: F401  (re-export for routes/pitch.py late-bind)
 from chirp import chirp_wav_bytes
-import sync_audio_detect
-from preview import (
-    FRAME_MAX_AGE_S as _PREVIEW_FRAME_MAX_AGE_S,
-    PreviewBuffer,
-)
-from marker_registry import MarkerRegistryDB
-from calibration_solver import (
-    PLATE_MARKER_WORLD,
-    derive_fov_intrinsics,
-    detect_all_markers_in_dict,
-    solve_homography_from_world_map,
-)
-from triangulate import build_K, camera_center_world, recover_extrinsics, triangulate_rays, undistorted_ray_cam
-from sync_solver import compute_mutual_sync
+from preview import FRAME_MAX_AGE_S as _PREVIEW_FRAME_MAX_AGE_S  # noqa: F401
+from calibration_solver import PLATE_MARKER_WORLD
 from cleanup_old_sessions import cleanup_expired_sessions
-from live_pairing import LivePairingSession
 from sse import SSEHub
 from ws import DeviceSocketManager
 
@@ -133,24 +90,19 @@ from ws import DeviceSocketManager
 # Re-export everything tests reference via `main.*` so the test suite
 # needs zero changes.
 from state import (
-    _AutoCalibrationRun,
-    _CALIBRATION_FRAME_TTL_S,
-    _DEFAULT_DATA_DIR,
-    _DEVICE_GC_AFTER_S,
-    _DEVICE_REGISTRY_CAP,
-    _DEVICE_STALE_S,
-    _DISARM_ECHO_S,
-    TimeSyncIntent,
-    _MAX_PITCH_UPLOAD_BYTES,
-    _new_session_id,
-    _new_sync_id,
-    _SYNC_COMMAND_TTL_S,
-    _SYNC_COOLDOWN_S,
-    _SYNC_LATE_REPORT_GRACE_S,
-    _SYNC_TIMEOUT_S,
-    _TIME_SYNC_INTENT_WINDOW_S,
+    _CALIBRATION_FRAME_TTL_S,  # noqa: F401  (test access via main.*)
+    _DEVICE_GC_AFTER_S,  # noqa: F401
+    _DEVICE_REGISTRY_CAP,  # noqa: F401
+    _DISARM_ECHO_S,  # noqa: F401
+    TimeSyncIntent,  # noqa: F401
+    _MAX_PITCH_UPLOAD_BYTES,  # noqa: F401
+    _SYNC_COMMAND_TTL_S,  # noqa: F401
+    _SYNC_COOLDOWN_S,  # noqa: F401
+    _SYNC_LATE_REPORT_GRACE_S,  # noqa: F401
+    _SYNC_TIMEOUT_S,  # noqa: F401
+    _TIME_SYNC_INTENT_WINDOW_S,  # noqa: F401
     _TIME_SYNC_MAX_AGE_S,
-    _validate_calibration_snapshot,
+    _validate_calibration_snapshot,  # noqa: F401
     State,
 )
 
@@ -243,14 +195,14 @@ app.include_router(_calibration_routes.router)
 app.include_router(_calibration_intrinsics_routes.router)
 app.include_router(_device_ws_routes.router)
 app.include_router(_presets_routes.router)
-from routes.camera import _validate_camera_id_or_422
-from routes.sessions import _SESSION_ID_RE
-from routes.viewer import _build_viewer_health, _find_clip_on_disk, _scene_for_session
-from routes.pitch import _summarize_result, _run_server_detection
+
+# Re-exports for routes/* late-bind imports — defined in routes/pitch.py but
+# accessed via `from main import _run_server_detection` etc.
+from routes.pitch import _run_server_detection, _summarize_result  # noqa: F401, E402
+
 from detection_config import (
     to_dict as _detection_config_to_dict,
 )
-from routes.calibration import _await_calibration_frame
 
 
 def _detection_config_view(state) -> dict:
@@ -262,12 +214,6 @@ def _detection_config_view(state) -> dict:
         **_detection_config_to_dict(cfg),
         "modified_fields": state.modified_fields_for(cfg),
     }
-from calibration_auto import (
-    _all_marker_world_xyz, _decode_calibration_jpeg,
-    _derive_auto_cal_intrinsics, _marker_camera_pose, _pose_from_homography,
-    _reprojection_error_px, _residual_bucket, _run_auto_calibration,
-    _solve_auto_cal_solution, _solve_pnp_homography, _triangulate_marker_candidates,
-)
 
 
 @app.middleware("http")
@@ -318,7 +264,7 @@ def _build_device_status_rows(
     now = state.now() if now is None else now
     ws_snapshot = device_ws.snapshot() if ws_snapshot is None else ws_snapshot
     fresh_devices = {d.camera_id: d for d in state.online_devices()}
-    expected = state._sync.expected_sync_id_snapshot()
+    expected = state.sync.expected_sync_id_snapshot()
     # Use heartbeat-based presence only. `state.heartbeat()` is called
     # immediately on WS connect (line 468), so a new device appears here
     # without needing the WS-connected fallback. The fallback caused a
@@ -432,8 +378,8 @@ def _build_status_response() -> dict[str, Any]:
     phone just polls this and reacts to `commands[self.camera_id]`."""
     summary = state.summary()
     session = state.session_snapshot()
-    sync_run = state._sync.current_sync()
-    last_sync = state._sync.last_sync_result()
+    sync_run = state.sync.current_sync()
+    last_sync = state.sync.last_sync_result()
     now = state.now()
     ws_snapshot = device_ws.snapshot()
     devices = _build_device_status_rows(now=now, ws_snapshot=ws_snapshot)
@@ -467,13 +413,13 @@ def _build_status_response() -> dict[str, Any]:
         # surface Δ + D without waiting for the next pitch upload.
         "sync": sync_run.to_dict() if sync_run is not None else None,
         "last_sync": last_sync.model_dump() if last_sync is not None else None,
-        "sync_cooldown_remaining_s": state._sync.sync_cooldown_remaining_s(),
+        "sync_cooldown_remaining_s": state.sync.sync_cooldown_remaining_s(),
         # Pending dashboard-triggered time-sync commands, keyed by camera.
         # Observational only: the phone reads its own command via
         # `sync_command` (set on the WS heartbeat / push path), and consumption
         # clears the flag. `/status` surfaces this map so the dashboard
         # can paint a "pending" badge until the phone drains it.
-        "sync_commands": state._sync.pending_sync_commands(),
+        "sync_commands": state.sync.pending_sync_commands(),
         # Runtime tunables pushed from the dashboard. iOS hot-applies any
         # changes from WS settings messages (matched-filter threshold into
         # AudioChirpDetector; cadence into ServerHealthMonitor).
@@ -491,7 +437,7 @@ def _build_status_response() -> dict[str, Any]:
         # renders a toggle per Devices row from this map; iPhones read
         # their own flag off the WS settings payload (separate sibling field,
         # see below) to decide whether to push preview JPEGs.
-        "preview_requested": state._preview.requested_map(),
+        "preview_requested": state.preview.requested_map(),
         # Per-camera one-shot calibration-frame pending map. Dashboard
         # paints a "capturing…" chip while true. The beating camera
         # reads its own flag off the WS settings payload's sibling
@@ -514,7 +460,7 @@ def _build_status_response() -> dict[str, Any]:
         "known_marker_ids": {
             "plate": sorted(PLATE_MARKER_WORLD.keys()),
             "extended": sorted(
-                rec.marker_id for rec in state._marker_registry.all_records()
+                rec.marker_id for rec in state.markers.all_records()
             ),
         },
         "live_session": state.live_session_summary(),
@@ -678,7 +624,7 @@ def events_index() -> HTMLResponse:
     from render_dashboard_page import render_events_index_html
 
     session = state.session_snapshot()
-    sync_run = state._sync.current_sync()
+    sync_run = state.sync.current_sync()
     devices = _build_device_status_rows()
     calibrations = sorted(state.calibrations().keys())
     return HTMLResponse(
@@ -691,7 +637,7 @@ def events_index() -> HTMLResponse:
             arm_readiness=_arm_readiness(devices, calibrations),
             detection_config=_detection_config_view(state),
             sync=sync_run.to_dict() if sync_run is not None else None,
-            sync_cooldown_remaining_s=state._sync.sync_cooldown_remaining_s(),
+            sync_cooldown_remaining_s=state.sync.sync_cooldown_remaining_s(),
             chirp_detect_threshold=state.chirp_detect_threshold(),
             heartbeat_interval_s=state.heartbeat_interval_s(),
             tracking_exposure_cap=state.tracking_exposure_cap().value,
@@ -700,10 +646,10 @@ def events_index() -> HTMLResponse:
             calibration_last_ts={
                 cam: p.stat().st_mtime
                 for cam in state.calibrations().keys()
-                for p in [state._calibration_path(cam)]
+                for p in [state.calibration_path(cam)]
                 if p.exists()
             },
-            preview_requested=state._preview.requested_map(),
+            preview_requested=state.preview.requested_map(),
         )
     )
 
@@ -715,8 +661,8 @@ def sync_page() -> HTMLResponse:
     from render_sync import render_sync_html
 
     session = state.session_snapshot()
-    sync_run = state._sync.current_sync()
-    last_sync = state._sync.last_sync_result()
+    sync_run = state.sync.current_sync()
+    last_sync = state.sync.last_sync_result()
     return HTMLResponse(
         render_sync_html(
             devices=_build_device_status_rows(),
@@ -724,7 +670,7 @@ def sync_page() -> HTMLResponse:
             calibrations=sorted(state.calibrations().keys()),
             sync=sync_run.to_dict() if sync_run is not None else None,
             last_sync=last_sync.model_dump() if last_sync is not None else None,
-            sync_cooldown_remaining_s=state._sync.sync_cooldown_remaining_s(),
+            sync_cooldown_remaining_s=state.sync.sync_cooldown_remaining_s(),
             sync_params={
                 "emit_a_at_s": state.sync_params().emit_a_at_s,
                 "emit_b_at_s": state.sync_params().emit_b_at_s,
@@ -746,20 +692,20 @@ def setup_page() -> HTMLResponse:
             devices=_build_device_status_rows(),
             session=session.to_dict() if session is not None else None,
             calibrations=sorted(state.calibrations().keys()),
-            sync_cooldown_remaining_s=state._sync.sync_cooldown_remaining_s(),
+            sync_cooldown_remaining_s=state.sync.sync_cooldown_remaining_s(),
             calibration_last_ts={
                 cam: p.stat().st_mtime
                 for cam in state.calibrations().keys()
-                for p in [state._calibration_path(cam)]
+                for p in [state.calibration_path(cam)]
                 if p.exists()
             },
-            markers_count=len(state._marker_registry.all_records()),
-            preview_requested=state._preview.requested_map(),
+            markers_count=len(state.markers.all_records()),
+            preview_requested=state.preview.requested_map(),
             calibration_last_solves=state.all_calibration_last_solves(),
             known_marker_ids={
                 "plate": sorted(PLATE_MARKER_WORLD.keys()),
                 "extended": sorted(
-                    rec.marker_id for rec in state._marker_registry.all_records()
+                    rec.marker_id for rec in state.markers.all_records()
                 ),
             },
         )
@@ -772,7 +718,7 @@ def markers_page() -> HTMLResponse:
     from reconstruct import build_calibration_scene
 
     session = state.session_snapshot()
-    markers = [_serialize_marker(rec) for rec in state._marker_registry.all_records()]
+    markers = [_serialize_marker(rec) for rec in state.markers.all_records()]
     compare_markers = [
         {
             "marker_id": int(mid),
@@ -791,7 +737,7 @@ def markers_page() -> HTMLResponse:
             "kind": "stored",
             "side_m": 0.08,
         }
-        for rec in state._marker_registry.all_records()
+        for rec in state.markers.all_records()
     ]
     scene = build_calibration_scene(state.calibrations()).to_dict()
     scene["plate"] = [

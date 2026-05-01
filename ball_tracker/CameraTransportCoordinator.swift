@@ -359,7 +359,10 @@ final class CameraTransportCoordinator: NSObject {
     }
 
     private func applyPushedTrackingExposureCap(_ modeStr: String) {
-        let exposureMode = ServerUploader.TrackingExposureCapMode(rawValue: modeStr) ?? .frameDuration
+        guard let exposureMode = ServerUploader.TrackingExposureCapMode(rawValue: modeStr) else {
+            transportLog.error("ws tracking_exposure_cap unknown mode=\(modeStr, privacy: .public) — atomic-drop")
+            return
+        }
         guard lastServerTrackingExposureCapMode != exposureMode else { return }
         lastServerTrackingExposureCapMode = exposureMode
         dependencies.applyTrackingExposureCap(modeStr, dependencies.getCurrentTargetFps())

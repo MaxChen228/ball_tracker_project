@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json as _json
 
-import numpy as np
 import pytest
 
 
@@ -52,7 +51,7 @@ def _build_minimal_pitches():
     """Two cameras looking at a single point from 90° apart, two frames
     each, simple intrinsics. Returns (pitch_a, pitch_b)."""
     from schemas import (
-        BlobCandidate, FramePayload, IntrinsicsPayload, PitchPayload,
+        BlobCandidate, FramePayload, IntrinsicsPayload,
     )
     fx = fy = 1000.0
     cx = cy = 500.0
