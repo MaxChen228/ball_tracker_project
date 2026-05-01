@@ -28,7 +28,7 @@ def _serialize_marker(record: MarkerRecord) -> dict[str, Any]:
 @router.get("/markers/state")
 def markers_state() -> dict[str, Any]:
     from main import state
-    records = state._marker_registry.all_records()
+    records = state.markers.all_records()
     return {
         "markers": [_serialize_marker(rec) for rec in records],
         "planar_marker_ids": [rec.marker_id for rec in records if rec.on_plate_plane],
@@ -52,14 +52,14 @@ def markers_batch_upsert(body: MarkerBatchUpsertRequest) -> dict[str, Any]:
             residual_m=draft.residual_m,
             source_camera_ids=list(draft.source_camera_ids),
         )
-        persisted.append(_serialize_marker(state._marker_registry.upsert(record)))
+        persisted.append(_serialize_marker(state.markers.upsert(record)))
     return {"ok": True, "markers": persisted}
 
 
 @router.patch("/markers/{marker_id}")
 def marker_update(marker_id: int, body: MarkerUpdateRequest) -> dict[str, Any]:
     from main import state
-    existing = state._marker_registry.get(marker_id)
+    existing = state.markers.get(marker_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"marker {marker_id} not registered")
     x_m = existing.x_m if body.x_m is None else body.x_m
@@ -78,14 +78,14 @@ def marker_update(marker_id: int, body: MarkerUpdateRequest) -> dict[str, Any]:
         residual_m=existing.residual_m,
         source_camera_ids=list(existing.source_camera_ids),
     )
-    state._marker_registry.upsert(updated)
+    state.markers.upsert(updated)
     return {"ok": True, "marker": _serialize_marker(updated)}
 
 
 @router.delete("/markers/{marker_id}")
 def marker_delete(marker_id: int) -> dict[str, Any]:
     from main import state
-    existed = state._marker_registry.remove(marker_id)
+    existed = state.markers.remove(marker_id)
     if not existed:
         raise HTTPException(status_code=404, detail=f"marker {marker_id} not registered")
     return {"ok": True, "marker_id": marker_id}
@@ -94,7 +94,7 @@ def marker_delete(marker_id: int) -> dict[str, Any]:
 @router.post("/markers/clear")
 def markers_clear() -> dict[str, Any]:
     from main import state
-    cleared = state._marker_registry.clear()
+    cleared = state.markers.clear()
     return {"ok": True, "cleared_count": cleared}
 
 
@@ -114,7 +114,7 @@ def calibration_markers_list_legacy() -> dict[str, Any]:
     return {
         "markers": [
             {"id": rec.marker_id, "wx": rec.x_m, "wy": rec.y_m}
-            for rec in state._marker_registry.all_records()
+            for rec in state.markers.all_records()
             if rec.on_plate_plane
         ],
     }
@@ -165,7 +165,7 @@ async def markers_scan(
         bgr_a=bgr_a,
         bgr_b=bgr_b,
     )
-    existing_ids = {rec.marker_id for rec in state._marker_registry.all_records()}
+    existing_ids = {rec.marker_id for rec in state.markers.all_records()}
     return {
         "ok": True,
         "camera_ids": [camera_a_id, camera_b_id],

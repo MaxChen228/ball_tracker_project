@@ -352,7 +352,7 @@ def test_calibration_auto_uses_pose_solver_when_3d_markers_available(tmp_path, m
             image_height_px=1080,
         )
     )
-    main.state._marker_registry.upsert(
+    main.state.markers.upsert(
         main.MarkerRecord(
             marker_id=9,
             x_m=-0.40,
@@ -362,7 +362,7 @@ def test_calibration_auto_uses_pose_solver_when_3d_markers_available(tmp_path, m
             source_camera_ids=["A", "B"],
         )
     )
-    main.state._marker_registry.upsert(
+    main.state.markers.upsert(
         main.MarkerRecord(
             marker_id=11,
             x_m=-0.40,
@@ -538,10 +538,10 @@ def test_markers_crud_and_persistence(tmp_path, monkeypatch):
     client = TestClient(app)
 
     state = main.state
-    state._marker_registry.upsert(
+    state.markers.upsert(
         main.MarkerRecord(marker_id=9, x_m=1.0, y_m=2.0, z_m=0.0, on_plate_plane=True)
     )
-    state._marker_registry.upsert(
+    state.markers.upsert(
         main.MarkerRecord(marker_id=10, x_m=-1.0, y_m=0.5, z_m=0.4, on_plate_plane=False)
     )
     assert client.get("/markers/state").json()["markers"] == [
@@ -572,14 +572,14 @@ def test_markers_crud_and_persistence(tmp_path, monkeypatch):
 
     # Persistence: recreate State from the same dir, registry must survive.
     main.state = main.State(data_dir=tmp_path)
-    persisted = {rec.marker_id: rec for rec in main.state._marker_registry.all_records()}
+    persisted = {rec.marker_id: rec for rec in main.state.markers.all_records()}
     assert persisted[9].on_plate_plane is True
     assert persisted[10].z_m == 0.4
 
     r = client.delete("/markers/9")
     assert r.status_code == 200
     assert r.json()["ok"] is True
-    assert main.state._marker_registry.get(9) is None
+    assert main.state.markers.get(9) is None
 
     r = client.delete("/markers/99")
     assert r.status_code == 404
@@ -592,7 +592,7 @@ def test_markers_crud_and_persistence(tmp_path, monkeypatch):
 
 def test_markers_reject_plate_reserved_ids(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
-    db = main.state._marker_registry
+    db = main.state.markers
     for reserved in (0, 1, 2, 3, 4, 5, 6, 7, 8):
         with pytest.raises(Exception):
             db.upsert(main.MarkerRecord(marker_id=reserved, x_m=0.0, y_m=0.0, z_m=0.0))

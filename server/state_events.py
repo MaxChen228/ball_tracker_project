@@ -259,7 +259,7 @@ def _latest_pitch_mtime(state: "State", cams_present: list[str], sid: str) -> fl
     latest: float | None = None
     for cam in cams_present:
         try:
-            mtime = state._pitch_path(cam, sid).stat().st_mtime
+            mtime = state.pitch_path(cam, sid).stat().st_mtime
         except FileNotFoundError:
             continue
         if latest is None or mtime > latest:
