@@ -220,8 +220,9 @@ frame count without polling.
 event: server_post_progress
 data: {
   "sid": str,
+  "cam": str,            # "A" or "B" — broadcasts are per-cam
   "frames_done": int,    # frames decoded so far
-  "frames_total": int    # total MOV frame count (from count_frames); 0 if unknown
+  "frames_total": int    # total MOV frame count (from probe_frame_count); null if unknown
 }
 ```
 
@@ -236,8 +237,10 @@ re-enables.
 event: server_post_done
 data: {
   "sid": str,
-  "status": "ok" | "cancelled" | "error",
-  "error": str | null    # present only when status == "error"
+  "cam": str,                            # "A" or "B" — broadcasts are per-cam
+  "reason": "ok" | "canceled" | "error", # note US spelling "canceled"
+  "frames_done": int,                    # frames decoded before terminal event
+  "frames_total": int                    # total MOV frame count; null if unknown
 }
 ```
 
