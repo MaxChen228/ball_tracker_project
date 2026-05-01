@@ -98,14 +98,6 @@ body {
   background: rgba(34, 197, 94, 0.35);
 }
 
-.fill-phantom {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  background: repeating-linear-gradient(
-    -45deg, rgba(250, 204, 21, 0.15) 0 3px, transparent 3px 6px);
-}
-
 #scrubber {
   position: absolute;
   top: 0;

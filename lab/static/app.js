@@ -77,67 +77,34 @@ function clearError() {
 }
 
 function currentFrame() {
-  if (state.fps == null) return 0;
-  // Prefer mediaTime from requestVideoFrameCallback when available — it is the
-  // exact PTS of the frame the compositor just painted, not the timeupdate-
-  // throttled currentTime which can lag by up to 250ms.
+  // Frame index = position in the dense PTS list (the only source of truth,
+  // mirrors viewer's `unionTimes`). Snap to nearest PTS so rVFC's mediaTime
+  // (exact PTS of compositor-painted frame) lands on the matching index.
+  const tbl = state.ptsTable;
+  if (!tbl || tbl.length === 0) return 0;
   const t = state.lastDisplayedMediaTime != null
     ? state.lastDisplayedMediaTime
     : el.video.currentTime;
-  const tbl = state.ptsTable;
-  if (tbl && tbl.length > 0) {
-    // Find the index whose PTS is closest to t (rVFC mediaTime ≈ exact PTS).
-    // round(t*fps) is wrong when frame spacing != 1/avgFps. We do a small
-    // local search around the avg-fps guess to keep it O(1) on typical cases.
-    const guess = Math.max(0, Math.min(tbl.length - 1, Math.round(t * state.fps)));
-    let best = guess, bestDiff = Infinity;
-    const lo = Math.max(0, guess - 8);
-    const hi = Math.min(tbl.length - 1, guess + 8);
-    for (let i = lo; i <= hi; i++) {
-      if (tbl[i] == null) continue;
-      const d = Math.abs(tbl[i] - t);
-      if (d < bestDiff) { bestDiff = d; best = i; }
-    }
-    return best;
+  if (t <= tbl[0]) return 0;
+  if (t >= tbl[tbl.length - 1]) return tbl.length - 1;
+  let lo = 0, hi = tbl.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (tbl[mid] <= t) lo = mid; else hi = mid - 1;
   }
-  return Math.round(t * state.fps);
+  if (lo + 1 < tbl.length && Math.abs(tbl[lo + 1] - t) < Math.abs(tbl[lo] - t)) return lo + 1;
+  return lo;
 }
 
 function frameToTime(f) {
-  if (state.fps == null) return 0;
-  // Prefer the real PTS table when available — `f / fps` is wrong for variable-
-  // fps videos. We aim for the middle of frame f's display interval so the
+  // Dense pts list — pts[f] always defined. Seek to mid-display-window so the
   // browser unambiguously decodes f (not f-1 or f+1).
   const tbl = state.ptsTable;
-  if (tbl && tbl.length > 0) {
-    let pts = tbl[f];
-    if (pts == null) {
-      // Variable-fps gap: fall back to nearest neighbor below, then above.
-      for (let i = f - 1; i >= 0; i--) {
-        if (tbl[i] != null) { pts = tbl[i]; break; }
-      }
-      if (pts == null) {
-        for (let i = f + 1; i < tbl.length; i++) {
-          if (tbl[i] != null) { pts = tbl[i]; break; }
-        }
-      }
-    }
-    if (pts != null) {
-      // Use mid-display-window: midpoint between this PTS and the next non-null
-      // PTS. Guarantees landing strictly inside f's window even when frame
-      // spacing is irregular (3ms..147ms in this material). For the last frame
-      // we don't have a "next", so fall back to a small epsilon past PTS.
-      let nextPts = null;
-      for (let i = f + 1; i < tbl.length; i++) {
-        if (tbl[i] != null) { nextPts = tbl[i]; break; }
-      }
-      if (nextPts != null && nextPts > pts) {
-        return (pts + nextPts) / 2;
-      }
-      return pts + 0.25 / state.fps;
-    }
-  }
-  return f / state.fps;
+  if (!tbl || tbl.length === 0) return 0;
+  const pts = tbl[f];
+  if (f + 1 < tbl.length) return (pts + tbl[f + 1]) / 2;
+  const prevGap = f > 0 ? (pts - tbl[f - 1]) : (1 / 240);
+  return pts + prevGap / 2;
 }
 
 function fmt(n) {
@@ -366,6 +333,9 @@ function syncFromItem(item) {
     return false;
   }
   state.fps = item.fps;
+  // totalFrames + scrubber.max get set authoritatively by fetchPts below;
+  // seed with item.total_frames so the UI isn't blank during the few hundred
+  // ms it takes to load the dense PTS list.
   state.totalFrames = item.total_frames || 0;
   state.inFrame = item.in_frame == null ? null : item.in_frame;
   state.outFrame = item.out_frame == null ? null : item.out_frame;
@@ -380,16 +350,16 @@ function syncFromItem(item) {
   clearSeedMask();
   clearDoneFills();
   clearOverlay();
-  state.seedMaskReady = false;
   state.ptsTable = null;
   state.pendingTargetFrame = null;
   state.isSeeking = false;
+  state.lastSeekTarget = null;
   updateMarkers();
   updatePropagateBtn();
   updateStatus();
   startSse();
-  fetchPts(item.slug);  // background; arrow keys fall back to f/fps until ready
-  rehydrateMasks(item.slug);  // rebuild timeline fills from on-disk masks
+  fetchPts(item.slug);
+  rehydrateMasks(item.slug);
   return true;
 }
 
@@ -634,51 +604,25 @@ async function cancelOrEscape() {
   }
 }
 
-function nextPresentFrame(f, dir) {
-  // Walk to the next index in the PTS table that has an actual decoded frame.
-  // Variable-fps + collision-rounded indexing leaves gaps (~18% on slo-mo
-  // iPhone clips); without skipping, arrow → "+1" sometimes lands on a gap
-  // and the user sees no visible change.
-  const tbl = state.ptsTable;
-  if (!tbl) return f;
-  let g = f;
-  while (g >= 0 && g < tbl.length) {
-    if (tbl[g] != null) return g;
-    g += dir;
-  }
-  return f;
-}
-
 function stepFrames(delta) {
-  if (state.fps == null) {
-    showError("fps unset; cannot step frames");
-    return;
-  }
+  if (!state.ptsTable) return;
   if (!el.video.paused) el.video.pause();
-  // Each unit of |delta| should land on a real (non-gap) frame so the user
-  // always sees motion. Compute absolute target from the latest known frame.
-  // Priority: still-queued seek > most recent in-flight target (rVFC may not
-  // have caught up yet) > displayed frame. Without lastSeekTarget the user
-  // hits a race window after `seeked` fires but before rVFC updates
-  // mediaTime — pressing right twice fast lands on the SAME target both times.
+  // Priority for "where am I now": queued target (not yet flushed) > in-flight
+  // seek target (rVFC may not have updated mediaTime) > displayed frame.
+  // Without lastSeekTarget, two fast right-arrow presses race and land on the
+  // same target.
   const start = state.pendingTargetFrame != null
     ? state.pendingTargetFrame
     : (state.lastSeekTarget != null ? state.lastSeekTarget : currentFrame());
-  let target = start;
-  const dir = delta > 0 ? 1 : -1;
-  for (let i = 0; i < Math.abs(delta); i++) {
-    target = nextPresentFrame(target + dir, dir);
-  }
-  target = Math.max(0, Math.min(state.totalFrames - 1, target));
+  const target = Math.max(0, Math.min(state.totalFrames - 1, start + delta));
   state.pendingTargetFrame = target;
   if (!state.isSeeking) flushStep();
 }
 
 function jumpToFrame(f) {
-  if (state.fps == null) return;
+  if (!state.ptsTable) return;
   if (!el.video.paused) el.video.pause();
-  const target = Math.max(0, Math.min(state.totalFrames - 1,
-    nextPresentFrame(f, f >= currentFrame() ? 1 : -1)));
+  const target = Math.max(0, Math.min(state.totalFrames - 1, f));
   state.pendingTargetFrame = target;
   if (!state.isSeeking) flushStep();
 }
@@ -689,63 +633,41 @@ function flushStep() {
   state.pendingTargetFrame = null;
   state.isSeeking = true;
   state.lastSeekTarget = target;
-  const seekT = frameToTime(target);
-  // Optimistic UI snap: paint target's mask + scrubber + status BEFORE waiting
-  // for the browser to actually seek. If the seek lands on a different frame
-  // (browser snap-quantization, B-frame seek), rVFC will overwrite with the
-  // real value. This makes arrow-key nav feel instant even when the browser
-  // takes 30-60ms to repaint, AND avoids the "f stays 879 but mask vanishes"
-  // race when rVFC hasn't fired yet for the new frame.
+  // Optimistic UI snap: paint mask + scrubber + status BEFORE the browser
+  // finishes seeking. rVFC overwrites with truth when the real frame paints.
   const tbl = state.ptsTable;
-  if (tbl && tbl[target] != null) {
-    state.lastDisplayedMediaTime = tbl[target];
-    state.lastDisplayedFrame = target;
-    el.scrubber.value = String(target);
-    if (maskUrlForFrame(target) != null) loadMaskForFrame(target);
-    else clearOverlay();
-    if (target === state.seedFrame && state.seedPoint && maskUrlForFrame(target) == null) {
-      drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
-    }
-    updateStatus();
+  state.lastDisplayedMediaTime = tbl[target];
+  state.lastDisplayedFrame = target;
+  el.scrubber.value = String(target);
+  if (maskUrlForFrame(target) != null) loadMaskForFrame(target);
+  else clearOverlay();
+  if (target === state.seedFrame && state.seedPoint && maskUrlForFrame(target) == null) {
+    drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
   }
-  console.log(`[seek] target=${target} pts=${tbl?.[target]} seekTo=${seekT.toFixed(6)}`);
-  el.video.currentTime = seekT;
+  updateStatus();
+  el.video.currentTime = frameToTime(target);
 }
 
 async function fetchPts(slug) {
   try {
     const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(slug)}/pts`);
     if (!r.ok) {
-      console.warn(`pts fetch HTTP ${r.status}; falling back to f/fps`);
+      showError(`pts fetch HTTP ${r.status}`);
       return;
     }
     const j = await r.json();
-    if (j && Array.isArray(j.pts)) {
+    if (j && Array.isArray(j.pts) && typeof j.total_frames === "number") {
       state.ptsTable = j.pts;
-      console.log(`pts table loaded: ${j.pts.length} frames, gaps=${j.pts.filter(x => x == null).length}`);
-      paintPhantomGaps();
+      // Authoritative frame count comes from the dense PTS list, not the
+      // /api/items snapshot. /api/items can be stale if scan_sources ran with
+      // a previous (legacy) total_frames; the PTS list is rebuilt from source.
+      state.totalFrames = j.total_frames;
+      el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
+      updateMarkers();
+      console.log(`pts loaded: ${j.pts.length} frames`);
     }
   } catch (e) {
-    console.warn("pts fetch failed", e);
-  }
-}
-
-function paintPhantomGaps() {
-  // Render variable-fps phantom indices (no decoded frame at index N because
-  // round(pts*avgFps) collided) as dim amber bars on the timeline. These are
-  // NOT SAM2 failures — they're indices that never had a frame to begin with.
-  // Without this, they look identical to "SAM2 lost the ball here" and is
-  // confusing.
-  const tbl = state.ptsTable;
-  if (!tbl || state.totalFrames <= 0) return;
-  const w = 100 / state.totalFrames;
-  for (let f = 0; f < tbl.length; f++) {
-    if (tbl[f] != null) continue;
-    const div = document.createElement("div");
-    div.className = "fill-phantom";
-    div.style.left = `${(f / state.totalFrames) * 100}%`;
-    div.style.width = `${Math.max(w, 0.2)}%`;
-    el.fills.appendChild(div);
+    showError(`pts fetch failed: ${e}`);
   }
 }
 
@@ -854,7 +776,7 @@ function onDisplayedFrame(_now, metadata) {
   // visual update from here so mask / scrubber / overlay stay locked to the
   // displayed video frame, not to the throttled timeupdate event.
   state.lastDisplayedMediaTime = metadata.mediaTime;
-  if (state.fps != null) {
+  if (state.ptsTable) {
     const f = currentFrame();
     // Diagnostic — log when rVFC's f disagrees with the in-flight seek target.
     // Helps confirm whether browser snap-quantized to a neighbor frame.
@@ -921,7 +843,7 @@ function bindUi() {
 
   el.scrubber.addEventListener("input", () => {
     const f = parseInt(el.scrubber.value, 10);
-    if (state.fps == null) return;
+    if (!state.ptsTable) return;
     jumpToFrame(f);
   });
   // Suppress the range element's native arrow-key step. Our onKeydown handler

@@ -42,21 +42,22 @@ def _slugify(text: str) -> str:
 
 
 def _video_meta(path: Path) -> dict[str, Any]:
+    """fps / duration only. total_frames is NOT taken from ffprobe nb_read_frames
+    because that count is only useful as a sanity check; the authoritative frame
+    index space comes from the dense PTS list built later in `build_pts_table`.
+    Mirroring the server-side viewer (`unionTimes` in
+    `server/static/viewer/20_filters.js`) — frame index = position in real-data
+    timestamp list, not `round(pts * avg_fps)` which collides on variable-fps."""
     cmd = [
         "ffprobe", "-v", "error", "-select_streams", "v:0",
-        "-count_frames", "-show_entries",
-        "stream=nb_read_frames,avg_frame_rate,duration",
+        "-show_entries", "stream=avg_frame_rate,duration",
         "-of", "json", str(path),
     ]
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     stream = json.loads(result.stdout)["streams"][0]
     num, den = stream["avg_frame_rate"].split("/")
     fps = float(num) / float(den)
-    return {
-        "fps": fps,
-        "total_frames": int(stream["nb_read_frames"]),
-        "duration_s": float(stream["duration"]),
-    }
+    return {"fps": fps, "duration_s": float(stream["duration"])}
 
 
 class ManifestStore:
@@ -88,11 +89,17 @@ class ManifestStore:
                 while slug in existing:
                     slug = f"{slug}_{secrets.token_hex(2)}"
                 meta = _video_meta(video)
+                # Build the dense PTS list now so total_frames is authoritative
+                # (= count of decoded frames). On variable-fps slo-mo MOVs this
+                # is ≠ ffprobe nb_read_frames; whichever way we decide later,
+                # the manifest must agree with the PTS table or scrubber.max
+                # ends up off by ~200 on iPhone 240fps clips.
+                pts_payload = _build_and_cache_pts(video, slug, meta["fps"])
                 payload["items"].append({
                     "slug": slug,
                     "source_video": video.name,
                     "fps": meta["fps"],
-                    "total_frames": meta["total_frames"],
+                    "total_frames": pts_payload["total_frames"],
                     "in_frame": None,
                     "out_frame": None,
                     "seed_frame": None,
@@ -139,51 +146,45 @@ def masks_dir_for(slug: str) -> Path:
     return item_dir(slug) / "masks"
 
 
-def _pts_to_frame_index(frame, fps: float) -> int:
-    """Map a PyAV frame's PTS to the same frame index the browser uses.
-
-    The browser-side `currentFrame = round(mediaTime * fps)` is the canonical
-    source of truth for 'which frame is this'. We mirror that formula here
-    using `frame.pts * frame.time_base` (== exact PTS in seconds), so backend
-    file naming and frontend lookups agree even on variable-fps videos where
-    decode-order index does NOT equal PTS-derived index.
-    """
-    if frame.pts is None:
-        # Some containers omit PTS. Fall back to frame.time which PyAV synthesizes.
-        if frame.time is None:
-            raise RuntimeError("frame has neither pts nor time; cannot index")
-        t = float(frame.time)
-    else:
-        t = float(frame.pts * frame.time_base)
-    return int(round(t * fps))
-
-
 PTS_CACHE_DIR = WORKSPACE / "pts_cache"
 
 
-def build_pts_table(source_path: Path, total_frames: int, fps: float) -> list[float | None]:
-    """One PTS-second value per source frame index. None where no decoded frame
-    rounds to that index (variable-fps gap). The browser uses these to seek to
-    the exact mid-point of frame N, so arrow-key step lands on the visually-
-    next frame even when avg-fps is a lie."""
+def _decode_pts_seconds(source_path: Path) -> list[float]:
+    """Walk all decoded frames once, return their PTS in seconds, sorted ASC.
+
+    Output is the canonical frame index space: position `i` in the returned
+    list IS frame index `i`. No nulls, no synthetic `round(pts*fps)`. This is
+    the same idea as `unionTimes` in `server/static/viewer/20_filters.js`."""
     import av  # type: ignore
 
-    table: list[float | None] = [None] * total_frames
+    times: list[float] = []
     container = av.open(str(source_path))
     try:
         for frame in container.decode(video=0):
-            if frame.pts is None:
-                if frame.time is None:
-                    continue
+            if frame.pts is not None:
+                t = float(frame.pts * frame.time_base)
+            elif frame.time is not None:
                 t = float(frame.time)
             else:
-                t = float(frame.pts * frame.time_base)
-            idx = int(round(t * fps))
-            if 0 <= idx < total_frames:
-                table[idx] = t
+                continue
+            times.append(t)
     finally:
         container.close()
-    return table
+    times.sort()
+    return times
+
+
+def _build_and_cache_pts(source_path: Path, slug: str, fps: float) -> dict[str, Any]:
+    PTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    times = _decode_pts_seconds(source_path)
+    payload = {
+        "fps": float(fps),
+        "total_frames": len(times),
+        "source_mtime": source_path.stat().st_mtime,
+        "pts": times,
+    }
+    (PTS_CACHE_DIR / f"{slug}.json").write_text(json.dumps(payload), encoding="utf-8")
+    return payload
 
 
 def get_pts_table(slug: str) -> dict[str, Any]:
@@ -194,61 +195,61 @@ def get_pts_table(slug: str) -> dict[str, Any]:
     src_mtime = source.stat().st_mtime
     if cache_path.exists():
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
-        if cached.get("source_mtime") == src_mtime and cached.get("total_frames") == item["total_frames"]:
+        if cached.get("source_mtime") == src_mtime:
+            # Trust cache as the authoritative frame count; sync manifest if it
+            # disagrees (cheap idempotent reconcile so old manifests with the
+            # legacy ffprobe nb_read_frames don't keep showing wrong scrubber).
+            if cached.get("total_frames") != item.get("total_frames"):
+                STORE.update(slug, total_frames=cached["total_frames"])
             return cached
-    table = build_pts_table(source, int(item["total_frames"]), float(item["fps"]))
-    payload = {
-        "fps": float(item["fps"]),
-        "total_frames": int(item["total_frames"]),
-        "source_mtime": src_mtime,
-        "pts": table,
-    }
-    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+    payload = _build_and_cache_pts(source, slug, float(item["fps"]))
+    if payload["total_frames"] != item.get("total_frames"):
+        STORE.update(slug, total_frames=payload["total_frames"])
     return payload
 
 
-def extract_one_frame(source_path: Path, frame_index: int, fps: float):
-    """Decode the frame whose PTS-derived index == frame_index. Returns BGR ndarray.
+def _pts_idx_for(time_s: float, pts_list: list[float], eps: float = 1e-6) -> int | None:
+    """Position of a PyAV frame's PTS in the dense list. None if not found."""
+    import bisect
 
-    Uses the same `round(pts * fps)` formula the browser uses for its
-    `currentFrame` so the seed click on browser frame N hits source frame N.
-    """
+    pos = bisect.bisect_left(pts_list, time_s - eps)
+    if pos < 0 or pos >= len(pts_list):
+        return None
+    if abs(pts_list[pos] - time_s) > eps:
+        return None
+    return pos
+
+
+def extract_one_frame(source_path: Path, frame_index: int, pts_list: list[float]):
+    """Decode through the source until we find the frame whose PTS == pts_list[frame_index]."""
     import av  # type: ignore
 
+    target = pts_list[frame_index]
     container = av.open(str(source_path))
     try:
-        last_below = None
         for frame in container.decode(video=0):
-            idx = _pts_to_frame_index(frame, fps)
-            if idx == frame_index:
-                return frame.to_ndarray(format="bgr24")
-            if idx < frame_index:
-                last_below = (idx, frame)
+            t = float(frame.pts * frame.time_base) if frame.pts is not None else (
+                float(frame.time) if frame.time is not None else None
+            )
+            if t is None:
                 continue
-            # idx > frame_index: PTS overshot without an exact match (variable fps gap).
-            # Use the closest frame on either side.
-            arr_after = frame.to_ndarray(format="bgr24")
-            if last_below is not None and (frame_index - last_below[0]) <= (idx - frame_index):
-                return last_below[1].to_ndarray(format="bgr24")
-            return arr_after
-        if last_below is not None:
-            return last_below[1].to_ndarray(format="bgr24")
-        raise IndexError(f"frame {frame_index} not found in {source_path}")
+            if abs(t - target) < 1e-6:
+                return frame.to_ndarray(format="bgr24")
     finally:
         container.close()
+    raise IndexError(f"frame {frame_index} (pts={target}) not found in {source_path}")
 
 
 def extract_range_to_dir(
-    source_path: Path, in_frame: int, out_frame: int, dest: Path, fps: float,
+    source_path: Path, in_frame: int, out_frame: int, dest: Path, pts_list: list[float],
 ) -> list[int]:
-    """Extract source frames whose PTS-index ∈ [in_frame, out_frame] into dest.
+    """Extract every decoded frame whose source index ∈ [in_frame, out_frame].
 
-    Files are written sequentially (00000.jpg, 00001.jpg, ...) because SAM 2
-    video predictor expects sequential local indexing. Returns the local→source
-    map (`local_to_source[local_idx] == source_idx`) and persists it as
-    `local_to_source.json` next to the frames so subsequent calls (propagate
-    seed lookup, mask filenames) can translate between local and source coords
-    without re-decoding.
+    Indices are positions in the dense `pts_list` (built by `_decode_pts_seconds`).
+    Decode order may differ from PTS order (B-frames), so we stage files under
+    src-keyed names and rename to sequential 00000.jpg afterwards. SAM 2 expects
+    sequential filenames; `local_to_source[local] == source_idx` lets the
+    propagator translate back to mask filenames the browser understands.
     """
     import av  # type: ignore
     import cv2  # type: ignore
@@ -256,7 +257,6 @@ def extract_range_to_dir(
     dest.mkdir(parents=True, exist_ok=True)
     sidecar = dest.parent / "local_to_source.json"
 
-    # Cache check: same range + sidecar present and consistent → skip work.
     if sidecar.exists():
         cached = json.loads(sidecar.read_text(encoding="utf-8"))
         if cached.get("in_frame") == in_frame and cached.get("out_frame") == out_frame:
@@ -266,26 +266,37 @@ def extract_range_to_dir(
 
     for old in dest.glob("*.jpg"):
         old.unlink()
+    for old in dest.glob("src_*.tmp.jpg"):
+        old.unlink()
 
-    local_to_source: list[int] = []
+    src_to_path: dict[int, Path] = {}
     container = av.open(str(source_path))
     try:
         for frame in container.decode(video=0):
-            source_idx = _pts_to_frame_index(frame, fps)
-            if source_idx < in_frame:
+            t = float(frame.pts * frame.time_base) if frame.pts is not None else (
+                float(frame.time) if frame.time is not None else None
+            )
+            if t is None:
                 continue
-            if source_idx > out_frame:
-                break
+            pos = _pts_idx_for(t, pts_list)
+            if pos is None:
+                continue
+            if not (in_frame <= pos <= out_frame):
+                continue
             arr = frame.to_ndarray(format="bgr24")
-            local = len(local_to_source)
-            cv2.imwrite(str(dest / f"{local:05d}.jpg"), arr, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            local_to_source.append(source_idx)
+            tmp = dest / f"src_{pos:08d}.tmp.jpg"
+            cv2.imwrite(str(tmp), arr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            src_to_path[pos] = tmp
     finally:
         container.close()
-    if not local_to_source:
-        raise RuntimeError(f"no frames extracted in PTS range [{in_frame}, {out_frame}] @ fps={fps}")
+    if not src_to_path:
+        raise RuntimeError(f"no frames extracted in source-idx range [{in_frame}, {out_frame}]")
+    local_to_source: list[int] = []
+    for local, src in enumerate(sorted(src_to_path.keys())):
+        os.replace(src_to_path[src], dest / f"{local:05d}.jpg")
+        local_to_source.append(src)
     sidecar.write_text(
-        json.dumps({"in_frame": in_frame, "out_frame": out_frame, "fps": fps,
+        json.dumps({"in_frame": in_frame, "out_frame": out_frame,
                     "local_to_source": local_to_source}, indent=2),
         encoding="utf-8",
     )
@@ -379,14 +390,14 @@ def run_propagate(slug: str) -> None:
     for old in mdir.glob("*.png"):
         old.unlink()
 
-    fps = float(item["fps"])
     expected = out_f - in_f + 1
     BUS.publish(slug, "phase", {
         "phase": "extracting", "expected_frames": expected, "in_frame": in_f, "out_frame": out_f,
     })
     t_extract = time.time()
     try:
-        local_to_source = extract_range_to_dir(source, in_f, out_f, fdir, fps)
+        pts_payload = get_pts_table(slug)
+        local_to_source = extract_range_to_dir(source, in_f, out_f, fdir, pts_payload["pts"])
     except Exception as e:
         BUS.publish(slug, "error", {"msg": f"frame extract failed: {e}"})
         STORE.update(slug, propagate_status="failed")
@@ -661,7 +672,8 @@ class Handler(BaseHTTPRequestHandler):
             item = STORE.get(slug)
             source = SOURCES_DIR / item["source_video"]
             try:
-                arr = extract_one_frame(source, frame_index, float(item["fps"]))
+                pts_payload = get_pts_table(slug)
+                arr = extract_one_frame(source, frame_index, pts_payload["pts"])
             except Exception as e:
                 self._send_text(HTTPStatus.INTERNAL_SERVER_ERROR, f"extract failed: {e}")
                 return
