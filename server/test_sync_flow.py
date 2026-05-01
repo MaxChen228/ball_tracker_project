@@ -1,7 +1,6 @@
 """Sync trigger/command TTL/drain/mismatched sync ids."""
 from __future__ import annotations
 
-import main
 
 
 def test_sync_trigger_flags_all_online_cameras():

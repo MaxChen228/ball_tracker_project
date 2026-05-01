@@ -7,7 +7,6 @@ within floating-point noise, across sign and magnitude corners.
 
 from __future__ import annotations
 
-import math
 
 import pytest
 
