@@ -19,7 +19,7 @@ from dataclasses import replace
 
 import main
 from conftest import sid
-from detection import HSVRange, ShapeGate
+from detection import HSVRange
 from pairing_tuning import PairingTuning
 from schemas import BlobCandidate
 
