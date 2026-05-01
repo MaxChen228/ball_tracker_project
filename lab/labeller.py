@@ -139,54 +139,108 @@ def masks_dir_for(slug: str) -> Path:
     return item_dir(slug) / "masks"
 
 
-def extract_one_frame(source_path: Path, frame_index: int):
-    """Decode a single frame from source video by frame index. Returns BGR ndarray."""
+def _pts_to_frame_index(frame, fps: float) -> int:
+    """Map a PyAV frame's PTS to the same frame index the browser uses.
+
+    The browser-side `currentFrame = round(mediaTime * fps)` is the canonical
+    source of truth for 'which frame is this'. We mirror that formula here
+    using `frame.pts * frame.time_base` (== exact PTS in seconds), so backend
+    file naming and frontend lookups agree even on variable-fps videos where
+    decode-order index does NOT equal PTS-derived index.
+    """
+    if frame.pts is None:
+        # Some containers omit PTS. Fall back to frame.time which PyAV synthesizes.
+        if frame.time is None:
+            raise RuntimeError("frame has neither pts nor time; cannot index")
+        t = float(frame.time)
+    else:
+        t = float(frame.pts * frame.time_base)
+    return int(round(t * fps))
+
+
+def extract_one_frame(source_path: Path, frame_index: int, fps: float):
+    """Decode the frame whose PTS-derived index == frame_index. Returns BGR ndarray.
+
+    Uses the same `round(pts * fps)` formula the browser uses for its
+    `currentFrame` so the seed click on browser frame N hits source frame N.
+    """
     import av  # type: ignore
-    import numpy as np  # type: ignore
 
     container = av.open(str(source_path))
     try:
-        stream = container.streams.video[0]
-        for i, frame in enumerate(container.decode(video=0)):
-            if i == frame_index:
-                arr = frame.to_ndarray(format="bgr24")
-                return arr
+        last_below = None
+        for frame in container.decode(video=0):
+            idx = _pts_to_frame_index(frame, fps)
+            if idx == frame_index:
+                return frame.to_ndarray(format="bgr24")
+            if idx < frame_index:
+                last_below = (idx, frame)
+                continue
+            # idx > frame_index: PTS overshot without an exact match (variable fps gap).
+            # Use the closest frame on either side.
+            arr_after = frame.to_ndarray(format="bgr24")
+            if last_below is not None and (frame_index - last_below[0]) <= (idx - frame_index):
+                return last_below[1].to_ndarray(format="bgr24")
+            return arr_after
+        if last_below is not None:
+            return last_below[1].to_ndarray(format="bgr24")
         raise IndexError(f"frame {frame_index} not found in {source_path}")
     finally:
         container.close()
 
 
-def extract_range_to_dir(source_path: Path, in_frame: int, out_frame: int, dest: Path) -> int:
-    """Extract source frames [in_frame, out_frame] inclusive into dest as 00000.jpg, 00001.jpg, ..."""
+def extract_range_to_dir(
+    source_path: Path, in_frame: int, out_frame: int, dest: Path, fps: float,
+) -> list[int]:
+    """Extract source frames whose PTS-index ∈ [in_frame, out_frame] into dest.
+
+    Files are written sequentially (00000.jpg, 00001.jpg, ...) because SAM 2
+    video predictor expects sequential local indexing. Returns the local→source
+    map (`local_to_source[local_idx] == source_idx`) and persists it as
+    `local_to_source.json` next to the frames so subsequent calls (propagate
+    seed lookup, mask filenames) can translate between local and source coords
+    without re-decoding.
+    """
     import av  # type: ignore
     import cv2  # type: ignore
 
     dest.mkdir(parents=True, exist_ok=True)
-    expected = out_frame - in_frame + 1
-    existing = sorted(dest.glob("*.jpg"))
-    if len(existing) == expected:
-        return expected
+    sidecar = dest.parent / "local_to_source.json"
 
-    for old in existing:
+    # Cache check: same range + sidecar present and consistent → skip work.
+    if sidecar.exists():
+        cached = json.loads(sidecar.read_text(encoding="utf-8"))
+        if cached.get("in_frame") == in_frame and cached.get("out_frame") == out_frame:
+            mapping = cached["local_to_source"]
+            if all((dest / f"{i:05d}.jpg").exists() for i in range(len(mapping))):
+                return mapping
+
+    for old in dest.glob("*.jpg"):
         old.unlink()
 
+    local_to_source: list[int] = []
     container = av.open(str(source_path))
-    written = 0
     try:
-        for i, frame in enumerate(container.decode(video=0)):
-            if i < in_frame:
+        for frame in container.decode(video=0):
+            source_idx = _pts_to_frame_index(frame, fps)
+            if source_idx < in_frame:
                 continue
-            if i > out_frame:
+            if source_idx > out_frame:
                 break
             arr = frame.to_ndarray(format="bgr24")
-            local = i - in_frame
+            local = len(local_to_source)
             cv2.imwrite(str(dest / f"{local:05d}.jpg"), arr, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            written += 1
+            local_to_source.append(source_idx)
     finally:
         container.close()
-    if written != expected:
-        raise RuntimeError(f"extracted {written} frames, expected {expected}")
-    return written
+    if not local_to_source:
+        raise RuntimeError(f"no frames extracted in PTS range [{in_frame}, {out_frame}] @ fps={fps}")
+    sidecar.write_text(
+        json.dumps({"in_frame": in_frame, "out_frame": out_frame, "fps": fps,
+                    "local_to_source": local_to_source}, indent=2),
+        encoding="utf-8",
+    )
+    return local_to_source
 
 
 class SseBus:
@@ -276,23 +330,29 @@ def run_propagate(slug: str) -> None:
     for old in mdir.glob("*.png"):
         old.unlink()
 
+    fps = float(item["fps"])
     expected = out_f - in_f + 1
     BUS.publish(slug, "phase", {
         "phase": "extracting", "expected_frames": expected, "in_frame": in_f, "out_frame": out_f,
     })
     t_extract = time.time()
     try:
-        extract_range_to_dir(source, in_f, out_f, fdir)
+        local_to_source = extract_range_to_dir(source, in_f, out_f, fdir, fps)
     except Exception as e:
         BUS.publish(slug, "error", {"msg": f"frame extract failed: {e}"})
         STORE.update(slug, propagate_status="failed")
         return
     BUS.publish(slug, "phase", {
-        "phase": "extracted", "expected_frames": expected,
+        "phase": "extracted", "expected_frames": len(local_to_source),
         "elapsed_s": round(time.time() - t_extract, 2),
     })
 
-    seed_local = seed_f - in_f
+    # Find local index whose source idx is closest to the seed frame.
+    seed_local = min(range(len(local_to_source)), key=lambda i: abs(local_to_source[i] - seed_f))
+    if local_to_source[seed_local] != seed_f:
+        BUS.publish(slug, "phase", {
+            "phase": "seed_remapped", "requested": seed_f, "matched": local_to_source[seed_local],
+        })
     BUS.publish(slug, "phase", {"phase": "model_loading"})
     t_model = time.time()
     prop = get_propagator()
@@ -307,7 +367,11 @@ def run_propagate(slug: str) -> None:
     t_prop = time.time()
     try:
         for local_idx, mask_png in prop.propagate(fdir, seed_local, (seed_p[0], seed_p[1])):
-            source_idx = local_idx + in_f
+            # Translate SAM 2's local sequential idx back to the canonical source
+            # frame index the browser uses, via the local_to_source map. This
+            # keeps mask filenames aligned with `round(mediaTime * fps)` so the
+            # frontend overlay lines up with the ball, not 1-2 frames offset.
+            source_idx = local_to_source[local_idx]
             (mdir / f"{source_idx:05d}.png").write_bytes(mask_png)
             BUS.publish(slug, "mask", {
                 "frame": source_idx,
@@ -519,7 +583,7 @@ class Handler(BaseHTTPRequestHandler):
             item = STORE.get(slug)
             source = SOURCES_DIR / item["source_video"]
             try:
-                arr = extract_one_frame(source, frame_index)
+                arr = extract_one_frame(source, frame_index, float(item["fps"]))
             except Exception as e:
                 self._send_text(HTTPStatus.INTERNAL_SERVER_ERROR, f"extract failed: {e}")
                 return

@@ -26,6 +26,9 @@ const state = {
   propDevice: null,
   propModel: null,
   propStartMs: null,
+  lastDisplayedMediaTime: null,
+  lastDisplayedFrame: -1,
+  rvfcHandle: null,
   sse: null,
 };
 
@@ -71,7 +74,13 @@ function clearError() {
 
 function currentFrame() {
   if (state.fps == null) return 0;
-  return Math.round(el.video.currentTime * state.fps);
+  // Prefer mediaTime from requestVideoFrameCallback when available — it is the
+  // exact PTS of the frame the compositor just painted, not the timeupdate-
+  // throttled currentTime which can lag by up to 250ms.
+  const t = state.lastDisplayedMediaTime != null
+    ? state.lastDisplayedMediaTime
+    : el.video.currentTime;
+  return Math.round(t * state.fps);
 }
 
 function frameToTime(f) {
@@ -632,22 +641,63 @@ function onKeydown(e) {
   }
 }
 
+function onDisplayedFrame(_now, metadata) {
+  // Fires once per actually-presented video frame. metadata.mediaTime is the
+  // exact PTS of the frame the compositor just painted. Drive every per-frame
+  // visual update from here so mask / scrubber / overlay stay locked to the
+  // displayed video frame, not to the throttled timeupdate event.
+  state.lastDisplayedMediaTime = metadata.mediaTime;
+  if (state.fps != null) {
+    const f = Math.round(metadata.mediaTime * state.fps);
+    if (f !== state.lastDisplayedFrame) {
+      state.lastDisplayedFrame = f;
+      el.scrubber.value = String(f);
+      if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
+      else clearOverlay();
+      // Also redraw the click marker if we are on the seed frame, so it stays
+      // visible even after the mask reload clearRect'd it.
+      if (f === state.seedFrame && state.seedPoint && maskUrlForFrame(f) == null) {
+        drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+      }
+    }
+  }
+  resizeOverlay();
+  updateStatus();
+  state.rvfcHandle = el.video.requestVideoFrameCallback(onDisplayedFrame);
+}
+
 function bindUi() {
   el.video.addEventListener("loadedmetadata", () => {
     resizeOverlay();
     updateStatus();
-  });
-  el.video.addEventListener("timeupdate", () => {
-    if (state.fps != null) {
-      el.scrubber.value = String(currentFrame());
+    if (typeof el.video.requestVideoFrameCallback === "function") {
+      if (state.rvfcHandle != null) el.video.cancelVideoFrameCallback(state.rvfcHandle);
+      state.rvfcHandle = el.video.requestVideoFrameCallback(onDisplayedFrame);
+    } else {
+      // Fallback: pre-Safari 17 / very old browsers. Will lag but at least works.
+      console.warn("requestVideoFrameCallback unsupported; falling back to timeupdate");
     }
+  });
+  // timeupdate is a fallback only — fires at coarse 250ms cadence.
+  el.video.addEventListener("timeupdate", () => {
+    if (typeof el.video.requestVideoFrameCallback === "function") return;
+    if (state.fps != null) el.scrubber.value = String(currentFrame());
     const f = currentFrame();
     if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
     else clearOverlay();
     updateStatus();
   });
   el.video.addEventListener("click", onVideoClick);
-  window.addEventListener("resize", resizeOverlay);
+  // Use ResizeObserver for layout-sensitive overlay; window resize alone misses
+  // CSS-driven size changes (e.g. picker dropdown reflow).
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(() => resizeOverlay()).observe(el.video);
+  } else {
+    window.addEventListener("resize", resizeOverlay);
+  }
+  // Also resize on seeked since seeking can change layout briefly on some
+  // browsers when the metadata updates.
+  el.video.addEventListener("seeked", resizeOverlay);
 
   el.scrubber.addEventListener("input", () => {
     const f = parseInt(el.scrubber.value, 10);
