@@ -125,6 +125,7 @@ class FrameSource {
   // on the same idx coalesce into one decode.
   getFrame(frameIdx) {
     if (this._closed) return Promise.reject(new Error("FrameSource closed"));
+    if (!this._samples) return Promise.reject(new Error("FrameSource not loaded"));
     if (frameIdx < 0 || frameIdx >= this._samples.length) {
       return Promise.reject(new Error("frame out of range: " + frameIdx));
     }

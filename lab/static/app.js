@@ -333,7 +333,10 @@ async function scheduleScrubPaint(frame) {
     try {
       bm = await fs.getFrame(frame);
     } catch (e) {
-      if (e && e.message !== "FrameSource closed") {
+      const msg = e && e.message;
+      // Silent on benign races: closed = slug switched away;
+      // not-loaded = user scrubbed before mp4 demux finished.
+      if (msg !== "FrameSource closed" && msg !== "FrameSource not loaded") {
         console.warn("getFrame failed", frame, e);
       }
       return;
@@ -535,6 +538,20 @@ function syncFromItem(item) {
   state.pendingTargetFrame = null;
   state.isSeeking = false;
   state.lastSeekTarget = null;
+  // Clear cross-slug-leaking UI flags. Without these, "click to set seed
+  // point", a "seeding…" status banner, or a stale propagate ticker can
+  // bleed from the previous slug onto this one's view. The actual server
+  // work for the prior slug keeps running and self-cleans via captured-slug
+  // gates in sendSeed/propagate.
+  state.pendingSeedClick = false;
+  state.seedComputing = false;
+  state.seedComputeStartMs = null;
+  state.propPhase = null;
+  state.propDoneCount = 0;
+  state.propExpected = 0;
+  state.propPhaseElapsed = 0;
+  state.propStartMs = null;
+  if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
   updateMarkers();
   updatePropagateBtn();
   updateStatus();
@@ -547,6 +564,22 @@ function syncFromItem(item) {
 }
 
 async function selectSlug(slug) {
+  // Refetch /api/items first so propagate_status / seed_frame for sessions
+  // that completed in the background (SSE was closed when we switched away)
+  // reflect what's actually on disk. Cheap (~50ms LAN). Without this,
+  // switching back to a session that finished propagating elsewhere shows
+  // stale "running" state until the next reload.
+  try {
+    const items = await fetchItems();
+    state.items = items;
+    renderSidebar();
+  } catch (e) { console.warn("items refresh on selectSlug failed", e); }
+  // Rapid hash navigation can race: if the user already moved to a different
+  // slug while we were awaiting fetchItems, abandon this sync — the newer
+  // selectSlug call will handle the latest target.
+  const m = (window.location.hash || "").match(/slug=([^&]+)/);
+  const wantedSlug = m ? decodeURIComponent(m[1]) : slug;
+  if (wantedSlug !== slug) return;
   const item = state.items.find((it) => it.slug === slug);
   if (!item) { showError(`slug not found: ${slug}`); return; }
   syncFromItem(item);
@@ -780,10 +813,17 @@ async function deleteItem(slug) {
 function startSse() {
   if (state.sse) { state.sse.close(); state.sse = null; }
   if (!state.current) return;
-  const url = `${API_BASE}/api/items/${encodeURIComponent(state.current)}/events`;
+  // Capture the slug this SSE is bound to. Per WHATWG spec, EventSource.close()
+  // prevents new connections but doesn't synchronously kill an already-queued
+  // dispatch task — so a "done" event for slug A can theoretically still fire
+  // a microtask after we switched to B and closed A's stream. Every handler
+  // below gates on capturedSlug so it can never bleed into the new view.
+  const capturedSlug = state.current;
+  const url = `${API_BASE}/api/items/${encodeURIComponent(capturedSlug)}/events`;
   const es = new EventSource(url);
   state.sse = es;
   es.addEventListener("mask", (ev) => {
+    if (state.current !== capturedSlug) return;
     let payload;
     try { payload = JSON.parse(ev.data); } catch (_) { return; }
     const frame = payload.frame;
@@ -796,7 +836,7 @@ function startSse() {
       const img = new Image();
       img.onload = () => {
         try { state.tintedCache.set(frame, buildTintedCanvas(img)); } catch (_) {}
-        if (currentFrame() === frame) blitCachedMask(frame);
+        if (state.current === capturedSlug && currentFrame() === frame) blitCachedMask(frame);
       };
       img.src = maskUrl;
     } else if (frame === currentFrame()) {
@@ -805,6 +845,7 @@ function startSse() {
     updateStatus();
   });
   es.addEventListener("phase", (ev) => {
+    if (state.current !== capturedSlug) return;
     let payload;
     try { payload = JSON.parse(ev.data); } catch (_) { return; }
     state.propPhase = payload.phase || null;
@@ -818,20 +859,24 @@ function startSse() {
   es.addEventListener("done", (ev) => {
     let payload = {};
     try { payload = JSON.parse(ev.data); } catch (_) {}
-    state.propagateStatus = "done";
-    state.propPhase = "done";
-    if (typeof payload.elapsed_s === "number") state.propPhaseElapsed = payload.elapsed_s;
-    if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
-    if (state.current) updateSidebarStatus(state.current, "done");
-    updatePropagateBtn();
-    updateStatus();
-    if (state.current) prefetchMasks(state.current);
+    // Always reflect the captured slug's completion into the sidebar / items
+    // — the propagation actually finished on disk for that slug.
+    updateSidebarStatus(capturedSlug, "done");
+    if (state.current === capturedSlug) {
+      state.propagateStatus = "done";
+      state.propPhase = "done";
+      if (typeof payload.elapsed_s === "number") state.propPhaseElapsed = payload.elapsed_s;
+      if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
+      updatePropagateBtn();
+      updateStatus();
+      prefetchMasks(capturedSlug);
+    }
   });
   es.addEventListener("error", (ev) => {
     let payload = {};
     try { payload = JSON.parse(ev.data); } catch (_) {}
-    if (state.current) updateSidebarStatus(state.current, "failed");
-    if (payload.msg) showError(`propagate: ${payload.msg}`);
+    updateSidebarStatus(capturedSlug, "failed");
+    if (state.current === capturedSlug && payload.msg) showError(`propagate: ${payload.msg}`);
   });
   es.onerror = () => {};
 }
@@ -868,13 +913,18 @@ async function markOut() {
 
 async function sendTrim() {
   if (state.inFrame == null || state.outFrame == null) return;
+  const capturedSlug = state.current;
+  const inF = state.inFrame, outF = state.outFrame;
   try {
-    const r = await postJson(`/api/items/${encodeURIComponent(state.current)}/trim`, {
-      in_frame: state.inFrame, out_frame: state.outFrame,
+    const r = await postJson(`/api/items/${encodeURIComponent(capturedSlug)}/trim`, {
+      in_frame: inF, out_frame: outF,
     });
+    if (state.current !== capturedSlug) return;  // user moved on; server still got the trim
     if (!r.ok) showError(`trim failed: HTTP ${r.status}`);
     else if (state.frameSource) state.frameSource.prefetchRange(state.inFrame, state.outFrame);
-  } catch (e) { showError(`trim failed: ${e}`); }
+  } catch (e) {
+    if (state.current === capturedSlug) showError(`trim failed: ${e}`);
+  }
 }
 
 function markSeed() {
@@ -892,51 +942,73 @@ function markSeed() {
 }
 
 async function sendSeed(frameIndex, x, y) {
+  // Capture slug at call site so a slug switch mid-flight doesn't pollute
+  // the new slug's state with this seed's result. Server-side the POST URL
+  // already pins the work to capturedSlug; the issue is purely frontend
+  // bookkeeping leaking across slugs.
+  const capturedSlug = state.current;
   state.seedComputing = true;
   state.seedComputeStartMs = performance.now();
   updateStatus();
   const tickHandle = setInterval(updateStatus, 200);
   try {
-    const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(state.current)}/seed`, {
+    const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(capturedSlug)}/seed`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ frame_index: frameIndex, x, y }),
     });
     if (!r.ok) {
       const text = await r.text().catch(() => "");
-      showError(`seed failed: HTTP ${r.status} ${text}`);
+      if (state.current === capturedSlug) showError(`seed failed: HTTP ${r.status} ${text}`);
+      else console.warn(`seed for ${capturedSlug} failed (user already moved on): HTTP ${r.status}`);
       return;
     }
     const blob = await r.blob();
-    clearSeedMask();
-    state.seedMaskUrl = URL.createObjectURL(blob);
-    state.seedMaskReady = true;
-    if (currentFrame() === frameIndex) loadMaskForFrame(frameIndex);
-    updatePropagateBtn();
-    const it = state.items.find(i => i.slug === state.current);
+    // Always reflect server-side truth into items[] for the captured slug —
+    // its seed file IS on disk now.
+    const it = state.items.find(i => i.slug === capturedSlug);
     if (it) {
       it.seed_frame = frameIndex;
       it.seed_point = [x, y];
-      const card = el.itemList.querySelector(`.item-card[data-slug="${state.current}"]`);
+      const card = el.itemList.querySelector(`.item-card[data-slug="${capturedSlug}"]`);
       if (card) {
         const dot = card.querySelector(".item-status");
         if (dot) dot.className = `item-status item-status-${effectiveStatus(it)}`;
       }
       updateQueueButton();
     }
-  } catch (e) { showError(`seed failed: ${e}`); }
-  finally {
+    // View-state writes ONLY if the user is still looking at this slug.
+    // If they switched away, the blob just gets GC'd — we never made an
+    // object URL for it on this branch.
+    if (state.current === capturedSlug) {
+      clearSeedMask();
+      state.seedMaskUrl = URL.createObjectURL(blob);
+      state.seedMaskReady = true;
+      if (currentFrame() === frameIndex) loadMaskForFrame(frameIndex);
+      updatePropagateBtn();
+    }
+  } catch (e) {
+    if (state.current === capturedSlug) showError(`seed failed: ${e}`);
+    else console.warn(`seed for ${capturedSlug} threw (user already moved on):`, e);
+  } finally {
     clearInterval(tickHandle);
-    state.seedComputing = false;
-    state.seedComputeStartMs = null;
-    updateStatus();
+    // The "seeding…" status banner only makes sense for the slug we started
+    // on; if user switched, B was never seeding so we shouldn't have shown
+    // anything for it (handled by syncFromItem reset). Either way this clears
+    // the global flag now that this in-flight call is done.
+    if (state.current === capturedSlug) {
+      state.seedComputing = false;
+      state.seedComputeStartMs = null;
+      updateStatus();
+    }
   }
 }
 
 async function propagate() {
   if (el.btnPropagate.disabled) return;
+  const capturedSlug = state.current;
   state.propagateStatus = "running";
-  if (state.current) updateSidebarStatus(state.current, "running");
+  updateSidebarStatus(capturedSlug, "running");
   state.propPhase = "starting";
   state.propDoneCount = 0;
   state.propExpected = (state.outFrame - state.inFrame + 1) || 0;
@@ -948,23 +1020,33 @@ async function propagate() {
   if (state.propTickHandle) clearInterval(state.propTickHandle);
   state.propTickHandle = setInterval(updateStatus, 200);
   try {
-    const r = await postJson(`/api/items/${encodeURIComponent(state.current)}/propagate`);
+    const r = await postJson(`/api/items/${encodeURIComponent(capturedSlug)}/propagate`);
     if (!r.ok) {
-      state.propagateStatus = "failed";
       const text = await r.text().catch(() => "");
-      showError(`propagate failed: HTTP ${r.status} ${text}`);
-      clearInterval(state.propTickHandle);
-      state.propTickHandle = null;
-      updatePropagateBtn();
-      updateStatus();
+      updateSidebarStatus(capturedSlug, "failed");
+      if (state.current === capturedSlug) {
+        state.propagateStatus = "failed";
+        showError(`propagate failed: HTTP ${r.status} ${text}`);
+        clearInterval(state.propTickHandle);
+        state.propTickHandle = null;
+        updatePropagateBtn();
+        updateStatus();
+      } else {
+        console.warn(`propagate POST for ${capturedSlug} failed (user moved on): HTTP ${r.status}`);
+      }
     }
   } catch (e) {
-    state.propagateStatus = "failed";
-    clearInterval(state.propTickHandle);
-    state.propTickHandle = null;
-    showError(`propagate failed: ${e}`);
-    updatePropagateBtn();
-    updateStatus();
+    updateSidebarStatus(capturedSlug, "failed");
+    if (state.current === capturedSlug) {
+      state.propagateStatus = "failed";
+      clearInterval(state.propTickHandle);
+      state.propTickHandle = null;
+      showError(`propagate failed: ${e}`);
+      updatePropagateBtn();
+      updateStatus();
+    } else {
+      console.warn(`propagate POST for ${capturedSlug} threw (user moved on):`, e);
+    }
   }
 }
 
@@ -1030,8 +1112,10 @@ function flushStep() {
 async function fetchPts(slug) {
   try {
     const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(slug)}/pts`);
+    if (slug !== state.current) return;
     if (!r.ok) { showError(`pts fetch HTTP ${r.status}`); return; }
     const j = await r.json();
+    if (slug !== state.current) return;
     if (j && Array.isArray(j.pts) && typeof j.total_frames === "number") {
       state.ptsTable = j.pts;
       state.totalFrames = j.total_frames;
@@ -1039,7 +1123,7 @@ async function fetchPts(slug) {
       updateMarkers();
       console.log(`pts loaded: ${j.pts.length} frames`);
     }
-  } catch (e) { showError(`pts fetch failed: ${e}`); }
+  } catch (e) { if (slug === state.current) showError(`pts fetch failed: ${e}`); }
 }
 
 async function rehydrateMasks(slug) {
