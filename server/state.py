@@ -170,6 +170,15 @@ class State:
         # iPhones don't mint identifiers any more.
         self.pitches: dict[tuple[str, str], PitchPayload] = {}
         self.results: dict[str, SessionResult] = {}
+        # Mtime of the latest atomic_write to each pitch JSON, keyed by
+        # (camera_id, session_id). state_events.build_events reads this
+        # to avoid a per-row disk stat() on the dashboard's 5 s tick
+        # (~40k stat()/min at 100-session scale). Source of truth is still
+        # the on-disk file; the cache is a write-through summary.
+        # Invalidated by record() (write) and delete_session() / reset()
+        # (purge). Cold misses fall through to stat() in
+        # state_events._latest_pitch_mtime.
+        self._pitch_mtime_cache: dict[tuple[str, str], float] = {}
         self._data_dir = data_dir
         self._pitch_dir = data_dir / "pitches"
         self._result_dir = data_dir / "results"
@@ -942,6 +951,12 @@ class State:
         # (camera, session) and each pitch uses its own tmp file, so two
         # concurrent calls here cannot collide. ---
         self._atomic_write(pitch_path, pitch.model_dump_json())
+        # Refresh the mtime cache so state_events.build_events can skip
+        # the per-row stat(). Using _time_fn() (write moment) instead of
+        # path.stat().st_mtime avoids an extra syscall and matches the
+        # ordering need — the value is only ever compared against other
+        # cached values within build_events.
+        self._pitch_mtime_cache[(pitch.camera_id, pitch.session_id)] = self._time_fn()
 
         # --- Outside the lock: build the result + triangulate if paired. ---
         result = session_results.rebuild_result_for_session(self, pitch.session_id)
@@ -1955,6 +1970,12 @@ class State:
             )
             for key in keys_to_drop:
                 self.pitches.pop(key, None)
+            # Drop any cached pitch mtimes for this session — both cams,
+            # whether or not pitches actually held them (e.g. server_post
+            # rerun without a fresh pitch upload may have cached without
+            # a pitches entry, defensive).
+            for cam in ("A", "B"):
+                self._pitch_mtime_cache.pop((cam, session_id), None)
             self.results.pop(session_id, None)
             # Purge the live-pairing entry too. Without this the
             # store_result race guard (which treats "session in
@@ -2002,6 +2023,7 @@ class State:
         with self._lock:
             self.pitches.clear()
             self.results.clear()
+            self._pitch_mtime_cache.clear()
             self._device_registry.clear()
             self._current_session = None
             self._recently_ended_sessions.clear()
