@@ -21,12 +21,16 @@ selector retirement). Presets carry HSV + shape gate only.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import algorithms
 from detection import HSVRange, ShapeGate
+
+logger = logging.getLogger("ball_tracker")
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,13 @@ class Preset:
     label: str
     hsv: HSVRange
     shape_gate: ShapeGate
+    # Which detection algorithm this preset's params are tuned for.
+    # Today every preset targets `algorithms.V11_HSV_CC` because that's
+    # the only registered algorithm; the field exists so future
+    # algorithms (with different params shapes) can ship their own
+    # presets without a schema break or a name collision with v11
+    # presets in the same `data/presets/` directory.
+    algorithm_id: str = algorithms.DEFAULT_ALGORITHM_ID
 
 
 _PRESETS_DIRNAME = "presets"
@@ -96,6 +107,7 @@ def validate_slug(name: str) -> None:
 
 def _to_dict(preset: Preset) -> dict:
     return {
+        "algorithm_id": preset.algorithm_id,
         "name": preset.name,
         "label": preset.label,
         "hsv": {
@@ -113,9 +125,17 @@ def _to_dict(preset: Preset) -> dict:
 def _from_dict(d: dict) -> Preset:
     """Strict load — every required key must be present. Per CLAUDE.md
     no-silent-fallback: a corrupt preset file raises rather than masking
-    a config bug as a defaults-restore."""
+    a config bug as a defaults-restore.
+
+    `algorithm_id` defaults to the registry default when the key is
+    absent — that branch is only reachable when reading a preset file
+    written before the field existed (one-shot read migration in
+    `list_presets` / `load_preset` rewrites the canonical shape). An
+    unknown id raises via `algorithms.validate_id`."""
     hsv = d["hsv"]
     sg = d["shape_gate"]
+    algorithm_id = d.get("algorithm_id", algorithms.DEFAULT_ALGORITHM_ID)
+    algorithms.validate_id(algorithm_id)
     return Preset(
         name=str(d["name"]),
         label=str(d["label"]),
@@ -128,7 +148,30 @@ def _from_dict(d: dict) -> Preset:
             aspect_min=float(sg["aspect_min"]),
             fill_min=float(sg["fill_min"]),
         ),
+        algorithm_id=algorithm_id,
     )
+
+
+def _read_with_migration(
+    path: Path,
+    *,
+    atomic_write: Callable[[Path, str], None] | None,
+) -> Preset:
+    """Read one preset file, returning the parsed `Preset`. If the file
+    pre-dates the `algorithm_id` field (phase-1 of the multi-version
+    refactor), `_from_dict` backfills the default and this helper
+    rewrites the canonical shape so subsequent reads are explicit.
+    Skips the rewrite when no `atomic_write` is supplied (read-only
+    callers like the offline reprocess CLI)."""
+    raw = json.loads(path.read_text())
+    preset = _from_dict(raw)
+    if atomic_write is not None and "algorithm_id" not in raw:
+        atomic_write(path, json.dumps(_to_dict(preset), indent=2))
+        logger.info(
+            "preset %s: backfilled `algorithm_id=%s` and rewrote canonical shape",
+            path.name, preset.algorithm_id,
+        )
+    return preset
 
 
 def seed_builtins(
@@ -149,29 +192,46 @@ def seed_builtins(
             atomic_write(path, json.dumps(_to_dict(preset), indent=2))
 
 
-def load_preset(data_dir: Path, name: str) -> Preset:
+def load_preset(
+    data_dir: Path,
+    name: str,
+    *,
+    atomic_write: Callable[[Path, str], None] | None = None,
+) -> Preset:
     """Read a single preset by slug. Raises `KeyError(name)` if missing
-    — callers at the API boundary translate to HTTP 400/404."""
+    — callers at the API boundary translate to HTTP 400/404.
+
+    When `atomic_write` is supplied (the runtime call path), files
+    pre-dating the `algorithm_id` field are rewritten in canonical
+    shape on read. Read-only callers (offline tools) omit it."""
     path = _preset_path(data_dir, name)
     if not path.exists():
         raise KeyError(name)
-    return _from_dict(json.loads(path.read_text()))
+    return _read_with_migration(path, atomic_write=atomic_write)
 
 
 def preset_exists(data_dir: Path, name: str) -> bool:
     return _preset_path(data_dir, name).exists()
 
 
-def list_presets(data_dir: Path) -> list[Preset]:
+def list_presets(
+    data_dir: Path,
+    *,
+    atomic_write: Callable[[Path, str], None] | None = None,
+) -> list[Preset]:
     """All presets sorted by slug. Empty list if the directory does not
     yet exist (caller treats as fresh install — `seed_builtins` would
-    typically have run already at boot)."""
+    typically have run already at boot).
+
+    When `atomic_write` is supplied (the runtime call path), files
+    pre-dating the `algorithm_id` field are rewritten in canonical
+    shape on read."""
     pdir = presets_dir(data_dir)
     if not pdir.exists():
         return []
     out: list[Preset] = []
     for path in sorted(pdir.glob("*.json")):
-        out.append(_from_dict(json.loads(path.read_text())))
+        out.append(_read_with_migration(path, atomic_write=atomic_write))
     return out
 
 
@@ -181,11 +241,12 @@ def save_preset(
     *,
     atomic_write: Callable[[Path, str], None],
 ) -> None:
-    """Atomic single-file write. Validates the slug before touching disk.
-    Overwrites any existing file with the same name — name-collision
-    policy (409 vs PUT semantics) is enforced at the route layer, not
-    here."""
+    """Atomic single-file write. Validates the slug + algorithm_id
+    before touching disk. Overwrites any existing file with the same
+    name — name-collision policy (409 vs PUT semantics) is enforced at
+    the route layer, not here."""
     validate_slug(preset.name)
+    algorithms.validate_id(preset.algorithm_id)
     presets_dir(data_dir).mkdir(parents=True, exist_ok=True)
     atomic_write(
         _preset_path(data_dir, preset.name),

@@ -1637,15 +1637,27 @@ class State:
 
     def list_presets(self):
         """All presets sorted by slug. Reads disk on every call (the
-        dashboard render path is the dominant caller; ms-scale)."""
-        return _presets.list_presets(self._data_dir)
+        dashboard render path is the dominant caller; ms-scale).
+
+        Threads `_atomic_write` through so any preset file pre-dating
+        the `algorithm_id` field gets rewritten in canonical shape on
+        first read post-upgrade."""
+        return _presets.list_presets(
+            self._data_dir, atomic_write=self._atomic_write
+        )
 
     def load_preset(self, name: str):
         """Single preset by slug. Raises `KeyError(name)` if the file
         is missing on disk — endpoint handlers translate to 404; the
         dashboard renderer's `identity-deleted` branch handles the
-        dangling-reference case before this would be called."""
-        return _presets.load_preset(self._data_dir, name)
+        dangling-reference case before this would be called.
+
+        Threads `_atomic_write` through so a file pre-dating the
+        `algorithm_id` field gets rewritten in canonical shape on
+        first read post-upgrade."""
+        return _presets.load_preset(
+            self._data_dir, name, atomic_write=self._atomic_write
+        )
 
     def preset_exists(self, name: str) -> bool:
         return _presets.preset_exists(self._data_dir, name)

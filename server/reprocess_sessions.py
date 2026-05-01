@@ -62,8 +62,8 @@ def load_detection_config() -> tuple[HSVRange, ShapeGate]:
     )
     label = cfg.preset or "custom"
     logger.info(
-        "detection_config preset=%s hsv h[%d-%d] s[%d-%d] v[%d-%d] aspect>=%.2f fill>=%.2f",
-        label,
+        "detection_config algorithm=%s preset=%s hsv h[%d-%d] s[%d-%d] v[%d-%d] aspect>=%.2f fill>=%.2f",
+        cfg.algorithm_id, label,
         hsv.h_min, hsv.h_max, hsv.s_min, hsv.s_max, hsv.v_min, hsv.v_max,
         gate.aspect_min, gate.fill_min,
     )

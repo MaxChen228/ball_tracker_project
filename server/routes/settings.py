@@ -116,6 +116,11 @@ async def detection_config_post(request: Request):
     gate = _validated_shape_gate(body["shape_gate"])
 
     preset_name = body.get("preset")
+    # When the request claims a preset, the resulting config inherits
+    # that preset's algorithm_id; otherwise (custom config) we keep the
+    # currently-active config's algorithm_id so a slider edit doesn't
+    # silently re-bind to the registry default.
+    inherited_algorithm_id = state.detection_config().algorithm_id
     if preset_name is not None:
         if not isinstance(preset_name, str):
             raise HTTPException(
@@ -144,12 +149,14 @@ async def detection_config_post(request: Request):
                     "preset=null for custom."
                 ),
             )
+        inherited_algorithm_id = ref.algorithm_id
 
     cfg = DetectionConfig(
         hsv=hsv,
         shape_gate=gate,
         preset=preset_name,
         last_applied_at=None,  # state stamps under lock
+        algorithm_id=inherited_algorithm_id,
     )
     applied = state.set_detection_config(cfg)
     await device_ws.broadcast(

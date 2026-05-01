@@ -28,6 +28,7 @@ router = APIRouter()
 
 def _preset_to_wire(p: Preset) -> dict[str, Any]:
     return {
+        "algorithm_id": p.algorithm_id,
         "name": p.name,
         "label": p.label,
         "hsv": {
@@ -189,6 +190,7 @@ async def presets_create(request: Request) -> dict[str, Any]:
         shape_gate=preset.shape_gate,
         preset=preset.name,
         last_applied_at=None,
+        algorithm_id=preset.algorithm_id,
     )
     state.set_detection_config(cfg)
     await device_ws.broadcast(
@@ -230,6 +232,7 @@ async def presets_set_active(request: Request) -> dict[str, Any]:
         shape_gate=p.shape_gate,
         preset=name,
         last_applied_at=None,
+        algorithm_id=p.algorithm_id,
     )
     state.set_detection_config(cfg)
     await device_ws.broadcast(

@@ -260,3 +260,81 @@ def test_set_hsv_range_alone_clears_preset_binding(tmp_path, monkeypatch):
 # `POST /detection/config/reset_to_preset` retired — coverage moved to
 # `test_presets.py::test_set_active_preset_*`, which exercises the
 # replacement endpoint `POST /presets/active` end-to-end.
+
+
+def test_default_config_carries_algorithm_id(tmp_path, monkeypatch):
+    """Boot zero state binds to the registry default — every config
+    that flows out of `detection_config` carries an explicit
+    `algorithm_id`, never an absent / None / unknown value."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    import algorithms
+
+    cfg = main.state.detection_config()
+    assert cfg.algorithm_id == algorithms.DEFAULT_ALGORITHM_ID
+    assert algorithms.is_known(cfg.algorithm_id)
+
+
+def test_load_or_migrate_backfills_algorithm_id_into_legacy_disk_file(
+    tmp_path, monkeypatch,
+):
+    """Pre-phase-1 disk file lacks `algorithm_id`. First boot reads
+    successfully (default backfill in `from_dict`) AND rewrites the
+    file in canonical shape so subsequent reads see an explicit
+    field."""
+    legacy = {
+        # No `algorithm_id` key — that's the whole point of this fixture.
+        "preset": "blue_ball",
+        "hsv": {
+            "h_min": 105, "h_max": 112, "s_min": 140, "s_max": 255,
+            "v_min": 40, "v_max": 255,
+        },
+        "shape_gate": {"aspect_min": 0.75, "fill_min": 0.55},
+        "last_applied_at": None,
+    }
+    (tmp_path / "detection_config.json").write_text(json.dumps(legacy))
+
+    main = _fresh_main(tmp_path, monkeypatch)
+    import algorithms
+
+    cfg = main.state.detection_config()
+    assert cfg.algorithm_id == algorithms.DEFAULT_ALGORITHM_ID
+
+    # File was rewritten in canonical shape — the explicit key is now
+    # on disk so a subsequent boot's `from_dict` default branch goes
+    # cold.
+    persisted = json.loads((tmp_path / "detection_config.json").read_text())
+    assert persisted["algorithm_id"] == algorithms.DEFAULT_ALGORITHM_ID
+
+
+def test_unknown_algorithm_id_on_disk_fails_loud_at_boot(
+    tmp_path, monkeypatch,
+):
+    """A typo / future-version disk record with an algorithm not in
+    the registry must raise at load time — silent fallback to the
+    default would mask exactly the kind of config-file bug
+    `from_dict`'s strict mode exists to prevent."""
+    bad = {
+        "algorithm_id": "v999_not_registered",
+        "preset": None,
+        "hsv": {
+            "h_min": 0, "h_max": 1, "s_min": 0, "s_max": 1,
+            "v_min": 0, "v_max": 1,
+        },
+        "shape_gate": {"aspect_min": 0.0, "fill_min": 0.0},
+        "last_applied_at": None,
+    }
+    (tmp_path / "detection_config.json").write_text(json.dumps(bad))
+
+    with pytest.raises(RuntimeError, match="detection_config.json corrupt"):
+        _fresh_main(tmp_path, monkeypatch)
+
+
+def test_settings_payload_surfaces_algorithm_id(tmp_path, monkeypatch):
+    """`/status` (and the WS settings push that mirrors it) carries
+    `algorithm_id` so iOS / dashboard can record / display which
+    algorithm produced the live frames."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    j = client.get("/status").json()
+    import algorithms
+    assert j["algorithm_id"] == algorithms.DEFAULT_ALGORITHM_ID

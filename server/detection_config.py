@@ -32,6 +32,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
+import algorithms
 from detection import HSVRange, ShapeGate
 from presets import load_preset, preset_exists
 
@@ -53,11 +54,20 @@ class DetectionConfig:
     """The detection-time pair plus the preset it was last derived from
     (None = custom). `last_applied_at` is a unix timestamp used by the UI
     to show "synced X ago" — None means never explicitly applied (i.e.
-    boot defaults). Mirrors the on-disk schema 1:1."""
+    boot defaults). Mirrors the on-disk schema 1:1.
+
+    `algorithm_id` is the registry key for which detection algorithm
+    this config feeds. Today only `algorithms.V11_HSV_CC` exists, so
+    every persisted config carries that string; the field is
+    first-class so future versions can drop in without another schema
+    bump. Validation runs at every load + every `set_detection_config`
+    write — an unknown id raises rather than silently falling through
+    to the default."""
     hsv: HSVRange
     shape_gate: ShapeGate
     preset: str | None
     last_applied_at: float | None
+    algorithm_id: str = algorithms.DEFAULT_ALGORITHM_ID
 
     def with_(
         self,
@@ -66,11 +76,16 @@ class DetectionConfig:
         shape_gate: ShapeGate | None = None,
         preset: "str | None | _Sentinel" = _SENTINEL,
         last_applied_at: "float | None | _Sentinel" = _SENTINEL,
+        algorithm_id: str | None = None,
     ) -> "DetectionConfig":
         """Functional replace; sentinel-distinguishes "leave unchanged"
         from "set to None". The `set_hsv_range` / `set_shape_gate`
         adapters use this to mutate one section while explicitly clearing
-        `preset` (editing any sub-knob means leaving the named preset)."""
+        `preset` (editing any sub-knob means leaving the named preset).
+
+        `algorithm_id` uses None-as-leave-unchanged because it cannot
+        validly be None — every config has an algorithm. Pass an explicit
+        registered id to switch (currently only one is registered)."""
         return replace(
             self,
             hsv=self.hsv if hsv is None else hsv,
@@ -81,6 +96,7 @@ class DetectionConfig:
                 if isinstance(last_applied_at, _Sentinel)
                 else last_applied_at
             ),
+            algorithm_id=self.algorithm_id if algorithm_id is None else algorithm_id,
         )
 
 
@@ -114,6 +130,7 @@ def _shape_gate_from_dict(d: dict) -> ShapeGate:
 def to_dict(cfg: DetectionConfig) -> dict:
     """Wire / disk shape. Symmetric with `from_dict`."""
     return {
+        "algorithm_id": cfg.algorithm_id,
         "preset": cfg.preset,
         "hsv": _hsv_to_dict(cfg.hsv),
         "shape_gate": _shape_gate_to_dict(cfg.shape_gate),
@@ -129,12 +146,22 @@ def from_dict(d: dict) -> DetectionConfig:
     A residual `selector` key (from a pre-retirement build) is ignored
     here; `load_or_migrate` rewrites the file in canonical shape on
     first boot post-retirement so the stale field is gone within one
-    cycle."""
+    cycle.
+
+    `algorithm_id` defaults to the registry default when the key is
+    absent — that branch is *only* reachable on a one-shot read
+    migration from a pre-algorithm-id disk file (see
+    `load_or_migrate`), which immediately re-persists in canonical
+    shape. After that boot every read sees the explicit field. An
+    unknown id raises via `algorithms.validate_id`."""
+    algorithm_id = d.get("algorithm_id", algorithms.DEFAULT_ALGORITHM_ID)
+    algorithms.validate_id(algorithm_id)
     return DetectionConfig(
         hsv=_hsv_from_dict(d["hsv"]),
         shape_gate=_shape_gate_from_dict(d["shape_gate"]),
         preset=d.get("preset"),
         last_applied_at=d.get("last_applied_at"),
+        algorithm_id=algorithm_id,
     )
 
 
@@ -185,6 +212,7 @@ def _default_config(data_dir: Path) -> DetectionConfig:
         shape_gate=p.shape_gate,
         preset="tennis",
         last_applied_at=None,
+        algorithm_id=p.algorithm_id,
     )
 
 
@@ -229,6 +257,7 @@ def _load_legacy_triple(data_dir: Path) -> DetectionConfig | None:
     return DetectionConfig(
         hsv=hsv, shape_gate=sg,
         preset=None, last_applied_at=None,
+        algorithm_id=algorithms.DEFAULT_ALGORITHM_ID,
     )
 
 
@@ -258,16 +287,25 @@ def load_or_migrate(
             raise RuntimeError(
                 f"detection_config.json corrupt at {new_path}: {e}"
             ) from e
+        rewrite_reasons = []
         if "selector" in raw:
             # Pre-retirement build wrote a `selector` block; rewrite the
             # file in canonical (no-selector) shape so the next boot
             # reads a clean record. One-shot, idempotent: subsequent
             # boots see no `selector` key and skip this branch.
+            rewrite_reasons.append("strip legacy `selector` key")
+        if "algorithm_id" not in raw:
+            # Pre-algorithm-id build (phase-1 of the multi-version
+            # refactor introduced the field). `from_dict` already
+            # backfilled to `algorithms.DEFAULT_ALGORITHM_ID`; persist
+            # the canonical record so subsequent boots see an explicit
+            # field and the `from_dict` default branch goes cold.
+            rewrite_reasons.append("backfill `algorithm_id`")
+        if rewrite_reasons:
             atomic_write(new_path, json.dumps(to_dict(cfg), indent=2))
             logger.info(
-                "stripped legacy `selector` key from %s "
-                "(weights now hardcoded `_W_ASPECT` / `_W_FILL`)",
-                new_path,
+                "rewrote %s in canonical shape (%s)",
+                new_path, " + ".join(rewrite_reasons),
             )
         return cfg
 

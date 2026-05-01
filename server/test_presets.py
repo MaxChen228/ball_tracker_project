@@ -43,6 +43,70 @@ def test_get_preset_returns_full_record(tmp_path, monkeypatch):
     assert p["label"] == "Blue ball"
     assert p["hsv"]["h_min"] == 105
     assert p["shape_gate"]["aspect_min"] == pytest.approx(0.75)
+    # Phase-1 algorithm_id discriminator. Today every preset targets
+    # the sole registered algorithm; the field exists so future entries
+    # with different params shapes can ship in the same directory.
+    import algorithms
+    assert p["algorithm_id"] == algorithms.DEFAULT_ALGORITHM_ID
+
+
+def test_load_preset_backfills_algorithm_id_into_legacy_file(
+    tmp_path, monkeypatch,
+):
+    """A preset file written before phase-1 lacks `algorithm_id`. First
+    runtime read backfills the registry default AND rewrites the file
+    canonical so subsequent boots see an explicit field. Drives the
+    one-shot read migration on `presets._read_with_migration`."""
+    import json
+    pdir = tmp_path / "presets"
+    pdir.mkdir(parents=True, exist_ok=True)
+    legacy_body = {
+        # No `algorithm_id` key.
+        "name": "legacy_test",
+        "label": "Legacy",
+        "hsv": {"h_min": 0, "h_max": 1, "s_min": 0, "s_max": 1, "v_min": 0, "v_max": 1},
+        "shape_gate": {"aspect_min": 0.5, "fill_min": 0.5},
+    }
+    (pdir / "legacy_test.json").write_text(json.dumps(legacy_body))
+
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    r = client.get("/presets/legacy_test")
+    assert r.status_code == 200, r.text
+    import algorithms
+    assert r.json()["algorithm_id"] == algorithms.DEFAULT_ALGORITHM_ID
+
+    # File on disk now carries the explicit field.
+    persisted = json.loads((pdir / "legacy_test.json").read_text())
+    assert persisted["algorithm_id"] == algorithms.DEFAULT_ALGORITHM_ID
+
+
+def test_unknown_algorithm_id_in_preset_file_fails_loud(
+    tmp_path, monkeypatch,
+):
+    """A preset file naming an algorithm not in the registry must fail
+    at read time — defensive against future-version files copied
+    backwards or operator typos."""
+    import json
+    pdir = tmp_path / "presets"
+    pdir.mkdir(parents=True, exist_ok=True)
+    bad = {
+        "algorithm_id": "v999_not_registered",
+        "name": "bad_algo",
+        "label": "Bad algo",
+        "hsv": {"h_min": 0, "h_max": 1, "s_min": 0, "s_max": 1, "v_min": 0, "v_max": 1},
+        "shape_gate": {"aspect_min": 0.5, "fill_min": 0.5},
+    }
+    (pdir / "bad_algo.json").write_text(json.dumps(bad))
+
+    main = _fresh_main(tmp_path, monkeypatch)
+    # State-level call surfaces the loud failure — `_from_dict` raises
+    # `ValueError` via `algorithms.validate_id`. The HTTP layer turns
+    # that into a 500; we assert at the state layer to keep the test
+    # focused on schema strictness rather than FastAPI exception
+    # plumbing (which TestClient re-raises by default).
+    with pytest.raises(ValueError, match="v999_not_registered"):
+        main.state.list_presets()
 
 
 def test_get_unknown_preset_returns_404(tmp_path, monkeypatch):

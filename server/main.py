@@ -407,6 +407,13 @@ def _build_status_response() -> dict[str, Any]:
         # /detection/config slider POST during this transition; new
         # preset-CRUD paths always set a non-None value.
         "active_preset_name": state.detection_config().preset,
+        # Algorithm registry id of the active detection config. Today
+        # always `v11_hsv_cc` (the only registered algorithm). Pushed
+        # to iOS so its arm-time log records which algorithm produced
+        # the live frames; future server upgrades that register a new
+        # algorithm flip this string and iOS picks the matching local
+        # detector.
+        "algorithm_id": state.detection_config().algorithm_id,
         # Mutual-sync context. `sync.id` is the sole dedupe key the phone
         # uses to decide whether a fresh `sync_run` command has arrived
         # vs. a repeat of an in-flight run. `last_sync` lets the dashboard
@@ -489,6 +496,7 @@ def _settings_message_for(camera_id: str) -> dict[str, Any]:
         "hsv_range": status.get("hsv_range"),
         "shape_gate": status.get("shape_gate"),
         "active_preset_name": status.get("active_preset_name"),
+        "algorithm_id": status.get("algorithm_id"),
         "chirp_detect_threshold": status.get("chirp_detect_threshold"),
         "mutual_sync_threshold": status.get("mutual_sync_threshold"),
         "heartbeat_interval_s": status.get("heartbeat_interval_s"),
