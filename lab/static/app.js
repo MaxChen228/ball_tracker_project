@@ -241,10 +241,12 @@ function resizeOverlay() {
   const v = el.video;
   const disp = videoDisplayRect();
   if (!disp) return;
-  el.overlay.width = v.videoWidth;
-  el.overlay.height = v.videoHeight;
-  // Position overlay over the displayed frame (not the element box) so the
-  // canvas pixels line up exactly with what the user sees.
+  // Only assign canvas .width / .height when they actually change — assigning
+  // even the same value is destructive (it resets the canvas and wipes the
+  // previously-blitted mask). Calling this every rVFC tick was the source
+  // of the play-time mask flicker.
+  if (el.overlay.width !== v.videoWidth) el.overlay.width = v.videoWidth;
+  if (el.overlay.height !== v.videoHeight) el.overlay.height = v.videoHeight;
   const wrapRect = el.video.parentElement.getBoundingClientRect();
   el.overlay.style.width = disp.width + "px";
   el.overlay.style.height = disp.height + "px";
@@ -960,7 +962,6 @@ function onDisplayedFrame(_now, metadata) {
       }
     }
   }
-  resizeOverlay();
   updateStatus();
   state.rvfcHandle = el.video.requestVideoFrameCallback(onDisplayedFrame);
 }
