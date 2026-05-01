@@ -2,12 +2,10 @@
 early-surface guarantee for on-device triangulation."""
 from __future__ import annotations
 
-from pathlib import Path
 
 import numpy as np
 from fastapi.testclient import TestClient
 
-import main
 from main import app
 
 from _test_helpers import (
@@ -15,7 +13,6 @@ from _test_helpers import (
     _encode_single_ball_mov,
     _make_scene,
     _post_pitch,
-    _project_pixels,
     _seed_ready_stereo,
 )
 

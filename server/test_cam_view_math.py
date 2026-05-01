@@ -5,7 +5,6 @@ when one of these tests breaks, both halves must move together.
 """
 from __future__ import annotations
 
-import pytest
 
 from cam_view_math import (
     compare_rows_collapse,

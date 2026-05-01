@@ -194,7 +194,7 @@ def sync_state(log_limit: int = 200) -> dict[str, Any]:
 
 @router.post("/sync/trigger")
 async def sync_trigger(request: Request) -> Any:
-    from main import state, device_ws, _wants_html
+    from main import state, device_ws
     ctype = request.headers.get("content-type", "").lower()
     is_form = "application/x-www-form-urlencoded" in ctype or "multipart/form-data" in ctype
     camera_ids: list[str] | None = None
