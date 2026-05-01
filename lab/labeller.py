@@ -467,6 +467,7 @@ def run_propagate(slug: str) -> None:
 
 SLUG_RE = re.compile(r"^/api/items/([A-Za-z0-9_\-]+)/(trim|seed|propagate|propagate/cancel|events|pts|masks)$")
 MASK_RE = re.compile(r"^/mask/([A-Za-z0-9_\-]+)/(\d{5})\.png$")
+FRAME_RE = re.compile(r"^/frame/([A-Za-z0-9_\-]+)/(\d+)\.jpg$")
 CLIP_RE = re.compile(r"^/clip/([A-Za-z0-9_\-]+)\.mp4$")
 
 
@@ -567,6 +568,62 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_bytes(HTTPStatus.OK, path.read_bytes(), "image/png")
 
+    def _serve_frame(self, slug: str, src_idx_str: str) -> None:
+        """Serve a single source-frame as JPG.
+
+        Within the propagated [in,out] range we map source idx → local idx via
+        local_to_source.json (already on disk from extract_range_to_dir) and
+        return the cached JPG. Outside the range we decode on demand and cache
+        to all_frames/<src:05d>.jpg so future scrubs are O(1).
+
+        This exists so the frontend can do img-swap scrubbing instead of
+        video.currentTime seek — Chrome refuses some sub-frame paused seeks
+        and silently keeps the old frame on screen, which is exactly the
+        flicker the user reported.
+        """
+        try:
+            src_idx = int(src_idx_str)
+        except ValueError:
+            self._send_text(HTTPStatus.BAD_REQUEST, "bad idx")
+            return
+        try:
+            item = STORE.get(slug)
+        except KeyError:
+            self._send_text(HTTPStatus.NOT_FOUND, "no such slug")
+            return
+
+        idir = item_dir(slug)
+        sidecar = idir / "local_to_source.json"
+        if sidecar.is_file():
+            mapping = json.loads(sidecar.read_text(encoding="utf-8"))["local_to_source"]
+            try:
+                local = mapping.index(src_idx)
+            except ValueError:
+                local = None
+            if local is not None:
+                jpg = frames_dir_for(slug) / f"{local:05d}.jpg"
+                if jpg.is_file():
+                    self._send_bytes(HTTPStatus.OK, jpg.read_bytes(), "image/jpeg")
+                    return
+
+        cache_dir = idir / "all_frames"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached = cache_dir / f"{src_idx:05d}.jpg"
+        if cached.is_file():
+            self._send_bytes(HTTPStatus.OK, cached.read_bytes(), "image/jpeg")
+            return
+
+        try:
+            pts_payload = get_pts_table(slug)
+            arr = extract_one_frame(SOURCES_DIR / item["source_video"], src_idx, pts_payload["pts"])
+        except Exception as e:
+            self._send_text(HTTPStatus.INTERNAL_SERVER_ERROR, f"decode failed: {e}")
+            return
+        import cv2  # type: ignore
+
+        cv2.imwrite(str(cached), arr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        self._send_bytes(HTTPStatus.OK, cached.read_bytes(), "image/jpeg")
+
     def _serve_sse(self, slug: str) -> None:
         try:
             STORE.get(slug)
@@ -656,6 +713,10 @@ class Handler(BaseHTTPRequestHandler):
         m = MASK_RE.match(p)
         if m:
             self._serve_mask(m.group(1), m.group(2))
+            return
+        m = FRAME_RE.match(p)
+        if m:
+            self._serve_frame(m.group(1), m.group(2))
             return
         m = CLIP_RE.match(p)
         if m:

@@ -34,6 +34,7 @@ const state = {
   pendingTargetFrame: null,
   isSeeking: false,
   lastSeekTarget: null,
+  scrubMode: true,
   // Pre-tinted canvases keyed by source frame index. We build one per mask
   // (sync, ~5ms each) the first time we see it, then `showMaskFor` blits it
   // in O(1). Without this cache, every arrow-key step re-decoded the PNG and
@@ -55,6 +56,8 @@ function clearPropMasks() {
 
 const el = {
   video: document.getElementById("video"),
+  videoWrap: document.querySelector("#video-wrap"),
+  frameImg: document.getElementById("frame-img"),
   overlay: document.getElementById("overlay"),
   scrubber: document.getElementById("scrubber"),
   fills: document.getElementById("timeline-fills"),
@@ -397,6 +400,9 @@ function syncFromItem(item) {
   el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
   el.scrubber.value = "0";
   el.video.src = `${API_BASE}/clip/${item.slug}.mp4`;
+  state.lastDisplayedFrame = 0;
+  enterScrubMode();
+  el.frameImg.src = `${API_BASE}/frame/${encodeURIComponent(item.slug)}/00000.jpg`;
   clearSeedMask();
   clearDoneFills();
   clearOverlay();
@@ -718,7 +724,7 @@ function stepFrames(delta) {
     : (state.lastSeekTarget != null ? state.lastSeekTarget : currentFrame());
   const target = Math.max(0, Math.min(state.totalFrames - 1, start + delta));
   state.pendingTargetFrame = target;
-  if (!state.isSeeking) flushStep();
+  flushStep();
 }
 
 function jumpToFrame(f) {
@@ -726,28 +732,43 @@ function jumpToFrame(f) {
   if (!el.video.paused) el.video.pause();
   const target = Math.max(0, Math.min(state.totalFrames - 1, f));
   state.pendingTargetFrame = target;
-  if (!state.isSeeking) flushStep();
+  flushStep();
+}
+
+function enterScrubMode() {
+  if (state.scrubMode) return;
+  state.scrubMode = true;
+  el.videoWrap.classList.add("scrub");
+  if (!el.video.paused) el.video.pause();
+}
+
+function exitScrubMode() {
+  if (!state.scrubMode) return;
+  state.scrubMode = false;
+  el.videoWrap.classList.remove("scrub");
 }
 
 function flushStep() {
   if (state.pendingTargetFrame == null) return;
   const target = state.pendingTargetFrame;
   state.pendingTargetFrame = null;
-  state.isSeeking = true;
-  state.lastSeekTarget = target;
-  // Optimistic UI snap: paint mask + scrubber + status BEFORE the browser
-  // finishes seeking. rVFC overwrites with truth when the real frame paints.
+  // Img-swap scrubbing: bypass video.currentTime entirely. Chrome refuses
+  // some sub-frame paused seeks (silently keeps the previous frame on
+  // screen — that was the "f doesn't change but t does" symptom). The
+  // server pre-extracted every frame in [in,out] as a JPG; outside that
+  // range a /frame endpoint decodes on demand and caches.
+  enterScrubMode();
   const tbl = state.ptsTable;
   state.lastDisplayedMediaTime = tbl[target];
   state.lastDisplayedFrame = target;
   el.scrubber.value = String(target);
+  el.frameImg.src = `${API_BASE}/frame/${encodeURIComponent(state.current)}/${String(target).padStart(5, "0")}.jpg`;
   if (maskUrlForFrame(target) != null) loadMaskForFrame(target);
   else clearOverlay();
   if (target === state.seedFrame && state.seedPoint && maskUrlForFrame(target) == null) {
     drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
   }
   updateStatus();
-  el.video.currentTime = frameToTime(target);
 }
 
 async function fetchPts(slug) {
@@ -802,9 +823,32 @@ async function rehydrateMasks(slug) {
   }
 }
 
+async function togglePlay() {
+  if (state.scrubMode) {
+    // Resume video at the displayed frame's PTS.
+    const tbl = state.ptsTable;
+    const f = state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0;
+    if (tbl && tbl[f] != null) el.video.currentTime = tbl[f];
+    exitScrubMode();
+    try { await el.video.play(); } catch (e) { console.warn("play failed", e); enterScrubMode(); }
+  } else {
+    el.video.pause();
+    enterScrubMode();
+    // Snapshot the currently-displayed frame as a JPG so the user has visual
+    // continuity (rather than seeing the last decoded video frame disappear).
+    const f = currentFrame();
+    state.lastDisplayedFrame = f;
+    el.frameImg.src = `${API_BASE}/frame/${encodeURIComponent(state.current)}/${String(f).padStart(5, "0")}.jpg`;
+    el.scrubber.value = String(f);
+    if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
+    else clearOverlay();
+    updateStatus();
+  }
+}
+
 function onVideoClick(e) {
   if (!state.pendingSeedClick) {
-    if (el.video.paused) el.video.play(); else el.video.pause();
+    togglePlay();
     return;
   }
   if (state.seedFrame == null) return;
@@ -845,7 +889,7 @@ function onKeydown(e) {
   // keyboard works without claw-grip on the cursor cluster.
   if (e.key === " ") {
     e.preventDefault();
-    if (el.video.paused) el.video.play(); else el.video.pause();
+    togglePlay();
   } else if (e.key === "ArrowLeft" || e.key === ",") {
     e.preventDefault();
     const d = e.altKey ? -100 : (e.shiftKey ? -10 : -1);
@@ -874,17 +918,10 @@ function onKeydown(e) {
 }
 
 function onDisplayedFrame(_now, metadata) {
-  // Fires once per actually-presented video frame. metadata.mediaTime is the
-  // exact PTS of the frame the compositor just painted.
-  //
-  // CRITICAL: while a seek is in flight we ignore rVFC entirely. Without this,
-  // setting `video.currentTime` returns immediately but the next rVFC may
-  // still fire for the PREVIOUS frame (the compositor hasn't repainted yet).
-  // That stale callback would compute f = previous-frame, override the
-  // optimistic snap from flushStep, and reload the previous mask — exactly
-  // the "flicker to old frame and back" the user reported. Once `seeked`
-  // clears state.isSeeking, rVFC takes over again with the truth.
-  if (state.isSeeking) {
+  // Fires once per actually-presented video frame during playback. While in
+  // scrub mode the video element is hidden and we drive the overlay off
+  // img-swaps, so rVFC must not override our state.
+  if (state.scrubMode) {
     state.rvfcHandle = el.video.requestVideoFrameCallback(onDisplayedFrame);
     return;
   }
@@ -930,7 +967,16 @@ function bindUi() {
     else clearOverlay();
     updateStatus();
   });
-  el.video.addEventListener("click", onVideoClick);
+  el.videoWrap.addEventListener("click", onVideoClick);
+  el.video.addEventListener("play", () => exitScrubMode());
+  el.video.addEventListener("pause", () => {
+    if (!state.scrubMode && state.current && state.ptsTable) {
+      const f = currentFrame();
+      enterScrubMode();
+      state.lastDisplayedFrame = f;
+      el.frameImg.src = `${API_BASE}/frame/${encodeURIComponent(state.current)}/${String(f).padStart(5, "0")}.jpg`;
+    }
+  });
   // Use ResizeObserver for layout-sensitive overlay; window resize alone misses
   // CSS-driven size changes (e.g. picker dropdown reflow).
   if (typeof ResizeObserver === "function") {
@@ -938,14 +984,7 @@ function bindUi() {
   } else {
     window.addEventListener("resize", resizeOverlay);
   }
-  // Also resize on seeked since seeking can change layout briefly on some
-  // browsers when the metadata updates. Also: clear the seek gate so any
-  // arrow-key presses queued during the in-flight seek can drain.
-  el.video.addEventListener("seeked", () => {
-    resizeOverlay();
-    state.isSeeking = false;
-    if (state.pendingTargetFrame != null) flushStep();
-  });
+  el.video.addEventListener("seeked", () => resizeOverlay());
 
   el.scrubber.addEventListener("input", () => {
     const f = parseInt(el.scrubber.value, 10);
