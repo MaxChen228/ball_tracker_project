@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -42,6 +43,10 @@ class RuntimeSettingsStore:
     HEARTBEAT_INTERVAL_MIN = 1.0
     HEARTBEAT_INTERVAL_MAX = 60.0
     ALLOWED_CAPTURE_HEIGHTS = (720, 1080)
+    SYNC_RECORD_DURATION_MIN = 1.0
+    SYNC_RECORD_DURATION_MAX = 30.0
+    SYNC_SEARCH_WINDOW_MIN = 0.05
+    SYNC_SEARCH_WINDOW_MAX = 2.0
 
     def __init__(
         self,
@@ -81,6 +86,12 @@ class RuntimeSettingsStore:
         ivl = obj.get("heartbeat_interval_s")
         if isinstance(ivl, (int, float)) and self.HEARTBEAT_INTERVAL_MIN <= ivl <= self.HEARTBEAT_INTERVAL_MAX:
             self.heartbeat_interval_s = float(ivl)
+        raw_sync = obj.get("sync_params")
+        if raw_sync is not None:
+            try:
+                self.sync_params = self._validated_sync_params(raw_sync)
+            except ValueError as e:
+                logger.warning("skip invalid sync_params in runtime_settings %s: %s", self._path, e)
         ch = obj.get("capture_height_px")
         if isinstance(ch, int) and ch in self.ALLOWED_CAPTURE_HEIGHTS:
             self.capture_height_px = ch
@@ -125,6 +136,12 @@ class RuntimeSettingsStore:
                 "chirp_detect_threshold": self.chirp_detect_threshold,
                 "mutual_sync_threshold": self.mutual_sync_threshold,
                 "heartbeat_interval_s": self.heartbeat_interval_s,
+                "sync_params": {
+                    "emit_a_at_s": self.sync_params.emit_a_at_s,
+                    "emit_b_at_s": self.sync_params.emit_b_at_s,
+                    "record_duration_s": self.sync_params.record_duration_s,
+                    "search_window_s": self.sync_params.search_window_s,
+                },
                 "capture_height_px": self.capture_height_px,
                 "tracking_exposure_cap": self.tracking_exposure_cap.value,
                 "strike_zone": {
@@ -164,6 +181,19 @@ class RuntimeSettingsStore:
         self.persist()
         return v
 
+    def set_sync_params(self, params: SyncParams) -> SyncParams:
+        v = self._validated_sync_params(
+            {
+                "emit_a_at_s": params.emit_a_at_s,
+                "emit_b_at_s": params.emit_b_at_s,
+                "record_duration_s": params.record_duration_s,
+                "search_window_s": params.search_window_s,
+            }
+        )
+        self.sync_params = v
+        self.persist()
+        return v
+
     def set_heartbeat_interval_s(self, value: float) -> float:
         if not isinstance(value, (int, float)):
             raise ValueError("interval must be numeric")
@@ -196,4 +226,53 @@ class RuntimeSettingsStore:
                 f"threshold {v} out of range "
                 f"[{self.CHIRP_THRESHOLD_MIN}, {self.CHIRP_THRESHOLD_MAX}]"
             )
+        return v
+
+    def _validated_sync_params(self, obj: object) -> SyncParams:
+        if not isinstance(obj, dict):
+            raise ValueError("sync_params must be an object")
+        dur = self._validated_float(
+            obj.get("record_duration_s"),
+            "record_duration_s",
+            self.SYNC_RECORD_DURATION_MIN,
+            self.SYNC_RECORD_DURATION_MAX,
+        )
+        win = self._validated_float(
+            obj.get("search_window_s"),
+            "search_window_s",
+            self.SYNC_SEARCH_WINDOW_MIN,
+            self.SYNC_SEARCH_WINDOW_MAX,
+        )
+        return SyncParams(
+            emit_a_at_s=self._validated_emit_times(obj.get("emit_a_at_s"), "emit_a_at_s", dur),
+            emit_b_at_s=self._validated_emit_times(obj.get("emit_b_at_s"), "emit_b_at_s", dur),
+            record_duration_s=dur,
+            search_window_s=win,
+        )
+
+    def _validated_emit_times(self, value: object, name: str, duration_s: float) -> list[float]:
+        if not isinstance(value, list):
+            raise ValueError(f"{name} must be an array")
+        if not value:
+            raise ValueError(f"{name} must be non-empty")
+        out: list[float] = []
+        for raw in value:
+            if not isinstance(raw, (int, float)):
+                raise ValueError(f"{name} entries must be numeric")
+            t = float(raw)
+            if not math.isfinite(t):
+                raise ValueError(f"{name} entries must be finite")
+            if t < 0.0 or t > duration_s:
+                raise ValueError(f"{name} entry {t} outside recording duration {duration_s}")
+            out.append(t)
+        return out
+
+    def _validated_float(self, value: object, name: str, min_value: float, max_value: float) -> float:
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be numeric")
+        v = float(value)
+        if not math.isfinite(v):
+            raise ValueError(f"{name} must be finite")
+        if not (min_value <= v <= max_value):
+            raise ValueError(f"{name} {v} out of range [{min_value}, {max_value}]")
         return v

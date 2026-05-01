@@ -142,6 +142,10 @@ def test_shared_baseball_and_playback_modules_are_used_by_both_surfaces():
     viewer = (_RUNTIME_DIR / "viewer_layers.js").read_text()
     dashboard = (_RUNTIME_DIR / "dashboard_layers.js").read_text()
     assert "export function createBaseballMarker" in ball
+    assert "baseball_seam_left" in ball
+    assert "baseball_stitches_left" in ball
+    assert "CanvasTexture" not in ball
+    assert "TubeGeometry" not in ball
     assert "export function resolvePlaybackMarkerPose" in resolver
     assert 'from "./ball_marker.js"' in viewer
     assert 'from "./playback_marker.js"' in viewer
@@ -157,6 +161,17 @@ def test_dashboard_layers_expose_marker_only_playback_api():
     assert "setPlaybackTime(t)" in text
     assert "dashboard_playback_marker" in text
     assert "createBaseballMarker()" in text
+
+
+def test_playback_rates_are_browser_persisted():
+    """Playback speed is an operator view preference, so reloads should
+    preserve it in browser storage on both viewer and dashboard surfaces."""
+    viewer = (Path(main.__file__).parent / "static" / "viewer" / "60_playback.js").read_text()
+    dashboard = (Path(main.__file__).parent / "static" / "dashboard" / "36_playback.js").read_text()
+    assert "ball_tracker_viewer_playback_rate" in viewer
+    assert "localStorage.setItem(VIEWER_PLAYBACK_RATE_KEY" in viewer
+    assert "ball_tracker_dashboard_playback_rate" in dashboard
+    assert "localStorage.setItem(DASH_PLAYBACK_RATE_KEY" in dashboard
 
 
 def test_scene_theme_is_json_safe():

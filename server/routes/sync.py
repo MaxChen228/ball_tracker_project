@@ -274,8 +274,11 @@ async def sync_params_set(request: Request) -> dict[str, Any]:
     cur = state.sync_params()
     emit_a = body.get("emit_a_at_s", cur.emit_a_at_s)
     emit_b = body.get("emit_b_at_s", cur.emit_b_at_s)
-    dur = float(body.get("record_duration_s", cur.record_duration_s))
-    win = float(body.get("search_window_s", cur.search_window_s))
+    try:
+        dur = float(body.get("record_duration_s", cur.record_duration_s))
+        win = float(body.get("search_window_s", cur.search_window_s))
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=422, detail="record_duration_s and search_window_s must be numeric") from e
     if not isinstance(emit_a, list) or not isinstance(emit_b, list):
         raise HTTPException(status_code=422, detail="emit_a_at_s and emit_b_at_s must be arrays")
     if not emit_a or not emit_b:
@@ -284,10 +287,13 @@ async def sync_params_set(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="record_duration_s must be 1-30 s")
     if win < 0.05 or win > 2.0:
         raise HTTPException(status_code=422, detail="search_window_s must be 0.05-2.0 s")
-    state.set_sync_params(SyncParams(
-        emit_a_at_s=[float(t) for t in emit_a],
-        emit_b_at_s=[float(t) for t in emit_b],
-        record_duration_s=dur,
-        search_window_s=win,
-    ))
+    try:
+        state.set_sync_params(SyncParams(
+            emit_a_at_s=[float(t) for t in emit_a],
+            emit_b_at_s=[float(t) for t in emit_b],
+            record_duration_s=dur,
+            search_window_s=win,
+        ))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     return {"ok": True, **sync_params_get()}

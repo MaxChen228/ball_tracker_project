@@ -4,12 +4,32 @@
 // selected session/path. Full video-synchronised playback remains the
 // viewer's job.
 
+  const DASH_PLAYBACK_RATE_KEY = 'ball_tracker_dashboard_playback_rate';
+  const DASH_PLAYBACK_RATES = [0.25, 0.5, 1.0];
+
+  function _readDashboardPlaybackRate() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(DASH_PLAYBACK_RATE_KEY);
+      const parsed = Number(raw);
+      if (DASH_PLAYBACK_RATES.some((r) => Math.abs(r - parsed) < 1e-6)) return parsed;
+    } catch {}
+    return 1.0;
+  }
+
+  function _persistDashboardPlaybackRate(rate) {
+    try {
+      if (window.localStorage) {
+        window.localStorage.setItem(DASH_PLAYBACK_RATE_KEY, String(rate));
+      }
+    } catch {}
+  }
+
   const dashPlayback = {
     key: null,
     range: null,
     t: 0,
     playing: false,
-    rate: 1.0,
+    rate: _readDashboardPlaybackRate(),
     raf: null,
     lastMs: 0,
   };
@@ -174,6 +194,7 @@
       const r = Number(b.dataset.dashPlaybackRate);
       if (!Number.isFinite(r) || r <= 0) return;
       dashPlayback.rate = r;
+      _persistDashboardPlaybackRate(r);
       _paintPlaybackControls();
     });
   }

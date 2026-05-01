@@ -323,9 +323,10 @@ class State:
         # lock refs so the coordinator can read pitches / video dir.
         self._processing = SessionProcessingState()
         self._processing.attach(self, self._lock)
-        # Calibrations first — _load_from_disk re-triangulates every cached
-        # pitch, and triangulation needs the calibration snapshot to decide
-        # the intrinsic-scale factor (MOV dims vs. calibration dims).
+        # Calibrations first — stale/missing result-cache entries are rebuilt
+        # during _load_from_disk(), and triangulation needs the calibration
+        # snapshot to decide the intrinsic-scale factor (MOV dims vs.
+        # calibration dims).
         self._load_session_meta_from_disk()
         self._load_from_disk()
 
@@ -432,6 +433,30 @@ class State:
     def _result_path(self, session_id: str) -> Path:
         return self._result_dir / f"session_{session_id}.json"
 
+    def _load_cached_result_for_session(self, session_id: str, pitch_paths: list[Path]) -> tuple[SessionResult | None, str]:
+        path = self._result_path(session_id)
+        if not path.exists():
+            return None, "missing"
+        try:
+            result_mtime_ns = path.stat().st_mtime_ns
+        except OSError as e:
+            return None, f"stat_error:{e}"
+        latest_pitch_mtime_ns = 0
+        for pitch_path in pitch_paths:
+            try:
+                latest_pitch_mtime_ns = max(latest_pitch_mtime_ns, pitch_path.stat().st_mtime_ns)
+            except OSError as e:
+                return None, f"pitch_stat_error:{e}"
+        if latest_pitch_mtime_ns > result_mtime_ns:
+            return None, "stale"
+        try:
+            result = SessionResult.model_validate(json.loads(path.read_text()))
+        except Exception as e:
+            return None, f"invalid:{str(e)[:120]}"
+        if result.session_id != session_id:
+            return None, f"session_id_mismatch:{result.session_id}"
+        return result, "cached"
+
     def _load_from_disk(self) -> None:
         # Corrupt / schema-incompatible pitch JSONs get logged at ERROR
         # (was WARNING — masqueraded as benign) so the operator notices
@@ -440,6 +465,7 @@ class State:
         # silent disappearance of sessions impossible to miss.
         backfill: list[tuple[Path, tuple[str, str]]] = []
         load_failures: list[tuple[str, str]] = []
+        pitch_paths_by_session: dict[str, list[Path]] = {}
         for path in sorted(self._pitch_dir.glob("session_*.json")):
             try:
                 obj = json.loads(path.read_text())
@@ -459,6 +485,7 @@ class State:
                     pitch.created_at = self._time_fn()
                 backfill.append((path, (pitch.camera_id, pitch.session_id)))
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
+            pitch_paths_by_session.setdefault(pitch.session_id, []).append(path)
 
         for path, key in backfill:
             pitch = self.pitches.get(key)
@@ -469,16 +496,29 @@ class State:
             except OSError as e:
                 logger.warning("created_at backfill write failed %s: %s", path, e)
 
-        seen_sessions = {sid for _, sid in self.pitches.keys()}
+        seen_sessions = set(pitch_paths_by_session)
+        cached_count = 0
+        rebuilt_by_reason: dict[str, int] = {}
         for sid in sorted(seen_sessions):
-            self.results[sid] = session_results.rebuild_result_for_session(self, sid)
+            cached, reason = self._load_cached_result_for_session(sid, pitch_paths_by_session[sid])
+            if cached is not None:
+                self.results[sid] = cached
+                cached_count += 1
+                continue
+            rebuilt_by_reason[reason] = rebuilt_by_reason.get(reason, 0) + 1
+            result = session_results.rebuild_result_for_session(self, sid)
+            self.results[sid] = result
+            self._atomic_write(self._result_path(sid), result.model_dump_json())
 
         if self.pitches:
             logger.info(
-                "restored %d pitch payloads across %d sessions from %s",
+                "restored %d pitch payloads across %d sessions from %s; result cache cached=%d rebuilt=%d reasons=%s",
                 len(self.pitches),
                 len(seen_sessions),
                 self._data_dir,
+                cached_count,
+                sum(rebuilt_by_reason.values()),
+                rebuilt_by_reason,
             )
         if load_failures:
             logger.error(
@@ -1714,9 +1754,9 @@ class State:
         with self._lock:
             return self._runtime_settings.sync_params
 
-    def set_sync_params(self, params: SyncParams) -> None:
+    def set_sync_params(self, params: SyncParams) -> SyncParams:
         with self._lock:
-            self._runtime_settings.sync_params = params
+            return self._runtime_settings.set_sync_params(params)
 
     def heartbeat_interval_s(self) -> float:
         with self._lock:

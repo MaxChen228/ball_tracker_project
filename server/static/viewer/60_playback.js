@@ -1,3 +1,35 @@
+  const VIEWER_PLAYBACK_RATE_KEY = "ball_tracker_viewer_playback_rate";
+
+  function viewerPlaybackRates() {
+    return Array.from(speedGroup.querySelectorAll("button[data-rate]"))
+      .map((b) => Number(b.dataset.rate))
+      .filter((r) => Number.isFinite(r) && r > 0);
+  }
+
+  function readViewerPlaybackRate() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(VIEWER_PLAYBACK_RATE_KEY);
+      const parsed = Number(raw);
+      if (viewerPlaybackRates().some((r) => Math.abs(r - parsed) < 1e-6)) return parsed;
+    } catch {}
+    return 1.0;
+  }
+
+  function persistViewerPlaybackRate(rate) {
+    try {
+      if (window.localStorage) {
+        window.localStorage.setItem(VIEWER_PLAYBACK_RATE_KEY, String(rate));
+      }
+    } catch {}
+  }
+
+  function paintViewerPlaybackRates() {
+    for (const b of speedGroup.querySelectorAll("button[data-rate]")) {
+      const r = Number(b.dataset.rate);
+      b.classList.toggle("active", Math.abs(r - currentRate) < 1e-6);
+    }
+  }
+
   function markManualSeekWindow(ms = 180) {
     suppressVideoFeedbackUntilMs = Math.max(suppressVideoFeedbackUntilMs, performance.now() + ms);
   }
@@ -263,15 +295,17 @@
   stepLastBtn.addEventListener("click", () => stepFrames(+TOTAL_FRAMES));
   stepBackBtn.addEventListener("click", () => stepFrames(-1));
   stepFwdBtn.addEventListener("click", () => stepFrames(+1));
-  let currentRate = 1.0;
+  let currentRate = readViewerPlaybackRate();
+  paintViewerPlaybackRates();
   speedGroup.addEventListener("click", (ev) => {
     const btn = ev.target.closest("button[data-rate]");
     if (!btn) return;
     const r = parseFloat(btn.dataset.rate);
     if (!isFinite(r) || r <= 0) return;
     currentRate = r;
+    persistViewerPlaybackRate(r);
     resetVideoPlaybackRates();
-    for (const b of speedGroup.querySelectorAll("button")) b.classList.toggle("active", b === btn);
+    paintViewerPlaybackRates();
   });
   window.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") {

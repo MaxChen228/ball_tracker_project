@@ -79,8 +79,11 @@ def _reset_state() -> None:
     main.state.sync._last_sync_result = None
     main.state.sync._sync_cooldown_until = 0.0
     # Ensure default SyncParams for predictable windowed detection windows.
-    main.state.set_sync_params(SyncParams())
+    with main.state._lock:
+        main.state._runtime_settings.sync_params = SyncParams()
     yield
+    with main.state._lock:
+        main.state._runtime_settings.sync_params = SyncParams()
 
 
 def _heartbeat_both() -> None:
@@ -219,7 +222,8 @@ def test_audio_upload_persists_wav_to_disk(tmp_path: Path) -> None:
     assert persisted.read_bytes() == wav
 
 
-def test_sync_params_endpoint() -> None:
+def test_sync_params_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(main.app)
     # GET current params
     r = client.get("/sync/params")
@@ -239,3 +243,20 @@ def test_sync_params_endpoint() -> None:
     # Verify persisted
     r3 = client.get("/sync/params")
     assert r3.json()["emit_a_at_s"] == [0.4, 0.6]
+
+
+def test_sync_params_persist_across_state_restart(tmp_path: Path) -> None:
+    s1 = main.State(data_dir=tmp_path)
+    s1.set_sync_params(SyncParams(
+        emit_a_at_s=[0.4, 0.6],
+        emit_b_at_s=[2.0, 2.2],
+        record_duration_s=5.0,
+        search_window_s=0.25,
+    ))
+
+    s2 = main.State(data_dir=tmp_path)
+    params = s2.sync_params()
+    assert params.emit_a_at_s == [0.4, 0.6]
+    assert params.emit_b_at_s == [2.0, 2.2]
+    assert params.record_duration_s == 5.0
+    assert params.search_window_s == 0.25

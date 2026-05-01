@@ -10,6 +10,7 @@ import pytest
 
 import main
 import pairing
+import session_results
 from cleanup_old_sessions import cleanup_expired_sessions
 from conftest import sid
 from triangulate import (
@@ -119,8 +120,8 @@ def test_triangulate_sweeps_ball_path():
     assert max(residuals) < 1e-6
 
 
-def test_persistence_reloads_state_across_process_restart(tmp_path):
-    """State pointed at an existing data dir re-triangulates stored pitches."""
+def test_persistence_reloads_state_across_process_restart(tmp_path, monkeypatch):
+    """State pointed at an existing data dir restores the persisted result cache."""
     K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
     P_true = np.array([0.2, 0.5, 1.1])
     ts = np.array([0.0])
@@ -135,6 +136,11 @@ def test_persistence_reloads_state_across_process_restart(tmp_path):
     s1.record(payload_b)
     del s1
 
+    def fail_rebuild(*_args, **_kwargs):
+        raise AssertionError("fresh result cache should not rebuild on restart")
+
+    monkeypatch.setattr(session_results, "rebuild_result_for_session", fail_rebuild)
+
     s2 = main.State(data_dir=tmp_path)
     latest = s2.latest()
     assert latest is not None
@@ -145,6 +151,41 @@ def test_persistence_reloads_state_across_process_restart(tmp_path):
     assert abs(pt.x_m - P_true[0]) < 1e-6
     assert abs(pt.y_m - P_true[1]) < 1e-6
     assert abs(pt.z_m - P_true[2]) < 1e-6
+
+
+def test_state_rebuilds_result_cache_when_pitch_is_newer(tmp_path, monkeypatch):
+    K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
+    ts = np.array([0.0])
+    path = np.array([[0.2, 0.5, 1.1]])
+    session_id = sid(43)
+    payload_a = _direct_payload_with_frames("A", session_id, path, ts, R_a, t_a, H_a, K)
+    payload_b = _direct_payload_with_frames("B", session_id, path, ts, R_b, t_b, H_b, K)
+
+    s1 = main.State(data_dir=tmp_path)
+    s1.record(payload_a)
+    s1.record(payload_b)
+    result_path = tmp_path / "results" / f"session_{session_id}.json"
+    pitch_path = tmp_path / "pitches" / f"session_{session_id}_A.json"
+    pitch_mtime_ns = pitch_path.stat().st_mtime_ns
+    old_result_mtime_ns = max(1, pitch_mtime_ns - 1_000_000)
+    os.utime(result_path, ns=(old_result_mtime_ns, old_result_mtime_ns))
+
+    calls = 0
+    original = session_results.rebuild_result_for_session
+
+    def counted_rebuild(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(session_results, "rebuild_result_for_session", counted_rebuild)
+
+    s2 = main.State(data_dir=tmp_path)
+    assert calls == 1
+    latest = s2.latest()
+    assert latest is not None
+    assert latest.session_id == session_id
+    assert result_path.stat().st_mtime_ns >= pitch_path.stat().st_mtime_ns
 
 
 # --------------------------- API smoke --------------------------------------
