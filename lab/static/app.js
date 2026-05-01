@@ -37,6 +37,7 @@ const state = {
   scrubMode: false,
   queueRunning: false,
   queueSse: null,
+  queueSnapshot: { running: false, current: null, done: 0, ready: 0, total: 0 },
   // Pre-tinted canvases keyed by source frame index. We build one per mask
   // (sync, ~5ms each) the first time we see it, then `showMaskFor` blits it
   // in O(1). Without this cache, every arrow-key step re-decoded the PNG and
@@ -965,6 +966,7 @@ async function bootstrap() {
   el.btnRescan.addEventListener("click", rescanItems);
   el.btnQueue.addEventListener("click", toggleQueue);
   startQueueSse();
+  fetchQueueStatus();
   window.addEventListener("hashchange", onHashChange);
   const slug = pickInitialSlug(state.items);
   if (!slug) {
@@ -1030,7 +1032,9 @@ function renderSidebar() {
 function updateQueueButton() {
   const ready = state.items.filter(it => effectiveStatus(it) === "ready").length;
   if (state.queueRunning) {
-    el.btnQueue.textContent = "■ Stop Queue";
+    const snap = state.queueSnapshot;
+    const tail = snap.total > 0 ? ` ${snap.done}/${snap.total}` : "";
+    el.btnQueue.textContent = `■ Stop Queue${tail}`;
     el.btnQueue.classList.add("running");
     el.btnQueue.disabled = false;
   } else {
@@ -1075,6 +1079,27 @@ async function toggleQueue() {
   }
 }
 
+function applyQueueSnapshot(snap) {
+  state.queueSnapshot = {
+    running: !!snap.running,
+    current: snap.current ?? null,
+    done: snap.done ?? 0,
+    ready: snap.ready ?? 0,
+    total: snap.total ?? 0,
+  };
+  state.queueRunning = state.queueSnapshot.running;
+  updateQueueButton();
+  renderSidebar();
+}
+
+async function fetchQueueStatus() {
+  try {
+    const r = await fetch(`${API_BASE}/api/queue/status`);
+    if (!r.ok) return;
+    applyQueueSnapshot(await r.json());
+  } catch (_) { /* SSE will also deliver state */ }
+}
+
 function startQueueSse() {
   if (state.queueSse) { state.queueSse.close(); state.queueSse = null; }
   const es = new EventSource(`${API_BASE}/api/items/__queue__/events`);
@@ -1082,8 +1107,7 @@ function startQueueSse() {
   es.addEventListener("queue", (ev) => {
     let payload = {};
     try { payload = JSON.parse(ev.data); } catch (_) { return; }
-    state.queueRunning = !!payload.running;
-    updateQueueButton();
+    applyQueueSnapshot(payload);
   });
   es.onerror = () => { /* browser auto-reconnects */ };
 }

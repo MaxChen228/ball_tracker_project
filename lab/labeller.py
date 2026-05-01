@@ -462,18 +462,55 @@ STORE = ManifestStore()
 BUS = SseBus()
 PROP_THREADS: dict[str, threading.Thread] = {}
 
+
+def _recover_crashed_propagations() -> None:
+    """If the previous server died mid-propagate, items remain stamped
+    `running` and the queue's `idle`-filter would skip them forever. Reset
+    those to `idle` so Run Queue picks up where we left off."""
+    recovered: list[str] = []
+    for it in STORE.list():
+        if it.get("propagate_status") == "running":
+            STORE.update(it["slug"], propagate_status="idle")
+            recovered.append(it["slug"])
+    if recovered:
+        print(f"[labeller] recovered {len(recovered)} crashed propagations: {recovered}", flush=True)
+
+
+_recover_crashed_propagations()
+
 # Queue state — one global queue runner thread; cancel flag is set by user.
 _QUEUE_LOCK = threading.Lock()
 _QUEUE_THREAD: threading.Thread | None = None
 _QUEUE_CANCEL = threading.Event()
+_QUEUE_CURRENT: str | None = None  # slug of the item _queue_runner is currently propagating
+
+
+def _queue_snapshot() -> dict[str, Any]:
+    with _QUEUE_LOCK:
+        running = _QUEUE_THREAD is not None and _QUEUE_THREAD.is_alive()
+        current = _QUEUE_CURRENT
+    items = STORE.list()
+    seeded = [it for it in items if it.get("seed_frame") is not None]
+    done = sum(1 for it in seeded if it.get("propagate_status") == "done")
+    ready = sum(1 for it in seeded
+                if it.get("propagate_status") == "idle"
+                and it["slug"] != current)
+    return {
+        "running": running,
+        "current": current,
+        "done": done,
+        "ready": ready,
+        "total": len(seeded),
+    }
 
 
 def _queue_runner() -> None:
     """Iterate ready items (seed set, status idle), propagate one at a time.
     Re-queries manifest each iteration so newly-readied items get picked up."""
+    global _QUEUE_CURRENT
     print("[labeller] queue: starting", flush=True)
     unload_seeder()
-    BUS.publish("__queue__", "queue", {"running": True})
+    BUS.publish("__queue__", "queue", _queue_snapshot())
     try:
         while not _QUEUE_CANCEL.is_set():
             items = STORE.list()
@@ -485,7 +522,9 @@ def _queue_runner() -> None:
             slug = ready[0]["slug"]
             print(f"[labeller] queue: propagate {slug} ({len(ready)} ready)", flush=True)
             STORE.update(slug, propagate_status="running")
-            BUS.publish("__queue__", "queue", {"running": True, "current": slug, "remaining": len(ready)})
+            with _QUEUE_LOCK:
+                _QUEUE_CURRENT = slug
+            BUS.publish("__queue__", "queue", _queue_snapshot())
             try:
                 run_propagate(slug)  # blocks until done / failed / cancelled
             except Exception as e:
@@ -501,7 +540,9 @@ def _queue_runner() -> None:
                 break
         print("[labeller] queue: drained", flush=True)
     finally:
-        BUS.publish("__queue__", "queue", {"running": False})
+        with _QUEUE_LOCK:
+            _QUEUE_CURRENT = None
+        BUS.publish("__queue__", "queue", _queue_snapshot())
         _QUEUE_CANCEL.clear()
 
 
@@ -787,6 +828,9 @@ class Handler(BaseHTTPRequestHandler):
             STORE.scan_sources()
             self._send_json(HTTPStatus.OK, {"items": [self._public_item(it) for it in STORE.list()]})
             return
+        if p == "/api/queue/status":
+            self._send_json(HTTPStatus.OK, _queue_snapshot())
+            return
         if p == "/api/models":
             self._send_json(HTTPStatus.OK, {
                 "available": AVAILABLE_MODELS,
@@ -871,9 +915,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"ok": True})
             return
         if url.path == "/api/queue/status":
-            with _QUEUE_LOCK:
-                running = _QUEUE_THREAD is not None and _QUEUE_THREAD.is_alive()
-            self._send_json(HTTPStatus.OK, {"running": running})
+            self._send_json(HTTPStatus.OK, _queue_snapshot())
             return
         if url.path == "/api/models/unload_seed":
             unload_seeder()
