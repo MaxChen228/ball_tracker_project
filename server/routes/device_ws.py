@@ -261,7 +261,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 # detection went through fit_ballistic_ransac (since
                 # retired) + a disk write, hammering both CPU and disk
                 # 50-200×/pitch for no UI gain. Streaming clients already
-                # see incremental updates via the `point` SSE event above;
+                # see incremental updates via the `points` SSE event above;
                 # the authoritative SessionResult is rebuilt at cycle_end
                 # (see below) and viewer GET /results/{sid} rebuilds on
                 # demand if it lands mid-stream (state.get).

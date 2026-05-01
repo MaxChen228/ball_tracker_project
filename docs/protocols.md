@@ -157,7 +157,7 @@ Sent at capture rate (240 Hz on the binned 240 fps formats) while the session is
 type: "frame"
 i: int                               # frame_index (monotonic per-camera)
 ts: float                            # timestamp_s on iOS session clock
-sid: str                             # session id; empty/missing → frame is silently dropped (no fallback)
+sid: str                             # session id; empty/missing → handler raises loud (schema bug)
 candidates: list[{
     px: float,                       # blob centroid X in pixels
     py: float,                       # blob centroid Y in pixels
