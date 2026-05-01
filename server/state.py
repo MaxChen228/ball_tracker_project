@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import secrets
 import time
 from collections import deque
@@ -48,7 +47,6 @@ from state_calibration import (
     CalibrationStore,
     CALIBRATION_FRAME_TTL_S as _CALIBRATION_FRAME_TTL_S,
     DeviceIntrinsicsStore,
-    scale_intrinsics_to,
     validate_calibration_snapshot as _validate_calibration_snapshot,
 )
 from state_devices import DeviceRegistry
@@ -348,6 +346,42 @@ class State:
         respect the same `_lock` invariants the legacy `_processing`
         path relied on."""
         return self._processing
+
+    @property
+    def sync(self) -> SyncCoordinator:
+        """Public accessor for the sync coordinator (chirp + mutual sync)."""
+        return self._sync
+
+    @property
+    def preview(self) -> PreviewBuffer:
+        """Public accessor for the live preview JPEG buffer."""
+        return self._preview
+
+    @property
+    def markers(self) -> MarkerRegistryDB:
+        """Public accessor for the marker registry DB."""
+        return self._marker_registry
+
+    def calibration_path(self, camera_id: str) -> Path:
+        """Public accessor for the on-disk calibration JSON path of a camera."""
+        return self._calibration_path(camera_id)
+
+    def pitch_path(self, camera_id: str, session_id: str) -> Path:
+        """Public accessor for the on-disk pitch JSON path."""
+        return self._pitch_path(camera_id, session_id)
+
+    def session_paths_for(self, session_id: str) -> set[DetectionPath] | None:
+        """Return the detection paths frozen on a session at arm time, or
+        None if the session is unknown. Holds `_lock` during lookup."""
+        with self._lock:
+            sess = self._lookup_session_locked(session_id)
+            return set(sess.paths) if sess is not None else None
+
+    def default_detection_paths(self) -> set[DetectionPath]:
+        """Return a copy of the operator's currently-selected default
+        detection paths. Holds `_lock` during read."""
+        with self._lock:
+            return set(self._runtime_settings.default_paths)
 
     def now(self) -> float:
         """Public accessor for the injectable wall-clock used across

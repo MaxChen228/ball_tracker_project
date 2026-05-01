@@ -5,11 +5,10 @@ Every pitch carries two parallel frame buckets (`frames_live`,
 `(pitch, path)` pair, which bucket is the authoritative source and how to
 project the pitch onto a single path for triangulation.
 
-The pure helpers (`normalize_paths`, `has_server_frames`) depend on nothing
-and are safe to call anywhere. The state-dependent helpers
-(`paths_for_pitch`, `get_path_frames`, `pitch_with_path_frames`) read
-`state._current_session` / `state._recently_ended_sessions` /
-`state._runtime_settings` under `state._lock`.
+The pure helpers (`normalize_paths`, `has_server_frames`, `get_path_frames`,
+`pitch_with_path_frames`) depend on nothing and are safe to call anywhere.
+The state-dependent helper (`paths_for_pitch`) reads via the public State
+accessors `session_paths_for` / `default_detection_paths`.
 """
 
 from __future__ import annotations
@@ -50,23 +49,19 @@ def paths_for_pitch(state: "State", pitch: PitchPayload) -> set[DetectionPath]:
     explicit = normalize_paths(pitch.paths)
     if explicit:
         return explicit
-    with state._lock:
-        session = state._lookup_session_locked(pitch.session_id)
-        if session is not None:
-            return set(session.paths)
-        return set(state._runtime_settings.default_paths)
+    sess_paths = state.session_paths_for(pitch.session_id)
+    if sess_paths is not None:
+        return sess_paths
+    return state.default_detection_paths()
 
 
-def get_path_frames(
-    state: "State", pitch: PitchPayload, path: DetectionPath
-) -> list[FramePayload]:
+def get_path_frames(pitch: PitchPayload, path: DetectionPath) -> list[FramePayload]:
     if path == DetectionPath.live:
         return list(pitch.frames_live)
     return list(pitch.frames_server_post)
 
 
 def pitch_with_path_frames(
-    state: "State",
     pitch: PitchPayload,
     path: DetectionPath,
 ) -> PitchPayload:
@@ -75,5 +70,5 @@ def pitch_with_path_frames(
     # consumers (reconstruct.build_scene, ray builders) can read a single
     # field regardless of which path produced the frames. The clone's other
     # bucket is left intact since it isn't read past this point.
-    clone.frames_server_post = get_path_frames(state, pitch, path)
+    clone.frames_server_post = get_path_frames(pitch, path)
     return clone
