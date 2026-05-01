@@ -9,6 +9,7 @@ their own home.
 from __future__ import annotations
 
 import asyncio
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -16,6 +17,24 @@ import session_results
 from schemas import DetectionPath, FramePayload
 
 router = APIRouter()
+
+# Throttle `frame_count` SSE emits to ~1 Hz per (sid, cam). At 240 fps × 2
+# cams the raw rate is ~480 events/sec which floods the dashboard event
+# loop with no operator-visible benefit (the panel only renders integer
+# counts). One emit per second per cam keeps the UI live without the cost.
+# Single-task asyncio context → plain dict mutation is race-free.
+_FRAME_COUNT_EMIT_INTERVAL_S = 1.0
+_last_frame_count_emit_ts: dict[tuple[str, str], float] = {}
+
+
+def _should_emit_frame_count(session_id: str, camera_id: str) -> bool:
+    key = (session_id, camera_id)
+    now = time.monotonic()
+    last = _last_frame_count_emit_ts.get(key)
+    if last is None or (now - last) >= _FRAME_COUNT_EMIT_INTERVAL_S:
+        _last_frame_count_emit_ts[key] = now
+        return True
+    return False
 
 
 @router.websocket("/ws/device/{camera_id}")
@@ -50,7 +69,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
         # If a mutual-sync run is active when a phone (re)connects, push
         # the sync_run signal so it can join late instead of sitting idle
         # until the run times out.
-        active_sync = state._sync.current_sync()
+        active_sync = state.sync.current_sync()
         if active_sync is not None and camera_id not in active_sync.reports:
             _p = state.sync_params()
             await device_ws.send(camera_id, {
@@ -102,7 +121,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 )
                 telem = msg.get("sync_telemetry")
                 if isinstance(telem, dict):
-                    state._sync.record_sync_telemetry(camera_id, telem)
+                    state.sync.record_sync_telemetry(camera_id, telem)
                 # SSE: broadcast heartbeat-derived fields (battery, ws
                 # latency, last_seen) so the dashboard can update the
                 # Devices card without waiting for the 5 s /status fallback.
@@ -114,7 +133,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 # id doesn't match the active expected id.
                 _ws_snap = device_ws.snapshot().get(camera_id)
                 _now = state.now()
-                _expected = state._sync.expected_sync_id_snapshot().get(camera_id)
+                _expected = state.sync.expected_sync_id_snapshot().get(camera_id)
                 _d_snapshot = state.device_snapshot(camera_id)
                 _gated = _gated_time_synced(_d_snapshot, _expected, _now)
                 await sse_hub.broadcast(
@@ -166,64 +185,83 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 if "sid" not in msg or not msg["sid"]:
                     raise ValueError(f"frame message missing required 'sid' (cam={camera_id})")
                 session_id = str(msg["sid"])
-                new_points, counts, resolved_frame = await asyncio.to_thread(
-                    state.ingest_live_frame,
-                    camera_id,
-                    session_id,
-                    frame,
-                )
-                rays = await asyncio.to_thread(
-                    state.live_rays_for_frame,
-                    camera_id,
-                    session_id,
-                    resolved_frame,
-                )
-                await sse_hub.broadcast(
-                    "frame_count",
-                    {
-                        "sid": session_id,
-                        "cam": camera_id,
-                        "path": DetectionPath.live.value,
-                        "count": counts.get(camera_id, 0),
-                    },
-                )
-                # Fan-out: one SSE 'ray' event per candidate so the
-                # dashboard 3D scene can apply the same cost-threshold
-                # filter as the post-pitch viewer. Pre-fan-out we
-                # emitted only the winner-dot ray here.
-                for ray in rays:
+                # Combined hot-path: ingest + ray projection in one
+                # to_thread hop. Both methods take state._lock briefly
+                # (ingest writes the live buffer, live_rays_for_frame
+                # reads cal/device under the same lock) so there's no
+                # benefit to two separate thread hops at 240 fps × 2 cam.
+                def _ingest_and_project():
+                    new_points, counts, resolved_frame = state.ingest_live_frame(
+                        camera_id, session_id, frame,
+                    )
+                    rays = state.live_rays_for_frame(
+                        camera_id, session_id, resolved_frame,
+                    )
+                    return new_points, counts, rays
+
+                new_points, counts, rays = await asyncio.to_thread(_ingest_and_project)
+                # frame_count throttled to ~1 Hz per (sid, cam). Raw rate
+                # at 240 fps × 2 cam is ~480 events/sec which only drives
+                # an integer counter in the dashboard panel — wasted work.
+                if _should_emit_frame_count(session_id, camera_id):
                     await sse_hub.broadcast(
-                        "ray",
+                        "frame_count",
                         {
                             "sid": session_id,
                             "cam": camera_id,
                             "path": DetectionPath.live.value,
-                            "frame_index": ray.frame_index,
-                            "t_rel_s": ray.t_rel_s,
-                            "origin": ray.origin,
-                            "endpoint": ray.endpoint,
-                            "source": ray.source,
-                            "cand_idx": ray.cand_idx,
-                            "cost": ray.cost,
+                            "count": counts.get(camera_id, 0),
                         },
                     )
-                for point in new_points:
+                # Coalesced fan-out: one 'rays' event carrying the full
+                # candidate array per frame instead of N broadcasts. Saves
+                # ~3k JSON encodes/sec at 240 fps × 2 cam vs the previous
+                # per-candidate emit. Dashboard listener iterates the
+                # array. The dashboard 3D scene applies the same
+                # cost-threshold filter as the post-pitch viewer.
+                if rays:
                     await sse_hub.broadcast(
-                        "point",
+                        "rays",
+                        {
+                            "sid": session_id,
+                            "cam": camera_id,
+                            "path": DetectionPath.live.value,
+                            "rays": [
+                                {
+                                    "frame_index": r.frame_index,
+                                    "t_rel_s": r.t_rel_s,
+                                    "origin": r.origin,
+                                    "endpoint": r.endpoint,
+                                    "source": r.source,
+                                    "cand_idx": r.cand_idx,
+                                    "cost": r.cost,
+                                }
+                                for r in rays
+                            ],
+                        },
+                    )
+                if new_points:
+                    await sse_hub.broadcast(
+                        "points",
                         {
                             "sid": session_id,
                             "path": DetectionPath.live.value,
-                            "x": point.x_m,
-                            "y": point.y_m,
-                            "z": point.z_m,
-                            "t_rel_s": point.t_rel_s,
+                            "points": [
+                                {
+                                    "x": p.x_m,
+                                    "y": p.y_m,
+                                    "z": p.z_m,
+                                    "t_rel_s": p.t_rel_s,
+                                }
+                                for p in new_points
+                            ],
                         },
                     )
                 # Per-frame rebuild + atomic JSON write was removed: each
                 # detection went through fit_ballistic_ransac (since
                 # retired) + a disk write, hammering both CPU and disk
                 # 50-200×/pitch for no UI gain. Streaming clients already
-                # see incremental updates via the `point` SSE event above;
+                # see incremental updates via the `points` SSE event above;
                 # the authoritative SessionResult is rebuilt at cycle_end
                 # (see below) and viewer GET /results/{sid} rebuilds on
                 # demand if it lands mid-stream (state.get).
@@ -280,7 +318,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
         # Also clear any live preview request — there's no client to push
         # to anymore, and leaving the TTL alive would re-arm the phone the
         # instant it reconnects.
-        state._preview.request(camera_id, enabled=False)
+        state.preview.request(camera_id, enabled=False)
         await sse_hub.broadcast(
             "device_status",
             {"cam": camera_id, "online": False, "ws_connected": False},

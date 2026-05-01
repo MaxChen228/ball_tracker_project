@@ -121,4 +121,4 @@ def _render_burst_params_body(sync_params: dict[str, Any] | None) -> str:
     )
 
 
-from render_sync_page import render_setup_html, render_sync_html
+from render_sync_page import render_setup_html, render_sync_html  # noqa: F401, E402

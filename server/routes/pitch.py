@@ -13,7 +13,6 @@ import session_results
 from detection import HSVRange, ShapeGate
 from pipeline import ProcessingCanceled
 from schemas import (
-    DetectionPath,
     HSVRangePayload,
     PitchPayload,
     SessionResult,

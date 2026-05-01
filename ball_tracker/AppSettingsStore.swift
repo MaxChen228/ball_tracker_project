@@ -1,4 +1,5 @@
 import Foundation
+import os.log
 
 struct AppSettings {
     var serverIP: String
@@ -15,8 +16,12 @@ enum AppSettingsStore {
 
     static func load() -> AppSettings {
         let defaults = UserDefaults.standard
-        let serverIP = defaults.string(forKey: keyServerIP) ?? "192.168.1.100"
-        let cameraRole = defaults.string(forKey: keyCameraRole) ?? "A"
+        let serverIP = defaults.string(forKey: keyServerIP) ?? "192.168.50.106"
+        let cameraRoleStored = defaults.string(forKey: keyCameraRole)
+        if cameraRoleStored == nil {
+            os_log("AppSettingsStore: cameraRole not set — defaulting to A. SET THIS PER DEVICE.", type: .error)
+        }
+        let cameraRole = cameraRoleStored ?? "A"
         return AppSettings(serverIP: serverIP, cameraRole: cameraRole)
     }
 

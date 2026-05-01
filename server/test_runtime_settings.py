@@ -351,7 +351,7 @@ def test_preview_push_rejected_when_not_requested():
                     headers={"Content-Type": "image/jpeg"})
     assert r.status_code == 409
     # Buffer must not have stored anything.
-    assert main.state._preview.latest("A") is None
+    assert main.state.preview.latest("A") is None
 
 
 def test_preview_push_and_fetch_round_trip():
@@ -375,7 +375,7 @@ def test_preview_push_and_fetch_round_trip():
     # Disable → flag drops AND cached frame is cleared.
     r = client.post("/camera/A/preview_request", json={"enabled": False})
     assert r.status_code == 200 and r.json()["enabled"] is False
-    assert main.state._preview.latest("A") is None
+    assert main.state.preview.latest("A") is None
     r = client.get("/camera/A/preview")
     assert r.status_code == 404
 
@@ -387,16 +387,16 @@ def test_preview_request_flag_persists_without_ttl(tmp_path, monkeypatch):
     def fake_time() -> float:
         return clock[0]
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
-    main.state._preview.request("A", enabled=True)
-    assert main.state._preview.is_requested("A")
+    main.state.preview.request("A", enabled=True)
+    assert main.state.preview.is_requested("A")
     # Jump an hour into the future — flag must NOT auto-expire.
     clock[0] += 3600.0
-    assert main.state._preview.is_requested("A")
-    assert main.state._preview.requested_map() == {"A": True}
+    assert main.state.preview.is_requested("A")
+    assert main.state.preview.requested_map() == {"A": True}
     # Explicit off — flag drops.
-    main.state._preview.request("A", enabled=False)
-    assert not main.state._preview.is_requested("A")
-    assert main.state._preview.requested_map() == {}
+    main.state.preview.request("A", enabled=False)
+    assert not main.state.preview.is_requested("A")
+    assert main.state.preview.requested_map() == {}
 
 
 def test_preview_frame_expires_after_age_limit(tmp_path, monkeypatch):
@@ -404,12 +404,12 @@ def test_preview_frame_expires_after_age_limit(tmp_path, monkeypatch):
     def fake_time() -> float:
         return clock[0]
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
-    main.state._preview.request("A", enabled=True)
+    main.state.preview.request("A", enabled=True)
     jpeg = _minimal_jpeg()
-    assert main.state._preview.push("A", jpeg, ts=clock[0]) is True
-    assert main.state._preview.latest("A", max_age_s=main._PREVIEW_FRAME_MAX_AGE_S) == (jpeg, clock[0])
+    assert main.state.preview.push("A", jpeg, ts=clock[0]) is True
+    assert main.state.preview.latest("A", max_age_s=main._PREVIEW_FRAME_MAX_AGE_S) == (jpeg, clock[0])
     clock[0] += main._PREVIEW_FRAME_MAX_AGE_S + 0.1
-    assert main.state._preview.latest("A", max_age_s=main._PREVIEW_FRAME_MAX_AGE_S) is None
+    assert main.state.preview.latest("A", max_age_s=main._PREVIEW_FRAME_MAX_AGE_S) is None
 
 
 def test_preview_oversize_rejected_413():
@@ -420,7 +420,7 @@ def test_preview_oversize_rejected_413():
     r = client.post("/camera/A/preview_frame", content=huge,
                     headers={"Content-Type": "image/jpeg"})
     assert r.status_code == 413
-    assert main.state._preview.latest("A") is None
+    assert main.state.preview.latest("A") is None
 
 
 def test_status_surfaces_preview_requested_map():

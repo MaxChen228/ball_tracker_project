@@ -25,7 +25,6 @@ from scene_runtime import (
     assert_scene_runtime_present,
     scene_runtime_html,
     scene_theme,
-    scene_theme_json,
     vendor_files_present,
 )
 

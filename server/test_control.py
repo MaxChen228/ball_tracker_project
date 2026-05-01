@@ -8,7 +8,6 @@ autouse `_reset_main_state` fixture from `conftest.py`.
 """
 from __future__ import annotations
 
-import json as _json
 
 import numpy as np
 import pytest
