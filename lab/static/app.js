@@ -343,6 +343,19 @@ async function loadMaskForFrame(frame) {
   img.src = url;
 }
 
+function repaintOverlayForCurrentFrame() {
+  const f = currentFrame();
+  const url = maskUrlForFrame(f);
+  if (url != null) {
+    loadMaskForFrame(f);
+    return;
+  }
+  clearOverlay();
+  if (f === state.seedFrame && state.seedPoint) {
+    drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+  }
+}
+
 async function fetchItems() {
   const r = await fetch(`${API_BASE}/api/items`);
   if (!r.ok) throw new Error(`/api/items HTTP ${r.status}`);
@@ -455,7 +468,7 @@ function startSse() {
     state.propMaskUrlByFrame.set(frame, maskUrl);
     state.propDoneCount = state.propMaskUrlByFrame.size;
     addDoneFill(frame);
-    if (frame === currentFrame()) loadMaskForFrame(frame);
+    if (frame === currentFrame()) repaintOverlayForCurrentFrame();
     updateStatus();
   });
   es.addEventListener("phase", (ev) => {
@@ -701,11 +714,7 @@ function flushStep() {
     state.lastDisplayedMediaTime = tbl[target];
     state.lastDisplayedFrame = target;
     el.scrubber.value = String(target);
-    if (maskUrlForFrame(target) != null) loadMaskForFrame(target);
-    else clearOverlay();
-    if (target === state.seedFrame && state.seedPoint && maskUrlForFrame(target) == null) {
-      drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
-    }
+    repaintOverlayForCurrentFrame();
     updateStatus();
   }
   console.log(`[seek] target=${target} pts=${tbl?.[target]} seekTo=${seekT.toFixed(6)}`);
@@ -769,8 +778,7 @@ async function rehydrateMasks(slug) {
       state.propExpected = (state.outFrame != null && state.inFrame != null)
         ? (state.outFrame - state.inFrame + 1) : state.propDoneCount;
     }
-    const f = currentFrame();
-    if (state.propMaskUrlByFrame.has(f)) loadMaskForFrame(f);
+    repaintOverlayForCurrentFrame();
     updateStatus();
   } catch (e) {
     console.warn("rehydrate masks failed", e);
@@ -867,13 +875,7 @@ function onDisplayedFrame(_now, metadata) {
     if (f !== state.lastDisplayedFrame) {
       state.lastDisplayedFrame = f;
       el.scrubber.value = String(f);
-      if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
-      else clearOverlay();
-      // Also redraw the click marker if we are on the seed frame, so it stays
-      // visible even after the mask reload clearRect'd it.
-      if (f === state.seedFrame && state.seedPoint && maskUrlForFrame(f) == null) {
-        drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
-      }
+      repaintOverlayForCurrentFrame();
     }
   }
   resizeOverlay();
@@ -897,9 +899,7 @@ function bindUi() {
   el.video.addEventListener("timeupdate", () => {
     if (typeof el.video.requestVideoFrameCallback === "function") return;
     if (state.fps != null) el.scrubber.value = String(currentFrame());
-    const f = currentFrame();
-    if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
-    else clearOverlay();
+    repaintOverlayForCurrentFrame();
     updateStatus();
   });
   el.video.addEventListener("click", onVideoClick);
