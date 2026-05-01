@@ -187,7 +187,8 @@ reason: str | null                   # free-form ("timeout", "user_stop", etc.) 
 Server emits SSE events for state-change broadcasts. Listeners in
 `server/static/dashboard/86_live_stream.js` handle `session_armed`,
 `frame_count`, `ray`, `point`, `path_completed`, `session_ended`,
-`device_status`, `device_heartbeat`, `calibration_changed`, and `fit`.
+`device_status`, `device_heartbeat`, `calibration_changed`, `fit`,
+`server_post_progress`, and `server_post_done`.
 
 #### `event: fit`
 
@@ -207,6 +208,41 @@ data: {
 ```
 
 `SegmentRecord` matches `server/schemas.py` exactly: `(indices, original_indices, p0[3], v0[3], t_anchor, t_start, t_end, rmse_m, speed_kph)`. Sample curves are NOT carried — clients reconstruct via `p0 + v0·τ + ½·G·τ²`.
+
+#### `event: server_post_progress`
+
+Emitted by the `run_server_post` BackgroundTask as frames are decoded and
+detected. Throttled (not every frame) to avoid saturating the SSE channel.
+Events-row and viewer progress indicators consume this to show a running
+frame count without polling.
+
+```
+event: server_post_progress
+data: {
+  "sid": str,
+  "cam": str,            # "A" or "B" — broadcasts are per-cam
+  "frames_done": int,    # frames decoded so far
+  "frames_total": int    # total MOV frame count (from probe_frame_count); null if unknown
+}
+```
+
+#### `event: server_post_done`
+
+Terminal event broadcast once the BackgroundTask finishes (success **or**
+cancellation). Dashboard events row switches the `[Cancel]` button back to
+`[Run srv]` and reloads the session row; viewer "Rerun server" button
+re-enables.
+
+```
+event: server_post_done
+data: {
+  "sid": str,
+  "cam": str,                            # "A" or "B" — broadcasts are per-cam
+  "reason": "ok" | "canceled" | "error", # note US spelling "canceled"
+  "frames_done": int,                    # frames decoded before terminal event
+  "frames_total": int                    # total MOV frame count; null if unknown
+}
+```
 
 ### Operator audit checklist (when changing wire shapes)
 
