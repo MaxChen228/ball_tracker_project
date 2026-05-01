@@ -325,7 +325,6 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
 詳見 PR #93 description「Outstanding NITs」段；主要漏掉的：
 
 - 三條 silent-fallback regression test 補上
-- `routes/pitch.py` 兩處 `state._processing` / `state._time_fn` 私屬性戳
 - iOS LiveFrameDispatcherTests fixture aspect/fill 補
 
 ---
@@ -349,9 +348,9 @@ seed 寫入並可被操作員從 dashboard `Manage…` 改寫。
 - preset library 是磁碟驅動：`data/presets/<slug>.json` 每個檔一個 preset。
   `presets.py` 只持有 `_BUILTIN_SEEDS` 種子值（tennis / blue_ball），boot
   時若檔案不存在才寫入；既有檔案永遠不被覆蓋。要還原內建 → `rm` + 重啟
-- 操作員建立的自訂 preset 走 dashboard `[+ Save as new]` / `[Manage…]`，
-  不要改 source code；CRUD endpoints `GET/POST/PUT/DELETE /presets` 已
-  曝露完整 surface
+- 操作員建立的自訂 preset 走 dashboard Apply（開 slug+label prompt → `POST
+  /presets`）或 `[Manage…]` Duplicate，不要改 source code；CRUD endpoints
+  `GET/POST/POST /presets/active/DELETE /presets` 已曝露完整 surface
 - `detection.py` docstring 寫「default 是黃綠網球」是歷史 fallback，不要
   改
 
