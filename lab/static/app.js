@@ -60,12 +60,10 @@ const state = {
 const FRAME_BITMAP_CACHE_MAX = 800;
 const FRAME_PREFETCH_CONCURRENCY = 4;
 const WARM_UP_CONCURRENCY = 16;
-// Display-only target width for decoded ImageBitmaps. The full-resolution
-// JPG (1920×1080 from a 240fps iPhone clip) costs ~5-8ms per drawImage on
-// M-series, which jams scrubber drag at 60Hz. Decoding to 960px wide cuts
-// drawImage cost ~4×. Server-side frame extraction and SAM2 propagation
-// continue to run on the full-res source MOV — this only affects the
-// browser preview.
+// Display-only target width for decoded ImageBitmaps. Full-res 1920×1080
+// JPG decodes jam scrubber drag at 60Hz on M-series; 640 cuts pixel volume
+// 9× vs source. Server-side frame extraction and SAM2 propagation still run
+// on the full-res source MOV — this only affects browser preview.
 const SCRUB_PREVIEW_MAX_W = 640;
 
 function clearSeedMask() {
@@ -668,14 +666,16 @@ async function prefetchFrames(slug) {
   await Promise.all(Array.from({ length: FRAME_PREFETCH_CONCURRENCY }, worker));
 }
 
-// Aggressive warm-up: decode every frame in [in, out] at high concurrency so
-// the user can scrub the full clip with 100% cache hits. After warm-up
-// finishes, falls through to prefetchFrames() for outward expansion.
+// Decoupled from prefetchFrames so the [in, out] range gets a dedicated
+// high-concurrency burst before any outward expansion competes for HTTP
+// slots — without this, scrubbing inside the trim range during warm-up still
+// hits cold cache.
 async function warmUpClip(slug) {
   const myToken = ++state.framePrefetchAbort;
   const lo = state.inFrame;
   const hi = state.outFrame;
   if (lo == null || hi == null) return;
+  console.assert(lo <= hi, `warmUpClip: inverted trim range lo=${lo} hi=${hi}`);
 
   const frames = [];
   for (let f = lo; f <= hi; f++) {
@@ -686,7 +686,8 @@ async function warmUpClip(slug) {
     return;
   }
 
-  state.warmUpProgress = { done: 0, total: frames.length };
+  const progress = { done: 0, total: frames.length };
+  state.warmUpProgress = progress;
   updateStatus();
 
   const aborted = () =>
@@ -700,25 +701,27 @@ async function warmUpClip(slug) {
       try {
         const bm = await fetchFrameBitmap(slug, f);
         if (aborted()) {
-          if (bm && typeof bm.close === "function") bm.close();
+          bm.close();
           return;
         }
         if (state.frameBitmapCache.has(f)) {
-          if (bm && typeof bm.close === "function") bm.close();
+          bm.close();
         } else {
           state.frameBitmapCache.set(f, bm);
           enforceFrameCacheLRU();
         }
-        state.warmUpProgress.done++;
-        updateStatus();
-      } catch (_) {
-        // non-fatal; on-demand fetch will surface real errors
+        // Guard the increment too — a superseded invocation's in-flight
+        // workers could otherwise bump the new invocation's counter past total.
+        if (!aborted()) {
+          progress.done++;
+          updateStatus();
+        }
+      } catch (e) {
+        console.warn("warmUpClip frame fetch failed", f, e);
       }
     }
   };
   await Promise.all(Array.from({ length: WARM_UP_CONCURRENCY }, worker));
-  // Only this invocation may clear progress — if we were superseded, the
-  // newer warmUpClip owns the field.
   if (myToken === state.framePrefetchAbort) {
     state.warmUpProgress = null;
     updateStatus();
