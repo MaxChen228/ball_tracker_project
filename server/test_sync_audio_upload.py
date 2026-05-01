@@ -252,6 +252,20 @@ def test_sync_params_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert r3.json()["emit_a_at_s"] == [0.4, 0.6]
 
 
+def test_sync_params_rejects_partial_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(main.app)
+
+    r = client.post("/settings/sync_params", json={
+        "record_duration_s": 5.0,
+        "search_window_s": 0.25,
+    })
+
+    assert r.status_code == 422
+    assert "missing required keys" in r.json()["detail"]
+    assert main.state.sync_params().record_duration_s == 4.0
+
+
 def test_sync_params_persist_across_state_restart(tmp_path: Path) -> None:
     s1 = main.State(data_dir=tmp_path)
     s1.set_sync_params(SyncParams(

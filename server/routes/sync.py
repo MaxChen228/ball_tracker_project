@@ -278,12 +278,15 @@ async def sync_params_set(request: Request) -> dict[str, Any]:
         body = await request.json()
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"JSON parse error: {e}") from e
-    cur = state.sync_params()
-    emit_a = body.get("emit_a_at_s", cur.emit_a_at_s)
-    emit_b = body.get("emit_b_at_s", cur.emit_b_at_s)
+    required = ("emit_a_at_s", "emit_b_at_s", "record_duration_s", "search_window_s")
+    missing = [key for key in required if key not in body]
+    if missing:
+        raise HTTPException(status_code=422, detail=f"sync_params missing required keys: {missing}")
+    emit_a = body["emit_a_at_s"]
+    emit_b = body["emit_b_at_s"]
     try:
-        dur = float(body.get("record_duration_s", cur.record_duration_s))
-        win = float(body.get("search_window_s", cur.search_window_s))
+        dur = float(body["record_duration_s"])
+        win = float(body["search_window_s"])
     except (TypeError, ValueError) as e:
         raise HTTPException(status_code=422, detail="record_duration_s and search_window_s must be numeric") from e
     if not isinstance(emit_a, list) or not isinstance(emit_b, list):
