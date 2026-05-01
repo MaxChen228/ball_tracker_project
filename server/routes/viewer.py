@@ -138,7 +138,7 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
     latest_mtime: float | None = None
     for cam_id in pitches:
         try:
-            mtime = state._pitch_path(cam_id, session_id).stat().st_mtime
+            mtime = state.pitch_path(cam_id, session_id).stat().st_mtime
         except (FileNotFoundError, OSError):
             continue
         if latest_mtime is None or mtime > latest_mtime:

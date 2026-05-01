@@ -69,7 +69,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
         # If a mutual-sync run is active when a phone (re)connects, push
         # the sync_run signal so it can join late instead of sitting idle
         # until the run times out.
-        active_sync = state._sync.current_sync()
+        active_sync = state.sync.current_sync()
         if active_sync is not None and camera_id not in active_sync.reports:
             _p = state.sync_params()
             await device_ws.send(camera_id, {
@@ -121,7 +121,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 )
                 telem = msg.get("sync_telemetry")
                 if isinstance(telem, dict):
-                    state._sync.record_sync_telemetry(camera_id, telem)
+                    state.sync.record_sync_telemetry(camera_id, telem)
                 # SSE: broadcast heartbeat-derived fields (battery, ws
                 # latency, last_seen) so the dashboard can update the
                 # Devices card without waiting for the 5 s /status fallback.
@@ -133,7 +133,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                 # id doesn't match the active expected id.
                 _ws_snap = device_ws.snapshot().get(camera_id)
                 _now = state.now()
-                _expected = state._sync.expected_sync_id_snapshot().get(camera_id)
+                _expected = state.sync.expected_sync_id_snapshot().get(camera_id)
                 _d_snapshot = state.device_snapshot(camera_id)
                 _gated = _gated_time_synced(_d_snapshot, _expected, _now)
                 await sse_hub.broadcast(
@@ -318,7 +318,7 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
         # Also clear any live preview request — there's no client to push
         # to anymore, and leaving the TTL alive would re-arm the phone the
         # instant it reconnects.
-        state._preview.request(camera_id, enabled=False)
+        state.preview.request(camera_id, enabled=False)
         await sse_hub.broadcast(
             "device_status",
             {"cam": camera_id, "online": False, "ws_connected": False},

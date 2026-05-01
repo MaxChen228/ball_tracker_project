@@ -66,7 +66,7 @@ async def camera_calibration_frame(
 async def camera_preview_frame(camera_id: str, request: Request) -> dict[str, Any]:
     from main import state
     _validate_camera_id_or_422(camera_id)
-    if not state._preview.is_requested(camera_id):
+    if not state.preview.is_requested(camera_id):
         raise HTTPException(status_code=409, detail="preview not requested")
     content_type = request.headers.get("content-type", "").lower()
     if content_type.startswith("multipart/"):
@@ -79,7 +79,7 @@ async def camera_preview_frame(camera_id: str, request: Request) -> dict[str, An
         body = await request.body()
     if not body:
         raise HTTPException(status_code=422, detail="empty body")
-    ok = state._preview.push(camera_id, bytes(body), ts=time.time())
+    ok = state.preview.push(camera_id, bytes(body), ts=time.time())
     if not ok:
         raise HTTPException(status_code=413, detail="preview frame too large")
     return {"ok": True, "bytes": len(body)}
@@ -89,7 +89,7 @@ async def camera_preview_frame(camera_id: str, request: Request) -> dict[str, An
 def camera_preview_latest(camera_id: str) -> Response:
     from main import state
     _validate_camera_id_or_422(camera_id)
-    got = state._preview.latest(camera_id, max_age_s=_PREVIEW_FRAME_MAX_AGE_S)
+    got = state.preview.latest(camera_id, max_age_s=_PREVIEW_FRAME_MAX_AGE_S)
     if got is None:
         raise HTTPException(status_code=404, detail="no preview frame")
     jpeg_bytes, _ = got
@@ -112,9 +112,9 @@ def camera_preview_mjpeg(camera_id: str) -> Response:
         tick_s = 1.0 / 10.0
         try:
             while True:
-                if not state._preview.is_requested(camera_id):
+                if not state.preview.is_requested(camera_id):
                     break
-                got = state._preview.latest(camera_id, max_age_s=_PREVIEW_FRAME_MAX_AGE_S)
+                got = state.preview.latest(camera_id, max_age_s=_PREVIEW_FRAME_MAX_AGE_S)
                 now = time.time()
                 if got is not None:
                     jpeg_bytes, ts = got
@@ -172,7 +172,7 @@ async def camera_preview_request(
         flag = True
     else:
         flag = bool(raw)
-    state._preview.request(camera_id, enabled=flag)
+    state.preview.request(camera_id, enabled=flag)
     await device_ws.send(camera_id, _settings_message_for(camera_id))
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)

@@ -86,7 +86,7 @@ def calibration_state() -> dict[str, Any]:
     cals = state.calibrations()
     scene = build_calibration_scene(cals)
     def _cal_mtime(cam_id: str) -> float | None:
-        p = state._calibration_path(cam_id)
+        p = state.calibration_path(cam_id)
         try:
             return p.stat().st_mtime
         except OSError:

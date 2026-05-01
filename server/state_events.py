@@ -280,7 +280,7 @@ def _latest_pitch_mtime(state: "State", cams_present: list[str], sid: str) -> fl
             mtime: float = cached
         else:
             try:
-                mtime = state._pitch_path(cam, sid).stat().st_mtime
+                mtime = state.pitch_path(cam, sid).stat().st_mtime
             except FileNotFoundError:
                 continue
             # Backfill the cache so a boot-loaded session converges to the
