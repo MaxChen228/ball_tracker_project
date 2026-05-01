@@ -15,9 +15,20 @@ const state = {
   seedMaskReady: false,
   propagateStatus: "idle",
   doneFrames: new Set(),
-  lastMaskUrlByFrame: new Map(),
+  seedMaskUrl: null,
+  propMaskUrlByFrame: new Map(),
   sse: null,
 };
+
+function clearSeedMask() {
+  if (state.seedMaskUrl) URL.revokeObjectURL(state.seedMaskUrl);
+  state.seedMaskUrl = null;
+}
+
+function clearPropMasks() {
+  for (const url of state.propMaskUrlByFrame.values()) URL.revokeObjectURL(url);
+  state.propMaskUrlByFrame.clear();
+}
 
 const el = {
   video: document.getElementById("video"),
@@ -113,6 +124,7 @@ function addDoneFill(frame) {
 function clearDoneFills() {
   state.doneFrames.clear();
   el.fills.innerHTML = "";
+  clearPropMasks();
 }
 
 function resizeOverlay() {
@@ -158,8 +170,14 @@ function drawMaskTinted(img) {
   ctx.drawImage(tmp, 0, 0);
 }
 
+function maskUrlForFrame(frame) {
+  if (state.propMaskUrlByFrame.has(frame)) return state.propMaskUrlByFrame.get(frame);
+  if (frame === state.seedFrame && state.seedMaskUrl) return state.seedMaskUrl;
+  return null;
+}
+
 async function loadMaskForFrame(frame) {
-  const url = state.lastMaskUrlByFrame.get(frame);
+  const url = maskUrlForFrame(frame);
   if (!url) {
     clearOverlay();
     return;
@@ -206,8 +224,10 @@ function syncFromItem(item) {
   el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
   el.scrubber.value = "0";
   el.video.src = `${API_BASE}/clip/${item.slug}.mp4`;
+  clearSeedMask();
   clearDoneFills();
   clearOverlay();
+  state.seedMaskReady = false;
   updateMarkers();
   updatePropagateBtn();
   updateStatus();
@@ -274,7 +294,7 @@ function startSse() {
     const frame = payload.frame;
     const maskUrl = payload.mask_url;
     if (typeof frame !== "number" || typeof maskUrl !== "string") return;
-    state.lastMaskUrlByFrame.set(frame, maskUrl);
+    state.propMaskUrlByFrame.set(frame, maskUrl);
     addDoneFill(frame);
     if (frame === currentFrame()) loadMaskForFrame(frame);
   });
@@ -336,7 +356,10 @@ function markSeed() {
   if (!state.current) return;
   state.seedFrame = currentFrame();
   state.seedMaskReady = false;
+  state.seedPoint = null;
   state.pendingSeedClick = true;
+  clearSeedMask();
+  clearOverlay();
   updateMarkers();
   updatePropagateBtn();
   updateStatus();
@@ -355,8 +378,8 @@ async function sendSeed(frameIndex, x, y) {
       return;
     }
     const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    state.lastMaskUrlByFrame.set(frameIndex, url);
+    clearSeedMask();
+    state.seedMaskUrl = URL.createObjectURL(blob);
     state.seedMaskReady = true;
     if (currentFrame() === frameIndex) loadMaskForFrame(frameIndex);
     updatePropagateBtn();
@@ -475,7 +498,7 @@ function bindUi() {
       el.scrubber.value = String(currentFrame());
     }
     const f = currentFrame();
-    if (state.lastMaskUrlByFrame.has(f)) loadMaskForFrame(f);
+    if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
     else clearOverlay();
     updateStatus();
   });
