@@ -166,9 +166,22 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
     assert ("session_armed", {"sid": session_id, "paths": ["live"], "armed_at": arm.json()["session"]["started_at"]}) in events
     assert any(name == "frame_count" and data["cam"] == "A" and data["count"] == 1 for name, data in events)
     assert any(name == "frame_count" and data["cam"] == "B" and data["count"] == 1 for name, data in events)
-    assert any(name == "ray" and data["sid"] == session_id and data["cam"] == "A" for name, data in events)
-    assert any(name == "ray" and data["sid"] == session_id and data["cam"] == "B" for name, data in events)
-    assert any(name == "point" and data["sid"] == session_id and abs(data["x"] - P_true[0]) < 1e-6 for name, data in events)
+    assert any(
+        name == "rays" and data["sid"] == session_id and data["cam"] == "A"
+        and isinstance(data.get("rays"), list) and data["rays"]
+        for name, data in events
+    )
+    assert any(
+        name == "rays" and data["sid"] == session_id and data["cam"] == "B"
+        and isinstance(data.get("rays"), list) and data["rays"]
+        for name, data in events
+    )
+    assert any(
+        name == "points" and data["sid"] == session_id
+        and isinstance(data.get("points"), list)
+        and any(abs(p["x"] - P_true[0]) < 1e-6 for p in data["points"])
+        for name, data in events
+    )
     assert any(name == "path_completed" and data["sid"] == session_id and data["cam"] == "A" for name, data in events)
     assert any(name == "path_completed" and data["sid"] == session_id and data["point_count"] == 1 for name, data in events)
     # `fit` SSE is broadcast on every cycle_end (per-cam, since rebuild
@@ -286,8 +299,8 @@ def test_live_websocket_single_camera_no_sync_anchor_drops_rays(monkeypatch):
         # frame_count still fires (it doesn't depend on the anchor) but
         # no rays should escape since the device has no sync anchor.
         assert any(name == "frame_count" for name, _ in events)
-        assert not any(name == "ray" for name, _ in events)
-        assert not any(name == "point" for name, _ in events)
+        assert not any(name == "rays" for name, _ in events)
+        assert not any(name == "points" for name, _ in events)
 
 
 def test_sync_trigger_broadcasts_websocket_command(monkeypatch):
