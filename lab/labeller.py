@@ -435,7 +435,7 @@ def run_propagate(slug: str) -> None:
     BUS.publish(slug, "done", {"elapsed_s": round(time.time() - t_prop, 2)})
 
 
-SLUG_RE = re.compile(r"^/api/items/([A-Za-z0-9_\-]+)/(trim|seed|propagate|propagate/cancel|events|pts)$")
+SLUG_RE = re.compile(r"^/api/items/([A-Za-z0-9_\-]+)/(trim|seed|propagate|propagate/cancel|events|pts|masks)$")
 MASK_RE = re.compile(r"^/mask/([A-Za-z0-9_\-]+)/(\d{5})\.png$")
 CLIP_RE = re.compile(r"^/clip/([A-Za-z0-9_\-]+)\.mp4$")
 
@@ -594,6 +594,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_text(HTTPStatus.INTERNAL_SERVER_ERROR, f"pts build failed: {e}")
                 return
             self._send_json(HTTPStatus.OK, payload)
+            return
+        if m and m.group(2) == "masks":
+            slug = m.group(1)
+            try:
+                STORE.get(slug)
+            except KeyError:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such slug")
+                return
+            mdir = masks_dir_for(slug)
+            frames: list[int] = []
+            if mdir.is_dir():
+                for png in mdir.glob("*.png"):
+                    try:
+                        frames.append(int(png.stem))
+                    except ValueError:
+                        continue
+            frames.sort()
+            self._send_json(HTTPStatus.OK, {"frames": frames})
             return
         m = MASK_RE.match(p)
         if m:

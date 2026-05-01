@@ -33,6 +33,7 @@ const state = {
   ptsTable: null,
   pendingTargetFrame: null,
   isSeeking: false,
+  lastSeekTarget: null,
 };
 
 function clearSeedMask() {
@@ -178,7 +179,10 @@ function updateStatus() {
     }
     computing = true;
   } else if (state.propagateStatus === "done" && state.propDoneCount > 0) {
-    statusTag = `propagate done: ${state.propDoneCount}/${state.propExpected} frames in ${state.propPhaseElapsed}s`;
+    const tail = state.propPhaseElapsed > 0
+      ? `in ${state.propPhaseElapsed}s`
+      : "(cached on disk)";
+    statusTag = `propagate done: ${state.propDoneCount}/${state.propExpected} frames ${tail}`;
   }
   if (computing) el.statusbar.classList.add("computing");
   else el.statusbar.classList.remove("computing");
@@ -385,6 +389,7 @@ function syncFromItem(item) {
   updateStatus();
   startSse();
   fetchPts(item.slug);  // background; arrow keys fall back to f/fps until ready
+  rehydrateMasks(item.slug);  // rebuild timeline fills from on-disk masks
   return true;
 }
 
@@ -651,9 +656,14 @@ function stepFrames(delta) {
   }
   if (!el.video.paused) el.video.pause();
   // Each unit of |delta| should land on a real (non-gap) frame so the user
-  // always sees motion. Compute absolute target from the latest known frame
-  // (current displayed if no seek pending, else the in-flight target).
-  const start = state.pendingTargetFrame != null ? state.pendingTargetFrame : currentFrame();
+  // always sees motion. Compute absolute target from the latest known frame.
+  // Priority: still-queued seek > most recent in-flight target (rVFC may not
+  // have caught up yet) > displayed frame. Without lastSeekTarget the user
+  // hits a race window after `seeked` fires but before rVFC updates
+  // mediaTime — pressing right twice fast lands on the SAME target both times.
+  const start = state.pendingTargetFrame != null
+    ? state.pendingTargetFrame
+    : (state.lastSeekTarget != null ? state.lastSeekTarget : currentFrame());
   let target = start;
   const dir = delta > 0 ? 1 : -1;
   for (let i = 0; i < Math.abs(delta); i++) {
@@ -678,6 +688,7 @@ function flushStep() {
   const target = state.pendingTargetFrame;
   state.pendingTargetFrame = null;
   state.isSeeking = true;
+  state.lastSeekTarget = target;
   el.video.currentTime = frameToTime(target);
 }
 
@@ -695,6 +706,34 @@ async function fetchPts(slug) {
     }
   } catch (e) {
     console.warn("pts fetch failed", e);
+  }
+}
+
+async function rehydrateMasks(slug) {
+  // SSE only fans out live propagate events; on reload the previous run's
+  // masks are durable on disk but the timeline shows empty. Re-list them
+  // here so the URL cache + green fills get rebuilt.
+  try {
+    const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(slug)}/masks`);
+    if (!r.ok) return;
+    const j = await r.json();
+    if (slug !== state.current) return;  // user switched item mid-fetch
+    if (!Array.isArray(j.frames)) return;
+    for (const f of j.frames) {
+      const url = `${API_BASE}/mask/${encodeURIComponent(slug)}/${String(f).padStart(5, "0")}.png`;
+      state.propMaskUrlByFrame.set(f, url);
+      addDoneFill(f);
+    }
+    state.propDoneCount = state.propMaskUrlByFrame.size;
+    if (state.propagateStatus === "done") {
+      state.propExpected = (state.outFrame != null && state.inFrame != null)
+        ? (state.outFrame - state.inFrame + 1) : state.propDoneCount;
+    }
+    const f = currentFrame();
+    if (state.propMaskUrlByFrame.has(f)) loadMaskForFrame(f);
+    updateStatus();
+  } catch (e) {
+    console.warn("rehydrate masks failed", e);
   }
 }
 
@@ -776,7 +815,14 @@ function onDisplayedFrame(_now, metadata) {
   // displayed video frame, not to the throttled timeupdate event.
   state.lastDisplayedMediaTime = metadata.mediaTime;
   if (state.fps != null) {
-    const f = Math.round(metadata.mediaTime * state.fps);
+    const f = currentFrame();
+    // Clear the in-flight seek target once rVFC actually paints it (or near
+    // enough — gaps can land us ±1 from the requested frame). Without this,
+    // stepFrames keeps using the stale lastSeekTarget forever after the very
+    // first arrow press.
+    if (state.lastSeekTarget != null && Math.abs(f - state.lastSeekTarget) <= 1) {
+      state.lastSeekTarget = null;
+    }
     if (f !== state.lastDisplayedFrame) {
       state.lastDisplayedFrame = f;
       el.scrubber.value = String(f);
