@@ -53,6 +53,10 @@ class Propagator:
         Yields (local_frame_idx, mask_png_bytes) for each propagated frame in the order
         SAM 2 emits them. `frames_dir` must contain JPEGs named 00000.jpg, 00001.jpg, ...
         """
+        import gc
+
+        import torch
+
         x, y = seed_point
         with self._lock:
             self.reset_cancel()
@@ -60,23 +64,39 @@ class Propagator:
                 video_path=str(frames_dir),
                 offload_video_to_cpu=offload_video_to_cpu,
             )
-            self._predictor.add_new_points_or_box(
-                inference_state=state,
-                frame_idx=seed_local_idx,
-                obj_id=1,
-                points=np.array([[x, y]], dtype=np.float32),
-                labels=np.array([1], dtype=np.int32),
-            )
+            try:
+                self._predictor.add_new_points_or_box(
+                    inference_state=state,
+                    frame_idx=seed_local_idx,
+                    obj_id=1,
+                    points=np.array([[x, y]], dtype=np.float32),
+                    labels=np.array([1], dtype=np.int32),
+                )
 
-            for reverse in (False, True):
-                for out_frame_idx, _obj_ids, out_mask_logits in self._predictor.propagate_in_video(
-                    state, start_frame_idx=seed_local_idx, reverse=reverse
-                ):
-                    if self._cancel:
-                        return
-                    mask = (out_mask_logits[0] > 0).cpu().numpy().astype(np.uint8) * 255
-                    if mask.ndim == 3:
-                        mask = mask[0]
-                    buf = io.BytesIO()
-                    Image.fromarray(mask, mode="L").save(buf, format="PNG", optimize=False)
-                    yield int(out_frame_idx), buf.getvalue()
+                for reverse in (False, True):
+                    for out_frame_idx, _obj_ids, out_mask_logits in self._predictor.propagate_in_video(
+                        state, start_frame_idx=seed_local_idx, reverse=reverse
+                    ):
+                        if self._cancel:
+                            return
+                        mask = (out_mask_logits[0] > 0).cpu().numpy().astype(np.uint8) * 255
+                        if mask.ndim == 3:
+                            mask = mask[0]
+                        buf = io.BytesIO()
+                        Image.fromarray(mask, mode="L").save(buf, format="PNG", optimize=False)
+                        yield int(out_frame_idx), buf.getvalue()
+            finally:
+                # SAM2 video predictor's inference_state caches per-frame image
+                # embeddings + multi-scale feature maps; for ~500-frame clips
+                # this grows to multi-GB. Without explicit teardown the MPS pool
+                # never shrinks across sequential queue items and the OS swaps.
+                try:
+                    self._predictor.reset_state(state)
+                except Exception:
+                    pass
+                state = None
+                gc.collect()
+                if self.device == "mps" and torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+                elif self.device == "cuda" and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
