@@ -64,7 +64,8 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
             DetectionPath.server_post.value: 0,
         }
         if result is not None:
-            for path, segs in (result.segments_by_path or {}).items():
+            assert result.segments_by_path is not None
+            for path, segs in result.segments_by_path.items():
                 n_segments_by_path[path] = len(segs)
         error = result.error if result is not None else None
 
@@ -204,7 +205,8 @@ def _snapshot_sessions_locked(
             for cam in cams_present:
                 pitch = state.pitches[(cam, sid)]
                 for path, attr in _PATH_TO_FRAMES_ATTR:
-                    frames = getattr(pitch, attr, ()) or ()
+                    frames = getattr(pitch, attr)
+                    assert frames is not None
                     n_ball_frames_by_path[path][cam] = sum(
                         1 for f in frames if f.ball_detected
                     )
@@ -256,12 +258,28 @@ def _snapshot_sessions_locked(
 
 
 def _latest_pitch_mtime(state: "State", cams_present: list[str], sid: str) -> float | None:
+    """Latest pitch JSON timestamp across `cams_present`, in seconds.
+
+    Reads the write-through cache populated by `State.record()`; falls
+    through to disk `stat()` only on cache miss (cold start before any
+    record() landed for this session, e.g. /pitch JSON loaded from disk
+    at boot). At dashboard 5 s tick × 100 sessions × 2 cams the prior
+    stat()-every-row path was ~40k stat()/min; cache hits make it
+    O(in-memory dict lookup).
+    """
     latest: float | None = None
     for cam in cams_present:
-        try:
-            mtime = state._pitch_path(cam, sid).stat().st_mtime
-        except FileNotFoundError:
-            continue
+        cached = state._pitch_mtime_cache.get((cam, sid))
+        if cached is not None:
+            mtime: float = cached
+        else:
+            try:
+                mtime = state._pitch_path(cam, sid).stat().st_mtime
+            except FileNotFoundError:
+                continue
+            # Backfill the cache so a boot-loaded session converges to the
+            # hot path after its first build_events read.
+            state._pitch_mtime_cache[(cam, sid)] = mtime
         if latest is None or mtime > latest:
             latest = mtime
     return latest
