@@ -64,6 +64,9 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
             DetectionPath.server_post.value: 0,
         }
         if result is not None:
+            # SessionResult.segments_by_path has default_factory=dict;
+            # internal invariant is non-None. Assert rather than silently
+            # `or {}` — silent-fallback hides schema drift.
             assert result.segments_by_path is not None
             for path, segs in result.segments_by_path.items():
                 n_segments_by_path[path] = len(segs)
@@ -205,6 +208,9 @@ def _snapshot_sessions_locked(
             for cam in cams_present:
                 pitch = state.pitches[(cam, sid)]
                 for path, attr in _PATH_TO_FRAMES_ATTR:
+                    # PitchPayload.frames_{live,server_post} both have
+                    # default_factory=list; non-None invariant. Drop the
+                    # `or ()` silent fallback — assert instead.
                     frames = getattr(pitch, attr)
                     assert frames is not None
                     n_ball_frames_by_path[path][cam] = sum(
