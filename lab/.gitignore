@@ -1,0 +1,4 @@
+.venvs/
+standalone_workspace/
+__pycache__/
+*.pyc
