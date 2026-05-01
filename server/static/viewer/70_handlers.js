@@ -284,6 +284,16 @@
   (() => {
     const toggles = layerToggles.querySelectorAll("[data-popover-target]");
     if (!toggles.length) return;
+    const positionPopover = (toggle, pop) => {
+      pop.classList.remove("open-up", "open-down");
+      const toggleRect = toggle.getBoundingClientRect();
+      const popRect = pop.getBoundingClientRect();
+      const gapPx = 6;
+      const spaceBelow = window.innerHeight - toggleRect.bottom;
+      const spaceAbove = toggleRect.top;
+      const opensUp = spaceBelow < popRect.height + gapPx && spaceAbove >= popRect.height + gapPx;
+      pop.classList.add(opensUp ? "open-up" : "open-down");
+    };
     const closeAll = (except) => {
       for (const t of toggles) {
         const pop = document.getElementById(t.getAttribute("data-popover-target"));
@@ -305,6 +315,7 @@
         pop.hidden = !willOpen;
         toggle.setAttribute("aria-expanded", String(willOpen));
         toggle.classList.toggle("open", willOpen);
+        if (willOpen) positionPopover(toggle, pop);
       });
     }
     if (!document._tlPopoverOutsideBound) {

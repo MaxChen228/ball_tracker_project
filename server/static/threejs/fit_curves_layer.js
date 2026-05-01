@@ -386,6 +386,16 @@ export function setupFitHoverTooltip({ scene, fitGroupGetter, segmentsFn, toolti
 export function bindLayerPopovers(root = document) {
   const toggles = root.querySelectorAll("[data-popover-target]");
   if (!toggles.length) return;
+  const positionPopover = (toggle, pop) => {
+    pop.classList.remove("open-up", "open-down");
+    const toggleRect = toggle.getBoundingClientRect();
+    const popRect = pop.getBoundingClientRect();
+    const gapPx = 6;
+    const spaceBelow = window.innerHeight - toggleRect.bottom;
+    const spaceAbove = toggleRect.top;
+    const opensUp = spaceBelow < popRect.height + gapPx && spaceAbove >= popRect.height + gapPx;
+    pop.classList.add(opensUp ? "open-up" : "open-down");
+  };
   const closeAll = (except = null) => {
     for (const t of toggles) {
       const popId = t.getAttribute("data-popover-target");
@@ -398,6 +408,8 @@ export function bindLayerPopovers(root = document) {
     }
   };
   for (const toggle of toggles) {
+    if (toggle.dataset.popoverBound === "1") continue;
+    toggle.dataset.popoverBound = "1";
     toggle.addEventListener("click", (ev) => {
       ev.stopPropagation();
       const popId = toggle.getAttribute("data-popover-target");
@@ -408,6 +420,7 @@ export function bindLayerPopovers(root = document) {
       pop.hidden = !willOpen;
       toggle.setAttribute("aria-expanded", String(willOpen));
       toggle.classList.toggle("open", willOpen);
+      if (willOpen) positionPopover(toggle, pop);
     });
   }
   document.addEventListener("click", (ev) => {

@@ -416,13 +416,15 @@
      popover into the strip canvases (and historically got clipped by
      `.timeline { overflow:hidden }`). Opening upward lands the panel
      in the `.work` area where there's room to breathe. */
-  .layer-toggles .layer-popover { position:absolute; bottom:calc(100% + 4px); left:0; z-index:50;
+  .layer-toggles .layer-popover { position:absolute; left:0; z-index:50;
     min-width:160px; padding:8px 10px;
     background:var(--surface); border:1px solid var(--border-base);
     border-radius:var(--r);
     box-shadow:0 -4px 12px rgba(0,0,0,0.08);
     display:flex; flex-direction:column; gap:6px;
     text-transform:none; }
+  .layer-toggles .layer-popover.open-up { bottom:calc(100% + 4px); top:auto; }
+  .layer-toggles .layer-popover.open-down { top:calc(100% + 4px); bottom:auto; box-shadow:0 4px 12px rgba(0,0,0,0.08); }
   .layer-toggles .layer-popover[hidden] { display:none; }
   .layer-toggles .layer-popover .mini-slider,
   .layer-toggles .layer-popover .point-size-slider { width:100%; }

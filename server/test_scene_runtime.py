@@ -124,6 +124,17 @@ def test_viewer_layers_use_role_based_not_path_based_colors():
     assert "this.SEGMENTS_BY_PATH = opts.SEGMENTS_BY_PATH || {};" in text
 
 
+def test_viewer_playback_uses_single_ball_marker_layer():
+    """Playback current-ball rendering belongs to one layer, not separate
+    traj and fit marker paths."""
+    text = (_RUNTIME_DIR / "viewer_layers.js").read_text()
+    assert "viewer_playback_marker" in text
+    assert "viewer_fit_marker" not in text
+    assert "_playbackBallMarker(" in text
+    assert "_lastVisibleTrajectoryPoint(" in text
+    assert "_activeFitSegmentIndex()" in text
+
+
 def test_scene_theme_is_json_safe():
     """`scene_theme()` is consumed via JSON.parse(textContent) on a
     `<script type=application/json>` block. Every value must be
@@ -309,6 +320,17 @@ def test_layer_chip_with_popover_html_includes_toggle_and_panel():
     assert 'data-popover' in html
     assert 'aria-expanded="false"' in html
     assert 'class="x-inner"' in html
+
+
+def test_layer_popover_binder_is_idempotent_and_viewport_aware():
+    """Viewer binds popovers once in the classic bundle and once from the
+    Three.js layer module. The shared binder must not add a second click
+    listener, and open panels must choose up/down by viewport space."""
+    text = (_RUNTIME_DIR / "fit_curves_layer.js").read_text()
+    assert 'if (toggle.dataset.popoverBound === "1") continue;' in text
+    assert 'toggle.dataset.popoverBound = "1";' in text
+    assert 'const spaceBelow = window.innerHeight - toggleRect.bottom;' in text
+    assert 'pop.classList.add(opensUp ? "open-up" : "open-down");' in text
 
 
 def test_layer_chip_with_popover_supports_checkbox_less_chip():

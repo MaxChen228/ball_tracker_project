@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json as _json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -923,6 +924,9 @@ def test_viewer_ships_interactive_diagnostic_widgets():
     assert 'data-popover-target="viewer-fit-popover"' in body
     assert 'id="viewer-traj-popover"' in body
     assert 'id="viewer-fit-popover"' in body
+    css = (Path(__file__).parent / "static" / "viewer" / "viewer.css").read_text()
+    assert ".layer-popover.open-up" in css
+    assert ".layer-popover.open-down" in css
     # Detection strip rows stack 3 sub-bands (A · B · S) — segments
     # render in the bottom S band so live/svr fit segments line up with
     # the same row's per-cam detection densities. Canvas height bumped

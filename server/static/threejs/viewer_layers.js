@@ -221,6 +221,49 @@ class ViewerLayers {
     const pts = this.TRAJ_BY_PATH[this._currentPath()];
     return Array.isArray(pts) ? pts : [];
   }
+  _activeFitSegmentIndex() {
+    const segs = this._currentSegments();
+    for (let i = 0; i < segs.length; ++i) {
+      const seg = segs[i];
+      if (this.t >= seg.t_start - 1e-3 && this.t <= seg.t_end + 1e-3) return i;
+    }
+    return -1;
+  }
+  _lastVisibleTrajectoryPoint(cutoff, residualPasses, costPassesPoint) {
+    let lastVisible = null;
+    for (const p of this._currentTrajectory()) {
+      if (p.t_rel_s > cutoff) continue;
+      if (!residualPasses(p)) continue;
+      if (!costPassesPoint(p)) continue;
+      lastVisible = p;
+    }
+    return lastVisible;
+  }
+  _playbackBallMarker(cutoff, residualPasses, costPassesPoint) {
+    if (this.mode !== "playback") return null;
+    if (this._isVisible("fit")) {
+      const i = this._activeFitSegmentIndex();
+      if (i !== -1) {
+        const seg = this._currentSegments()[i];
+        return {
+          p: evalSegmentAt(seg, this.t),
+          color: SEG_PALETTE[i % SEG_PALETTE.length],
+          radius: 0.030,
+        };
+      }
+    }
+    if (this._isVisible("traj")) {
+      const p = this._lastVisibleTrajectoryPoint(cutoff, residualPasses, costPassesPoint);
+      if (p) {
+        return {
+          p: [p.x, p.y, p.z],
+          color: FIT_ACCENT,
+          radius: this._pointSize * 1.6,
+        };
+      }
+    }
+    return null;
+  }
   _layerOn(layer) { return !!this.layerVisibility[layer]; }
   // True iff the layer's enable flag is on AND its data subset matches the
   // global path.
@@ -344,7 +387,7 @@ class ViewerLayers {
   _rebuildDynamic() {
     this.scene.removeLayer("viewer_rays");
     this.scene.removeLayer("viewer_traj");
-    this.scene.removeLayer("viewer_fit_marker");
+    this.scene.removeLayer("viewer_playback_marker");
 
     const playback = this.mode === "playback";
     const cutoff = playback ? this.t : Infinity;
@@ -429,7 +472,6 @@ class ViewerLayers {
     if (this._isVisible("traj")) {
       const pathPts = this._currentTrajectory();
       const buckets = new Map();  // segIdx | "out" -> [points]
-      let lastVisible = null;
       for (let i = 0; i < pathPts.length; ++i) {
         const p = pathPts[i];
         if (p.t_rel_s > cutoff) continue;
@@ -439,7 +481,6 @@ class ViewerLayers {
         const key = k === -1 ? "out" : String(k);
         if (!buckets.has(key)) buckets.set(key, []);
         buckets.get(key).push(p);
-        lastVisible = p;
       }
       if (buckets.size) {
         const group = new THREE.Group();
@@ -452,27 +493,20 @@ class ViewerLayers {
             isOutlier: isOut,
           }));
         }
-        if (playback && lastVisible) {
-          group.add(pointMarker([lastVisible.x, lastVisible.y, lastVisible.z], FIT_ACCENT, sizeM * 1.6));
-        }
         this.scene.addLayer("viewer_traj", group);
       }
     }
 
-    // Active fit-segment marker (the "predicted ball position at this t").
-    if (playback && this._isVisible("fit")) {
-      const segs = this._currentSegments();
-      for (let i = 0; i < segs.length; ++i) {
-        const seg = segs[i];
-        if (this.t < seg.t_start - 1e-3 || this.t > seg.t_end + 1e-3) continue;
-        const color = SEG_PALETTE[i % SEG_PALETTE.length];
-        const p = evalSegmentAt(seg, this.t);
-        const group = new THREE.Group();
-        group.name = "viewer_fit_marker";
-        group.add(pointMarker(p, color, 0.030));
-        this.scene.addLayer("viewer_fit_marker", group);
-        break;  // only one segment can be active at any t
-      }
+    // Single playback ball marker. Fit owns the marker when an active
+    // segment exists; otherwise it falls back to the measured trajectory
+    // head. Keeping this outside traj/fit prevents two "current ball"
+    // markers from being rendered by independent layers.
+    const marker = this._playbackBallMarker(cutoff, residualPasses, costPassesPoint);
+    if (marker) {
+      const group = new THREE.Group();
+      group.name = "viewer_playback_marker";
+      group.add(pointMarker(marker.p, marker.color, marker.radius));
+      this.scene.addLayer("viewer_playback_marker", group);
     }
   }
 
