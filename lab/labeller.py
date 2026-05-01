@@ -158,6 +158,55 @@ def _pts_to_frame_index(frame, fps: float) -> int:
     return int(round(t * fps))
 
 
+PTS_CACHE_DIR = WORKSPACE / "pts_cache"
+
+
+def build_pts_table(source_path: Path, total_frames: int, fps: float) -> list[float | None]:
+    """One PTS-second value per source frame index. None where no decoded frame
+    rounds to that index (variable-fps gap). The browser uses these to seek to
+    the exact mid-point of frame N, so arrow-key step lands on the visually-
+    next frame even when avg-fps is a lie."""
+    import av  # type: ignore
+
+    table: list[float | None] = [None] * total_frames
+    container = av.open(str(source_path))
+    try:
+        for frame in container.decode(video=0):
+            if frame.pts is None:
+                if frame.time is None:
+                    continue
+                t = float(frame.time)
+            else:
+                t = float(frame.pts * frame.time_base)
+            idx = int(round(t * fps))
+            if 0 <= idx < total_frames:
+                table[idx] = t
+    finally:
+        container.close()
+    return table
+
+
+def get_pts_table(slug: str) -> dict[str, Any]:
+    PTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = PTS_CACHE_DIR / f"{slug}.json"
+    item = STORE.get(slug)
+    source = SOURCES_DIR / item["source_video"]
+    src_mtime = source.stat().st_mtime
+    if cache_path.exists():
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        if cached.get("source_mtime") == src_mtime and cached.get("total_frames") == item["total_frames"]:
+            return cached
+    table = build_pts_table(source, int(item["total_frames"]), float(item["fps"]))
+    payload = {
+        "fps": float(item["fps"]),
+        "total_frames": int(item["total_frames"]),
+        "source_mtime": src_mtime,
+        "pts": table,
+    }
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+    return payload
+
+
 def extract_one_frame(source_path: Path, frame_index: int, fps: float):
     """Decode the frame whose PTS-derived index == frame_index. Returns BGR ndarray.
 
@@ -386,7 +435,7 @@ def run_propagate(slug: str) -> None:
     BUS.publish(slug, "done", {"elapsed_s": round(time.time() - t_prop, 2)})
 
 
-SLUG_RE = re.compile(r"^/api/items/([A-Za-z0-9_\-]+)/(trim|seed|propagate|propagate/cancel|events)$")
+SLUG_RE = re.compile(r"^/api/items/([A-Za-z0-9_\-]+)/(trim|seed|propagate|propagate/cancel|events|pts)$")
 MASK_RE = re.compile(r"^/mask/([A-Za-z0-9_\-]+)/(\d{5})\.png$")
 CLIP_RE = re.compile(r"^/clip/([A-Za-z0-9_\-]+)\.mp4$")
 
@@ -534,6 +583,17 @@ class Handler(BaseHTTPRequestHandler):
         m = SLUG_RE.match(p)
         if m and m.group(2) == "events":
             self._serve_sse(m.group(1))
+            return
+        if m and m.group(2) == "pts":
+            try:
+                payload = get_pts_table(m.group(1))
+            except KeyError:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such slug")
+                return
+            except Exception as e:
+                self._send_text(HTTPStatus.INTERNAL_SERVER_ERROR, f"pts build failed: {e}")
+                return
+            self._send_json(HTTPStatus.OK, payload)
             return
         m = MASK_RE.match(p)
         if m:
