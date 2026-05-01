@@ -85,10 +85,10 @@ body {
   object-fit: contain;
   background: #000;
   display: none;
+  z-index: 1;
 }
 
 #video-wrap.scrub #frame-img { display: block; }
-#video-wrap.scrub #video { opacity: 0; }
 
 #overlay {
   position: absolute;

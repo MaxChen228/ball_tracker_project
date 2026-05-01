@@ -125,7 +125,9 @@ function fmt(n) {
 
 function updateStatus() {
   const f = currentFrame();
-  const t = el.video.currentTime || 0;
+  const t = state.scrubMode && state.lastDisplayedMediaTime != null
+    ? state.lastDisplayedMediaTime
+    : (el.video.currentTime || 0);
   const pt = state.seedPoint ? `(${state.seedPoint[0]},${state.seedPoint[1]})` : "-";
   const fStr = String(f).padStart(4, "0");
   let statusTag = state.propagateStatus;
@@ -825,23 +827,33 @@ async function rehydrateMasks(slug) {
 
 async function togglePlay() {
   if (state.scrubMode) {
-    // Resume video at the displayed frame's PTS.
     const tbl = state.ptsTable;
     const f = state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0;
-    if (tbl && tbl[f] != null) el.video.currentTime = tbl[f];
+    const targetT = tbl ? tbl[f] : null;
+    if (targetT == null) return;
+    // Wait for the seek to actually land before play(), otherwise play()
+    // may resolve while the decoder is still backfilling and the user sees
+    // either the old frame or a black flash.
+    if (Math.abs(el.video.currentTime - targetT) > 0.005) {
+      const seekDone = new Promise((res) => {
+        el.video.addEventListener("seeked", res, { once: true });
+      });
+      el.video.currentTime = targetT;
+      await Promise.race([seekDone, new Promise((r) => setTimeout(r, 250))]);
+    }
+    state.lastDisplayedMediaTime = el.video.currentTime;
     exitScrubMode();
-    try { await el.video.play(); } catch (e) { console.warn("play failed", e); enterScrubMode(); }
+    try { await el.video.play(); }
+    catch (e) { console.warn("play failed", e); enterScrubMode(); }
   } else {
     el.video.pause();
-    enterScrubMode();
-    // Snapshot the currently-displayed frame as a JPG so the user has visual
-    // continuity (rather than seeing the last decoded video frame disappear).
     const f = currentFrame();
     state.lastDisplayedFrame = f;
     el.frameImg.src = `${API_BASE}/frame/${encodeURIComponent(state.current)}/${String(f).padStart(5, "0")}.jpg`;
     el.scrubber.value = String(f);
     if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
     else clearOverlay();
+    enterScrubMode();
     updateStatus();
   }
 }
