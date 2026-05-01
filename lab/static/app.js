@@ -3,21 +3,18 @@
 const API_BASE = window.location.origin;
 
 const state = {
-  items: [],
-  current: null,
+  items: [],            // each item carries .segments[] + .active_segment_id
+  current: null,        // current slug
   fps: null,
   totalFrames: 0,
-  inFrame: null,
-  outFrame: null,
-  seedFrame: null,
-  seedPoint: null,
+  // Active segment is the one targeted by [/]/S/Enter. Reads/writes go through
+  // activeSegment(); never read state.activeSegmentId directly without lookup.
+  activeSegmentId: null,
   pendingSeedClick: false,
-  seedMaskReady: false,
-  propagateStatus: "idle",
-  doneFrames: new Set(),
-  seedMaskUrl: null,
-  propMaskUrlByFrame: new Map(),
-  seedComputing: false,
+  doneFrames: new Set(),                         // active-segment frames with masks
+  seedMaskUrls: new Map(),                       // seg_id → blob URL for the seed-frame mask
+  propMaskUrlsBySeg: new Map(),                  // seg_id → Map<frame, url>
+  seedComputingSeg: null,                        // seg_id currently mid-seed (or null)
   seedComputeStartMs: null,
   propPhase: null,
   propExpected: 0,
@@ -39,16 +36,51 @@ const state = {
   queueRunning: false,
   queueSse: null,
   queueSnapshot: { running: false, current: null, done: 0, ready: 0, total: 0 },
-  // Pre-tinted canvases keyed by source frame index, built lazily as masks
-  // arrive over SSE or via scrub. Costs ~5ms per first paint, then O(1) blits.
   tintedCache: new Map(),
   prefetchAbort: 0,
-  // WebCodecs frame source: one MP4 download → mp4box demux → VideoDecoder
-  // → ImageBitmap cache, keyed by frame index. Recreated per-slug.
   frameSource: null,
   scrubPaintToken: 0,
   frameSourceLoading: false,
 };
+
+// ---- segment helpers -------------------------------------------------------
+
+function currentItem() {
+  return state.items.find(i => i.slug === state.current) || null;
+}
+
+function activeSegment() {
+  const it = currentItem();
+  if (!it || !state.activeSegmentId) return null;
+  return (it.segments || []).find(s => s.id === state.activeSegmentId) || null;
+}
+
+function segmentsOf(slug) {
+  const it = state.items.find(i => i.slug === slug);
+  return it ? (it.segments || []) : [];
+}
+
+function maskUrlsForActive() {
+  return state.propMaskUrlsBySeg.get(state.activeSegmentId) || new Map();
+}
+
+function setActiveSegmentLocal(item, segId) {
+  state.activeSegmentId = segId;
+  if (item) item.active_segment_id = segId;
+}
+
+function aggregateStatus(it) {
+  const segs = it.segments || [];
+  if (segs.length === 0) return "idle";
+  const statuses = segs.map(s => s.propagate_status);
+  if (statuses.includes("running")) return "running";
+  if (statuses.includes("failed")) return "failed";
+  const allDone = statuses.every(s => s === "done");
+  if (allDone) return "done";
+  const anyReady = segs.some(s => s.propagate_status === "idle" && s.seed_frame != null);
+  if (anyReady) return "ready";
+  return "idle";
+}
 
 const el = {
   video: document.getElementById("video"),
@@ -57,9 +89,8 @@ const el = {
   overlay: document.getElementById("overlay"),
   scrubber: document.getElementById("scrubber"),
   fills: document.getElementById("timeline-fills"),
-  mIn: document.getElementById("marker-in"),
-  mOut: document.getElementById("marker-out"),
-  mSeed: document.getElementById("marker-seed"),
+  markerLayer: document.getElementById("marker-layer"),
+  segmentsStrip: document.getElementById("segments-strip"),
   status: document.getElementById("status-line"),
   statusbar: document.getElementById("statusbar"),
   itemSlug: document.getElementById("item-slug"),
@@ -71,6 +102,7 @@ const el = {
   btnIn: document.getElementById("btn-in"),
   btnOut: document.getElementById("btn-out"),
   btnSeed: document.getElementById("btn-seed"),
+  btnNewSeg: document.getElementById("btn-new-seg"),
   btnPropagate: document.getElementById("btn-propagate"),
   btnCancel: document.getElementById("btn-cancel"),
 };
@@ -86,14 +118,34 @@ function clearError() {
   el.statusbar.classList.remove("error");
 }
 
-function clearSeedMask() {
-  if (state.seedMaskUrl) URL.revokeObjectURL(state.seedMaskUrl);
-  state.seedMaskUrl = null;
+function clearSeedMask(segId) {
+  // segId omitted → clear all (slug switch).
+  if (segId == null) {
+    for (const url of state.seedMaskUrls.values()) URL.revokeObjectURL(url);
+    state.seedMaskUrls.clear();
+    return;
+  }
+  const url = state.seedMaskUrls.get(segId);
+  if (url) URL.revokeObjectURL(url);
+  state.seedMaskUrls.delete(segId);
 }
 
-function clearPropMasks() {
-  for (const url of state.propMaskUrlByFrame.values()) URL.revokeObjectURL(url);
-  state.propMaskUrlByFrame.clear();
+function clearPropMasks(segId) {
+  if (segId == null) {
+    for (const m of state.propMaskUrlsBySeg.values()) {
+      for (const url of m.values()) {
+        if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+      }
+    }
+    state.propMaskUrlsBySeg.clear();
+    return;
+  }
+  const m = state.propMaskUrlsBySeg.get(segId);
+  if (!m) return;
+  for (const url of m.values()) {
+    if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+  }
+  state.propMaskUrlsBySeg.delete(segId);
 }
 
 function currentFrame() {
@@ -141,18 +193,25 @@ function updateStatus() {
   if (tbl && f >= 0 && f < tbl.length) t = tbl[f];
   else if (state.lastDisplayedMediaTime != null) t = state.lastDisplayedMediaTime;
   else t = el.video.currentTime || 0;
-  const pt = state.seedPoint ? `(${state.seedPoint[0]},${state.seedPoint[1]})` : "-";
+  const seg = activeSegment();
+  const inF = seg ? seg.in_frame : null;
+  const outF = seg ? seg.out_frame : null;
+  const seedF = seg ? seg.seed_frame : null;
+  const seedP = seg ? seg.seed_point : null;
+  const pStat = seg ? seg.propagate_status : "idle";
+  const segLabel = seg ? seg.id.slice(4) : "—";
+  const pt = seedP ? `(${seedP[0]},${seedP[1]})` : "-";
   const fStr = String(f).padStart(4, "0");
-  let statusTag = state.propagateStatus;
+  let statusTag = pStat;
   let computing = false;
   if (state.frameSourceLoading) {
     statusTag = "loading clip (WebCodecs decode init)…";
     computing = true;
-  } else if (state.seedComputing) {
+  } else if (state.seedComputingSeg && state.seedComputingSeg === state.activeSegmentId) {
     const elapsed = ((performance.now() - state.seedComputeStartMs) / 1000).toFixed(1);
     statusTag = `seeding... ${elapsed}s (SAM2 image predictor)`;
     computing = true;
-  } else if (state.propagateStatus === "running") {
+  } else if (pStat === "running") {
     const phase = state.propPhase || "starting";
     if (phase === "extracting") {
       const elapsed = state.propStartMs ? ((performance.now() - state.propStartMs) / 1000).toFixed(1) : "0.0";
@@ -175,38 +234,95 @@ function updateStatus() {
       statusTag = `propagate: ${phase}`;
     }
     computing = true;
-  } else if (state.propagateStatus === "done" && state.propDoneCount > 0) {
+  } else if (pStat === "done" && state.propDoneCount > 0) {
     const tail = state.propPhaseElapsed > 0 ? `in ${state.propPhaseElapsed}s` : "(cached on disk)";
     statusTag = `propagate done: ${state.propDoneCount}/${state.propExpected} frames ${tail}`;
   }
   if (computing) el.statusbar.classList.add("computing");
   else el.statusbar.classList.remove("computing");
   el.status.textContent =
-    `f=${fStr} t=${t.toFixed(3)}s | in=${fmt(state.inFrame)} out=${fmt(state.outFrame)} seed=${fmt(state.seedFrame)} pt=${pt} | status=${statusTag}${state.pendingSeedClick ? " (click to set seed point)" : ""}`;
-}
-
-function updateMarker(markerEl, frame) {
-  if (frame == null || state.totalFrames <= 0) { markerEl.hidden = true; return; }
-  const pct = (frame / Math.max(1, state.totalFrames - 1)) * 100;
-  markerEl.style.left = `calc(${pct}% )`;
-  markerEl.hidden = false;
+    `f=${fStr} t=${t.toFixed(3)}s | seg=${segLabel} in=${fmt(inF)} out=${fmt(outF)} seed=${fmt(seedF)} pt=${pt} | status=${statusTag}${state.pendingSeedClick ? " (click to set seed point)" : ""}`;
 }
 
 function updateMarkers() {
-  updateMarker(el.mIn, state.inFrame);
-  updateMarker(el.mOut, state.outFrame);
-  updateMarker(el.mSeed, state.seedFrame);
+  // Render per-segment in/out/seed markers under #marker-layer. Active segment
+  // gets a brighter accent + click-to-activate; non-active segments dim.
+  const layer = el.markerLayer;
+  layer.innerHTML = "";
+  const it = currentItem();
+  if (!it || state.totalFrames <= 0) return;
+  const denom = Math.max(1, state.totalFrames - 1);
+  for (const seg of (it.segments || [])) {
+    const isActive = seg.id === state.activeSegmentId;
+    const cls = isActive ? "active" : "dim";
+    if (seg.in_frame != null && seg.out_frame != null) {
+      const span = document.createElement("div");
+      span.className = `seg-span ${cls}`;
+      span.style.left = `${(seg.in_frame / denom) * 100}%`;
+      span.style.width = `${((seg.out_frame - seg.in_frame) / denom) * 100}%`;
+      span.title = `${seg.id} [${seg.in_frame}–${seg.out_frame}]`;
+      span.addEventListener("click", () => activateSegment(seg.id));
+      layer.appendChild(span);
+    }
+    const mk = (frame, kind) => {
+      if (frame == null) return;
+      const m = document.createElement("div");
+      m.className = `seg-marker seg-marker-${kind} ${cls}`;
+      m.style.left = `${(frame / denom) * 100}%`;
+      if (kind === "seed") m.textContent = "★";
+      layer.appendChild(m);
+    };
+    mk(seg.in_frame, "in");
+    mk(seg.out_frame, "out");
+    mk(seg.seed_frame, "seed");
+  }
 }
 
 function updatePropagateBtn() {
+  const seg = activeSegment();
   const ready =
-    state.inFrame != null &&
-    state.outFrame != null &&
-    state.seedFrame != null &&
-    state.seedPoint != null &&
-    state.seedMaskReady &&
-    state.propagateStatus !== "running";
+    seg != null &&
+    seg.in_frame != null &&
+    seg.out_frame != null &&
+    seg.seed_frame != null &&
+    seg.seed_point != null &&
+    state.seedMaskUrls.has(seg.id) &&
+    seg.propagate_status !== "running";
   el.btnPropagate.disabled = !ready;
+}
+
+function renderSegmentsStrip() {
+  const strip = el.segmentsStrip;
+  strip.innerHTML = "";
+  const it = currentItem();
+  if (!it) return;
+  for (const seg of (it.segments || [])) {
+    const chip = document.createElement("div");
+    const isActive = seg.id === state.activeSegmentId;
+    chip.className = `seg-chip seg-chip-${seg.propagate_status}` + (isActive ? " active" : "");
+    chip.title = `${seg.id} (${seg.propagate_status})`;
+    const dot = document.createElement("span");
+    dot.className = "seg-chip-dot";
+    chip.appendChild(dot);
+    chip.appendChild(document.createTextNode(seg.id.replace("seg_", "")));
+    chip.addEventListener("click", () => activateSegment(seg.id));
+    if (!isActive || (it.segments || []).length > 1) {
+      const x = document.createElement("button");
+      x.className = "seg-chip-x";
+      x.type = "button";
+      x.textContent = "×";
+      x.title = "Delete segment";
+      x.addEventListener("click", (e) => { e.stopPropagation(); deleteSegment(seg.id); });
+      chip.appendChild(x);
+    }
+    strip.appendChild(chip);
+  }
+  const addBtn = document.createElement("button");
+  addBtn.className = "seg-chip-add";
+  addBtn.type = "button";
+  addBtn.textContent = "+ New segment (N)";
+  addBtn.addEventListener("click", () => createSegment());
+  strip.appendChild(addBtn);
 }
 
 function addDoneFill(frame) {
@@ -317,8 +433,9 @@ function paintAtomic(frame, bm) {
     if (!blitCachedMask(frame)) clearOverlay();
   } else {
     clearOverlay();
-    if (frame === state.seedFrame && state.seedPoint && state.showSeedMarker) {
-      drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+    const seg = activeSegment();
+    if (seg && frame === seg.seed_frame && seg.seed_point && state.showSeedMarker) {
+      drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
     }
   }
 }
@@ -401,15 +518,21 @@ function blitCachedMask(frame) {
   const ctx = el.overlay.getContext("2d");
   ctx.clearRect(0, 0, el.overlay.width, el.overlay.height);
   ctx.drawImage(cached, 0, 0);
-  if (frame === state.seedFrame && state.seedPoint && state.showSeedMarker) {
-    drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+  const seg = activeSegment();
+  if (seg && frame === seg.seed_frame && seg.seed_point && state.showSeedMarker) {
+    drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
   }
   return true;
 }
 
 function maskUrlForFrame(frame) {
-  if (state.propMaskUrlByFrame.has(frame)) return state.propMaskUrlByFrame.get(frame);
-  if (frame === state.seedFrame && state.seedMaskUrl) return state.seedMaskUrl;
+  const urls = maskUrlsForActive();
+  if (urls.has(frame)) return urls.get(frame);
+  const seg = activeSegment();
+  if (seg && frame === seg.seed_frame) {
+    const sm = state.seedMaskUrls.get(seg.id);
+    if (sm) return sm;
+  }
   return null;
 }
 
@@ -433,7 +556,7 @@ async function prefetchMasks(slug) {
     el.video.addEventListener("loadedmetadata", () => prefetchMasks(slug), { once: true });
     return;
   }
-  const entries = Array.from(state.propMaskUrlByFrame.entries())
+  const entries = Array.from(maskUrlsForActive().entries())
     .sort((a, b) => a[0] - b[0])
     .filter(([frame]) => !state.tintedCache.has(frame));
   const concurrency = 8;
@@ -502,9 +625,10 @@ async function loadFrameSource(slug) {
   el.frameCanvas.height = fs.previewHeight;
   resizeOverlay();
   updateStatus();
-  // Prefetch the trim range so subsequent scrub is all cache hits.
-  if (state.inFrame != null && state.outFrame != null) {
-    fs.prefetchRange(state.inFrame, state.outFrame);
+  // Prefetch the active segment's trim range so subsequent scrub is all cache hits.
+  const seg = activeSegment();
+  if (seg && seg.in_frame != null && seg.out_frame != null) {
+    fs.prefetchRange(seg.in_frame, seg.out_frame);
   }
   // Repaint the current frame now that the source is ready.
   scheduleScrubPaint(state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0);
@@ -518,12 +642,7 @@ function syncFromItem(item) {
   }
   state.fps = item.fps;
   state.totalFrames = item.total_frames || 0;
-  state.inFrame = item.in_frame == null ? null : item.in_frame;
-  state.outFrame = item.out_frame == null ? null : item.out_frame;
-  state.seedFrame = item.seed_frame == null ? null : item.seed_frame;
-  state.seedPoint = item.seed_point == null ? null : item.seed_point;
-  state.propagateStatus = item.propagate_status;
-  state.seedMaskReady = state.seedFrame != null && state.seedPoint != null;
+  state.activeSegmentId = item.active_segment_id || null;
   el.itemSlug.textContent = item.slug;
   updateSidebarActive();
   el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
@@ -532,20 +651,16 @@ function syncFromItem(item) {
   state.lastDisplayedFrame = 0;
   enterScrubMode();
   state.scrubPaintToken++;
-  clearSeedMask();
+  clearSeedMask();        // all segments
+  clearPropMasks();       // all segments
   clearDoneFills();
   clearOverlay();
   state.ptsTable = null;
   state.pendingTargetFrame = null;
   state.isSeeking = false;
   state.lastSeekTarget = null;
-  // Clear cross-slug-leaking UI flags. Without these, "click to set seed
-  // point", a "seeding…" status banner, or a stale propagate ticker can
-  // bleed from the previous slug onto this one's view. The actual server
-  // work for the prior slug keeps running and self-cleans via captured-slug
-  // gates in sendSeed/propagate.
   state.pendingSeedClick = false;
-  state.seedComputing = false;
+  state.seedComputingSeg = null;
   state.seedComputeStartMs = null;
   state.propPhase = null;
   state.propDoneCount = 0;
@@ -553,6 +668,7 @@ function syncFromItem(item) {
   state.propPhaseElapsed = 0;
   state.propStartMs = null;
   if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
+  renderSegmentsStrip();
   updateMarkers();
   updatePropagateBtn();
   updateStatus();
@@ -645,9 +761,13 @@ function onHashChange() {
 }
 
 function effectiveStatus(it) {
-  const ps = it.propagate_status;
-  if (ps === "idle" && it.seed_frame != null) return "ready";
-  return ps;
+  return aggregateStatus(it);
+}
+
+function segmentCounts(it) {
+  const segs = it.segments || [];
+  const done = segs.filter(s => s.propagate_status === "done").length;
+  return { done, total: segs.length };
 }
 
 function renderSidebar() {
@@ -659,7 +779,9 @@ function renderSidebar() {
     const status = effectiveStatus(it);
     const fps = it.fps ? `${Math.round(it.fps)}fps` : "";
     const frames = it.total_frames ? `${it.total_frames}f` : "";
-    const meta = [fps, frames].filter(Boolean).join(" · ");
+    const counts = segmentCounts(it);
+    const segLabel = counts.total > 0 ? `${counts.done}/${counts.total} seg` : "";
+    const meta = [fps, frames, segLabel].filter(Boolean).join(" · ");
     const nameDiv = document.createElement("div");
     nameDiv.className = "item-card-name";
     const dot = document.createElement("span");
@@ -677,7 +799,7 @@ function renderSidebar() {
     delBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteItem(it.slug); });
     card.appendChild(nameDiv);
     card.appendChild(metaDiv);
-    if (state.queueSnapshot.current === it.slug) {
+    if (state.queueSnapshot.current && state.queueSnapshot.current.slug === it.slug) {
       const bar = document.createElement("div");
       bar.className = "item-card-progress";
       const fill = document.createElement("div");
@@ -725,14 +847,21 @@ function updateSidebarActive() {
   }
 }
 
-function updateSidebarStatus(slug, status) {
+function updateSidebarStatus(slug, segId, status) {
+  // Stamps the segment-level propagate_status, then refreshes the sidebar dot
+  // (uses aggregateStatus across all segments) and the segments strip if
+  // this slug is currently active.
   const it = state.items.find(i => i.slug === slug);
-  if (it) it.propagate_status = status;
+  if (it) {
+    const seg = (it.segments || []).find(s => s.id === segId);
+    if (seg) seg.propagate_status = status;
+  }
   const card = el.itemList.querySelector(`.item-card[data-slug="${slug}"]`);
   if (card) {
     const dot = card.querySelector(".item-status");
     if (dot) dot.className = `item-status item-status-${it ? effectiveStatus(it) : status}`;
   }
+  if (slug === state.current) renderSegmentsStrip();
   updateQueueButton();
 }
 
@@ -829,26 +958,32 @@ function startSse() {
     try { payload = JSON.parse(ev.data); } catch (_) { return; }
     const frame = payload.frame;
     const maskUrl = payload.mask_url;
-    if (typeof frame !== "number" || typeof maskUrl !== "string") return;
-    state.propMaskUrlByFrame.set(frame, maskUrl);
-    state.propDoneCount = state.propMaskUrlByFrame.size;
-    addDoneFill(frame);
-    if (el.overlay.width && el.overlay.height) {
-      const img = new Image();
-      img.onload = () => {
-        try { state.tintedCache.set(frame, buildTintedCanvas(img)); } catch (_) {}
-        if (state.current === capturedSlug && currentFrame() === frame) blitCachedMask(frame);
-      };
-      img.src = maskUrl;
-    } else if (frame === currentFrame()) {
-      loadMaskForFrame(frame);
+    const segId = payload.seg_id;
+    if (typeof frame !== "number" || typeof maskUrl !== "string" || typeof segId !== "string") return;
+    let m = state.propMaskUrlsBySeg.get(segId);
+    if (!m) { m = new Map(); state.propMaskUrlsBySeg.set(segId, m); }
+    m.set(frame, maskUrl);
+    if (segId === state.activeSegmentId) {
+      state.propDoneCount = m.size;
+      addDoneFill(frame);
+      if (el.overlay.width && el.overlay.height) {
+        const img = new Image();
+        img.onload = () => {
+          try { state.tintedCache.set(frame, buildTintedCanvas(img)); } catch (_) {}
+          if (state.current === capturedSlug && currentFrame() === frame) blitCachedMask(frame);
+        };
+        img.src = maskUrl;
+      } else if (frame === currentFrame()) {
+        loadMaskForFrame(frame);
+      }
+      updateStatus();
     }
-    updateStatus();
   });
   es.addEventListener("phase", (ev) => {
     if (state.current !== capturedSlug) return;
     let payload;
     try { payload = JSON.parse(ev.data); } catch (_) { return; }
+    if (payload.seg_id !== state.activeSegmentId) return;  // not the segment we're viewing
     state.propPhase = payload.phase || null;
     if (typeof payload.expected_frames === "number") state.propExpected = payload.expected_frames;
     if (typeof payload.elapsed_s === "number") state.propPhaseElapsed = payload.elapsed_s;
@@ -860,11 +995,10 @@ function startSse() {
   es.addEventListener("done", (ev) => {
     let payload = {};
     try { payload = JSON.parse(ev.data); } catch (_) {}
-    // Always reflect the captured slug's completion into the sidebar / items
-    // — the propagation actually finished on disk for that slug.
-    updateSidebarStatus(capturedSlug, "done");
-    if (state.current === capturedSlug) {
-      state.propagateStatus = "done";
+    const segId = payload.seg_id;
+    if (typeof segId !== "string") return;
+    updateSidebarStatus(capturedSlug, segId, "done");
+    if (state.current === capturedSlug && segId === state.activeSegmentId) {
       state.propPhase = "done";
       if (typeof payload.elapsed_s === "number") state.propPhaseElapsed = payload.elapsed_s;
       if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
@@ -876,8 +1010,13 @@ function startSse() {
   es.addEventListener("error", (ev) => {
     let payload = {};
     try { payload = JSON.parse(ev.data); } catch (_) {}
-    updateSidebarStatus(capturedSlug, "failed");
-    if (state.current === capturedSlug && payload.msg) showError(`propagate: ${payload.msg}`);
+    const segId = payload.seg_id;
+    if (typeof segId === "string") {
+      updateSidebarStatus(capturedSlug, segId, "failed");
+    }
+    if (state.current === capturedSlug && payload.msg && segId === state.activeSegmentId) {
+      showError(`propagate: ${payload.msg}`);
+    }
   });
   es.onerror = () => {};
 }
@@ -890,65 +1029,171 @@ async function postJson(path, body) {
   });
 }
 
+async function ensureActiveEditableSegment() {
+  // Returns the active segment if writable; else creates a fresh one and
+  // returns it. "Auto-new" guard: we never overwrite a done/running segment's
+  // in/out — that would silently invalidate masks that took 30s+ to compute.
+  let seg = activeSegment();
+  if (seg && seg.propagate_status !== "done" && seg.propagate_status !== "running") {
+    return seg;
+  }
+  if (currentItem() == null) return null;
+  const newSeg = await createSegment();
+  return newSeg;
+}
+
 async function markIn() {
   if (!state.current) return;
-  const f = currentFrame();
-  state.inFrame = f;
+  const seg = await ensureActiveEditableSegment();
+  if (!seg) return;
+  seg.in_frame = currentFrame();
   updateMarkers();
+  renderSegmentsStrip();
   updatePropagateBtn();
   updateStatus();
-  console.log("mark in", f);
-  if (state.outFrame != null) sendTrim();
+  if (seg.out_frame != null) sendTrim(seg);
 }
 
 async function markOut() {
   if (!state.current) return;
-  const f = currentFrame();
-  state.outFrame = f;
+  const seg = await ensureActiveEditableSegment();
+  if (!seg) return;
+  seg.out_frame = currentFrame();
   updateMarkers();
+  renderSegmentsStrip();
   updatePropagateBtn();
   updateStatus();
-  console.log("mark out", f);
-  if (state.inFrame != null) sendTrim();
+  if (seg.in_frame != null) sendTrim(seg);
 }
 
-async function sendTrim() {
-  if (state.inFrame == null || state.outFrame == null) return;
+async function sendTrim(seg) {
+  if (!seg || seg.in_frame == null || seg.out_frame == null) return;
   const capturedSlug = state.current;
-  const inF = state.inFrame, outF = state.outFrame;
+  const segId = seg.id;
+  const inF = seg.in_frame, outF = seg.out_frame;
   try {
     const r = await postJson(`/api/items/${encodeURIComponent(capturedSlug)}/trim`, {
-      in_frame: inF, out_frame: outF,
+      seg_id: segId, in_frame: inF, out_frame: outF,
     });
-    if (state.current !== capturedSlug) return;  // user moved on; server still got the trim
+    if (state.current !== capturedSlug) return;
     if (!r.ok) showError(`trim failed: HTTP ${r.status}`);
-    else if (state.frameSource) state.frameSource.prefetchRange(state.inFrame, state.outFrame);
+    else if (state.frameSource && state.activeSegmentId === segId) {
+      state.frameSource.prefetchRange(inF, outF);
+    }
   } catch (e) {
     if (state.current === capturedSlug) showError(`trim failed: ${e}`);
   }
 }
 
-function markSeed() {
+async function markSeed() {
   if (!state.current) return;
-  state.seedFrame = currentFrame();
-  state.seedMaskReady = false;
-  state.seedPoint = null;
+  const seg = await ensureActiveEditableSegment();
+  if (!seg) return;
+  seg.seed_frame = currentFrame();
+  seg.seed_point = null;
   state.pendingSeedClick = true;
-  clearSeedMask();
+  clearSeedMask(seg.id);
   clearOverlay();
+  updateMarkers();
+  renderSegmentsStrip();
+  updatePropagateBtn();
+  updateStatus();
+  console.log("mark seed", seg.id, seg.seed_frame, "awaiting click");
+}
+
+async function createSegment() {
+  if (!state.current) return null;
+  const capturedSlug = state.current;
+  try {
+    const r = await postJson(`/api/items/${encodeURIComponent(capturedSlug)}/segments/new`);
+    if (!r.ok) { showError(`new segment failed: HTTP ${r.status}`); return null; }
+    const j = await r.json();
+    const segId = j.seg_id;
+    if (state.current !== capturedSlug) return null;
+    const it = currentItem();
+    if (!it) return null;
+    it.segments = it.segments || [];
+    const newSeg = {
+      id: segId, in_frame: null, out_frame: null,
+      seed_frame: null, seed_point: null, propagate_status: "idle",
+    };
+    it.segments.push(newSeg);
+    setActiveSegmentLocal(it, segId);
+    clearDoneFills();   // active changed → wipe overlay state
+    clearOverlay();
+    state.propDoneCount = 0;
+    state.propExpected = 0;
+    state.propPhase = null;
+    renderSegmentsStrip();
+    updateMarkers();
+    updatePropagateBtn();
+    renderSidebar();
+    updateStatus();
+    return newSeg;
+  } catch (e) { showError(`new segment failed: ${e}`); return null; }
+}
+
+async function deleteSegment(segId) {
+  if (!confirm(`Delete segment ${segId}?\n\nMasks for this segment will be removed.`)) return;
+  const capturedSlug = state.current;
+  const r = await postJson(`/api/items/${encodeURIComponent(capturedSlug)}/segments/${segId}/delete`);
+  if (!r.ok) { showError(`delete segment failed: HTTP ${r.status}`); return; }
+  if (state.current !== capturedSlug) return;
+  const it = currentItem();
+  if (!it) return;
+  it.segments = (it.segments || []).filter(s => s.id !== segId);
+  if (state.activeSegmentId === segId) {
+    setActiveSegmentLocal(it, it.segments.length ? it.segments[it.segments.length - 1].id : null);
+  }
+  clearSeedMask(segId);
+  clearPropMasks(segId);
+  clearDoneFills();
+  // Re-add fills for whatever the new active segment has.
+  const m = maskUrlsForActive();
+  for (const f of m.keys()) addDoneFill(f);
+  renderSegmentsStrip();
+  renderSidebar();
   updateMarkers();
   updatePropagateBtn();
   updateStatus();
-  console.log("mark seed", state.seedFrame, "awaiting click");
+  scheduleScrubPaint(state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0);
+}
+
+async function activateSegment(segId) {
+  if (!state.current || state.activeSegmentId === segId) return;
+  const it = currentItem();
+  if (!it) return;
+  setActiveSegmentLocal(it, segId);
+  // Persist server-side (best-effort; UI doesn't depend on it).
+  postJson(`/api/items/${encodeURIComponent(it.slug)}/segments/${segId}/active`)
+    .catch(() => {});
+  clearDoneFills();
+  const m = maskUrlsForActive();
+  for (const f of m.keys()) addDoneFill(f);
+  state.propDoneCount = m.size;
+  const seg = activeSegment();
+  state.propExpected = (seg && seg.in_frame != null && seg.out_frame != null)
+    ? (seg.out_frame - seg.in_frame + 1) : 0;
+  state.propPhase = null;
+  state.propStartMs = null;
+  state.propPhaseElapsed = 0;
+  if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
+  renderSegmentsStrip();
+  updateMarkers();
+  updatePropagateBtn();
+  renderSidebar();
+  if (state.frameSource && seg && seg.in_frame != null && seg.out_frame != null) {
+    state.frameSource.prefetchRange(seg.in_frame, seg.out_frame);
+  }
+  scheduleScrubPaint(state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0);
+  updateStatus();
 }
 
 async function sendSeed(frameIndex, x, y) {
-  // Capture slug at call site so a slug switch mid-flight doesn't pollute
-  // the new slug's state with this seed's result. Server-side the POST URL
-  // already pins the work to capturedSlug; the issue is purely frontend
-  // bookkeeping leaking across slugs.
   const capturedSlug = state.current;
-  state.seedComputing = true;
+  const capturedSegId = state.activeSegmentId;
+  if (!capturedSegId) return;
+  state.seedComputingSeg = capturedSegId;
   state.seedComputeStartMs = performance.now();
   updateStatus();
   const tickHandle = setInterval(updateStatus, 200);
@@ -956,21 +1201,23 @@ async function sendSeed(frameIndex, x, y) {
     const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(capturedSlug)}/seed`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ frame_index: frameIndex, x, y }),
+      body: JSON.stringify({ seg_id: capturedSegId, frame_index: frameIndex, x, y }),
     });
     if (!r.ok) {
       const text = await r.text().catch(() => "");
       if (state.current === capturedSlug) showError(`seed failed: HTTP ${r.status} ${text}`);
-      else console.warn(`seed for ${capturedSlug} failed (user already moved on): HTTP ${r.status}`);
+      else console.warn(`seed for ${capturedSlug}/${capturedSegId} failed: HTTP ${r.status}`);
       return;
     }
     const blob = await r.blob();
-    // Always reflect server-side truth into items[] for the captured slug —
-    // its seed file IS on disk now.
+    // Mirror server-truth into items[].segments
     const it = state.items.find(i => i.slug === capturedSlug);
+    const seg = it && (it.segments || []).find(s => s.id === capturedSegId);
+    if (seg) {
+      seg.seed_frame = frameIndex;
+      seg.seed_point = [x, y];
+    }
     if (it) {
-      it.seed_frame = frameIndex;
-      it.seed_point = [x, y];
       const card = el.itemList.querySelector(`.item-card[data-slug="${capturedSlug}"]`);
       if (card) {
         const dot = card.querySelector(".item-status");
@@ -978,27 +1225,22 @@ async function sendSeed(frameIndex, x, y) {
       }
       updateQueueButton();
     }
-    // View-state writes ONLY if the user is still looking at this slug.
-    // If they switched away, the blob just gets GC'd — we never made an
-    // object URL for it on this branch.
     if (state.current === capturedSlug) {
-      clearSeedMask();
-      state.seedMaskUrl = URL.createObjectURL(blob);
-      state.seedMaskReady = true;
-      if (currentFrame() === frameIndex) loadMaskForFrame(frameIndex);
+      clearSeedMask(capturedSegId);
+      state.seedMaskUrls.set(capturedSegId, URL.createObjectURL(blob));
+      if (state.activeSegmentId === capturedSegId && currentFrame() === frameIndex) {
+        loadMaskForFrame(frameIndex);
+      }
+      renderSegmentsStrip();
       updatePropagateBtn();
     }
   } catch (e) {
     if (state.current === capturedSlug) showError(`seed failed: ${e}`);
-    else console.warn(`seed for ${capturedSlug} threw (user already moved on):`, e);
+    else console.warn(`seed for ${capturedSlug}/${capturedSegId} threw:`, e);
   } finally {
     clearInterval(tickHandle);
-    // The "seeding…" status banner only makes sense for the slug we started
-    // on; if user switched, B was never seeding so we shouldn't have shown
-    // anything for it (handled by syncFromItem reset). Either way this clears
-    // the global flag now that this in-flight call is done.
-    if (state.current === capturedSlug) {
-      state.seedComputing = false;
+    if (state.seedComputingSeg === capturedSegId) {
+      state.seedComputingSeg = null;
       state.seedComputeStartMs = null;
       updateStatus();
     }
@@ -1008,45 +1250,45 @@ async function sendSeed(frameIndex, x, y) {
 async function propagate() {
   if (el.btnPropagate.disabled) return;
   const capturedSlug = state.current;
-  state.propagateStatus = "running";
-  updateSidebarStatus(capturedSlug, "running");
+  const seg = activeSegment();
+  if (!seg) return;
+  const capturedSegId = seg.id;
+  seg.propagate_status = "running";
+  updateSidebarStatus(capturedSlug, capturedSegId, "running");
   state.propPhase = "starting";
   state.propDoneCount = 0;
-  state.propExpected = (state.outFrame - state.inFrame + 1) || 0;
+  state.propExpected = (seg.out_frame - seg.in_frame + 1) || 0;
   state.propPhaseElapsed = 0;
   state.propStartMs = performance.now();
+  // Wipe THIS segment's prior masks so a re-propagate doesn't show stale data.
+  clearPropMasks(capturedSegId);
   clearDoneFills();
   updatePropagateBtn();
   updateStatus();
   if (state.propTickHandle) clearInterval(state.propTickHandle);
   state.propTickHandle = setInterval(updateStatus, 200);
   try {
-    const r = await postJson(`/api/items/${encodeURIComponent(capturedSlug)}/propagate`);
+    const r = await postJson(`/api/items/${encodeURIComponent(capturedSlug)}/propagate`,
+      { seg_id: capturedSegId });
     if (!r.ok) {
       const text = await r.text().catch(() => "");
-      updateSidebarStatus(capturedSlug, "failed");
-      if (state.current === capturedSlug) {
-        state.propagateStatus = "failed";
+      updateSidebarStatus(capturedSlug, capturedSegId, "failed");
+      if (state.current === capturedSlug && state.activeSegmentId === capturedSegId) {
         showError(`propagate failed: HTTP ${r.status} ${text}`);
         clearInterval(state.propTickHandle);
         state.propTickHandle = null;
         updatePropagateBtn();
         updateStatus();
-      } else {
-        console.warn(`propagate POST for ${capturedSlug} failed (user moved on): HTTP ${r.status}`);
       }
     }
   } catch (e) {
-    updateSidebarStatus(capturedSlug, "failed");
-    if (state.current === capturedSlug) {
-      state.propagateStatus = "failed";
+    updateSidebarStatus(capturedSlug, capturedSegId, "failed");
+    if (state.current === capturedSlug && state.activeSegmentId === capturedSegId) {
       clearInterval(state.propTickHandle);
       state.propTickHandle = null;
       showError(`propagate failed: ${e}`);
       updatePropagateBtn();
       updateStatus();
-    } else {
-      console.warn(`propagate POST for ${capturedSlug} threw (user moved on):`, e);
     }
   }
 }
@@ -1057,18 +1299,21 @@ async function cancelOrEscape() {
     updateStatus();
     return;
   }
-  if (state.propagateStatus === "running" && state.current) {
-    const capturedSlug = state.current;
-    try {
-      const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(capturedSlug)}/propagate/cancel`, { method: "POST" });
-      if (r.status !== 404 && !r.ok) console.warn(`cancel HTTP ${r.status}`);
-    } catch (e) { console.warn("cancel failed", e); }
-    updateSidebarStatus(capturedSlug, "idle");
-    if (state.current === capturedSlug) {
-      state.propagateStatus = "idle";
-      updatePropagateBtn();
-      updateStatus();
-    }
+  const seg = activeSegment();
+  if (!seg || seg.propagate_status !== "running" || !state.current) return;
+  const capturedSlug = state.current;
+  const capturedSegId = seg.id;
+  try {
+    const r = await postJson(
+      `/api/items/${encodeURIComponent(capturedSlug)}/propagate/cancel`,
+      { seg_id: capturedSegId },
+    );
+    if (r.status !== 404 && !r.ok) console.warn(`cancel HTTP ${r.status}`);
+  } catch (e) { console.warn("cancel failed", e); }
+  updateSidebarStatus(capturedSlug, capturedSegId, "idle");
+  if (state.current === capturedSlug && state.activeSegmentId === capturedSegId) {
+    updatePropagateBtn();
+    updateStatus();
   }
 }
 
@@ -1136,19 +1381,27 @@ async function rehydrateMasks(slug) {
     if (!r.ok) return;
     const j = await r.json();
     if (slug !== state.current) return;
-    if (!Array.isArray(j.frames)) return;
-    for (const f of j.frames) {
-      const url = `${API_BASE}/mask/${encodeURIComponent(slug)}/${String(f).padStart(5, "0")}.png`;
-      state.propMaskUrlByFrame.set(f, url);
-      addDoneFill(f);
+    if (!j.segments || typeof j.segments !== "object") return;
+    for (const [segId, frames] of Object.entries(j.segments)) {
+      if (!Array.isArray(frames)) continue;
+      let m = state.propMaskUrlsBySeg.get(segId);
+      if (!m) { m = new Map(); state.propMaskUrlsBySeg.set(segId, m); }
+      for (const f of frames) {
+        const url = `${API_BASE}/mask/${encodeURIComponent(slug)}/${segId}/${String(f).padStart(5, "0")}.png`;
+        m.set(f, url);
+      }
     }
-    state.propDoneCount = state.propMaskUrlByFrame.size;
-    if (state.propagateStatus === "done") {
-      state.propExpected = (state.outFrame != null && state.inFrame != null)
-        ? (state.outFrame - state.inFrame + 1) : state.propDoneCount;
+    // Render fills for the active segment only.
+    const active = maskUrlsForActive();
+    for (const f of active.keys()) addDoneFill(f);
+    state.propDoneCount = active.size;
+    const seg = activeSegment();
+    if (seg && seg.propagate_status === "done") {
+      state.propExpected = (seg.in_frame != null && seg.out_frame != null)
+        ? (seg.out_frame - seg.in_frame + 1) : state.propDoneCount;
     }
     const f = currentFrame();
-    if (state.propMaskUrlByFrame.has(f)) loadMaskForFrame(f);
+    if (active.has(f)) loadMaskForFrame(f);
     updateStatus();
     prefetchMasks(slug);
   } catch (e) { console.warn("rehydrate masks failed", e); }
@@ -1178,7 +1431,8 @@ function togglePlay() {
 
 function onVideoClick(e) {
   if (!state.pendingSeedClick) { togglePlay(); return; }
-  if (state.seedFrame == null) return;
+  const seg = activeSegment();
+  if (!seg || seg.seed_frame == null) return;
   const fs = state.frameSource;
   const nativeW = (fs && fs.width) || el.video.videoWidth;
   const nativeH = (fs && fs.height) || el.video.videoHeight;
@@ -1193,10 +1447,10 @@ function onVideoClick(e) {
   const x = Math.round((e.clientX - disp.left) * (nativeW / disp.width));
   const y = Math.round((e.clientY - disp.top) * (nativeH / disp.height));
   console.log("seed click", { client: [e.clientX, e.clientY], disp, native: [x, y] });
-  state.seedPoint = [x, y];
+  seg.seed_point = [x, y];
   state.pendingSeedClick = false;
   updateStatus();
-  sendSeed(state.seedFrame, x, y);
+  sendSeed(seg.seed_frame, x, y);
 }
 
 function onKeydown(e) {
@@ -1215,23 +1469,27 @@ function onKeydown(e) {
     stepFrames(e.altKey ? 100 : (e.shiftKey ? 10 : 1));
   } else if (e.key === "Home") {
     e.preventDefault();
-    jumpToFrame(state.inFrame != null ? state.inFrame : 0);
+    const seg = activeSegment();
+    jumpToFrame(seg && seg.in_frame != null ? seg.in_frame : 0);
   } else if (e.key === "End") {
     e.preventDefault();
-    jumpToFrame(state.outFrame != null ? state.outFrame : state.totalFrames - 1);
+    const seg = activeSegment();
+    jumpToFrame(seg && seg.out_frame != null ? seg.out_frame : state.totalFrames - 1);
   } else if (e.key === "[") markIn();
   else if (e.key === "]") markOut();
   else if (e.key === "s" || e.key === "S") markSeed();
+  else if (e.key === "n" || e.key === "N") createSegment();
   else if (e.key === "Enter") propagate();
   else if (e.key === "Escape") cancelOrEscape();
   else if (e.key === "h" || e.key === "H") {
     state.showSeedMarker = !state.showSeedMarker;
     const f = currentFrame();
+    const seg = activeSegment();
     if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
     else {
       clearOverlay();
-      if (state.showSeedMarker && f === state.seedFrame && state.seedPoint) {
-        drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+      if (state.showSeedMarker && seg && f === seg.seed_frame && seg.seed_point) {
+        drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
       }
     }
   }
@@ -1253,8 +1511,9 @@ function onDisplayedFrame(_now, metadata) {
       el.scrubber.value = String(f);
       if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
       else clearOverlay();
-      if (f === state.seedFrame && state.seedPoint && state.showSeedMarker && maskUrlForFrame(f) == null) {
-        drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+      const seg = activeSegment();
+      if (seg && f === seg.seed_frame && seg.seed_point && state.showSeedMarker && maskUrlForFrame(f) == null) {
+        drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
       }
     }
   }
@@ -1332,6 +1591,7 @@ function bindUi() {
   el.btnIn.addEventListener("click", markIn);
   el.btnOut.addEventListener("click", markOut);
   el.btnSeed.addEventListener("click", markSeed);
+  el.btnNewSeg.addEventListener("click", () => createSegment());
   el.btnPropagate.addEventListener("click", propagate);
   el.btnCancel.addEventListener("click", cancelOrEscape);
 

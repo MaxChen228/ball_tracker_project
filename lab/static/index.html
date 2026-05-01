@@ -35,12 +35,14 @@
         </div>
       </main>
 
+      <section id="segments-section">
+        <div id="segments-strip"></div>
+      </section>
+
       <section id="timeline-section">
         <div id="timeline-wrap">
           <div id="timeline-fills"></div>
-          <div id="marker-in" class="marker marker-in" hidden></div>
-          <div id="marker-out" class="marker marker-out" hidden></div>
-          <div id="marker-seed" class="marker marker-seed" hidden>&#9733;</div>
+          <div id="marker-layer"></div>
           <input id="scrubber" type="range" min="0" max="0" step="1" value="0">
         </div>
       </section>
@@ -49,6 +51,7 @@
         <button id="btn-in" type="button">Mark In [</button>
         <button id="btn-out" type="button">Mark Out ]</button>
         <button id="btn-seed" type="button">Mark Seed (S)</button>
+        <button id="btn-new-seg" type="button">+ New Segment (N)</button>
         <button id="btn-propagate" type="button" disabled>Propagate (Enter)</button>
         <button id="btn-cancel" type="button">Cancel (Esc)</button>
       </section>

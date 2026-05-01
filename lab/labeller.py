@@ -747,14 +747,18 @@ def _queue_runner() -> None:
                 run_propagate(slug, seg_id)  # blocks until done / failed / cancelled
             except Exception as e:
                 print(f"[labeller] queue: {slug}/{seg_id} failed: {e}", flush=True)
-                STORE.update_segment(slug, seg_id, propagate_status="failed")
-            # Drop the predictor between queue items (see prior comment about
-            # MPS pool fragmentation; reloading costs ~1.5s on M-series).
+                try:
+                    STORE.update_segment(slug, seg_id, propagate_status="failed")
+                except KeyError:
+                    pass
             unload_propagator()
             if _QUEUE_CANCEL.is_set():
                 cur_seg = _segment_or_404(slug, seg_id)
                 if cur_seg and cur_seg.get("propagate_status") != "done":
-                    STORE.update_segment(slug, seg_id, propagate_status="idle")
+                    try:
+                        STORE.update_segment(slug, seg_id, propagate_status="idle")
+                    except KeyError:
+                        pass
                 break
         print("[labeller] queue: drained", flush=True)
     finally:
@@ -776,11 +780,17 @@ def run_propagate(slug: str, seg_id: str) -> None:
     seed_p = seg["seed_point"]
     if None in (in_f, out_f, seed_f, seed_p):
         BUS.publish(slug, "error", {"seg_id": seg_id, "msg": "missing in/out/seed/point"})
-        STORE.update_segment(slug, seg_id, propagate_status="failed")
+        try:
+            STORE.update_segment(slug, seg_id, propagate_status="failed")
+        except KeyError:
+            pass  # segment deleted concurrently; nothing to update
         return
     if not (in_f <= seed_f <= out_f):
         BUS.publish(slug, "error", {"seg_id": seg_id, "msg": "seed_frame outside [in,out]"})
-        STORE.update_segment(slug, seg_id, propagate_status="failed")
+        try:
+            STORE.update_segment(slug, seg_id, propagate_status="failed")
+        except KeyError:
+            pass  # segment deleted concurrently; nothing to update
         return
 
     source = SOURCES_DIR / item["source_video"]
@@ -801,7 +811,10 @@ def run_propagate(slug: str, seg_id: str) -> None:
         local_to_source = extract_range_to_dir(source, in_f, out_f, fdir, pts_payload["pts"])
     except Exception as e:
         BUS.publish(slug, "error", {"seg_id": seg_id, "msg": f"frame extract failed: {e}"})
-        STORE.update_segment(slug, seg_id, propagate_status="failed")
+        try:
+            STORE.update_segment(slug, seg_id, propagate_status="failed")
+        except KeyError:
+            pass  # segment deleted concurrently; nothing to update
         return
     BUS.publish(slug, "phase", {
         "seg_id": seg_id, "phase": "extracted",
@@ -853,22 +866,31 @@ def run_propagate(slug: str, seg_id: str) -> None:
     except PropagationCancelled:
         for png in mdir.glob("*.png"):
             png.unlink()
-        STORE.update_segment(slug, seg_id, propagate_status="idle")
+        try:
+            STORE.update_segment(slug, seg_id, propagate_status="idle")
+        except KeyError:
+            pass
         BUS.publish(slug, "error", {"seg_id": seg_id, "msg": "cancelled"})
         return
     except Exception as e:
         BUS.publish(slug, "error", {"seg_id": seg_id, "msg": f"propagate failed: {e}"})
-        STORE.update_segment(slug, seg_id, propagate_status="failed")
+        try:
+            STORE.update_segment(slug, seg_id, propagate_status="failed")
+        except KeyError:
+            pass  # segment deleted concurrently; nothing to update
         return
 
-    STORE.update_segment(slug, seg_id, propagate_status="done")
+    try:
+        STORE.update_segment(slug, seg_id, propagate_status="done")
+    except KeyError:
+        pass
     BUS.publish(slug, "done", {"seg_id": seg_id, "elapsed_s": round(time.time() - t_prop, 2)})
 
 
 SLUG_RE = re.compile(
     r"^/api/items/([A-Za-z0-9_\-]+)/"
     r"(trim|seed|propagate|propagate/cancel|events|pts|masks|delete|"
-    r"segments/new|segments/[A-Za-z0-9_]+/active|segments/[A-Za-z0-9_]+/delete)$"
+    r"segments/new|segments/seg_[A-Za-z0-9]+/active|segments/seg_[A-Za-z0-9]+/delete)$"
 )
 MASK_RE = re.compile(r"^/mask/([A-Za-z0-9_\-]+)/(seg_[A-Za-z0-9]+)/(\d{5})\.png$")
 CLIP_RE = re.compile(r"^/clip/([A-Za-z0-9_\-]+)\.mp4$")
