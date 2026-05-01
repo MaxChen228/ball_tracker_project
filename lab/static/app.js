@@ -127,21 +127,62 @@ function clearDoneFills() {
   clearPropMasks();
 }
 
+function videoDisplayRect() {
+  // Returns the actual displayed video frame rect inside the <video> element,
+  // accounting for letterbox/pillarbox. Coords are in CSS pixels relative to
+  // the viewport (same frame as getBoundingClientRect()).
+  const v = el.video;
+  if (!v.videoWidth || !v.videoHeight) return null;
+  const rect = v.getBoundingClientRect();
+  const elemRatio = rect.width / rect.height;
+  const vidRatio = v.videoWidth / v.videoHeight;
+  let dispW, dispH, padX, padY;
+  if (elemRatio > vidRatio) {
+    dispH = rect.height; dispW = dispH * vidRatio;
+    padX = (rect.width - dispW) / 2; padY = 0;
+  } else {
+    dispW = rect.width; dispH = dispW / vidRatio;
+    padX = 0; padY = (rect.height - dispH) / 2;
+  }
+  return { left: rect.left + padX, top: rect.top + padY, width: dispW, height: dispH };
+}
+
 function resizeOverlay() {
   const v = el.video;
-  if (!v.videoWidth || !v.videoHeight) return;
-  const rect = v.getBoundingClientRect();
+  const disp = videoDisplayRect();
+  if (!disp) return;
   el.overlay.width = v.videoWidth;
   el.overlay.height = v.videoHeight;
-  el.overlay.style.width = rect.width + "px";
-  el.overlay.style.height = rect.height + "px";
-  el.overlay.style.top = v.offsetTop + "px";
-  el.overlay.style.left = v.offsetLeft + "px";
+  // Position overlay over the displayed frame (not the element box) so the
+  // canvas pixels line up exactly with what the user sees.
+  const wrapRect = el.video.parentElement.getBoundingClientRect();
+  el.overlay.style.width = disp.width + "px";
+  el.overlay.style.height = disp.height + "px";
+  el.overlay.style.left = (disp.left - wrapRect.left) + "px";
+  el.overlay.style.top = (disp.top - wrapRect.top) + "px";
 }
 
 function clearOverlay() {
   const ctx = el.overlay.getContext("2d");
   ctx.clearRect(0, 0, el.overlay.width, el.overlay.height);
+}
+
+function drawClickMarker(x, y) {
+  const c = el.overlay;
+  const ctx = c.getContext("2d");
+  ctx.save();
+  ctx.strokeStyle = "rgba(239, 68, 68, 1.0)";
+  ctx.fillStyle = "rgba(239, 68, 68, 0.6)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(x, y, 14, 0, 2 * Math.PI);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 22, y); ctx.lineTo(x + 22, y);
+  ctx.moveTo(x, y - 22); ctx.lineTo(x, y + 22);
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawMaskTinted(img) {
@@ -184,7 +225,12 @@ async function loadMaskForFrame(frame) {
   }
   const img = new Image();
   img.onload = () => {
-    if (currentFrame() === frame) drawMaskTinted(img);
+    if (currentFrame() === frame) {
+      drawMaskTinted(img);
+      if (frame === state.seedFrame && state.seedPoint) {
+        drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+      }
+    }
   };
   img.onerror = () => clearOverlay();
   img.src = url;
@@ -452,9 +498,20 @@ function onVideoClick(e) {
     showError("video metadata not ready");
     return;
   }
-  const rect = v.getBoundingClientRect();
-  const x = Math.round((e.clientX - rect.left) * (v.videoWidth / rect.width));
-  const y = Math.round((e.clientY - rect.top) * (v.videoHeight / rect.height));
+  const disp = videoDisplayRect();
+  if (!disp) {
+    showError("video display rect unresolved");
+    return;
+  }
+  // Reject clicks landing in the letterbox margin (outside the actual frame).
+  if (e.clientX < disp.left || e.clientX > disp.left + disp.width ||
+      e.clientY < disp.top || e.clientY > disp.top + disp.height) {
+    console.warn("click outside video frame area, ignored");
+    return;
+  }
+  const x = Math.round((e.clientX - disp.left) * (v.videoWidth / disp.width));
+  const y = Math.round((e.clientY - disp.top) * (v.videoHeight / disp.height));
+  console.log("seed click", { client: [e.clientX, e.clientY], disp, native: [x, y] });
   state.seedPoint = [x, y];
   state.pendingSeedClick = false;
   updateStatus();
