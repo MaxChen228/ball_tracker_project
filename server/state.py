@@ -1595,6 +1595,8 @@ class State:
         out of `state._time_fn`, and means a "now()" stamp can never
         drift from when the disk row was actually written.
         """
+        import algorithms
+        algorithms.validate_id(cfg.algorithm_id)
         with self._lock:
             self._detection_config = cfg.with_(last_applied_at=self._time_fn())
             self._persist_detection_config_locked()

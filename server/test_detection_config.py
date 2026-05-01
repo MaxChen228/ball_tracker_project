@@ -306,6 +306,61 @@ def test_load_or_migrate_backfills_algorithm_id_into_legacy_disk_file(
     assert persisted["algorithm_id"] == algorithms.DEFAULT_ALGORITHM_ID
 
 
+def test_load_or_migrate_combined_selector_and_missing_algorithm_id(
+    tmp_path, monkeypatch,
+):
+    """A pre-phase-1 disk file with BOTH the legacy `selector` block
+    and a missing `algorithm_id` exercises both `rewrite_reasons`
+    branches in one call — single atomic_write should land canonical
+    shape with neither stale field present."""
+    legacy_with_both_issues = {
+        "selector": {"w_aspect": 0.6, "w_fill": 0.4},
+        "preset": "blue_ball",
+        "hsv": {
+            "h_min": 105, "h_max": 112, "s_min": 140, "s_max": 255,
+            "v_min": 40, "v_max": 255,
+        },
+        "shape_gate": {"aspect_min": 0.75, "fill_min": 0.55},
+        "last_applied_at": None,
+    }
+    (tmp_path / "detection_config.json").write_text(
+        json.dumps(legacy_with_both_issues)
+    )
+
+    main = _fresh_main(tmp_path, monkeypatch)
+    import algorithms
+
+    cfg = main.state.detection_config()
+    assert cfg.algorithm_id == algorithms.DEFAULT_ALGORITHM_ID
+
+    persisted = json.loads((tmp_path / "detection_config.json").read_text())
+    assert "selector" not in persisted
+    assert persisted["algorithm_id"] == algorithms.DEFAULT_ALGORITHM_ID
+
+
+def test_set_detection_config_validates_algorithm_id_at_write(
+    tmp_path, monkeypatch,
+):
+    """Boundary test for the BLOCK fix in phase-1 follow-up:
+    `set_detection_config` must `validate_id` before persisting so a
+    bad id from any internal path (test fixture, future caller) cannot
+    land on disk and only fail on next boot."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    from detection_config import DetectionConfig
+    from detection import HSVRange, ShapeGate
+
+    cfg = DetectionConfig(
+        hsv=HSVRange(h_min=10, h_max=20, s_min=30, s_max=40, v_min=50, v_max=60),
+        shape_gate=ShapeGate(aspect_min=0.5, fill_min=0.5),
+        preset=None,
+        last_applied_at=None,
+        algorithm_id="v999_not_registered",
+    )
+    with pytest.raises(ValueError, match="v999_not_registered"):
+        main.state.set_detection_config(cfg)
+    assert not (tmp_path / "detection_config.json").exists()
+
+
 def test_unknown_algorithm_id_on_disk_fails_loud_at_boot(
     tmp_path, monkeypatch,
 ):

@@ -57,12 +57,8 @@ class DetectionConfig:
     boot defaults). Mirrors the on-disk schema 1:1.
 
     `algorithm_id` is the registry key for which detection algorithm
-    this config feeds. Today only `algorithms.V11_HSV_CC` exists, so
-    every persisted config carries that string; the field is
-    first-class so future versions can drop in without another schema
-    bump. Validation runs at every load + every `set_detection_config`
-    write — an unknown id raises rather than silently falling through
-    to the default."""
+    this config feeds. Validated against `algorithms._REGISTRY` at
+    load + write time; unknown id raises."""
     hsv: HSVRange
     shape_gate: ShapeGate
     preset: str | None
@@ -83,9 +79,8 @@ class DetectionConfig:
         adapters use this to mutate one section while explicitly clearing
         `preset` (editing any sub-knob means leaving the named preset).
 
-        `algorithm_id` uses None-as-leave-unchanged because it cannot
-        validly be None — every config has an algorithm. Pass an explicit
-        registered id to switch (currently only one is registered)."""
+        `algorithm_id` uses plain `None`-as-unchanged (not `_SENTINEL`)
+        because the field cannot validly be None."""
         return replace(
             self,
             hsv=self.hsv if hsv is None else hsv,
@@ -148,12 +143,9 @@ def from_dict(d: dict) -> DetectionConfig:
     first boot post-retirement so the stale field is gone within one
     cycle.
 
-    `algorithm_id` defaults to the registry default when the key is
-    absent — that branch is *only* reachable on a one-shot read
-    migration from a pre-algorithm-id disk file (see
-    `load_or_migrate`), which immediately re-persists in canonical
-    shape. After that boot every read sees the explicit field. An
-    unknown id raises via `algorithms.validate_id`."""
+    The `.get(..., DEFAULT)` branch is only reachable for pre-phase-1
+    disk files; `load_or_migrate` rewrites canonical shape on first
+    boot post-upgrade so subsequent reads see an explicit key."""
     algorithm_id = d.get("algorithm_id", algorithms.DEFAULT_ALGORITHM_ID)
     algorithms.validate_id(algorithm_id)
     return DetectionConfig(

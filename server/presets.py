@@ -40,11 +40,7 @@ class Preset:
     hsv: HSVRange
     shape_gate: ShapeGate
     # Which detection algorithm this preset's params are tuned for.
-    # Today every preset targets `algorithms.V11_HSV_CC` because that's
-    # the only registered algorithm; the field exists so future
-    # algorithms (with different params shapes) can ship their own
-    # presets without a schema break or a name collision with v11
-    # presets in the same `data/presets/` directory.
+    # Validated against the registry on load / save.
     algorithm_id: str = algorithms.DEFAULT_ALGORITHM_ID
 
 
@@ -127,11 +123,9 @@ def _from_dict(d: dict) -> Preset:
     no-silent-fallback: a corrupt preset file raises rather than masking
     a config bug as a defaults-restore.
 
-    `algorithm_id` defaults to the registry default when the key is
-    absent — that branch is only reachable when reading a preset file
-    written before the field existed (one-shot read migration in
-    `list_presets` / `load_preset` rewrites the canonical shape). An
-    unknown id raises via `algorithms.validate_id`."""
+    The `.get(..., DEFAULT)` branch is only reachable for preset
+    files predating the field; `_read_with_migration` rewrites
+    canonical shape on first read."""
     hsv = d["hsv"]
     sg = d["shape_gate"]
     algorithm_id = d.get("algorithm_id", algorithms.DEFAULT_ALGORITHM_ID)
@@ -157,12 +151,8 @@ def _read_with_migration(
     *,
     atomic_write: Callable[[Path, str], None] | None,
 ) -> Preset:
-    """Read one preset file, returning the parsed `Preset`. If the file
-    pre-dates the `algorithm_id` field (phase-1 of the multi-version
-    refactor), `_from_dict` backfills the default and this helper
-    rewrites the canonical shape so subsequent reads are explicit.
-    Skips the rewrite when no `atomic_write` is supplied (read-only
-    callers like the offline reprocess CLI)."""
+    """Read one preset file. If the file lacks `algorithm_id` and an
+    `atomic_write` is supplied, rewrite canonical shape on read."""
     raw = json.loads(path.read_text())
     preset = _from_dict(raw)
     if atomic_write is not None and "algorithm_id" not in raw:

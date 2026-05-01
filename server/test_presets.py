@@ -100,13 +100,13 @@ def test_unknown_algorithm_id_in_preset_file_fails_loud(
     (pdir / "bad_algo.json").write_text(json.dumps(bad))
 
     main = _fresh_main(tmp_path, monkeypatch)
-    # State-level call surfaces the loud failure — `_from_dict` raises
-    # `ValueError` via `algorithms.validate_id`. The HTTP layer turns
-    # that into a 500; we assert at the state layer to keep the test
-    # focused on schema strictness rather than FastAPI exception
-    # plumbing (which TestClient re-raises by default).
+    # Both list_presets (iterates dir) and load_preset (single file)
+    # must surface the loud failure — they're independent code paths
+    # and could regress separately.
     with pytest.raises(ValueError, match="v999_not_registered"):
         main.state.list_presets()
+    with pytest.raises(ValueError, match="v999_not_registered"):
+        main.state.load_preset("bad_algo")
 
 
 def test_get_unknown_preset_returns_404(tmp_path, monkeypatch):
