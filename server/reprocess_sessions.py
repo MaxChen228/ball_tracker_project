@@ -3,11 +3,19 @@ sessions. Reads the current `data/detection_config.json`, iterates pitch
 JSONs paired with their stored MOVs, re-runs `detect_pitch`, rewrites the
 pitch JSON, and re-triangulates sessions where both A and B are present.
 
-Usage:
-    uv run python reprocess_sessions.py --since today
-    uv run python reprocess_sessions.py --since 2026-04-20
-    uv run python reprocess_sessions.py --session s_c8d36fe2
-    uv run python reprocess_sessions.py --all
+Selection (mutually exclusive, one required):
+    --since today | YYYY-MM-DD     filter pitch JSONs by mtime
+    --session s_xxxx [s_yyyy ...]  explicit session IDs
+    --all                          every pitch on disk
+
+Config source (default → current disk config):
+    --algorithm-id <id>            override only the algorithm_id slot
+    --params <file.json>           load entire snapshot from JSON
+    --use-frozen-snapshot          replay each pitch's stored snapshot
+
+Workflow:
+    --dry-run                      detect+triangulate, don't overwrite
+    --strict                       exit non-zero on any per-pitch failure
 """
 from __future__ import annotations
 
@@ -50,10 +58,11 @@ def load_detection_config_snapshot() -> DetectionConfigSnapshotPayload:
     so the operator can spot it (not a silent fallback)."""
     cfg = load_or_migrate(DATA_DIR, atomic_write=atomic_write)
     snapshot = DetectionConfigSnapshotPayload.from_detection_config(cfg)
+    preset_label = snapshot.preset_name if snapshot.preset_name is not None else "custom"
     logger.info(
         "detection_config algorithm=%s preset=%s hsv h[%d-%d] s[%d-%d] v[%d-%d] "
         "aspect>=%.2f fill>=%.2f",
-        snapshot.algorithm_id, snapshot.preset_name or "custom",
+        snapshot.algorithm_id, preset_label,
         snapshot.hsv.h_min, snapshot.hsv.h_max,
         snapshot.hsv.s_min, snapshot.hsv.s_max,
         snapshot.hsv.v_min, snapshot.hsv.v_max,
@@ -288,11 +297,52 @@ def main() -> None:
              "behavior is to pick up your current disk config so tuning "
              "workflows actually see new results.",
     )
+    ap.add_argument(
+        "--algorithm-id",
+        help="override the algorithm_id of the active disk config. Must "
+             "be a registered id (see server/algorithms/__init__.py). "
+             "Mutually exclusive with --params (--params already carries "
+             "its own algorithm_id).",
+    )
+    ap.add_argument(
+        "--params",
+        type=Path,
+        help="path to a JSON file with the same shape as a "
+             "DetectionConfigSnapshotPayload (algorithm_id, hsv, "
+             "shape_gate, preset_name). Replaces the disk config for "
+             "this run only. For parameter sweeps without mutating "
+             "data/detection_config.json.",
+    )
+    ap.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit non-zero if any pitch fails to reprocess. Default "
+             "behaviour is to log failures + return 0 so partial runs "
+             "complete; --strict is for automation that wants a hard "
+             "fail signal.",
+    )
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    snapshot = load_detection_config_snapshot()
+    if args.algorithm_id is not None and args.params is not None:
+        raise SystemExit(
+            "--algorithm-id and --params are mutually exclusive; --params "
+            "already carries its own algorithm_id"
+        )
+
+    if args.params is not None:
+        snapshot = _load_snapshot_from_file(args.params)
+    else:
+        snapshot = load_detection_config_snapshot()
+        if args.algorithm_id is not None:
+            import algorithms
+            algorithms.validate_id(args.algorithm_id)
+            snapshot = snapshot.model_copy(
+                update={"algorithm_id": args.algorithm_id}
+            )
+            logger.info("algorithm_id override → %s", args.algorithm_id)
+
     pairing_tuning = load_pairing_tuning()
     calibrations = load_calibrations()
 
@@ -336,7 +386,20 @@ def main() -> None:
         logger.error("%d pitch file(s) failed to reprocess:", len(failures))
         for name, err in failures:
             logger.error("  %s — %s", name, err)
+        if args.strict:
+            raise SystemExit(
+                f"--strict: aborting with non-zero exit due to "
+                f"{len(failures)} reprocess failure(s)"
+            )
     logger.info("done.")
+
+
+def _load_snapshot_from_file(path: Path) -> DetectionConfigSnapshotPayload:
+    """Read a DetectionConfigSnapshotPayload from a JSON file. Strict
+    parse — Pydantic enforces the schema and the model's
+    `_validate_algorithm_id` rejects ids not in the registry."""
+    raw = path.read_text()
+    return DetectionConfigSnapshotPayload.model_validate_json(raw)
 
 
 if __name__ == "__main__":

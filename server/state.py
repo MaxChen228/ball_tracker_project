@@ -1161,9 +1161,13 @@ class State:
         with self._lock:
             existing = self.results.get(session_id)
         if existing is None:
-            logger.info(
-                "stamp_server_post_config: session %s missing — likely "
-                "deleted during server_post run; skipping",
+            # Race: caller's earlier `record(pitch)` returned a real
+            # SessionResult, but the session was deleted between then
+            # and now. Loud warning so the caller's `result = stamp_*`
+            # doesn't silently shadow a real result with a shell.
+            logger.warning(
+                "stamp_server_post_config: session %s missing — deleted "
+                "during server_post run; snapshot will not be persisted",
                 session_id,
             )
             return SessionResult(

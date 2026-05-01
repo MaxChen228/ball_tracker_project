@@ -205,6 +205,118 @@ def test_rerun_detection_use_frozen_snapshot_legacy_falls_back_with_warning(
     assert "lacks server_post_config_used" in msgs
 
 
+def test_load_snapshot_from_file_strict_parse(tmp_path):
+    """`--params <json>` reads the file via Pydantic strict parse: any
+    schema mismatch raises rather than silently falling back to default
+    values. Round-trip is intentional — the file format equals the wire
+    format for `DetectionConfigSnapshotPayload`."""
+    import json
+    import reprocess_sessions as R
+
+    good = _snapshot(
+        h_min=10, h_max=20, s_min=30, s_max=40, v_min=50, v_max=60,
+        aspect_min=0.7, fill_min=0.55,
+    )
+    good_path = tmp_path / "good.json"
+    good_path.write_text(good.model_dump_json())
+    loaded = R._load_snapshot_from_file(good_path)
+    assert loaded.hsv.h_min == 10
+    assert loaded.shape_gate.aspect_min == pytest.approx(0.7)
+
+    # Unknown algorithm_id rejected by the model validator.
+    bad_path = tmp_path / "bad_algo.json"
+    bad_path.write_text(json.dumps({
+        "algorithm_id": "v999_not_registered",
+        "hsv": {"h_min": 0, "h_max": 1, "s_min": 0, "s_max": 1, "v_min": 0, "v_max": 1},
+        "shape_gate": {"aspect_min": 0.5, "fill_min": 0.5},
+        "preset_name": None,
+    }))
+    with pytest.raises(Exception, match="v999_not_registered"):
+        R._load_snapshot_from_file(bad_path)
+
+
+def test_strict_flag_propagates_failure_to_exit_code(tmp_path, monkeypatch):
+    """`--strict` turns "any pitch failed" into a non-zero exit; default
+    behaviour returns 0 so a single bad MOV doesn't sink an automation
+    sweep over a hundred sessions."""
+    import sys
+    import reprocess_sessions as R
+
+    pitch = _make_pitch(server_post_used=None)
+    pitch_path = tmp_path / "pitches" / "session_s_strict01_A.json"
+    _write_pitch(pitch_path, pitch)
+    monkeypatch.setattr(R, "PITCH_DIR", tmp_path / "pitches")
+    monkeypatch.setattr(R, "RESULT_DIR", tmp_path / "results")
+    (tmp_path / "results").mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        R, "load_detection_config_snapshot",
+        lambda: _snapshot(
+            h_min=0, h_max=1, s_min=0, s_max=1, v_min=0, v_max=1,
+            aspect_min=0.5, fill_min=0.5,
+        ),
+    )
+    monkeypatch.setattr(R, "load_pairing_tuning", lambda: R.PairingTuning.default())
+    monkeypatch.setattr(R, "load_calibrations", lambda: {})
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic fail")
+
+    monkeypatch.setattr(R, "rerun_detection", boom)
+
+    monkeypatch.setattr(sys, "argv", ["reprocess_sessions", "--all"])
+    R.main()  # default → completes despite failure
+
+    monkeypatch.setattr(sys, "argv", ["reprocess_sessions", "--all", "--strict"])
+    with pytest.raises(SystemExit):
+        R.main()
+
+
+def test_algorithm_id_override_validates_against_registry(tmp_path, monkeypatch):
+    """`--algorithm-id` rewrites the snapshot's id but rejects an id
+    that isn't in the registry. Bad id → SystemExit before any work."""
+    import sys
+    import reprocess_sessions as R
+
+    monkeypatch.setattr(
+        R, "load_detection_config_snapshot",
+        lambda: _snapshot(
+            h_min=0, h_max=1, s_min=0, s_max=1, v_min=0, v_max=1,
+            aspect_min=0.5, fill_min=0.5,
+        ),
+    )
+    monkeypatch.setattr(R, "select_pitch_files", lambda args: [])
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["reprocess_sessions", "--all", "--algorithm-id", "v999_not_registered"],
+    )
+    with pytest.raises(ValueError, match="v999_not_registered"):
+        R.main()
+
+
+def test_algorithm_id_and_params_are_mutually_exclusive(tmp_path, monkeypatch):
+    """`--params` already carries its own algorithm_id, so combining
+    with `--algorithm-id` is ambiguous — abort early so the operator
+    can pick one source of truth."""
+    import sys
+    import reprocess_sessions as R
+
+    params_path = tmp_path / "p.json"
+    params_path.write_text(_snapshot(
+        h_min=0, h_max=1, s_min=0, s_max=1, v_min=0, v_max=1,
+        aspect_min=0.5, fill_min=0.5,
+    ).model_dump_json())
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["reprocess_sessions", "--all",
+         "--algorithm-id", "v11_hsv_cc",
+         "--params", str(params_path)],
+    )
+    with pytest.raises(SystemExit, match="mutually exclusive"):
+        R.main()
+
+
 def test_rerun_detection_stamps_used_values_back_on_legacy(tmp_path, monkeypatch):
     """After reprocessing a legacy pitch, the freshly-used values are
     stamped back so the next reprocess can honour the freeze."""
