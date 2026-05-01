@@ -10,6 +10,11 @@ import numpy as np
 from PIL import Image
 
 
+class PropagationCancelled(RuntimeError):
+    """Raised mid-generator when cancel() is invoked. Distinct from generic
+    failure so callers can mark the item idle/resumable instead of done."""
+
+
 def _pick_device() -> str:
     import torch
 
@@ -78,7 +83,7 @@ class Propagator:
                         state, start_frame_idx=seed_local_idx, reverse=reverse
                     ):
                         if self._cancel:
-                            return
+                            raise PropagationCancelled()
                         mask = (out_mask_logits[0] > 0).cpu().numpy().astype(np.uint8) * 255
                         if mask.ndim == 3:
                             mask = mask[0]

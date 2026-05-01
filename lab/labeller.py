@@ -18,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from lab.propagator import PropagationCancelled
+
 LAB_DIR = Path(__file__).resolve().parent
 STATIC_DIR = LAB_DIR / "static"
 WORKSPACE = LAB_DIR / "standalone_workspace"
@@ -629,6 +631,16 @@ def run_propagate(slug: str) -> None:
                     snap["frame_total"] = expected + 1
                     snap["elapsed_s"] = round(now - t_prop, 2)
                     BUS.publish("__queue__", "queue", snap)
+    except PropagationCancelled:
+        # User pressed Stop. Wipe the partial masks and reset to idle so the
+        # next Run Queue (or single propagate) starts from scratch — leaving
+        # the mid-run masks on disk would let a half-done session masquerade
+        # as complete on the next reload.
+        for png in mdir.glob("*.png"):
+            png.unlink()
+        STORE.update(slug, propagate_status="idle")
+        BUS.publish(slug, "error", {"msg": "cancelled"})
+        return
     except Exception as e:
         BUS.publish(slug, "error", {"msg": f"propagate failed: {e}"})
         STORE.update(slug, propagate_status="failed")
