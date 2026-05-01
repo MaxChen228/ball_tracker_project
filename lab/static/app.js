@@ -405,6 +405,9 @@ function syncFromItem(item) {
   state.lastDisplayedFrame = 0;
   enterScrubMode();
   el.frameImg.src = `${API_BASE}/frame/${encodeURIComponent(item.slug)}/00000.jpg`;
+  // Grab focus from the URL bar so the very first space-press toggles play
+  // without the user having to click into the page first.
+  el.videoWrap.focus();
   clearSeedMask();
   clearDoneFills();
   clearOverlay();
@@ -755,11 +758,6 @@ function flushStep() {
   if (state.pendingTargetFrame == null) return;
   const target = state.pendingTargetFrame;
   state.pendingTargetFrame = null;
-  // Img-swap scrubbing: bypass video.currentTime entirely. Chrome refuses
-  // some sub-frame paused seeks (silently keeps the previous frame on
-  // screen — that was the "f doesn't change but t does" symptom). The
-  // server pre-extracted every frame in [in,out] as a JPG; outside that
-  // range a /frame endpoint decodes on demand and caches.
   enterScrubMode();
   const tbl = state.ptsTable;
   state.lastDisplayedMediaTime = tbl[target];
@@ -770,6 +768,13 @@ function flushStep() {
   else clearOverlay();
   if (target === state.seedFrame && state.seedPoint && maskUrlForFrame(target) == null) {
     drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+  }
+  // Background-sync the underlying video element to the same PTS so togglePlay
+  // can call play() without burning the user-gesture token on a seek. Chrome
+  // sometimes refuses paused sub-frame seeks but always honours the LAST seek
+  // before play(), so cumulative scrubbing leaves video positioned correctly.
+  if (Math.abs(el.video.currentTime - tbl[target]) > 0.005) {
+    el.video.currentTime = tbl[target];
   }
   updateStatus();
 }
@@ -832,35 +837,18 @@ function togglePlay() {
     const f = state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0;
     const targetT = tbl ? tbl[f] : null;
     if (targetT == null) return;
-    console.log("[play] before:", {
-      readyState: el.video.readyState,
-      networkState: el.video.networkState,
-      paused: el.video.paused,
-      currentTime: el.video.currentTime,
-      duration: el.video.duration,
-      src: el.video.currentSrc,
-      targetT,
-    });
+    // flushStep keeps el.video.currentTime in sync as the user scrubs, so by
+    // now the video is already positioned. Just call play() — no seek means
+    // no microtask before play, so the user-gesture token survives.
     if (Math.abs(el.video.currentTime - targetT) > 0.005) {
       el.video.currentTime = targetT;
     }
     state.lastDisplayedMediaTime = targetT;
     exitScrubMode();
-    const p = el.video.play();
-    if (p && typeof p.then === "function") {
-      p.then(() => console.log("[play] resolved, currentTime=", el.video.currentTime, "paused=", el.video.paused))
-       .catch((e) => {
-         console.warn("[play] rejected:", e);
-         enterScrubMode();
-       });
-    }
-    setTimeout(() => {
-      console.log("[play] +200ms:", {
-        currentTime: el.video.currentTime,
-        paused: el.video.paused,
-        readyState: el.video.readyState,
-      });
-    }, 200);
+    el.video.play().catch((e) => {
+      console.warn("play failed", e);
+      enterScrubMode();
+    });
   } else {
     el.video.pause();
     const f = currentFrame();
