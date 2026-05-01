@@ -27,6 +27,13 @@ def _fmt_ts(ts: float) -> str:
     return dt.strftime("%H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
 
 
+def _fmt_log_ts(ts: Any) -> str:
+    try:
+        return _fmt_ts(float(ts))
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "unknown"
+
+
 def _snip(v: Any) -> str:
     if isinstance(v, float):
         if math.isnan(v) or math.isinf(v):
@@ -186,12 +193,12 @@ def build_debug_report(
 
         L.append("LOG (last 20 entries):")
         for entry in logs[-20:]:
-            ts = entry.get("ts", 0)
+            ts = entry.get("ts")
             source = str(entry.get("source") or "?").ljust(6)
             event = str(entry.get("event") or "?")
             detail = entry.get("detail") or {}
             detail_str = " ".join(f"{k}={_snip(v)}" for k, v in detail.items())
-            L.append(f"  [{_fmt_ts(ts)}] {source} {event} {detail_str}")
+            L.append(f"  [{_fmt_log_ts(ts)}] {source} {event} {detail_str}")
         L.append("")
 
         L.append("DIAGNOSIS (Quick Chirp):")
@@ -335,12 +342,12 @@ def build_debug_report(
     # --- Log tail ---
     L.append("LOG (last 30 entries):")
     for entry in logs[-30:]:
-        ts = entry.get("ts", 0)
+        ts = entry.get("ts")
         source = str(entry.get("source") or "?").ljust(6)
         event = str(entry.get("event") or "?")
         detail = entry.get("detail") or {}
         detail_str = " ".join(f"{k}={_snip(v)}" for k, v in detail.items())
-        L.append(f"  [{_fmt_ts(ts)}] {source} {event} {detail_str}")
+        L.append(f"  [{_fmt_log_ts(ts)}] {source} {event} {detail_str}")
     L.append("")
 
     # --- Anomaly flags + diagnosis ---
