@@ -25,11 +25,18 @@ from chirp import (
     SYNC_CHIRP_DURATION_S,
     _hann_chirp,
 )
+from routes.sync import _fmt_optional_seconds
 from state import SyncParams
 
 SAMPLE_RATE = 48000
 # Match server default SyncParams so windowed detection finds chirps.
 DEFAULT_PARAMS = SyncParams()
+
+
+def test_optional_sync_timestamp_log_format_distinguishes_none_from_zero() -> None:
+    assert _fmt_optional_seconds(None) == "None"
+    assert _fmt_optional_seconds(0.0) == "0.000000"
+    assert _fmt_optional_seconds(1.2345678) == "1.234568"
 
 
 def _wav_bytes(mono: np.ndarray, rate: int = SAMPLE_RATE) -> bytes:

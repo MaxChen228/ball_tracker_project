@@ -22,6 +22,12 @@ _SYNC_START_STATUS_FOR_REASON: dict[str, int] = {
 _SYNC_WAV_RE = re.compile(r"^sy_[0-9a-f]{4,32}_[A-Za-z0-9_-]{1,16}\.wav$")
 
 
+def _fmt_optional_seconds(value: float | None) -> str:
+    if value is None:
+        return "None"
+    return f"{value:.6f}"
+
+
 @router.post("/sync/start")
 async def sync_start(request: Request) -> dict[str, Any]:
     from main import state, device_ws
@@ -108,11 +114,12 @@ async def sync_audio_upload(
     logger.info(
         "sync_audio_upload cam=%s role=%s duration_s=%.3f "
         "peak_self=%.4f peak_other=%.4f psr_self=%.2f psr_other=%.2f "
-        "t_self=%.6f t_other=%.6f",
+        "t_self=%s t_other=%s",
         camera_id, role, debug["duration_s"],
         debug["peak_self"], debug["peak_other"],
         debug["psr_self"], debug["psr_other"],
-        report.t_self_s or 0.0, report.t_from_other_s or 0.0,
+        _fmt_optional_seconds(report.t_self_s),
+        _fmt_optional_seconds(report.t_from_other_s),
     )
     run_after, result, reason = state.sync.record_sync_report(report)
     if reason == "no_sync":
