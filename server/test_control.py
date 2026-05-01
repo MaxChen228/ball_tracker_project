@@ -960,6 +960,9 @@ def test_dashboard_renders_control_panel():
     assert 'id="session-body"' in body
     assert 'id="events-body"' in body
     assert 'id="scene-root"' in body
+    assert 'id="dash-playback-bar"' in body
+    assert 'id="dash-playback-scrub"' in body
+    assert 'data-dash-playback-rate="1"' in body
     assert 'href="/setup"' in body
     assert 'href="/markers"' in body
 

@@ -115,7 +115,6 @@ def test_viewer_layers_use_role_based_not_path_based_colors():
     assert "const PATH_COLORS =" not in text
     assert "function colorForCamPath" not in text
     assert "function colorForCamera" in text
-    assert "const FIT_ACCENT = 0xC0392B;" in text
     assert 'group.name = "viewer_traj";' in text
     assert 'viewer_traj_live' not in text
     assert 'viewer_traj_svr' not in text
@@ -131,8 +130,33 @@ def test_viewer_playback_uses_single_ball_marker_layer():
     assert "viewer_playback_marker" in text
     assert "viewer_fit_marker" not in text
     assert "_playbackBallMarker(" in text
-    assert "_lastVisibleTrajectoryPoint(" in text
-    assert "_activeFitSegmentIndex()" in text
+    assert "resolvePlaybackMarkerPose(" in text
+    assert "createBaseballMarker(" in text
+
+
+def test_shared_baseball_and_playback_modules_are_used_by_both_surfaces():
+    """Dashboard and viewer should share both the current-ball mesh and
+    the marker pose resolver, instead of duplicating marker policy."""
+    ball = (_RUNTIME_DIR / "ball_marker.js").read_text()
+    resolver = (_RUNTIME_DIR / "playback_marker.js").read_text()
+    viewer = (_RUNTIME_DIR / "viewer_layers.js").read_text()
+    dashboard = (_RUNTIME_DIR / "dashboard_layers.js").read_text()
+    assert "export function createBaseballMarker" in ball
+    assert "export function resolvePlaybackMarkerPose" in resolver
+    assert 'from "./ball_marker.js"' in viewer
+    assert 'from "./playback_marker.js"' in viewer
+    assert 'from "./ball_marker.js"' in dashboard
+    assert 'from "./playback_marker.js"' in dashboard
+
+
+def test_dashboard_layers_expose_marker_only_playback_api():
+    """Dashboard playback is 3D-only: the classic bundle owns the clock,
+    the layer module owns one baseball marker layer."""
+    text = (_RUNTIME_DIR / "dashboard_layers.js").read_text()
+    assert "setPlaybackMode(mode)" in text
+    assert "setPlaybackTime(t)" in text
+    assert "dashboard_playback_marker" in text
+    assert "createBaseballMarker()" in text
 
 
 def test_scene_theme_is_json_safe():

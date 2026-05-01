@@ -50,9 +50,9 @@ import {
   readPersistedFitExtensionSeconds,
   writePersistedFitExtensionSeconds,
 } from "./fit_curves_layer.js";
+import { createBaseballMarker, setBaseballMarkerPose } from "./ball_marker.js";
+import { resolvePlaybackMarkerPose } from "./playback_marker.js";
 
-const FIT_ACCENT = 0xC0392B;
-const G_Z = -9.81;
 // Same ±tol as raysAtT in the previous implementation — a single decoded
 // frame's worth.
 const PLAYBACK_RAY_TOL = 0.010;
@@ -100,23 +100,6 @@ function lineSegmentsFromPairs(pairs, color, opts = {}) {
   }));
 }
 
-function pointMarker(p, color, radius = 0.030) {
-  const geom = new THREE.SphereGeometry(radius, 16, 12);
-  const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(color) });
-  const m = new THREE.Mesh(geom, mat);
-  m.position.set(p[0], p[1], p[2]);
-  return m;
-}
-
-function evalSegmentAt(seg, t) {
-  const tau = t - seg.t_anchor;
-  return [
-    seg.p0[0] + seg.v0[0] * tau,
-    seg.p0[1] + seg.v0[1] * tau,
-    seg.p0[2] + seg.v0[2] * tau + 0.5 * G_Z * tau * tau,
-  ];
-}
-
 class ViewerLayers {
   constructor(scene, opts) {
     this.scene = scene;
@@ -152,6 +135,8 @@ class ViewerLayers {
     // controls a single value via the Rays popover.
     this._raysOpacity = 0.7;
     this._raysLineWidth = 1.5;
+    this._playbackMarkerGroup = null;
+    this._playbackMarkerBall = null;
 
     // --- one-time cameras + ground traces + fit curves ---
     this._buildCameras();
@@ -221,48 +206,17 @@ class ViewerLayers {
     const pts = this.TRAJ_BY_PATH[this._currentPath()];
     return Array.isArray(pts) ? pts : [];
   }
-  _activeFitSegmentIndex() {
-    const segs = this._currentSegments();
-    for (let i = 0; i < segs.length; ++i) {
-      const seg = segs[i];
-      if (this.t >= seg.t_start - 1e-3 && this.t <= seg.t_end + 1e-3) return i;
-    }
-    return -1;
-  }
-  _lastVisibleTrajectoryPoint(cutoff, residualPasses, costPassesPoint) {
-    let lastVisible = null;
-    for (const p of this._currentTrajectory()) {
-      if (p.t_rel_s > cutoff) continue;
-      if (!residualPasses(p)) continue;
-      if (!costPassesPoint(p)) continue;
-      lastVisible = p;
-    }
-    return lastVisible;
-  }
   _playbackBallMarker(cutoff, residualPasses, costPassesPoint) {
-    if (this.mode !== "playback") return null;
-    if (this._isVisible("fit")) {
-      const i = this._activeFitSegmentIndex();
-      if (i !== -1) {
-        const seg = this._currentSegments()[i];
-        return {
-          p: evalSegmentAt(seg, this.t),
-          color: SEG_PALETTE[i % SEG_PALETTE.length],
-          radius: 0.030,
-        };
-      }
-    }
-    if (this._isVisible("traj")) {
-      const p = this._lastVisibleTrajectoryPoint(cutoff, residualPasses, costPassesPoint);
-      if (p) {
-        return {
-          p: [p.x, p.y, p.z],
-          color: FIT_ACCENT,
-          radius: this._pointSize * 1.6,
-        };
-      }
-    }
-    return null;
+    return resolvePlaybackMarkerPose({
+      mode: this.mode,
+      t: this.t,
+      fitVisible: this._isVisible("fit"),
+      trajVisible: this._isVisible("traj"),
+      segments: this._currentSegments(),
+      points: this._currentTrajectory(),
+      residualPasses,
+      costPassesPoint,
+    });
   }
   _layerOn(layer) { return !!this.layerVisibility[layer]; }
   // True iff the layer's enable flag is on AND its data subset matches the
@@ -387,7 +341,6 @@ class ViewerLayers {
   _rebuildDynamic() {
     this.scene.removeLayer("viewer_rays");
     this.scene.removeLayer("viewer_traj");
-    this.scene.removeLayer("viewer_playback_marker");
 
     const playback = this.mode === "playback";
     const cutoff = playback ? this.t : Infinity;
@@ -502,12 +455,25 @@ class ViewerLayers {
     // head. Keeping this outside traj/fit prevents two "current ball"
     // markers from being rendered by independent layers.
     const marker = this._playbackBallMarker(cutoff, residualPasses, costPassesPoint);
-    if (marker) {
+    this._applyPlaybackMarker(marker);
+  }
+
+  _applyPlaybackMarker(marker) {
+    if (!marker) {
+      if (this._playbackMarkerGroup) this._playbackMarkerGroup.visible = false;
+      return;
+    }
+    if (!this._playbackMarkerGroup) {
       const group = new THREE.Group();
       group.name = "viewer_playback_marker";
-      group.add(pointMarker(marker.p, marker.color, marker.radius));
+      const ball = createBaseballMarker({ radiusM: 0.0365 });
+      group.add(ball);
       this.scene.addLayer("viewer_playback_marker", group);
+      this._playbackMarkerGroup = group;
+      this._playbackMarkerBall = ball;
     }
+    this._playbackMarkerGroup.visible = true;
+    setBaseballMarkerPose(this._playbackMarkerBall, marker.position);
   }
 
   // ---- public API ----

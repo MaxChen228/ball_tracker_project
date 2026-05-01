@@ -50,6 +50,8 @@ import {
   readPersistedFitExtensionSeconds,
   writePersistedFitExtensionSeconds,
 } from "./fit_curves_layer.js";
+import { createBaseballMarker, setBaseballMarkerPose } from "./ball_marker.js";
+import { resolvePlaybackMarkerPose } from "./playback_marker.js";
 
 // Visual constants for the dashboard's accent palette. Match the
 // previous Plotly-era values in 20_trajectory.js so the on-screen
@@ -171,6 +173,12 @@ class DashboardLayers {
     this._fitExtensionSec = readPersistedFitExtensionSeconds();
     // Cached so applyResolution() can re-push it after a canvas resize.
     this._fitGroup = null;
+    this._playbackMode = "all";
+    this._playbackT = 0;
+    this._playbackSegments = [];
+    this._playbackPoints = [];
+    this._playbackMarkerGroup = null;
+    this._playbackMarkerBall = null;
     // Resize listener — Line2 LineMaterial.resolution must follow the
     // renderer or linewidth uniform reads stale screen px and lines
     // render at default-zero width on next paint.
@@ -288,7 +296,12 @@ class DashboardLayers {
     this.scene.removeLayer("fit_release");
     this.scene.removeLayer("fit_arrows");
     this.scene.removeLayer("fit_points");
+    this.scene.removeLayer("dashboard_playback_marker");
     this._fitGroup = null;
+    this._playbackSegments = [];
+    this._playbackPoints = [];
+    this._playbackMarkerGroup = null;
+    this._playbackMarkerBall = null;
   }
 
   _rebuildFitLayers() {
@@ -314,6 +327,14 @@ class DashboardLayers {
     // indexes into the full `points` list — pre-filtering would break
     // that contract). null threshold → all-true mask.
     const keep = _buildPointKeepMask(points, result.cost_threshold, result.gap_threshold_m);
+    const xyz = points.map((p) => ({ x: p.x_m, y: p.y_m, z: p.z_m, t_rel_s: p.t_rel_s }));
+    const byPoint = classifyPointsBySegment(xyz, segments);
+    this._playbackSegments = segments;
+    this._playbackPoints = [];
+    for (let i = 0; i < xyz.length; ++i) {
+      if (!keep[i]) continue;
+      this._playbackPoints.push({ ...xyz[i], seg_idx: byPoint[i] });
+    }
 
     // --- fit curves ---
     const dom = this.scene.renderer && this.scene.renderer.domElement;
@@ -360,14 +381,9 @@ class DashboardLayers {
     if (this._showPoints && points.length) {
       const pointsGroup = new THREE.Group();
       pointsGroup.name = "fit_points";
-      // Normalise dashboard's `{x_m,y_m,z_m}` shape to `{x,y,z}` once,
-      // so the shared pointsCloud helper has a single contract with
-      // viewer (which already speaks `{x,y,z}`).
-      const xyz = points.map((p) => ({ x: p.x_m, y: p.y_m, z: p.z_m }));
       // Classify on the FULL list — `SegmentRecord.original_indices`
       // are full-list indices. Then skip masked-out points in the
       // bucketing pass below.
-      const byPoint = classifyPointsBySegment(xyz, segments);
       const buckets = new Map();
       for (let i = 0; i < xyz.length; ++i) {
         if (!keep[i]) continue;
@@ -387,7 +403,52 @@ class DashboardLayers {
       }
       this.scene.addLayer("fit_points", pointsGroup);
     }
+    this._rebuildPlaybackMarker();
+  }
 
+  setPlaybackMode(mode) {
+    if (mode !== "all" && mode !== "playback") {
+      throw new Error(`setPlaybackMode: invalid mode '${mode}'`);
+    }
+    this._playbackMode = mode;
+    this._rebuildPlaybackMarker();
+  }
+
+  setPlaybackTime(t) {
+    if (!Number.isFinite(t)) {
+      throw new Error(`setPlaybackTime: non-finite time '${t}'`);
+    }
+    this._playbackT = t;
+    this._playbackMode = "playback";
+    this._rebuildPlaybackMarker();
+  }
+
+  _rebuildPlaybackMarker() {
+    const pose = resolvePlaybackMarkerPose({
+      mode: this._playbackMode,
+      t: this._playbackT,
+      fitVisible: true,
+      trajVisible: true,
+      segments: this._playbackSegments,
+      points: this._playbackPoints,
+      residualPasses: () => true,
+      costPassesPoint: () => true,
+    });
+    if (!pose) {
+      if (this._playbackMarkerGroup) this._playbackMarkerGroup.visible = false;
+      return;
+    }
+    if (!this._playbackMarkerGroup) {
+      const ball = createBaseballMarker();
+      const group = new THREE.Group();
+      group.name = "dashboard_playback_marker";
+      group.add(ball);
+      this.scene.addLayer("dashboard_playback_marker", group);
+      this._playbackMarkerGroup = group;
+      this._playbackMarkerBall = ball;
+    }
+    this._playbackMarkerGroup.visible = true;
+    setBaseballMarkerPose(this._playbackMarkerBall, pose.position);
   }
 
   // ---- live in-progress session ----

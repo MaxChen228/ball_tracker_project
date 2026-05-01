@@ -122,6 +122,9 @@ class BallTrackerScene {
     // Soft ambient so the strike-zone fill mesh reads as translucent
     // rather than flat-shaded black on the back faces.
     this.scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 0.55);
+    keyLight.position.set(1.5, -2.0, 3.0);
+    this.scene.add(keyLight);
 
     // --- camera ---
     // FOV 35° gives a mild perspective without strong barrel; the

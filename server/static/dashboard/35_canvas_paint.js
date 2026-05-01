@@ -45,6 +45,7 @@
       selectedTrajIds.delete(sid);
       persistTrajSelection();
       layers.applyFit(null, null);
+      if (typeof syncDashboardPlayback === 'function') syncDashboardPlayback(null, null);
       if (typeof renderEvents === 'function' && Array.isArray(currentEvents)) {
         _lastEvKey = null;
         renderEvents(currentEvents);
@@ -53,6 +54,7 @@
       return;
     }
     layers.applyFit(sid, view);
+    if (typeof syncDashboardPlayback === 'function') syncDashboardPlayback(sid, view);
     // Live session — pulls live trail + per-cam rays from the
     // `livePointStore` / `liveRayStore` maps that the WS frame
     // listener (86_live_stream.js) pushes into.
