@@ -39,10 +39,9 @@ Detection presets live as JSON files under `server/data/presets/<slug>.json` (th
 
 Operator workflow lives entirely on the dashboard's **DETECTION CONFIG** card:
 
-- **Switch presets** — click a preset button (e.g. `Blue ball`) to load its values into the form, then `APPLY DETECTION CONFIG`. The identity tag updates to the chosen preset.
-- **Edit & save as new** — drag sliders to taste, click `+ Save as new`, supply a slug (`[a-z0-9_]{1,32}`) and an operator-facing label. The new preset is on disk before the prompt closes.
-- **Manage** — click `Manage…` to open the library list; per row you get `Use` (snap live config to that preset), `Duplicate` (prompt for a new slug+label, copy the values), `Delete` (unlink the file). The currently-bound preset is marked `★ current`.
-- **Reset to preset** — appears only when the live config is bound to a preset but has been edited (`identity-modified`); snaps back to the canonical values.
+- **Switch presets** — click `Manage…` to open the library list, then click `Use` on the target preset (POSTs to `POST /presets/active`). The identity tag updates to the chosen preset.
+- **Edit & save** — drag sliders to taste, click `Apply`. Apply always opens a single slug+label prompt and POSTs to `POST /presets`, creating a new preset file and atomically switching the live config to it. The slug doubles as the filename; saving under an existing slug returns 409.
+- **Manage** — click `Manage…` to open the library list; per row you get `Use` (snap live config to that preset via `POST /presets/active`), `Duplicate` (prompt for a new slug+label, copy the values), `Delete` (unlink the file — 409 if the slug is currently active). The currently-bound preset is marked `★ current`.
 
 If the live config's `preset` field references a preset that has been deleted, the identity tag turns red and reads `<slug> (preset deleted)`. The dashboard does not silently re-bind; the next Apply records `preset=null` (custom).
 
