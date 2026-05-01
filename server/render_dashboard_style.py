@@ -837,9 +837,12 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                                   letter-spacing: 0.02em; line-height: 1; }}
 .latest-pitch-badge .lpb-units {{ font-size: 11px; color: var(--sub);
                                   letter-spacing: 0.12em; text-transform: uppercase; }}
-.latest-pitch-badge .lpb-meta {{ font-size: 10px; color: var(--sub);
-                                 letter-spacing: 0.06em; padding-left: 6px;
-                                 border-left: 1px solid var(--border-base); margin-left: 4px; }}
+.latest-pitch-badge .lpb-meta {{ font-size: 11px; font-weight: 600;
+                                 letter-spacing: 0.10em; padding-left: 8px;
+                                 border-left: 1px solid var(--border-base); margin-left: 4px;
+                                 color: var(--sub); }}
+.latest-pitch-badge.verdict-strike .lpb-meta {{ color: var(--ok, #16a34a); }}
+.latest-pitch-badge.verdict-ball .lpb-meta {{ color: var(--contra, #d97706); }}
 
 /* --- Fit filter bar (bottom-right of canvas) --- */
 .fit-filter-bar {{ position: absolute; right: var(--s-4); bottom: var(--s-4); z-index: 6;

@@ -209,35 +209,45 @@
     updateSpeedBadge();
   }
 
-  // Reflect the active SegmentRecord's release speed in the speed badge
-  // pinned bottom-left of #scene. Active segment is the one whose
-  // [t_start, t_end] contains `currentT`; in "all" mode (no scrubber
-  // active) we fall back to segment 0. Hidden when SEGMENTS is empty
-  // (e.g. session predates segments persistence and migration script
-  // hasn't been run, or the segmenter found nothing).
+  // Bottom-left badge: |v(t)| at the current playback time + STRIKE / BALL
+  // verdict for the whole pitch. Speed reads the segment *active* at
+  // currentT (not always seg0 — a bounced 94 km/h pitch frequently has a
+  // small detection-noise seg0 ≈ 50 km/h that we'd otherwise display
+  // forever); verdict iterates all segs with no extrapolation past seg
+  // boundaries (bounces invalidate ballistic continuation). Helpers live
+  // on the shared `BallTrackerOverlays` NS so dashboard + viewer use one
+  // canonical implementation, parity-tested against Python.
   function updateSpeedBadge() {
     const badge = document.getElementById("viewer-speed-badge");
     if (!badge) return;
     const segs = currentSegments();
     if (!Array.isArray(segs) || !segs.length) {
       badge.hidden = true;
+      badge.classList.remove('verdict-strike', 'verdict-ball');
       return;
     }
-    const playback = mode !== "all";
-    const idx = playback ? activeSegmentIndex(currentT) : 0;
-    const seg = segs[idx >= 0 ? idx : 0];
     badge.hidden = false;
     const speedEl = document.getElementById("viewer-lpb-speed");
     const metaEl = document.getElementById("viewer-lpb-meta");
-    if (speedEl) speedEl.textContent = seg.speed_kph.toFixed(1);
-    const isActiveByTime = playback
-      && currentT >= seg.t_start - 1e-3
-      && currentT <= seg.t_end + 1e-3;
-    const tag = isActiveByTime ? "live" : (playback ? "nearest" : "release");
-    const extra = segs.length > 1
-      ? `${PATH_LABEL[currentPath()]} seg${idx} · ${tag} · ${segs.length} segs`
-      : `${tag} · rmse ${(seg.rmse_m * 100).toFixed(1)}cm`;
-    if (metaEl) metaEl.textContent = extra;
+
+    const NS = window.BallTrackerOverlays;
+    const playback = mode !== "all";
+    const tEval = playback ? currentT : segs[0].t_start;
+    const idx = NS.activeSegmentIndex(segs, tEval);
+    const activeSeg = segs[idx >= 0 ? idx : 0];
+    const inst = NS.instantSpeedKph(activeSeg, tEval);
+    if (speedEl) speedEl.textContent = Number.isFinite(inst) ? inst.toFixed(1) : '—';
+
+    const zone = window.BallTrackerScene && typeof window.BallTrackerScene.strikeZone === 'function'
+      ? window.BallTrackerScene.strikeZone() : null;
+    let verdict = 'ball';
+    if (zone) {
+      const judg = NS.judgePitch(segs, zone);
+      verdict = judg ? judg.verdict : 'ball';
+    }
+    if (metaEl) metaEl.textContent = verdict === 'strike' ? 'STRIKE' : 'BALL';
+    badge.classList.toggle('verdict-strike', verdict === 'strike');
+    badge.classList.toggle('verdict-ball', verdict === 'ball');
   }
   // BallTrackerCamView's per-cam ResizeObserver handles canvas reflow
   // automatically; no need for a window resize listener here.

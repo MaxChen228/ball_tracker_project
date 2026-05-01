@@ -60,6 +60,9 @@
     if (window.BallTrackerScene && typeof window.BallTrackerScene.setStrikeZone === 'function') {
       window.BallTrackerScene.setStrikeZone(zone);
     }
+    // Strike/ball verdict in the bottom-left badge depends on these
+    // bounds; refresh so dragging the slider flips the label live.
+    if (typeof updateLatestPitchBadge === 'function') updateLatestPitchBadge();
   }
 
   function renderStrikeZone(state, opts = {}) {

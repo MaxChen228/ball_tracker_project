@@ -79,11 +79,20 @@
   // selection restored from localStorage is rehydrated immediately.
   window.BallTrackerDashboardRepaint = repaintCanvas;
 
-  // Refresh the speed badge overlay above the 3D canvas. Reads the
-  // currently-selected sid's segments from `trajCache` and shows the
-  // first segment's speed (operators throw single-segment pitches; a
-  // bouncing ball produces multi-segment but the release speed lives
-  // on segment 0). Hidden when no fit data is available.
+  // Refresh the speed badge overlay above the 3D canvas.
+  //
+  // Speed: instantaneous |v(t)| at the current dashboard playback time,
+  // computed against the segment that's *active* at that t (via
+  // `BallTrackerOverlays.activeSegmentIndex`). Releases of small noisy
+  // pre-segs would mis-display as the "pitch speed" if we always used
+  // seg0 — a bounced 94 km/h fastball produces seg0 ≈ a 50 km/h
+  // detection-noise sliver before the real seg, and the badge needs to
+  // follow the scrubber to seg1 where the actual physics live.
+  //
+  // Verdict: whole-pitch judgment via `judgePitch(segs, zone)` — iterates
+  // segments, no extrapolation past any seg's [t_start, t_end] (bounces
+  // invalidate ballistic continuation). NO_PLATE_CROSS surfaces as "—"
+  // rather than silently collapsing into BALL.
   function updateLatestPitchBadge() {
     const badge = document.getElementById('latest-pitch-badge');
     if (!badge) return;
@@ -95,16 +104,28 @@
     const segs = view && Array.isArray(view.segments) ? view.segments : [];
     if (!sid || !segs.length) {
       badge.hidden = true;
+      badge.classList.remove('verdict-strike', 'verdict-ball');
       return;
     }
-    const seg = segs[0];
     badge.hidden = false;
-    if (speedEl) speedEl.textContent = seg.speed_kph.toFixed(1);
-    const pathTag = view && view.path === 'server_post' ? 'SVR' : 'LIVE';
-    const extra = segs.length > 1
-      ? `${pathTag} · ${segs.length} segs · rmse ${(seg.rmse_m * 100).toFixed(1)}cm`
-      : `${pathTag} · rmse ${(seg.rmse_m * 100).toFixed(1)}cm`;
-    if (metaEl) metaEl.textContent = extra;
+    const NS = window.BallTrackerOverlays;
+    const tEval = (typeof dashPlayback !== 'undefined' && dashPlayback && Number.isFinite(dashPlayback.t))
+      ? dashPlayback.t : segs[0].t_start;
+    const idx = NS.activeSegmentIndex(segs, tEval);
+    const activeSeg = segs[idx >= 0 ? idx : 0];
+    const inst = NS.instantSpeedKph(activeSeg, tEval);
+    if (speedEl) speedEl.textContent = Number.isFinite(inst) ? inst.toFixed(1) : '—';
+
+    const zone = window.BallTrackerScene && typeof window.BallTrackerScene.strikeZone === 'function'
+      ? window.BallTrackerScene.strikeZone() : null;
+    let verdict = 'ball';
+    if (zone) {
+      const judg = NS.judgePitch(segs, zone);
+      verdict = judg ? judg.verdict : 'ball';
+    }
+    if (metaEl) metaEl.textContent = verdict === 'strike' ? 'STRIKE' : 'BALL';
+    badge.classList.toggle('verdict-strike', verdict === 'strike');
+    badge.classList.toggle('verdict-ball', verdict === 'ball');
   }
 
   // Mirror the selected entry's `paths_completed` set onto the LIVE/SVR

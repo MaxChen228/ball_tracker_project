@@ -46,8 +46,10 @@
       selectedTrajIds.add(sid);
     }
     persistTrajSelection();
+    // repaintCanvas's tail already calls updateLatestPitchBadge (single
+    // source of truth for badge refresh); a second call here was a stale
+    // duplicate from before that hook existed.
     repaintCanvas();
-    updateLatestPitchBadge();
     // Repaint rows so the clicked row picks up `.selected` (background
     // tint) and its swatch flips to filled. Bust `_lastEvKey` first:
     // the renderEvents wrapper in 65_diff_wrappers.js short-circuits

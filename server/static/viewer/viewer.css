@@ -570,9 +570,12 @@
     font-variant-numeric:tabular-nums; letter-spacing:0.02em; line-height:1; }
   .scene-col .latest-pitch-badge .lpb-units { font-size:10px; color:var(--sub);
     letter-spacing:0.12em; text-transform:uppercase; }
-  .scene-col .latest-pitch-badge .lpb-meta { font-size:10px; color:var(--sub);
-    letter-spacing:0.06em; padding-left:6px;
-    border-left:1px solid var(--border-base); margin-left:4px; }
+  .scene-col .latest-pitch-badge .lpb-meta { font-size:11px; font-weight:600;
+    letter-spacing:0.10em; padding-left:8px;
+    border-left:1px solid var(--border-base); margin-left:4px;
+    color:var(--sub); }
+  .scene-col .latest-pitch-badge.verdict-strike .lpb-meta { color:var(--ok, #16a34a); }
+  .scene-col .latest-pitch-badge.verdict-ball .lpb-meta { color:var(--contra, #d97706); }
   .hint-btn { font:inherit; font-size:12px; padding:0; width:26px; height:26px; border:1px solid var(--border-base);
     background:var(--surface); color:var(--sub); border-radius:50%; cursor:pointer; margin-left:auto;
     min-width:auto; font-weight:600; letter-spacing:0; display:inline-flex; align-items:center; justify-content:center; }

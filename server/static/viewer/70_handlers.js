@@ -273,6 +273,9 @@
     paintLayerPills();
     if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();
     renderDetectionStrip();
+    // PATH switch swaps SEGMENTS_BY_PATH[currentPath()] under the badge —
+    // refresh now so speed + verdict don't lag a frame on the old path.
+    if (typeof updateSpeedBadge === 'function') updateSpeedBadge();
   });
   // Layer-chip popover wiring — chevron buttons toggle the sibling
   // popover. Mirrors `bindLayerPopovers` in fit_curves_layer.js so the

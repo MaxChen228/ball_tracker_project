@@ -344,6 +344,14 @@ class BallTrackerScene {
       || !!this._staticRoot.getObjectByName(name);
   }
 
+  // Read-only accessor for the current strike-zone bounds. Used by the
+  // shared `BallTrackerOverlays.judgeStrike(seg, zone)` helper so the
+  // bottom-left badge updates live when the operator drags the batter-
+  // height slider (setStrikeZone() rebuilds and we re-read on next paint).
+  strikeZone() {
+    return this.theme && this.theme.strike_zone ? this.theme.strike_zone : null;
+  }
+
   setStrikeZone(next) {
     if (!next || !this._staticRoot) return;
     const wasVisible = this._strikeZoneGroup ? this._strikeZoneGroup.visible : strikeZoneVisible();

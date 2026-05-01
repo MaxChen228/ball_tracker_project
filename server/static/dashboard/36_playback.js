@@ -102,6 +102,8 @@
     if (window.BallTrackerDashboardScene) {
       window.BallTrackerDashboardScene.setPlaybackTime(dashPlayback.t);
     }
+    // Bottom-left badge shows |v(t)| — keep it in sync with the scrubber.
+    if (typeof updateLatestPitchBadge === 'function') updateLatestPitchBadge();
   }
 
   function _startDashboardPlayback() {
@@ -130,6 +132,10 @@
     if (window.BallTrackerDashboardScene) {
       window.BallTrackerDashboardScene.setPlaybackMode('all');
     }
+    // 'all' button bypasses _setDashboardPlaybackTime, so the badge would
+    // otherwise stay frozen on the last scrub-time speed value until the
+    // next /events tick. Refresh in lockstep with the scene mode flip.
+    if (typeof updateLatestPitchBadge === 'function') updateLatestPitchBadge();
   }
 
   function syncDashboardPlayback(sid, view) {
@@ -160,6 +166,10 @@
       dashPlayback.t = Math.max(range.min, Math.min(range.max, dashPlayback.t));
     }
     _paintPlaybackControls();
+    // Session / path switch lands here without going through
+    // _setDashboardPlaybackTime, so refresh the badge so its speed +
+    // verdict don't show the previous selection's values for a frame.
+    if (typeof updateLatestPitchBadge === 'function') updateLatestPitchBadge();
   }
 
   if (dp.play) {
