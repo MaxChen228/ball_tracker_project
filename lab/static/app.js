@@ -419,7 +419,10 @@ function stepFrames(delta) {
 }
 
 function onVideoClick(e) {
-  if (!state.pendingSeedClick) return;
+  if (!state.pendingSeedClick) {
+    if (el.video.paused) el.video.play(); else el.video.pause();
+    return;
+  }
   if (state.seedFrame == null) return;
   const v = el.video;
   if (!v.videoWidth || !v.videoHeight) {
