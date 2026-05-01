@@ -34,7 +34,7 @@ const state = {
   pendingTargetFrame: null,
   isSeeking: false,
   lastSeekTarget: null,
-  scrubMode: true,
+  scrubMode: false,
   // Pre-tinted canvases keyed by source frame index. We build one per mask
   // (sync, ~5ms each) the first time we see it, then `showMaskFor` blits it
   // in O(1). Without this cache, every arrow-key step re-decoded the PNG and
@@ -80,7 +80,8 @@ const el = {
   status: document.getElementById("status-line"),
   statusbar: document.getElementById("statusbar"),
   itemSlug: document.getElementById("item-slug"),
-  itemPicker: document.getElementById("item-picker"),
+  itemList: document.getElementById("item-list"),
+  btnRescan: document.getElementById("btn-rescan"),
   seedModel: document.getElementById("seed-model"),
   propModel: document.getElementById("prop-model"),
   btnIn: document.getElementById("btn-in"),
@@ -247,6 +248,79 @@ function clearDoneFills() {
   state.tintedCache.clear();
   state.prefetchAbort++;
 }
+
+// Diagnostic to pinpoint which layer is broken when user reports
+// "different frame indices show identical pixels". Compares:
+//   - bytes received from server (sha256 of blob)
+//   - decoded ImageBitmap pixels (via offscreen draw + getImageData)
+//   - what's actually on the visible #frame-canvas right now
+window.debugFrames = async function (a, b) {
+  const slug = state.current;
+  if (!slug) { console.log("no current slug"); return; }
+  const c = el.frameCanvas;
+  const ctx = c.getContext("2d");
+  const out = { slug, a, b };
+
+  async function sha(buf) {
+    const h = await crypto.subtle.digest("SHA-256", buf);
+    return [...new Uint8Array(h)].slice(0, 8).map(x => x.toString(16).padStart(2,"0")).join("");
+  }
+  async function pull(f) {
+    const url = `${API_BASE}/frame/${encodeURIComponent(slug)}/${String(f).padStart(5,"0")}.jpg`;
+    const r = await fetch(url, { cache: "no-store" });
+    const buf = await r.arrayBuffer();
+    const blob = new Blob([buf], { type: "image/jpeg" });
+    const bm = await createImageBitmap(blob);
+    const off = new OffscreenCanvas(bm.width, bm.height);
+    const octx = off.getContext("2d");
+    octx.drawImage(bm, 0, 0);
+    const data = octx.getImageData(0, 0, Math.min(200, bm.width), Math.min(200, bm.height)).data;
+    return { bytesHash: await sha(buf), bytesLen: buf.byteLength, w: bm.width, h: bm.height, sample: data, bm };
+  }
+
+  const [ra, rb] = await Promise.all([pull(a), pull(b)]);
+  out.fetched_a = { hash: ra.bytesHash, len: ra.bytesLen, dim: `${ra.w}x${ra.h}` };
+  out.fetched_b = { hash: rb.bytesHash, len: rb.bytesLen, dim: `${rb.w}x${rb.h}` };
+
+  let sampleSame = 0;
+  for (let i = 0; i < ra.sample.length; i++) if (ra.sample[i] === rb.sample[i]) sampleSame++;
+  out.decoded_pixel_same_pct = (sampleSame / ra.sample.length * 100).toFixed(2) + "%";
+
+  // Force-paint a then b to the real visible canvas with delay so user can SEE.
+  ctx.clearRect(0, 0, c.width, c.height);
+  if (c.width !== ra.w) c.width = ra.w;
+  if (c.height !== ra.h) c.height = ra.h;
+  ctx.drawImage(ra.bm, 0, 0);
+  await new Promise(r => setTimeout(r, 800));
+  const visA = ctx.getImageData(0, 0, 200, 200).data;
+
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.drawImage(rb.bm, 0, 0);
+  await new Promise(r => setTimeout(r, 800));
+  const visB = ctx.getImageData(0, 0, 200, 200).data;
+
+  let visSame = 0;
+  for (let i = 0; i < visA.length; i++) if (visA[i] === visB[i]) visSame++;
+  out.canvas_pixel_same_pct = (visSame / visA.length * 100).toFixed(2) + "%";
+
+  // Cache state
+  out.cache_a = state.frameBitmapCache.has(a);
+  out.cache_b = state.frameBitmapCache.has(b);
+  out.cache_a_eq_b = state.frameBitmapCache.get(a) === state.frameBitmapCache.get(b);
+
+  // Visible elements
+  const vw = el.videoWrap.getBoundingClientRect();
+  const cv = c.getBoundingClientRect();
+  const vd = el.video.getBoundingClientRect();
+  out.scrub_class = el.videoWrap.classList.contains("scrub");
+  out.canvas_rect = `${cv.width.toFixed(0)}x${cv.height.toFixed(0)} @ ${cv.left.toFixed(0)},${cv.top.toFixed(0)}`;
+  out.video_rect = `${vd.width.toFixed(0)}x${vd.height.toFixed(0)} @ ${vd.left.toFixed(0)},${vd.top.toFixed(0)}`;
+  out.video_visibility = getComputedStyle(el.video).visibility;
+  out.video_currentTime = el.video.currentTime;
+
+  console.log(out);
+  return out;
+};
 
 window.debugMask = async function (frame) {
   const out = { frame };
@@ -480,10 +554,30 @@ function paintAtomic(frame, bm) {
 // canvas pixels (no flicker, no mid-load desync) and paints both layers
 // together once everything is ready — but only if the user hasn't moved
 // on to a different frame in the meantime.
+// Find the closest frame index that already has a cached bitmap. Used as a
+// "good enough" preview while the exact target is still being fetched, so
+// fast scrub-drags don't visibly stall on cache misses.
+function nearestCachedFrame(frame) {
+  let best = null, bestDist = Infinity;
+  for (const f of state.frameBitmapCache.keys()) {
+    const d = Math.abs(f - frame);
+    if (d < bestDist) { bestDist = d; best = f; }
+  }
+  return best;
+}
+
 async function scheduleScrubPaint(frame) {
   const token = ++state.scrubPaintToken;
   let bm = touchFrameBitmap(frame);
   if (!bm) {
+    // Cache miss: paint nearest cached neighbor immediately so the scrubber
+    // tracks the user's drag without visible stutter. The exact target lands
+    // when the fetch completes (token-checked).
+    const near = nearestCachedFrame(frame);
+    if (near != null) {
+      const nearBm = state.frameBitmapCache.get(near);
+      if (nearBm) paintAtomic(near, nearBm);
+    }
     try {
       bm = await ensureFrameBitmap(state.current, frame);
     } catch (e) {
@@ -503,12 +597,26 @@ async function scheduleScrubPaint(frame) {
 
 async function prefetchFrames(slug) {
   const myToken = ++state.framePrefetchAbort;
-  if (state.inFrame == null || state.outFrame == null) return;
-  const lo = Math.min(state.inFrame, state.outFrame);
-  const hi = Math.max(state.inFrame, state.outFrame);
+  const total = state.totalFrames;
+  if (!total) return;
+  // Priority order: [in, out] first, then expand outward toward 0 and total-1
+  // so scrub-drag outside the trim range still hits cache after a brief warm-up.
+  const lo = state.inFrame != null ? state.inFrame : 0;
+  const hi = state.outFrame != null ? state.outFrame : total - 1;
+  const seen = new Set();
   const frames = [];
-  for (let f = lo; f <= hi; f++) {
+  const push = (f) => {
+    if (f < 0 || f >= total) return;
+    if (seen.has(f)) return;
+    seen.add(f);
     if (!state.frameBitmapCache.has(f)) frames.push(f);
+  };
+  for (let f = lo; f <= hi; f++) push(f);
+  // Expand outward in alternating steps from the range edges.
+  const maxOut = Math.max(lo, total - 1 - hi);
+  for (let d = 1; d <= maxOut; d++) {
+    push(lo - d);
+    push(hi + d);
   }
   let cursor = 0;
   const worker = async () => {
@@ -682,6 +790,7 @@ function syncFromItem(item) {
   state.propagateStatus = item.propagate_status || "idle";
   state.seedMaskReady = state.seedFrame != null && state.seedPoint != null;
   el.itemSlug.textContent = item.slug;
+  updateSidebarActive();
   el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
   el.scrubber.value = "0";
   el.video.src = `${API_BASE}/clip/${item.slug}.mp4`;
@@ -767,24 +876,13 @@ async function bootstrap() {
   } catch (e) {
     showError(`models init failed: ${e}`);
   }
-  el.itemPicker.innerHTML = "";
-  for (const it of state.items) {
-    const opt = document.createElement("option");
-    opt.value = it.slug;
-    opt.textContent = it.slug;
-    el.itemPicker.appendChild(opt);
-  }
-  el.itemPicker.addEventListener("change", () => {
-    window.location.hash = `slug=${el.itemPicker.value}`;
-    el.itemPicker.blur();
-  });
+  renderSidebar();
+  el.btnRescan.addEventListener("click", rescanItems);
   window.addEventListener("hashchange", onHashChange);
   const slug = pickInitialSlug(state.items);
   if (!slug) {
-    showError("no items returned by /api/items");
-    return;
+    return;  // empty workspace; user can press Rescan
   }
-  el.itemPicker.value = slug;
   selectSlug(slug);
 }
 
@@ -792,8 +890,101 @@ function onHashChange() {
   const m = (window.location.hash || "").match(/slug=([^&]+)/);
   if (!m) return;
   const slug = decodeURIComponent(m[1]);
-  el.itemPicker.value = slug;
   selectSlug(slug);
+}
+
+function renderSidebar() {
+  el.itemList.innerHTML = "";
+  for (const it of state.items) {
+    const card = document.createElement("div");
+    card.className = "item-card" + (it.slug === state.current ? " active" : "");
+    card.dataset.slug = it.slug;
+    const status = it.status || it.propagate_status || "idle";
+    const fps = it.fps ? `${Math.round(it.fps)}fps` : "";
+    const frames = it.total_frames ? `${it.total_frames}f` : "";
+    const meta = [fps, frames].filter(Boolean).join(" · ");
+    const nameDiv = document.createElement("div");
+    nameDiv.className = "item-card-name";
+    const dot = document.createElement("span");
+    dot.className = `item-status item-status-${status}`;
+    nameDiv.appendChild(dot);
+    nameDiv.appendChild(document.createTextNode(it.slug));
+    const metaDiv = document.createElement("div");
+    metaDiv.className = "item-card-meta";
+    metaDiv.textContent = meta;
+    const delBtn = document.createElement("button");
+    delBtn.className = "item-card-delete";
+    delBtn.type = "button";
+    delBtn.title = "Delete";
+    delBtn.textContent = "✕";
+    delBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteItem(it.slug);
+    });
+    card.appendChild(nameDiv);
+    card.appendChild(metaDiv);
+    card.appendChild(delBtn);
+    card.addEventListener("click", () => {
+      if (state.current === it.slug) return;
+      window.location.hash = `slug=${it.slug}`;
+    });
+    el.itemList.appendChild(card);
+  }
+}
+
+function updateSidebarActive() {
+  for (const card of el.itemList.querySelectorAll(".item-card")) {
+    card.classList.toggle("active", card.dataset.slug === state.current);
+  }
+}
+
+function updateSidebarStatus(slug, status) {
+  const card = el.itemList.querySelector(`.item-card[data-slug="${slug}"]`);
+  if (card) {
+    const dot = card.querySelector(".item-status");
+    if (dot) dot.className = `item-status item-status-${status}`;
+  }
+  const it = state.items.find(i => i.slug === slug);
+  if (it) {
+    it.status = status;
+    it.propagate_status = status;
+  }
+}
+
+async function rescanItems() {
+  el.btnRescan.disabled = true;
+  try {
+    const r = await fetch(`${API_BASE}/api/items/rescan`, { method: "POST" });
+    if (!r.ok) { showError(`rescan failed: HTTP ${r.status}`); return; }
+    const data = await r.json();
+    state.items = data.items || [];
+    renderSidebar();
+    if (!state.current && state.items.length) {
+      selectSlug(state.items[0].slug);
+    }
+  } finally {
+    el.btnRescan.disabled = false;
+  }
+}
+
+async function deleteItem(slug) {
+  if (!confirm(`Delete "${slug}"?\n\nThis removes the workspace files (masks, frames, PTS cache).\nThe source video file is kept intact.`)) return;
+  const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(slug)}/delete`, { method: "POST" });
+  if (!r.ok) { showError(`delete failed: HTTP ${r.status}`); return; }
+  const wasCurrent = state.current === slug;
+  state.items = state.items.filter(i => i.slug !== slug);
+  if (wasCurrent) {
+    state.current = null;
+    if (state.sse) { state.sse.close(); state.sse = null; }
+  }
+  renderSidebar();
+  if (wasCurrent) {
+    if (state.items.length) {
+      window.location.hash = `slug=${state.items[0].slug}`;
+    } else {
+      el.itemSlug.textContent = "no item";
+    }
+  }
 }
 
 function startSse() {
@@ -846,6 +1037,7 @@ function startSse() {
     state.propPhase = "done";
     if (typeof payload.elapsed_s === "number") state.propPhaseElapsed = payload.elapsed_s;
     if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
+    if (state.current) updateSidebarStatus(state.current, "done");
     updatePropagateBtn();
     updateStatus();
     if (state.current) prefetchMasks(state.current);
@@ -853,6 +1045,7 @@ function startSse() {
   es.addEventListener("error", (ev) => {
     let payload = {};
     try { payload = JSON.parse(ev.data); } catch (_) {}
+    if (state.current) updateSidebarStatus(state.current, "failed");
     if (payload.msg) showError(`propagate: ${payload.msg}`);
   });
   es.onerror = () => {
@@ -954,6 +1147,7 @@ async function sendSeed(frameIndex, x, y) {
 async function propagate() {
   if (el.btnPropagate.disabled) return;
   state.propagateStatus = "running";
+  if (state.current) updateSidebarStatus(state.current, "running");
   state.propPhase = "starting";
   state.propDoneCount = 0;
   state.propExpected = (state.outFrame - state.inFrame + 1) || 0;
@@ -1001,6 +1195,7 @@ async function cancelOrEscape() {
       console.warn("cancel failed", e);
     }
     state.propagateStatus = "idle";
+    if (state.current) updateSidebarStatus(state.current, "idle");
     updatePropagateBtn();
     updateStatus();
   }

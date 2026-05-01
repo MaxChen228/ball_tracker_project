@@ -7,41 +7,50 @@
 </head>
 <body>
   <header id="topbar">
-    <div id="item-info">
-      <span id="item-slug">no item</span>
-      <select id="item-picker"></select>
-    </div>
+    <span id="item-slug">no item</span>
     <div id="model-info">
       <label>seed: <select id="seed-model"></select></label>
       <label>prop: <select id="prop-model"></select></label>
     </div>
   </header>
 
-  <main id="stage">
-    <div id="video-wrap" tabindex="-1">
-      <video id="video" preload="auto" playsinline></video>
-      <canvas id="frame-canvas"></canvas>
-      <canvas id="overlay"></canvas>
-    </div>
-  </main>
+  <div id="main-layout">
+    <nav id="sidebar">
+      <div id="sidebar-header">
+        <span>Sessions</span>
+        <button id="btn-rescan" type="button" title="Rescan source dirs">↺</button>
+      </div>
+      <div id="item-list"></div>
+    </nav>
 
-  <section id="timeline-section">
-    <div id="timeline-wrap">
-      <div id="timeline-fills"></div>
-      <div id="marker-in" class="marker marker-in" hidden></div>
-      <div id="marker-out" class="marker marker-out" hidden></div>
-      <div id="marker-seed" class="marker marker-seed" hidden>&#9733;</div>
-      <input id="scrubber" type="range" min="0" max="0" step="1" value="0">
-    </div>
-  </section>
+    <div id="work-area">
+      <main id="stage">
+        <div id="video-wrap" tabindex="-1">
+          <video id="video" preload="auto" playsinline></video>
+          <canvas id="frame-canvas"></canvas>
+          <canvas id="overlay"></canvas>
+        </div>
+      </main>
 
-  <section id="controls">
-    <button id="btn-in" type="button">Mark In [</button>
-    <button id="btn-out" type="button">Mark Out ]</button>
-    <button id="btn-seed" type="button">Mark Seed (S)</button>
-    <button id="btn-propagate" type="button" disabled>Propagate (Enter)</button>
-    <button id="btn-cancel" type="button">Cancel (Esc)</button>
-  </section>
+      <section id="timeline-section">
+        <div id="timeline-wrap">
+          <div id="timeline-fills"></div>
+          <div id="marker-in" class="marker marker-in" hidden></div>
+          <div id="marker-out" class="marker marker-out" hidden></div>
+          <div id="marker-seed" class="marker marker-seed" hidden>&#9733;</div>
+          <input id="scrubber" type="range" min="0" max="0" step="1" value="0">
+        </div>
+      </section>
+
+      <section id="controls">
+        <button id="btn-in" type="button">Mark In [</button>
+        <button id="btn-out" type="button">Mark Out ]</button>
+        <button id="btn-seed" type="button">Mark Seed (S)</button>
+        <button id="btn-propagate" type="button" disabled>Propagate (Enter)</button>
+        <button id="btn-cancel" type="button">Cancel (Esc)</button>
+      </section>
+    </div>
+  </div>
 
   <footer id="statusbar">
     <span id="status-line">f=0000 t=0.000s | in=- out=- seed=- pt=- | status=idle</span>

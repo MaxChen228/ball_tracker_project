@@ -67,6 +67,12 @@ class ManifestStore:
         ITEMS_DIR.mkdir(parents=True, exist_ok=True)
         if not MANIFEST_PATH.exists():
             MANIFEST_PATH.write_text(json.dumps({"items": []}, indent=2), encoding="utf-8")
+        cfg_path = WORKSPACE / "workspace_config.json"
+        self._extra_source_dirs: list[Path] = []
+        if cfg_path.exists():
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            for d in cfg.get("extra_source_dirs", []):
+                self._extra_source_dirs.append((WORKSPACE / d).resolve())
 
     def _read(self) -> dict[str, Any]:
         return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -75,7 +81,19 @@ class ManifestStore:
         MANIFEST_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def scan_sources(self) -> None:
-        """Pick up any new files dropped into source_videos/. Slug = filename stem."""
+        """Pick up any new files dropped into source_videos/ or extra_source_dirs.
+        Slug = filename stem. Files from extra dirs are symlinked into SOURCES_DIR
+        so all downstream code can keep treating source_video as a SOURCES_DIR-relative name."""
+        # Symlink any files from extra dirs into SOURCES_DIR before scanning.
+        for src_dir in self._extra_source_dirs:
+            if not src_dir.is_dir():
+                continue
+            for video in src_dir.iterdir():
+                if video.is_dir() or video.suffix.lower() not in VIDEO_EXTS:
+                    continue
+                link = SOURCES_DIR / video.name
+                if not link.exists() and not link.is_symlink():
+                    link.symlink_to(video)
         with self._lock:
             payload = self._read()
             existing = {it["slug"] for it in payload["items"]}
@@ -130,6 +148,23 @@ class ManifestStore:
                     self._write(payload)
                     return it
         raise KeyError(slug)
+
+    def delete(self, slug: str) -> None:
+        """Remove item from manifest and delete its workspace files.
+        Source video is left intact (might be a symlink to user's data dir)."""
+        with self._lock:
+            payload = self._read()
+            before = len(payload["items"])
+            payload["items"] = [it for it in payload["items"] if it["slug"] != slug]
+            if len(payload["items"]) == before:
+                raise KeyError(slug)
+            self._write(payload)
+        idir = ITEMS_DIR / slug
+        if idir.exists():
+            shutil.rmtree(idir)
+        pts_file = PTS_CACHE_DIR / f"{slug}.json"
+        if pts_file.exists():
+            pts_file.unlink()
 
 
 def item_dir(slug: str) -> Path:
@@ -465,7 +500,7 @@ def run_propagate(slug: str) -> None:
     BUS.publish(slug, "done", {"elapsed_s": round(time.time() - t_prop, 2)})
 
 
-SLUG_RE = re.compile(r"^/api/items/([A-Za-z0-9_\-]+)/(trim|seed|propagate|propagate/cancel|events|pts|masks)$")
+SLUG_RE = re.compile(r"^/api/items/([A-Za-z0-9_\-]+)/(trim|seed|propagate|propagate/cancel|events|pts|masks|delete)$")
 MASK_RE = re.compile(r"^/mask/([A-Za-z0-9_\-]+)/(\d{5})\.png$")
 FRAME_RE = re.compile(r"^/frame/([A-Za-z0-9_\-]+)/(\d+)\.jpg$")
 CLIP_RE = re.compile(r"^/clip/([A-Za-z0-9_\-]+)\.mp4$")
@@ -729,6 +764,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         url = urllib.parse.urlparse(self.path)
+        if url.path == "/api/items/rescan":
+            STORE.scan_sources()
+            self._send_json(HTTPStatus.OK, {"items": [self._public_item(it) for it in STORE.list()]})
+            return
         if url.path == "/api/models":
             body = self._read_json()
             kind = body["kind"]
@@ -809,6 +848,14 @@ class Handler(BaseHTTPRequestHandler):
             if _PROPAGATOR is not None:
                 _PROPAGATOR.cancel()
             STORE.update(slug, propagate_status="idle")
+            self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+
+        if action == "delete":
+            t = PROP_THREADS.get(slug)
+            if t and t.is_alive() and _PROPAGATOR is not None:
+                _PROPAGATOR.cancel()
+            STORE.delete(slug)
             self._send_json(HTTPStatus.OK, {"ok": True})
             return
 

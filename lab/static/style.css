@@ -31,11 +31,121 @@ body {
   font-family: monospace;
 }
 
-#item-picker, #seed-model, #prop-model {
+#seed-model, #prop-model {
   background: #0f172a;
   color: #f8fafc;
   border: 1px solid #334155;
   padding: 4px 8px;
+}
+
+#main-layout {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+
+#sidebar {
+  width: 220px;
+  min-width: 220px;
+  background: #1e293b;
+  border-right: 1px solid #334155;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#sidebar-header {
+  padding: 8px 10px;
+  border-bottom: 1px solid #334155;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+#btn-rescan {
+  background: none;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0 4px;
+  line-height: 1;
+}
+#btn-rescan:hover { color: #f8fafc; }
+#btn-rescan:disabled { opacity: 0.4; cursor: wait; }
+
+#item-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.item-card {
+  padding: 8px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid #0f172a;
+  position: relative;
+}
+.item-card:hover { background: #263146; }
+.item-card.active {
+  background: #1d3a5f;
+  border-left: 3px solid #3b82f6;
+  padding-left: 7px;
+}
+
+.item-card-name {
+  font-size: 12px;
+  font-family: monospace;
+  color: #e2e8f0;
+  word-break: break-all;
+  padding-right: 16px;
+}
+.item-card-meta {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 2px;
+}
+
+.item-status {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+.item-status-idle { background: #475569; }
+.item-status-running { background: #f59e0b; }
+.item-status-done { background: #22c55e; }
+.item-status-failed { background: #ef4444; }
+
+.item-card-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: none;
+  border: none;
+  color: #475569;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 3px;
+  line-height: 1;
+  display: none;
+}
+.item-card:hover .item-card-delete,
+.item-card.active .item-card-delete { display: block; }
+.item-card-delete:hover { color: #ef4444; }
+
+#work-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
 }
 
 #model-info {
@@ -90,6 +200,12 @@ body {
 }
 
 #video-wrap.scrub #frame-canvas { display: block; }
+/* In scrub mode the canvas is the source of truth — hide the underlying
+   <video> element so it can never bleed through. Chrome silently ignores
+   paused sub-frame currentTime seeks (~5ms steps at 184fps), which would
+   otherwise make the video appear stuck on the same frame even though
+   scheduleScrubPaint is correctly drawing distinct ImageBitmaps. */
+#video-wrap.scrub #video { visibility: hidden; }
 
 #overlay {
   position: absolute;
