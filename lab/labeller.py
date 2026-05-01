@@ -417,9 +417,92 @@ def get_propagator():
     return _PROPAGATOR
 
 
+def unload_seeder() -> None:
+    """Drop the SAM2 image predictor and free MPS/CUDA cache. Used before a
+    queue propagate run to claw back the ~few-GB resident large model."""
+    global _SEEDER
+    with _MODEL_LOCK:
+        if _SEEDER is None:
+            return
+        print(f"[labeller] unloading image predictor ({_SEEDER.model_id})", flush=True)
+        _SEEDER = None
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def unload_propagator() -> None:
+    """Drop the SAM2 video predictor (mirror of unload_seeder)."""
+    global _PROPAGATOR
+    with _MODEL_LOCK:
+        if _PROPAGATOR is None:
+            return
+        print(f"[labeller] unloading video predictor ({_PROPAGATOR.model_id})", flush=True)
+        _PROPAGATOR = None
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 STORE = ManifestStore()
 BUS = SseBus()
 PROP_THREADS: dict[str, threading.Thread] = {}
+
+# Queue state — one global queue runner thread; cancel flag is set by user.
+_QUEUE_LOCK = threading.Lock()
+_QUEUE_THREAD: threading.Thread | None = None
+_QUEUE_CANCEL = threading.Event()
+
+
+def _queue_runner() -> None:
+    """Iterate ready items (seed set, status idle), propagate one at a time.
+    Re-queries manifest each iteration so newly-readied items get picked up."""
+    print("[labeller] queue: starting", flush=True)
+    unload_seeder()
+    BUS.publish("__queue__", "queue", {"running": True})
+    try:
+        while not _QUEUE_CANCEL.is_set():
+            items = STORE.list()
+            ready = [it for it in items
+                     if it.get("seed_frame") is not None
+                     and it.get("propagate_status") == "idle"]
+            if not ready:
+                break
+            slug = ready[0]["slug"]
+            print(f"[labeller] queue: propagate {slug} ({len(ready)} ready)", flush=True)
+            STORE.update(slug, propagate_status="running")
+            BUS.publish("__queue__", "queue", {"running": True, "current": slug, "remaining": len(ready)})
+            try:
+                run_propagate(slug)  # blocks until done / failed / cancelled
+            except Exception as e:
+                print(f"[labeller] queue: {slug} failed: {e}", flush=True)
+                STORE.update(slug, propagate_status="failed")
+            if _QUEUE_CANCEL.is_set():
+                # Stop-Queue cancelled this item mid-run (run_propagate caught
+                # the exception and stamped "failed"). Reset to idle so the
+                # next Run Queue resumes from this exact session.
+                cur = STORE.get(slug)
+                if cur.get("propagate_status") != "done":
+                    STORE.update(slug, propagate_status="idle")
+                break
+        print("[labeller] queue: drained", flush=True)
+    finally:
+        BUS.publish("__queue__", "queue", {"running": False})
+        _QUEUE_CANCEL.clear()
 
 
 def run_propagate(slug: str) -> None:
@@ -660,11 +743,13 @@ class Handler(BaseHTTPRequestHandler):
         self._send_bytes(HTTPStatus.OK, cached.read_bytes(), "image/jpeg")
 
     def _serve_sse(self, slug: str) -> None:
-        try:
-            STORE.get(slug)
-        except KeyError:
-            self._send_text(HTTPStatus.NOT_FOUND, "no such slug")
-            return
+        # __queue__ is a reserved channel for global queue events; no manifest entry.
+        if slug != "__queue__":
+            try:
+                STORE.get(slug)
+            except KeyError:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such slug")
+                return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -767,6 +852,32 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/items/rescan":
             STORE.scan_sources()
             self._send_json(HTTPStatus.OK, {"items": [self._public_item(it) for it in STORE.list()]})
+            return
+        if url.path == "/api/queue/run":
+            global _QUEUE_THREAD
+            with _QUEUE_LOCK:
+                if _QUEUE_THREAD is not None and _QUEUE_THREAD.is_alive():
+                    self._send_json(HTTPStatus.CONFLICT, {"ok": False, "msg": "queue already running"})
+                    return
+                _QUEUE_CANCEL.clear()
+                _QUEUE_THREAD = threading.Thread(target=_queue_runner, daemon=True)
+                _QUEUE_THREAD.start()
+            self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+        if url.path == "/api/queue/cancel":
+            _QUEUE_CANCEL.set()
+            if _PROPAGATOR is not None:
+                _PROPAGATOR.cancel()
+            self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+        if url.path == "/api/queue/status":
+            with _QUEUE_LOCK:
+                running = _QUEUE_THREAD is not None and _QUEUE_THREAD.is_alive()
+            self._send_json(HTTPStatus.OK, {"running": running})
+            return
+        if url.path == "/api/models/unload_seed":
+            unload_seeder()
+            self._send_json(HTTPStatus.OK, {"ok": True})
             return
         if url.path == "/api/models":
             body = self._read_json()

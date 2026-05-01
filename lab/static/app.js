@@ -35,6 +35,8 @@ const state = {
   isSeeking: false,
   lastSeekTarget: null,
   scrubMode: false,
+  queueRunning: false,
+  queueSse: null,
   // Pre-tinted canvases keyed by source frame index. We build one per mask
   // (sync, ~5ms each) the first time we see it, then `showMaskFor` blits it
   // in O(1). Without this cache, every arrow-key step re-decoded the PNG and
@@ -55,7 +57,14 @@ const state = {
 };
 
 const FRAME_BITMAP_CACHE_MAX = 800;
-const FRAME_PREFETCH_CONCURRENCY = 6;
+const FRAME_PREFETCH_CONCURRENCY = 4;
+// Display-only target width for decoded ImageBitmaps. The full-resolution
+// JPG (1920×1080 from a 240fps iPhone clip) costs ~5-8ms per drawImage on
+// M-series, which jams scrubber drag at 60Hz. Decoding to 960px wide cuts
+// drawImage cost ~4×. Server-side frame extraction and SAM2 propagation
+// continue to run on the full-res source MOV — this only affects the
+// browser preview.
+const SCRUB_PREVIEW_MAX_W = 960;
 
 function clearSeedMask() {
   if (state.seedMaskUrl) URL.revokeObjectURL(state.seedMaskUrl);
@@ -82,6 +91,7 @@ const el = {
   itemSlug: document.getElementById("item-slug"),
   itemList: document.getElementById("item-list"),
   btnRescan: document.getElementById("btn-rescan"),
+  btnQueue: document.getElementById("btn-queue"),
   seedModel: document.getElementById("seed-model"),
   propModel: document.getElementById("prop-model"),
   btnIn: document.getElementById("btn-in"),
@@ -479,7 +489,14 @@ async function fetchFrameBitmap(slug, frame) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`frame ${frame} HTTP ${r.status}`);
   const blob = await r.blob();
-  return await createImageBitmap(blob);
+  // Decode at preview resolution (resize done off-thread as part of decode).
+  // resizeWidth alone preserves aspect ratio per spec; Chrome/Safari honour
+  // this. Only the browser preview uses this — server-side propagation reads
+  // the original full-res frames directly off disk.
+  return await createImageBitmap(blob, {
+    resizeWidth: SCRUB_PREVIEW_MAX_W,
+    resizeQuality: "medium",
+  });
 }
 
 async function ensureFrameBitmap(slug, frame) {
@@ -878,6 +895,8 @@ async function bootstrap() {
   }
   renderSidebar();
   el.btnRescan.addEventListener("click", rescanItems);
+  el.btnQueue.addEventListener("click", toggleQueue);
+  startQueueSse();
   window.addEventListener("hashchange", onHashChange);
   const slug = pickInitialSlug(state.items);
   if (!slug) {
@@ -893,13 +912,20 @@ function onHashChange() {
   selectSlug(slug);
 }
 
+// "ready" = seed marked but not yet propagated → eligible for queue run.
+function effectiveStatus(it) {
+  const ps = it.status || it.propagate_status || "idle";
+  if (ps === "idle" && it.seed_frame != null) return "ready";
+  return ps;
+}
+
 function renderSidebar() {
   el.itemList.innerHTML = "";
   for (const it of state.items) {
     const card = document.createElement("div");
     card.className = "item-card" + (it.slug === state.current ? " active" : "");
     card.dataset.slug = it.slug;
-    const status = it.status || it.propagate_status || "idle";
+    const status = effectiveStatus(it);
     const fps = it.fps ? `${Math.round(it.fps)}fps` : "";
     const frames = it.total_frames ? `${it.total_frames}f` : "";
     const meta = [fps, frames].filter(Boolean).join(" · ");
@@ -930,6 +956,20 @@ function renderSidebar() {
     });
     el.itemList.appendChild(card);
   }
+  updateQueueButton();
+}
+
+function updateQueueButton() {
+  const ready = state.items.filter(it => effectiveStatus(it) === "ready").length;
+  if (state.queueRunning) {
+    el.btnQueue.textContent = "■ Stop Queue";
+    el.btnQueue.classList.add("running");
+    el.btnQueue.disabled = false;
+  } else {
+    el.btnQueue.textContent = `▶ Run Queue (${ready})`;
+    el.btnQueue.classList.remove("running");
+    el.btnQueue.disabled = ready === 0;
+  }
 }
 
 function updateSidebarActive() {
@@ -939,16 +979,45 @@ function updateSidebarActive() {
 }
 
 function updateSidebarStatus(slug, status) {
-  const card = el.itemList.querySelector(`.item-card[data-slug="${slug}"]`);
-  if (card) {
-    const dot = card.querySelector(".item-status");
-    if (dot) dot.className = `item-status item-status-${status}`;
-  }
   const it = state.items.find(i => i.slug === slug);
   if (it) {
     it.status = status;
     it.propagate_status = status;
   }
+  const card = el.itemList.querySelector(`.item-card[data-slug="${slug}"]`);
+  if (card) {
+    const dot = card.querySelector(".item-status");
+    if (dot) dot.className = `item-status item-status-${it ? effectiveStatus(it) : status}`;
+  }
+  updateQueueButton();
+}
+
+async function toggleQueue() {
+  if (state.queueRunning) {
+    if (!confirm("Stop queue? The currently-running session will be cancelled.")) return;
+    await fetch(`${API_BASE}/api/queue/cancel`, { method: "POST" });
+    return;
+  }
+  const ready = state.items.filter(it => effectiveStatus(it) === "ready").length;
+  if (!ready) return;
+  if (!confirm(`Run queue on ${ready} ready session(s)?\n\nSeed model will be unloaded to free memory; reload it via the dropdown when finished.`)) return;
+  const r = await fetch(`${API_BASE}/api/queue/run`, { method: "POST" });
+  if (!r.ok) {
+    showError(`queue start failed: HTTP ${r.status}`);
+  }
+}
+
+function startQueueSse() {
+  if (state.queueSse) { state.queueSse.close(); state.queueSse = null; }
+  const es = new EventSource(`${API_BASE}/api/items/__queue__/events`);
+  state.queueSse = es;
+  es.addEventListener("queue", (ev) => {
+    let payload = {};
+    try { payload = JSON.parse(ev.data); } catch (_) { return; }
+    state.queueRunning = !!payload.running;
+    updateQueueButton();
+  });
+  es.onerror = () => { /* browser auto-reconnects */ };
 }
 
 async function rescanItems() {
@@ -1134,6 +1203,19 @@ async function sendSeed(frameIndex, x, y) {
     state.seedMaskReady = true;
     if (currentFrame() === frameIndex) loadMaskForFrame(frameIndex);
     updatePropagateBtn();
+    // Reflect seed_frame back into the in-memory items list so the sidebar
+    // card flips to "ready" (blue dot) and the queue counter increments.
+    const it = state.items.find(i => i.slug === state.current);
+    if (it) {
+      it.seed_frame = frameIndex;
+      it.seed_point = [x, y];
+      const card = el.itemList.querySelector(`.item-card[data-slug="${state.current}"]`);
+      if (card) {
+        const dot = card.querySelector(".item-status");
+        if (dot) dot.className = `item-status item-status-${effectiveStatus(it)}`;
+      }
+      updateQueueButton();
+    }
   } catch (e) {
     showError(`seed failed: ${e}`);
   } finally {
@@ -1490,10 +1572,23 @@ function bindUi() {
   }
   el.video.addEventListener("seeked", () => resizeOverlay());
 
+  // rAF-coalesce scrubber input. The native input event fires per pixel of
+  // mouse movement (200+/sec on a fast drag), each call queues a paintAtomic
+  // (1920×1080 drawImage). Without coalescing the main thread saturates and
+  // click events queue behind paints — Mark Out feels delayed and the drag
+  // visually stutters. Coalescing caps paint rate at display refresh (~60Hz)
+  // and leaves room for input handling.
+  let scrubRafPending = false;
+  let scrubRafTarget = null;
   el.scrubber.addEventListener("input", () => {
-    const f = parseInt(el.scrubber.value, 10);
     if (!state.ptsTable) return;
-    jumpToFrame(f);
+    scrubRafTarget = parseInt(el.scrubber.value, 10);
+    if (scrubRafPending) return;
+    scrubRafPending = true;
+    requestAnimationFrame(() => {
+      scrubRafPending = false;
+      if (state.ptsTable && scrubRafTarget != null) jumpToFrame(scrubRafTarget);
+    });
   });
   // Suppress the range element's native arrow-key step. Our onKeydown handler
   // (with PTS-aware seek + queue) runs instead.
