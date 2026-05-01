@@ -877,32 +877,35 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                                    font-weight: 600; }}
 .fit-filter-bar .ff-path-count:empty {{ display: none; }}
 
-/* --- Dashboard 3D playback — simple marker-only transport. Video sync
+/* --- Dashboard 3D playback — sidebar marker-only transport. Video sync
    belongs to /viewer; dashboard playback only scrubs the shared 3D ball
    marker over the selected path's fit/points. */
-.dash-playback-bar {{ position: absolute; left: 50%; bottom: var(--s-4); transform: translateX(-50%);
-                      z-index: 7; display: inline-flex; align-items: center; gap: var(--s-2);
-                      padding: var(--s-1) var(--s-2);
-                      background: var(--surface); border: 1px solid var(--border-base);
-                      border-radius: var(--r); box-shadow: 0 1px 2px rgba(0,0,0,0.08);
-                      font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; }}
-.dash-playback-bar .dp-btn,
-.dash-playback-bar .dp-rate {{ font: inherit; font-size: 10px; letter-spacing: 0.08em;
-                                padding: 3px 8px; border: 1px solid var(--border-base);
-                                border-radius: 2px; background: transparent; color: var(--sub);
-                                cursor: pointer; text-transform: uppercase; }}
-.dash-playback-bar .dp-btn:hover:not(:disabled),
-.dash-playback-bar .dp-rate:hover {{ border-color: var(--ink); color: var(--ink); }}
-.dash-playback-bar .dp-btn:disabled {{ opacity: 0.35; cursor: not-allowed; }}
-.dash-playback-bar .dp-rate.active {{ background: var(--ink); color: var(--surface); border-color: var(--ink); }}
-.dash-playback-bar input[type="range"] {{ width: 180px; height: 14px; accent-color: var(--ink); }}
-.dash-playback-bar input[type="range"]:disabled {{ opacity: 0.35; }}
-.dash-playback-bar .dp-time {{ color: var(--sub); min-width: 84px; text-align: right;
-                               font-variant-numeric: tabular-nums; }}
-.dash-playback-bar .dp-rate-group {{ display: inline-flex; gap: 0; }}
-.dash-playback-bar .dp-rate + .dp-rate {{ border-left-width: 0; border-radius: 0; }}
-.dash-playback-bar .dp-rate:first-child {{ border-top-right-radius: 0; border-bottom-right-radius: 0; }}
-.dash-playback-bar .dp-rate:last-child {{ border-top-left-radius: 0; border-bottom-left-radius: 0; }}
+.dash-playback-card {{ display: flex; flex-direction: column; gap: var(--s-2);
+                       font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; }}
+.dash-playback-card .card-title {{ margin-bottom: var(--s-1); }}
+.dash-playback-card .dp-head {{ display: grid; grid-template-columns: auto auto minmax(0, 1fr);
+                                align-items: center; gap: var(--s-2); }}
+.dash-playback-card .dp-btn,
+.dash-playback-card .dp-rate {{ font: inherit; font-size: 10px; letter-spacing: 0.08em;
+                                 min-height: 28px; padding: 4px 8px;
+                                 border: 1px solid var(--border-base); border-radius: 2px;
+                                 background: transparent; color: var(--sub);
+                                 cursor: pointer; text-transform: uppercase; }}
+.dash-playback-card .dp-btn:hover:not(:disabled),
+.dash-playback-card .dp-rate:hover {{ border-color: var(--ink); color: var(--ink); }}
+.dash-playback-card .dp-btn:disabled {{ opacity: 0.35; cursor: not-allowed; }}
+.dash-playback-card .dp-rate.active {{ background: var(--ink); color: var(--surface); border-color: var(--ink); }}
+.dash-playback-card input[type="range"] {{ width: 100%; height: 16px; margin: 0; accent-color: var(--ink); }}
+.dash-playback-card input[type="range"]:disabled {{ opacity: 0.35; }}
+.dash-playback-card .dp-time {{ color: var(--sub); text-align: right;
+                                font-variant-numeric: tabular-nums; white-space: nowrap; }}
+.dash-playback-card .dp-rate-group {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; }}
+.dash-playback-card .dp-rate {{ width: 100%; }}
+.dash-playback-card .dp-rate + .dp-rate {{ border-left-width: 0; border-radius: 0; }}
+.dash-playback-card .dp-rate:first-child {{ border-top-left-radius: 2px; border-bottom-left-radius: 2px;
+                                             border-top-right-radius: 0; border-bottom-right-radius: 0; }}
+.dash-playback-card .dp-rate:last-child {{ border-top-right-radius: 2px; border-bottom-right-radius: 2px;
+                                            border-top-left-radius: 0; border-bottom-left-radius: 0; }}
 
 /* --- Mini-slider — shared between dashboard fit-filter-bar + viewer
    layer-toggles. PT (point-size), LW (fit linewidth), EXT (fit dashed

@@ -960,9 +960,10 @@ def test_dashboard_renders_control_panel():
     assert 'id="session-body"' in body
     assert 'id="events-body"' in body
     assert 'id="scene-root"' in body
-    assert 'id="dash-playback-bar"' in body
+    assert 'class="card dash-playback-card" id="dash-playback-bar"' in body
     assert 'id="dash-playback-scrub"' in body
     assert 'data-dash-playback-rate="1"' in body
+    assert body.index('id="dash-playback-bar"') < body.index('<section class="canvas">')
     assert 'href="/setup"' in body
     assert 'href="/markers"' in body
 
