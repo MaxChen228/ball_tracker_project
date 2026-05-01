@@ -14,8 +14,12 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "netwo
 ///                  the phone any more)
 final class ServerUploader: @unchecked Sendable {
     struct ServerConfig {
-        var serverIP: String = "192.168.1.100"
-        var serverPort: Int = 8765
+        // No default values — caller must supply both. CLAUDE.md "禁 silent
+        // fallback": a stale 192.168.1.100 default historically masked
+        // mis-wired callers and would point new ones at a non-LAN IP.
+        // Current LAN value lives in AppSettings / dashboard, not here.
+        var serverIP: String
+        var serverPort: Int
 
         func baseURL() -> URL? {
             return URL(string: "http://\(serverIP):\(serverPort)")
@@ -24,7 +28,7 @@ final class ServerUploader: @unchecked Sendable {
 
     private let config: ServerConfig
 
-    init(config: ServerConfig = ServerConfig()) {
+    init(config: ServerConfig) {
         self.config = config
     }
 

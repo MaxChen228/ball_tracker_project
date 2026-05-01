@@ -242,7 +242,16 @@ final class CameraCaptureRuntime {
     }
 
     func applyTrackingExposureCap(_ rawMode: String, targetFps: Double) {
-        let exposureMode = ServerUploader.TrackingExposureCapMode(rawValue: rawMode) ?? .frameDuration
+        // Atomic-drop unknown mode strings rather than silent-fall back to
+        // .frameDuration. Per CLAUDE.md "禁 silent fallback" — even though
+        // CameraTransportCoordinator already filters at the WS boundary,
+        // landmining a fallback here means a future caller wiring a new
+        // path silently mis-applies exposure. Make the contract explicit:
+        // either the rawMode parses, or we drop and log.
+        guard let exposureMode = ServerUploader.TrackingExposureCapMode(rawValue: rawMode) else {
+            captureLog.error("applyTrackingExposureCap dropping unknown mode raw=\(rawMode, privacy: .public)")
+            return
+        }
         guard trackingExposureCapMode != exposureMode else { return }
         trackingExposureCapMode = exposureMode
         guard let device = currentCaptureDevice else { return }
