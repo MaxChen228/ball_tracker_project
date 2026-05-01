@@ -26,10 +26,9 @@ from pairing_tuning import PairingTuning
 from pipeline import detect_pitch
 from schemas import (
     CalibrationSnapshot,
-    HSVRangePayload,
+    DetectionConfigSnapshotPayload,
     PitchPayload,
     SessionResult,
-    ShapeGatePayload,
 )
 
 logger = logging.getLogger("reprocess")
@@ -44,30 +43,23 @@ PAIRING_TUNING_PATH = DATA_DIR / "pairing_tuning.json"
 VIDEO_EXTS = (".mov", ".mp4", ".m4v")
 
 
-def load_detection_config() -> tuple[HSVRange, ShapeGate]:
-    # On a fresh-empty data/ (no detection_config.json, no legacy split files
-    # to migrate), `load_or_migrate` returns its hardcoded Tennis default
-    # without writing anything. The INFO log below surfaces "preset=tennis"
-    # so the operator can spot it — not a silent fallback. Real workflow
-    # always has a config on disk because the running server seeds it.
+def load_detection_config_snapshot() -> DetectionConfigSnapshotPayload:
+    """Read the active detection config from disk and freeze a snapshot.
+    On a fresh-empty data/, `load_or_migrate` returns its Tennis
+    default without writing — the INFO log below surfaces "preset=tennis"
+    so the operator can spot it (not a silent fallback)."""
     cfg = load_or_migrate(DATA_DIR, atomic_write=atomic_write)
-    hsv = HSVRange(
-        h_min=cfg.hsv.h_min, h_max=cfg.hsv.h_max,
-        s_min=cfg.hsv.s_min, s_max=cfg.hsv.s_max,
-        v_min=cfg.hsv.v_min, v_max=cfg.hsv.v_max,
-    )
-    gate = ShapeGate(
-        aspect_min=cfg.shape_gate.aspect_min,
-        fill_min=cfg.shape_gate.fill_min,
-    )
-    label = cfg.preset or "custom"
+    snapshot = DetectionConfigSnapshotPayload.from_detection_config(cfg)
     logger.info(
-        "detection_config algorithm=%s preset=%s hsv h[%d-%d] s[%d-%d] v[%d-%d] aspect>=%.2f fill>=%.2f",
-        cfg.algorithm_id, label,
-        hsv.h_min, hsv.h_max, hsv.s_min, hsv.s_max, hsv.v_min, hsv.v_max,
-        gate.aspect_min, gate.fill_min,
+        "detection_config algorithm=%s preset=%s hsv h[%d-%d] s[%d-%d] v[%d-%d] "
+        "aspect>=%.2f fill>=%.2f",
+        snapshot.algorithm_id, snapshot.preset_name or "custom",
+        snapshot.hsv.h_min, snapshot.hsv.h_max,
+        snapshot.hsv.s_min, snapshot.hsv.s_max,
+        snapshot.hsv.v_min, snapshot.hsv.v_max,
+        snapshot.shape_gate.aspect_min, snapshot.shape_gate.fill_min,
     )
-    return hsv, gate
+    return snapshot
 
 
 def load_calibrations() -> dict[str, CalibrationSnapshot]:
@@ -123,60 +115,50 @@ def select_pitch_files(args: argparse.Namespace) -> list[Path]:
 
 def rerun_detection(
     pitch_path: Path,
-    hsv: HSVRange,
-    shape_gate: ShapeGate,
+    snapshot: DetectionConfigSnapshotPayload,
     dry_run: bool,
     *,
     use_frozen_snapshot: bool = False,
 ) -> PitchPayload | None:
     """Re-run server-side detection on one persisted pitch.
 
-    Default: use **current** disk config (`data/hsv_range.json` etc.) —
-    matches the operator's tuning workflow ("I tweaked HSV, rerun this
-    session and see if it improves"). The freshly-used values are
-    stamped back onto the pitch so `pitch.*_used` always reflects the
-    config of the most recent detection run.
+    Default (`use_frozen_snapshot=False`): use the supplied `snapshot`
+    (current disk config) — matches the operator's tuning workflow.
+    `pitch.server_post_config_used` is overwritten with the snapshot
+    that just produced these frames.
 
-    Opt-in `use_frozen_snapshot=True` (CLI: `--use-frozen-snapshot`):
-    re-use the values stamped on the pitch by the original detection
-    run. For reproducibility audits — answers "what would the original
-    live/server_post run have produced if I rebuilt from scratch?"
-    Falls back to disk for legacy pitches that pre-date the stamp,
-    logging a warning so the operator knows that rerun isn't an
-    unambiguous historical reproduction."""
+    `use_frozen_snapshot=True`: reuse the snapshot already stamped on
+    `pitch.server_post_config_used`. Reproducibility audit path;
+    pitches that pre-date the server_post freeze fall back to the
+    supplied current-disk `snapshot` with a warning."""
     pitch = PitchPayload.model_validate_json(pitch_path.read_text())
     video = find_video(pitch.session_id, pitch.camera_id)
     if video is None:
         logger.warning("  skip %s/%s — no MOV", pitch.session_id, pitch.camera_id)
         return None
 
-    if not use_frozen_snapshot:
-        hsv_eff, gate_eff = hsv, shape_gate
+    if use_frozen_snapshot:
+        if pitch.server_post_config_used is not None:
+            effective = pitch.server_post_config_used
+        else:
+            logger.warning(
+                "  %s/%s legacy pitch lacks server_post_config_used — "
+                "using current disk config",
+                pitch.session_id, pitch.camera_id,
+            )
+            effective = snapshot
     else:
-        if pitch.hsv_range_used is not None:
-            p = pitch.hsv_range_used
-            hsv_eff = HSVRange(
-                h_min=p.h_min, h_max=p.h_max,
-                s_min=p.s_min, s_max=p.s_max,
-                v_min=p.v_min, v_max=p.v_max,
-            )
-        else:
-            logger.warning(
-                "  %s/%s legacy pitch lacks hsv_range_used — using current disk config",
-                pitch.session_id, pitch.camera_id,
-            )
-            hsv_eff = hsv
-        if pitch.shape_gate_used is not None:
-            gate_eff = ShapeGate(
-                aspect_min=pitch.shape_gate_used.aspect_min,
-                fill_min=pitch.shape_gate_used.fill_min,
-            )
-        else:
-            logger.warning(
-                "  %s/%s legacy pitch lacks shape_gate_used — using current disk config",
-                pitch.session_id, pitch.camera_id,
-            )
-            gate_eff = shape_gate
+        effective = snapshot
+
+    hsv_eff = HSVRange(
+        h_min=effective.hsv.h_min, h_max=effective.hsv.h_max,
+        s_min=effective.hsv.s_min, s_max=effective.hsv.s_max,
+        v_min=effective.hsv.v_min, v_max=effective.hsv.v_max,
+    )
+    gate_eff = ShapeGate(
+        aspect_min=effective.shape_gate.aspect_min,
+        fill_min=effective.shape_gate.fill_min,
+    )
 
     old_hits = sum(1 for f in pitch.frames_server_post if f.px is not None)
     frames = detect_pitch(
@@ -191,15 +173,7 @@ def rerun_detection(
         pitch.session_id, pitch.camera_id, len(frames), old_hits, new_hits,
     )
     pitch.frames_server_post = frames
-    # Re-stamp with the values just used so legacy pitches stop being legacy.
-    pitch.hsv_range_used = HSVRangePayload(
-        h_min=hsv_eff.h_min, h_max=hsv_eff.h_max,
-        s_min=hsv_eff.s_min, s_max=hsv_eff.s_max,
-        v_min=hsv_eff.v_min, v_max=hsv_eff.v_max,
-    )
-    pitch.shape_gate_used = ShapeGatePayload(
-        aspect_min=gate_eff.aspect_min, fill_min=gate_eff.fill_min,
-    )
+    pitch.server_post_config_used = effective
     if not dry_run:
         atomic_write(pitch_path, pitch.model_dump_json())
     return pitch
@@ -245,16 +219,14 @@ def triangulate_session(
         cost_threshold=pairing_tuning.cost_threshold,
         gap_threshold_m=pairing_tuning.gap_threshold_m,
     )
-    # Mirror the pitch-level frozen config onto the result so the viewer
-    # tuning strip / future audit can answer "what HSV / shape-gate /
-    # selector tuning produced these points?" without reading the pitch
-    # JSON. Aggregation policy (A-wins, fall-back-to-B, warn on divergence)
-    # is shared with `session_results.aggregate_pitch_used_configs` so the
-    # online rebuild and offline reprocess paths can never silently disagree.
+    # Mirror per-pitch per-path frozen snapshots onto the result so the
+    # viewer / future audit can answer "what config produced these
+    # points?" without reading the pitch JSON. Aggregation policy
+    # (A-wins, B-fallback, warn on divergence) is shared with
+    # `session_results.aggregate_pitch_used_configs`.
     used = session_results.aggregate_pitch_used_configs(a, b, sid)
-    result.hsv_range_used = used["hsv_range_used"]
-    result.shape_gate_used = used["shape_gate_used"]
-    result.live_preset_name = used["live_preset_name"]
+    result.live_config_used = used["live_config_used"]
+    result.server_post_config_used = used["server_post_config_used"]
     if a is None or b is None:
         logger.info("  %s — solo (%s only); skipping triangulation",
                     sid, "A" if a else "B")
@@ -311,9 +283,8 @@ def main() -> None:
     ap.add_argument(
         "--use-frozen-snapshot",
         action="store_true",
-        help="reuse the per-pitch frozen detection-config snapshot "
-             "(pitch.{hsv,shape_gate}_used) instead of current "
-             "data/*.json values. For reproducibility audits — default "
+        help="reuse `pitch.server_post_config_used` instead of the current "
+             "disk detection config. For reproducibility audits — default "
              "behavior is to pick up your current disk config so tuning "
              "workflows actually see new results.",
     )
@@ -321,7 +292,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    hsv, shape_gate = load_detection_config()
+    snapshot = load_detection_config_snapshot()
     pairing_tuning = load_pairing_tuning()
     calibrations = load_calibrations()
 
@@ -331,16 +302,15 @@ def main() -> None:
         return
 
     # group by session, re-detect each pitch. Per-file try/except so a
-    # single corrupt MOV / unreadable JSON doesn't abort the whole batch
-    # (NIT N2 from phase-3 review). Failures are tallied + reported at end
-    # so they're loud, not silent.
+    # single corrupt MOV / unreadable JSON doesn't abort the whole batch.
+    # Failures tallied + reported at end so they're loud, not silent.
     by_session: dict[str, dict[str, PitchPayload]] = {}
     failures: list[tuple[str, str]] = []
     for path in pitch_paths:
         logger.info("redetect %s", path.name)
         try:
             pitch = rerun_detection(
-                path, hsv, shape_gate, args.dry_run,
+                path, snapshot, args.dry_run,
                 use_frozen_snapshot=args.use_frozen_snapshot,
             )
         except Exception as e:

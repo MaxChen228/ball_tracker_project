@@ -145,6 +145,12 @@ class DetectionConfigSnapshotPayload(BaseModel):
     shape_gate: ShapeGatePayload
     preset_name: str | None
 
+    @model_validator(mode="after")
+    def _validate_algorithm_id(self) -> "DetectionConfigSnapshotPayload":
+        import algorithms
+        algorithms.validate_id(self.algorithm_id)
+        return self
+
     @classmethod
     def from_detection_config(cls, cfg) -> "DetectionConfigSnapshotPayload":
         """Construct from a `detection_config.DetectionConfig`.

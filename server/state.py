@@ -678,7 +678,7 @@ class State:
             # Idempotent: arm_session pre-creates LivePairingSession (so a
             # `session_id not in dict` check would never fire on the dashboard
             # path), and tests that bypass arm hit the setdefault above. The
-            # `hsv_range_used is None` freshness check covers both: stamp
+            # `live_config_used is None` freshness check covers both: stamp
             # exactly once on first ingest regardless of who created the
             # LivePairingSession. Subsequent ingests see the fields already
             # set and skip the block.

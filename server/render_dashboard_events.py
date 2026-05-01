@@ -201,48 +201,60 @@ def _pipes_html(e: dict[str, Any]) -> str:
 
 
 def _cfg_strip_html(e: dict[str, Any]) -> str:
-    """Live + server_post preset chips — `Live: <name> | Svr: <name|—>`.
+    """Live + server_post config chips driven by frozen snapshots.
 
-    Resolves the preset on disk to populate the hover popover with the
-    actual H/S/V values. A preset filename that's been deleted out from
-    under the session renders with a "(deleted)" suffix and no popover.
+    Snapshot values are the source of truth. If `preset_name` still
+    exists on disk we use its label for the tooltip; if the preset was
+    deleted or the config was custom (`preset_name=None`), we still show
+    the exact frozen HSV / gate values from the snapshot.
     """
     from main import state as _state
 
-    live_name = e.get("live_preset_name")
-    srv_name = e.get("server_post_preset_name")
-    if live_name is None and srv_name is None:
+    live_cfg = e.get("live_config_used")
+    srv_cfg = e.get("server_post_config_used")
+    if live_cfg is None and srv_cfg is None:
         return ""
 
-    def _chip(label: str, name: str | None) -> str:
-        if name is None:
+    def _tip(cfg: dict[str, Any]) -> str:
+        h = cfg["hsv"]
+        g = cfg["shape_gate"]
+        return (
+            f"H {h['h_min']}-{h['h_max']} · "
+            f"S {h['s_min']}-{h['s_max']} · "
+            f"V {h['v_min']}-{h['v_max']} · "
+            f"asp≥{g['aspect_min']:.2f} fill≥{g['fill_min']:.2f}"
+        )
+
+    def _chip(label: str, cfg: dict[str, Any] | None) -> str:
+        if cfg is None:
             return (
                 f'<span class="ev-cfg-chip none" title="{html.escape(label)}: not set">'
                 f'{html.escape(label)} <b>—</b></span>'
+            )
+        name = cfg.get("preset_name")
+        tip = _tip(cfg)
+        if name is None:
+            return (
+                f'<span class="ev-cfg-chip" title="{html.escape(label)}: custom — {html.escape(tip)}">'
+                f'{html.escape(label)} <b>custom</b></span>'
             )
         try:
             p = _state.load_preset(name)
         except KeyError:
             return (
                 f'<span class="ev-cfg-chip deleted" title="{html.escape(label)}: '
-                f'preset {html.escape(name)} no longer on disk">'
+                f'preset {html.escape(name)} no longer on disk — {html.escape(tip)}">'
                 f'{html.escape(label)} <b>{html.escape(name)}</b> '
                 f'<i>(deleted)</i></span>'
             )
-        h = p.hsv
-        g = p.shape_gate
-        tip = (
-            f"H {h.h_min}-{h.h_max} · S {h.s_min}-{h.s_max} · V {h.v_min}-{h.v_max} · "
-            f"asp≥{g.aspect_min:.2f} fill≥{g.fill_min:.2f}"
-        )
         return (
             f'<span class="ev-cfg-chip" title="{html.escape(p.label)} — {html.escape(tip)}">'
             f'{html.escape(label)} <b>{html.escape(name)}</b></span>'
         )
 
     return (
-        f'<div class="ev-cfg-strip">{_chip("Live", live_name)}'
-        f'{_chip("Svr", srv_name)}</div>'
+        f'<div class="ev-cfg-strip">{_chip("Live", live_cfg)}'
+        f'{_chip("Svr", srv_cfg)}</div>'
     )
 
 

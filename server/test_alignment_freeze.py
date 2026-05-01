@@ -9,8 +9,8 @@ slider drag + first ingest → frozen values are the ones in effect at
 arm time, NOT the post-drag values.
 
 Covers the frozen fields exposed via `LivePairingSession`:
-  - hsv_range_used
-  - shape_gate_used
+  - live_config_used.hsv
+  - live_config_used.shape_gate
   - pairing_tuning    (cd87995 cost/gap freeze contract)
 """
 from __future__ import annotations
@@ -60,7 +60,11 @@ def test_arm_then_slider_drag_then_ingest_freezes_arm_time_hsv(tmp_path):
 
     frozen = s.live_session_frozen_config(session.id)
     assert frozen is not None, "first ingest must have stamped"
-    hsv_frozen, _gate_frozen = frozen
+    hsv_frozen = HSVRange(
+        h_min=frozen.hsv.h_min, h_max=frozen.hsv.h_max,
+        s_min=frozen.hsv.s_min, s_max=frozen.hsv.s_max,
+        v_min=frozen.hsv.v_min, v_max=frozen.hsv.v_max,
+    )
     assert hsv_frozen == hsv_x, (
         f"frozen hsv should be arm-time X, got {hsv_frozen}; "
         "slider drag between arm and first ingest poisoned the session"
@@ -72,8 +76,8 @@ def test_arm_then_slider_drag_then_ingest_freezes_arm_time_hsv(tmp_path):
     s.ingest_live_frame("A", session.id, _make_frame(2))
     frozen2 = s.live_session_frozen_config(session.id)
     assert frozen2 is not None
-    hsv_frozen2, _ = frozen2
-    assert hsv_frozen2 == hsv_x, "stamp must be idempotent — never re-stamped"
+    assert (frozen2.hsv.h_min, frozen2.hsv.h_max) == (hsv_x.h_min, hsv_x.h_max), \
+        "stamp must be idempotent — never re-stamped"
 
 
 def test_arm_then_slider_drag_then_ingest_freezes_arm_time_shape_gate(tmp_path):
@@ -90,7 +94,11 @@ def test_arm_then_slider_drag_then_ingest_freezes_arm_time_shape_gate(tmp_path):
 
     frozen = s.live_session_frozen_config(session.id)
     assert frozen is not None
-    _hsv, gate_frozen = frozen
+    from detection import ShapeGate
+    gate_frozen = ShapeGate(
+        aspect_min=frozen.shape_gate.aspect_min,
+        fill_min=frozen.shape_gate.fill_min,
+    )
     assert gate_frozen == gate_x
 
 
@@ -142,5 +150,9 @@ def test_arm_alone_stamps_without_waiting_for_ingest(tmp_path):
 
     frozen = s.live_session_frozen_config(session.id)
     assert frozen is not None, "arm_session must stamp synchronously"
-    hsv_frozen, _ = frozen
+    hsv_frozen = HSVRange(
+        h_min=frozen.hsv.h_min, h_max=frozen.hsv.h_max,
+        s_min=frozen.hsv.s_min, s_max=frozen.hsv.s_max,
+        v_min=frozen.hsv.v_min, v_max=frozen.hsv.v_max,
+    )
     assert hsv_frozen == hsv_x

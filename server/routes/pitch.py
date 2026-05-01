@@ -221,22 +221,16 @@ async def _run_server_detection(
     clip_path: Path,
     pitch: PitchPayload,
     *,
-    hsv_range: "HSVRange",
-    shape_gate: "ShapeGate",
-    preset_name: str,
+    config_snapshot: DetectionConfigSnapshotPayload,
 ) -> None:
     """Background task: decode the MOV, run HSV detection, annotate, then
     re-record the pitch so `result.points` (and the annotated MP4) land on
-    disk. Runs after /pitch has already returned — the dashboard sees the
-    session + on-device points immediately, and this task backfills the
-    server-side trace 8-20 s later.
+    disk. Runs after /pitch has already returned.
 
-    The detection config pair (`hsv_range` / `shape_gate`) and its
-    `preset_name` identity are resolved by the caller
-    (`_enqueue_server_post`) by loading the operator-chosen preset file
-    at request time — this background task never re-reads state mid-run.
-    `preset_name` is stamped onto `SessionResult.server_post_preset_name`
-    after detection completes.
+    `config_snapshot` is resolved by the caller from the operator-
+    chosen preset; this task never re-reads state mid-run. Stamped
+    onto `pitch.server_post_config_used` and
+    `SessionResult.server_post_config_used` after detection completes.
     """
     import main as _main
     state = _main.state
@@ -318,17 +312,24 @@ async def _run_server_detection(
         {"sid": sid, "cam": cam, "frames_done": 0, "frames_total": frames_total},
     )
 
-    # The pair was resolved at request time by
-    # `_resolve_detection_config` — never re-read from state here, since
-    # the operator's choice (`preset:blue_ball`, `frozen`, ...) must be
-    # honored regardless of any concurrent dashboard edit. The persisted
-    # `*_used` stamp records exactly what `detect_pitch` ran with, so
-    # later reprocess can reproduce this run from frozen snapshot alone.
-    hsv_used = hsv_range
-    gate_used = shape_gate
+    # Materialize a HSVRange / ShapeGate from the immutable snapshot so
+    # detect_pitch's signature (which still takes the legacy types) can
+    # call without leaking the wire payload deeper. Whatever the
+    # snapshot says is what runs — never re-read state here, since
+    # operator-chosen preset must survive concurrent dashboard edits.
+    hsv_used = HSVRange(
+        h_min=config_snapshot.hsv.h_min, h_max=config_snapshot.hsv.h_max,
+        s_min=config_snapshot.hsv.s_min, s_max=config_snapshot.hsv.s_max,
+        v_min=config_snapshot.hsv.v_min, v_max=config_snapshot.hsv.v_max,
+    )
+    gate_used = ShapeGate(
+        aspect_min=config_snapshot.shape_gate.aspect_min,
+        fill_min=config_snapshot.shape_gate.fill_min,
+    )
     logger.info(
-        "background detection start session=%s cam=%s hsv=%r",
-        sid, cam, hsv_used,
+        "background detection start session=%s cam=%s algo=%s preset=%s hsv=%r",
+        sid, cam, config_snapshot.algorithm_id, config_snapshot.preset_name,
+        hsv_used,
     )
     try:
         frames = await asyncio.to_thread(
@@ -368,19 +369,10 @@ async def _run_server_detection(
     # SessionResult rebuild picks it up via max(A, B). Only set on
     # success — cancellation / errors above return before this line.
     pitch.server_post_ran_at = state.now()
-    # Overwrite the live-side stamp with what server_post actually used
-    # for this run — server_post is the authoritative cost basis once it
-    # has run, since reprocess will read from `frames_server_post`.
-    # `live_preset_name` is preserved verbatim: it is the arm-time live
-    # identity and never reflects the server_post run's choice (the
-    # server_post preset name is recorded separately on
-    # `SessionResult.server_post_preset_name`).
-    _stamp_detection_config(
-        pitch,
-        hsv_range=hsv_used,
-        shape_gate=gate_used,
-        preset_name=pitch.live_preset_name,
-    )
+    # Stamp the snapshot that just produced these frames. live_config_used
+    # is preserved — it is the arm-time live identity and never reflects
+    # server_post's run choice.
+    pitch.server_post_config_used = config_snapshot
     try:
         result = await asyncio.to_thread(state.record, pitch)
     except Exception as exc:
@@ -392,12 +384,11 @@ async def _run_server_detection(
             sid, cam, exc,
         )
         return
-    # Stamp the preset name onto the just-rebuilt SessionResult. Both
-    # cams of a given session run with the same preset_name (the request
-    # body locks it for both), so last-writer-wins on this field is a
-    # no-op idempotent overwrite.
+    # Mirror the snapshot onto the SessionResult. Both cams of a session
+    # run with the same snapshot (request body locks it), so last-writer-
+    # wins is idempotent.
     result = await asyncio.to_thread(
-        state.stamp_server_post_preset_name, sid, preset_name
+        state.stamp_server_post_config, sid, config_snapshot
     )
 
     ball = sum(1 for f in frames if f.ball_detected)

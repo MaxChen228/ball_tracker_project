@@ -249,10 +249,11 @@ def presets_delete(name: str) -> dict[str, Any]:
     Built-in seeds (tennis, blue_ball) are deletable — restart will
     re-seed any built-in whose file is missing.
 
-    Sessions whose `live_preset_name` / `server_post_preset_name`
-    references the deleted preset render the chip with a "(deleted)"
-    suffix at the dashboard / viewer; the underlying detection results
-    on disk are untouched.
+    Sessions whose `live_config_used.preset_name` /
+    `server_post_config_used.preset_name` references the deleted preset
+    render the chip with a "(deleted)" suffix at the dashboard /
+    viewer, but still use the frozen snapshot's HSV + shape-gate values.
+    The underlying detection results on disk are untouched.
     """
     from main import state
     if state.detection_config().preset == name:

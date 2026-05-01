@@ -159,15 +159,18 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         "server_post_ran_at": (
             result.server_post_ran_at if result is not None else None
         ),
-        # Preset filenames for the per-session CFG strip in the viewer
-        # nav. Both nullable: `live_preset_name` is None on legacy
-        # sessions armed before preset-stamping; `server_post_preset_name`
-        # is None until the operator first runs server_post.
-        "live_preset_name": (
-            result.live_preset_name if result is not None else None
+        # Per-path frozen detection-config snapshots for the viewer CFG
+        # strip. Snapshot values are authoritative even if the referenced
+        # preset has since been deleted or the run used a custom config.
+        "live_config_used": (
+            result.live_config_used.model_dump(mode="json")
+            if result is not None and result.live_config_used is not None
+            else None
         ),
-        "server_post_preset_name": (
-            result.server_post_preset_name if result is not None else None
+        "server_post_config_used": (
+            result.server_post_config_used.model_dump(mode="json")
+            if result is not None and result.server_post_config_used is not None
+            else None
         ),
     }
 

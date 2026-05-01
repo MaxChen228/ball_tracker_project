@@ -241,24 +241,31 @@
   }
 
   function _cfgStripHtml(e) {
-    const liveName = e.live_preset_name || null;
-    const srvName = e.server_post_preset_name || null;
-    if (liveName === null && srvName === null) return '';
+    const liveCfg = e.live_config_used || null;
+    const srvCfg = e.server_post_config_used || null;
+    if (liveCfg === null && srvCfg === null) return '';
     const known = new Map(_presetsCache.map(p => [p.name, p]));
-    const chip = (label, name) => {
-      if (name === null) {
+    const tip = (cfg) => {
+      const h = cfg.hsv;
+      const g = cfg.shape_gate;
+      return `H ${h.h_min}-${h.h_max} · S ${h.s_min}-${h.s_max} · V ${h.v_min}-${h.v_max} · asp≥${g.aspect_min.toFixed(2)} fill≥${g.fill_min.toFixed(2)}`;
+    };
+    const chip = (label, cfg) => {
+      if (cfg === null) {
         return `<span class="ev-cfg-chip none" title="${esc(label)}: not set">${esc(label)} <b>—</b></span>`;
+      }
+      const name = cfg.preset_name || null;
+      const cfgTip = tip(cfg);
+      if (name === null) {
+        return `<span class="ev-cfg-chip" title="${esc(label)}: custom — ${esc(cfgTip)}">${esc(label)} <b>custom</b></span>`;
       }
       const p = known.get(name);
       if (!p) {
-        return `<span class="ev-cfg-chip deleted" title="${esc(label)}: preset ${esc(name)} no longer on disk">${esc(label)} <b>${esc(name)}</b> <i>(deleted)</i></span>`;
+        return `<span class="ev-cfg-chip deleted" title="${esc(label)}: preset ${esc(name)} no longer on disk — ${esc(cfgTip)}">${esc(label)} <b>${esc(name)}</b> <i>(deleted)</i></span>`;
       }
-      const h = p.hsv;
-      const g = p.shape_gate;
-      const tip = `H ${h.h_min}-${h.h_max} · S ${h.s_min}-${h.s_max} · V ${h.v_min}-${h.v_max} · asp≥${g.aspect_min.toFixed(2)} fill≥${g.fill_min.toFixed(2)}`;
-      return `<span class="ev-cfg-chip" title="${esc(p.label)} — ${esc(tip)}">${esc(label)} <b>${esc(name)}</b></span>`;
+      return `<span class="ev-cfg-chip" title="${esc(p.label)} — ${esc(cfgTip)}">${esc(label)} <b>${esc(name)}</b></span>`;
     };
-    return `<div class="ev-cfg-strip">${chip('Live', liveName)}${chip('Svr', srvName)}</div>`;
+    return `<div class="ev-cfg-strip">${chip('Live', liveCfg)}${chip('Svr', srvCfg)}</div>`;
   }
 
   function _runSrvForm(sid) {

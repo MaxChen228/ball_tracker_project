@@ -207,17 +207,17 @@ def session_tuning_strip_html(
 
 
 def detection_config_strip_html(
-    live_preset_name: str | None,
-    server_post_preset_name: str | None,
+    live_config_used: dict | None,
+    server_post_config_used: dict | None,
     *,
     presets_by_name: dict | None = None,
 ) -> str:
     """Per-session "what config produced this" strip on the viewer nav.
-    Two pills (LIVE / SVR) showing the preset filename plus a compact
-    HSV+gate summary so the operator can see at a glance which config
-    each pipeline ran under without round-tripping through the
-    dashboard. Stale references (preset deleted since the session was
-    recorded) render greyed-out with a `(deleted)` tag.
+    Two pills (LIVE / SVR) showing the frozen config identity plus a
+    compact HSV+gate summary so the operator can see at a glance which
+    config each pipeline ran under without round-tripping through the
+    dashboard. Stale preset references render greyed-out with a
+    `(deleted)` tag, but still use the frozen snapshot values.
 
     `presets_by_name` is an optional pre-built `{name: Preset}` map; if
     None, the renderer asks `state.load_preset` per pill (cheap — at
@@ -226,22 +226,39 @@ def detection_config_strip_html(
     return (
         '<div class="config-strip" role="status" aria-label="Detection config used">'
         '<span class="cfg-head">CFG</span>'
-        f'{_config_pill_html("LIVE", live_preset_name, presets_by_name)}'
-        f'{_config_pill_html("SVR", server_post_preset_name, presets_by_name)}'
+        f'{_config_pill_html("LIVE", live_config_used, presets_by_name)}'
+        f'{_config_pill_html("SVR", server_post_config_used, presets_by_name)}'
         '</div>'
     )
 
 
 def _config_pill_html(
     label: str,
-    preset_name: str | None,
+    snapshot: dict | None,
     presets_by_name: dict | None,
 ) -> str:
-    if preset_name is None:
+    if snapshot is None:
         return (
             f'<span class="cfg-pill missing" title="{html.escape(label)}: not set">'
             f'<span class="cfg-label">{html.escape(label)}</span>'
             f'<span class="cfg-tag">—</span>'
+            f'</span>'
+        )
+
+    hsv = snapshot["hsv"]
+    gate = snapshot["shape_gate"]
+    tip = (
+        f"H {hsv['h_min']}-{hsv['h_max']} · "
+        f"S {hsv['s_min']}-{hsv['s_max']} · "
+        f"V {hsv['v_min']}-{hsv['v_max']} · "
+        f"asp≥{gate['aspect_min']:.2f} fill≥{gate['fill_min']:.2f}"
+    )
+    preset_name = snapshot.get("preset_name")
+    if preset_name is None:
+        return (
+            f'<span class="cfg-pill ok" title="{html.escape(label)}: custom — {html.escape(tip)}">'
+            f'<span class="cfg-label">{html.escape(label)}</span>'
+            f'<span class="cfg-tag">custom</span>'
             f'</span>'
         )
 
@@ -255,14 +272,14 @@ def _config_pill_html(
     if p is None:
         return (
             f'<span class="cfg-pill missing" '
-            f'title="{html.escape(label)}: preset {html.escape(preset_name)} no longer on disk">'
+            f'title="{html.escape(label)}: preset {html.escape(preset_name)} no longer on disk — {html.escape(tip)}">'
             f'<span class="cfg-label">{html.escape(label)}</span>'
             f'<span class="cfg-tag">{html.escape(preset_name)} (deleted)</span>'
             f'</span>'
         )
 
     return (
-        f'<span class="cfg-pill ok" title="{html.escape(p.label)}">'
+        f'<span class="cfg-pill ok" title="{html.escape(p.label)} — {html.escape(tip)}">'
         f'<span class="cfg-label">{html.escape(label)}</span>'
         f'<span class="cfg-tag">{html.escape(preset_name)}</span>'
         f'</span>'

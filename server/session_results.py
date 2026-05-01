@@ -45,9 +45,8 @@ logger = logging.getLogger(__name__)
 
 
 _FROZEN_USED_FIELDS = (
-    "hsv_range_used",
-    "shape_gate_used",
-    "live_preset_name",
+    "live_config_used",
+    "server_post_config_used",
 )
 
 
@@ -56,13 +55,11 @@ def aggregate_pitch_used_configs(
     b: PitchPayload | None,
     sid: str,
 ) -> dict[str, object | None]:
-    """Aggregate the per-pitch frozen `*_used` fields into a single mapping.
-    Divergence (A and B carry different values because operator edited the
-    config mid-cycle) is logged as a warning but does not raise — diagnostic,
-    not crashable. Policy: A wins, fall back to B. Shared by `rebuild_result`
-    here and by `reprocess_sessions._build_session_result` so both paths
-    enforce the same A-wins-B-fallback policy and emit identical warnings.
-    """
+    """Aggregate the per-pitch per-path frozen config snapshots into a
+    single mapping. Policy: A wins, fall back to B. Divergence (operator
+    edited config mid-cycle) logs warning, doesn't raise — diagnostic,
+    not crashable. Shared by `rebuild_result` and reprocess so both paths
+    enforce identical aggregation."""
     out: dict[str, object | None] = {}
     for field_name in _FROZEN_USED_FIELDS:
         va = getattr(a, field_name) if a is not None else None
@@ -81,10 +78,10 @@ def _stamp_frozen_config_on_result(
     a: PitchPayload | None,
     b: PitchPayload | None,
 ) -> None:
-    """Mirror the per-pitch frozen detection config onto the SessionResult.
-    Thin wrapper around `aggregate_pitch_used_configs` that does the
-    setattr loop; the aggregation policy lives in the helper so reprocess
-    and rebuild share one source of truth."""
+    """Mirror per-pitch per-path frozen snapshots onto the SessionResult.
+    Aggregation policy (A wins, fall back to B) lives in
+    `aggregate_pitch_used_configs` so reprocess + rebuild share one
+    source of truth."""
     used = aggregate_pitch_used_configs(a, b, result.session_id)
     for field_name, value in used.items():
         setattr(result, field_name, value)

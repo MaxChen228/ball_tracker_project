@@ -203,13 +203,13 @@ async def sessions_run_server_post(
     the request body.
 
     Body (JSON or form): `preset_name` — required, must be an existing
-    preset slug under `data/presets/`. The named preset's HSV +
-    shape_gate is loaded into the background detection job; the
-    operator's dashboard active preset is irrelevant to this run. The
-    chosen `preset_name` is recorded onto the resulting
-    `SessionResult.server_post_preset_name`; re-running with a
-    different preset overwrites both the detection results and that
-    field.
+    preset slug under `data/presets/`. The named preset's full
+    detection-config snapshot is loaded into the background detection
+    job; the operator's dashboard active preset is irrelevant to this
+    run. The resulting `SessionResult.server_post_config_used` carries
+    the exact HSV + shape-gate + preset identity that produced the
+    rerun; re-running with a different preset overwrites both the
+    detection results and that snapshot.
     """
     return await _enqueue_server_post(request, session_id, background_tasks)
 
@@ -252,14 +252,30 @@ async def _enqueue_server_post(
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
+    from schemas import (
+        DetectionConfigSnapshotPayload,
+        HSVRangePayload,
+        ShapeGatePayload,
+    )
+    snapshot = DetectionConfigSnapshotPayload(
+        algorithm_id=preset.algorithm_id,
+        hsv=HSVRangePayload(
+            h_min=preset.hsv.h_min, h_max=preset.hsv.h_max,
+            s_min=preset.hsv.s_min, s_max=preset.hsv.s_max,
+            v_min=preset.hsv.v_min, v_max=preset.hsv.v_max,
+        ),
+        shape_gate=ShapeGatePayload(
+            aspect_min=preset.shape_gate.aspect_min,
+            fill_min=preset.shape_gate.fill_min,
+        ),
+        preset_name=preset_name,
+    )
     for clip_path, pitch in queued:
         background_tasks.add_task(
             _run_server_detection,
             clip_path,
             pitch,
-            hsv_range=preset.hsv,
-            shape_gate=preset.shape_gate,
-            preset_name=preset_name,
+            config_snapshot=snapshot,
         )
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)

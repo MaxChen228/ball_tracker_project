@@ -214,8 +214,8 @@ def build_viewer_page_context(
             cost_threshold, gap_threshold_m, scene.session_id,
         ),
         config_strip_html=detection_config_strip_html(
-            health.get("live_preset_name"),
-            health.get("server_post_preset_name"),
+            health.get("live_config_used"),
+            health.get("server_post_config_used"),
         ),
         cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
@@ -312,14 +312,10 @@ def render_viewer_html(
                 f'{iso}</span>'
             )
         # Operator picks which preset to detect under. Default selection
-        # is the dashboard's current active preset (matches what the iOS
-        # live path is using right now), but the operator can pick any
-        # named preset on disk — the server resolves the file at request
-        # time and stamps the chosen name onto
-        # `SessionResult.server_post_preset_name`. Re-running with a
-        # different preset overwrites both detection results and the
-        # field; there is no per-session history of past server_post
-        # runs.
+        # is the dashboard's current active preset, but the operator can
+        # pick any named preset on disk. The server resolves the file at
+        # request time and stamps the full frozen snapshot onto
+        # `SessionResult.server_post_config_used`.
         from main import state as _state
         from html import escape as _esc
         active = _state.detection_config().preset
