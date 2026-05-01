@@ -30,6 +30,9 @@ const state = {
   lastDisplayedFrame: -1,
   rvfcHandle: null,
   sse: null,
+  ptsTable: null,
+  pendingTargetFrame: null,
+  isSeeking: false,
 };
 
 function clearSeedMask() {
@@ -85,6 +88,28 @@ function currentFrame() {
 
 function frameToTime(f) {
   if (state.fps == null) return 0;
+  // Prefer the real PTS table when available — `f / fps` is wrong for variable-
+  // fps videos. We aim for the middle of frame f's display interval so the
+  // browser unambiguously decodes f (not f-1 or f+1).
+  const tbl = state.ptsTable;
+  if (tbl && tbl.length > 0) {
+    let pts = tbl[f];
+    if (pts == null) {
+      // Variable-fps gap: fall back to nearest neighbor below, then above.
+      for (let i = f - 1; i >= 0; i--) {
+        if (tbl[i] != null) { pts = tbl[i]; break; }
+      }
+      if (pts == null) {
+        for (let i = f + 1; i < tbl.length; i++) {
+          if (tbl[i] != null) { pts = tbl[i]; break; }
+        }
+      }
+    }
+    if (pts != null) {
+      // Half a frame past PTS: lands inside f's display window across decoders.
+      return pts + 0.5 / state.fps;
+    }
+  }
   return f / state.fps;
 }
 
@@ -326,10 +351,14 @@ function syncFromItem(item) {
   clearDoneFills();
   clearOverlay();
   state.seedMaskReady = false;
+  state.ptsTable = null;
+  state.pendingTargetFrame = null;
+  state.isSeeking = false;
   updateMarkers();
   updatePropagateBtn();
   updateStatus();
   startSse();
+  fetchPts(item.slug);  // background; arrow keys fall back to f/fps until ready
   return true;
 }
 
@@ -574,13 +603,73 @@ async function cancelOrEscape() {
   }
 }
 
+function nextPresentFrame(f, dir) {
+  // Walk to the next index in the PTS table that has an actual decoded frame.
+  // Variable-fps + collision-rounded indexing leaves gaps (~18% on slo-mo
+  // iPhone clips); without skipping, arrow → "+1" sometimes lands on a gap
+  // and the user sees no visible change.
+  const tbl = state.ptsTable;
+  if (!tbl) return f;
+  let g = f;
+  while (g >= 0 && g < tbl.length) {
+    if (tbl[g] != null) return g;
+    g += dir;
+  }
+  return f;
+}
+
 function stepFrames(delta) {
   if (state.fps == null) {
     showError("fps unset; cannot step frames");
     return;
   }
-  const f = Math.max(0, Math.min(state.totalFrames - 1, currentFrame() + delta));
-  el.video.currentTime = frameToTime(f);
+  if (!el.video.paused) el.video.pause();
+  // Each unit of |delta| should land on a real (non-gap) frame so the user
+  // always sees motion. Compute absolute target from the latest known frame
+  // (current displayed if no seek pending, else the in-flight target).
+  const start = state.pendingTargetFrame != null ? state.pendingTargetFrame : currentFrame();
+  let target = start;
+  const dir = delta > 0 ? 1 : -1;
+  for (let i = 0; i < Math.abs(delta); i++) {
+    target = nextPresentFrame(target + dir, dir);
+  }
+  target = Math.max(0, Math.min(state.totalFrames - 1, target));
+  state.pendingTargetFrame = target;
+  if (!state.isSeeking) flushStep();
+}
+
+function jumpToFrame(f) {
+  if (state.fps == null) return;
+  if (!el.video.paused) el.video.pause();
+  const target = Math.max(0, Math.min(state.totalFrames - 1,
+    nextPresentFrame(f, f >= currentFrame() ? 1 : -1)));
+  state.pendingTargetFrame = target;
+  if (!state.isSeeking) flushStep();
+}
+
+function flushStep() {
+  if (state.pendingTargetFrame == null) return;
+  const target = state.pendingTargetFrame;
+  state.pendingTargetFrame = null;
+  state.isSeeking = true;
+  el.video.currentTime = frameToTime(target);
+}
+
+async function fetchPts(slug) {
+  try {
+    const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(slug)}/pts`);
+    if (!r.ok) {
+      console.warn(`pts fetch HTTP ${r.status}; falling back to f/fps`);
+      return;
+    }
+    const j = await r.json();
+    if (j && Array.isArray(j.pts)) {
+      state.ptsTable = j.pts;
+      console.log(`pts table loaded: ${j.pts.length} frames, gaps=${j.pts.filter(x => x == null).length}`);
+    }
+  } catch (e) {
+    console.warn("pts fetch failed", e);
+  }
 }
 
 function onVideoClick(e) {
@@ -616,18 +705,31 @@ function onVideoClick(e) {
 
 function onKeydown(e) {
   const tag = (e.target && e.target.tagName) || "";
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
-    if (e.target !== el.scrubber) return;
-  }
+  const isInput = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  // Allow keys to pass through into the scrubber (we suppress its native arrow
+  // handling below); for any other input element, leave the user alone.
+  if (isInput && e.target !== el.scrubber) return;
+
+  // Big jumps: Shift+arrow = ±10, Alt/Option+arrow = ±100, plain = ±1.
+  // Industry-standard ,/. as alternates so right-handed mouse + left-hand
+  // keyboard works without claw-grip on the cursor cluster.
   if (e.key === " ") {
     e.preventDefault();
     if (el.video.paused) el.video.play(); else el.video.pause();
-  } else if (e.key === "ArrowLeft") {
+  } else if (e.key === "ArrowLeft" || e.key === ",") {
     e.preventDefault();
-    stepFrames(e.shiftKey ? -10 : -1);
-  } else if (e.key === "ArrowRight") {
+    const d = e.altKey ? -100 : (e.shiftKey ? -10 : -1);
+    stepFrames(d);
+  } else if (e.key === "ArrowRight" || e.key === ".") {
     e.preventDefault();
-    stepFrames(e.shiftKey ? 10 : 1);
+    const d = e.altKey ? 100 : (e.shiftKey ? 10 : 1);
+    stepFrames(d);
+  } else if (e.key === "Home") {
+    e.preventDefault();
+    jumpToFrame(state.inFrame != null ? state.inFrame : 0);
+  } else if (e.key === "End") {
+    e.preventDefault();
+    jumpToFrame(state.outFrame != null ? state.outFrame : state.totalFrames - 1);
   } else if (e.key === "[") {
     markIn();
   } else if (e.key === "]") {
@@ -696,13 +798,26 @@ function bindUi() {
     window.addEventListener("resize", resizeOverlay);
   }
   // Also resize on seeked since seeking can change layout briefly on some
-  // browsers when the metadata updates.
-  el.video.addEventListener("seeked", resizeOverlay);
+  // browsers when the metadata updates. Also: clear the seek gate so any
+  // arrow-key presses queued during the in-flight seek can drain.
+  el.video.addEventListener("seeked", () => {
+    resizeOverlay();
+    state.isSeeking = false;
+    if (state.pendingTargetFrame != null) flushStep();
+  });
 
   el.scrubber.addEventListener("input", () => {
     const f = parseInt(el.scrubber.value, 10);
     if (state.fps == null) return;
-    el.video.currentTime = frameToTime(f);
+    jumpToFrame(f);
+  });
+  // Suppress the range element's native arrow-key step. Our onKeydown handler
+  // (with PTS-aware seek + queue) runs instead.
+  el.scrubber.addEventListener("keydown", (e) => {
+    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+         "PageUp", "PageDown", "Home", "End"].includes(e.key)) {
+      e.preventDefault();
+    }
   });
 
   el.btnIn.addEventListener("click", markIn);
