@@ -87,11 +87,23 @@ def _render_sync_body(
 
 def _render_burst_params_body(sync_params: dict[str, Any] | None) -> str:
     """Editable burst params card body. Values hydrated by JS tickSyncParams."""
-    p = sync_params or {}
-    emit_a = ", ".join(str(v) for v in p.get("emit_a_at_s", [0.3, 0.5, 0.7]))
-    emit_b = ", ".join(str(v) for v in p.get("emit_b_at_s", [1.8, 2.0, 2.2]))
-    dur = p.get("record_duration_s", 4.0)
-    win = p.get("search_window_s", 0.3)
+    if sync_params is None:
+        p: dict[str, Any] = {
+            "emit_a_at_s": [0.3, 0.5, 0.7],
+            "emit_b_at_s": [1.8, 2.0, 2.2],
+            "record_duration_s": 4.0,
+            "search_window_s": 0.3,
+        }
+    else:
+        required = ("emit_a_at_s", "emit_b_at_s", "record_duration_s", "search_window_s")
+        missing = [key for key in required if key not in sync_params]
+        if missing:
+            raise KeyError(f"sync_params missing required keys: {missing}")
+        p = sync_params
+    emit_a = ", ".join(str(v) for v in p["emit_a_at_s"])
+    emit_b = ", ".join(str(v) for v in p["emit_b_at_s"])
+    dur = p["record_duration_s"]
+    win = p["search_window_s"]
     return (
         '<form class="inline" action="/settings/sync_params" method="POST">'
         '<div class="tuning-row">'
