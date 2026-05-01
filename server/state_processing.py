@@ -40,6 +40,7 @@ class SessionProcessingState:
 
     def __init__(self) -> None:
         self.trashed_sessions: dict[str, float] = {}
+        self.starred_sessions: dict[str, float] = {}
         self.server_post_jobs: dict[JobKey, str] = {}
         self.server_post_active_tasks: set[JobKey] = set()
         # Per-session latest server_post error string:
@@ -80,6 +81,27 @@ class SessionProcessingState:
 
     def trash_count(self) -> int:
         return len(self.trashed_sessions)
+
+    # ---- Star (persisted) --------------------------------------------
+
+    def load_starred(self, starred: dict[str, float]) -> None:
+        self.starred_sessions.clear()
+        self.starred_sessions.update(starred)
+
+    def is_starred(self, session_id: str) -> bool:
+        return session_id in self.starred_sessions
+
+    def star(self, session_id: str, *, at: float) -> None:
+        self.starred_sessions[session_id] = at
+
+    def unstar(self, session_id: str) -> bool:
+        if session_id not in self.starred_sessions:
+            return False
+        self.starred_sessions.pop(session_id, None)
+        return True
+
+    def star_count(self) -> int:
+        return len(self.starred_sessions)
 
     # ---- Low-level job lifecycle -------------------------------------
 
@@ -296,12 +318,14 @@ class SessionProcessingState:
 
     def clear(self) -> None:
         self.trashed_sessions.clear()
+        self.starred_sessions.clear()
         self.server_post_jobs.clear()
         self.server_post_active_tasks.clear()
         self.server_post_errors.clear()
 
     def remove_session(self, session_id: str) -> None:
         self.trashed_sessions.pop(session_id, None)
+        self.starred_sessions.pop(session_id, None)
         self.server_post_errors.pop(session_id, None)
         for key in list(self.server_post_jobs.keys()):
             if key[1] == session_id:

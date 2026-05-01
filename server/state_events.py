@@ -100,6 +100,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                 "error": error,
                 "path_status": path_status,
                 "trashed": trashed,
+                "starred": state.processing.is_starred(sid),
                 "processing_state": processing_state,
                 "processing_resumable": processing_resumable,
                 # Cams whose live frames arrived without a calibration on

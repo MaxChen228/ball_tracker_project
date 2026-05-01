@@ -574,15 +574,30 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .ev-viewer-link:hover {{ color: var(--ink); border-color: var(--ink); }}
 
 /* Has-traj indicator. Pure visual — the row itself is the click target
-   (40_traj_handlers.js). Selected rows get a filled dot; unselected
-   rows with traj show as outline; rows without traj show .swatch-empty. */
+   (40_traj_handlers.js). Selected rows render a centred ★ glyph (replaces
+   the prior filled-dot indicator); unselected rows with traj show an
+   outline circle; rows without traj show .swatch-empty. */
 .swatch,
-.swatch-empty {{ width: 12px; height: 12px; border-radius: 50%;
+.swatch-empty {{ width: 14px; height: 14px; border-radius: 50%;
                  border: 1px solid var(--accent, #C0392B);
-                 display: inline-block; flex: 0 0 auto;
-                 background: transparent; }}
+                 display: inline-flex; align-items: center;
+                 justify-content: center; flex: 0 0 auto;
+                 background: transparent; line-height: 1;
+                 font-size: 11px; }}
 .swatch-empty {{ border-color: rgba(0,0,0,0.18); opacity: 0.45; }}
-.swatch.selected {{ background: var(--accent, #C0392B); }}
+.swatch.selected {{ border-color: transparent; }}
+.swatch.selected::before {{ content: '★';
+                            color: var(--accent, #C0392B);
+                            font-size: 16px; line-height: 1; }}
+
+/* Per-session ★ toggle (persisted). Sits between swatch and time on row1.
+   Wrapped in <form class="ev-action-form"> so 40_traj_handlers's row-click
+   delegation already excludes it (no extra JS needed). */
+.ev-star-btn {{ background: transparent; border: 0; cursor: pointer;
+                font-size: 16px; line-height: 1; padding: 0 2px;
+                color: rgba(0,0,0,0.28); flex: 0 0 auto; }}
+.ev-star-btn.on {{ color: #f5a623; }}
+.ev-star-btn:hover {{ color: #f5a623; opacity: 0.85; }}
 .event-item.selected .ev-sid {{ color: var(--ink); font-weight: 600; }}
 .event-item.selected .ev-time {{ color: var(--accent, #C0392B); }}
 
