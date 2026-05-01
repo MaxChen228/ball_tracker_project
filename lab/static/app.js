@@ -34,6 +34,13 @@ const state = {
   pendingTargetFrame: null,
   isSeeking: false,
   lastSeekTarget: null,
+  // Pre-tinted canvases keyed by source frame index. We build one per mask
+  // (sync, ~5ms each) the first time we see it, then `showMaskFor` blits it
+  // in O(1). Without this cache, every arrow-key step re-decoded the PNG and
+  // re-ran the per-pixel tint loop, leaving the overlay blank for 30-60ms —
+  // the visible "flicker" the user reported.
+  tintedCache: new Map(),
+  prefetchAbort: 0,
 };
 
 function clearSeedMask() {
@@ -201,6 +208,8 @@ function clearDoneFills() {
   state.doneFrames.clear();
   el.fills.innerHTML = "";
   clearPropMasks();
+  state.tintedCache.clear();
+  state.prefetchAbort++;
 }
 
 function videoDisplayRect() {
@@ -261,16 +270,13 @@ function drawClickMarker(x, y) {
   ctx.restore();
 }
 
-function drawMaskTinted(img) {
-  const c = el.overlay;
+function buildTintedCanvas(img) {
+  const c = document.createElement("canvas");
+  c.width = el.overlay.width;
+  c.height = el.overlay.height;
   const ctx = c.getContext("2d");
-  ctx.clearRect(0, 0, c.width, c.height);
-  const tmp = document.createElement("canvas");
-  tmp.width = c.width;
-  tmp.height = c.height;
-  const tctx = tmp.getContext("2d");
-  tctx.drawImage(img, 0, 0, c.width, c.height);
-  const data = tctx.getImageData(0, 0, c.width, c.height);
+  ctx.drawImage(img, 0, 0, c.width, c.height);
+  const data = ctx.getImageData(0, 0, c.width, c.height);
   const px = data.data;
   for (let i = 0; i < px.length; i += 4) {
     const a = px[i] || px[i + 1] || px[i + 2];
@@ -283,8 +289,20 @@ function drawMaskTinted(img) {
       px[i + 3] = 0;
     }
   }
-  tctx.putImageData(data, 0, 0);
-  ctx.drawImage(tmp, 0, 0);
+  ctx.putImageData(data, 0, 0);
+  return c;
+}
+
+function blitCachedMask(frame) {
+  const cached = state.tintedCache.get(frame);
+  if (!cached) return false;
+  const ctx = el.overlay.getContext("2d");
+  ctx.clearRect(0, 0, el.overlay.width, el.overlay.height);
+  ctx.drawImage(cached, 0, 0);
+  if (frame === state.seedFrame && state.seedPoint) {
+    drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+  }
+  return true;
 }
 
 function maskUrlForFrame(frame) {
@@ -293,23 +311,53 @@ function maskUrlForFrame(frame) {
   return null;
 }
 
-async function loadMaskForFrame(frame) {
+function loadMaskForFrame(frame) {
   const url = maskUrlForFrame(frame);
   if (!url) {
     clearOverlay();
     return;
   }
+  if (blitCachedMask(frame)) return;
+  // Cache miss — keep whatever is on the overlay (avoid the blank-flash) and
+  // build the tint asynchronously. Once cached, redraw if the user is still
+  // on this frame.
   const img = new Image();
   img.onload = () => {
-    if (currentFrame() === frame) {
-      drawMaskTinted(img);
-      if (frame === state.seedFrame && state.seedPoint) {
-        drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
-      }
-    }
+    if (!el.overlay.width || !el.overlay.height) return;
+    state.tintedCache.set(frame, buildTintedCanvas(img));
+    if (currentFrame() === frame) blitCachedMask(frame);
   };
   img.onerror = () => clearOverlay();
   img.src = url;
+}
+
+async function prefetchMasks(slug) {
+  // Build the tinted-canvas cache for every known mask in the background so
+  // the user can scrub through the propagated range at full rVFC rate without
+  // each frame triggering a fresh PNG decode + per-pixel tint loop.
+  const myToken = ++state.prefetchAbort;
+  if (!el.overlay.width || !el.overlay.height) {
+    el.video.addEventListener("loadedmetadata", () => prefetchMasks(slug), { once: true });
+    return;
+  }
+  const entries = Array.from(state.propMaskUrlByFrame.entries())
+    .sort((a, b) => a[0] - b[0]);
+  for (const [frame, url] of entries) {
+    if (state.current !== slug || myToken !== state.prefetchAbort) return;
+    if (state.tintedCache.has(frame)) continue;
+    await new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        try { state.tintedCache.set(frame, buildTintedCanvas(img)); } catch (_) {}
+        resolve();
+      };
+      img.onerror = () => resolve();
+      img.src = url;
+    });
+    // Yield to the event loop so a fast arrow-key still feels responsive
+    // while the cache is warming.
+    await new Promise((r) => setTimeout(r, 0));
+  }
 }
 
 async function fetchItems() {
@@ -467,7 +515,18 @@ function startSse() {
     state.propMaskUrlByFrame.set(frame, maskUrl);
     state.propDoneCount = state.propMaskUrlByFrame.size;
     addDoneFill(frame);
-    if (frame === currentFrame()) loadMaskForFrame(frame);
+    // Warm the tinted-canvas cache as soon as the SSE event lands so the user
+    // never hits an async-decode flicker even on the very first scrub-through.
+    if (el.overlay.width && el.overlay.height) {
+      const img = new Image();
+      img.onload = () => {
+        try { state.tintedCache.set(frame, buildTintedCanvas(img)); } catch (_) {}
+        if (currentFrame() === frame) blitCachedMask(frame);
+      };
+      img.src = maskUrl;
+    } else if (frame === currentFrame()) {
+      loadMaskForFrame(frame);
+    }
     updateStatus();
   });
   es.addEventListener("phase", (ev) => {
@@ -490,6 +549,7 @@ function startSse() {
     if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
     updatePropagateBtn();
     updateStatus();
+    if (state.current) prefetchMasks(state.current);
   });
   es.addEventListener("error", (ev) => {
     let payload = {};
@@ -736,6 +796,7 @@ async function rehydrateMasks(slug) {
     const f = currentFrame();
     if (state.propMaskUrlByFrame.has(f)) loadMaskForFrame(f);
     updateStatus();
+    prefetchMasks(slug);
   } catch (e) {
     console.warn("rehydrate masks failed", e);
   }
