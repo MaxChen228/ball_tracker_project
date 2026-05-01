@@ -2,8 +2,9 @@
 //
 // This module is intentionally Three.js-free. It answers one question:
 // "for playback time t, where should the single current-ball marker be?"
-// Page-specific layers own rendering; this keeps FIT and TRAJ from each
-// independently drawing their own marker.
+// Page-specific layers own rendering. The marker is the fitted model's
+// continuous ball pose; raw triangulated points are observations and never
+// drive playback.
 
 const EPS_S = 1e-3;
 
@@ -26,33 +27,14 @@ export function activeSegmentIndex(segments, t) {
   return -1;
 }
 
-export function lastVisiblePoint(points, cutoff, residualPasses, costPassesPoint) {
-  let last = null;
-  for (const p of points || []) {
-    if (typeof p.t_rel_s !== "number" || !Number.isFinite(p.t_rel_s)) continue;
-    if (p.t_rel_s > cutoff) continue;
-    if (!residualPasses(p)) continue;
-    if (!costPassesPoint(p)) continue;
-    last = p;
-  }
-  return last;
-}
-
 export function resolvePlaybackMarkerPose({
   mode,
   t,
   fitVisible,
-  trajVisible,
   segments,
-  points,
-  residualPasses,
-  costPassesPoint,
 }) {
   if (mode !== "playback") return null;
   if (typeof t !== "number" || !Number.isFinite(t)) return null;
-  if (typeof residualPasses !== "function" || typeof costPassesPoint !== "function") {
-    throw new Error("resolvePlaybackMarkerPose: residualPasses and costPassesPoint are required");
-  }
   if (fitVisible) {
     const idx = activeSegmentIndex(segments || [], t);
     if (idx !== -1) {
@@ -60,16 +42,6 @@ export function resolvePlaybackMarkerPose({
         source: "fit",
         segIdx: idx,
         position: evalSegmentAt(segments[idx], t),
-      };
-    }
-  }
-  if (trajVisible) {
-    const p = lastVisiblePoint(points || [], t, residualPasses, costPassesPoint);
-    if (p) {
-      return {
-        source: "traj",
-        segIdx: typeof p.seg_idx === "number" ? p.seg_idx : -1,
-        position: [p.x, p.y, p.z],
       };
     }
   }

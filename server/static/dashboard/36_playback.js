@@ -51,12 +51,6 @@
       if (Number.isFinite(seg.t_start)) minT = Math.min(minT, seg.t_start);
       if (Number.isFinite(seg.t_end)) maxT = Math.max(maxT, seg.t_end);
     }
-    for (const p of view.points || []) {
-      if (Number.isFinite(p.t_rel_s)) {
-        minT = Math.min(minT, p.t_rel_s);
-        maxT = Math.max(maxT, p.t_rel_s);
-      }
-    }
     if (!Number.isFinite(minT) || !Number.isFinite(maxT) || maxT < minT) return null;
     if (maxT === minT) maxT = minT + 1 / 240;
     return { min: minT, max: maxT };
@@ -92,11 +86,11 @@
     }
   }
 
-  function _stopDashboardPlayback() {
+  function _stopDashboardPlayback({ repaint = true } = {}) {
     dashPlayback.playing = false;
     if (dashPlayback.raf !== null) cancelAnimationFrame(dashPlayback.raf);
     dashPlayback.raf = null;
-    _paintPlaybackControls();
+    if (repaint) _paintPlaybackControls();
   }
 
   function _setDashboardPlaybackTime(t) {
@@ -182,8 +176,11 @@
   }
   if (dp.scrub) {
     dp.scrub.addEventListener('input', () => {
-      _stopDashboardPlayback();
-      _setDashboardPlaybackTime(Number(dp.scrub.value));
+      const next = Number(dp.scrub.value);
+      if (!Number.isFinite(next)) return;
+      _stopDashboardPlayback({ repaint: false });
+      _setDashboardPlaybackTime(next);
+      _paintPlaybackControls();
     });
   }
   if (dp.all) {

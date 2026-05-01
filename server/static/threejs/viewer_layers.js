@@ -450,10 +450,10 @@ class ViewerLayers {
       }
     }
 
-    // Single playback ball marker. Fit owns the marker when an active
-    // segment exists; otherwise it falls back to the measured trajectory
-    // head. Keeping this outside traj/fit prevents two "current ball"
-    // markers from being rendered by independent layers.
+    // Single playback ball marker. It follows the fitted segment only;
+    // raw trajectory points remain visible as observations but never
+    // drive playback pose. Keeping this outside traj/fit prevents two
+    // "current ball" markers from being rendered by independent layers.
     const marker = this._playbackBallMarker(cutoff, residualPasses, costPassesPoint);
     this._applyPlaybackMarker(marker);
   }

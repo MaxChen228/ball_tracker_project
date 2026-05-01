@@ -879,7 +879,7 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 
 /* --- Dashboard 3D playback — sidebar marker-only transport. Video sync
    belongs to /viewer; dashboard playback only scrubs the shared 3D ball
-   marker over the selected path's fit/points. */
+   marker over the selected path's fitted segments. */
 .dash-playback-card {{ display: flex; flex-direction: column; gap: var(--s-2);
                        font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; }}
 .dash-playback-card .card-title {{ margin-bottom: var(--s-1); }}

@@ -153,6 +153,29 @@ def test_shared_baseball_and_playback_modules_are_used_by_both_surfaces():
     assert 'from "./playback_marker.js"' in dashboard
 
 
+def test_playback_marker_pose_is_fit_only():
+    """Playback should follow fitted trajectory, never raw observed
+    triangulated points."""
+    resolver = (_RUNTIME_DIR / "playback_marker.js").read_text()
+    dashboard_playback = (Path(main.__file__).parent / "static" / "dashboard" / "36_playback.js").read_text()
+    assert "source: \"fit\"" in resolver
+    assert "source: \"traj\"" not in resolver
+    assert "lastVisiblePoint" not in resolver
+    assert "for (const p of view.points" not in dashboard_playback
+    assert "for (const seg of view.segments" in dashboard_playback
+
+
+def test_dashboard_playback_scrub_reads_user_value_before_repaint():
+    """The input handler must capture the range's new value before
+    stopping playback; stop repaint writes the old time back to the DOM."""
+    text = (Path(main.__file__).parent / "static" / "dashboard" / "36_playback.js").read_text()
+    handler_idx = text.index("dp.scrub.addEventListener('input'")
+    read_idx = text.index("const next = Number(dp.scrub.value);", handler_idx)
+    stop_idx = text.index("_stopDashboardPlayback({ repaint: false });", handler_idx)
+    set_idx = text.index("_setDashboardPlaybackTime(next);", handler_idx)
+    assert read_idx < stop_idx < set_idx
+
+
 def test_dashboard_layers_expose_marker_only_playback_api():
     """Dashboard playback is 3D-only: the classic bundle owns the clock,
     the layer module owns one baseball marker layer."""
