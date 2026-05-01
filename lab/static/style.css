@@ -1,0 +1,188 @@
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #0f172a;
+  color: #f8fafc;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace;
+  font-size: 13px;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+#topbar {
+  padding: 8px 12px;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+#item-slug {
+  font-weight: bold;
+  font-family: monospace;
+}
+
+#item-picker {
+  background: #0f172a;
+  color: #f8fafc;
+  border: 1px solid #334155;
+  padding: 4px 8px;
+}
+
+#stage {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 12px;
+  overflow: hidden;
+}
+
+#video-wrap {
+  position: relative;
+  max-width: 100%;
+  max-height: 100%;
+  display: inline-block;
+}
+
+#video {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  background: #000;
+}
+
+#overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+
+#timeline-section {
+  padding: 8px 12px;
+  background: #1e293b;
+  border-top: 1px solid #334155;
+}
+
+#timeline-wrap {
+  position: relative;
+  height: 32px;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 4px;
+}
+
+#timeline-fills {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+.fill-done {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(34, 197, 94, 0.35);
+}
+
+#scrubber {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 32px;
+  margin: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+#scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 4px;
+  height: 32px;
+  background: #f8fafc;
+  cursor: pointer;
+}
+
+#scrubber::-moz-range-thumb {
+  width: 4px;
+  height: 32px;
+  background: #f8fafc;
+  cursor: pointer;
+  border: 0;
+}
+
+.marker {
+  position: absolute;
+  top: 0;
+  height: 32px;
+  width: 3px;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.marker-in { background: #22c55e; }
+.marker-out { background: #ef4444; }
+
+.marker-seed {
+  background: transparent;
+  width: 14px;
+  margin-left: -7px;
+  color: #facc15;
+  font-size: 18px;
+  line-height: 32px;
+  text-align: center;
+}
+
+#controls {
+  padding: 8px 12px;
+  background: #1e293b;
+  display: flex;
+  gap: 8px;
+}
+
+#controls button {
+  background: #334155;
+  color: #f8fafc;
+  border: 1px solid #475569;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+#controls button:hover:not(:disabled) {
+  background: #475569;
+}
+
+#controls button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+#statusbar {
+  padding: 6px 12px;
+  background: #0b1220;
+  border-top: 1px solid #334155;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+#statusbar.error {
+  background: #7f1d1d;
+  color: #fff;
+}
