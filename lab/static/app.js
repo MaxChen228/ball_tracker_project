@@ -559,12 +559,21 @@ function loadMaskForFrame(frame) {
 // fallback when a mask exists; the else branch here covers no-mask + crosshair.
 function repaintOverlayForCurrentFrame() {
   const f = currentFrame();
-  if (maskUrlForFrame(f) != null) {
+  const url = maskUrlForFrame(f);
+  const seg = activeSegment();
+  console.log("[repaint]", {
+    f, url, segId: seg?.id, seedFrame: seg?.seed_frame, seedPoint: seg?.seed_point,
+    activeSegId: state.activeSegmentId,
+    mapForActive: state.propMaskUrlsBySeg.get(state.activeSegmentId),
+    overlayWH: [el.overlay.width, el.overlay.height],
+    scrubMode: state.scrubMode,
+    lastDisplayedFrame: state.lastDisplayedFrame,
+  });
+  if (url != null) {
     loadMaskForFrame(f);
     return;
   }
   clearOverlay();
-  const seg = activeSegment();
   if (seg && f === seg.seed_frame && seg.seed_point && state.showSeedMarker) {
     drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
   }
@@ -655,7 +664,9 @@ async function loadFrameSource(slug) {
   // the user sees the existing mask immediately without hunting on the timeline.
   // Only auto-jump if we haven't moved off frame 0 (don't yank a user who
   // already scrubbed somewhere during the load).
+  console.log("[loadFrameSource done]", { activeSegId: state.activeSegmentId, segSeedFrame: seg?.seed_frame, lastDisplayedFrame: state.lastDisplayedFrame, ptsLoaded: !!state.ptsTable });
   if (seg && seg.seed_frame != null && state.lastDisplayedFrame === 0 && state.ptsTable) {
+    console.log("[loadFrameSource] auto-jump →", seg.seed_frame);
     jumpToFrame(seg.seed_frame);
     return;
   }
@@ -1427,7 +1438,15 @@ function flushStep() {
   state.pendingTargetFrame = null;
   enterScrubMode();
   el.scrubber.value = String(target);
+  // Snap lastDisplayedFrame so currentFrame()/repaintOverlayForCurrentFrame()
+  // see the new frame even before scheduleScrubPaint's async paintAtomic lands.
+  state.lastDisplayedFrame = target;
   scheduleScrubPaint(target);
+  // Belt-and-suspenders: scheduleScrubPaint's internal mask handling has races
+  // around overlay resize + ensureTintedCanvas timing. loadMaskForFrame (called
+  // from repaintOverlayForCurrentFrame) has an independent image.onload → blit
+  // lifecycle that survives those races.
+  repaintOverlayForCurrentFrame();
 }
 
 async function fetchPts(slug) {
@@ -1447,8 +1466,10 @@ async function fetchPts(slug) {
       // seed-frame auto-jump now. Guarded the same way so we never yank a
       // user who already moved.
       const seg = activeSegment();
+      console.log("[fetchPts done]", { activeSegId: state.activeSegmentId, segSeedFrame: seg?.seed_frame, lastDisplayedFrame: state.lastDisplayedFrame, fsReady: !!state.frameSource && !state.frameSourceLoading });
       if (seg && seg.seed_frame != null && state.lastDisplayedFrame === 0
           && state.frameSource && !state.frameSourceLoading) {
+        console.log("[fetchPts] auto-jump →", seg.seed_frame);
         jumpToFrame(seg.seed_frame);
       }
     }
