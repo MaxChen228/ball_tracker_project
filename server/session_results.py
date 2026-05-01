@@ -253,8 +253,8 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         # so persisted `frames_live` can still drive the live trajectory.
         if path == DetectionPath.live and live is not None:
             continue
-        frames_a = get_path_frames(state, a, path) if a is not None else []
-        frames_b = get_path_frames(state, b, path) if b is not None else []
+        frames_a = get_path_frames(a, path) if a is not None else []
+        frames_b = get_path_frames(b, path) if b is not None else []
         frame_counts: dict[str, int] = {}
         if a is not None and frames_a:
             frame_counts["A"] = len(frames_a)
@@ -269,8 +269,8 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             try:
                 pts = triangulate_pair(
                     state,
-                    pitch_with_path_frames(state, a, path),
-                    pitch_with_path_frames(state, b, path),
+                    pitch_with_path_frames(a, path),
+                    pitch_with_path_frames(b, path),
                     source="server",
                 )
             except Exception as exc:
@@ -527,8 +527,8 @@ def recompute_result_for_session(
 
     if a is not None and b is not None and sync_error is None:
         for path in sorted(candidate_paths, key=lambda p: p.value):
-            frames_a = get_path_frames(state, a, path)
-            frames_b = get_path_frames(state, b, path)
+            frames_a = get_path_frames(a, path)
+            frames_b = get_path_frames(b, path)
             if not frames_a or not frames_b:
                 continue
             result.frame_counts_by_path[path.value] = {
@@ -538,8 +538,8 @@ def recompute_result_for_session(
             try:
                 pts = triangulate_pair(
                     state,
-                    pitch_with_path_frames(state, a, path),
-                    pitch_with_path_frames(state, b, path),
+                    pitch_with_path_frames(a, path),
+                    pitch_with_path_frames(b, path),
                     source="server",
                     tuning=tuning,
                 )

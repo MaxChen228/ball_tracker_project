@@ -120,7 +120,7 @@ def _all_marker_world_xyz() -> dict[int, tuple[float, float, float]]:
         mid: (float(xy[0]), float(xy[1]), 0.0)
         for mid, xy in PLATE_MARKER_WORLD.items()
     }
-    for rec in state._marker_registry.all_records():
+    for rec in state.markers.all_records():
         world_xyz[rec.marker_id] = (rec.x_m, rec.y_m, rec.z_m)
     return world_xyz
 
@@ -161,7 +161,7 @@ def _triangulate_marker_candidates(
 
     det_a = {m.id: m for m in detect_all_markers_in_dict(bgr_a)}
     det_b = {m.id: m for m in detect_all_markers_in_dict(bgr_b)}
-    existing = {rec.marker_id: rec for rec in state._marker_registry.all_records()}
+    existing = {rec.marker_id: rec for rec in state.markers.all_records()}
     common_ids = sorted(set(det_a.keys()) & set(det_b.keys()))
     candidates: list[dict[str, Any]] = []
     for marker_id in common_ids:
@@ -362,7 +362,7 @@ def _solve_auto_cal_solution(
     state = _main.state
 
     world_map: dict[int, tuple[float, float]] = dict(PLATE_MARKER_WORLD)
-    world_map.update(state._marker_registry.planar_world_map())
+    world_map.update(state.markers.planar_world_map())
     planar = solve_homography_from_world_map(
         detected, world_map, image_size=image_size
     )
@@ -573,7 +573,7 @@ async def _run_auto_calibration(
     all_detected = detect_all_markers_in_dict(bgr)
     detected = [
         m for m in all_detected
-        if (m.id in PLATE_MARKER_WORLD or state._marker_registry.get(m.id) is not None)
+        if (m.id in PLATE_MARKER_WORLD or state.markers.get(m.id) is not None)
     ]
     if track_run:
         state.append_auto_cal_event(
