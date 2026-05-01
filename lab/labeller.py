@@ -62,6 +62,13 @@ def _video_meta(path: Path) -> dict[str, Any]:
     return {"fps": fps, "duration_s": float(stream["duration"])}
 
 
+def _new_segment_id() -> str:
+    return f"seg_{secrets.token_hex(4)}"
+
+
+SCHEMA_VERSION = 2
+
+
 class ManifestStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -75,6 +82,53 @@ class ManifestStore:
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             for d in cfg.get("extra_source_dirs", []):
                 self._extra_source_dirs.append((WORKSPACE / d).resolve())
+        self._migrate_v1_to_v2()
+
+    def _migrate_v1_to_v2(self) -> None:
+        """One-shot: collapse flat in/out/seed/seed_point/propagate_status into
+        a single-segment `segments[]`. Idempotent via `_schema_version` stamp.
+        Also relocates legacy `masks/*.png` → `masks/<seg_id>/*.png` for items
+        whose old propagate finished."""
+        with self._lock:
+            payload = self._read()
+            mutated = False
+            for it in payload["items"]:
+                if it.get("_schema_version", 1) >= SCHEMA_VERSION:
+                    continue
+                in_f = it.pop("in_frame", None)
+                out_f = it.pop("out_frame", None)
+                seed_f = it.pop("seed_frame", None)
+                seed_p = it.pop("seed_point", None)
+                ps = it.pop("propagate_status", "idle")
+                segments: list[dict[str, Any]] = []
+                active_id = None
+                # "Has any signal" — if old item touched in/out/seed at all,
+                # roll those into one segment. Pure unconfigured items get [].
+                if any(v is not None for v in (in_f, out_f, seed_f, seed_p)):
+                    seg_id = _new_segment_id()
+                    segments.append({
+                        "id": seg_id,
+                        "in_frame": in_f,
+                        "out_frame": out_f,
+                        "seed_frame": seed_f,
+                        "seed_point": seed_p,
+                        "propagate_status": ps,
+                    })
+                    active_id = seg_id
+                    # Move legacy mask files into the segment subdir.
+                    legacy_mdir = ITEMS_DIR / it["slug"] / "masks"
+                    if legacy_mdir.is_dir():
+                        target = legacy_mdir / seg_id
+                        target.mkdir(parents=True, exist_ok=True)
+                        for png in legacy_mdir.glob("*.png"):
+                            png.rename(target / png.name)
+                it["segments"] = segments
+                it["active_segment_id"] = active_id
+                it["_schema_version"] = SCHEMA_VERSION
+                mutated = True
+            if mutated:
+                self._write(payload)
+                print(f"[labeller] migrated manifest to schema v{SCHEMA_VERSION}", flush=True)
 
     def _read(self) -> dict[str, Any]:
         return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -120,11 +174,9 @@ class ManifestStore:
                     "source_video": video.name,
                     "fps": meta["fps"],
                     "total_frames": pts_payload["total_frames"],
-                    "in_frame": None,
-                    "out_frame": None,
-                    "seed_frame": None,
-                    "seed_point": None,
-                    "propagate_status": "idle",
+                    "segments": [],
+                    "active_segment_id": None,
+                    "_schema_version": SCHEMA_VERSION,
                 })
                 existing.add(slug)
                 existing_sources.add(video.name)
@@ -149,6 +201,77 @@ class ManifestStore:
                     it.update(fields)
                     self._write(payload)
                     return it
+        raise KeyError(slug)
+
+    def add_segment(self, slug: str) -> str:
+        """Append a fresh empty segment to slug, return its id, set active."""
+        with self._lock:
+            payload = self._read()
+            for it in payload["items"]:
+                if it["slug"] == slug:
+                    seg_id = _new_segment_id()
+                    it.setdefault("segments", []).append({
+                        "id": seg_id,
+                        "in_frame": None,
+                        "out_frame": None,
+                        "seed_frame": None,
+                        "seed_point": None,
+                        "propagate_status": "idle",
+                    })
+                    it["active_segment_id"] = seg_id
+                    self._write(payload)
+                    return seg_id
+        raise KeyError(slug)
+
+    def update_segment(self, slug: str, seg_id: str, **fields: Any) -> dict[str, Any]:
+        with self._lock:
+            payload = self._read()
+            for it in payload["items"]:
+                if it["slug"] != slug:
+                    continue
+                for seg in it.get("segments", []):
+                    if seg["id"] == seg_id:
+                        seg.update(fields)
+                        self._write(payload)
+                        return seg
+                raise KeyError(f"{slug}/{seg_id}")
+        raise KeyError(slug)
+
+    def remove_segment(self, slug: str, seg_id: str) -> None:
+        with self._lock:
+            payload = self._read()
+            for it in payload["items"]:
+                if it["slug"] != slug:
+                    continue
+                segs = it.get("segments", [])
+                before = len(segs)
+                it["segments"] = [s for s in segs if s["id"] != seg_id]
+                if len(it["segments"]) == before:
+                    raise KeyError(f"{slug}/{seg_id}")
+                # Pick a replacement active segment (last one) if we just dropped active.
+                if it.get("active_segment_id") == seg_id:
+                    it["active_segment_id"] = (
+                        it["segments"][-1]["id"] if it["segments"] else None
+                    )
+                self._write(payload)
+                # Wipe the segment's mask dir on disk.
+                mdir = ITEMS_DIR / slug / "masks" / seg_id
+                if mdir.exists():
+                    shutil.rmtree(mdir)
+                return
+        raise KeyError(slug)
+
+    def set_active_segment(self, slug: str, seg_id: str) -> None:
+        with self._lock:
+            payload = self._read()
+            for it in payload["items"]:
+                if it["slug"] != slug:
+                    continue
+                if not any(s["id"] == seg_id for s in it.get("segments", [])):
+                    raise KeyError(f"{slug}/{seg_id}")
+                it["active_segment_id"] = seg_id
+                self._write(payload)
+                return
         raise KeyError(slug)
 
     def delete(self, slug: str) -> None:
@@ -179,8 +302,8 @@ def frames_dir_for(slug: str) -> Path:
     return item_dir(slug) / "frames"
 
 
-def masks_dir_for(slug: str) -> Path:
-    return item_dir(slug) / "masks"
+def masks_dir_for(slug: str, seg_id: str) -> Path:
+    return item_dir(slug) / "masks" / seg_id
 
 
 PTS_CACHE_DIR = WORKSPACE / "pts_cache"
@@ -462,7 +585,7 @@ def unload_propagator() -> None:
 
 STORE = ManifestStore()
 BUS = SseBus()
-PROP_THREADS: dict[str, threading.Thread] = {}
+PROP_THREADS: dict[tuple[str, str], threading.Thread] = {}
 
 
 # Per-slug locks so concurrent extract requests for the same slug serialize
@@ -517,34 +640,60 @@ def _kick_background_extract(slug: str, in_f: int, out_f: int) -> None:
 
 
 def _bootstrap_extract_all() -> None:
-    """At startup, eagerly extract every seeded session's [in,out] range so
-    warmUp on first selection hits pre-extracted JPEGs from disk instead of
-    triggering per-frame cv2 decodes."""
+    """At startup, kick a background extract for the active segment of every
+    seeded session so the first selection hits pre-extracted JPEGs."""
     for it in STORE.list():
-        in_f = it.get("in_frame")
-        out_f = it.get("out_frame")
+        active = _active_segment(it)
+        if active is None:
+            continue
+        in_f = active.get("in_frame")
+        out_f = active.get("out_frame")
         if isinstance(in_f, int) and isinstance(out_f, int) and in_f < out_f:
             _kick_background_extract(it["slug"], in_f, out_f)
 
 
 def _recover_crashed_propagations() -> None:
-    """If the previous server died mid-propagate, items remain stamped
-    `running` and the queue's `idle`-filter would skip them forever. Reset
-    those to `idle` so Run Queue picks up where we left off."""
+    """Reset any segment stamped `running` back to `idle`. If the previous
+    server died mid-propagate, that flag would otherwise let the queue's
+    idle-filter skip the segment forever."""
     recovered: list[str] = []
     for it in STORE.list():
-        if it.get("propagate_status") == "running":
-            STORE.update(it["slug"], propagate_status="idle")
-            recovered.append(it["slug"])
+        for seg in it.get("segments", []):
+            if seg.get("propagate_status") == "running":
+                STORE.update_segment(it["slug"], seg["id"], propagate_status="idle")
+                recovered.append(f"{it['slug']}/{seg['id']}")
     if recovered:
         print(f"[labeller] recovered {len(recovered)} crashed propagations: {recovered}", flush=True)
+
+
+def _active_segment(item: dict[str, Any]) -> dict[str, Any] | None:
+    sid = item.get("active_segment_id")
+    if sid is None:
+        return None
+    for seg in item.get("segments", []):
+        if seg["id"] == sid:
+            return seg
+    return None
+
+
+def _segment_or_404(slug: str, seg_id: str) -> dict[str, Any] | None:
+    """Lookup helper; returns None on miss (caller emits 404)."""
+    try:
+        item = STORE.get(slug)
+    except KeyError:
+        return None
+    for seg in item.get("segments", []):
+        if seg["id"] == seg_id:
+            return seg
+    return None
 
 
 # Queue state — one global queue runner thread; cancel flag is set by user.
 _QUEUE_LOCK = threading.Lock()
 _QUEUE_THREAD: threading.Thread | None = None
 _QUEUE_CANCEL = threading.Event()
-_QUEUE_CURRENT: str | None = None  # slug of the item _queue_runner is currently propagating
+# (slug, seg_id) of the segment _queue_runner is currently propagating
+_QUEUE_CURRENT: tuple[str, str] | None = None
 
 
 def _queue_snapshot() -> dict[str, Any]:
@@ -552,23 +701,27 @@ def _queue_snapshot() -> dict[str, Any]:
         running = _QUEUE_THREAD is not None and _QUEUE_THREAD.is_alive()
         current = _QUEUE_CURRENT
     items = STORE.list()
-    seeded = [it for it in items if it.get("seed_frame") is not None]
-    done = sum(1 for it in seeded if it.get("propagate_status") == "done")
-    ready = sum(1 for it in seeded
-                if it.get("propagate_status") == "idle"
-                and it["slug"] != current)
+    seeded_segs: list[tuple[str, dict[str, Any]]] = []
+    for it in items:
+        for seg in it.get("segments", []):
+            if seg.get("seed_frame") is not None:
+                seeded_segs.append((it["slug"], seg))
+    done = sum(1 for _, s in seeded_segs if s.get("propagate_status") == "done")
+    ready = sum(1 for slug, s in seeded_segs
+                if s.get("propagate_status") == "idle"
+                and (current is None or (slug, s["id"]) != current))
     return {
         "running": running,
-        "current": current,
+        "current": {"slug": current[0], "seg_id": current[1]} if current else None,
         "done": done,
         "ready": ready,
-        "total": len(seeded),
+        "total": len(seeded_segs),
     }
 
 
 def _queue_runner() -> None:
-    """Iterate ready items (seed set, status idle), propagate one at a time.
-    Re-queries manifest each iteration so newly-readied items get picked up."""
+    """Iterate ready segments (seed set, status idle), propagate one at a time.
+    Re-queries manifest each iteration so newly-readied segments get picked up."""
     global _QUEUE_CURRENT
     print("[labeller] queue: starting", flush=True)
     unload_seeder()
@@ -576,35 +729,32 @@ def _queue_runner() -> None:
     try:
         while not _QUEUE_CANCEL.is_set():
             items = STORE.list()
-            ready = [it for it in items
-                     if it.get("seed_frame") is not None
-                     and it.get("propagate_status") == "idle"]
+            ready: list[tuple[str, dict[str, Any]]] = []
+            for it in items:
+                for seg in it.get("segments", []):
+                    if seg.get("seed_frame") is not None and seg.get("propagate_status") == "idle":
+                        ready.append((it["slug"], seg))
             if not ready:
                 break
-            slug = ready[0]["slug"]
-            print(f"[labeller] queue: propagate {slug} ({len(ready)} ready)", flush=True)
-            STORE.update(slug, propagate_status="running")
+            slug, seg = ready[0]
+            seg_id = seg["id"]
+            print(f"[labeller] queue: propagate {slug}/{seg_id} ({len(ready)} ready)", flush=True)
+            STORE.update_segment(slug, seg_id, propagate_status="running")
             with _QUEUE_LOCK:
-                _QUEUE_CURRENT = slug
+                _QUEUE_CURRENT = (slug, seg_id)
             BUS.publish("__queue__", "queue", _queue_snapshot())
             try:
-                run_propagate(slug)  # blocks until done / failed / cancelled
+                run_propagate(slug, seg_id)  # blocks until done / failed / cancelled
             except Exception as e:
-                print(f"[labeller] queue: {slug} failed: {e}", flush=True)
-                STORE.update(slug, propagate_status="failed")
-            # Drop the predictor between queue items. SAM2's reset_state +
-            # torch.mps.empty_cache inside Propagator.propagate() do not fully
-            # release the per-session activation buffers + MPS pool fragments;
-            # over 3 consecutive sessions RSS climbs past 10GB. Reloading the
-            # model costs ~1.5s on M-series MPS, paid once per item.
+                print(f"[labeller] queue: {slug}/{seg_id} failed: {e}", flush=True)
+                STORE.update_segment(slug, seg_id, propagate_status="failed")
+            # Drop the predictor between queue items (see prior comment about
+            # MPS pool fragmentation; reloading costs ~1.5s on M-series).
             unload_propagator()
             if _QUEUE_CANCEL.is_set():
-                # Stop-Queue cancelled this item mid-run (run_propagate caught
-                # the exception and stamped "failed"). Reset to idle so the
-                # next Run Queue resumes from this exact session.
-                cur = STORE.get(slug)
-                if cur.get("propagate_status") != "done":
-                    STORE.update(slug, propagate_status="idle")
+                cur_seg = _segment_or_404(slug, seg_id)
+                if cur_seg and cur_seg.get("propagate_status") != "done":
+                    STORE.update_segment(slug, seg_id, propagate_status="idle")
                 break
         print("[labeller] queue: drained", flush=True)
     finally:
@@ -614,30 +764,35 @@ def _queue_runner() -> None:
         _QUEUE_CANCEL.clear()
 
 
-def run_propagate(slug: str) -> None:
+def run_propagate(slug: str, seg_id: str) -> None:
     item = STORE.get(slug)
-    in_f = item["in_frame"]
-    out_f = item["out_frame"]
-    seed_f = item["seed_frame"]
-    seed_p = item["seed_point"]
+    seg = next((s for s in item.get("segments", []) if s["id"] == seg_id), None)
+    if seg is None:
+        BUS.publish(slug, "error", {"seg_id": seg_id, "msg": "no such segment"})
+        return
+    in_f = seg["in_frame"]
+    out_f = seg["out_frame"]
+    seed_f = seg["seed_frame"]
+    seed_p = seg["seed_point"]
     if None in (in_f, out_f, seed_f, seed_p):
-        BUS.publish(slug, "error", {"msg": "missing in/out/seed/point"})
-        STORE.update(slug, propagate_status="failed")
+        BUS.publish(slug, "error", {"seg_id": seg_id, "msg": "missing in/out/seed/point"})
+        STORE.update_segment(slug, seg_id, propagate_status="failed")
         return
     if not (in_f <= seed_f <= out_f):
-        BUS.publish(slug, "error", {"msg": "seed_frame outside [in,out]"})
-        STORE.update(slug, propagate_status="failed")
+        BUS.publish(slug, "error", {"seg_id": seg_id, "msg": "seed_frame outside [in,out]"})
+        STORE.update_segment(slug, seg_id, propagate_status="failed")
         return
 
     source = SOURCES_DIR / item["source_video"]
     fdir = frames_dir_for(slug)
-    mdir = masks_dir_for(slug)
+    mdir = masks_dir_for(slug, seg_id)
     mdir.mkdir(parents=True, exist_ok=True)
     for old in mdir.glob("*.png"):
         old.unlink()
 
     expected = out_f - in_f + 1
     BUS.publish(slug, "phase", {
+        "seg_id": seg_id,
         "phase": "extracting", "expected_frames": expected, "in_frame": in_f, "out_frame": out_f,
     })
     t_extract = time.time()
@@ -645,52 +800,48 @@ def run_propagate(slug: str) -> None:
         pts_payload = get_pts_table(slug)
         local_to_source = extract_range_to_dir(source, in_f, out_f, fdir, pts_payload["pts"])
     except Exception as e:
-        BUS.publish(slug, "error", {"msg": f"frame extract failed: {e}"})
-        STORE.update(slug, propagate_status="failed")
+        BUS.publish(slug, "error", {"seg_id": seg_id, "msg": f"frame extract failed: {e}"})
+        STORE.update_segment(slug, seg_id, propagate_status="failed")
         return
     BUS.publish(slug, "phase", {
-        "phase": "extracted", "expected_frames": len(local_to_source),
+        "seg_id": seg_id, "phase": "extracted",
+        "expected_frames": len(local_to_source),
         "elapsed_s": round(time.time() - t_extract, 2),
     })
 
-    # Find local index whose source idx is closest to the seed frame.
     seed_local = min(range(len(local_to_source)), key=lambda i: abs(local_to_source[i] - seed_f))
     if local_to_source[seed_local] != seed_f:
         BUS.publish(slug, "phase", {
-            "phase": "seed_remapped", "requested": seed_f, "matched": local_to_source[seed_local],
+            "seg_id": seg_id, "phase": "seed_remapped",
+            "requested": seed_f, "matched": local_to_source[seed_local],
         })
-    BUS.publish(slug, "phase", {"phase": "model_loading"})
+    BUS.publish(slug, "phase", {"seg_id": seg_id, "phase": "model_loading"})
     t_model = time.time()
     prop = get_propagator()
     BUS.publish(slug, "phase", {
-        "phase": "model_ready", "device": prop.device, "model": prop.model_id,
+        "seg_id": seg_id, "phase": "model_ready",
+        "device": prop.device, "model": prop.model_id,
         "elapsed_s": round(time.time() - t_model, 2),
     })
 
     BUS.publish(slug, "phase", {
-        "phase": "propagating", "expected_frames": expected, "seed_frame": seed_f,
+        "seg_id": seg_id, "phase": "propagating",
+        "expected_frames": expected, "seed_frame": seed_f,
     })
     t_prop = time.time()
     last_queue_pub = 0.0
     frames_emitted = 0
     try:
         for local_idx, mask_png in prop.propagate(fdir, seed_local, (seed_p[0], seed_p[1])):
-            # Translate SAM 2's local sequential idx back to the canonical source
-            # frame index the browser uses, via the local_to_source map. This
-            # keeps mask filenames aligned with `round(mediaTime * fps)` so the
-            # frontend overlay lines up with the ball, not 1-2 frames offset.
             source_idx = local_to_source[local_idx]
             (mdir / f"{source_idx:05d}.png").write_bytes(mask_png)
             BUS.publish(slug, "mask", {
+                "seg_id": seg_id,
                 "frame": source_idx,
-                "mask_url": f"/mask/{slug}/{source_idx:05d}.png",
+                "mask_url": f"/mask/{slug}/{seg_id}/{source_idx:05d}.png",
             })
             frames_emitted += 1
-            # Throttle queue-channel progress to ~1 update / 1.5s. SAM 2's
-            # forward pass emits (expected - seed_local) frames and the reverse
-            # pass emits (seed_local + 1), so total = expected + 1 (seed visited
-            # in both passes).
-            if _QUEUE_CURRENT == slug:
+            if _QUEUE_CURRENT == (slug, seg_id):
                 now = time.time()
                 if now - last_queue_pub >= 1.5:
                     last_queue_pub = now
@@ -700,26 +851,26 @@ def run_propagate(slug: str) -> None:
                     snap["elapsed_s"] = round(now - t_prop, 2)
                     BUS.publish("__queue__", "queue", snap)
     except PropagationCancelled:
-        # User pressed Stop. Wipe the partial masks and reset to idle so the
-        # next Run Queue (or single propagate) starts from scratch — leaving
-        # the mid-run masks on disk would let a half-done session masquerade
-        # as complete on the next reload.
         for png in mdir.glob("*.png"):
             png.unlink()
-        STORE.update(slug, propagate_status="idle")
-        BUS.publish(slug, "error", {"msg": "cancelled"})
+        STORE.update_segment(slug, seg_id, propagate_status="idle")
+        BUS.publish(slug, "error", {"seg_id": seg_id, "msg": "cancelled"})
         return
     except Exception as e:
-        BUS.publish(slug, "error", {"msg": f"propagate failed: {e}"})
-        STORE.update(slug, propagate_status="failed")
+        BUS.publish(slug, "error", {"seg_id": seg_id, "msg": f"propagate failed: {e}"})
+        STORE.update_segment(slug, seg_id, propagate_status="failed")
         return
 
-    STORE.update(slug, propagate_status="done")
-    BUS.publish(slug, "done", {"elapsed_s": round(time.time() - t_prop, 2)})
+    STORE.update_segment(slug, seg_id, propagate_status="done")
+    BUS.publish(slug, "done", {"seg_id": seg_id, "elapsed_s": round(time.time() - t_prop, 2)})
 
 
-SLUG_RE = re.compile(r"^/api/items/([A-Za-z0-9_\-]+)/(trim|seed|propagate|propagate/cancel|events|pts|masks|delete)$")
-MASK_RE = re.compile(r"^/mask/([A-Za-z0-9_\-]+)/(\d{5})\.png$")
+SLUG_RE = re.compile(
+    r"^/api/items/([A-Za-z0-9_\-]+)/"
+    r"(trim|seed|propagate|propagate/cancel|events|pts|masks|delete|"
+    r"segments/new|segments/[A-Za-z0-9_]+/active|segments/[A-Za-z0-9_]+/delete)$"
+)
+MASK_RE = re.compile(r"^/mask/([A-Za-z0-9_\-]+)/(seg_[A-Za-z0-9]+)/(\d{5})\.png$")
 CLIP_RE = re.compile(r"^/clip/([A-Za-z0-9_\-]+)\.mp4$")
 
 
@@ -817,8 +968,8 @@ class Handler(BaseHTTPRequestHandler):
             with src.open("rb") as f:
                 shutil.copyfileobj(f, self.wfile)
 
-    def _serve_mask(self, slug: str, idx: str) -> None:
-        path = masks_dir_for(slug) / f"{idx}.png"
+    def _serve_mask(self, slug: str, seg_id: str, idx: str) -> None:
+        path = masks_dir_for(slug, seg_id) / f"{idx}.png"
         if not path.is_file():
             self._send_text(HTTPStatus.NOT_FOUND, "no mask")
             return
@@ -900,24 +1051,28 @@ class Handler(BaseHTTPRequestHandler):
         if m and m.group(2) == "masks":
             slug = m.group(1)
             try:
-                STORE.get(slug)
+                item = STORE.get(slug)
             except KeyError:
                 self._send_text(HTTPStatus.NOT_FOUND, "no such slug")
                 return
-            mdir = masks_dir_for(slug)
-            frames: list[int] = []
-            if mdir.is_dir():
-                for png in mdir.glob("*.png"):
-                    try:
-                        frames.append(int(png.stem))
-                    except ValueError:
-                        continue
-            frames.sort()
-            self._send_json(HTTPStatus.OK, {"frames": frames})
+            by_seg: dict[str, list[int]] = {}
+            for seg in item.get("segments", []):
+                seg_id = seg["id"]
+                mdir = masks_dir_for(slug, seg_id)
+                frames: list[int] = []
+                if mdir.is_dir():
+                    for png in mdir.glob("*.png"):
+                        try:
+                            frames.append(int(png.stem))
+                        except ValueError:
+                            continue
+                frames.sort()
+                by_seg[seg_id] = frames
+            self._send_json(HTTPStatus.OK, {"segments": by_seg})
             return
         m = MASK_RE.match(p)
         if m:
-            self._serve_mask(m.group(1), m.group(2))
+            self._serve_mask(m.group(1), m.group(2), m.group(3))
             return
         m = CLIP_RE.match(p)
         if m:
@@ -984,28 +1139,65 @@ class Handler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.NOT_FOUND, "no such slug")
             return
 
+        if action == "segments/new":
+            seg_id = STORE.add_segment(slug)
+            self._send_json(HTTPStatus.OK, {"ok": True, "seg_id": seg_id})
+            return
+
+        if action.startswith("segments/") and action.endswith("/active"):
+            seg_id = action.split("/")[1]
+            try:
+                STORE.set_active_segment(slug, seg_id)
+            except KeyError:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such segment")
+                return
+            self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+
+        if action.startswith("segments/") and action.endswith("/delete"):
+            seg_id = action.split("/")[1]
+            # If this segment is actively running, cancel first (mirrors slug-delete logic).
+            t = PROP_THREADS.get((slug, seg_id))
+            owns_propagator = (t is not None and t.is_alive()) or _QUEUE_CURRENT == (slug, seg_id)
+            if owns_propagator and _PROPAGATOR is not None:
+                _PROPAGATOR.cancel()
+            try:
+                STORE.remove_segment(slug, seg_id)
+            except KeyError:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such segment")
+                return
+            PROP_THREADS.pop((slug, seg_id), None)
+            self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+
         if action == "trim":
             body = self._read_json()
+            seg_id = body["seg_id"]
             in_f = body["in_frame"]
             out_f = body["out_frame"]
             if not (isinstance(in_f, int) and isinstance(out_f, int) and 0 <= in_f < out_f):
                 self._send_text(HTTPStatus.BAD_REQUEST, "in_frame/out_frame must be int with in<out")
                 return
-            STORE.update(slug, in_frame=in_f, out_frame=out_f)
-            # Kick the single-pass PyAV extract for the new range. Returns
-            # immediately; warmUp's /frame fetches will then hit pre-decoded
-            # JPEGs on disk instead of forcing per-frame decode.
+            try:
+                STORE.update_segment(slug, seg_id, in_frame=in_f, out_frame=out_f)
+            except KeyError:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such segment")
+                return
             _kick_background_extract(slug, in_f, out_f)
             self._send_json(HTTPStatus.OK, {"ok": True})
             return
 
         if action == "seed":
             body = self._read_json()
+            seg_id = body["seg_id"]
             frame_index = body["frame_index"]
             x = body["x"]
             y = body["y"]
             if not all(isinstance(v, int) for v in (frame_index, x, y)):
                 self._send_text(HTTPStatus.BAD_REQUEST, "frame_index/x/y must be int")
+                return
+            if _segment_or_404(slug, seg_id) is None:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such segment")
                 return
             item = STORE.get(slug)
             source = SOURCES_DIR / item["source_video"]
@@ -1021,43 +1213,52 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_text(HTTPStatus.INTERNAL_SERVER_ERROR, f"seed failed: {e}")
                 return
-            (item_dir(slug) / "seed_mask.png").write_bytes(png)
-            STORE.update(slug, seed_frame=frame_index, seed_point=[x, y])
+            STORE.update_segment(slug, seg_id, seed_frame=frame_index, seed_point=[x, y])
             self._send_bytes(HTTPStatus.OK, png, "image/png")
             return
 
         if action == "propagate":
-            t = PROP_THREADS.get(slug)
+            body = self._read_json()
+            seg_id = body["seg_id"]
+            if _segment_or_404(slug, seg_id) is None:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such segment")
+                return
+            t = PROP_THREADS.get((slug, seg_id))
             if t and t.is_alive():
                 self._send_text(HTTPStatus.CONFLICT, "propagate already running")
                 return
-            STORE.update(slug, propagate_status="running")
-            t = threading.Thread(target=run_propagate, args=(slug,), daemon=True)
-            PROP_THREADS[slug] = t
+            STORE.update_segment(slug, seg_id, propagate_status="running")
+            t = threading.Thread(target=run_propagate, args=(slug, seg_id), daemon=True)
+            PROP_THREADS[(slug, seg_id)] = t
             t.start()
             self._send_json(HTTPStatus.OK, {"ok": True})
             return
 
         if action == "propagate/cancel":
-            # Only fire global cancel if THIS slug is the one actively running.
-            # _PROPAGATOR is a singleton — calling cancel() while another slug
-            # owns it (queue runner on a different item) would interrupt the
-            # wrong propagation.
-            t = PROP_THREADS.get(slug)
-            owns_propagator = (t is not None and t.is_alive()) or _QUEUE_CURRENT == slug
+            body = self._read_json()
+            seg_id = body["seg_id"]
+            if _segment_or_404(slug, seg_id) is None:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such segment")
+                return
+            t = PROP_THREADS.get((slug, seg_id))
+            owns_propagator = (t is not None and t.is_alive()) or _QUEUE_CURRENT == (slug, seg_id)
             if owns_propagator and _PROPAGATOR is not None:
                 _PROPAGATOR.cancel()
-            STORE.update(slug, propagate_status="idle")
+            STORE.update_segment(slug, seg_id, propagate_status="idle")
             self._send_json(HTTPStatus.OK, {"ok": True})
             return
 
         if action == "delete":
-            t = PROP_THREADS.get(slug)
-            owns_propagator = (t is not None and t.is_alive()) or _QUEUE_CURRENT == slug
-            if owns_propagator and _PROPAGATOR is not None:
+            # Slug-level delete: cancel any segment under this slug that is running.
+            for (s2, seg_id), t in list(PROP_THREADS.items()):
+                if s2 == slug and t.is_alive() and _PROPAGATOR is not None:
+                    _PROPAGATOR.cancel()
+                    break
+            if _QUEUE_CURRENT and _QUEUE_CURRENT[0] == slug and _PROPAGATOR is not None:
                 _PROPAGATOR.cancel()
             STORE.delete(slug)
-            PROP_THREADS.pop(slug, None)
+            for key in [k for k in PROP_THREADS if k[0] == slug]:
+                PROP_THREADS.pop(key, None)
             _EXTRACT_LOCKS.pop(slug, None)
             with BUS._lock:
                 BUS._subs.pop(slug, None)
