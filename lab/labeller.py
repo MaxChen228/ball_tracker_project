@@ -616,16 +616,17 @@ def run_propagate(slug: str) -> None:
                 "mask_url": f"/mask/{slug}/{source_idx:05d}.png",
             })
             frames_emitted += 1
-            # Throttle queue-channel progress to ~1 update / 1.5s. SAM 2 emits
-            # forward+reverse so the total can exceed `expected` by ~1 (seed
-            # frame visited twice); cap the displayed total accordingly.
+            # Throttle queue-channel progress to ~1 update / 1.5s. SAM 2's
+            # forward pass emits (expected - seed_local) frames and the reverse
+            # pass emits (seed_local + 1), so total = expected + 1 (seed visited
+            # in both passes).
             if _QUEUE_CURRENT == slug:
                 now = time.time()
                 if now - last_queue_pub >= 1.5:
                     last_queue_pub = now
                     snap = _queue_snapshot()
                     snap["frame_done"] = frames_emitted
-                    snap["frame_total"] = expected * 2  # forward + reverse
+                    snap["frame_total"] = expected + 1
                     snap["elapsed_s"] = round(now - t_prop, 2)
                     BUS.publish("__queue__", "queue", snap)
     except Exception as e:

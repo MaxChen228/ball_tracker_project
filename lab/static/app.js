@@ -1052,8 +1052,9 @@ function updateQueueButton() {
   const ready = state.items.filter(it => effectiveStatus(it) === "ready").length;
   if (state.queueRunning) {
     const snap = state.queueSnapshot;
-    const tail = snap.total > 0 ? ` ${snap.done}/${snap.total}` : "";
-    el.btnQueue.textContent = `■ Stop Queue${tail}`;
+    const sessions = snap.total > 0 ? ` ${snap.done}/${snap.total}` : "";
+    const elapsed = snap.elapsed_s > 0 ? ` · ${Math.round(snap.elapsed_s)}s` : "";
+    el.btnQueue.textContent = `■ Stop Queue${sessions}${elapsed}`;
     el.btnQueue.classList.add("running");
     el.btnQueue.disabled = false;
   } else {
