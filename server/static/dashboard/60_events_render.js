@@ -271,6 +271,38 @@
     return `<form class="ev-action-form" method="POST" action="${action}"${onsubmit}><button class="ev-btn ${variant}" type="submit"${titleAttr}>${label}</button></form>`;
   }
 
+  // Hash search — substring filter on session_id. Lives in the DOM layer
+  // (not the events list itself), so SSR rows and JS-rendered rows are
+  // both filtered, and the filter survives every renderEvents tick.
+  // Applied after each render and on input. Day groups with no visible
+  // rows collapse to display:none so the empty header doesn't linger.
+  let eventsSearchQuery = '';
+  function _applyEventsSearch() {
+    if (!eventsBox) return;
+    const q = eventsSearchQuery.trim().toLowerCase();
+    const rows = eventsBox.querySelectorAll('.event-item');
+    rows.forEach(row => {
+      const sid = (row.dataset.sid || '').toLowerCase();
+      row.style.display = (!q || sid.includes(q)) ? '' : 'none';
+    });
+    const groups = eventsBox.querySelectorAll('.event-day-group');
+    groups.forEach(g => {
+      if (!q) { g.style.display = ''; return; }
+      let hasVisible = false;
+      g.querySelectorAll('.event-item').forEach(r => {
+        if (r.style.display !== 'none') hasVisible = true;
+      });
+      g.style.display = hasVisible ? '' : 'none';
+    });
+  }
+  const _searchInput = document.getElementById('events-search');
+  if (_searchInput) {
+    _searchInput.addEventListener('input', () => {
+      eventsSearchQuery = _searchInput.value || '';
+      _applyEventsSearch();
+    });
+  }
+
   function renderEvents(events) {
     if (!eventsBox) return;
     if (!events || events.length === 0) {
@@ -380,4 +412,5 @@
       }
       _eventDayCache.delete(day);
     }
+    _applyEventsSearch();
   }

@@ -138,27 +138,21 @@
     }
   }
 
-  function _slugFromPrompt(suggestion) {
-    // POST /presets validates the slug server-side; this is just a
-    // client-side hint to nudge operators toward a valid value before
-    // a round-trip. The server is the source of truth for both slug
-    // shape and uniqueness.
-    const raw = window.prompt(
-      'Preset slug (filename, [a-z0-9_]{1,32}):',
-      suggestion,
-    );
+  function _namePrompt(message, suggestion) {
+    // Single prompt — the same string is used as both the on-disk slug
+    // and the operator-facing label. Server validates slug shape and
+    // uniqueness; we just trim and forward.
+    const raw = window.prompt(message, suggestion);
     if (raw === null) return null;
     return raw.trim();
   }
 
   async function _saveAsNew(form, status) {
-    const slug = _slugFromPrompt('');
-    if (!slug) return;
-    const label = window.prompt('Operator-facing label:', slug);
-    if (label === null) return;
+    const name = _namePrompt('Preset name:', '');
+    if (!name) return;
     const body = {
-      name: slug,
-      label: label,
+      name: name,
+      label: name,
       hsv: _readHSV(form),
       shape_gate: _readShape(form),
     };
@@ -213,8 +207,8 @@
   }
 
   async function _duplicate(name, modal) {
-    const slug = _slugFromPrompt(`${name}_copy`);
-    if (!slug) return;
+    const newName = _namePrompt('Preset name:', `${name}_copy`);
+    if (!newName) return;
     _setModalStatus(modal, '…');
     try {
       // Read source preset, then POST a new file under the new slug.
@@ -226,14 +220,12 @@
         return;
       }
       const srcBody = await src.json();
-      const label = window.prompt('Label for the duplicate:', `${srcBody.label} (copy)`);
-      if (label === null) return;
       const r = await fetch('/presets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: slug,
-          label: label,
+          name: newName,
+          label: newName,
           hsv: srcBody.hsv,
           shape_gate: srcBody.shape_gate,
         }),
@@ -278,10 +270,6 @@
   }
 
   function _initPresetLibraryControls(form, status) {
-    const saveBtn = document.querySelector('[data-preset-save-as]');
-    if (saveBtn) {
-      saveBtn.addEventListener('click', () => _saveAsNew(form, status));
-    }
     const modal = document.getElementById('preset-manage-modal');
     const manageBtn = document.querySelector('[data-preset-manage]');
     if (manageBtn && modal && typeof modal.showModal === 'function') {

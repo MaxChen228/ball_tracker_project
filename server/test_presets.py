@@ -241,13 +241,14 @@ def test_dashboard_shows_deleted_when_bound_preset_removed(tmp_path, monkeypatch
 
 
 def test_dashboard_renders_save_as_new_and_manage_buttons(tmp_path, monkeypatch):
-    """Phase 3 affordances: the Detection-config card must surface
-    `+ Save as new` and `Manage…` buttons, and the Manage modal must
-    SSR a row per preset with Use / Duplicate / Delete actions."""
+    """The Detection-config card must surface the `Manage…` button, and
+    the Manage modal must SSR a row per preset with Use / Duplicate /
+    Delete actions. Save-as-new was consolidated into the Apply button
+    (one button, one prompt) so `data-preset-save-as` no longer renders."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
     body = client.get("/").text
-    assert 'data-preset-save-as' in body
+    assert 'data-preset-save-as' not in body
     assert 'data-preset-manage' in body
     assert 'id="preset-manage-modal"' in body
     # Each seeded preset surfaces in the modal table with all three
