@@ -26,6 +26,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import algorithms
 import session_results
 from detection import HSVRange, ShapeGate
 from detection_config import load_or_migrate
@@ -307,11 +308,8 @@ def main() -> None:
     ap.add_argument(
         "--params",
         type=Path,
-        help="path to a JSON file with the same shape as a "
-             "DetectionConfigSnapshotPayload (algorithm_id, hsv, "
-             "shape_gate, preset_name). Replaces the disk config for "
-             "this run only. For parameter sweeps without mutating "
-             "data/detection_config.json.",
+        help="JSON file matching DetectionConfigSnapshotPayload shape; "
+             "replaces the disk config for this run only.",
     )
     ap.add_argument(
         "--strict",
@@ -330,14 +328,27 @@ def main() -> None:
             "--algorithm-id and --params are mutually exclusive; --params "
             "already carries its own algorithm_id"
         )
+    # `--use-frozen-snapshot` reads each pitch's stored snapshot and
+    # ignores the disk/CLI snapshot entirely — combining it with a
+    # snapshot override would silently drop the override. Reject up
+    # front so the operator picks one source of truth.
+    if args.use_frozen_snapshot and (
+        args.algorithm_id is not None or args.params is not None
+    ):
+        raise SystemExit(
+            "--use-frozen-snapshot ignores --algorithm-id / --params; "
+            "drop the override or remove --use-frozen-snapshot"
+        )
 
     if args.params is not None:
         snapshot = _load_snapshot_from_file(args.params)
     else:
         snapshot = load_detection_config_snapshot()
         if args.algorithm_id is not None:
-            import algorithms
-            algorithms.validate_id(args.algorithm_id)
+            try:
+                algorithms.validate_id(args.algorithm_id)
+            except ValueError as e:
+                raise SystemExit(f"--algorithm-id: {e}") from None
             snapshot = snapshot.model_copy(
                 update={"algorithm_id": args.algorithm_id}
             )
@@ -396,10 +407,19 @@ def main() -> None:
 
 def _load_snapshot_from_file(path: Path) -> DetectionConfigSnapshotPayload:
     """Read a DetectionConfigSnapshotPayload from a JSON file. Strict
-    parse — Pydantic enforces the schema and the model's
-    `_validate_algorithm_id` rejects ids not in the registry."""
-    raw = path.read_text()
-    return DetectionConfigSnapshotPayload.model_validate_json(raw)
+    parse via Pydantic. Wraps file-not-found / malformed JSON / schema
+    errors in `SystemExit` with the path so operator gets an actionable
+    one-line message instead of an opaque stack trace."""
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        raise SystemExit(f"--params {path}: file does not exist") from None
+    except OSError as e:
+        raise SystemExit(f"--params {path}: {e}") from None
+    try:
+        return DetectionConfigSnapshotPayload.model_validate_json(raw)
+    except Exception as e:
+        raise SystemExit(f"--params {path}: {e}") from None
 
 
 if __name__ == "__main__":

@@ -231,8 +231,82 @@ def test_load_snapshot_from_file_strict_parse(tmp_path):
         "shape_gate": {"aspect_min": 0.5, "fill_min": 0.5},
         "preset_name": None,
     }))
-    with pytest.raises(Exception, match="v999_not_registered"):
+    with pytest.raises(SystemExit, match="v999_not_registered"):
         R._load_snapshot_from_file(bad_path)
+
+
+def test_load_snapshot_from_file_missing_path_raises_actionable_systemexit(tmp_path):
+    """Operator running `--params /tmp/typo.json` deserves a one-line
+    `--params <path>: file does not exist`, not a Pydantic stack trace."""
+    import reprocess_sessions as R
+
+    with pytest.raises(SystemExit, match="does not exist"):
+        R._load_snapshot_from_file(tmp_path / "nope.json")
+
+
+def test_load_snapshot_from_file_malformed_json_raises_actionable_systemexit(tmp_path):
+    """Same actionable-error contract for malformed JSON content."""
+    import reprocess_sessions as R
+
+    bad_path = tmp_path / "bad.json"
+    bad_path.write_text("{ not valid json")
+    with pytest.raises(SystemExit, match=str(bad_path.name)):
+        R._load_snapshot_from_file(bad_path)
+
+
+def test_use_frozen_snapshot_with_algorithm_id_override_is_rejected(
+    tmp_path, monkeypatch,
+):
+    """`--use-frozen-snapshot` ignores the disk/CLI snapshot, so
+    combining it with `--algorithm-id` would silently drop the
+    override. Reject up front."""
+    import sys
+    import reprocess_sessions as R
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["reprocess_sessions", "--all", "--use-frozen-snapshot",
+         "--algorithm-id", "v11_hsv_cc"],
+    )
+    with pytest.raises(SystemExit, match="--use-frozen-snapshot"):
+        R.main()
+
+
+def test_strict_flag_exit_code_is_nonzero(tmp_path, monkeypatch):
+    """Pin the contract: --strict's exit code MUST be non-zero so
+    automation pipelines can `set -e` against it. A change that left
+    SystemExit(0) on failure would silently break CI."""
+    import sys
+    import reprocess_sessions as R
+
+    pitch = _make_pitch(server_post_used=None)
+    pitch_path = tmp_path / "pitches" / "session_s_strictcode_A.json"
+    _write_pitch(pitch_path, pitch)
+    monkeypatch.setattr(R, "PITCH_DIR", tmp_path / "pitches")
+    monkeypatch.setattr(R, "RESULT_DIR", tmp_path / "results")
+    (tmp_path / "results").mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        R, "load_detection_config_snapshot",
+        lambda: _snapshot(
+            h_min=0, h_max=1, s_min=0, s_max=1, v_min=0, v_max=1,
+            aspect_min=0.5, fill_min=0.5,
+        ),
+    )
+    monkeypatch.setattr(R, "load_pairing_tuning", lambda: R.PairingTuning.default())
+    monkeypatch.setattr(R, "load_calibrations", lambda: {})
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic fail")
+
+    monkeypatch.setattr(R, "rerun_detection", boom)
+
+    monkeypatch.setattr(sys, "argv", ["reprocess_sessions", "--all", "--strict"])
+    with pytest.raises(SystemExit) as exc:
+        R.main()
+    code = exc.value.code
+    assert code != 0 and code is not None, (
+        f"--strict must exit non-zero on failure; got {code!r}"
+    )
 
 
 def test_strict_flag_propagates_failure_to_exit_code(tmp_path, monkeypatch):
@@ -290,7 +364,7 @@ def test_algorithm_id_override_validates_against_registry(tmp_path, monkeypatch)
         sys, "argv",
         ["reprocess_sessions", "--all", "--algorithm-id", "v999_not_registered"],
     )
-    with pytest.raises(ValueError, match="v999_not_registered"):
+    with pytest.raises(SystemExit, match="v999_not_registered"):
         R.main()
 
 
