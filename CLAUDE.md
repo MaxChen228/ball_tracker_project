@@ -350,7 +350,7 @@ seed 寫入並可被操作員從 dashboard `Manage…` 改寫。
   時若檔案不存在才寫入；既有檔案永遠不被覆蓋。要還原內建 → `rm` + 重啟
 - 操作員建立的自訂 preset 走 dashboard Apply（開 slug+label prompt → `POST
   /presets`）或 `[Manage…]` Duplicate，不要改 source code；CRUD endpoints
-  `GET/POST/POST /presets/active/DELETE /presets` 已曝露完整 surface
+  `GET /presets`, `POST /presets`, `POST /presets/active`, `DELETE /presets/{name}` 已曝露完整 surface
 - `detection.py` docstring 寫「default 是黃綠網球」是歷史 fallback，不要
   改
 
