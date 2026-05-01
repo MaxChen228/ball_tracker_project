@@ -83,6 +83,22 @@ function currentFrame() {
   const t = state.lastDisplayedMediaTime != null
     ? state.lastDisplayedMediaTime
     : el.video.currentTime;
+  const tbl = state.ptsTable;
+  if (tbl && tbl.length > 0) {
+    // Find the index whose PTS is closest to t (rVFC mediaTime ≈ exact PTS).
+    // round(t*fps) is wrong when frame spacing != 1/avgFps. We do a small
+    // local search around the avg-fps guess to keep it O(1) on typical cases.
+    const guess = Math.max(0, Math.min(tbl.length - 1, Math.round(t * state.fps)));
+    let best = guess, bestDiff = Infinity;
+    const lo = Math.max(0, guess - 8);
+    const hi = Math.min(tbl.length - 1, guess + 8);
+    for (let i = lo; i <= hi; i++) {
+      if (tbl[i] == null) continue;
+      const d = Math.abs(tbl[i] - t);
+      if (d < bestDiff) { bestDiff = d; best = i; }
+    }
+    return best;
+  }
   return Math.round(t * state.fps);
 }
 
@@ -106,8 +122,18 @@ function frameToTime(f) {
       }
     }
     if (pts != null) {
-      // Half a frame past PTS: lands inside f's display window across decoders.
-      return pts + 0.5 / state.fps;
+      // Use mid-display-window: midpoint between this PTS and the next non-null
+      // PTS. Guarantees landing strictly inside f's window even when frame
+      // spacing is irregular (3ms..147ms in this material). For the last frame
+      // we don't have a "next", so fall back to a small epsilon past PTS.
+      let nextPts = null;
+      for (let i = f + 1; i < tbl.length; i++) {
+        if (tbl[i] != null) { nextPts = tbl[i]; break; }
+      }
+      if (nextPts != null && nextPts > pts) {
+        return (pts + nextPts) / 2;
+      }
+      return pts + 0.25 / state.fps;
     }
   }
   return f / state.fps;
