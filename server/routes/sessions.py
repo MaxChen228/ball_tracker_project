@@ -148,6 +148,36 @@ async def sessions_restore(request: Request, session_id: str):
     return {"ok": True, "session_id": session_id}
 
 
+@router.post("/sessions/{session_id}/star")
+async def sessions_star(request: Request, session_id: str):
+    from main import state, _wants_html
+    if not _SESSION_ID_RE.match(session_id):
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=422, detail="invalid session_id")
+    starred = state.star_session(session_id)
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    if not starred:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+    return {"ok": True, "session_id": session_id}
+
+
+@router.post("/sessions/{session_id}/unstar")
+async def sessions_unstar(request: Request, session_id: str):
+    from main import state, _wants_html
+    if not _SESSION_ID_RE.match(session_id):
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=422, detail="invalid session_id")
+    unstarred = state.unstar_session(session_id)
+    if _wants_html(request):
+        return RedirectResponse("/", status_code=303)
+    if not unstarred:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not starred")
+    return {"ok": True, "session_id": session_id}
+
+
 @router.post("/sessions/{session_id}/cancel_processing")
 async def sessions_cancel_processing(request: Request, session_id: str):
     from main import state, _wants_html

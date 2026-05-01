@@ -460,10 +460,20 @@ class State:
                 if isinstance(sid, str) and isinstance(ts, (int, float)):
                     parsed[sid] = float(ts)
             self._processing.load_trashed(parsed)
+        starred = obj.get("starred_sessions")
+        if isinstance(starred, dict):
+            parsed_s: dict[str, float] = {}
+            for sid, ts in starred.items():
+                if isinstance(sid, str) and isinstance(ts, (int, float)):
+                    parsed_s[sid] = float(ts)
+            self._processing.load_starred(parsed_s)
 
     def _persist_session_meta_locked(self) -> None:
         payload = json.dumps(
-            {"trashed_sessions": self._processing.trashed_sessions},
+            {
+                "trashed_sessions": self._processing.trashed_sessions,
+                "starred_sessions": self._processing.starred_sessions,
+            },
             indent=2,
         )
         self._atomic_write(self._session_meta_path, payload)
@@ -1781,6 +1791,27 @@ class State:
                 return False
             self._persist_session_meta_locked()
             return True
+
+    def star_session(self, session_id: str) -> bool:
+        now = self._time_fn()
+        with self._lock:
+            known = any(sid == session_id for _, sid in self.pitches) or session_id in self.results
+            if not known:
+                return False
+            self._processing.star(session_id, at=now)
+            self._persist_session_meta_locked()
+            return True
+
+    def unstar_session(self, session_id: str) -> bool:
+        with self._lock:
+            if not self._processing.unstar(session_id):
+                return False
+            self._persist_session_meta_locked()
+            return True
+
+    def is_session_starred(self, session_id: str) -> bool:
+        with self._lock:
+            return self._processing.is_starred(session_id)
 
     def trash_count(self) -> int:
         with self._lock:

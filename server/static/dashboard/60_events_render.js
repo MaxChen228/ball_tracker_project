@@ -130,8 +130,18 @@
     const isSelected = selectedTrajIds.has(e.session_id);
     const color = hasTraj ? trajColorFor(e.session_id) : '';
     const swatch = hasTraj
-      ? `<span class="swatch${isSelected ? ' selected' : ''}" style="border-color:${color};${isSelected ? `background:${color};` : ''}" aria-hidden="true"></span>`
+      ? `<span class="swatch${isSelected ? ' selected' : ''}" style="border-color:${color};" aria-hidden="true"></span>`
       : `<span class="swatch swatch-empty" aria-hidden="true"></span>`;
+
+    // --- per-session star toggle (persisted via session_meta.json) ---
+    const starred = !!e.starred;
+    const starAction = starred ? 'unstar' : 'star';
+    const starGlyph = starred ? '★' : '☆';
+    const starCls = starred ? 'ev-star-btn on' : 'ev-star-btn';
+    const starLabel = starred ? 'unstar session' : 'star session';
+    const starHtml = `<form class="ev-action-form" method="post" action="/sessions/${sid}/${starAction}">`
+      + `<button type="submit" class="${starCls}" aria-label="${starLabel}" title="${starLabel}">${starGlyph}</button>`
+      + `</form>`;
 
     // --- row1 right: status chips ---
     const statusChips = [];
@@ -196,6 +206,7 @@
     return `
       <div class="ev-row1" title="${hasTraj ? 'Load fit into dashboard 3D scene' : 'No renderable fit for dashboard 3D'}">
         ${swatch}
+        ${starHtml}
         <span class="ev-time">${hm}</span>
         <span class="ev-sid">${sid}</span>
         <span class="ev-spacer"></span>

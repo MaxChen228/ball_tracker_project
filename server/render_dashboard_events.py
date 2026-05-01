@@ -53,12 +53,14 @@ def _render_card(e: dict[str, Any]) -> str:
     n_tri = int(e.get("n_triangulated") or 0)
     processing_state = e.get("processing_state") or ""
     trashed = bool(e.get("trashed"))
+    starred = bool(e.get("starred"))
 
     classes = ["event-item"]
     if processing_state in {"queued", "processing"}:
         classes.append("processing")
 
     swatch_html = _swatch_html(sid, n_tri > 0)
+    star_html = _star_html(sid, starred)
     statuses_html = _statuses_html(e)
     pipes_html = _pipes_html(e)
     cfg_html = _cfg_strip_html(e)
@@ -67,6 +69,7 @@ def _render_card(e: dict[str, Any]) -> str:
     row1 = (
         f'<div class="ev-row1">'
         f'{swatch_html}'
+        f'{star_html}'
         f'<span class="ev-time">{hm}</span>'
         f'<span class="ev-sid">{sid}</span>'
         f'<span class="ev-spacer"></span>'
@@ -96,6 +99,20 @@ def _swatch_html(sid: str, has_traj: bool) -> str:
     if has_traj:
         return '<span class="swatch" aria-hidden="true"></span>'
     return '<span class="swatch swatch-empty" aria-hidden="true"></span>'
+
+
+def _star_html(sid: str, starred: bool) -> str:
+    """Per-session star toggle. POSTs to /sessions/{sid}/{star,unstar};
+    server persists into session_meta.json and 303-redirects back."""
+    action = "unstar" if starred else "star"
+    glyph = "★" if starred else "☆"
+    cls = "ev-star-btn on" if starred else "ev-star-btn"
+    label = "unstar session" if starred else "star session"
+    return (
+        f'<form class="ev-action-form" method="post" action="/sessions/{sid}/{action}">'
+        f'<button type="submit" class="{cls}" aria-label="{label}" title="{label}">'
+        f'{glyph}</button></form>'
+    )
 
 
 def _statuses_html(e: dict[str, Any]) -> str:
