@@ -77,7 +77,7 @@ body {
   background: #000;
 }
 
-#frame-img {
+#frame-canvas {
   position: absolute;
   top: 0;
   left: 0;
@@ -89,7 +89,7 @@ body {
   z-index: 1;
 }
 
-#video-wrap.scrub #frame-img { display: block; }
+#video-wrap.scrub #frame-canvas { display: block; }
 
 #overlay {
   position: absolute;

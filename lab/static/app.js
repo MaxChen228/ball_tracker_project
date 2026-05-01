@@ -42,7 +42,20 @@ const state = {
   // the visible "flicker" the user reported.
   tintedCache: new Map(),
   prefetchAbort: 0,
+  // ImageBitmap LRU keyed by source frame index. Scrub-mode paint draws
+  // bitmaps to #frame-canvas synchronously alongside the mask blit, so the
+  // base image and the overlay can never desynchronise. Without this we
+  // had a race: <img>.src=... only starts a fetch+decode, mask blits from
+  // memory immediately — two consecutive arrow keys faster than image
+  // decode left the displayed frame stale while the mask jumped ahead.
+  frameBitmapCache: new Map(),
+  framePrefetchAbort: 0,
+  scrubPaintToken: 0,
+  frameBitmapAspect: null,
 };
+
+const FRAME_BITMAP_CACHE_MAX = 800;
+const FRAME_PREFETCH_CONCURRENCY = 6;
 
 function clearSeedMask() {
   if (state.seedMaskUrl) URL.revokeObjectURL(state.seedMaskUrl);
@@ -57,7 +70,7 @@ function clearPropMasks() {
 const el = {
   video: document.getElementById("video"),
   videoWrap: document.querySelector("#video-wrap"),
-  frameImg: document.getElementById("frame-img"),
+  frameCanvas: document.getElementById("frame-canvas"),
   overlay: document.getElementById("overlay"),
   scrubber: document.getElementById("scrubber"),
   fills: document.getElementById("timeline-fills"),
@@ -125,9 +138,25 @@ function fmt(n) {
 
 function updateStatus() {
   const f = currentFrame();
-  const t = state.scrubMode && state.lastDisplayedMediaTime != null
-    ? state.lastDisplayedMediaTime
-    : (el.video.currentTime || 0);
+  // Scrubber thumb is derived state — keep it locked to currentFrame so play /
+  // arrow / pause / propagate-tick paths can never leave a stale value behind.
+  if (state.totalFrames > 0 && document.activeElement !== el.scrubber) {
+    const want = String(f);
+    if (el.scrubber.value !== want) el.scrubber.value = want;
+  }
+  // Derive `t` from the snapped frame index so f and t can never disagree.
+  // Pre-fix `t` came from `el.video.currentTime` during play; that runs
+  // ahead of rVFC's `mediaTime` (the actually-painted PTS) by up to one
+  // frame, which made `f=NNNN t=X.YYYs` look self-inconsistent.
+  const tbl = state.ptsTable;
+  let t;
+  if (tbl && f >= 0 && f < tbl.length) {
+    t = tbl[f];
+  } else if (state.lastDisplayedMediaTime != null) {
+    t = state.lastDisplayedMediaTime;
+  } else {
+    t = el.video.currentTime || 0;
+  }
   const pt = state.seedPoint ? `(${state.seedPoint[0]},${state.seedPoint[1]})` : "-";
   const fStr = String(f).padStart(4, "0");
   let statusTag = state.propagateStatus;
@@ -203,9 +232,11 @@ function addDoneFill(frame) {
   state.doneFrames.add(frame);
   const div = document.createElement("div");
   div.className = "fill-done";
-  const w = 100 / state.totalFrames;
-  div.style.left = `${(frame / state.totalFrames) * 100}%`;
-  div.style.width = `${Math.max(w, 0.2)}%`;
+  const denom = Math.max(1, state.totalFrames - 1);
+  const cellPct = 100 / denom;
+  const w = Math.max(cellPct, 0.2);
+  div.style.left = `${(frame / denom) * 100 - w / 2}%`;
+  div.style.width = `${w}%`;
   el.fills.appendChild(div);
 }
 
@@ -216,6 +247,87 @@ function clearDoneFills() {
   state.tintedCache.clear();
   state.prefetchAbort++;
 }
+
+window.debugMask = async function (frame) {
+  const out = { frame };
+  out.urlMapHas = state.propMaskUrlByFrame.has(frame);
+  out.url = state.propMaskUrlByFrame.get(frame) || null;
+  out.cacheHas = state.tintedCache.has(frame);
+  if (out.cacheHas) {
+    const c = state.tintedCache.get(frame);
+    out.cacheSize = `${c.width}x${c.height}`;
+    const ctx = c.getContext("2d");
+    const img = ctx.getImageData(0, 0, c.width, c.height);
+    let nz = 0;
+    for (let i = 3; i < img.data.length; i += 4) if (img.data[i] > 0) nz++;
+    out.cacheNonzeroAlpha = nz;
+  }
+  if (out.url) {
+    const r = await fetch(out.url);
+    out.fetchStatus = r.status;
+    const blob = await r.blob();
+    out.fetchBytes = blob.size;
+    const im = new Image();
+    im.src = URL.createObjectURL(blob);
+    await new Promise((res, rej) => { im.onload = res; im.onerror = rej; });
+    out.imgNatural = `${im.naturalWidth}x${im.naturalHeight}`;
+    const tmp = document.createElement("canvas");
+    tmp.width = im.naturalWidth; tmp.height = im.naturalHeight;
+    const tctx = tmp.getContext("2d");
+    tctx.drawImage(im, 0, 0);
+    const id = tctx.getImageData(0, 0, tmp.width, tmp.height);
+    let nz = 0;
+    for (let i = 0; i < id.data.length; i += 4) if (id.data[i] > 0) nz++;
+    out.rawNonzeroPixels = nz;
+  }
+  out.overlaySize = `${el.overlay.width}x${el.overlay.height}`;
+  out.currentFrame = currentFrame();
+  console.log(JSON.stringify(out, null, 2));
+  return out;
+};
+
+window.debugTimeline = function () {
+  const wrap = document.getElementById("timeline-wrap");
+  const wrapRect = wrap.getBoundingClientRect();
+  const W = wrapRect.width;
+  const N = state.totalFrames;
+  const denom = Math.max(1, N - 1);
+  const expectPct = (f) => (f / denom) * 100;
+  const elemPct = (rect) => ((rect.left - wrapRect.left) / W) * 100;
+  const out = {
+    totalFrames: N,
+    timelineWidthPx: W.toFixed(2),
+    inFrame: state.inFrame, outFrame: state.outFrame, seedFrame: state.seedFrame,
+    expectedPct: {
+      in: state.inFrame != null ? expectPct(state.inFrame).toFixed(3) : null,
+      out: state.outFrame != null ? expectPct(state.outFrame).toFixed(3) : null,
+      seed: state.seedFrame != null ? expectPct(state.seedFrame).toFixed(3) : null,
+    },
+    actualMarkerPct: {
+      in: !el.mIn.hidden ? elemPct(el.mIn.getBoundingClientRect()).toFixed(3) : "hidden",
+      out: !el.mOut.hidden ? elemPct(el.mOut.getBoundingClientRect()).toFixed(3) : "hidden",
+      seed: !el.mSeed.hidden ? elemPct(el.mSeed.getBoundingClientRect()).toFixed(3) : "hidden",
+    },
+  };
+  const fillDivs = el.fills.children;
+  if (fillDivs.length > 0) {
+    const first = fillDivs[0].getBoundingClientRect();
+    const last = fillDivs[fillDivs.length - 1].getBoundingClientRect();
+    const sortedFrames = [...state.doneFrames].sort((a, b) => a - b);
+    out.fillCount = fillDivs.length;
+    out.fillFrameRange = [sortedFrames[0], sortedFrames[sortedFrames.length - 1]];
+    out.fillFirstActualPct = elemPct(first).toFixed(3);
+    out.fillFirstExpectedPct = expectPct(sortedFrames[0]).toFixed(3);
+    out.fillLastActualLeftPct = elemPct(last).toFixed(3);
+    out.fillLastActualRightPct = (((last.right - wrapRect.left) / W) * 100).toFixed(3);
+    out.fillLastExpectedPct = expectPct(sortedFrames[sortedFrames.length - 1]).toFixed(3);
+  }
+  const thumbVal = parseInt(el.scrubber.value, 10);
+  out.scrubberValue = thumbVal;
+  out.scrubberExpectedPct = expectPct(thumbVal).toFixed(3);
+  console.table(out);
+  return out;
+};
 
 function videoDisplayRect() {
   // Returns the actual displayed video frame rect inside the <video> element,
@@ -257,6 +369,171 @@ function resizeOverlay() {
 function clearOverlay() {
   const ctx = el.overlay.getContext("2d");
   ctx.clearRect(0, 0, el.overlay.width, el.overlay.height);
+}
+
+function _evictOldestFrameBitmap() {
+  const it = state.frameBitmapCache.entries().next();
+  if (it.done) return;
+  const [k, bm] = it.value;
+  state.frameBitmapCache.delete(k);
+  if (bm && typeof bm.close === "function") bm.close();
+}
+
+function enforceFrameCacheLRU() {
+  while (state.frameBitmapCache.size > FRAME_BITMAP_CACHE_MAX) _evictOldestFrameBitmap();
+}
+
+function touchFrameBitmap(frame) {
+  const v = state.frameBitmapCache.get(frame);
+  if (v === undefined) return undefined;
+  state.frameBitmapCache.delete(frame);
+  state.frameBitmapCache.set(frame, v);
+  return v;
+}
+
+function clearFrameBitmapCache() {
+  state.framePrefetchAbort++;
+  for (const bm of state.frameBitmapCache.values()) {
+    if (bm && typeof bm.close === "function") bm.close();
+  }
+  state.frameBitmapCache.clear();
+  state.frameBitmapAspect = null;
+}
+
+async function fetchFrameBitmap(slug, frame) {
+  const url = `${API_BASE}/frame/${encodeURIComponent(slug)}/${String(frame).padStart(5, "0")}.jpg`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`frame ${frame} HTTP ${r.status}`);
+  const blob = await r.blob();
+  return await createImageBitmap(blob);
+}
+
+async function ensureFrameBitmap(slug, frame) {
+  const cached = touchFrameBitmap(frame);
+  if (cached) return cached;
+  const bm = await fetchFrameBitmap(slug, frame);
+  // If the user switched items mid-fetch, drop the bitmap rather than
+  // polluting the new item's cache with a stale frame. The caller's
+  // scrubPaintToken check will short-circuit before it tries to draw.
+  if (slug !== state.current) {
+    if (bm && typeof bm.close === "function") bm.close();
+    return bm;
+  }
+  const existing = state.frameBitmapCache.get(frame);
+  if (existing) {
+    if (bm && typeof bm.close === "function") bm.close();
+    return touchFrameBitmap(frame);
+  }
+  state.frameBitmapCache.set(frame, bm);
+  enforceFrameCacheLRU();
+  return bm;
+}
+
+function drawFrameBitmap(bm) {
+  const c = el.frameCanvas;
+  const ctx = c.getContext("2d");
+  if (c.width !== bm.width) c.width = bm.width;
+  if (c.height !== bm.height) c.height = bm.height;
+  // Backing-store aspect drives the canvas's intrinsic ratio so
+  // `object-fit: contain` produces the same letterbox box as the overlay's
+  // `videoDisplayRect()`-derived rect.
+  state.frameBitmapAspect = bm.width / bm.height;
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.drawImage(bm, 0, 0);
+}
+
+function ensureTintedCanvas(frame, url) {
+  return new Promise((resolve) => {
+    if (state.tintedCache.has(frame)) { resolve(); return; }
+    const img = new Image();
+    img.onload = () => {
+      try {
+        if (el.overlay.width && el.overlay.height) {
+          state.tintedCache.set(frame, buildTintedCanvas(img));
+        }
+      } catch (_) { /* swallow — caller will fall back to clearOverlay */ }
+      resolve();
+    };
+    img.onerror = () => resolve();
+    img.src = url;
+  });
+}
+
+// Atomic visual update: image + mask drawn in the same tick so the user
+// can never observe one moving without the other. Caller is responsible
+// for ensuring the tinted-mask cache is warm (via scheduleScrubPaint).
+function paintAtomic(frame, bm) {
+  drawFrameBitmap(bm);
+  const url = maskUrlForFrame(frame);
+  if (url) {
+    if (!blitCachedMask(frame)) clearOverlay();
+  } else {
+    clearOverlay();
+    if (frame === state.seedFrame && state.seedPoint) {
+      drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+    }
+  }
+}
+
+// Schedules an atomic paint for `frame`. On full cache hit (bitmap + mask
+// tinted) paints synchronously this tick. On any miss keeps the previous
+// canvas pixels (no flicker, no mid-load desync) and paints both layers
+// together once everything is ready — but only if the user hasn't moved
+// on to a different frame in the meantime.
+async function scheduleScrubPaint(frame) {
+  const token = ++state.scrubPaintToken;
+  let bm = touchFrameBitmap(frame);
+  if (!bm) {
+    try {
+      bm = await ensureFrameBitmap(state.current, frame);
+    } catch (e) {
+      console.warn("frame bitmap fetch failed", frame, e);
+      return;
+    }
+    if (token !== state.scrubPaintToken) return;
+  }
+  const maskUrl = maskUrlForFrame(frame);
+  if (maskUrl && !state.tintedCache.has(frame)) {
+    await ensureTintedCanvas(frame, maskUrl);
+    if (token !== state.scrubPaintToken) return;
+  }
+  if (state.current == null) return;
+  paintAtomic(frame, bm);
+}
+
+async function prefetchFrames(slug) {
+  const myToken = ++state.framePrefetchAbort;
+  if (state.inFrame == null || state.outFrame == null) return;
+  const lo = Math.min(state.inFrame, state.outFrame);
+  const hi = Math.max(state.inFrame, state.outFrame);
+  const frames = [];
+  for (let f = lo; f <= hi; f++) {
+    if (!state.frameBitmapCache.has(f)) frames.push(f);
+  }
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < frames.length) {
+      if (state.current !== slug || myToken !== state.framePrefetchAbort) return;
+      const f = frames[cursor++];
+      try {
+        const bm = await fetchFrameBitmap(slug, f);
+        if (state.current !== slug || myToken !== state.framePrefetchAbort) {
+          if (bm && typeof bm.close === "function") bm.close();
+          return;
+        }
+        if (state.frameBitmapCache.has(f)) {
+          if (bm && typeof bm.close === "function") bm.close();
+        } else {
+          state.frameBitmapCache.set(f, bm);
+          enforceFrameCacheLRU();
+        }
+      } catch (_) {
+        // Per-frame fetch failures are non-fatal; the on-demand path will
+        // surface a real error if the user ever lands on this frame.
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: FRAME_PREFETCH_CONCURRENCY }, worker));
 }
 
 function drawClickMarker(x, y) {
@@ -410,7 +687,11 @@ function syncFromItem(item) {
   el.video.src = `${API_BASE}/clip/${item.slug}.mp4`;
   state.lastDisplayedFrame = 0;
   enterScrubMode();
-  el.frameImg.src = `${API_BASE}/frame/${encodeURIComponent(item.slug)}/00000.jpg`;
+  // Drop the previous item's bitmap cache (closes ImageBitmaps to free GPU
+  // memory) and request frame 0 via the atomic paint pipeline.
+  clearFrameBitmapCache();
+  state.scrubPaintToken++;
+  scheduleScrubPaint(0);
   // Grab focus from the URL bar so the very first space-press toggles play
   // without the user having to click into the page first.
   el.videoWrap.focus();
@@ -618,6 +899,7 @@ async function sendTrim() {
       out_frame: state.outFrame,
     });
     if (!r.ok) showError(`trim failed: HTTP ${r.status}`);
+    else if (state.current) prefetchFrames(state.current);
   } catch (e) {
     showError(`trim failed: ${e}`);
   }
@@ -769,12 +1051,10 @@ function flushStep() {
   state.lastDisplayedMediaTime = tbl[target];
   state.lastDisplayedFrame = target;
   el.scrubber.value = String(target);
-  el.frameImg.src = `${API_BASE}/frame/${encodeURIComponent(state.current)}/${String(target).padStart(5, "0")}.jpg`;
-  if (maskUrlForFrame(target) != null) loadMaskForFrame(target);
-  else clearOverlay();
-  if (target === state.seedFrame && state.seedPoint && maskUrlForFrame(target) == null) {
-    drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
-  }
+  // Atomic frame+mask paint. Cache hit paints synchronously this tick;
+  // cache miss leaves the previous frame visible (no flicker, no desync)
+  // and paints both layers together once the bitmap arrives.
+  scheduleScrubPaint(target);
   // Background-sync the underlying video element to the same PTS so togglePlay
   // can call play() without burning the user-gesture token on a seek. Chrome
   // sometimes refuses paused sub-frame seeks but always honours the LAST seek
@@ -802,6 +1082,9 @@ async function fetchPts(slug) {
       el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
       updateMarkers();
       console.log(`pts loaded: ${j.pts.length} frames`);
+      // Kick off background prefetch over the trimmed range so subsequent
+      // scrubbing hits the bitmap cache instead of fetch+decode.
+      if (state.inFrame != null && state.outFrame != null) prefetchFrames(slug);
     }
   } catch (e) {
     showError(`pts fetch failed: ${e}`);
@@ -859,11 +1142,10 @@ function togglePlay() {
     el.video.pause();
     const f = currentFrame();
     state.lastDisplayedFrame = f;
-    el.frameImg.src = `${API_BASE}/frame/${encodeURIComponent(state.current)}/${String(f).padStart(5, "0")}.jpg`;
+    if (state.ptsTable) state.lastDisplayedMediaTime = state.ptsTable[f];
     el.scrubber.value = String(f);
-    if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
-    else clearOverlay();
     enterScrubMode();
+    scheduleScrubPaint(f);
     updateStatus();
   }
 }
@@ -998,7 +1280,10 @@ function bindUi() {
       const f = currentFrame();
       enterScrubMode();
       state.lastDisplayedFrame = f;
-      el.frameImg.src = `${API_BASE}/frame/${encodeURIComponent(state.current)}/${String(f).padStart(5, "0")}.jpg`;
+      state.lastDisplayedMediaTime = state.ptsTable[f];
+      el.scrubber.value = String(f);
+      scheduleScrubPaint(f);
+      updateStatus();
     }
   });
   // Use ResizeObserver for layout-sensitive overlay; window resize alone misses
