@@ -35,6 +35,7 @@ const state = {
   isSeeking: false,
   lastSeekTarget: null,
   scrubMode: false,
+  showSeedMarker: true,
   queueRunning: false,
   queueSse: null,
   queueSnapshot: { running: false, current: null, done: 0, ready: 0, total: 0 },
@@ -316,7 +317,7 @@ function paintAtomic(frame, bm) {
     if (!blitCachedMask(frame)) clearOverlay();
   } else {
     clearOverlay();
-    if (frame === state.seedFrame && state.seedPoint) {
+    if (frame === state.seedFrame && state.seedPoint && state.showSeedMarker) {
       drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
     }
   }
@@ -400,7 +401,7 @@ function blitCachedMask(frame) {
   const ctx = el.overlay.getContext("2d");
   ctx.clearRect(0, 0, el.overlay.width, el.overlay.height);
   ctx.drawImage(cached, 0, 0);
-  if (frame === state.seedFrame && state.seedPoint) {
+  if (frame === state.seedFrame && state.seedPoint && state.showSeedMarker) {
     drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
   }
   return true;
@@ -521,7 +522,7 @@ function syncFromItem(item) {
   state.outFrame = item.out_frame == null ? null : item.out_frame;
   state.seedFrame = item.seed_frame == null ? null : item.seed_frame;
   state.seedPoint = item.seed_point == null ? null : item.seed_point;
-  state.propagateStatus = item.propagate_status || "idle";
+  state.propagateStatus = item.propagate_status;
   state.seedMaskReady = state.seedFrame != null && state.seedPoint != null;
   el.itemSlug.textContent = item.slug;
   updateSidebarActive();
@@ -644,7 +645,7 @@ function onHashChange() {
 }
 
 function effectiveStatus(it) {
-  const ps = it.status || it.propagate_status || "idle";
+  const ps = it.propagate_status;
   if (ps === "idle" && it.seed_frame != null) return "ready";
   return ps;
 }
@@ -726,7 +727,7 @@ function updateSidebarActive() {
 
 function updateSidebarStatus(slug, status) {
   const it = state.items.find(i => i.slug === slug);
-  if (it) { it.status = status; it.propagate_status = status; }
+  if (it) it.propagate_status = status;
   const card = el.itemList.querySelector(`.item-card[data-slug="${slug}"]`);
   if (card) {
     const dot = card.querySelector(".item-status");
@@ -1057,14 +1058,17 @@ async function cancelOrEscape() {
     return;
   }
   if (state.propagateStatus === "running" && state.current) {
+    const capturedSlug = state.current;
     try {
-      const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(state.current)}/propagate/cancel`, { method: "POST" });
+      const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(capturedSlug)}/propagate/cancel`, { method: "POST" });
       if (r.status !== 404 && !r.ok) console.warn(`cancel HTTP ${r.status}`);
     } catch (e) { console.warn("cancel failed", e); }
-    state.propagateStatus = "idle";
-    if (state.current) updateSidebarStatus(state.current, "idle");
-    updatePropagateBtn();
-    updateStatus();
+    updateSidebarStatus(capturedSlug, "idle");
+    if (state.current === capturedSlug) {
+      state.propagateStatus = "idle";
+      updatePropagateBtn();
+      updateStatus();
+    }
   }
 }
 
@@ -1220,6 +1224,17 @@ function onKeydown(e) {
   else if (e.key === "s" || e.key === "S") markSeed();
   else if (e.key === "Enter") propagate();
   else if (e.key === "Escape") cancelOrEscape();
+  else if (e.key === "h" || e.key === "H") {
+    state.showSeedMarker = !state.showSeedMarker;
+    const f = currentFrame();
+    if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
+    else {
+      clearOverlay();
+      if (state.showSeedMarker && f === state.seedFrame && state.seedPoint) {
+        drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+      }
+    }
+  }
 }
 
 function onDisplayedFrame(_now, metadata) {
@@ -1238,7 +1253,7 @@ function onDisplayedFrame(_now, metadata) {
       el.scrubber.value = String(f);
       if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
       else clearOverlay();
-      if (f === state.seedFrame && state.seedPoint && maskUrlForFrame(f) == null) {
+      if (f === state.seedFrame && state.seedPoint && state.showSeedMarker && maskUrlForFrame(f) == null) {
         drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
       }
     }

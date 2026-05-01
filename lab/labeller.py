@@ -1039,7 +1039,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "propagate/cancel":
-            if _PROPAGATOR is not None:
+            # Only fire global cancel if THIS slug is the one actively running.
+            # _PROPAGATOR is a singleton — calling cancel() while another slug
+            # owns it (queue runner on a different item) would interrupt the
+            # wrong propagation.
+            t = PROP_THREADS.get(slug)
+            owns_propagator = (t is not None and t.is_alive()) or _QUEUE_CURRENT == slug
+            if owns_propagator and _PROPAGATOR is not None:
                 _PROPAGATOR.cancel()
             STORE.update(slug, propagate_status="idle")
             self._send_json(HTTPStatus.OK, {"ok": True})
@@ -1047,9 +1053,14 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "delete":
             t = PROP_THREADS.get(slug)
-            if t and t.is_alive() and _PROPAGATOR is not None:
+            owns_propagator = (t is not None and t.is_alive()) or _QUEUE_CURRENT == slug
+            if owns_propagator and _PROPAGATOR is not None:
                 _PROPAGATOR.cancel()
             STORE.delete(slug)
+            PROP_THREADS.pop(slug, None)
+            _EXTRACT_LOCKS.pop(slug, None)
+            with BUS._lock:
+                BUS._subs.pop(slug, None)
             self._send_json(HTTPStatus.OK, {"ok": True})
             return
 
@@ -1057,9 +1068,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _public_item(it: dict[str, Any]) -> dict[str, Any]:
-        out = dict(it)
-        out["status"] = it["propagate_status"]
-        return out
+        return dict(it)
 
 
 class _QuietThreadingHTTPServer(ThreadingHTTPServer):
