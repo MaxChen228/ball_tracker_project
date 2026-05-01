@@ -875,17 +875,22 @@ function onKeydown(e) {
 
 function onDisplayedFrame(_now, metadata) {
   // Fires once per actually-presented video frame. metadata.mediaTime is the
-  // exact PTS of the frame the compositor just painted. Drive every per-frame
-  // visual update from here so mask / scrubber / overlay stay locked to the
-  // displayed video frame, not to the throttled timeupdate event.
+  // exact PTS of the frame the compositor just painted.
+  //
+  // CRITICAL: while a seek is in flight we ignore rVFC entirely. Without this,
+  // setting `video.currentTime` returns immediately but the next rVFC may
+  // still fire for the PREVIOUS frame (the compositor hasn't repainted yet).
+  // That stale callback would compute f = previous-frame, override the
+  // optimistic snap from flushStep, and reload the previous mask — exactly
+  // the "flicker to old frame and back" the user reported. Once `seeked`
+  // clears state.isSeeking, rVFC takes over again with the truth.
+  if (state.isSeeking) {
+    state.rvfcHandle = el.video.requestVideoFrameCallback(onDisplayedFrame);
+    return;
+  }
   state.lastDisplayedMediaTime = metadata.mediaTime;
   if (state.ptsTable) {
     const f = currentFrame();
-    // Diagnostic — log when rVFC's f disagrees with the in-flight seek target.
-    // Helps confirm whether browser snap-quantized to a neighbor frame.
-    if (state.lastSeekTarget != null && f !== state.lastSeekTarget) {
-      console.log(`[rVFC] mediaTime=${metadata.mediaTime.toFixed(6)} computed_f=${f} target=${state.lastSeekTarget} (diff=${f - state.lastSeekTarget})`);
-    }
     if (state.lastSeekTarget != null && Math.abs(f - state.lastSeekTarget) <= 1) {
       state.lastSeekTarget = null;
     }
@@ -894,8 +899,6 @@ function onDisplayedFrame(_now, metadata) {
       el.scrubber.value = String(f);
       if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
       else clearOverlay();
-      // Also redraw the click marker if we are on the seed frame, so it stays
-      // visible even after the mask reload clearRect'd it.
       if (f === state.seedFrame && state.seedPoint && maskUrlForFrame(f) == null) {
         drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
       }
