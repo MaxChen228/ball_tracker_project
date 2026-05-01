@@ -80,7 +80,11 @@ def detect_pitch(
                 px=winner.px if winner else None,
                 py=winner.py if winner else None,
                 ball_detected=winner is not None,
-                candidates=blobs if winner else (blobs or None),
+                # Always pass through the actual blobs list. Empty list
+                # ("detector ran, found 0 candidates") must not collapse
+                # to None ("no detection attempted") — research-mode
+                # invariant: callers distinguish these cases.
+                candidates=blobs,
             )
         )
     ball_frames = sum(1 for f in out if f.ball_detected)
