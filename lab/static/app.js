@@ -650,6 +650,15 @@ async function loadFrameSource(slug) {
   if (seg && seg.in_frame != null && seg.out_frame != null) {
     fs.prefetchRange(seg.in_frame, seg.out_frame);
   }
+  // Reload UX: syncFromItem reset lastDisplayedFrame=0, but the active seg's
+  // mask lives at seed_frame ∈ [in, out]. Default to landing on seed_frame so
+  // the user sees the existing mask immediately without hunting on the timeline.
+  // Only auto-jump if we haven't moved off frame 0 (don't yank a user who
+  // already scrubbed somewhere during the load).
+  if (seg && seg.seed_frame != null && state.lastDisplayedFrame === 0 && state.ptsTable) {
+    jumpToFrame(seg.seed_frame);
+    return;
+  }
   // Repaint the current frame now that the source is ready.
   scheduleScrubPaint(state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0);
 }
@@ -1434,6 +1443,14 @@ async function fetchPts(slug) {
       el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
       updateMarkers();
       console.log(`pts loaded: ${j.pts.length} frames`);
+      // Reload UX (mirror of loadFrameSource): if pts arrives second, do the
+      // seed-frame auto-jump now. Guarded the same way so we never yank a
+      // user who already moved.
+      const seg = activeSegment();
+      if (seg && seg.seed_frame != null && state.lastDisplayedFrame === 0
+          && state.frameSource && !state.frameSourceLoading) {
+        jumpToFrame(seg.seed_frame);
+      }
     }
   } catch (e) { if (slug === state.current) showError(`pts fetch failed: ${e}`); }
 }
