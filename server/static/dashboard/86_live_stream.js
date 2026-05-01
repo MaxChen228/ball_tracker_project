@@ -168,26 +168,31 @@
         }
       } catch (_) {}
     });
-    es.addEventListener('ray', (evt) => {
+    es.addEventListener('rays', (evt) => {
       try {
         const data = JSON.parse(evt.data);
         const sid = data.sid;
         const cam = data.cam || '?';
         if (!currentLiveSession || currentLiveSession.session_id !== sid) return;
-        if (!Array.isArray(data.origin) || !Array.isArray(data.endpoint)) return;
-        // Fan-out: one event per candidate. Server stamps `cand_idx`
-        // (>=0 for fan-out, -1 for legacy single-ray) and `cost` so the
-        // dashboard ray store can later apply the same cost-threshold
-        // filter the viewer uses on post-pitch sessions.
-        pushLiveRay(sid, cam, {
-          origin: data.origin.map(Number),
-          endpoint: data.endpoint.map(Number),
-          t_rel_s: Number(data.t_rel_s || 0),
-          frame_index: Number(data.frame_index || 0),
-          cand_idx: data.cand_idx == null ? -1 : Number(data.cand_idx),
-          cost: data.cost == null ? null : Number(data.cost),
-        });
-        scheduleLiveRayRepaint();
+        if (!Array.isArray(data.rays)) return;
+        // Coalesced fan-out: one event per frame carrying all candidate
+        // rays. Server stamps `cand_idx` and `cost` per ray so the
+        // dashboard ray store can apply the same cost-threshold filter
+        // the viewer uses on post-pitch sessions.
+        let pushed = false;
+        for (const r of data.rays) {
+          if (!Array.isArray(r.origin) || !Array.isArray(r.endpoint)) continue;
+          pushLiveRay(sid, cam, {
+            origin: r.origin.map(Number),
+            endpoint: r.endpoint.map(Number),
+            t_rel_s: Number(r.t_rel_s || 0),
+            frame_index: Number(r.frame_index || 0),
+            cand_idx: r.cand_idx == null ? -1 : Number(r.cand_idx),
+            cost: r.cost == null ? null : Number(r.cost),
+          });
+          pushed = true;
+        }
+        if (pushed) scheduleLiveRayRepaint();
       } catch (_) {}
     });
     es.addEventListener('calibration_changed', () => {
@@ -197,32 +202,41 @@
       // its first paint done.
       if (typeof tickCalibration === 'function') tickCalibration();
     });
-    es.addEventListener('point', (evt) => {
+    es.addEventListener('points', (evt) => {
       try {
         const data = JSON.parse(evt.data);
         const sid = data.sid;
-        const pt = {
-          x: Number(data.x),
-          y: Number(data.y),
-          z: Number(data.z),
-          t_rel_s: Number(data.t_rel_s || 0),
-        };
+        if (!Array.isArray(data.points) || data.points.length === 0) return;
         const arr = livePointStore.get(sid) || [];
-        arr.push(pt);
+        const isCurrent = currentLiveSession && currentLiveSession.session_id === sid;
+        let lastPt = null;
+        let allFastPath = true;
+        for (const raw of data.points) {
+          const pt = {
+            x: Number(raw.x),
+            y: Number(raw.y),
+            z: Number(raw.z),
+            t_rel_s: Number(raw.t_rel_s || 0),
+          };
+          arr.push(pt);
+          lastPt = pt;
+          if (isCurrent) {
+            if (!currentLiveSession.point_depths) currentLiveSession.point_depths = [];
+            currentLiveSession.point_depths.push(pt.z);
+            if (currentLiveSession.point_depths.length > 20) {
+              currentLiveSession.point_depths.shift();
+            }
+            // Fast path: append to the already-anchored live trace slot.
+            // Falls back to a full repaint if the slot is stale (first
+            // point after an arm, or structural change invalidated cache).
+            if (!extendLivePoint(pt)) allFastPath = false;
+          }
+        }
         livePointStore.set(sid, arr);
-        if (currentLiveSession && currentLiveSession.session_id === sid) {
+        if (isCurrent) {
           currentLiveSession.point_count = arr.length;
           currentLiveSession.last_point_at_ms = Date.now();
-          if (!currentLiveSession.point_depths) currentLiveSession.point_depths = [];
-          currentLiveSession.point_depths.push(pt.z);
-          if (currentLiveSession.point_depths.length > 20) {
-            currentLiveSession.point_depths.shift();
-          }
-          // Fast path: append to the already-anchored live trace slot.
-          // Falls back to a full repaint if the slot is stale (e.g. first
-          // point after an arm, or after a structural change invalidated
-          // the cached index).
-          if (!extendLivePoint(pt)) repaintCanvas();
+          if (!allFastPath) repaintCanvas();
         } else {
           repaintCanvas();
         }
