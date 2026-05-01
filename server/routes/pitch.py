@@ -13,48 +13,14 @@ import session_results
 from detection import HSVRange, ShapeGate
 from pipeline import ProcessingCanceled
 from schemas import (
-    HSVRangePayload,
+    DetectionConfigSnapshotPayload,
     PitchPayload,
     SessionResult,
-    ShapeGatePayload,
 )
 from video import probe_dims, probe_frame_count
 
 router = APIRouter()
 logger = logging.getLogger("ball_tracker")
-
-
-def _stamp_detection_config(
-    pitch: PitchPayload,
-    *,
-    hsv_range,
-    shape_gate,
-    preset_name: str | None,
-) -> None:
-    """Freeze the detection-time config onto the pitch so reprocess can
-    reproduce exactly which HSV / shape-gate basis was in effect when
-    this pitch's candidates were scored. Mirrors the cd87995
-    PairingTuning-on-SessionResult pattern. Idempotent — callers can
-    stamp on every state.record() and the wire shape stays stable.
-
-    Selector cost weights are no longer freezable: they're hardcoded
-    `_W_ASPECT` / `_W_FILL` constants in `candidate_selector`, so a
-    pitch's cost basis is fully determined by the (HSV, shape_gate)
-    pair plus the constants.
-
-    `preset_name` is the active preset filename at arm time (from
-    `state.live_session_preset_name`); None when no live session was
-    pre-stamped (server_post-only flow / test fixture)."""
-    pitch.hsv_range_used = HSVRangePayload(
-        h_min=hsv_range.h_min, h_max=hsv_range.h_max,
-        s_min=hsv_range.s_min, s_max=hsv_range.s_max,
-        v_min=hsv_range.v_min, v_max=hsv_range.v_max,
-    )
-    pitch.shape_gate_used = ShapeGatePayload(
-        aspect_min=shape_gate.aspect_min,
-        fill_min=shape_gate.fill_min,
-    )
-    pitch.live_preset_name = preset_name
 
 
 def _summarize_result(result: SessionResult) -> dict[str, Any]:
@@ -202,23 +168,17 @@ async def pitch(
     # to the current state snapshot. The server_post path overwrites these
     # later in `_run_server_detection` with the snapshot it actually called
     # `detect_pitch` with.
-    frozen = state.live_session_frozen_config(payload_obj.session_id)
-    if frozen is not None:
-        hsv_used, gate_used = frozen
-    else:
-        hsv_used = state.hsv_range()
-        gate_used = state.shape_gate()
-    preset_used = state.live_session_preset_name(payload_obj.session_id)
-    if preset_used is None:
-        # No LivePairingSession pre-stamp (test fixture / server_post-only
-        # flow); fall back to the current dashboard active preset name.
-        preset_used = state.detection_config().preset
-    _stamp_detection_config(
-        payload_obj,
-        hsv_range=hsv_used,
-        shape_gate=gate_used,
-        preset_name=preset_used,
-    )
+    # Stamp the live detection-config snapshot frozen at arm time.
+    # When the session never armed (test fixture / server_post-only),
+    # state.live_session_frozen_config returns None; build a fresh
+    # snapshot from current disk config so the pitch always carries
+    # an explicit live snapshot.
+    frozen_live = state.live_session_frozen_config(payload_obj.session_id)
+    if frozen_live is None:
+        frozen_live = DetectionConfigSnapshotPayload.from_detection_config(
+            state.detection_config()
+        )
+    payload_obj.live_config_used = frozen_live
 
     result = await asyncio.to_thread(state.record, payload_obj)
 
