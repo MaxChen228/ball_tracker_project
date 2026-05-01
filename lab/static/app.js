@@ -551,6 +551,25 @@ function loadMaskForFrame(frame) {
   img.src = url;
 }
 
+// Single source of truth for "redraw the overlay for the current frame given
+// current active segment + state". Call this from any state-change site that
+// doesn't naturally trigger a frame change (chip activation, rehydrate after
+// reload, SSE mask delivery on the visible frame, optimistic seek snap).
+// loadMaskForFrame's blitCachedMask already handles the seed-frame crosshair
+// fallback when a mask exists; the else branch here covers no-mask + crosshair.
+function repaintOverlayForCurrentFrame() {
+  const f = currentFrame();
+  if (maskUrlForFrame(f) != null) {
+    loadMaskForFrame(f);
+    return;
+  }
+  clearOverlay();
+  const seg = activeSegment();
+  if (seg && f === seg.seed_frame && seg.seed_point && state.showSeedMarker) {
+    drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
+  }
+}
+
 async function prefetchMasks(slug) {
   const myToken = ++state.prefetchAbort;
   if (!el.overlay.width || !el.overlay.height) {
@@ -975,7 +994,7 @@ function startSse() {
         };
         img.src = maskUrl;
       } else if (frame === currentFrame()) {
-        loadMaskForFrame(frame);
+        repaintOverlayForCurrentFrame();
       }
       updateStatus();
     }
@@ -1196,6 +1215,11 @@ async function activateSegment(segId) {
     state.frameSource.prefetchRange(seg.in_frame, seg.out_frame);
   }
   scheduleScrubPaint(state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0);
+  // scheduleScrubPaint relies on FrameSource being loaded; if user just reloaded
+  // and clicks a chip before the mp4 demux finished, the paint silently no-ops.
+  // repaintOverlayForCurrentFrame only touches the overlay canvas — no FrameSource
+  // needed — so the mask + crosshair show up immediately even on cold cache.
+  repaintOverlayForCurrentFrame();
   updateStatus();
 }
 
@@ -1439,8 +1463,7 @@ async function rehydrateMasks(slug) {
       state.propExpected = (seg.in_frame != null && seg.out_frame != null)
         ? (seg.out_frame - seg.in_frame + 1) : state.propDoneCount;
     }
-    const f = currentFrame();
-    if (active.has(f)) loadMaskForFrame(f);
+    repaintOverlayForCurrentFrame();
     updateStatus();
     prefetchMasks(slug);
   } catch (e) { console.warn("rehydrate masks failed", e); }
@@ -1557,12 +1580,7 @@ function onDisplayedFrame(_now, metadata) {
     if (f !== state.lastDisplayedFrame) {
       state.lastDisplayedFrame = f;
       el.scrubber.value = String(f);
-      if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
-      else clearOverlay();
-      const seg = activeSegment();
-      if (seg && f === seg.seed_frame && seg.seed_point && state.showSeedMarker && maskUrlForFrame(f) == null) {
-        drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
-      }
+      repaintOverlayForCurrentFrame();
     }
   }
   updateStatus();
@@ -1583,9 +1601,7 @@ function bindUi() {
   el.video.addEventListener("timeupdate", () => {
     if (typeof el.video.requestVideoFrameCallback === "function") return;
     if (state.fps != null) el.scrubber.value = String(currentFrame());
-    const f = currentFrame();
-    if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
-    else clearOverlay();
+    repaintOverlayForCurrentFrame();
     updateStatus();
   });
   el.videoWrap.addEventListener("click", onVideoClick);
