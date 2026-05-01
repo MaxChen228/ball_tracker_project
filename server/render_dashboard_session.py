@@ -127,6 +127,8 @@ def _render_hsv_body(
         cfg = detection_config
         if "hsv" not in cfg or "shape_gate" not in cfg:
             raise KeyError("detection_config missing required 'hsv' or 'shape_gate'")
+        if "preset" not in cfg or "modified_fields" not in cfg:
+            raise KeyError("detection_config missing required 'preset' or 'modified_fields'")
         hsv_obj = cfg["hsv"]
         sg_obj = cfg["shape_gate"]
         if not isinstance(hsv_obj, dict) or not isinstance(sg_obj, dict):
@@ -142,8 +144,11 @@ def _render_hsv_body(
             )
         hsv = hsv_obj
         sg = sg_obj
-    preset_name = cfg.get("preset")
-    modified_fields = cfg.get("modified_fields") or []
+    preset_name = cfg["preset"] if detection_config is not None else None
+    modified_fields_obj = cfg["modified_fields"] if detection_config is not None else []
+    if not isinstance(modified_fields_obj, list):
+        raise TypeError("detection_config 'modified_fields' must be a list")
+    modified_fields = modified_fields_obj
     presets_by_name = {p.name: p for p in presets}
 
     h_lo, h_hi = int(hsv.get("h_min", 25)), int(hsv.get("h_max", 55))

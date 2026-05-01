@@ -43,3 +43,44 @@ def test_render_hsv_body_rejects_partial_config():
             },
             [_preset()],
         )
+
+
+def test_render_hsv_body_rejects_missing_identity_fields():
+    cfg = {
+        "hsv": {
+            "h_min": 25,
+            "h_max": 55,
+            "s_min": 90,
+            "s_max": 255,
+            "v_min": 90,
+            "v_max": 255,
+        },
+        "shape_gate": {
+            "aspect_min": 0.70,
+            "fill_min": 0.55,
+        },
+        "preset": "tennis",
+    }
+    with pytest.raises(KeyError, match="modified_fields"):
+        _render_hsv_body(cfg, [_preset()])
+
+
+def test_render_hsv_body_rejects_non_list_modified_fields():
+    cfg = {
+        "hsv": {
+            "h_min": 25,
+            "h_max": 55,
+            "s_min": 90,
+            "s_max": 255,
+            "v_min": 90,
+            "v_max": 255,
+        },
+        "shape_gate": {
+            "aspect_min": 0.70,
+            "fill_min": 0.55,
+        },
+        "preset": "tennis",
+        "modified_fields": "hsv.h_min",
+    }
+    with pytest.raises(TypeError, match="modified_fields"):
+        _render_hsv_body(cfg, [_preset()])
