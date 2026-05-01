@@ -465,6 +465,68 @@ BUS = SseBus()
 PROP_THREADS: dict[str, threading.Thread] = {}
 
 
+# Per-slug locks so concurrent extract requests for the same slug serialize
+# rather than racing on the on-disk frames dir.
+_EXTRACT_LOCKS: dict[str, threading.Lock] = {}
+_EXTRACT_LOCKS_GUARD = threading.Lock()
+
+
+def _get_extract_lock(slug: str) -> threading.Lock:
+    with _EXTRACT_LOCKS_GUARD:
+        lk = _EXTRACT_LOCKS.get(slug)
+        if lk is None:
+            lk = threading.Lock()
+            _EXTRACT_LOCKS[slug] = lk
+        return lk
+
+
+def _ensure_range_extracted(slug: str, in_f: int, out_f: int) -> None:
+    """Run extract_range_to_dir if its sidecar isn't already populated for
+    this exact range. Single PyAV pass decodes the whole [in,out] interval
+    so propagate has frames ready on disk."""
+    try:
+        item = STORE.get(slug)
+    except KeyError:
+        return
+    source = SOURCES_DIR / item["source_video"]
+    fdir = frames_dir_for(slug)
+    sidecar = fdir.parent / "local_to_source.json"
+    if sidecar.is_file():
+        try:
+            cached = json.loads(sidecar.read_text(encoding="utf-8"))
+            if cached.get("in_frame") == in_f and cached.get("out_frame") == out_f:
+                return
+        except Exception:
+            pass
+    lock = _get_extract_lock(slug)
+    if not lock.acquire(blocking=False):
+        return  # another thread already extracting
+    try:
+        pts_payload = get_pts_table(slug)
+        extract_range_to_dir(source, in_f, out_f, fdir, pts_payload["pts"])
+    except Exception as e:
+        print(f"[labeller] background extract {slug} failed: {e}", flush=True)
+    finally:
+        lock.release()
+
+
+def _kick_background_extract(slug: str, in_f: int, out_f: int) -> None:
+    threading.Thread(
+        target=_ensure_range_extracted, args=(slug, in_f, out_f), daemon=True
+    ).start()
+
+
+def _bootstrap_extract_all() -> None:
+    """At startup, eagerly extract every seeded session's [in,out] range so
+    warmUp on first selection hits pre-extracted JPEGs from disk instead of
+    triggering per-frame cv2 decodes."""
+    for it in STORE.list():
+        in_f = it.get("in_frame")
+        out_f = it.get("out_frame")
+        if isinstance(in_f, int) and isinstance(out_f, int) and in_f < out_f:
+            _kick_background_extract(it["slug"], in_f, out_f)
+
+
 def _recover_crashed_propagations() -> None:
     """If the previous server died mid-propagate, items remain stamped
     `running` and the queue's `idle`-filter would skip them forever. Reset
@@ -530,6 +592,12 @@ def _queue_runner() -> None:
             except Exception as e:
                 print(f"[labeller] queue: {slug} failed: {e}", flush=True)
                 STORE.update(slug, propagate_status="failed")
+            # Drop the predictor between queue items. SAM2's reset_state +
+            # torch.mps.empty_cache inside Propagator.propagate() do not fully
+            # release the per-session activation buffers + MPS pool fragments;
+            # over 3 consecutive sessions RSS climbs past 10GB. Reloading the
+            # model costs ~1.5s on M-series MPS, paid once per item.
+            unload_propagator()
             if _QUEUE_CANCEL.is_set():
                 # Stop-Queue cancelled this item mid-run (run_propagate caught
                 # the exception and stamped "failed"). Reset to idle so the
@@ -652,12 +720,15 @@ def run_propagate(slug: str) -> None:
 
 SLUG_RE = re.compile(r"^/api/items/([A-Za-z0-9_\-]+)/(trim|seed|propagate|propagate/cancel|events|pts|masks|delete)$")
 MASK_RE = re.compile(r"^/mask/([A-Za-z0-9_\-]+)/(\d{5})\.png$")
-FRAME_RE = re.compile(r"^/frame/([A-Za-z0-9_\-]+)/(\d+)\.jpg$")
 CLIP_RE = re.compile(r"^/clip/([A-Za-z0-9_\-]+)\.mp4$")
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "lab-labeller/1.0"
+    # HTTP/1.1 keep-alive: reuse TCP across SSE + clip range requests. (The
+    # legacy per-JPEG /frame/<NNNNN>.jpg path is gone; clips now stream as one
+    # MP4 + WebCodecs decode in the browser.)
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write(f"[{self.log_date_time_string()}] {fmt % args}\n")
@@ -752,62 +823,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.NOT_FOUND, "no mask")
             return
         self._send_bytes(HTTPStatus.OK, path.read_bytes(), "image/png")
-
-    def _serve_frame(self, slug: str, src_idx_str: str) -> None:
-        """Serve a single source-frame as JPG.
-
-        Within the propagated [in,out] range we map source idx → local idx via
-        local_to_source.json (already on disk from extract_range_to_dir) and
-        return the cached JPG. Outside the range we decode on demand and cache
-        to all_frames/<src:05d>.jpg so future scrubs are O(1).
-
-        This exists so the frontend can do img-swap scrubbing instead of
-        video.currentTime seek — Chrome refuses some sub-frame paused seeks
-        and silently keeps the old frame on screen, which is exactly the
-        flicker the user reported.
-        """
-        try:
-            src_idx = int(src_idx_str)
-        except ValueError:
-            self._send_text(HTTPStatus.BAD_REQUEST, "bad idx")
-            return
-        try:
-            item = STORE.get(slug)
-        except KeyError:
-            self._send_text(HTTPStatus.NOT_FOUND, "no such slug")
-            return
-
-        idir = item_dir(slug)
-        sidecar = idir / "local_to_source.json"
-        if sidecar.is_file():
-            mapping = json.loads(sidecar.read_text(encoding="utf-8"))["local_to_source"]
-            try:
-                local = mapping.index(src_idx)
-            except ValueError:
-                local = None
-            if local is not None:
-                jpg = frames_dir_for(slug) / f"{local:05d}.jpg"
-                if jpg.is_file():
-                    self._send_bytes(HTTPStatus.OK, jpg.read_bytes(), "image/jpeg")
-                    return
-
-        cache_dir = idir / "all_frames"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cached = cache_dir / f"{src_idx:05d}.jpg"
-        if cached.is_file():
-            self._send_bytes(HTTPStatus.OK, cached.read_bytes(), "image/jpeg")
-            return
-
-        try:
-            pts_payload = get_pts_table(slug)
-            arr = extract_one_frame(SOURCES_DIR / item["source_video"], src_idx, pts_payload["pts"])
-        except Exception as e:
-            self._send_text(HTTPStatus.INTERNAL_SERVER_ERROR, f"decode failed: {e}")
-            return
-        import cv2  # type: ignore
-
-        cv2.imwrite(str(cached), arr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        self._send_bytes(HTTPStatus.OK, cached.read_bytes(), "image/jpeg")
 
     def _serve_sse(self, slug: str) -> None:
         # __queue__ is a reserved channel for global queue events; no manifest entry.
@@ -904,15 +919,11 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self._serve_mask(m.group(1), m.group(2))
             return
-        m = FRAME_RE.match(p)
-        if m:
-            self._serve_frame(m.group(1), m.group(2))
-            return
         m = CLIP_RE.match(p)
         if m:
             self._serve_clip(m.group(1))
             return
-        if p.startswith("/static/") or p in ("/", "/index.html", "/app.js", "/style.css"):
+        if p.startswith("/static/") or p in ("/", "/index.html", "/app.js", "/style.css", "/frame_source.js") or p.startswith("/vendor/"):
             self._serve_static(p[len("/static"):] if p.startswith("/static/") else p)
             return
         self._send_text(HTTPStatus.NOT_FOUND, f"no route: {p}")
@@ -981,6 +992,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_text(HTTPStatus.BAD_REQUEST, "in_frame/out_frame must be int with in<out")
                 return
             STORE.update(slug, in_frame=in_f, out_frame=out_f)
+            # Kick the single-pass PyAV extract for the new range. Returns
+            # immediately; warmUp's /frame fetches will then hit pre-decoded
+            # JPEGs on disk instead of forcing per-frame decode.
+            _kick_background_extract(slug, in_f, out_f)
             self._send_json(HTTPStatus.OK, {"ok": True})
             return
 
@@ -1047,12 +1062,27 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
 
+class _QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """Suppress the noisy traceback stdlib emits when a browser aborts a
+    fetch / closes an EventSource mid-request — that surfaces as
+    ConnectionResetError or BrokenPipeError before handle_one_request
+    can even read the request line. Real exceptions still propagate."""
+
+    def handle_error(self, request, client_address):
+        import sys
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def main() -> None:
     STORE.scan_sources()
     _recover_crashed_propagations()
+    _bootstrap_extract_all()
     port = int(os.environ.get("LABELLER_PORT", "8876"))
     addr = ("127.0.0.1", port)
-    server = ThreadingHTTPServer(addr, Handler)
+    server = _QuietThreadingHTTPServer(addr, Handler)
     print(f"[labeller] http://{addr[0]}:{addr[1]}", flush=True)
     print(f"[labeller] static={STATIC_DIR}", flush=True)
     print(f"[labeller] workspace={WORKSPACE}", flush=True)

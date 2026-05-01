@@ -38,44 +38,16 @@ const state = {
   queueRunning: false,
   queueSse: null,
   queueSnapshot: { running: false, current: null, done: 0, ready: 0, total: 0 },
-  // Pre-tinted canvases keyed by source frame index. We build one per mask
-  // (sync, ~5ms each) the first time we see it, then `showMaskFor` blits it
-  // in O(1). Without this cache, every arrow-key step re-decoded the PNG and
-  // re-ran the per-pixel tint loop, leaving the overlay blank for 30-60ms —
-  // the visible "flicker" the user reported.
+  // Pre-tinted canvases keyed by source frame index, built lazily as masks
+  // arrive over SSE or via scrub. Costs ~5ms per first paint, then O(1) blits.
   tintedCache: new Map(),
   prefetchAbort: 0,
-  // ImageBitmap LRU keyed by source frame index. Scrub-mode paint draws
-  // bitmaps to #frame-canvas synchronously alongside the mask blit, so the
-  // base image and the overlay can never desynchronise. Without this we
-  // had a race: <img>.src=... only starts a fetch+decode, mask blits from
-  // memory immediately — two consecutive arrow keys faster than image
-  // decode left the displayed frame stale while the mask jumped ahead.
-  frameBitmapCache: new Map(),
-  framePrefetchAbort: 0,
+  // WebCodecs frame source: one MP4 download → mp4box demux → VideoDecoder
+  // → ImageBitmap cache, keyed by frame index. Recreated per-slug.
+  frameSource: null,
   scrubPaintToken: 0,
-  frameBitmapAspect: null,
-  warmUpProgress: null,
+  frameSourceLoading: false,
 };
-
-const FRAME_BITMAP_CACHE_MAX = 800;
-const FRAME_PREFETCH_CONCURRENCY = 4;
-const WARM_UP_CONCURRENCY = 16;
-// Display-only target width for decoded ImageBitmaps. Full-res 1920×1080
-// JPG decodes jam scrubber drag at 60Hz on M-series; 640 cuts pixel volume
-// 9× vs source. Server-side frame extraction and SAM2 propagation still run
-// on the full-res source MOV — this only affects browser preview.
-const SCRUB_PREVIEW_MAX_W = 640;
-
-function clearSeedMask() {
-  if (state.seedMaskUrl) URL.revokeObjectURL(state.seedMaskUrl);
-  state.seedMaskUrl = null;
-}
-
-function clearPropMasks() {
-  for (const url of state.propMaskUrlByFrame.values()) URL.revokeObjectURL(url);
-  state.propMaskUrlByFrame.clear();
-}
 
 const el = {
   video: document.getElementById("video"),
@@ -113,10 +85,23 @@ function clearError() {
   el.statusbar.classList.remove("error");
 }
 
+function clearSeedMask() {
+  if (state.seedMaskUrl) URL.revokeObjectURL(state.seedMaskUrl);
+  state.seedMaskUrl = null;
+}
+
+function clearPropMasks() {
+  for (const url of state.propMaskUrlByFrame.values()) URL.revokeObjectURL(url);
+  state.propMaskUrlByFrame.clear();
+}
+
 function currentFrame() {
-  // Frame index = position in the dense PTS list (the only source of truth,
-  // mirrors viewer's `unionTimes`). Snap to nearest PTS so rVFC's mediaTime
-  // (exact PTS of compositor-painted frame) lands on the matching index.
+  // Scrub mode: painted canvas is truth — return lastDisplayedFrame so the
+  // status line never claims a frame the user can't see yet.
+  if (state.scrubMode) {
+    return state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0;
+  }
+  // Play mode: snap rVFC mediaTime to the dense PTS list.
   const tbl = state.ptsTable;
   if (!tbl || tbl.length === 0) return 0;
   const t = state.lastDisplayedMediaTime != null
@@ -134,8 +119,6 @@ function currentFrame() {
 }
 
 function frameToTime(f) {
-  // Dense pts list — pts[f] always defined. Seek to mid-display-window so the
-  // browser unambiguously decodes f (not f-1 or f+1).
   const tbl = state.ptsTable;
   if (!tbl || tbl.length === 0) return 0;
   const pts = tbl[f];
@@ -144,36 +127,27 @@ function frameToTime(f) {
   return pts + prevGap / 2;
 }
 
-function fmt(n) {
-  return String(n == null ? "-" : n);
-}
+function fmt(n) { return String(n == null ? "-" : n); }
 
 function updateStatus() {
   const f = currentFrame();
-  // Scrubber thumb is derived state — keep it locked to currentFrame so play /
-  // arrow / pause / propagate-tick paths can never leave a stale value behind.
-  if (state.totalFrames > 0 && document.activeElement !== el.scrubber) {
+  if (state.totalFrames > 0 && !state.scrubMode && document.activeElement !== el.scrubber) {
     const want = String(f);
     if (el.scrubber.value !== want) el.scrubber.value = want;
   }
-  // Derive `t` from the snapped frame index so f and t can never disagree.
-  // Pre-fix `t` came from `el.video.currentTime` during play; that runs
-  // ahead of rVFC's `mediaTime` (the actually-painted PTS) by up to one
-  // frame, which made `f=NNNN t=X.YYYs` look self-inconsistent.
   const tbl = state.ptsTable;
   let t;
-  if (tbl && f >= 0 && f < tbl.length) {
-    t = tbl[f];
-  } else if (state.lastDisplayedMediaTime != null) {
-    t = state.lastDisplayedMediaTime;
-  } else {
-    t = el.video.currentTime || 0;
-  }
+  if (tbl && f >= 0 && f < tbl.length) t = tbl[f];
+  else if (state.lastDisplayedMediaTime != null) t = state.lastDisplayedMediaTime;
+  else t = el.video.currentTime || 0;
   const pt = state.seedPoint ? `(${state.seedPoint[0]},${state.seedPoint[1]})` : "-";
   const fStr = String(f).padStart(4, "0");
   let statusTag = state.propagateStatus;
   let computing = false;
-  if (state.seedComputing) {
+  if (state.frameSourceLoading) {
+    statusTag = "loading clip (WebCodecs decode init)…";
+    computing = true;
+  } else if (state.seedComputing) {
     const elapsed = ((performance.now() - state.seedComputeStartMs) / 1000).toFixed(1);
     statusTag = `seeding... ${elapsed}s (SAM2 image predictor)`;
     computing = true;
@@ -201,27 +175,17 @@ function updateStatus() {
     }
     computing = true;
   } else if (state.propagateStatus === "done" && state.propDoneCount > 0) {
-    const tail = state.propPhaseElapsed > 0
-      ? `in ${state.propPhaseElapsed}s`
-      : "(cached on disk)";
+    const tail = state.propPhaseElapsed > 0 ? `in ${state.propPhaseElapsed}s` : "(cached on disk)";
     statusTag = `propagate done: ${state.propDoneCount}/${state.propExpected} frames ${tail}`;
   }
   if (computing) el.statusbar.classList.add("computing");
   else el.statusbar.classList.remove("computing");
-  let line =
+  el.status.textContent =
     `f=${fStr} t=${t.toFixed(3)}s | in=${fmt(state.inFrame)} out=${fmt(state.outFrame)} seed=${fmt(state.seedFrame)} pt=${pt} | status=${statusTag}${state.pendingSeedClick ? " (click to set seed point)" : ""}`;
-  if (state.warmUpProgress) {
-    const { done, total } = state.warmUpProgress;
-    line += ` | warm ${done}/${total}`;
-  }
-  el.status.textContent = line;
 }
 
 function updateMarker(markerEl, frame) {
-  if (frame == null || state.totalFrames <= 0) {
-    markerEl.hidden = true;
-    return;
-  }
+  if (frame == null || state.totalFrames <= 0) { markerEl.hidden = true; return; }
   const pct = (frame / Math.max(1, state.totalFrames - 1)) * 100;
   markerEl.style.left = `calc(${pct}% )`;
   markerEl.hidden = false;
@@ -265,191 +229,48 @@ function clearDoneFills() {
   state.prefetchAbort++;
 }
 
-// Diagnostic to pinpoint which layer is broken when user reports
-// "different frame indices show identical pixels". Compares:
-//   - bytes received from server (sha256 of blob)
-//   - decoded ImageBitmap pixels (via offscreen draw + getImageData)
-//   - what's actually on the visible #frame-canvas right now
-window.debugFrames = async function (a, b) {
-  const slug = state.current;
-  if (!slug) { console.log("no current slug"); return; }
-  const c = el.frameCanvas;
-  const ctx = c.getContext("2d");
-  const out = { slug, a, b };
-
-  async function sha(buf) {
-    const h = await crypto.subtle.digest("SHA-256", buf);
-    return [...new Uint8Array(h)].slice(0, 8).map(x => x.toString(16).padStart(2,"0")).join("");
-  }
-  async function pull(f) {
-    const url = `${API_BASE}/frame/${encodeURIComponent(slug)}/${String(f).padStart(5,"0")}.jpg`;
-    const r = await fetch(url, { cache: "no-store" });
-    const buf = await r.arrayBuffer();
-    const blob = new Blob([buf], { type: "image/jpeg" });
-    const bm = await createImageBitmap(blob);
-    const off = new OffscreenCanvas(bm.width, bm.height);
-    const octx = off.getContext("2d");
-    octx.drawImage(bm, 0, 0);
-    const data = octx.getImageData(0, 0, Math.min(200, bm.width), Math.min(200, bm.height)).data;
-    return { bytesHash: await sha(buf), bytesLen: buf.byteLength, w: bm.width, h: bm.height, sample: data, bm };
-  }
-
-  const [ra, rb] = await Promise.all([pull(a), pull(b)]);
-  out.fetched_a = { hash: ra.bytesHash, len: ra.bytesLen, dim: `${ra.w}x${ra.h}` };
-  out.fetched_b = { hash: rb.bytesHash, len: rb.bytesLen, dim: `${rb.w}x${rb.h}` };
-
-  let sampleSame = 0;
-  for (let i = 0; i < ra.sample.length; i++) if (ra.sample[i] === rb.sample[i]) sampleSame++;
-  out.decoded_pixel_same_pct = (sampleSame / ra.sample.length * 100).toFixed(2) + "%";
-
-  // Force-paint a then b to the real visible canvas with delay so user can SEE.
-  ctx.clearRect(0, 0, c.width, c.height);
-  if (c.width !== ra.w) c.width = ra.w;
-  if (c.height !== ra.h) c.height = ra.h;
-  ctx.drawImage(ra.bm, 0, 0);
-  await new Promise(r => setTimeout(r, 800));
-  const visA = ctx.getImageData(0, 0, 200, 200).data;
-
-  ctx.clearRect(0, 0, c.width, c.height);
-  ctx.drawImage(rb.bm, 0, 0);
-  await new Promise(r => setTimeout(r, 800));
-  const visB = ctx.getImageData(0, 0, 200, 200).data;
-
-  let visSame = 0;
-  for (let i = 0; i < visA.length; i++) if (visA[i] === visB[i]) visSame++;
-  out.canvas_pixel_same_pct = (visSame / visA.length * 100).toFixed(2) + "%";
-
-  // Cache state
-  out.cache_a = state.frameBitmapCache.has(a);
-  out.cache_b = state.frameBitmapCache.has(b);
-  out.cache_a_eq_b = state.frameBitmapCache.get(a) === state.frameBitmapCache.get(b);
-
-  // Visible elements
-  const vw = el.videoWrap.getBoundingClientRect();
-  const cv = c.getBoundingClientRect();
-  const vd = el.video.getBoundingClientRect();
-  out.scrub_class = el.videoWrap.classList.contains("scrub");
-  out.canvas_rect = `${cv.width.toFixed(0)}x${cv.height.toFixed(0)} @ ${cv.left.toFixed(0)},${cv.top.toFixed(0)}`;
-  out.video_rect = `${vd.width.toFixed(0)}x${vd.height.toFixed(0)} @ ${vd.left.toFixed(0)},${vd.top.toFixed(0)}`;
-  out.video_visibility = getComputedStyle(el.video).visibility;
-  out.video_currentTime = el.video.currentTime;
-
-  console.log(out);
-  return out;
-};
-
-window.debugMask = async function (frame) {
-  const out = { frame };
-  out.urlMapHas = state.propMaskUrlByFrame.has(frame);
-  out.url = state.propMaskUrlByFrame.get(frame) || null;
-  out.cacheHas = state.tintedCache.has(frame);
-  if (out.cacheHas) {
-    const c = state.tintedCache.get(frame);
-    out.cacheSize = `${c.width}x${c.height}`;
-    const ctx = c.getContext("2d");
-    const img = ctx.getImageData(0, 0, c.width, c.height);
-    let nz = 0;
-    for (let i = 3; i < img.data.length; i += 4) if (img.data[i] > 0) nz++;
-    out.cacheNonzeroAlpha = nz;
-  }
-  if (out.url) {
-    const r = await fetch(out.url);
-    out.fetchStatus = r.status;
-    const blob = await r.blob();
-    out.fetchBytes = blob.size;
-    const im = new Image();
-    im.src = URL.createObjectURL(blob);
-    await new Promise((res, rej) => { im.onload = res; im.onerror = rej; });
-    out.imgNatural = `${im.naturalWidth}x${im.naturalHeight}`;
-    const tmp = document.createElement("canvas");
-    tmp.width = im.naturalWidth; tmp.height = im.naturalHeight;
-    const tctx = tmp.getContext("2d");
-    tctx.drawImage(im, 0, 0);
-    const id = tctx.getImageData(0, 0, tmp.width, tmp.height);
-    let nz = 0;
-    for (let i = 0; i < id.data.length; i += 4) if (id.data[i] > 0) nz++;
-    out.rawNonzeroPixels = nz;
-  }
-  out.overlaySize = `${el.overlay.width}x${el.overlay.height}`;
-  out.currentFrame = currentFrame();
-  console.log(JSON.stringify(out, null, 2));
-  return out;
-};
-
-window.debugTimeline = function () {
-  const wrap = document.getElementById("timeline-wrap");
-  const wrapRect = wrap.getBoundingClientRect();
-  const W = wrapRect.width;
-  const N = state.totalFrames;
-  const denom = Math.max(1, N - 1);
-  const expectPct = (f) => (f / denom) * 100;
-  const elemPct = (rect) => ((rect.left - wrapRect.left) / W) * 100;
-  const out = {
-    totalFrames: N,
-    timelineWidthPx: W.toFixed(2),
-    inFrame: state.inFrame, outFrame: state.outFrame, seedFrame: state.seedFrame,
-    expectedPct: {
-      in: state.inFrame != null ? expectPct(state.inFrame).toFixed(3) : null,
-      out: state.outFrame != null ? expectPct(state.outFrame).toFixed(3) : null,
-      seed: state.seedFrame != null ? expectPct(state.seedFrame).toFixed(3) : null,
-    },
-    actualMarkerPct: {
-      in: !el.mIn.hidden ? elemPct(el.mIn.getBoundingClientRect()).toFixed(3) : "hidden",
-      out: !el.mOut.hidden ? elemPct(el.mOut.getBoundingClientRect()).toFixed(3) : "hidden",
-      seed: !el.mSeed.hidden ? elemPct(el.mSeed.getBoundingClientRect()).toFixed(3) : "hidden",
-    },
-  };
-  const fillDivs = el.fills.children;
-  if (fillDivs.length > 0) {
-    const first = fillDivs[0].getBoundingClientRect();
-    const last = fillDivs[fillDivs.length - 1].getBoundingClientRect();
-    const sortedFrames = [...state.doneFrames].sort((a, b) => a - b);
-    out.fillCount = fillDivs.length;
-    out.fillFrameRange = [sortedFrames[0], sortedFrames[sortedFrames.length - 1]];
-    out.fillFirstActualPct = elemPct(first).toFixed(3);
-    out.fillFirstExpectedPct = expectPct(sortedFrames[0]).toFixed(3);
-    out.fillLastActualLeftPct = elemPct(last).toFixed(3);
-    out.fillLastActualRightPct = (((last.right - wrapRect.left) / W) * 100).toFixed(3);
-    out.fillLastExpectedPct = expectPct(sortedFrames[sortedFrames.length - 1]).toFixed(3);
-  }
-  const thumbVal = parseInt(el.scrubber.value, 10);
-  out.scrubberValue = thumbVal;
-  out.scrubberExpectedPct = expectPct(thumbVal).toFixed(3);
-  console.table(out);
-  return out;
-};
-
 function videoDisplayRect() {
-  // Returns the actual displayed video frame rect inside the <video> element,
-  // accounting for letterbox/pillarbox. Coords are in CSS pixels relative to
-  // the viewport (same frame as getBoundingClientRect()).
-  const v = el.video;
-  if (!v.videoWidth || !v.videoHeight) return null;
-  const rect = v.getBoundingClientRect();
-  const elemRatio = rect.width / rect.height;
-  const vidRatio = v.videoWidth / v.videoHeight;
+  // Returns the actual displayed video frame rect inside the wrap, accounting
+  // for letterbox/pillarbox. In scrub mode the canvas is what's painted; in
+  // play mode the <video> element shows. Both are object-fit: contain inside
+  // the same wrap, with identical intrinsic aspect, so a single rect logic
+  // works for either.
+  const wrapRect = el.videoWrap.getBoundingClientRect();
+  const fs = state.frameSource;
+  let w, h;
+  if (fs && fs.width && fs.height) { w = fs.width; h = fs.height; }
+  else if (el.video.videoWidth && el.video.videoHeight) {
+    w = el.video.videoWidth; h = el.video.videoHeight;
+  } else return null;
+  // Mirror the wrap's effective box. We intentionally use the canvas/video
+  // bounding rect because the wrap may have padding/decoration in future.
+  const refRect = state.scrubMode
+    ? el.frameCanvas.getBoundingClientRect()
+    : el.video.getBoundingClientRect();
+  if (refRect.width === 0 || refRect.height === 0) return null;
+  const elemRatio = refRect.width / refRect.height;
+  const vidRatio = w / h;
   let dispW, dispH, padX, padY;
   if (elemRatio > vidRatio) {
-    dispH = rect.height; dispW = dispH * vidRatio;
-    padX = (rect.width - dispW) / 2; padY = 0;
+    dispH = refRect.height; dispW = dispH * vidRatio;
+    padX = (refRect.width - dispW) / 2; padY = 0;
   } else {
-    dispW = rect.width; dispH = dispW / vidRatio;
-    padX = 0; padY = (rect.height - dispH) / 2;
+    dispW = refRect.width; dispH = dispW / vidRatio;
+    padX = 0; padY = (refRect.height - dispH) / 2;
   }
-  return { left: rect.left + padX, top: rect.top + padY, width: dispW, height: dispH };
+  return { left: refRect.left + padX, top: refRect.top + padY, width: dispW, height: dispH };
 }
 
 function resizeOverlay() {
-  const v = el.video;
+  const fs = state.frameSource;
+  const w = (fs && fs.width) || el.video.videoWidth;
+  const h = (fs && fs.height) || el.video.videoHeight;
+  if (!w || !h) return;
   const disp = videoDisplayRect();
   if (!disp) return;
-  // Only assign canvas .width / .height when they actually change — assigning
-  // even the same value is destructive (it resets the canvas and wipes the
-  // previously-blitted mask). Calling this every rVFC tick was the source
-  // of the play-time mask flicker.
-  if (el.overlay.width !== v.videoWidth) el.overlay.width = v.videoWidth;
-  if (el.overlay.height !== v.videoHeight) el.overlay.height = v.videoHeight;
-  const wrapRect = el.video.parentElement.getBoundingClientRect();
+  if (el.overlay.width !== w) el.overlay.width = w;
+  if (el.overlay.height !== h) el.overlay.height = h;
+  const wrapRect = el.videoWrap.getBoundingClientRect();
   el.overlay.style.width = disp.width + "px";
   el.overlay.style.height = disp.height + "px";
   el.overlay.style.left = (disp.left - wrapRect.left) + "px";
@@ -461,80 +282,11 @@ function clearOverlay() {
   ctx.clearRect(0, 0, el.overlay.width, el.overlay.height);
 }
 
-function _evictOldestFrameBitmap() {
-  const it = state.frameBitmapCache.entries().next();
-  if (it.done) return;
-  const [k, bm] = it.value;
-  state.frameBitmapCache.delete(k);
-  if (bm && typeof bm.close === "function") bm.close();
-}
-
-function enforceFrameCacheLRU() {
-  while (state.frameBitmapCache.size > FRAME_BITMAP_CACHE_MAX) _evictOldestFrameBitmap();
-}
-
-function touchFrameBitmap(frame) {
-  const v = state.frameBitmapCache.get(frame);
-  if (v === undefined) return undefined;
-  state.frameBitmapCache.delete(frame);
-  state.frameBitmapCache.set(frame, v);
-  return v;
-}
-
-function clearFrameBitmapCache() {
-  state.framePrefetchAbort++;
-  for (const bm of state.frameBitmapCache.values()) {
-    if (bm && typeof bm.close === "function") bm.close();
-  }
-  state.frameBitmapCache.clear();
-  state.frameBitmapAspect = null;
-}
-
-async function fetchFrameBitmap(slug, frame) {
-  const url = `${API_BASE}/frame/${encodeURIComponent(slug)}/${String(frame).padStart(5, "0")}.jpg`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`frame ${frame} HTTP ${r.status}`);
-  const blob = await r.blob();
-  // Decode at preview resolution (resize done off-thread as part of decode).
-  // resizeWidth alone preserves aspect ratio per spec; Chrome/Safari honour
-  // this. Only the browser preview uses this — server-side propagation reads
-  // the original full-res frames directly off disk.
-  return await createImageBitmap(blob, {
-    resizeWidth: SCRUB_PREVIEW_MAX_W,
-    resizeQuality: "medium",
-  });
-}
-
-async function ensureFrameBitmap(slug, frame) {
-  const cached = touchFrameBitmap(frame);
-  if (cached) return cached;
-  const bm = await fetchFrameBitmap(slug, frame);
-  // If the user switched items mid-fetch, drop the bitmap rather than
-  // polluting the new item's cache with a stale frame. The caller's
-  // scrubPaintToken check will short-circuit before it tries to draw.
-  if (slug !== state.current) {
-    if (bm && typeof bm.close === "function") bm.close();
-    return bm;
-  }
-  const existing = state.frameBitmapCache.get(frame);
-  if (existing) {
-    if (bm && typeof bm.close === "function") bm.close();
-    return touchFrameBitmap(frame);
-  }
-  state.frameBitmapCache.set(frame, bm);
-  enforceFrameCacheLRU();
-  return bm;
-}
-
 function drawFrameBitmap(bm) {
   const c = el.frameCanvas;
   const ctx = c.getContext("2d");
   if (c.width !== bm.width) c.width = bm.width;
   if (c.height !== bm.height) c.height = bm.height;
-  // Backing-store aspect drives the canvas's intrinsic ratio so
-  // `object-fit: contain` produces the same letterbox box as the overlay's
-  // `videoDisplayRect()`-derived rect.
-  state.frameBitmapAspect = bm.width / bm.height;
   ctx.clearRect(0, 0, c.width, c.height);
   ctx.drawImage(bm, 0, 0);
 }
@@ -548,7 +300,7 @@ function ensureTintedCanvas(frame, url) {
         if (el.overlay.width && el.overlay.height) {
           state.tintedCache.set(frame, buildTintedCanvas(img));
         }
-      } catch (_) { /* swallow — caller will fall back to clearOverlay */ }
+      } catch (_) {}
       resolve();
     };
     img.onerror = () => resolve();
@@ -556,9 +308,7 @@ function ensureTintedCanvas(frame, url) {
   });
 }
 
-// Atomic visual update: image + mask drawn in the same tick so the user
-// can never observe one moving without the other. Caller is responsible
-// for ensuring the tinted-mask cache is warm (via scheduleScrubPaint).
+// Atomic visual update: image + mask drawn in the same tick.
 function paintAtomic(frame, bm) {
   drawFrameBitmap(bm);
   const url = maskUrlForFrame(frame);
@@ -572,39 +322,20 @@ function paintAtomic(frame, bm) {
   }
 }
 
-// Schedules an atomic paint for `frame`. On full cache hit (bitmap + mask
-// tinted) paints synchronously this tick. On any miss keeps the previous
-// canvas pixels (no flicker, no mid-load desync) and paints both layers
-// together once everything is ready — but only if the user hasn't moved
-// on to a different frame in the meantime.
-// Find the closest frame index that already has a cached bitmap. Used as a
-// "good enough" preview while the exact target is still being fetched, so
-// fast scrub-drags don't visibly stall on cache misses.
-function nearestCachedFrame(frame) {
-  let best = null, bestDist = Infinity;
-  for (const f of state.frameBitmapCache.keys()) {
-    const d = Math.abs(f - frame);
-    if (d < bestDist) { bestDist = d; best = f; }
-  }
-  return best;
-}
-
+// Paint pipeline: token-guarded, never paints stale frames. Sync hot path
+// (cache + cache) does NOT await — it paints synchronously, no Promise tick.
 async function scheduleScrubPaint(frame) {
   const token = ++state.scrubPaintToken;
-  let bm = touchFrameBitmap(frame);
+  const fs = state.frameSource;
+  if (!fs) return;
+  let bm = fs.peek(frame);
   if (!bm) {
-    // Cache miss: paint nearest cached neighbor immediately so the scrubber
-    // tracks the user's drag without visible stutter. The exact target lands
-    // when the fetch completes (token-checked).
-    const near = nearestCachedFrame(frame);
-    if (near != null) {
-      const nearBm = state.frameBitmapCache.get(near);
-      if (nearBm) paintAtomic(near, nearBm);
-    }
     try {
-      bm = await ensureFrameBitmap(state.current, frame);
+      bm = await fs.getFrame(frame);
     } catch (e) {
-      console.warn("frame bitmap fetch failed", frame, e);
+      if (e && e.message !== "FrameSource closed") {
+        console.warn("getFrame failed", frame, e);
+      }
       return;
     }
     if (token !== state.scrubPaintToken) return;
@@ -614,120 +345,12 @@ async function scheduleScrubPaint(frame) {
     await ensureTintedCanvas(frame, maskUrl);
     if (token !== state.scrubPaintToken) return;
   }
-  if (state.current == null) return;
   paintAtomic(frame, bm);
-}
-
-async function prefetchFrames(slug) {
-  const myToken = ++state.framePrefetchAbort;
-  const total = state.totalFrames;
-  if (!total) return;
-  // Priority order: [in, out] first, then expand outward toward 0 and total-1
-  // so scrub-drag outside the trim range still hits cache after a brief warm-up.
-  const lo = state.inFrame != null ? state.inFrame : 0;
-  const hi = state.outFrame != null ? state.outFrame : total - 1;
-  const seen = new Set();
-  const frames = [];
-  const push = (f) => {
-    if (f < 0 || f >= total) return;
-    if (seen.has(f)) return;
-    seen.add(f);
-    if (!state.frameBitmapCache.has(f)) frames.push(f);
-  };
-  for (let f = lo; f <= hi; f++) push(f);
-  // Expand outward in alternating steps from the range edges.
-  const maxOut = Math.max(lo, total - 1 - hi);
-  for (let d = 1; d <= maxOut; d++) {
-    push(lo - d);
-    push(hi + d);
+  state.lastDisplayedFrame = frame;
+  if (state.ptsTable && frame >= 0 && frame < state.ptsTable.length) {
+    state.lastDisplayedMediaTime = state.ptsTable[frame];
   }
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < frames.length) {
-      if (state.current !== slug || myToken !== state.framePrefetchAbort) return;
-      const f = frames[cursor++];
-      try {
-        const bm = await fetchFrameBitmap(slug, f);
-        if (state.current !== slug || myToken !== state.framePrefetchAbort) {
-          if (bm && typeof bm.close === "function") bm.close();
-          return;
-        }
-        if (state.frameBitmapCache.has(f)) {
-          if (bm && typeof bm.close === "function") bm.close();
-        } else {
-          state.frameBitmapCache.set(f, bm);
-          enforceFrameCacheLRU();
-        }
-      } catch (_) {
-        // Per-frame fetch failures are non-fatal; the on-demand path will
-        // surface a real error if the user ever lands on this frame.
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: FRAME_PREFETCH_CONCURRENCY }, worker));
-}
-
-// Decoupled from prefetchFrames so the [in, out] range gets a dedicated
-// high-concurrency burst before any outward expansion competes for HTTP
-// slots — without this, scrubbing inside the trim range during warm-up still
-// hits cold cache.
-async function warmUpClip(slug) {
-  const myToken = ++state.framePrefetchAbort;
-  const lo = state.inFrame;
-  const hi = state.outFrame;
-  if (lo == null || hi == null) return;
-  console.assert(lo <= hi, `warmUpClip: inverted trim range lo=${lo} hi=${hi}`);
-
-  const frames = [];
-  for (let f = lo; f <= hi; f++) {
-    if (!state.frameBitmapCache.has(f)) frames.push(f);
-  }
-  if (!frames.length) {
-    prefetchFrames(slug);
-    return;
-  }
-
-  const progress = { done: 0, total: frames.length };
-  state.warmUpProgress = progress;
   updateStatus();
-
-  const aborted = () =>
-    state.current !== slug || myToken !== state.framePrefetchAbort;
-
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < frames.length) {
-      if (aborted()) return;
-      const f = frames[cursor++];
-      try {
-        const bm = await fetchFrameBitmap(slug, f);
-        if (aborted()) {
-          bm.close();
-          return;
-        }
-        if (state.frameBitmapCache.has(f)) {
-          bm.close();
-        } else {
-          state.frameBitmapCache.set(f, bm);
-          enforceFrameCacheLRU();
-        }
-        // Guard the increment too — a superseded invocation's in-flight
-        // workers could otherwise bump the new invocation's counter past total.
-        if (!aborted()) {
-          progress.done++;
-          updateStatus();
-        }
-      } catch (e) {
-        console.warn("warmUpClip frame fetch failed", f, e);
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: WARM_UP_CONCURRENCY }, worker));
-  if (myToken === state.framePrefetchAbort) {
-    state.warmUpProgress = null;
-    updateStatus();
-    if (state.current === slug) prefetchFrames(slug);
-  }
 }
 
 function drawClickMarker(x, y) {
@@ -759,10 +382,7 @@ function buildTintedCanvas(img) {
   for (let i = 0; i < px.length; i += 4) {
     const a = px[i] || px[i + 1] || px[i + 2];
     if (a > 8) {
-      px[i] = 34;
-      px[i + 1] = 197;
-      px[i + 2] = 94;
-      px[i + 3] = 128;
+      px[i] = 34; px[i + 1] = 197; px[i + 2] = 94; px[i + 3] = 128;
     } else {
       px[i + 3] = 0;
     }
@@ -791,14 +411,8 @@ function maskUrlForFrame(frame) {
 
 function loadMaskForFrame(frame) {
   const url = maskUrlForFrame(frame);
-  if (!url) {
-    clearOverlay();
-    return;
-  }
+  if (!url) { clearOverlay(); return; }
   if (blitCachedMask(frame)) return;
-  // Cache miss — keep whatever is on the overlay (avoid the blank-flash) and
-  // build the tint asynchronously. Once cached, redraw if the user is still
-  // on this frame.
   const img = new Image();
   img.onload = () => {
     if (!el.overlay.width || !el.overlay.height) return;
@@ -818,10 +432,6 @@ async function prefetchMasks(slug) {
   const entries = Array.from(state.propMaskUrlByFrame.entries())
     .sort((a, b) => a[0] - b[0])
     .filter(([frame]) => !state.tintedCache.has(frame));
-  // Parallel load with bounded concurrency. Sequential await meant a 262-mask
-  // prefetch took ~3 seconds; users dragging the scrubber within that window
-  // hit cold cache and saw no mask. 8-way parallel finishes in ~400ms over
-  // localhost.
   const concurrency = 8;
   let cursor = 0;
   const worker = async () => {
@@ -858,6 +468,44 @@ function pickInitialSlug(items) {
   return items[0].slug;
 }
 
+async function loadFrameSource(slug) {
+  // Tear down previous source (releases GPU mem from cached ImageBitmaps).
+  if (state.frameSource) {
+    state.frameSource.close();
+    state.frameSource = null;
+  }
+  const fs = new FrameSource();
+  state.frameSource = fs;
+  state.frameSourceLoading = true;
+  updateStatus();
+  try {
+    await fs.load(`${API_BASE}/clip/${slug}.mp4`);
+  } catch (e) {
+    if (state.frameSource === fs) state.frameSource = null;
+    state.frameSourceLoading = false;
+    showError(`frame source load failed: ${e.message || e}`);
+    return;
+  }
+  if (state.current !== slug || state.frameSource !== fs) {
+    fs.close();
+    return;
+  }
+  state.frameSourceLoading = false;
+  // Canvas backing-store at PREVIEW resolution (what we actually draw). The
+  // overlay below stays at native resolution for mask alignment with the
+  // server-side full-res masks.
+  el.frameCanvas.width = fs.previewWidth;
+  el.frameCanvas.height = fs.previewHeight;
+  resizeOverlay();
+  updateStatus();
+  // Prefetch the trim range so subsequent scrub is all cache hits.
+  if (state.inFrame != null && state.outFrame != null) {
+    fs.prefetchRange(state.inFrame, state.outFrame);
+  }
+  // Repaint the current frame now that the source is ready.
+  scheduleScrubPaint(state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0);
+}
+
 function syncFromItem(item) {
   state.current = item.slug;
   if (item.fps == null) {
@@ -865,9 +513,6 @@ function syncFromItem(item) {
     return false;
   }
   state.fps = item.fps;
-  // totalFrames + scrubber.max get set authoritatively by fetchPts below;
-  // seed with item.total_frames so the UI isn't blank during the few hundred
-  // ms it takes to load the dense PTS list.
   state.totalFrames = item.total_frames || 0;
   state.inFrame = item.in_frame == null ? null : item.in_frame;
   state.outFrame = item.out_frame == null ? null : item.out_frame;
@@ -882,14 +527,7 @@ function syncFromItem(item) {
   el.video.src = `${API_BASE}/clip/${item.slug}.mp4`;
   state.lastDisplayedFrame = 0;
   enterScrubMode();
-  // Drop the previous item's bitmap cache (closes ImageBitmaps to free GPU
-  // memory) and request frame 0 via the atomic paint pipeline.
-  clearFrameBitmapCache();
   state.scrubPaintToken++;
-  scheduleScrubPaint(0);
-  // Grab focus from the URL bar so the very first space-press toggles play
-  // without the user having to click into the page first.
-  el.videoWrap.focus();
   clearSeedMask();
   clearDoneFills();
   clearOverlay();
@@ -903,15 +541,14 @@ function syncFromItem(item) {
   startSse();
   fetchPts(item.slug);
   rehydrateMasks(item.slug);
+  loadFrameSource(item.slug);
+  el.videoWrap.focus();
   return true;
 }
 
 async function selectSlug(slug) {
   const item = state.items.find((it) => it.slug === slug);
-  if (!item) {
-    showError(`slug not found: ${slug}`);
-    return;
-  }
+  if (!item) { showError(`slug not found: ${slug}`); return; }
   syncFromItem(item);
 }
 
@@ -947,21 +584,15 @@ async function setActiveModel(kind, modelId) {
 }
 
 async function bootstrap() {
-  try {
-    state.items = await fetchItems();
-  } catch (e) {
-    showError(String(e));
-    return;
-  }
+  try { state.items = await fetchItems(); }
+  catch (e) { showError(String(e)); return; }
   try {
     const models = await fetchModels();
     populateModelPicker(el.seedModel, models.available, models.active.seed);
     populateModelPicker(el.propModel, models.available, models.active.prop);
     el.seedModel.addEventListener("change", () => { setActiveModel("seed", el.seedModel.value); el.seedModel.blur(); });
     el.propModel.addEventListener("change", () => { setActiveModel("prop", el.propModel.value); el.propModel.blur(); });
-  } catch (e) {
-    showError(`models init failed: ${e}`);
-  }
+  } catch (e) { showError(`models init failed: ${e}`); }
   renderSidebar();
   el.btnRescan.addEventListener("click", rescanItems);
   el.btnQueue.addEventListener("click", toggleQueue);
@@ -969,20 +600,16 @@ async function bootstrap() {
   fetchQueueStatus();
   window.addEventListener("hashchange", onHashChange);
   const slug = pickInitialSlug(state.items);
-  if (!slug) {
-    return;  // empty workspace; user can press Rescan
-  }
+  if (!slug) return;
   selectSlug(slug);
 }
 
 function onHashChange() {
   const m = (window.location.hash || "").match(/slug=([^&]+)/);
   if (!m) return;
-  const slug = decodeURIComponent(m[1]);
-  selectSlug(slug);
+  selectSlug(decodeURIComponent(m[1]));
 }
 
-// "ready" = seed marked but not yet propagated → eligible for queue run.
 function effectiveStatus(it) {
   const ps = it.status || it.propagate_status || "idle";
   if (ps === "idle" && it.seed_frame != null) return "ready";
@@ -1013,10 +640,7 @@ function renderSidebar() {
     delBtn.type = "button";
     delBtn.title = "Delete";
     delBtn.textContent = "✕";
-    delBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      deleteItem(it.slug);
-    });
+    delBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteItem(it.slug); });
     card.appendChild(nameDiv);
     card.appendChild(metaDiv);
     if (state.queueSnapshot.current === it.slug) {
@@ -1026,15 +650,12 @@ function renderSidebar() {
       fill.className = "item-card-progress-fill";
       const snap = state.queueSnapshot;
       const pct = snap.frame_total > 0
-        ? Math.min(100, (snap.frame_done / snap.frame_total) * 100)
-        : 0;
+        ? Math.min(100, (snap.frame_done / snap.frame_total) * 100) : 0;
       fill.style.width = `${pct.toFixed(1)}%`;
       bar.appendChild(fill);
       const label = document.createElement("div");
       label.className = "item-card-progress-label";
-      label.textContent = snap.frame_total > 0
-        ? `${snap.frame_done}/${snap.frame_total}`
-        : "starting…";
+      label.textContent = snap.frame_total > 0 ? `${snap.frame_done}/${snap.frame_total}` : "starting…";
       card.appendChild(bar);
       card.appendChild(label);
     }
@@ -1072,10 +693,7 @@ function updateSidebarActive() {
 
 function updateSidebarStatus(slug, status) {
   const it = state.items.find(i => i.slug === slug);
-  if (it) {
-    it.status = status;
-    it.propagate_status = status;
-  }
+  if (it) { it.status = status; it.propagate_status = status; }
   const card = el.itemList.querySelector(`.item-card[data-slug="${slug}"]`);
   if (card) {
     const dot = card.querySelector(".item-status");
@@ -1094,23 +712,13 @@ async function toggleQueue() {
   if (!ready) return;
   if (!confirm(`Run queue on ${ready} ready session(s)?\n\nSeed model will be unloaded to free memory; reload it via the dropdown when finished.`)) return;
   const r = await fetch(`${API_BASE}/api/queue/run`, { method: "POST" });
-  if (!r.ok) {
-    showError(`queue start failed: HTTP ${r.status}`);
-  }
+  if (!r.ok) showError(`queue start failed: HTTP ${r.status}`);
 }
 
 function applyQueueSnapshot(snap) {
-  // Backend always emits {running, current, done, ready, total}; frame_done/
-  // frame_total/elapsed_s only present during active propagation.
   state.queueSnapshot = {
-    running: snap.running,
-    current: snap.current,
-    done: snap.done,
-    ready: snap.ready,
-    total: snap.total,
-    frame_done: snap.frame_done ?? 0,
-    frame_total: snap.frame_total ?? 0,
-    elapsed_s: snap.elapsed_s ?? 0,
+    running: snap.running, current: snap.current, done: snap.done, ready: snap.ready, total: snap.total,
+    frame_done: snap.frame_done ?? 0, frame_total: snap.frame_total ?? 0, elapsed_s: snap.elapsed_s ?? 0,
   };
   state.queueRunning = state.queueSnapshot.running;
   updateQueueButton();
@@ -1122,7 +730,7 @@ async function fetchQueueStatus() {
     const r = await fetch(`${API_BASE}/api/queue/status`);
     if (!r.ok) return;
     applyQueueSnapshot(await r.json());
-  } catch (_) { /* SSE will also deliver state */ }
+  } catch (_) {}
 }
 
 function startQueueSse() {
@@ -1134,7 +742,7 @@ function startQueueSse() {
     try { payload = JSON.parse(ev.data); } catch (_) { return; }
     applyQueueSnapshot(payload);
   });
-  es.onerror = () => { /* browser auto-reconnects */ };
+  es.onerror = () => {};
 }
 
 async function rescanItems() {
@@ -1145,9 +753,7 @@ async function rescanItems() {
     const data = await r.json();
     state.items = data.items || [];
     renderSidebar();
-    if (!state.current && state.items.length) {
-      selectSlug(state.items[0].slug);
-    }
+    if (!state.current && state.items.length) selectSlug(state.items[0].slug);
   } finally {
     el.btnRescan.disabled = false;
   }
@@ -1162,22 +768,17 @@ async function deleteItem(slug) {
   if (wasCurrent) {
     state.current = null;
     if (state.sse) { state.sse.close(); state.sse = null; }
+    if (state.frameSource) { state.frameSource.close(); state.frameSource = null; }
   }
   renderSidebar();
   if (wasCurrent) {
-    if (state.items.length) {
-      window.location.hash = `slug=${state.items[0].slug}`;
-    } else {
-      el.itemSlug.textContent = "no item";
-    }
+    if (state.items.length) window.location.hash = `slug=${state.items[0].slug}`;
+    else el.itemSlug.textContent = "no item";
   }
 }
 
 function startSse() {
-  if (state.sse) {
-    state.sse.close();
-    state.sse = null;
-  }
+  if (state.sse) { state.sse.close(); state.sse = null; }
   if (!state.current) return;
   const url = `${API_BASE}/api/items/${encodeURIComponent(state.current)}/events`;
   const es = new EventSource(url);
@@ -1191,8 +792,6 @@ function startSse() {
     state.propMaskUrlByFrame.set(frame, maskUrl);
     state.propDoneCount = state.propMaskUrlByFrame.size;
     addDoneFill(frame);
-    // Warm the tinted-canvas cache as soon as the SSE event lands so the user
-    // never hits an async-decode flicker even on the very first scrub-through.
     if (el.overlay.width && el.overlay.height) {
       const img = new Image();
       img.onload = () => {
@@ -1234,54 +833,48 @@ function startSse() {
     if (state.current) updateSidebarStatus(state.current, "failed");
     if (payload.msg) showError(`propagate: ${payload.msg}`);
   });
-  es.onerror = () => {
-    // SSE 中斷由瀏覽器自動重連；這裡不假裝成功
-  };
+  es.onerror = () => {};
 }
 
 async function postJson(path, body) {
-  const r = await fetch(`${API_BASE}${path}`, {
+  return await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: body == null ? "{}" : JSON.stringify(body),
   });
-  return r;
 }
 
 async function markIn() {
   if (!state.current) return;
   const f = currentFrame();
   state.inFrame = f;
-  if (state.outFrame != null) await sendTrim();
   updateMarkers();
   updatePropagateBtn();
   updateStatus();
   console.log("mark in", f);
+  if (state.outFrame != null) sendTrim();
 }
 
 async function markOut() {
   if (!state.current) return;
   const f = currentFrame();
   state.outFrame = f;
-  if (state.inFrame != null) await sendTrim();
   updateMarkers();
   updatePropagateBtn();
   updateStatus();
   console.log("mark out", f);
+  if (state.inFrame != null) sendTrim();
 }
 
 async function sendTrim() {
   if (state.inFrame == null || state.outFrame == null) return;
   try {
     const r = await postJson(`/api/items/${encodeURIComponent(state.current)}/trim`, {
-      in_frame: state.inFrame,
-      out_frame: state.outFrame,
+      in_frame: state.inFrame, out_frame: state.outFrame,
     });
     if (!r.ok) showError(`trim failed: HTTP ${r.status}`);
-    else if (state.current) warmUpClip(state.current);
-  } catch (e) {
-    showError(`trim failed: ${e}`);
-  }
+    else if (state.frameSource) state.frameSource.prefetchRange(state.inFrame, state.outFrame);
+  } catch (e) { showError(`trim failed: ${e}`); }
 }
 
 function markSeed() {
@@ -1320,8 +913,6 @@ async function sendSeed(frameIndex, x, y) {
     state.seedMaskReady = true;
     if (currentFrame() === frameIndex) loadMaskForFrame(frameIndex);
     updatePropagateBtn();
-    // Reflect seed_frame back into the in-memory items list so the sidebar
-    // card flips to "ready" (blue dot) and the queue counter increments.
     const it = state.items.find(i => i.slug === state.current);
     if (it) {
       it.seed_frame = frameIndex;
@@ -1333,9 +924,8 @@ async function sendSeed(frameIndex, x, y) {
       }
       updateQueueButton();
     }
-  } catch (e) {
-    showError(`seed failed: ${e}`);
-  } finally {
+  } catch (e) { showError(`seed failed: ${e}`); }
+  finally {
     clearInterval(tickHandle);
     state.seedComputing = false;
     state.seedComputeStartMs = null;
@@ -1387,12 +977,8 @@ async function cancelOrEscape() {
   if (state.propagateStatus === "running" && state.current) {
     try {
       const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(state.current)}/propagate/cancel`, { method: "POST" });
-      if (r.status !== 404 && !r.ok) {
-        console.warn(`cancel HTTP ${r.status}`);
-      }
-    } catch (e) {
-      console.warn("cancel failed", e);
-    }
+      if (r.status !== 404 && !r.ok) console.warn(`cancel HTTP ${r.status}`);
+    } catch (e) { console.warn("cancel failed", e); }
     state.propagateStatus = "idle";
     if (state.current) updateSidebarStatus(state.current, "idle");
     updatePropagateBtn();
@@ -1403,13 +989,9 @@ async function cancelOrEscape() {
 function stepFrames(delta) {
   if (!state.ptsTable) return;
   if (!el.video.paused) el.video.pause();
-  // Priority for "where am I now": queued target (not yet flushed) > in-flight
-  // seek target (rVFC may not have updated mediaTime) > displayed frame.
-  // Without lastSeekTarget, two fast right-arrow presses race and land on the
-  // same target.
   const start = state.pendingTargetFrame != null
     ? state.pendingTargetFrame
-    : (state.lastSeekTarget != null ? state.lastSeekTarget : currentFrame());
+    : parseInt(el.scrubber.value, 10);
   const target = Math.max(0, Math.min(state.totalFrames - 1, start + delta));
   state.pendingTargetFrame = target;
   flushStep();
@@ -1441,59 +1023,31 @@ function flushStep() {
   const target = state.pendingTargetFrame;
   state.pendingTargetFrame = null;
   enterScrubMode();
-  const tbl = state.ptsTable;
-  state.lastDisplayedMediaTime = tbl[target];
-  state.lastDisplayedFrame = target;
   el.scrubber.value = String(target);
-  // Atomic frame+mask paint. Cache hit paints synchronously this tick;
-  // cache miss leaves the previous frame visible (no flicker, no desync)
-  // and paints both layers together once the bitmap arrives.
   scheduleScrubPaint(target);
-  // Background-sync the underlying video element to the same PTS so togglePlay
-  // can call play() without burning the user-gesture token on a seek. Chrome
-  // sometimes refuses paused sub-frame seeks but always honours the LAST seek
-  // before play(), so cumulative scrubbing leaves video positioned correctly.
-  if (Math.abs(el.video.currentTime - tbl[target]) > 0.005) {
-    el.video.currentTime = tbl[target];
-  }
-  updateStatus();
 }
 
 async function fetchPts(slug) {
   try {
     const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(slug)}/pts`);
-    if (!r.ok) {
-      showError(`pts fetch HTTP ${r.status}`);
-      return;
-    }
+    if (!r.ok) { showError(`pts fetch HTTP ${r.status}`); return; }
     const j = await r.json();
     if (j && Array.isArray(j.pts) && typeof j.total_frames === "number") {
       state.ptsTable = j.pts;
-      // Authoritative frame count comes from the dense PTS list, not the
-      // /api/items snapshot. /api/items can be stale if scan_sources ran with
-      // a previous (legacy) total_frames; the PTS list is rebuilt from source.
       state.totalFrames = j.total_frames;
       el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
       updateMarkers();
       console.log(`pts loaded: ${j.pts.length} frames`);
-      // Kick off background prefetch over the trimmed range so subsequent
-      // scrubbing hits the bitmap cache instead of fetch+decode.
-      if (state.inFrame != null && state.outFrame != null) warmUpClip(slug);
     }
-  } catch (e) {
-    showError(`pts fetch failed: ${e}`);
-  }
+  } catch (e) { showError(`pts fetch failed: ${e}`); }
 }
 
 async function rehydrateMasks(slug) {
-  // SSE only fans out live propagate events; on reload the previous run's
-  // masks are durable on disk but the timeline shows empty. Re-list them
-  // here so the URL cache + green fills get rebuilt.
   try {
     const r = await fetch(`${API_BASE}/api/items/${encodeURIComponent(slug)}/masks`);
     if (!r.ok) return;
     const j = await r.json();
-    if (slug !== state.current) return;  // user switched item mid-fetch
+    if (slug !== state.current) return;
     if (!Array.isArray(j.frames)) return;
     for (const f of j.frames) {
       const url = `${API_BASE}/mask/${encodeURIComponent(slug)}/${String(f).padStart(5, "0")}.png`;
@@ -1509,9 +1063,7 @@ async function rehydrateMasks(slug) {
     if (state.propMaskUrlByFrame.has(f)) loadMaskForFrame(f);
     updateStatus();
     prefetchMasks(slug);
-  } catch (e) {
-    console.warn("rehydrate masks failed", e);
-  }
+  } catch (e) { console.warn("rehydrate masks failed", e); }
 }
 
 function togglePlay() {
@@ -1520,18 +1072,10 @@ function togglePlay() {
     const f = state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0;
     const targetT = tbl ? tbl[f] : null;
     if (targetT == null) return;
-    // flushStep keeps el.video.currentTime in sync as the user scrubs, so by
-    // now the video is already positioned. Just call play() — no seek means
-    // no microtask before play, so the user-gesture token survives.
-    if (Math.abs(el.video.currentTime - targetT) > 0.005) {
-      el.video.currentTime = targetT;
-    }
+    if (Math.abs(el.video.currentTime - targetT) > 0.005) el.video.currentTime = targetT;
     state.lastDisplayedMediaTime = targetT;
     exitScrubMode();
-    el.video.play().catch((e) => {
-      console.warn("play failed", e);
-      enterScrubMode();
-    });
+    el.video.play().catch((e) => { console.warn("play failed", e); enterScrubMode(); });
   } else {
     el.video.pause();
     const f = currentFrame();
@@ -1545,29 +1089,21 @@ function togglePlay() {
 }
 
 function onVideoClick(e) {
-  if (!state.pendingSeedClick) {
-    togglePlay();
-    return;
-  }
+  if (!state.pendingSeedClick) { togglePlay(); return; }
   if (state.seedFrame == null) return;
-  const v = el.video;
-  if (!v.videoWidth || !v.videoHeight) {
-    showError("video metadata not ready");
-    return;
-  }
+  const fs = state.frameSource;
+  const nativeW = (fs && fs.width) || el.video.videoWidth;
+  const nativeH = (fs && fs.height) || el.video.videoHeight;
+  if (!nativeW || !nativeH) { showError("frame source not ready"); return; }
   const disp = videoDisplayRect();
-  if (!disp) {
-    showError("video display rect unresolved");
-    return;
-  }
-  // Reject clicks landing in the letterbox margin (outside the actual frame).
+  if (!disp) { showError("video display rect unresolved"); return; }
   if (e.clientX < disp.left || e.clientX > disp.left + disp.width ||
       e.clientY < disp.top || e.clientY > disp.top + disp.height) {
     console.warn("click outside video frame area, ignored");
     return;
   }
-  const x = Math.round((e.clientX - disp.left) * (v.videoWidth / disp.width));
-  const y = Math.round((e.clientY - disp.top) * (v.videoHeight / disp.height));
+  const x = Math.round((e.clientX - disp.left) * (nativeW / disp.width));
+  const y = Math.round((e.clientY - disp.top) * (nativeH / disp.height));
   console.log("seed click", { client: [e.clientX, e.clientY], disp, native: [x, y] });
   state.seedPoint = [x, y];
   state.pendingSeedClick = false;
@@ -1578,50 +1114,31 @@ function onVideoClick(e) {
 function onKeydown(e) {
   const tag = (e.target && e.target.tagName) || "";
   const isInput = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-  // Space (play/pause) and arrows always work — otherwise the focused-on-a-
-  // dropdown case eats the key and the user can't toggle playback. Other
-  // shortcuts respect text inputs.
   const isNavKey = e.key === " " || e.key === "ArrowLeft" || e.key === "ArrowRight"
     || e.key === "Home" || e.key === "End";
   if (isInput && e.target !== el.scrubber && !isNavKey) return;
 
-  // Big jumps: Shift+arrow = ±10, Alt/Option+arrow = ±100, plain = ±1.
-  // Industry-standard ,/. as alternates so right-handed mouse + left-hand
-  // keyboard works without claw-grip on the cursor cluster.
-  if (e.key === " ") {
+  if (e.key === " ") { e.preventDefault(); togglePlay(); }
+  else if (e.key === "ArrowLeft" || e.key === ",") {
     e.preventDefault();
-    togglePlay();
-  } else if (e.key === "ArrowLeft" || e.key === ",") {
-    e.preventDefault();
-    const d = e.altKey ? -100 : (e.shiftKey ? -10 : -1);
-    stepFrames(d);
+    stepFrames(e.altKey ? -100 : (e.shiftKey ? -10 : -1));
   } else if (e.key === "ArrowRight" || e.key === ".") {
     e.preventDefault();
-    const d = e.altKey ? 100 : (e.shiftKey ? 10 : 1);
-    stepFrames(d);
+    stepFrames(e.altKey ? 100 : (e.shiftKey ? 10 : 1));
   } else if (e.key === "Home") {
     e.preventDefault();
     jumpToFrame(state.inFrame != null ? state.inFrame : 0);
   } else if (e.key === "End") {
     e.preventDefault();
     jumpToFrame(state.outFrame != null ? state.outFrame : state.totalFrames - 1);
-  } else if (e.key === "[") {
-    markIn();
-  } else if (e.key === "]") {
-    markOut();
-  } else if (e.key === "s" || e.key === "S") {
-    markSeed();
-  } else if (e.key === "Enter") {
-    propagate();
-  } else if (e.key === "Escape") {
-    cancelOrEscape();
-  }
+  } else if (e.key === "[") markIn();
+  else if (e.key === "]") markOut();
+  else if (e.key === "s" || e.key === "S") markSeed();
+  else if (e.key === "Enter") propagate();
+  else if (e.key === "Escape") cancelOrEscape();
 }
 
 function onDisplayedFrame(_now, metadata) {
-  // Fires once per actually-presented video frame during playback. While in
-  // scrub mode the video element is hidden and we drive the overlay off
-  // img-swaps, so rVFC must not override our state.
   if (state.scrubMode) {
     state.rvfcHandle = el.video.requestVideoFrameCallback(onDisplayedFrame);
     return;
@@ -1654,11 +1171,9 @@ function bindUi() {
       if (state.rvfcHandle != null) el.video.cancelVideoFrameCallback(state.rvfcHandle);
       state.rvfcHandle = el.video.requestVideoFrameCallback(onDisplayedFrame);
     } else {
-      // Fallback: pre-Safari 17 / very old browsers. Will lag but at least works.
       console.warn("requestVideoFrameCallback unsupported; falling back to timeupdate");
     }
   });
-  // timeupdate is a fallback only — fires at coarse 250ms cadence.
   el.video.addEventListener("timeupdate", () => {
     if (typeof el.video.requestVideoFrameCallback === "function") return;
     if (state.fps != null) el.scrubber.value = String(currentFrame());
@@ -1680,8 +1195,6 @@ function bindUi() {
       updateStatus();
     }
   });
-  // Use ResizeObserver for layout-sensitive overlay; window resize alone misses
-  // CSS-driven size changes (e.g. picker dropdown reflow).
   if (typeof ResizeObserver === "function") {
     new ResizeObserver(() => resizeOverlay()).observe(el.video);
   } else {
@@ -1689,12 +1202,9 @@ function bindUi() {
   }
   el.video.addEventListener("seeked", () => resizeOverlay());
 
-  // rAF-coalesce scrubber input. The native input event fires per pixel of
-  // mouse movement (200+/sec on a fast drag), each call queues a paintAtomic
-  // (1920×1080 drawImage). Without coalescing the main thread saturates and
-  // click events queue behind paints — Mark Out feels delayed and the drag
-  // visually stutters. Coalescing caps paint rate at display refresh (~60Hz)
-  // and leaves room for input handling.
+  // rAF-coalesce scrubber input. Native input fires 200+/sec on a fast drag;
+  // each call would queue a paint, saturating the main thread. Coalescing
+  // caps paint rate at refresh and leaves room for input handling.
   let scrubRafPending = false;
   let scrubRafTarget = null;
   el.scrubber.addEventListener("input", () => {
@@ -1707,8 +1217,12 @@ function bindUi() {
       if (state.ptsTable && scrubRafTarget != null) jumpToFrame(scrubRafTarget);
     });
   });
-  // Suppress the range element's native arrow-key step. Our onKeydown handler
-  // (with PTS-aware seek + queue) runs instead.
+  el.scrubber.addEventListener("change", () => {
+    if (!state.ptsTable) return;
+    const f = parseInt(el.scrubber.value, 10);
+    const t = state.ptsTable[f];
+    if (t != null && Math.abs(el.video.currentTime - t) > 0.005) el.video.currentTime = t;
+  });
   el.scrubber.addEventListener("keydown", (e) => {
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
          "PageUp", "PageDown", "Home", "End"].includes(e.key)) {
