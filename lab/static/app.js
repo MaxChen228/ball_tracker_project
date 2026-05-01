@@ -689,7 +689,27 @@ function flushStep() {
   state.pendingTargetFrame = null;
   state.isSeeking = true;
   state.lastSeekTarget = target;
-  el.video.currentTime = frameToTime(target);
+  const seekT = frameToTime(target);
+  // Optimistic UI snap: paint target's mask + scrubber + status BEFORE waiting
+  // for the browser to actually seek. If the seek lands on a different frame
+  // (browser snap-quantization, B-frame seek), rVFC will overwrite with the
+  // real value. This makes arrow-key nav feel instant even when the browser
+  // takes 30-60ms to repaint, AND avoids the "f stays 879 but mask vanishes"
+  // race when rVFC hasn't fired yet for the new frame.
+  const tbl = state.ptsTable;
+  if (tbl && tbl[target] != null) {
+    state.lastDisplayedMediaTime = tbl[target];
+    state.lastDisplayedFrame = target;
+    el.scrubber.value = String(target);
+    if (maskUrlForFrame(target) != null) loadMaskForFrame(target);
+    else clearOverlay();
+    if (target === state.seedFrame && state.seedPoint && maskUrlForFrame(target) == null) {
+      drawClickMarker(state.seedPoint[0], state.seedPoint[1]);
+    }
+    updateStatus();
+  }
+  console.log(`[seek] target=${target} pts=${tbl?.[target]} seekTo=${seekT.toFixed(6)}`);
+  el.video.currentTime = seekT;
 }
 
 async function fetchPts(slug) {
@@ -703,9 +723,29 @@ async function fetchPts(slug) {
     if (j && Array.isArray(j.pts)) {
       state.ptsTable = j.pts;
       console.log(`pts table loaded: ${j.pts.length} frames, gaps=${j.pts.filter(x => x == null).length}`);
+      paintPhantomGaps();
     }
   } catch (e) {
     console.warn("pts fetch failed", e);
+  }
+}
+
+function paintPhantomGaps() {
+  // Render variable-fps phantom indices (no decoded frame at index N because
+  // round(pts*avgFps) collided) as dim amber bars on the timeline. These are
+  // NOT SAM2 failures — they're indices that never had a frame to begin with.
+  // Without this, they look identical to "SAM2 lost the ball here" and is
+  // confusing.
+  const tbl = state.ptsTable;
+  if (!tbl || state.totalFrames <= 0) return;
+  const w = 100 / state.totalFrames;
+  for (let f = 0; f < tbl.length; f++) {
+    if (tbl[f] != null) continue;
+    const div = document.createElement("div");
+    div.className = "fill-phantom";
+    div.style.left = `${(f / state.totalFrames) * 100}%`;
+    div.style.width = `${Math.max(w, 0.2)}%`;
+    el.fills.appendChild(div);
   }
 }
 
@@ -816,10 +856,11 @@ function onDisplayedFrame(_now, metadata) {
   state.lastDisplayedMediaTime = metadata.mediaTime;
   if (state.fps != null) {
     const f = currentFrame();
-    // Clear the in-flight seek target once rVFC actually paints it (or near
-    // enough — gaps can land us ±1 from the requested frame). Without this,
-    // stepFrames keeps using the stale lastSeekTarget forever after the very
-    // first arrow press.
+    // Diagnostic — log when rVFC's f disagrees with the in-flight seek target.
+    // Helps confirm whether browser snap-quantized to a neighbor frame.
+    if (state.lastSeekTarget != null && f !== state.lastSeekTarget) {
+      console.log(`[rVFC] mediaTime=${metadata.mediaTime.toFixed(6)} computed_f=${f} target=${state.lastSeekTarget} (diff=${f - state.lastSeekTarget})`);
+    }
     if (state.lastSeekTarget != null && Math.abs(f - state.lastSeekTarget) <= 1) {
       state.lastSeekTarget = null;
     }
