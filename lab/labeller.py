@@ -88,10 +88,14 @@ class ManifestStore:
         """One-shot: collapse flat in/out/seed/seed_point/propagate_status into
         a single-segment `segments[]`. Idempotent via `_schema_version` stamp.
         Also relocates legacy `masks/*.png` → `masks/<seg_id>/*.png` for items
-        whose old propagate finished."""
+        whose old propagate finished.
+
+        Per-item write-after-success: if a rename throws (cross-device link,
+        permissions), prior items keep their v2 stamp on disk so a retry won't
+        re-rename already-relocated files."""
         with self._lock:
             payload = self._read()
-            mutated = False
+            migrated = 0
             for it in payload["items"]:
                 if it.get("_schema_version", 1) >= SCHEMA_VERSION:
                     continue
@@ -102,8 +106,6 @@ class ManifestStore:
                 ps = it.pop("propagate_status", "idle")
                 segments: list[dict[str, Any]] = []
                 active_id = None
-                # "Has any signal" — if old item touched in/out/seed at all,
-                # roll those into one segment. Pure unconfigured items get [].
                 if any(v is not None for v in (in_f, out_f, seed_f, seed_p)):
                     seg_id = _new_segment_id()
                     segments.append({
@@ -115,20 +117,37 @@ class ManifestStore:
                         "propagate_status": ps,
                     })
                     active_id = seg_id
-                    # Move legacy mask files into the segment subdir.
                     legacy_mdir = ITEMS_DIR / it["slug"] / "masks"
                     if legacy_mdir.is_dir():
+                        # Defensive: if a previous half-migration already created
+                        # `seg_*/` subdirs alongside loose pngs (mixed state),
+                        # bail out for this item — operator must resolve manually
+                        # before we orphan the loose pngs into a NEW seg_id.
+                        existing_seg_dirs = [
+                            p for p in legacy_mdir.iterdir()
+                            if p.is_dir() and p.name.startswith("seg_")
+                        ]
+                        loose_pngs = list(legacy_mdir.glob("*.png"))
+                        if existing_seg_dirs and loose_pngs:
+                            print(
+                                f"[labeller] migrate skip {it['slug']}: mixed state "
+                                f"(seg_* dirs + {len(loose_pngs)} loose pngs)",
+                                flush=True,
+                            )
+                            continue
                         target = legacy_mdir / seg_id
                         target.mkdir(parents=True, exist_ok=True)
-                        for png in legacy_mdir.glob("*.png"):
+                        for png in loose_pngs:
                             png.rename(target / png.name)
                 it["segments"] = segments
                 it["active_segment_id"] = active_id
                 it["_schema_version"] = SCHEMA_VERSION
-                mutated = True
-            if mutated:
+                # Persist progress per item so a later failure can't unwind
+                # already-relocated files.
                 self._write(payload)
-                print(f"[labeller] migrated manifest to schema v{SCHEMA_VERSION}", flush=True)
+                migrated += 1
+            if migrated:
+                print(f"[labeller] migrated {migrated} item(s) to schema v{SCHEMA_VERSION}", flush=True)
 
     def _read(self) -> dict[str, Any]:
         return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -658,7 +677,15 @@ def _recover_crashed_propagations() -> None:
     idle-filter skip the segment forever."""
     recovered: list[str] = []
     for it in STORE.list():
-        for seg in it.get("segments", []):
+        # No silent fallback: migration is supposed to make `segments` always
+        # present. A missing key means the manifest is corrupt — surface it
+        # rather than skipping the item invisibly.
+        if "segments" not in it:
+            raise RuntimeError(
+                f"item {it['slug']} missing `segments` after migration; "
+                f"manifest is corrupt"
+            )
+        for seg in it["segments"]:
             if seg.get("propagate_status") == "running":
                 STORE.update_segment(it["slug"], seg["id"], propagate_status="idle")
                 recovered.append(f"{it['slug']}/{seg['id']}")
@@ -847,7 +874,14 @@ def run_propagate(slug: str, seg_id: str) -> None:
     try:
         for local_idx, mask_png in prop.propagate(fdir, seed_local, (seed_p[0], seed_p[1])):
             source_idx = local_to_source[local_idx]
-            (mdir / f"{source_idx:05d}.png").write_bytes(mask_png)
+            try:
+                (mdir / f"{source_idx:05d}.png").write_bytes(mask_png)
+            except FileNotFoundError:
+                # Segment was deleted mid-propagate (remove_segment rmtree'd
+                # mdir). Treat as cancellation — quit cleanly without trying
+                # to also clean up partials (the dir is already gone).
+                BUS.publish(slug, "error", {"seg_id": seg_id, "msg": "cancelled (segment deleted)"})
+                return
             BUS.publish(slug, "mask", {
                 "seg_id": seg_id,
                 "frame": source_idx,
