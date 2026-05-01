@@ -472,8 +472,8 @@ async function bootstrap() {
     const models = await fetchModels();
     populateModelPicker(el.seedModel, models.available, models.active.seed);
     populateModelPicker(el.propModel, models.available, models.active.prop);
-    el.seedModel.addEventListener("change", () => setActiveModel("seed", el.seedModel.value));
-    el.propModel.addEventListener("change", () => setActiveModel("prop", el.propModel.value));
+    el.seedModel.addEventListener("change", () => { setActiveModel("seed", el.seedModel.value); el.seedModel.blur(); });
+    el.propModel.addEventListener("change", () => { setActiveModel("prop", el.propModel.value); el.propModel.blur(); });
   } catch (e) {
     showError(`models init failed: ${e}`);
   }
@@ -486,6 +486,7 @@ async function bootstrap() {
   }
   el.itemPicker.addEventListener("change", () => {
     window.location.hash = `slug=${el.itemPicker.value}`;
+    el.itemPicker.blur();
   });
   window.addEventListener("hashchange", onHashChange);
   const slug = pickInitialSlug(state.items);
@@ -831,18 +832,35 @@ function togglePlay() {
     const f = state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0;
     const targetT = tbl ? tbl[f] : null;
     if (targetT == null) return;
-    // Seek + play synchronously inside the user-gesture handler. Any await
-    // before play() consumes the autoplay-policy token; Chrome silently
-    // ignores the play() that follows and the video stays paused.
+    console.log("[play] before:", {
+      readyState: el.video.readyState,
+      networkState: el.video.networkState,
+      paused: el.video.paused,
+      currentTime: el.video.currentTime,
+      duration: el.video.duration,
+      src: el.video.currentSrc,
+      targetT,
+    });
     if (Math.abs(el.video.currentTime - targetT) > 0.005) {
       el.video.currentTime = targetT;
     }
     state.lastDisplayedMediaTime = targetT;
     exitScrubMode();
-    el.video.play().catch((e) => {
-      console.warn("play failed", e);
-      enterScrubMode();
-    });
+    const p = el.video.play();
+    if (p && typeof p.then === "function") {
+      p.then(() => console.log("[play] resolved, currentTime=", el.video.currentTime, "paused=", el.video.paused))
+       .catch((e) => {
+         console.warn("[play] rejected:", e);
+         enterScrubMode();
+       });
+    }
+    setTimeout(() => {
+      console.log("[play] +200ms:", {
+        currentTime: el.video.currentTime,
+        paused: el.video.paused,
+        readyState: el.video.readyState,
+      });
+    }, 200);
   } else {
     el.video.pause();
     const f = currentFrame();
@@ -890,9 +908,12 @@ function onVideoClick(e) {
 function onKeydown(e) {
   const tag = (e.target && e.target.tagName) || "";
   const isInput = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-  // Allow keys to pass through into the scrubber (we suppress its native arrow
-  // handling below); for any other input element, leave the user alone.
-  if (isInput && e.target !== el.scrubber) return;
+  // Space (play/pause) and arrows always work — otherwise the focused-on-a-
+  // dropdown case eats the key and the user can't toggle playback. Other
+  // shortcuts respect text inputs.
+  const isNavKey = e.key === " " || e.key === "ArrowLeft" || e.key === "ArrowRight"
+    || e.key === "Home" || e.key === "End";
+  if (isInput && e.target !== el.scrubber && !isNavKey) return;
 
   // Big jumps: Shift+arrow = ±10, Alt/Option+arrow = ±100, plain = ±1.
   // Industry-standard ,/. as alternates so right-handed mouse + left-hand
