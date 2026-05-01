@@ -276,15 +276,35 @@ def run_propagate(slug: str) -> None:
     for old in mdir.glob("*.png"):
         old.unlink()
 
+    expected = out_f - in_f + 1
+    BUS.publish(slug, "phase", {
+        "phase": "extracting", "expected_frames": expected, "in_frame": in_f, "out_frame": out_f,
+    })
+    t_extract = time.time()
     try:
         extract_range_to_dir(source, in_f, out_f, fdir)
     except Exception as e:
         BUS.publish(slug, "error", {"msg": f"frame extract failed: {e}"})
         STORE.update(slug, propagate_status="failed")
         return
+    BUS.publish(slug, "phase", {
+        "phase": "extracted", "expected_frames": expected,
+        "elapsed_s": round(time.time() - t_extract, 2),
+    })
 
     seed_local = seed_f - in_f
+    BUS.publish(slug, "phase", {"phase": "model_loading"})
+    t_model = time.time()
     prop = get_propagator()
+    BUS.publish(slug, "phase", {
+        "phase": "model_ready", "device": prop.device, "model": prop.model_id,
+        "elapsed_s": round(time.time() - t_model, 2),
+    })
+
+    BUS.publish(slug, "phase", {
+        "phase": "propagating", "expected_frames": expected, "seed_frame": seed_f,
+    })
+    t_prop = time.time()
     try:
         for local_idx, mask_png in prop.propagate(fdir, seed_local, (seed_p[0], seed_p[1])):
             source_idx = local_idx + in_f
@@ -299,7 +319,7 @@ def run_propagate(slug: str) -> None:
         return
 
     STORE.update(slug, propagate_status="done")
-    BUS.publish(slug, "done", {})
+    BUS.publish(slug, "done", {"elapsed_s": round(time.time() - t_prop, 2)})
 
 
 SLUG_RE = re.compile(r"^/api/items/([A-Za-z0-9_\-]+)/(trim|seed|propagate|propagate/cancel|events)$")

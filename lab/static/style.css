@@ -186,3 +186,8 @@ body {
   background: #7f1d1d;
   color: #fff;
 }
+
+#statusbar.computing {
+  background: #1e3a8a;
+  color: #fff;
+}

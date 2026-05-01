@@ -39,7 +39,13 @@ class Seeder:
         self._lock = Lock()
 
     def seed_at(self, frame_bgr: np.ndarray, x: int, y: int) -> bytes:
-        """Run a single positive-point prompt; return mask PNG bytes (binary, 0/255)."""
+        """Run a single positive-point prompt; return mask PNG bytes (binary, 0/255).
+
+        SAM 2 returns 3 hierarchical masks for an ambiguous single point. For
+        small objects on textured backgrounds the highest-scored one is often
+        the surrounding region, not the object. We pick the smallest mask
+        whose area > 0 — i.e. the tightest interpretation of the click.
+        """
         rgb = frame_bgr[:, :, ::-1].copy()
         with self._lock:
             self._predictor.set_image(rgb)
@@ -48,8 +54,12 @@ class Seeder:
                 point_labels=np.array([1], dtype=np.int32),
                 multimask_output=True,
             )
-        best_idx = int(np.argmax(scores))
-        mask = masks[best_idx].astype(np.uint8) * 255
+        areas = masks.reshape(masks.shape[0], -1).sum(axis=1)
+        valid = np.where(areas > 0)[0]
+        if valid.size == 0:
+            raise RuntimeError("SAM 2 returned all-zero masks for this click")
+        pick = int(valid[np.argmin(areas[valid])])
+        mask = masks[pick].astype(np.uint8) * 255
         buf = io.BytesIO()
         Image.fromarray(mask, mode="L").save(buf, format="PNG", optimize=False)
         return buf.getvalue()
