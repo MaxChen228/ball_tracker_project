@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DetectionPath(str, Enum):
@@ -128,6 +128,92 @@ class ShapeGatePayload(BaseModel):
     fill_min: float
 
 
+class DetectionConfigSnapshotPayload(BaseModel):
+    """Per-path frozen snapshot of the detection config that produced
+    a path's frames. Wire mirror of `detection_config.DetectionConfig`
+    minus `last_applied_at` (snapshot is timestamped by the carrier —
+    `PitchPayload.created_at` for live, `PitchPayload.server_post_ran_at`
+    for server_post). `preset_name` matches `DetectionConfig.preset`
+    semantics: None = custom, non-None = identity claim that may be
+    surfaced as `(deleted)` if the on-disk preset is gone.
+
+    `extra="forbid"` because every field is required at the wire
+    boundary — `from_detection_config` is the only constructor."""
+    model_config = ConfigDict(extra="forbid")
+    algorithm_id: str
+    hsv: HSVRangePayload
+    shape_gate: ShapeGatePayload
+    preset_name: str | None
+
+    @classmethod
+    def from_detection_config(cls, cfg) -> "DetectionConfigSnapshotPayload":
+        """Construct from a `detection_config.DetectionConfig`.
+        Imported lazily to avoid a schemas → detection_config →
+        detection cycle at module load."""
+        return cls(
+            algorithm_id=cfg.algorithm_id,
+            hsv=HSVRangePayload(
+                h_min=cfg.hsv.h_min, h_max=cfg.hsv.h_max,
+                s_min=cfg.hsv.s_min, s_max=cfg.hsv.s_max,
+                v_min=cfg.hsv.v_min, v_max=cfg.hsv.v_max,
+            ),
+            shape_gate=ShapeGatePayload(
+                aspect_min=cfg.shape_gate.aspect_min,
+                fill_min=cfg.shape_gate.fill_min,
+            ),
+            preset_name=cfg.preset,
+        )
+
+
+def _migrate_legacy_used_fields_into_per_path(
+    data: dict,
+    *,
+    target_paths: tuple[str, ...],
+) -> dict:
+    """One-shot read migration: pre-phase-2 records carried a single
+    top-level `(hsv_range_used, shape_gate_used, live_preset_name)`
+    trio (and `server_post_preset_name` on SessionResult) instead of
+    per-path snapshots. Fold those into one snapshot and stamp on
+    every target path that doesn't already have its own.
+
+    Best-effort: legacy never recorded `algorithm_id`, never separated
+    live params from server_post params, and on SessionResult only
+    server_post had its own preset_name. We can recover preset
+    identity per path but not divergent params — so both paths
+    receive the same params snapshot. The next save drops legacy
+    fields permanently.
+
+    Returns the modified dict (in place; same object). `target_paths`
+    selects which `<path>_config_used` slots to populate ("live" /
+    "server_post" subset depending on caller's schema)."""
+    legacy_hsv = data.pop("hsv_range_used", None)
+    legacy_sg = data.pop("shape_gate_used", None)
+    legacy_live_preset = data.pop("live_preset_name", None)
+    legacy_srv_preset = data.pop("server_post_preset_name", None)
+    if legacy_hsv is None and legacy_sg is None:
+        # No params trio to migrate. We may still have a stray
+        # server_post_preset_name on a SessionResult that lacked the
+        # params trio (server_post run without live arm) — drop it
+        # silently; a snapshot without params would be ill-formed.
+        return data
+
+    import algorithms
+    base_snapshot = {
+        "algorithm_id": algorithms.DEFAULT_ALGORITHM_ID,
+        "hsv": legacy_hsv,
+        "shape_gate": legacy_sg,
+        "preset_name": legacy_live_preset,
+    }
+    if "live" in target_paths and data.get("live_config_used") is None:
+        data["live_config_used"] = dict(base_snapshot)
+    if "server_post" in target_paths and data.get("server_post_config_used") is None:
+        srv_snapshot = dict(base_snapshot)
+        if legacy_srv_preset is not None:
+            srv_snapshot["preset_name"] = legacy_srv_preset
+        data["server_post_config_used"] = srv_snapshot
+    return data
+
+
 class CaptureTelemetryPayload(BaseModel):
     """Actual capture conditions observed on-device for one uploaded pitch.
 
@@ -210,28 +296,24 @@ class PitchPayload(BaseModel):
     # server_post run. Viewer surfaces "last run X ago" next to the
     # Rerun-server button.
     server_post_ran_at: float | None = None
-    # Frozen snapshot of the detection config in effect at the moment
-    # detection ran for this pitch. Mirrors the per-session
-    # `PairingTuning` snapshot stamped on `SessionResult` (cd87995):
-    # `reprocess_sessions.py` reads these first so a later dashboard
-    # edit to `data/hsv_range.json` (or shape_gate) cannot retroactively
-    # change the cost basis used to score blobs in a previously-
-    # recorded pitch. None on legacy pitches written before this
-    # stamping landed; the offline reprocess script logs a warning and
-    # falls back to current disk config in that case. Selector cost
-    # weights are no longer part of this snapshot — they live as
-    # `_W_ASPECT` / `_W_FILL` constants in `candidate_selector` rather
-    # than a runtime tunable.
-    hsv_range_used: HSVRangePayload | None = None
-    shape_gate_used: ShapeGatePayload | None = None
-    # Active preset filename at the moment this pitch's live session was
-    # armed. New writes always populate (read from
-    # `state.live_session_preset_name`); None on legacy on-disk pitch
-    # JSONs predating arm-time preset stamping. Sibling of
-    # `hsv_range_used` / `shape_gate_used` — those carry the raw config
-    # values for `reprocess --use-frozen-snapshot` reproduction; this
-    # carries the on-disk preset identity for events-list rendering.
-    live_preset_name: str | None = None
+    # Per-path frozen detection-config snapshots. Stamped at the
+    # moment each path produced its frames so reprocess /
+    # `--use-frozen-snapshot` can reproduce exactly which params
+    # produced these candidates regardless of subsequent dashboard
+    # edits. Live snapshot is set on first frame ingest; server_post
+    # snapshot is set when run_server_post completes. None when that
+    # path never ran (e.g., live-only flow has no server_post snapshot).
+    live_config_used: DetectionConfigSnapshotPayload | None = None
+    server_post_config_used: DetectionConfigSnapshotPayload | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_used_fields(cls, data):
+        if not isinstance(data, dict):
+            return data
+        return _migrate_legacy_used_fields_into_per_path(
+            data, target_paths=("live", "server_post"),
+        )
 
 
 class TriangulatedPoint(BaseModel):
@@ -315,27 +397,14 @@ class SessionResult(BaseModel):
     # Viewer reads it for the Gap slider's initial position; sibling of
     # `cost_threshold` in the per-session tuning strip.
     gap_threshold_m: float | None = None
-    # Mirror of the per-pitch frozen detection config (`PitchPayload.*_used`).
-    # Aggregated from A+B at result-build time using "A wins, fall back to
-    # B on missing"; a divergence (A and B were detected under different
-    # config because operator edited mid-cycle) is logged as a warning but
-    # does not raise — diagnostic noise, not a crashable condition. None on
-    # legacy results / when neither pitch carried a frozen snapshot.
-    hsv_range_used: HSVRangePayload | None = None
-    shape_gate_used: ShapeGatePayload | None = None
-    # Preset filename frozen onto the live session at arm time
-    # (aggregated A-wins-B-fallback from per-pitch `live_preset_name`).
-    # None on legacy results / sessions armed before preset stamping.
-    # Drives the events-list `Live: <name>` chip; the popover resolves
-    # H/S/V values by reading `data/presets/<name>.json` at render time
-    # (or shows `(deleted)` faded if the file no longer exists).
-    live_preset_name: str | None = None
-    # Preset filename selected on the most recent
-    # `POST /sessions/{sid}/run_server_post` for this session. None when
-    # server_post has never been run, or when the session predates
-    # named-preset rerun. Re-running with a different preset overwrites
-    # — there is no history of past server_post preset choices.
-    server_post_preset_name: str | None = None
+    # Per-path frozen detection-config snapshots, mirrored from each
+    # pitch's `*_config_used` at result-build time using A-wins/B-fallback
+    # aggregation (a divergence between A and B is logged as warning,
+    # not raised — operator edited mid-cycle is diagnostic, not crashable).
+    # Drives events-list / viewer "Live: <preset> | Svr: <preset>" chip
+    # plus the popover that resolves H/S/V values from the preset name.
+    live_config_used: DetectionConfigSnapshotPayload | None = None
+    server_post_config_used: DetectionConfigSnapshotPayload | None = None
     # Multi-segment ballistic fit. Populated by `find_segments` at result
     # build / recompute time so dashboard + viewer can paint fit curves +
     # speed badges without running the segmenter at view time. Empty list
@@ -348,6 +417,14 @@ class SessionResult(BaseModel):
     # server_post each carry their own fit curves / speed badge semantics.
     segments_by_path: dict[str, list[SegmentRecord]] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_used_fields(cls, data):
+        if not isinstance(data, dict):
+            return data
+        return _migrate_legacy_used_fields_into_per_path(
+            data, target_paths=("live", "server_post"),
+        )
 
 
 class DeviceIntrinsics(BaseModel):

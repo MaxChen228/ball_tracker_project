@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from candidate_selector import Candidate, score_candidates
-from detection import HSVRange, ShapeGate
+from detection import HSVRange, ShapeGate  # noqa: F401  (re-export for callers)
+from schemas import DetectionConfigSnapshotPayload  # noqa: F401
 from pairing_tuning import PairingTuning
 from schemas import FramePayload, TriangulatedPoint
 
@@ -75,25 +76,13 @@ class LivePairingSession:
     # /sessions/{sid}/recompute) is the sole residual gate — segmenter
     # and viewer trust it, no downstream re-filter.
     pairing_tuning: PairingTuning = field(default_factory=PairingTuning.default)
-    # HSV / shape-gate snapshot frozen at first ingest_live_frame of this
-    # session, atomically with `pairing_tuning` above. None
-    # before the first ingest (e.g. arm_session pre-creates the session but
-    # no WS live frame has flowed yet — server_post-only flow) and when the
-    # session was constructed entirely outside ingest_live_frame (tests /
-    # direct LivePairingSession()). state.live_session_frozen_config returns
-    # None for both cases so /pitch falls back atomically to current state.
-    hsv_range_used: HSVRange | None = None
-    shape_gate_used: ShapeGate | None = None
-    # Active preset filename at the moment this session was armed (or
-    # at first ingest when arm pre-stamping was bypassed by a test
+    # Detection-config snapshot frozen at arm time (or at first
+    # ingest_live_frame when arm pre-stamping was bypassed by a test
     # fixture / direct-construct path). Carries through to
-    # `PitchPayload.live_preset_name` and onto `SessionResult.live_preset_name`,
-    # so the events list / viewer can render `Live: <name>` chips that
-    # point back at a real on-disk preset file even if the operator has
-    # since switched the dashboard active preset to something else.
-    # None on legacy paths that pre-date arm-time preset stamping; the
-    # dashboard renders such chips as `Live: —` with no popover.
-    live_preset_name: str | None = None
+    # `PitchPayload.live_config_used` and onto
+    # `SessionResult.live_config_used`. None when no live frame has
+    # flowed yet (server_post-only flow / unstamped test fixture).
+    live_config_used: "DetectionConfigSnapshotPayload | None" = None
 
     def __post_init__(self) -> None:
         # Internal mutex covering buffers / frames_by_cam / frame_counts /

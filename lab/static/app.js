@@ -105,6 +105,7 @@ const el = {
   btnNewSeg: document.getElementById("btn-new-seg"),
   btnPropagate: document.getElementById("btn-propagate"),
   btnCancel: document.getElementById("btn-cancel"),
+  btnToggleSeedMarker: document.getElementById("btn-toggle-seed-marker"),
 };
 
 function showError(msg) {
@@ -1089,7 +1090,16 @@ async function markSeed() {
   if (!state.current) return;
   const seg = await ensureActiveEditableSegment();
   if (!seg) return;
-  seg.seed_frame = currentFrame();
+  const f = currentFrame();
+  if (seg.in_frame == null || seg.out_frame == null) {
+    showError("mark in/out first before seeding");
+    return;
+  }
+  if (f < seg.in_frame || f > seg.out_frame) {
+    showError(`current frame ${f} outside segment range [${seg.in_frame}, ${seg.out_frame}] — scrub into range first`);
+    return;
+  }
+  seg.seed_frame = f;
   seg.seed_point = null;
   state.pendingSeedClick = true;
   clearSeedMask(seg.id);
@@ -1216,6 +1226,9 @@ async function sendSeed(frameIndex, x, y) {
     if (seg) {
       seg.seed_frame = frameIndex;
       seg.seed_point = [x, y];
+      // Backend wipes prior PNGs on reseed and resets propagate_status to idle.
+      // Mirror that here so chip color + queue counts stay in sync.
+      seg.propagate_status = "idle";
     }
     if (it) {
       const card = el.itemList.querySelector(`.item-card[data-slug="${capturedSlug}"]`);
@@ -1227,12 +1240,38 @@ async function sendSeed(frameIndex, x, y) {
     }
     if (state.current === capturedSlug) {
       clearSeedMask(capturedSegId);
-      state.seedMaskUrls.set(capturedSegId, URL.createObjectURL(blob));
+      // Backend wipes ALL prior PNGs in masks/<seg>/ on reseed (orphan seeds
+      // + stale propagate masks). Mirror that purge in client caches.
+      // Order matters: do destructive cleanup BEFORE creating the new blob URL
+      // — clearPropMasks revokes all blob URLs in propMaskUrlsBySeg, and we
+      // don't want it eating the URL we just made.
+      if (state.activeSegmentId === capturedSegId) {
+        // Active seg: full reset — wipe done fills, all-seg prop URLs, tinted
+        // cache. Counters back to 0; chip color flipped via seg.propagate_status
+        // mutation above.
+        clearDoneFills();
+        state.propDoneCount = 0;
+        state.propExpected = 0;
+        state.propPhase = null;
+      } else {
+        // Background seg: only wipe its own propMask map + tintedCache entries.
+        const oldMap = state.propMaskUrlsBySeg.get(capturedSegId);
+        if (oldMap) {
+          for (const f of oldMap.keys()) state.tintedCache.delete(f);
+        }
+        clearPropMasks(capturedSegId);
+      }
+      const blobUrl = URL.createObjectURL(blob);
+      state.seedMaskUrls.set(capturedSegId, blobUrl);
+      const segMap = new Map();
+      state.propMaskUrlsBySeg.set(capturedSegId, segMap);
+      segMap.set(frameIndex, blobUrl);
       if (state.activeSegmentId === capturedSegId && currentFrame() === frameIndex) {
         loadMaskForFrame(frameIndex);
       }
       renderSegmentsStrip();
       updatePropagateBtn();
+      updateStatus();
     }
   } catch (e) {
     if (state.current === capturedSlug) showError(`seed failed: ${e}`);
@@ -1481,18 +1520,27 @@ function onKeydown(e) {
   else if (e.key === "n" || e.key === "N") createSegment();
   else if (e.key === "Enter") propagate();
   else if (e.key === "Escape") cancelOrEscape();
-  else if (e.key === "h" || e.key === "H") {
-    state.showSeedMarker = !state.showSeedMarker;
-    const f = currentFrame();
-    const seg = activeSegment();
-    if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
-    else {
-      clearOverlay();
-      if (state.showSeedMarker && seg && f === seg.seed_frame && seg.seed_point) {
-        drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
-      }
+  else if (e.key === "h" || e.key === "H") toggleSeedMarker();
+}
+
+function toggleSeedMarker() {
+  state.showSeedMarker = !state.showSeedMarker;
+  updateSeedMarkerBtn();
+  const f = currentFrame();
+  const seg = activeSegment();
+  if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
+  else {
+    clearOverlay();
+    if (state.showSeedMarker && seg && f === seg.seed_frame && seg.seed_point) {
+      drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
     }
   }
+}
+
+function updateSeedMarkerBtn() {
+  if (!el.btnToggleSeedMarker) return;
+  el.btnToggleSeedMarker.textContent =
+    state.showSeedMarker ? "Hide Seed × (H)" : "Show Seed × (H)";
 }
 
 function onDisplayedFrame(_now, metadata) {
@@ -1594,6 +1642,8 @@ function bindUi() {
   el.btnNewSeg.addEventListener("click", () => createSegment());
   el.btnPropagate.addEventListener("click", propagate);
   el.btnCancel.addEventListener("click", cancelOrEscape);
+  el.btnToggleSeedMarker.addEventListener("click", toggleSeedMarker);
+  updateSeedMarkerBtn();
 
   document.addEventListener("keydown", onKeydown);
 }

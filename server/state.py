@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from schemas import (
     CalibrationSnapshot,
+    DetectionConfigSnapshotPayload,
     DetectionPath,
     Device,
     DeviceIntrinsics,
@@ -681,11 +682,13 @@ class State:
             # exactly once on first ingest regardless of who created the
             # LivePairingSession. Subsequent ingests see the fields already
             # set and skip the block.
-            if live.hsv_range_used is None:
+            if live.live_config_used is None:
                 live.pairing_tuning = self._pairing_tuning
-                live.hsv_range_used = self._detection_config.hsv
-                live.shape_gate_used = self._detection_config.shape_gate
-                live.live_preset_name = self._detection_config.preset
+                live.live_config_used = (
+                    DetectionConfigSnapshotPayload.from_detection_config(
+                        self._detection_config
+                    )
+                )
             cal_a = self._calibration_store.get("A")
             cal_b = self._calibration_store.get("B")
             dev_a = self._device_registry.get("A")
@@ -1142,26 +1145,24 @@ class State:
                 return
             self.results[sid] = result
 
-    def stamp_server_post_preset_name(
-        self, session_id: str, preset_name: str
+    def stamp_server_post_config(
+        self,
+        session_id: str,
+        snapshot: "DetectionConfigSnapshotPayload",
     ) -> SessionResult:
-        """Set `result.server_post_preset_name = preset_name` on the
-        in-memory SessionResult and persist. Called from
-        `_run_server_detection` after each cam's detection completes;
-        both cams of a session always run with the same preset choice
-        (the request body locks it), so last-writer-wins is a no-op.
+        """Set `result.server_post_config_used = snapshot` on the
+        in-memory SessionResult and persist. Both cams of a session
+        run with the same preset / params (the request body locks
+        it), so last-writer-wins is a no-op.
 
-        Raises KeyError if the session has no result yet — the caller
-        always invokes this after `state.record(pitch)` returned a
-        rebuilt result, so this would only fire on a delete-during-write
-        race; treat as a no-op to match `record`'s "session deleted"
-        guards.
+        Returns an empty SessionResult shell if the session was deleted
+        between record() and this call — matches `record`'s race guard.
         """
         with self._lock:
             existing = self.results.get(session_id)
         if existing is None:
             logger.info(
-                "stamp_server_post_preset_name: session %s missing — likely "
+                "stamp_server_post_config: session %s missing — likely "
                 "deleted during server_post run; skipping",
                 session_id,
             )
@@ -1170,7 +1171,9 @@ class State:
                 camera_a_received=False,
                 camera_b_received=False,
             )
-        updated = existing.model_copy(update={"server_post_preset_name": preset_name})
+        updated = existing.model_copy(
+            update={"server_post_config_used": snapshot}
+        )
         self.store_result(updated)
         return updated
 
@@ -1554,14 +1557,16 @@ class State:
                 # detection config NOW, at arm time — not at first ingest.
                 # The R7-fixed contract: a slider drag between arm and
                 # first WS frame must NOT poison the session. ingest_live_frame
-                # below has a `live.hsv_range_used is None` guard so the
+                # below has a `live.live_config_used is None` guard so the
                 # test-bypass-arm path (build LivePairingSession inline,
                 # call ingest directly) still gets stamped on first frame.
                 live = LivePairingSession(session.id)
                 live.pairing_tuning = self._pairing_tuning
-                live.hsv_range_used = self._detection_config.hsv
-                live.shape_gate_used = self._detection_config.shape_gate
-                live.live_preset_name = self._detection_config.preset
+                live.live_config_used = (
+                    DetectionConfigSnapshotPayload.from_detection_config(
+                        self._detection_config
+                    )
+                )
                 self._live_pairings[session.id] = live
                 self._current_session = session
                 self._sync.clear_time_sync_intent_locked()
@@ -1705,26 +1710,18 @@ class State:
         """
         with self._lock:
             live = self._live_pairings.get(session_id)
-            if live is None:
+            if live is None or live.live_config_used is None:
                 return None
-            if live.hsv_range_used is None or live.shape_gate_used is None:
-                return None
-            return (
-                live.hsv_range_used,
-                live.shape_gate_used,
-            )
+            return live.live_config_used
 
     def live_session_preset_name(self, session_id: str) -> str | None:
-        """Public accessor for the active preset name frozen onto a
-        LivePairingSession at arm time (or first ingest fallback).
-        Sibling of `live_session_frozen_config`. Returns None when no
-        LivePairingSession exists for the id, or when the session was
-        armed before preset-stamping landed (legacy fixture path)."""
+        """Active preset name frozen onto the LivePairingSession at
+        arm time. None when no session / no snapshot yet."""
         with self._lock:
             live = self._live_pairings.get(session_id)
-            if live is None:
+            if live is None or live.live_config_used is None:
                 return None
-            return live.live_preset_name
+            return live.live_config_used.preset_name
 
     def set_shape_gate(self, shape_gate: ShapeGate) -> ShapeGate:
         with self._lock:

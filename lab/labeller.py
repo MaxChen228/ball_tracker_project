@@ -1252,8 +1252,23 @@ class Handler(BaseHTTPRequestHandler):
             if not all(isinstance(v, int) for v in (frame_index, x, y)):
                 self._send_text(HTTPStatus.BAD_REQUEST, "frame_index/x/y must be int")
                 return
-            if _segment_or_404(slug, seg_id) is None:
+            seg = _segment_or_404(slug, seg_id)
+            if seg is None:
                 self._send_text(HTTPStatus.NOT_FOUND, "no such segment")
+                return
+            in_f = seg.get("in_frame")
+            out_f = seg.get("out_frame")
+            if in_f is None or out_f is None:
+                self._send_text(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                "segment has no in/out range; mark in+out first")
+                return
+            if not (in_f <= frame_index <= out_f):
+                self._send_text(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                f"seed frame {frame_index} outside segment range [{in_f}, {out_f}]")
+                return
+            if seg.get("propagate_status") == "running":
+                self._send_text(HTTPStatus.CONFLICT,
+                                "cannot reseed while propagate is running; cancel first")
                 return
             item = STORE.get(slug)
             source = SOURCES_DIR / item["source_video"]
@@ -1269,7 +1284,26 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_text(HTTPStatus.INTERNAL_SERVER_ERROR, f"seed failed: {e}")
                 return
-            STORE.update_segment(slug, seg_id, seed_frame=frame_index, seed_point=[x, y])
+            # Reseed invalidates any prior propagate result for this segment
+            # (the seed point or frame may have moved); reset status so the UI
+            # reflects "needs propagate again". Disk PNG cleanup happens below.
+            STORE.update_segment(slug, seg_id,
+                                 seed_frame=frame_index, seed_point=[x, y],
+                                 propagate_status="idle")
+            # Persist seed mask to disk so it survives page reload (browser-side
+            # blob URLs are in-memory only). Same naming as propagate masks —
+            # propagate later overwrites this frame anyway.
+            mdir = masks_dir_for(slug, seg_id)
+            mdir.mkdir(parents=True, exist_ok=True)
+            target_name = f"{frame_index:05d}.png"
+            # Reseed orphan cleanup: any PNG not matching the new seed frame is
+            # stale (either a prior seed_frame from re-seeding, or a leftover
+            # from a propagate that no longer matches the current seed). Wipe
+            # them — propagate (if rerun) writes the full [in,out] range fresh.
+            for png_path in mdir.glob("*.png"):
+                if png_path.name != target_name:
+                    png_path.unlink()
+            (mdir / target_name).write_bytes(png)
             self._send_bytes(HTTPStatus.OK, png, "image/png")
             return
 
