@@ -51,81 +51,38 @@ identifiers.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 import socket
-import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
-from typing import Any, Callable
+from typing import Any
 
-import numpy as np
 from fastapi import (
-    BackgroundTasks,
     FastAPI,
-    File,
-    Form,
-    HTTPException,
     Request,
-    UploadFile,
 )
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import ValidationError
 
 # Re-exports so `from main import PitchPayload, ...` keeps working for the
 # existing test suite and any downstream tooling. New callers should import
 # from the split modules directly (schemas / pairing / chirp / render_*).
 from schemas import (
-    CalibrationSnapshot,
-    CaptureTelemetryPayload,
-    DetectionPath,
-    Device,
-    FramePayload,
-    IntrinsicsPayload,
-    MarkerBatchUpsertRequest,
-    MarkerDraft,
-    MarkerRecord,
-    MarkerUpdateRequest,
-    PitchPayload,
+    CalibrationSnapshot,  # noqa: F401  (re-export for tests / reconstruct.py)
+    DetectionPath,  # noqa: F401
+    FramePayload,  # noqa: F401
+    IntrinsicsPayload,  # noqa: F401
+    MarkerRecord,  # noqa: F401
+    PitchPayload,  # noqa: F401
     Session,
-    SessionResult,
-    SyncLogBody,
-    SyncLogEntry,
-    SyncReport,
-    SyncResult,
-    SyncRun,
-    TrackingExposureCapMode,
-    TriangulatedPoint,
-    _DEFAULT_TRACKING_EXPOSURE_CAP_MODE,
-    _DEFAULT_SESSION_TIMEOUT_S,
-    _DEFAULT_PATHS,
+    TriangulatedPoint,  # noqa: F401
 )
-from collections import deque
-from pairing import scale_pitch_to_video_dims, triangulate_cycle
-from pipeline import ProcessingCanceled, detect_pitch
-from video import probe_dims
+from pipeline import detect_pitch  # noqa: F401  (re-export for routes/pitch.py late-bind)
 from chirp import chirp_wav_bytes
-import sync_audio_detect
-from preview import (
-    FRAME_MAX_AGE_S as _PREVIEW_FRAME_MAX_AGE_S,
-    PreviewBuffer,
-)
-from marker_registry import MarkerRegistryDB
-from calibration_solver import (
-    PLATE_MARKER_WORLD,
-    derive_fov_intrinsics,
-    detect_all_markers_in_dict,
-    solve_homography_from_world_map,
-)
-from triangulate import build_K, camera_center_world, recover_extrinsics, triangulate_rays, undistorted_ray_cam
-from sync_solver import compute_mutual_sync
+from preview import FRAME_MAX_AGE_S as _PREVIEW_FRAME_MAX_AGE_S  # noqa: F401
+from calibration_solver import PLATE_MARKER_WORLD
 from cleanup_old_sessions import cleanup_expired_sessions
-from live_pairing import LivePairingSession
 from sse import SSEHub
 from ws import DeviceSocketManager
 
@@ -133,24 +90,19 @@ from ws import DeviceSocketManager
 # Re-export everything tests reference via `main.*` so the test suite
 # needs zero changes.
 from state import (
-    _AutoCalibrationRun,
-    _CALIBRATION_FRAME_TTL_S,
-    _DEFAULT_DATA_DIR,
-    _DEVICE_GC_AFTER_S,
-    _DEVICE_REGISTRY_CAP,
-    _DEVICE_STALE_S,
-    _DISARM_ECHO_S,
-    TimeSyncIntent,
-    _MAX_PITCH_UPLOAD_BYTES,
-    _new_session_id,
-    _new_sync_id,
-    _SYNC_COMMAND_TTL_S,
-    _SYNC_COOLDOWN_S,
-    _SYNC_LATE_REPORT_GRACE_S,
-    _SYNC_TIMEOUT_S,
-    _TIME_SYNC_INTENT_WINDOW_S,
+    _CALIBRATION_FRAME_TTL_S,  # noqa: F401  (test access via main.*)
+    _DEVICE_GC_AFTER_S,  # noqa: F401
+    _DEVICE_REGISTRY_CAP,  # noqa: F401
+    _DISARM_ECHO_S,  # noqa: F401
+    TimeSyncIntent,  # noqa: F401
+    _MAX_PITCH_UPLOAD_BYTES,  # noqa: F401
+    _SYNC_COMMAND_TTL_S,  # noqa: F401
+    _SYNC_COOLDOWN_S,  # noqa: F401
+    _SYNC_LATE_REPORT_GRACE_S,  # noqa: F401
+    _SYNC_TIMEOUT_S,  # noqa: F401
+    _TIME_SYNC_INTENT_WINDOW_S,  # noqa: F401
     _TIME_SYNC_MAX_AGE_S,
-    _validate_calibration_snapshot,
+    _validate_calibration_snapshot,  # noqa: F401
     State,
 )
 
@@ -243,14 +195,14 @@ app.include_router(_calibration_routes.router)
 app.include_router(_calibration_intrinsics_routes.router)
 app.include_router(_device_ws_routes.router)
 app.include_router(_presets_routes.router)
-from routes.camera import _validate_camera_id_or_422
-from routes.sessions import _SESSION_ID_RE
-from routes.viewer import _build_viewer_health, _find_clip_on_disk, _scene_for_session
-from routes.pitch import _summarize_result, _run_server_detection
+
+# Re-exports for routes/* late-bind imports — defined in routes/pitch.py but
+# accessed via `from main import _run_server_detection` etc.
+from routes.pitch import _run_server_detection, _summarize_result  # noqa: F401, E402
+
 from detection_config import (
     to_dict as _detection_config_to_dict,
 )
-from routes.calibration import _await_calibration_frame
 
 
 def _detection_config_view(state) -> dict:
@@ -262,12 +214,6 @@ def _detection_config_view(state) -> dict:
         **_detection_config_to_dict(cfg),
         "modified_fields": state.modified_fields_for(cfg),
     }
-from calibration_auto import (
-    _all_marker_world_xyz, _decode_calibration_jpeg,
-    _derive_auto_cal_intrinsics, _marker_camera_pose, _pose_from_homography,
-    _reprojection_error_px, _residual_bucket, _run_auto_calibration,
-    _solve_auto_cal_solution, _solve_pnp_homography, _triangulate_marker_candidates,
-)
 
 
 @app.middleware("http")

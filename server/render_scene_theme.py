@@ -3,17 +3,17 @@ from __future__ import annotations
 
 from palette import (
     _ACCENT,
-    _BG,
-    _BORDER_BASE,
-    _BORDER_L,
-    _CONTRA,
-    _DEV,
-    _DUAL,
+    _BG,  # noqa: F401  (re-exported for scene_runtime / viewer_page)
+    _BORDER_BASE,  # noqa: F401
+    _BORDER_L,  # noqa: F401
+    _CONTRA,  # noqa: F401
+    _DEV,  # noqa: F401
+    _DUAL,  # noqa: F401
     _INK,
-    _OK,
-    _PENDING,
+    _OK,  # noqa: F401
+    _PENDING,  # noqa: F401
     _SUB,
-    _SURFACE,
+    _SURFACE,  # noqa: F401
 )
 from strike_zone import (
     BASELINE_Z_BOTTOM_M,
