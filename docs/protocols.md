@@ -186,7 +186,7 @@ reason: str | null                   # free-form ("timeout", "user_stop", etc.) 
 
 Server emits SSE events for state-change broadcasts. Listeners in
 `server/static/dashboard/86_live_stream.js` handle `session_armed`,
-`frame_count`, `ray`, `point`, `path_completed`, `session_ended`,
+`frame_count`, `rays`, `points`, `path_completed`, `session_ended`,
 `device_status`, `device_heartbeat`, `calibration_changed`, and `fit`.
 
 #### `event: fit`
