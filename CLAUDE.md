@@ -95,18 +95,18 @@ true`, `isolation: "worktree"`）派 batch worker 時，prompt 結尾**必須**
 不加這段歷史上發生過：worker 寫完 code 停在 commit 前 → worktree
 auto-cleanup → code 全消失。
 
-## Subagent — 一律 Opus
+## Subagent — 模型選擇
 
-呼叫 `Agent` tool（不論 subagent_type 是 Explore / Plan /
-general-purpose / claude-code-guide / 自訂 worker）**一律加** `model:
-"opus"`。
+呼叫 `Agent` tool 時依任務複雜度選 model：
 
-- Haiku agent 摘要曾編造內容（把「cartesian 全洩漏」當結論回報，但實際
-  server 端 `gap_threshold_m` / `cost_threshold` 在 emit 前已 reject 大量
-  組合），導致主 agent 誤判
-- 即使輕量 Explore quick 也用 Opus，不為省 token 換 Haiku
-- 收到 subagent 摘要後仍要對關鍵結論 file:line 自行驗證
-- 例外：使用者明說「用 Haiku/Sonnet 跑這個」
+- **預設 Sonnet**：一般 Explore / Plan / worker 任務
+- **複雜任務必用 Opus**：跨檔重構、深度 audit、需要強推理 / 長 context
+  整合的任務
+- **Haiku 可用但不可信**：Haiku 摘要曾編造內容（把「cartesian 全洩漏」
+  當結論回報，但實際 server 端 `gap_threshold_m` / `cost_threshold` 在
+  emit 前已 reject 大量組合），導致主 agent 誤判。輕量 lookup 可用，但
+  關鍵結論一律 file:line 自行驗證
+- 收到任何 subagent 摘要都要對關鍵結論自行驗證
 
 ## iOS — 禁 xcodebuild test
 
