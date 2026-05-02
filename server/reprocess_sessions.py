@@ -39,10 +39,8 @@ from pairing_tuning import PairingTuning
 from schemas import (
     CalibrationSnapshot,
     DetectionConfigSnapshotPayload,
-    HSVRangePayload,
     PitchPayload,
     SessionResult,
-    ShapeGatePayload,
     persist_pitch_json,
     persist_result_json,
 )
@@ -66,17 +64,23 @@ def atomic_write(path: Path, text: str) -> None:
 
 
 def _snapshot_from_preset(preset: presets.Preset) -> DetectionConfigSnapshotPayload:
+    """Encode a Preset as a snapshot. Preset itself is still v11-shaped
+    (`.hsv` + `.shape_gate`) — Phase 2 will widen Preset to be
+    algorithm-agnostic at which point this encoder grows a dispatch
+    table on `preset.algorithm_id`."""
     return DetectionConfigSnapshotPayload(
         algorithm_id=preset.algorithm_id,
-        hsv=HSVRangePayload(
-            h_min=preset.hsv.h_min, h_max=preset.hsv.h_max,
-            s_min=preset.hsv.s_min, s_max=preset.hsv.s_max,
-            v_min=preset.hsv.v_min, v_max=preset.hsv.v_max,
-        ),
-        shape_gate=ShapeGatePayload(
-            aspect_min=preset.shape_gate.aspect_min,
-            fill_min=preset.shape_gate.fill_min,
-        ),
+        params={
+            "hsv": {
+                "h_min": preset.hsv.h_min, "h_max": preset.hsv.h_max,
+                "s_min": preset.hsv.s_min, "s_max": preset.hsv.s_max,
+                "v_min": preset.hsv.v_min, "v_max": preset.hsv.v_max,
+            },
+            "shape_gate": {
+                "aspect_min": preset.shape_gate.aspect_min,
+                "fill_min": preset.shape_gate.fill_min,
+            },
+        },
         preset_name=preset.name,
     )
 
@@ -213,7 +217,7 @@ def rerun_detection(
         snapshot.algorithm_id,
         video,
         pitch.video_start_pts_s,
-        {"hsv": snapshot.hsv, "shape_gate": snapshot.shape_gate},
+        snapshot.params,
     )
     new_hits = sum(1 for f in frames if f.px is not None)
     logger.info(
@@ -363,14 +367,12 @@ def _load_force_preset_snapshot(name: str) -> DetectionConfigSnapshotPayload:
             f"--force-preset {name!r}: preset file is malformed — {e}"
         ) from None
     snap = _snapshot_from_preset(preset)
+    # Log the params dict raw — keeps the line algorithm-agnostic
+    # (different detectors emit different keys; we don't pretend to
+    # know which ones to format).
     logger.info(
-        "force-preset %s — algorithm=%s hsv h[%d-%d] s[%d-%d] v[%d-%d] "
-        "aspect>=%.2f fill>=%.2f",
-        name, snap.algorithm_id,
-        snap.hsv.h_min, snap.hsv.h_max,
-        snap.hsv.s_min, snap.hsv.s_max,
-        snap.hsv.v_min, snap.hsv.v_max,
-        snap.shape_gate.aspect_min, snap.shape_gate.fill_min,
+        "force-preset %s — algorithm=%s params=%s",
+        name, snap.algorithm_id, snap.params,
     )
     return snap
 

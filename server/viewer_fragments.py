@@ -230,8 +230,13 @@ def _config_pill_html(
             f'</span>'
         )
 
-    hsv = snapshot["hsv"]
-    gate = snapshot["shape_gate"]
+    # Snapshot serialised shape: `{algorithm_id, params, preset_name}`.
+    # v11_hsv_cc params shape = `{hsv, shape_gate}`. Phase 2 will
+    # dispatch on `algorithm_id` to render any algorithm; for now v11
+    # is the only one shipping so the formatter assumes v11 params.
+    params = snapshot["params"]
+    hsv = params["hsv"]
+    gate = params["shape_gate"]
     tip = (
         f"H {hsv['h_min']}-{hsv['h_max']} · "
         f"S {hsv['s_min']}-{hsv['s_max']} · "

@@ -246,8 +246,12 @@
     if (liveCfg === null && srvCfg === null) return '';
     const known = new Map(_presetsCache.map(p => [p.name, p]));
     const tip = (cfg) => {
-      const h = cfg.hsv;
-      const g = cfg.shape_gate;
+      // Snapshot is now `{algorithm_id, params, preset_name}`. v11_hsv_cc
+      // params shape = `{hsv, shape_gate}`. Phase 2 will dispatch on
+      // `cfg.algorithm_id` to render any algorithm; for now v11 is the
+      // only one shipping so the formatter assumes v11 params.
+      const h = cfg.params.hsv;
+      const g = cfg.params.shape_gate;
       return `H ${h.h_min}-${h.h_max} · S ${h.s_min}-${h.s_max} · V ${h.v_min}-${h.v_max} · asp≥${g.aspect_min.toFixed(2)} fill≥${g.fill_min.toFixed(2)}`;
     };
     const chip = (label, cfg) => {

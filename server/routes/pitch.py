@@ -322,9 +322,9 @@ async def _run_server_detection(
     # edits. `algorithms.run_detection` materialises the typed params and
     # dispatches to the registered detector for `algorithm_id`.
     logger.info(
-        "background detection start session=%s cam=%s algo=%s preset=%s hsv=%r",
+        "background detection start session=%s cam=%s algo=%s preset=%s params=%s",
         sid, cam, config_snapshot.algorithm_id, config_snapshot.preset_name,
-        config_snapshot.hsv,
+        config_snapshot.params,
     )
     try:
         frames = await asyncio.to_thread(
@@ -332,7 +332,7 @@ async def _run_server_detection(
             config_snapshot.algorithm_id,
             clip_path,
             pitch.video_start_pts_s,
-            {"hsv": config_snapshot.hsv, "shape_gate": config_snapshot.shape_gate},
+            config_snapshot.params,
             should_cancel=lambda: proc.should_cancel_server_post_job(sid, cam),
             progress=on_progress,
         )
