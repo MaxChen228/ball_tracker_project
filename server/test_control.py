@@ -776,6 +776,61 @@ def test_cancel_and_resume_processing_summary(tmp_path):
     assert resumable is True
 
 
+def test_record_preserves_frozen_used_configs_on_later_partial_merge(tmp_path):
+    from schemas import (
+        DetectionConfigSnapshotPayload,
+        HSVRangePayload,
+        ShapeGatePayload,
+    )
+
+    def _snap(name: str) -> DetectionConfigSnapshotPayload:
+        return DetectionConfigSnapshotPayload(
+            algorithm_id="v11_hsv_cc",
+            preset_name=name,
+            hsv=HSVRangePayload(
+                h_min=10, h_max=20,
+                s_min=30, s_max=200,
+                v_min=40, v_max=210,
+            ),
+            shape_gate=ShapeGatePayload(aspect_min=0.7, fill_min=0.55),
+        )
+
+    s = main.State(data_dir=tmp_path)
+    session_id = sid(71)
+
+    first = _minimal_pitch("A", session_id=session_id).model_copy(deep=True)
+    first.live_config_used = _snap("live_cfg")
+    first.server_post_config_used = _snap("server_cfg")
+    first.server_post_ran_at = 123.0
+    s.record(first)
+
+    later = main.PitchPayload(
+        camera_id="A",
+        session_id=session_id,
+        sync_id="sy_deadbeef",
+        sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        frames_live=[
+            main.FramePayload(
+                frame_index=1,
+                timestamp_s=0.1,
+                px=110.0,
+                py=120.0,
+                ball_detected=True,
+            )
+        ],
+    )
+    s.record(later)
+
+    stored = s.pitches[("A", session_id)]
+    assert stored.live_config_used is not None
+    assert stored.live_config_used.preset_name == "live_cfg"
+    assert stored.server_post_config_used is not None
+    assert stored.server_post_config_used.preset_name == "server_cfg"
+    assert stored.server_post_ran_at == pytest.approx(123.0)
+
+
 def test_sessions_delete_json_api():
     client = TestClient(app)
     main.state.record(_minimal_pitch("A", session_id=sid(3)))
