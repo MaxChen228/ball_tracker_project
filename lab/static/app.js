@@ -2,6 +2,14 @@
 
 const API_BASE = window.location.origin;
 
+const MASK_COLORS = {
+  green:  [34, 197, 94],    // #22c55e
+  blue:   [59, 130, 246],   // #3b82f6
+  red:    [239, 68, 68],    // #ef4444
+  yellow: [250, 204, 21],   // #facc15
+};
+const MASK_ALPHA = 128;
+
 const state = {
   items: [],            // each item carries .segments[]
   current: null,        // current slug
@@ -43,6 +51,10 @@ const state = {
   frameSource: null,
   scrubPaintToken: 0,
   frameSourceLoading: false,
+  maskColor: (() => {
+    const v = localStorage.getItem("labMaskColor");
+    return (v && MASK_COLORS[v]) ? v : "green";
+  })(),
 };
 
 // ---- segment helpers -------------------------------------------------------
@@ -599,16 +611,36 @@ function buildTintedCanvas(img) {
   ctx.drawImage(img, 0, 0, c.width, c.height);
   const data = ctx.getImageData(0, 0, c.width, c.height);
   const px = data.data;
+  const [r, g, b] = MASK_COLORS[state.maskColor] || MASK_COLORS.green;
   for (let i = 0; i < px.length; i += 4) {
     const a = px[i] || px[i + 1] || px[i + 2];
     if (a > 8) {
-      px[i] = 34; px[i + 1] = 197; px[i + 2] = 94; px[i + 3] = 128;
+      px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = MASK_ALPHA;
     } else {
       px[i + 3] = 0;
     }
   }
   ctx.putImageData(data, 0, 0);
   return c;
+}
+
+function setMaskColor(name) {
+  if (!MASK_COLORS[name] || state.maskColor === name) return;
+  state.maskColor = name;
+  localStorage.setItem("labMaskColor", name);
+  // tintedCache holds canvases pre-tinted with the OLD color — invalidate.
+  state.tintedCache.clear();
+  // Cancel in-flight prefetch workers; they'd populate cache with old color.
+  state.prefetchAbort++;
+  repaintOverlayForCurrentFrame();
+  updateColorSwatchActive();
+  if (state.current) prefetchMasks(state.current);
+}
+
+function updateColorSwatchActive() {
+  document.querySelectorAll("#mask-color-swatches .swatch").forEach(s => {
+    s.classList.toggle("active", s.dataset.color === state.maskColor);
+  });
 }
 
 function blitCachedMask(frame) {
@@ -1746,6 +1778,11 @@ function bindUi() {
   el.btnCancel.addEventListener("click", cancelOrEscape);
   el.btnToggleSeedMarker.addEventListener("click", toggleSeedMarker);
   updateSeedMarkerBtn();
+
+  document.querySelectorAll("#mask-color-swatches .swatch").forEach(s => {
+    s.addEventListener("click", () => setMaskColor(s.dataset.color));
+  });
+  updateColorSwatchActive();
 
   document.addEventListener("keydown", onKeydown);
 }

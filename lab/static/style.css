@@ -216,6 +216,25 @@ body {
   gap: 4px;
 }
 
+#mask-color-swatches {
+  display: flex;
+  gap: 4px;
+  margin-left: 8px;
+}
+#mask-color-swatches .swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  border: 1px solid #475569;
+  cursor: pointer;
+  padding: 0;
+}
+#mask-color-swatches .swatch.active { border: 2px solid #f8fafc; }
+#mask-color-swatches .swatch[data-color="green"]  { background: #22c55e; }
+#mask-color-swatches .swatch[data-color="blue"]   { background: #3b82f6; }
+#mask-color-swatches .swatch[data-color="red"]    { background: #ef4444; }
+#mask-color-swatches .swatch[data-color="yellow"] { background: #facc15; }
+
 #stage {
   flex: 1;
   display: flex;
