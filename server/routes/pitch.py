@@ -350,15 +350,18 @@ async def _run_server_detection(
             sid, cam,
         )
         return
-    pitch.frames_server_post = frames
     # Stamp the wall-clock for this cam's just-completed run so the
     # SessionResult rebuild picks it up via max(A, B). Only set on
     # success — cancellation / errors above return before this line.
     pitch.server_post_ran_at = state.now()
-    # Stamp the snapshot that just produced these frames. live_config_used
-    # is preserved — it is the arm-time live identity and never reflects
-    # server_post's run choice.
-    pitch.server_post_config_used = config_snapshot
+    # Atomically: update server_post snapshot + frames in both legacy
+    # field and `frames_by_algorithm`. live_config_used is preserved
+    # — it is the arm-time live identity and never reflects
+    # server_post's run choice. Previous runs under a different
+    # algorithm id keep their frames in `frames_by_algorithm[<old id>]`
+    # so v11→v12 runs leave both algorithms persisted on disk.
+    from detection_paths import stamp_server_post_run
+    stamp_server_post_run(pitch, config_snapshot, frames)
     try:
         result = await asyncio.to_thread(state.record, pitch)
     except Exception as exc:

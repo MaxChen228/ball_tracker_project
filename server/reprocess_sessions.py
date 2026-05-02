@@ -222,8 +222,14 @@ def rerun_detection(
         snapshot.preset_name if snapshot.preset_name is not None else "custom",
         len(frames), old_hits, new_hits,
     )
-    pitch.frames_server_post = frames
-    pitch.server_post_config_used = snapshot
+    # Atomically stamp the new run via the helper so multi-algorithm
+    # accumulation works the same as the live `_run_server_detection`
+    # path: the previous algorithm's frames stay in
+    # `frames_by_algorithm[<old id>]` while the new algorithm
+    # populates its own bucket and the legacy `frames_server_post`
+    # back-sync.
+    from detection_paths import stamp_server_post_run
+    stamp_server_post_run(pitch, snapshot, frames)
     if not dry_run:
         atomic_write(pitch_path, persist_pitch_json(pitch))
     return pitch

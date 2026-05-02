@@ -123,6 +123,81 @@ def test_set_algorithm_frames_legacy_pre_snapshot_writes_through_to_server_post(
     assert len(p.frames_server_post) == 1
 
 
+def test_stamp_server_post_run_accumulates_two_algorithms(monkeypatch):
+    """Phase 7 multi-algorithm contract: running v11 then v12 in the
+    same session must leave BOTH algorithms' frames on disk. The
+    legacy `frames_server_post` reflects the most recent run; the
+    dict accumulates both. Monkeypatches a fake `v12_test` into the
+    registry so this test runs today (v11 is the only real entry as
+    of Phase 7) and stays valid when v12 lands."""
+    import algorithms as algorithms_mod
+    from detection_paths import stamp_server_post_run
+    from schemas import persist_pitch_json
+    import json
+
+    fake = algorithms_mod.AlgorithmEntry(
+        algorithm_id="v12_test",
+        label="test",
+        description="test",
+        detector=algorithms_mod._REGISTRY["v11_hsv_cc"].detector,
+    )
+    patched = dict(algorithms_mod._REGISTRY)
+    patched["v12_test"] = fake
+    monkeypatch.setattr(algorithms_mod, "_REGISTRY", patched)
+
+    p = _pitch()
+    snap_v11 = _snapshot("v11_hsv_cc")
+    stamp_server_post_run(p, snap_v11, [_frame(1), _frame(2)])
+    blob1 = persist_pitch_json(p)
+    parsed1 = json.loads(blob1)
+    assert len(parsed1["frames_by_algorithm"]["v11_hsv_cc"]) == 2
+    assert len(parsed1["frames_server_post"]) == 2
+    assert parsed1["server_post_config_used"]["algorithm_id"] == "v11_hsv_cc"
+
+    snap_v12 = _snapshot("v12_test")
+    stamp_server_post_run(p, snap_v12, [_frame(10), _frame(11), _frame(12)])
+    blob2 = persist_pitch_json(p)
+    parsed2 = json.loads(blob2)
+    assert len(parsed2["frames_by_algorithm"]["v11_hsv_cc"]) == 2
+    assert len(parsed2["frames_by_algorithm"]["v12_test"]) == 3
+    assert len(parsed2["frames_server_post"]) == 3
+    assert parsed2["server_post_config_used"]["algorithm_id"] == "v12_test"
+    p2 = PitchPayload.model_validate(parsed2)
+    assert len(p2.frames_by_algorithm["v11_hsv_cc"]) == 2
+    assert len(p2.frames_by_algorithm["v12_test"]) == 3
+
+
+def test_stamp_server_post_run_rejects_ios_capture_time():
+    """Storage-correctness guard: `ios_capture_time` has special
+    semantics in `set_algorithm_frames` (back-syncs `frames_live`,
+    not `frames_server_post`) that would corrupt the server-post
+    slot if combined with the snapshot mutation `stamp_server_post_run`
+    performs."""
+    from detection_paths import stamp_server_post_run
+
+    p = _pitch()
+    snap_ios = _snapshot("ios_capture_time")
+    try:
+        stamp_server_post_run(p, snap_ios, [_frame(1)])
+        raise AssertionError("should have rejected ios_capture_time")
+    except ValueError as e:
+        assert "ios_capture_time" in str(e)
+
+
+def test_stamp_server_post_run_rerun_same_algorithm_overwrites():
+    """Re-running the same algorithm overwrites its bucket — same
+    semantics as the legacy single-slot behaviour for v11-only
+    workflows. Pin so a future "always-append" change is caught."""
+    from detection_paths import stamp_server_post_run
+
+    p = _pitch()
+    snap_v11 = _snapshot("v11_hsv_cc")
+    stamp_server_post_run(p, snap_v11, [_frame(1), _frame(2), _frame(3)])
+    stamp_server_post_run(p, snap_v11, [_frame(10)])
+    assert len(p.frames_by_algorithm["v11_hsv_cc"]) == 1
+    assert len(p.frames_server_post) == 1
+
+
 def test_pitch_with_algorithm_frames_projects_into_server_post_slot():
     """Counterpart to `pitch_with_path_frames`. Downstream code
     (reconstruct, rays) reads `frames_server_post` on the clone."""

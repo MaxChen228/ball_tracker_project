@@ -151,6 +151,49 @@ def set_algorithm_frames(
         pitch.frames_server_post = list(frames)
 
 
+def stamp_server_post_run(
+    pitch: PitchPayload,
+    snapshot,
+    frames: list[FramePayload],
+) -> None:
+    """Atomically stamp one server-side detection run onto a pitch:
+    update `server_post_config_used` to the snapshot that produced
+    these frames, then route the frames through `set_algorithm_frames`
+    so the new algorithm's bucket in `frames_by_algorithm` is filled
+    AND `frames_server_post` back-syncs (because the snapshot we just
+    set declares this algorithm to be the current server_post slot).
+
+    Phase 7 entry point for `routes/pitch.py::_run_server_detection`
+    and `reprocess_sessions.py`. Callers must NOT split this into
+    individual mutations: the mirror helpers run on every load /
+    persist and would interpret an intermediate state (snapshot
+    updated, frames not yet replaced) as canonical, mis-filing the
+    previous algorithm's frames under the new id.
+
+    Multi-algorithm semantics: a previous run under a DIFFERENT
+    algorithm id leaves its frames in `frames_by_algorithm[<old id>]`
+    untouched (union mirror preserves it). Only the algorithm id that
+    matches the new snapshot is overwritten. So running v11 then v12
+    leaves dict={v11: <v11 frames>, v12: <v12 frames>} and
+    frames_server_post=<v12 frames> as the "current" surface.
+
+    The non-runnable id `ios_capture_time` is rejected: it represents
+    iOS-side capture-time detection (read-only) and has special
+    storage semantics in `set_algorithm_frames` (back-syncs
+    `frames_live`, NOT `frames_server_post`) that would corrupt the
+    server-post slot if used here.
+    """
+    if snapshot.algorithm_id == IOS_CAPTURE_TIME_ALGORITHM_ID:
+        raise ValueError(
+            f"stamp_server_post_run rejects non-runnable id "
+            f"{IOS_CAPTURE_TIME_ALGORITHM_ID!r}: server-post slot "
+            "is reserved for runnable algorithms"
+        )
+    pitch.server_post_config_used = snapshot
+    pitch.config_used_by_algorithm[snapshot.algorithm_id] = snapshot
+    set_algorithm_frames(pitch, snapshot.algorithm_id, frames)
+
+
 def pitch_with_algorithm_frames(
     pitch: PitchPayload, algorithm_id: str,
 ) -> PitchPayload:
