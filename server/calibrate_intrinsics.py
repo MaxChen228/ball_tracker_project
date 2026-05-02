@@ -117,8 +117,14 @@ def calibrate_from_images(
     board, _ = board_spec.build()
     detector = cv2.aruco.CharucoDetector(board)
 
-    all_corners: list[np.ndarray] = []
-    all_ids: list[np.ndarray] = []
+    # OpenCV 4.10+ removed cv2.aruco.calibrateCameraCharuco. Replacement
+    # path: CharucoBoard.matchImagePoints() turns detected ChArUco
+    # corners into 3D-2D correspondences, then generic cv2.calibrateCamera
+    # solves K + distortion. matchImagePoints asserts CV_32F on corners
+    # and CV_32S on ids — wrong dtypes throw inside OpenCV with no
+    # silent coercion.
+    all_obj_pts: list[np.ndarray] = []
+    all_img_pts: list[np.ndarray] = []
     used_paths: list[str] = []
     image_size: tuple[int, int] | None = None
 
@@ -141,25 +147,33 @@ def calibrate_from_images(
             print(f"[skip] {path}: only {len(charuco_corners)} corners (< {min_corners_per_image})", file=sys.stderr)
             continue
 
-        all_corners.append(charuco_corners)
-        all_ids.append(charuco_ids)
+        corners_f32 = np.asarray(charuco_corners, dtype=np.float32).reshape(-1, 1, 2)
+        ids_i32 = np.asarray(charuco_ids, dtype=np.int32).reshape(-1, 1)
+        obj_pts, img_pts = board.matchImagePoints(corners_f32, ids_i32)
+        if obj_pts is None or img_pts is None or len(obj_pts) < min_corners_per_image:
+            print(
+                f"[skip] {path}: matchImagePoints returned "
+                f"{0 if obj_pts is None else len(obj_pts)} points (< {min_corners_per_image})",
+                file=sys.stderr,
+            )
+            continue
+
+        all_obj_pts.append(obj_pts)
+        all_img_pts.append(img_pts)
         used_paths.append(path)
 
-    if len(all_corners) < 4:
+    if len(all_obj_pts) < 4:
         raise SystemExit(
-            f"only {len(all_corners)} usable image(s); need ≥4 with varied poses for a stable K"
+            f"only {len(all_obj_pts)} usable image(s); need ≥4 with varied poses for a stable K"
         )
     assert image_size is not None
 
-    flags = 0
-    rms, K, dist, _, _ = cv2.aruco.calibrateCameraCharuco(
-        all_corners,
-        all_ids,
-        board,
+    rms, K, dist, _, _ = cv2.calibrateCamera(
+        all_obj_pts,
+        all_img_pts,
         image_size,
-        cameraMatrix=None,
-        distCoeffs=None,
-        flags=flags,
+        None,
+        None,
     )
 
     return CalibrationResult(
@@ -171,7 +185,7 @@ def calibrate_from_images(
         image_height=image_size[1],
         rms_reprojection_error_px=float(rms),
         distortion_coeffs=[float(x) for x in dist.flatten().tolist()],
-        num_images_used=len(all_corners),
+        num_images_used=len(all_obj_pts),
         image_paths_used=used_paths,
     )
 

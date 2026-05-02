@@ -63,21 +63,17 @@ def test_calibration_recovers_known_intrinsics_from_synthetic_projections():
         tz = 0.55 + rng.uniform(-0.10, 0.20)
         poses.append((np.array([rx, ry, rz]), np.array([tx, ty, tz])))
 
-    all_corners: list[np.ndarray] = []
-    all_ids: list[np.ndarray] = []
+    all_obj_pts: list[np.ndarray] = []
+    all_img_pts: list[np.ndarray] = []
     for rvec, tvec in poses:
         pts2d, _ = cv2.projectPoints(corners_3d, rvec, tvec, K_true, dist_true)
-        all_corners.append(pts2d.reshape(-1, 1, 2).astype(np.float32))
-        all_ids.append(ids.copy())
+        corners_f32 = pts2d.reshape(-1, 1, 2).astype(np.float32)
+        obj_pts, img_pts = board.matchImagePoints(corners_f32, ids.copy())
+        all_obj_pts.append(obj_pts)
+        all_img_pts.append(img_pts)
 
-    rms, K_rec, _, _, _ = cv2.aruco.calibrateCameraCharuco(
-        all_corners,
-        all_ids,
-        board,
-        img_size,
-        cameraMatrix=None,
-        distCoeffs=None,
-        flags=0,
+    rms, K_rec, _, _, _ = cv2.calibrateCamera(
+        all_obj_pts, all_img_pts, img_size, None, None,
     )
 
     # Noise-free projections → calibration should be tight to ground truth.
