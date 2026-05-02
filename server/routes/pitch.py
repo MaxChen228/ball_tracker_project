@@ -171,7 +171,7 @@ async def pitch(
     #
     # The server_post path overwrites `server_post_config_used` later
     # in `_run_server_detection` with the snapshot it actually called
-    # `detect_pitch` with — that path is unaffected by this guard.
+    # `run_detection` with — that path is unaffected by this guard.
     payload_obj.live_config_used = state.live_session_frozen_config(
         payload_obj.session_id
     )
@@ -263,7 +263,7 @@ async def _run_server_detection(
         # ~30 fps wall-clock, so this fires ≈ 1 Hz — fast enough for a
         # visibly moving bar, slow enough to not pressure the SSE pipe.
         # Skip idx=0 because the priming broadcast below already shipped
-        # frames_done=0 with the same payload before detect_pitch ran.
+        # frames_done=0 with the same payload before run_detection ran.
         if idx == 0 or idx % 30 != 0:
             return
         fut = asyncio.run_coroutine_threadsafe(

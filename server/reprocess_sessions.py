@@ -448,9 +448,20 @@ def main() -> None:
         return
 
     by_session: dict[str, dict[str, PitchPayload]] = {}
+    # (session_id, camera_id) pairs we attempted to reprocess but had
+    # to skip — either resolve_snapshot_for_pitch returned None (legacy
+    # pitch missing the required snapshot/preset identity) or the
+    # rerun raised. We cannot triangulate any session containing such
+    # a cam: its disk pitch holds frames_server_post produced under
+    # the OLD config, while the other cam (if reprocessed) carries
+    # NEW frames. Mixing them would write a `session_<sid>.json`
+    # whose triangulation pairs new-A frames with stale-B frames,
+    # silently overwriting the previous result with garbage.
+    skipped: set[tuple[str, str]] = set()
     failures: list[tuple[str, str]] = []
     for path in pitch_paths:
         logger.info("redetect %s", path.name)
+        pitch_for_resolve: PitchPayload | None = None
         try:
             pitch_for_resolve = PitchPayload.model_validate_json(path.read_text())
             snapshot = resolve_snapshot_for_pitch(
@@ -461,16 +472,32 @@ def main() -> None:
                 algorithm_id_override=algorithm_id_override,
             )
             if snapshot is None:
+                skipped.add(
+                    (pitch_for_resolve.session_id, pitch_for_resolve.camera_id)
+                )
                 continue
             pitch = rerun_detection(path, snapshot, args.dry_run)
         except Exception as e:
             logger.error("FAIL %s: %s", path.name, e)
             failures.append((path.name, str(e)[:200]))
+            if pitch_for_resolve is not None:
+                skipped.add(
+                    (pitch_for_resolve.session_id, pitch_for_resolve.camera_id)
+                )
             continue
         if pitch is not None:
             by_session.setdefault(pitch.session_id, {})[pitch.camera_id] = pitch
 
     for sid in sorted(by_session):
+        if any((sid, cam) in skipped for cam in ("A", "B")):
+            logger.warning(
+                "  %s — skipping triangulation: at least one cam was "
+                "skipped above; counterpart on disk is stale wrt the new "
+                "params and would yield a mixed result. Existing "
+                "session_%s.json left untouched.",
+                sid, sid,
+            )
+            continue
         cams = by_session[sid]
         for cam in ("A", "B"):
             if cam in cams:
