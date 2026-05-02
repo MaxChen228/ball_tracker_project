@@ -18,6 +18,9 @@
       <button class="swatch" data-color="red"    title="Red"    type="button"></button>
       <button class="swatch" data-color="yellow" title="Yellow" type="button"></button>
     </div>
+    <label id="approve-toggle" title="Mark this item's mask review as approved">
+      <input type="checkbox" id="chk-approve"> ✓ Approved
+    </label>
   </header>
 
   <div id="main-layout">
@@ -43,6 +46,7 @@
 
       <section id="segments-section">
         <div id="segments-strip"></div>
+        <div id="bad-ranges-strip"></div>
       </section>
 
       <section id="timeline-section">
@@ -61,6 +65,9 @@
         <button id="btn-propagate" type="button" disabled>Propagate (Enter)</button>
         <button id="btn-cancel" type="button">Cancel (Esc)</button>
         <button id="btn-toggle-seed-marker" type="button">Hide Seed × (H)</button>
+        <span class="ctrl-divider"></span>
+        <button id="btn-bad-in" type="button" title="Shift+I">Bad In ⌥[</button>
+        <button id="btn-bad-out" type="button" title="Shift+O">Bad Out ⌥]</button>
         <label id="play-rate-label">Speed
           <select id="play-rate">
             <option value="0.1">0.1×</option>

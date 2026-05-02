@@ -358,6 +358,66 @@ class ManifestStore:
                 return
         raise KeyError(slug)
 
+    # ---- review (per-item) ------------------------------------------------
+    # review = {approved: bool, approved_at: iso|None, bad_ranges: [{id,in_frame,out_frame}]}
+    # Operator-driven QA layer on top of automated propagation. Persisted in
+    # the same manifest file as segments (no second writer).
+
+    def _ensure_review(self, item: dict[str, Any]) -> dict[str, Any]:
+        rv = item.setdefault("review", {})
+        rv.setdefault("approved", False)
+        rv.setdefault("approved_at", None)
+        rv.setdefault("bad_ranges", [])
+        return rv
+
+    def add_bad_range(self, slug: str, in_f: int, out_f: int) -> dict[str, Any]:
+        with self._lock:
+            payload = self._read()
+            for it in payload["items"]:
+                if it["slug"] != slug:
+                    continue
+                rv = self._ensure_review(it)
+                entry = {"id": f"br_{secrets.token_hex(4)}", "in_frame": in_f, "out_frame": out_f}
+                rv["bad_ranges"].append(entry)
+                rv["bad_ranges"].sort(key=lambda r: r["in_frame"])
+                # Adding a flagged frame invalidates any prior approval.
+                rv["approved"] = False
+                rv["approved_at"] = None
+                self._write(payload)
+                return entry
+        raise KeyError(slug)
+
+    def delete_bad_range(self, slug: str, br_id: str) -> None:
+        with self._lock:
+            payload = self._read()
+            for it in payload["items"]:
+                if it["slug"] != slug:
+                    continue
+                rv = self._ensure_review(it)
+                before = len(rv["bad_ranges"])
+                rv["bad_ranges"] = [r for r in rv["bad_ranges"] if r["id"] != br_id]
+                if len(rv["bad_ranges"]) == before:
+                    raise KeyError(f"{slug}/{br_id}")
+                self._write(payload)
+                return
+        raise KeyError(slug)
+
+    def set_approved(self, slug: str, approved: bool) -> dict[str, Any]:
+        with self._lock:
+            payload = self._read()
+            for it in payload["items"]:
+                if it["slug"] != slug:
+                    continue
+                rv = self._ensure_review(it)
+                rv["approved"] = bool(approved)
+                rv["approved_at"] = (
+                    __import__("datetime").datetime.utcnow().isoformat(timespec="seconds") + "Z"
+                    if rv["approved"] else None
+                )
+                self._write(payload)
+                return rv
+        raise KeyError(slug)
+
     def set_active_segment(self, slug: str, seg_id: str) -> None:
         with self._lock:
             payload = self._read()
@@ -1048,7 +1108,8 @@ SLUG_RE = re.compile(
     r"^/api/items/([A-Za-z0-9_\-]+)/"
     r"(trim|seed|propagate|propagate/cancel|events|pts|masks|delete|"
     r"segments/new|segments/seg_[A-Za-z0-9]+/active|segments/seg_[A-Za-z0-9]+/delete|"
-    r"segments/seg_[A-Za-z0-9]+/clear)$"
+    r"segments/seg_[A-Za-z0-9]+/clear|"
+    r"review/bad/add|review/bad/delete|review/approve)$"
 )
 MASK_RE = re.compile(r"^/mask/([A-Za-z0-9_\-]+)/(seg_[A-Za-z0-9]+)/(\d{5})\.png$")
 CLIP_RE = re.compile(r"^/clip/([A-Za-z0-9_\-]+)\.mp4$")
@@ -1557,6 +1618,42 @@ class Handler(BaseHTTPRequestHandler):
                 _PROPAGATOR.cancel()
             STORE.update_segment(slug, seg_id, propagate_status="idle")
             self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+
+        if action == "review/bad/add":
+            body = self._read_json()
+            in_f = body.get("in_frame")
+            out_f = body.get("out_frame")
+            if not (isinstance(in_f, int) and isinstance(out_f, int) and 0 <= in_f <= out_f):
+                self._send_text(HTTPStatus.BAD_REQUEST,
+                                "in_frame/out_frame must be int with 0 <= in <= out")
+                return
+            entry = STORE.add_bad_range(slug, in_f, out_f)
+            self._send_json(HTTPStatus.OK, {"ok": True, "entry": entry})
+            return
+
+        if action == "review/bad/delete":
+            body = self._read_json()
+            br_id = body.get("id")
+            if not isinstance(br_id, str):
+                self._send_text(HTTPStatus.BAD_REQUEST, "id must be string")
+                return
+            try:
+                STORE.delete_bad_range(slug, br_id)
+            except KeyError:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such bad-range id")
+                return
+            self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+
+        if action == "review/approve":
+            body = self._read_json()
+            approved = body.get("approved")
+            if not isinstance(approved, bool):
+                self._send_text(HTTPStatus.BAD_REQUEST, "approved must be bool")
+                return
+            rv = STORE.set_approved(slug, approved)
+            self._send_json(HTTPStatus.OK, {"ok": True, "review": rv})
             return
 
         if action == "delete":

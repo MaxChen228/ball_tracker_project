@@ -9,6 +9,7 @@ const MASK_COLORS = {
   yellow: [250, 204, 21],   // #facc15
 };
 const MASK_ALPHA = 128;
+const MASK_OUTLINE_PX = 2;
 const BITMAP_CACHE_LIMIT = 512;
 
 const state = {
@@ -58,6 +59,11 @@ const state = {
     const v = localStorage.getItem("labMaskColor");
     return (v && MASK_COLORS[v]) ? v : "green";
   })(),
+  // review = QA layer on top of propagation: operator can flag bad-frame
+  // ranges + tick "approved" once happy. Mirrored from manifest item.review.
+  // pendingBadIn: source frame index where the next "Bad Out" will close,
+  // null = no half-open range pending.
+  pendingBadIn: null,
 };
 
 // ---- segment helpers -------------------------------------------------------
@@ -138,6 +144,156 @@ function findMaskAtFrame(f) {
   return null;
 }
 
+// ---- review helpers --------------------------------------------------------
+
+function reviewOf(it) {
+  if (!it) return { approved: false, approved_at: null, bad_ranges: [] };
+  const rv = it.review || {};
+  return {
+    approved: !!rv.approved,
+    approved_at: rv.approved_at || null,
+    bad_ranges: Array.isArray(rv.bad_ranges) ? rv.bad_ranges : [],
+  };
+}
+
+function renderApproveCheckbox() {
+  const it = currentItem();
+  const rv = reviewOf(it);
+  if (el.chkApprove) el.chkApprove.checked = rv.approved;
+  if (el.approveLabel) el.approveLabel.classList.toggle("approved", rv.approved);
+}
+
+function renderBadRangesStrip() {
+  const strip = el.badRangesStrip;
+  if (!strip) return;
+  strip.innerHTML = "";
+  const it = currentItem();
+  if (!it) return;
+  const rv = reviewOf(it);
+  if (rv.bad_ranges.length === 0 && state.pendingBadIn == null) return;
+  const label = document.createElement("span");
+  label.className = "bad-label";
+  label.textContent = "BAD:";
+  strip.appendChild(label);
+  for (const br of rv.bad_ranges) {
+    const chip = document.createElement("div");
+    chip.className = "bad-chip";
+    chip.title = `${br.id} [${br.in_frame}-${br.out_frame}] — click to jump`;
+    chip.textContent = `${br.in_frame}–${br.out_frame}`;
+    chip.addEventListener("click", () => jumpToFrame(br.in_frame));
+    const x = document.createElement("button");
+    x.className = "bad-chip-x";
+    x.type = "button";
+    x.textContent = "×";
+    x.title = "Delete bad-range";
+    x.addEventListener("click", (e) => { e.stopPropagation(); deleteBadRange(br.id); });
+    chip.appendChild(x);
+    strip.appendChild(chip);
+  }
+  if (state.pendingBadIn != null) {
+    const pending = document.createElement("div");
+    pending.className = "bad-chip";
+    pending.style.borderStyle = "dashed";
+    pending.textContent = `pending in=${state.pendingBadIn} (Bad Out to close)`;
+    strip.appendChild(pending);
+  }
+}
+
+async function markBadIn() {
+  if (!state.current) return;
+  state.pendingBadIn = currentFrame();
+  renderBadRangesStrip();
+  updateMarkers();
+  updateStatus();
+}
+
+async function markBadOut() {
+  if (!state.current) return;
+  if (state.pendingBadIn == null) {
+    showError("no pending Bad In — press Bad In first to start a range");
+    return;
+  }
+  const f = currentFrame();
+  let inF = state.pendingBadIn;
+  let outF = f;
+  if (outF < inF) { const tmp = inF; inF = outF; outF = tmp; }
+  const capturedSlug = state.current;
+  try {
+    const r = await postJson(`/api/items/${encodeURIComponent(capturedSlug)}/review/bad/add`,
+      { in_frame: inF, out_frame: outF });
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      showError(`bad-range add failed: HTTP ${r.status} ${text}`);
+      return;
+    }
+    const j = await r.json();
+    if (state.current !== capturedSlug) return;
+    const it = currentItem();
+    if (it) {
+      const rv = it.review || (it.review = { approved: false, approved_at: null, bad_ranges: [] });
+      rv.bad_ranges = rv.bad_ranges || [];
+      rv.bad_ranges.push(j.entry);
+      rv.bad_ranges.sort((a, b) => a.in_frame - b.in_frame);
+      // Server clears approval on add — mirror locally.
+      rv.approved = false;
+      rv.approved_at = null;
+    }
+    state.pendingBadIn = null;
+    renderBadRangesStrip();
+    renderApproveCheckbox();
+    renderSidebar();
+    updateMarkers();
+    updateStatus();
+  } catch (e) { showError(`bad-range add failed: ${e}`); }
+}
+
+async function deleteBadRange(brId) {
+  const capturedSlug = state.current;
+  if (!capturedSlug) return;
+  try {
+    const r = await postJson(`/api/items/${encodeURIComponent(capturedSlug)}/review/bad/delete`,
+      { id: brId });
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      showError(`bad-range delete failed: HTTP ${r.status} ${text}`);
+      return;
+    }
+    if (state.current !== capturedSlug) return;
+    const it = currentItem();
+    if (it && it.review && Array.isArray(it.review.bad_ranges)) {
+      it.review.bad_ranges = it.review.bad_ranges.filter(r => r.id !== brId);
+    }
+    renderBadRangesStrip();
+    renderSidebar();
+    updateMarkers();
+  } catch (e) { showError(`bad-range delete failed: ${e}`); }
+}
+
+async function setApproved(approved) {
+  const capturedSlug = state.current;
+  if (!capturedSlug) return;
+  try {
+    const r = await postJson(`/api/items/${encodeURIComponent(capturedSlug)}/review/approve`,
+      { approved: !!approved });
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      showError(`approve toggle failed: HTTP ${r.status} ${text}`);
+      // Revert checkbox on failure.
+      renderApproveCheckbox();
+      return;
+    }
+    const j = await r.json();
+    if (state.current !== capturedSlug) return;
+    const it = currentItem();
+    if (it) it.review = j.review;
+    renderApproveCheckbox();
+    renderSidebar();
+  } catch (e) {
+    showError(`approve toggle failed: ${e}`);
+    renderApproveCheckbox();
+  }
+}
+
 function aggregateStatus(it) {
   const segs = it.segments || [];
   if (segs.length === 0) return "idle";
@@ -175,6 +331,11 @@ const el = {
   btnPropagate: document.getElementById("btn-propagate"),
   btnCancel: document.getElementById("btn-cancel"),
   btnToggleSeedMarker: document.getElementById("btn-toggle-seed-marker"),
+  btnBadIn: document.getElementById("btn-bad-in"),
+  btnBadOut: document.getElementById("btn-bad-out"),
+  chkApprove: document.getElementById("chk-approve"),
+  approveLabel: document.getElementById("approve-toggle"),
+  badRangesStrip: document.getElementById("bad-ranges-strip"),
   playRate: document.getElementById("play-rate"),
 };
 
@@ -353,6 +514,26 @@ function updateMarkers() {
     mk(seg.in_frame, "in");
     mk(seg.out_frame, "out");
     mk(seg.seed_frame, "seed");
+  }
+  // Bad-range overlay: red strips on top of seg-spans (drawn after so they
+  // visually dominate). Frames range from in to out inclusive.
+  const rv = reviewOf(it);
+  for (const br of rv.bad_ranges) {
+    if (br.in_frame == null || br.out_frame == null) continue;
+    const span = document.createElement("div");
+    span.className = "bad-span";
+    span.style.left = `${(br.in_frame / denom) * 100}%`;
+    const w = Math.max(((br.out_frame - br.in_frame) / denom) * 100, 0.3);
+    span.style.width = `${w}%`;
+    span.title = `${br.id} [${br.in_frame}-${br.out_frame}]`;
+    layer.appendChild(span);
+  }
+  if (state.pendingBadIn != null) {
+    const m = document.createElement("div");
+    m.className = "bad-pending";
+    m.style.left = `${(state.pendingBadIn / denom) * 100}%`;
+    m.title = `Bad In pending @ ${state.pendingBadIn}`;
+    layer.appendChild(m);
   }
 }
 
@@ -645,13 +826,32 @@ function blitCachedMask(frame) {
   const ctx = el.overlay.getContext("2d");
   const w = el.overlay.width, h = el.overlay.height;
   const [r, g, b] = MASK_COLORS[state.maskColor] || MASK_COLORS.green;
-  // GPU composite: paint a solid color, then keep only where mask alpha != 0.
-  // ~0.5ms on M-series at 1920×1080 vs the legacy 8M-iter JS tint (~80ms).
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = `rgba(${r},${g},${b},${MASK_ALPHA / 255})`;
+
+  // Outline-only render: erode the mask (AND of 4 cardinal-shifted copies) into
+  // an offscreen canvas, then subtract it from the filled mask to leave a ring.
+  // Ball is small + dark; full fill hides the object so the operator can't tell
+  // the mask is mis-attached.
+  const off = state.outlineCanvas || (state.outlineCanvas = document.createElement("canvas"));
+  if (off.width !== w || off.height !== h) { off.width = w; off.height = h; }
+  const octx = off.getContext("2d");
+  octx.globalCompositeOperation = "source-over";
+  octx.clearRect(0, 0, w, h);
+  octx.drawImage(bm, 0, 0, w, h);
+  octx.globalCompositeOperation = "destination-in";
+  const k = MASK_OUTLINE_PX;
+  octx.drawImage(bm, -k,  0, w, h);
+  octx.drawImage(bm,  k,  0, w, h);
+  octx.drawImage(bm,  0, -k, w, h);
+  octx.drawImage(bm,  0,  k, w, h);
+  octx.globalCompositeOperation = "source-over";
+
+  ctx.fillStyle = `rgba(${r},${g},${b},1.0)`;
   ctx.fillRect(0, 0, w, h);
   ctx.globalCompositeOperation = "destination-in";
   ctx.drawImage(bm, 0, 0, w, h);
+  ctx.globalCompositeOperation = "destination-out";
+  ctx.drawImage(off, 0, 0, w, h);
   ctx.globalCompositeOperation = "source-over";
   drawAllSeedCrosshairs(frame);
   return true;
@@ -780,8 +980,11 @@ function syncFromItem(item) {
   state.propPhaseElapsed = 0;
   state.propStartMs = null;
   if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
+  state.pendingBadIn = null;
   resizeOverlay();
   renderSegmentsStrip();
+  renderBadRangesStrip();
+  renderApproveCheckbox();
   updateMarkers();
   updatePropagateBtn();
   updateStatus();
@@ -889,7 +1092,11 @@ function renderSidebar() {
   el.itemList.innerHTML = "";
   for (const it of state.items) {
     const card = document.createElement("div");
-    card.className = "item-card" + (it.slug === state.current ? " active" : "");
+    const rv = reviewOf(it);
+    let cls = "item-card";
+    if (it.slug === state.current) cls += " active";
+    if (rv.approved) cls += " approved";
+    card.className = cls;
     card.dataset.slug = it.slug;
     const status = effectiveStatus(it);
     const fps = it.fps ? `${Math.round(it.fps)}fps` : "";
@@ -902,7 +1109,21 @@ function renderSidebar() {
     const dot = document.createElement("span");
     dot.className = `item-status item-status-${status}`;
     nameDiv.appendChild(dot);
+    if (rv.approved) {
+      const badge = document.createElement("span");
+      badge.className = "item-card-approved";
+      badge.textContent = "✓";
+      badge.title = `approved${rv.approved_at ? " " + rv.approved_at : ""}`;
+      nameDiv.appendChild(badge);
+    }
     nameDiv.appendChild(document.createTextNode(it.slug));
+    if (rv.bad_ranges && rv.bad_ranges.length > 0) {
+      const flag = document.createElement("span");
+      flag.className = "item-card-bad-count";
+      flag.textContent = `⚑${rv.bad_ranges.length}`;
+      flag.title = `${rv.bad_ranges.length} bad-range(s) flagged`;
+      nameDiv.appendChild(flag);
+    }
     const metaDiv = document.createElement("div");
     metaDiv.className = "item-card-meta";
     metaDiv.textContent = meta;
@@ -1585,6 +1806,11 @@ async function rehydrateMasks(slug) {
       state.propExpected = ctx.out_frame - ctx.in_frame + 1;
     }
     repaintOverlayForCurrentFrame();
+    // Re-evaluate Propagate button: isSegReadyForPropagate needs the seed
+    // frame's URL to be in propMaskUrlsBySeg, which we just populated. Without
+    // this, the button stays disabled from the syncFromItem() call that fired
+    // before this fetch resolved.
+    updatePropagateBtn();
     updateStatus();
     prefetchMasks(slug);
   } catch (e) { console.warn("rehydrate masks failed", e); }
@@ -1663,8 +1889,11 @@ function onKeydown(e) {
     e.preventDefault();
     const seg = contextSegment();
     jumpToFrame(seg && seg.out_frame != null ? seg.out_frame : state.totalFrames - 1);
-  } else if (e.key === "[") markIn();
-  else if (e.key === "]") markOut();
+  } else if (e.key === "[") {
+    if (e.altKey) markBadIn(); else markIn();
+  } else if (e.key === "]") {
+    if (e.altKey) markBadOut(); else markOut();
+  }
   else if (e.key === "s" || e.key === "S") markSeed();
   else if (e.key === "n" || e.key === "N") createSegment();
   else if (e.key === "Enter") propagate();
@@ -1781,6 +2010,9 @@ function bindUi() {
   el.btnCancel.addEventListener("click", cancelOrEscape);
   el.btnToggleSeedMarker.addEventListener("click", toggleSeedMarker);
   updateSeedMarkerBtn();
+  if (el.btnBadIn) el.btnBadIn.addEventListener("click", markBadIn);
+  if (el.btnBadOut) el.btnBadOut.addEventListener("click", markBadOut);
+  if (el.chkApprove) el.chkApprove.addEventListener("change", () => setApproved(el.chkApprove.checked));
 
   document.querySelectorAll("#mask-color-swatches .swatch").forEach(s => {
     s.addEventListener("click", () => setMaskColor(s.dataset.color));
