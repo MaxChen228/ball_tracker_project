@@ -319,10 +319,11 @@ def load_or_migrate(
             rewrite_reasons.append("strip legacy `selector` key")
         if algorithm_id_was_missing:
             # Pre-algorithm-id build (phase-1 of the multi-version
-            # refactor introduced the field). `from_dict` already
-            # backfilled to `algorithms.DEFAULT_ALGORITHM_ID`; persist
-            # the canonical record so subsequent boots see an explicit
-            # field and the `from_dict` default branch goes cold.
+            # refactor introduced the field). The injection above
+            # filled `raw["algorithm_id"]` with the registry default
+            # so strict `from_dict` succeeded; persist the canonical
+            # record so subsequent boots see an explicit field and
+            # skip injection entirely.
             rewrite_reasons.append("backfill `algorithm_id`")
         if rewrite_reasons:
             atomic_write(new_path, json.dumps(to_dict(cfg), indent=2))

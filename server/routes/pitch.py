@@ -157,27 +157,24 @@ async def pitch(
 
         payload_obj.frames_server_post = []
 
-    # Freeze detection config onto the pitch BEFORE first persist. For
-    # live frames the iPhone-side detector snapshot is unobservable from
-    # here, so we stamp the values the live session was frozen to at
-    # first ingest. When the dashboard-armed live-streaming path ran,
-    # state.live_session_frozen_config returns the atomic (HSV, shape_gate)
-    # pair stamped by ingest_live_frame. When no live frame ever streamed (test fixture
-    # or server_post-only flow), it returns None and we fall back atomically
-    # to the current state snapshot. The server_post path overwrites these
-    # later in `_run_server_detection` with the snapshot it actually called
-    # `detect_pitch` with.
     # Stamp the live detection-config snapshot frozen at arm time.
-    # When the session never armed (test fixture / server_post-only),
-    # state.live_session_frozen_config returns None; build a fresh
-    # snapshot from current disk config so the pitch always carries
-    # an explicit live snapshot.
-    frozen_live = state.live_session_frozen_config(payload_obj.session_id)
-    if frozen_live is None:
-        frozen_live = DetectionConfigSnapshotPayload.from_detection_config(
-            state.detection_config()
-        )
-    payload_obj.live_config_used = frozen_live
+    # `state.live_session_frozen_config` returns the atomic (HSV,
+    # shape_gate, preset_name) tuple stamped by `ingest_live_frame`
+    # when the dashboard-armed live-streaming path ran. If it returns
+    # None, no live detector ever ran for this session — leave
+    # `live_config_used = None` rather than fabricating a snapshot
+    # from current disk config. A fabricated snapshot would make the
+    # viewer CFG chip claim a live config that no detection actually
+    # used (CLAUDE.md no-silent-fallback): the dashboard reader would
+    # see "Live: tennis" on a server_post-only session, biasing
+    # post-hoc delta investigations.
+    #
+    # The server_post path overwrites `server_post_config_used` later
+    # in `_run_server_detection` with the snapshot it actually called
+    # `detect_pitch` with — that path is unaffected by this guard.
+    payload_obj.live_config_used = state.live_session_frozen_config(
+        payload_obj.session_id
+    )
 
     result = await asyncio.to_thread(state.record, payload_obj)
 
