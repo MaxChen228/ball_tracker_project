@@ -171,6 +171,77 @@ class DetectionConfigSnapshotPayload(BaseModel):
         )
 
 
+# Algorithm-id key for the iOS-side capture-time data source. Mirrors
+# `algorithms.IOS_CAPTURE_TIME` — duplicated here as a string literal
+# (not imported) because `algorithms.__init__` already imports schemas
+# transitively (V11Detector → schemas) and a back-import would cycle.
+# A drift-detection assertion in `algorithms` pins these two equal at
+# registry load.
+IOS_CAPTURE_TIME_ALGORITHM_ID = "ios_capture_time"
+
+
+def _resolve_server_post_algorithm_id(
+    snapshot: "DetectionConfigSnapshotPayload | None",
+) -> str:
+    """Algorithm id to file `frames_server_post` under in the dict mirror.
+    Prefer the explicit snapshot stamp; fall back to the registry default
+    when no snapshot was ever recorded (legacy pitches predating snapshot
+    persistence)."""
+    if snapshot is not None:
+        return snapshot.algorithm_id
+    import algorithms
+    return algorithms.DEFAULT_ALGORITHM_ID
+
+
+def _mirror_pitch_old_into_dicts(pitch: "PitchPayload") -> None:
+    """Idempotently mirror old per-path fields (`frames_live`,
+    `frames_server_post`, `live_config_used`, `server_post_config_used`)
+    into the new dict fields (`frames_by_algorithm`,
+    `config_used_by_algorithm`). Safe to call repeatedly. In Phase 6a
+    old fields remain canonical and the dicts are derived; Phase 6b will
+    flip the canonical direction."""
+    if pitch.frames_live:
+        pitch.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = list(pitch.frames_live)
+    if pitch.frames_server_post:
+        srv_alg = _resolve_server_post_algorithm_id(pitch.server_post_config_used)
+        pitch.frames_by_algorithm[srv_alg] = list(pitch.frames_server_post)
+    if pitch.live_config_used is not None:
+        pitch.config_used_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = pitch.live_config_used
+    if pitch.server_post_config_used is not None:
+        pitch.config_used_by_algorithm[
+            pitch.server_post_config_used.algorithm_id
+        ] = pitch.server_post_config_used
+
+
+def _mirror_result_old_into_dicts(result: "SessionResult") -> None:
+    """Same idempotent mirror for SessionResult. Maps the two legacy
+    `_by_path` keys ("live", "server_post") to algorithm ids and
+    populates the matching `_by_algorithm` slots."""
+    srv_alg = _resolve_server_post_algorithm_id(result.server_post_config_used)
+    path_to_alg = {
+        "live": IOS_CAPTURE_TIME_ALGORITHM_ID,
+        "server_post": srv_alg,
+    }
+    for path_key, alg_id in path_to_alg.items():
+        pts = result.triangulated_by_path.get(path_key)
+        if pts:
+            result.triangulated_by_algorithm[alg_id] = list(pts)
+        segs = result.segments_by_path.get(path_key)
+        if segs:
+            result.segments_by_algorithm[alg_id] = list(segs)
+        counts = result.frame_counts_by_path.get(path_key)
+        if counts:
+            result.frame_counts_by_algorithm[alg_id] = dict(counts)
+        if path_key in result.paths_completed:
+            result.algorithms_completed.add(alg_id)
+    if result.live_config_used is not None:
+        result.config_used_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = result.live_config_used
+    if result.server_post_config_used is not None:
+        result.config_used_by_algorithm[
+            result.server_post_config_used.algorithm_id
+        ] = result.server_post_config_used
+
+
 def _migrate_legacy_used_fields_into_per_path(
     data: dict,
     *,
@@ -311,6 +382,15 @@ class PitchPayload(BaseModel):
     # path never ran (e.g., live-only flow has no server_post snapshot).
     live_config_used: DetectionConfigSnapshotPayload | None = None
     server_post_config_used: DetectionConfigSnapshotPayload | None = None
+    # Phase 6a additive mirror: dict keyed by algorithm_id. In 6a the
+    # old `frames_live` / `frames_server_post` / `*_config_used` are
+    # canonical and these dicts are auto-derived by the after-validator
+    # below + `_mirror_pitch_old_into_dicts` at writer sites. 6b will
+    # flip readers to consume these and make the old fields derived.
+    frames_by_algorithm: dict[str, list[FramePayload]] = Field(default_factory=dict)
+    config_used_by_algorithm: dict[str, DetectionConfigSnapshotPayload] = Field(
+        default_factory=dict
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -320,6 +400,11 @@ class PitchPayload(BaseModel):
         return _migrate_legacy_used_fields_into_per_path(
             data, target_paths=("live", "server_post"),
         )
+
+    @model_validator(mode="after")
+    def _mirror_into_by_algorithm(self) -> "PitchPayload":
+        _mirror_pitch_old_into_dicts(self)
+        return self
 
 
 class TriangulatedPoint(BaseModel):
@@ -422,6 +507,17 @@ class SessionResult(BaseModel):
     # older consumers; viewer PATH switching uses this mapping so live and
     # server_post each carry their own fit curves / speed badge semantics.
     segments_by_path: dict[str, list[SegmentRecord]] = Field(default_factory=dict)
+    # Phase 6a additive mirrors. Same canonical-direction story as
+    # PitchPayload: the `_by_path` fields above remain authoritative;
+    # these dicts are auto-derived by the after-validator + the runtime
+    # `_mirror_result_old_into_dicts` helper called by writers.
+    triangulated_by_algorithm: dict[str, list[TriangulatedPoint]] = Field(default_factory=dict)
+    segments_by_algorithm: dict[str, list[SegmentRecord]] = Field(default_factory=dict)
+    frame_counts_by_algorithm: dict[str, dict[str, int]] = Field(default_factory=dict)
+    algorithms_completed: set[str] = Field(default_factory=set)
+    config_used_by_algorithm: dict[str, DetectionConfigSnapshotPayload] = Field(
+        default_factory=dict
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -431,6 +527,11 @@ class SessionResult(BaseModel):
         return _migrate_legacy_used_fields_into_per_path(
             data, target_paths=("live", "server_post"),
         )
+
+    @model_validator(mode="after")
+    def _mirror_into_by_algorithm(self) -> "SessionResult":
+        _mirror_result_old_into_dicts(self)
+        return self
 
 
 class DeviceIntrinsics(BaseModel):

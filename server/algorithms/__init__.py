@@ -29,6 +29,33 @@ V11_HSV_CC = "v11_hsv_cc"
 
 DEFAULT_ALGORITHM_ID = V11_HSV_CC
 
+# iOS-side capture-time detection. Stamped on `frames_by_algorithm` and
+# `config_used_by_algorithm` for the `live` data source. NOT runnable
+# server-side (source pixels live only in the iOS capture buffer; no
+# MOV-equivalent to feed back), so it bypasses `_REGISTRY` and lives in
+# `_NON_RUNNABLE_IDS` instead. `validate_id` accepts it (it's a real id
+# seen on disk + wire); `run_detection` rejects it via the registry
+# lookup.
+IOS_CAPTURE_TIME = "ios_capture_time"
+
+_NON_RUNNABLE_IDS: frozenset[str] = frozenset({IOS_CAPTURE_TIME})
+
+
+# Drift guard: schemas.py duplicates the IOS_CAPTURE_TIME literal to
+# avoid a back-import cycle. Anyone editing one but not the other gets
+# caught at boot rather than at first wire load.
+def _check_schemas_constant_drift() -> None:
+    from schemas import IOS_CAPTURE_TIME_ALGORITHM_ID as _SCHEMAS_IOS_ID
+    if _SCHEMAS_IOS_ID != IOS_CAPTURE_TIME:
+        raise RuntimeError(
+            f"algorithms.IOS_CAPTURE_TIME ({IOS_CAPTURE_TIME!r}) and "
+            f"schemas.IOS_CAPTURE_TIME_ALGORITHM_ID ({_SCHEMAS_IOS_ID!r}) "
+            "have drifted — keep the literal identical in both files."
+        )
+
+
+_check_schemas_constant_drift()
+
 
 @dataclass(frozen=True)
 class AlgorithmEntry:
@@ -78,11 +105,12 @@ def validate_id(algorithm_id: str) -> None:
         raise ValueError(
             f"invalid algorithm_id {algorithm_id!r}: must match [a-z0-9_]{{1,32}}"
         )
-    if algorithm_id not in _REGISTRY:
-        known = sorted(_REGISTRY)
-        raise ValueError(
-            f"unknown algorithm_id {algorithm_id!r} (known: {known})"
-        )
+    if algorithm_id in _REGISTRY or algorithm_id in _NON_RUNNABLE_IDS:
+        return
+    known = sorted(set(_REGISTRY) | _NON_RUNNABLE_IDS)
+    raise ValueError(
+        f"unknown algorithm_id {algorithm_id!r} (known: {known})"
+    )
 
 
 def run_detection(
@@ -102,6 +130,11 @@ def run_detection(
     `pydantic.ValidationError` (params fail schema) before touching
     the video — caller catches at the system boundary."""
     validate_id(algorithm_id)
+    if algorithm_id not in _REGISTRY:
+        raise ValueError(
+            f"algorithm_id {algorithm_id!r} is not server-runnable "
+            f"(non-runnable data sources: {sorted(_NON_RUNNABLE_IDS)})"
+        )
     entry = _REGISTRY[algorithm_id]
     typed_params = entry.detector.params_schema.model_validate(params)
     return entry.detector.detect(
