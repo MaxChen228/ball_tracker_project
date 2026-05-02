@@ -285,6 +285,57 @@ def test_state_record_merge_deep_copies_preserved_frames(tmp_path, monkeypatch):
     assert merged_v11_frame is not p1_v11_frame
 
 
+def test_state_record_merge_deep_copies_preserved_flat_frames(tmp_path):
+    """Flat-field counterpart to the dict-merge test above. When an
+    incoming pitch lacks frames_live / frames_server_post but the cached
+    one has them, the merge must deep-copy — not pass list refs through.
+    Without this, mutating merged.frames_live[0] in place would also
+    mutate the cached pitch's list."""
+    import main
+
+    s = main.State(data_dir=tmp_path)
+    s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef",
+                sync_anchor_timestamp_s=0.0)
+
+    p1 = _pitch(frames_live=[_frame(1), _frame(2)])
+    s.record(p1)
+    p1_live_frame = s.pitches[("A", "s_deadbeef")].frames_live[0]
+
+    # Second record arrives without frames_live — the merge branch
+    # at state.py:997 fires and must deep-copy from existing.
+    p2 = _pitch()
+    from detection_paths import stamp_server_post_run
+    stamp_server_post_run(p2, _snapshot("v11_hsv_cc"), [_frame(10)])
+    s.record(p2)
+
+    merged = s.pitches[("A", "s_deadbeef")]
+    assert merged.frames_live[0].frame_index == p1_live_frame.frame_index
+    assert merged.frames_live[0] is not p1_live_frame
+
+
+def test_state_record_merge_deep_copies_preserved_server_post_frames(tmp_path):
+    """Same as above but for frames_server_post (state.py:1001 branch)."""
+    import main
+
+    s = main.State(data_dir=tmp_path)
+    s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef",
+                sync_anchor_timestamp_s=0.0)
+
+    from detection_paths import stamp_server_post_run
+    p1 = _pitch()
+    stamp_server_post_run(p1, _snapshot("v11_hsv_cc"), [_frame(1), _frame(2)])
+    s.record(p1)
+    p1_srv_frame = s.pitches[("A", "s_deadbeef")].frames_server_post[0]
+
+    # Second record arrives without frames_server_post.
+    p2 = _pitch(frames_live=[_frame(20)])
+    s.record(p2)
+
+    merged = s.pitches[("A", "s_deadbeef")]
+    assert merged.frames_server_post[0].frame_index == p1_srv_frame.frame_index
+    assert merged.frames_server_post[0] is not p1_srv_frame
+
+
 def test_pitch_with_algorithm_frames_projects_into_server_post_slot():
     """Counterpart to `pitch_with_path_frames`. Downstream code
     (reconstruct, rays) reads `frames_server_post` on the clone."""

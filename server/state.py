@@ -994,10 +994,18 @@ class State:
             )
             merged = pitch.model_copy(deep=True)
             if existing is not None:
+                # Deep-copy the same way the dict-merge branch below does
+                # (FramePayload is not frozen; sharing instances would let
+                # any future in-place mutation on `merged` bleed back into
+                # the cached `existing`).
                 if not merged.frames_live and existing.frames_live:
-                    merged.frames_live = list(existing.frames_live)
+                    merged.frames_live = [
+                        f.model_copy(deep=True) for f in existing.frames_live
+                    ]
                 if not merged.frames_server_post and existing.frames_server_post:
-                    merged.frames_server_post = list(existing.frames_server_post)
+                    merged.frames_server_post = [
+                        f.model_copy(deep=True) for f in existing.frames_server_post
+                    ]
                 if merged.live_config_used is None and existing.live_config_used is not None:
                     merged.live_config_used = existing.live_config_used.model_copy(deep=True)
                 if (
