@@ -13,8 +13,7 @@
 ## metric 重新框架（為什麼要丟 R_emit、改用 R_top1）
 
 - `27_cand_count_hist.py` — per-frame n_cand 分布；PROD/V11/V11+D1 三條線疊圖
-- `27b_R_vs_ncand_truth.py` — R-vs-n_cand scatter，把過去研究線每個 SOTA 數據點放一張圖；R 0.99x 是 spray bonus，n_cand 飆到 9966 的歷史記錄為證
-- `27c_R_topK.py` — production shape-cost ranker 下的 R@K；揭穿亂槍打鳥（V11+D1 R_emit=0.974 / R_top1=0.008）
+- `27c_R_topK.py` — production shape-cost ranker 下的 R@K；V11+D1 R_emit=0.974 / R_top1=0.008，spray bonus 量化
 
 ## 偵測勝出方法
 

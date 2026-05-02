@@ -4,7 +4,7 @@ PROD gives R_top1 = 0.615 because its tight HSV+shape gate has high
 precision but low recall (R_emit = 0.721). On 28% of GT frames, PROD
 emits nothing — those are pure misses.
 
-V11 + motion-novelty (28c) gives R_top1 = 0.448 because V11 sweeps
+V11 + motion-novelty alone gives R_top1 = 0.448 because V11 sweeps
 loose (R_emit = 0.925) but motion-novelty can't beat shape on the
 mixed pool of static + moving distractors.
 

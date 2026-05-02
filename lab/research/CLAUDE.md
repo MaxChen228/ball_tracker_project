@@ -54,18 +54,19 @@ PROD baseline: see `outputs/27c_R_topK.json`. Don't move the goalposts.
 
 If a method needs > 3 hyperparameters tuned per-session it's overfit.
 
-## Lessons banked from prior phases (don't redo)
+## Failure modes that look like progress
 
-- "Spray + union" is dead end. V11+D1+D2+D3 emits 800-2000 cands/frame
-  to push R_emit to 0.986, but truth-cand median rank under shape cost
-  is 128. Production cost ranker has zero discrimination on dense
-  same-color blobs. See `outputs/_figures/27c_R_topK.png`.
-- FRST emits 9966 cands/frame. Numerically R=0.998, physically
-  unusable (no rank signal). Dead end.
-- Y-diff alone is not a ball detector — it's "anything moving". R_alone
-  ≤ 0.61 across all thresholds. Only useful gated by HSV/shape.
-- BT.601 (iOS) vs BT.709 (server) chroma offset: ≤ 3 OpenCV hue units,
-  Jaccard ≥ 0.97 on tennis preset. Not a meaningful research lever.
+These patterns inflate R_emit while degrading R_top1; reject before
+running large experiments:
+
+- **Spray + union**: emit 100s-1000s cands/frame, claim R_emit > 0.97.
+  Truth-cand rank under any shape ranker collapses (median rank ≫ 1).
+  Spray gap (R_emit − R_top1) > 0.5 is the tell.
+- **Single-cue temporal gate alone**: motion-only / diff-only. Ball
+  isn't the only moving thing in the scene. Always need it gated by a
+  ball-specific cue.
+- **Per-session threshold tuning**: looks like a generalisable method,
+  isn't. See anti-overfit checklist above.
 
 ## What's actually open
 

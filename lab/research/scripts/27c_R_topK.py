@@ -10,7 +10,7 @@ has R_top1 ≪ R_emit.
 Algorithms scored (mirrors 27_cand_count_hist):
   PROD    production tight HSV+gate
   V11     research baseline loose gate
-  V11∪D1  V11 + |Y[t]-Y[t-1]| diff stream union (current SOTA candidate)
+  V11∪D1  V11 + |Y[t]-Y[t-1]| diff stream union (extreme spray reference)
 
 For each algo, emit candidates with full {cx, cy, area, aspect, fill},
 sort by score_candidates(), compute hit @ top-K for K ∈ {1, 3, 5, 10, ∞}.

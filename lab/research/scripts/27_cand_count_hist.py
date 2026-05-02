@@ -10,8 +10,8 @@ Algorithms:
   PROD     production: tight HSV [105,112][140,255][40,255] + aspect>=0.75
            + fill>=0.55 + area>=20  (from data/presets/blue_ball.json)
   V11      research baseline: loose HSV [103,118][120,255][30,255]
-           + aspect>=0.40 + fill>=0.35 + area>=3  (from 26_multiscale)
-  V11+D1   V11 ∪ |Y[t]-Y[t-1]| diff stream (apex bonus, current SOTA candidate)
+           + aspect>=0.40 + fill>=0.35 + area>=3
+  V11+D1   V11 ∪ |Y[t]-Y[t-1]| diff stream (extreme spray reference)
 
 Output:
   outputs/27_cand_count_hist.png   3-line overlay (linear + log axes)
@@ -38,7 +38,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 FIG_DIR = OUT / "_figures"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Detectors (lift configs from 02_head_to_head + 26_multiscale_ydiff) ──
+# ── Detectors ────────────────────────────────────────────────────────────
 
 PROD = dict(h=(105, 112), s=(140, 255), v=(40, 255),
             aspect=0.75, fill=0.55, area=(20, 150_000))
