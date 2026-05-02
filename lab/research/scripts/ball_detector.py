@@ -121,8 +121,8 @@ def _bench(n_frames: int = 240):
     import time, json, sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from _paths import WS
-    m = json.loads((WS / "manifest.json").read_text())
+    from _paths import WS, load_manifest
+    m = load_manifest()
     item = next(it for it in m["items"] if it.get("propagate_status") == "done")
     fps = sorted((WS / "items" / item["slug"] / "frames").glob("*.jpg"))[:n_frames]
     frames = [cv2.imread(str(p), cv2.IMREAD_COLOR) for p in fps]
@@ -151,8 +151,8 @@ if __name__ == "__main__":
         from pathlib import Path
         import json
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from _paths import WS
-        m = json.loads((WS/"manifest.json").read_text())
+        from _paths import WS, load_manifest
+        m = load_manifest()
         item = next(it for it in m["items"] if it.get("propagate_status")=="done")
         slug = item["slug"]; in_f = item["in_frame"]
         det = BallDetector()

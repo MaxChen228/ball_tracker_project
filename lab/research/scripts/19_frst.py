@@ -24,9 +24,9 @@ import sys
 # Add lab/research/scripts to path so we can import ball_detector
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ball_detector import BallDetector, BallDetectorConfig
-from _paths import ROOT, WS
+from _paths import ROOT, WS, load_manifest, SEG_BY_SLUG, read_mask
 
-M    = json.loads((WS / "manifest.json").read_text())
+M    = load_manifest()
 
 # ------------------------------------------------------------------
 # FRST implementation
@@ -141,7 +141,7 @@ def load_session_frames(item: dict) -> list[dict]:
     """Load all GT frames for a session item. Returns list of frame dicts."""
     slug = item["slug"]
     in_f = item["in_frame"]
-    masks_dir = WS / "items" / slug / "masks"
+    masks_dir = WS / "items" / slug / "masks" / SEG_BY_SLUG[slug]
     frames_dir = WS / "items" / slug / "frames"
 
     rows = []
@@ -151,7 +151,7 @@ def load_session_frames(item: dict) -> list[dict]:
         fp = frames_dir / f"{local:05d}.jpg"
         if not fp.exists():
             continue
-        gt = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+        gt = read_mask(mp)
         if gt is None:
             continue
         ball_in = int((gt > 0).sum()) >= 5

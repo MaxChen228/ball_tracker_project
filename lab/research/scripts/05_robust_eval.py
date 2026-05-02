@@ -24,7 +24,7 @@ import numpy as np
 import cv2
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS, OUT
+from _paths import ROOT, WS, OUT, load_manifest, SEG_BY_SLUG, read_mask
 
 
 EXCLUDE_SESSIONS = {"session_s_21af9a82_b"}
@@ -104,7 +104,7 @@ def best_iou(cands, labels, gt_mask):
 
 def main():
     t0 = time.time()
-    MANIFEST = json.loads((WS/"manifest.json").read_text())
+    MANIFEST = load_manifest()
     items = [it for it in MANIFEST["items"]
              if it.get("propagate_status")=="done"
              and it["slug"] not in EXCLUDE_SESSIONS]
@@ -112,14 +112,14 @@ def main():
     rows = []  # one entry per (session, src) — has all three metric flavors for both pipelines
     for item in items:
         slug = item["slug"]; in_f = item["in_frame"]
-        masks_dir = WS/"items"/slug/"masks"
+        masks_dir = WS/"items"/slug/"masks" / SEG_BY_SLUG[slug]
         # session-median area for suspect criterion — only over frames
         # with non-trivial mask (≥20 px). SAM2 propagation may leave
         # empty/tiny masks where it lost lock; including those in median
         # makes median=0 and breaks the >3× threshold for everyone.
         areas = []
         for mp in sorted(masks_dir.glob("*.png")):
-            mk = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+            mk = read_mask(mp)
             if mk is None: continue
             a = int((mk > 0).sum())
             if a >= 20:
@@ -131,7 +131,7 @@ def main():
             src = int(mp.stem); local = src - in_f
             fp = WS/"items"/slug/"frames"/f"{local:05d}.jpg"
             if not fp.exists(): continue
-            mask = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+            mask = read_mask(mp)
             frame = cv2.imread(str(fp), cv2.IMREAD_COLOR)
             if mask is None or frame is None or mask.shape != frame.shape[:2]: continue
             ys = np.where(mask>0)[0]

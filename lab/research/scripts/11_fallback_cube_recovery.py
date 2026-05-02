@@ -28,9 +28,9 @@ import numpy as np
 import cv2
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS, OUT
+from _paths import ROOT, WS, OUT, load_manifest, SEG_BY_SLUG, read_mask
 
-M = json.loads((WS / "manifest.json").read_text())
+M = load_manifest()
 
 V10 = dict(h=(103, 118), s=(120, 255), v=(30, 255), aspect=0.50, fill=0.35, area=(5, 150_000))
 
@@ -84,7 +84,7 @@ def main():
 
     for it in items:
         slug = it["slug"]; in_f = it["in_frame"]
-        masks = sorted((WS/"items"/slug/"masks").glob("*.png"))
+        masks = sorted((WS/"items"/slug/"masks" / SEG_BY_SLUG[slug]).glob("*.png"))
         sess_m1 = 0
         sess_recover = {fk:0 for fk in FALLBACKS}
         sess_fp = {fk:0 for fk in FALLBACKS}
@@ -94,7 +94,7 @@ def main():
             src = int(mp.stem); local = src - in_f
             fp = WS/"items"/slug/"frames"/f"{local:05d}.jpg"
             if not fp.exists(): continue
-            gt = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+            gt = read_mask(mp)
             if gt is None or (gt>0).sum() < 5: continue
             frame = cv2.imread(str(fp), cv2.IMREAD_COLOR)
             if frame is None: continue

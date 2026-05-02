@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import cv2
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS
+from _paths import ROOT, WS, load_manifest, SEG_BY_SLUG, read_mask
 
 # Force unbuffered stdout for background runs
 sys.stdout.reconfigure(line_buffering=True)
@@ -228,7 +228,7 @@ def iter_session_frames(item: dict):
         fp    = frames_dir / f"{local:05d}.jpg"
         if not fp.exists():
             continue
-        gt = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+        gt = read_mask(mp)
         if gt is None:
             continue
         ball_in = int((gt > 0).sum()) >= 5
@@ -393,7 +393,7 @@ def bench_roi_frst(item: dict, roi_half: int = ROI_HALF, n: int = 100) -> dict:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    M = json.loads((WS / "manifest.json").read_text())
+    M = load_manifest()
     items = load_items(M)
     print(f"Sessions: {len(items)}")
     for it in items:

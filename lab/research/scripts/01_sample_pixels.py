@@ -14,11 +14,11 @@ from pathlib import Path
 import numpy as np
 import cv2
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS, OUT
+from _paths import ROOT, WS, OUT, load_manifest, SEG_BY_SLUG, read_mask
 
 OUT.mkdir(parents=True, exist_ok=True)
 
-MANIFEST = json.loads((WS / "manifest.json").read_text())
+MANIFEST = load_manifest()
 
 BG_PER_BALL = 5  # background pixels sampled per ball pixel (per frame)
 RNG = np.random.default_rng(0)
@@ -72,7 +72,7 @@ def main():
     for item in items:
         slug = item["slug"]
         in_f = item["in_frame"]
-        masks_dir = WS / "items" / slug / "masks"
+        masks_dir = WS / "items" / slug / "masks" / SEG_BY_SLUG[slug]
         mask_files = sorted(masks_dir.glob("*.png"))
         sess_ball, sess_bg = 0, 0
         sample_step = max(1, len(mask_files) // 60)  # cap ~60 frames per session
@@ -81,7 +81,7 @@ def main():
             frame = load_frame(item, src_idx)
             if frame is None:
                 continue
-            mask = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+            mask = read_mask(mp)
             if mask is None or mask.shape != frame.shape[:2]:
                 continue
             ys, xs = np.where(mask > 0)

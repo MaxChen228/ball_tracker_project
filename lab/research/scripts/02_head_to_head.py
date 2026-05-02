@@ -30,7 +30,7 @@ import numpy as np
 import cv2
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS, OUT
+from _paths import ROOT, WS, OUT, load_manifest, SEG_BY_SLUG, read_mask
 
 
 TOL_PX = 10.0
@@ -49,7 +49,7 @@ PROP = dict(
     min_area=5, max_area=150_000,
 )
 
-MANIFEST = json.loads((WS / "manifest.json").read_text())
+MANIFEST = load_manifest()
 items = [it for it in MANIFEST["items"] if it.get("propagate_status") == "done"]
 
 
@@ -116,7 +116,7 @@ def run():
     rows_prod, rows_prop = [], []
     for item in items:
         slug = item["slug"]; in_f = item["in_frame"]
-        masks_dir = WS / "items" / slug / "masks"
+        masks_dir = WS / "items" / slug / "masks" / SEG_BY_SLUG[slug]
         gt_set = {int(p.stem) for p in masks_dir.glob("*.png")}
         prev_buf: list[np.ndarray] = []
         # iterate sequentially so motion gate has temporal context
@@ -132,7 +132,7 @@ def run():
             # only score on GT frames
             if src not in gt_set: continue
             mp = masks_dir / f"{src:05d}.png"
-            mask = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+            mask = read_mask(mp)
             if mask is None or mask.shape != frame.shape[:2]: continue
             ys = np.where(mask > 0)[0]
             if len(ys) < 20: continue

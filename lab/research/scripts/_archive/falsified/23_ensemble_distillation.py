@@ -35,12 +35,12 @@ from torch.utils.data import Dataset, DataLoader
 OUT.mkdir(exist_ok=True)
 NOTES.mkdir(exist_ok=True)
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from ball_detector import BallDetector  # noqa: E402
 
 # Reuse FRST from script 19
 import importlib.util
-from _paths import ROOT, WS, OUT, NOTES
+from _paths import ROOT, WS, OUT, NOTES, load_manifest, SEG_BY_SLUG, read_mask
 _frst_spec = importlib.util.spec_from_file_location(
     "frst_mod", Path(__file__).resolve().parent / "19_frst.py"
 )
@@ -49,7 +49,7 @@ _frst_spec.loader.exec_module(_frst_mod)
 frst_compute = _frst_mod.frst
 frst_candidates = _frst_mod.frst_candidates
 
-M = json.loads((WS / "manifest.json").read_text())
+M = load_manifest()
 
 
 def _active_seg(it: dict) -> dict | None:
@@ -283,7 +283,7 @@ def load_all_records(verbose: bool = True) -> list[FrameRecord]:
             bgr = cv2.imread(str(e["frame_path"]), cv2.IMREAD_COLOR)
             if bgr is None:
                 continue
-            mask = cv2.imread(str(e["mask_path"]), cv2.IMREAD_GRAYSCALE)
+            mask = read_mask(e["mask_path"])
             if mask is None:
                 continue
             h, w = bgr.shape[:2]

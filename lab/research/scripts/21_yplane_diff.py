@@ -26,11 +26,11 @@ from pathlib import Path
 import numpy as np
 import cv2
 import sys
-from _paths import ROOT, WS, OUT
+from _paths import ROOT, WS, OUT, load_manifest, SEG_BY_SLUG, read_mask
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-M    = json.loads((WS / "manifest.json").read_text())
+M    = load_manifest()
 
 # ── V11 reference ──────────────────────────────────────────────────────────
 
@@ -116,7 +116,7 @@ def classify_miss_mode(gt_s: float, gt_h: float) -> str:
 def load_session_frames(item: dict) -> list[dict]:
     slug = item["slug"]
     in_f = item["in_frame"]
-    masks_dir = WS / "items" / slug / "masks"
+    masks_dir = WS / "items" / slug / "masks" / SEG_BY_SLUG[slug]
     frames_dir = WS / "items" / slug / "frames"
 
     rows: list[dict] = []
@@ -126,7 +126,7 @@ def load_session_frames(item: dict) -> list[dict]:
         fp = frames_dir / f"{local:05d}.jpg"
         if not fp.exists():
             continue
-        gt = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+        gt = read_mask(mp)
         if gt is None:
             continue
         ball_in = int((gt > 0).sum()) >= 5

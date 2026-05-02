@@ -14,10 +14,10 @@ from pathlib import Path
 import numpy as np
 import cv2
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS, OUT
+from _paths import ROOT, WS, OUT, load_manifest, SEG_BY_SLUG, read_mask
 
 OUT.mkdir(parents=True, exist_ok=True)
-M = json.loads((WS / "manifest.json").read_text())
+M = load_manifest()
 
 PROD = dict(h=(105, 112), s=(140, 255), v=(40, 255), aspect=0.75, fill=0.55, area=(20, 150_000))
 V10  = dict(h=(103, 118), s=(120, 255), v=(30, 255), aspect=0.50, fill=0.35, area=(5, 150_000))
@@ -110,14 +110,14 @@ def main():
 
     for it in items:
         slug = it["slug"]; in_f = it["in_frame"]
-        masks = sorted((WS/"items"/slug/"masks").glob("*.png"))
+        masks = sorted((WS/"items"/slug/"masks" / SEG_BY_SLUG[slug]).glob("*.png"))
         sess_n = 0; sess_prod = 0; sess_v10 = 0
         sess_miss = {"M1":0, "M2":0, "M3":0, "M4":0, "M5":0}
         for mp in masks:
             src = int(mp.stem); local = src - in_f
             fp = WS/"items"/slug/"frames"/f"{local:05d}.jpg"
             if not fp.exists(): continue
-            gt = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+            gt = read_mask(mp)
             if gt is None or (gt>0).sum() < 5: continue
             frame = cv2.imread(str(fp), cv2.IMREAD_COLOR)
             if frame is None: continue

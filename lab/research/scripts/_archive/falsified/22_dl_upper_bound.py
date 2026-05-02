@@ -42,15 +42,15 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS, OUT, NOTES
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _paths import ROOT, WS, OUT, NOTES, load_manifest, SEG_BY_SLUG, read_mask
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 OUT.mkdir(exist_ok=True)
 NOTES.mkdir(exist_ok=True)
 
-M = json.loads((WS / "manifest.json").read_text())
+M = load_manifest()
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -172,7 +172,7 @@ def load_all_sessions() -> list[FrameRecord]:
     for it in items:
         slug = it["slug"]
         in_f = it["in_frame"]
-        masks_dir = WS / "items" / slug / "masks"
+        masks_dir = WS / "items" / slug / "masks" / SEG_BY_SLUG[slug]
         frames_dir = WS / "items" / slug / "frames"
 
         for mp in sorted(masks_dir.glob("*.png")):
@@ -181,7 +181,7 @@ def load_all_sessions() -> list[FrameRecord]:
             fp = frames_dir / f"{local:05d}.jpg"
             if not fp.exists():
                 continue
-            gt_gray = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+            gt_gray = read_mask(mp)
             if gt_gray is None:
                 continue
             bgr = cv2.imread(str(fp), cv2.IMREAD_COLOR)

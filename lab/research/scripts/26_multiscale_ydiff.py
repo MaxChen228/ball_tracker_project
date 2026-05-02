@@ -23,10 +23,10 @@ import numpy as np
 import cv2
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS, OUT
+from _paths import ROOT, WS, OUT, load_manifest, SEG_BY_SLUG, read_mask
 
 OUT.mkdir(parents=True, exist_ok=True)
-M    = json.loads((WS / "manifest.json").read_text())
+M    = load_manifest()
 
 # ── V11 gate (canonical) ──────────────────────────────────────────────────
 V11 = dict(h=(103, 118), s=(120, 255), v=(30, 255),
@@ -139,7 +139,7 @@ def load_session(item: dict) -> tuple[list[dict], dict[int, np.ndarray]]:
     local_to_gray: dict[int, np.ndarray] = {}
     for fp in sorted(frames_dir.glob("*.jpg")):
         local = int(fp.stem)
-        g = cv2.imread(str(fp), cv2.IMREAD_GRAYSCALE)
+        g = read_mask(fp)
         if g is not None:
             local_to_gray[local] = g
 
@@ -150,7 +150,7 @@ def load_session(item: dict) -> tuple[list[dict], dict[int, np.ndarray]]:
         fp = frames_dir / f"{local:05d}.jpg"
         if not fp.exists():
             continue
-        gt = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+        gt = read_mask(mp)
         if gt is None:
             continue
         ball_in = int((gt > 0).sum()) >= 5

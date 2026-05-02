@@ -25,7 +25,7 @@ import numpy as np
 import cv2
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS
+from _paths import ROOT, WS, load_manifest, SEG_BY_SLUG, read_mask
 
 EXCLUDE_SESSIONS = {"session_s_21af9a82_b"}
 TOL = 10.0
@@ -114,7 +114,7 @@ def gt_features(frame, mask):
 
 
 def main():
-    MANIFEST = json.loads((WS/"manifest.json").read_text())
+    MANIFEST = load_manifest()
     items = [it for it in MANIFEST["items"]
              if it.get("propagate_status")=="done"
              and it["slug"] not in EXCLUDE_SESSIONS]
@@ -123,17 +123,17 @@ def main():
     hits = []   # rows for V10 hit frames
     for item in items:
         slug = item["slug"]; in_f = item["in_frame"]
-        masks_dir = WS/"items"/slug/"masks"
-        areas = [int((cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)>0).sum())
+        masks_dir = WS/"items"/slug/"masks" / SEG_BY_SLUG[slug]
+        areas = [int((read_mask(p)>0).sum())
                  for p in sorted(masks_dir.glob("*.png"))
-                 if cv2.imread(str(p), cv2.IMREAD_GRAYSCALE) is not None]
+                 if read_mask(p) is not None]
         areas = [a for a in areas if a >= 20]
         sess_med = float(np.median(areas)) if areas else 0
         for mp in sorted(masks_dir.glob("*.png")):
             src = int(mp.stem); local = src - in_f
             fp = WS/"items"/slug/"frames"/f"{local:05d}.jpg"
             if not fp.exists(): continue
-            mask = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+            mask = read_mask(mp)
             frame = cv2.imread(str(fp), cv2.IMREAD_COLOR)
             if mask is None or frame is None or mask.shape != frame.shape[:2]: continue
             if mask_suspect(mask, sess_med): continue

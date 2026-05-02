@@ -19,10 +19,10 @@ import numpy as np
 import cv2
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS, OUT
+from _paths import ROOT, WS, OUT, load_manifest, SEG_BY_SLUG, read_mask
 
 
-MANIFEST = json.loads((WS / "manifest.json").read_text())
+MANIFEST = load_manifest()
 items = [it for it in MANIFEST["items"] if it.get("propagate_status") == "done"]
 
 
@@ -68,10 +68,10 @@ def main():
     suspect_total = 0
     for item in items:
         slug = item["slug"]; in_f = item["in_frame"]
-        masks = sorted((WS/"items"/slug/"masks").glob("*.png"))
+        masks = sorted((WS/"items"/slug/"masks" / SEG_BY_SLUG[slug]).glob("*.png"))
         rows = []
         for mp in masks:
-            mask = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+            mask = read_mask(mp)
             if mask is None: continue
             ys = np.where(mask>0)[0]
             if len(ys) < 5: continue

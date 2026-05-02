@@ -24,11 +24,11 @@ from pathlib import Path
 import numpy as np
 import cv2
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS, OUT
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _paths import ROOT, WS, OUT, load_manifest, SEG_BY_SLUG, read_mask
 
 OUT.mkdir(parents=True, exist_ok=True)
-M = json.loads((WS / "manifest.json").read_text())
+M = load_manifest()
 
 # V11 cube (canonical)
 V11 = dict(h=(103, 118), s=(120, 255), v=(30, 255), aspect=0.40, fill=0.35,
@@ -204,7 +204,7 @@ def main():
         local_to_gray = {}
         for fp in sorted(frames_dir.glob("*.jpg")):
             local = int(fp.stem)
-            g = cv2.imread(str(fp), cv2.IMREAD_GRAYSCALE)
+            g = read_mask(fp)
             if g is not None:
                 local_to_gray[local] = g
 
@@ -213,7 +213,7 @@ def main():
             fp = frames_dir / f"{local:05d}.jpg"
             if not fp.exists():
                 continue
-            gt = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+            gt = read_mask(mp)
             ys, xs = np.where(gt > 0)
             if len(ys) < 5:
                 continue

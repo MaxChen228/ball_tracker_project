@@ -1,88 +1,54 @@
 # lab/research
 
-球體偵測研究工作區。獨立於 `lab/` 標註流程，**用途是研究與驗證，不是 production code**。
+球體偵測研究工作區。**研究與量化驗證用，不是 production code**。
 
-## 先看哪裡
+iOS 編譯進去的 detector (`ball_tracker/BallDetector.mm`) 是 HSV+CC+aspect/fill
+gate（研究稱它為 V11，是研究的起點不是研究產物）。研究最高成果 V11+Y-diff
+(R=0.970) 尚未整合進 iOS。
 
-- 當前總結：[`notes/00_synthesis_2026-05-01.md`](notes/00_synthesis_2026-05-01.md)
-- V11 主報告：[`notes/02_v11_followup.md`](notes/02_v11_followup.md)
-- 筆記索引：[`notes/README.md`](notes/README.md)
-- 產物索引：[`outputs/README.md`](outputs/README.md)
+## 從哪開始讀
 
-## 現況一句話
-
-目前最有價值的結論不是 single-frame HSV，而是：
-
-- `V11`：recall `0.905`
-- `V11 + Y-diff(thr=15)`：recall `0.970`
-- `ROI-FRST`：只有邊際增益
-- tiny FCN / distillation：在 1073 GT frames 規模下失敗
-
-詳見 [`notes/00_synthesis_2026-05-01.md`](notes/00_synthesis_2026-05-01.md)。
+| 目的 | 看這裡 |
+|---|---|
+| 30 秒抓全景 | [`MAP.md`](MAP.md) |
+| 上次 GT 擴張改了哪些數字 | [`CHANGELOG.md`](CHANGELOG.md) |
+| 想 30 分鐘進入研究 | `notes/00_synthesis_2026-05-01.md` → `02_v11_followup.md` → `11_cue_independence.md` → `19_multiscale_ydiff.md` → `20_consensus_residual_analysis.md` |
 
 ## 目錄
 
 ```
 lab/research/
-├── README.md          入口與重跑方式
-├── notes/             研究筆記、報告、設計稿
-├── outputs/           腳本產出的量化結果與視覺化
-└── scripts/           可重跑研究腳本
-    └── _archive/      已確認 dead-end 的舊探索腳本
+├── README.md            ← 你在這裡
+├── MAP.md               單頁全景（演算法世代 × scripts × notes 矩陣）
+├── CHANGELOG.md         GT 擴張或結構改動記錄
+├── notes/               研究筆記、報告、設計稿（內容不依編號順序，看 MAP）
+├── outputs/             scripts 產出（含 _figures/ 收集視覺化 PNG）
+└── scripts/
+    ├── _paths.py        ROOT/WS/OUT helper + manifest 適配 + mask reader
+    ├── ball_detector.py V11 reference impl
+    ├── 0X_*.py 1X_*.py  研究 script（編號為時間軸，狀態見 MAP.md）
+    └── _archive/
+        ├── 0X_*.py      pre-V10 早期 heuristic 探索（化石）
+        └── falsified/   負結果 code（dichromatic / DL distillation）
 ```
 
-這裡先**不做實體搬檔**。很多 script / note 直接引用既有檔名與路徑，先把索引補齊，避免整理過程把研究鏈條弄斷。
+## 重跑
 
-## 研究主線
+```bash
+cd lab/research
+# active headlines（GT 擴大時值得重跑）
+for s in 02_head_to_head 19_frst 21_yplane_diff 22_cue_independence \
+         24_roi_frst 26_consensus_residual 26_multiscale_ydiff; do
+  uv run --project ../../server python scripts/${s}.py
+done
+```
 
-| 範圍 | 主要文件 | 對應腳本 / 產物 |
-|---|---|---|
-| V10/V11 HSV 基線 | [`01_final_report.md`](notes/01_final_report.md), [`02_v11_followup.md`](notes/02_v11_followup.md) | `01`-`18`, `ball_detector.py` |
-| Y-plane / temporal cues | [`08_yplane_diff.md`](notes/08_yplane_diff.md), [`11_cue_independence.md`](notes/11_cue_independence.md), [`19_multiscale_ydiff.md`](notes/19_multiscale_ydiff.md) | `21`, `22`, `26_multiscale_ydiff.py` |
-| FRST / ROI-FRST | [`03_frst_eval.md`](notes/03_frst_eval.md), [`16_roi_frst.md`](notes/16_roi_frst.md) | `19_frst.py`, `24_roi_frst.py` |
-| Distillation / DL feasibility | [`09_a15_detection_benchmarks.md`](notes/09_a15_detection_benchmarks.md), [`12_ensemble_distillation_design.md`](notes/12_ensemble_distillation_design.md), [`13_ensemble_distillation_results.md`](notes/13_ensemble_distillation_results.md) | `22_dl_upper_bound.py`, `23_ensemble_distillation.py` |
-| Physical / failure-mode analysis | [`17_dichromatic_design.md`](notes/17_dichromatic_design.md), [`18_dichromatic_results.md`](notes/18_dichromatic_results.md), [`20_consensus_residual_analysis.md`](notes/20_consensus_residual_analysis.md) | `25_dichromatic.py`, `26_consensus_residual.py`, `26b_cluster.py` |
-| Side investigations | [`03_dual_pipeline_arch.md`](notes/03_dual_pipeline_arch.md), [`04_literature_survey.md`](notes/04_literature_survey.md), [`05_github_survey.md`](notes/05_github_survey.md), [`07_epipolar_rescue.md`](notes/07_epipolar_rescue.md), [`14_vision_circle_api_check.md`](notes/14_vision_circle_api_check.md), [`15_yolo_ane_latency_check.md`](notes/15_yolo_ane_latency_check.md) | mostly note-only |
+完整 active list、每支 script 用途、negative result 對照見 [`MAP.md`](MAP.md)。
 
 ## 環境
 
-跑在 `server/.venv`（`uv` 管理，Python 3.13）。
+跑在 `server/.venv`（`uv` 管理，Python 3.13）。一律以
+`uv run --project ../../server python scripts/<n>.py` 執行。
 
-- 傳統 CV 腳本主要依賴：`opencv-python`, `numpy`, `scipy`
-- DL 腳本另外依賴：`torch`
-
-不是所有 script 都是「純 cv2 + numpy + scipy」。`22_dl_upper_bound.py` 和 `23_ensemble_distillation.py` 需要 PyTorch。
-
-## 重跑方式
-
-大部分腳本都假設從 repo root 或 `lab/research/` 執行最穩：
-
-```bash
-cd /Users/chenliangyu/Desktop/active/ball_tracker_project/lab/research
-uv run python scripts/19_frst.py
-uv run python scripts/21_yplane_diff.py
-uv run python scripts/22_cue_independence.py
-uv run python scripts/23_ensemble_distillation.py
-```
-
-若你想從 `server/` 執行，也可以：
-
-```bash
-cd /Users/chenliangyu/Desktop/active/ball_tracker_project/server
-uv run python ../lab/research/scripts/19_frst.py
-```
-
-所有腳本都讀 `lab/standalone_workspace/manifest.json` 與對應 frame/mask，輸出到 `lab/research/outputs/`。
-
-## 命名規則
-
-- `notes/<nn>_*.md`：研究筆記或報告
-- `scripts/<nn>_*.py`：實驗腳本
-- `outputs/<nn>_*.{json,npz,png,csv}`：該階段的主要產物
-
-同一編號不保證嚴格一對一；有些 track 只有 note、有些只有 script，有些是多檔輸出。對照表放在 [`notes/README.md`](notes/README.md) 和 [`outputs/README.md`](outputs/README.md)。
-
-## 已知缺口
-
-- `scripts/22_dl_upper_bound.py` 提到的 `notes/10_dl_upper_bound.md` 和 `outputs/22_dl_upper_bound_results.json` 目前不在 tree 內，視為未整理完成的研究分支。
-- `outputs/` 目前約數百 MB，包含大型 `.npz` 與視覺化 PNG；先保留原路徑，不拆子資料夾，避免破壞現有引用。
+依賴：`opencv-python` / `numpy` / `scipy`（傳統 CV 腳本）；
+`torch`（僅 falsified 的 DL 腳本需要）。

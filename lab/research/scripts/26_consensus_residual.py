@@ -20,11 +20,11 @@ import numpy as np
 import cv2
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import ROOT, WS, OUT
+from _paths import ROOT, WS, OUT, load_manifest, SEG_BY_SLUG, read_mask
 
 OUT.mkdir(parents=True, exist_ok=True)
 
-M = json.loads((WS / "manifest.json").read_text())
+M = load_manifest()
 
 V11 = dict(h=(103, 118), s=(120, 255), v=(30, 255),
            aspect=0.40, fill=0.35, area=(3, 150_000), close=3)
@@ -229,7 +229,7 @@ def collect():
             fp = frames_dir / f"{local:05d}.jpg"
             if not fp.exists():
                 continue
-            gt = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+            gt = read_mask(mp)
             if gt is None or (gt > 0).sum() < 5:
                 continue
             bgr = cv2.imread(str(fp), cv2.IMREAD_COLOR)
