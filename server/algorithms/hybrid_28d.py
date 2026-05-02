@@ -48,33 +48,38 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Per-cell area gates. Same defaults as `detection._MIN_AREA_PX` /
-# `_MAX_AREA_PX` — the ball-size envelope is algorithm-independent at
-# our 1080p / 240 fps rig. Hardcoded here rather than made tunable so
-# operator misconfig of one detector can't silently widen the area
-# envelope on the others.
-_MIN_AREA_PX = 20
 _MAX_AREA_PX = 150_000
 
 
 class Hybrid28dParams(BaseModel):
     """Per-call params for `Hybrid28dDetector`. Two HSV cubes (PROD
-    tight + V11 loose), each with its own shape gate. `v11_close_kernel`
-    is the morphological CLOSE size the loose fallback applies to the
-    HSV mask before connected components — bridges thin gaps in the
-    deeper-blue ball's HSV mask that v11_hsv_cc's no-morphology pipeline
-    drops. `neigh_half` + `match_px` are the temporal-persistence rerank
-    knobs (see module docstring).
+    tight + V11 loose), each with its own shape gate AND its own area
+    floor. `v11_close_kernel` is the morphological CLOSE size the
+    loose fallback applies to the HSV mask before connected components
+    — bridges thin gaps in the deeper-blue ball's HSV mask that
+    v11_hsv_cc's no-morphology pipeline drops. `neigh_half` +
+    `match_px` are the temporal-persistence rerank knobs (see module
+    docstring).
 
     Defaults match `lab/research/scripts/28d_hybrid.py` constants —
     physics-derived, not per-session tuned: NEIGH_HALF=6 ≈ 50ms at
     240fps (long enough that a real ball has moved >> match radius);
-    MATCH_PX=5.0 ≈ CC centroid noise scale on this rig."""
+    MATCH_PX=5.0 ≈ CC centroid noise scale on this rig.
+
+    The two area floors are deliberately asymmetric: PROD inherits
+    v11_hsv_cc's 20-px floor (ball-sized only) so its top-1 emit has
+    high precision; V11 fallback drops to 3 px so it can emit small /
+    partially-occluded blobs that PROD's tight gate misses but the
+    persistence rerank can still distinguish from clutter. The lab
+    eval's +0.045 R_top1 rescue rate (PR #112) depends on this gap —
+    raising the V11 floor would silently drop micro-rescue blobs."""
     model_config = ConfigDict(extra="forbid")
     prod_hsv: HSVRangePayload
     prod_shape: ShapeGatePayload
+    prod_area_min: int = Field(default=20, ge=1, le=10_000)
     v11_hsv: HSVRangePayload
     v11_shape: ShapeGatePayload
+    v11_area_min: int = Field(default=3, ge=1, le=10_000)
     v11_close_kernel: int = Field(default=3, ge=1, le=9)
     neigh_half: int = Field(default=6, ge=1, le=30)
     match_px: float = Field(default=5.0, ge=0.5, le=50.0)
@@ -86,13 +91,17 @@ def _emit_candidates(
     shape: ShapeGatePayload,
     *,
     close_kernel: int | None,
+    area_min: int,
 ) -> list[BlobCandidate]:
     """Single-pass HSV + (optional) morphology CLOSE + connected-
     components + shape gate + cost-stamping. Returns every survivor
     with `cost` populated — caller decides which subset / ordering to
     emit. `close_kernel=None` skips morphology (PROD); a small odd int
     runs `cv2.MORPH_CLOSE` with an elliptical kernel of that size (V11
-    loose).
+    loose). `area_min` is the per-pool floor: PROD uses 20 (ball-sized
+    only, high precision), V11 uses 3 (rescue micro-blobs that the
+    persistence rerank can still distinguish from clutter — see
+    Hybrid28dParams docstring for the precision/recall rationale).
 
     Mirror of `detection.detect_ball_with_candidates` but stripped of
     the winner-select responsibility — Hybrid28dDetector does its own
@@ -119,7 +128,7 @@ def _emit_candidates(
     shape_stats: list[tuple[float, float]] = []
     for idx in range(1, n):
         area = int(stats[idx, cv2.CC_STAT_AREA])
-        if area < _MIN_AREA_PX or area > _MAX_AREA_PX:
+        if area < area_min or area > _MAX_AREA_PX:
             continue
         w = int(stats[idx, cv2.CC_STAT_WIDTH])
         h = int(stats[idx, cv2.CC_STAT_HEIGHT])
@@ -221,11 +230,14 @@ class Hybrid28dDetector(Detector):
                 progress(idx)
             timestamps.append(absolute_pts_s)
             prod_per_frame.append(_emit_candidates(
-                bgr, params.prod_hsv, params.prod_shape, close_kernel=None,
+                bgr, params.prod_hsv, params.prod_shape,
+                close_kernel=None,
+                area_min=params.prod_area_min,
             ))
             v11_per_frame.append(_emit_candidates(
                 bgr, params.v11_hsv, params.v11_shape,
                 close_kernel=params.v11_close_kernel,
+                area_min=params.v11_area_min,
             ))
 
         n_frames = len(timestamps)
@@ -240,9 +252,16 @@ class Hybrid28dDetector(Detector):
             if prod_blobs:
                 # PROD path — already cost-stamped; sort ASC so the
                 # cheapest blob is `candidates[0]` for downstream.
-                chosen = sorted(prod_blobs, key=lambda b: b.cost or 0.0)
+                # `_emit_candidates` always sets `cost`; assert so a
+                # future refactor that breaks the invariant fails
+                # loudly here instead of silently re-ranking with 0.
+                for b in prod_blobs:
+                    assert b.cost is not None, "_emit_candidates must stamp cost"
+                chosen = sorted(prod_blobs, key=lambda b: b.cost)
             elif v11_blobs:
                 rescue_attempted += 1
+                for b in v11_blobs:
+                    assert b.cost is not None, "_emit_candidates must stamp cost"
                 # V11 fallback path. Build neighbor cand lists in
                 # ±neigh_half window (skipping idx itself), then sort
                 # by (persistence ASC, shape cost ASC).
@@ -257,7 +276,7 @@ class Hybrid28dDetector(Detector):
                     v11_blobs,
                     key=lambda b: (
                         _persistence(b, neigh, params.match_px),
-                        b.cost or 0.0,
+                        b.cost,
                     ),
                 )
                 rescue_emitted += 1

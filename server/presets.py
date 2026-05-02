@@ -167,12 +167,18 @@ _BUILTIN_SEEDS: dict[str, Preset] = {
                 "v_min": 40, "v_max": 255,
             },
             "prod_shape": {"aspect_min": 0.75, "fill_min": 0.55},
+            # PROD inherits v11_hsv_cc's 20-px floor (ball-sized).
+            "prod_area_min": 20,
             "v11_hsv": {
                 "h_min": 103, "h_max": 118,
                 "s_min": 120, "s_max": 255,
                 "v_min": 30, "v_max": 255,
             },
             "v11_shape": {"aspect_min": 0.40, "fill_min": 0.35},
+            # V11 floor drops to 3 px so the rescue path can emit
+            # micro-blobs PROD's tight floor would silently drop.
+            # Matches lab `28d_hybrid.py` `V11["area"]=(3, 150_000)`.
+            "v11_area_min": 3,
             "v11_close_kernel": 3,
             "neigh_half": 6,
             "match_px": 5.0,

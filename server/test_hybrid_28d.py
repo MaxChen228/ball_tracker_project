@@ -129,6 +129,7 @@ def test_emit_candidates_passes_prod_for_in_band_blob():
         HSVRangePayload(h_min=105, h_max=112, s_min=140, s_max=255, v_min=40, v_max=255),
         ShapeGatePayload(aspect_min=0.75, fill_min=0.55),
         close_kernel=None,
+        area_min=20,
     )
     assert len(cands) == 1
     assert abs(cands[0].px - 160) < 2
@@ -144,6 +145,7 @@ def test_emit_candidates_rejects_out_of_band_blob_under_prod():
         HSVRangePayload(h_min=105, h_max=112, s_min=140, s_max=255, v_min=40, v_max=255),
         ShapeGatePayload(aspect_min=0.75, fill_min=0.55),
         close_kernel=None,
+        area_min=20,
     )
     assert prod == []
     v11 = _emit_candidates(
@@ -151,6 +153,7 @@ def test_emit_candidates_rejects_out_of_band_blob_under_prod():
         HSVRangePayload(h_min=103, h_max=118, s_min=120, s_max=255, v_min=30, v_max=255),
         ShapeGatePayload(aspect_min=0.40, fill_min=0.35),
         close_kernel=3,
+        area_min=3,
     )
     assert len(v11) == 1
 
@@ -238,6 +241,95 @@ def test_detect_emits_no_winner_when_both_empty():
         assert f.px is None
         assert f.py is None
         assert f.candidates == []
+
+
+def test_detect_winner_is_always_candidates_zero():
+    """Cross-cutting invariant: when ball_detected, the FramePayload's
+    `(px, py)` must equal `candidates[0].(px, py)`. Downstream
+    consumers reading either surface would silently disagree if these
+    diverge."""
+    bgr = _bgr_with_blob(160, 120, hsv_h=108)
+
+    def stub_iter(_path, start):
+        for i in range(3):
+            yield (start + i / 240.0, bgr.copy())
+
+    detector = Hybrid28dDetector()
+    frames = detector.detect(
+        Path("/dev/null/fake.mov"),
+        0.0,
+        Hybrid28dParams.model_validate(_params_dict()),
+        frame_iter=stub_iter,
+    )
+    for f in frames:
+        if not f.ball_detected:
+            continue
+        assert f.candidates, "ball_detected without candidates"
+        assert f.px == f.candidates[0].px
+        assert f.py == f.candidates[0].py
+
+
+def test_detect_window_edge_frames_dont_blow_up():
+    """Pass 2 clips the persistence window to `[max(0, idx-K),
+    min(N-1, idx+K)]`. First and last frames have no left- / right-
+    side neighbors. Verify both clip cleanly without crashing or
+    inflating persistence by reaching into invalid indices."""
+    bgr = _bgr_with_blob(160, 120, hsv_h=115)  # PROD-empty, V11-emit
+
+    def stub_iter(_path, start):
+        for i in range(2):
+            yield (start + i / 240.0, bgr.copy())
+
+    detector = Hybrid28dDetector()
+    frames = detector.detect(
+        Path("/dev/null/fake.mov"),
+        0.0,
+        Hybrid28dParams.model_validate(_params_dict()),
+        frame_iter=stub_iter,
+    )
+    assert len(frames) == 2
+    for f in frames:
+        assert f.ball_detected
+        assert abs(f.px - 160) < 3
+
+
+def test_v11_area_floor_below_prod_recovers_micro_blobs():
+    """Lab-fidelity pin: V11 area floor must drop to 3 px so the
+    rescue path can emit micro-blobs PROD's 20-px floor would
+    silently drop. The +0.045 R_top1 lab eval (PR #112) depends on
+    this asymmetry — raising V11's floor silently kills the rescue
+    path."""
+    # Tiny edge-of-band blob ~ π * 1.5² ≈ 7 px. Below PROD floor (20),
+    # above V11 floor (3).
+    bgr = _bgr_with_blob(160, 120, hsv_h=115, radius=1)
+    prod = _emit_candidates(
+        bgr,
+        HSVRangePayload(h_min=105, h_max=112, s_min=140, s_max=255, v_min=40, v_max=255),
+        ShapeGatePayload(aspect_min=0.75, fill_min=0.55),
+        close_kernel=None,
+        area_min=20,
+    )
+    assert prod == [], "PROD's 20-px floor + tight HSV must reject micro-blob"
+    v11 = _emit_candidates(
+        bgr,
+        HSVRangePayload(h_min=103, h_max=118, s_min=120, s_max=255, v_min=30, v_max=255),
+        ShapeGatePayload(aspect_min=0.40, fill_min=0.35),
+        close_kernel=3,
+        area_min=3,
+    )
+    assert len(v11) == 1, "V11's 3-px floor must emit the micro-blob"
+    # Regression guard: same blob, V11 with PROD's 20-px floor → dies.
+    v11_with_prod_floor = _emit_candidates(
+        bgr,
+        HSVRangePayload(h_min=103, h_max=118, s_min=120, s_max=255, v_min=30, v_max=255),
+        ShapeGatePayload(aspect_min=0.40, fill_min=0.35),
+        close_kernel=3,
+        area_min=20,
+    )
+    assert v11_with_prod_floor == [], (
+        "regression guard: if V11's area_min is ever raised to 20, "
+        "the +0.045 R_top1 rescue path silently dies"
+    )
 
 
 def test_detect_persistence_demotes_static_distractor_in_v11_fallback():
