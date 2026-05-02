@@ -336,6 +336,17 @@ body {
 .seg-chip-done .seg-chip-dot { background: #22c55e; }
 .seg-chip-failed .seg-chip-dot { background: #ef4444; }
 
+.seg-chip-rerun {
+  background: none;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.seg-chip-rerun:hover { color: #f59e0b; }
+
 .seg-chip-x {
   background: none;
   border: none;
@@ -506,6 +517,24 @@ body {
 #controls button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+#play-rate-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: #94a3b8;
+  font-size: 12px;
+}
+#play-rate {
+  background: #0f172a;
+  color: #f8fafc;
+  border: 1px solid #475569;
+  padding: 4px 6px;
+  font-family: monospace;
+  font-size: 12px;
+  cursor: pointer;
 }
 
 #statusbar {

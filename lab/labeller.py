@@ -598,6 +598,15 @@ _SEEDER = None
 _PROPAGATOR = None
 _MODEL_LOCK = threading.Lock()
 
+# Idle-unload watcher: drop both SAM2 models after N seconds of no seed/propagate
+# activity. SAM2 hiera-large + base-plus + MPS allocator slabs hold ~8GB on M-series
+# unified memory; reclaiming on idle keeps the long-running labeller process at
+# ~500MB baseline. Re-load on next /seed or /propagate (~1.5s lazy init).
+# Set LAB_IDLE_UNLOAD_SECONDS=0 to disable.
+_LAST_ACTIVITY = time.monotonic()
+_IDLE_UNLOAD_SECONDS = int(os.environ.get("LAB_IDLE_UNLOAD_SECONDS", "600"))
+_IDLE_WATCHER_THREAD: threading.Thread | None = None
+
 AVAILABLE_MODELS = [
     "facebook/sam2-hiera-tiny",
     "facebook/sam2-hiera-small",
@@ -611,7 +620,7 @@ _ACTIVE_MODELS = {
 
 
 def get_seeder():
-    global _SEEDER
+    global _SEEDER, _LAST_ACTIVITY
     with _MODEL_LOCK:
         target = _ACTIVE_MODELS["seed"]
         if _SEEDER is not None and getattr(_SEEDER, "model_id", None) != target:
@@ -623,11 +632,12 @@ def get_seeder():
             t0 = time.time()
             _SEEDER = Seeder(model_id=target)
             print(f"[labeller] image predictor ready on {_SEEDER.device} in {time.time()-t0:.1f}s", flush=True)
+    _LAST_ACTIVITY = time.monotonic()
     return _SEEDER
 
 
 def get_propagator():
-    global _PROPAGATOR
+    global _PROPAGATOR, _LAST_ACTIVITY
     with _MODEL_LOCK:
         target = _ACTIVE_MODELS["prop"]
         if _PROPAGATOR is not None and getattr(_PROPAGATOR, "model_id", None) != target:
@@ -639,6 +649,7 @@ def get_propagator():
             t0 = time.time()
             _PROPAGATOR = Propagator(model_id=target)
             print(f"[labeller] video predictor ready on {_PROPAGATOR.device} in {time.time()-t0:.1f}s", flush=True)
+    _LAST_ACTIVITY = time.monotonic()
     return _PROPAGATOR
 
 
@@ -681,6 +692,37 @@ def unload_propagator() -> None:
             torch.cuda.empty_cache()
     except Exception:
         pass
+
+
+def _idle_watcher_loop() -> None:
+    """Drop SAM2 models when nothing has touched them for _IDLE_UNLOAD_SECONDS.
+    Runs forever as a daemon thread; cheap (60s tick + a few global reads)."""
+    while True:
+        time.sleep(60)
+        if _IDLE_UNLOAD_SECONDS <= 0:
+            continue
+        if _SEEDER is None and _PROPAGATOR is None:
+            continue
+        # Skip if a propagation is in flight; it'd race with reset_state in finally.
+        busy = (_QUEUE_CURRENT is not None) or any(
+            t.is_alive() for t in PROP_THREADS.values()
+        )
+        if busy:
+            continue
+        idle_for = time.monotonic() - _LAST_ACTIVITY
+        if idle_for < _IDLE_UNLOAD_SECONDS:
+            continue
+        print(f"[labeller] idle {idle_for:.0f}s ≥ {_IDLE_UNLOAD_SECONDS}s → unloading models", flush=True)
+        unload_seeder()
+        unload_propagator()
+
+
+def _start_idle_watcher() -> None:
+    global _IDLE_WATCHER_THREAD
+    if _IDLE_WATCHER_THREAD is not None:
+        return
+    _IDLE_WATCHER_THREAD = threading.Thread(target=_idle_watcher_loop, daemon=True)
+    _IDLE_WATCHER_THREAD.start()
 
 
 STORE = ManifestStore()
@@ -1005,7 +1047,8 @@ def run_propagate(slug: str, seg_id: str) -> None:
 SLUG_RE = re.compile(
     r"^/api/items/([A-Za-z0-9_\-]+)/"
     r"(trim|seed|propagate|propagate/cancel|events|pts|masks|delete|"
-    r"segments/new|segments/seg_[A-Za-z0-9]+/active|segments/seg_[A-Za-z0-9]+/delete)$"
+    r"segments/new|segments/seg_[A-Za-z0-9]+/active|segments/seg_[A-Za-z0-9]+/delete|"
+    r"segments/seg_[A-Za-z0-9]+/clear)$"
 )
 MASK_RE = re.compile(r"^/mask/([A-Za-z0-9_\-]+)/(seg_[A-Za-z0-9]+)/(\d{5})\.png$")
 CLIP_RE = re.compile(r"^/clip/([A-Za-z0-9_\-]+)\.mp4$")
@@ -1290,6 +1333,17 @@ class Handler(BaseHTTPRequestHandler):
             unload_seeder()
             self._send_json(HTTPStatus.OK, {"ok": True})
             return
+        if url.path == "/admin/free-cache":
+            had_seeder = _SEEDER is not None
+            had_propagator = _PROPAGATOR is not None
+            unload_seeder()
+            unload_propagator()
+            self._send_json(HTTPStatus.OK, {
+                "freed": True,
+                "had_seeder": had_seeder,
+                "had_propagator": had_propagator,
+            })
+            return
         if url.path == "/api/models":
             body = self._read_json()
             kind = body["kind"]
@@ -1345,6 +1399,52 @@ class Handler(BaseHTTPRequestHandler):
                 return
             PROP_THREADS.pop((slug, seg_id), None)
             self._send_json(HTTPStatus.OK, {"ok": True})
+            return
+
+        if action.startswith("segments/") and action.endswith("/clear"):
+            # Clear propagation results, preserve seed. Lets the user re-run
+            # propagate without re-clicking the seed point. Keeps the seed mask
+            # PNG (<seed_frame:05d>.png) so the UI can still display the seed
+            # frame's mask before propagate is re-triggered.
+            seg_id = action.split("/")[1]
+            seg = _segment_or_404(slug, seg_id)
+            if seg is None:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such segment")
+                return
+            seed_frame = seg.get("seed_frame")
+            if seed_frame is None:
+                self._send_text(HTTPStatus.UNPROCESSABLE_ENTITY,
+                                "segment has no seed; nothing to preserve. Use delete instead.")
+                return
+            # Cancel any in-flight propagation for this segment first; the
+            # propagator's finally block will run reset_state + empty_cache.
+            t = PROP_THREADS.get((slug, seg_id))
+            owns_propagator = (t is not None and t.is_alive()) or _QUEUE_CURRENT == (slug, seg_id)
+            if owns_propagator and _PROPAGATOR is not None:
+                _PROPAGATOR.cancel()
+                if t is not None:
+                    t.join(timeout=5.0)
+            mdir = masks_dir_for(slug, seg_id)
+            seed_name = f"{seed_frame:05d}.png"
+            deleted = 0
+            if mdir.is_dir():
+                for png_path in mdir.glob("*.png"):
+                    if png_path.name == seed_name:
+                        continue
+                    try:
+                        png_path.unlink()
+                        deleted += 1
+                    except OSError:
+                        pass
+            try:
+                STORE.update_segment(slug, seg_id, propagate_status="idle")
+            except KeyError:
+                self._send_text(HTTPStatus.NOT_FOUND, "no such segment")
+                return
+            BUS.publish(slug, "segment_cleared",
+                        {"seg_id": seg_id, "deleted": deleted, "seed_frame": seed_frame})
+            self._send_json(HTTPStatus.OK,
+                            {"ok": True, "deleted": deleted, "preserved_seed_frame": seed_frame})
             return
 
         if action == "trim":
@@ -1501,6 +1601,7 @@ def main() -> None:
     STORE.scan_sources()
     _recover_crashed_propagations()
     _bootstrap_extract_all()
+    _start_idle_watcher()
     port = int(os.environ.get("LABELLER_PORT", "8876"))
     addr = ("127.0.0.1", port)
     server = _QuietThreadingHTTPServer(addr, Handler)

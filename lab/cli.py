@@ -107,6 +107,16 @@ def cmd_propagate(args: argparse.Namespace) -> None:
         _fail("GET", events_url, e)
 
 
+def cmd_clear_segment(args: argparse.Namespace) -> None:
+    url = f"{args.server}/api/items/{args.slug}/segments/{args.seg_id}/clear"
+    _, body, _ = _request("POST", url, body={})
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        data = {"raw": body.decode("utf-8", "replace")}
+    print(f"cleared {data.get('deleted', '?')} mask(s); preserved seed_frame={data.get('preserved_seed_frame')}")
+
+
 def cmd_overlay(args: argparse.Namespace) -> None:
     import cv2  # type: ignore
     import numpy as np  # type: ignore
@@ -193,6 +203,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--slug", required=True)
     sp.add_argument("--watch", action="store_true")
     sp.set_defaults(func=cmd_propagate)
+
+    sp = sub.add_parser(
+        "clear-segment",
+        help="Clear propagation results for a segment, keep seed",
+        parents=[common],
+    )
+    sp.add_argument("--slug", required=True)
+    sp.add_argument("--seg-id", required=True)
+    sp.set_defaults(func=cmd_clear_segment)
 
     sp = sub.add_parser("overlay", help="Compose mask overlay video", parents=[common])
     sp.add_argument("--slug", required=True)

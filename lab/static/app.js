@@ -175,7 +175,13 @@ const el = {
   btnPropagate: document.getElementById("btn-propagate"),
   btnCancel: document.getElementById("btn-cancel"),
   btnToggleSeedMarker: document.getElementById("btn-toggle-seed-marker"),
+  playRate: document.getElementById("play-rate"),
 };
+
+el.playRate.addEventListener("change", () => {
+  const r = parseFloat(el.playRate.value);
+  if (Number.isFinite(r) && r > 0) el.video.playbackRate = r;
+});
 
 function showError(msg) {
   el.statusbar.classList.add("error");
@@ -395,6 +401,17 @@ function renderSegmentsStrip() {
       if (seg.seed_frame != null) jumpToFrame(seg.seed_frame);
       else if (seg.in_frame != null) jumpToFrame(seg.in_frame);
     });
+    // Rerun: clear propagation results, keep seed → user can re-Propagate
+    // with the same seed click. Only shown when there's a seed to preserve.
+    if (seg.seed_frame != null) {
+      const rr = document.createElement("button");
+      rr.className = "seg-chip-rerun";
+      rr.type = "button";
+      rr.textContent = "↻";
+      rr.title = "Clear propagation results (keep seed)";
+      rr.addEventListener("click", (e) => { e.stopPropagation(); clearSegmentResults(seg.id); });
+      chip.appendChild(rr);
+    }
     const x = document.createElement("button");
     x.className = "seg-chip-x";
     x.type = "button";
@@ -742,6 +759,7 @@ function syncFromItem(item) {
   // Lazy: <video preload="metadata"> only fetches enough to expose duration.
   // No frame decode happens until togglePlay() lands on this clip.
   el.video.src = `${API_BASE}/clip/${item.slug}.mp4`;
+  el.video.playbackRate = parseFloat(el.playRate.value) || 1;
   state.lastDisplayedFrame = 0;
   enterScrubMode();
   state.scrubPaintToken++;
@@ -1102,6 +1120,14 @@ function startSse() {
       prefetchMasks(capturedSlug);
     }
   });
+  es.addEventListener("segment_cleared", (ev) => {
+    if (state.current !== capturedSlug) return;
+    let payload = {};
+    try { payload = JSON.parse(ev.data); } catch (_) {}
+    const segId = payload.seg_id;
+    if (typeof segId !== "string") return;
+    applySegmentCleared(segId);
+  });
   es.addEventListener("error", (ev) => {
     let payload = {};
     try { payload = JSON.parse(ev.data); } catch (_) {}
@@ -1256,6 +1282,50 @@ async function deleteSegment(segId) {
   renderSegmentsStrip();
   renderSidebar();
   updateMarkers();
+  updatePropagateBtn();
+  updateStatus();
+  scheduleScrubPaint(state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0);
+}
+
+async function clearSegmentResults(segId) {
+  if (!confirm(`Clear propagation results for ${segId}?\n\nSeed will be kept; you can re-Propagate with one click.`)) return;
+  const capturedSlug = state.current;
+  const r = await postJson(`/api/items/${encodeURIComponent(capturedSlug)}/segments/${segId}/clear`);
+  if (!r.ok) { showError(`clear segment failed: HTTP ${r.status}`); return; }
+  if (state.current !== capturedSlug) return;
+  // SSE `segment_cleared` will also fire and run the same cleanup; idempotent.
+  applySegmentCleared(segId);
+}
+
+function applySegmentCleared(segId) {
+  const it = currentItem();
+  if (!it) return;
+  const seg = (it.segments || []).find(s => s.id === segId);
+  if (!seg) return;
+  // Drop bitmap cache + prop URLs for this seg's range. Seed URL/bitmap are
+  // re-derived from the surviving on-disk PNG via /mask URL after
+  // rebuildDoneFills repopulates state from server-side propMaskUrlsBySeg —
+  // but we explicitly preserve the seed entry below.
+  const seedFrame = seg.seed_frame;
+  const propMap = state.propMaskUrlsBySeg.get(segId);
+  if (propMap) {
+    for (const [f, url] of propMap.entries()) {
+      if (f === seedFrame) continue;
+      const bm = state.bitmapCache.get(f);
+      if (bm) { try { bm.close(); } catch (_) {} }
+      state.bitmapCache.delete(f);
+      if (typeof url === "string" && url.startsWith("blob:")) URL.revokeObjectURL(url);
+    }
+    // Keep only the seed entry in the prop map.
+    const surviving = new Map();
+    if (seedFrame != null && propMap.has(seedFrame)) {
+      surviving.set(seedFrame, propMap.get(seedFrame));
+    }
+    state.propMaskUrlsBySeg.set(segId, surviving);
+  }
+  seg.propagate_status = "idle";
+  rebuildDoneFills();
+  renderSegmentsStrip();
   updatePropagateBtn();
   updateStatus();
   scheduleScrubPaint(state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0);
