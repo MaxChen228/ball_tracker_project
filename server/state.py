@@ -24,6 +24,8 @@ from schemas import (
     TrackingExposureCapMode,
     TriangulatedPoint,
     _DEFAULT_SESSION_TIMEOUT_S,
+    persist_pitch_json,
+    persist_result_json,
 )
 from detection import HSVRange, ShapeGate
 from detection_config import (
@@ -493,7 +495,7 @@ class State:
             if pitch is None:
                 continue
             try:
-                self._atomic_write(path, pitch.model_dump_json())
+                self._atomic_write(path, persist_pitch_json(pitch))
             except OSError as e:
                 logger.warning("created_at backfill write failed %s: %s", path, e)
 
@@ -509,7 +511,7 @@ class State:
             rebuilt_by_reason[reason] = rebuilt_by_reason.get(reason, 0) + 1
             result = session_results.rebuild_result_for_session(self, sid)
             self.results[sid] = result
-            self._atomic_write(self._result_path(sid), result.model_dump_json())
+            self._atomic_write(self._result_path(sid), persist_result_json(result))
 
         if self.pitches:
             logger.info(
@@ -1036,7 +1038,7 @@ class State:
         # --- Outside the lock: write pitch JSON. Filename is unique per
         # (camera, session) and each pitch uses its own tmp file, so two
         # concurrent calls here cannot collide. ---
-        self._atomic_write(pitch_path, pitch.model_dump_json())
+        self._atomic_write(pitch_path, persist_pitch_json(pitch))
         # Refresh the mtime cache so state_events.build_events can skip
         # the per-row stat(). Using _time_fn() (write moment) instead of
         # path.stat().st_mtime avoids an extra syscall and matches the
@@ -1061,7 +1063,7 @@ class State:
         # --- Outside the lock: persist the result JSON. ---
         self._atomic_write(
             self._result_path(pitch.session_id),
-            result.model_dump_json(),
+            persist_result_json(result),
         )
 
         # --- Critical section 2: publish the result into the in-memory map.
@@ -1139,7 +1141,7 @@ class State:
         if not known:
             logger.info("store_result: skipping unknown session %s (deleted?)", sid)
             return
-        self._atomic_write(self._result_path(sid), result.model_dump_json())
+        self._atomic_write(self._result_path(sid), persist_result_json(result))
         with self._lock:
             still_known = (
                 any(s == sid for _, s in self.pitches)
@@ -1614,7 +1616,7 @@ class State:
         drift from when the disk row was actually written.
         """
         import algorithms
-        algorithms.validate_id(cfg.algorithm_id)
+        algorithms.validate_runnable_id(cfg.algorithm_id)
         with self._lock:
             self._detection_config = cfg.with_(last_applied_at=self._time_fn())
             self._persist_detection_config_locked()

@@ -149,7 +149,7 @@ def from_dict(d: dict) -> DetectionConfig:
     handing in a stripped dict gets a KeyError, which is the intended
     boundary."""
     algorithm_id = d["algorithm_id"]
-    algorithms.validate_id(algorithm_id)
+    algorithms.validate_runnable_id(algorithm_id)
     return DetectionConfig(
         hsv=_hsv_from_dict(d["hsv"]),
         shape_gate=_shape_gate_from_dict(d["shape_gate"]),

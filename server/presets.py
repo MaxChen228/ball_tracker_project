@@ -131,7 +131,7 @@ def _from_dict(d: dict) -> Preset:
     hsv = d["hsv"]
     sg = d["shape_gate"]
     algorithm_id = d["algorithm_id"]
-    algorithms.validate_id(algorithm_id)
+    algorithms.validate_runnable_id(algorithm_id)
     return Preset(
         name=str(d["name"]),
         label=str(d["label"]),
@@ -247,7 +247,7 @@ def save_preset(
     name — name-collision policy (409 vs PUT semantics) is enforced at
     the route layer, not here."""
     validate_slug(preset.name)
-    algorithms.validate_id(preset.algorithm_id)
+    algorithms.validate_runnable_id(preset.algorithm_id)
     presets_dir(data_dir).mkdir(parents=True, exist_ok=True)
     atomic_write(
         _preset_path(data_dir, preset.name),

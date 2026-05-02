@@ -180,26 +180,46 @@ class DetectionConfigSnapshotPayload(BaseModel):
 IOS_CAPTURE_TIME_ALGORITHM_ID = "ios_capture_time"
 
 
+# Legacy pre-snapshot bucket for `frames_server_post` records that
+# predate `DetectionConfigSnapshotPayload` persistence (Phase-2). At
+# the time those frames were produced, `v11_hsv_cc` was the only
+# server-side detector that ever shipped — so funneling them under
+# its id is historically accurate, NOT a guess. This is named
+# distinctly from `DEFAULT_ALGORITHM_ID` so future callers reading
+# the dict can't mistake "filed under v11" for "explicitly stamped
+# v11"; if a Phase 6b reader ever needs to surface the distinction it
+# should track inferred-vs-stamped at the call site, not by reading
+# this constant.
+_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID = "v11_hsv_cc"
+
+
 def _resolve_server_post_algorithm_id(
     snapshot: "DetectionConfigSnapshotPayload | None",
 ) -> str:
     """Algorithm id to file `frames_server_post` under in the dict mirror.
-    Prefer the explicit snapshot stamp; fall back to the registry default
-    when no snapshot was ever recorded (legacy pitches predating snapshot
-    persistence)."""
+    Prefer the explicit snapshot stamp; fall back to the legacy bucket
+    when no snapshot was ever recorded (pre-Phase-2 pitches)."""
     if snapshot is not None:
         return snapshot.algorithm_id
-    import algorithms
-    return algorithms.DEFAULT_ALGORITHM_ID
+    return _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
 
 
 def _mirror_pitch_old_into_dicts(pitch: "PitchPayload") -> None:
     """Idempotently mirror old per-path fields (`frames_live`,
     `frames_server_post`, `live_config_used`, `server_post_config_used`)
     into the new dict fields (`frames_by_algorithm`,
-    `config_used_by_algorithm`). Safe to call repeatedly. In Phase 6a
-    old fields remain canonical and the dicts are derived; Phase 6b will
-    flip the canonical direction."""
+    `config_used_by_algorithm`). Safe to call repeatedly.
+
+    Semantics: **union, not projection.** Pre-existing dict keys that
+    don't correspond to a populated old field are NOT removed. In
+    Phase 6a no writer should be putting anything into the dict
+    directly (the old fields are canonical), so a non-mirrored key is
+    almost certainly a hand-constructed test fixture or an attacker-
+    supplied wire payload — both cases the after-validator sees once
+    and we accept the union. When Phase 6b flips canonical, writers
+    will own dict keys directly and mirroring becomes the reverse
+    direction (dict → old as a derived view). The `if frames_*:`
+    guards here intentionally match that Phase-6a contract."""
     if pitch.frames_live:
         pitch.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = list(pitch.frames_live)
     if pitch.frames_server_post:
@@ -240,6 +260,24 @@ def _mirror_result_old_into_dicts(result: "SessionResult") -> None:
         result.config_used_by_algorithm[
             result.server_post_config_used.algorithm_id
         ] = result.server_post_config_used
+
+
+def persist_pitch_json(pitch: "PitchPayload") -> str:
+    """Sync dict mirrors then serialize. Use at every disk-write site
+    for `PitchPayload`. Without this hook, a `model_copy(deep=True)` +
+    field-mutation flow (`state.record`, `routes/pitch.py` server_post
+    run, `reprocess_sessions.py`) would persist a stale dict — the
+    after-validator only fires on construction, not on assignment.
+    Phase 6a's `_mirror_pitch_old_into_dicts` is the load-time
+    failsafe; this is the write-time one."""
+    _mirror_pitch_old_into_dicts(pitch)
+    return pitch.model_dump_json()
+
+
+def persist_result_json(result: "SessionResult") -> str:
+    """Mirror twin of `persist_pitch_json` for `SessionResult`."""
+    _mirror_result_old_into_dicts(result)
+    return result.model_dump_json()
 
 
 def _migrate_legacy_used_fields_into_per_path(

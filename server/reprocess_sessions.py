@@ -43,6 +43,8 @@ from schemas import (
     PitchPayload,
     SessionResult,
     ShapeGatePayload,
+    persist_pitch_json,
+    persist_result_json,
 )
 
 logger = logging.getLogger("reprocess")
@@ -223,7 +225,7 @@ def rerun_detection(
     pitch.frames_server_post = frames
     pitch.server_post_config_used = snapshot
     if not dry_run:
-        atomic_write(pitch_path, pitch.model_dump_json())
+        atomic_write(pitch_path, persist_pitch_json(pitch))
     return pitch
 
 
@@ -270,7 +272,7 @@ def triangulate_session(
         logger.info("  %s — solo (%s only); skipping triangulation",
                     sid, "A" if a else "B")
         if not dry_run:
-            atomic_write(RESULT_DIR / f"session_{sid}.json", result.model_dump_json())
+            atomic_write(RESULT_DIR / f"session_{sid}.json", persist_result_json(result))
         return
 
     def scale(p: PitchPayload) -> PitchPayload:
@@ -320,7 +322,7 @@ def triangulate_session(
         f"  err={result.error}" if result.error else "",
     )
     if not dry_run:
-        atomic_write(RESULT_DIR / f"session_{sid}.json", result.model_dump_json())
+        atomic_write(RESULT_DIR / f"session_{sid}.json", persist_result_json(result))
 
 
 def _load_force_preset_snapshot(name: str) -> DetectionConfigSnapshotPayload:
@@ -433,7 +435,7 @@ def main() -> None:
 
     if args.algorithm_id is not None:
         try:
-            algorithms.validate_id(args.algorithm_id)
+            algorithms.validate_runnable_id(args.algorithm_id)
         except ValueError as e:
             raise SystemExit(f"--algorithm-id: {e}") from None
         algorithm_id_override = args.algorithm_id

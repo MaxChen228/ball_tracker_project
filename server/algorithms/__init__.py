@@ -100,7 +100,18 @@ def list_all() -> list[AlgorithmEntry]:
 
 
 def validate_id(algorithm_id: str) -> None:
-    """Raise `ValueError` if the id isn't a registered algorithm."""
+    """Raise `ValueError` if `algorithm_id` is not a known wire / disk
+    identity. Accepts both server-runnable algorithms (`_REGISTRY`) and
+    non-runnable data-source ids (`_NON_RUNNABLE_IDS`, e.g.
+    `ios_capture_time`).
+
+    Use this when you only need to validate that a string is a real
+    algorithm identity — e.g. when stamping
+    `DetectionConfigSnapshotPayload.algorithm_id` from disk or wire.
+
+    For callsites that will later pass `algorithm_id` to
+    `run_detection`, use `validate_runnable_id` instead so a typo like
+    `ios_capture_time` is caught at set time, not at run time."""
     if not _ID_RE.match(algorithm_id):
         raise ValueError(
             f"invalid algorithm_id {algorithm_id!r}: must match [a-z0-9_]{{1,32}}"
@@ -111,6 +122,24 @@ def validate_id(algorithm_id: str) -> None:
     raise ValueError(
         f"unknown algorithm_id {algorithm_id!r} (known: {known})"
     )
+
+
+def validate_runnable_id(algorithm_id: str) -> None:
+    """Raise `ValueError` unless `algorithm_id` names an algorithm that
+    `run_detection` can actually execute. Stricter than `validate_id`:
+    rejects non-runnable data sources (`ios_capture_time`).
+
+    Use at set-time boundaries where the caller's contract is "this id
+    will get passed to run_detection later" — preset writes, dashboard
+    active-config edits, reprocess `--algorithm-id` overrides. Pushes
+    typo errors forward to set time instead of run time."""
+    validate_id(algorithm_id)
+    if algorithm_id not in _REGISTRY:
+        raise ValueError(
+            f"algorithm_id {algorithm_id!r} is a non-runnable data "
+            f"source — cannot be used where run_detection is the eventual "
+            f"target (runnable: {sorted(_REGISTRY)})"
+        )
 
 
 def run_detection(
