@@ -780,7 +780,7 @@ def test_trash_session_hides_from_active_events_and_restore_brings_it_back(tmp_p
 def test_cancel_and_resume_processing_summary(tmp_path):
     s = main.State(data_dir=tmp_path)
     pitch = _minimal_pitch("A", session_id=sid(7)).model_copy(deep=True)
-    pitch.frames_server_post = []
+    pitch.frames_by_algorithm.pop("v11_hsv_cc", None)
     pitch.paths = [main.DetectionPath.server_post.value]
     s.record(pitch)
     (tmp_path / "videos" / f"session_{sid(7)}_A.mov").write_bytes(b"fake mov")
@@ -823,8 +823,9 @@ def test_record_preserves_frozen_used_configs_on_later_partial_merge(tmp_path):
         preset_name="live_cfg",
     )
     first = _minimal_pitch("A", session_id=session_id).model_copy(deep=True)
-    first.live_config_used = snapshot.model_copy(deep=True)
-    first.server_post_config_used = snapshot.model_copy(deep=True)
+    first.config_used_by_algorithm["ios_capture_time"] = snapshot.model_copy(deep=True)
+    first.config_used_by_algorithm["v11_hsv_cc"] = snapshot.model_copy(deep=True)
+    first.active_server_post_algorithm_id = "v11_hsv_cc"
     first.server_post_ran_at = 123.0
     s.record(first)
 
@@ -894,7 +895,7 @@ def test_sessions_trash_and_restore_json_api():
 def test_sessions_cancel_and_run_server_post_json_api(tmp_path):
     client = TestClient(app)
     pitch = _minimal_pitch("A", session_id=sid(34)).model_copy(deep=True)
-    pitch.frames_server_post = []
+    pitch.frames_by_algorithm.pop("v11_hsv_cc", None)
     pitch.paths = [main.DetectionPath.server_post.value]
     main.state.record(pitch)
     (main.state.video_dir / f"session_{sid(34)}_A.mov").write_bytes(b"fake mov")
@@ -922,7 +923,7 @@ def _arm_minimal_session_for_run_server_post(session_id: str) -> None:
     """Records one server_post-pending pitch with a fake MOV so the endpoint
     has something to enqueue."""
     pitch = _minimal_pitch("A", session_id=session_id).model_copy(deep=True)
-    pitch.frames_server_post = []
+    pitch.frames_by_algorithm.pop("v11_hsv_cc", None)
     pitch.paths = [main.DetectionPath.server_post.value]
     main.state.record(pitch)
     (main.state.video_dir / f"session_{session_id}_A.mov").write_bytes(b"fake mov")
@@ -1151,7 +1152,7 @@ def test_state_marks_single_camera_server_post_path_completed(tmp_path):
     s = main.State(data_dir=tmp_path)
     pitch = _minimal_pitch("A", session_id=sid(90))
     pitch.paths = [main.DetectionPath.server_post.value]
-    pitch.frames_server_post = [
+    pitch.frames_by_algorithm["v11_hsv_cc"] = [
         main.FramePayload(frame_index=0, timestamp_s=0.0, px=100.0, py=100.0, ball_detected=True),
     ]
 
@@ -1175,7 +1176,7 @@ def test_record_merges_live_frames_into_single_camera_pitch(tmp_path):
 
     pitch = _minimal_pitch("A", session_id=sid(92))
     pitch.paths = [main.DetectionPath.live.value]
-    pitch.frames_server_post = []
+    pitch.frames_by_algorithm.pop("v11_hsv_cc", None)
 
     s.record(pitch)
     stored = s.pitches_for_session(sid(92))["A"]

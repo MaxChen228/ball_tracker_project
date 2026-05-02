@@ -17,6 +17,7 @@ from schemas import (
     Device,
     DeviceIntrinsics,
     FramePayload,
+    IOS_CAPTURE_TIME_ALGORITHM_ID,
     PitchPayload,
     Session,
     SessionResult,
@@ -869,7 +870,7 @@ class State:
         if existing.frames_live == live_frames:
             return self.get(session_id)
         merged = existing.model_copy(deep=True)
-        merged.frames_live = list(live_frames)
+        merged.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = list(live_frames)
         return self.record(merged)
 
     def flush_live_frames_for_session(self, session_id: str) -> None:
@@ -994,52 +995,40 @@ class State:
             )
             merged = pitch.model_copy(deep=True)
             if existing is not None:
-                # Deep-copy the same way the dict-merge branch below does
-                # (FramePayload is not frozen; sharing instances would let
-                # any future in-place mutation on `merged` bleed back into
-                # the cached `existing`).
-                if not merged.frames_live and existing.frames_live:
-                    merged.frames_live = [
-                        f.model_copy(deep=True) for f in existing.frames_live
-                    ]
-                if not merged.frames_server_post and existing.frames_server_post:
-                    merged.frames_server_post = [
-                        f.model_copy(deep=True) for f in existing.frames_server_post
-                    ]
-                if merged.live_config_used is None and existing.live_config_used is not None:
-                    merged.live_config_used = existing.live_config_used.model_copy(deep=True)
-                if (
-                    merged.server_post_config_used is None
-                    and existing.server_post_config_used is not None
-                ):
-                    merged.server_post_config_used = existing.server_post_config_used.model_copy(
-                        deep=True
-                    )
-                # Preserve the previous run's wall-clock when the
-                # incoming pitch doesn't carry one (e.g., live-frames
-                # merge after server_post had already completed).
-                if merged.server_post_ran_at is None and existing.server_post_ran_at is not None:
-                    merged.server_post_ran_at = existing.server_post_ran_at
-                # Phase 6b dict-level merge: existing buckets that the
-                # incoming pitch lacks must survive. Without this,
-                # running v11→v12 (which arrives with only v12 in
-                # frames_by_algorithm because the writer rebuilt the
-                # pitch from current state) would lose v11's
-                # accumulated frames. Incoming wins on key collision
-                # (it's the latest write); missing keys carry over
-                # from existing. Same logic for config_used_by_algorithm.
+                # Dict-level merge: existing buckets that the incoming
+                # pitch lacks must survive. Running v11→v12 would
+                # otherwise lose v11's accumulated frames (incoming
+                # writer typically rebuilds the pitch from current
+                # snapshot only). Incoming wins on key collision
+                # (latest write); missing keys carry over from existing.
+                # Same union logic for config_used_by_algorithm.
                 for alg_id, frames in existing.frames_by_algorithm.items():
                     if alg_id not in merged.frames_by_algorithm:
-                        # Deep-copy each frame so any future in-place mutation
-                        # on `merged` cannot bleed back into the cached
-                        # `existing` (FramePayload is not frozen). Snapshots
-                        # below already use model_copy(deep=True).
+                        # Deep-copy each frame so any future in-place
+                        # mutation on `merged` cannot bleed back into
+                        # the cached `existing` (FramePayload is not
+                        # frozen).
                         merged.frames_by_algorithm[alg_id] = [
                             f.model_copy(deep=True) for f in frames
                         ]
                 for alg_id, snap in existing.config_used_by_algorithm.items():
                     if alg_id not in merged.config_used_by_algorithm:
                         merged.config_used_by_algorithm[alg_id] = snap.model_copy(deep=True)
+                # Preserve the active server_post pointer when incoming
+                # didn't carry one (e.g. live-frames merge after a
+                # server_post run had already stamped the pointer).
+                if (
+                    merged.active_server_post_algorithm_id is None
+                    and existing.active_server_post_algorithm_id is not None
+                ):
+                    merged.active_server_post_algorithm_id = (
+                        existing.active_server_post_algorithm_id
+                    )
+                # Preserve the previous run's wall-clock when the
+                # incoming pitch doesn't carry one (e.g., live-frames
+                # merge after server_post had already completed).
+                if merged.server_post_ran_at is None and existing.server_post_ran_at is not None:
+                    merged.server_post_ran_at = existing.server_post_ran_at
                 # Preserve the original creation stamp across re-records
                 # (server_post backfill, live merge). If the existing record
                 # lacked one (legacy / synthetic before this field shipped),
@@ -1049,7 +1038,7 @@ class State:
             if merged.created_at is None:
                 merged.created_at = self._time_fn()
             if not merged.frames_live and live_frames:
-                merged.frames_live = list(live_frames)
+                merged.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = list(live_frames)
             pitch = merged
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
             # Drive the session state machine forward — any upload arriving

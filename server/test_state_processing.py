@@ -55,9 +55,13 @@ def test_candidates_include_completed_pitches_for_rerun(tmp_path):
     s = State(data_dir=tmp_path)
     sid = _sid(2)
     p = _pitch("A", sid)
-    p.frames_server_post = [
+    # Pin frames under the legacy pre-snapshot bucket so the
+    # `frames_server_post` computed_field projects them out and the
+    # session_processing eligibility check sees a "completed" pitch.
+    p.frames_by_algorithm["v11_hsv_cc"] = [
         FramePayload(frame_index=0, timestamp_s=0.0, ball_detected=False)
     ]
+    p.active_server_post_algorithm_id = "v11_hsv_cc"
     s.record(p)
     (s.video_dir / f"session_{sid}_A.mov").write_bytes(b"x")
 
@@ -90,9 +94,13 @@ def test_completed_session_summary_survives_rerun_eligibility(tmp_path):
     s = State(data_dir=tmp_path)
     sid = _sid(31)
     p = _pitch("A", sid)
-    p.frames_server_post = [
+    # Pin frames under the legacy pre-snapshot bucket so the
+    # `frames_server_post` computed_field projects them out and the
+    # session_processing eligibility check sees a "completed" pitch.
+    p.frames_by_algorithm["v11_hsv_cc"] = [
         FramePayload(frame_index=0, timestamp_s=0.0, ball_detected=False)
     ]
+    p.active_server_post_algorithm_id = "v11_hsv_cc"
     s.record(p)
     (s.video_dir / f"session_{sid}_A.mov").write_bytes(b"x")
 

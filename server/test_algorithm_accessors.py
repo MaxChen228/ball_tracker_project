@@ -152,8 +152,9 @@ def test_stamp_server_post_run_accumulates_two_algorithms(monkeypatch):
     blob1 = persist_pitch_json(p)
     parsed1 = json.loads(blob1)
     assert len(parsed1["frames_by_algorithm"]["v11_hsv_cc"]) == 2
-    assert len(parsed1["frames_server_post"]) == 2
-    assert parsed1["server_post_config_used"]["algorithm_id"] == "v11_hsv_cc"
+    assert parsed1["active_server_post_algorithm_id"] == "v11_hsv_cc"
+    assert "frames_server_post" not in parsed1  # disk is dict-canonical
+    assert "server_post_config_used" not in parsed1
 
     snap_v12 = _snapshot("v12_test")
     stamp_server_post_run(p, snap_v12, [_frame(10), _frame(11), _frame(12)])
@@ -161,11 +162,13 @@ def test_stamp_server_post_run_accumulates_two_algorithms(monkeypatch):
     parsed2 = json.loads(blob2)
     assert len(parsed2["frames_by_algorithm"]["v11_hsv_cc"]) == 2
     assert len(parsed2["frames_by_algorithm"]["v12_test"]) == 3
-    assert len(parsed2["frames_server_post"]) == 3
-    assert parsed2["server_post_config_used"]["algorithm_id"] == "v12_test"
+    assert parsed2["active_server_post_algorithm_id"] == "v12_test"
     p2 = PitchPayload.model_validate(parsed2)
     assert len(p2.frames_by_algorithm["v11_hsv_cc"]) == 2
     assert len(p2.frames_by_algorithm["v12_test"]) == 3
+    # Computed-field projections agree post-reload:
+    assert len(p2.frames_server_post) == 3
+    assert p2.server_post_config_used.algorithm_id == "v12_test"
 
 
 def test_stamp_server_post_run_rejects_ios_capture_time():

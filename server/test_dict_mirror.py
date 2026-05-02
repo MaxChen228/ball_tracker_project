@@ -1,12 +1,15 @@
-"""Phase 6a — additive `*_by_algorithm` dict mirrors.
+"""Phase 1 dict-canonical contract for PitchPayload + still-flat-canonical
+SessionResult.
 
-Pins the contract that the after-validator on `PitchPayload` /
-`SessionResult` mirrors old per-path fields (`frames_live`,
-`frames_server_post`, `live_config_used`, `server_post_config_used`,
-`triangulated_by_path`, `segments_by_path`, `frame_counts_by_path`,
-`paths_completed`) into the new algorithm-id-keyed dicts on every
-construction / load. Old fields remain canonical in 6a; these tests
-ensure 6b can flip readers safely because the dict is always present.
+After the dict-canonical flip (PitchPayload), `frames_by_algorithm` /
+`config_used_by_algorithm` / `active_server_post_algorithm_id` are the
+single source of truth. The flat surfaces `frames_live`,
+`frames_server_post`, `live_config_used`, `server_post_config_used` are
+read-only `@computed_field` projections — they round-trip on the wire
+but disk persist drops them via `persist_pitch_json`'s exclude set.
+
+SessionResult flip lands in phase 2; for now its mirror direction is
+unchanged and tested below as it always was.
 """
 from __future__ import annotations
 
@@ -53,53 +56,235 @@ def _base_pitch(**kw):
     return PitchPayload(**defaults)
 
 
-def test_pitch_mirrors_frames_live_into_ios_capture_time():
+# --- computed_field projections from canonical dicts ----------------------
+
+
+def test_frames_live_projects_from_ios_capture_time_bucket():
+    p = _base_pitch(
+        frames_by_algorithm={IOS_CAPTURE_TIME_ALGORITHM_ID: [_frame(1), _frame(2)]},
+    )
+    assert len(p.frames_live) == 2
+    assert p.frames_live[0].frame_index == 1
+
+
+def test_frames_server_post_projects_from_active_pointer_bucket():
+    p = _base_pitch(
+        frames_by_algorithm={"v11_hsv_cc": [_frame(1), _frame(2), _frame(3)]},
+        config_used_by_algorithm={"v11_hsv_cc": _snapshot("v11_hsv_cc")},
+        active_server_post_algorithm_id="v11_hsv_cc",
+    )
+    assert len(p.frames_server_post) == 3
+    assert p.server_post_config_used is not None
+    assert p.server_post_config_used.algorithm_id == "v11_hsv_cc"
+
+
+def test_frames_server_post_falls_back_to_legacy_pre_snapshot_bucket():
+    """When no `active_server_post_algorithm_id` is set, the
+    `frames_server_post` computed view reads
+    `frames_by_algorithm[_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID]` so that
+    pre-flip / pre-snapshot disk records still surface their frames."""
+    p = _base_pitch(frames_by_algorithm={"v11_hsv_cc": [_frame(1)]})
+    assert p.active_server_post_algorithm_id is None
+    assert len(p.frames_server_post) == 1
+    # No snapshot in dict → server_post_config_used returns None
+    assert p.server_post_config_used is None
+
+
+def test_live_config_used_projects_from_ios_capture_time_bucket():
+    p = _base_pitch(
+        config_used_by_algorithm={IOS_CAPTURE_TIME_ALGORITHM_ID: _snapshot("ios_capture_time", preset="blue_ball")},
+    )
+    assert p.live_config_used is not None
+    assert p.live_config_used.preset_name == "blue_ball"
+
+
+def test_empty_canonical_dicts_yield_empty_projections():
+    p = _base_pitch()
+    assert p.frames_live == []
+    assert p.frames_server_post == []
+    assert p.live_config_used is None
+    assert p.server_post_config_used is None
+
+
+# --- transitional flat-input collapse (phase 1+2 only) --------------------
+
+
+def test_construction_kwargs_with_flat_keys_collapse_into_dict():
+    """Backward-compat for in-flight callers/tests that still pass flat
+    kwargs. Phase 3 deletes the shim."""
     p = _base_pitch(frames_live=[_frame(1), _frame(2)])
     assert IOS_CAPTURE_TIME_ALGORITHM_ID in p.frames_by_algorithm
     assert len(p.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 2
 
 
-def test_pitch_mirrors_frames_server_post_under_snapshot_algorithm_id():
-    snap = _snapshot("v11_hsv_cc")
+def test_disk_json_with_flat_keys_loads_via_collapse_shim():
+    """Mixed pre-flip on-disk shape: flat keys present alongside
+    `frames_by_algorithm`. The before-validator pops flat into the
+    dict (without clobbering pre-existing entries) and stamps the
+    active_server_post pointer from the snapshot."""
+    raw = {
+        "camera_id": "A",
+        "session_id": "s_deadbeef",
+        "video_start_pts_s": 0.0,
+        "frames_live": [_frame(1).model_dump()],
+        "frames_server_post": [_frame(2).model_dump(), _frame(3).model_dump()],
+        "server_post_config_used": _snapshot("v11_hsv_cc").model_dump(),
+        "live_config_used": _snapshot("ios_capture_time", preset="blue").model_dump(),
+    }
+    p = PitchPayload.model_validate(raw)
+    assert p.active_server_post_algorithm_id == "v11_hsv_cc"
+    assert len(p.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 1
+    assert len(p.frames_by_algorithm["v11_hsv_cc"]) == 2
+    assert p.live_config_used.preset_name == "blue"
+    assert p.server_post_config_used.algorithm_id == "v11_hsv_cc"
+
+
+def test_legacy_hsv_used_trio_migrates_then_collapses():
+    """Pre-phase-2 `hsv_range_used` trio + flat live frames: the
+    `_migrate_legacy_used_fields` before-validator runs first to fold
+    the trio into per-path snapshots, then the collapse shim pops them
+    into `config_used_by_algorithm`."""
+    raw = {
+        "camera_id": "A",
+        "session_id": "s_deadbeef",
+        "video_start_pts_s": 0.0,
+        "frames_live": [_frame(1).model_dump()],
+        "hsv_range_used": {
+            "h_min": 10, "h_max": 20, "s_min": 30, "s_max": 200,
+            "v_min": 40, "v_max": 210,
+        },
+        "shape_gate_used": {"aspect_min": 0.7, "fill_min": 0.55},
+        "live_preset_name": "blue_ball",
+    }
+    p = PitchPayload.model_validate(raw)
+    assert p.live_config_used is not None
+    assert p.live_config_used.preset_name == "blue_ball"
+    assert len(p.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 1
+
+
+def test_pre_existing_dict_keys_not_clobbered_by_collapse():
+    """Some on-disk records already had `frames_by_algorithm` populated
+    before the flip (phase 6a/6b mirror). The collapse shim must not
+    overwrite a pre-existing dict entry with the legacy flat list — the
+    dict was already canonical truth in those records."""
+    raw = {
+        "camera_id": "A",
+        "session_id": "s_deadbeef",
+        "video_start_pts_s": 0.0,
+        "frames_live": [_frame(99).model_dump()],  # ghost 1-frame in flat
+        "frames_by_algorithm": {
+            IOS_CAPTURE_TIME_ALGORITHM_ID: [_frame(1).model_dump(), _frame(2).model_dump()],
+        },
+    }
+    p = PitchPayload.model_validate(raw)
+    # Dict wins (already-canonical truth).
+    assert len(p.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 2
+
+
+# --- persist round-trip ----------------------------------------------------
+
+
+def test_persist_pitch_json_drops_flat_keys_from_disk_payload():
+    """Disk shape is dict-canonical: flat surfaces excluded from
+    `persist_pitch_json` so the disk record carries a single source of
+    truth. Reload reconstructs the projection."""
+    from schemas import persist_pitch_json
+    import json
+
     p = _base_pitch(
-        frames_server_post=[_frame(1), _frame(2), _frame(3)],
-        server_post_config_used=snap,
+        frames_by_algorithm={
+            IOS_CAPTURE_TIME_ALGORITHM_ID: [_frame(1)],
+            "v11_hsv_cc": [_frame(2), _frame(3)],
+        },
+        config_used_by_algorithm={
+            IOS_CAPTURE_TIME_ALGORITHM_ID: _snapshot("ios_capture_time"),
+            "v11_hsv_cc": _snapshot("v11_hsv_cc"),
+        },
+        active_server_post_algorithm_id="v11_hsv_cc",
     )
-    assert "v11_hsv_cc" in p.frames_by_algorithm
-    assert len(p.frames_by_algorithm["v11_hsv_cc"]) == 3
+    blob = persist_pitch_json(p)
+    parsed = json.loads(blob)
+    # Disk has only canonical shape:
+    assert "frames_live" not in parsed
+    assert "frames_server_post" not in parsed
+    assert "live_config_used" not in parsed
+    assert "server_post_config_used" not in parsed
+    assert IOS_CAPTURE_TIME_ALGORITHM_ID in parsed["frames_by_algorithm"]
+    assert "v11_hsv_cc" in parsed["frames_by_algorithm"]
+    assert parsed["active_server_post_algorithm_id"] == "v11_hsv_cc"
+
+    # Reload — flat surfaces project from dict via computed_field.
+    p2 = PitchPayload.model_validate_json(blob)
+    assert len(p2.frames_live) == 1
+    assert len(p2.frames_server_post) == 2
+    assert p2.server_post_config_used.algorithm_id == "v11_hsv_cc"
 
 
-def test_pitch_frames_server_post_without_snapshot_falls_back_to_default():
-    """Legacy pitch JSONs predating snapshot persistence — the dict
-    mirror still has to file frames somewhere. Use the registry default
-    so 6b readers find the frames under a real algorithm id."""
-    p = _base_pitch(frames_server_post=[_frame(1)])
-    assert algorithms.DEFAULT_ALGORITHM_ID in p.frames_by_algorithm
+def test_wire_dump_keeps_flat_surfaces_for_clients():
+    """HTTP / WS wire keeps the flat surfaces (computed_field default
+    serialize) so dashboard / viewer JS clients don't have to learn the
+    new dict shape."""
+    p = _base_pitch(
+        frames_by_algorithm={IOS_CAPTURE_TIME_ALGORITHM_ID: [_frame(1)]},
+    )
+    import json
+    wire = json.loads(p.model_dump_json())
+    assert "frames_live" in wire
+    assert wire["frames_live"][0]["frame_index"] == 1
+    assert "frames_by_algorithm" in wire  # dict still on wire too
 
 
-def test_pitch_mirrors_config_used_into_dict():
-    live_snap = _snapshot("ios_capture_time", preset="blue_ball")
-    srv_snap = _snapshot("v11_hsv_cc", preset="tennis")
-    p = _base_pitch(live_config_used=live_snap, server_post_config_used=srv_snap)
-    assert p.config_used_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID].preset_name == "blue_ball"
-    assert p.config_used_by_algorithm["v11_hsv_cc"].preset_name == "tennis"
+def test_writers_set_dict_directly_no_legacy_back_sync():
+    """`set_algorithm_frames` writes only the dict bucket — there is
+    no flat field to back-sync. Reading the projection picks up the
+    new state automatically."""
+    from detection_paths import set_algorithm_frames
 
-
-def test_pitch_empty_old_fields_yields_empty_dict():
-    """Mirror must NOT fabricate dict keys when old fields are empty —
-    otherwise 6b readers would see ghost algorithm rows for sessions
-    that never ran that path."""
     p = _base_pitch()
-    assert p.frames_by_algorithm == {}
-    assert p.config_used_by_algorithm == {}
+    set_algorithm_frames(p, IOS_CAPTURE_TIME_ALGORITHM_ID, [_frame(10)])
+    assert len(p.frames_live) == 1
+    assert p.frames_live[0].frame_index == 10
 
 
-def test_pitch_mirror_idempotent_on_revalidation():
-    p = _base_pitch(frames_live=[_frame(1)])
-    dumped = p.model_dump(mode="json")
-    p2 = PitchPayload.model_validate(dumped)
-    assert list(p.frames_by_algorithm.keys()) == list(p2.frames_by_algorithm.keys())
-    assert len(p2.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 1
+def test_stamp_server_post_run_atomic_writes_pointer_dict_and_snapshot():
+    """`stamp_server_post_run` is the canonical entry for server-side
+    detection runs. It writes the pointer + snapshot + frames in one
+    call so projection invariants stay coherent."""
+    from detection_paths import stamp_server_post_run
+
+    p = _base_pitch()
+    snap = _snapshot("v11_hsv_cc", preset="tennis")
+    stamp_server_post_run(p, snap, [_frame(20), _frame(21)])
+    assert p.active_server_post_algorithm_id == "v11_hsv_cc"
+    assert p.frames_by_algorithm["v11_hsv_cc"] == [_frame(20), _frame(21)]
+    assert p.config_used_by_algorithm["v11_hsv_cc"].preset_name == "tennis"
+    # Projections agree:
+    assert len(p.frames_server_post) == 2
+    assert p.server_post_config_used.preset_name == "tennis"
+
+
+def test_persist_round_trip_byte_stable_after_no_op_load_dump():
+    """Load-and-resave a dict-canonical record must be byte-stable.
+    Pins that no spurious mutation (sorting, default backfill) creeps
+    into the wire boundary."""
+    from schemas import persist_pitch_json
+    p = _base_pitch(
+        frames_by_algorithm={
+            IOS_CAPTURE_TIME_ALGORITHM_ID: [_frame(1)],
+            "v11_hsv_cc": [_frame(2)],
+        },
+        config_used_by_algorithm={
+            "v11_hsv_cc": _snapshot("v11_hsv_cc"),
+        },
+        active_server_post_algorithm_id="v11_hsv_cc",
+    )
+    blob1 = persist_pitch_json(p)
+    p2 = PitchPayload.model_validate_json(blob1)
+    blob2 = persist_pitch_json(p2)
+    assert blob1 == blob2
+
+
+# --- SessionResult side: still flat canonical (phase 2 territory) ---------
 
 
 def _tri_point() -> TriangulatedPoint:
@@ -133,15 +318,13 @@ def test_result_mirrors_triangulated_and_segments_by_path():
     assert len(r.triangulated_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 1
     assert len(r.triangulated_by_algorithm["v11_hsv_cc"]) == 2
     assert len(r.segments_by_algorithm["v11_hsv_cc"]) == 1
-    assert IOS_CAPTURE_TIME_ALGORITHM_ID not in r.segments_by_algorithm  # nothing to mirror
+    assert IOS_CAPTURE_TIME_ALGORITHM_ID not in r.segments_by_algorithm
     assert r.frame_counts_by_algorithm["v11_hsv_cc"] == {"A": 200, "B": 200}
     assert r.algorithms_completed == {IOS_CAPTURE_TIME_ALGORITHM_ID, "v11_hsv_cc"}
     assert set(r.config_used_by_algorithm) == {IOS_CAPTURE_TIME_ALGORITHM_ID, "v11_hsv_cc"}
 
 
 def test_result_server_post_alg_id_falls_back_when_no_snapshot():
-    """Pre-snapshot legacy results — server_post points still have to
-    file under a real algorithm id."""
     r = SessionResult(
         session_id="s_deadbeef",
         camera_a_received=True, camera_b_received=True,
@@ -150,88 +333,6 @@ def test_result_server_post_alg_id_falls_back_when_no_snapshot():
     )
     assert algorithms.DEFAULT_ALGORITHM_ID in r.triangulated_by_algorithm
     assert algorithms.DEFAULT_ALGORITHM_ID in r.algorithms_completed
-
-
-def test_pitch_legacy_hsv_used_plus_dict_keys_round_trip():
-    """Mixed JSON: pre-phase-2 legacy `hsv_range_used` trio + a wire
-    payload that already carries `frames_by_algorithm` keys. The
-    before-validator migrates legacy → per-path, then the after-
-    validator mirrors per-path → dict. Pre-existing dict keys for the
-    same algorithm id must be overwritten by the freshly-derived
-    mirror (old fields are canonical in 6a)."""
-    raw = {
-        "camera_id": "A",
-        "session_id": "s_deadbeef",
-        "video_start_pts_s": 0.0,
-        "frames_live": [_frame(1).model_dump()],
-        "hsv_range_used": {
-            "h_min": 10, "h_max": 20, "s_min": 30, "s_max": 200,
-            "v_min": 40, "v_max": 210,
-        },
-        "shape_gate_used": {"aspect_min": 0.7, "fill_min": 0.55},
-        "live_preset_name": "blue_ball",
-        # Hand-supplied dict key that mirror should overwrite:
-        "frames_by_algorithm": {
-            IOS_CAPTURE_TIME_ALGORITHM_ID: [],  # stale ghost: empty list
-        },
-    }
-    p = PitchPayload.model_validate(raw)
-    # Legacy fields migrated to per-path:
-    assert p.live_config_used is not None
-    assert p.live_config_used.preset_name == "blue_ball"
-    # Mirror overwrote the stale dict entry from old field's truth:
-    assert len(p.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 1
-
-
-def test_pitch_dict_ghost_keys_unrelated_to_old_fields_persist():
-    """Phase-6a contract: mirror is **union** semantics, not
-    projection. Ghost keys not corresponding to any old field are
-    preserved. This test pins the documented behavior so a future
-    refactor that flips to projection doesn't slip past review."""
-    p = _base_pitch(
-        frames_by_algorithm={"v12_future": [_frame(99)]},
-    )
-    assert "v12_future" in p.frames_by_algorithm
-    assert len(p.frames_by_algorithm["v12_future"]) == 1
-
-
-def test_pitch_mirror_under_non_v11_server_post_algorithm_id():
-    """Confirm dict key tracks `server_post_config_used.algorithm_id`,
-    not a hardcoded `v11_hsv_cc`. Future v12+ detectors must file
-    under their own id without requiring schema changes."""
-    # Use a non-runnable id since registry currently only has v11; the
-    # snapshot validator only checks `validate_id` (not runnable), so
-    # `ios_capture_time` is accepted as a placeholder for "some future
-    # registered detector" without us having to register a fake.
-    snap = _snapshot("ios_capture_time")
-    p = _base_pitch(
-        frames_server_post=[_frame(1)],
-        server_post_config_used=snap,
-    )
-    assert "ios_capture_time" in p.frames_by_algorithm
-    assert "v11_hsv_cc" not in p.frames_by_algorithm
-
-
-def test_persist_pitch_json_syncs_dict_after_mutation():
-    """Writer-side sync hook: model_copy + mutation of old fields does
-    NOT re-run the after-validator, so the dict goes stale on the
-    in-memory model. `persist_pitch_json` must call the mirror helper
-    so the on-disk JSON always reflects the latest old-field state."""
-    from schemas import persist_pitch_json
-    import json
-
-    p = _base_pitch(frames_live=[_frame(1)])
-    # Mutate AFTER construction — validator already ran, dict frozen.
-    p.frames_server_post = [_frame(2), _frame(3)]
-    snap = _snapshot("v11_hsv_cc")
-    p.server_post_config_used = snap
-    # Without the writer hook, model_dump_json would emit the stale
-    # dict (still missing v11_hsv_cc). persist_pitch_json must fix it.
-    blob = persist_pitch_json(p)
-    parsed = json.loads(blob)
-    assert "v11_hsv_cc" in parsed["frames_by_algorithm"]
-    assert len(parsed["frames_by_algorithm"]["v11_hsv_cc"]) == 2
-    assert "v11_hsv_cc" in parsed["config_used_by_algorithm"]
 
 
 def test_persist_result_json_syncs_dict_after_mutation():
@@ -246,17 +347,16 @@ def test_persist_result_json_syncs_dict_after_mutation():
     r.paths_completed = {"server_post"}
     blob = persist_result_json(r)
     parsed = json.loads(blob)
-    # Legacy fallback algorithm id used because snapshot is None:
     assert algorithms.DEFAULT_ALGORITHM_ID in parsed["triangulated_by_algorithm"]
     assert algorithms.DEFAULT_ALGORITHM_ID in parsed["algorithms_completed"]
 
 
+# --- Drift guards ----------------------------------------------------------
+
+
 def test_validate_runnable_id_rejects_ios_capture_time():
-    """`ios_capture_time` is a valid wire/disk id but not runnable.
-    `validate_runnable_id` is the strict variant for callsites whose
-    contract is 'this id will reach run_detection'."""
-    algorithms.validate_id("ios_capture_time")  # OK
-    algorithms.validate_runnable_id("v11_hsv_cc")  # OK
+    algorithms.validate_id("ios_capture_time")
+    algorithms.validate_runnable_id("v11_hsv_cc")
     try:
         algorithms.validate_runnable_id("ios_capture_time")
         raise AssertionError("should have rejected non-runnable id")
@@ -265,9 +365,6 @@ def test_validate_runnable_id_rejects_ios_capture_time():
 
 
 def test_drift_guard_catches_schemas_constant_mismatch(monkeypatch):
-    """`algorithms._check_schemas_constant_drift` pins
-    `IOS_CAPTURE_TIME` literal equality across the back-import-cycle
-    boundary. Simulate a developer editing one but not the other."""
     import algorithms as algorithms_mod
     import schemas as schemas_mod
     monkeypatch.setattr(schemas_mod, "IOS_CAPTURE_TIME_ALGORITHM_ID", "drifted_value")
@@ -279,9 +376,6 @@ def test_drift_guard_catches_schemas_constant_mismatch(monkeypatch):
 
 
 def test_legacy_bucket_drift_guard_catches_unregistered_id(monkeypatch):
-    """Drift guard #2: removing v11 from the registry without updating
-    `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID` would silently break legacy
-    pre-snapshot pitch reads. Boot must fail loudly."""
     import algorithms as algorithms_mod
     import schemas as schemas_mod
     monkeypatch.setattr(
@@ -294,55 +388,34 @@ def test_legacy_bucket_drift_guard_catches_unregistered_id(monkeypatch):
         assert "v999_dangling" in str(e)
 
 
+# --- end-to-end round-trip pinning multi-algorithm history ----------------
+
+
 def test_set_algorithm_frames_round_trip_through_persist_and_reload():
-    """End-to-end Phase 6b contract: caller writes via
-    `set_algorithm_frames` (e.g. Phase 7's run-algorithm endpoint),
-    persists via `persist_pitch_json`, reloads from JSON. The new
-    algorithm's frames + dict key must survive — including for
-    algorithm ids OTHER than the current server_post stamp (v12 while
-    v11 is canonical), which is the multi-algorithm point."""
-    from detection_paths import set_algorithm_frames
+    """End-to-end: write under multiple algorithm ids, persist, reload.
+    All algorithm buckets survive — including ids OTHER than the
+    current active_server_post pointer (multi-algorithm point)."""
+    from detection_paths import set_algorithm_frames, stamp_server_post_run
     from schemas import persist_pitch_json
     import json
 
-    # v11 is the current server_post; v12 frames will live in dict only.
     snap_v11 = _snapshot("v11_hsv_cc")
-    p = _base_pitch(
-        frames_server_post=[_frame(1)],
-        server_post_config_used=snap_v11,
-    )
-    set_algorithm_frames(p, "ios_capture_time", [_frame(10)])  # back-syncs frames_live
-    set_algorithm_frames(p, "v11_hsv_cc", [_frame(20), _frame(21)])  # back-syncs frames_server_post
-    # ios_capture_time is non-runnable but valid in snapshot (validate_id, not _runnable_).
-    # Use it as a stand-in for a future second runnable algorithm so this
-    # test doesn't break when v12 lands as a real registry entry.
+    p = _base_pitch()
+    stamp_server_post_run(p, snap_v11, [_frame(1)])
+    set_algorithm_frames(p, IOS_CAPTURE_TIME_ALGORITHM_ID, [_frame(10)])
+    # Drop a future-algorithm bucket (not promoted to active):
     set_algorithm_frames(p, "ios_capture_time", [_frame(10)])
+    set_algorithm_frames(p, "v11_hsv_cc", [_frame(20), _frame(21)])
 
     blob = persist_pitch_json(p)
     parsed = json.loads(blob)
     assert "ios_capture_time" in parsed["frames_by_algorithm"]
     assert "v11_hsv_cc" in parsed["frames_by_algorithm"]
-    assert parsed["frames_live"] == parsed["frames_by_algorithm"]["ios_capture_time"]
-    assert parsed["frames_server_post"] == parsed["frames_by_algorithm"]["v11_hsv_cc"]
+    assert parsed["active_server_post_algorithm_id"] == "v11_hsv_cc"
 
     p2 = PitchPayload.model_validate(parsed)
     assert len(p2.frames_by_algorithm["v11_hsv_cc"]) == 2
     assert len(p2.frames_by_algorithm["ios_capture_time"]) == 1
-
-
-def test_raw_model_dump_json_without_persist_helper_emits_stale_dict():
-    """Negative contract: bypassing `persist_pitch_json` and dumping
-    raw must result in a stale dict on disk. Pins the failure mode so a
-    future regression that re-introduces direct `model_dump_json()`
-    calls would visibly break this test instead of silently shipping
-    inconsistent JSON."""
-    import json
-
-    p = _base_pitch(frames_live=[_frame(1)])
-    # Direct mutation, no persist hook:
-    p.frames_server_post = [_frame(2), _frame(3)]
-    p.server_post_config_used = _snapshot("v11_hsv_cc")
-    raw = json.loads(p.model_dump_json())
-    # frames_server_post is on disk, but the dict mirror was not refreshed:
-    assert "v11_hsv_cc" not in raw["frames_by_algorithm"]
-    assert raw["frames_server_post"][0]["frame_index"] == 2
+    # Projections agree post-reload:
+    assert len(p2.frames_server_post) == 2
+    assert len(p2.frames_live) == 1

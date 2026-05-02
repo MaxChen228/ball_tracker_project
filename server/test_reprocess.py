@@ -816,7 +816,10 @@ def test_skipped_cam_blocks_session_triangulation(tmp_path, monkeypatch):
     # pitch like the real path does.
     def fake_rerun(path, snapshot, dry_run):
         p = PitchPayload.model_validate_json(path.read_text())
-        p.frames_server_post = []
+        # Simulate detection returning 0 frames: clear whichever bucket
+        # the active server_post pointer references.
+        bucket = p.active_server_post_algorithm_id or "v11_hsv_cc"
+        p.frames_by_algorithm[bucket] = []
         return p
 
     monkeypatch.setattr(R, "rerun_detection", fake_rerun)
@@ -884,7 +887,8 @@ def test_failed_cam_also_blocks_session_triangulation(tmp_path, monkeypatch):
         if "_B.json" in str(path):
             raise RuntimeError("synthetic mov decode failure")
         p = PitchPayload.model_validate_json(path.read_text())
-        p.frames_server_post = []
+        bucket = p.active_server_post_algorithm_id or "v11_hsv_cc"
+        p.frames_by_algorithm[bucket] = []
         return p
 
     monkeypatch.setattr(R, "rerun_detection", fake_rerun)

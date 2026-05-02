@@ -13,6 +13,7 @@ import session_results
 from pipeline import ProcessingCanceled
 from schemas import (
     DetectionConfigSnapshotPayload,
+    IOS_CAPTURE_TIME_ALGORITHM_ID,
     PitchPayload,
     SessionResult,
 )
@@ -155,7 +156,13 @@ async def pitch(
                 payload_obj.image_width_px = mw
                 payload_obj.image_height_px = mh
 
-        payload_obj.frames_server_post = []
+        # Drop any stale server_post bucket so the upcoming detection
+        # run owns a clean slot. Touching the active pointer's bucket
+        # only — other algorithms' history (if any) is preserved.
+        srv_alg = payload_obj.active_server_post_algorithm_id
+        if srv_alg is not None:
+            payload_obj.frames_by_algorithm.pop(srv_alg, None)
+            payload_obj.active_server_post_algorithm_id = None
 
     # Stamp the live detection-config snapshot frozen at arm time.
     # `state.live_session_frozen_config` returns the atomic (HSV,
@@ -172,9 +179,11 @@ async def pitch(
     # The server_post path overwrites `server_post_config_used` later
     # in `_run_server_detection` with the snapshot it actually called
     # `run_detection` with — that path is unaffected by this guard.
-    payload_obj.live_config_used = state.live_session_frozen_config(
-        payload_obj.session_id
-    )
+    live_snap = state.live_session_frozen_config(payload_obj.session_id)
+    if live_snap is not None:
+        payload_obj.config_used_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = live_snap
+    else:
+        payload_obj.config_used_by_algorithm.pop(IOS_CAPTURE_TIME_ALGORITHM_ID, None)
 
     result = await asyncio.to_thread(state.record, payload_obj)
 

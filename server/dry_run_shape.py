@@ -263,6 +263,15 @@ def load_pitch(sid, cam):
     return json.loads((DATA / "pitches" / f"session_{sid}_{cam}.json").read_text())
 
 
+def _live_frames_from_disk(d: dict) -> list[dict]:
+    """Return live frames from a raw pitch dict, tolerant of both the
+    legacy flat shape (`frames_live`) and the dict-canonical shape
+    (`frames_by_algorithm["ios_capture_time"]`)."""
+    if "frames_live" in d:
+        return d.get("frames_live") or []
+    return (d.get("frames_by_algorithm") or {}).get("ios_capture_time") or []
+
+
 def live_truth(sid):
     """Run segmenter on live winners (existing pitches JSON) → ground truth segments."""
     da, db = load_pitch(sid, "A"), load_pitch(sid, "B")
@@ -270,12 +279,12 @@ def live_truth(sid):
     Kb, distb, Rb, Cb = setup_cam(db)
     aa, ab = da["sync_anchor_timestamp_s"], db["sync_anchor_timestamp_s"]
     ra = []
-    for f in da.get("frames_live", []):
+    for f in _live_frames_from_disk(da):
         if f.get("ball_detected") and f.get("px") is not None:
             d_cam = undistorted_ray_cam(f["px"], f["py"], Ka, dista)
             ra.append((f["timestamp_s"] - aa, Ra.T @ d_cam))
     rb = []
-    for f in db.get("frames_live", []):
+    for f in _live_frames_from_disk(db):
         if f.get("ball_detected") and f.get("px") is not None:
             d_cam = undistorted_ray_cam(f["px"], f["py"], Kb, distb)
             rb.append((f["timestamp_s"] - ab, Rb.T @ d_cam))

@@ -7,6 +7,16 @@ import json as _json
 import pytest
 
 
+def _replace_server_post_frame(pitch, idx, frame):
+    """Replace `pitch.frames_server_post[idx]` by mutating the
+    underlying canonical bucket (`frames_by_algorithm[<active alg>]`).
+    `frames_server_post` is a `@computed_field` projection — direct
+    `pitch.frames_server_post[idx] = ...` would mutate a temporary
+    list returned by the property and have no effect."""
+    bucket = pitch.active_server_post_algorithm_id or "v11_hsv_cc"
+    pitch.frames_by_algorithm[bucket][idx] = frame
+
+
 def test_pairing_tuning_default_values():
     from pairing_tuning import PairingTuning
     t = PairingTuning.default()
@@ -111,14 +121,14 @@ def test_triangulate_cycle_fan_out_emits_multi_points():
         BlobCandidate(px=fb.px + 30, py=fb.py + 30, area=80,
                       area_score=0.8, aspect=0.8, fill=0.55, cost=0.30),
     ]
-    payload_a.frames_server_post[0] = FramePayload(
+    _replace_server_post_frame(payload_a, 0, FramePayload(
         frame_index=0, timestamp_s=fa.timestamp_s,
         candidates=cands_a, ball_detected=True,
-    )
-    payload_b.frames_server_post[0] = FramePayload(
+    ))
+    _replace_server_post_frame(payload_b, 0, FramePayload(
         frame_index=0, timestamp_s=fb.timestamp_s,
         candidates=cands_b, ball_detected=True,
-    )
+    ))
 
     pts = triangulate_cycle(payload_a, payload_b)
     # 2×2 fan-out: up to 4 points. Some may be near-parallel-rejected,
@@ -155,20 +165,20 @@ def test_triangulate_cycle_emit_carries_cost_for_downstream_filter():
         BlobCandidate(px=fa.px + 30, py=fa.py + 30, area=80,
                       area_score=0.8, aspect=0.8, fill=0.55, cost=0.30),
     ]
-    payload_a.frames_server_post[0] = FramePayload(
+    _replace_server_post_frame(payload_a, 0, FramePayload(
         frame_index=0, timestamp_s=fa.timestamp_s,
         candidates=cands, ball_detected=True,
-    )
+    ))
     cands_b = [
         BlobCandidate(px=fb.px, py=fb.py, area=100, area_score=1.0,
                       aspect=1.0, fill=0.68, cost=0.10),
         BlobCandidate(px=fb.px + 30, py=fb.py + 30, area=80,
                       area_score=0.8, aspect=0.8, fill=0.55, cost=0.30),
     ]
-    payload_b.frames_server_post[0] = FramePayload(
+    _replace_server_post_frame(payload_b, 0, FramePayload(
         frame_index=0, timestamp_s=fb.timestamp_s,
         candidates=cands_b, ball_detected=True,
-    )
+    ))
     pts = triangulate_cycle(payload_a, payload_b)
     # All four (cand_a × cand_b) pairs are well under the emit cost
     # ceiling (5.0).
@@ -202,17 +212,17 @@ def test_triangulate_cycle_emit_invariant_to_gap_threshold():
         BlobCandidate(px=fa.px + 200, py=fa.py + 200, area=80,
                       area_score=0.8, aspect=0.8, fill=0.55, cost=0.10),
     ]
-    payload_a.frames_server_post[0] = FramePayload(
+    _replace_server_post_frame(payload_a, 0, FramePayload(
         frame_index=0, timestamp_s=fa.timestamp_s,
         candidates=cands_a, ball_detected=True,
-    )
-    payload_b.frames_server_post[0] = FramePayload(
+    ))
+    _replace_server_post_frame(payload_b, 0, FramePayload(
         frame_index=0, timestamp_s=fb.timestamp_s,
         candidates=[BlobCandidate(
             px=fb.px, py=fb.py, area=100, area_score=1.0,
             aspect=1.0, fill=0.68, cost=0.10,
         )], ball_detected=True,
-    )
+    ))
 
     pts1 = triangulate_cycle(payload_a, payload_b)
     pts2 = triangulate_cycle(payload_a, payload_b)

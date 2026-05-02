@@ -42,6 +42,34 @@ EXIT_NO_LIVE = 3
 EXIT_NOT_FOUND = 4
 
 
+# Algorithm ids used in the dict-canonical disk shape. Duplicated from
+# `schemas` / `algorithms` rather than imported so this dry-run tool
+# stays free of the schema dependency it consciously avoids.
+_IOS_CAPTURE_TIME = "ios_capture_time"
+_LEGACY_PRE_SNAPSHOT = "v11_hsv_cc"
+
+
+def _disk_frame_lists(
+    obj: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
+    """Return `(frames_live, frames_server_post)` lists from a raw
+    pitch-JSON dict, tolerant of both pre-flip flat shape and the
+    dict-canonical post-flip shape (`frames_by_algorithm[<alg>]`).
+    Either side may be None when the corresponding bucket is missing
+    entirely — `[]` is returned for explicit-empty buckets.
+
+    server_post resolution: prefer the active pointer, fall back to the
+    pre-snapshot legacy bucket so old pitches lacking
+    `active_server_post_algorithm_id` still surface their frames."""
+    if "frames_live" in obj or "frames_server_post" in obj:
+        return obj.get("frames_live"), obj.get("frames_server_post")
+    fba = obj.get("frames_by_algorithm") or {}
+    live = fba.get(_IOS_CAPTURE_TIME)
+    srv_alg = obj.get("active_server_post_algorithm_id") or _LEGACY_PRE_SNAPSHOT
+    server = fba.get(srv_alg)
+    return live, server
+
+
 # ----------------------------- core data types -------------------------------
 
 
@@ -143,12 +171,12 @@ def build_cam_report(
     window_s: float,
     top_n_disagreements: int = 10,
 ) -> CamReport:
-    raw_live = pitch_obj.get("frames_live")
-    raw_server = pitch_obj.get("frames_server_post")
+    raw_live, raw_server = _disk_frame_lists(pitch_obj)
     if raw_live is None or raw_server is None:
         raise KeyError(
-            f"{session_id}/{camera_id}: pitch JSON missing frames_live or "
-            f"frames_server_post key"
+            f"{session_id}/{camera_id}: pitch JSON missing frames_live / "
+            f"frames_server_post (or their dict-canonical equivalents in "
+            f"frames_by_algorithm)"
         )
 
     live = [FrameLite.from_dict(d) for d in raw_live]
@@ -453,8 +481,9 @@ def run_session(session_id: str, window_s: float) -> tuple[int, list[CamReport]]
             rc = max(rc, EXIT_NOT_FOUND)
             continue
 
-        n_server = len(obj.get("frames_server_post") or [])
-        n_live = len(obj.get("frames_live") or [])
+        live_list, server_list = _disk_frame_lists(obj)
+        n_server = len(server_list or [])
+        n_live = len(live_list or [])
         if n_server == 0:
             print(
                 f"[{session_id}/{cam_id}] frames_server_post is empty — "

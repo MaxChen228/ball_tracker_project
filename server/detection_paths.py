@@ -79,12 +79,16 @@ def pitch_with_path_frames(
     pitch: PitchPayload,
     path: DetectionPath,
 ) -> PitchPayload:
+    """Clone the pitch with the chosen path's frames promoted into
+    the active server_post slot so downstream consumers
+    (reconstruct.build_scene, ray builders) can read a single source.
+    Implemented by routing the chosen path's algorithm id through
+    `active_server_post_algorithm_id` on the clone — the
+    `frames_server_post` computed field then projects from the matching
+    `frames_by_algorithm` bucket."""
+    alg_id = algorithm_id_for_path(pitch, path)
     clone = pitch.model_copy(deep=True)
-    # Project the chosen bucket into `frames_server_post` so downstream
-    # consumers (reconstruct.build_scene, ray builders) can read a single
-    # field regardless of which path produced the frames. The clone's other
-    # bucket is left intact since it isn't read past this point.
-    clone.frames_server_post = get_path_frames(pitch, path)
+    clone.active_server_post_algorithm_id = alg_id
     return clone
 
 
@@ -99,16 +103,16 @@ def pitch_with_path_frames(
 
 
 def algorithm_id_for_path(pitch: PitchPayload, path: DetectionPath) -> str:
-    """Resolve the algorithm id a path's frames should live under in
+    """Resolve the algorithm id a path's frames live under in
     `frames_by_algorithm`. `live` always maps to `ios_capture_time`
-    (the iOS-side capture-time data source). `server_post` reads the
-    stamped snapshot's `algorithm_id`, falling back to the legacy
-    pre-snapshot bucket for pitches that predate snapshot
+    (the iOS-side capture-time data source). `server_post` reads
+    `pitch.active_server_post_algorithm_id`, falling back to the
+    legacy pre-snapshot bucket for pitches that predate snapshot
     persistence."""
     if path == DetectionPath.live:
         return IOS_CAPTURE_TIME_ALGORITHM_ID
-    if pitch.server_post_config_used is not None:
-        return pitch.server_post_config_used.algorithm_id
+    if pitch.active_server_post_algorithm_id is not None:
+        return pitch.active_server_post_algorithm_id
     return _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
 
 
@@ -126,38 +130,21 @@ def set_algorithm_frames(
     algorithm_id: str,
     frames: list[FramePayload],
 ) -> None:
-    """**Low-level helper. Prefer `stamp_server_post_run`** for
-    server-side detection results — it maintains the snapshot ↔
-    frames invariant atomically. This function does NOT mutate
-    `server_post_config_used`, so calling it on its own with an
-    `algorithm_id` that doesn't match the current snapshot's id will
-    leave the invariant `frames_server_post == frames produced under
-    server_post_config_used` temporarily broken until the caller also
-    updates the snapshot.
+    """Store frames under `algorithm_id` in `frames_by_algorithm`.
 
-    Store frames under `algorithm_id` and keep the legacy old field
-    in sync when applicable so existing path-keyed readers continue to
-    see what they expect:
-
-    - `ios_capture_time` → also writes `pitch.frames_live`
-    - any other id whose frames are currently in the server_post slot
-      (i.e. the pitch's `server_post_config_used.algorithm_id` matches,
-      OR the pitch has no snapshot and we're writing under the legacy
-      pre-snapshot bucket) → also writes `pitch.frames_server_post`
+    **Low-level helper. Prefer `stamp_server_post_run`** for
+    server-side detection results — it stamps the
+    `active_server_post_algorithm_id` pointer + the
+    `config_used_by_algorithm` snapshot atomically so the
+    `frames_server_post` / `server_post_config_used` computed-field
+    projections stay coherent.
 
     Writes to a different algorithm id (e.g. v12 while v11 is still
-    server_post-canonical) DO NOT touch `frames_server_post` — they
-    live only in the dict. Phase 6b path-keyed readers will keep
-    surfacing whichever id is the current server_post stamp.
+    server_post-canonical) leave `active_server_post_algorithm_id`
+    alone — they live only in the dict. The path-keyed projections
+    keep surfacing whichever id is the current server_post pointer.
     """
     pitch.frames_by_algorithm[algorithm_id] = list(frames)
-    if algorithm_id == IOS_CAPTURE_TIME_ALGORITHM_ID:
-        pitch.frames_live = list(frames)
-        return
-    snap = pitch.server_post_config_used
-    server_post_alg = snap.algorithm_id if snap is not None else _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
-    if algorithm_id == server_post_alg:
-        pitch.frames_server_post = list(frames)
 
 
 def stamp_server_post_run(
@@ -198,19 +185,19 @@ def stamp_server_post_run(
             f"{IOS_CAPTURE_TIME_ALGORITHM_ID!r}: server-post slot "
             "is reserved for runnable algorithms"
         )
-    pitch.server_post_config_used = snapshot
+    pitch.active_server_post_algorithm_id = snapshot.algorithm_id
     pitch.config_used_by_algorithm[snapshot.algorithm_id] = snapshot
-    set_algorithm_frames(pitch, snapshot.algorithm_id, frames)
+    pitch.frames_by_algorithm[snapshot.algorithm_id] = list(frames)
 
 
 def pitch_with_algorithm_frames(
     pitch: PitchPayload, algorithm_id: str,
 ) -> PitchPayload:
     """Algorithm-keyed counterpart to `pitch_with_path_frames`.
-    Projects the chosen algorithm's frames into `frames_server_post`
-    on a clone so existing downstream consumers (reconstruct,
-    ray builders) read a single field regardless of which algorithm
-    produced the frames."""
+    Promotes the chosen algorithm to the active server_post slot on a
+    clone so existing downstream consumers (reconstruct, ray builders)
+    can read `frames_server_post` regardless of which algorithm
+    produced the frames. The original pitch is unchanged."""
     clone = pitch.model_copy(deep=True)
-    clone.frames_server_post = get_algorithm_frames(pitch, algorithm_id)
+    clone.active_server_post_algorithm_id = algorithm_id
     return clone

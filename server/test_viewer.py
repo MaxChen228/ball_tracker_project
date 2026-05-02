@@ -152,8 +152,8 @@ def test_build_scene_includes_persisted_live_rays():
     P = np.array([0.0, 0.2, 0.4])
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([]))
     u, v = _project_pixels(K, R_a, t_a, P)
-    pitch.frames_server_post = []
-    pitch.frames_live = [
+    pitch.frames_by_algorithm.pop("v11_hsv_cc", None)
+    pitch.frames_by_algorithm["ios_capture_time"] = [
         schemas.FramePayload(
             frame_index=7,
             timestamp_s=7.0 / 240.0,
@@ -1446,8 +1446,12 @@ def test_events_path_status_marks_live_done_on_frame_existence_not_triangulation
         )
         for i in range(2)
     ]
-    # Stitch frames_live on top while keeping the rest of the payload valid.
-    enriched = base.model_copy(update={"frames_live": live_frames, "frames_server_post": []})
+    # Stitch frames_live on top while keeping the rest of the payload
+    # valid. Dict-canonical: write the live bucket and replace the dict
+    # so the server_post bucket the base carried is cleared.
+    enriched = base.model_copy(
+        update={"frames_by_algorithm": {"ios_capture_time": live_frames}},
+    )
     main.state.record(enriched)
 
     client = TestClient(app)

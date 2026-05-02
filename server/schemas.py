@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 
 class DetectionPath(str, Enum):
@@ -205,33 +205,68 @@ def _resolve_server_post_algorithm_id(
     return _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
 
 
-def _mirror_pitch_old_into_dicts(pitch: "PitchPayload") -> None:
-    """Idempotently mirror old per-path fields (`frames_live`,
-    `frames_server_post`, `live_config_used`, `server_post_config_used`)
-    into the new dict fields (`frames_by_algorithm`,
-    `config_used_by_algorithm`). Safe to call repeatedly.
+_PITCH_PERSIST_EXCLUDE = {
+    "frames_live",
+    "frames_server_post",
+    "live_config_used",
+    "server_post_config_used",
+}
 
-    Semantics: **union, not projection.** Pre-existing dict keys that
-    don't correspond to a populated old field are NOT removed. In
-    Phase 6a no writer should be putting anything into the dict
-    directly (the old fields are canonical), so a non-mirrored key is
-    almost certainly a hand-constructed test fixture or an attacker-
-    supplied wire payload — both cases the after-validator sees once
-    and we accept the union. When Phase 6b flips canonical, writers
-    will own dict keys directly and mirroring becomes the reverse
-    direction (dict → old as a derived view). The `if frames_*:`
-    guards here intentionally match that Phase-6a contract."""
-    if pitch.frames_live:
-        pitch.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = list(pitch.frames_live)
-    if pitch.frames_server_post:
-        srv_alg = _resolve_server_post_algorithm_id(pitch.server_post_config_used)
-        pitch.frames_by_algorithm[srv_alg] = list(pitch.frames_server_post)
-    if pitch.live_config_used is not None:
-        pitch.config_used_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = pitch.live_config_used
-    if pitch.server_post_config_used is not None:
-        pitch.config_used_by_algorithm[
-            pitch.server_post_config_used.algorithm_id
-        ] = pitch.server_post_config_used
+
+def _collapse_legacy_pitch_flat_input(data: dict) -> dict:
+    """Transitional before-validator: pop legacy flat keys from raw
+    input and route them into the canonical dicts + active pointer.
+
+    Phase 1 of the dict-canonical flip leaves disk JSON containing
+    `frames_live` / `frames_server_post` / `live_config_used` /
+    `server_post_config_used`; with `extra="forbid"` and those names
+    now bound to `@computed_field` this would reject every pre-flip
+    record. This shim absorbs the legacy keys into:
+
+    - `frames_by_algorithm[ios_capture_time]` ← `frames_live`
+    - `frames_by_algorithm[<alg>]` ← `frames_server_post` (alg from
+      `server_post_config_used.algorithm_id` if present, else
+      `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID`)
+    - `config_used_by_algorithm[ios_capture_time]` ← `live_config_used`
+    - `config_used_by_algorithm[<alg>]` ← `server_post_config_used`
+    - `active_server_post_algorithm_id` ← `<alg>` from snapshot
+
+    Pre-existing dict entries are NOT clobbered (legacy already-mirrored
+    records were dual-write; both views agreed). Phase 3 deletes this
+    shim once `migrate_disk_pitches.py` has rewritten on-disk files into
+    pure dict shape — at that point any remaining flat key is a
+    mis-formed input that should fail loudly.
+    """
+    flat_live = data.pop("frames_live", None)
+    flat_server = data.pop("frames_server_post", None)
+    flat_live_cfg = data.pop("live_config_used", None)
+    flat_server_cfg = data.pop("server_post_config_used", None)
+
+    if flat_server_cfg is not None:
+        srv_alg = (
+            flat_server_cfg.get("algorithm_id")
+            if isinstance(flat_server_cfg, dict)
+            else getattr(flat_server_cfg, "algorithm_id", None)
+        )
+    else:
+        srv_alg = None
+
+    if flat_live:
+        fba = data.setdefault("frames_by_algorithm", {})
+        fba.setdefault(IOS_CAPTURE_TIME_ALGORITHM_ID, flat_live)
+    if flat_server:
+        bucket = srv_alg if srv_alg is not None else _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
+        fba = data.setdefault("frames_by_algorithm", {})
+        fba.setdefault(bucket, flat_server)
+    if flat_live_cfg is not None:
+        cba = data.setdefault("config_used_by_algorithm", {})
+        cba.setdefault(IOS_CAPTURE_TIME_ALGORITHM_ID, flat_live_cfg)
+    if flat_server_cfg is not None:
+        cba = data.setdefault("config_used_by_algorithm", {})
+        if srv_alg is not None:
+            cba.setdefault(srv_alg, flat_server_cfg)
+            data.setdefault("active_server_post_algorithm_id", srv_alg)
+    return data
 
 
 def _mirror_result_old_into_dicts(result: "SessionResult") -> None:
@@ -264,15 +299,16 @@ def _mirror_result_old_into_dicts(result: "SessionResult") -> None:
 
 
 def persist_pitch_json(pitch: "PitchPayload") -> str:
-    """Sync dict mirrors then serialize. Use at every disk-write site
-    for `PitchPayload`. Without this hook, a `model_copy(deep=True)` +
-    field-mutation flow (`state.record`, `routes/pitch.py` server_post
-    run, `reprocess_sessions.py`) would persist a stale dict — the
-    after-validator only fires on construction, not on assignment.
-    Phase 6a's `_mirror_pitch_old_into_dicts` is the load-time
-    failsafe; this is the write-time one."""
-    _mirror_pitch_old_into_dicts(pitch)
-    return pitch.model_dump_json()
+    """Serialize a pitch to disk-canonical JSON: dict-keyed buckets +
+    active pointer, with the four legacy flat surfaces excluded.
+
+    Wire shape (HTTP responses / WS pushes) keeps the computed_field
+    flat surfaces — clients (viewer JS / dashboard) still see
+    `frames_live` / `frames_server_post` / `*_config_used` projected
+    from the dicts. On-disk shape drops them so the disk truly has a
+    single source of truth and `migrate_disk_pitches.py` can stay a
+    one-shot tool rather than a permanent shim."""
+    return pitch.model_dump_json(exclude=_PITCH_PERSIST_EXCLUDE)
 
 
 def persist_result_json(result: "SessionResult") -> str:
@@ -388,11 +424,6 @@ class PitchPayload(BaseModel):
     local_recording_index: int | None = None
     # Snapshot of the session's requested detection paths.
     paths: list[str] | None = None
-    # Live-streamed frame detections captured over WebSocket during the
-    # active session. Persisted for forensics / future viewer switching.
-    frames_live: list[FramePayload] = Field(default_factory=list)
-    # Finalized server-side post-pass results decoded from the uploaded MOV.
-    frames_server_post: list[FramePayload] = Field(default_factory=list)
     intrinsics: IntrinsicsPayload | None = None
     homography: list[float] | None = None
     image_width_px: int | None = None
@@ -412,38 +443,97 @@ class PitchPayload(BaseModel):
     # server_post run. Viewer surfaces "last run X ago" next to the
     # Rerun-server button.
     server_post_ran_at: float | None = None
-    # Per-path frozen detection-config snapshots. Stamped at the
-    # moment each path produced its frames so reprocess /
-    # `--use-frozen-snapshot` can reproduce exactly which params
-    # produced these candidates regardless of subsequent dashboard
-    # edits. Live snapshot is set on first frame ingest; server_post
-    # snapshot is set when run_server_post completes. None when that
-    # path never ran (e.g., live-only flow has no server_post snapshot).
-    live_config_used: DetectionConfigSnapshotPayload | None = None
-    server_post_config_used: DetectionConfigSnapshotPayload | None = None
-    # Phase 6a additive mirror: dict keyed by algorithm_id. In 6a the
-    # old `frames_live` / `frames_server_post` / `*_config_used` are
-    # canonical and these dicts are auto-derived by the after-validator
-    # below + `_mirror_pitch_old_into_dicts` at writer sites. 6b will
-    # flip readers to consume these and make the old fields derived.
+    # Canonical algorithm-id-keyed buckets. Each algorithm that has run
+    # against this pitch (live capture-time detection under
+    # `ios_capture_time`, plus any server-side detector) owns one entry
+    # in `frames_by_algorithm`. The flat `frames_live` / `frames_server_post`
+    # / `live_config_used` / `server_post_config_used` surfaces below are
+    # `@computed_field` projections; writers MUST mutate the dicts (or
+    # use `detection_paths.set_algorithm_frames` /
+    # `stamp_server_post_run`) — direct attribute assignment to the flat
+    # surfaces will fail.
     frames_by_algorithm: dict[str, list[FramePayload]] = Field(default_factory=dict)
     config_used_by_algorithm: dict[str, DetectionConfigSnapshotPayload] = Field(
         default_factory=dict
     )
+    # Pointer identifying which algorithm currently owns the
+    # `server_post` slot. Set by `stamp_server_post_run` whenever a
+    # server-side detection run completes; the `frames_server_post` and
+    # `server_post_config_used` computed fields read this to pick the
+    # right dict bucket. None on pitches that never had server_post run
+    # (live-only flows, fresh pitches before run_server_post). Pre-snapshot
+    # legacy disk records that lacked an explicit snapshot fall back to
+    # `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID` at read time without needing
+    # this pointer set.
+    active_server_post_algorithm_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_legacy_used_fields(cls, data):
+    def _migrate_then_collapse_legacy(cls, data):
+        """Two before-stage migrations chained into one validator
+        (combined to make the order deterministic — multiple
+        `mode='before'` validators on one class do not guarantee
+        declaration order).
+
+        Step 1 — `_migrate_legacy_used_fields_into_per_path`: pre-phase-2
+        records carried a single `(hsv_range_used, shape_gate_used,
+        live_preset_name)` trio; fold it into per-path snapshots
+        `live_config_used` / `server_post_config_used`.
+
+        Step 2 — `_collapse_legacy_pitch_flat_input` (transitional,
+        phase 3 deletes this step): pop the four flat keys
+        `frames_live` / `frames_server_post` / `live_config_used` /
+        `server_post_config_used` (which are now `@computed_field`)
+        from the input and route them into the canonical dicts +
+        `active_server_post_algorithm_id` pointer."""
         if not isinstance(data, dict):
             return data
-        return _migrate_legacy_used_fields_into_per_path(
+        data = _migrate_legacy_used_fields_into_per_path(
             data, target_paths=("live", "server_post"),
         )
+        return _collapse_legacy_pitch_flat_input(data)
 
-    @model_validator(mode="after")
-    def _mirror_into_by_algorithm(self) -> "PitchPayload":
-        _mirror_pitch_old_into_dicts(self)
-        return self
+    @computed_field
+    @property
+    def frames_live(self) -> list[FramePayload]:
+        """Live-streamed frame detections captured over WebSocket
+        during the active session. Derived view of
+        `frames_by_algorithm[ios_capture_time]`. Read-only — write via
+        `detection_paths.set_algorithm_frames(pitch, IOS_CAPTURE_TIME_ALGORITHM_ID, frames)`
+        or mutate the dict directly."""
+        return list(self.frames_by_algorithm.get(IOS_CAPTURE_TIME_ALGORITHM_ID, []))
+
+    @computed_field
+    @property
+    def frames_server_post(self) -> list[FramePayload]:
+        """Finalized server-side post-pass detections decoded from the
+        uploaded MOV. Derived view of
+        `frames_by_algorithm[active_server_post_algorithm_id]`,
+        falling back to `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID` for
+        pre-snapshot records. Read-only — write via
+        `detection_paths.stamp_server_post_run`."""
+        bucket = self.active_server_post_algorithm_id
+        if bucket is None:
+            bucket = _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
+        return list(self.frames_by_algorithm.get(bucket, []))
+
+    @computed_field
+    @property
+    def live_config_used(self) -> DetectionConfigSnapshotPayload | None:
+        """Frozen detection-config snapshot for the live path. Derived
+        view of `config_used_by_algorithm[ios_capture_time]`."""
+        return self.config_used_by_algorithm.get(IOS_CAPTURE_TIME_ALGORITHM_ID)
+
+    @computed_field
+    @property
+    def server_post_config_used(self) -> DetectionConfigSnapshotPayload | None:
+        """Frozen detection-config snapshot for the server_post path —
+        the snapshot of whichever algorithm currently owns the slot.
+        None when no server_post run has stamped a pointer."""
+        bucket = self.active_server_post_algorithm_id
+        if bucket is None:
+            return None
+        return self.config_used_by_algorithm.get(bucket)
 
 
 class TriangulatedPoint(BaseModel):
