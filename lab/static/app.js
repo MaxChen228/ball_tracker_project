@@ -698,10 +698,14 @@ async function prefetchMasks(slug) {
   const myToken = ++state.prefetchAbort;
   // Defer until overlay reflects real frame source dimensions, so blits done
   // mid-prefetch don't see a 300×150 default canvas and paint a top-left patch.
+  // Loop on FrameSource readiness — <video> is lazy-loaded now, so keying off
+  // its loadedmetadata would block prefetch until the user pressed play.
   const fs = state.frameSource;
-  const targetW = (fs && fs.width) || el.video.videoWidth;
+  const targetW = fs && fs.width;
   if (!targetW || el.overlay.width !== targetW) {
-    el.video.addEventListener("loadedmetadata", () => prefetchMasks(slug), { once: true });
+    setTimeout(() => {
+      if (state.current === slug && myToken === state.prefetchAbort) prefetchMasks(slug);
+    }, 250);
     return;
   }
   const allEntries = [];
@@ -804,7 +808,18 @@ function syncFromItem(item) {
   updateSidebarActive();
   el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
   el.scrubber.value = "0";
-  el.video.src = `${API_BASE}/clip/${item.slug}.mp4`;
+  // Defer <video> load until the user actually presses play. The labelling
+  // workflow is 99% scrub (served by FrameSource / WebCodecs) — eagerly
+  // pointing <video> at the clip on every item switch fired a parallel
+  // 1080p MOV download + decode that competed with FrameSource for network
+  // and main thread, leaving the first ~5s after item-switch laggy.
+  // togglePlay() lazy-sets src on first play.
+  state.videoSrcSlug = item.slug;
+  if (el.video.src) {
+    el.video.pause();
+    el.video.removeAttribute("src");
+    el.video.load();   // releases buffered frames + cancels in-flight fetch
+  }
   state.lastDisplayedFrame = 0;
   enterScrubMode();
   state.scrubPaintToken++;
@@ -1583,12 +1598,28 @@ async function rehydrateMasks(slug) {
   } catch (e) { console.warn("rehydrate masks failed", e); }
 }
 
-function togglePlay() {
+async function togglePlay() {
   if (state.scrubMode) {
     const tbl = state.ptsTable;
     const f = state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0;
     const targetT = tbl ? tbl[f] : null;
     if (targetT == null) return;
+    // Lazy-load <video> on first play — see syncFromItem for rationale.
+    const wantSlug = state.videoSrcSlug;
+    if (!el.video.src && wantSlug) {
+      el.video.src = `${API_BASE}/clip/${wantSlug}.mp4`;
+      try {
+        await new Promise((res, rej) => {
+          el.video.addEventListener("canplay", res, { once: true });
+          el.video.addEventListener("error", () => rej(new Error("video load")), { once: true });
+        });
+      } catch (e) {
+        console.warn("video lazy-load failed", e);
+        return;
+      }
+      // User may have switched items while we awaited canplay.
+      if (state.videoSrcSlug !== wantSlug) return;
+    }
     if (Math.abs(el.video.currentTime - targetT) > 0.005) el.video.currentTime = targetT;
     state.lastDisplayedMediaTime = targetT;
     exitScrubMode();
