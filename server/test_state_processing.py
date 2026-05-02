@@ -86,6 +86,20 @@ def test_cancel_then_resume_transitions_queue_state(tmp_path):
     assert status == "queued"
 
 
+def test_completed_session_summary_survives_rerun_eligibility(tmp_path):
+    s = State(data_dir=tmp_path)
+    sid = _sid(31)
+    p = _pitch("A", sid)
+    p.frames_server_post = [
+        FramePayload(frame_index=0, timestamp_s=0.0, ball_detected=False)
+    ]
+    s.record(p)
+    (s.video_dir / f"session_{sid}_A.mov").write_bytes(b"x")
+
+    status, resumable = s._processing.session_summary(sid)
+    assert (status, resumable) == ("completed", False)
+
+
 def test_record_and_clear_error_round_trip(tmp_path):
     s = State(data_dir=tmp_path)
     sid = _sid(4)

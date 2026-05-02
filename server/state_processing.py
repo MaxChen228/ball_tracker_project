@@ -310,7 +310,7 @@ class SessionProcessingState:
             return "queued", True
         if any(state == "canceled" for state in job_states):
             return "canceled", bool(pending_keys)
-        if not has_candidates and completed:
+        if completed:
             return "completed", False
         return None, False
 

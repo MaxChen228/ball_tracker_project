@@ -328,12 +328,22 @@ def viewer(session_id: str) -> HTMLResponse:
     videos_with_offsets = _videos_for_session(session_id)
     health = _build_viewer_health(session_id)
     # Per-session pairing-tuning for the viewer header strip. Both fields
-    # are None on legacy SessionResult (predates the recompute endpoint) →
-    # session_tuning_strip_html seeds 1.0 / 200cm (= no client-side filter
-    # on either axis).
+    # may be None on legacy SessionResult (predates the recompute endpoint).
+    # Resolve those from the current saved global tuning so a restarted
+    # server / rebuilt result still seeds the viewer with what the
+    # operator actually has configured, not the module hardcoded default.
     result = state.get(session_id)
-    cost_threshold = result.cost_threshold if result is not None else None
-    gap_threshold_m = result.gap_threshold_m if result is not None else None
+    pairing_tuning = state.pairing_tuning()
+    cost_threshold = (
+        result.cost_threshold
+        if result is not None and result.cost_threshold is not None
+        else pairing_tuning.cost_threshold
+    )
+    gap_threshold_m = (
+        result.gap_threshold_m
+        if result is not None and result.gap_threshold_m is not None
+        else pairing_tuning.gap_threshold_m
+    )
     segments = list(result.segments) if result is not None else []
     segments_by_path = (
         {k: list(v) for k, v in result.segments_by_path.items()}

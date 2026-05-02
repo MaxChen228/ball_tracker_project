@@ -181,6 +181,7 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         b = state.pitches.get(("B", session_id))
         live = state._live_pairings.get(session_id)
         session_obj = state._lookup_session_locked(session_id)
+        pairing_tuning = state._pairing_tuning
 
     result = empty_result_for_session(
         state,
@@ -188,6 +189,8 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         camera_a_received=a is not None,
         camera_b_received=b is not None,
     )
+    result.cost_threshold = pairing_tuning.cost_threshold
+    result.gap_threshold_m = pairing_tuning.gap_threshold_m
     # Aggregate the two cams' last-run timestamps — the more recent one
     # wins so a partial rerun (only one cam's MOV reprocessed) still
     # advances the session's "last server_post" age.
@@ -381,12 +384,11 @@ def stamp_segments_on_result(
     segmenter so `Segment.original_indices` is a stable index into a
     time-sorted list.
 
-    `result.cost_threshold` / `gap_threshold_m` may be None on a freshly-
-    armed session that has not yet been stamped — in that case fall back
-    to the operator's saved global default (`PairingTuning.default()`),
-    which is also the value the viewer's slider initializes to. This is
-    NOT a silent fallback: the global default is itself an explicit
-    operator-set value (or the documented module default 1.0 / 0.20).
+    `result.cost_threshold` / `gap_threshold_m` may be None only on
+    legacy/manual callers that bypass `rebuild_result_for_session` /
+    `recompute_result_for_session`. In that case fall back to
+    `PairingTuning.default()` so those test-only / migration surfaces
+    still render deterministically.
 
     Empty `triangulated_by_path` ⇒ empty segments (no log noise;
     "nothing to fit" is not an error)."""

@@ -1001,6 +1001,15 @@ class State:
                     merged.frames_live = list(existing.frames_live)
                 if not merged.frames_server_post and existing.frames_server_post:
                     merged.frames_server_post = list(existing.frames_server_post)
+                if merged.live_config_used is None and existing.live_config_used is not None:
+                    merged.live_config_used = existing.live_config_used.model_copy(deep=True)
+                if (
+                    merged.server_post_config_used is None
+                    and existing.server_post_config_used is not None
+                ):
+                    merged.server_post_config_used = existing.server_post_config_used.model_copy(
+                        deep=True
+                    )
                 # Preserve the previous run's wall-clock when the
                 # incoming pitch doesn't carry one (e.g., live-frames
                 # merge after server_post had already completed).
