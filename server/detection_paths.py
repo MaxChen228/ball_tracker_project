@@ -126,7 +126,16 @@ def set_algorithm_frames(
     algorithm_id: str,
     frames: list[FramePayload],
 ) -> None:
-    """Store frames under `algorithm_id` and keep the legacy old field
+    """**Low-level helper. Prefer `stamp_server_post_run`** for
+    server-side detection results — it maintains the snapshot ↔
+    frames invariant atomically. This function does NOT mutate
+    `server_post_config_used`, so calling it on its own with an
+    `algorithm_id` that doesn't match the current snapshot's id will
+    leave the invariant `frames_server_post == frames produced under
+    server_post_config_used` temporarily broken until the caller also
+    updates the snapshot.
+
+    Store frames under `algorithm_id` and keep the legacy old field
     in sync when applicable so existing path-keyed readers continue to
     see what they expect:
 

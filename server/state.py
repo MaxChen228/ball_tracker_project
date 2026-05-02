@@ -1017,6 +1017,20 @@ class State:
                 # merge after server_post had already completed).
                 if merged.server_post_ran_at is None and existing.server_post_ran_at is not None:
                     merged.server_post_ran_at = existing.server_post_ran_at
+                # Phase 6b dict-level merge: existing buckets that the
+                # incoming pitch lacks must survive. Without this,
+                # running v11→v12 (which arrives with only v12 in
+                # frames_by_algorithm because the writer rebuilt the
+                # pitch from current state) would lose v11's
+                # accumulated frames. Incoming wins on key collision
+                # (it's the latest write); missing keys carry over
+                # from existing. Same logic for config_used_by_algorithm.
+                for alg_id, frames in existing.frames_by_algorithm.items():
+                    if alg_id not in merged.frames_by_algorithm:
+                        merged.frames_by_algorithm[alg_id] = list(frames)
+                for alg_id, snap in existing.config_used_by_algorithm.items():
+                    if alg_id not in merged.config_used_by_algorithm:
+                        merged.config_used_by_algorithm[alg_id] = snap.model_copy(deep=True)
                 # Preserve the original creation stamp across re-records
                 # (server_post backfill, live merge). If the existing record
                 # lacked one (legacy / synthetic before this field shipped),

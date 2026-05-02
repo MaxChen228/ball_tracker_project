@@ -19,9 +19,11 @@ import logging
 from typing import TYPE_CHECKING
 
 from detection_paths import (
+    algorithm_id_for_path,
     get_path_frames,
     normalize_paths,
     paths_for_pitch,
+    pitch_with_algorithm_frames,
     pitch_with_path_frames,
 )
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
@@ -121,6 +123,70 @@ def triangulate_pair(
         (cal_b.image_width_px, cal_b.image_height_px) if cal_b else None,
     )
     return triangulate_cycle(a_scaled, b_scaled, source=source, tuning=tuning)
+
+
+def _triangulate_non_current_algorithms(
+    state: "State",
+    a: PitchPayload | None,
+    b: PitchPayload | None,
+    sync_error: str | None,
+    result: SessionResult,
+) -> None:
+    """Phase 7 multi-algorithm result builder.
+
+    The path-loop in `rebuild_result_for_session` triangulates only
+    the *current* server_post slot (whatever
+    `server_post_config_used.algorithm_id` names), feeding it into
+    `triangulated_by_path["server_post"]`. The dict mirror fans that
+    one entry into `triangulated_by_algorithm[<current_alg>]`.
+
+    But Phase 7's `stamp_server_post_run` keeps history: running v11
+    then v12 leaves *both* algorithms' frames in
+    `pitch.frames_by_algorithm`. This helper triangulates each
+    non-current algorithm bucket and writes it directly into
+    `result.triangulated_by_algorithm[<alg_id>]` so the events list,
+    viewer, and any future Phase-8 N-track UI can read v11 trajectories
+    without re-running detection.
+
+    Skipped buckets:
+    - `ios_capture_time` (the live data source) — already surfaced via
+      the live aggregator; not a server-side triangulation target.
+    - The *current* server_post alg — already handled by the path-loop.
+    """
+    if sync_error is not None or a is None or b is None:
+        return
+    from algorithms import IOS_CAPTURE_TIME
+
+    current_alg = algorithm_id_for_path(a, DetectionPath.server_post)
+    candidate_algs: set[str] = (
+        set(a.frames_by_algorithm) | set(b.frames_by_algorithm)
+    )
+    for alg_id in sorted(candidate_algs):
+        if alg_id in (IOS_CAPTURE_TIME, current_alg):
+            continue
+        frames_a = a.frames_by_algorithm.get(alg_id) or []
+        frames_b = b.frames_by_algorithm.get(alg_id) or []
+        if not frames_a or not frames_b:
+            continue
+        try:
+            pts = triangulate_pair(
+                state,
+                pitch_with_algorithm_frames(a, alg_id),
+                pitch_with_algorithm_frames(b, alg_id),
+                source="server",
+            )
+        except Exception as exc:
+            logger.warning(
+                "non-current-algorithm triangulation failed sid=%s alg=%s: %s",
+                result.session_id, alg_id, exc,
+            )
+            continue
+        result.triangulated_by_algorithm[alg_id] = pts
+        result.algorithms_completed.add(alg_id)
+        result.frame_counts_by_algorithm[alg_id] = {
+            "A": len(frames_a),
+            "B": len(frames_b),
+        }
 
 
 def live_frames_for_camera_locked(
@@ -284,6 +350,16 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             # has finalized frames on the sole uploaded camera it should be
             # surfaced as completed instead of lingering in "stopped".
             result.paths_completed.add(path.value)
+
+    # Phase 7 multi-algorithm: triangulate every algorithm bucket
+    # present in `pitch.frames_by_algorithm` so a v11 → v12 rerun
+    # leaves both algorithms' trajectories surfaced on the result.
+    # The path-loop above already covers the *current* server_post
+    # alg via the after-validator mirror; this loop handles the
+    # non-current ones (the "history" the dict accumulates). live
+    # path is excluded — `ios_capture_time` is already surfaced via
+    # the live aggregator at the top of this function.
+    _triangulate_non_current_algorithms(state, a, b, sync_error, result)
 
     authority: list[TriangulatedPoint] = []
     for path in (

@@ -198,6 +198,52 @@ def test_stamp_server_post_run_rerun_same_algorithm_overwrites():
     assert len(p.frames_server_post) == 1
 
 
+def test_state_record_merge_preserves_existing_dict_buckets(tmp_path, monkeypatch):
+    """Phase 7-fix Block 2: state.record's in-memory merge runs
+    BEFORE persist (where the after-validator regenerates dict from
+    old fields). If existing pitch has v11 in dict but the incoming
+    pitch was constructed without v11 (e.g., a fresh re-record
+    carrying only v12), the merge must carry v11 forward — otherwise
+    multi-algorithm history is silently dropped on disk."""
+    import algorithms as algorithms_mod
+    from detection_paths import stamp_server_post_run
+    import main
+
+    fake = algorithms_mod.AlgorithmEntry(
+        algorithm_id="v12_test",
+        label="test",
+        description="test",
+        detector=algorithms_mod._REGISTRY["v11_hsv_cc"].detector,
+    )
+    monkeypatch.setitem(algorithms_mod._REGISTRY, "v12_test", fake)
+
+    s = main.State(data_dir=tmp_path)
+    s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef",
+                sync_anchor_timestamp_s=0.0)
+
+    # First record: stamp v11 frames.
+    p1 = _pitch()
+    stamp_server_post_run(p1, _snapshot("v11_hsv_cc"), [_frame(1), _frame(2)])
+    s.record(p1)
+
+    # Second record: a NEW pitch object (simulating a re-record from
+    # an upload that doesn't know about v11 history) carrying only
+    # v12. The merge must still preserve v11 in the dict.
+    p2 = _pitch()
+    stamp_server_post_run(p2, _snapshot("v12_test"), [_frame(10), _frame(11), _frame(12)])
+    s.record(p2)
+
+    merged = s.pitches[("A", "s_deadbeef")]
+    assert "v11_hsv_cc" in merged.frames_by_algorithm, (
+        "v11 history was lost across re-record; "
+        "state.record merge must preserve existing dict buckets"
+    )
+    assert len(merged.frames_by_algorithm["v11_hsv_cc"]) == 2
+    assert len(merged.frames_by_algorithm["v12_test"]) == 3
+    assert "v11_hsv_cc" in merged.config_used_by_algorithm
+    assert "v12_test" in merged.config_used_by_algorithm
+
+
 def test_pitch_with_algorithm_frames_projects_into_server_post_slot():
     """Counterpart to `pitch_with_path_frames`. Downstream code
     (reconstruct, rays) reads `frames_server_post` on the clone."""
