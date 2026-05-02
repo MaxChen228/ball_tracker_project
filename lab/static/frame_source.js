@@ -177,13 +177,15 @@ class FrameSource {
     let gopEnd = frameIdx + 1;
     while (gopEnd < this._samples.length && !this._samples[gopEnd].isSync) gopEnd++;
 
-    if (this._runKey === gopStart && this._runTail >= gopEnd - 1) {
-      // Entire GOP already submitted; decoder will emit any frame in it.
-      return;
-    }
-
-    // Submit the GOP in DTS (decode) order. Decoder treats the leading key
-    // sample as IDR → flushes prior reference state automatically.
+    // No short-circuit on "GOP already submitted". Caller has already verified
+    // the frame is NOT in cache (getFrame's `_cache.get` miss → pending insert
+    // → here). If the GOP was decoded earlier and the bitmap got LRU-evicted
+    // (BITMAP_CACHE_MAX=240), the decoder has already emitted+forgotten this
+    // frame — it will NOT re-emit on its own. Without re-submit, the pending
+    // Promise hangs forever, scheduleScrubPaint awaits forever, and the UI
+    // freezes mid-video while head/tail still works (they hit fresh GOPs).
+    // The cost of re-submit is one GOP re-decode (~50ms cold) per cache-miss
+    // revisit; the decoder treats the leading key chunk as IDR and resets.
     const span = this._samples.slice(gopStart, gopEnd);
     span.sort((a, b) => a.dts - b.dts);
     for (const s of span) {
