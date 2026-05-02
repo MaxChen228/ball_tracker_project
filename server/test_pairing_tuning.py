@@ -45,6 +45,33 @@ def test_corrupt_tuning_json_falls_back_to_default(tmp_path, monkeypatch):
     assert s.pairing_tuning() == PairingTuning.default()
 
 
+def test_rebuild_result_seeds_current_global_pairing_tuning(tmp_path, monkeypatch):
+    import main
+    from pairing_tuning import PairingTuning
+    from session_results import rebuild_result_for_session
+
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    s = main.state
+    s.set_pairing_tuning(PairingTuning(cost_threshold=0.12, gap_threshold_m=0.07))
+
+    sid = "s_dead00f1"
+    pitch_a = main.PitchPayload(
+        camera_id="A",
+        session_id=sid,
+        sync_id="sy_deadbeef",
+        sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        frames_live=[],
+        frames_server_post=[],
+    )
+    s.record(pitch_a)
+
+    result = rebuild_result_for_session(s, sid)
+    assert result.cost_threshold == pytest.approx(0.12)
+    assert result.gap_threshold_m == pytest.approx(0.07)
+
+
 # ---------- triangulate_cycle fan-out: cost / gap filter behaviour ----------
 
 def _build_minimal_pitches():

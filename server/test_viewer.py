@@ -819,6 +819,28 @@ def test_apply_tuning_patches_in_place_no_reload():
     assert "gapInput.value = String(cm)" in body
 
 
+def test_viewer_route_falls_back_to_saved_global_tuning_for_legacy_result():
+    from pairing_tuning import PairingTuning
+
+    client = TestClient(app)
+    K, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_rig()
+    session_id = sid(801)
+    pitch_a = _pitch("A", 801, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
+    pitch_b = _pitch("B", 801, K, R_b, t_b, H_b, np.array([[0.1, 0.3, 1.0]]))
+    main.state.record(pitch_a)
+    result = main.state.record(pitch_b)
+    main.state.set_pairing_tuning(PairingTuning(cost_threshold=0.12, gap_threshold_m=0.07))
+    result.cost_threshold = None
+    result.gap_threshold_m = None
+    main.state.results[session_id] = result
+
+    body = client.get(f"/viewer/{session_id}").text
+    assert 'value="0.12"' in body
+    assert '>0.12<' in body
+    assert 'value="7"' in body
+    assert '≤ 7 cm' in body
+
+
 def test_viewer_page_run_server_post_form_carries_preset_selector():
     """Operator picks the preset to detect under via an inline <select>
     on the Run-server form. Default selected option is the dashboard's
