@@ -353,11 +353,9 @@ class PitchPayload(BaseModel):
         `frames_by_algorithm[active_server_post_algorithm_id]`. Returns
         `[]` when no pointer is set (server_post never ran for this
         pitch) — no silent fallback to a legacy bucket per CLAUDE.md.
-        The `_collapse_legacy_pitch_flat_input` shim + the
-        `migrate_disk_pitches.py` script eagerly stamp the pointer
-        whenever legacy input declares server_post frames, so the
-        absent-pointer + non-empty-bucket case is unreachable for
-        on-disk records.
+        `migrate_disk_pitches.py` eagerly stamps the pointer whenever
+        legacy input declared server_post frames, so the absent-pointer
+        + non-empty-bucket case is unreachable for on-disk records.
 
         Read-only — write via `detection_paths.stamp_server_post_run`."""
         bucket = self.active_server_post_algorithm_id

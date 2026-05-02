@@ -103,7 +103,28 @@ def _resolve_server_post_alg_for_result(
     falls back. Returns None when neither pitch has a server_post
     pointer (live-only flow). Result writers that need to file
     `server_post`-path frames into `triangulated_by_algorithm` call
-    this BEFORE the path-loop runs so the bucket name is known."""
+    this BEFORE the path-loop runs so the bucket name is known.
+
+    Cross-cam mismatch (A=v11, B=v12) logs a warning and picks A's
+    pointer; the path-loop then triangulates B's frames against A's
+    bucket. `_triangulate_non_current_algorithms` handles the alg
+    each side does NOT share so the un-paired side still surfaces.
+    Operator action to recover: rerun `/run_server_post` on both cams
+    with the same preset / algorithm."""
+    if (
+        a is not None and b is not None
+        and a.active_server_post_algorithm_id is not None
+        and b.active_server_post_algorithm_id is not None
+        and a.active_server_post_algorithm_id != b.active_server_post_algorithm_id
+    ):
+        logger.warning(
+            "session %s server_post pointer mismatch A=%s B=%s — "
+            "path-loop will pair B's frames into A's bucket; rerun "
+            "/run_server_post on both cams to recover",
+            a.session_id,
+            a.active_server_post_algorithm_id,
+            b.active_server_post_algorithm_id,
+        )
     for pitch in (a, b):
         if pitch is not None and pitch.active_server_post_algorithm_id is not None:
             return pitch.active_server_post_algorithm_id
@@ -706,8 +727,10 @@ def recompute_result_for_session(
             result.triangulated_by_algorithm[path_alg] = pts
             result.algorithms_completed.add(path_alg)
 
-    # Phase 7-fix-2: also triangulate non-current algorithm buckets
-    # so Recompute preserves multi-alg history the same way rebuild does.
+    # Also triangulate non-current algorithm buckets so Recompute
+    # preserves multi-algorithm history the same way `rebuild_result_for_session`
+    # does — without this, recomputing with a v12 active pointer
+    # would drop v11 trajectories from the result.
     _triangulate_non_current_algorithms(
         state, a, b, sync_error, result,
     )
