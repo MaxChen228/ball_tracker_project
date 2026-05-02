@@ -229,6 +229,9 @@ def test_stamp_segments_on_result_populates_segments_for_ballistic_input():
         camera_a_received=True,
         camera_b_received=True,
         triangulated=pts,
+        triangulated_by_algorithm={"v11_hsv_cc": pts},
+        algorithms_completed={"v11_hsv_cc"},
+        active_server_post_algorithm_id="v11_hsv_cc",
     )
     stamp_segments_on_result(result)
     assert len(result.segments) == 1, [s.model_dump() for s in result.segments]

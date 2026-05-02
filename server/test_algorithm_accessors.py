@@ -113,14 +113,19 @@ def test_set_algorithm_frames_for_other_alg_leaves_frames_server_post_alone():
     assert "v11_hsv_cc" in p.frames_by_algorithm  # mirrored from frames_server_post
 
 
-def test_set_algorithm_frames_legacy_pre_snapshot_writes_through_to_server_post():
-    """Pre-snapshot pitches: `server_post_config_used is None`. The
-    legacy bucket fallback is `v11_hsv_cc`; writing under that id
-    should still sync `frames_server_post` so existing readers see
-    the new frames."""
+def test_set_algorithm_frames_alone_does_not_surface_as_server_post():
+    """`set_algorithm_frames` is the low-level dict writer. Without a
+    matching `active_server_post_algorithm_id` pointer (which only
+    `stamp_server_post_run` stamps), the `frames_server_post`
+    projection returns []. This is the explicit no-silent-fallback
+    contract: callers that mean "this is the server_post run" use the
+    higher-level helper, which atomically stamps pointer + snapshot
+    + frames."""
     p = _pitch()
     set_algorithm_frames(p, "v11_hsv_cc", [_frame(1)])
-    assert len(p.frames_server_post) == 1
+    assert "v11_hsv_cc" in p.frames_by_algorithm
+    assert p.active_server_post_algorithm_id is None
+    assert p.frames_server_post == []
 
 
 def test_stamp_server_post_run_accumulates_two_algorithms(monkeypatch):

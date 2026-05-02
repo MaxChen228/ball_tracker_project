@@ -1198,9 +1198,12 @@ class State:
                 camera_a_received=False,
                 camera_b_received=False,
             )
-        updated = existing.model_copy(
-            update={"server_post_config_used": snapshot}
-        )
+        # Dict-canonical: stamp the new snapshot into
+        # `config_used_by_algorithm` and update the active pointer.
+        # `model_copy` is shallow; we mutate the cloned dict directly.
+        updated = existing.model_copy(deep=True)
+        updated.config_used_by_algorithm[snapshot.algorithm_id] = snapshot
+        updated.active_server_post_algorithm_id = snapshot.algorithm_id
         self.store_result(updated)
         return updated
 

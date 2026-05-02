@@ -69,6 +69,13 @@ def collapse_pitch_dict(d: dict) -> tuple[dict, bool]:
     if flat_server:
         bucket = srv_alg if srv_alg is not None else _LEGACY_PRE_SNAPSHOT
         d.setdefault("frames_by_algorithm", {}).setdefault(bucket, flat_server)
+        # Stamp pointer eagerly so the post-flip schema's
+        # `frames_server_post` computed_field projection (which has
+        # NO silent legacy fallback per CLAUDE.md) surfaces these
+        # frames. Without this, pre-snapshot legacy records would
+        # land on disk with frames in the v11 bucket but no pointer
+        # → projection returns [].
+        d.setdefault("active_server_post_algorithm_id", bucket)
     if flat_live_cfg is not None:
         d.setdefault("config_used_by_algorithm", {}).setdefault(_IOS_CAPTURE_TIME, flat_live_cfg)
     if flat_server_cfg is not None and srv_alg is not None:

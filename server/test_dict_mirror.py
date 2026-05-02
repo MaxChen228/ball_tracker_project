@@ -78,16 +78,33 @@ def test_frames_server_post_projects_from_active_pointer_bucket():
     assert p.server_post_config_used.algorithm_id == "v11_hsv_cc"
 
 
-def test_frames_server_post_falls_back_to_legacy_pre_snapshot_bucket():
-    """When no `active_server_post_algorithm_id` is set, the
-    `frames_server_post` computed view reads
-    `frames_by_algorithm[_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID]` so that
-    pre-flip / pre-snapshot disk records still surface their frames."""
+def test_frames_server_post_returns_empty_without_pointer():
+    """No silent fallback per CLAUDE.md: when
+    `active_server_post_algorithm_id` is None the projection returns
+    `[]` regardless of what `frames_by_algorithm` happens to hold.
+    The collapse shim + migration script stamp the pointer eagerly
+    so legitimate legacy pre-snapshot records always have one when
+    they arrive at this property."""
     p = _base_pitch(frames_by_algorithm={"v11_hsv_cc": [_frame(1)]})
     assert p.active_server_post_algorithm_id is None
-    assert len(p.frames_server_post) == 1
-    # No snapshot in dict → server_post_config_used returns None
+    assert p.frames_server_post == []
     assert p.server_post_config_used is None
+
+
+def test_collapse_shim_stamps_active_pointer_when_only_flat_server_frames_present():
+    """Pre-snapshot legacy disk record: `frames_server_post` populated
+    but no `server_post_config_used`. The collapse shim must still
+    stamp `active_server_post_algorithm_id` (using the legacy bucket
+    `v11_hsv_cc`) so the post-collapse projection surfaces the frames."""
+    raw = {
+        "camera_id": "A",
+        "session_id": "s_deadbeef",
+        "video_start_pts_s": 0.0,
+        "frames_server_post": [_frame(1).model_dump(), _frame(2).model_dump()],
+    }
+    p = PitchPayload.model_validate(raw)
+    assert p.active_server_post_algorithm_id == "v11_hsv_cc"
+    assert len(p.frames_server_post) == 2
 
 
 def test_live_config_used_projects_from_ios_capture_time_bucket():
@@ -335,20 +352,36 @@ def test_result_server_post_alg_id_falls_back_when_no_snapshot():
     assert algorithms.DEFAULT_ALGORITHM_ID in r.algorithms_completed
 
 
-def test_persist_result_json_syncs_dict_after_mutation():
+def test_persist_result_json_drops_flat_keys_from_disk_payload():
+    """Disk shape is dict-canonical. Wire (model_dump_json without
+    exclude) keeps the flat surfaces via computed_field default
+    serialize."""
     from schemas import persist_result_json
     import json
 
     r = SessionResult(
         session_id="s_deadbeef",
         camera_a_received=True, camera_b_received=True,
+        triangulated_by_algorithm={"v11_hsv_cc": [_tri_point()]},
+        algorithms_completed={"v11_hsv_cc"},
+        active_server_post_algorithm_id="v11_hsv_cc",
     )
-    r.triangulated_by_path = {"server_post": [_tri_point()]}
-    r.paths_completed = {"server_post"}
     blob = persist_result_json(r)
     parsed = json.loads(blob)
-    assert algorithms.DEFAULT_ALGORITHM_ID in parsed["triangulated_by_algorithm"]
-    assert algorithms.DEFAULT_ALGORITHM_ID in parsed["algorithms_completed"]
+    # Disk: dict-only canonical
+    assert "triangulated_by_path" not in parsed
+    assert "segments_by_path" not in parsed
+    assert "frame_counts_by_path" not in parsed
+    assert "paths_completed" not in parsed
+    assert "live_config_used" not in parsed
+    assert "server_post_config_used" not in parsed
+    assert parsed["active_server_post_algorithm_id"] == "v11_hsv_cc"
+    assert "v11_hsv_cc" in parsed["triangulated_by_algorithm"]
+    assert "v11_hsv_cc" in parsed["algorithms_completed"]
+    # Reload — flat surfaces project from dict via computed_field.
+    r2 = SessionResult.model_validate_json(blob)
+    assert "server_post" in r2.triangulated_by_path
+    assert r2.paths_completed == {"server_post"}
 
 
 # --- Drift guards ----------------------------------------------------------

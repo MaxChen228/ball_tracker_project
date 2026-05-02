@@ -44,17 +44,17 @@ def test_legacy_points_no_silent_fallback_to_live_when_server_post_requested():
     from schemas import DetectionPath, SessionResult
     from session_results import stamp_segments_on_result
 
+    from schemas import IOS_CAPTURE_TIME_ALGORITHM_ID
     live_pt = _make_triangulated_point()
     result = SessionResult(
         session_id="s_deadbeef",
         camera_a_received=True,
         camera_b_received=True,
-    )
-    result.triangulated_by_path = {
-        DetectionPath.live.value: [live_pt],
+        triangulated_by_algorithm={IOS_CAPTURE_TIME_ALGORITHM_ID: [live_pt]},
+        algorithms_completed={IOS_CAPTURE_TIME_ALGORITHM_ID},
         # server_post entry absent → simulates "server_post never ran /
         # produced no triangulation"
-    }
+    )
 
     stamp_segments_on_result(
         result,
@@ -74,15 +74,15 @@ def test_legacy_points_uses_live_only_when_server_post_not_requested():
     from schemas import DetectionPath, SessionResult
     from session_results import stamp_segments_on_result
 
+    from schemas import IOS_CAPTURE_TIME_ALGORITHM_ID
     live_pt = _make_triangulated_point()
     result = SessionResult(
         session_id="s_deadbeef",
         camera_a_received=True,
         camera_b_received=True,
+        triangulated_by_algorithm={IOS_CAPTURE_TIME_ALGORITHM_ID: [live_pt]},
+        algorithms_completed={IOS_CAPTURE_TIME_ALGORITHM_ID},
     )
-    result.triangulated_by_path = {
-        DetectionPath.live.value: [live_pt],
-    }
 
     stamp_segments_on_result(result, legacy_points_path=DetectionPath.live)
 

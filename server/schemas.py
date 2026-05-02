@@ -258,6 +258,11 @@ def _collapse_legacy_pitch_flat_input(data: dict) -> dict:
         bucket = srv_alg if srv_alg is not None else _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
         fba = data.setdefault("frames_by_algorithm", {})
         fba.setdefault(bucket, flat_server)
+        # Stamp the pointer eagerly. CLAUDE.md forbids silent fallback,
+        # so the `frames_server_post` computed projection can't infer
+        # the bucket at read time. Anchor it here whenever the legacy
+        # input declares server_post frames (snapshot or no snapshot).
+        data.setdefault("active_server_post_algorithm_id", bucket)
     if flat_live_cfg is not None:
         cba = data.setdefault("config_used_by_algorithm", {})
         cba.setdefault(IOS_CAPTURE_TIME_ALGORITHM_ID, flat_live_cfg)
@@ -269,33 +274,98 @@ def _collapse_legacy_pitch_flat_input(data: dict) -> dict:
     return data
 
 
-def _mirror_result_old_into_dicts(result: "SessionResult") -> None:
-    """Same idempotent mirror for SessionResult. Maps the two legacy
-    `_by_path` keys ("live", "server_post") to algorithm ids and
-    populates the matching `_by_algorithm` slots."""
-    srv_alg = _resolve_server_post_algorithm_id(result.server_post_config_used)
-    path_to_alg = {
-        "live": IOS_CAPTURE_TIME_ALGORITHM_ID,
-        "server_post": srv_alg,
-    }
-    for path_key, alg_id in path_to_alg.items():
-        pts = result.triangulated_by_path.get(path_key)
-        if pts:
-            result.triangulated_by_algorithm[alg_id] = list(pts)
-        segs = result.segments_by_path.get(path_key)
-        if segs:
-            result.segments_by_algorithm[alg_id] = list(segs)
-        counts = result.frame_counts_by_path.get(path_key)
-        if counts:
-            result.frame_counts_by_algorithm[alg_id] = dict(counts)
-        if path_key in result.paths_completed:
-            result.algorithms_completed.add(alg_id)
-    if result.live_config_used is not None:
-        result.config_used_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = result.live_config_used
-    if result.server_post_config_used is not None:
-        result.config_used_by_algorithm[
-            result.server_post_config_used.algorithm_id
-        ] = result.server_post_config_used
+_RESULT_PERSIST_EXCLUDE = {
+    "triangulated_by_path",
+    "segments_by_path",
+    "frame_counts_by_path",
+    "paths_completed",
+    "live_config_used",
+    "server_post_config_used",
+}
+
+
+def _collapse_legacy_result_flat_input(data: dict) -> dict:
+    """Transitional before-validator: pop legacy SessionResult flat
+    keys from raw input and route them into the canonical dicts +
+    active pointer.
+
+    Phase 2 of the dict-canonical flip leaves disk JSON containing
+    `triangulated_by_path` / `segments_by_path` / `frame_counts_by_path`
+    / `paths_completed` / `live_config_used` /
+    `server_post_config_used`; with `extra="forbid"` and those names
+    now bound to `@computed_field` this would reject every pre-flip
+    record. This shim absorbs the legacy keys into:
+
+    - `triangulated_by_algorithm[ios_capture_time]` / `[<alg>]`
+    - `segments_by_algorithm[ios_capture_time]` / `[<alg>]`
+    - `frame_counts_by_algorithm[ios_capture_time]` / `[<alg>]`
+    - `algorithms_completed` ← `paths_completed` (mapped through alg id)
+    - `config_used_by_algorithm[ios_capture_time]` ← `live_config_used`
+    - `config_used_by_algorithm[<alg>]` ← `server_post_config_used`
+    - `active_server_post_algorithm_id` ← `<alg>` from snapshot
+    """
+    flat_tri = data.pop("triangulated_by_path", None)
+    flat_segs = data.pop("segments_by_path", None)
+    flat_counts = data.pop("frame_counts_by_path", None)
+    flat_paths = data.pop("paths_completed", None)
+    flat_live_cfg = data.pop("live_config_used", None)
+    flat_server_cfg = data.pop("server_post_config_used", None)
+
+    if flat_server_cfg is not None:
+        srv_alg = (
+            flat_server_cfg.get("algorithm_id")
+            if isinstance(flat_server_cfg, dict)
+            else getattr(flat_server_cfg, "algorithm_id", None)
+        )
+    else:
+        srv_alg = None
+    srv_bucket = srv_alg if srv_alg is not None else _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
+
+    server_post_observed = False
+
+    def _route_path_dict(legacy: dict | None, target_key: str) -> bool:
+        nonlocal server_post_observed
+        saw_srv = False
+        if not legacy:
+            return saw_srv
+        target = data.setdefault(target_key, {})
+        live_val = legacy.get("live")
+        if live_val:
+            target.setdefault(IOS_CAPTURE_TIME_ALGORITHM_ID, live_val)
+        server_val = legacy.get("server_post")
+        if server_val:
+            target.setdefault(srv_bucket, server_val)
+            saw_srv = True
+            server_post_observed = True
+        return saw_srv
+
+    _route_path_dict(flat_tri, "triangulated_by_algorithm")
+    _route_path_dict(flat_segs, "segments_by_algorithm")
+    _route_path_dict(flat_counts, "frame_counts_by_algorithm")
+
+    if flat_paths:
+        completed = data.setdefault("algorithms_completed", [])
+        completed_set = set(completed) if isinstance(completed, list) else set(completed)
+        if "live" in flat_paths:
+            completed_set.add(IOS_CAPTURE_TIME_ALGORITHM_ID)
+        if "server_post" in flat_paths:
+            completed_set.add(srv_bucket)
+            server_post_observed = True
+        data["algorithms_completed"] = sorted(completed_set)
+    if flat_live_cfg is not None:
+        cba = data.setdefault("config_used_by_algorithm", {})
+        cba.setdefault(IOS_CAPTURE_TIME_ALGORITHM_ID, flat_live_cfg)
+    if flat_server_cfg is not None and srv_alg is not None:
+        cba = data.setdefault("config_used_by_algorithm", {})
+        cba.setdefault(srv_alg, flat_server_cfg)
+        data.setdefault("active_server_post_algorithm_id", srv_alg)
+    # Anchor the active pointer eagerly whenever any legacy server_post
+    # surface declared data — same eager-stamp contract as PitchPayload.
+    # CLAUDE.md forbids the read-side projection from inferring a
+    # bucket via fallback.
+    if server_post_observed:
+        data.setdefault("active_server_post_algorithm_id", srv_bucket)
+    return data
 
 
 def persist_pitch_json(pitch: "PitchPayload") -> str:
@@ -312,9 +382,12 @@ def persist_pitch_json(pitch: "PitchPayload") -> str:
 
 
 def persist_result_json(result: "SessionResult") -> str:
-    """Mirror twin of `persist_pitch_json` for `SessionResult`."""
-    _mirror_result_old_into_dicts(result)
-    return result.model_dump_json()
+    """Serialize a SessionResult to disk-canonical JSON: dict-keyed
+    buckets + active pointer, with the six legacy flat surfaces
+    excluded. Wire shape (dashboard / viewer JSON) keeps the flat
+    surfaces via computed_field default-serialize so clients are
+    unaffected."""
+    return result.model_dump_json(exclude=_RESULT_PERSIST_EXCLUDE)
 
 
 def _migrate_legacy_used_fields_into_per_path(
@@ -508,13 +581,19 @@ class PitchPayload(BaseModel):
     def frames_server_post(self) -> list[FramePayload]:
         """Finalized server-side post-pass detections decoded from the
         uploaded MOV. Derived view of
-        `frames_by_algorithm[active_server_post_algorithm_id]`,
-        falling back to `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID` for
-        pre-snapshot records. Read-only — write via
-        `detection_paths.stamp_server_post_run`."""
+        `frames_by_algorithm[active_server_post_algorithm_id]`. Returns
+        `[]` when no pointer is set (server_post never ran for this
+        pitch) — no silent fallback to a legacy bucket per CLAUDE.md.
+        The `_collapse_legacy_pitch_flat_input` shim + the
+        `migrate_disk_pitches.py` script eagerly stamp the pointer
+        whenever legacy input declares server_post frames, so the
+        absent-pointer + non-empty-bucket case is unreachable for
+        on-disk records.
+
+        Read-only — write via `detection_paths.stamp_server_post_run`."""
         bucket = self.active_server_post_algorithm_id
         if bucket is None:
-            bucket = _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
+            return []
         return list(self.frames_by_algorithm.get(bucket, []))
 
     @computed_field
@@ -598,9 +677,6 @@ class SessionResult(BaseModel):
     # this session. Drives the viewer's Rerun button label / age stamp.
     server_post_ran_at: float | None = None
     triangulated: list[TriangulatedPoint] = []
-    triangulated_by_path: dict[str, list[TriangulatedPoint]] = Field(default_factory=dict)
-    frame_counts_by_path: dict[str, dict[str, int]] = Field(default_factory=dict)
-    paths_completed: set[str] = Field(default_factory=set)
     aborted: bool = False
     abort_reasons: dict[str, str] = Field(default_factory=dict)
     points: list[TriangulatedPoint] = []
@@ -612,29 +688,18 @@ class SessionResult(BaseModel):
     # gate is no longer per-session — each algorithm owns its own
     # threshold via `algorithms.cost_threshold_for_algorithm`.
     gap_threshold_m: float | None = None
-    # Per-path frozen detection-config snapshots, mirrored from each
-    # pitch's `*_config_used` at result-build time using A-wins/B-fallback
-    # aggregation (a divergence between A and B is logged as warning,
-    # not raised — operator edited mid-cycle is diagnostic, not crashable).
-    # Drives events-list / viewer "Live: <preset> | Svr: <preset>" chip
-    # plus the popover that resolves H/S/V values from the preset name.
-    live_config_used: DetectionConfigSnapshotPayload | None = None
-    server_post_config_used: DetectionConfigSnapshotPayload | None = None
     # Multi-segment ballistic fit. Populated by `find_segments` at result
     # build / recompute time so dashboard + viewer can paint fit curves +
     # speed badges without running the segmenter at view time. Empty list
     # = no segments found (too few points, or pure noise). Sample curves
     # are NOT persisted — clients reconstruct from p0/v0/t_anchor.
     segments: list[SegmentRecord] = []
-    # Per-path fit surfaces. `segments` above remains the legacy single
-    # "active" surface (prefer server_post, else live) for dashboard and
-    # older consumers; viewer PATH switching uses this mapping so live and
-    # server_post each carry their own fit curves / speed badge semantics.
-    segments_by_path: dict[str, list[SegmentRecord]] = Field(default_factory=dict)
-    # Phase 6a additive mirrors. Same canonical-direction story as
-    # PitchPayload: the `_by_path` fields above remain authoritative;
-    # these dicts are auto-derived by the after-validator + the runtime
-    # `_mirror_result_old_into_dicts` helper called by writers.
+    # Canonical algorithm-id-keyed buckets. Each algorithm whose
+    # frames triangulated for this session owns one entry. The flat
+    # `triangulated_by_path` / `segments_by_path` / `frame_counts_by_path`
+    # / `paths_completed` / `live_config_used` / `server_post_config_used`
+    # surfaces below are `@computed_field` projections; writers MUST
+    # mutate the dicts.
     triangulated_by_algorithm: dict[str, list[TriangulatedPoint]] = Field(default_factory=dict)
     segments_by_algorithm: dict[str, list[SegmentRecord]] = Field(default_factory=dict)
     frame_counts_by_algorithm: dict[str, dict[str, int]] = Field(default_factory=dict)
@@ -642,20 +707,112 @@ class SessionResult(BaseModel):
     config_used_by_algorithm: dict[str, DetectionConfigSnapshotPayload] = Field(
         default_factory=dict
     )
+    # Pointer identifying which algorithm currently owns the
+    # `server_post` slot — same semantics as `PitchPayload`. Writers
+    # set this whenever a server-side detection run completes.
+    active_server_post_algorithm_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_legacy_used_fields(cls, data):
+    def _migrate_then_collapse_legacy(cls, data):
+        """Two before-stage migrations chained into one validator
+        (combined to make the order deterministic — multiple
+        `mode='before'` validators on one class do not guarantee
+        declaration order).
+
+        Step 1 — `_migrate_legacy_used_fields_into_per_path`: pre-phase-2
+        records carried a single `(hsv_range_used, shape_gate_used,
+        live_preset_name)` trio; fold into per-path snapshots.
+
+        Step 2 — `_collapse_legacy_result_flat_input` (transitional,
+        phase 3 deletes this step): pop the six legacy flat keys
+        (now `@computed_field`) from the input and route them into
+        the canonical dicts + `active_server_post_algorithm_id`."""
         if not isinstance(data, dict):
             return data
-        return _migrate_legacy_used_fields_into_per_path(
+        data = _migrate_legacy_used_fields_into_per_path(
             data, target_paths=("live", "server_post"),
         )
+        return _collapse_legacy_result_flat_input(data)
 
-    @model_validator(mode="after")
-    def _mirror_into_by_algorithm(self) -> "SessionResult":
-        _mirror_result_old_into_dicts(self)
-        return self
+    @computed_field
+    @property
+    def triangulated_by_path(self) -> dict[str, list[TriangulatedPoint]]:
+        """Per-path triangulated points. Derived view of
+        `triangulated_by_algorithm`: `live` ← `[ios_capture_time]`,
+        `server_post` ← `[active_server_post_algorithm_id]` (or the
+        legacy pre-snapshot bucket fallback). Empty path keys are
+        dropped so callers iterating `triangulated_by_path.items()`
+        don't see ghost rows."""
+        out: dict[str, list[TriangulatedPoint]] = {}
+        live = self.triangulated_by_algorithm.get(IOS_CAPTURE_TIME_ALGORITHM_ID)
+        if live:
+            out["live"] = list(live)
+        srv_bucket = self.active_server_post_algorithm_id
+        if srv_bucket is None:
+            srv_bucket = _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
+        srv = self.triangulated_by_algorithm.get(srv_bucket)
+        if srv:
+            out["server_post"] = list(srv)
+        return out
+
+    @computed_field
+    @property
+    def segments_by_path(self) -> dict[str, list[SegmentRecord]]:
+        out: dict[str, list[SegmentRecord]] = {}
+        live = self.segments_by_algorithm.get(IOS_CAPTURE_TIME_ALGORITHM_ID)
+        if live:
+            out["live"] = list(live)
+        srv_bucket = self.active_server_post_algorithm_id
+        if srv_bucket is None:
+            srv_bucket = _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
+        srv = self.segments_by_algorithm.get(srv_bucket)
+        if srv:
+            out["server_post"] = list(srv)
+        return out
+
+    @computed_field
+    @property
+    def frame_counts_by_path(self) -> dict[str, dict[str, int]]:
+        out: dict[str, dict[str, int]] = {}
+        live = self.frame_counts_by_algorithm.get(IOS_CAPTURE_TIME_ALGORITHM_ID)
+        if live:
+            out["live"] = dict(live)
+        srv_bucket = self.active_server_post_algorithm_id
+        if srv_bucket is None:
+            srv_bucket = _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
+        srv = self.frame_counts_by_algorithm.get(srv_bucket)
+        if srv:
+            out["server_post"] = dict(srv)
+        return out
+
+    @computed_field
+    @property
+    def paths_completed(self) -> set[str]:
+        """Path names completed for this session, derived from
+        `algorithms_completed`. `ios_capture_time` → "live", anything
+        else → "server_post" (set semantics naturally dedupe when
+        multiple algorithms have run server_post)."""
+        out: set[str] = set()
+        for alg_id in self.algorithms_completed:
+            if alg_id == IOS_CAPTURE_TIME_ALGORITHM_ID:
+                out.add("live")
+            else:
+                out.add("server_post")
+        return out
+
+    @computed_field
+    @property
+    def live_config_used(self) -> DetectionConfigSnapshotPayload | None:
+        return self.config_used_by_algorithm.get(IOS_CAPTURE_TIME_ALGORITHM_ID)
+
+    @computed_field
+    @property
+    def server_post_config_used(self) -> DetectionConfigSnapshotPayload | None:
+        bucket = self.active_server_post_algorithm_id
+        if bucket is None:
+            return None
+        return self.config_used_by_algorithm.get(bucket)
 
 
 class DeviceIntrinsics(BaseModel):

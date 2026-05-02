@@ -36,7 +36,6 @@ from schemas import (
     SessionResult,
     TriangulatedPoint,
     _DEFAULT_PATHS,
-    _resolve_server_post_algorithm_id,
 )
 from segmenter import Segment, find_segments
 
@@ -81,13 +80,34 @@ def _stamp_frozen_config_on_result(
     a: PitchPayload | None,
     b: PitchPayload | None,
 ) -> None:
-    """Mirror per-pitch per-path frozen snapshots onto the SessionResult.
-    Aggregation policy (A wins, fall back to B) lives in
+    """Mirror per-pitch per-path frozen snapshots onto the SessionResult's
+    canonical `config_used_by_algorithm` dict + `active_server_post_algorithm_id`
+    pointer. Aggregation policy (A wins, fall back to B) lives in
     `aggregate_pitch_used_configs` so reprocess + rebuild share one
     source of truth."""
     used = aggregate_pitch_used_configs(a, b, result.session_id)
-    for field_name, value in used.items():
-        setattr(result, field_name, value)
+    live_snap = used.get("live_config_used")
+    if live_snap is not None:
+        result.config_used_by_algorithm[IOS_CAPTURE_TIME] = live_snap
+    server_snap = used.get("server_post_config_used")
+    if server_snap is not None:
+        result.config_used_by_algorithm[server_snap.algorithm_id] = server_snap
+        result.active_server_post_algorithm_id = server_snap.algorithm_id
+
+
+def _resolve_server_post_alg_for_result(
+    a: PitchPayload | None, b: PitchPayload | None,
+) -> str | None:
+    """Resolve the server_post algorithm id this result should pin
+    based on the participating pitches' active pointers. A wins, B
+    falls back. Returns None when neither pitch has a server_post
+    pointer (live-only flow). Result writers that need to file
+    `server_post`-path frames into `triangulated_by_algorithm` call
+    this BEFORE the path-loop runs so the bucket name is known."""
+    for pitch in (a, b):
+        if pitch is not None and pitch.active_server_post_algorithm_id is not None:
+            return pitch.active_server_post_algorithm_id
+    return None
 
 
 def triangulate_pair(
@@ -299,16 +319,24 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         candidate_paths = set(_DEFAULT_PATHS)
     legacy_points_path = _legacy_points_path(candidate_paths)
 
+    # Stamp the active server_post pointer early — the path-loop below
+    # needs it to know which `triangulated_by_algorithm` bucket to fill.
+    srv_alg = _resolve_server_post_alg_for_result(a, b)
+    if srv_alg is not None:
+        result.active_server_post_algorithm_id = srv_alg
+
     if live is not None:
         with live._lock:
             triangulated_copy = list(live.triangulated)
             abort_reasons_copy = dict(live.abort_reasons)
-        result.frame_counts_by_path[DetectionPath.live.value] = {
+        live_counts = {
             cam: int(count) for cam, count in live_frame_counts.items() if count
         }
+        if live_counts:
+            result.frame_counts_by_algorithm[IOS_CAPTURE_TIME] = live_counts
         if triangulated_copy:
-            result.triangulated_by_path[DetectionPath.live.value] = triangulated_copy
-            result.paths_completed.add(DetectionPath.live.value)
+            result.triangulated_by_algorithm[IOS_CAPTURE_TIME] = triangulated_copy
+            result.algorithms_completed.add(IOS_CAPTURE_TIME)
         if abort_reasons_copy:
             result.abort_reasons.update(
                 {f"live:{cam}": why for cam, why in abort_reasons_copy.items()}
@@ -336,8 +364,18 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             frame_counts["A"] = len(frames_a)
         if b is not None and frames_b:
             frame_counts["B"] = len(frames_b)
+        path_alg = (
+            IOS_CAPTURE_TIME if path == DetectionPath.live
+            else result.active_server_post_algorithm_id
+        )
+        if path_alg is None:
+            # server_post path with no resolvable algorithm — this only
+            # fires when both A and B lack an active pointer, which
+            # contradicts having frames in `frames_server_post`. Skip
+            # rather than mis-file under a guessed bucket.
+            continue
         if frame_counts:
-            result.frame_counts_by_path[path.value] = frame_counts
+            result.frame_counts_by_algorithm[path_alg] = frame_counts
 
         if sync_error is None and a is not None and b is not None:
             if not frames_a or not frames_b:
@@ -352,13 +390,13 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             except Exception as exc:
                 result.abort_reasons[path.value] = f"{type(exc).__name__}: {exc}"
                 continue
-            result.triangulated_by_path[path.value] = pts
-            result.paths_completed.add(path.value)
+            result.triangulated_by_algorithm[path_alg] = pts
+            result.algorithms_completed.add(path_alg)
         elif mono_session and frame_counts:
             # Single-camera sessions cannot triangulate, but once the path
             # has finalized frames on the sole uploaded camera it should be
             # surfaced as completed instead of lingering in "stopped".
-            result.paths_completed.add(path.value)
+            result.algorithms_completed.add(path_alg)
 
     # Phase 7 multi-algorithm: triangulate every algorithm bucket
     # present in `pitch.frames_by_algorithm` so a v11 → v12 rerun
@@ -424,16 +462,19 @@ def _passes_stamped_filter(
 
 def _algorithm_id_for_result_path(
     result: SessionResult, path: str
-) -> str:
-    """Map a `triangulated_by_path` key to its algorithm id, mirroring
-    `schemas._mirror_result_old_into_dicts`. Live path → IOS_CAPTURE_TIME;
-    server_post → frozen snapshot's algorithm_id (or legacy v11 bucket
-    if no snapshot was ever stamped). Raises `ValueError` for unknown
-    paths so a typo doesn't silently funnel into a default cost."""
+) -> str | None:
+    """Map a `triangulated_by_path` key to its algorithm id. Live path
+    → `IOS_CAPTURE_TIME`; server_post → `result.active_server_post_algorithm_id`
+    (set by `_stamp_frozen_config_on_result` /
+    `_resolve_server_post_alg_for_result`). Returns `None` for the
+    server_post path when no active pointer is set (live-only session
+    with no server_post run); callers must explicitly skip `None`
+    rather than guess a bucket per CLAUDE.md no-silent-fallback.
+    Raises `ValueError` for unknown path strings."""
     if path == DetectionPath.live.value:
         return IOS_CAPTURE_TIME
     if path == DetectionPath.server_post.value:
-        return _resolve_server_post_algorithm_id(result.server_post_config_used)
+        return result.active_server_post_algorithm_id
     raise ValueError(f"unknown result path key {path!r}")
 
 
@@ -494,28 +535,37 @@ def stamp_segments_on_result(
         gap = PairingTuning.default().gap_threshold_m
     else:
         gap = result.gap_threshold_m
-    if not result.triangulated_by_path and result.triangulated:
-        # Legacy/unit-test ingress: older callers still construct a
-        # SessionResult with only `triangulated` populated. At this
-        # internal boundary, project that single surface into the
-        # canonical per-path map so the rest of the function can stay
-        # path-native. Prefer the historical default path = server_post.
-        result.triangulated_by_path = {
-            DetectionPath.server_post.value: list(result.triangulated)
-        }
 
     path_priority = (
         DetectionPath.server_post.value,
         DetectionPath.live.value,
     )
-    result.segments_by_path = {}
-    for path, pts in list(result.triangulated_by_path.items()):
+    # Reset segments_by_algorithm for the live + current server_post
+    # buckets so this call is idempotent. Non-current alg buckets
+    # (multi-alg history) are NOT segmented here — `_triangulate_non_current_algorithms`
+    # populates `triangulated_by_algorithm` for them but segmenting
+    # those is out of scope until a future Phase-8 N-track UI needs it.
+    for path in path_priority:
+        path_alg = _algorithm_id_for_result_path(result, path)
+        if path_alg is None:
+            continue
+        result.segments_by_algorithm.pop(path_alg, None)
+
+    for path in path_priority:
+        pts = result.triangulated_by_path.get(path) or []
         if not pts:
             continue
         path_alg = _algorithm_id_for_result_path(result, path)
+        if path_alg is None:
+            # server_post path has triangulated points but no pointer
+            # — that violates the writer-side invariant (path-loop
+            # already gates on `path_alg is None`). Belt-and-braces.
+            continue
         path_cost = cost_threshold_for_algorithm(path_alg)
         pts_sorted = sorted(pts, key=lambda p: p.t_rel_s)
-        result.triangulated_by_path[path] = pts_sorted
+        # Persist time-sorted order on the canonical dict so reload
+        # sees a stable index space for `Segment.original_indices`.
+        result.triangulated_by_algorithm[path_alg] = pts_sorted
         fit_input: list[TriangulatedPoint] = []
         fit_to_full: list[int] = []
         for full_idx, p in enumerate(pts_sorted):
@@ -528,7 +578,7 @@ def stamp_segments_on_result(
             rec = _segment_record_from_segment(s)
             rec.original_indices = [fit_to_full[i] for i in rec.original_indices]
             records.append(rec)
-        result.segments_by_path[path] = records
+        result.segments_by_algorithm[path_alg] = records
 
     authority_path: str | None = None
     for path in path_priority:
@@ -621,13 +671,25 @@ def recompute_result_for_session(
         if sync_error is not None:
             result.error = sync_error
 
+    # Stamp the active server_post pointer up front so the path-loop
+    # below can resolve `server_post → algorithm_id` deterministically.
+    srv_alg = _resolve_server_post_alg_for_result(a, b)
+    if srv_alg is not None:
+        result.active_server_post_algorithm_id = srv_alg
+
     if a is not None and b is not None and sync_error is None:
         for path in sorted(candidate_paths, key=lambda p: p.value):
             frames_a = get_path_frames(a, path)
             frames_b = get_path_frames(b, path)
             if not frames_a or not frames_b:
                 continue
-            result.frame_counts_by_path[path.value] = {
+            path_alg = (
+                IOS_CAPTURE_TIME if path == DetectionPath.live
+                else result.active_server_post_algorithm_id
+            )
+            if path_alg is None:
+                continue
+            result.frame_counts_by_algorithm[path_alg] = {
                 "A": len(frames_a),
                 "B": len(frames_b),
             }
@@ -641,8 +703,8 @@ def recompute_result_for_session(
             except Exception as exc:
                 result.abort_reasons[path.value] = f"{type(exc).__name__}: {exc}"
                 continue
-            result.triangulated_by_path[path.value] = pts
-            result.paths_completed.add(path.value)
+            result.triangulated_by_algorithm[path_alg] = pts
+            result.algorithms_completed.add(path_alg)
 
     # Phase 7-fix-2: also triangulate non-current algorithm buckets
     # so Recompute preserves multi-alg history the same way rebuild does.

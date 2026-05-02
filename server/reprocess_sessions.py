@@ -269,8 +269,13 @@ def triangulate_session(
         gap_threshold_m=pairing_tuning.gap_threshold_m,
     )
     used = session_results.aggregate_pitch_used_configs(a, b, sid)
-    result.live_config_used = used["live_config_used"]
-    result.server_post_config_used = used["server_post_config_used"]
+    live_snap = used["live_config_used"]
+    if live_snap is not None:
+        result.config_used_by_algorithm[algorithms.IOS_CAPTURE_TIME] = live_snap
+    server_snap = used["server_post_config_used"]
+    if server_snap is not None:
+        result.config_used_by_algorithm[server_snap.algorithm_id] = server_snap
+        result.active_server_post_algorithm_id = server_snap.algorithm_id
     if a is None or b is None:
         logger.info("  %s — solo (%s only); skipping triangulation",
                     sid, "A" if a else "B")
@@ -299,21 +304,35 @@ def triangulate_session(
         except Exception as e:
             result.abort_reasons["live"] = f"{type(e).__name__}: {e}"
         else:
-            result.triangulated_by_path["live"] = live_pts
-            result.paths_completed.add("live")
+            result.triangulated_by_algorithm[algorithms.IOS_CAPTURE_TIME] = live_pts
+            result.algorithms_completed.add(algorithms.IOS_CAPTURE_TIME)
 
     if a.frames_server_post and b.frames_server_post:
-        try:
-            pts = triangulate_cycle(
-                scale(a), scale(b), source="server",
+        srv_alg = result.active_server_post_algorithm_id
+        if srv_alg is None:
+            # Frames present but no snapshot stamped on either pitch:
+            # would mean the pitches' active pointers are out of sync
+            # with their bucket contents. The PitchPayload computed_field
+            # forbids this state (frames_server_post returns [] without
+            # a pointer), so getting here means a hand-built fixture or
+            # a partially-migrated record. Skip the write rather than
+            # silently pick a bucket per CLAUDE.md.
+            logger.warning(
+                "  %s  frames_server_post present but no active pointer "
+                "on either pitch — skipping server_post triangulation", sid,
             )
-        except Exception as e:
-            result.error = f"{type(e).__name__}: {e}"
         else:
-            result.triangulated_by_path["server_post"] = pts
-            result.paths_completed.add("server_post")
-            result.triangulated = pts
-            result.points = list(pts)
+            try:
+                pts = triangulate_cycle(
+                    scale(a), scale(b), source="server",
+                )
+            except Exception as e:
+                result.error = f"{type(e).__name__}: {e}"
+            else:
+                result.triangulated_by_algorithm[srv_alg] = pts
+                result.algorithms_completed.add(srv_alg)
+                result.triangulated = pts
+                result.points = list(pts)
 
     session_results.stamp_segments_on_result(result)
 
