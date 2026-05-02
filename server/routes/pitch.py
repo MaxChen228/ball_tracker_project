@@ -335,9 +335,9 @@ async def _run_server_detection(
     except Exception as exc:
         await broadcast_done("error", 0)
         proc.finish_server_post_job(sid, cam, canceled=False)
-        proc.record_error(sid, cam, f"detect_pitch: {exc}")
+        proc.record_error(sid, cam, f"run_detection: {exc}")
         logger.warning(
-            "background detect_pitch failed session=%s cam=%s err=%s",
+            "background run_detection failed session=%s cam=%s err=%s",
             sid, cam, exc,
         )
         return

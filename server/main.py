@@ -78,7 +78,6 @@ from schemas import (
     Session,
     TriangulatedPoint,  # noqa: F401
 )
-from pipeline import detect_pitch  # noqa: F401  (re-export for routes/pitch.py late-bind)
 from chirp import chirp_wav_bytes
 from preview import FRAME_MAX_AGE_S as _PREVIEW_FRAME_MAX_AGE_S  # noqa: F401
 from calibration_solver import PLATE_MARKER_WORLD

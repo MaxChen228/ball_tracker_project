@@ -127,8 +127,9 @@ def test_arm_then_slider_drag_then_ingest_freezes_arm_time_pairing_tuning(tmp_pa
 
 def test_no_live_session_returns_none(tmp_path):
     """Test fixtures that POST /pitch without arming see no LivePairingSession.
-    Accessor returns None so the caller falls back to current state — that's
-    how test_pitch_endpoints + replay paths stay green."""
+    Accessor returns None and the caller propagates None to
+    `live_config_used` (no fabrication from disk) — viewer / events
+    renderers display a dash for sessions that never armed."""
     s = main.State(data_dir=tmp_path)
     assert s.live_session_frozen_config(sid(999)) is None
 

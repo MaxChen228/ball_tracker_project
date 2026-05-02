@@ -29,10 +29,13 @@ if TYPE_CHECKING:
 
 
 class V11Params(BaseModel):
-    """Per-call params for the V11 detector. Matches the wire shape
-    used by `DetectionConfigSnapshotPayload.{hsv,shape_gate}` so
-    callers can pass `{"hsv": payload.hsv, "shape_gate": payload.shape_gate}`
-    directly."""
+    """Per-call params for the V11 detector. The current v11 callsite
+    convention is `{"hsv": payload.hsv, "shape_gate": payload.shape_gate}`
+    because `DetectionConfigSnapshotPayload` happens to expose those
+    same flat fields; this is **not** a permanent registry contract.
+    Future detectors define their own `params_schema` and the snapshot
+    layer is expected to grow a generic `params: dict[str, Any]` slot
+    when a non-v11 algorithm lands."""
     model_config = ConfigDict(extra="forbid")
     hsv: HSVRangePayload
     shape_gate: ShapeGatePayload
