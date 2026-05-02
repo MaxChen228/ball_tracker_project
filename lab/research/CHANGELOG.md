@@ -18,6 +18,8 @@ GT 規模從 9 sessions / 1073 ball-in frames 擴到 **15 sessions / 1949 ball-i
 | V11 ∪ Y-diff(15) | 0.970 | **0.971** | +0.1pp ✓ |
 | V11 ∪ Y-diff(30) | — | 0.976 | new |
 | V11 ∪ all-3 (yd15+yd30) | 0.980 | **0.983** | +0.3pp |
+| V11+D1+D2+D3 ceiling | 0.984 | **0.986** | +0.2pp |
+| D3 apex hit% − D1 apex hit% | +16.6pp | **+16.8pp** | apex 假設仍 falsified |
 | MI(V11, Y-diff15) bits | 0.009 | **0.0094** | +0.0004 (內變化) |
 | V11 ∪ FRST | 0.996 | **0.998** | +0.2pp（FP 9730/frame，仍不可用） |
 
