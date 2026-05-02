@@ -87,8 +87,12 @@ class Propagator:
                         mask = (out_mask_logits[0] > 0).cpu().numpy().astype(np.uint8) * 255
                         if mask.ndim == 3:
                             mask = mask[0]
+                        # LA mode: L=0, A=mask. Browser decodes to RGBA with
+                        # R=G=B=0, A=mask, letting the front-end paint via a
+                        # GPU `destination-in` composite (no per-pixel JS).
+                        la = np.stack([np.zeros_like(mask), mask], axis=-1)
                         buf = io.BytesIO()
-                        Image.fromarray(mask, mode="L").save(buf, format="PNG", optimize=False)
+                        Image.fromarray(la, mode="LA").save(buf, format="PNG", optimize=False)
                         yield int(out_frame_idx), buf.getvalue()
             finally:
                 # SAM2 video predictor's inference_state caches per-frame image

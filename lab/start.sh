@@ -26,6 +26,12 @@ if [[ -n "$existing" ]]; then
   done
 fi
 
+# Idempotent mask migration (L → LA mode for GPU `destination-in` composite).
+# Re-encoding only happens for L-mode files; LA-mode files are skipped.
+# Safe to run on every restart since the server is already killed above.
+echo "[start] migrating masks (L → LA, idempotent)…"
+"$PYTHON" "$LAB_DIR/migrate_masks_to_alpha.py" >/dev/null
+
 cd "$PROJECT_ROOT"
 echo "[start] launching: $PYTHON -m lab.labeller (cwd=$PROJECT_ROOT)"
 exec "$PYTHON" -m lab.labeller

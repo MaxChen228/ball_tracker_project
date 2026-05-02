@@ -60,8 +60,10 @@ class Seeder:
             raise RuntimeError("SAM 2 returned all-zero masks for this click")
         pick = int(valid[np.argmin(areas[valid])])
         mask = masks[pick].astype(np.uint8) * 255
+        # LA mode: L=0, A=mask. See propagator.py for rationale.
+        la = np.stack([np.zeros_like(mask), mask], axis=-1)
         buf = io.BytesIO()
-        Image.fromarray(mask, mode="L").save(buf, format="PNG", optimize=False)
+        Image.fromarray(la, mode="LA").save(buf, format="PNG", optimize=False)
         return buf.getvalue()
 
     def write_png(self, mask_png_bytes: bytes, dest: Path) -> None:
