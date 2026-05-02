@@ -958,15 +958,12 @@ class State:
                     merged.frames_live = list(existing.frames_live)
                 if not merged.frames_server_post and existing.frames_server_post:
                     merged.frames_server_post = list(existing.frames_server_post)
-                if merged.live_config_used is None and existing.live_config_used is not None:
-                    merged.live_config_used = existing.live_config_used.model_copy(deep=True)
-                if (
-                    merged.server_post_config_used is None
-                    and existing.server_post_config_used is not None
-                ):
-                    merged.server_post_config_used = existing.server_post_config_used.model_copy(
-                        deep=True
-                    )
+                if merged.hsv_range_used is None and existing.hsv_range_used is not None:
+                    merged.hsv_range_used = existing.hsv_range_used.model_copy(deep=True)
+                if merged.shape_gate_used is None and existing.shape_gate_used is not None:
+                    merged.shape_gate_used = existing.shape_gate_used.model_copy(deep=True)
+                if merged.live_preset_name is None and existing.live_preset_name is not None:
+                    merged.live_preset_name = existing.live_preset_name
                 # Preserve the previous run's wall-clock when the
                 # incoming pitch doesn't carry one (e.g., live-frames
                 # merge after server_post had already completed).
