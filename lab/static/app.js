@@ -587,22 +587,20 @@ function drawClickMarker(x, y) {
 }
 
 function buildTintedCanvas(img) {
+  // GPU-composite tint: draw the mask, then paint green over only the opaque
+  // region via "source-in". Replaces an 8M-pixel JS loop on a 1920×1080 canvas
+  // (~50ms main-thread block per mask) with a couple of native compositing
+  // ops (~1ms). Critical for scrub responsiveness when many masks need to
+  // tint in quick succession.
   const c = document.createElement("canvas");
   c.width = el.overlay.width;
   c.height = el.overlay.height;
   const ctx = c.getContext("2d");
   ctx.drawImage(img, 0, 0, c.width, c.height);
-  const data = ctx.getImageData(0, 0, c.width, c.height);
-  const px = data.data;
-  for (let i = 0; i < px.length; i += 4) {
-    const a = px[i] || px[i + 1] || px[i + 2];
-    if (a > 8) {
-      px[i] = 34; px[i + 1] = 197; px[i + 2] = 94; px[i + 3] = 128;
-    } else {
-      px[i + 3] = 0;
-    }
-  }
-  ctx.putImageData(data, 0, 0);
+  ctx.globalCompositeOperation = "source-in";
+  ctx.fillStyle = "rgba(34, 197, 94, 0.5)";
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.globalCompositeOperation = "source-over";
   return c;
 }
 
@@ -629,9 +627,12 @@ function loadMaskForFrame(frame) {
   img.onload = () => {
     if (!el.overlay.width || !el.overlay.height) return;
     state.tintedCache.set(frame, buildTintedCanvas(img));
+    // Frame-guard the blit: by the time this onload fires, the user may have
+    // scrubbed away. Without the guard, an old frame's mask would paint over
+    // the current overlay and visibly flicker during fast drag.
     if (currentFrame() === frame) blitCachedMask(frame);
   };
-  img.onerror = () => clearOverlay();
+  img.onerror = () => { if (currentFrame() === frame) clearOverlay(); };
   img.src = url;
 }
 
@@ -1488,15 +1489,10 @@ function flushStep() {
   state.pendingTargetFrame = null;
   enterScrubMode();
   el.scrubber.value = String(target);
-  // Snap lastDisplayedFrame so currentFrame()/repaintOverlayForCurrentFrame()
-  // see the new frame even before scheduleScrubPaint's async paintAtomic lands.
+  // Snap lastDisplayedFrame so currentFrame() reads the new frame even before
+  // scheduleScrubPaint's async paintAtomic lands.
   state.lastDisplayedFrame = target;
   scheduleScrubPaint(target);
-  // Belt-and-suspenders: scheduleScrubPaint's internal mask handling has races
-  // around overlay resize + ensureTintedCanvas timing. loadMaskForFrame (called
-  // from repaintOverlayForCurrentFrame) has an independent image.onload → blit
-  // lifecycle that survives those races.
-  repaintOverlayForCurrentFrame();
 }
 
 async function fetchPts(slug) {
