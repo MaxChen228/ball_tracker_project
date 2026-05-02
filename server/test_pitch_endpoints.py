@@ -157,9 +157,11 @@ def test_post_pitch_mode_two_accepts_frames_without_video(tmp_path):
     }]
 
     body_a = _base_payload("A", session_id, K, H_a)
-    body_a["frames_server_post"] = frames_a
+    body_a["frames_by_algorithm"] = {"v11_hsv_cc": frames_a}
+    body_a["active_server_post_algorithm_id"] = "v11_hsv_cc"
     body_b = _base_payload("B", session_id, K, H_b)
-    body_b["frames_server_post"] = frames_b
+    body_b["frames_by_algorithm"] = {"v11_hsv_cc": frames_b}
+    body_b["active_server_post_algorithm_id"] = "v11_hsv_cc"
 
     r1 = _post_pitch(client, body_a, None)
     assert r1.status_code == 200, r1.text
@@ -264,7 +266,7 @@ def test_post_pitch_anchorless_single_camera_keeps_rays(tmp_path):
     client = TestClient(app)
     body = _base_payload("A", sid(502), K, H_a, anchor_ts=None)
     body["paths"] = ["live"]
-    body["frames_live"] = [
+    body["frames_by_algorithm"] = {"ios_capture_time": [
         {
             "frame_index": 0,
             "timestamp_s": body["video_start_pts_s"],
@@ -272,7 +274,7 @@ def test_post_pitch_anchorless_single_camera_keeps_rays(tmp_path):
             "py": v,
             "ball_detected": True,
         }
-    ]
+    ]}
     r = _post_pitch(client, body, None)
     assert r.status_code == 200, r.text
     assert r.json()["error"] is None

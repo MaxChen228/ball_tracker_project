@@ -540,16 +540,16 @@ def stamp_segments_on_result(
         DetectionPath.server_post.value,
         DetectionPath.live.value,
     )
-    # Reset segments_by_algorithm for the live + current server_post
-    # buckets so this call is idempotent. Non-current alg buckets
-    # (multi-alg history) are NOT segmented here — `_triangulate_non_current_algorithms`
-    # populates `triangulated_by_algorithm` for them but segmenting
-    # those is out of scope until a future Phase-8 N-track UI needs it.
-    for path in path_priority:
-        path_alg = _algorithm_id_for_result_path(result, path)
-        if path_alg is None:
-            continue
-        result.segments_by_algorithm.pop(path_alg, None)
+    # Reset segments_by_algorithm: drop ALL existing segment buckets
+    # so a previous run's stale bucket (e.g. v11 segments left behind
+    # when the operator switched the server_post algorithm to v12)
+    # does not orphan on disk. We only re-populate live + current
+    # server_post below — non-current algorithm buckets in
+    # `triangulated_by_algorithm` (multi-alg history from
+    # `_triangulate_non_current_algorithms`) are NOT segmented here;
+    # that surface stays out of scope until a future N-track UI
+    # asks for it.
+    result.segments_by_algorithm.clear()
 
     for path in path_priority:
         pts = result.triangulated_by_path.get(path) or []

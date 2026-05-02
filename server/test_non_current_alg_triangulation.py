@@ -45,6 +45,23 @@ def _snapshot(alg_id: str) -> DetectionConfigSnapshotPayload:
 
 
 def _pitch(camera_id: str = "A", **kw) -> PitchPayload:
+    """Helper that translates a couple of legacy convenience kwargs
+    into the post-phase-3 dict-canonical shape so call sites stay
+    readable."""
+    server_post_config = kw.pop("server_post_config_used", None)
+    live_config = kw.pop("live_config_used", None)
+    config_dict = dict(kw.pop("config_used_by_algorithm", {}))
+    if live_config is not None:
+        config_dict.setdefault("ios_capture_time", live_config)
+    active = kw.pop("active_server_post_algorithm_id", None)
+    if server_post_config is not None:
+        config_dict.setdefault(server_post_config.algorithm_id, server_post_config)
+        if active is None:
+            active = server_post_config.algorithm_id
+    if config_dict:
+        kw["config_used_by_algorithm"] = config_dict
+    if active is not None:
+        kw["active_server_post_algorithm_id"] = active
     return PitchPayload(
         camera_id=camera_id,
         session_id="s_deadbeef",

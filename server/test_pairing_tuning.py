@@ -83,8 +83,6 @@ def test_rebuild_result_seeds_current_global_pairing_tuning(tmp_path, monkeypatc
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames_live=[],
-        frames_server_post=[],
     )
     s.record(pitch_a)
 

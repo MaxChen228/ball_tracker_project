@@ -836,7 +836,7 @@ def test_record_preserves_frozen_used_configs_on_later_partial_merge(tmp_path):
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames_live=[
+        frames_by_algorithm={"ios_capture_time": [
             main.FramePayload(
                 frame_index=1,
                 timestamp_s=0.1,
@@ -844,7 +844,7 @@ def test_record_preserves_frozen_used_configs_on_later_partial_merge(tmp_path):
                 py=120.0,
                 ball_detected=True,
             )
-        ],
+        ]},
     )
     s.record(later)
 
@@ -1734,12 +1734,13 @@ def _minimal_pitch(camera_id: str, session_id: str) -> main.PitchPayload:
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames_server_post=[
+        frames_by_algorithm={"v11_hsv_cc": [
             main.FramePayload(
                 frame_index=0,
                 timestamp_s=0.0,
                 px=100.0, py=100.0,
                 ball_detected=True,
             ),
-        ],
+        ]},
+        active_server_post_algorithm_id="v11_hsv_cc",
     )

@@ -47,6 +47,9 @@ def _snapshot(alg_id: str, preset: str | None = None) -> DetectionConfigSnapshot
 
 
 def _base_pitch(**kw):
+    """Test helper: passes most kwargs through to PitchPayload, with a
+    convenience fold of `frames_by_algorithm` + `config_used_by_algorithm`
+    + `active_server_post_algorithm_id` already accepted directly."""
     defaults = dict(
         camera_id="A",
         session_id="s_deadbeef",
@@ -91,22 +94,6 @@ def test_frames_server_post_returns_empty_without_pointer():
     assert p.server_post_config_used is None
 
 
-def test_collapse_shim_stamps_active_pointer_when_only_flat_server_frames_present():
-    """Pre-snapshot legacy disk record: `frames_server_post` populated
-    but no `server_post_config_used`. The collapse shim must still
-    stamp `active_server_post_algorithm_id` (using the legacy bucket
-    `v11_hsv_cc`) so the post-collapse projection surfaces the frames."""
-    raw = {
-        "camera_id": "A",
-        "session_id": "s_deadbeef",
-        "video_start_pts_s": 0.0,
-        "frames_server_post": [_frame(1).model_dump(), _frame(2).model_dump()],
-    }
-    p = PitchPayload.model_validate(raw)
-    assert p.active_server_post_algorithm_id == "v11_hsv_cc"
-    assert len(p.frames_server_post) == 2
-
-
 def test_live_config_used_projects_from_ios_capture_time_bucket():
     p = _base_pitch(
         config_used_by_algorithm={IOS_CAPTURE_TIME_ALGORITHM_ID: _snapshot("ios_capture_time", preset="blue_ball")},
@@ -123,79 +110,14 @@ def test_empty_canonical_dicts_yield_empty_projections():
     assert p.server_post_config_used is None
 
 
-# --- transitional flat-input collapse (phase 1+2 only) --------------------
-
-
-def test_construction_kwargs_with_flat_keys_collapse_into_dict():
-    """Backward-compat for in-flight callers/tests that still pass flat
-    kwargs. Phase 3 deletes the shim."""
-    p = _base_pitch(frames_live=[_frame(1), _frame(2)])
-    assert IOS_CAPTURE_TIME_ALGORITHM_ID in p.frames_by_algorithm
-    assert len(p.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 2
-
-
-def test_disk_json_with_flat_keys_loads_via_collapse_shim():
-    """Mixed pre-flip on-disk shape: flat keys present alongside
-    `frames_by_algorithm`. The before-validator pops flat into the
-    dict (without clobbering pre-existing entries) and stamps the
-    active_server_post pointer from the snapshot."""
-    raw = {
-        "camera_id": "A",
-        "session_id": "s_deadbeef",
-        "video_start_pts_s": 0.0,
-        "frames_live": [_frame(1).model_dump()],
-        "frames_server_post": [_frame(2).model_dump(), _frame(3).model_dump()],
-        "server_post_config_used": _snapshot("v11_hsv_cc").model_dump(),
-        "live_config_used": _snapshot("ios_capture_time", preset="blue").model_dump(),
-    }
-    p = PitchPayload.model_validate(raw)
-    assert p.active_server_post_algorithm_id == "v11_hsv_cc"
-    assert len(p.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 1
-    assert len(p.frames_by_algorithm["v11_hsv_cc"]) == 2
-    assert p.live_config_used.preset_name == "blue"
-    assert p.server_post_config_used.algorithm_id == "v11_hsv_cc"
-
-
-def test_legacy_hsv_used_trio_migrates_then_collapses():
-    """Pre-phase-2 `hsv_range_used` trio + flat live frames: the
-    `_migrate_legacy_used_fields` before-validator runs first to fold
-    the trio into per-path snapshots, then the collapse shim pops them
-    into `config_used_by_algorithm`."""
-    raw = {
-        "camera_id": "A",
-        "session_id": "s_deadbeef",
-        "video_start_pts_s": 0.0,
-        "frames_live": [_frame(1).model_dump()],
-        "hsv_range_used": {
-            "h_min": 10, "h_max": 20, "s_min": 30, "s_max": 200,
-            "v_min": 40, "v_max": 210,
-        },
-        "shape_gate_used": {"aspect_min": 0.7, "fill_min": 0.55},
-        "live_preset_name": "blue_ball",
-    }
-    p = PitchPayload.model_validate(raw)
-    assert p.live_config_used is not None
-    assert p.live_config_used.preset_name == "blue_ball"
-    assert len(p.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 1
-
-
-def test_pre_existing_dict_keys_not_clobbered_by_collapse():
-    """Some on-disk records already had `frames_by_algorithm` populated
-    before the flip (phase 6a/6b mirror). The collapse shim must not
-    overwrite a pre-existing dict entry with the legacy flat list — the
-    dict was already canonical truth in those records."""
-    raw = {
-        "camera_id": "A",
-        "session_id": "s_deadbeef",
-        "video_start_pts_s": 0.0,
-        "frames_live": [_frame(99).model_dump()],  # ghost 1-frame in flat
-        "frames_by_algorithm": {
-            IOS_CAPTURE_TIME_ALGORITHM_ID: [_frame(1).model_dump(), _frame(2).model_dump()],
-        },
-    }
-    p = PitchPayload.model_validate(raw)
-    # Dict wins (already-canonical truth).
-    assert len(p.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 2
+def test_legacy_flat_kwargs_now_rejected_post_phase3():
+    """After phase 3 deleted `_collapse_legacy_*_flat_input`, the old
+    flat-key kwargs hit `extra="forbid"` and raise. Pin the failure
+    mode so a future re-introduction of the shim breaks this test."""
+    import pytest as _pytest
+    with _pytest.raises(Exception) as exc_info:
+        _base_pitch(frames_live=[_frame(1)])
+    assert "frames_live" in str(exc_info.value)
 
 
 # --- persist round-trip ----------------------------------------------------
@@ -320,36 +242,60 @@ def _segment() -> SegmentRecord:
     )
 
 
-def test_result_mirrors_triangulated_and_segments_by_path():
+def test_result_projections_from_dict_canonical_construction():
+    """SessionResult constructed via canonical dict-keyed kwargs.
+    Verifies the path-keyed `@computed_field` projections."""
     srv_snap = _snapshot("v11_hsv_cc")
     r = SessionResult(
         session_id="s_deadbeef",
         camera_a_received=True, camera_b_received=True,
-        triangulated_by_path={"live": [_tri_point()], "server_post": [_tri_point(), _tri_point()]},
-        segments_by_path={"server_post": [_segment()]},
-        frame_counts_by_path={"live": {"A": 100, "B": 100}, "server_post": {"A": 200, "B": 200}},
-        paths_completed={"live", "server_post"},
-        live_config_used=_snapshot("ios_capture_time"),
-        server_post_config_used=srv_snap,
+        triangulated_by_algorithm={
+            IOS_CAPTURE_TIME_ALGORITHM_ID: [_tri_point()],
+            "v11_hsv_cc": [_tri_point(), _tri_point()],
+        },
+        segments_by_algorithm={"v11_hsv_cc": [_segment()]},
+        frame_counts_by_algorithm={
+            IOS_CAPTURE_TIME_ALGORITHM_ID: {"A": 100, "B": 100},
+            "v11_hsv_cc": {"A": 200, "B": 200},
+        },
+        algorithms_completed={IOS_CAPTURE_TIME_ALGORITHM_ID, "v11_hsv_cc"},
+        config_used_by_algorithm={
+            IOS_CAPTURE_TIME_ALGORITHM_ID: _snapshot("ios_capture_time"),
+            "v11_hsv_cc": srv_snap,
+        },
+        active_server_post_algorithm_id="v11_hsv_cc",
     )
-    assert len(r.triangulated_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID]) == 1
-    assert len(r.triangulated_by_algorithm["v11_hsv_cc"]) == 2
-    assert len(r.segments_by_algorithm["v11_hsv_cc"]) == 1
-    assert IOS_CAPTURE_TIME_ALGORITHM_ID not in r.segments_by_algorithm
-    assert r.frame_counts_by_algorithm["v11_hsv_cc"] == {"A": 200, "B": 200}
-    assert r.algorithms_completed == {IOS_CAPTURE_TIME_ALGORITHM_ID, "v11_hsv_cc"}
-    assert set(r.config_used_by_algorithm) == {IOS_CAPTURE_TIME_ALGORITHM_ID, "v11_hsv_cc"}
+    # Path-keyed projections route to the right buckets.
+    assert len(r.triangulated_by_path["live"]) == 1
+    assert len(r.triangulated_by_path["server_post"]) == 2
+    assert len(r.segments_by_path["server_post"]) == 1
+    assert "live" not in r.segments_by_path
+    assert r.frame_counts_by_path["server_post"] == {"A": 200, "B": 200}
+    assert r.paths_completed == {"live", "server_post"}
+    assert r.live_config_used.algorithm_id == "ios_capture_time"
+    assert r.server_post_config_used is srv_snap
 
 
-def test_result_server_post_alg_id_falls_back_when_no_snapshot():
+def test_paths_completed_excludes_non_current_alg_history():
+    """Reviewer BLOCK 1 (phase 2): when
+    `_triangulate_non_current_algorithms` adds v12 history to
+    `algorithms_completed`, `paths_completed` MUST NOT add
+    "server_post" unless the current pointer's bucket is also
+    completed. Otherwise the path-keyed projection diverges from
+    `triangulated_by_path` (which only surfaces the current pointer)."""
     r = SessionResult(
         session_id="s_deadbeef",
         camera_a_received=True, camera_b_received=True,
-        triangulated_by_path={"server_post": [_tri_point()]},
-        paths_completed={"server_post"},
+        triangulated_by_algorithm={"v12_test": [_tri_point()]},
+        algorithms_completed={"v12_test"},
+        active_server_post_algorithm_id="v11_hsv_cc",  # v11 is current, but never ran
     )
-    assert algorithms.DEFAULT_ALGORITHM_ID in r.triangulated_by_algorithm
-    assert algorithms.DEFAULT_ALGORITHM_ID in r.algorithms_completed
+    # v12 in algorithms_completed but current pointer (v11) is not →
+    # paths_completed has neither "live" nor "server_post".
+    assert r.paths_completed == set()
+    # triangulated_by_path projection: v12 bucket not surfaced because
+    # active pointer points to v11.
+    assert "server_post" not in r.triangulated_by_path
 
 
 def test_persist_result_json_drops_flat_keys_from_disk_payload():

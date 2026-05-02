@@ -1,22 +1,28 @@
 """Frame-bucket and detection-path selection helpers.
 
-Every pitch carries two parallel frame buckets (`frames_live`,
-`frames_server_post`). These helpers decide, for any given
-`(pitch, path)` pair, which bucket is the authoritative source and how to
-project the pitch onto a single path for triangulation.
+Every pitch's frames live in `frames_by_algorithm` keyed by algorithm
+id (`ios_capture_time` for iOS-side capture-time detection, runnable
+algorithm ids like `v11_hsv_cc` for server-side detection). These
+helpers map between the legacy `(pitch, DetectionPath)` interface
+that callers still want to read and the canonical dict storage:
 
-The pure helpers (`normalize_paths`, `has_server_frames`, `get_path_frames`,
-`pitch_with_path_frames`) depend on nothing and are safe to call anywhere.
-The state-dependent helper (`paths_for_pitch`) reads via the public State
-accessors `session_paths_for` / `default_detection_paths`.
+- `algorithm_id_for_path` resolves a path → algorithm id (live →
+  `ios_capture_time`, server_post → `pitch.active_server_post_algorithm_id`,
+  legacy fallback for pre-snapshot pitches).
+- `get_algorithm_frames` / `set_algorithm_frames` are the low-level
+  dict accessors.
+- `stamp_server_post_run` is the atomic writer for a server-side
+  detection result (snapshot + frames + active pointer).
+- `pitch_with_path_frames` / `pitch_with_algorithm_frames` clone a
+  pitch with the chosen surface promoted into the active server_post
+  slot so downstream consumers (`reconstruct.build_scene`, ray
+  builders) can read a single field regardless of source.
 
-Phase 6b adds algorithm-id-keyed peers (`get_algorithm_frames`,
-`set_algorithm_frames`, `pitch_with_algorithm_frames`) for the
-multi-algorithm refactor. Path-keyed helpers above remain for back-
-compat — they delegate to the algorithm-keyed accessors via the
-fixed `live → ios_capture_time` / `server_post → <stamped alg id>`
-mapping. Phase 7's `POST /sessions/{sid}/runs/{algorithm_id}` endpoint
-writes into the dict via `set_algorithm_frames`.
+The pure helpers (`normalize_paths`, `has_server_frames`,
+`get_path_frames`, the `pitch_with_*` cloners) depend on nothing
+beyond the schema and are safe to call anywhere. The state-dependent
+helper (`paths_for_pitch`) reads via the public State accessors
+`session_paths_for` / `default_detection_paths`.
 """
 
 from __future__ import annotations
@@ -92,14 +98,13 @@ def pitch_with_path_frames(
     return clone
 
 
-# --- Phase 6b: algorithm-id-keyed accessors ---------------------------------
+# --- algorithm-id-keyed accessors -------------------------------------------
 #
-# These read from / write to `pitch.frames_by_algorithm` directly. They
-# are the API Phase 7's `POST /sessions/{sid}/runs/{algorithm_id}` will
-# build on. Path-keyed helpers above keep working: their internal
-# semantics are equivalent to calling the algorithm-keyed peer with
-# the path's resolved algorithm id (`live → ios_capture_time`,
-# `server_post → <whichever alg the server_post snapshot stamped>`).
+# These read from / write to `pitch.frames_by_algorithm` directly.
+# Path-keyed helpers above are convenience views — internally they
+# resolve the path's algorithm id (`live → ios_capture_time`,
+# `server_post → <pitch.active_server_post_algorithm_id>`) and read
+# from the same dict.
 
 
 def algorithm_id_for_path(pitch: PitchPayload, path: DetectionPath) -> str:

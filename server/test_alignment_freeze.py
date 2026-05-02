@@ -179,12 +179,15 @@ def test_pitch_ingest_does_not_fabricate_live_config_when_never_armed(tmp_path):
 
     # Bypass arm. POST a frames-only pitch (mode-two, no MOV).
     payload = _base_payload("A", session_id, K, H_a)
-    payload["frames_live"] = [{
+    # Frames now live in the dict-canonical bucket. iOS's wire shape
+    # never carries pre-detection frames anyway — this is a synthetic
+    # ingest path bypassing arm.
+    payload["frames_by_algorithm"] = {"ios_capture_time": [{
         "frame_index": 0,
         "timestamp_s": 0.0,
         "ball_detected": False,
         "candidates": [],
-    }]
+    }]}
     r = _post_pitch(client, payload, None)
     assert r.status_code == 200, r.text
 

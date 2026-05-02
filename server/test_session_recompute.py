@@ -36,11 +36,13 @@ def _seed_session(state, session_id: str):
         BlobCandidate(px=fb.px + 30, py=fb.py + 30, area=80,
                       area_score=0.8, aspect=0.8, fill=0.55, cost=0.50),
     ]
-    payload_a.frames_server_post[0] = FramePayload(
+    bucket_a = payload_a.active_server_post_algorithm_id or "v11_hsv_cc"
+    bucket_b = payload_b.active_server_post_algorithm_id or "v11_hsv_cc"
+    payload_a.frames_by_algorithm[bucket_a][0] = FramePayload(
         frame_index=0, timestamp_s=fa.timestamp_s,
         candidates=cands_a, ball_detected=True,
     )
-    payload_b.frames_server_post[0] = FramePayload(
+    payload_b.frames_by_algorithm[bucket_b][0] = FramePayload(
         frame_index=0, timestamp_s=fb.timestamp_s,
         candidates=cands_b, ball_detected=True,
     )
@@ -242,8 +244,10 @@ def test_segmenter_filters_input_by_per_algorithm_cost_threshold(monkeypatch):
         session_id="s_seg_tight",
         camera_a_received=True,
         camera_b_received=True,
-        triangulated_by_path={DetectionPath.server_post.value: list(pts)},
-        server_post_config_used=snap,
+        triangulated_by_algorithm={"v99_tight": list(pts)},
+        algorithms_completed={"v99_tight"},
+        config_used_by_algorithm={"v99_tight": snap},
+        active_server_post_algorithm_id="v99_tight",
         gap_threshold_m=0.20,
     )
     stamp_segments_on_result(

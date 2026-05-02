@@ -153,12 +153,13 @@ def test_record_does_not_hold_lock_during_io(tmp_path, monkeypatch):
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames_server_post=[
+        frames_by_algorithm={"v11_hsv_cc": [
             main.FramePayload(
                 frame_index=0, timestamp_s=0.0,
                 px=u, py=v, ball_detected=True,
             )
-        ],
+        ]},
+        active_server_post_algorithm_id="v11_hsv_cc",
         intrinsics=main.IntrinsicsPayload(
             fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),

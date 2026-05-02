@@ -181,28 +181,17 @@ class DetectionConfigSnapshotPayload(BaseModel):
 IOS_CAPTURE_TIME_ALGORITHM_ID = "ios_capture_time"
 
 
-# Legacy pre-snapshot bucket for `frames_server_post` records that
-# predate `DetectionConfigSnapshotPayload` persistence (Phase-2). At
-# the time those frames were produced, `v11_hsv_cc` was the only
-# server-side detector that ever shipped — so funneling them under
-# its id is historically accurate, NOT a guess. This is named
-# distinctly from `DEFAULT_ALGORITHM_ID` so future callers reading
-# the dict can't mistake "filed under v11" for "explicitly stamped
-# v11"; if a Phase 6b reader ever needs to surface the distinction it
-# should track inferred-vs-stamped at the call site, not by reading
-# this constant.
+# Legacy pre-snapshot bucket id for pitches that predate
+# `DetectionConfigSnapshotPayload` persistence. At the time those
+# frames were produced `v11_hsv_cc` was the only server-side detector
+# that had shipped, so the historical `frames_server_post` content
+# always came from v11. `migrate_disk_pitches.py` and
+# `algorithm_id_for_path` use this constant to anchor the
+# `active_server_post_algorithm_id` pointer when no explicit snapshot
+# stamp exists. Named distinctly from `DEFAULT_ALGORITHM_ID` so a
+# future reader can't mistake "filed under v11" for "explicitly
+# stamped v11" if it ever matters at a call site.
 _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID = "v11_hsv_cc"
-
-
-def _resolve_server_post_algorithm_id(
-    snapshot: "DetectionConfigSnapshotPayload | None",
-) -> str:
-    """Algorithm id to file `frames_server_post` under in the dict mirror.
-    Prefer the explicit snapshot stamp; fall back to the legacy bucket
-    when no snapshot was ever recorded (pre-Phase-2 pitches)."""
-    if snapshot is not None:
-        return snapshot.algorithm_id
-    return _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
 
 
 _PITCH_PERSIST_EXCLUDE = {
@@ -213,67 +202,6 @@ _PITCH_PERSIST_EXCLUDE = {
 }
 
 
-def _collapse_legacy_pitch_flat_input(data: dict) -> dict:
-    """Transitional before-validator: pop legacy flat keys from raw
-    input and route them into the canonical dicts + active pointer.
-
-    Phase 1 of the dict-canonical flip leaves disk JSON containing
-    `frames_live` / `frames_server_post` / `live_config_used` /
-    `server_post_config_used`; with `extra="forbid"` and those names
-    now bound to `@computed_field` this would reject every pre-flip
-    record. This shim absorbs the legacy keys into:
-
-    - `frames_by_algorithm[ios_capture_time]` ← `frames_live`
-    - `frames_by_algorithm[<alg>]` ← `frames_server_post` (alg from
-      `server_post_config_used.algorithm_id` if present, else
-      `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID`)
-    - `config_used_by_algorithm[ios_capture_time]` ← `live_config_used`
-    - `config_used_by_algorithm[<alg>]` ← `server_post_config_used`
-    - `active_server_post_algorithm_id` ← `<alg>` from snapshot
-
-    Pre-existing dict entries are NOT clobbered (legacy already-mirrored
-    records were dual-write; both views agreed). Phase 3 deletes this
-    shim once `migrate_disk_pitches.py` has rewritten on-disk files into
-    pure dict shape — at that point any remaining flat key is a
-    mis-formed input that should fail loudly.
-    """
-    flat_live = data.pop("frames_live", None)
-    flat_server = data.pop("frames_server_post", None)
-    flat_live_cfg = data.pop("live_config_used", None)
-    flat_server_cfg = data.pop("server_post_config_used", None)
-
-    if flat_server_cfg is not None:
-        srv_alg = (
-            flat_server_cfg.get("algorithm_id")
-            if isinstance(flat_server_cfg, dict)
-            else getattr(flat_server_cfg, "algorithm_id", None)
-        )
-    else:
-        srv_alg = None
-
-    if flat_live:
-        fba = data.setdefault("frames_by_algorithm", {})
-        fba.setdefault(IOS_CAPTURE_TIME_ALGORITHM_ID, flat_live)
-    if flat_server:
-        bucket = srv_alg if srv_alg is not None else _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
-        fba = data.setdefault("frames_by_algorithm", {})
-        fba.setdefault(bucket, flat_server)
-        # Stamp the pointer eagerly. CLAUDE.md forbids silent fallback,
-        # so the `frames_server_post` computed projection can't infer
-        # the bucket at read time. Anchor it here whenever the legacy
-        # input declares server_post frames (snapshot or no snapshot).
-        data.setdefault("active_server_post_algorithm_id", bucket)
-    if flat_live_cfg is not None:
-        cba = data.setdefault("config_used_by_algorithm", {})
-        cba.setdefault(IOS_CAPTURE_TIME_ALGORITHM_ID, flat_live_cfg)
-    if flat_server_cfg is not None:
-        cba = data.setdefault("config_used_by_algorithm", {})
-        if srv_alg is not None:
-            cba.setdefault(srv_alg, flat_server_cfg)
-            data.setdefault("active_server_post_algorithm_id", srv_alg)
-    return data
-
-
 _RESULT_PERSIST_EXCLUDE = {
     "triangulated_by_path",
     "segments_by_path",
@@ -282,90 +210,6 @@ _RESULT_PERSIST_EXCLUDE = {
     "live_config_used",
     "server_post_config_used",
 }
-
-
-def _collapse_legacy_result_flat_input(data: dict) -> dict:
-    """Transitional before-validator: pop legacy SessionResult flat
-    keys from raw input and route them into the canonical dicts +
-    active pointer.
-
-    Phase 2 of the dict-canonical flip leaves disk JSON containing
-    `triangulated_by_path` / `segments_by_path` / `frame_counts_by_path`
-    / `paths_completed` / `live_config_used` /
-    `server_post_config_used`; with `extra="forbid"` and those names
-    now bound to `@computed_field` this would reject every pre-flip
-    record. This shim absorbs the legacy keys into:
-
-    - `triangulated_by_algorithm[ios_capture_time]` / `[<alg>]`
-    - `segments_by_algorithm[ios_capture_time]` / `[<alg>]`
-    - `frame_counts_by_algorithm[ios_capture_time]` / `[<alg>]`
-    - `algorithms_completed` ← `paths_completed` (mapped through alg id)
-    - `config_used_by_algorithm[ios_capture_time]` ← `live_config_used`
-    - `config_used_by_algorithm[<alg>]` ← `server_post_config_used`
-    - `active_server_post_algorithm_id` ← `<alg>` from snapshot
-    """
-    flat_tri = data.pop("triangulated_by_path", None)
-    flat_segs = data.pop("segments_by_path", None)
-    flat_counts = data.pop("frame_counts_by_path", None)
-    flat_paths = data.pop("paths_completed", None)
-    flat_live_cfg = data.pop("live_config_used", None)
-    flat_server_cfg = data.pop("server_post_config_used", None)
-
-    if flat_server_cfg is not None:
-        srv_alg = (
-            flat_server_cfg.get("algorithm_id")
-            if isinstance(flat_server_cfg, dict)
-            else getattr(flat_server_cfg, "algorithm_id", None)
-        )
-    else:
-        srv_alg = None
-    srv_bucket = srv_alg if srv_alg is not None else _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
-
-    server_post_observed = False
-
-    def _route_path_dict(legacy: dict | None, target_key: str) -> bool:
-        nonlocal server_post_observed
-        saw_srv = False
-        if not legacy:
-            return saw_srv
-        target = data.setdefault(target_key, {})
-        live_val = legacy.get("live")
-        if live_val:
-            target.setdefault(IOS_CAPTURE_TIME_ALGORITHM_ID, live_val)
-        server_val = legacy.get("server_post")
-        if server_val:
-            target.setdefault(srv_bucket, server_val)
-            saw_srv = True
-            server_post_observed = True
-        return saw_srv
-
-    _route_path_dict(flat_tri, "triangulated_by_algorithm")
-    _route_path_dict(flat_segs, "segments_by_algorithm")
-    _route_path_dict(flat_counts, "frame_counts_by_algorithm")
-
-    if flat_paths:
-        completed = data.setdefault("algorithms_completed", [])
-        completed_set = set(completed) if isinstance(completed, list) else set(completed)
-        if "live" in flat_paths:
-            completed_set.add(IOS_CAPTURE_TIME_ALGORITHM_ID)
-        if "server_post" in flat_paths:
-            completed_set.add(srv_bucket)
-            server_post_observed = True
-        data["algorithms_completed"] = sorted(completed_set)
-    if flat_live_cfg is not None:
-        cba = data.setdefault("config_used_by_algorithm", {})
-        cba.setdefault(IOS_CAPTURE_TIME_ALGORITHM_ID, flat_live_cfg)
-    if flat_server_cfg is not None and srv_alg is not None:
-        cba = data.setdefault("config_used_by_algorithm", {})
-        cba.setdefault(srv_alg, flat_server_cfg)
-        data.setdefault("active_server_post_algorithm_id", srv_alg)
-    # Anchor the active pointer eagerly whenever any legacy server_post
-    # surface declared data — same eager-stamp contract as PitchPayload.
-    # CLAUDE.md forbids the read-side projection from inferring a
-    # bucket via fallback.
-    if server_post_observed:
-        data.setdefault("active_server_post_algorithm_id", srv_bucket)
-    return data
 
 
 def persist_pitch_json(pitch: "PitchPayload") -> str:
@@ -388,55 +232,6 @@ def persist_result_json(result: "SessionResult") -> str:
     surfaces via computed_field default-serialize so clients are
     unaffected."""
     return result.model_dump_json(exclude=_RESULT_PERSIST_EXCLUDE)
-
-
-def _migrate_legacy_used_fields_into_per_path(
-    data: dict,
-    *,
-    target_paths: tuple[str, ...],
-) -> dict:
-    """One-shot read migration: pre-phase-2 records carried a single
-    top-level `(hsv_range_used, shape_gate_used, live_preset_name)`
-    trio (and `server_post_preset_name` on SessionResult) instead of
-    per-path snapshots. Fold those into one snapshot and stamp on
-    every target path that doesn't already have its own.
-
-    Best-effort: legacy never recorded `algorithm_id`, never separated
-    live params from server_post params, and on SessionResult only
-    server_post had its own preset_name. We can recover preset
-    identity per path but not divergent params — so both paths
-    receive the same params snapshot. The next save drops legacy
-    fields permanently.
-
-    Returns the modified dict (in place; same object). `target_paths`
-    selects which `<path>_config_used` slots to populate ("live" /
-    "server_post" subset depending on caller's schema)."""
-    legacy_hsv = data.pop("hsv_range_used", None)
-    legacy_sg = data.pop("shape_gate_used", None)
-    legacy_live_preset = data.pop("live_preset_name", None)
-    legacy_srv_preset = data.pop("server_post_preset_name", None)
-    if legacy_hsv is None and legacy_sg is None:
-        # No params trio to migrate. We may still have a stray
-        # server_post_preset_name on a SessionResult that lacked the
-        # params trio (server_post run without live arm) — drop it
-        # silently; a snapshot without params would be ill-formed.
-        return data
-
-    import algorithms
-    base_snapshot = {
-        "algorithm_id": algorithms.DEFAULT_ALGORITHM_ID,
-        "hsv": legacy_hsv,
-        "shape_gate": legacy_sg,
-        "preset_name": legacy_live_preset,
-    }
-    if "live" in target_paths and data.get("live_config_used") is None:
-        data["live_config_used"] = dict(base_snapshot)
-    if "server_post" in target_paths and data.get("server_post_config_used") is None:
-        srv_snapshot = dict(base_snapshot)
-        if legacy_srv_preset is not None:
-            srv_snapshot["preset_name"] = legacy_srv_preset
-        data["server_post_config_used"] = srv_snapshot
-    return data
 
 
 class CaptureTelemetryPayload(BaseModel):
@@ -539,32 +334,6 @@ class PitchPayload(BaseModel):
     # `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID` at read time without needing
     # this pointer set.
     active_server_post_algorithm_id: str | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_then_collapse_legacy(cls, data):
-        """Two before-stage migrations chained into one validator
-        (combined to make the order deterministic — multiple
-        `mode='before'` validators on one class do not guarantee
-        declaration order).
-
-        Step 1 — `_migrate_legacy_used_fields_into_per_path`: pre-phase-2
-        records carried a single `(hsv_range_used, shape_gate_used,
-        live_preset_name)` trio; fold it into per-path snapshots
-        `live_config_used` / `server_post_config_used`.
-
-        Step 2 — `_collapse_legacy_pitch_flat_input` (transitional,
-        phase 3 deletes this step): pop the four flat keys
-        `frames_live` / `frames_server_post` / `live_config_used` /
-        `server_post_config_used` (which are now `@computed_field`)
-        from the input and route them into the canonical dicts +
-        `active_server_post_algorithm_id` pointer."""
-        if not isinstance(data, dict):
-            return data
-        data = _migrate_legacy_used_fields_into_per_path(
-            data, target_paths=("live", "server_post"),
-        )
-        return _collapse_legacy_pitch_flat_input(data)
 
     @computed_field
     @property
@@ -712,48 +481,26 @@ class SessionResult(BaseModel):
     # set this whenever a server-side detection run completes.
     active_server_post_algorithm_id: str | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_then_collapse_legacy(cls, data):
-        """Two before-stage migrations chained into one validator
-        (combined to make the order deterministic — multiple
-        `mode='before'` validators on one class do not guarantee
-        declaration order).
-
-        Step 1 — `_migrate_legacy_used_fields_into_per_path`: pre-phase-2
-        records carried a single `(hsv_range_used, shape_gate_used,
-        live_preset_name)` trio; fold into per-path snapshots.
-
-        Step 2 — `_collapse_legacy_result_flat_input` (transitional,
-        phase 3 deletes this step): pop the six legacy flat keys
-        (now `@computed_field`) from the input and route them into
-        the canonical dicts + `active_server_post_algorithm_id`."""
-        if not isinstance(data, dict):
-            return data
-        data = _migrate_legacy_used_fields_into_per_path(
-            data, target_paths=("live", "server_post"),
-        )
-        return _collapse_legacy_result_flat_input(data)
-
     @computed_field
     @property
     def triangulated_by_path(self) -> dict[str, list[TriangulatedPoint]]:
         """Per-path triangulated points. Derived view of
         `triangulated_by_algorithm`: `live` ← `[ios_capture_time]`,
-        `server_post` ← `[active_server_post_algorithm_id]` (or the
-        legacy pre-snapshot bucket fallback). Empty path keys are
-        dropped so callers iterating `triangulated_by_path.items()`
-        don't see ghost rows."""
+        `server_post` ← `[active_server_post_algorithm_id]`. No
+        silent legacy fallback — when the pointer is unset the
+        server_post key is absent from the projection (per CLAUDE.md
+        the writer must stamp the pointer before frames land in any
+        algorithm bucket). Empty path keys are dropped so callers
+        iterating `.items()` don't see ghost rows."""
         out: dict[str, list[TriangulatedPoint]] = {}
         live = self.triangulated_by_algorithm.get(IOS_CAPTURE_TIME_ALGORITHM_ID)
         if live:
             out["live"] = list(live)
         srv_bucket = self.active_server_post_algorithm_id
-        if srv_bucket is None:
-            srv_bucket = _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
-        srv = self.triangulated_by_algorithm.get(srv_bucket)
-        if srv:
-            out["server_post"] = list(srv)
+        if srv_bucket is not None:
+            srv = self.triangulated_by_algorithm.get(srv_bucket)
+            if srv:
+                out["server_post"] = list(srv)
         return out
 
     @computed_field
@@ -764,11 +511,10 @@ class SessionResult(BaseModel):
         if live:
             out["live"] = list(live)
         srv_bucket = self.active_server_post_algorithm_id
-        if srv_bucket is None:
-            srv_bucket = _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
-        srv = self.segments_by_algorithm.get(srv_bucket)
-        if srv:
-            out["server_post"] = list(srv)
+        if srv_bucket is not None:
+            srv = self.segments_by_algorithm.get(srv_bucket)
+            if srv:
+                out["server_post"] = list(srv)
         return out
 
     @computed_field
@@ -779,26 +525,30 @@ class SessionResult(BaseModel):
         if live:
             out["live"] = dict(live)
         srv_bucket = self.active_server_post_algorithm_id
-        if srv_bucket is None:
-            srv_bucket = _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
-        srv = self.frame_counts_by_algorithm.get(srv_bucket)
-        if srv:
-            out["server_post"] = dict(srv)
+        if srv_bucket is not None:
+            srv = self.frame_counts_by_algorithm.get(srv_bucket)
+            if srv:
+                out["server_post"] = dict(srv)
         return out
 
     @computed_field
     @property
     def paths_completed(self) -> set[str]:
         """Path names completed for this session, derived from
-        `algorithms_completed`. `ios_capture_time` → "live", anything
-        else → "server_post" (set semantics naturally dedupe when
-        multiple algorithms have run server_post)."""
+        `algorithms_completed`. `ios_capture_time` → "live"; the
+        active server_post pointer's bucket → "server_post". Other
+        algorithm ids in `algorithms_completed` (multi-algorithm
+        history populated by `_triangulate_non_current_algorithms`)
+        do NOT inflate the path-keyed view — `triangulated_by_path`
+        / `segments_by_path` only surface the current pointer, so
+        `paths_completed` must agree to keep the wire-side path-keyed
+        projections internally consistent."""
         out: set[str] = set()
-        for alg_id in self.algorithms_completed:
-            if alg_id == IOS_CAPTURE_TIME_ALGORITHM_ID:
-                out.add("live")
-            else:
-                out.add("server_post")
+        if IOS_CAPTURE_TIME_ALGORITHM_ID in self.algorithms_completed:
+            out.add("live")
+        srv = self.active_server_post_algorithm_id
+        if srv is not None and srv in self.algorithms_completed:
+            out.add("server_post")
         return out
 
     @computed_field

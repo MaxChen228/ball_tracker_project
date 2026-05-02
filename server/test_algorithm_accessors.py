@@ -45,6 +45,35 @@ def _snapshot(alg_id: str) -> DetectionConfigSnapshotPayload:
 
 
 def _pitch(**kw) -> PitchPayload:
+    """Translation helper: legacy convenience kwargs (`server_post_config_used`,
+    `live_config_used`, `frames_live`, `frames_server_post`) are folded
+    into the canonical dict shape so existing call sites keep reading."""
+    server_post_config = kw.pop("server_post_config_used", None)
+    live_config = kw.pop("live_config_used", None)
+    legacy_live_frames = kw.pop("frames_live", None)
+    legacy_server_frames = kw.pop("frames_server_post", None)
+    config_dict = dict(kw.pop("config_used_by_algorithm", {}))
+    fba = dict(kw.pop("frames_by_algorithm", {}))
+    if live_config is not None:
+        config_dict.setdefault("ios_capture_time", live_config)
+    if legacy_live_frames is not None:
+        fba.setdefault("ios_capture_time", legacy_live_frames)
+    active = kw.pop("active_server_post_algorithm_id", None)
+    if server_post_config is not None:
+        config_dict.setdefault(server_post_config.algorithm_id, server_post_config)
+        if active is None:
+            active = server_post_config.algorithm_id
+    if legacy_server_frames is not None:
+        bucket = active if active is not None else "v11_hsv_cc"
+        fba.setdefault(bucket, legacy_server_frames)
+        if active is None:
+            active = bucket
+    if fba:
+        kw["frames_by_algorithm"] = fba
+    if config_dict:
+        kw["config_used_by_algorithm"] = config_dict
+    if active is not None:
+        kw["active_server_post_algorithm_id"] = active
     return PitchPayload(
         camera_id="A",
         session_id="s_deadbeef",

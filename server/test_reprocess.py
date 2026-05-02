@@ -61,19 +61,27 @@ def _make_pitch(
     live_used: DetectionConfigSnapshotPayload | None = None,
     sid: str = "s_abcd1234",
 ) -> PitchPayload:
+    config_dict: dict[str, DetectionConfigSnapshotPayload] = {}
+    if live_used is not None:
+        config_dict["ios_capture_time"] = live_used
+    active = None
+    if server_post_used is not None:
+        config_dict[server_post_used.algorithm_id] = server_post_used
+        active = server_post_used.algorithm_id
     return PitchPayload(
         camera_id="A",
         session_id=sid,
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
-        server_post_config_used=server_post_used,
-        live_config_used=live_used,
+        config_used_by_algorithm=config_dict,
+        active_server_post_algorithm_id=active,
     )
 
 
 def _write_pitch(path: Path, pitch: PitchPayload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(pitch.model_dump_json())
+    from schemas import persist_pitch_json
+    path.write_text(persist_pitch_json(pitch))
 
 
 def _write_preset(presets_dir: Path, name: str, snap: DetectionConfigSnapshotPayload) -> None:

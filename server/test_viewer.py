@@ -81,7 +81,8 @@ def _pitch(cam_id, cycle, K, R, t, H, P_trajectory):
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames_server_post=frames,
+        frames_by_algorithm={"v11_hsv_cc": frames},
+        active_server_post_algorithm_id="v11_hsv_cc",
         intrinsics=schemas.IntrinsicsPayload(fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]),
         homography=H.flatten().tolist(),
     )
@@ -666,7 +667,8 @@ def test_viewer_health_strip_path_chip_colour_tiers():
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames_server_post=frames,
+        frames_by_algorithm={"v11_hsv_cc": frames},
+        active_server_post_algorithm_id="v11_hsv_cc",
         intrinsics=schemas.IntrinsicsPayload(
             fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
@@ -1274,10 +1276,11 @@ def test_viewer_exposes_camera_t_rel_offsets(tmp_path):
         sync_anchor_timestamp_s=100.0,  # chirp hit at session-clock 100 s
         video_start_pts_s=101.5,        # first MOV frame at 101.5 s
         video_fps=240.0,
-        frames_server_post=[schemas.FramePayload(
+        frames_by_algorithm={"v11_hsv_cc": [schemas.FramePayload(
             frame_index=0, timestamp_s=101.5, px=960.0, py=540.0,
             ball_detected=True,
-        )],
+        )]},
+        active_server_post_algorithm_id="v11_hsv_cc",
         intrinsics=schemas.IntrinsicsPayload(
             fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
@@ -1305,7 +1308,7 @@ def test_viewer_exposes_per_frame_index(tmp_path):
         sync_anchor_timestamp_s=0.0,
         video_start_pts_s=0.0,
         video_fps=240.0,
-        frames_server_post=[
+        frames_by_algorithm={"v11_hsv_cc": [
             schemas.FramePayload(
                 frame_index=42, timestamp_s=0.0, px=960.0, py=540.0,
                 ball_detected=True,
@@ -1317,7 +1320,8 @@ def test_viewer_exposes_per_frame_index(tmp_path):
             schemas.FramePayload(
                 frame_index=44, timestamp_s=0.010, ball_detected=False,
             ),
-        ],
+        ]},
+        active_server_post_algorithm_id="v11_hsv_cc",
         intrinsics=schemas.IntrinsicsPayload(
             fx=K[0, 0], fy=K[1, 1], cx=K[0, 2], cy=K[1, 2]
         ),
