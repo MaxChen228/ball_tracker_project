@@ -123,12 +123,14 @@ def _from_dict(d: dict) -> Preset:
     no-silent-fallback: a corrupt preset file raises rather than masking
     a config bug as a defaults-restore.
 
-    The `.get(..., DEFAULT)` branch is only reachable for preset
-    files predating the field; `_read_with_migration` rewrites
-    canonical shape on first read."""
+    `algorithm_id` is required. Pre-algorithm-id preset files are
+    migrated by `_read_with_migration` (which injects the default into
+    the raw dict before calling this function); a direct caller handing
+    in a stripped dict gets a KeyError, which is the intended
+    boundary."""
     hsv = d["hsv"]
     sg = d["shape_gate"]
-    algorithm_id = d.get("algorithm_id", algorithms.DEFAULT_ALGORITHM_ID)
+    algorithm_id = d["algorithm_id"]
     algorithms.validate_id(algorithm_id)
     return Preset(
         name=str(d["name"]),
@@ -151,11 +153,20 @@ def _read_with_migration(
     *,
     atomic_write: Callable[[Path, str], None] | None,
 ) -> Preset:
-    """Read one preset file. If the file lacks `algorithm_id` and an
-    `atomic_write` is supplied, rewrite canonical shape on read."""
+    """Read one preset file. If the file lacks `algorithm_id`, inject
+    the default before strict `_from_dict` and (when `atomic_write` is
+    supplied) rewrite canonical shape on read.
+
+    `atomic_write=None` is a read-only mode for offline tools — they
+    still get a working `Preset` but the file stays in pre-migration
+    shape. Every runtime caller (State, route handlers) must supply
+    `atomic_write` so migration converges within one boot."""
     raw = json.loads(path.read_text())
+    algorithm_id_was_missing = "algorithm_id" not in raw
+    if algorithm_id_was_missing:
+        raw["algorithm_id"] = algorithms.DEFAULT_ALGORITHM_ID
     preset = _from_dict(raw)
-    if atomic_write is not None and "algorithm_id" not in raw:
+    if atomic_write is not None and algorithm_id_was_missing:
         atomic_write(path, json.dumps(_to_dict(preset), indent=2))
         logger.info(
             "preset %s: backfilled `algorithm_id=%s` and rewrote canonical shape",

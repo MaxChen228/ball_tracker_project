@@ -1695,7 +1695,11 @@ class State:
         _presets.delete_preset(self._data_dir, name)
 
     def modified_fields_for(self, cfg: DetectionConfig) -> list[str]:
-        return _detection_config_modified_fields(cfg, data_dir=self._data_dir)
+        return _detection_config_modified_fields(
+            cfg,
+            data_dir=self._data_dir,
+            atomic_write=self._atomic_write,
+        )
 
     def set_pairing_tuning(self, tuning: PairingTuning) -> PairingTuning:
         with self._lock:

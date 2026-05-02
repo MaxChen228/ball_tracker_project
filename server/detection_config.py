@@ -143,10 +143,12 @@ def from_dict(d: dict) -> DetectionConfig:
     first boot post-retirement so the stale field is gone within one
     cycle.
 
-    The `.get(..., DEFAULT)` branch is only reachable for pre-phase-1
-    disk files; `load_or_migrate` rewrites canonical shape on first
-    boot post-upgrade so subsequent reads see an explicit key."""
-    algorithm_id = d.get("algorithm_id", algorithms.DEFAULT_ALGORITHM_ID)
+    `algorithm_id` is required. Pre-phase-1 disk files lacking the
+    field are migrated by `load_or_migrate` (which injects the default
+    into the raw dict before calling this function); a direct caller
+    handing in a stripped dict gets a KeyError, which is the intended
+    boundary."""
+    algorithm_id = d["algorithm_id"]
     algorithms.validate_id(algorithm_id)
     return DetectionConfig(
         hsv=_hsv_from_dict(d["hsv"]),
@@ -157,7 +159,12 @@ def from_dict(d: dict) -> DetectionConfig:
     )
 
 
-def modified_fields(cfg: DetectionConfig, *, data_dir: Path) -> list[str]:
+def modified_fields(
+    cfg: DetectionConfig,
+    *,
+    data_dir: Path,
+    atomic_write: Callable[[Path, str], None],
+) -> list[str]:
     """If `cfg.preset` is set, return the dotted paths within the pair
     that differ from the on-disk preset of that name. Empty list =
     preset-pure; non-empty = "modified" indicator on the dashboard.
@@ -167,10 +174,16 @@ def modified_fields(cfg: DetectionConfig, *, data_dir: Path) -> list[str]:
     for that state. If `cfg.preset` references a preset that no longer
     exists on disk (operator deleted it), also returns empty list — the
     UI surfaces "deleted" via a separate identity branch.
+
+    `atomic_write` is required so that a preset file pre-dating the
+    `algorithm_id` field is rewritten in canonical shape on the first
+    diff after boot — the dashboard hits this on every page render, so
+    plumbing it through guarantees migration converges within one boot
+    rather than leaving the file in a half-migrated state forever.
     """
     if cfg.preset is None or not preset_exists(data_dir, cfg.preset):
         return []
-    base = load_preset(data_dir, cfg.preset)
+    base = load_preset(data_dir, cfg.preset, atomic_write=atomic_write)
     diff: list[str] = []
     if cfg.hsv != base.hsv:
         for k, v in _hsv_to_dict(cfg.hsv).items():
@@ -192,13 +205,23 @@ _LEGACY_SHAPE_GATE_FILENAME = "shape_gate.json"
 _LEGACY_SELECTOR_FILENAME = "candidate_selector_tuning.json"
 
 
-def _default_config(data_dir: Path) -> DetectionConfig:
+def _default_config(
+    data_dir: Path,
+    *,
+    atomic_write: Callable[[Path, str], None],
+) -> DetectionConfig:
     """Boot default when neither the new file nor any legacy file exists.
     Tennis preset is the canonical default — `HSVRange.default()` /
     `ShapeGate.default()` are bound to its seed values, so this is the
     self-consistent zero state. Caller (`load_or_migrate`) must ensure
-    `seed_builtins` has run so the tennis preset is on disk."""
-    p = load_preset(data_dir, "tennis")
+    `seed_builtins` has run so the tennis preset is on disk.
+
+    `atomic_write` is threaded through to `load_preset` so a tennis
+    seed file pre-dating the `algorithm_id` field is rewritten in
+    canonical shape during the boot read — without this the file would
+    stay in pre-migration shape until something else triggered a
+    rewrite, defeating the whole migration mechanism."""
+    p = load_preset(data_dir, "tennis", atomic_write=atomic_write)
     return DetectionConfig(
         hsv=p.hsv,
         shape_gate=p.shape_gate,
@@ -268,6 +291,14 @@ def load_or_migrate(
     if new_path.exists():
         try:
             raw = json.loads(new_path.read_text())
+            # Pre-phase-1 disk files lack `algorithm_id`; inject the
+            # default into the raw dict before strict `from_dict` so
+            # boot succeeds. We capture this BEFORE injection so the
+            # `rewrite_reasons` branch below can still detect the
+            # need to persist canonical shape.
+            algorithm_id_was_missing = "algorithm_id" not in raw
+            if algorithm_id_was_missing:
+                raw["algorithm_id"] = algorithms.DEFAULT_ALGORITHM_ID
             cfg = from_dict(raw)
         except Exception as e:
             # Strict: a corrupt new file is a real bug, not "fall back
@@ -286,7 +317,7 @@ def load_or_migrate(
             # reads a clean record. One-shot, idempotent: subsequent
             # boots see no `selector` key and skip this branch.
             rewrite_reasons.append("strip legacy `selector` key")
-        if "algorithm_id" not in raw:
+        if algorithm_id_was_missing:
             # Pre-algorithm-id build (phase-1 of the multi-version
             # refactor introduced the field). `from_dict` already
             # backfilled to `algorithms.DEFAULT_ALGORITHM_ID`; persist
@@ -319,7 +350,7 @@ def load_or_migrate(
         )
         return legacy
 
-    return _default_config(data_dir)
+    return _default_config(data_dir, atomic_write=atomic_write)
 
 
 def persist(
