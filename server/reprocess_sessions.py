@@ -311,6 +311,13 @@ def _load_force_preset_snapshot(name: str) -> DetectionConfigSnapshotPayload:
             f"--force-preset {name!r}: preset does not exist on disk; "
             f"check `data/presets/` or use --params"
         ) from None
+    except (json.JSONDecodeError, ValueError) as e:
+        # Malformed preset file (corrupt JSON, schema violation,
+        # invalid algorithm_id) — actionable one-line message instead
+        # of a stack trace at script startup.
+        raise SystemExit(
+            f"--force-preset {name!r}: preset file is malformed — {e}"
+        ) from None
     snap = _snapshot_from_preset(preset)
     logger.info(
         "force-preset %s — algorithm=%s hsv h[%d-%d] s[%d-%d] v[%d-%d] "
@@ -370,11 +377,10 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    # Mutex matrix — every snapshot source is exclusive of the others;
-    # --algorithm-id is the only one that combines with default-B1 or
-    # --force-preset (it overrides the id slot of whichever snapshot
-    # got chosen). --params and --use-frozen-snapshot already carry
-    # their own algorithm_id, so combining is ambiguous.
+    # --algorithm-id is the only override that combines with another
+    # snapshot source (it rewrites just the id slot); --params and
+    # --use-frozen-snapshot already carry their own id so combining
+    # is ambiguous.
     if args.params is not None and args.force_preset is not None:
         raise SystemExit(
             "--params and --force-preset are mutually exclusive; pick one "

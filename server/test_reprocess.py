@@ -13,7 +13,6 @@ so the "what was X originally detected with" question stays answerable.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -406,6 +405,75 @@ def test_resolve_params_overrides_frozen_lookup(tmp_path, monkeypatch):
         algorithm_id_override=None,
     )
     assert snap is params
+
+
+def test_resolve_default_server_post_with_null_preset_falls_through_to_live(
+    tmp_path, monkeypatch,
+):
+    """Boundary case: server_post_config_used is set but its preset_name
+    is None (e.g. legacy server_post run before preset identity
+    landed). Must fall through to live_config_used.preset_name rather
+    than treat the None as a legitimate preset_name lookup."""
+    import reprocess_sessions as R
+
+    tennis = _snapshot(
+        h_min=25, h_max=55, s_min=90, s_max=255, v_min=90, v_max=255,
+        aspect_min=0.7, fill_min=0.55, preset_name="tennis",
+    )
+    _write_preset(tmp_path / "presets", "tennis", tennis)
+    monkeypatch.setattr(R, "DATA_DIR", tmp_path)
+
+    server_post_no_name = _snapshot(
+        h_min=99, h_max=99, s_min=99, s_max=99, v_min=99, v_max=99,
+        aspect_min=0.5, fill_min=0.5, preset_name=None,
+    )
+    live_with_name = _snapshot(
+        h_min=1, h_max=1, s_min=1, s_max=1, v_min=1, v_max=1,
+        aspect_min=0.5, fill_min=0.5, preset_name="tennis",
+    )
+    pitch = _make_pitch(
+        server_post_used=server_post_no_name, live_used=live_with_name,
+    )
+
+    snap = R.resolve_snapshot_for_pitch(
+        pitch,
+        use_frozen_snapshot=False,
+        params_snapshot=None,
+        force_preset_snapshot=None,
+        algorithm_id_override=None,
+    )
+    assert snap is not None
+    assert snap.preset_name == "tennis"
+    assert snap.hsv.h_min == 25  # disk tennis values, not the 99/1 stamps
+
+
+def test_resolve_force_preset_combines_with_algorithm_id_override(
+    tmp_path, monkeypatch,
+):
+    """--force-preset + --algorithm-id is allowed; algorithm_id_override
+    rewrites the id slot of the loaded preset's snapshot, leaving the
+    HSV / shape_gate values intact."""
+    import reprocess_sessions as R
+
+    monkeypatch.setattr(R, "DATA_DIR", tmp_path)
+    forced = _snapshot(
+        h_min=25, h_max=55, s_min=90, s_max=255, v_min=90, v_max=255,
+        aspect_min=0.7, fill_min=0.55, preset_name="tennis",
+        algorithm_id="v11_hsv_cc",
+    )
+    pitch = _make_pitch(server_post_used=None, live_used=forced)
+
+    snap = R.resolve_snapshot_for_pitch(
+        pitch,
+        use_frozen_snapshot=False,
+        params_snapshot=None,
+        force_preset_snapshot=forced,
+        algorithm_id_override="v11_hsv_cc",
+    )
+    assert snap is not None
+    assert snap.algorithm_id == "v11_hsv_cc"
+    assert snap.hsv.h_min == 25
+    assert snap.preset_name == "tennis"
 
 
 def test_resolve_algorithm_id_override_combines_with_default(tmp_path, monkeypatch):

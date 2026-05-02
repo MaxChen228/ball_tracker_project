@@ -316,8 +316,9 @@ async def _run_server_detection(
     # edits. `algorithms.run_detection` materialises the typed params and
     # dispatches to the registered detector for `algorithm_id`.
     logger.info(
-        "background detection start session=%s cam=%s algo=%s preset=%s",
+        "background detection start session=%s cam=%s algo=%s preset=%s hsv=%r",
         sid, cam, config_snapshot.algorithm_id, config_snapshot.preset_name,
+        config_snapshot.hsv,
     )
     try:
         frames = await asyncio.to_thread(
