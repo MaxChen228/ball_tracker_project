@@ -70,3 +70,4 @@ server/charuco_board.png
 !.claude/skills/**
 
 .DS_Store
+lab-research/outputs/
