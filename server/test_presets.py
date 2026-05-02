@@ -23,14 +23,17 @@ def _fresh_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_list_presets_returns_seeded_builtins(tmp_path, monkeypatch):
-    """Fresh boot: tennis + blue_ball seeds are written to disk and
-    surface in `GET /presets`."""
+    """Fresh boot: every name in `_BUILTIN_SEEDS` is written to disk
+    and surfaces in `GET /presets`. Sourced from the seeds dict so a
+    new shipped algorithm's seed adds itself without a test edit."""
+    import presets as _presets
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
     r = client.get("/presets")
     assert r.status_code == 200, r.text
     names = sorted(p["name"] for p in r.json()["presets"])
-    assert names == ["blue_ball", "tennis"]
+    expected = sorted(_presets._BUILTIN_SEEDS.keys())
+    assert names == expected
 
 
 def test_get_preset_returns_full_record(tmp_path, monkeypatch):

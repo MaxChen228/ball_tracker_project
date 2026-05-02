@@ -149,6 +149,35 @@ _BUILTIN_SEEDS: dict[str, Preset] = {
         # see CLAUDE.md tuning baselines).
         shape_gate=ShapeGate(aspect_min=0.75, fill_min=0.55),
     ),
+    "hybrid_28d_blue_ball": Preset(
+        name="hybrid_28d_blue_ball",
+        label="Hybrid 28d (blue ball)",
+        algorithm_id=algorithms.HYBRID_28D,
+        # Two HSV cubes + two shape gates, matching the lab/research
+        # PR #112 winner. PROD = the existing blue_ball seed values
+        # (tight, high-precision-low-recall); V11 loose = wider hue
+        # band + lower aspect/fill gates that cover the rescue subset
+        # PROD misses. neigh_half / match_px are 28d_hybrid.py
+        # constants — physics-derived (50ms motion window @ 240fps,
+        # CC centroid noise ≈ 5px on this rig).
+        params={
+            "prod_hsv": {
+                "h_min": 105, "h_max": 112,
+                "s_min": 140, "s_max": 255,
+                "v_min": 40, "v_max": 255,
+            },
+            "prod_shape": {"aspect_min": 0.75, "fill_min": 0.55},
+            "v11_hsv": {
+                "h_min": 103, "h_max": 118,
+                "s_min": 120, "s_max": 255,
+                "v_min": 30, "v_max": 255,
+            },
+            "v11_shape": {"aspect_min": 0.40, "fill_min": 0.35},
+            "v11_close_kernel": 3,
+            "neigh_half": 6,
+            "match_px": 5.0,
+        },
+    ),
 }
 
 
