@@ -386,6 +386,13 @@ function resizeOverlay() {
   if (!w || !h) return;
   const disp = videoDisplayRect();
   if (!disp) return;
+  if (el.overlay.width !== w || el.overlay.height !== h) {
+    // Backing-store size is changing — any cached tinted canvases were built
+    // against the OLD dimensions (e.g. canvas's 300×150 default before video
+    // metadata loaded) and would blit as a tiny patch in the top-left corner.
+    // Drop them; loadMaskForFrame rebuilds at the new size on next paint.
+    state.tintedCache.clear();
+  }
   if (el.overlay.width !== w) el.overlay.width = w;
   if (el.overlay.height !== h) el.overlay.height = h;
   const wrapRect = el.videoWrap.getBoundingClientRect();
@@ -559,21 +566,12 @@ function loadMaskForFrame(frame) {
 // fallback when a mask exists; the else branch here covers no-mask + crosshair.
 function repaintOverlayForCurrentFrame() {
   const f = currentFrame();
-  const url = maskUrlForFrame(f);
-  const seg = activeSegment();
-  console.log("[repaint]", {
-    f, url, segId: seg?.id, seedFrame: seg?.seed_frame, seedPoint: seg?.seed_point,
-    activeSegId: state.activeSegmentId,
-    mapForActive: state.propMaskUrlsBySeg.get(state.activeSegmentId),
-    overlayWH: [el.overlay.width, el.overlay.height],
-    scrubMode: state.scrubMode,
-    lastDisplayedFrame: state.lastDisplayedFrame,
-  });
-  if (url != null) {
+  if (maskUrlForFrame(f) != null) {
     loadMaskForFrame(f);
     return;
   }
   clearOverlay();
+  const seg = activeSegment();
   if (seg && f === seg.seed_frame && seg.seed_point && state.showSeedMarker) {
     drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
   }
@@ -581,7 +579,14 @@ function repaintOverlayForCurrentFrame() {
 
 async function prefetchMasks(slug) {
   const myToken = ++state.prefetchAbort;
-  if (!el.overlay.width || !el.overlay.height) {
+  // Defer until overlay reflects real frame source dimensions. The HTML canvas
+  // default is 300×150 (truthy), so the old `!width || !height` check passed
+  // even before resizeOverlay had run — pre-building tintedCache at 300×150
+  // produced cached canvases that blitted as a top-left patch on the real
+  // 1920×1080 overlay. Wait for the frame source to land first.
+  const fs = state.frameSource;
+  const targetW = (fs && fs.width) || el.video.videoWidth;
+  if (!targetW || el.overlay.width !== targetW) {
     el.video.addEventListener("loadedmetadata", () => prefetchMasks(slug), { once: true });
     return;
   }
@@ -664,9 +669,7 @@ async function loadFrameSource(slug) {
   // the user sees the existing mask immediately without hunting on the timeline.
   // Only auto-jump if we haven't moved off frame 0 (don't yank a user who
   // already scrubbed somewhere during the load).
-  console.log("[loadFrameSource done]", { activeSegId: state.activeSegmentId, segSeedFrame: seg?.seed_frame, lastDisplayedFrame: state.lastDisplayedFrame, ptsLoaded: !!state.ptsTable });
   if (seg && seg.seed_frame != null && state.lastDisplayedFrame === 0 && state.ptsTable) {
-    console.log("[loadFrameSource] auto-jump →", seg.seed_frame);
     jumpToFrame(seg.seed_frame);
     return;
   }
@@ -1466,10 +1469,8 @@ async function fetchPts(slug) {
       // seed-frame auto-jump now. Guarded the same way so we never yank a
       // user who already moved.
       const seg = activeSegment();
-      console.log("[fetchPts done]", { activeSegId: state.activeSegmentId, segSeedFrame: seg?.seed_frame, lastDisplayedFrame: state.lastDisplayedFrame, fsReady: !!state.frameSource && !state.frameSourceLoading });
       if (seg && seg.seed_frame != null && state.lastDisplayedFrame === 0
           && state.frameSource && !state.frameSourceLoading) {
-        console.log("[fetchPts] auto-jump →", seg.seed_frame);
         jumpToFrame(seg.seed_frame);
       }
     }
