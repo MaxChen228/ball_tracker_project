@@ -1027,7 +1027,13 @@ class State:
                 # from existing. Same logic for config_used_by_algorithm.
                 for alg_id, frames in existing.frames_by_algorithm.items():
                     if alg_id not in merged.frames_by_algorithm:
-                        merged.frames_by_algorithm[alg_id] = list(frames)
+                        # Deep-copy each frame so any future in-place mutation
+                        # on `merged` cannot bleed back into the cached
+                        # `existing` (FramePayload is not frozen). Snapshots
+                        # below already use model_copy(deep=True).
+                        merged.frames_by_algorithm[alg_id] = [
+                            f.model_copy(deep=True) for f in frames
+                        ]
                 for alg_id, snap in existing.config_used_by_algorithm.items():
                     if alg_id not in merged.config_used_by_algorithm:
                         merged.config_used_by_algorithm[alg_id] = snap.model_copy(deep=True)

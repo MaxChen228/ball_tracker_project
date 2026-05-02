@@ -244,6 +244,44 @@ def test_state_record_merge_preserves_existing_dict_buckets(tmp_path, monkeypatc
     assert "v12_test" in merged.config_used_by_algorithm
 
 
+def test_state_record_merge_deep_copies_preserved_frames(tmp_path, monkeypatch):
+    """Phase 7-fix-2 (2/2): the merge that carries forward existing dict
+    buckets must deep-copy frames, not pass list references through.
+    FramePayload is not frozen; without deep-copy, any future in-place
+    mutation on the merged pitch would bleed back into the dict the
+    test still holds a reference to via `existing`."""
+    import algorithms as algorithms_mod
+    import main
+
+    fake = algorithms_mod.AlgorithmEntry(
+        algorithm_id="v12_test",
+        label="test", description="test",
+        detector=algorithms_mod._REGISTRY["v11_hsv_cc"].detector,
+    )
+    monkeypatch.setitem(algorithms_mod._REGISTRY, "v12_test", fake)
+
+    s = main.State(data_dir=tmp_path)
+    s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef",
+                sync_anchor_timestamp_s=0.0)
+
+    p1 = _pitch()
+    stamp_frames = [_frame(1), _frame(2)]
+    from detection_paths import stamp_server_post_run
+    stamp_server_post_run(p1, _snapshot("v11_hsv_cc"), stamp_frames)
+    s.record(p1)
+    p1_v11_frame = s.pitches[("A", "s_deadbeef")].frames_by_algorithm["v11_hsv_cc"][0]
+
+    p2 = _pitch()
+    stamp_server_post_run(p2, _snapshot("v12_test"), [_frame(10)])
+    s.record(p2)
+
+    merged = s.pitches[("A", "s_deadbeef")]
+    merged_v11_frame = merged.frames_by_algorithm["v11_hsv_cc"][0]
+    # Same content, different object identity — deep-copied.
+    assert merged_v11_frame.frame_index == p1_v11_frame.frame_index
+    assert merged_v11_frame is not p1_v11_frame
+
+
 def test_pitch_with_algorithm_frames_projects_into_server_post_slot():
     """Counterpart to `pitch_with_path_frames`. Downstream code
     (reconstruct, rays) reads `frames_server_post` on the clone."""
