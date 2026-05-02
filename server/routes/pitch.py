@@ -398,7 +398,6 @@ async def _run_server_detection(
                 "sid": sid,
                 "cause": "server_post",
                 "segments": [s.model_dump() for s in result.segments],
-                "cost_threshold": result.cost_threshold,
                 "gap_threshold_m": result.gap_threshold_m,
             },
         )

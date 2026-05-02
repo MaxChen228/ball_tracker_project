@@ -69,12 +69,13 @@ class LivePairingSession:
     # state.ingest_live_frame; reused across the 8 ms pair loop so the
     # hot path skips per-frame pitch construction + SVD extrinsics.
     camera_poses: dict[str, CameraPose] = field(default_factory=dict)
-    # Triangulation fan-out tuning (cost + gap thresholds), refreshed by
-    # state.ingest_live_frame on every ingest. Default lets every shape-
-    # gate-passed candidate through (cost=1.0); `PairingTuning.gap_threshold_m`
-    # (default 0.20m, per-session override via the viewer's Gap slider →
-    # /sessions/{sid}/recompute) is the sole residual gate — segmenter
-    # and viewer trust it, no downstream re-filter.
+    # Operator-tunable gap threshold, refreshed by state.ingest_live_frame
+    # on every ingest. `PairingTuning.gap_threshold_m` (default 0.20 m,
+    # per-session override via the viewer's Gap slider →
+    # /sessions/{sid}/recompute) gates the stamped-tuning filter applied
+    # before segmenter consumption. Cost is no longer here — each
+    # algorithm owns its own threshold via
+    # `algorithms.cost_threshold_for_algorithm`.
     pairing_tuning: PairingTuning = field(default_factory=PairingTuning.default)
     # Detection-config snapshot frozen at arm time (or at first
     # ingest_live_frame when arm pre-stamping was bypassed by a test

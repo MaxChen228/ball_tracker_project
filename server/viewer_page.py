@@ -73,7 +73,7 @@ class ViewerPageContext:
     health_failure_html: str
     session_tuning_html: str
     config_strip_html: str
-    cost_threshold: float | None
+    cost_threshold: float
     gap_threshold_m: float | None
     video_cells_html: str
     session_id: str
@@ -93,7 +93,7 @@ def build_viewer_page_context(
     videos: list[tuple[str, str, float, float, dict[str, list]]],
     health: dict,
     *,
-    cost_threshold: float | None = None,
+    cost_threshold: float,
     gap_threshold_m: float | None = None,
     segments: list | None = None,
     segments_by_path: dict[str, list] | None = None,
@@ -281,7 +281,7 @@ def render_viewer_html(
     health: dict,
     *,
     strike_zone: dict | None = None,
-    cost_threshold: float | None = None,
+    cost_threshold: float,
     gap_threshold_m: float | None = None,
     segments: list | None = None,
     segments_by_path: dict[str, list] | None = None,
@@ -565,7 +565,7 @@ def render_viewer_html(
   "has_triangulated": {str(ctx.has_triangulated).lower()}
 }}</script>
 <script>
-window.VIEWER_INITIAL_COST_THRESHOLD = {float(_pt_default.cost_threshold) if ctx.cost_threshold is None else float(ctx.cost_threshold)};
+window.VIEWER_INITIAL_COST_THRESHOLD = {float(ctx.cost_threshold)};
 // Initial gap in METRES (None → PairingTuning.default().gap_threshold_m).
 // 50_canvas.js converts to client-side residualCapM as a finite metres
 // value; the slider's 200cm position is just `2.0m`, no Infinity special
@@ -595,7 +595,7 @@ window._applyTuning = function(btn) {{
   fetch('/sessions/' + encodeURIComponent(sid) + '/recompute', {{
     method: 'POST',
     headers: {{ 'Content-Type': 'application/json' }},
-    body: JSON.stringify({{ cost_threshold: cost, gap_threshold_m: gap_m }}),
+    body: JSON.stringify({{ gap_threshold_m: gap_m }}),
   }}).then(function(r) {{
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
@@ -621,11 +621,6 @@ window._applyTuning = function(btn) {{
     // labels — operator sees what was actually applied, not whatever
     // they happened to drag to before clicking. Subsequent drags
     // diff from this new baseline.
-    if (typeof r.cost_threshold === 'number') {{
-      window.VIEWER_INITIAL_COST_THRESHOLD = r.cost_threshold;
-      costInput.value = r.cost_threshold.toFixed(2);
-      if (costValueEl) costValueEl.textContent = r.cost_threshold.toFixed(2);
-    }}
     if (typeof r.gap_threshold_m === 'number') {{
       window.VIEWER_INITIAL_GAP_THRESHOLD_M = r.gap_threshold_m;
       const cm = Math.round(r.gap_threshold_m * 100);

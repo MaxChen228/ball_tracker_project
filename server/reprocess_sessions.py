@@ -241,17 +241,15 @@ def load_pairing_tuning() -> PairingTuning:
     has never written the file."""
     if not PAIRING_TUNING_PATH.exists():
         d = PairingTuning.default()
-        logger.info("no pairing_tuning.json — using default cost=%.2f gap=%.2fm",
-                    d.cost_threshold, d.gap_threshold_m)
+        logger.info("no pairing_tuning.json — using default gap=%.2fm",
+                    d.gap_threshold_m)
         return d
     obj = json.loads(PAIRING_TUNING_PATH.read_text())
     d = PairingTuning.default()
     t = PairingTuning(
-        cost_threshold=float(obj.get("cost_threshold", d.cost_threshold)),
         gap_threshold_m=float(obj.get("gap_threshold_m", d.gap_threshold_m)),
     )
-    logger.info("pairing_tuning cost=%.2f gap=%.2fm",
-                t.cost_threshold, t.gap_threshold_m)
+    logger.info("pairing_tuning gap=%.2fm", t.gap_threshold_m)
     return t
 
 
@@ -268,7 +266,6 @@ def triangulate_session(
         session_id=sid,
         camera_a_received=a is not None,
         camera_b_received=b is not None,
-        cost_threshold=pairing_tuning.cost_threshold,
         gap_threshold_m=pairing_tuning.gap_threshold_m,
     )
     used = session_results.aggregate_pitch_used_configs(a, b, sid)
@@ -297,7 +294,7 @@ def triangulate_session(
             live_pts = triangulate_cycle(
                 pitch_with_path_frames(scale(a), DetectionPath.live),
                 pitch_with_path_frames(scale(b), DetectionPath.live),
-                source="server", tuning=pairing_tuning,
+                source="server",
             )
         except Exception as e:
             result.abort_reasons["live"] = f"{type(e).__name__}: {e}"
@@ -308,7 +305,7 @@ def triangulate_session(
     if a.frames_server_post and b.frames_server_post:
         try:
             pts = triangulate_cycle(
-                scale(a), scale(b), source="server", tuning=pairing_tuning,
+                scale(a), scale(b), source="server",
             )
         except Exception as e:
             result.error = f"{type(e).__name__}: {e}"

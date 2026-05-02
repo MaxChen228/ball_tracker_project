@@ -40,6 +40,14 @@ IOS_CAPTURE_TIME = "ios_capture_time"
 
 _NON_RUNNABLE_IDS: frozenset[str] = frozenset({IOS_CAPTURE_TIME})
 
+# Cost threshold for the iOS capture-time data source. The live pipeline
+# uses the same `score_candidates` cost function as v11_hsv_cc (both
+# read aspect/fill from HSV+CC mask candidates), so the threshold also
+# matches v11's. Held as a separate constant rather than synthesized
+# from `_REGISTRY` so the lookup helper stays a single dict read for
+# the runnable case and a typed branch for IOS_CAPTURE_TIME.
+IOS_CAPTURE_TIME_COST_THRESHOLD = 0.5
+
 
 # Drift guard: schemas.py duplicates the IOS_CAPTURE_TIME literal to
 # avoid a back-import cycle. Anyone editing one but not the other gets
@@ -63,6 +71,15 @@ class AlgorithmEntry:
     label: str
     description: str
     detector: Detector
+    # Algorithm-owned cost gate, applied as `max(cost_a, cost_b) ≤
+    # cost_threshold` on every triangulated point before the segmenter
+    # consumes it (`session_results._passes_stamped_filter`). The cost
+    # values themselves come from `candidate_selector.score_candidates`,
+    # which reads detection-specific features (aspect, fill) — so the
+    # "right" threshold is a property of the detector + its feature
+    # distribution, not an operator preference. v11_hsv_cc baseline 0.5
+    # was the previous global default; future algorithms set their own.
+    cost_threshold: float
 
 
 _ID_RE = re.compile(r"^[a-z0-9_]{1,32}$")
@@ -79,6 +96,7 @@ _REGISTRY: dict[str, AlgorithmEntry] = {
             "the 1073-frame GT set."
         ),
         detector=V11Detector(),
+        cost_threshold=0.5,
     ),
 }
 
@@ -113,6 +131,24 @@ def get(algorithm_id: str) -> AlgorithmEntry:
     boundary (HTTP routes, disk loaders) so they can translate to
     HTTP 400 / boot failure with the offending id in the message."""
     return _REGISTRY[algorithm_id]
+
+
+def cost_threshold_for_algorithm(algorithm_id: str) -> float:
+    """Strict cost-threshold lookup for any wire / disk algorithm id.
+
+    Accepts both runnable algorithms (`_REGISTRY`) and the non-runnable
+    iOS capture-time data source — both have a cost gate applied on
+    triangulated points. Raises `ValueError` on unknown ids; no silent
+    fallback (CLAUDE.md: experimental phase, no backcompat shims)."""
+    entry = _REGISTRY.get(algorithm_id)
+    if entry is not None:
+        return entry.cost_threshold
+    if algorithm_id == IOS_CAPTURE_TIME:
+        return IOS_CAPTURE_TIME_COST_THRESHOLD
+    known = sorted(set(_REGISTRY) | _NON_RUNNABLE_IDS)
+    raise ValueError(
+        f"unknown algorithm_id {algorithm_id!r} (known: {known})"
+    )
 
 
 def list_all() -> list[AlgorithmEntry]:

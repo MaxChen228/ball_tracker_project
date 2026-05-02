@@ -429,11 +429,9 @@ def test_triangulate_live_pair_matches_triangulate_cycle():
 
     pose_a = CameraPose(K=K, R=R_a, C=C_a, dist=None, image_wh=(1920, 1080))
     pose_b = CameraPose(K=K, R=R_b, C=C_b, dist=None, image_wh=(1920, 1080))
-    from pairing_tuning import PairingTuning
     live_points = pairing.triangulate_live_pair(
         pose_a, pose_b, fa, fb,
         anchor_a=anchor, anchor_b=anchor,
-        tuning=PairingTuning.default(),
     )
     assert len(live_points) == 1
     live_pt = live_points[0]

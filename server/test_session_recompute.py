@@ -1,10 +1,10 @@
-"""Tests for POST /sessions/{sid}/recompute (per-session cost_threshold).
+"""Tests for POST /sessions/{sid}/recompute (per-session gap_threshold_m).
 
 Verifies:
-- Lower threshold drops more candidates (fan-out fewer points)
-- SessionResult.cost_threshold persists what the operator chose
+- Stamped gap_threshold_m round-trips through the route + result
 - Out-of-range / missing input → 400
 - Unknown session → 404
+- Segmenter applies per-algorithm cost gate before fit
 """
 from __future__ import annotations
 
@@ -48,59 +48,38 @@ def _seed_session(state, session_id: str):
     state.pitches[("B", session_id)] = payload_b
 
 
-def test_recompute_emit_invariant_to_stamped_cost(tmp_path, monkeypatch):
-    """Architectural invariant after pairing-full-emit: stamped
-    cost_threshold no longer gates pairing emit. Two recomputes with
-    different stamped costs produce identical `triangulated_by_path`
-    counts; only `segments` (fit input is filtered subset) and the
-    persisted stamped value differ. Each emitted point carries
-    `cost_a`/`cost_b` so the viewer slider can filter client-side."""
-    import main
-    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
-    sid = "s_aaaa0001"
-    _seed_session(main.state, sid)
-    client = TestClient(main.app)
-
-    r1 = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": 1.0})
-    assert r1.status_code == 200, r1.text
-    by_path_loose = r1.json()["result"]["triangulated_by_path"]
-    n_loose = sum(len(v) for v in by_path_loose.values())
-
-    r2 = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": 0.2})
-    assert r2.status_code == 200
-    by_path_tight = r2.json()["result"]["triangulated_by_path"]
-    n_tight = sum(len(v) for v in by_path_tight.values())
-
-    # Emit count is INVARIANT to stamped cost — full set is persisted.
-    assert n_tight == n_loose, (n_loose, n_tight)
-    # Stamped value still round-trips to SessionResult so viewer slider
-    # initialises correctly.
-    assert r1.json()["result"]["cost_threshold"] == pytest.approx(1.0)
-    assert r2.json()["result"]["cost_threshold"] == pytest.approx(0.2)
-    # Each emitted point carries cost_a/cost_b so client-side filter has
-    # the data it needs.
-    for path_pts in by_path_tight.values():
-        for p in path_pts:
-            assert "cost_a" in p
-            assert "cost_b" in p
-
-
-def test_recompute_persists_cost_threshold(tmp_path, monkeypatch):
+def test_recompute_persists_gap_threshold(tmp_path, monkeypatch):
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     sid = "s_bbbb0002"
     _seed_session(main.state, sid)
     client = TestClient(main.app)
 
-    r = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": 0.45})
+    r = client.post(f"/sessions/{sid}/recompute", json={"gap_threshold_m": 0.08})
     assert r.status_code == 200
     body = r.json()["result"]
-    assert body["cost_threshold"] == pytest.approx(0.45)
+    assert body["gap_threshold_m"] == pytest.approx(0.08)
 
     # GET /results/{sid} also surfaces the value.
     g = client.get(f"/results/{sid}")
     assert g.status_code == 200
-    assert g.json()["cost_threshold"] == pytest.approx(0.45)
+    assert g.json()["gap_threshold_m"] == pytest.approx(0.08)
+
+
+def test_recompute_response_no_longer_includes_cost_threshold(tmp_path, monkeypatch):
+    """Cost-absorption refactor: cost is per-algorithm, not per-session.
+    The recompute response must NOT carry a `cost_threshold` field on
+    the SessionResult dump (Pydantic strips the dropped field)."""
+    import main
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    sid = "s_cccc0003"
+    _seed_session(main.state, sid)
+    client = TestClient(main.app)
+
+    r = client.post(f"/sessions/{sid}/recompute", json={"gap_threshold_m": 0.10})
+    assert r.status_code == 200
+    body = r.json()["result"]
+    assert "cost_threshold" not in body, body.keys()
 
 
 def test_recompute_broadcasts_fit_with_cause(tmp_path, monkeypatch):
@@ -122,70 +101,27 @@ def test_recompute_broadcasts_fit_with_cause(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "sse_hub", _CaptureHub())
     client = TestClient(main.app)
-    r = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": 0.6})
+    r = client.post(f"/sessions/{sid}/recompute", json={"gap_threshold_m": 0.06})
     assert r.status_code == 200
     fit_events = [d for n, d in events if n == "fit" and d.get("sid") == sid]
     assert len(fit_events) == 1
     fe = fit_events[0]
     assert fe["cause"] == "recompute"
     assert "segments" in fe
-    assert "cost_threshold" in fe
     assert "gap_threshold_m" in fe
+    # Cost is no longer per-session; broadcast must NOT carry it.
+    assert "cost_threshold" not in fe
 
 
-def test_recompute_rejects_out_of_range(tmp_path, monkeypatch):
+def test_recompute_rejects_missing_gap(tmp_path, monkeypatch):
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
-    sid = "s_cccc0003"
+    sid = "s_cccc0030"
     _seed_session(main.state, sid)
     client = TestClient(main.app)
 
-    for bad in (-0.1, 1.5):
-        r = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": bad})
-        assert r.status_code == 400, f"expected 400 for {bad}: {r.text}"
-
-    # Missing field → 400.
     r = client.post(f"/sessions/{sid}/recompute", json={})
     assert r.status_code == 400
-
-
-def test_recompute_persists_both_thresholds(tmp_path, monkeypatch):
-    """Per-session sibling of cost_threshold: gap_threshold_m must round-trip
-    through the recompute body and surface on SessionResult / GET /results."""
-    import main
-    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
-    sid = "s_bbbb1002"
-    _seed_session(main.state, sid)
-    client = TestClient(main.app)
-
-    r = client.post(
-        f"/sessions/{sid}/recompute",
-        json={"cost_threshold": 0.45, "gap_threshold_m": 0.08},
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()["result"]
-    assert body["cost_threshold"] == pytest.approx(0.45)
-    assert body["gap_threshold_m"] == pytest.approx(0.08)
-
-    g = client.get(f"/results/{sid}")
-    assert g.status_code == 200
-    assert g.json()["gap_threshold_m"] == pytest.approx(0.08)
-
-
-def test_recompute_omitted_gap_falls_back_to_state_default(tmp_path, monkeypatch):
-    """Body without gap_threshold_m → route resolves it from
-    state.pairing_tuning() and stamps it on the result so the viewer slider
-    can re-init from a concrete value (not None)."""
-    import main
-    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
-    sid = "s_bbbb1003"
-    _seed_session(main.state, sid)
-    client = TestClient(main.app)
-
-    expected_gap = main.state.pairing_tuning().gap_threshold_m
-    r = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": 1.0})
-    assert r.status_code == 200, r.text
-    assert r.json()["result"]["gap_threshold_m"] == pytest.approx(expected_gap)
 
 
 def test_recompute_rejects_out_of_range_gap(tmp_path, monkeypatch):
@@ -198,45 +134,41 @@ def test_recompute_rejects_out_of_range_gap(tmp_path, monkeypatch):
     for bad in (-0.01, 2.5):
         r = client.post(
             f"/sessions/{sid}/recompute",
-            json={"cost_threshold": 0.5, "gap_threshold_m": bad},
+            json={"gap_threshold_m": bad},
         )
         assert r.status_code == 400, f"expected 400 for gap={bad}: {r.text}"
 
     r = client.post(
         f"/sessions/{sid}/recompute",
-        json={"cost_threshold": 0.5, "gap_threshold_m": "garbage"},
+        json={"gap_threshold_m": "garbage"},
     )
     assert r.status_code == 400
 
 
 def test_recompute_emit_invariant_to_stamped_gap(tmp_path, monkeypatch):
-    """Sibling of the cost-axis emit-invariance test: stamped
-    gap_threshold_m no longer gates pairing emit. The stamped value
-    persists on SessionResult so the viewer slider can initialise from
-    it; the segmenter and viewer client filter downstream."""
+    """Architectural invariant after pairing-full-emit: stamped
+    gap_threshold_m no longer gates pairing emit. Two recomputes with
+    different stamped gaps produce identical `triangulated_by_path`
+    counts; only `segments` (fit input is filtered subset) and the
+    persisted stamped value differ."""
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     sid = "s_dddd1005"
     _seed_session(main.state, sid)
     client = TestClient(main.app)
 
-    # Wide gap → all pairs flow through emit.
     r1 = client.post(
         f"/sessions/{sid}/recompute",
-        json={"cost_threshold": 1.0, "gap_threshold_m": 2.0},
+        json={"gap_threshold_m": 2.0},
     )
     assert r1.status_code == 200, r1.text
     n_loose = sum(
         len(v) for v in r1.json()["result"]["triangulated_by_path"].values()
     )
 
-    # Tight gap — emit count must still match (gap_threshold_m no longer
-    # gates pairing emit; it's a stamped-filter input the segmenter and
-    # viewer slider apply downstream). The stamped value DOES round-trip
-    # to SessionResult so the viewer header strip re-initialises.
     r2 = client.post(
         f"/sessions/{sid}/recompute",
-        json={"cost_threshold": 1.0, "gap_threshold_m": 0.005},
+        json={"gap_threshold_m": 0.005},
     )
     assert r2.status_code == 200
     n_tight = sum(
@@ -246,22 +178,39 @@ def test_recompute_emit_invariant_to_stamped_gap(tmp_path, monkeypatch):
     assert r2.json()["result"]["gap_threshold_m"] == pytest.approx(0.005)
 
 
-def test_segmenter_filters_input_by_stamped_cost_threshold():
+def test_segmenter_filters_input_by_per_algorithm_cost_threshold(monkeypatch):
     """Direct unit-level check that `stamp_segments_on_result` runs the
-    segmenter against the stamped-tuning SUBSET of `result.triangulated`,
-    not the full set. Builds a synthetic ballistic with two candidates
-    per timestamp — a low-cost "real ball" and a high-cost distractor.
-    Tightening cost_threshold to exclude the distractor changes which
-    points the segmenter sees.
+    segmenter against the per-algorithm cost-filtered SUBSET of
+    `result.triangulated`, not the full set. The cost gate now comes
+    from `algorithms.cost_threshold_for_algorithm` keyed on the path's
+    algorithm id, not from a SessionResult field.
 
-    Architectural significance: this is the test that decouples emit
-    (full set persisted) from fit (stamped subset). Without this,
-    raising the cost slider on the viewer would have no effect on the
-    fit segments — defeating the whole "Apply re-runs segmenter" UX.
+    Architectural significance: this decouples emit (full set persisted)
+    from fit (algorithm-stamped subset). Without this, the cost-absorption
+    refactor would have lost the cost-side filter entirely.
     """
     import numpy as np
+    import algorithms as algorithms_mod
     from session_results import stamp_segments_on_result
-    from schemas import SessionResult, TriangulatedPoint
+    from schemas import (
+        DetectionConfigSnapshotPayload,
+        DetectionPath,
+        HSVRangePayload,
+        SessionResult,
+        ShapeGatePayload,
+        TriangulatedPoint,
+    )
+
+    # Build a private fake algorithm with a TIGHT cost threshold so we
+    # can assert the segmenter sees only low-cost points.
+    fake_entry = algorithms_mod.AlgorithmEntry(
+        algorithm_id="v99_tight",
+        label="tight test",
+        description="tight test",
+        detector=algorithms_mod._REGISTRY["v11_hsv_cc"].detector,
+        cost_threshold=0.20,
+    )
+    monkeypatch.setitem(algorithms_mod._REGISTRY, "v99_tight", fake_entry)
 
     # 12 frames of clean ballistic, each with a "real" + "distractor" point.
     G = np.array([0.0, 0.0, -9.81])
@@ -274,49 +223,43 @@ def test_segmenter_filters_input_by_stamped_cost_threshold():
         pts.append(TriangulatedPoint(
             t_rel_s=t, x_m=float(pos[0]), y_m=float(pos[1]), z_m=float(pos[2]),
             residual_m=0.001,
-            cost_a=0.10, cost_b=0.10,  # real ball, low cost
+            cost_a=0.10, cost_b=0.10,  # real ball, below 0.20 gate
         ))
         pts.append(TriangulatedPoint(
             t_rel_s=t, x_m=float(pos[0]) + 5.0, y_m=float(pos[1]),
             z_m=float(pos[2]),  # distractor 5 m sideways
             residual_m=0.001,
-            cost_a=0.80, cost_b=0.80,  # distractor, high cost
+            cost_a=0.80, cost_b=0.80,  # above 0.20 gate
         ))
 
-    # Loose cost: distractors flow into segmenter and may produce a fake
-    # second segment / contaminate the fit.
-    loose = SessionResult(
-        session_id="s_seg_loose",
-        camera_a_received=True,
-        camera_b_received=True,
-        triangulated=list(pts),
-        cost_threshold=1.0,
-        gap_threshold_m=0.20,
+    snap = DetectionConfigSnapshotPayload(
+        algorithm_id="v99_tight",
+        hsv=HSVRangePayload(h_min=10, h_max=20, s_min=30, s_max=200, v_min=40, v_max=210),
+        shape_gate=ShapeGatePayload(aspect_min=0.7, fill_min=0.55),
+        preset_name=None,
     )
-    stamp_segments_on_result(loose)
-
-    # Tight cost: only real-ball points reach segmenter — clean single fit.
-    tight = SessionResult(
+    result = SessionResult(
         session_id="s_seg_tight",
         camera_a_received=True,
         camera_b_received=True,
-        triangulated=list(pts),
-        cost_threshold=0.20,
+        triangulated_by_path={DetectionPath.server_post.value: list(pts)},
+        server_post_config_used=snap,
         gap_threshold_m=0.20,
     )
-    stamp_segments_on_result(tight)
+    stamp_segments_on_result(
+        result, legacy_points_path=DetectionPath.server_post,
+    )
 
-    # Both produce ≥1 segment, but the tight cost excludes 12 distractor
-    # points so the segment(s) cover at most the 12 real points.
-    assert len(tight.segments) >= 1
-    tight_total_indices = sum(len(s.original_indices) for s in tight.segments)
+    assert len(result.segments) >= 1
+    tight_total_indices = sum(
+        len(s.original_indices) for s in result.segments
+    )
+    # Only the 12 real-ball points pass the v99_tight 0.20 cost gate.
     assert tight_total_indices <= 12, tight_total_indices
-    # And `original_indices` index back into the FULL list (size 24), so
-    # they must all be < 24 — the remap step in stamp_segments_on_result
-    # correctly translates filter-subset indices to full-list indices.
-    full_n = len(tight.triangulated)
+    # And `original_indices` index back into the FULL list (size 24).
+    full_n = len(result.triangulated)
     assert full_n == 24
-    for s in tight.segments:
+    for s in result.segments:
         for idx in s.original_indices:
             assert 0 <= idx < full_n
 
@@ -325,7 +268,7 @@ def test_recompute_unknown_session_returns_404(tmp_path, monkeypatch):
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(main.app)
-    r = client.post("/sessions/s_dddd0004/recompute", json={"cost_threshold": 0.5})
+    r = client.post("/sessions/s_dddd0004/recompute", json={"gap_threshold_m": 0.20})
     assert r.status_code == 404
 
 
@@ -340,7 +283,7 @@ def test_recompute_accepts_live_only_session_in_live_pairings(tmp_path, monkeypa
     sid = "s_eeee0005"
     main.state._live_pairings[sid] = LivePairingSession(sid)
     client = TestClient(main.app)
-    r = client.post(f"/sessions/{sid}/recompute", json={"cost_threshold": 0.5})
+    r = client.post(f"/sessions/{sid}/recompute", json={"gap_threshold_m": 0.20})
     # Not 404 — the guard recognised the session. May be 200 with empty
     # result (no pitches persisted yet), but the response code is what
     # we're asserting here.
@@ -351,5 +294,5 @@ def test_recompute_invalid_session_id_returns_422(tmp_path, monkeypatch):
     import main
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(main.app)
-    r = client.post("/sessions/not-a-session-id/recompute", json={"cost_threshold": 0.5})
+    r = client.post("/sessions/not-a-session-id/recompute", json={"gap_threshold_m": 0.20})
     assert r.status_code == 422

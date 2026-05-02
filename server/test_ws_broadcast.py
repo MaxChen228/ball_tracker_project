@@ -193,13 +193,13 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
     for fe in fit_events:
         assert fe["cause"] == "cycle_end"
         assert fe["segments"] == []
-        # Both threshold fields must ship on every fit event so dashboard
-        # can refresh its client-side mask without a /results round-trip.
-        # cycle_end fits before any operator Apply mirror SessionResult's
-        # default-None state — the keys must still be present so the
-        # client's `'cost_threshold' in payload` patch path triggers.
-        assert "cost_threshold" in fe
+        # gap_threshold_m must ship on every fit event so dashboard can
+        # refresh its client-side mask without a /results round-trip.
+        # Cost is per-algorithm (post cost-absorption refactor) and
+        # MUST NOT ship on the broadcast — clients resolve it from
+        # algorithm metadata.
         assert "gap_threshold_m" in fe
+        assert "cost_threshold" not in fe
 
 
 def test_stamp_segments_on_result_populates_segments_for_ballistic_input():

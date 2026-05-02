@@ -582,7 +582,6 @@ class State:
             obj = json.loads(path.read_text())
             d = PairingTuning.default()
             return PairingTuning(
-                cost_threshold=float(obj.get("cost_threshold", d.cost_threshold)),
                 gap_threshold_m=float(obj.get("gap_threshold_m", d.gap_threshold_m)),
             )
         except Exception as e:
@@ -592,10 +591,7 @@ class State:
     def _persist_pairing_tuning_locked(self) -> None:
         t = self._pairing_tuning
         payload = json.dumps(
-            {
-                "cost_threshold": t.cost_threshold,
-                "gap_threshold_m": t.gap_threshold_m,
-            },
+            {"gap_threshold_m": t.gap_threshold_m},
             indent=2,
         )
         self._atomic_write(self._pairing_tuning_path, payload)
@@ -770,7 +766,6 @@ class State:
                 frame_a, frame_b,
                 anchor_a=dev_a.sync_anchor_timestamp_s,
                 anchor_b=dev_b.sync_anchor_timestamp_s,
-                tuning=live.pairing_tuning,
             )
 
         created = live.ingest(camera_id, frame, triangulate_live, anchors=anchors)

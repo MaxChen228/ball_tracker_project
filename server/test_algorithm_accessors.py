@@ -140,6 +140,7 @@ def test_stamp_server_post_run_accumulates_two_algorithms(monkeypatch):
         label="test",
         description="test",
         detector=algorithms_mod._REGISTRY["v11_hsv_cc"].detector,
+        cost_threshold=0.5,
     )
     patched = dict(algorithms_mod._REGISTRY)
     patched["v12_test"] = fake
@@ -214,6 +215,7 @@ def test_state_record_merge_preserves_existing_dict_buckets(tmp_path, monkeypatc
         label="test",
         description="test",
         detector=algorithms_mod._REGISTRY["v11_hsv_cc"].detector,
+        cost_threshold=0.5,
     )
     monkeypatch.setitem(algorithms_mod._REGISTRY, "v12_test", fake)
 
@@ -257,6 +259,7 @@ def test_state_record_merge_deep_copies_preserved_frames(tmp_path, monkeypatch):
         algorithm_id="v12_test",
         label="test", description="test",
         detector=algorithms_mod._REGISTRY["v11_hsv_cc"].detector,
+        cost_threshold=0.5,
     )
     monkeypatch.setitem(algorithms_mod._REGISTRY, "v12_test", fake)
 

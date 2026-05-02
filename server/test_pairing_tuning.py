@@ -10,7 +10,6 @@ import pytest
 def test_pairing_tuning_default_values():
     from pairing_tuning import PairingTuning
     t = PairingTuning.default()
-    assert t.cost_threshold == 0.5
     assert t.gap_threshold_m == 0.20
 
 
@@ -23,14 +22,13 @@ def test_pairing_tuning_disk_round_trip(tmp_path, monkeypatch):
     # Default surfaces.
     assert s.pairing_tuning() == PairingTuning.default()
 
-    s.set_pairing_tuning(PairingTuning(cost_threshold=0.5, gap_threshold_m=0.10))
+    s.set_pairing_tuning(PairingTuning(gap_threshold_m=0.10))
     persisted = _json.loads((tmp_path / "pairing_tuning.json").read_text())
-    assert persisted == {"cost_threshold": 0.5, "gap_threshold_m": 0.10}
+    assert persisted == {"gap_threshold_m": 0.10}
 
     # Simulate restart.
     fresh = main.State(data_dir=tmp_path)
     t = fresh.pairing_tuning()
-    assert t.cost_threshold == pytest.approx(0.5)
     assert t.gap_threshold_m == pytest.approx(0.10)
 
 
@@ -45,6 +43,19 @@ def test_corrupt_tuning_json_falls_back_to_default(tmp_path, monkeypatch):
     assert s.pairing_tuning() == PairingTuning.default()
 
 
+def test_pairing_tuning_json_with_legacy_cost_field_still_loads(tmp_path):
+    """Old disk JSON predates the cost-absorption refactor and includes
+    a stray `cost_threshold` key. Loader must ignore the extra key, not
+    crash, so a fresh boot off old data still surfaces gap defaults."""
+    (tmp_path / "pairing_tuning.json").write_text(
+        _json.dumps({"cost_threshold": 0.5, "gap_threshold_m": 0.15})
+    )
+    import main
+    s = main.State(data_dir=tmp_path)
+    t = s.pairing_tuning()
+    assert t.gap_threshold_m == pytest.approx(0.15)
+
+
 def test_rebuild_result_seeds_current_global_pairing_tuning(tmp_path, monkeypatch):
     import main
     from pairing_tuning import PairingTuning
@@ -52,7 +63,7 @@ def test_rebuild_result_seeds_current_global_pairing_tuning(tmp_path, monkeypatc
 
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     s = main.state
-    s.set_pairing_tuning(PairingTuning(cost_threshold=0.12, gap_threshold_m=0.07))
+    s.set_pairing_tuning(PairingTuning(gap_threshold_m=0.07))
 
     sid = "s_dead00f1"
     pitch_a = main.PitchPayload(
@@ -68,70 +79,19 @@ def test_rebuild_result_seeds_current_global_pairing_tuning(tmp_path, monkeypatc
     s.record(pitch_a)
 
     result = rebuild_result_for_session(s, sid)
-    assert result.cost_threshold == pytest.approx(0.12)
     assert result.gap_threshold_m == pytest.approx(0.07)
 
 
-# ---------- triangulate_cycle fan-out: cost / gap filter behaviour ----------
-
-def _build_minimal_pitches():
-    """Two cameras looking at a single point from 90° apart, two frames
-    each, simple intrinsics. Returns (pitch_a, pitch_b)."""
-    from schemas import (
-        BlobCandidate, FramePayload, IntrinsicsPayload,
-    )
-    fx = fy = 1000.0
-    cx = cy = 500.0
-    intr = IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy)
-
-    # Camera A at (-2, 0, 1) looking at origin; Camera B at (0, -2, 1).
-    # For a target at (0, 0, 0), project pixels with simple geometry.
-    # A's optical axis is +x; target lies along it → centre pixel.
-    # B's optical axis is +y; same → centre pixel.
-    # We'll cheat and just put px=cx, py=cy on both — produces rays
-    # that intersect approximately at world origin.
-
-    def _frame(idx: int, t: float, cands: list[BlobCandidate]) -> FramePayload:
-        return FramePayload(
-            frame_index=idx, timestamp_s=t,
-            candidates=cands, ball_detected=True,
-        )
-
-    cands_a = [
-        BlobCandidate(px=cx, py=cy, area=100, area_score=1.0,
-                      aspect=1.0, fill=0.68, cost=0.10),
-        BlobCandidate(px=cx + 50, py=cy, area=80, area_score=0.8,
-                      aspect=0.8, fill=0.55, cost=0.40),
-    ]
-    cands_b = [
-        BlobCandidate(px=cx, py=cy, area=100, area_score=1.0,
-                      aspect=1.0, fill=0.68, cost=0.10),
-        BlobCandidate(px=cx, py=cy + 50, area=80, area_score=0.8,
-                      aspect=0.8, fill=0.55, cost=0.40),
-    ]
-
-    # Homography: identity-ish so recover_extrinsics returns a valid
-    # pose. We need plate-plane→pixel mapping, so the homography has
-    # to be consistent with the camera placement. For a unit test of
-    # the fan-out plumbing we use the two cams from
-    # test_triangulation_math which already builds proper H.
-    return cands_a, cands_b
+# ---------- triangulate_cycle fan-out: gap filter behaviour ----------
 
 
 def test_triangulate_cycle_fan_out_emits_multi_points():
     """Fan-out across 2 candidates per cam → up to 4 triangulated
     pairs, each tagged with source_a_cand_idx + source_b_cand_idx."""
-    # Reuse the synthetic-camera builder from test_triangulation_math
     import test_triangulation_math as ttm
     from schemas import BlobCandidate, FramePayload
     from pairing import triangulate_cycle
-    from pairing_tuning import PairingTuning
 
-    # Build pitches with one frame each, 2 candidates per side.
-    K, _ = ttm._tri_make_camera_pair_setup() if hasattr(ttm, '_tri_make_camera_pair_setup') else (None, None)
-
-    # Simpler: hand-roll using the existing _build_pairing_payloads
-    # helper (gives us valid intrinsics + homography + extrinsics).
     payload_a, payload_b = ttm._build_pairing_payloads(
         [0.0], [0.0], "s_fa00ff01",
     )
@@ -160,10 +120,7 @@ def test_triangulate_cycle_fan_out_emits_multi_points():
         candidates=cands_b, ball_detected=True,
     )
 
-    pts = triangulate_cycle(
-        payload_a, payload_b,
-        tuning=PairingTuning(cost_threshold=1.0, gap_threshold_m=10.0),
-    )
+    pts = triangulate_cycle(payload_a, payload_b)
     # 2×2 fan-out: up to 4 points. Some may be near-parallel-rejected,
     # but the (cand0_a, cand0_b) pair should triangulate cleanly since
     # those are the original valid pixel pairs.
@@ -176,16 +133,16 @@ def test_triangulate_cycle_fan_out_emits_multi_points():
         assert 0 <= p.source_b_cand_idx < 2
 
 
-def test_triangulate_cycle_emit_ignores_tuning_cost_threshold():
-    """Pairing emit is decoupled from PairingTuning.cost_threshold.
-    A tight tuning.cost_threshold no longer drops candidate pairs at
-    emit time — viewer slider + segmenter use the stamped value
-    downstream. All candidate pairs under the absolute emit ceiling
-    flow through regardless of tuning."""
+def test_triangulate_cycle_emit_carries_cost_for_downstream_filter():
+    """Pairing emit is decoupled from any cost threshold (per-algorithm
+    or otherwise). All candidate pairs under the absolute emit ceiling
+    flow through; the emitted point's `cost_a` / `cost_b` carry the
+    source candidates' costs so the downstream stamped-tuning filter
+    (`session_results._passes_stamped_filter`) can reproduce the gate
+    using the algorithm's own threshold."""
     import test_triangulation_math as ttm
     from schemas import BlobCandidate, FramePayload
     from pairing import triangulate_cycle
-    from pairing_tuning import PairingTuning
 
     payload_a, payload_b = ttm._build_pairing_payloads(
         [0.0], [0.0], "s_c001ff02",
@@ -212,14 +169,9 @@ def test_triangulate_cycle_emit_ignores_tuning_cost_threshold():
         frame_index=0, timestamp_s=fb.timestamp_s,
         candidates=cands_b, ball_detected=True,
     )
-    pts = triangulate_cycle(
-        payload_a, payload_b,
-        tuning=PairingTuning(cost_threshold=0.2, gap_threshold_m=10.0),
-    )
+    pts = triangulate_cycle(payload_a, payload_b)
     # All four (cand_a × cand_b) pairs are well under the emit cost
-    # ceiling (5.0); tuning's 0.2 must not gate emit. Each emitted
-    # point carries the source cands' costs so a downstream filter
-    # (viewer / segmenter) can reproduce the old "tuning ≤ 0.2" behavior.
+    # ceiling (5.0).
     seen_pairs = {(p.source_a_cand_idx, p.source_b_cand_idx) for p in pts}
     assert (0, 0) in seen_pairs
     assert (1, 1) in seen_pairs
@@ -230,15 +182,14 @@ def test_triangulate_cycle_emit_ignores_tuning_cost_threshold():
             assert p.cost_a == 0.30
 
 
-def test_triangulate_cycle_emit_ignores_tuning_gap_threshold():
-    """Pairing emit is decoupled from PairingTuning.gap_threshold_m.
-    A tight tuning gap no longer drops large-residual pairs at emit
-    time; only the absolute `_EMIT_GAP_CEILING_M` does. Loose vs tight
-    tuning produce identical emitted sets."""
+def test_triangulate_cycle_emit_invariant_to_gap_threshold():
+    """Pairing emit is decoupled from operator gap tuning. Loose vs
+    tight runs produce identical emitted sets; only the absolute
+    `_EMIT_GAP_CEILING_M` gates emit. The downstream filter at
+    `_passes_stamped_filter` applies the per-session gap."""
     import test_triangulation_math as ttm
     from schemas import BlobCandidate, FramePayload
     from pairing import triangulate_cycle
-    from pairing_tuning import PairingTuning
 
     payload_a, payload_b = ttm._build_pairing_payloads(
         [0.0], [0.0], "s_9af00f03",
@@ -263,17 +214,10 @@ def test_triangulate_cycle_emit_ignores_tuning_gap_threshold():
         )], ball_detected=True,
     )
 
-    loose = triangulate_cycle(
-        payload_a, payload_b,
-        tuning=PairingTuning(cost_threshold=1.0, gap_threshold_m=10.0),
-    )
-    tight = triangulate_cycle(
-        payload_a, payload_b,
-        tuning=PairingTuning(cost_threshold=1.0, gap_threshold_m=0.01),
-    )
-    # Identical emit — tuning.gap_threshold_m is no longer an emit gate.
-    assert len(tight) == len(loose)
-    # Each emitted point still carries its true geometric residual; a
-    # downstream viewer slider / segmenter filter at 0.01 m would drop
-    # the high-residual pair even though emit kept it.
-    assert any(p.residual_m > 0.01 for p in loose)
+    pts1 = triangulate_cycle(payload_a, payload_b)
+    pts2 = triangulate_cycle(payload_a, payload_b)
+    assert len(pts1) == len(pts2)
+    # Each emitted point carries its true geometric residual; a downstream
+    # gap filter at 0.01 m would drop the high-residual pair even though
+    # emit kept it.
+    assert any(p.residual_m > 0.01 for p in pts1)

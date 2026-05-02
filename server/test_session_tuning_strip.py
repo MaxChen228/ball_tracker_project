@@ -1,6 +1,10 @@
 """Tests for `viewer_fragments.session_tuning_strip_html` —
-the per-session pairing-tuning sliders (cost + gap) in the viewer's
-nav bar."""
+the per-session pairing-tuning sliders in the viewer's nav bar.
+
+Post cost-absorption refactor: cost is per-algorithm (read-only display
+in this transitional phase, removed entirely in Phase 2). Gap remains
+operator-tunable.
+"""
 from __future__ import annotations
 
 import re
@@ -8,15 +12,15 @@ import re
 from viewer_fragments import session_tuning_strip_html
 
 
-def test_strip_renders_with_defaults_when_thresholds_are_none():
-    body = session_tuning_strip_html(None, None, "s_dead00f1")
+def test_strip_renders_with_default_gap_when_none():
+    body = session_tuning_strip_html(0.5, None, "s_dead00f1")
     assert 'class="session-tuning"' in body
     assert 'data-session-cost-threshold' in body
     assert 'data-session-gap-threshold' in body
     assert 'data-session-recompute' in body
-    # Cost: None → PairingTuning.default().cost_threshold (0.5) shown.
+    # Cost: caller-supplied (resolved per-algorithm at the route).
     assert 'value="0.50"' in body
-    assert '>0.50<' in body  # st-value display for cost
+    assert '>0.50<' in body
     # Gap: None → PairingTuning.default().gap_threshold_m (0.20m → 20cm).
     assert 'value="20"' in body
     # No more "off" magic word — readout always speaks centimetres.
@@ -42,14 +46,14 @@ def test_strip_clamps_gap_above_route_max_to_slider_max():
     # Defensive: even if a future tuning ships gap > 2.0m (route max),
     # strip should clamp the slider to 200cm instead of rendering an
     # invalid `value="500"`.
-    body = session_tuning_strip_html(None, 5.0, "s_aabb00cc")
+    body = session_tuning_strip_html(0.5, 5.0, "s_aabb00cc")
     assert 'value="200"' in body
     assert '≤ 200 cm' in body
     assert '>off<' not in body
 
 
 def test_strip_renders_floor_gap_at_zero():
-    body = session_tuning_strip_html(None, 0.0, "s_aabb00cd")
+    body = session_tuning_strip_html(0.5, 0.0, "s_aabb00cd")
     # 0m → 0cm slider position. Readout shows "≤ 0 cm" — same
     # template as every other position, no special-cased word.
     assert 'value="0"' in body
@@ -61,7 +65,7 @@ def test_strip_has_no_pairing_cap_artifacts():
     pairing-cap tick / overflow shade / "Apply needed" warn — both
     sliders are pure client-side masks. Guard against accidental
     re-introduction."""
-    body = session_tuning_strip_html(None, None, "s_aabb00cc")
+    body = session_tuning_strip_html(0.5, None, "s_aabb00cc")
     assert 'st-gap-tick' not in body
     assert 'st-gap-track' not in body
     assert 'st-gap-warn' not in body
@@ -74,7 +78,7 @@ def test_strip_has_no_pairing_cap_artifacts():
 def test_strip_escapes_session_id_attr():
     """Session id pattern restricts to hex (^s_[0-9a-f]{4,32}$) but
     escape anyway — defense in depth."""
-    body = session_tuning_strip_html(None, None, 's_aabb00cc')
+    body = session_tuning_strip_html(0.5, None, 's_aabb00cc')
     assert '<script>' not in body
     assert 'onerror' not in body
     # Both range inputs are well-formed.
@@ -89,11 +93,12 @@ def test_strip_escapes_session_id_attr():
 
 
 def test_strip_apply_handler_uses_unified_window_global():
-    body = session_tuning_strip_html(None, None, "s_aabb00cc")
+    body = session_tuning_strip_html(0.5, None, "s_aabb00cc")
     # oninput handlers invoke the per-axis preview hooks.
     assert 'window._setCostThreshold' in body
     assert 'window._setGapThreshold' in body
-    # Apply onclick invokes the unified _applyTuning (sends both axes).
+    # Apply onclick invokes the unified _applyTuning (sends gap only post
+    # cost-absorption refactor).
     assert 'window._applyTuning' in body
     # Old single-axis handler must be gone — would silently drop gap.
     assert 'window._applyCostThreshold' not in body

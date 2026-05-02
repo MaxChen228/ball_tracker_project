@@ -62,20 +62,19 @@ def _empty_result() -> SessionResult:
 
 
 class _FakeTriangulatePair:
-    """Records every call so tests can assert tuning + alg routing."""
+    """Records every call so tests can assert alg routing."""
 
     def __init__(self, *, raise_for: set[str] | None = None):
         self.calls: list[dict] = []
         self.raise_for = raise_for or set()
 
-    def __call__(self, state, a, b, *, source="server", tuning=None):
+    def __call__(self, state, a, b, *, source="server"):
         # Detect which alg this clone is carrying — pitch_with_algorithm_frames
         # projects the alg's frames into frames_server_post, so frame[0].frame_index
         # encodes which bucket was selected by the helper.
         alg_marker = a.frames_server_post[0].frame_index if a.frames_server_post else -1
         self.calls.append({
             "alg_marker": alg_marker,
-            "tuning": tuning,
             "source": source,
         })
         if alg_marker in self.raise_for:
@@ -143,11 +142,12 @@ def test_helper_writes_abort_reason_on_exception(monkeypatch):
     assert "v12_bad" not in result.algorithms_completed
 
 
-def test_helper_threads_tuning_into_triangulate_pair(monkeypatch):
-    """tuning kwarg must reach triangulate_pair so per-session
-    Recompute slider values apply to non-current algs."""
-    from pairing_tuning import PairingTuning
-
+def test_helper_calls_triangulate_pair_for_each_non_current_alg(monkeypatch):
+    """Helper must call triangulate_pair once per non-current algorithm.
+    Cost-absorption refactor removed the per-session `tuning` kwarg —
+    cost is per-algorithm (resolved at filter time), gap is on the
+    SessionResult — so the helper signature is now plain
+    `(state, a, b, sync_error, result)`."""
     fake = _FakeTriangulatePair()
     monkeypatch.setattr(session_results, "triangulate_pair", fake)
 
@@ -156,15 +156,15 @@ def test_helper_threads_tuning_into_triangulate_pair(monkeypatch):
     b = _pitch(camera_id="B", server_post_config_used=snap_v11)
     a.frames_by_algorithm = {"v11_hsv_cc": [_frame(11)], "v12_x": [_frame(12)]}
     b.frames_by_algorithm = {"v11_hsv_cc": [_frame(11)], "v12_x": [_frame(12)]}
-    custom = PairingTuning(cost_threshold=0.42, gap_threshold_m=0.13)
 
     session_results._triangulate_non_current_algorithms(
         state=None, a=a, b=b, sync_error=None,
-        result=_empty_result(), tuning=custom,
+        result=_empty_result(),
     )
 
+    # Only v12_x is non-current; v11 (current per snapshot) is skipped.
     assert len(fake.calls) == 1
-    assert fake.calls[0]["tuning"] is custom
+    assert fake.calls[0]["alg_marker"] == 12
 
 
 def test_helper_logs_cross_cam_algorithm_mismatch(monkeypatch, caplog):
@@ -172,6 +172,7 @@ def test_helper_logs_cross_cam_algorithm_mismatch(monkeypatch, caplog):
     fake_entry = algorithms_mod.AlgorithmEntry(
         algorithm_id="v12_other", label="other", description="other",
         detector=algorithms_mod._REGISTRY["v11_hsv_cc"].detector,
+        cost_threshold=0.5,
     )
     monkeypatch.setitem(algorithms_mod._REGISTRY, "v12_other", fake_entry)
 
@@ -207,6 +208,7 @@ def test_recompute_preserves_non_current_alg_history(tmp_path, monkeypatch):
         algorithm_id="v12_test",
         label="test", description="test",
         detector=algorithms_mod._REGISTRY["v11_hsv_cc"].detector,
+        cost_threshold=0.5,
     )
     monkeypatch.setitem(algorithms_mod._REGISTRY, "v12_test", fake)
 
@@ -231,7 +233,7 @@ def test_recompute_preserves_non_current_alg_history(tmp_path, monkeypatch):
         s.record(p2)
 
     result = session_results.recompute_result_for_session(
-        s, "s_deadbeef", cost_threshold=0.5, gap_threshold_m=0.2,
+        s, "s_deadbeef", gap_threshold_m=0.2,
     )
 
     assert "v11_hsv_cc" in result.triangulated_by_algorithm, (

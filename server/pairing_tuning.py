@@ -1,31 +1,30 @@
-"""Operator-tunable per-session filters for pairing fan-out output.
+"""Operator-tunable per-session filter for pairing fan-out output.
 
-`PairingTuning` holds two filter values that the operator stamps onto a
-session via the viewer's `Cost ≤` / `Gap ≤` sliders → Apply →
-`POST /sessions/{sid}/recompute`. Stamped values land on
-`SessionResult.cost_threshold` / `gap_threshold_m` and gate which points
-the segmenter consumes.
+`PairingTuning` holds the one filter value the operator stamps onto a
+session via the viewer's `Gap ≤` slider → Apply →
+`POST /sessions/{sid}/recompute`. Stamped value lands on
+`SessionResult.gap_threshold_m` and gates which points the segmenter
+consumes.
 
-**These fields no longer gate pairing emit.** Pairing's emit-time gate
-is the absolute ceiling pair (`pairing._EMIT_COST_CEILING` /
+**This field does NOT gate pairing emit.** Pairing's emit-time gate is
+the absolute ceiling pair (`pairing._EMIT_COST_CEILING` /
 `pairing._EMIT_GAP_CEILING_M`) — disk/memory protection only, not
 operator-tunable. The persisted point set is the full emitted set; the
 viewer slider filters client-side and Apply re-runs the segmenter on
-the stamped subset. Pre-this-PR architecture conflated emit gate with
-operator filter; that conflation is now decoupled.
+the stamped subset.
 
-- `cost_threshold` — selector cost cap (semantically `max(cost_a, cost_b)
-  ≤ threshold`). The viewer slider hides points client-side; segmenter
-  ignores them on Apply. Default 0.5 — empirically a good balance for
-  this rig: drops the noisy tail of the cost distribution while keeping
-  enough points for clean segments. Slider range 0–1 covers the
-  production cost band; drag to 1.0 to see every emitted point.
 - `gap_threshold_m` — skew-line residual (closest distance between the
-  two camera rays) cap. Same semantics: viewer hides, segmenter ignores.
-  Default 0.20 m (20 cm) — the empirical floor below which residual
-  filtering starts cutting real flight points (see CLAUDE.md). Slider
-  range 0–200 cm; 200 cm is at-or-above the emit ceiling so dragging
-  there reveals every emitted point.
+  two camera rays) cap. Viewer hides points above the cap; segmenter
+  ignores them on Apply. Default 0.20 m (20 cm) — the empirical floor
+  below which residual filtering starts cutting real flight points
+  (see CLAUDE.md). Slider range 0–200 cm; 200 cm is at-or-above the
+  emit ceiling so dragging there reveals every emitted point.
+
+The cost gate that used to live alongside this knob now lives on each
+`AlgorithmEntry.cost_threshold` — cost is a property of the detector's
+feature distribution (aspect/fill medians for HSV+CC, different for
+future detectors), not an operator preference. See
+`algorithms.cost_threshold_for_algorithm`.
 
 `server/dry_run_shape.py` and `server/dry_run_multi_ray.py` hard-code
 `GAP_MAX=0.30` for offline research artefacts — looser than production
@@ -39,17 +38,13 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class PairingTuning:
-    """Cross-camera per-session filter values. Persisted to
-    `data/pairing_tuning.json`. Both fields must be supplied — no
-    module-level fallbacks, so callers cannot silently inherit a stale
+    """Cross-camera per-session filter value. Persisted to
+    `data/pairing_tuning.json`. The field must be supplied — no
+    module-level fallback, so callers cannot silently inherit a stale
     magic number."""
 
-    cost_threshold: float
     gap_threshold_m: float
 
     @classmethod
     def default(cls) -> "PairingTuning":
-        return cls(
-            cost_threshold=0.5,
-            gap_threshold_m=0.20,
-        )
+        return cls(gap_threshold_m=0.20)

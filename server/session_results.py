@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from algorithms import IOS_CAPTURE_TIME, cost_threshold_for_algorithm
 from detection_paths import (
     algorithm_id_for_path,
     get_path_frames,
@@ -35,11 +36,11 @@ from schemas import (
     SessionResult,
     TriangulatedPoint,
     _DEFAULT_PATHS,
+    _resolve_server_post_algorithm_id,
 )
 from segmenter import Segment, find_segments
 
 if TYPE_CHECKING:
-    from pairing_tuning import PairingTuning
     from state import State
 
 
@@ -95,7 +96,6 @@ def triangulate_pair(
     b: PitchPayload,
     *,
     source: str = "server",
-    tuning: "PairingTuning | None" = None,
 ) -> list[TriangulatedPoint]:
     """Scale each pitch's intrinsics + homography to its MOV's actual pixel
     grid (using the cached calibration snapshot as the reference resolution)
@@ -107,10 +107,9 @@ def triangulate_pair(
     `source` picks the detection stream (`"server"` default reads
     `pitch.frames_server_post`).
 
-    `tuning` overrides the pairing fan-out cost/gap thresholds; defaults to
-    `state.pairing_tuning()` (operator's currently-applied global tuning)."""
-    if tuning is None:
-        tuning = state.pairing_tuning()
+    Triangulate emits the full set under hard ceilings; per-algorithm
+    cost gate + operator gap gate apply downstream in
+    `_passes_stamped_filter`."""
     with state._lock:
         cal_a = state._calibration_store.get(a.camera_id)
         cal_b = state._calibration_store.get(b.camera_id)
@@ -122,7 +121,7 @@ def triangulate_pair(
         b,
         (cal_b.image_width_px, cal_b.image_height_px) if cal_b else None,
     )
-    return triangulate_cycle(a_scaled, b_scaled, source=source, tuning=tuning)
+    return triangulate_cycle(a_scaled, b_scaled, source=source)
 
 
 def _triangulate_non_current_algorithms(
@@ -131,8 +130,6 @@ def _triangulate_non_current_algorithms(
     b: PitchPayload | None,
     sync_error: str | None,
     result: SessionResult,
-    *,
-    tuning: "PairingTuning | None" = None,
 ) -> None:
     """Phase 7 multi-algorithm result builder.
 
@@ -161,7 +158,6 @@ def _triangulate_non_current_algorithms(
     """
     if sync_error is not None or a is None or b is None:
         return
-    from algorithms import IOS_CAPTURE_TIME
 
     current_alg_a = algorithm_id_for_path(a, DetectionPath.server_post)
     current_alg_b = algorithm_id_for_path(b, DetectionPath.server_post)
@@ -189,7 +185,6 @@ def _triangulate_non_current_algorithms(
                 pitch_with_algorithm_frames(a, alg_id),
                 pitch_with_algorithm_frames(b, alg_id),
                 source="server",
-                tuning=tuning,
             )
         except Exception as exc:
             result.abort_reasons[f"alg:{alg_id}"] = (
@@ -270,7 +265,6 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         camera_a_received=a is not None,
         camera_b_received=b is not None,
     )
-    result.cost_threshold = pairing_tuning.cost_threshold
     result.gap_threshold_m = pairing_tuning.gap_threshold_m
     # Aggregate the two cams' last-run timestamps — the more recent one
     # wins so a partial rerun (only one cam's MOV reprocessed) still
@@ -375,7 +369,7 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
     # path is excluded — `ios_capture_time` is already surfaced via
     # the live aggregator at the top of this function.
     _triangulate_non_current_algorithms(
-        state, a, b, sync_error, result, tuning=pairing_tuning,
+        state, a, b, sync_error, result,
     )
 
     authority: list[TriangulatedPoint] = []
@@ -406,12 +400,15 @@ def _passes_stamped_filter(
     gap_threshold_m: float,
 ) -> bool:
     """Stamped-tuning filter applied to TriangulatedPoint before segmenter
-    consumption (and mirrored client-side by the viewer's `Cost ≤` /
-    `Gap ≤` slider mask). A point passes when:
+    consumption (and mirrored client-side by the viewer's `Gap ≤` slider).
+    A point passes when:
       - `residual_m ≤ gap_threshold_m`, AND
       - `max(cost_a, cost_b) ≤ cost_threshold` (None costs treated as
-        "no info" → pass; matches the JS `_passCostFilter` legacy
-        fall-through semantics).
+        "no info" → pass; matches the JS legacy fall-through semantics).
+
+    `cost_threshold` is supplied by the caller (resolved per algorithm
+    via `algorithms.cost_threshold_for_algorithm`); `gap_threshold_m`
+    comes from `SessionResult.gap_threshold_m` (operator slider).
     """
     if p.residual_m > gap_threshold_m:
         return False
@@ -434,6 +431,21 @@ def _apply_stamped_filter(
     return [p for p in pts if _passes_stamped_filter(
         p, cost_threshold=cost_threshold, gap_threshold_m=gap_threshold_m,
     )]
+
+
+def _algorithm_id_for_result_path(
+    result: SessionResult, path: str
+) -> str:
+    """Map a `triangulated_by_path` key to its algorithm id, mirroring
+    `schemas._mirror_result_old_into_dicts`. Live path → IOS_CAPTURE_TIME;
+    server_post → frozen snapshot's algorithm_id (or legacy v11 bucket
+    if no snapshot was ever stamped). Raises `ValueError` for unknown
+    paths so a typo doesn't silently funnel into a default cost."""
+    if path == DetectionPath.live.value:
+        return IOS_CAPTURE_TIME
+    if path == DetectionPath.server_post.value:
+        return _resolve_server_post_algorithm_id(result.server_post_config_used)
+    raise ValueError(f"unknown result path key {path!r}")
 
 
 def _legacy_points_path(candidate_paths: set[DetectionPath]) -> DetectionPath | None:
@@ -461,12 +473,13 @@ def stamp_segments_on_result(
     was there.
 
     Architecture: `result.triangulated` / `result.triangulated_by_path`
-    carry the FULL emitted set (every
-    candidate pair under pairing's absolute emit ceiling). The segmenter
-    runs against the operator's stamped subset
-    (`cost_threshold` / `gap_threshold_m` from `SessionResult`); the
-    viewer slider mirrors the same predicate client-side. This decouples
-    "what the operator sees" from "what gets fit".
+    carry the FULL emitted set (every candidate pair under pairing's
+    absolute emit ceiling). The segmenter runs against the stamped
+    subset — per-algorithm `cost_threshold` (from
+    `algorithms.cost_threshold_for_algorithm`) plus operator
+    `gap_threshold_m` (from `SessionResult`). Viewer slider mirrors the
+    gap predicate client-side; cost is read-only. This decouples "what
+    the operator sees" from "what gets fit".
 
     `result.points` / `result.segments` follow `legacy_points_path` when
     the caller supplies one; this prevents a missing server_post surface from
@@ -477,21 +490,20 @@ def stamp_segments_on_result(
     segmenter so `Segment.original_indices` is a stable index into a
     time-sorted list.
 
-    `result.cost_threshold` / `gap_threshold_m` may be None only on
-    legacy/manual callers that bypass `rebuild_result_for_session` /
+    `result.gap_threshold_m` may be None only on legacy/manual callers
+    that bypass `rebuild_result_for_session` /
     `recompute_result_for_session`. In that case fall back to
     `PairingTuning.default()` so those test-only / migration surfaces
-    still render deterministically.
+    still render deterministically. Cost is per-algorithm (looked up
+    via `_algorithm_id_for_result_path` → `cost_threshold_for_algorithm`),
+    so it never has a "missing" branch.
 
     Empty `triangulated_by_path` ⇒ empty segments (no log noise;
     "nothing to fit" is not an error)."""
-    if result.cost_threshold is None or result.gap_threshold_m is None:
+    if result.gap_threshold_m is None:
         from pairing_tuning import PairingTuning
-        defaults = PairingTuning.default()
-        cost = result.cost_threshold if result.cost_threshold is not None else defaults.cost_threshold
-        gap = result.gap_threshold_m if result.gap_threshold_m is not None else defaults.gap_threshold_m
+        gap = PairingTuning.default().gap_threshold_m
     else:
-        cost = result.cost_threshold
         gap = result.gap_threshold_m
     if not result.triangulated_by_path and result.triangulated:
         # Legacy/unit-test ingress: older callers still construct a
@@ -511,12 +523,14 @@ def stamp_segments_on_result(
     for path, pts in list(result.triangulated_by_path.items()):
         if not pts:
             continue
+        path_alg = _algorithm_id_for_result_path(result, path)
+        path_cost = cost_threshold_for_algorithm(path_alg)
         pts_sorted = sorted(pts, key=lambda p: p.t_rel_s)
         result.triangulated_by_path[path] = pts_sorted
         fit_input: list[TriangulatedPoint] = []
         fit_to_full: list[int] = []
         for full_idx, p in enumerate(pts_sorted):
-            if _passes_stamped_filter(p, cost_threshold=cost, gap_threshold_m=gap):
+            if _passes_stamped_filter(p, cost_threshold=path_cost, gap_threshold_m=gap):
                 fit_input.append(p)
                 fit_to_full.append(full_idx)
         segs, _pts_sorted = find_segments(fit_input)
@@ -567,33 +581,22 @@ def recompute_result_for_session(
     state: "State",
     session_id: str,
     *,
-    cost_threshold: float,
     gap_threshold_m: float,
 ) -> SessionResult:
     """Re-run pairing fan-out + segmenter on this session's already-
-    detected frames using per-session `cost_threshold` + `gap_threshold_m`
-    overrides.
+    detected frames using a per-session `gap_threshold_m` override.
 
     Differences from `rebuild_result_for_session`:
       - Always re-triangulates the live path (does NOT reuse
         `LivePairingSession.triangulated`, which was built incrementally
         under the old/global tuning at ingest time).
-      - Both live and server_post paths use a `PairingTuning` built from
-        BOTH caller-supplied values — no fallback to global tuning here;
-        the route is responsible for resolving defaults before calling.
-      - Stamps both chosen values into `SessionResult.cost_threshold` /
-        `SessionResult.gap_threshold_m` for viewer slider re-init.
+      - Stamps the chosen gap value into `SessionResult.gap_threshold_m`
+        for viewer slider re-init. Cost is per-algorithm (looked up via
+        `algorithms.cost_threshold_for_algorithm`) and not stamped.
 
     Caller is the `POST /sessions/{sid}/recompute` route. No MOV decode,
     no HSV — candidates are read from the persisted `frames_live` /
     `frames_server_post` directly. Sub-second on a typical session."""
-    from pairing_tuning import PairingTuning
-
-    tuning = PairingTuning(
-        cost_threshold=float(cost_threshold),
-        gap_threshold_m=float(gap_threshold_m),
-    )
-
     with state._lock:
         a = state.pitches.get(("A", session_id))
         b = state.pitches.get(("B", session_id))
@@ -604,7 +607,6 @@ def recompute_result_for_session(
         camera_a_received=a is not None,
         camera_b_received=b is not None,
     )
-    result.cost_threshold = float(cost_threshold)
     result.gap_threshold_m = float(gap_threshold_m)
 
     server_post_ts = [
@@ -646,7 +648,6 @@ def recompute_result_for_session(
                     pitch_with_path_frames(a, path),
                     pitch_with_path_frames(b, path),
                     source="server",
-                    tuning=tuning,
                 )
             except Exception as exc:
                 result.abort_reasons[path.value] = f"{type(exc).__name__}: {exc}"
@@ -655,11 +656,9 @@ def recompute_result_for_session(
             result.paths_completed.add(path.value)
 
     # Phase 7-fix-2: also triangulate non-current algorithm buckets
-    # so Recompute (per-session tuning) preserves multi-alg history
-    # the same way rebuild does. Helper takes the same `tuning` so
-    # the sliders apply to every alg, not just the current server_post.
+    # so Recompute preserves multi-alg history the same way rebuild does.
     _triangulate_non_current_algorithms(
-        state, a, b, sync_error, result, tuning=tuning,
+        state, a, b, sync_error, result,
     )
 
     authority: list[TriangulatedPoint] = []

@@ -134,7 +134,7 @@ def cam_view_shared_toolbar_html() -> str:
 
 
 def session_tuning_strip_html(
-    cost_threshold: float | None,
+    cost_threshold: float,
     gap_threshold_m: float | None,
     session_id: str,
 ) -> str:
@@ -142,22 +142,23 @@ def session_tuning_strip_html(
     nav bar.
 
     Pairing emits the full triangulated set (gated only by hard ceilings
-    in `pairing.py`); both sliders are pure client-side masks over that
-    set, so dragging either direction is instantaneous and never needs
-    Apply to *reveal* points.
+    in `pairing.py`); the gap slider is a pure client-side mask over
+    that set, so dragging is instantaneous and never needs Apply to
+    *reveal* points.
 
-    Cost slider: drag = client-side preview (filter blobs + 3D rays by
-    `cost > threshold`). Initial value is `SessionResult.cost_threshold`
-    (None → `PairingTuning.default().cost_threshold`).
+    Cost slider: read-only display of the active algorithm's cost
+    gate (caller supplies the resolved value via
+    `algorithms.cost_threshold_for_algorithm`). The slider remains
+    interactive in this phase but Apply does not ship the cost — Phase 2
+    removes the slider HTML entirely.
 
     Gap slider: drag = client-side preview (hide triangulated points
     whose `residual_m > threshold`). Range 0–200cm. Initial value is
     `SessionResult.gap_threshold_m * 100` (None →
     `PairingTuning.default().gap_threshold_m * 100`).
 
-    Apply = POST /sessions/{sid}/recompute with both values, server
-    re-runs the segmenter on the already-emitted point set filtered by
-    these thresholds and overwrites SessionResult.
+    Apply = POST /sessions/{sid}/recompute with `gap_threshold_m`,
+    server re-runs the segmenter and overwrites SessionResult.
 
     `session_id` is interpolated into the Apply handler's URL — the
     pattern is `^s_[0-9a-f]{4,32}$` (validated server-side too) so no
@@ -165,7 +166,7 @@ def session_tuning_strip_html(
     """
     from pairing_tuning import PairingTuning
     _pt_default = PairingTuning.default()
-    cost_initial = float(_pt_default.cost_threshold) if cost_threshold is None else float(cost_threshold)
+    cost_initial = float(cost_threshold)
     gap_initial_cm = (
         round(_pt_default.gap_threshold_m * 100)
         if gap_threshold_m is None

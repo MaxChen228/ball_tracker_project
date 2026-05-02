@@ -66,8 +66,9 @@ class BlobCandidate(BaseModel):
     A-cand × B-cand combination per matched frame pair) and lets the
     skew-line residual gate + segmenter ballistic fit pick the real
     trajectory. There is no single "winner" per frame anymore — the
-    `cost` field is computed on ingest so the viewer's cost_threshold
-    slider can filter cheap distractors. `area_score` is
+    `cost` field is computed on ingest so the per-algorithm cost gate
+    (`algorithms.cost_threshold_for_algorithm`) can filter cheap
+    distractors before the segmenter consumes them. `area_score` is
     area / max_area_in_batch on the producing side; kept for the
     viewer's BLOBS overlay sort fallback."""
     model_config = ConfigDict(extra="forbid")
@@ -514,17 +515,12 @@ class SessionResult(BaseModel):
     abort_reasons: dict[str, str] = Field(default_factory=dict)
     points: list[TriangulatedPoint] = []
     error: str | None = None
-    # Operator-chosen `PairingTuning.cost_threshold` last applied via
-    # POST /sessions/{sid}/recompute. None on legacy results (predates
-    # the recompute endpoint) and on results computed under the global
-    # default — the viewer treats None as "show the global default" for
-    # the slider's initial position.
-    cost_threshold: float | None = None
-    # Same story for `PairingTuning.gap_threshold_m` (skew-line residual
+    # Operator-chosen `PairingTuning.gap_threshold_m` (skew-line residual
     # cap, metres). None on legacy results / when the recompute caller
     # didn't override (route used `state.pairing_tuning()` default).
-    # Viewer reads it for the Gap slider's initial position; sibling of
-    # `cost_threshold` in the per-session tuning strip.
+    # Viewer reads it for the Gap slider's initial position. The cost
+    # gate is no longer per-session — each algorithm owns its own
+    # threshold via `algorithms.cost_threshold_for_algorithm`.
     gap_threshold_m: float | None = None
     # Per-path frozen detection-config snapshots, mirrored from each
     # pitch's `*_config_used` at result-build time using A-wins/B-fallback

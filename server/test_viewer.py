@@ -740,7 +740,7 @@ def test_viewer_page_context_computes_single_cam_layout_and_video_cells():
         ("A", "/videos/session_x_A.mov", 0.0, 240.0, {"t_rel_s": [0.0], "detected": [True]}),
     ]
 
-    ctx = build_viewer_page_context(scene, videos, health)
+    ctx = build_viewer_page_context(scene, videos, health, cost_threshold=0.5)
 
     assert ctx.layout_mode == "single-cam"
     assert 'data-cam="A"' in ctx.video_cells_html
@@ -797,15 +797,17 @@ def test_apply_tuning_patches_in_place_no_reload():
         "session_id": session_id, "triangulated_count": 0, "error": None,
         "duration_s": None, "received_at": None, "mode": "armed",
     }
-    body = render_viewer_html(scene, [], health)
+    body = render_viewer_html(scene, [], health, cost_threshold=0.5)
     # The Apply handler is the patch-in-place path now. Reload is gone.
     assert "_applyTuning" in body
     assert "window.location.reload" not in body
     assert "setSessionData" in body
-    # And it still ships both axes to the route (regression guard from
-    # the previous round).
-    assert "cost_threshold: cost" in body
+    # Apply ships gap (cost is now per-algorithm; the route resolves it
+    # from the algorithm registry, not the slider).
     assert "gap_threshold_m: gap_m" in body
+    assert "cost_threshold: cost" not in body, (
+        "JS POST must not ship cost — it's per-algorithm post cost-absorption"
+    )
     # Recompute UX: in-flight guard + visual state. Without these the
     # operator sees no feedback on a sub-second recompute and a slider
     # wiggle mid-flight re-enables the button.
@@ -813,14 +815,21 @@ def test_apply_tuning_patches_in_place_no_reload():
     assert "btn.dataset.recomputing" in body
     assert "costInput.disabled = true" in body
     assert "gapInput.disabled = true" in body
-    # After fetch resolves, the slider DOM + tick label are reseeded
-    # from the server response so the operator sees what was actually
-    # applied (not their drag position).
-    assert "costInput.value = r.cost_threshold.toFixed(2)" in body
+    # After fetch resolves, the gap slider DOM is reseeded from the
+    # server response so the operator sees what was actually applied
+    # (not their drag position). Cost slider is read-only display
+    # in this transitional phase; Phase 2 removes the slider entirely.
     assert "gapInput.value = String(cm)" in body
+    assert "costInput.value = r.cost_threshold" not in body
 
 
 def test_viewer_route_falls_back_to_saved_global_tuning_for_legacy_result():
+    """Legacy SessionResult (cost-absorption refactor: cost_threshold field
+    dropped entirely; gap may still be None on results predating the
+    recompute endpoint). Route resolves gap from `state.pairing_tuning()`
+    so a restarted server / rebuilt result still seeds the slider with
+    the operator's current value. Cost is now per-algorithm — route
+    resolves it from the algorithm registry, NOT the SessionResult."""
     from pairing_tuning import PairingTuning
 
     client = TestClient(app)
@@ -830,14 +839,16 @@ def test_viewer_route_falls_back_to_saved_global_tuning_for_legacy_result():
     pitch_b = _pitch("B", 801, K, R_b, t_b, H_b, np.array([[0.1, 0.3, 1.0]]))
     main.state.record(pitch_a)
     result = main.state.record(pitch_b)
-    main.state.set_pairing_tuning(PairingTuning(cost_threshold=0.12, gap_threshold_m=0.07))
-    result.cost_threshold = None
+    main.state.set_pairing_tuning(PairingTuning(gap_threshold_m=0.07))
     result.gap_threshold_m = None
     main.state.results[session_id] = result
 
     body = client.get(f"/viewer/{session_id}").text
-    assert 'value="0.12"' in body
-    assert '>0.12<' in body
+    # Cost shown = v11_hsv_cc.cost_threshold (0.5), resolved from algorithm
+    # registry — no longer dependent on PairingTuning or SessionResult.
+    assert 'value="0.50"' in body
+    assert '>0.50<' in body
+    # Gap shown = saved global pairing_tuning's gap (0.07m → 7cm).
     assert 'value="7"' in body
     assert '≤ 7 cm' in body
 
@@ -873,7 +884,7 @@ def test_viewer_page_run_server_post_form_carries_preset_selector():
         ("A", "/videos/session_x_A.mov", 0.0, 240.0, {"t_rel_s": [0.0], "detected": [True]}),
     ]
 
-    html = render_viewer_html(scene, videos, health)
+    html = render_viewer_html(scene, videos, health, cost_threshold=0.5)
 
     assert f'action="/sessions/{session_id}/run_server_post"' in html
     # Inline preset picker — name matches the run_server_post body field.
@@ -1056,7 +1067,7 @@ def test_viewer_renders_camera_marker_dynamically_following_pipeline_pills():
     # any "static traces" list to leak a camera trace into. Sanity:
     # the scene itself ships through `scene_json` (the runtime reads
     # `data.scene.cameras`), and no `static_traces_json` field exists.
-    ctx = build_viewer_page_context(scene, [], health)
+    ctx = build_viewer_page_context(scene, [], health, cost_threshold=0.5)
     import json as _json
     parsed_scene = _json.loads(ctx.scene_json)
     assert any(c.get("camera_id") == "A" for c in parsed_scene.get("cameras", []))

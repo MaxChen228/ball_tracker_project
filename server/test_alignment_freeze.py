@@ -108,11 +108,11 @@ def test_arm_then_slider_drag_then_ingest_freezes_arm_time_pairing_tuning(tmp_pa
     s = main.State(data_dir=tmp_path)
     s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef",
                 sync_anchor_timestamp_s=0.0)
-    pt_x = PairingTuning(cost_threshold=0.42, gap_threshold_m=0.42)
+    pt_x = PairingTuning(gap_threshold_m=0.42)
     s.set_pairing_tuning(pt_x)
     session = s.arm_session(paths={main.DetectionPath.live})
 
-    pt_y = PairingTuning(cost_threshold=0.99, gap_threshold_m=0.99)
+    pt_y = PairingTuning(gap_threshold_m=0.99)
     s.set_pairing_tuning(pt_y)
     s.ingest_live_frame("A", session.id, _make_frame(1))
 

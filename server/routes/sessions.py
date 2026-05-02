@@ -302,18 +302,18 @@ async def _enqueue_server_post(
 @router.post("/sessions/{session_id}/recompute")
 async def sessions_recompute(request: Request, session_id: str):
     """Re-run pairing fan-out + segmenter on this session's already-
-    detected frames using per-session `cost_threshold` + `gap_threshold_m`
-    overrides. No MOV decode, no HSV — candidates are read from the
-    persisted `frames_live` / `frames_server_post` directly. Sub-second
-    on a typical session.
+    detected frames using a per-session `gap_threshold_m` override. No
+    MOV decode, no HSV — candidates are read from the persisted
+    `frames_live` / `frames_server_post` directly. Sub-second on a
+    typical session.
 
     Body (JSON):
-      - `cost_threshold` (required): float in [0, 1].
-      - `gap_threshold_m` (optional): float in [0, 2.0] — skew-line
-        residual cap, metres. Omitted → falls back to the global
-        `state.pairing_tuning().gap_threshold_m`. The viewer's tuning
-        strip always sends both; the optional path is a transitional
-        courtesy for callers that haven't migrated.
+      - `gap_threshold_m` (required): float in [0, 2.0] — skew-line
+        residual cap, metres.
+
+    The cost gate is no longer per-session — each algorithm owns its
+    own threshold via `algorithms.cost_threshold_for_algorithm`. The
+    viewer's tuning strip only ships gap.
     """
     from main import state
     from session_results import recompute_result_for_session
@@ -321,29 +321,16 @@ async def sessions_recompute(request: Request, session_id: str):
     if not _SESSION_ID_RE.match(session_id):
         raise HTTPException(status_code=422, detail="invalid session_id")
     body = await request.json()
-    raw = body.get("cost_threshold")
+    raw_gap = body.get("gap_threshold_m")
     try:
-        cost_threshold = float(raw)
+        gap_threshold_m = float(raw_gap)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="missing or invalid 'cost_threshold'")
-    if not 0.0 <= cost_threshold <= 1.0:
+        raise HTTPException(status_code=400, detail="missing or invalid 'gap_threshold_m'")
+    if not 0.0 <= gap_threshold_m <= 2.0:
         raise HTTPException(
             status_code=400,
-            detail="cost_threshold out of range [0, 1]",
+            detail="gap_threshold_m out of range [0, 2.0]",
         )
-    raw_gap = body.get("gap_threshold_m")
-    if raw_gap is None:
-        gap_threshold_m = state.pairing_tuning().gap_threshold_m
-    else:
-        try:
-            gap_threshold_m = float(raw_gap)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="invalid 'gap_threshold_m'")
-        if not 0.0 <= gap_threshold_m <= 2.0:
-            raise HTTPException(
-                status_code=400,
-                detail="gap_threshold_m out of range [0, 2.0]",
-            )
 
     # Existence check matches `state.store_result`'s own guard:
     # a session is "alive" iff it has a pitch entry, a result entry, or
@@ -363,7 +350,6 @@ async def sessions_recompute(request: Request, session_id: str):
 
     new_result = recompute_result_for_session(
         state, session_id,
-        cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
     )
     state.store_result(new_result)
@@ -371,17 +357,15 @@ async def sessions_recompute(request: Request, session_id: str):
     # dashboard / viewer fit visuals) need to refresh too. Broadcast the
     # same `fit` event the cycle_end path uses; dashboard listens
     # blindly for the active session id and patches its scene.
-    # Ship the per-session thresholds alongside segments so dashboard /
-    # viewer caches that maintain a client-side mask over `result.points`
-    # (full triangulated set; pairing emits everything post Phase 1-5)
-    # know the new gate without an extra `/results/<sid>` round-trip.
+    # Ship the per-session gap threshold alongside segments so dashboard
+    # / viewer caches that maintain a client-side mask know the new gate
+    # without an extra `/results/<sid>` round-trip.
     await sse_hub.broadcast(
         "fit",
         {
             "sid": session_id,
             "cause": "recompute",
             "segments": [s.model_dump() for s in new_result.segments],
-            "cost_threshold": new_result.cost_threshold,
             "gap_threshold_m": new_result.gap_threshold_m,
         },
     )

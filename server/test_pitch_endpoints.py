@@ -73,11 +73,11 @@ def test_post_pitch_with_video_triangulates_server_side(tmp_path):
 
 def test_run_server_post_broadcasts_fit_with_thresholds(tmp_path, monkeypatch):
     """Each cam's `_run_server_detection` finishes by broadcasting `fit`
-    so viewer + dashboard can repaint the curve and re-apply the
-    cost/gap mask without polling /results. Mirrors the cycle_end /
-    recompute fit contract: payload always carries `cost_threshold` and
-    `gap_threshold_m` keys so the client's `'cost_threshold' in payload`
-    patch path triggers."""
+    so viewer + dashboard can repaint the curve and re-apply the gap
+    mask without polling /results. Mirrors the cycle_end / recompute
+    fit contract: payload carries `gap_threshold_m` (cost is
+    per-algorithm post cost-absorption — clients resolve it from
+    algorithm metadata, never from the broadcast)."""
     K, *_, (R_a, t_a, _, H_a), (R_b, t_b, _, H_b) = _make_scene()
     P_true = np.array([0.1, 0.3, 1.0])
     session_id = sid(704)
@@ -110,8 +110,8 @@ def test_run_server_post_broadcasts_fit_with_thresholds(tmp_path, monkeypatch):
     for fe in fit_events:
         assert fe["cause"] == "server_post"
         assert isinstance(fe["segments"], list)
-        assert "cost_threshold" in fe
         assert "gap_threshold_m" in fe
+        assert "cost_threshold" not in fe
 
 
 def test_post_pitch_without_video_or_frames_returns_422(tmp_path):

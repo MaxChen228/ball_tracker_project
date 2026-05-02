@@ -13,7 +13,6 @@ import os
 import numpy as np
 
 from schemas import BlobCandidate, IntrinsicsPayload, FramePayload, PitchPayload, TriangulatedPoint
-from pairing_tuning import PairingTuning
 from triangulate import (
     build_K,
     camera_center_world,
@@ -40,12 +39,14 @@ _MAX_DT_S = float(os.environ.get("BALL_TRACKER_MAX_DT_S", _DEFAULT_MAX_DT_S))
 # pixels in image space) and the resulting "point" is geometric noise
 # beyond any plausible operator slider.
 #
-# `PairingTuning.cost_threshold` / `gap_threshold_m` are the OPERATOR-
-# TUNABLE per-session filters applied DOWNSTREAM (segmenter input, viewer
-# slider). They do NOT gate emit. The viewer renders the full emitted set
-# and the slider filters client-side; Apply re-runs the segmenter on the
-# stamped subset. Pre-this-PR architecture conflated emit gate with
-# operator filter; that conflation is what this ceiling decouples.
+# Each algorithm's `cost_threshold` (from
+# `algorithms.cost_threshold_for_algorithm`) and the operator's
+# `PairingTuning.gap_threshold_m` are filters applied DOWNSTREAM
+# (segmenter input, viewer slider mirror). They do NOT gate emit. The
+# viewer renders the full emitted set and the slider filters
+# client-side; Apply re-runs the segmenter on the stamped subset.
+# Pre-this-PR architecture conflated emit gate with operator filter;
+# that conflation is what this ceiling decouples.
 _EMIT_GAP_CEILING_M = 5.0
 _EMIT_COST_CEILING = 5.0
 
@@ -229,16 +230,15 @@ def triangulate_live_pair(
     *,
     anchor_a: float,
     anchor_b: float,
-    tuning: PairingTuning,
 ) -> list[TriangulatedPoint]:
     """Hot-path multi-candidate triangulation for the live A/B ray pair.
 
     Iterates every (frame_a.candidates × frame_b.candidates) combination,
-    runs ray-midpoint triangulation per pair, filters by selector cost
-    and skew-line gap from `tuning`, returns all survivors. Empty list
-    when no candidates pair up (no ball detected, outside time window,
-    all near-parallel, or all gap-rejected) — same failure surface as
-    `triangulate_cycle`.
+    runs ray-midpoint triangulation per pair, filters by absolute emit
+    ceilings (`_EMIT_COST_CEILING` / `_EMIT_GAP_CEILING_M`), returns all
+    survivors. Empty list when no candidates pair up (no ball detected,
+    outside time window, all near-parallel, or all gap-rejected) — same
+    failure surface as `triangulate_cycle`.
 
     Bypasses `triangulate_pair` / `scale_pitch_to_video_dims` because the
     live path's intrinsics are already the calibration snapshot itself
@@ -258,11 +258,11 @@ def triangulate_live_pair(
     if not cands_a or not cands_b:
         return []
 
-    # NOTE: emit gates are absolute ceilings, NOT tuning-driven. The
-    # `tuning` argument is retained on the signature for downstream
-    # callers (segmenter / viewer slider stamp), but emit is decoupled
-    # from per-session tuning so the persisted point set is the full
-    # data the slider can reveal. See `_EMIT_*_CEILING` docstring.
+    # Emit gates are absolute ceilings (disk/memory protection), not
+    # operator-tunable. The persisted point set is the full emitted set;
+    # downstream stamped-tuning filtering happens in
+    # `session_results._passes_stamped_filter` using each algorithm's
+    # cost_threshold + the operator's gap_threshold_m.
     out: list[TriangulatedPoint] = []
     for ca_idx, ca in enumerate(cands_a):
         if ca.cost is not None and ca.cost > _EMIT_COST_CEILING:
@@ -341,7 +341,6 @@ def _frame_items(p: PitchPayload, *, source: str = "server"):
 
 def triangulate_cycle(
     a: PitchPayload, b: PitchPayload, *, source: str = "server",
-    tuning: PairingTuning | None = None,
 ) -> list[TriangulatedPoint]:
     """Pair A and B frames within an 8 ms window of anchor-relative time
     and run multi-candidate fan-out triangulation. Each matched frame
@@ -350,18 +349,13 @@ def triangulate_cycle(
     the absolute emit ceilings (`_EMIT_COST_CEILING` / `_EMIT_GAP_CEILING_M`).
     Requires intrinsics + homography on both cameras.
 
-    `tuning` is retained on the signature for downstream stamping
-    (`SessionResult.cost_threshold` / `gap_threshold_m` snapshot the
-    operator's chosen filter at apply time) but does NOT gate emit. The
-    persisted set is the full emitted set; viewer slider filters client-
-    side and Apply re-runs the segmenter on the stamped subset."""
+    The persisted set is the full emitted set; downstream stamped-tuning
+    filtering (per-algorithm `cost_threshold` + operator `gap_threshold_m`)
+    happens in `session_results._passes_stamped_filter`."""
     if a.intrinsics is None or a.homography is None:
         raise ValueError("camera A missing calibration (run Calibrate in iPhone app)")
     if b.intrinsics is None or b.homography is None:
         raise ValueError("camera B missing calibration (run Calibrate in iPhone app)")
-
-    if tuning is None:
-        tuning = PairingTuning.default()
 
     K_a, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
     K_b, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
