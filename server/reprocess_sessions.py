@@ -1,6 +1,8 @@
 """Offline re-run of HSV detection + triangulation over already-recorded
-sessions. Reads the current `data/detection_config.json`, iterates pitch
-JSONs paired with their stored MOVs, re-runs `detect_pitch`, rewrites the
+sessions. For each pitch JSON, looks up the preset that produced it (via
+the frozen `server_post_config_used.preset_name` or, on first server_post
+run, `live_config_used.preset_name`), reads that preset's CURRENT values
+from `data/presets/<name>.json`, re-runs `detect_pitch`, rewrites the
 pitch JSON, and re-triangulates sessions where both A and B are present.
 
 Selection (mutually exclusive, one required):
@@ -8,10 +10,12 @@ Selection (mutually exclusive, one required):
     --session s_xxxx [s_yyyy ...]  explicit session IDs
     --all                          every pitch on disk
 
-Config source (default → current disk config):
-    --algorithm-id <id>            override only the algorithm_id slot
+Snapshot source (default → per-pitch frozen preset, current values):
+    --force-preset <name>          load one preset from disk, apply to all
     --params <file.json>           load entire snapshot from JSON
     --use-frozen-snapshot          replay each pitch's stored snapshot
+    --algorithm-id <id>            override only the algorithm_id slot
+                                   (combinable with default or --force-preset)
 
 Workflow:
     --dry-run                      detect+triangulate, don't overwrite
@@ -27,17 +31,19 @@ from datetime import datetime
 from pathlib import Path
 
 import algorithms
+import presets
 import session_results
 from detection import HSVRange, ShapeGate
-from detection_config import load_or_migrate
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pairing_tuning import PairingTuning
 from pipeline import detect_pitch
 from schemas import (
     CalibrationSnapshot,
     DetectionConfigSnapshotPayload,
+    HSVRangePayload,
     PitchPayload,
     SessionResult,
+    ShapeGatePayload,
 )
 
 logger = logging.getLogger("reprocess")
@@ -52,24 +58,39 @@ PAIRING_TUNING_PATH = DATA_DIR / "pairing_tuning.json"
 VIDEO_EXTS = (".mov", ".mp4", ".m4v")
 
 
-def load_detection_config_snapshot() -> DetectionConfigSnapshotPayload:
-    """Read the active detection config from disk and freeze a snapshot.
-    On a fresh-empty data/, `load_or_migrate` returns its Tennis
-    default without writing — the INFO log below surfaces "preset=tennis"
-    so the operator can spot it (not a silent fallback)."""
-    cfg = load_or_migrate(DATA_DIR, atomic_write=atomic_write)
-    snapshot = DetectionConfigSnapshotPayload.from_detection_config(cfg)
-    preset_label = snapshot.preset_name if snapshot.preset_name is not None else "custom"
-    logger.info(
-        "detection_config algorithm=%s preset=%s hsv h[%d-%d] s[%d-%d] v[%d-%d] "
-        "aspect>=%.2f fill>=%.2f",
-        snapshot.algorithm_id, preset_label,
-        snapshot.hsv.h_min, snapshot.hsv.h_max,
-        snapshot.hsv.s_min, snapshot.hsv.s_max,
-        snapshot.hsv.v_min, snapshot.hsv.v_max,
-        snapshot.shape_gate.aspect_min, snapshot.shape_gate.fill_min,
+def atomic_write(path: Path, text: str) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
+def _snapshot_from_preset(preset: presets.Preset) -> DetectionConfigSnapshotPayload:
+    return DetectionConfigSnapshotPayload(
+        algorithm_id=preset.algorithm_id,
+        hsv=HSVRangePayload(
+            h_min=preset.hsv.h_min, h_max=preset.hsv.h_max,
+            s_min=preset.hsv.s_min, s_max=preset.hsv.s_max,
+            v_min=preset.hsv.v_min, v_max=preset.hsv.v_max,
+        ),
+        shape_gate=ShapeGatePayload(
+            aspect_min=preset.shape_gate.aspect_min,
+            fill_min=preset.shape_gate.fill_min,
+        ),
+        preset_name=preset.name,
     )
-    return snapshot
+
+
+def _frozen_preset_name(pitch: PitchPayload) -> str | None:
+    """Per-pitch identity claim for which preset produced this session.
+    server_post side wins because it was the most recent detection; live
+    side is the fallback for pitches that never ran server_post yet
+    (first reprocess sweep). No silent fallback past these two slots."""
+    if pitch.server_post_config_used is not None:
+        if pitch.server_post_config_used.preset_name is not None:
+            return pitch.server_post_config_used.preset_name
+    if pitch.live_config_used is not None:
+        return pitch.live_config_used.preset_name
+    return None
 
 
 def load_calibrations() -> dict[str, CalibrationSnapshot]:
@@ -96,7 +117,6 @@ def parse_since(s: str) -> datetime:
     if s == "today":
         now = datetime.now().astimezone()
         return now.replace(hour=0, minute=0, second=0, microsecond=0)
-    # accept YYYY-MM-DD or full ISO
     try:
         d = datetime.fromisoformat(s)
     except ValueError:
@@ -104,12 +124,6 @@ def parse_since(s: str) -> datetime:
     if d.tzinfo is None:
         d = d.astimezone()
     return d
-
-
-def atomic_write(path: Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text)
-    tmp.replace(path)
 
 
 def select_pitch_files(args: argparse.Namespace) -> list[Path]:
@@ -123,51 +137,84 @@ def select_pitch_files(args: argparse.Namespace) -> list[Path]:
     return paths
 
 
+def resolve_snapshot_for_pitch(
+    pitch: PitchPayload,
+    *,
+    use_frozen_snapshot: bool,
+    params_snapshot: DetectionConfigSnapshotPayload | None,
+    force_preset_snapshot: DetectionConfigSnapshotPayload | None,
+    algorithm_id_override: str | None,
+) -> DetectionConfigSnapshotPayload | None:
+    """Pick the snapshot for one pitch given the operator's flags. Returns
+    None when the pitch should be skipped (with a logged reason). The
+    four sources are mutually exclusive at the CLI parse layer; here we
+    just dispatch in priority order: frozen > params > force-preset >
+    per-pitch frozen preset lookup."""
+    if use_frozen_snapshot:
+        if pitch.server_post_config_used is None:
+            logger.warning(
+                "  skip %s/%s — --use-frozen-snapshot but pitch has no "
+                "server_post_config_used (legacy pre-freeze pitch); "
+                "rerun under --force-preset to stamp one",
+                pitch.session_id, pitch.camera_id,
+            )
+            return None
+        return pitch.server_post_config_used
+
+    if params_snapshot is not None:
+        return params_snapshot
+
+    if force_preset_snapshot is not None:
+        snap = force_preset_snapshot
+    else:
+        name = _frozen_preset_name(pitch)
+        if name is None:
+            logger.warning(
+                "  skip %s/%s — no frozen preset_name on pitch (legacy "
+                "session pre-dating preset identity stamp); rerun under "
+                "--force-preset <name> to apply a preset explicitly",
+                pitch.session_id, pitch.camera_id,
+            )
+            return None
+        try:
+            preset = presets.load_preset(DATA_DIR, name)
+        except KeyError:
+            logger.warning(
+                "  skip %s/%s — frozen preset %r no longer exists on disk; "
+                "restore the preset file or rerun under --force-preset",
+                pitch.session_id, pitch.camera_id, name,
+            )
+            return None
+        snap = _snapshot_from_preset(preset)
+
+    if algorithm_id_override is not None:
+        snap = snap.model_copy(update={"algorithm_id": algorithm_id_override})
+    return snap
+
+
 def rerun_detection(
     pitch_path: Path,
     snapshot: DetectionConfigSnapshotPayload,
     dry_run: bool,
-    *,
-    use_frozen_snapshot: bool = False,
 ) -> PitchPayload | None:
-    """Re-run server-side detection on one persisted pitch.
-
-    Default (`use_frozen_snapshot=False`): use the supplied `snapshot`
-    (current disk config) — matches the operator's tuning workflow.
-    `pitch.server_post_config_used` is overwritten with the snapshot
-    that just produced these frames.
-
-    `use_frozen_snapshot=True`: reuse the snapshot already stamped on
-    `pitch.server_post_config_used`. Reproducibility audit path;
-    pitches that pre-date the server_post freeze fall back to the
-    supplied current-disk `snapshot` with a warning."""
+    """Run server-side detection on one persisted pitch using the supplied
+    snapshot. Caller (main) is responsible for picking the snapshot via
+    `resolve_snapshot_for_pitch`. `pitch.server_post_config_used` is
+    overwritten with the snapshot that just produced these frames."""
     pitch = PitchPayload.model_validate_json(pitch_path.read_text())
     video = find_video(pitch.session_id, pitch.camera_id)
     if video is None:
         logger.warning("  skip %s/%s — no MOV", pitch.session_id, pitch.camera_id)
         return None
 
-    if use_frozen_snapshot:
-        if pitch.server_post_config_used is not None:
-            effective = pitch.server_post_config_used
-        else:
-            logger.warning(
-                "  %s/%s legacy pitch lacks server_post_config_used — "
-                "using current disk config",
-                pitch.session_id, pitch.camera_id,
-            )
-            effective = snapshot
-    else:
-        effective = snapshot
-
     hsv_eff = HSVRange(
-        h_min=effective.hsv.h_min, h_max=effective.hsv.h_max,
-        s_min=effective.hsv.s_min, s_max=effective.hsv.s_max,
-        v_min=effective.hsv.v_min, v_max=effective.hsv.v_max,
+        h_min=snapshot.hsv.h_min, h_max=snapshot.hsv.h_max,
+        s_min=snapshot.hsv.s_min, s_max=snapshot.hsv.s_max,
+        v_min=snapshot.hsv.v_min, v_max=snapshot.hsv.v_max,
     )
     gate_eff = ShapeGate(
-        aspect_min=effective.shape_gate.aspect_min,
-        fill_min=effective.shape_gate.fill_min,
+        aspect_min=snapshot.shape_gate.aspect_min,
+        fill_min=snapshot.shape_gate.fill_min,
     )
 
     old_hits = sum(1 for f in pitch.frames_server_post if f.px is not None)
@@ -179,11 +226,13 @@ def rerun_detection(
     )
     new_hits = sum(1 for f in frames if f.px is not None)
     logger.info(
-        "  %s/%s  frames=%d  hits %d → %d",
-        pitch.session_id, pitch.camera_id, len(frames), old_hits, new_hits,
+        "  %s/%s  preset=%s  frames=%d  hits %d → %d",
+        pitch.session_id, pitch.camera_id,
+        snapshot.preset_name if snapshot.preset_name is not None else "custom",
+        len(frames), old_hits, new_hits,
     )
     pitch.frames_server_post = frames
-    pitch.server_post_config_used = effective
+    pitch.server_post_config_used = snapshot
     if not dry_run:
         atomic_write(pitch_path, pitch.model_dump_json())
     return pitch
@@ -218,10 +267,6 @@ def triangulate_session(
 ) -> None:
     a = pitches.get("A")
     b = pitches.get("B")
-    # Stamp the active tuning onto the result so the viewer's per-session
-    # Cost / Gap sliders re-init at the values that produced the points.
-    # Without this they'd show "off" and an Apply would silently overwrite
-    # the result with whatever the user happened to drag the sliders to.
     result = SessionResult(
         session_id=sid,
         camera_a_received=a is not None,
@@ -229,11 +274,6 @@ def triangulate_session(
         cost_threshold=pairing_tuning.cost_threshold,
         gap_threshold_m=pairing_tuning.gap_threshold_m,
     )
-    # Mirror per-pitch per-path frozen snapshots onto the result so the
-    # viewer / future audit can answer "what config produced these
-    # points?" without reading the pitch JSON. Aggregation policy
-    # (A-wins, B-fallback, warn on divergence) is shared with
-    # `session_results.aggregate_pitch_used_configs`.
     used = session_results.aggregate_pitch_used_configs(a, b, sid)
     result.live_config_used = used["live_config_used"]
     result.server_post_config_used = used["server_post_config_used"]
@@ -257,19 +297,11 @@ def triangulate_session(
         except Exception as e:
             result.error = f"{type(e).__name__}: {e}"
         else:
-            # Mirror session_results.rebuild_result_for_session's authority
-            # contract: viewer reads `triangulated` (per-path map plus the
-            # winner picked by server_post→live precedence). `points` is
-            # the legacy field; keep it in sync so older readers still work.
             result.triangulated_by_path["server_post"] = pts
             result.paths_completed.add("server_post")
             result.triangulated = pts
             result.points = list(pts)
 
-    # Run the segmenter so reprocessed results carry the same
-    # `segments` payload as the live cycle_end / recompute paths.
-    # `stamp_segments_on_result` is idempotent and safe on empty
-    # `triangulated`.
     session_results.stamp_segments_on_result(result)
 
     n = len(result.points)
@@ -283,6 +315,27 @@ def triangulate_session(
         atomic_write(RESULT_DIR / f"session_{sid}.json", result.model_dump_json())
 
 
+def _load_force_preset_snapshot(name: str) -> DetectionConfigSnapshotPayload:
+    try:
+        preset = presets.load_preset(DATA_DIR, name)
+    except KeyError:
+        raise SystemExit(
+            f"--force-preset {name!r}: preset does not exist on disk; "
+            f"check `data/presets/` or use --params"
+        ) from None
+    snap = _snapshot_from_preset(preset)
+    logger.info(
+        "force-preset %s — algorithm=%s hsv h[%d-%d] s[%d-%d] v[%d-%d] "
+        "aspect>=%.2f fill>=%.2f",
+        name, snap.algorithm_id,
+        snap.hsv.h_min, snap.hsv.h_max,
+        snap.hsv.s_min, snap.hsv.s_max,
+        snap.hsv.v_min, snap.hsv.v_max,
+        snap.shape_gate.aspect_min, snap.shape_gate.fill_min,
+    )
+    return snap
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     g = ap.add_mutually_exclusive_group(required=True)
@@ -293,66 +346,84 @@ def main() -> None:
     ap.add_argument(
         "--use-frozen-snapshot",
         action="store_true",
-        help="reuse `pitch.server_post_config_used` instead of the current "
-             "disk detection config. For reproducibility audits — default "
-             "behavior is to pick up your current disk config so tuning "
-             "workflows actually see new results.",
+        help="replay each pitch's stored server_post_config_used. "
+             "Reproducibility-audit path; pitches that pre-date the freeze "
+             "are skipped with a warning.",
+    )
+    ap.add_argument(
+        "--force-preset",
+        metavar="NAME",
+        help="load one preset by name and apply to every pitch. Overrides "
+             "the per-pitch frozen preset lookup. Use when you want to "
+             "re-evaluate all sessions under one preset (e.g., consolidating "
+             "history under tennis).",
     )
     ap.add_argument(
         "--algorithm-id",
-        help="override the algorithm_id of the active disk config. Must "
-             "be a registered id (see server/algorithms/__init__.py). "
+        help="override the algorithm_id slot of whichever snapshot is "
+             "selected (per-pitch frozen preset / --force-preset). Must be "
+             "a registered id (see server/algorithms/__init__.py). "
              "Mutually exclusive with --params (--params already carries "
-             "its own algorithm_id).",
+             "its own algorithm_id) and --use-frozen-snapshot.",
     )
     ap.add_argument(
         "--params",
         type=Path,
         help="JSON file matching DetectionConfigSnapshotPayload shape; "
-             "replaces the disk config for this run only.",
+             "applied to every pitch. Overrides per-pitch lookup and "
+             "--force-preset.",
     )
     ap.add_argument(
         "--strict",
         action="store_true",
-        help="exit non-zero if any pitch fails to reprocess. Default "
-             "behaviour is to log failures + return 0 so partial runs "
-             "complete; --strict is for automation that wants a hard "
-             "fail signal.",
+        help="exit non-zero if any pitch fails to reprocess.",
     )
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+    # Mutex matrix — every snapshot source is exclusive of the others;
+    # --algorithm-id is the only one that combines with default-B1 or
+    # --force-preset (it overrides the id slot of whichever snapshot
+    # got chosen). --params and --use-frozen-snapshot already carry
+    # their own algorithm_id, so combining is ambiguous.
+    if args.params is not None and args.force_preset is not None:
+        raise SystemExit(
+            "--params and --force-preset are mutually exclusive; pick one "
+            "snapshot source"
+        )
     if args.algorithm_id is not None and args.params is not None:
         raise SystemExit(
             "--algorithm-id and --params are mutually exclusive; --params "
             "already carries its own algorithm_id"
         )
-    # `--use-frozen-snapshot` reads each pitch's stored snapshot and
-    # ignores the disk/CLI snapshot entirely — combining it with a
-    # snapshot override would silently drop the override. Reject up
-    # front so the operator picks one source of truth.
     if args.use_frozen_snapshot and (
-        args.algorithm_id is not None or args.params is not None
+        args.algorithm_id is not None
+        or args.params is not None
+        or args.force_preset is not None
     ):
         raise SystemExit(
-            "--use-frozen-snapshot ignores --algorithm-id / --params; "
-            "drop the override or remove --use-frozen-snapshot"
+            "--use-frozen-snapshot replays the stamp on each pitch and "
+            "ignores --algorithm-id / --params / --force-preset; drop the "
+            "override or remove --use-frozen-snapshot"
         )
 
+    params_snapshot: DetectionConfigSnapshotPayload | None = None
+    force_preset_snapshot: DetectionConfigSnapshotPayload | None = None
+    algorithm_id_override: str | None = None
+
     if args.params is not None:
-        snapshot = _load_snapshot_from_file(args.params)
-    else:
-        snapshot = load_detection_config_snapshot()
-        if args.algorithm_id is not None:
-            try:
-                algorithms.validate_id(args.algorithm_id)
-            except ValueError as e:
-                raise SystemExit(f"--algorithm-id: {e}") from None
-            snapshot = snapshot.model_copy(
-                update={"algorithm_id": args.algorithm_id}
-            )
-            logger.info("algorithm_id override → %s", args.algorithm_id)
+        params_snapshot = _load_snapshot_from_file(args.params)
+    elif args.force_preset is not None:
+        force_preset_snapshot = _load_force_preset_snapshot(args.force_preset)
+
+    if args.algorithm_id is not None:
+        try:
+            algorithms.validate_id(args.algorithm_id)
+        except ValueError as e:
+            raise SystemExit(f"--algorithm-id: {e}") from None
+        algorithm_id_override = args.algorithm_id
+        logger.info("algorithm_id override → %s", algorithm_id_override)
 
     pairing_tuning = load_pairing_tuning()
     calibrations = load_calibrations()
@@ -362,18 +433,22 @@ def main() -> None:
     if not pitch_paths:
         return
 
-    # group by session, re-detect each pitch. Per-file try/except so a
-    # single corrupt MOV / unreadable JSON doesn't abort the whole batch.
-    # Failures tallied + reported at end so they're loud, not silent.
     by_session: dict[str, dict[str, PitchPayload]] = {}
     failures: list[tuple[str, str]] = []
     for path in pitch_paths:
         logger.info("redetect %s", path.name)
         try:
-            pitch = rerun_detection(
-                path, snapshot, args.dry_run,
+            pitch_for_resolve = PitchPayload.model_validate_json(path.read_text())
+            snapshot = resolve_snapshot_for_pitch(
+                pitch_for_resolve,
                 use_frozen_snapshot=args.use_frozen_snapshot,
+                params_snapshot=params_snapshot,
+                force_preset_snapshot=force_preset_snapshot,
+                algorithm_id_override=algorithm_id_override,
             )
+            if snapshot is None:
+                continue
+            pitch = rerun_detection(path, snapshot, args.dry_run)
         except Exception as e:
             logger.error("FAIL %s: %s", path.name, e)
             failures.append((path.name, str(e)[:200]))
@@ -381,8 +456,6 @@ def main() -> None:
         if pitch is not None:
             by_session.setdefault(pitch.session_id, {})[pitch.camera_id] = pitch
 
-    # re-triangulate each affected session. Re-load the unchanged counterpart
-    # from disk if it wasn't in our filter so A+B sessions still pair.
     for sid in sorted(by_session):
         cams = by_session[sid]
         for cam in ("A", "B"):
