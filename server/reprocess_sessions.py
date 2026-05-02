@@ -33,6 +33,7 @@ from pathlib import Path
 import algorithms
 import presets
 import session_results
+from detection_paths import DetectionPath, pitch_with_path_frames
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pairing_tuning import PairingTuning
 from schemas import (
@@ -276,6 +277,25 @@ def triangulate_session(
         cal = calibrations.get(p.camera_id)
         dims = (cal.image_width_px, cal.image_height_px) if cal else None
         return scale_pitch_to_video_dims(p, dims)
+
+    # Live triangulation runs first so its result lands on the same
+    # SessionResult slot the streaming aggregator would have written.
+    # `pitch.frames_live` is preserved untouched by reprocess; reusing
+    # it here keeps `triangulated_by_path["live"]` populated across
+    # rebuilds (otherwise viewer's live 3D layer would silently empty
+    # whenever an operator re-runs server_post).
+    if a.frames_live and b.frames_live:
+        try:
+            live_pts = triangulate_cycle(
+                pitch_with_path_frames(scale(a), DetectionPath.live),
+                pitch_with_path_frames(scale(b), DetectionPath.live),
+                source="server", tuning=pairing_tuning,
+            )
+        except Exception as e:
+            result.abort_reasons["live"] = f"{type(e).__name__}: {e}"
+        else:
+            result.triangulated_by_path["live"] = live_pts
+            result.paths_completed.add("live")
 
     if a.frames_server_post and b.frames_server_post:
         try:
