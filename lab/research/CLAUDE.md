@@ -42,7 +42,7 @@ top-1  = first cand under production cost ranker (server/candidate_selector.py:
          emits with shape stats, this comparison is automatic.
 ```
 
-PROD baseline: see `outputs/27c_R_topK.json`. Don't move the goalposts.
+PROD baseline: see `outputs/R_topK_baseline.json`. Don't move the goalposts.
 
 ## Anti-overfit checklist (must answer "yes" to all before claiming win)
 
@@ -84,8 +84,9 @@ post-hoc reranker on top of spray):
 
 ## File ownership inside research/
 
-- `scripts/NN_*.py` — one experiment per file, numbered roughly by
-  time. `_paths.py` resolves repo paths.
+- `scripts/<name>.py` — one experiment per file, named by content.
+  Dead-end experiments get `git rm`d, not renumbered. GT/audit tools
+  keep `_` prefix. `_paths.py` resolves repo paths.
 - `outputs/` — gitignored. Each script writes its own JSON/PNG.
 - `notes/` — write-ups. Synthesis doc `00_synthesis_*.md` is the
   current top-of-stack summary.

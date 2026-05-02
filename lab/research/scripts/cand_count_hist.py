@@ -1,4 +1,4 @@
-"""27 — Per-algorithm candidate-count distribution.
+"""Per-algorithm candidate-count distribution.
 
 Three algorithms, side-by-side per-frame n_cand histograms (overlay lines).
 Premise: R_emit (current metric) rewards spray-and-pray. A high n_cand
@@ -14,10 +14,10 @@ Algorithms:
   V11+D1   V11 ∪ |Y[t]-Y[t-1]| diff stream (extreme spray reference)
 
 Output:
-  outputs/27_cand_count_hist.png   3-line overlay (linear + log axes)
-  outputs/27_cand_count_stats.json per-algo distribution stats
+  outputs/cand_count_hist.png   3-line overlay (linear + log axes)
+  outputs/cand_count_stats.json per-algo distribution stats
 
-Run: cd lab/research && uv run python scripts/27_cand_count_hist.py
+Run: cd lab/research && uv run python scripts/cand_count_hist.py
 """
 from __future__ import annotations
 import json
@@ -215,9 +215,9 @@ def main() -> None:
         print(f"{name:<10}{s['n']:>6}{s['mean']:>8.2f}{s['median']:>5}"
               f"{s['p95']:>5}{s['p99']:>5}{s['max']:>6}"
               f"{s['frac_zero']*100:>6.1f}%{s['frac_one']*100:>6.1f}%{s['frac_le_3']*100:>6.1f}%")
-    out_json = OUT / "27_cand_count_stats.json"
+    out_json = OUT / "cand_count_stats.json"
     out_json.write_text(json.dumps({"summary": summary, "raw": counts}, indent=2))
-    out_png = FIG_DIR / "27_cand_count_hist.png"
+    out_png = FIG_DIR / "cand_count_hist.png"
     plot_overlay(counts, out_png)
     print(f"\n[saved] {out_json}")
     print(f"[saved] {out_png}")
