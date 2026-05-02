@@ -489,13 +489,18 @@ def main() -> None:
             by_session.setdefault(pitch.session_id, {})[pitch.camera_id] = pitch
 
     for sid in sorted(by_session):
-        if any((sid, cam) in skipped for cam in ("A", "B")):
+        skipped_cams = sorted(cam for cam in ("A", "B") if (sid, cam) in skipped)
+        if skipped_cams:
+            fresh_cams = sorted(by_session[sid])
             logger.warning(
-                "  %s — skipping triangulation: at least one cam was "
-                "skipped above; counterpart on disk is stale wrt the new "
-                "params and would yield a mixed result. Existing "
-                "session_%s.json left untouched.",
-                sid, sid,
+                "  %s — skipping triangulation: cam(s) %s skipped above; "
+                "counterpart on disk is stale wrt the new params and "
+                "would yield a mixed result. Existing session_%s.json "
+                "left untouched. NOTE: fresh cam(s) %s pitch JSON has "
+                "already been overwritten — disk pitches and result.json "
+                "are now diverged for this sid until the skipped cam(s) "
+                "are reprocessed.",
+                sid, skipped_cams, sid, fresh_cams,
             )
             continue
         cams = by_session[sid]

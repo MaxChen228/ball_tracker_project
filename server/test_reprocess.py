@@ -753,3 +753,152 @@ def test_strict_flag_propagates_failure_to_exit_code(tmp_path, monkeypatch):
     )
     with pytest.raises(SystemExit):
         R.main()
+
+
+def test_skipped_cam_blocks_session_triangulation(tmp_path, monkeypatch):
+    """Audit B3 regression. When one cam is skipped (resolve returned
+    None) and the counterpart succeeded, the old code auto-loaded the
+    skipped cam's stale disk pitch and triangulated against it,
+    silently overwriting `session_<sid>.json` with a mixed result that
+    paired NEW frames from one cam with STALE frames from the other.
+    Fix: track skipped (sid, cam) pairs and refuse to triangulate any
+    session with mixed-generation membership.
+
+    Setup: A has a frozen preset_name → resolves and reruns; B has
+    no frozen preset identity → resolve returns None → B is skipped.
+    Expected: triangulate_session is NEVER called for this sid, and
+    the existing `session_<sid>.json` is left untouched.
+    """
+    import sys
+    import reprocess_sessions as R
+
+    sid = "s_5c1bbed1"
+
+    # A pitch with frozen preset → will resolve and rerun.
+    a_snap = _snapshot(
+        h_min=25, h_max=55, s_min=90, s_max=255, v_min=90, v_max=255,
+        aspect_min=0.7, fill_min=0.55, preset_name="tennis",
+    )
+    a_pitch = _make_pitch(server_post_used=a_snap, sid=sid)
+    a_pitch.camera_id = "A"
+    a_path = tmp_path / "pitches" / f"session_{sid}_A.json"
+    _write_pitch(a_path, a_pitch)
+
+    # B pitch with NO preset identity (legacy) → resolve returns None.
+    b_pitch = _make_pitch(server_post_used=None, sid=sid)
+    b_pitch.camera_id = "B"
+    b_path = tmp_path / "pitches" / f"session_{sid}_B.json"
+    _write_pitch(b_path, b_pitch)
+
+    monkeypatch.setattr(R, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(R, "PITCH_DIR", tmp_path / "pitches")
+    monkeypatch.setattr(R, "RESULT_DIR", tmp_path / "results")
+    (tmp_path / "results").mkdir(exist_ok=True)
+    _write_preset(tmp_path / "presets", "tennis", a_snap)
+    monkeypatch.setattr(R, "load_pairing_tuning", lambda: R.PairingTuning.default())
+    monkeypatch.setattr(R, "load_calibrations", lambda: {})
+
+    # Sentinel result.json on disk — must remain untouched.
+    sentinel_result = (tmp_path / "results" / f"session_{sid}.json")
+    sentinel_result.write_text(json.dumps({"_sentinel": "do-not-overwrite"}))
+
+    # Capture triangulate_session invocations to assert it never ran.
+    triangulate_calls: list[str] = []
+    real_triangulate = R.triangulate_session
+
+    def spy_triangulate(s, *args, **kwargs):
+        triangulate_calls.append(s)
+        return real_triangulate(s, *args, **kwargs)
+
+    monkeypatch.setattr(R, "triangulate_session", spy_triangulate)
+
+    # Stub rerun_detection so we don't need a real MOV; return a mutated
+    # pitch like the real path does.
+    def fake_rerun(path, snapshot, dry_run):
+        p = PitchPayload.model_validate_json(path.read_text())
+        p.frames_server_post = []
+        return p
+
+    monkeypatch.setattr(R, "rerun_detection", fake_rerun)
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["reprocess_sessions", "--session", sid],
+    )
+    R.main()
+
+    assert sid not in triangulate_calls, (
+        "triangulate_session must not run when any cam was skipped — "
+        f"but ran with sid={triangulate_calls!r}"
+    )
+    # Sentinel preserved → result.json was not overwritten.
+    assert json.loads(sentinel_result.read_text()) == {
+        "_sentinel": "do-not-overwrite"
+    }
+
+
+def test_failed_cam_also_blocks_session_triangulation(tmp_path, monkeypatch):
+    """Adjacent invariant: an exception during rerun_detection is the
+    same staleness category as a None-resolve skip — the cam's disk
+    counterpart still carries OLD frames while the other cam (if
+    succeeded) carries NEW. Both must block triangulation."""
+    import sys
+    import reprocess_sessions as R
+
+    sid = "s_5c1bbed2"
+
+    snap = _snapshot(
+        h_min=25, h_max=55, s_min=90, s_max=255, v_min=90, v_max=255,
+        aspect_min=0.7, fill_min=0.55, preset_name="tennis",
+    )
+    a_pitch = _make_pitch(server_post_used=snap, sid=sid)
+    a_pitch.camera_id = "A"
+    a_path = tmp_path / "pitches" / f"session_{sid}_A.json"
+    _write_pitch(a_path, a_pitch)
+
+    b_pitch = _make_pitch(server_post_used=snap, sid=sid)
+    b_pitch.camera_id = "B"
+    b_path = tmp_path / "pitches" / f"session_{sid}_B.json"
+    _write_pitch(b_path, b_pitch)
+
+    monkeypatch.setattr(R, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(R, "PITCH_DIR", tmp_path / "pitches")
+    monkeypatch.setattr(R, "RESULT_DIR", tmp_path / "results")
+    (tmp_path / "results").mkdir(exist_ok=True)
+    _write_preset(tmp_path / "presets", "tennis", snap)
+    monkeypatch.setattr(R, "load_pairing_tuning", lambda: R.PairingTuning.default())
+    monkeypatch.setattr(R, "load_calibrations", lambda: {})
+
+    sentinel_result = tmp_path / "results" / f"session_{sid}.json"
+    sentinel_result.write_text(json.dumps({"_sentinel": "do-not-overwrite"}))
+
+    triangulate_calls: list[str] = []
+
+    def spy_triangulate(s, *args, **kwargs):
+        triangulate_calls.append(s)
+
+    monkeypatch.setattr(R, "triangulate_session", spy_triangulate)
+
+    def fake_rerun(path, snapshot, dry_run):
+        # Fail B, succeed A.
+        if "_B.json" in str(path):
+            raise RuntimeError("synthetic mov decode failure")
+        p = PitchPayload.model_validate_json(path.read_text())
+        p.frames_server_post = []
+        return p
+
+    monkeypatch.setattr(R, "rerun_detection", fake_rerun)
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["reprocess_sessions", "--session", sid],
+    )
+    R.main()
+
+    assert sid not in triangulate_calls, (
+        "triangulate_session must not run when any cam errored — "
+        f"but ran with sid={triangulate_calls!r}"
+    )
+    assert json.loads(sentinel_result.read_text()) == {
+        "_sentinel": "do-not-overwrite"
+    }

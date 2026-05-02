@@ -157,3 +157,43 @@ def test_arm_alone_stamps_without_waiting_for_ingest(tmp_path):
         v_min=frozen.hsv.v_min, v_max=frozen.hsv.v_max,
     )
     assert hsv_frozen == hsv_x
+
+
+def test_pitch_ingest_does_not_fabricate_live_config_when_never_armed(tmp_path):
+    """Phase-2 contract: when no arm ever happened for this session_id,
+    `state.live_session_frozen_config` returns None and `/pitch` MUST
+    propagate None to `pitch.live_config_used`. Pre-fix the route
+    fabricated a snapshot from `state.detection_config()` (current
+    disk values), making the viewer CFG chip claim a live config that
+    no detection ever actually used — a silent-fallback violation
+    that biased post-hoc live-vs-server_post delta investigations."""
+    from fastapi.testclient import TestClient
+    from main import app
+    from _test_helpers import _base_payload, _make_scene, _post_pitch
+
+    K, *_, (R_a, t_a, _, H_a), _ = _make_scene()
+    session_id = sid(770)
+
+    client = TestClient(app)
+    # Disk-side config drag — what the old fallback would have copied.
+    client.post("/detection/hsv", json={
+        "h_min": 33, "h_max": 44, "s_min": 33, "s_max": 200,
+        "v_min": 33, "v_max": 200,
+    })
+
+    # Bypass arm. POST a frames-only pitch (mode-two, no MOV).
+    payload = _base_payload("A", session_id, K, H_a)
+    payload["frames_live"] = [{
+        "frame_index": 0,
+        "timestamp_s": 0.0,
+        "ball_detected": False,
+        "candidates": [],
+    }]
+    r = _post_pitch(client, payload, None)
+    assert r.status_code == 200, r.text
+
+    persisted = main.state.pitches[("A", session_id)]
+    assert persisted.live_config_used is None, (
+        f"live_config_used must be None when no arm preceded /pitch; "
+        f"got {persisted.live_config_used!r}"
+    )
