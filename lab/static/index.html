@@ -35,8 +35,8 @@
     <div id="work-area">
       <main id="stage">
         <div id="video-wrap" tabindex="-1">
-          <video id="video" preload="none" playsinline></video>
-          <canvas id="frame-canvas"></canvas>
+          <video id="video" preload="metadata" playsinline></video>
+          <img id="frame-img" alt="" decoding="async">
           <canvas id="overlay"></canvas>
         </div>
       </main>
@@ -69,8 +69,6 @@
     <span id="status-line">f=0000 t=0.000s | in=- out=- seed=- pt=- | status=idle</span>
   </footer>
 
-  <script src="vendor/mp4box.all.min.js"></script>
-  <script src="frame_source.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

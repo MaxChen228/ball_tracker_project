@@ -25,6 +25,7 @@ STATIC_DIR = LAB_DIR / "static"
 WORKSPACE = LAB_DIR / "standalone_workspace"
 SOURCES_DIR = WORKSPACE / "source_videos"
 ITEMS_DIR = WORKSPACE / "items"
+PROXY_DIR = WORKSPACE / "proxy_frames"  # low-res JPEG-per-frame for scrub UI
 MANIFEST_PATH = WORKSPACE / "manifest.json"
 
 VIDEO_EXTS = (".mp4", ".mov", ".m4v")
@@ -44,22 +45,93 @@ def _slugify(text: str) -> str:
 
 
 def _video_meta(path: Path) -> dict[str, Any]:
-    """fps / duration only. total_frames is NOT taken from ffprobe nb_read_frames
-    because that count is only useful as a sanity check; the authoritative frame
-    index space comes from the dense PTS list built later in `build_pts_table`.
-    Mirroring the server-side viewer (`unionTimes` in
+    """fps / duration / width / height. total_frames is NOT taken from ffprobe
+    nb_read_frames because that count is only useful as a sanity check; the
+    authoritative frame index space comes from the dense PTS list built later
+    in `build_pts_table`. Mirroring the server-side viewer (`unionTimes` in
     `server/static/viewer/20_filters.js`) — frame index = position in real-data
-    timestamp list, not `round(pts * avg_fps)` which collides on variable-fps."""
+    timestamp list, not `round(pts * avg_fps)` which collides on variable-fps.
+
+    width/height are needed by the browser for click-coord conversion (proxy
+    JPEGs are downscaled; clicks must report source-pixel coords to SAM2)."""
     cmd = [
         "ffprobe", "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=avg_frame_rate,duration",
+        "-show_entries", "stream=avg_frame_rate,duration,width,height",
         "-of", "json", str(path),
     ]
     result = subprocess.run(cmd, check=True, capture_output=True, text=True)
     stream = json.loads(result.stdout)["streams"][0]
     num, den = stream["avg_frame_rate"].split("/")
     fps = float(num) / float(den)
-    return {"fps": fps, "duration_s": float(stream["duration"])}
+    return {
+        "fps": fps,
+        "duration_s": float(stream["duration"]),
+        "width": int(stream["width"]),
+        "height": int(stream["height"]),
+    }
+
+
+PROXY_WIDTH = 480       # display-resolution scrubbing thumbnails
+PROXY_JPEG_QUALITY = 75  # PIL .save(quality=…); 75 ≈ JPEG default, ~15 KB/frame at 480px
+
+
+def _extract_proxy_frames(source_path: Path, slug: str) -> int:
+    """Pre-extract every decoded source frame to a low-res JPEG strip under
+    `proxy_frames/<slug>/00000.jpg`. Browser scrubbing swaps `<img>.src`
+    instead of running an H.264 decoder in the input loop — same approach
+    as Premiere/DaVinci/Frame.io proxy clips.
+
+    Decoder MUST be PyAV (same as `_decode_pts_seconds`). ffmpeg's MOV
+    demuxer and PyAV diverge on VFR slo-mo clips (ffmpeg can drop dup-DTS
+    frames or insert dups, breaking 1:1 frame-index alignment with the
+    PTS table). Using PyAV here makes frame `i` on disk == PTS index `i`
+    by construction.
+
+    Idempotent: `<slug>/done.flag` carries source mtime; matching skips.
+    Atomic via tmp_dir + rename so a crash never leaves a partial strip
+    mistaken for done.
+    Returns frame count written (0 if skipped)."""
+    import av
+
+    proxy_dir = PROXY_DIR / slug
+    flag_path = proxy_dir / "done.flag"
+    src_mtime = source_path.stat().st_mtime
+    if flag_path.exists():
+        try:
+            cached_mtime = float(flag_path.read_text(encoding="utf-8").strip())
+            if abs(cached_mtime - src_mtime) < 1e-3:
+                return 0
+        except (ValueError, OSError):
+            pass
+
+    tmp_dir = PROXY_DIR / f"{slug}.tmp"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True)
+
+    container = av.open(str(source_path))
+    try:
+        stream = container.streams.video[0]
+        cw, ch = stream.codec_context.width, stream.codec_context.height
+        new_w = PROXY_WIDTH
+        new_h = round(new_w * ch / cw)
+        if new_h % 2:
+            new_h += 1
+        n = 0
+        for frame in container.decode(video=0):
+            if frame.pts is None and frame.time is None:
+                continue  # mirrors `_decode_pts_seconds` skip — same predicate
+            img = frame.reformat(width=new_w, height=new_h, format="rgb24").to_image()
+            img.save(tmp_dir / f"{n:05d}.jpg", quality=PROXY_JPEG_QUALITY, optimize=False)
+            n += 1
+    finally:
+        container.close()
+
+    if proxy_dir.exists():
+        shutil.rmtree(proxy_dir)
+    tmp_dir.rename(proxy_dir)
+    flag_path.write_text(f"{src_mtime}\n", encoding="utf-8")
+    return n
 
 
 def _new_segment_id() -> str:
@@ -188,10 +260,16 @@ class ManifestStore:
                 # the manifest must agree with the PTS table or scrubber.max
                 # ends up off by ~200 on iPhone 240fps clips.
                 pts_payload = _build_and_cache_pts(video, slug, meta["fps"])
+                # Pre-extract scrub proxies. Done synchronously inside ingest
+                # so the moment the item appears in the sidebar, scrubbing
+                # works without a hot decoder. Cost: ~3-5s per clip.
+                _extract_proxy_frames(video, slug)
                 payload["items"].append({
                     "slug": slug,
                     "source_video": video.name,
                     "fps": meta["fps"],
+                    "width": meta["width"],
+                    "height": meta["height"],
                     "total_frames": pts_payload["total_frames"],
                     "segments": [],
                     "active_segment_id": None,
@@ -309,6 +387,9 @@ class ManifestStore:
         pts_file = PTS_CACHE_DIR / f"{slug}.json"
         if pts_file.exists():
             pts_file.unlink()
+        proxy_dir = PROXY_DIR / slug
+        if proxy_dir.exists():
+            shutil.rmtree(proxy_dir)
 
 
 def item_dir(slug: str) -> Path:
@@ -928,6 +1009,7 @@ SLUG_RE = re.compile(
 )
 MASK_RE = re.compile(r"^/mask/([A-Za-z0-9_\-]+)/(seg_[A-Za-z0-9]+)/(\d{5})\.png$")
 CLIP_RE = re.compile(r"^/clip/([A-Za-z0-9_\-]+)\.mp4$")
+PROXY_RE = re.compile(r"^/proxy/([A-Za-z0-9_\-]+)/(\d{5})\.jpg$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1025,6 +1107,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             with src.open("rb") as f:
                 shutil.copyfileobj(f, self.wfile)
+
+    def _serve_proxy(self, slug: str, idx: str) -> None:
+        path = PROXY_DIR / slug / f"{idx}.jpg"
+        if not path.is_file():
+            self._send_text(HTTPStatus.NOT_FOUND, "no proxy frame")
+            return
+        # Proxy JPEGs are content-addressed (frame index, regenerated only on
+        # source-mtime change with full directory swap). Year-long immutable
+        # cache lets the browser image cache absorb scrubbing entirely.
+        self._send_bytes(
+            HTTPStatus.OK,
+            path.read_bytes(),
+            "image/jpeg",
+            cache_control="public, max-age=31536000, immutable",
+        )
 
     def _serve_mask(self, slug: str, seg_id: str, idx: str) -> None:
         path = masks_dir_for(slug, seg_id) / f"{idx}.png"
@@ -1141,11 +1238,15 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self._serve_mask(m.group(1), m.group(2), m.group(3))
             return
+        m = PROXY_RE.match(p)
+        if m:
+            self._serve_proxy(m.group(1), m.group(2))
+            return
         m = CLIP_RE.match(p)
         if m:
             self._serve_clip(m.group(1))
             return
-        if p.startswith("/static/") or p in ("/", "/index.html", "/app.js", "/style.css", "/frame_source.js") or p.startswith("/vendor/"):
+        if p.startswith("/static/") or p in ("/", "/index.html", "/app.js", "/style.css") or p.startswith("/vendor/"):
             self._serve_static(p[len("/static"):] if p.startswith("/static/") else p)
             return
         self._send_text(HTTPStatus.NOT_FOUND, f"no route: {p}")

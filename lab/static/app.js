@@ -49,9 +49,11 @@ const state = {
   queueSnapshot: { running: false, current: null, done: 0, ready: 0, total: 0 },
   bitmapCache: new Map(),                        // frame → ImageBitmap (mask alpha; LRU bounded)
   prefetchAbort: 0,
-  frameSource: null,
+  // Source-pixel dimensions of the current item, used for overlay backing-store
+  // sizing + click→source coord conversion. Populated from /api/items.
+  sourceWidth: 0,
+  sourceHeight: 0,
   scrubPaintToken: 0,
-  frameSourceLoading: false,
   maskColor: (() => {
     const v = localStorage.getItem("labMaskColor");
     return (v && MASK_COLORS[v]) ? v : "green";
@@ -152,7 +154,7 @@ function aggregateStatus(it) {
 const el = {
   video: document.getElementById("video"),
   videoWrap: document.querySelector("#video-wrap"),
-  frameCanvas: document.getElementById("frame-canvas"),
+  frameImg: document.getElementById("frame-img"),
   overlay: document.getElementById("overlay"),
   scrubber: document.getElementById("scrubber"),
   fills: document.getElementById("timeline-fills"),
@@ -274,10 +276,7 @@ function updateStatus() {
   const fStr = String(f).padStart(4, "0");
   let statusTag = pStat;
   let computing = false;
-  if (state.frameSourceLoading) {
-    statusTag = "loading clip (WebCodecs decode init)…";
-    computing = true;
-  } else if (state.seedComputingSeg) {
+  if (state.seedComputingSeg) {
     const elapsed = ((performance.now() - state.seedComputeStartMs) / 1000).toFixed(1);
     statusTag = `seeding... ${elapsed}s (SAM2 image predictor)`;
     computing = true;
@@ -443,21 +442,17 @@ function clearDoneFills() {
 
 function videoDisplayRect() {
   // Returns the actual displayed video frame rect inside the wrap, accounting
-  // for letterbox/pillarbox. In scrub mode the canvas is what's painted; in
-  // play mode the <video> element shows. Both are object-fit: contain inside
-  // the same wrap, with identical intrinsic aspect, so a single rect logic
-  // works for either.
-  const wrapRect = el.videoWrap.getBoundingClientRect();
-  const fs = state.frameSource;
-  let w, h;
-  if (fs && fs.width && fs.height) { w = fs.width; h = fs.height; }
-  else if (el.video.videoWidth && el.video.videoHeight) {
+  // for letterbox/pillarbox. In scrub mode the proxy <img> is what's painted;
+  // in play mode the <video> element shows. Both are object-fit: contain
+  // inside the same wrap with the source's intrinsic aspect, so a single
+  // rect calc works for either.
+  let w = state.sourceWidth, h = state.sourceHeight;
+  if ((!w || !h) && el.video.videoWidth && el.video.videoHeight) {
     w = el.video.videoWidth; h = el.video.videoHeight;
-  } else return null;
-  // Mirror the wrap's effective box. We intentionally use the canvas/video
-  // bounding rect because the wrap may have padding/decoration in future.
+  }
+  if (!w || !h) return null;
   const refRect = state.scrubMode
-    ? el.frameCanvas.getBoundingClientRect()
+    ? el.frameImg.getBoundingClientRect()
     : el.video.getBoundingClientRect();
   if (refRect.width === 0 || refRect.height === 0) return null;
   const elemRatio = refRect.width / refRect.height;
@@ -474,9 +469,8 @@ function videoDisplayRect() {
 }
 
 function resizeOverlay() {
-  const fs = state.frameSource;
-  const w = (fs && fs.width) || el.video.videoWidth;
-  const h = (fs && fs.height) || el.video.videoHeight;
+  const w = state.sourceWidth || el.video.videoWidth;
+  const h = state.sourceHeight || el.video.videoHeight;
   if (!w || !h) return;
   const disp = videoDisplayRect();
   if (!disp) return;
@@ -499,13 +493,18 @@ function clearOverlay() {
   ctx.clearRect(0, 0, el.overlay.width, el.overlay.height);
 }
 
-function drawFrameBitmap(bm) {
-  const c = el.frameCanvas;
-  const ctx = c.getContext("2d");
-  if (c.width !== bm.width) c.width = bm.width;
-  if (c.height !== bm.height) c.height = bm.height;
-  ctx.clearRect(0, 0, c.width, c.height);
-  ctx.drawImage(bm, 0, 0);
+function proxyUrl(slug, frame) {
+  return `${API_BASE}/proxy/${encodeURIComponent(slug)}/${String(frame).padStart(5, "0")}.jpg`;
+}
+
+function setFrameImage(slug, frame) {
+  // Browser image decoder + image cache handle the heavy lifting. Setting
+  // .src is synchronous-ish: the browser kicks off async decode and paints
+  // when ready. On warm cache (any frame seen this session) it's a single-
+  // frame swap with zero JS cost.
+  const url = proxyUrl(slug, frame);
+  if (el.frameImg.src.endsWith(url) || el.frameImg.src === url) return;
+  el.frameImg.src = url;
 }
 
 // Fetch mask URL → ImageBitmap (alpha-channel PNG decoded by browser, off
@@ -562,45 +561,26 @@ function drawAllSeedCrosshairs(frame) {
   }
 }
 
-// Atomic visual update: image + mask drawn in the same tick.
-function paintAtomic(frame, bm) {
-  drawFrameBitmap(bm);
-  const hit = findMaskAtFrame(frame);
-  if (hit) {
-    if (!blitCachedMask(frame)) clearOverlay();
-  } else {
-    clearOverlay();
-    drawAllSeedCrosshairs(frame);
-  }
-}
-
-// Paint pipeline: token-guarded, never paints stale frames. Sync hot path
-// (cache + cache) does NOT await — it paints synchronously, no Promise tick.
+// Paint pipeline (proxy strip era): swap <img>.src for the frame, then blit
+// the mask overlay. Frame swap is browser-native (async decode + composite,
+// off main thread); mask overlay is GPU canvas. Token-guarded so a fast
+// scrub never blits a stale mask onto the wrong frame.
 async function scheduleScrubPaint(frame) {
   const token = ++state.scrubPaintToken;
-  const fs = state.frameSource;
-  if (!fs) return;
-  let bm = fs.peek(frame);
-  if (!bm) {
-    try {
-      bm = await fs.getFrame(frame);
-    } catch (e) {
-      const msg = e && e.message;
-      // Silent on benign races: closed = slug switched away;
-      // not-loaded = user scrubbed before mp4 demux finished.
-      if (msg !== "FrameSource closed" && msg !== "FrameSource not loaded") {
-        console.warn("getFrame failed", frame, e);
-      }
-      return;
-    }
-    if (token !== state.scrubPaintToken) return;
-  }
+  const slug = state.current;
+  if (!slug) return;
+  setFrameImage(slug, frame);
   const maskUrl = maskUrlForFrame(frame);
   if (maskUrl && !state.bitmapCache.has(frame)) {
     await loadMaskBitmap(frame, maskUrl);
     if (token !== state.scrubPaintToken) return;
   }
-  paintAtomic(frame, bm);
+  if (maskUrlForFrame(frame) != null && blitCachedMask(frame)) {
+    // mask blitted; crosshair drawn inside blitCachedMask
+  } else {
+    clearOverlay();
+    drawAllSeedCrosshairs(frame);
+  }
   state.lastDisplayedFrame = frame;
   if (state.ptsTable && frame >= 0 && frame < state.ptsTable.length) {
     state.lastDisplayedMediaTime = state.ptsTable[frame];
@@ -696,16 +676,12 @@ function repaintOverlayForCurrentFrame() {
 
 async function prefetchMasks(slug) {
   const myToken = ++state.prefetchAbort;
-  // Defer until overlay reflects real frame source dimensions, so blits done
-  // mid-prefetch don't see a 300×150 default canvas and paint a top-left patch.
-  // Loop on FrameSource readiness — <video> is lazy-loaded now, so keying off
-  // its loadedmetadata would block prefetch until the user pressed play.
-  const fs = state.frameSource;
-  const targetW = fs && fs.width;
+  // Defer until overlay matches the source-pixel backing-store size — blits
+  // built before resizeOverlay would land on a 300×150 default canvas and
+  // paint as a top-left patch on the real overlay.
+  const targetW = state.sourceWidth;
   if (!targetW || el.overlay.width !== targetW) {
-    setTimeout(() => {
-      if (state.current === slug && myToken === state.prefetchAbort) prefetchMasks(slug);
-    }, 250);
+    setTimeout(() => prefetchMasks(slug), 50);
     return;
   }
   const allEntries = [];
@@ -745,86 +721,32 @@ function pickInitialSlug(items) {
   return items[0].slug;
 }
 
-async function loadFrameSource(slug) {
-  // Tear down previous source (releases GPU mem from cached ImageBitmaps).
-  if (state.frameSource) {
-    state.frameSource.close();
-    state.frameSource = null;
-  }
-  const fs = new FrameSource();
-  state.frameSource = fs;
-  state.frameSourceLoading = true;
-  updateStatus();
-  try {
-    await fs.load(`${API_BASE}/clip/${slug}.mp4`);
-  } catch (e) {
-    if (state.frameSource === fs) state.frameSource = null;
-    state.frameSourceLoading = false;
-    showError(`frame source load failed: ${e.message || e}`);
-    return;
-  }
-  if (state.current !== slug || state.frameSource !== fs) {
-    fs.close();
-    return;
-  }
-  state.frameSourceLoading = false;
-  // Canvas backing-store at PREVIEW resolution (what we actually draw). The
-  // overlay below stays at native resolution for mask alignment with the
-  // server-side full-res masks.
-  el.frameCanvas.width = fs.previewWidth;
-  el.frameCanvas.height = fs.previewHeight;
-  resizeOverlay();
-  updateStatus();
-  // Prefetch every seg's trim range so subsequent scrub is all cache hits.
-  const it = currentItem();
-  const segs = it ? (it.segments || []) : [];
-  for (const seg of segs) {
-    if (seg.in_frame != null && seg.out_frame != null) {
-      fs.prefetchRange(seg.in_frame, seg.out_frame);
-    }
-  }
-  // Reload UX: land on the first seg's seed_frame so the user sees an existing
-  // mask immediately without hunting on the timeline. Only auto-jump if we
-  // haven't moved off frame 0 (don't yank a user who already scrubbed somewhere
-  // during the load).
-  const firstSeeded = segs.find(s => s.seed_frame != null);
-  if (firstSeeded && state.lastDisplayedFrame === 0 && state.ptsTable) {
-    jumpToFrame(firstSeeded.seed_frame);
-    return;
-  }
-  // Repaint the current frame now that the source is ready.
-  scheduleScrubPaint(state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0);
-}
-
 function syncFromItem(item) {
   state.current = item.slug;
   if (item.fps == null) {
     showError(`item ${item.slug}: fps missing in /api/items response`);
     return false;
   }
+  if (!item.width || !item.height) {
+    showError(`item ${item.slug}: width/height missing — run migrate_extract_proxies.py`);
+    return false;
+  }
   state.fps = item.fps;
   state.totalFrames = item.total_frames || 0;
+  state.sourceWidth = item.width;
+  state.sourceHeight = item.height;
   el.itemSlug.textContent = item.slug;
   updateSidebarActive();
   el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
   el.scrubber.value = "0";
-  // Defer <video> load until the user actually presses play. The labelling
-  // workflow is 99% scrub (served by FrameSource / WebCodecs) — eagerly
-  // pointing <video> at the clip on every item switch fired a parallel
-  // 1080p MOV download + decode that competed with FrameSource for network
-  // and main thread, leaving the first ~5s after item-switch laggy.
-  // togglePlay() lazy-sets src on first play.
-  state.videoSrcSlug = item.slug;
-  if (el.video.src) {
-    el.video.pause();
-    el.video.removeAttribute("src");
-    el.video.load();   // releases buffered frames + cancels in-flight fetch
-  }
+  // Lazy: <video preload="metadata"> only fetches enough to expose duration.
+  // No frame decode happens until togglePlay() lands on this clip.
+  el.video.src = `${API_BASE}/clip/${item.slug}.mp4`;
   state.lastDisplayedFrame = 0;
   enterScrubMode();
   state.scrubPaintToken++;
-  clearSeedMask();        // all segments
-  clearPropMasks();       // all segments
+  clearSeedMask();
+  clearPropMasks();
   clearDoneFills();
   clearOverlay();
   state.ptsTable = null;
@@ -840,6 +762,7 @@ function syncFromItem(item) {
   state.propPhaseElapsed = 0;
   state.propStartMs = null;
   if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
+  resizeOverlay();
   renderSegmentsStrip();
   updateMarkers();
   updatePropagateBtn();
@@ -847,7 +770,9 @@ function syncFromItem(item) {
   startSse();
   fetchPts(item.slug);
   rehydrateMasks(item.slug);
-  loadFrameSource(item.slug);
+  // Start at frame 0 immediately. fetchPts → may auto-jump to first seg's
+  // seed_frame once the dense pts list arrives (handled in fetchPts).
+  scheduleScrubPaint(0);
   el.videoWrap.focus();
   return true;
 }
@@ -1103,7 +1028,8 @@ async function deleteItem(slug) {
   if (wasCurrent) {
     state.current = null;
     if (state.sse) { state.sse.close(); state.sse = null; }
-    if (state.frameSource) { state.frameSource.close(); state.frameSource = null; }
+    state.sourceWidth = 0; state.sourceHeight = 0;
+    el.frameImg.removeAttribute("src");
   }
   renderSidebar();
   if (wasCurrent) {
@@ -1256,9 +1182,6 @@ async function sendTrim(seg) {
     });
     if (state.current !== capturedSlug) return;
     if (!r.ok) showError(`trim failed: HTTP ${r.status}`);
-    else if (state.frameSource) {
-      state.frameSource.prefetchRange(inF, outF);
-    }
   } catch (e) {
     if (state.current === capturedSlug) showError(`trim failed: ${e}`);
   }
@@ -1556,13 +1479,12 @@ async function fetchPts(slug) {
       el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
       updateMarkers();
       console.log(`pts loaded: ${j.pts.length} frames`);
-      // Reload UX (mirror of loadFrameSource): if pts arrives second, do the
-      // seed-frame auto-jump now. Guarded the same way so we never yank a
-      // user who already moved.
+      // Reload UX: pts arrives async; if there's a seeded seg and we're still
+      // sitting at frame 0, jump to its seed_frame now (proxy <img> swap is
+      // ~free). Guard so we never yank a user who already moved.
       const it = currentItem();
       const firstSeeded = it && (it.segments || []).find(s => s.seed_frame != null);
-      if (firstSeeded && state.lastDisplayedFrame === 0
-          && state.frameSource && !state.frameSourceLoading) {
+      if (firstSeeded && state.lastDisplayedFrame === 0) {
         jumpToFrame(firstSeeded.seed_frame);
       }
     }
@@ -1598,28 +1520,12 @@ async function rehydrateMasks(slug) {
   } catch (e) { console.warn("rehydrate masks failed", e); }
 }
 
-async function togglePlay() {
+function togglePlay() {
   if (state.scrubMode) {
     const tbl = state.ptsTable;
     const f = state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0;
     const targetT = tbl ? tbl[f] : null;
     if (targetT == null) return;
-    // Lazy-load <video> on first play — see syncFromItem for rationale.
-    const wantSlug = state.videoSrcSlug;
-    if (!el.video.src && wantSlug) {
-      el.video.src = `${API_BASE}/clip/${wantSlug}.mp4`;
-      try {
-        await new Promise((res, rej) => {
-          el.video.addEventListener("canplay", res, { once: true });
-          el.video.addEventListener("error", () => rej(new Error("video load")), { once: true });
-        });
-      } catch (e) {
-        console.warn("video lazy-load failed", e);
-        return;
-      }
-      // User may have switched items while we awaited canplay.
-      if (state.videoSrcSlug !== wantSlug) return;
-    }
     if (Math.abs(el.video.currentTime - targetT) > 0.005) el.video.currentTime = targetT;
     state.lastDisplayedMediaTime = targetT;
     exitScrubMode();
@@ -1646,10 +1552,9 @@ function onVideoClick(e) {
     updateStatus();
     return;
   }
-  const fs = state.frameSource;
-  const nativeW = (fs && fs.width) || el.video.videoWidth;
-  const nativeH = (fs && fs.height) || el.video.videoHeight;
-  if (!nativeW || !nativeH) { showError("frame source not ready"); return; }
+  const nativeW = state.sourceWidth || el.video.videoWidth;
+  const nativeH = state.sourceHeight || el.video.videoHeight;
+  if (!nativeW || !nativeH) { showError("source dims not loaded"); return; }
   const disp = videoDisplayRect();
   if (!disp) { showError("video display rect unresolved"); return; }
   if (e.clientX < disp.left || e.clientX > disp.left + disp.width ||
@@ -1761,7 +1666,10 @@ function bindUi() {
     }
   });
   if (typeof ResizeObserver === "function") {
-    new ResizeObserver(() => resizeOverlay()).observe(el.video);
+    // Observe the wrap (the layout container) — its size is what scales
+    // both <img> and <video>. The previous observer on el.video missed
+    // resizes that happened while in scrub mode (video element hidden).
+    new ResizeObserver(() => resizeOverlay()).observe(el.videoWrap);
   } else {
     window.addEventListener("resize", resizeOverlay);
   }

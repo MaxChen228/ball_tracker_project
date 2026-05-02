@@ -259,7 +259,7 @@ body {
   background: #000;
 }
 
-#frame-canvas {
+#frame-img {
   position: absolute;
   top: 0;
   left: 0;
@@ -269,14 +269,18 @@ body {
   background: #000;
   display: none;
   z-index: 1;
+  /* Browser-decoded JPEG; resampled to display size. Pixelated avoids the
+     extra GPU cost of bilinear at every scrub tick — proxies are 480px wide,
+     fine to nearest-neighbor when upscaled to ~1280px display. */
+  image-rendering: auto;
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
-#video-wrap.scrub #frame-canvas { display: block; }
-/* In scrub mode the canvas is the source of truth — hide the underlying
-   <video> element so it can never bleed through. Chrome silently ignores
-   paused sub-frame currentTime seeks (~5ms steps at 184fps), which would
-   otherwise make the video appear stuck on the same frame even though
-   scheduleScrubPaint is correctly drawing distinct ImageBitmaps. */
+#video-wrap.scrub #frame-img { display: block; }
+/* In scrub mode the proxy <img> is the source of truth — hide the underlying
+   <video> element so it can never bleed through (e.g. a stale paint or a
+   live decode coming back after the user already scrubbed away). */
 #video-wrap.scrub #video { visibility: hidden; }
 
 #overlay {

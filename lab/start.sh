@@ -32,6 +32,12 @@ fi
 echo "[start] migrating masks (L → LA, idempotent)…"
 "$PYTHON" "$LAB_DIR/migrate_masks_to_alpha.py" >/dev/null
 
+# Idempotent proxy-frame extraction (low-res JPEG strip per item for scrub UI).
+# Skips clips whose proxy_frames/<slug>/done.flag matches source mtime; first
+# run on existing items can take a couple minutes (one ffmpeg pass per clip).
+echo "[start] extracting scrub proxies (idempotent)…"
+"$PYTHON" "$LAB_DIR/migrate_extract_proxies.py"
+
 cd "$PROJECT_ROOT"
 echo "[start] launching: $PYTHON -m lab.labeller (cwd=$PROJECT_ROOT)"
 exec "$PYTHON" -m lab.labeller
