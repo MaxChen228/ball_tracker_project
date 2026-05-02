@@ -961,8 +961,10 @@ class Handler(BaseHTTPRequestHandler):
         self._send_bytes(code, msg.encode("utf-8"), "text/plain; charset=utf-8")
 
     def _read_json(self) -> dict[str, Any]:
-        n = int(self.headers.get("Content-Length", "0") or "0")
-        raw = self.rfile.read(n) if n > 0 else b""
+        # Body was already drained into self._post_body at the top of do_POST
+        # to keep HTTP/1.1 keep-alive request boundaries intact even on routes
+        # that don't care about the body. Just parse from there.
+        raw = getattr(self, "_post_body", b"")
         if not raw:
             return {}
         return json.loads(raw.decode("utf-8"))
@@ -1140,6 +1142,15 @@ class Handler(BaseHTTPRequestHandler):
         self._send_text(HTTPStatus.NOT_FOUND, f"no route: {p}")
 
     def do_POST(self) -> None:
+        # Drain Content-Length bytes up front. Required for HTTP/1.1 keep-alive:
+        # routes that ignore the body (e.g. /segments/<id>/active receives "{}"
+        # from postJson) would otherwise leave it in rfile, and the next request
+        # on the same TCP connection would parse "{}POST /..." as method "{}",
+        # returning 501 "Unsupported method". Symptom: seeding a second segment
+        # right after activating it fails with 501 even though /seed itself is
+        # implemented.
+        n = int(self.headers.get("Content-Length", "0") or "0")
+        self._post_body = self.rfile.read(n) if n > 0 else b""
         url = urllib.parse.urlparse(self.path)
         if url.path == "/api/items/rescan":
             STORE.scan_sources()

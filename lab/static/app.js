@@ -3,15 +3,17 @@
 const API_BASE = window.location.origin;
 
 const state = {
-  items: [],            // each item carries .segments[] + .active_segment_id
+  items: [],            // each item carries .segments[]
   current: null,        // current slug
   fps: null,
   totalFrames: 0,
-  // Active segment is the one targeted by [/]/S/Enter. Reads/writes go through
-  // activeSegment(); never read state.activeSegmentId directly without lookup.
-  activeSegmentId: null,
-  pendingSeedClick: false,
-  doneFrames: new Set(),                         // active-segment frames with masks
+  // No active-segment concept. The seg targeted by [/]/S/Enter is derived from
+  // the current frame: segContainingFrame(f) → openSegment() → createSegment().
+  // pendingSeedClick stashes {segId, frame} so the next click knows where to
+  // route the seed point (current-frame lookup at click time would race against
+  // the user scrubbing while the seed mode is pending).
+  pendingSeedClick: null,                        // null | {segId, frame}
+  doneFrames: new Set(),                         // union of mask frames across all segs
   seedMaskUrls: new Map(),                       // seg_id → blob URL for the seed-frame mask
   propMaskUrlsBySeg: new Map(),                  // seg_id → Map<frame, url>
   seedComputingSeg: null,                        // seg_id currently mid-seed (or null)
@@ -49,24 +51,76 @@ function currentItem() {
   return state.items.find(i => i.slug === state.current) || null;
 }
 
-function activeSegment() {
-  const it = currentItem();
-  if (!it || !state.activeSegmentId) return null;
-  return (it.segments || []).find(s => s.id === state.activeSegmentId) || null;
-}
-
 function segmentsOf(slug) {
   const it = state.items.find(i => i.slug === slug);
   return it ? (it.segments || []) : [];
 }
 
-function maskUrlsForActive() {
-  return state.propMaskUrlsBySeg.get(state.activeSegmentId) || new Map();
+// First-class lookups over the always-on multi-seg display. There is no
+// "active" seg — every read is keyed by the frame the user is looking at.
+function segContainingFrame(f) {
+  const it = currentItem();
+  if (!it) return null;
+  for (const seg of (it.segments || [])) {
+    if (seg.in_frame != null && seg.out_frame != null
+        && seg.in_frame <= f && f <= seg.out_frame) return seg;
+  }
+  return null;
 }
 
-function setActiveSegmentLocal(item, segId) {
-  state.activeSegmentId = segId;
-  if (item) item.active_segment_id = segId;
+// The unique seg with in xor out (mid-creation). [/] target before any seg
+// contains f. Returns first match — there should never be two open at once
+// since [/] always fills the existing open before creating new.
+function openSegment() {
+  const it = currentItem();
+  if (!it) return null;
+  for (const seg of (it.segments || [])) {
+    const hasIn = seg.in_frame != null;
+    const hasOut = seg.out_frame != null;
+    if (hasIn !== hasOut) return seg;
+  }
+  return null;
+}
+
+// "The seg the user is contextually editing" — drives status bar, propagate
+// button, cancel target. Prefers seg containing current frame (so scrubbing
+// into a range surfaces that seg's status), else any open seg.
+function contextSegment() {
+  const f = currentFrameSafe();
+  return segContainingFrame(f) || openSegment();
+}
+
+function currentFrameSafe() {
+  // currentFrame() depends on ptsTable / scrubMode; safe wrapper for callers
+  // (status display) that can be invoked before pts loads.
+  if (!state.ptsTable && state.lastDisplayedFrame < 0) return 0;
+  return currentFrame();
+}
+
+function segWithRunningProp() {
+  const it = currentItem();
+  if (!it) return null;
+  return (it.segments || []).find(s => s.propagate_status === "running") || null;
+}
+
+// Mask lookup: scan all segs at this frame. Non-overlapping invariant means
+// at most one seg owns the mask (prop fills [in,out]; seed is one frame).
+function findMaskAtFrame(f) {
+  for (const [segId, m] of state.propMaskUrlsBySeg) {
+    if (m.has(f)) return { segId, url: m.get(f) };
+  }
+  // Fallback: seed mask blob URLs (only present until rehydrate replaces them
+  // with /mask/ URLs in propMaskUrlsBySeg).
+  const it = currentItem();
+  if (it) {
+    for (const seg of (it.segments || [])) {
+      if (seg.seed_frame === f) {
+        const sm = state.seedMaskUrls.get(seg.id);
+        if (sm) return { segId: seg.id, url: sm };
+      }
+    }
+  }
+  return null;
 }
 
 function aggregateStatus(it) {
@@ -194,13 +248,15 @@ function updateStatus() {
   if (tbl && f >= 0 && f < tbl.length) t = tbl[f];
   else if (state.lastDisplayedMediaTime != null) t = state.lastDisplayedMediaTime;
   else t = el.video.currentTime || 0;
-  const seg = activeSegment();
+  const seg = contextSegment();
+  const runningSeg = segWithRunningProp();
+  const dispSeg = runningSeg || seg;
   const inF = seg ? seg.in_frame : null;
   const outF = seg ? seg.out_frame : null;
   const seedF = seg ? seg.seed_frame : null;
   const seedP = seg ? seg.seed_point : null;
-  const pStat = seg ? seg.propagate_status : "idle";
-  const segLabel = seg ? seg.id.slice(4) : "—";
+  const pStat = dispSeg ? dispSeg.propagate_status : "idle";
+  const segLabel = dispSeg ? dispSeg.id.slice(4) : "—";
   const pt = seedP ? `(${seedP[0]},${seedP[1]})` : "-";
   const fStr = String(f).padStart(4, "0");
   let statusTag = pStat;
@@ -208,7 +264,7 @@ function updateStatus() {
   if (state.frameSourceLoading) {
     statusTag = "loading clip (WebCodecs decode init)…";
     computing = true;
-  } else if (state.seedComputingSeg && state.seedComputingSeg === state.activeSegmentId) {
+  } else if (state.seedComputingSeg) {
     const elapsed = ((performance.now() - state.seedComputeStartMs) / 1000).toFixed(1);
     statusTag = `seeding... ${elapsed}s (SAM2 image predictor)`;
     computing = true;
@@ -225,7 +281,9 @@ function updateStatus() {
       statusTag = `propagate: model ready (${state.propModel || "?"} on ${state.propDevice || "?"} in ${state.propPhaseElapsed}s)`;
     } else if (phase === "propagating") {
       const total = state.propExpected || 1;
-      const done = state.propDoneCount;
+      // Per-running-seg count, not the union — accurate %/ETA.
+      const runningMap = state.propMaskUrlsBySeg.get(dispSeg ? dispSeg.id : null);
+      const done = runningMap ? runningMap.size : 0;
       const elapsedS = state.propStartMs ? (performance.now() - state.propStartMs) / 1000 : 0;
       const fps = elapsedS > 0 ? (done / elapsedS).toFixed(2) : "?";
       const etaS = (fps !== "?" && fps > 0) ? Math.max(0, (total - done) / parseFloat(fps)).toFixed(0) : "?";
@@ -235,40 +293,41 @@ function updateStatus() {
       statusTag = `propagate: ${phase}`;
     }
     computing = true;
-  } else if (pStat === "done" && state.propDoneCount > 0) {
+  } else if (pStat === "done") {
+    const dispMap = state.propMaskUrlsBySeg.get(dispSeg ? dispSeg.id : null);
+    const done = dispMap ? dispMap.size : 0;
+    const total = (dispSeg && dispSeg.in_frame != null && dispSeg.out_frame != null)
+      ? (dispSeg.out_frame - dispSeg.in_frame + 1) : done;
     const tail = state.propPhaseElapsed > 0 ? `in ${state.propPhaseElapsed}s` : "(cached on disk)";
-    statusTag = `propagate done: ${state.propDoneCount}/${state.propExpected} frames ${tail}`;
+    statusTag = `propagate done: ${done}/${total} frames ${tail}`;
   }
   if (computing) el.statusbar.classList.add("computing");
   else el.statusbar.classList.remove("computing");
+  const pendingHint = state.pendingSeedClick ? " (click to set seed point)" : "";
   el.status.textContent =
-    `f=${fStr} t=${t.toFixed(3)}s | seg=${segLabel} in=${fmt(inF)} out=${fmt(outF)} seed=${fmt(seedF)} pt=${pt} | status=${statusTag}${state.pendingSeedClick ? " (click to set seed point)" : ""}`;
+    `f=${fStr} t=${t.toFixed(3)}s | seg=${segLabel} in=${fmt(inF)} out=${fmt(outF)} seed=${fmt(seedF)} pt=${pt} | status=${statusTag}${pendingHint}`;
 }
 
 function updateMarkers() {
-  // Render per-segment in/out/seed markers under #marker-layer. Active segment
-  // gets a brighter accent + click-to-activate; non-active segments dim.
+  // All segs render with equal weight — no active/dim distinction.
   const layer = el.markerLayer;
   layer.innerHTML = "";
   const it = currentItem();
   if (!it || state.totalFrames <= 0) return;
   const denom = Math.max(1, state.totalFrames - 1);
   for (const seg of (it.segments || [])) {
-    const isActive = seg.id === state.activeSegmentId;
-    const cls = isActive ? "active" : "dim";
     if (seg.in_frame != null && seg.out_frame != null) {
       const span = document.createElement("div");
-      span.className = `seg-span ${cls}`;
+      span.className = "seg-span";
       span.style.left = `${(seg.in_frame / denom) * 100}%`;
       span.style.width = `${((seg.out_frame - seg.in_frame) / denom) * 100}%`;
       span.title = `${seg.id} [${seg.in_frame}–${seg.out_frame}]`;
-      span.addEventListener("click", () => activateSegment(seg.id));
       layer.appendChild(span);
     }
     const mk = (frame, kind) => {
       if (frame == null) return;
       const m = document.createElement("div");
-      m.className = `seg-marker seg-marker-${kind} ${cls}`;
+      m.className = `seg-marker seg-marker-${kind}`;
       m.style.left = `${(frame / denom) * 100}%`;
       if (kind === "seed") m.textContent = "★";
       layer.appendChild(m);
@@ -279,43 +338,58 @@ function updateMarkers() {
   }
 }
 
+function isSegReadyForPropagate(seg) {
+  return seg != null
+    && seg.in_frame != null && seg.out_frame != null
+    && seg.seed_frame != null && seg.seed_point != null
+    && (state.seedMaskUrls.has(seg.id) || (state.propMaskUrlsBySeg.get(seg.id) || new Map()).has(seg.seed_frame))
+    && seg.propagate_status !== "running";
+}
+
+function pickPropagateTarget() {
+  // Prefer seg containing current frame (user just seeded it), else any ready
+  // seg. Returns null if none ready.
+  const ctx = contextSegment();
+  if (isSegReadyForPropagate(ctx)) return ctx;
+  const it = currentItem();
+  if (!it) return null;
+  for (const seg of (it.segments || [])) {
+    if (isSegReadyForPropagate(seg)) return seg;
+  }
+  return null;
+}
+
 function updatePropagateBtn() {
-  const seg = activeSegment();
-  const ready =
-    seg != null &&
-    seg.in_frame != null &&
-    seg.out_frame != null &&
-    seg.seed_frame != null &&
-    seg.seed_point != null &&
-    state.seedMaskUrls.has(seg.id) &&
-    seg.propagate_status !== "running";
-  el.btnPropagate.disabled = !ready;
+  el.btnPropagate.disabled = pickPropagateTarget() == null;
 }
 
 function renderSegmentsStrip() {
+  // Chips are status indicators + delete handles. They're not selectors —
+  // there is no active seg to select. Click on chip jumps to seed_frame for
+  // convenience (so the user can scrub to the seg without manual hunting).
   const strip = el.segmentsStrip;
   strip.innerHTML = "";
   const it = currentItem();
   if (!it) return;
   for (const seg of (it.segments || [])) {
     const chip = document.createElement("div");
-    const isActive = seg.id === state.activeSegmentId;
-    chip.className = `seg-chip seg-chip-${seg.propagate_status}` + (isActive ? " active" : "");
-    chip.title = `${seg.id} (${seg.propagate_status})`;
+    chip.className = `seg-chip seg-chip-${seg.propagate_status}`;
+    chip.title = `${seg.id} (${seg.propagate_status}) — click to jump to seed frame`;
     const dot = document.createElement("span");
     dot.className = "seg-chip-dot";
     chip.appendChild(dot);
     chip.appendChild(document.createTextNode(seg.id.replace("seg_", "")));
-    chip.addEventListener("click", () => activateSegment(seg.id));
-    if (!isActive || (it.segments || []).length > 1) {
-      const x = document.createElement("button");
-      x.className = "seg-chip-x";
-      x.type = "button";
-      x.textContent = "×";
-      x.title = "Delete segment";
-      x.addEventListener("click", (e) => { e.stopPropagation(); deleteSegment(seg.id); });
-      chip.appendChild(x);
-    }
+    chip.addEventListener("click", () => {
+      if (seg.seed_frame != null) jumpToFrame(seg.seed_frame);
+      else if (seg.in_frame != null) jumpToFrame(seg.in_frame);
+    });
+    const x = document.createElement("button");
+    x.className = "seg-chip-x";
+    x.type = "button";
+    x.textContent = "×";
+    x.title = "Delete segment";
+    x.addEventListener("click", (e) => { e.stopPropagation(); deleteSegment(seg.id); });
+    chip.appendChild(x);
     strip.appendChild(chip);
   }
   const addBtn = document.createElement("button");
@@ -433,18 +507,30 @@ function ensureTintedCanvas(frame, url) {
   });
 }
 
+// Draw the red × crosshair for every seg whose seed_frame === frame. With
+// non-overlapping segs there can still be more than one seg pinned at the
+// same frame (e.g. user reseeded then created a new seg with overlapping
+// in/out — invariant is best-effort, not strict). All visible.
+function drawAllSeedCrosshairs(frame) {
+  if (!state.showSeedMarker) return;
+  const it = currentItem();
+  if (!it) return;
+  for (const seg of (it.segments || [])) {
+    if (seg.seed_frame === frame && seg.seed_point) {
+      drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
+    }
+  }
+}
+
 // Atomic visual update: image + mask drawn in the same tick.
 function paintAtomic(frame, bm) {
   drawFrameBitmap(bm);
-  const url = maskUrlForFrame(frame);
-  if (url) {
+  const hit = findMaskAtFrame(frame);
+  if (hit) {
     if (!blitCachedMask(frame)) clearOverlay();
   } else {
     clearOverlay();
-    const seg = activeSegment();
-    if (seg && frame === seg.seed_frame && seg.seed_point && state.showSeedMarker) {
-      drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
-    }
+    drawAllSeedCrosshairs(frame);
   }
 }
 
@@ -526,22 +612,13 @@ function blitCachedMask(frame) {
   const ctx = el.overlay.getContext("2d");
   ctx.clearRect(0, 0, el.overlay.width, el.overlay.height);
   ctx.drawImage(cached, 0, 0);
-  const seg = activeSegment();
-  if (seg && frame === seg.seed_frame && seg.seed_point && state.showSeedMarker) {
-    drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
-  }
+  drawAllSeedCrosshairs(frame);
   return true;
 }
 
 function maskUrlForFrame(frame) {
-  const urls = maskUrlsForActive();
-  if (urls.has(frame)) return urls.get(frame);
-  const seg = activeSegment();
-  if (seg && frame === seg.seed_frame) {
-    const sm = state.seedMaskUrls.get(seg.id);
-    if (sm) return sm;
-  }
-  return null;
+  const hit = findMaskAtFrame(frame);
+  return hit ? hit.url : null;
 }
 
 function loadMaskForFrame(frame) {
@@ -571,10 +648,7 @@ function repaintOverlayForCurrentFrame() {
     return;
   }
   clearOverlay();
-  const seg = activeSegment();
-  if (seg && f === seg.seed_frame && seg.seed_point && state.showSeedMarker) {
-    drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
-  }
+  drawAllSeedCrosshairs(f);
 }
 
 async function prefetchMasks(slug) {
@@ -590,7 +664,12 @@ async function prefetchMasks(slug) {
     el.video.addEventListener("loadedmetadata", () => prefetchMasks(slug), { once: true });
     return;
   }
-  const entries = Array.from(maskUrlsForActive().entries())
+  // Union across all segs — every mask is on screen now, prefetch all.
+  const allEntries = [];
+  for (const m of state.propMaskUrlsBySeg.values()) {
+    for (const [frame, url] of m) allEntries.push([frame, url]);
+  }
+  const entries = allEntries
     .sort((a, b) => a[0] - b[0])
     .filter(([frame]) => !state.tintedCache.has(frame));
   const concurrency = 8;
@@ -659,18 +738,21 @@ async function loadFrameSource(slug) {
   el.frameCanvas.height = fs.previewHeight;
   resizeOverlay();
   updateStatus();
-  // Prefetch the active segment's trim range so subsequent scrub is all cache hits.
-  const seg = activeSegment();
-  if (seg && seg.in_frame != null && seg.out_frame != null) {
-    fs.prefetchRange(seg.in_frame, seg.out_frame);
+  // Prefetch every seg's trim range so subsequent scrub is all cache hits.
+  const it = currentItem();
+  const segs = it ? (it.segments || []) : [];
+  for (const seg of segs) {
+    if (seg.in_frame != null && seg.out_frame != null) {
+      fs.prefetchRange(seg.in_frame, seg.out_frame);
+    }
   }
-  // Reload UX: syncFromItem reset lastDisplayedFrame=0, but the active seg's
-  // mask lives at seed_frame ∈ [in, out]. Default to landing on seed_frame so
-  // the user sees the existing mask immediately without hunting on the timeline.
-  // Only auto-jump if we haven't moved off frame 0 (don't yank a user who
-  // already scrubbed somewhere during the load).
-  if (seg && seg.seed_frame != null && state.lastDisplayedFrame === 0 && state.ptsTable) {
-    jumpToFrame(seg.seed_frame);
+  // Reload UX: land on the first seg's seed_frame so the user sees an existing
+  // mask immediately without hunting on the timeline. Only auto-jump if we
+  // haven't moved off frame 0 (don't yank a user who already scrubbed somewhere
+  // during the load).
+  const firstSeeded = segs.find(s => s.seed_frame != null);
+  if (firstSeeded && state.lastDisplayedFrame === 0 && state.ptsTable) {
+    jumpToFrame(firstSeeded.seed_frame);
     return;
   }
   // Repaint the current frame now that the source is ready.
@@ -685,7 +767,6 @@ function syncFromItem(item) {
   }
   state.fps = item.fps;
   state.totalFrames = item.total_frames || 0;
-  state.activeSegmentId = item.active_segment_id || null;
   el.itemSlug.textContent = item.slug;
   updateSidebarActive();
   el.scrubber.max = String(Math.max(0, state.totalFrames - 1));
@@ -702,7 +783,7 @@ function syncFromItem(item) {
   state.pendingTargetFrame = null;
   state.isSeeking = false;
   state.lastSeekTarget = null;
-  state.pendingSeedClick = false;
+  state.pendingSeedClick = null;
   state.seedComputingSeg = null;
   state.seedComputeStartMs = null;
   state.propPhase = null;
@@ -1006,27 +1087,27 @@ function startSse() {
     let m = state.propMaskUrlsBySeg.get(segId);
     if (!m) { m = new Map(); state.propMaskUrlsBySeg.set(segId, m); }
     m.set(frame, maskUrl);
-    if (segId === state.activeSegmentId) {
-      state.propDoneCount = m.size;
-      addDoneFill(frame);
-      if (el.overlay.width && el.overlay.height) {
-        const img = new Image();
-        img.onload = () => {
-          try { state.tintedCache.set(frame, buildTintedCanvas(img)); } catch (_) {}
-          if (state.current === capturedSlug && currentFrame() === frame) blitCachedMask(frame);
-        };
-        img.src = maskUrl;
-      } else if (frame === currentFrame()) {
-        repaintOverlayForCurrentFrame();
-      }
-      updateStatus();
+    // No active gate — every seg's mask paints. doneFills is union across segs.
+    if (!state.doneFrames.has(frame)) addDoneFill(frame);
+    state.propDoneCount += 1;
+    if (el.overlay.width && el.overlay.height) {
+      const img = new Image();
+      img.onload = () => {
+        try { state.tintedCache.set(frame, buildTintedCanvas(img)); } catch (_) {}
+        if (state.current === capturedSlug && currentFrame() === frame) blitCachedMask(frame);
+      };
+      img.src = maskUrl;
+    } else if (frame === currentFrame()) {
+      repaintOverlayForCurrentFrame();
     }
+    updateStatus();
   });
   es.addEventListener("phase", (ev) => {
     if (state.current !== capturedSlug) return;
     let payload;
     try { payload = JSON.parse(ev.data); } catch (_) { return; }
-    if (payload.seg_id !== state.activeSegmentId) return;  // not the segment we're viewing
+    // Show phase for any running seg — there's only one running at a time
+    // per slug since SAM2 propagator is serial.
     state.propPhase = payload.phase || null;
     if (typeof payload.expected_frames === "number") state.propExpected = payload.expected_frames;
     if (typeof payload.elapsed_s === "number") state.propPhaseElapsed = payload.elapsed_s;
@@ -1041,7 +1122,7 @@ function startSse() {
     const segId = payload.seg_id;
     if (typeof segId !== "string") return;
     updateSidebarStatus(capturedSlug, segId, "done");
-    if (state.current === capturedSlug && segId === state.activeSegmentId) {
+    if (state.current === capturedSlug) {
       state.propPhase = "done";
       if (typeof payload.elapsed_s === "number") state.propPhaseElapsed = payload.elapsed_s;
       if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
@@ -1057,7 +1138,7 @@ function startSse() {
     if (typeof segId === "string") {
       updateSidebarStatus(capturedSlug, segId, "failed");
     }
-    if (state.current === capturedSlug && payload.msg && segId === state.activeSegmentId) {
+    if (state.current === capturedSlug && payload.msg) {
       showError(`propagate: ${payload.msg}`);
     }
   });
@@ -1072,24 +1153,32 @@ async function postJson(path, body) {
   });
 }
 
-async function ensureActiveEditableSegment() {
-  // Returns the active segment if writable; else creates a fresh one and
-  // returns it. "Auto-new" guard: we never overwrite a done/running segment's
-  // in/out — that would silently invalidate masks that took 30s+ to compute.
-  let seg = activeSegment();
-  if (seg && seg.propagate_status !== "done" && seg.propagate_status !== "running") {
-    return seg;
+// Pick the seg [/]/N edits target. Decision tree (no manual selection):
+//   1. Frame is inside an idle complete seg → edit that seg (extends in/out).
+//   2. There's an open seg (in xor out) → fill in the missing endpoint.
+//   3. Otherwise create a new seg.
+// Done/running segs are never picked — overwriting their range silently
+// invalidates masks that took ~30s+ to compute.
+async function pickInOutTarget(f) {
+  const inside = segContainingFrame(f);
+  if (inside && inside.propagate_status !== "done" && inside.propagate_status !== "running") {
+    return inside;
   }
-  if (currentItem() == null) return null;
-  const newSeg = await createSegment();
-  return newSeg;
+  const open = openSegment();
+  if (open && open.propagate_status !== "done" && open.propagate_status !== "running") {
+    return open;
+  }
+  return await createSegment();
 }
 
 async function markIn() {
   if (!state.current) return;
-  const seg = await ensureActiveEditableSegment();
+  const f = currentFrame();
+  const seg = await pickInOutTarget(f);
   if (!seg) return;
-  seg.in_frame = currentFrame();
+  seg.in_frame = f;
+  // Maintain in < out invariant — if user marks in past existing out, drop out.
+  if (seg.out_frame != null && seg.out_frame <= seg.in_frame) seg.out_frame = null;
   updateMarkers();
   renderSegmentsStrip();
   updatePropagateBtn();
@@ -1099,9 +1188,11 @@ async function markIn() {
 
 async function markOut() {
   if (!state.current) return;
-  const seg = await ensureActiveEditableSegment();
+  const f = currentFrame();
+  const seg = await pickInOutTarget(f);
   if (!seg) return;
-  seg.out_frame = currentFrame();
+  seg.out_frame = f;
+  if (seg.in_frame != null && seg.in_frame >= seg.out_frame) seg.in_frame = null;
   updateMarkers();
   renderSegmentsStrip();
   updatePropagateBtn();
@@ -1120,7 +1211,7 @@ async function sendTrim(seg) {
     });
     if (state.current !== capturedSlug) return;
     if (!r.ok) showError(`trim failed: HTTP ${r.status}`);
-    else if (state.frameSource && state.activeSegmentId === segId) {
+    else if (state.frameSource) {
       state.frameSource.prefetchRange(inF, outF);
     }
   } catch (e) {
@@ -1130,22 +1221,24 @@ async function sendTrim(seg) {
 
 async function markSeed() {
   if (!state.current) return;
-  const seg = await ensureActiveEditableSegment();
-  if (!seg) return;
   const f = currentFrame();
-  if (seg.in_frame == null || seg.out_frame == null) {
-    showError("mark in/out first before seeding");
+  // Seed disambiguation = the seg whose [in,out] contains f. Self-consistent:
+  // user must scrub into a marked range before seeding. No fallback create.
+  const seg = segContainingFrame(f);
+  if (!seg) {
+    showError(`frame ${f} is not inside any segment range — Mark In/Out first`);
     return;
   }
-  if (f < seg.in_frame || f > seg.out_frame) {
-    showError(`current frame ${f} outside segment range [${seg.in_frame}, ${seg.out_frame}] — scrub into range first`);
+  if (seg.propagate_status === "running") {
+    showError(`segment ${seg.id} is propagating — Cancel first to reseed`);
     return;
   }
   seg.seed_frame = f;
   seg.seed_point = null;
-  state.pendingSeedClick = true;
+  state.pendingSeedClick = { segId: seg.id, frame: f };
   clearSeedMask(seg.id);
   clearOverlay();
+  drawAllSeedCrosshairs(f);
   updateMarkers();
   renderSegmentsStrip();
   updatePropagateBtn();
@@ -1170,12 +1263,6 @@ async function createSegment() {
       seed_frame: null, seed_point: null, propagate_status: "idle",
     };
     it.segments.push(newSeg);
-    setActiveSegmentLocal(it, segId);
-    clearDoneFills();   // active changed → wipe overlay state
-    clearOverlay();
-    state.propDoneCount = 0;
-    state.propExpected = 0;
-    state.propPhase = null;
     renderSegmentsStrip();
     updateMarkers();
     updatePropagateBtn();
@@ -1194,15 +1281,10 @@ async function deleteSegment(segId) {
   const it = currentItem();
   if (!it) return;
   it.segments = (it.segments || []).filter(s => s.id !== segId);
-  if (state.activeSegmentId === segId) {
-    setActiveSegmentLocal(it, it.segments.length ? it.segments[it.segments.length - 1].id : null);
-  }
   clearSeedMask(segId);
   clearPropMasks(segId);
-  clearDoneFills();
-  // Re-add fills for whatever the new active segment has.
-  const m = maskUrlsForActive();
-  for (const f of m.keys()) addDoneFill(f);
+  // Rebuild doneFills from the union across remaining segs.
+  rebuildDoneFills();
   renderSegmentsStrip();
   renderSidebar();
   updateMarkers();
@@ -1211,44 +1293,20 @@ async function deleteSegment(segId) {
   scheduleScrubPaint(state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0);
 }
 
-async function activateSegment(segId) {
-  if (!state.current || state.activeSegmentId === segId) return;
-  const it = currentItem();
-  if (!it) return;
-  setActiveSegmentLocal(it, segId);
-  // Persist server-side (best-effort; UI doesn't depend on it).
-  postJson(`/api/items/${encodeURIComponent(it.slug)}/segments/${segId}/active`)
-    .catch(() => {});
-  clearDoneFills();
-  const m = maskUrlsForActive();
-  for (const f of m.keys()) addDoneFill(f);
-  state.propDoneCount = m.size;
-  const seg = activeSegment();
-  state.propExpected = (seg && seg.in_frame != null && seg.out_frame != null)
-    ? (seg.out_frame - seg.in_frame + 1) : 0;
-  state.propPhase = null;
-  state.propStartMs = null;
-  state.propPhaseElapsed = 0;
-  if (state.propTickHandle) { clearInterval(state.propTickHandle); state.propTickHandle = null; }
-  renderSegmentsStrip();
-  updateMarkers();
-  updatePropagateBtn();
-  renderSidebar();
-  if (state.frameSource && seg && seg.in_frame != null && seg.out_frame != null) {
-    state.frameSource.prefetchRange(seg.in_frame, seg.out_frame);
+function rebuildDoneFills() {
+  state.doneFrames.clear();
+  el.fills.innerHTML = "";
+  state.tintedCache.clear();
+  state.prefetchAbort++;
+  for (const m of state.propMaskUrlsBySeg.values()) {
+    for (const f of m.keys()) addDoneFill(f);
   }
-  scheduleScrubPaint(state.lastDisplayedFrame >= 0 ? state.lastDisplayedFrame : 0);
-  // scheduleScrubPaint relies on FrameSource being loaded; if user just reloaded
-  // and clicks a chip before the mp4 demux finished, the paint silently no-ops.
-  // repaintOverlayForCurrentFrame only touches the overlay canvas — no FrameSource
-  // needed — so the mask + crosshair show up immediately even on cold cache.
-  repaintOverlayForCurrentFrame();
-  updateStatus();
+  state.propDoneCount = state.doneFrames.size;
 }
 
-async function sendSeed(frameIndex, x, y) {
+async function sendSeed(segId, frameIndex, x, y) {
   const capturedSlug = state.current;
-  const capturedSegId = state.activeSegmentId;
+  const capturedSegId = segId;
   if (!capturedSegId) return;
   state.seedComputingSeg = capturedSegId;
   state.seedComputeStartMs = performance.now();
@@ -1288,32 +1346,22 @@ async function sendSeed(frameIndex, x, y) {
     if (state.current === capturedSlug) {
       clearSeedMask(capturedSegId);
       // Backend wipes ALL prior PNGs in masks/<seg>/ on reseed (orphan seeds
-      // + stale propagate masks). Mirror that purge in client caches.
-      // Order matters: do destructive cleanup BEFORE creating the new blob URL
-      // — clearPropMasks revokes all blob URLs in propMaskUrlsBySeg, and we
-      // don't want it eating the URL we just made.
-      if (state.activeSegmentId === capturedSegId) {
-        // Active seg: full reset — wipe done fills, all-seg prop URLs, tinted
-        // cache. Counters back to 0; chip color flipped via seg.propagate_status
-        // mutation above.
-        clearDoneFills();
-        state.propDoneCount = 0;
-        state.propExpected = 0;
-        state.propPhase = null;
-      } else {
-        // Background seg: only wipe its own propMask map + tintedCache entries.
-        const oldMap = state.propMaskUrlsBySeg.get(capturedSegId);
-        if (oldMap) {
-          for (const f of oldMap.keys()) state.tintedCache.delete(f);
-        }
-        clearPropMasks(capturedSegId);
+      // + stale propagate masks). Mirror that purge: drop this seg's prop
+      // map + tintedCache for its frames. Order matters — do destructive
+      // cleanup BEFORE creating the new blob URL.
+      const oldMap = state.propMaskUrlsBySeg.get(capturedSegId);
+      if (oldMap) {
+        for (const f of oldMap.keys()) state.tintedCache.delete(f);
       }
+      clearPropMasks(capturedSegId);
       const blobUrl = URL.createObjectURL(blob);
       state.seedMaskUrls.set(capturedSegId, blobUrl);
       const segMap = new Map();
       state.propMaskUrlsBySeg.set(capturedSegId, segMap);
       segMap.set(frameIndex, blobUrl);
-      if (state.activeSegmentId === capturedSegId && currentFrame() === frameIndex) {
+      // Rebuild doneFills since this seg's old masks just got nuked.
+      rebuildDoneFills();
+      if (currentFrame() === frameIndex) {
         loadMaskForFrame(frameIndex);
       }
       renderSegmentsStrip();
@@ -1336,19 +1384,18 @@ async function sendSeed(frameIndex, x, y) {
 async function propagate() {
   if (el.btnPropagate.disabled) return;
   const capturedSlug = state.current;
-  const seg = activeSegment();
+  const seg = pickPropagateTarget();
   if (!seg) return;
   const capturedSegId = seg.id;
   seg.propagate_status = "running";
   updateSidebarStatus(capturedSlug, capturedSegId, "running");
   state.propPhase = "starting";
-  state.propDoneCount = 0;
   state.propExpected = (seg.out_frame - seg.in_frame + 1) || 0;
   state.propPhaseElapsed = 0;
   state.propStartMs = performance.now();
   // Wipe THIS segment's prior masks so a re-propagate doesn't show stale data.
   clearPropMasks(capturedSegId);
-  clearDoneFills();
+  rebuildDoneFills();
   updatePropagateBtn();
   updateStatus();
   if (state.propTickHandle) clearInterval(state.propTickHandle);
@@ -1359,7 +1406,7 @@ async function propagate() {
     if (!r.ok) {
       const text = await r.text().catch(() => "");
       updateSidebarStatus(capturedSlug, capturedSegId, "failed");
-      if (state.current === capturedSlug && state.activeSegmentId === capturedSegId) {
+      if (state.current === capturedSlug) {
         showError(`propagate failed: HTTP ${r.status} ${text}`);
         clearInterval(state.propTickHandle);
         state.propTickHandle = null;
@@ -1369,7 +1416,7 @@ async function propagate() {
     }
   } catch (e) {
     updateSidebarStatus(capturedSlug, capturedSegId, "failed");
-    if (state.current === capturedSlug && state.activeSegmentId === capturedSegId) {
+    if (state.current === capturedSlug) {
       clearInterval(state.propTickHandle);
       state.propTickHandle = null;
       showError(`propagate failed: ${e}`);
@@ -1381,12 +1428,12 @@ async function propagate() {
 
 async function cancelOrEscape() {
   if (state.pendingSeedClick) {
-    state.pendingSeedClick = false;
+    state.pendingSeedClick = null;
     updateStatus();
     return;
   }
-  const seg = activeSegment();
-  if (!seg || seg.propagate_status !== "running" || !state.current) return;
+  const seg = segWithRunningProp();
+  if (!seg || !state.current) return;
   const capturedSlug = state.current;
   const capturedSegId = seg.id;
   try {
@@ -1397,7 +1444,7 @@ async function cancelOrEscape() {
     if (r.status !== 404 && !r.ok) console.warn(`cancel HTTP ${r.status}`);
   } catch (e) { console.warn("cancel failed", e); }
   updateSidebarStatus(capturedSlug, capturedSegId, "idle");
-  if (state.current === capturedSlug && state.activeSegmentId === capturedSegId) {
+  if (state.current === capturedSlug) {
     updatePropagateBtn();
     updateStatus();
   }
@@ -1468,10 +1515,11 @@ async function fetchPts(slug) {
       // Reload UX (mirror of loadFrameSource): if pts arrives second, do the
       // seed-frame auto-jump now. Guarded the same way so we never yank a
       // user who already moved.
-      const seg = activeSegment();
-      if (seg && seg.seed_frame != null && state.lastDisplayedFrame === 0
+      const it = currentItem();
+      const firstSeeded = it && (it.segments || []).find(s => s.seed_frame != null);
+      if (firstSeeded && state.lastDisplayedFrame === 0
           && state.frameSource && !state.frameSourceLoading) {
-        jumpToFrame(seg.seed_frame);
+        jumpToFrame(firstSeeded.seed_frame);
       }
     }
   } catch (e) { if (slug === state.current) showError(`pts fetch failed: ${e}`); }
@@ -1493,14 +1541,12 @@ async function rehydrateMasks(slug) {
         m.set(f, url);
       }
     }
-    // Render fills for the active segment only.
-    const active = maskUrlsForActive();
-    for (const f of active.keys()) addDoneFill(f);
-    state.propDoneCount = active.size;
-    const seg = activeSegment();
-    if (seg && seg.propagate_status === "done") {
-      state.propExpected = (seg.in_frame != null && seg.out_frame != null)
-        ? (seg.out_frame - seg.in_frame + 1) : state.propDoneCount;
+    // Render fills for ALL segs (union, since every mask is on screen).
+    rebuildDoneFills();
+    // propExpected: show the contextual seg's range total (status bar uses it).
+    const ctx = contextSegment();
+    if (ctx && ctx.in_frame != null && ctx.out_frame != null) {
+      state.propExpected = ctx.out_frame - ctx.in_frame + 1;
     }
     repaintOverlayForCurrentFrame();
     updateStatus();
@@ -1531,9 +1577,15 @@ function togglePlay() {
 }
 
 function onVideoClick(e) {
-  if (!state.pendingSeedClick) { togglePlay(); return; }
-  const seg = activeSegment();
-  if (!seg || seg.seed_frame == null) return;
+  const pending = state.pendingSeedClick;
+  if (!pending) { togglePlay(); return; }
+  const it = currentItem();
+  const seg = it && (it.segments || []).find(s => s.id === pending.segId);
+  if (!seg || seg.seed_frame == null) {
+    state.pendingSeedClick = null;
+    updateStatus();
+    return;
+  }
   const fs = state.frameSource;
   const nativeW = (fs && fs.width) || el.video.videoWidth;
   const nativeH = (fs && fs.height) || el.video.videoHeight;
@@ -1547,11 +1599,11 @@ function onVideoClick(e) {
   }
   const x = Math.round((e.clientX - disp.left) * (nativeW / disp.width));
   const y = Math.round((e.clientY - disp.top) * (nativeH / disp.height));
-  console.log("seed click", { client: [e.clientX, e.clientY], disp, native: [x, y] });
+  console.log("seed click", { seg: seg.id, client: [e.clientX, e.clientY], disp, native: [x, y] });
   seg.seed_point = [x, y];
-  state.pendingSeedClick = false;
+  state.pendingSeedClick = null;
   updateStatus();
-  sendSeed(seg.seed_frame, x, y);
+  sendSeed(seg.id, seg.seed_frame, x, y);
 }
 
 function onKeydown(e) {
@@ -1570,11 +1622,11 @@ function onKeydown(e) {
     stepFrames(e.altKey ? 100 : (e.shiftKey ? 10 : 1));
   } else if (e.key === "Home") {
     e.preventDefault();
-    const seg = activeSegment();
+    const seg = contextSegment();
     jumpToFrame(seg && seg.in_frame != null ? seg.in_frame : 0);
   } else if (e.key === "End") {
     e.preventDefault();
-    const seg = activeSegment();
+    const seg = contextSegment();
     jumpToFrame(seg && seg.out_frame != null ? seg.out_frame : state.totalFrames - 1);
   } else if (e.key === "[") markIn();
   else if (e.key === "]") markOut();
@@ -1588,15 +1640,7 @@ function onKeydown(e) {
 function toggleSeedMarker() {
   state.showSeedMarker = !state.showSeedMarker;
   updateSeedMarkerBtn();
-  const f = currentFrame();
-  const seg = activeSegment();
-  if (maskUrlForFrame(f) != null) loadMaskForFrame(f);
-  else {
-    clearOverlay();
-    if (state.showSeedMarker && seg && f === seg.seed_frame && seg.seed_point) {
-      drawClickMarker(seg.seed_point[0], seg.seed_point[1]);
-    }
-  }
+  repaintOverlayForCurrentFrame();
 }
 
 function updateSeedMarkerBtn() {
