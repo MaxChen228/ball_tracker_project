@@ -10,7 +10,6 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import ValidationError
 
 import session_results
-from detection import HSVRange, ShapeGate
 from pipeline import ProcessingCanceled
 from schemas import (
     DetectionConfigSnapshotPayload,
@@ -232,9 +231,9 @@ async def _run_server_detection(
     onto `pitch.server_post_config_used` and
     `SessionResult.server_post_config_used` after detection completes.
     """
+    import algorithms
     import main as _main
     state = _main.state
-    detect_pitch = _main.detect_pitch
     proc = state.processing
     sid = pitch.session_id
     cam = pitch.camera_id
@@ -312,33 +311,22 @@ async def _run_server_detection(
         {"sid": sid, "cam": cam, "frames_done": 0, "frames_total": frames_total},
     )
 
-    # Materialize a HSVRange / ShapeGate from the immutable snapshot so
-    # detect_pitch's signature (which still takes the legacy types) can
-    # call without leaking the wire payload deeper. Whatever the
-    # snapshot says is what runs — never re-read state here, since
-    # operator-chosen preset must survive concurrent dashboard edits.
-    hsv_used = HSVRange(
-        h_min=config_snapshot.hsv.h_min, h_max=config_snapshot.hsv.h_max,
-        s_min=config_snapshot.hsv.s_min, s_max=config_snapshot.hsv.s_max,
-        v_min=config_snapshot.hsv.v_min, v_max=config_snapshot.hsv.v_max,
-    )
-    gate_used = ShapeGate(
-        aspect_min=config_snapshot.shape_gate.aspect_min,
-        fill_min=config_snapshot.shape_gate.fill_min,
-    )
+    # Whatever the snapshot says is what runs — never re-read state here,
+    # since the operator-chosen preset must survive concurrent dashboard
+    # edits. `algorithms.run_detection` materialises the typed params and
+    # dispatches to the registered detector for `algorithm_id`.
     logger.info(
-        "background detection start session=%s cam=%s algo=%s preset=%s hsv=%r",
+        "background detection start session=%s cam=%s algo=%s preset=%s",
         sid, cam, config_snapshot.algorithm_id, config_snapshot.preset_name,
-        hsv_used,
     )
     try:
         frames = await asyncio.to_thread(
-            detect_pitch,
+            algorithms.run_detection,
+            config_snapshot.algorithm_id,
             clip_path,
             pitch.video_start_pts_s,
-            hsv_range=hsv_used,
+            {"hsv": config_snapshot.hsv, "shape_gate": config_snapshot.shape_gate},
             should_cancel=lambda: proc.should_cancel_server_post_job(sid, cam),
-            shape_gate=gate_used,
             progress=on_progress,
         )
     except ProcessingCanceled:

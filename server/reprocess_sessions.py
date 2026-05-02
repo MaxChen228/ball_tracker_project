@@ -33,10 +33,8 @@ from pathlib import Path
 import algorithms
 import presets
 import session_results
-from detection import HSVRange, ShapeGate
 from pairing import scale_pitch_to_video_dims, triangulate_cycle
 from pairing_tuning import PairingTuning
-from pipeline import detect_pitch
 from schemas import (
     CalibrationSnapshot,
     DetectionConfigSnapshotPayload,
@@ -207,22 +205,12 @@ def rerun_detection(
         logger.warning("  skip %s/%s — no MOV", pitch.session_id, pitch.camera_id)
         return None
 
-    hsv_eff = HSVRange(
-        h_min=snapshot.hsv.h_min, h_max=snapshot.hsv.h_max,
-        s_min=snapshot.hsv.s_min, s_max=snapshot.hsv.s_max,
-        v_min=snapshot.hsv.v_min, v_max=snapshot.hsv.v_max,
-    )
-    gate_eff = ShapeGate(
-        aspect_min=snapshot.shape_gate.aspect_min,
-        fill_min=snapshot.shape_gate.fill_min,
-    )
-
     old_hits = sum(1 for f in pitch.frames_server_post if f.px is not None)
-    frames = detect_pitch(
-        video_path=video,
-        video_start_pts_s=pitch.video_start_pts_s,
-        hsv_range=hsv_eff,
-        shape_gate=gate_eff,
+    frames = algorithms.run_detection(
+        snapshot.algorithm_id,
+        video,
+        pitch.video_start_pts_s,
+        {"hsv": snapshot.hsv, "shape_gate": snapshot.shape_gate},
     )
     new_hits = sum(1 for f in frames if f.px is not None)
     logger.info(

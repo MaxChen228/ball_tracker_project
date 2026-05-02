@@ -99,14 +99,25 @@ def _write_preset(presets_dir: Path, name: str, snap: DetectionConfigSnapshotPay
     (presets_dir / f"{name}.json").write_text(json.dumps(payload))
 
 
-def _capture_detect_pitch_args():
+def _capture_run_detection_args():
+    """Capture every `algorithms.run_detection` call's args/kwargs and
+    return [].  Replaces the prior `detect_pitch` capture; reprocess
+    now dispatches via the registry."""
     captured: list[dict] = []
 
-    def fake_detect_pitch(*args, **kwargs):
-        captured.append(kwargs)
+    def fake_run_detection(
+        algorithm_id, video_path, video_start_pts_s, params, **kwargs,
+    ):
+        captured.append({
+            "algorithm_id": algorithm_id,
+            "video_path": video_path,
+            "video_start_pts_s": video_start_pts_s,
+            "params": params,
+            **kwargs,
+        })
         return []
 
-    return fake_detect_pitch, captured
+    return fake_run_detection, captured
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +127,10 @@ def _capture_detect_pitch_args():
 # ---------------------------------------------------------------------------
 
 
-def test_rerun_detection_uses_supplied_snapshot(tmp_path, monkeypatch):
-    """rerun_detection runs detect_pitch with the snapshot it was given,
-    no fallback / no per-pitch override. Caller is responsible for
-    resolving the snapshot."""
+def test_rerun_detection_routes_through_registry(tmp_path, monkeypatch):
+    """rerun_detection dispatches via `algorithms.run_detection` with
+    the snapshot's algorithm_id + params. No direct detect_pitch call."""
+    import algorithms
     import reprocess_sessions as R
 
     pitch = _make_pitch(server_post_used=_snapshot(
@@ -130,8 +141,8 @@ def test_rerun_detection_uses_supplied_snapshot(tmp_path, monkeypatch):
     _write_pitch(pitch_path, pitch)
 
     monkeypatch.setattr(R, "find_video", lambda sid, cam: tmp_path / "fake.mov")
-    fake_dp, captured = _capture_detect_pitch_args()
-    monkeypatch.setattr(R, "detect_pitch", fake_dp)
+    fake_run, captured = _capture_run_detection_args()
+    monkeypatch.setattr(algorithms, "run_detection", fake_run)
 
     snap = _snapshot(
         h_min=100, h_max=110, s_min=120, s_max=130, v_min=140, v_max=150,
@@ -139,15 +150,17 @@ def test_rerun_detection_uses_supplied_snapshot(tmp_path, monkeypatch):
     )
     R.rerun_detection(pitch_path, snap, dry_run=True)
 
-    kw = captured[0]
-    assert kw["hsv_range"].h_min == 100 and kw["hsv_range"].h_max == 110
-    assert kw["shape_gate"].aspect_min == pytest.approx(0.99)
+    call = captured[0]
+    assert call["algorithm_id"] == snap.algorithm_id
+    assert call["params"]["hsv"].h_min == 100 and call["params"]["hsv"].h_max == 110
+    assert call["params"]["shape_gate"].aspect_min == pytest.approx(0.99)
 
 
 def test_rerun_detection_stamps_snapshot_back(tmp_path, monkeypatch):
     """After reprocessing, server_post_config_used is overwritten with
     the snapshot that produced the new frames, so the next reprocess
     can honour the freeze."""
+    import algorithms
     import reprocess_sessions as R
 
     pitch = _make_pitch(server_post_used=None)
@@ -155,8 +168,8 @@ def test_rerun_detection_stamps_snapshot_back(tmp_path, monkeypatch):
     _write_pitch(pitch_path, pitch)
 
     monkeypatch.setattr(R, "find_video", lambda sid, cam: tmp_path / "fake.mov")
-    fake_dp, _ = _capture_detect_pitch_args()
-    monkeypatch.setattr(R, "detect_pitch", fake_dp)
+    fake_run, _ = _capture_run_detection_args()
+    monkeypatch.setattr(algorithms, "run_detection", fake_run)
 
     snap = _snapshot(
         h_min=42, h_max=43, s_min=44, s_max=45, v_min=46, v_max=47,
