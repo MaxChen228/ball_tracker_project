@@ -42,12 +42,16 @@
   // overlay — single source of truth for "passing".
   window._candPassesThreshold = _candPassesThreshold;
 
-  // No client-side cost gate post cost-absorption refactor. All candidates
-  // pass; the per-algorithm cost threshold is enforced server-side at
-  // segment-fit time. Function kept as a stable predicate for callers
-  // (raysAtT in 30_frame_index.js, viewer_layers.js trajectory rebuild)
-  // so future per-algorithm display gates can drop in without touching
-  // those call sites.
+  // Explicit no-op predicates — NOT dead code. Cost gating is now
+  // server-side at segment-fit time (per-algorithm via
+  // `algorithms.cost_threshold_for_algorithm`); the viewer shows
+  // everything pairing emitted with no client-side cost mask.
+  // Kept as a stable extension point: callers (raysAtT in
+  // 30_frame_index.js, viewer_layers.js's trajectory rebuild) consume
+  // these as `.filter(predicate)` hooks, so a future per-algorithm
+  // display gate (e.g. "show only points whose alg's cost ≤ 0.3") can
+  // re-introduce filtering by editing these two lines without touching
+  // any caller.
   function _candPassesThreshold(_c) { return true; }
   function _passCostFilterPoint(_p) { return true; }
   window._passCostFilterPoint = _passCostFilterPoint;
