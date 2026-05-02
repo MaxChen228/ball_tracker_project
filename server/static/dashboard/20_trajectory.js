@@ -22,10 +22,12 @@
   const _PITCH_GHOST_COLOR = 'rgba(192, 57, 43, 0.20)';
   const _PITCH_POINTS_COLOR = 'rgba(74, 62, 36, 0.55)';
 
-  // sid -> { points, segments, cost_threshold, gap_threshold_m }
-  // Thresholds drive the dashboard's client-side mask over `points`
-  // (pairing emits the full set; cost/gap are pure overlay filters,
-  // mirroring the viewer's slider behaviour).
+  // sid -> { points, segments, gap_threshold_m }
+  // gap drives the dashboard's client-side mask over `points` (pairing
+  // emits the full set; gap is a pure overlay filter mirroring the
+  // viewer's slider). Cost is per-algorithm and applied server-side at
+  // segment-fit time, so the dashboard's `points` view is already
+  // post-cost-filtered.
   const trajCache = new Map();
 
   function persistTrajSelection() {
@@ -63,7 +65,6 @@
         paths_completed: new Set(Array.isArray(data.paths_completed) ? data.paths_completed : []),
         // None on legacy SessionResult predating recompute → null here.
         // Filter logic treats null as "no mask" (all points pass).
-        cost_threshold: data.cost_threshold == null ? null : Number(data.cost_threshold),
         gap_threshold_m: data.gap_threshold_m == null ? null : Number(data.gap_threshold_m),
       };
       trajCache.set(sid, entry);
@@ -121,7 +122,7 @@
 
   // Build the `applyFit` payload for the currently active path. Shape
   // matches the legacy single-path entry the dashboard layer expects:
-  // `{ points, segments, cost_threshold, gap_threshold_m }`.
+  // `{ points, segments, gap_threshold_m }`.
   function resolvedFitView(entry) {
     if (!entry) return null;
     const path = pickPathForEntry(entry);
@@ -132,7 +133,6 @@
       path,
       points: pts,
       segments: segs,
-      cost_threshold: entry.cost_threshold,
       gap_threshold_m: entry.gap_threshold_m,
     };
   }

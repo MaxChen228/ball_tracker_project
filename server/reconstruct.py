@@ -97,8 +97,8 @@ class Ray:
     source: str = "server"
     # Index into FramePayload.candidates this ray corresponds to. Each
     # detected frame fans out into one ray per candidate so the viewer
-    # can apply the cost_threshold filter to rays the same way it does
-    # to BLOBS overlay + 3D points. -1 reserved for legacy rays
+    # can apply the per-algorithm cost gate to rays the same way it
+    # does to BLOBS overlay + 3D points. -1 reserved for legacy rays
     # synthesised from frames that pre-date candidate persistence.
     cand_idx: int = -1
     # Selector cost stamped onto the candidate at detection time
@@ -206,10 +206,11 @@ def _rays_and_trace_for_source(
             continue
         t_rel = float(f.timestamp_s - anchor)
         # Fan out one ray per candidate so the viewer can filter by
-        # cost_threshold in playback (and so the operator can SEE every
-        # blob the detector saw, not only the winner). When candidates
-        # is empty we fall back to a single ray from f.px/f.py — covers
-        # legacy JSONs persisted before candidate-stamping landed.
+        # the per-algorithm cost gate in playback (and so the operator
+        # can SEE every blob the detector saw, not only the winner).
+        # When candidates is empty we fall back to a single ray from
+        # f.px/f.py — covers legacy JSONs persisted before candidate-
+        # stamping landed.
         cand_iter: list[tuple[int, float, float, float | None]]
         if f.candidates:
             cand_iter = [

@@ -1,45 +1,15 @@
-  // ----- BLOBS overlay (multi-candidate, gated by selector cost ≤ threshold) -----
+  // ----- BLOBS overlay (multi-candidate, no client-side cost gate) -----
   // Sole 2D overlay layer for detection. Pre-fan-out there was also a
   // `detection_live` / `detection_svr` "winner dot" layer drawn from
   // f.px/f.py — that's gone: with fan-out triangulation no candidate
   // is "the winner", every shape-gate-passing candidate gets its own
-  // ring + 3D ray + 3D point, gated only by the cost_threshold slider.
-  // Operator opens the BLOBS layer to see candidates the selector saw on
-  // each frame. The session-level cost_threshold slider in the viewer
-  // header (see `session_tuning_strip_html`) controls which
-  // candidates are drawn: cost ≤ threshold = show, cost > threshold =
-  // hide. The same threshold value is what the recompute endpoint will
-  // apply when the operator clicks Apply.
-  //
-  // Why threshold-based, not rank-based: rank ("top K") is cosmetic —
-  // it doesn't change which candidates the selector actually picks.
-  // Threshold is the same knob the server uses, so what you see in
-  // the overlay is what gets triangulated post-recompute.
-  //
-  // Initial value is seeded from SessionResult.cost_threshold (server-
-  // injected via VIEWER_INITIAL_COST_THRESHOLD), or 1.0 (no filter)
-  // when the session was computed before the recompute endpoint
-  // landed. Lives on `window` so the header slider's oninput can mutate
-  // it and trigger a redraw without the canvas knowing about the DOM
-  // input element.
-  let _costThreshold = (typeof window.VIEWER_INITIAL_COST_THRESHOLD === "number")
-    ? window.VIEWER_INITIAL_COST_THRESHOLD : 1.0;
-  function _setCostThreshold(v) {
-    const t = Math.max(0, Math.min(1.0, parseFloat(v)));
-    _costThreshold = Number.isFinite(t) ? t : 1.0;
-    if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();
-    // Also redraw the 3D scene — `raysAtT` reads `_candPassesThreshold`
-    // to decide which fan-out rays to draw at the matched frame, so the
-    // slider has visible effect on the 3D point cloud's ray bundle.
-    if (typeof scheduleSceneDraw === 'function') scheduleSceneDraw();
-  }
-  function _getCostThreshold() { return _costThreshold; }
-  // Expose for the header slider's inline `oninput` + the 3D-scene filter
-  // hook used by 60_session_tuning.js.
-  window._setCostThreshold = _setCostThreshold;
-  window._getCostThreshold = _getCostThreshold;
+  // ring + 3D ray + 3D point. The cost gate that used to live as an
+  // operator slider here is now per-algorithm metadata
+  // (`algorithms.cost_threshold_for_algorithm`) — applied server-side
+  // before the segmenter consumes points, NOT at view time. The viewer
+  // shows everything pairing emitted; predicates below pass-through.
 
-  // Sibling of cost: drag preview for the Gap slider in the same header
+  // Drag preview for the Gap slider in the viewer header strip
   // strip. Mutates `residualCapM` (declared in 10_video_master.js, shared
   // IIFE scope) so `_passResidualFilter` sees the new cap on next redraw.
   // Slider value is centimetres (0–200), converted to metres. 200cm =
@@ -72,32 +42,14 @@
   // overlay — single source of truth for "passing".
   window._candPassesThreshold = _candPassesThreshold;
 
-  // A candidate passes the threshold filter when its cost is ≤ the
-  // current setting. Legacy JSONs with cost=null pass unconditionally —
-  // there's no meaningful selector cost to compare against, so they
-  // can't be filtered at view time. Recompute is the path to assign
-  // costs to legacy data.
-  function _candPassesThreshold(c) {
-    if (c.cost == null || !Number.isFinite(c.cost)) return true;
-    return c.cost <= _costThreshold;
-  }
-
-  // Triangulated-point variant: each persisted point carries `cost_a` and
-  // `cost_b` from its source candidate pair (server schema, post-PR
-  // pairing-full-emit). The point passes when both ends are ≤ threshold.
-  // null / non-numeric on either side means "no cost info" → pass; the
-  // canonical case is the synthesized `_frame_candidates` px/py fallback
-  // path on legacy fixtures. Once Phase 5 retires that fallback this
-  // legacy-pass branch goes away and any null becomes a hard fail.
-  function _passCostFilterPoint(p) {
-    if (!p) return true;
-    const ca = p.cost_a, cb = p.cost_b;
-    let m = -1;
-    if (ca != null && Number.isFinite(ca)) m = Math.max(m, ca);
-    if (cb != null && Number.isFinite(cb)) m = Math.max(m, cb);
-    if (m < 0) return true;  // no cost info on either side
-    return m <= _costThreshold;
-  }
+  // No client-side cost gate post cost-absorption refactor. All candidates
+  // pass; the per-algorithm cost threshold is enforced server-side at
+  // segment-fit time. Function kept as a stable predicate for callers
+  // (raysAtT in 30_frame_index.js, viewer_layers.js trajectory rebuild)
+  // so future per-algorithm display gates can drop in without touching
+  // those call sites.
+  function _candPassesThreshold(_c) { return true; }
+  function _passCostFilterPoint(_p) { return true; }
   window._passCostFilterPoint = _passCostFilterPoint;
 
   // Plain floor lookup: BLOBS draws every candidate on the matched
@@ -172,10 +124,9 @@
           || c.image_width_px == null || c.image_height_px == null) continue;
       window.BallTrackerCamView.setMeta(c.camera_id, c);
     }
-    // Mount-time cost-threshold slider sync: HTML ships with the
-    // server-injected SessionResult.cost_threshold (or 1.0 default), so
-    // there's nothing extra to pull from localStorage — the value is
-    // session-scoped and authoritative on the server.
+    // No cost slider after the cost-absorption refactor — the cost
+    // gate is per-algorithm and applied server-side at fit time, not
+    // a client-side preview knob.
   }
   function drawVirtuals() {
     if (window.BallTrackerCamView) window.BallTrackerCamView.redrawAll();

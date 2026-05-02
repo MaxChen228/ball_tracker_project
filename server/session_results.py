@@ -422,17 +422,6 @@ def _passes_stamped_filter(
     return cost_max <= cost_threshold
 
 
-def _apply_stamped_filter(
-    pts: list[TriangulatedPoint],
-    *,
-    cost_threshold: float,
-    gap_threshold_m: float,
-) -> list[TriangulatedPoint]:
-    return [p for p in pts if _passes_stamped_filter(
-        p, cost_threshold=cost_threshold, gap_threshold_m=gap_threshold_m,
-    )]
-
-
 def _algorithm_id_for_result_path(
     result: SessionResult, path: str
 ) -> str:

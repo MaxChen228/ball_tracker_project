@@ -618,11 +618,12 @@ def test_viewer_page_uses_cam_view_with_detection_layers():
     assert "registerLayer('detection_blobs_svr'" not in body
     assert "registerLayer('detection_live'" not in body
     assert "registerLayer('detection_svr'" not in body
-    # K slider replaced by session-header cost_threshold slider — the
-    # CAND layer's filtering is now driven by `window._setCostThreshold`.
+    # K slider gone; cost gate is no longer client-side at all post
+    # cost-absorption refactor (per-algorithm, applied server-side at
+    # fit time). No `window._setCostThreshold` shipped.
     assert 'class="cv-blobs-k"' not in body
     assert 'window._setCandTopK' not in body
-    assert 'window._setCostThreshold' in body
+    assert 'window._setCostThreshold' not in body
     # Legacy SVG plate overlay + standalone virt-canvas DOM removed.
     assert 'real-plate-overlay-A' not in body
     assert 'id="virt-canvas-A"' not in body

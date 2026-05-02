@@ -134,23 +134,15 @@ def cam_view_shared_toolbar_html() -> str:
 
 
 def session_tuning_strip_html(
-    cost_threshold: float,
     gap_threshold_m: float | None,
     session_id: str,
 ) -> str:
-    """Per-session pairing-tuning sliders (cost + gap) for the viewer's
-    nav bar.
+    """Per-session gap slider for the viewer's nav bar.
 
     Pairing emits the full triangulated set (gated only by hard ceilings
     in `pairing.py`); the gap slider is a pure client-side mask over
     that set, so dragging is instantaneous and never needs Apply to
     *reveal* points.
-
-    Cost slider: read-only display of the active algorithm's cost
-    gate (caller supplies the resolved value via
-    `algorithms.cost_threshold_for_algorithm`). The slider remains
-    interactive in this phase but Apply does not ship the cost — Phase 2
-    removes the slider HTML entirely.
 
     Gap slider: drag = client-side preview (hide triangulated points
     whose `residual_m > threshold`). Range 0–200cm. Initial value is
@@ -160,13 +152,16 @@ def session_tuning_strip_html(
     Apply = POST /sessions/{sid}/recompute with `gap_threshold_m`,
     server re-runs the segmenter and overwrites SessionResult.
 
+    The cost gate that used to live next to the gap slider is now
+    per-algorithm (`algorithms.cost_threshold_for_algorithm`) — there
+    is no operator-tunable cost slider anymore.
+
     `session_id` is interpolated into the Apply handler's URL — the
     pattern is `^s_[0-9a-f]{4,32}$` (validated server-side too) so no
     HTML injection here, but escaping anyway is cheap.
     """
     from pairing_tuning import PairingTuning
     _pt_default = PairingTuning.default()
-    cost_initial = float(cost_threshold)
     gap_initial_cm = (
         round(_pt_default.gap_threshold_m * 100)
         if gap_threshold_m is None
@@ -175,19 +170,8 @@ def session_tuning_strip_html(
     sid_attr = html.escape(session_id, quote=True)
     return (
         '<div class="session-tuning" role="group" '
-        'aria-label="Per-session pairing tuning (cost + gap)">'
-        # --- Cost slider ---
-        '<label class="st-label">Cost ≤</label>'
-        '<input type="range" min="0" max="1" step="0.01" '
-        f'value="{cost_initial:.2f}" data-session-cost-threshold '
-        'aria-label="cost threshold" '
-        'oninput="window._setCostThreshold && window._setCostThreshold(this.value); '
-        'document.querySelector(\'[data-session-cost-value]\').textContent = '
-        '(+this.value).toFixed(2); '
-        '(function(b){if(b&&!b.dataset.recomputing)b.disabled=false;})'
-        '(document.querySelector(\'[data-session-recompute]\'));">'
-        f'<span class="st-value" data-session-cost-value>{cost_initial:.2f}</span>'
-        # --- Gap slider (skew-line residual cap, sibling of cost) ---
+        'aria-label="Per-session pairing tuning (gap)">'
+        # --- Gap slider (skew-line residual cap) ---
         '<label class="st-label">Gap ≤</label>'
         '<input type="range" min="0" max="200" step="1" '
         f'value="{gap_initial_cm}" data-session-gap-threshold '
@@ -198,7 +182,7 @@ def session_tuning_strip_html(
         '(function(b){if(b&&!b.dataset.recomputing)b.disabled=false;})'
         '(document.querySelector(\'[data-session-recompute]\'));">'
         f'<span class="st-value" data-session-gap-value>≤ {gap_initial_cm} cm</span>'
-        # --- Apply button (sends both values) ---
+        # --- Apply button ---
         '<button type="button" class="st-apply" data-session-recompute disabled '
         f'data-session-id="{sid_attr}" '
         'onclick="window._applyTuning && window._applyTuning(this);">'

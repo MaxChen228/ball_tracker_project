@@ -331,12 +331,7 @@ def viewer(session_id: str) -> HTMLResponse:
     # on legacy SessionResult (predates the recompute endpoint). Resolve
     # from the current saved global tuning so a restarted server /
     # rebuilt result still seeds the viewer with what the operator
-    # actually has configured, not the module hardcoded default. Cost
-    # is per-algorithm — viewer's read-only cost display reflects the
-    # current server_post algorithm's threshold (or live's, when no
-    # server_post snapshot exists yet).
-    from algorithms import IOS_CAPTURE_TIME, cost_threshold_for_algorithm
-    from schemas import _resolve_server_post_algorithm_id
+    # actually has configured, not the module hardcoded default.
     result = state.get(session_id)
     pairing_tuning = state.pairing_tuning()
     gap_threshold_m = (
@@ -344,13 +339,6 @@ def viewer(session_id: str) -> HTMLResponse:
         if result is not None and result.gap_threshold_m is not None
         else pairing_tuning.gap_threshold_m
     )
-    if result is not None and result.server_post_config_used is not None:
-        display_alg_id = _resolve_server_post_algorithm_id(
-            result.server_post_config_used,
-        )
-    else:
-        display_alg_id = IOS_CAPTURE_TIME
-    cost_threshold = cost_threshold_for_algorithm(display_alg_id)
     segments = list(result.segments) if result is not None else []
     segments_by_path = (
         {k: list(v) for k, v in result.segments_by_path.items()}
@@ -358,7 +346,6 @@ def viewer(session_id: str) -> HTMLResponse:
     )
     return HTMLResponse(render_viewer_html(
         scene, videos_with_offsets, health,
-        cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         strike_zone=state.strike_zone().to_dict(),
         segments=segments,

@@ -73,7 +73,6 @@ class ViewerPageContext:
     health_failure_html: str
     session_tuning_html: str
     config_strip_html: str
-    cost_threshold: float
     gap_threshold_m: float | None
     video_cells_html: str
     session_id: str
@@ -93,7 +92,6 @@ def build_viewer_page_context(
     videos: list[tuple[str, str, float, float, dict[str, list]]],
     health: dict,
     *,
-    cost_threshold: float,
     gap_threshold_m: float | None = None,
     segments: list | None = None,
     segments_by_path: dict[str, list] | None = None,
@@ -211,13 +209,12 @@ def build_viewer_page_context(
         health_strip_html=health_nav_strip_html(health),
         health_failure_html=failure_strip_html(health),
         session_tuning_html=session_tuning_strip_html(
-            cost_threshold, gap_threshold_m, scene.session_id,
+            gap_threshold_m, scene.session_id,
         ),
         config_strip_html=detection_config_strip_html(
             health.get("live_config_used"),
             health.get("server_post_config_used"),
         ),
-        cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         video_cells_html=video_cells,
         session_id=scene.session_id,
@@ -281,7 +278,6 @@ def render_viewer_html(
     health: dict,
     *,
     strike_zone: dict | None = None,
-    cost_threshold: float,
     gap_threshold_m: float | None = None,
     segments: list | None = None,
     segments_by_path: dict[str, list] | None = None,
@@ -292,7 +288,6 @@ def render_viewer_html(
         scene,
         videos,
         health,
-        cost_threshold=cost_threshold,
         gap_threshold_m=gap_threshold_m,
         segments=[] if segments is None else segments,
         segments_by_path={} if segments_by_path is None else segments_by_path,
@@ -565,32 +560,27 @@ def render_viewer_html(
   "has_triangulated": {str(ctx.has_triangulated).lower()}
 }}</script>
 <script>
-window.VIEWER_INITIAL_COST_THRESHOLD = {float(ctx.cost_threshold)};
 // Initial gap in METRES (None → PairingTuning.default().gap_threshold_m).
 // 50_canvas.js converts to client-side residualCapM as a finite metres
 // value; the slider's 200cm position is just `2.0m`, no Infinity special
 // case.
 window.VIEWER_INITIAL_GAP_THRESHOLD_M = {float(_pt_default.gap_threshold_m) if ctx.gap_threshold_m is None else float(ctx.gap_threshold_m)};
 window._applyTuning = function(btn) {{
-  const costInput = document.querySelector('[data-session-cost-threshold]');
   const gapInput = document.querySelector('[data-session-gap-threshold]');
-  const costValueEl = document.querySelector('[data-session-cost-value]');
   const gapValueEl = document.querySelector('[data-session-gap-value]');
-  const cost = parseFloat(costInput.value);
   // Slider value is centimetres (0–200); ship metres to the route.
   // 200cm = 2.0m = the route's max — every cartesian pair survives the
   // gap gate at that setting.
   const gap_m = parseFloat(gapInput.value) / 100;
   const sid = btn.getAttribute('data-session-id');
-  // In-flight guard: button + sliders disabled together, recomputing
-  // class drives the spinner border. The slider oninput handlers check
+  // In-flight guard: button + slider disabled together, recomputing
+  // class drives the spinner border. The slider oninput handler checks
   // data-recomputing before re-enabling the button so a mid-flight
   // wiggle can't sneak past the disabled state.
   btn.disabled = true;
   btn.dataset.recomputing = '1';
   btn.classList.add('recomputing');
   btn.textContent = 'Recomputing…';
-  costInput.disabled = true;
   gapInput.disabled = true;
   fetch('/sessions/' + encodeURIComponent(sid) + '/recompute', {{
     method: 'POST',
@@ -617,10 +607,10 @@ window._applyTuning = function(btn) {{
         r.segments_by_path || {{}},
       );
     }}
-    // Reflect server-persisted values back onto the sliders + tick
-    // labels — operator sees what was actually applied, not whatever
-    // they happened to drag to before clicking. Subsequent drags
-    // diff from this new baseline.
+    // Reflect server-persisted gap back onto the slider + tick label —
+    // operator sees what was actually applied, not whatever they
+    // happened to drag to before clicking. Subsequent drags diff from
+    // this new baseline.
     if (typeof r.gap_threshold_m === 'number') {{
       window.VIEWER_INITIAL_GAP_THRESHOLD_M = r.gap_threshold_m;
       const cm = Math.round(r.gap_threshold_m * 100);
@@ -631,14 +621,12 @@ window._applyTuning = function(btn) {{
     btn.disabled = true;
     btn.classList.remove('recomputing');
     delete btn.dataset.recomputing;
-    costInput.disabled = false;
     gapInput.disabled = false;
   }}).catch(function(err) {{
     btn.disabled = false;
     btn.textContent = 'Apply';
     btn.classList.remove('recomputing');
     delete btn.dataset.recomputing;
-    costInput.disabled = false;
     gapInput.disabled = false;
     alert('Recompute failed: ' + err);
   }});

@@ -59,19 +59,16 @@ import { resolvePlaybackMarkerPose } from "./playback_marker.js";
 const FIT_ACCENT = 0xC0392B;
 const ARROW_LEN_M = 0.3;
 
-// Build a boolean keep-mask aligned with `points` from per-session
-// cost/gap thresholds. Mirrors viewer's `_passCostFilterPoint` semantics:
-// null / non-finite threshold = "no mask" (point passes); both null
-// candidates on a point also pass (legacy / live-only points may not
-// carry per-camera cost yet). `points[i].cost_a/cost_b/residual_m`
-// are wire fields persisted on TriangulatedPoint.
-function _buildPointKeepMask(points, costThreshold, gapThresholdM) {
-  const costMax = (costThreshold == null || !Number.isFinite(costThreshold))
-    ? null : Number(costThreshold);
+// Build a boolean keep-mask aligned with `points` from the per-session
+// gap threshold. null / non-finite threshold = "no mask" (point passes).
+// `points[i].residual_m` is the wire field persisted on
+// TriangulatedPoint. Cost is per-algorithm (server-side at fit time),
+// not a client-side mask anymore.
+function _buildPointKeepMask(points, gapThresholdM) {
   const gapMax = (gapThresholdM == null || !Number.isFinite(gapThresholdM))
     ? null : Number(gapThresholdM);
   const n = points.length;
-  if (costMax === null && gapMax === null) {
+  if (gapMax === null) {
     const m = new Array(n);
     for (let i = 0; i < n; ++i) m[i] = true;
     return m;
@@ -79,17 +76,7 @@ function _buildPointKeepMask(points, costThreshold, gapThresholdM) {
   const m = new Array(n);
   for (let i = 0; i < n; ++i) {
     const p = points[i];
-    let pass = true;
-    if (gapMax !== null && Number.isFinite(p.residual_m) && p.residual_m > gapMax) {
-      pass = false;
-    }
-    if (pass && costMax !== null) {
-      let mc = -1;
-      if (p.cost_a != null && Number.isFinite(p.cost_a)) mc = Math.max(mc, p.cost_a);
-      if (p.cost_b != null && Number.isFinite(p.cost_b)) mc = Math.max(mc, p.cost_b);
-      if (mc >= 0 && mc > costMax) pass = false;
-    }
-    m[i] = pass;
+    m[i] = !(Number.isFinite(p.residual_m) && p.residual_m > gapMax);
   }
   return m;
 }
@@ -228,10 +215,11 @@ class DashboardLayers {
 
   // ---- fit (selected session) ----
   // `result` is a SessionResult-shaped object: { points, segments,
-  // cost_threshold, gap_threshold_m }. `points` is the FULL triangulated
-  // set (pairing emits everything; thresholds are operator masks set
-  // via the viewer's Apply button). null thresholds → no client-side
-  // mask. Pass `null` for either argument to clear (e.g. row deselect).
+  // gap_threshold_m }. `points` is the FULL triangulated set (pairing
+  // emits everything; gap is the operator mask set via the viewer's
+  // Apply button; cost is per-algorithm, applied server-side at fit
+  // time). null gap → no client-side mask. Pass `null` for the
+  // result argument to clear (e.g. row deselect).
   applyFit(sid, result) {
     if (!sid || !result) {
       // Drop selection AND cached payload so a subsequent applyFit
@@ -319,14 +307,14 @@ class DashboardLayers {
     this._removeFitLayers();
     const segments = Array.isArray(result.segments) ? result.segments : [];
     const points = result.points || [];
-    // Pairing emits the full triangulated set; cost/gap on the result
-    // are the operator's per-session mask (set via the viewer's Apply
+    // Pairing emits the full triangulated set; gap on the result is
+    // the operator's per-session mask (set via the viewer's Apply
     // button → POST /sessions/<sid>/recompute → SSE `fit`). Build a
     // boolean keep-mask aligned with `points` so the segment-bucket
     // pass below stays correct (`SegmentRecord.original_indices`
     // indexes into the full `points` list — pre-filtering would break
     // that contract). null threshold → all-true mask.
-    const keep = _buildPointKeepMask(points, result.cost_threshold, result.gap_threshold_m);
+    const keep = _buildPointKeepMask(points, result.gap_threshold_m);
     const xyz = points.map((p) => ({ x: p.x_m, y: p.y_m, z: p.z_m, t_rel_s: p.t_rel_s }));
     const byPoint = classifyPointsBySegment(xyz, segments);
     this._playbackSegments = segments;

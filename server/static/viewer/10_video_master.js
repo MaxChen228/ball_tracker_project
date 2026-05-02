@@ -67,14 +67,16 @@
     server_post: (TRAJ_BY_PATH.server_post || []).length > 0,
   };
   // --- Triangulation residual filter (client-side preview) ---
-  // Sibling of cost_threshold: drops points whose ray-midpoint gap
-  // exceeds this cap (m) at draw time. Authoritative knob is the
-  // per-session SessionResult.gap_threshold_m, server-injected as
+  // Drops points whose ray-midpoint gap exceeds this cap (m) at draw
+  // time. Authoritative knob is the per-session
+  // SessionResult.gap_threshold_m, server-injected as
   // VIEWER_INITIAL_GAP_THRESHOLD_M (metres). The header strip's Gap
   // slider drives `_setGapThreshold` (50_canvas.js) which mutates this
   // var; viewer_layers.js's trajectory rebuild reads it via
   // `window._passResidualFilter`. Always a finite metres value — 2.0m
-  // is just the slider's max, not "Infinity / off".
+  // is just the slider's max, not "Infinity / off". The cost gate
+  // sibling that used to live next to this is now per-algorithm
+  // (server-side, not user-tunable).
   let residualCapM = (typeof window.VIEWER_INITIAL_GAP_THRESHOLD_M === "number")
     ? window.VIEWER_INITIAL_GAP_THRESHOLD_M
     : 2.0;

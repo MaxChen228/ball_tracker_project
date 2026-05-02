@@ -41,10 +41,10 @@ appears on historical pitch JSONs that predate aspect/fill persistence.
 
 Weights `_W_ASPECT` / `_W_FILL` were a runtime tunable
 (`CandidateSelectorTuning`) until the selector retirement. Locked as
-constants now; change requires a code edit + restart. The slider's
-0–1 range represents the full theoretical cost band (1.0 = "every
-emitted point survives"); production default is 0.5 (see
-`pairing_tuning.PairingTuning.default()`).
+constants now; change requires a code edit + restart. The cost
+threshold that gates which scored candidates the segmenter consumes
+is per-algorithm, owned by `AlgorithmEntry.cost_threshold` (read via
+`algorithms.cost_threshold_for_algorithm`); v11_hsv_cc baseline 0.5.
 """
 from __future__ import annotations
 
