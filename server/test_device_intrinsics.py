@@ -154,18 +154,20 @@ def test_auto_cal_consumes_charuco_prior(tmp_path, monkeypatch):
     # The auto-cal derive helper should use the prior 1:1 when AR matches.
     from calibration_auto import _derive_auto_cal_intrinsics
 
-    intrinsics, legacy_prior = _derive_auto_cal_intrinsics(
+    intrinsics, legacy_prior, source = _derive_auto_cal_intrinsics(
         "A", w_img=1920, h_img=1080, h_fov_deg=None,
     )
     assert legacy_prior is None  # not the legacy CalibrationSnapshot path
+    assert source == "charuco"
     assert intrinsics.fx == pytest.approx(1580.5)
     # Distortion propagated verbatim
     assert intrinsics.distortion == [0.12, -0.25, 0.001, -0.001, 0.08]
 
     # Same device, different target dims (720p): linear scale applies.
-    intrinsics_720, _ = _derive_auto_cal_intrinsics(
+    intrinsics_720, _, source_720 = _derive_auto_cal_intrinsics(
         "A", w_img=1280, h_img=720, h_fov_deg=None,
     )
+    assert source_720 == "charuco"
     assert intrinsics_720.fx == pytest.approx(1580.5 * (1280 / 1920), rel=1e-6)
 
 
@@ -197,7 +199,10 @@ def test_auto_cal_handles_4_3_source_via_center_crop(tmp_path, monkeypatch):
     state.set_device_intrinsics(rec)
 
     from calibration_auto import _derive_auto_cal_intrinsics
-    intr, _ = _derive_auto_cal_intrinsics("A", w_img=1920, h_img=1080, h_fov_deg=None)
+    intr, _, source = _derive_auto_cal_intrinsics(
+        "A", w_img=1920, h_img=1080, h_fov_deg=None,
+    )
+    assert source == "charuco"
 
     # Scale factor: 4032→1920 = 0.4762 (same as 2268→1080 after crop).
     scale = 1920 / 4032
@@ -220,9 +225,10 @@ def test_auto_cal_falls_back_without_prior(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     from calibration_auto import _derive_auto_cal_intrinsics
 
-    intrinsics, _ = _derive_auto_cal_intrinsics(
+    intrinsics, _, source = _derive_auto_cal_intrinsics(
         "A", w_img=1920, h_img=1080, h_fov_deg=None,
     )
+    assert source == "fov"
     # FOV path produces no distortion
     assert intrinsics.distortion is None
 
@@ -248,3 +254,86 @@ def test_hello_carries_device_identity(tmp_path, monkeypatch):
     snap = main.state.device_snapshot("A")
     assert snap is not None
     assert snap.device_model == "iPhone15,3"
+
+
+def test_video_basis_intrinsics_fov_path_is_pure_pinhole():
+    """When intrinsics_source != 'charuco' (or photo_fov_deg unknown),
+    the rebuild path produces canonical FOV-only K. Correction factors
+    are 1.0 so callers can log them uniformly."""
+    from calibration_auto import _video_basis_intrinsics
+    from schemas import IntrinsicsPayload
+
+    photo_intr = IntrinsicsPayload(fx=1500.0, fy=1500.0, cx=2016.0, cy=1134.0)
+    intr, fxc, fyc = _video_basis_intrinsics(
+        photo_intrinsics=photo_intr,
+        photo_dims=(4032, 2268),
+        photo_fov_deg=73.828,
+        video_fov_deg=73.828,
+        intrinsics_source="fov",
+    )
+    assert fxc == 1.0
+    assert fyc == 1.0
+    # Pure FOV at 1920×1080 / 73.828° → fx ≈ 1278
+    assert intr.fx == pytest.approx(1278.0, abs=2.0)
+    assert intr.cx == pytest.approx(960.0, abs=0.5)
+    assert intr.cy == pytest.approx(540.0, abs=0.5)
+
+
+def test_video_basis_intrinsics_charuco_carries_correction():
+    """ChArUco-derived photo-basis K → rebuild applies the per-device
+    correction factor (ChArUco fx ÷ FOV-nominal fx at photo basis) to
+    the video-basis FOV K. This is the B2 fix: previously the rebuild
+    branch silently downgraded ChArUco to pure FOV approximation."""
+    from calibration_auto import _video_basis_intrinsics
+    from schemas import IntrinsicsPayload
+    import numpy as np
+
+    photo_w, photo_h = 4032, 2268
+    photo_fov = 73.828
+    # ChArUco measures fx 2 % above nominal FOV — typical per-device
+    # deviation on iPhone main 1.0×.
+    fov_fx_at_photo = (photo_w / 2.0) / np.tan(np.radians(photo_fov) / 2.0)
+    charuco_fx = fov_fx_at_photo * 1.02
+    charuco_fy = fov_fx_at_photo * 1.018
+    photo_intr = IntrinsicsPayload(
+        fx=charuco_fx, fy=charuco_fy,
+        cx=2016.0, cy=1134.0,
+        distortion=[0.19, -0.66, -0.002, 0.001, 0.67],
+    )
+    intr, fxc, fyc = _video_basis_intrinsics(
+        photo_intrinsics=photo_intr,
+        photo_dims=(photo_w, photo_h),
+        photo_fov_deg=photo_fov,
+        video_fov_deg=73.828,
+        intrinsics_source="charuco",
+    )
+    # Correction factor recovered to ChArUco/nominal ratio.
+    assert fxc == pytest.approx(1.02, rel=1e-6)
+    assert fyc == pytest.approx(1.018, rel=1e-6)
+    # Video-basis fx = nominal video fx × correction. Nominal video fx
+    # at 1920×1080 / 73.828° ≈ 1278.0.
+    nominal_video_fx = (1920 / 2.0) / np.tan(np.radians(73.828) / 2.0)
+    assert intr.fx == pytest.approx(nominal_video_fx * 1.02, rel=1e-6)
+    assert intr.fy == pytest.approx(nominal_video_fx * 1.018, rel=1e-3)
+    # Distortion survives basis swap unchanged.
+    assert intr.distortion == [0.19, -0.66, -0.002, 0.001, 0.67]
+
+
+def test_video_basis_intrinsics_charuco_without_photo_fov_skips_correction():
+    """No photo_fov_deg → cannot compute correction factor → fall back to
+    pure FOV. Edge case: operator forced --h_fov_deg override AND
+    intrinsics_source happens to be 'charuco' (shouldn't happen because
+    h_fov_deg override forces 'fov' path, but defensive)."""
+    from calibration_auto import _video_basis_intrinsics
+    from schemas import IntrinsicsPayload
+
+    photo_intr = IntrinsicsPayload(fx=2000.0, fy=2000.0, cx=2016.0, cy=1134.0)
+    intr, fxc, fyc = _video_basis_intrinsics(
+        photo_intrinsics=photo_intr,
+        photo_dims=(4032, 2268),
+        photo_fov_deg=None,
+        video_fov_deg=73.828,
+        intrinsics_source="charuco",
+    )
+    assert fxc == 1.0
+    assert fyc == 1.0

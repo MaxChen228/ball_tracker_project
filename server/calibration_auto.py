@@ -284,7 +284,7 @@ def _derive_auto_cal_intrinsics(
     w_img: int,
     h_img: int,
     h_fov_deg: float | None = None,
-) -> tuple[IntrinsicsPayload, CalibrationSnapshot | None]:
+) -> tuple[IntrinsicsPayload, CalibrationSnapshot | None, str]:
     """Pick the best intrinsics (K + distortion) to use for this auto-cal
     frame burst. Priority:
 
@@ -302,6 +302,12 @@ def _derive_auto_cal_intrinsics(
     `h_fov_deg` explicitly supplied by the caller forces path 3 so an
     operator doing a fresh calibration can bypass any cached K when they
     suspect the prior is stale.
+
+    Returns (intrinsics, prior_snapshot_for_delta, source) where source ∈
+    {"charuco", "snapshot", "fov"} so the canonical-rebuild path can
+    decide whether to carry a per-device fx/fy correction across the
+    photo→video basis swap (B2 fix). prior_snapshot is None except for
+    the snapshot path where it's used to compute delta_position_cm.
     """
     import main as _main
     state = _main.state
@@ -322,7 +328,7 @@ def _derive_auto_cal_intrinsics(
                 target_width_px=w_img,
                 target_height_px=h_img,
             )
-            return scaled, None
+            return scaled, None, "charuco"
 
     prior = state.calibrations().get(camera_id)
     if prior is not None and h_fov_deg is None:
@@ -345,11 +351,79 @@ def _derive_auto_cal_intrinsics(
                     cy=prior.intrinsics.cy * sy,
                     distortion=prior.intrinsics.distortion,
                 )
-                return intrinsics, prior
+                return intrinsics, prior, "snapshot"
         prior = None
     h_fov_rad = float(np.radians(h_fov_deg)) if h_fov_deg is not None else _IPHONE_MAIN_CAM_HFOV_RAD
     fx, fy, cx, cy = derive_fov_intrinsics(w_img, h_img, h_fov_rad)
-    return IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy), None
+    return IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy), None, "fov"
+
+
+def _video_basis_intrinsics(
+    *,
+    photo_intrinsics: IntrinsicsPayload,
+    photo_dims: tuple[int, int],
+    photo_fov_deg: float | None,
+    video_fov_deg: float,
+    intrinsics_source: str,
+) -> tuple[IntrinsicsPayload, float, float]:
+    """Build canonical 1920×1080 video-basis K from a photo-basis solve.
+
+    Pure FOV path (`intrinsics_source != "charuco"` or no `photo_fov_deg`):
+    K is `derive_fov_intrinsics(1920, 1080, video_fov)` — pinhole
+    approximation, fx ≈ 1278 on iPhone main 1.0×.
+
+    ChArUco carry-over path (`intrinsics_source == "charuco"` and
+    `photo_fov_deg` is known):
+
+        correction_x = fx_charuco / fx_fov_at_photo_basis
+        fx_video    = fx_fov_at_video_basis × correction_x
+
+    The correction factor captures "this device's measured fx is X %
+    off the iOS-reported nominal photo FOV". We assume that deviation is
+    basis-invariant — same physical optics, the photo↔video format swap
+    only changes sensor crop + binning, not focal length in metric units.
+    Without this carry-over the rebuild path silently degrades ChArUco
+    precision (RMS ~0.5 px in pixels) to pure FOV approximation (~1-3 %
+    fx error, per CLAUDE.md / docs/iphone_camera_formats.md).
+
+    cx/cy land at the canonical image center because we have no
+    cross-basis ground truth for the principal point — iPhone main cams
+    have approximately centered principal points on both formats and a
+    centered cy is the lowest-risk default. cy from ChArUco at photo
+    basis would mean nothing in the video-basis sensor crop.
+
+    Distortion coefficients live in normalized image coords (post K^-1)
+    and survive the basis swap unchanged.
+
+    Returns (intrinsics_video, fx_correction, fy_correction). The
+    correction factors are 1.0 on the pure-FOV path so callers can log
+    them uniformly.
+    """
+    video_fov_rad = float(np.radians(video_fov_deg))
+    fx_fov_v, fy_fov_v, cx_v, cy_v = derive_fov_intrinsics(
+        _CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H, video_fov_rad,
+    )
+    fx_correction = 1.0
+    fy_correction = 1.0
+    fx, fy = fx_fov_v, fy_fov_v
+    if intrinsics_source == "charuco" and photo_fov_deg is not None:
+        photo_fov_rad = float(np.radians(photo_fov_deg))
+        w_img, h_img = photo_dims
+        fx_fov_p, fy_fov_p, _, _ = derive_fov_intrinsics(
+            w_img, h_img, photo_fov_rad,
+        )
+        fx_correction = photo_intrinsics.fx / fx_fov_p
+        fy_correction = photo_intrinsics.fy / fy_fov_p
+        fx = fx_fov_v * fx_correction
+        fy = fy_fov_v * fy_correction
+    return (
+        IntrinsicsPayload(
+            fx=fx, fy=fy, cx=cx_v, cy=cy_v,
+            distortion=photo_intrinsics.distortion,
+        ),
+        fx_correction,
+        fy_correction,
+    )
 
 
 def _solve_auto_cal_solution(
@@ -550,7 +624,7 @@ async def _run_auto_calibration(
             data={"src": [src_w, src_h], "dst": [w_img, h_img], "dy": crop_dy},
         )
 
-    intrinsics, prior = _derive_auto_cal_intrinsics(
+    intrinsics, prior, intrinsics_source = _derive_auto_cal_intrinsics(
         camera_id, w_img=w_img, h_img=h_img, h_fov_deg=solve_fov_deg,
     )
     if track_run:
@@ -562,6 +636,7 @@ async def _run_auto_calibration(
                 "w": w_img, "h": h_img,
                 "fx": round(intrinsics.fx, 2), "fy": round(intrinsics.fy, 2),
                 "cx": round(intrinsics.cx, 2), "cy": round(intrinsics.cy, 2),
+                "source": intrinsics_source,
                 "reused_prior": prior is not None,
                 "charuco_prior_device_id": (
                     charuco_src.device_id if charuco_src is not None else None
@@ -660,29 +735,36 @@ async def _run_auto_calibration(
                 "iOS client too old; rebuild and reinstall."
             ),
         )
+    fx_correction = 1.0
+    fy_correction = 1.0
     if (w_img, h_img) != (_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H):
-        # Recover physical pose from the photo-basis solve.
+        # Recover physical pose from the photo-basis solve. (R, t) are
+        # basis-independent so we reuse them when rebuilding K + H in
+        # the canonical video basis below.
         K_solve = build_K(
             intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy,
         ).astype(np.float64)
         H_solve = np.array(result.homography_row_major, dtype=np.float64).reshape(3, 3)
         R_wc, t_wc = recover_extrinsics(K_solve, H_solve)
 
-        # Build K_video from the live video format's FOV. cx/cy land at
-        # canonical image center — the live video format's principal
-        # point is sensor-physical and ~ centered for iPhone main cams.
-        video_fov_rad = float(np.radians(video_fov_deg))
-        fx_v, fy_v, cx_v, cy_v = derive_fov_intrinsics(
-            _CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H, video_fov_rad,
-        )
-        intrinsics = IntrinsicsPayload(
-            fx=fx_v, fy=fy_v, cx=cx_v, cy=cy_v,
-            distortion=intrinsics.distortion,  # lens property; basis-invariant
+        # Build K_video from video-basis FOV. When the photo-basis K
+        # came from ChArUco (per-device measured ~0.5 px RMS), carry
+        # the per-device correction factor across the basis swap so we
+        # don't silently degrade to pure FOV approximation. See
+        # `_video_basis_intrinsics` docstring for the assumption + math.
+        intrinsics, fx_correction, fy_correction = _video_basis_intrinsics(
+            photo_intrinsics=intrinsics,
+            photo_dims=(w_img, h_img),
+            photo_fov_deg=photo_fov_deg,
+            video_fov_deg=video_fov_deg,
+            intrinsics_source=intrinsics_source,
         )
 
         # H_video = K_video × [r1 | r2 | t] — Zhang's planar homography
         # rebuilt in the live basis.
-        K_video = build_K(fx_v, fy_v, cx_v, cy_v).astype(np.float64)
+        K_video = build_K(
+            intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy,
+        ).astype(np.float64)
         rt_planar = np.column_stack((R_wc[:, 0], R_wc[:, 1], t_wc.reshape(3)))
         H_video = K_video @ rt_planar
         # Normalize h33 → 1 to match storage convention. h33 = K row 3 ·
@@ -709,8 +791,11 @@ async def _run_auto_calibration(
                     "dst": [_CANONICAL_SNAPSHOT_W, _CANONICAL_SNAPSHOT_H],
                     "photo_fov_deg": photo_fov_deg,
                     "video_fov_deg": video_fov_deg,
-                    "fx_video": round(fx_v, 2),
-                    "fy_video": round(fy_v, 2),
+                    "fx_video": round(intrinsics.fx, 2),
+                    "fy_video": round(intrinsics.fy, 2),
+                    "fx_correction": round(fx_correction, 4),
+                    "fy_correction": round(fy_correction, 4),
+                    "intrinsics_source": intrinsics_source,
                 },
             )
 
@@ -751,6 +836,9 @@ async def _run_auto_calibration(
             fx_video=intrinsics.fx,
             delta_position_cm=delta_pos_cm,
             delta_angle_deg=delta_ang_deg,
+            intrinsics_source=intrinsics_source,
+            fx_correction=fx_correction,
+            fy_correction=fy_correction,
         ),
     )
     return {
