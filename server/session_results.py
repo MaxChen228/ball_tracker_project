@@ -131,6 +131,8 @@ def _triangulate_non_current_algorithms(
     b: PitchPayload | None,
     sync_error: str | None,
     result: SessionResult,
+    *,
+    tuning: "PairingTuning | None" = None,
 ) -> None:
     """Phase 7 multi-algorithm result builder.
 
@@ -152,17 +154,30 @@ def _triangulate_non_current_algorithms(
     - `ios_capture_time` (the live data source) — already surfaced via
       the live aggregator; not a server-side triangulation target.
     - The *current* server_post alg — already handled by the path-loop.
+      Considered "current" if EITHER cam's snapshot names it (union),
+      so a partial-failure mismatch (A=v11, B=v12) skips both v11 and
+      v12 from this helper, leaving the path-loop's mixed pairing as
+      the sole — and visibly logged — source of those frames.
     """
     if sync_error is not None or a is None or b is None:
         return
     from algorithms import IOS_CAPTURE_TIME
 
-    current_alg = algorithm_id_for_path(a, DetectionPath.server_post)
+    current_alg_a = algorithm_id_for_path(a, DetectionPath.server_post)
+    current_alg_b = algorithm_id_for_path(b, DetectionPath.server_post)
+    if current_alg_a != current_alg_b:
+        logger.warning(
+            "session %s server_post algorithm mismatch A=%s B=%s — path-loop "
+            "will pair frames across algorithms; rerun /run_server_post on "
+            "both cams to recover",
+            result.session_id, current_alg_a, current_alg_b,
+        )
+    current_algs = {current_alg_a, current_alg_b}
     candidate_algs: set[str] = (
         set(a.frames_by_algorithm) | set(b.frames_by_algorithm)
     )
     for alg_id in sorted(candidate_algs):
-        if alg_id in (IOS_CAPTURE_TIME, current_alg):
+        if alg_id == IOS_CAPTURE_TIME or alg_id in current_algs:
             continue
         frames_a = a.frames_by_algorithm.get(alg_id) or []
         frames_b = b.frames_by_algorithm.get(alg_id) or []
@@ -174,11 +189,11 @@ def _triangulate_non_current_algorithms(
                 pitch_with_algorithm_frames(a, alg_id),
                 pitch_with_algorithm_frames(b, alg_id),
                 source="server",
+                tuning=tuning,
             )
         except Exception as exc:
-            logger.warning(
-                "non-current-algorithm triangulation failed sid=%s alg=%s: %s",
-                result.session_id, alg_id, exc,
+            result.abort_reasons[f"alg:{alg_id}"] = (
+                f"{type(exc).__name__}: {exc}"
             )
             continue
         result.triangulated_by_algorithm[alg_id] = pts
@@ -359,7 +374,9 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
     # non-current ones (the "history" the dict accumulates). live
     # path is excluded — `ios_capture_time` is already surfaced via
     # the live aggregator at the top of this function.
-    _triangulate_non_current_algorithms(state, a, b, sync_error, result)
+    _triangulate_non_current_algorithms(
+        state, a, b, sync_error, result, tuning=pairing_tuning,
+    )
 
     authority: list[TriangulatedPoint] = []
     for path in (
@@ -636,6 +653,14 @@ def recompute_result_for_session(
                 continue
             result.triangulated_by_path[path.value] = pts
             result.paths_completed.add(path.value)
+
+    # Phase 7-fix-2: also triangulate non-current algorithm buckets
+    # so Recompute (per-session tuning) preserves multi-alg history
+    # the same way rebuild does. Helper takes the same `tuning` so
+    # the sliders apply to every alg, not just the current server_post.
+    _triangulate_non_current_algorithms(
+        state, a, b, sync_error, result, tuning=tuning,
+    )
 
     authority: list[TriangulatedPoint] = []
     for path in (DetectionPath.server_post.value, DetectionPath.live.value):
