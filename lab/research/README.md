@@ -2,53 +2,42 @@
 
 球體偵測研究工作區。**研究與量化驗證用，不是 production code**。
 
-iOS 編譯進去的 detector (`ball_tracker/BallDetector.mm`) 是 HSV+CC+aspect/fill
-gate（研究稱它為 V11，是研究的起點不是研究產物）。研究最高成果 V11+Y-diff
-(R=0.970) 尚未整合進 iOS。
+iOS / server production detector 在 `ball_tracker/BallDetector.mm` 與
+`server/detection.py`（HSV + CC + aspect/fill gate；研究內部代號 PROD）。
+研究目標見 [`CLAUDE.md`](CLAUDE.md)：在 SAM2 GT 上以可泛化方法擊敗 PROD。
 
-## 從哪開始讀
+## 現況
 
-| 目的 | 看這裡 |
-|---|---|
-| 30 秒抓全景 | [`MAP.md`](MAP.md) |
-| 上次 GT 擴張改了哪些數字 | [`CHANGELOG.md`](CHANGELOG.md) |
-| 想 30 分鐘進入研究 | `notes/00_synthesis_2026-05-01.md` → `02_v11_followup.md` → `11_cue_independence.md` → `19_multiscale_ydiff.md` → `20_consensus_residual_analysis.md` |
+R_top1 比較（1956 GT frames，TOL=10 px，production shape-cost ranker）：
+
+| | R_top1 | 備註 |
+|---|---|---|
+| PROD | 0.615 | tight HSV+gate，每幀 ~1.2 cand |
+| **28d_hybrid** | **0.660** | PROD 為主，PROD 空時 V11 + persistence rescue |
+
+詳見 `scripts/28d_hybrid.py` + `outputs/28d_hybrid.json`。
 
 ## 目錄
 
 ```
 lab/research/
-├── README.md            ← 你在這裡
-├── MAP.md               單頁全景（演算法世代 × scripts × notes 矩陣）
-├── CHANGELOG.md         GT 擴張或結構改動記錄
-├── notes/               研究筆記、報告、設計稿（內容不依編號順序，看 MAP）
-├── outputs/             scripts 產出（含 _figures/ 收集視覺化 PNG）
+├── README.md          ← 你在這裡
+├── CLAUDE.md          agent mandate（讀這個，比 README 重要）
+├── notes/             空，等寫
+├── outputs/           gitignored；scripts 自己產
 └── scripts/
-    ├── _paths.py        ROOT/WS/OUT helper + manifest 適配 + mask reader
-    ├── ball_detector.py V11 reference impl
-    ├── 0X_*.py 1X_*.py  研究 script（編號為時間軸，狀態見 MAP.md）
-    └── _archive/
-        ├── 0X_*.py      pre-V10 早期 heuristic 探索（化石）
-        └── falsified/   負結果 code（dichromatic / DL distillation）
+    ├── _paths.py      路徑 helper
+    ├── _*.py          GT QA / cleanup pipeline
+    ├── 27*.py         metric 重新框架（R_emit → R_top1）
+    └── 28d_hybrid.py  贏 PROD 的方法
 ```
-
-## 重跑
-
-```bash
-cd lab/research
-# active headlines（GT 擴大時值得重跑）
-for s in 02_head_to_head 19_frst 21_yplane_diff 22_cue_independence \
-         24_roi_frst 26_consensus_residual 26_multiscale_ydiff; do
-  uv run --project ../../server python scripts/${s}.py
-done
-```
-
-完整 active list、每支 script 用途、negative result 對照見 [`MAP.md`](MAP.md)。
 
 ## 環境
 
-跑在 `server/.venv`（`uv` 管理，Python 3.13）。一律以
-`uv run --project ../../server python scripts/<n>.py` 執行。
+```bash
+cd lab/research
+uv run --project ../../server python scripts/28d_hybrid.py
+```
 
-依賴：`opencv-python` / `numpy` / `scipy`（傳統 CV 腳本）；
-`torch`（僅 falsified 的 DL 腳本需要）。
+`server/.venv`（uv 管理，Python 3.13）。需要 `opencv-python` / `numpy` /
+`matplotlib`（27 系列圖表用）。
