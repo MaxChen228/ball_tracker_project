@@ -83,6 +83,27 @@ _REGISTRY: dict[str, AlgorithmEntry] = {
 }
 
 
+# Drift guard #2: `schemas._LEGACY_PRE_SNAPSHOT_ALGORITHM_ID` names the
+# bucket pre-Phase-2 server_post frames mirror under (the only detector
+# that ever shipped at the time was v11_hsv_cc). If someone removes v11
+# from the registry without updating that constant, the legacy fallback
+# would point at a dangling id and 6b readers would surface nothing for
+# pre-snapshot pitches. Catch it at boot, after `_REGISTRY` is defined.
+def _check_legacy_bucket_in_registry() -> None:
+    from schemas import _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID as _BUCKET
+    if _BUCKET not in _REGISTRY:
+        raise RuntimeError(
+            f"schemas._LEGACY_PRE_SNAPSHOT_ALGORITHM_ID is "
+            f"{_BUCKET!r} but that id is no longer in the algorithm "
+            f"registry (have: {sorted(_REGISTRY)}). Either restore the "
+            "id or pick a new historical bucket — pre-snapshot pitches "
+            "still need somewhere to file their server_post frames."
+        )
+
+
+_check_legacy_bucket_in_registry()
+
+
 def is_known(algorithm_id: str) -> bool:
     return algorithm_id in _REGISTRY
 
@@ -158,12 +179,7 @@ def run_detection(
     job, reprocess CLI). Raises `ValueError` (unknown algorithm_id) or
     `pydantic.ValidationError` (params fail schema) before touching
     the video — caller catches at the system boundary."""
-    validate_id(algorithm_id)
-    if algorithm_id not in _REGISTRY:
-        raise ValueError(
-            f"algorithm_id {algorithm_id!r} is not server-runnable "
-            f"(non-runnable data sources: {sorted(_NON_RUNNABLE_IDS)})"
-        )
+    validate_runnable_id(algorithm_id)
     entry = _REGISTRY[algorithm_id]
     typed_params = entry.detector.params_schema.model_validate(params)
     return entry.detector.detect(

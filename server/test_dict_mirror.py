@@ -268,12 +268,81 @@ def test_drift_guard_catches_schemas_constant_mismatch(monkeypatch):
     """`algorithms._check_schemas_constant_drift` pins
     `IOS_CAPTURE_TIME` literal equality across the back-import-cycle
     boundary. Simulate a developer editing one but not the other."""
-    import importlib
+    import algorithms as algorithms_mod
     import schemas as schemas_mod
     monkeypatch.setattr(schemas_mod, "IOS_CAPTURE_TIME_ALGORITHM_ID", "drifted_value")
-    algorithms_mod = importlib.import_module("algorithms")
     try:
         algorithms_mod._check_schemas_constant_drift()
         raise AssertionError("drift guard should have raised")
     except RuntimeError as e:
         assert "drifted" in str(e)
+
+
+def test_legacy_bucket_drift_guard_catches_unregistered_id(monkeypatch):
+    """Drift guard #2: removing v11 from the registry without updating
+    `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID` would silently break legacy
+    pre-snapshot pitch reads. Boot must fail loudly."""
+    import algorithms as algorithms_mod
+    import schemas as schemas_mod
+    monkeypatch.setattr(
+        schemas_mod, "_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID", "v999_dangling"
+    )
+    try:
+        algorithms_mod._check_legacy_bucket_in_registry()
+        raise AssertionError("legacy-bucket drift guard should have raised")
+    except RuntimeError as e:
+        assert "v999_dangling" in str(e)
+
+
+def test_set_algorithm_frames_round_trip_through_persist_and_reload():
+    """End-to-end Phase 6b contract: caller writes via
+    `set_algorithm_frames` (e.g. Phase 7's run-algorithm endpoint),
+    persists via `persist_pitch_json`, reloads from JSON. The new
+    algorithm's frames + dict key must survive — including for
+    algorithm ids OTHER than the current server_post stamp (v12 while
+    v11 is canonical), which is the multi-algorithm point."""
+    from detection_paths import set_algorithm_frames
+    from schemas import persist_pitch_json
+    import json
+
+    # v11 is the current server_post; v12 frames will live in dict only.
+    snap_v11 = _snapshot("v11_hsv_cc")
+    p = _base_pitch(
+        frames_server_post=[_frame(1)],
+        server_post_config_used=snap_v11,
+    )
+    set_algorithm_frames(p, "ios_capture_time", [_frame(10)])  # back-syncs frames_live
+    set_algorithm_frames(p, "v11_hsv_cc", [_frame(20), _frame(21)])  # back-syncs frames_server_post
+    # ios_capture_time is non-runnable but valid in snapshot (validate_id, not _runnable_).
+    # Use it as a stand-in for a future second runnable algorithm so this
+    # test doesn't break when v12 lands as a real registry entry.
+    set_algorithm_frames(p, "ios_capture_time", [_frame(10)])
+
+    blob = persist_pitch_json(p)
+    parsed = json.loads(blob)
+    assert "ios_capture_time" in parsed["frames_by_algorithm"]
+    assert "v11_hsv_cc" in parsed["frames_by_algorithm"]
+    assert parsed["frames_live"] == parsed["frames_by_algorithm"]["ios_capture_time"]
+    assert parsed["frames_server_post"] == parsed["frames_by_algorithm"]["v11_hsv_cc"]
+
+    p2 = PitchPayload.model_validate(parsed)
+    assert len(p2.frames_by_algorithm["v11_hsv_cc"]) == 2
+    assert len(p2.frames_by_algorithm["ios_capture_time"]) == 1
+
+
+def test_raw_model_dump_json_without_persist_helper_emits_stale_dict():
+    """Negative contract: bypassing `persist_pitch_json` and dumping
+    raw must result in a stale dict on disk. Pins the failure mode so a
+    future regression that re-introduces direct `model_dump_json()`
+    calls would visibly break this test instead of silently shipping
+    inconsistent JSON."""
+    import json
+
+    p = _base_pitch(frames_live=[_frame(1)])
+    # Direct mutation, no persist hook:
+    p.frames_server_post = [_frame(2), _frame(3)]
+    p.server_post_config_used = _snapshot("v11_hsv_cc")
+    raw = json.loads(p.model_dump_json())
+    # frames_server_post is on disk, but the dict mirror was not refreshed:
+    assert "v11_hsv_cc" not in raw["frames_by_algorithm"]
+    assert raw["frames_server_post"][0]["frame_index"] == 2
