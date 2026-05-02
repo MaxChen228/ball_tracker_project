@@ -483,6 +483,10 @@ class LastSolveRecord:
     fx_video: float                  # stored fx (1080p basis)
     delta_position_cm: float | None  # vs previous solve, None on first
     delta_angle_deg: float | None    # vs previous solve, None on first
+    intrinsics_source: str           # "charuco" | "snapshot" | "fov"
+    fx_correction: float             # ChArUco fx ÷ FOV-nominal fx at photo basis;
+                                     # 1.0 on pure-FOV path. Applied to fx_video.
+    fy_correction: float             # same for fy
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -496,6 +500,9 @@ class LastSolveRecord:
             "fx_video": self.fx_video,
             "delta_position_cm": self.delta_position_cm,
             "delta_angle_deg": self.delta_angle_deg,
+            "intrinsics_source": self.intrinsics_source,
+            "fx_correction": self.fx_correction,
+            "fy_correction": self.fy_correction,
         }
 
 
