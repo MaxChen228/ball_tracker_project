@@ -163,10 +163,11 @@ def test_pitch_ingest_does_not_fabricate_live_config_when_never_armed(tmp_path):
     """Phase-2 contract: when no arm ever happened for this session_id,
     `state.live_session_frozen_config` returns None and `/pitch` MUST
     propagate None to `pitch.live_config_used`. Pre-fix the route
-    fabricated a snapshot from `state.detection_config()` (current
-    disk values), making the viewer CFG chip claim a live config that
-    no detection ever actually used — a silent-fallback violation
-    that biased post-hoc live-vs-server_post delta investigations."""
+    fabricated a snapshot from `state.detection_config()` (whatever
+    disk currently held — boot defaults or operator-edited),
+    silently claiming a live config that no detection ever actually
+    used. The viewer CFG chip would then surface this fabricated
+    name, biasing post-hoc live-vs-server_post delta investigations."""
     from fastapi.testclient import TestClient
     from main import app
     from _test_helpers import _base_payload, _make_scene, _post_pitch
@@ -175,11 +176,6 @@ def test_pitch_ingest_does_not_fabricate_live_config_when_never_armed(tmp_path):
     session_id = sid(770)
 
     client = TestClient(app)
-    # Disk-side config drag — what the old fallback would have copied.
-    client.post("/detection/hsv", json={
-        "h_min": 33, "h_max": 44, "s_min": 33, "s_max": 200,
-        "v_min": 33, "v_max": 200,
-    })
 
     # Bypass arm. POST a frames-only pitch (mode-two, no MOV).
     payload = _base_payload("A", session_id, K, H_a)
