@@ -587,20 +587,27 @@ function drawClickMarker(x, y) {
 }
 
 function buildTintedCanvas(img) {
-  // GPU-composite tint: draw the mask, then paint green over only the opaque
-  // region via "source-in". Replaces an 8M-pixel JS loop on a 1920×1080 canvas
-  // (~50ms main-thread block per mask) with a couple of native compositing
-  // ops (~1ms). Critical for scrub responsiveness when many masks need to
-  // tint in quick succession.
+  // Mask PNGs are opaque grayscale (white = ball, black = bg) — alpha is 255
+  // everywhere, so a naive source-in composite would tint the whole frame.
+  // Read pixels and threshold on luminance instead. ~8M-iter loop on 1920×1080
+  // is the cost; future optimization is to save masks as alpha-channel PNGs
+  // server-side, then this becomes a 1ms GPU composite.
   const c = document.createElement("canvas");
   c.width = el.overlay.width;
   c.height = el.overlay.height;
   const ctx = c.getContext("2d");
   ctx.drawImage(img, 0, 0, c.width, c.height);
-  ctx.globalCompositeOperation = "source-in";
-  ctx.fillStyle = "rgba(34, 197, 94, 0.5)";
-  ctx.fillRect(0, 0, c.width, c.height);
-  ctx.globalCompositeOperation = "source-over";
+  const data = ctx.getImageData(0, 0, c.width, c.height);
+  const px = data.data;
+  for (let i = 0; i < px.length; i += 4) {
+    const a = px[i] || px[i + 1] || px[i + 2];
+    if (a > 8) {
+      px[i] = 34; px[i + 1] = 197; px[i + 2] = 94; px[i + 3] = 128;
+    } else {
+      px[i + 3] = 0;
+    }
+  }
+  ctx.putImageData(data, 0, 0);
   return c;
 }
 
