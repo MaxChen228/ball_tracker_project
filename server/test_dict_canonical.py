@@ -370,6 +370,75 @@ def test_legacy_bucket_drift_guard_catches_unregistered_id(monkeypatch):
 # --- end-to-end round-trip pinning multi-algorithm history ----------------
 
 
+# --- DetectionConfigSnapshotPayload generic-params contract --------------
+#
+# These pin the post-platform-widening invariants for the snapshot wire
+# shape: top-level `params` (no flat `hsv`/`shape_gate`), validator
+# round-trips against the registered detector's params_schema, and
+# IOS_CAPTURE_TIME bypasses the round-trip (no Detector for that
+# data source).
+
+
+def test_snapshot_wire_dump_uses_top_level_params_no_flat_keys():
+    """Wire JSON must serialize `{algorithm_id, params, preset_name}`
+    verbatim. Catches a regression where some helper re-introduced a
+    legacy `hsv` / `shape_gate` flat surface — clients dispatch on
+    `params.hsv.*` and would silently misread."""
+    import json
+    snap = _snapshot("v11_hsv_cc", preset="blue_ball")
+    payload = json.loads(snap.model_dump_json())
+    assert set(payload.keys()) == {"algorithm_id", "params", "preset_name"}
+    assert "hsv" not in payload
+    assert "shape_gate" not in payload
+    assert payload["params"]["hsv"]["h_min"] == 10
+
+
+def test_snapshot_validator_rejects_v11_params_missing_hsv():
+    """Validator round-trips params through V11Params — missing keys
+    raise pydantic.ValidationError before the snapshot reaches disk
+    or wire."""
+    import pytest as _pytest
+    from pydantic import ValidationError
+    with _pytest.raises(ValidationError):
+        DetectionConfigSnapshotPayload(
+            algorithm_id="v11_hsv_cc",
+            params={"shape_gate": {"aspect_min": 0.7, "fill_min": 0.55}},
+            # missing "hsv"
+            preset_name=None,
+        )
+
+
+def test_snapshot_validator_rejects_v11_params_garbage_hsv_payload():
+    """Validator rejects a wrong-shape `hsv` payload (string instead
+    of int fields). Catches a class of disk-edit / agent-typo bugs at
+    the load boundary, not at first detection run."""
+    import pytest as _pytest
+    from pydantic import ValidationError
+    with _pytest.raises(ValidationError):
+        DetectionConfigSnapshotPayload(
+            algorithm_id="v11_hsv_cc",
+            params={
+                "hsv": "garbage_string_not_a_dict",
+                "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+            },
+            preset_name=None,
+        )
+
+
+def test_snapshot_validator_skips_round_trip_for_ios_capture_time():
+    """`ios_capture_time` is a non-runnable data source — no Detector,
+    no params_schema. The validator MUST skip schema round-trip
+    (otherwise loading any historical iOS-stamped snapshot crashes).
+    The iOS upload boundary is the validating step for that source."""
+    snap = DetectionConfigSnapshotPayload(
+        algorithm_id="ios_capture_time",
+        params={"any": "shape", "even": {"nested": True}},  # not v11
+        preset_name=None,
+    )
+    assert snap.algorithm_id == "ios_capture_time"
+    assert snap.params == {"any": "shape", "even": {"nested": True}}
+
+
 def test_set_algorithm_frames_round_trip_through_persist_and_reload():
     """End-to-end: write under multiple algorithm ids, persist, reload.
     All algorithm buckets survive — including ids OTHER than the

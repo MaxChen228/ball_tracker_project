@@ -245,14 +245,24 @@
     const srvCfg = e.server_post_config_used || null;
     if (liveCfg === null && srvCfg === null) return '';
     const known = new Map(_presetsCache.map(p => [p.name, p]));
-    const tip = (cfg) => {
-      // Snapshot is now `{algorithm_id, params, preset_name}`. v11_hsv_cc
-      // params shape = `{hsv, shape_gate}`. Phase 2 will dispatch on
-      // `cfg.algorithm_id` to render any algorithm; for now v11 is the
-      // only one shipping so the formatter assumes v11 params.
-      const h = cfg.params.hsv;
-      const g = cfg.params.shape_gate;
+    // Per-algorithm tooltip formatter. Snapshot wire shape:
+    // `{algorithm_id, params, preset_name}`. Each algorithm formats
+    // its own params; unknown algorithms fall back to a structural
+    // "alg:<id>" hint so a stale snapshot still renders something
+    // legible without crashing.
+    const _v11Tip = (params) => {
+      const h = params.hsv;
+      const g = params.shape_gate;
       return `H ${h.h_min}-${h.h_max} · S ${h.s_min}-${h.s_max} · V ${h.v_min}-${h.v_max} · asp≥${g.aspect_min.toFixed(2)} fill≥${g.fill_min.toFixed(2)}`;
+    };
+    const _CFG_FORMATTERS = {
+      'v11_hsv_cc': _v11Tip,
+      'ios_capture_time': _v11Tip,  // iOS live = v11-equivalent params shape
+    };
+    const tip = (cfg) => {
+      const fmt = _CFG_FORMATTERS[cfg.algorithm_id];
+      if (!fmt) return `alg:${cfg.algorithm_id}`;
+      return fmt(cfg.params);
     };
     const chip = (label, cfg) => {
       if (cfg === null) {

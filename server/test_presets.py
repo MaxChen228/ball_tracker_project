@@ -41,8 +41,13 @@ def test_get_preset_returns_full_record(tmp_path, monkeypatch):
     p = r.json()
     assert p["name"] == "blue_ball"
     assert p["label"] == "Blue ball"
-    assert p["hsv"]["h_min"] == 105
-    assert p["shape_gate"]["aspect_min"] == pytest.approx(0.75)
+    # Wire shape is canonical `{algorithm_id, name, label, params}`;
+    # `params` is opaque per-algorithm. v11_hsv_cc lays out
+    # `{hsv, shape_gate}` inside it. No legacy v11 flat surface.
+    assert p["params"]["hsv"]["h_min"] == 105
+    assert p["params"]["shape_gate"]["aspect_min"] == pytest.approx(0.75)
+    assert "hsv" not in p, "wire must not still emit legacy flat hsv"
+    assert "shape_gate" not in p, "wire must not still emit legacy flat shape_gate"
     # Phase-1 algorithm_id discriminator. Today every preset targets
     # the sole registered algorithm; the field exists so future entries
     # with different params shapes can ship in the same directory.

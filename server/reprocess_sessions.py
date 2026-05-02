@@ -64,23 +64,14 @@ def atomic_write(path: Path, text: str) -> None:
 
 
 def _snapshot_from_preset(preset: presets.Preset) -> DetectionConfigSnapshotPayload:
-    """Encode a Preset as a snapshot. Preset itself is still v11-shaped
-    (`.hsv` + `.shape_gate`) — Phase 2 will widen Preset to be
-    algorithm-agnostic at which point this encoder grows a dispatch
-    table on `preset.algorithm_id`."""
+    """Encode a Preset as a snapshot. Preset and snapshot now share the
+    same canonical `(algorithm_id, params)` shape, so this is a
+    straight passthrough — no per-algorithm marshalling needed.
+    `dict()` defensively copies so a later snapshot mutation can't
+    leak back into the source preset."""
     return DetectionConfigSnapshotPayload(
         algorithm_id=preset.algorithm_id,
-        params={
-            "hsv": {
-                "h_min": preset.hsv.h_min, "h_max": preset.hsv.h_max,
-                "s_min": preset.hsv.s_min, "s_max": preset.hsv.s_max,
-                "v_min": preset.hsv.v_min, "v_max": preset.hsv.v_max,
-            },
-            "shape_gate": {
-                "aspect_min": preset.shape_gate.aspect_min,
-                "fill_min": preset.shape_gate.fill_min,
-            },
-        },
+        params=dict(preset.params),
         preset_name=preset.name,
     )
 

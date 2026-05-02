@@ -40,6 +40,13 @@ IOS_CAPTURE_TIME = "ios_capture_time"
 
 _NON_RUNNABLE_IDS: frozenset[str] = frozenset({IOS_CAPTURE_TIME})
 
+# Public alias for callers that need to dispatch on "is this id a non-
+# runnable data source" — e.g. the wire-schema validator skips
+# `Detector.params_schema` round-trip for these ids because they have
+# no Detector. Naming convention matches the rest of the module's
+# public surface (no leading underscore).
+NON_RUNNABLE_IDS = _NON_RUNNABLE_IDS
+
 # Cost threshold for the iOS capture-time data source. The live pipeline
 # uses the same `score_candidates` cost function as v11_hsv_cc (both
 # read aspect/fill from HSV+CC mask candidates), so the threshold also

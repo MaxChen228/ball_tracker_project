@@ -265,19 +265,12 @@ async def _enqueue_server_post(
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
     from schemas import DetectionConfigSnapshotPayload
+    # Preset and snapshot share canonical `(algorithm_id, params)`
+    # shape — passthrough with a defensive copy so later snapshot
+    # mutation can't bleed into the preset.
     snapshot = DetectionConfigSnapshotPayload(
         algorithm_id=preset.algorithm_id,
-        params={
-            "hsv": {
-                "h_min": preset.hsv.h_min, "h_max": preset.hsv.h_max,
-                "s_min": preset.hsv.s_min, "s_max": preset.hsv.s_max,
-                "v_min": preset.hsv.v_min, "v_max": preset.hsv.v_max,
-            },
-            "shape_gate": {
-                "aspect_min": preset.shape_gate.aspect_min,
-                "fill_min": preset.shape_gate.fill_min,
-            },
-        },
+        params=dict(preset.params),
         preset_name=preset_name,
     )
     for clip_path, pitch in queued:

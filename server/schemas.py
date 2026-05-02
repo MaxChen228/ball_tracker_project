@@ -160,16 +160,17 @@ class DetectionConfigSnapshotPayload(BaseModel):
     def _validate_algorithm_id_and_params(self) -> "DetectionConfigSnapshotPayload":
         import algorithms
         algorithms.validate_id(self.algorithm_id)
-        # Round-trip params through the detector's typed schema (when
-        # the algorithm is runnable). IOS_CAPTURE_TIME has no detector
-        # but its params should still match v11's shape (the live
-        # pipeline is HSV+CC-equivalent) — we let it through without
-        # round-trip, the iOS upload boundary is the validating step
-        # for that data source.
-        if self.algorithm_id != IOS_CAPTURE_TIME_ALGORITHM_ID:
-            entry = algorithms._REGISTRY.get(self.algorithm_id)
-            if entry is not None:
-                entry.detector.params_schema.model_validate(self.params)
+        # Non-runnable data sources (today only IOS_CAPTURE_TIME) have
+        # no Detector and therefore no params_schema to round-trip
+        # against. The iOS upload boundary already validates the
+        # capture-time params shape, so we only enforce shape here for
+        # runnable algorithm ids. Listed explicitly (no fallback if the
+        # id "happens to be missing from _REGISTRY") so that adding a
+        # new non-runnable id forces a deliberate change here.
+        if self.algorithm_id in algorithms.NON_RUNNABLE_IDS:
+            return self
+        entry = algorithms.get(self.algorithm_id)  # KeyError on typo
+        entry.detector.params_schema.model_validate(self.params)
         return self
 
     @classmethod
