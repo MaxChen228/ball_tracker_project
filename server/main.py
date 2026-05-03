@@ -183,6 +183,7 @@ from routes import calibration as _calibration_routes
 from routes import calibration_intrinsics as _calibration_intrinsics_routes
 from routes import device_ws as _device_ws_routes
 from routes import presets as _presets_routes
+from routes import algorithms as _algorithms_routes
 app.include_router(_markers_routes.router)
 app.include_router(_settings_routes.router)
 app.include_router(_camera_routes.router)
@@ -194,6 +195,7 @@ app.include_router(_calibration_routes.router)
 app.include_router(_calibration_intrinsics_routes.router)
 app.include_router(_device_ws_routes.router)
 app.include_router(_presets_routes.router)
+app.include_router(_algorithms_routes.router)
 
 # Re-exports for routes/* late-bind imports — defined in routes/pitch.py but
 # accessed via `from main import _run_server_detection` etc.
