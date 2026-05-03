@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 
+import algorithms
 from presets import Preset, hsv_as_dict
 
 
@@ -215,8 +216,7 @@ def _render_hsv_body(
     # doesn't render a broken button (its `.hsv` accessor raises).
     # When a non-v11 algorithm grows its own dashboard surface, that
     # surface will iterate `presets` filtered to its own algorithm_id.
-    import algorithms as _algorithms
-    v11_presets = [p for p in presets if p.algorithm_id == _algorithms.V11_HSV_CC]
+    v11_presets = [p for p in presets if p.algorithm_id == algorithms.V11_HSV_CC]
 
     def _preset_button(p: Preset) -> str:
         d = hsv_as_dict(p)
