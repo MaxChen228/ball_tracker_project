@@ -223,3 +223,115 @@ def test_export_fields_unsupported_leaf_type_raises():
 
     with pytest.raises(ValueError, match="unsupported field type"):
         export_fields(HasBool)
+
+
+def test_export_fields_optional_field_raises():
+    """`Optional[int]` emits `anyOf: [int, null]` in Pydantic v2's
+    JSON Schema — without explicit handling the exporter would silently
+    treat it as a leaf with `type=None`. Reject loud so a future
+    detector with optional params doesn't ship a broken UI."""
+    from pydantic import BaseModel
+    from algorithms._form_schema import export_fields
+
+    class HasOptional(BaseModel):
+        maybe: int | None = None
+
+    with pytest.raises(ValueError, match="anyOf"):
+        export_fields(HasOptional)
+
+
+def test_export_fields_literal_field_raises():
+    """`Literal["a", "b"]` is a finite-choice param — needs a select
+    widget, not a slider. Until we extend `FormField.type` + the JS
+    dispatch table together, reject loud."""
+    from typing import Literal
+    from pydantic import BaseModel
+    from algorithms._form_schema import export_fields
+
+    class HasLiteral(BaseModel):
+        choice: Literal["a", "b"] = "a"
+
+    # Pydantic emits Literal as `enum` on a string leaf — falls through
+    # to the unsupported-type branch since the type is "string".
+    with pytest.raises(ValueError, match="unsupported field type"):
+        export_fields(HasLiteral)
+
+
+def test_export_fields_list_field_raises():
+    """`list[int]` is a variable-length param — no slider analogue.
+    Reject loud rather than silently emitting a broken field record."""
+    from pydantic import BaseModel
+    from algorithms._form_schema import export_fields
+
+    class HasList(BaseModel):
+        items: list[int] = []
+
+    with pytest.raises(ValueError, match="unsupported field type"):
+        export_fields(HasList)
+
+
+def test_export_fields_empty_model_raises():
+    """A `BaseModel` with zero declared fields would silently produce
+    zero `FormField`s — exactly the silent-drop the exporter exists to
+    prevent. The failure should name the empty container so the source
+    model is identifiable."""
+    from pydantic import BaseModel
+    from algorithms._form_schema import export_fields
+
+    class Empty(BaseModel):
+        pass
+
+    with pytest.raises(ValueError, match="empty properties"):
+        export_fields(Empty)
+
+
+def test_walk_rejects_allof_container():
+    """`allOf` wraps schemas under several Pydantic `Field(...)` +
+    nested-model combinations across versions. The exporter doesn't
+    unwrap them today; reject loud at the path so a future Pydantic
+    upgrade that starts emitting allOf surfaces immediately, not as
+    a silently-dropped form widget. Tested by feeding a hand-crafted
+    schema directly into `_walk` so the test is robust against
+    Pydantic's exact emit choices."""
+    from algorithms._form_schema import _walk
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "x": {"allOf": [{"$ref": "#/$defs/Inner"}]},
+        },
+    }
+    defs = {"Inner": {"properties": {"h": {"type": "integer"}}}}
+    with pytest.raises(ValueError, match="allOf"):
+        _walk(schema, prefix="", defs=defs)
+
+
+def test_walk_rejects_oneof_container():
+    """Same defensive reject for `oneOf` (Pydantic uses it for tagged
+    unions). The exporter doesn't render unions today."""
+    from algorithms._form_schema import _walk
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "x": {"oneOf": [{"type": "integer"}, {"type": "number"}]},
+        },
+    }
+    with pytest.raises(ValueError, match="oneOf"):
+        _walk(schema, prefix="", defs={})
+
+
+def test_resolve_ref_rejects_non_defs_root():
+    """`$ref` outside `#/$defs/` (e.g. a remote URL) would
+    coincidentally tail-match a `$defs` entry by name. Reject loud."""
+    from algorithms._form_schema import _walk
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "x": {"$ref": "http://example.com/schema#/Inner"},
+        },
+    }
+    defs = {"Inner": {"properties": {"h": {"type": "integer"}}}}
+    with pytest.raises(ValueError, match="unsupported \\$ref root"):
+        _walk(schema, prefix="", defs=defs)

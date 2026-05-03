@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 import algorithms
 from algorithms._form_schema import export_fields, field_to_wire
@@ -36,12 +36,12 @@ def _entry_to_wire(entry: algorithms.AlgorithmEntry) -> dict[str, Any]:
 
 @router.get("/algorithms")
 def list_algorithms() -> dict[str, Any]:
-    """Return every runnable detector in registry order. Shape:
-    `{algorithms: [{algorithm_id, label, description, cost_threshold,
-    fields: [{path, type, minimum, maximum, default, title}, ...]},
-    ...]}`. The dashboard binds form widgets to `fields` by `path`
-    (dotted, e.g. `prod_hsv.h_min`) — same path the preset POST body
-    + `state.update_param` accept."""
+    """Return every runnable detector sorted by id (matches
+    `algorithms.list_all`). Shape: `{algorithms: [{algorithm_id, label,
+    description, cost_threshold, fields: [{path, type, minimum,
+    maximum, default, title}, ...]}, ...]}`. The dashboard binds form
+    widgets to `fields` by `path` (dotted, e.g. `prod_hsv.h_min`) —
+    same path the preset POST body + `state.update_param` accept."""
     return {"algorithms": [_entry_to_wire(e) for e in algorithms.list_all()]}
 
 
@@ -50,7 +50,6 @@ def get_algorithm(algorithm_id: str) -> dict[str, Any]:
     """Single-algorithm form-schema fetch. Same wire shape as one
     entry of `GET /algorithms`. 404 on unknown id (including the
     non-runnable `ios_capture_time` — no params to edit)."""
-    from fastapi import HTTPException
     try:
         entry = algorithms.get(algorithm_id)
     except KeyError:

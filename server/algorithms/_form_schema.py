@@ -74,11 +74,23 @@ def _walk(
     prefix: str,
     defs: dict[str, Any],
 ) -> list[FormField]:
-    out: list[FormField] = []
     props = schema.get("properties", {})
+    if not props:
+        # An object schema with zero properties produces zero leaves —
+        # exactly the silent-drop the strict exporter exists to prevent.
+        # Either the source model is empty (no params to render → caller
+        # shouldn't be exporting it) or the schema uses
+        # `additionalProperties` / `patternProperties` which the
+        # dashboard can't render. Fail loud at the path of the empty
+        # container so the source model is identifiable.
+        raise ValueError(
+            f"empty properties at {prefix or '<root>'!r} — exporter "
+            "needs at least one declared field per object schema"
+        )
+    out: list[FormField] = []
     for name, sub in props.items():
         path = f"{prefix}.{name}" if prefix else name
-        resolved = _resolve_ref(sub, defs)
+        resolved = _resolve_ref(sub, defs, path=path)
         if "properties" in resolved:
             out.extend(_walk(resolved, prefix=path, defs=defs))
             continue
@@ -86,14 +98,43 @@ def _walk(
     return out
 
 
-def _resolve_ref(sub: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
+def _resolve_ref(
+    sub: dict[str, Any],
+    defs: dict[str, Any],
+    *,
+    path: str,
+) -> dict[str, Any]:
     """Inline a `$ref` to its `$defs` target. Pydantic v2 emits nested
     BaseModel as `{"$ref": "#/$defs/HSVRangePayload"}`; we follow it
-    once. Multi-hop refs aren't used by any detector today."""
+    once. Multi-hop refs aren't used by any detector today.
+
+    Strict on schema features the exporter doesn't implement:
+    - `allOf` / `anyOf` / `oneOf` containers — Pydantic v2 wraps these
+      around `Optional[T]` (anyOf: [T, null]) and `Field(default=...,
+      description=...)` on nested models (allOf: [{$ref}]). Silently
+      treating these as leaves would crash later in `_leaf_to_field`
+      with a confusing "unsupported field type: None" once a future
+      detector grows an Optional / decorated nested field.
+    - Non-`#/$defs/` ref roots (e.g. an http URL) — the lookup would
+      coincidentally match by tail name and return the wrong def.
+    """
+    for unsupported in ("allOf", "anyOf", "oneOf"):
+        if unsupported in sub:
+            raise ValueError(
+                f"{unsupported!r} at {path!r} not supported — exporter "
+                "doesn't render Optional / Union / decorated-nested-model "
+                "schemas; restructure the params model or extend the "
+                "exporter alongside the JS form generator"
+            )
     if "$ref" not in sub:
         return sub
     ref = sub["$ref"]
-    target_name = ref.rsplit("/", 1)[-1]
+    if not ref.startswith("#/$defs/"):
+        raise ValueError(
+            f"unsupported $ref root at {path!r}: {ref!r} (only "
+            "'#/$defs/<name>' supported)"
+        )
+    target_name = ref[len("#/$defs/"):]
     if target_name not in defs:
         raise ValueError(f"unresolved $ref {ref!r} (have: {sorted(defs)})")
     return defs[target_name]
@@ -123,9 +164,11 @@ def _leaf_to_field(path: str, sub: dict[str, Any]) -> FormField:
 
 def field_to_wire(f: FormField) -> dict[str, Any]:
     """Serialise a `FormField` to the wire shape returned by
-    `GET /algorithms`. Kept separate from the dataclass so the route
-    can produce JSON without leaking Pydantic-default rendering rules
-    (e.g. `None` → omit vs. include)."""
+    `GET /algorithms`. Always emits all five UI keys (`type`, `minimum`,
+    `maximum`, `default`, `title`) — `None` carries the meaning "no
+    constraint / no default" and the JS form generator dispatches on
+    presence-of-key, not value. Keeping the shape rectangular avoids
+    a `if "minimum" in f` branch in every JS render path."""
     return {
         "path": f.path,
         "type": f.type,
