@@ -129,10 +129,14 @@
   async function _switchActive(name, status) {
     if (status) status.textContent = '…';
     try {
+      // Phase-3: `/presets/active` requires a `target` slot. The
+      // existing preset-row buttons + Apply path drive the live (iOS)
+      // path; phase-4 will add a separate selector that posts
+      // `target: 'server_post'` for the post-pass slot.
       const r = await fetch('/presets/active', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, target: 'live' }),
       });
       if (!r.ok) {
         const t = await r.text();
@@ -201,10 +205,13 @@
   async function _useFromLibrary(name, modal) {
     _setModalStatus(modal, '…');
     try {
+      // Manage modal Use → live slot. Hybrid presets shown in the
+      // modal will return 422 here; phase-4 swaps in algorithm-aware
+      // routing (live for v11, server_post for hybrid).
       const r = await fetch('/presets/active', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, target: 'live' }),
       });
       if (!r.ok) {
         const t = await r.text();

@@ -208,21 +208,27 @@ async def presets_create(request: Request) -> dict[str, Any]:
     return _preset_to_wire(preset)
 
 
+_ALLOWED_TARGETS = ("live", "server_post")
+
+
 @router.post("/presets/active")
 async def presets_set_active(request: Request) -> dict[str, Any]:
-    """Pure switch of the active live preset — no file write. Loads
-    the named preset and snaps the live `DetectionConfig` to it, then
-    broadcasts WS settings to every online camera.
+    """Switch one of the two active preset slots — no file write.
 
-    Currently v11-only: a non-v11 preset returns 422. Phase-3 will
-    introduce dual active state (`live` slot stays v11; `server_post`
-    slot accepts any algorithm) and this endpoint will grow a `target`
-    body field. Until then, switching the active server_post algorithm
-    is done at run-time via `POST /sessions/{sid}/run_server_post`'s
-    `preset_name` body field (already algorithm-agnostic).
+    Body (JSON or form): `name` + `target` — both required.
 
-    Body (JSON or form): `name` — required, must be an existing slug
-    on disk. 404 on unknown name."""
+    `target="live"`: drives the iOS live path (HSV+CC detection).
+    Loads the preset, snaps `DetectionConfig` to it, broadcasts WS
+    settings. v11_hsv_cc-only — a non-v11 preset returns 422 because
+    iOS can't run any other algorithm.
+
+    `target="server_post"`: drives the server-side post-pass `Run
+    server` button (and reprocess defaults). Accepts any registered
+    algorithm. Does NOT touch live config and does NOT broadcast WS
+    — operators on iOS see no change.
+
+    Persisted across restart (live: `detection_config.json` preset
+    field; server_post: `active_server_post_preset.json` sidecar)."""
     from main import state, device_ws, _settings_message_for
 
     ctype = request.headers.get("content-type", "").lower()
@@ -231,39 +237,50 @@ async def presets_set_active(request: Request) -> dict[str, Any]:
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="body must be a JSON object")
         name = body.get("name")
+        target = body.get("target")
     else:
         form = await request.form()
         name = form.get("name")
+        target = form.get("target")
     if not isinstance(name, str) or not name:
         raise HTTPException(status_code=400, detail="missing required field 'name'")
+    if not isinstance(target, str) or not target:
+        raise HTTPException(status_code=400, detail="missing required field 'target'")
+    if target not in _ALLOWED_TARGETS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'target' must be one of {list(_ALLOWED_TARGETS)}, got {target!r}",
+        )
     try:
         p = state.load_preset(name)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown preset: {name!r}")
-    if not _is_v11(p.algorithm_id):
-        # Explicit reject rather than silently no-oping — operator must
-        # see that activating a non-v11 preset isn't supported on the
-        # live path. Phase-3 will route it to the server_post slot.
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"preset {name!r} targets {p.algorithm_id!r}; only "
-                f"{algorithms.V11_HSV_CC!r} can drive the live path "
-                "today (dual live/server_post active is phase 3)"
-            ),
+
+    if target == "live":
+        if not _is_v11(p.algorithm_id):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"preset {name!r} targets {p.algorithm_id!r}; only "
+                    f"{algorithms.V11_HSV_CC!r} can drive the live path "
+                    "(iOS detection is HSV+CC hardcoded)"
+                ),
+            )
+        cfg = DetectionConfig(
+            hsv=p.hsv,
+            shape_gate=p.shape_gate,
+            preset=name,
+            last_applied_at=None,
+            algorithm_id=p.algorithm_id,
         )
-    cfg = DetectionConfig(
-        hsv=p.hsv,
-        shape_gate=p.shape_gate,
-        preset=name,
-        last_applied_at=None,
-        algorithm_id=p.algorithm_id,
-    )
-    state.set_detection_config(cfg)
-    await device_ws.broadcast(
-        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
-    )
-    return {"ok": True, "active": name}
+        state.set_detection_config(cfg)
+        await device_ws.broadcast(
+            {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
+        )
+    else:
+        # target == "server_post"
+        state.set_active_server_post_preset(name)
+    return {"ok": True, "active": name, "target": target}
 
 
 @router.delete("/presets/{name}")

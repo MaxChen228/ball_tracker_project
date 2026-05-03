@@ -251,6 +251,20 @@ class State:
             data_dir,
             atomic_write=self._atomic_write,
         )
+        # Phase-3 dual active preset: `_detection_config.preset` drives
+        # the live (iOS) path and is v11_hsv_cc-only because iOS does
+        # the detection itself. `_active_server_post_preset_name` drives
+        # the server-side post-pass and accepts any registered algorithm
+        # (v11 or hybrid). Boot default = same as live preset (operator
+        # can re-bind to a hybrid preset via dashboard); persisted so a
+        # restart doesn't silently drop the operator's last server_post
+        # choice. Read by the dashboard render path + the `Run server`
+        # event button; orthogonal to live config and WS settings push
+        # (iOS never sees the server_post selection — it only ever runs
+        # the live algorithm).
+        self._active_server_post_preset_name: str = (
+            self._load_active_server_post_preset_or_default()
+        )
         self._pairing_tuning = self._load_pairing_tuning_from_disk()
         # Injectable clock so timeout and staleness tests don't need sleeps.
         self._time_fn = time_fn
@@ -574,6 +588,68 @@ class State:
             self._data_dir,
             atomic_write=self._atomic_write,
         )
+
+    @property
+    def _active_server_post_preset_path(self) -> Path:
+        return self._data_dir / "active_server_post_preset.json"
+
+    def _load_active_server_post_preset_or_default(self) -> str:
+        """Boot loader for the server_post active preset slot. Falls
+        through to the live preset name if the sidecar file is missing
+        — first-boot operators get `tennis` (or whichever v11 preset
+        was just seeded as live) without an extra "pick one" step.
+        Strict on a present-but-corrupt file: raises so a hand-edited
+        wrong slug surfaces at boot, not at first dashboard render."""
+        path = self._active_server_post_preset_path
+        if not path.exists():
+            return self._detection_config.preset
+        obj = json.loads(path.read_text())
+        if not isinstance(obj, dict):
+            raise ValueError(
+                f"{path} must be a JSON object with 'name'"
+            )
+        name = obj.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"{path} missing required 'name' field"
+            )
+        return name
+
+    def _persist_active_server_post_preset_locked(self) -> None:
+        """Caller owns `self._lock`. Sidecar file separate from
+        `detection_config.json` because that file is v11-shaped (carries
+        flat hsv + shape_gate) and the server_post slot is opaque
+        (just a preset name → preset library is the source of truth
+        for params)."""
+        self._atomic_write(
+            self._active_server_post_preset_path,
+            json.dumps({"name": self._active_server_post_preset_name}),
+        )
+
+    def active_server_post_preset_name(self) -> str:
+        """Slug of the preset that drives the server-side post-pass.
+        Always non-empty (boot default = live preset). Orthogonal to
+        `detection_config().preset` — the live path is v11-only, the
+        server_post path accepts any registered algorithm."""
+        with self._lock:
+            return self._active_server_post_preset_name
+
+    def set_active_server_post_preset(self, name: str) -> str:
+        """Switch the server_post active preset. Validates the preset
+        exists on disk before binding; raises `KeyError` otherwise.
+        Persists immediately so a restart doesn't drop the choice.
+        Does NOT touch live `_detection_config` and does NOT broadcast
+        WS settings — operators of the live (iOS) path see no change.
+        """
+        # Validate-then-bind under the lock: keeps the on-disk sidecar
+        # consistent with the in-memory pointer even if a concurrent
+        # set_active_server_post_preset / delete_preset arrives mid-call.
+        with self._lock:
+            if not _presets.preset_exists(self._data_dir, name):
+                raise KeyError(name)
+            self._active_server_post_preset_name = name
+            self._persist_active_server_post_preset_locked()
+            return self._active_server_post_preset_name
 
     def _load_pairing_tuning_from_disk(self) -> PairingTuning:
         path = self._pairing_tuning_path
