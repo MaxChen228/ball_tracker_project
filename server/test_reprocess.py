@@ -20,9 +20,7 @@ import pytest
 from detection import HSVRange, ShapeGate
 from schemas import (
     DetectionConfigSnapshotPayload,
-    HSVRangePayload,
     PitchPayload,
-    ShapeGatePayload,
 )
 
 
@@ -42,15 +40,17 @@ def _snapshot(
     import algorithms as _algorithms
     return DetectionConfigSnapshotPayload(
         algorithm_id=algorithm_id or _algorithms.DEFAULT_ALGORITHM_ID,
-        hsv=HSVRangePayload(
-            h_min=h_min, h_max=h_max,
-            s_min=s_min, s_max=s_max,
-            v_min=v_min, v_max=v_max,
-        ),
-        shape_gate=ShapeGatePayload(
-            aspect_min=aspect_min,
-            fill_min=fill_min,
-        ),
+        params={
+            "hsv": {
+                "h_min": h_min, "h_max": h_max,
+                "s_min": s_min, "s_max": s_max,
+                "v_min": v_min, "v_max": v_max,
+            },
+            "shape_gate": {
+                "aspect_min": aspect_min,
+                "fill_min": fill_min,
+            },
+        },
         preset_name=preset_name,
     )
 
@@ -89,19 +89,15 @@ def _write_preset(presets_dir: Path, name: str, snap: DetectionConfigSnapshotPay
     expected canonical shape (no algorithm_id/preset_name fields needed
     on the snapshot itself — the preset file IS the source of truth)."""
     presets_dir.mkdir(parents=True, exist_ok=True)
+    # Preset files are still v11-shaped on disk (they predate the
+    # snapshot generic-params flip and Phase 2 will widen Preset).
+    # Pull the raw HSV / shape_gate dicts straight from snap.params.
     payload = {
         "name": name,
         "label": name,
         "algorithm_id": snap.algorithm_id,
-        "hsv": {
-            "h_min": snap.hsv.h_min, "h_max": snap.hsv.h_max,
-            "s_min": snap.hsv.s_min, "s_max": snap.hsv.s_max,
-            "v_min": snap.hsv.v_min, "v_max": snap.hsv.v_max,
-        },
-        "shape_gate": {
-            "aspect_min": snap.shape_gate.aspect_min,
-            "fill_min": snap.shape_gate.fill_min,
-        },
+        "hsv": snap.params["hsv"],
+        "shape_gate": snap.params["shape_gate"],
     }
     (presets_dir / f"{name}.json").write_text(json.dumps(payload))
 
@@ -159,8 +155,10 @@ def test_rerun_detection_routes_through_registry(tmp_path, monkeypatch):
 
     call = captured[0]
     assert call["algorithm_id"] == snap.algorithm_id
-    assert call["params"]["hsv"].h_min == 100 and call["params"]["hsv"].h_max == 110
-    assert call["params"]["shape_gate"].aspect_min == pytest.approx(0.99)
+    # rerun_detection now passes snapshot.params straight through (it's
+    # already a dict), no per-key marshalling.
+    assert call["params"]["hsv"]["h_min"] == 100 and call["params"]["hsv"]["h_max"] == 110
+    assert call["params"]["shape_gate"]["aspect_min"] == pytest.approx(0.99)
 
 
 def test_rerun_detection_stamps_snapshot_back(tmp_path, monkeypatch):
@@ -186,8 +184,8 @@ def test_rerun_detection_stamps_snapshot_back(tmp_path, monkeypatch):
 
     written = PitchPayload.model_validate_json(pitch_path.read_text())
     assert written.server_post_config_used is not None
-    assert written.server_post_config_used.hsv.h_min == 42
-    assert written.server_post_config_used.shape_gate.aspect_min == pytest.approx(0.55)
+    assert written.server_post_config_used.params["hsv"]["h_min"] == 42
+    assert written.server_post_config_used.params["shape_gate"]["aspect_min"] == pytest.approx(0.55)
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +225,8 @@ def test_resolve_default_uses_per_pitch_frozen_preset(tmp_path, monkeypatch):
     )
     assert snap is not None
     assert snap.preset_name == "blue_ball"
-    assert snap.hsv.h_min == 105  # disk values, not the pitch's frozen 99
-    assert snap.shape_gate.aspect_min == pytest.approx(0.7)
+    assert snap.params["hsv"]["h_min"] == 105  # disk values, not the pitch's frozen 99
+    assert snap.params["shape_gate"]["aspect_min"] == pytest.approx(0.7)
 
 
 def test_resolve_default_falls_through_to_live_preset_name(tmp_path, monkeypatch):
@@ -260,7 +258,7 @@ def test_resolve_default_falls_through_to_live_preset_name(tmp_path, monkeypatch
     )
     assert snap is not None
     assert snap.preset_name == "tennis"
-    assert snap.hsv.h_min == 25  # disk tennis, not the pitch's frozen 1
+    assert snap.params["hsv"]["h_min"] == 25  # disk tennis, not the pitch's frozen 1
 
 
 def test_resolve_default_skips_pitch_without_any_frozen_preset_name(
@@ -452,7 +450,7 @@ def test_resolve_default_server_post_with_null_preset_falls_through_to_live(
     )
     assert snap is not None
     assert snap.preset_name == "tennis"
-    assert snap.hsv.h_min == 25  # disk tennis values, not the 99/1 stamps
+    assert snap.params["hsv"]["h_min"] == 25  # disk tennis values, not the 99/1 stamps
 
 
 def test_resolve_force_preset_combines_with_algorithm_id_override(
@@ -480,7 +478,7 @@ def test_resolve_force_preset_combines_with_algorithm_id_override(
     )
     assert snap is not None
     assert snap.algorithm_id == "v11_hsv_cc"
-    assert snap.hsv.h_min == 25
+    assert snap.params["hsv"]["h_min"] == 25
     assert snap.preset_name == "tennis"
 
 
@@ -506,7 +504,7 @@ def test_resolve_algorithm_id_override_combines_with_default(tmp_path, monkeypat
     )
     assert snap is not None
     assert snap.algorithm_id == "v11_hsv_cc"
-    assert snap.hsv.h_min == 105
+    assert snap.params["hsv"]["h_min"] == 105
 
 
 # ---------------------------------------------------------------------------
@@ -651,14 +649,16 @@ def test_load_snapshot_from_file_strict_parse(tmp_path):
     good_path = tmp_path / "good.json"
     good_path.write_text(good.model_dump_json())
     loaded = R._load_snapshot_from_file(good_path)
-    assert loaded.hsv.h_min == 10
-    assert loaded.shape_gate.aspect_min == pytest.approx(0.7)
+    assert loaded.params["hsv"]["h_min"] == 10
+    assert loaded.params["shape_gate"]["aspect_min"] == pytest.approx(0.7)
 
     bad_path = tmp_path / "bad_algo.json"
     bad_path.write_text(json.dumps({
         "algorithm_id": "v999_not_registered",
-        "hsv": {"h_min": 0, "h_max": 1, "s_min": 0, "s_max": 1, "v_min": 0, "v_max": 1},
-        "shape_gate": {"aspect_min": 0.5, "fill_min": 0.5},
+        "params": {
+            "hsv": {"h_min": 0, "h_max": 1, "s_min": 0, "s_max": 1, "v_min": 0, "v_max": 1},
+            "shape_gate": {"aspect_min": 0.5, "fill_min": 0.5},
+        },
         "preset_name": None,
     }))
     with pytest.raises(SystemExit, match="v999_not_registered"):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 
+import algorithms
 from presets import Preset, hsv_as_dict
 
 
@@ -68,16 +69,23 @@ def _render_manage_modal(presets: list[Preset], active_preset: object) -> str:
     phase" stance over a UX-side readonly affordance.
     """
     if not presets:
-        rows = '<tr><td colspan="3" class="preset-empty">No presets — boot seed_builtins should have written tennis + blue_ball; check server log.</td></tr>'
+        rows = '<tr><td colspan="4" class="preset-empty">No presets — boot seed_builtins should have written tennis + blue_ball; check server log.</td></tr>'
     else:
         row_html = []
         for p in presets:
             current = "★ current" if p.name == active_preset else ""
+            # Algorithm column makes non-v11 presets (hybrid_28d, etc.)
+            # legible in the modal even though Use / Duplicate via this
+            # UI is v11-only. The Use button is rendered for non-v11
+            # too (server-side `/presets/active` still works), but
+            # Duplicate falls back to a clear "non-v11 not supported"
+            # status message in 15_hsv_controls.js.
             row_html.append(
                 '<tr>'
                 f'<td><code>{html.escape(p.name)}</code> '
                 f'<span class="preset-current-tag">{current}</span></td>'
                 f'<td>{html.escape(p.label)}</td>'
+                f'<td><code>{html.escape(p.algorithm_id)}</code></td>'
                 '<td class="preset-actions">'
                 f'<button type="button" class="btn small" data-preset-use="{html.escape(p.name)}">Use</button>'
                 f'<button type="button" class="btn small secondary" data-preset-duplicate="{html.escape(p.name)}">Duplicate</button>'
@@ -93,7 +101,7 @@ def _render_manage_modal(presets: list[Preset], active_preset: object) -> str:
         '<button type="button" class="btn small secondary" data-preset-modal-close>Close</button>'
         '</div>'
         '<table class="preset-table">'
-        '<thead><tr><th>Slug</th><th>Label</th><th>Actions</th></tr></thead>'
+        '<thead><tr><th>Slug</th><th>Label</th><th>Algorithm</th><th>Actions</th></tr></thead>'
         f'<tbody>{rows}</tbody>'
         '</table>'
         '<div class="preset-modal-status" data-preset-modal-status></div>'
@@ -202,6 +210,14 @@ def _render_hsv_body(
         )
 
     # Preset picker --------------------------------------------------
+    # The dashboard HSV section is v11_hsv_cc-only — its sliders edit
+    # `hsv` + `shape_gate`. Non-v11 presets exist on disk but are not
+    # editable from this UI; filter them out so a hybrid_28d preset
+    # doesn't render a broken button (its `.hsv` accessor raises).
+    # When a non-v11 algorithm grows its own dashboard surface, that
+    # surface will iterate `presets` filtered to its own algorithm_id.
+    v11_presets = [p for p in presets if p.algorithm_id == algorithms.V11_HSV_CC]
+
     def _preset_button(p: Preset) -> str:
         d = hsv_as_dict(p)
         active = " active" if p.name == preset_name and not modified_fields else ""
@@ -214,7 +230,7 @@ def _render_hsv_body(
             f'data-fill-min="{p.shape_gate.fill_min:.2f}">'
             f'{html.escape(p.label)}</button>'
         )
-    preset_buttons = "".join(_preset_button(p) for p in presets)
+    preset_buttons = "".join(_preset_button(p) for p in v11_presets)
 
     # Sub-section markup --------------------------------------------
     hsv_block = (

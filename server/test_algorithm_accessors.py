@@ -19,10 +19,8 @@ from schemas import (
     DetectionConfigSnapshotPayload,
     DetectionPath,
     FramePayload,
-    HSVRangePayload,
     IOS_CAPTURE_TIME_ALGORITHM_ID,
     PitchPayload,
-    ShapeGatePayload,
 )
 
 
@@ -38,8 +36,10 @@ def _frame(idx: int) -> FramePayload:
 def _snapshot(alg_id: str) -> DetectionConfigSnapshotPayload:
     return DetectionConfigSnapshotPayload(
         algorithm_id=alg_id,
-        hsv=HSVRangePayload(h_min=10, h_max=20, s_min=30, s_max=200, v_min=40, v_max=210),
-        shape_gate=ShapeGatePayload(aspect_min=0.7, fill_min=0.55),
+        params={
+            "hsv": {"h_min": 10, "h_max": 20, "s_min": 30, "s_max": 200, "v_min": 40, "v_max": 210},
+            "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+        },
         preset_name=None,
     )
 

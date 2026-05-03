@@ -1,4 +1,4 @@
-"""28d — Hybrid: PROD-first, V11+motion-novelty backstop.
+"""Hybrid: PROD-first, V11+motion-novelty backstop.
 
 PROD gives R_top1 = 0.615 because its tight HSV+shape gate has high
 precision but low recall (R_emit = 0.721). On 28% of GT frames, PROD
@@ -176,7 +176,7 @@ def main():
     for s in worst:
         print(f"  {s['slug']:<28} R_hyb={s['R_hybrid']:.3f}  R_prod={s['R_prod']:.3f}  "
               f"rescue {s['rescue_hit']}/{s['rescue_att']}")
-    out = OUT / "28d_hybrid.json"
+    out = OUT / "hybrid.json"
     out.write_text(json.dumps({
         "R_hybrid": R_hyb, "R_prod_baseline": R_prod,
         "delta_vs_prod": R_hyb - R_prod,

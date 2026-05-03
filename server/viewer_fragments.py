@@ -217,6 +217,24 @@ def detection_config_strip_html(
     )
 
 
+def _format_snapshot_params(algorithm_id: str, params: dict) -> str:
+    """Per-algorithm tooltip formatter. Mirrors the JS dispatch in
+    `60_events_render.js`. Both v11_hsv_cc and ios_capture_time use
+    the same `{hsv, shape_gate}` params shape. Unknown algorithms
+    return `alg:<id>` rather than crashing — stale snapshots from a
+    deprecated algorithm should still render legibly."""
+    if algorithm_id in ("v11_hsv_cc", "ios_capture_time"):
+        h = params["hsv"]
+        g = params["shape_gate"]
+        return (
+            f"H {h['h_min']}-{h['h_max']} · "
+            f"S {h['s_min']}-{h['s_max']} · "
+            f"V {h['v_min']}-{h['v_max']} · "
+            f"asp≥{g['aspect_min']:.2f} fill≥{g['fill_min']:.2f}"
+        )
+    return f"alg:{algorithm_id}"
+
+
 def _config_pill_html(
     label: str,
     snapshot: dict | None,
@@ -230,14 +248,12 @@ def _config_pill_html(
             f'</span>'
         )
 
-    hsv = snapshot["hsv"]
-    gate = snapshot["shape_gate"]
-    tip = (
-        f"H {hsv['h_min']}-{hsv['h_max']} · "
-        f"S {hsv['s_min']}-{hsv['s_max']} · "
-        f"V {hsv['v_min']}-{hsv['v_max']} · "
-        f"asp≥{gate['aspect_min']:.2f} fill≥{gate['fill_min']:.2f}"
-    )
+    # Per-algorithm tooltip. Snapshot wire shape:
+    # `{algorithm_id, params, preset_name}`. v11_hsv_cc + iOS live
+    # share the `{hsv, shape_gate}` params shape; unknown algorithms
+    # render `alg:<id>` (stale snapshot or future detector with no
+    # formatter yet).
+    tip = _format_snapshot_params(snapshot["algorithm_id"], snapshot["params"])
     preset_name = snapshot.get("preset_name")
     if preset_name is None:
         return (

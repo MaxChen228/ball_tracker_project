@@ -130,44 +130,71 @@ class ShapeGatePayload(BaseModel):
 
 
 class DetectionConfigSnapshotPayload(BaseModel):
-    """Per-path frozen snapshot of the detection config that produced
-    a path's frames. Wire mirror of `detection_config.DetectionConfig`
-    minus `last_applied_at` (snapshot is timestamped by the carrier —
-    `PitchPayload.created_at` for live, `PitchPayload.server_post_ran_at`
-    for server_post). `preset_name` matches `DetectionConfig.preset`
-    semantics: None = custom, non-None = identity claim that may be
-    surfaced as `(deleted)` if the on-disk preset is gone.
+    """Per-path frozen snapshot of the detection config that produced a
+    path's frames. The snapshot identifies the algorithm and carries an
+    opaque `params` dict whose shape is owned by that algorithm's
+    `Detector.params_schema` — v11_hsv_cc puts `{hsv, shape_gate}`
+    here, future detectors put whatever they need (e.g. hybrid_28d
+    will carry two HSV cubes + temporal hyperparams).
 
-    `extra="forbid"` because every field is required at the wire
-    boundary — `from_detection_config` is the only constructor."""
+    `preset_name` matches `DetectionConfig.preset` semantics: None =
+    custom, non-None = identity claim that may be surfaced as
+    `(deleted)` if the on-disk preset is gone. Snapshot is timestamped
+    by the carrier (`PitchPayload.created_at` for live,
+    `PitchPayload.server_post_ran_at` for server_post).
+
+    `extra="forbid"` because the surface fields are stable across
+    algorithms — only `params` is per-algorithm. Validation rounds-
+    trips `params` through the registered detector's `params_schema`
+    so wire loads catch shape mismatches at the boundary.
+
+    The two writers are `from_detection_config` (server-runtime, when
+    a v11 `DetectionConfig` is the source of truth) and direct
+    construction (reprocess CLI / arm-time stamping for any algorithm)."""
     model_config = ConfigDict(extra="forbid")
     algorithm_id: str
-    hsv: HSVRangePayload
-    shape_gate: ShapeGatePayload
+    params: dict[str, Any]
     preset_name: str | None
 
     @model_validator(mode="after")
-    def _validate_algorithm_id(self) -> "DetectionConfigSnapshotPayload":
+    def _validate_algorithm_id_and_params(self) -> "DetectionConfigSnapshotPayload":
         import algorithms
         algorithms.validate_id(self.algorithm_id)
+        # Non-runnable data sources (today only IOS_CAPTURE_TIME) have
+        # no Detector and therefore no params_schema to round-trip
+        # against. The iOS upload boundary already validates the
+        # capture-time params shape, so we only enforce shape here for
+        # runnable algorithm ids. Listed explicitly (no fallback if the
+        # id "happens to be missing from _REGISTRY") so that adding a
+        # new non-runnable id forces a deliberate change here.
+        if self.algorithm_id in algorithms.NON_RUNNABLE_IDS:
+            return self
+        entry = algorithms.get(self.algorithm_id)  # KeyError on typo
+        entry.detector.params_schema.model_validate(self.params)
         return self
 
     @classmethod
     def from_detection_config(cls, cfg) -> "DetectionConfigSnapshotPayload":
-        """Construct from a `detection_config.DetectionConfig`.
-        Imported lazily to avoid a schemas → detection_config →
-        detection cycle at module load."""
+        """Construct from a `detection_config.DetectionConfig`. Today
+        `DetectionConfig` is v11-shaped (`.hsv` + `.shape_gate` are
+        the only knobs the dashboard slider edits), so the params
+        encoding is v11-specific. When a non-v11 detector starts
+        being driven by `DetectionConfig` this constructor either
+        gains a dispatch table or `DetectionConfig` itself becomes
+        algorithm-agnostic — until then, this is the bridge."""
         return cls(
             algorithm_id=cfg.algorithm_id,
-            hsv=HSVRangePayload(
-                h_min=cfg.hsv.h_min, h_max=cfg.hsv.h_max,
-                s_min=cfg.hsv.s_min, s_max=cfg.hsv.s_max,
-                v_min=cfg.hsv.v_min, v_max=cfg.hsv.v_max,
-            ),
-            shape_gate=ShapeGatePayload(
-                aspect_min=cfg.shape_gate.aspect_min,
-                fill_min=cfg.shape_gate.fill_min,
-            ),
+            params={
+                "hsv": {
+                    "h_min": cfg.hsv.h_min, "h_max": cfg.hsv.h_max,
+                    "s_min": cfg.hsv.s_min, "s_max": cfg.hsv.s_max,
+                    "v_min": cfg.hsv.v_min, "v_max": cfg.hsv.v_max,
+                },
+                "shape_gate": {
+                    "aspect_min": cfg.shape_gate.aspect_min,
+                    "fill_min": cfg.shape_gate.fill_min,
+                },
+            },
             preset_name=cfg.preset,
         )
 

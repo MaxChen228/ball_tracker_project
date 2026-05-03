@@ -135,58 +135,58 @@ class ShapeGate:
         return cls(aspect_min=_MIN_ASPECT, fill_min=_MIN_FILL)
 
 
-def detect_ball_with_candidates(
+def _run_hsv_emit_pipeline(
     frame_bgr: np.ndarray,
     hsv_range: HSVRange,
+    shape_gate: ShapeGate,
     *,
-    shape_gate: ShapeGate | None = None,
-) -> tuple["BlobCandidate | None", "list[BlobCandidate]"]:
-    """HSV → CC → shape gate → shape-prior selector. Returns
-    `(winner_or_None, scored_blobs)` where `scored_blobs` is every
-    survivor with `aspect`, `fill`, `area_score`, and selector `cost`
-    stamped — same shape `live_pairing._resolve_candidates` produces,
-    so server_post can feed `FramePayload.candidates` directly into the
-    viewer's BLOBS overlay.
-
-    Empty / no-survivors → `(None, [])`. Both lists ride the same
-    decision: if any candidate exists, the lowest-cost one is the winner.
-    Selector is track-independent — no `prev_position` plumbing.
-    """
+    close_kernel: int | None,
+    area_min: int,
+) -> "list[BlobCandidate]":
+    """Shared HSV → (optional morph CLOSE) → CC → shape gate → cost-stamp
+    pipeline. Caller decides ranking / winner-select. `close_kernel=None`
+    skips morphology (PROD / v11_hsv_cc); a small odd int runs
+    `cv2.MORPH_CLOSE` with that elliptical kernel size (hybrid_28d V11
+    fallback). `area_min` is per-pool: v11_hsv_cc and hybrid_28d's PROD
+    pool use 20 (ball-sized only), hybrid_28d's V11 pool uses 3 (rescue
+    micro-blobs whose persistence rerank can still distinguish them from
+    clutter — see `algorithms/hybrid_28d.py:Hybrid28dParams`)."""
     from candidate_selector import Candidate, score_candidates
     from schemas import BlobCandidate
 
     if frame_bgr is None or frame_bgr.size == 0:
-        return None, []
-    min_area, max_area = _MIN_AREA_PX, _MAX_AREA_PX
-    gate = shape_gate if shape_gate is not None else ShapeGate.default()
+        return []
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, hsv_range.lo(), hsv_range.hi())
+    if close_kernel is not None:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (close_kernel, close_kernel),
+        )
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-    # Connected components with stats (label 0 is the background).
     num_labels, _labels, stats, centroids = cv2.connectedComponentsWithStats(
-        mask, connectivity=8
+        mask, connectivity=8,
     )
     if num_labels <= 1:
-        return None, []
+        return []
 
     # survivors and shape_stats append in lockstep within the same loop
-    # iteration — order is locked. The downstream `scored` comprehension
-    # iterates `survivors` in order, and the final zip relies on that.
+    # iteration — order is locked. The downstream zip relies on that.
     survivors: list[Candidate] = []
     shape_stats: list[tuple[float, float]] = []
     for idx in range(1, num_labels):
         area = int(stats[idx, cv2.CC_STAT_AREA])
-        if area < min_area or area > max_area:
+        if area < area_min or area > _MAX_AREA_PX:
             continue
         w = int(stats[idx, cv2.CC_STAT_WIDTH])
         h = int(stats[idx, cv2.CC_STAT_HEIGHT])
         if w <= 0 or h <= 0:
             continue
         aspect = min(w, h) / max(w, h)
-        if aspect < gate.aspect_min:
+        if aspect < shape_gate.aspect_min:
             continue
         fill = area / (w * h)
-        if fill < gate.fill_min:
+        if fill < shape_gate.fill_min:
             continue
         cx, cy = centroids[idx]
         survivors.append(
@@ -196,10 +196,10 @@ def detect_ball_with_candidates(
         shape_stats.append((aspect, fill))
 
     if not survivors:
-        return None, []
+        return []
     max_area_batch = max(c.area for c in survivors)
     costs = score_candidates(survivors)
-    blobs = [
+    return [
         BlobCandidate(
             px=c.cx, py=c.cy, area=c.area,
             area_score=c.area / max_area_batch if max_area_batch > 0 else 0.0,
@@ -208,7 +208,30 @@ def detect_ball_with_candidates(
         )
         for c, (asp, fl), cost in zip(survivors, shape_stats, costs)
     ]
-    winner_idx = min(range(len(costs)), key=lambda i: costs[i])
+
+
+def detect_ball_with_candidates(
+    frame_bgr: np.ndarray,
+    hsv_range: HSVRange,
+    *,
+    shape_gate: ShapeGate | None = None,
+) -> tuple["BlobCandidate | None", "list[BlobCandidate]"]:
+    """v11_hsv_cc per-frame entry. Returns `(winner_or_None,
+    scored_blobs)` — `scored_blobs` carries `aspect`, `fill`,
+    `area_score`, and selector `cost` stamped, same shape
+    `live_pairing._resolve_candidates` produces so server_post can feed
+    `FramePayload.candidates` directly into the viewer's BLOBS overlay.
+
+    Winner is the lowest-cost survivor. Empty / no-survivors → `(None,
+    [])`. Selector is track-independent — no `prev_position` plumbing."""
+    gate = shape_gate if shape_gate is not None else ShapeGate.default()
+    blobs = _run_hsv_emit_pipeline(
+        frame_bgr, hsv_range, gate,
+        close_kernel=None, area_min=_MIN_AREA_PX,
+    )
+    if not blobs:
+        return None, []
+    winner_idx = min(range(len(blobs)), key=lambda i: blobs[i].cost)
     return blobs[winner_idx], blobs
 
 

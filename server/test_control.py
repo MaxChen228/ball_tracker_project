@@ -803,23 +803,17 @@ def test_cancel_and_resume_processing_summary(tmp_path):
 
 
 def test_record_preserves_frozen_used_configs_on_later_partial_merge(tmp_path):
-    from schemas import (
-        DetectionConfigSnapshotPayload,
-        HSVRangePayload,
-        ShapeGatePayload,
-    )
+    from schemas import DetectionConfigSnapshotPayload
 
     s = main.State(data_dir=tmp_path)
     session_id = sid(71)
 
     snapshot = DetectionConfigSnapshotPayload(
         algorithm_id="v11_hsv_cc",
-        hsv=HSVRangePayload(
-            h_min=10, h_max=20,
-            s_min=30, s_max=200,
-            v_min=40, v_max=210,
-        ),
-        shape_gate=ShapeGatePayload(aspect_min=0.7, fill_min=0.55),
+        params={
+            "hsv": {"h_min": 10, "h_max": 20, "s_min": 30, "s_max": 200, "v_min": 40, "v_max": 210},
+            "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+        },
         preset_name="live_cfg",
     )
     first = _minimal_pitch("A", session_id=session_id).model_copy(deep=True)
@@ -850,8 +844,8 @@ def test_record_preserves_frozen_used_configs_on_later_partial_merge(tmp_path):
 
     stored = s.pitches[("A", session_id)]
     assert stored.live_config_used is not None
-    assert stored.live_config_used.hsv.h_min == 10
-    assert stored.live_config_used.shape_gate.aspect_min == pytest.approx(0.7)
+    assert stored.live_config_used.params["hsv"]["h_min"] == 10
+    assert stored.live_config_used.params["shape_gate"]["aspect_min"] == pytest.approx(0.7)
     assert stored.live_config_used.preset_name == "live_cfg"
     assert stored.server_post_config_used is not None
     assert stored.server_post_config_used.preset_name == "live_cfg"

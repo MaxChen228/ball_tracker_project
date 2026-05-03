@@ -220,14 +220,25 @@
         return;
       }
       const srcBody = await src.json();
+      // Server response is canonical `{algorithm_id, name, label,
+      // params}`. POST body for the dashboard's v11 slider workflow
+      // is still flat-shaped (`{name, label, hsv, shape_gate}`) — the
+      // /presets handler unpacks it via `Preset.for_v11`. Duplicate
+      // is v11-only today (the dashboard only ever lists / edits v11
+      // presets); a non-v11 duplicate UI is a separate concern.
+      if (srcBody.algorithm_id !== 'v11_hsv_cc') {
+        _setModalStatus(modal,
+          `cannot duplicate non-v11 preset (${srcBody.algorithm_id}) from this UI`);
+        return;
+      }
       const r = await fetch('/presets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: newName,
           label: newName,
-          hsv: srcBody.hsv,
-          shape_gate: srcBody.shape_gate,
+          hsv: srcBody.params.hsv,
+          shape_gate: srcBody.params.shape_gate,
         }),
       });
       if (!r.ok) {

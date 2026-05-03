@@ -197,9 +197,7 @@ def test_segmenter_filters_input_by_per_algorithm_cost_threshold(monkeypatch):
     from schemas import (
         DetectionConfigSnapshotPayload,
         DetectionPath,
-        HSVRangePayload,
         SessionResult,
-        ShapeGatePayload,
         TriangulatedPoint,
     )
 
@@ -236,8 +234,10 @@ def test_segmenter_filters_input_by_per_algorithm_cost_threshold(monkeypatch):
 
     snap = DetectionConfigSnapshotPayload(
         algorithm_id="v99_tight",
-        hsv=HSVRangePayload(h_min=10, h_max=20, s_min=30, s_max=200, v_min=40, v_max=210),
-        shape_gate=ShapeGatePayload(aspect_min=0.7, fill_min=0.55),
+        params={
+            "hsv": {"h_min": 10, "h_max": 20, "s_min": 30, "s_max": 200, "v_min": 40, "v_max": 210},
+            "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+        },
         preset_name=None,
     )
     result = SessionResult(

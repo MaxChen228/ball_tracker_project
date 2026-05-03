@@ -9,12 +9,11 @@ from render_dashboard_session import _render_hsv_body
 def _preset(name: str = "tennis") -> Preset:
     from detection import HSVRange, ShapeGate
 
-    return Preset(
+    return Preset.for_v11(
         name=name,
         label="Tennis",
         hsv=HSVRange(h_min=25, h_max=55, s_min=90, s_max=255, v_min=90, v_max=255),
         shape_gate=ShapeGate(aspect_min=0.70, fill_min=0.55),
-        algorithm_id="hsv_cc_shape_v1",
     )
 
 

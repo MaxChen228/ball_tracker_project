@@ -1,4 +1,4 @@
-"""27c — R_top1 / R_topK using production shape-cost ranking.
+"""R_top1 / R_topK using production shape-cost ranking.
 
 Hypothesis: research SOTA's R=0.97-0.99 is spray-and-pray. If we rank
 each frame's candidates by the actual production cost (shape-prior:
@@ -7,7 +7,7 @@ as hits, the gap between R_emit (any) and R_top1 (winner) measures the
 spray bonus. A "real" algorithm has R_top1 ≈ R_emit; a spray algorithm
 has R_top1 ≪ R_emit.
 
-Algorithms scored (mirrors 27_cand_count_hist):
+Algorithms scored (mirrors cand_count_hist):
   PROD    production tight HSV+gate
   V11     research baseline loose gate
   V11∪D1  V11 + |Y[t]-Y[t-1]| diff stream union (extreme spray reference)
@@ -16,8 +16,8 @@ For each algo, emit candidates with full {cx, cy, area, aspect, fill},
 sort by score_candidates(), compute hit @ top-K for K ∈ {1, 3, 5, 10, ∞}.
 
 Output:
-  outputs/27c_R_topK.json
-  outputs/_figures/27c_R_topK.png  bar chart per algo per K + spray gap
+  outputs/R_topK_baseline.json
+  outputs/_figures/R_topK_baseline.png  bar chart per algo per K + spray gap
 """
 from __future__ import annotations
 import json
@@ -261,12 +261,12 @@ def main():
               f"{s['spray_gap']:>7.3f}  "
               f"{s['truth_rank_median']:>7}{s['truth_rank_p95']:>7}{s['truth_rank_max']:>7}  "
               f"{s['mean_n_emit']:>8.1f}")
-    out_json = OUT / "27c_R_topK.json"
+    out_json = OUT / "R_topK_baseline.json"
     out_json.write_text(json.dumps({"summary": summary,
                                     "raw_emit": {a: results[a]["emit"] for a in results},
                                     "raw_rank_truth": {a: results[a]["rank_truth"] for a in results}},
                                     indent=2))
-    out_png = FIG_DIR / "27c_R_topK.png"
+    out_png = FIG_DIR / "R_topK_baseline.png"
     plot(summary, out_png)
     print(f"\n[saved] {out_json}")
     print(f"[saved] {out_png}")

@@ -203,13 +203,21 @@ def test_all_builtin_presets_have_safe_hue_width():
     seeds = presets_mod._BUILTIN_SEEDS
     assert seeds, "no builtin presets — registry empty?"
     failures: list[str] = []
+    # Walk every dict inside `params` looking for HSV-shaped entries
+    # (`h_min` + `h_max` keys). Algorithm-agnostic — works for v11's
+    # single `hsv` cube and for hybrid_28d's `prod_hsv` + `v11_hsv`.
+    # Any future detector with multiple HSV bands gets checked
+    # automatically; an HSV-free detector contributes nothing.
     for name, preset in seeds.items():
-        width = preset.hsv.h_max - preset.hsv.h_min
-        if width < _MIN_SAFE_HUE_WIDTH_OPENCV_UNITS:
-            failures.append(
-                f"  - {name}: h[{preset.hsv.h_min},{preset.hsv.h_max}] "
-                f"width={width} < floor={_MIN_SAFE_HUE_WIDTH_OPENCV_UNITS}"
-            )
+        for hsv_key, band in preset.params.items():
+            if not (isinstance(band, dict) and "h_min" in band and "h_max" in band):
+                continue
+            width = band["h_max"] - band["h_min"]
+            if width < _MIN_SAFE_HUE_WIDTH_OPENCV_UNITS:
+                failures.append(
+                    f"  - {name}/{hsv_key}: h[{band['h_min']},{band['h_max']}] "
+                    f"width={width} < floor={_MIN_SAFE_HUE_WIDTH_OPENCV_UNITS}"
+                )
     if failures:
         msg = "preset(s) below safe hue-width floor:\n" + "\n".join(failures)
         msg += (

@@ -61,9 +61,9 @@ def test_arm_then_slider_drag_then_ingest_freezes_arm_time_hsv(tmp_path):
     frozen = s.live_session_frozen_config(session.id)
     assert frozen is not None, "first ingest must have stamped"
     hsv_frozen = HSVRange(
-        h_min=frozen.hsv.h_min, h_max=frozen.hsv.h_max,
-        s_min=frozen.hsv.s_min, s_max=frozen.hsv.s_max,
-        v_min=frozen.hsv.v_min, v_max=frozen.hsv.v_max,
+        h_min=frozen.params["hsv"]["h_min"], h_max=frozen.params["hsv"]["h_max"],
+        s_min=frozen.params["hsv"]["s_min"], s_max=frozen.params["hsv"]["s_max"],
+        v_min=frozen.params["hsv"]["v_min"], v_max=frozen.params["hsv"]["v_max"],
     )
     assert hsv_frozen == hsv_x, (
         f"frozen hsv should be arm-time X, got {hsv_frozen}; "
@@ -76,7 +76,7 @@ def test_arm_then_slider_drag_then_ingest_freezes_arm_time_hsv(tmp_path):
     s.ingest_live_frame("A", session.id, _make_frame(2))
     frozen2 = s.live_session_frozen_config(session.id)
     assert frozen2 is not None
-    assert (frozen2.hsv.h_min, frozen2.hsv.h_max) == (hsv_x.h_min, hsv_x.h_max), \
+    assert (frozen2.params["hsv"]["h_min"], frozen2.params["hsv"]["h_max"]) == (hsv_x.h_min, hsv_x.h_max), \
         "stamp must be idempotent — never re-stamped"
 
 
@@ -96,8 +96,8 @@ def test_arm_then_slider_drag_then_ingest_freezes_arm_time_shape_gate(tmp_path):
     assert frozen is not None
     from detection import ShapeGate
     gate_frozen = ShapeGate(
-        aspect_min=frozen.shape_gate.aspect_min,
-        fill_min=frozen.shape_gate.fill_min,
+        aspect_min=frozen.params["shape_gate"]["aspect_min"],
+        fill_min=frozen.params["shape_gate"]["fill_min"],
     )
     assert gate_frozen == gate_x
 
@@ -152,9 +152,9 @@ def test_arm_alone_stamps_without_waiting_for_ingest(tmp_path):
     frozen = s.live_session_frozen_config(session.id)
     assert frozen is not None, "arm_session must stamp synchronously"
     hsv_frozen = HSVRange(
-        h_min=frozen.hsv.h_min, h_max=frozen.hsv.h_max,
-        s_min=frozen.hsv.s_min, s_max=frozen.hsv.s_max,
-        v_min=frozen.hsv.v_min, v_max=frozen.hsv.v_max,
+        h_min=frozen.params["hsv"]["h_min"], h_max=frozen.params["hsv"]["h_max"],
+        s_min=frozen.params["hsv"]["s_min"], s_max=frozen.params["hsv"]["s_max"],
+        v_min=frozen.params["hsv"]["v_min"], v_max=frozen.params["hsv"]["v_max"],
     )
     assert hsv_frozen == hsv_x
 

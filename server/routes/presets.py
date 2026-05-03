@@ -27,19 +27,16 @@ router = APIRouter()
 
 
 def _preset_to_wire(p: Preset) -> dict[str, Any]:
+    """Wire shape: canonical `{algorithm_id, name, label, params}`.
+    `params` is opaque per-algorithm — frontend reads
+    `params.hsv.h_min` etc when `algorithm_id == "v11_hsv_cc"`. No
+    legacy v11 flat-key surface (CLAUDE.md no-backcompat: clients are
+    in-tree and updated in lockstep)."""
     return {
         "algorithm_id": p.algorithm_id,
         "name": p.name,
         "label": p.label,
-        "hsv": {
-            "h_min": p.hsv.h_min, "h_max": p.hsv.h_max,
-            "s_min": p.hsv.s_min, "s_max": p.hsv.s_max,
-            "v_min": p.hsv.v_min, "v_max": p.hsv.v_max,
-        },
-        "shape_gate": {
-            "aspect_min": p.shape_gate.aspect_min,
-            "fill_min": p.shape_gate.fill_min,
-        },
+        "params": p.params,
     }
 
 
@@ -132,7 +129,13 @@ def _read_preset_body(body: object, *, name_from_url: str | None) -> Preset:
     if not isinstance(sg_raw, dict):
         raise HTTPException(status_code=400, detail="missing or invalid 'shape_gate'")
 
-    return Preset(
+    # POST body is v11-shaped (`hsv` + `shape_gate` flat) because the
+    # dashboard slider that sends it is v11-only. The constructed
+    # Preset goes through canonical `params` storage via
+    # `Preset.for_v11`. Future non-v11 algorithms will get their own
+    # "save as preset" UI / endpoint when they ship — this route stays
+    # a v11-specific entry point until then.
+    return Preset.for_v11(
         name=name,
         label=label,
         hsv=_validated_hsv(hsv_raw),

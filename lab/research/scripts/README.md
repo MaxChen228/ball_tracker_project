@@ -12,17 +12,18 @@
 
 ## metric 重新框架（為什麼要丟 R_emit、改用 R_top1）
 
-- `27_cand_count_hist.py` — per-frame n_cand 分布；PROD/V11/V11+D1 三條線疊圖
-- `27c_R_topK.py` — production shape-cost ranker 下的 R@K；V11+D1 R_emit=0.974 / R_top1=0.008，spray bonus 量化
+- `cand_count_hist.py` — per-frame n_cand 分布；PROD/V11/V11+D1 三條線疊圖
+- `R_topK_baseline.py` — production shape-cost ranker 下的 R@K；V11+D1 R_emit=0.974 / R_top1=0.008，spray bonus 量化
 
 ## 偵測勝出方法
 
-- `28d_hybrid.py` — **R_top1 = 0.660 vs PROD 0.615**。
+- `hybrid.py` — **R_top1 = 0.660 vs PROD 0.615**。
   PROD 有 emit → PROD shape cost 排序；PROD 空 → V11 + neighbor-persistence-asc 救援（球會動，distractor 不會）。
   兩個 hyperparam 都從物理推：`NEIGH_HALF=6` (50ms@240fps)、`MATCH_PX=5` (CC centroid 雜訊)。
 
 ## 反規則
 
 - 不寫「per-session 微調 thresh / kernel / dedup_px」的腳本——過擬合
-- 不再走「emit 越多越好 + union 越多越好」這條死路（27b 圖裡每個點都是教訓）
+- 不走「emit 越多越好 + union 越多越好」這條死路
+- 死實驗 `git rm`，不留編號占位
 - outputs/ gitignored，自己看著辦
