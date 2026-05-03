@@ -18,7 +18,7 @@ from algorithms.base import Detector
 from algorithms.hybrid_28d import (
     Hybrid28dDetector,
     Hybrid28dParams,
-    _emit_candidates,
+    _emit,
     _persistence,
 )
 from schemas import BlobCandidate, HSVRangePayload, ShapeGatePayload
@@ -121,10 +121,10 @@ def _bgr_with_blob(cx: int, cy: int, *, hsv_h: int, hsv_s: int = 200, hsv_v: int
     return img
 
 
-def test_emit_candidates_passes_prod_for_in_band_blob():
+def test_emit_passes_prod_for_in_band_blob():
     """Sanity: a clean in-band blue blob passes PROD's tight gate."""
     bgr = _bgr_with_blob(160, 120, hsv_h=108, hsv_s=200, hsv_v=180)
-    cands = _emit_candidates(
+    cands = _emit(
         bgr,
         HSVRangePayload(h_min=105, h_max=112, s_min=140, s_max=255, v_min=40, v_max=255),
         ShapeGatePayload(aspect_min=0.75, fill_min=0.55),
@@ -136,11 +136,11 @@ def test_emit_candidates_passes_prod_for_in_band_blob():
     assert abs(cands[0].py - 120) < 2
 
 
-def test_emit_candidates_rejects_out_of_band_blob_under_prod():
+def test_emit_rejects_out_of_band_blob_under_prod():
     """A blob whose hue is just outside PROD's tight band fails — but
     would survive V11's looser band. Drives the rescue path."""
     bgr = _bgr_with_blob(160, 120, hsv_h=115, hsv_s=200, hsv_v=180)
-    prod = _emit_candidates(
+    prod = _emit(
         bgr,
         HSVRangePayload(h_min=105, h_max=112, s_min=140, s_max=255, v_min=40, v_max=255),
         ShapeGatePayload(aspect_min=0.75, fill_min=0.55),
@@ -148,7 +148,7 @@ def test_emit_candidates_rejects_out_of_band_blob_under_prod():
         area_min=20,
     )
     assert prod == []
-    v11 = _emit_candidates(
+    v11 = _emit(
         bgr,
         HSVRangePayload(h_min=103, h_max=118, s_min=120, s_max=255, v_min=30, v_max=255),
         ShapeGatePayload(aspect_min=0.40, fill_min=0.35),
@@ -302,7 +302,7 @@ def test_v11_area_floor_below_prod_recovers_micro_blobs():
     # Tiny edge-of-band blob ~ π * 1.5² ≈ 7 px. Below PROD floor (20),
     # above V11 floor (3).
     bgr = _bgr_with_blob(160, 120, hsv_h=115, radius=1)
-    prod = _emit_candidates(
+    prod = _emit(
         bgr,
         HSVRangePayload(h_min=105, h_max=112, s_min=140, s_max=255, v_min=40, v_max=255),
         ShapeGatePayload(aspect_min=0.75, fill_min=0.55),
@@ -310,7 +310,7 @@ def test_v11_area_floor_below_prod_recovers_micro_blobs():
         area_min=20,
     )
     assert prod == [], "PROD's 20-px floor + tight HSV must reject micro-blob"
-    v11 = _emit_candidates(
+    v11 = _emit(
         bgr,
         HSVRangePayload(h_min=103, h_max=118, s_min=120, s_max=255, v_min=30, v_max=255),
         ShapeGatePayload(aspect_min=0.40, fill_min=0.35),
@@ -319,7 +319,7 @@ def test_v11_area_floor_below_prod_recovers_micro_blobs():
     )
     assert len(v11) == 1, "V11's 3-px floor must emit the micro-blob"
     # Regression guard: same blob, V11 with PROD's 20-px floor → dies.
-    v11_with_prod_floor = _emit_candidates(
+    v11_with_prod_floor = _emit(
         bgr,
         HSVRangePayload(h_min=103, h_max=118, s_min=120, s_max=255, v_min=30, v_max=255),
         ShapeGatePayload(aspect_min=0.40, fill_min=0.35),

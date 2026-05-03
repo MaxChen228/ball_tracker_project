@@ -29,8 +29,6 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import cv2
-import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
 from algorithms.base import (
@@ -39,16 +37,14 @@ from algorithms.base import (
     FrameIteratorFactory,
     ProgressCallback,
 )
+from detection import HSVRange, ShapeGate, _run_hsv_emit_pipeline
 from schemas import BlobCandidate, FramePayload, HSVRangePayload, ShapeGatePayload
 
 if TYPE_CHECKING:
-    pass
+    import numpy as np
 
 
 logger = logging.getLogger(__name__)
-
-
-_MAX_AREA_PX = 150_000
 
 
 class Hybrid28dParams(BaseModel):
@@ -85,81 +81,29 @@ class Hybrid28dParams(BaseModel):
     match_px: float = Field(default=5.0, ge=0.5, le=50.0)
 
 
-def _emit_candidates(
-    bgr: np.ndarray,
+def _emit(
+    bgr: "np.ndarray",
     hsv: HSVRangePayload,
     shape: ShapeGatePayload,
     *,
     close_kernel: int | None,
     area_min: int,
 ) -> list[BlobCandidate]:
-    """Single-pass HSV + (optional) morphology CLOSE + connected-
-    components + shape gate + cost-stamping. Returns every survivor
-    with `cost` populated — caller decides which subset / ordering to
-    emit. `close_kernel=None` skips morphology (PROD); a small odd int
-    runs `cv2.MORPH_CLOSE` with an elliptical kernel of that size (V11
-    loose). `area_min` is the per-pool floor: PROD uses 20 (ball-sized
-    only, high precision), V11 uses 3 (rescue micro-blobs that the
-    persistence rerank can still distinguish from clutter — see
-    Hybrid28dParams docstring for the precision/recall rationale).
-
-    Mirror of `detection.detect_ball_with_candidates` but stripped of
-    the winner-select responsibility — Hybrid28dDetector does its own
-    cross-pool ranking."""
-    from candidate_selector import Candidate, score_candidates
-
-    if bgr is None or bgr.size == 0:
-        return []
-    hsv_image = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    lo = np.array([hsv.h_min, hsv.s_min, hsv.v_min], dtype=np.uint8)
-    hi = np.array([hsv.h_max, hsv.s_max, hsv.v_max], dtype=np.uint8)
-    mask = cv2.inRange(hsv_image, lo, hi)
-    if close_kernel is not None:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (close_kernel, close_kernel),
-        )
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-    n, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    if n <= 1:
-        return []
-
-    survivors: list[Candidate] = []
-    shape_stats: list[tuple[float, float]] = []
-    for idx in range(1, n):
-        area = int(stats[idx, cv2.CC_STAT_AREA])
-        if area < area_min or area > _MAX_AREA_PX:
-            continue
-        w = int(stats[idx, cv2.CC_STAT_WIDTH])
-        h = int(stats[idx, cv2.CC_STAT_HEIGHT])
-        if w <= 0 or h <= 0:
-            continue
-        aspect = min(w, h) / max(w, h)
-        if aspect < shape.aspect_min:
-            continue
-        fill = area / (w * h)
-        if fill < shape.fill_min:
-            continue
-        cx, cy = centroids[idx]
-        survivors.append(Candidate(
-            cx=float(cx), cy=float(cy), area=area,
-            aspect=aspect, fill=fill,
-        ))
-        shape_stats.append((aspect, fill))
-
-    if not survivors:
-        return []
-    max_area_batch = max(c.area for c in survivors)
-    costs = score_candidates(survivors)
-    return [
-        BlobCandidate(
-            px=c.cx, py=c.cy, area=c.area,
-            area_score=c.area / max_area_batch if max_area_batch > 0 else 0.0,
-            aspect=float(asp), fill=float(fl),
-            cost=float(cost),
-        )
-        for c, (asp, fl), cost in zip(survivors, shape_stats, costs)
-    ]
+    """Adapter: convert wire schemas to detection-module dataclasses,
+    delegate to `detection._run_hsv_emit_pipeline`. Hybrid28dDetector
+    runs this twice per frame (PROD pool + V11 pool) with different
+    HSV / shape / morphology / area_min settings."""
+    return _run_hsv_emit_pipeline(
+        bgr,
+        HSVRange(
+            h_min=hsv.h_min, h_max=hsv.h_max,
+            s_min=hsv.s_min, s_max=hsv.s_max,
+            v_min=hsv.v_min, v_max=hsv.v_max,
+        ),
+        ShapeGate(aspect_min=shape.aspect_min, fill_min=shape.fill_min),
+        close_kernel=close_kernel,
+        area_min=area_min,
+    )
 
 
 def _persistence(
@@ -229,12 +173,12 @@ class Hybrid28dDetector(Detector):
             if progress is not None:
                 progress(idx)
             timestamps.append(absolute_pts_s)
-            prod_per_frame.append(_emit_candidates(
+            prod_per_frame.append(_emit(
                 bgr, params.prod_hsv, params.prod_shape,
                 close_kernel=None,
                 area_min=params.prod_area_min,
             ))
-            v11_per_frame.append(_emit_candidates(
+            v11_per_frame.append(_emit(
                 bgr, params.v11_hsv, params.v11_shape,
                 close_kernel=params.v11_close_kernel,
                 area_min=params.v11_area_min,
@@ -252,16 +196,16 @@ class Hybrid28dDetector(Detector):
             if prod_blobs:
                 # PROD path — already cost-stamped; sort ASC so the
                 # cheapest blob is `candidates[0]` for downstream.
-                # `_emit_candidates` always sets `cost`; assert so a
+                # `_emit` always sets `cost`; assert so a
                 # future refactor that breaks the invariant fails
                 # loudly here instead of silently re-ranking with 0.
                 for b in prod_blobs:
-                    assert b.cost is not None, "_emit_candidates must stamp cost"
+                    assert b.cost is not None, "_emit must stamp cost"
                 chosen = sorted(prod_blobs, key=lambda b: b.cost)
             elif v11_blobs:
                 rescue_attempted += 1
                 for b in v11_blobs:
-                    assert b.cost is not None, "_emit_candidates must stamp cost"
+                    assert b.cost is not None, "_emit must stamp cost"
                 # V11 fallback path. Build neighbor cand lists in
                 # ±neigh_half window (skipping idx itself), then sort
                 # by (persistence ASC, shape cost ASC).
