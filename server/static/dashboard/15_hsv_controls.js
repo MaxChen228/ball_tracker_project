@@ -9,13 +9,20 @@
 //
 // Path summary (post-redesign):
 //   - Slider drag           → local <input> updates only, form marked dirty
-//   - Apply                 → POST /presets {name, label, hsv, shape_gate}
-//                             (server saves + switches active; 409 on
-//                              duplicate name → operator picks again)
+//   - Apply                 → POST /presets {name, label, algorithm_id,
+//                             params: {hsv, shape_gate}}
+//                             (server saves + switches active for v11;
+//                              409 on duplicate name → operator picks again)
 //   - Click preset button   → POST /presets/active {name}  (pure switch)
 //   - Manage modal Use      → POST /presets/active {name}
 //   - Manage modal Duplicate→ POST /presets {…} on the source's values
 //   - Manage modal Delete   → DELETE /presets/{name} (409 if active)
+//
+// Preset POST body shape (post-PR-#114): canonical
+// `{name, label, algorithm_id, params}`. The dashboard slider currently
+// only edits v11_hsv_cc params (`{hsv, shape_gate}`); phase-4 will
+// generate the form widget set from `GET /algorithms` and let the body
+// carry any registered algorithm's params shape.
 
   function _syncHSVField(form, key, value) {
     const range = form.querySelector(`[data-hsv-range="${key}"]`);
@@ -153,8 +160,12 @@
     const body = {
       name: name,
       label: name,
-      hsv: _readHSV(form),
-      shape_gate: _readShape(form),
+      // Dashboard slider edits v11_hsv_cc params only — phase-4 will
+      // dispatch on the active algorithm. POST body shape is canonical
+      // `{name, label, algorithm_id, params}`; the v11 params dict
+      // happens to be `{hsv, shape_gate}`.
+      algorithm_id: 'v11_hsv_cc',
+      params: { hsv: _readHSV(form), shape_gate: _readShape(form) },
     };
     if (status) status.textContent = '…';
     try {
@@ -220,25 +231,22 @@
         return;
       }
       const srcBody = await src.json();
-      // Server response is canonical `{algorithm_id, name, label,
-      // params}`. POST body for the dashboard's v11 slider workflow
-      // is still flat-shaped (`{name, label, hsv, shape_gate}`) — the
-      // /presets handler unpacks it via `Preset.for_v11`. Duplicate
-      // is v11-only today (the dashboard only ever lists / edits v11
-      // presets); a non-v11 duplicate UI is a separate concern.
-      if (srcBody.algorithm_id !== 'v11_hsv_cc') {
-        _setModalStatus(modal,
-          `cannot duplicate non-v11 preset (${srcBody.algorithm_id}) from this UI`);
-        return;
-      }
+      // Server response and POST body are both canonical
+      // `{algorithm_id, name, label, params}`. Duplicate ships the
+      // source's `algorithm_id` + `params` verbatim under the new name
+      // — works for any registered algorithm (v11_hsv_cc and
+      // hybrid_28d today). The "Apply" path on the dashboard is still
+      // v11-only because the slider widgets are; that constraint will
+      // lift in phase 4 when the form generator dispatches on
+      // `GET /algorithms`.
       const r = await fetch('/presets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: newName,
           label: newName,
-          hsv: srcBody.params.hsv,
-          shape_gate: srcBody.params.shape_gate,
+          algorithm_id: srcBody.algorithm_id,
+          params: srcBody.params,
         }),
       });
       if (!r.ok) {

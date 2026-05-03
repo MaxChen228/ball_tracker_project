@@ -158,8 +158,24 @@ def test_get_unknown_preset_returns_404(tmp_path, monkeypatch):
 _BODY_VALID = {
     "name": "indoor_overcast",
     "label": "Indoor / overcast",
-    "hsv": {"h_min": 100, "h_max": 130, "s_min": 80, "s_max": 255, "v_min": 60, "v_max": 255},
-    "shape_gate": {"aspect_min": 0.7, "fill_min": 0.5},
+    "algorithm_id": "v11_hsv_cc",
+    "params": {
+        "hsv": {"h_min": 100, "h_max": 130, "s_min": 80, "s_max": 255, "v_min": 60, "v_max": 255},
+        "shape_gate": {"aspect_min": 0.7, "fill_min": 0.5},
+    },
+}
+
+
+_BODY_VALID_HYBRID = {
+    "name": "hybrid_indoor",
+    "label": "Hybrid indoor",
+    "algorithm_id": "hybrid_28d",
+    "params": {
+        "prod_hsv": {"h_min": 105, "h_max": 112, "s_min": 140, "s_max": 255, "v_min": 40, "v_max": 255},
+        "prod_shape": {"aspect_min": 0.75, "fill_min": 0.55},
+        "v11_hsv": {"h_min": 103, "h_max": 118, "s_min": 120, "s_max": 255, "v_min": 30, "v_max": 255},
+        "v11_shape": {"aspect_min": 0.40, "fill_min": 0.35},
+    },
 }
 
 
@@ -177,13 +193,12 @@ def test_create_preset_persists_to_disk(tmp_path, monkeypatch):
 
 
 def test_create_preset_round_trip_canonical_shape(tmp_path, monkeypatch):
-    """`POST /presets` accepts the dashboard's v11-flat body, but the
-    storage + read-back surface is canonical. Round-tripping through
-    `GET /presets/{new_name}` must return `{algorithm_id, name, label,
-    params}` with values matching the POST body — no flat keys leaking
-    through. Pairs with `test_list_presets_wire_shape_is_canonical` to
-    pin every public read path of preset records."""
-    import algorithms
+    """`POST /presets` body and storage are both canonical
+    `{name, label, algorithm_id, params}`. Round-tripping through
+    `GET /presets/{new_name}` must return the same shape with values
+    matching the POST body — no legacy flat-key surface leaks through.
+    Pairs with `test_list_presets_wire_shape_is_canonical` to pin
+    every public read path of preset records."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
     r = client.post("/presets", json=_BODY_VALID)
@@ -192,13 +207,13 @@ def test_create_preset_round_trip_canonical_shape(tmp_path, monkeypatch):
     assert r.status_code == 200, r.text
     p = r.json()
     assert set(p.keys()) == {"algorithm_id", "name", "label", "params"}
-    assert p["algorithm_id"] == algorithms.DEFAULT_ALGORITHM_ID
+    assert p["algorithm_id"] == _BODY_VALID["algorithm_id"]
     assert p["name"] == _BODY_VALID["name"]
     assert p["label"] == _BODY_VALID["label"]
-    assert p["params"]["hsv"]["h_min"] == _BODY_VALID["hsv"]["h_min"]
-    assert p["params"]["hsv"]["h_max"] == _BODY_VALID["hsv"]["h_max"]
+    assert p["params"]["hsv"]["h_min"] == _BODY_VALID["params"]["hsv"]["h_min"]
+    assert p["params"]["hsv"]["h_max"] == _BODY_VALID["params"]["hsv"]["h_max"]
     assert p["params"]["shape_gate"]["aspect_min"] == pytest.approx(
-        _BODY_VALID["shape_gate"]["aspect_min"]
+        _BODY_VALID["params"]["shape_gate"]["aspect_min"]
     )
     assert "hsv" not in p
     assert "shape_gate" not in p
@@ -238,27 +253,91 @@ def test_create_preset_rejects_invalid_slug(tmp_path, monkeypatch):
         assert r.status_code == 400, (bad, r.text)
 
 
-def test_create_preset_rejects_missing_fields(tmp_path, monkeypatch):
+def test_create_preset_rejects_missing_top_level_fields(tmp_path, monkeypatch):
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    for missing in ("name", "label", "hsv", "shape_gate"):
+    for missing in ("name", "label", "algorithm_id", "params"):
         body = {**_BODY_VALID}
         del body[missing]
         r = client.post("/presets", json=body)
         assert r.status_code == 400, (missing, r.text)
 
 
-def test_create_preset_rejects_invalid_hsv_bounds(tmp_path, monkeypatch):
+def test_create_preset_rejects_unknown_algorithm_id(tmp_path, monkeypatch):
+    """`algorithm_id` must name a runnable detector — typo / future
+    version copied backwards / non-runnable data source like
+    `ios_capture_time` all fail at the system boundary before any disk
+    write. 422 (semantically invalid value) so dashboard distinguishes
+    from 400 (missing field)."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    body = {
-        **_BODY_VALID,
-        "name": "bad_hsv",
-        "hsv": {"h_min": 100, "h_max": 50, "s_min": 0, "s_max": 255, "v_min": 0, "v_max": 255},
-    }
+    body = {**_BODY_VALID, "name": "bad_algo", "algorithm_id": "v999_not_real"}
     r = client.post("/presets", json=body)
-    assert r.status_code == 400, r.text
-    assert "h_min" in r.json()["detail"]
+    assert r.status_code == 422, r.text
+    assert "v999_not_real" in r.json()["detail"]
+
+
+def test_create_preset_rejects_non_runnable_algorithm_id(tmp_path, monkeypatch):
+    """`ios_capture_time` is a valid wire identity but a non-runnable
+    data source (no Detector → no params_schema). Reject at write
+    time; otherwise the resulting preset would dangle (`POST
+    /presets/active` would crash on accessor lookup)."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    body = {**_BODY_VALID, "name": "ios_preset", "algorithm_id": "ios_capture_time"}
+    r = client.post("/presets", json=body)
+    assert r.status_code == 422, r.text
+
+
+def test_create_preset_rejects_schema_mismatched_params(tmp_path, monkeypatch):
+    """`params` must round-trip through the algorithm's
+    `params_schema`. A v11 preset missing `shape_gate` from `params`,
+    or carrying an extra field, surfaces Pydantic's structured error
+    list at 422 — dashboard form generator can highlight the offending
+    dotted path."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    # Missing shape_gate inside params — V11Params requires it.
+    bad_missing = {
+        **_BODY_VALID,
+        "name": "missing_sg",
+        "params": {"hsv": _BODY_VALID["params"]["hsv"]},
+    }
+    r = client.post("/presets", json=bad_missing)
+    assert r.status_code == 422, r.text
+    # Extra unknown key inside params — V11Params allows extras by
+    # default; flip when V11Params gains extra='forbid'. For now,
+    # confirm hybrid_28d (which IS extra='forbid') rejects extras.
+    bad_extra = {
+        **_BODY_VALID_HYBRID,
+        "name": "hybrid_extra",
+        "params": {**_BODY_VALID_HYBRID["params"], "rogue_field": 42},
+    }
+    r = client.post("/presets", json=bad_extra)
+    assert r.status_code == 422, r.text
+
+
+def test_create_hybrid_preset_persists_without_touching_live(tmp_path, monkeypatch):
+    """POST a hybrid_28d preset → file written; live `DetectionConfig`
+    must NOT change (it's still v11_hsv_cc). Phase-3 will introduce a
+    dual active state where hybrid can sit in the server_post slot.
+    Until then, creating a non-v11 preset is pure persistence."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    before_cfg = main.state.detection_config()
+    r = client.post("/presets", json=_BODY_VALID_HYBRID)
+    assert r.status_code == 200, r.text
+    assert (tmp_path / "presets" / "hybrid_indoor.json").exists()
+    after_cfg = main.state.detection_config()
+    # Live config untouched — same preset name, same algorithm_id.
+    assert after_cfg.preset == before_cfg.preset
+    assert after_cfg.algorithm_id == before_cfg.algorithm_id
+    # And the new preset reads back canonical.
+    r = client.get("/presets/hybrid_indoor")
+    p = r.json()
+    assert p["algorithm_id"] == "hybrid_28d"
+    assert p["params"]["prod_hsv"]["h_min"] == 105
+    assert p["params"]["v11_hsv"]["h_max"] == 118
 
 
 # ----- set active ----------------------------------------------------
@@ -294,6 +373,24 @@ def test_set_active_preset_rejects_missing_name(tmp_path, monkeypatch):
     client = TestClient(main.app)
     r = client.post("/presets/active", json={})
     assert r.status_code == 400, r.text
+
+
+def test_set_active_rejects_non_v11_preset(tmp_path, monkeypatch):
+    """The live path is v11_hsv_cc (iOS-side detection is hardcoded
+    HSV+CC). Activating a hybrid_28d preset on this endpoint can't
+    update the live config without lying about what's running on iOS,
+    so reject 422 with an explicit message. Phase-3 will add a `target`
+    body field to route hybrid to the server_post slot instead."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    # Built-in `hybrid_28d_blue_ball` is seeded at boot.
+    assert main.state.preset_exists("hybrid_28d_blue_ball")
+    before = main.state.detection_config().preset
+    r = client.post("/presets/active", json={"name": "hybrid_28d_blue_ball"})
+    assert r.status_code == 422, r.text
+    assert "hybrid_28d" in r.json()["detail"]
+    # Live config unchanged.
+    assert main.state.detection_config().preset == before
 
 
 # ----- delete --------------------------------------------------------
@@ -420,8 +517,11 @@ def test_dashboard_renders_after_creating_custom_preset(tmp_path, monkeypatch):
     body = {
         "name": "rainy_day",
         "label": "Rainy <day>",  # angle brackets to verify escape
-        "hsv": {"h_min": 100, "h_max": 130, "s_min": 80, "s_max": 255, "v_min": 60, "v_max": 255},
-        "shape_gate": {"aspect_min": 0.7, "fill_min": 0.5},
+        "algorithm_id": "v11_hsv_cc",
+        "params": {
+            "hsv": {"h_min": 100, "h_max": 130, "s_min": 80, "s_max": 255, "v_min": 60, "v_max": 255},
+            "shape_gate": {"aspect_min": 0.7, "fill_min": 0.5},
+        },
     }
     r = client.post("/presets", json=body)
     assert r.status_code == 200, r.text

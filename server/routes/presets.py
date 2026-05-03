@@ -1,16 +1,28 @@
 """CRUD endpoints for the disk-backed preset library.
 
-A preset = `{name, label, hsv, shape_gate}` JSON file under
+A preset = `{name, label, algorithm_id, params}` JSON file under
 `<data_dir>/presets/<name>.json`. The slug `name` is the URL key and
 filename — restricted to `[a-z0-9_]{1,32}` for portability. `label` is
 operator-facing and can be anything; the dashboard / viewer escape it
-on render. Built-in tennis / blue_ball seeds are written on first boot
-by `presets.seed_builtins`; an operator deleting a built-in and
+on render. `algorithm_id` is a runnable detector id from `algorithms`
+(non-runnable data sources like `ios_capture_time` are rejected at
+write time). `params` is the algorithm's `Detector.params_schema`
+shape — round-trip-validated on POST so a malformed body fails fast
+with the schema's own error.
+
+Built-in tennis / blue_ball / hybrid_28d_blue_ball seeds are written
+on first boot by `presets.seed_builtins`; deleting a built-in and
 restarting recreates it.
+
+Active-config side effect (current state, pre-phase-3):
+- v11_hsv_cc preset POST / activate → updates live `DetectionConfig`
+  and broadcasts WS settings to online cameras.
+- non-v11 preset POST → save to disk only; live config unchanged.
+- non-v11 activate → 422 (dual active live/server_post is phase 3).
 
 Identity validation on `POST /detection/config` (the live-config setter
 in `routes/settings.py`) compares the submitted pair against the
-on-disk preset, so a freshly-saved preset becomes claimable as
+on-disk preset, so a freshly-saved v11 preset becomes claimable as
 `preset=<name>` immediately without a server restart.
 """
 from __future__ import annotations
@@ -18,8 +30,9 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import ValidationError
 
-from detection import HSVRange, ShapeGate
+import algorithms
 from detection_config import DetectionConfig
 from presets import Preset, validate_slug
 
@@ -40,60 +53,24 @@ def _preset_to_wire(p: Preset) -> dict[str, Any]:
     }
 
 
-def _validated_hsv(values: dict[str, object]) -> HSVRange:
-    def _int_field(key: str, upper: int) -> int:
-        raw = values.get(key)
-        try:
-            v = int(raw)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail=f"missing or invalid 'hsv.{key}'")
-        if not (0 <= v <= upper):
-            raise HTTPException(
-                status_code=400,
-                detail=f"'hsv.{key}' out of range [0, {upper}]",
-            )
-        return v
-
-    h_min = _int_field("h_min", 179)
-    h_max = _int_field("h_max", 179)
-    s_min = _int_field("s_min", 255)
-    s_max = _int_field("s_max", 255)
-    v_min = _int_field("v_min", 255)
-    v_max = _int_field("v_max", 255)
-    if h_min > h_max:
-        raise HTTPException(status_code=400, detail="'hsv.h_min' must be <= 'hsv.h_max'")
-    if s_min > s_max:
-        raise HTTPException(status_code=400, detail="'hsv.s_min' must be <= 'hsv.s_max'")
-    if v_min > v_max:
-        raise HTTPException(status_code=400, detail="'hsv.v_min' must be <= 'hsv.v_max'")
-    return HSVRange(h_min=h_min, h_max=h_max, s_min=s_min, s_max=s_max, v_min=v_min, v_max=v_max)
-
-
-def _validated_shape_gate(values: dict[str, object]) -> ShapeGate:
-    def _float_field(key: str, lo: float, hi: float) -> float:
-        raw = values.get(key)
-        try:
-            v = float(raw)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail=f"missing or invalid 'shape_gate.{key}'")
-        if not (lo <= v <= hi):
-            raise HTTPException(
-                status_code=400,
-                detail=f"'shape_gate.{key}' out of range [{lo}, {hi}]",
-            )
-        return v
-
-    return ShapeGate(
-        aspect_min=_float_field("aspect_min", 0.0, 1.0),
-        fill_min=_float_field("fill_min", 0.0, 1.0),
-    )
-
-
 def _read_preset_body(body: object, *, name_from_url: str | None) -> Preset:
-    """Strict body parse — every field required, no per-field defaults
-    (per CLAUDE.md no-silent-fallback). When `name_from_url` is set, a
-    body-level `name` is rejected as ambiguous (URL is canonical for
-    PUT)."""
+    """Strict body parse for the canonical preset shape `{name, label,
+    algorithm_id, params}`. Every field is required (CLAUDE.md
+    no-silent-fallback); `params` is round-trip-validated through the
+    detector's `Detector.params_schema`, so a missing key inside
+    `params` surfaces as the schema's own ValidationError rather than
+    a silent default. The normalised dict (`model_dump()`) is what
+    persists, so disk preset files always carry exactly the fields
+    the schema declares — extras dropped, defaults filled.
+
+    `algorithm_id` MUST be runnable: non-runnable data sources like
+    `ios_capture_time` are valid wire ids but have no `Detector` so
+    there's no schema to validate `params` against and no detector to
+    re-run with. Caught here at the system boundary so a typo doesn't
+    persist a dangling preset.
+
+    When `name_from_url` is set, a body-level `name` is rejected as
+    ambiguous (URL is canonical for PUT)."""
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
 
@@ -122,25 +99,48 @@ def _read_preset_body(body: object, *, name_from_url: str | None) -> Preset:
     if not isinstance(label, str) or not label.strip():
         raise HTTPException(status_code=400, detail="missing or invalid 'label'")
 
-    hsv_raw = body.get("hsv")
-    if not isinstance(hsv_raw, dict):
-        raise HTTPException(status_code=400, detail="missing or invalid 'hsv'")
-    sg_raw = body.get("shape_gate")
-    if not isinstance(sg_raw, dict):
-        raise HTTPException(status_code=400, detail="missing or invalid 'shape_gate'")
+    algorithm_id = body.get("algorithm_id")
+    if not isinstance(algorithm_id, str) or not algorithm_id:
+        raise HTTPException(
+            status_code=400,
+            detail="missing required field 'algorithm_id'",
+        )
+    try:
+        algorithms.validate_runnable_id(algorithm_id)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
-    # POST body is v11-shaped (`hsv` + `shape_gate` flat) because the
-    # dashboard slider that sends it is v11-only. The constructed
-    # Preset goes through canonical `params` storage via
-    # `Preset.for_v11`. Future non-v11 algorithms will get their own
-    # "save as preset" UI / endpoint when they ship — this route stays
-    # a v11-specific entry point until then.
-    return Preset.for_v11(
+    params = body.get("params")
+    if not isinstance(params, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="missing or invalid 'params' (must be a JSON object)",
+        )
+
+    schema = algorithms.get(algorithm_id).detector.params_schema
+    try:
+        typed = schema.model_validate(params)
+    except ValidationError as e:
+        # Surface Pydantic's structured errors verbatim — the dashboard
+        # form generator can highlight the offending dotted path. 422
+        # so the operator distinguishes "schema mismatch" (fixable in
+        # the form) from 400 "missing top-level field".
+        raise HTTPException(status_code=422, detail=e.errors())
+
+    return Preset(
         name=name,
         label=label,
-        hsv=_validated_hsv(hsv_raw),
-        shape_gate=_validated_shape_gate(sg_raw),
+        algorithm_id=algorithm_id,
+        # Round-tripped dict — extras dropped (schema has extra='forbid'
+        # for hybrid_28d, allow-by-default for v11), defaults filled.
+        # Storing model_dump() instead of the raw body ensures disk
+        # files always conform to the schema's serialised shape.
+        params=typed.model_dump(),
     )
+
+
+def _is_v11(algorithm_id: str) -> bool:
+    return algorithm_id == algorithms.V11_HSV_CC
 
 
 @router.get("/presets")
@@ -165,15 +165,20 @@ def presets_get(name: str) -> dict[str, Any]:
 
 @router.post("/presets")
 async def presets_create(request: Request) -> dict[str, Any]:
-    """Create a new preset and atomically switch the live detection
-    config to it. 409 if a preset with that slug already exists — preset
-    files are immutable by name in the new model (the dashboard's Apply
-    button = "Save as new"); rename if you want to update.
+    """Create a new preset. 409 if a preset with that slug already
+    exists — preset files are immutable by name (the dashboard's
+    Apply button = "Save as new"); rename if you want to update.
 
-    Side effect: on success, the active `detection_config.preset` is
-    set to the newly-saved name and the WS settings broadcast goes out
-    so iOS sees the new HSV/shape_gate immediately. Body fields all
-    required."""
+    Side effect varies by `algorithm_id`:
+    - v11_hsv_cc → atomically activates the new preset (updates live
+      `DetectionConfig` + broadcasts WS settings to every online
+      camera). The dashboard's Apply path expects this so iOS sees
+      the new HSV/shape_gate immediately.
+    - any other algorithm_id → save to disk only; live config and WS
+      broadcast are left alone. Activating a non-v11 preset for the
+      server_post path is a separate concern handled by phase-3 dual
+      active state — this route just persists the preset file.
+    """
     from main import state, device_ws, _settings_message_for
 
     body = await request.json()
@@ -188,28 +193,33 @@ async def presets_create(request: Request) -> dict[str, Any]:
             ),
         )
     state.save_preset(preset)
-    cfg = DetectionConfig(
-        hsv=preset.hsv,
-        shape_gate=preset.shape_gate,
-        preset=preset.name,
-        last_applied_at=None,
-        algorithm_id=preset.algorithm_id,
-    )
-    state.set_detection_config(cfg)
-    await device_ws.broadcast(
-        {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
-    )
+    if _is_v11(preset.algorithm_id):
+        cfg = DetectionConfig(
+            hsv=preset.hsv,
+            shape_gate=preset.shape_gate,
+            preset=preset.name,
+            last_applied_at=None,
+            algorithm_id=preset.algorithm_id,
+        )
+        state.set_detection_config(cfg)
+        await device_ws.broadcast(
+            {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
+        )
     return _preset_to_wire(preset)
 
 
 @router.post("/presets/active")
 async def presets_set_active(request: Request) -> dict[str, Any]:
-    """Pure switch of the active preset — no file write. Loads the
-    named preset's HSV+shape_gate from disk and snaps the live
-    `DetectionConfig` to it, then broadcasts WS settings to every
-    online camera. Used by the dashboard preset dropdown when the
-    operator switches between already-saved presets without touching
-    the sliders.
+    """Pure switch of the active live preset — no file write. Loads
+    the named preset and snaps the live `DetectionConfig` to it, then
+    broadcasts WS settings to every online camera.
+
+    Currently v11-only: a non-v11 preset returns 422. Phase-3 will
+    introduce dual active state (`live` slot stays v11; `server_post`
+    slot accepts any algorithm) and this endpoint will grow a `target`
+    body field. Until then, switching the active server_post algorithm
+    is done at run-time via `POST /sessions/{sid}/run_server_post`'s
+    `preset_name` body field (already algorithm-agnostic).
 
     Body (JSON or form): `name` — required, must be an existing slug
     on disk. 404 on unknown name."""
@@ -230,6 +240,18 @@ async def presets_set_active(request: Request) -> dict[str, Any]:
         p = state.load_preset(name)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown preset: {name!r}")
+    if not _is_v11(p.algorithm_id):
+        # Explicit reject rather than silently no-oping — operator must
+        # see that activating a non-v11 preset isn't supported on the
+        # live path. Phase-3 will route it to the server_post slot.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"preset {name!r} targets {p.algorithm_id!r}; only "
+                f"{algorithms.V11_HSV_CC!r} can drive the live path "
+                "today (dual live/server_post active is phase 3)"
+            ),
+        )
     cfg = DetectionConfig(
         hsv=p.hsv,
         shape_gate=p.shape_gate,
