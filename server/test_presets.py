@@ -58,6 +58,34 @@ def test_get_preset_returns_full_record(tmp_path, monkeypatch):
     assert p["algorithm_id"] == algorithms.DEFAULT_ALGORITHM_ID
 
 
+def test_list_presets_wire_shape_is_canonical(tmp_path, monkeypatch):
+    """`GET /presets` must emit canonical `{algorithm_id, name, label,
+    params}` for every entry — never the legacy v11 flat surface
+    (`hsv` / `shape_gate` at the top level). The single-record `GET
+    /presets/{name}` shape is pinned by `test_get_preset_returns_full_record`;
+    this guards the list-endpoint shape so a future serializer split
+    can't regress one without the other."""
+    import algorithms
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    r = client.get("/presets")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "presets" in body and isinstance(body["presets"], list)
+    assert body["presets"], "boot must seed at least one preset"
+    for entry in body["presets"]:
+        assert set(entry.keys()) == {"algorithm_id", "name", "label", "params"}, (
+            f"unexpected keys on {entry.get('name')}: {sorted(entry)}"
+        )
+        algorithms.validate_id(entry["algorithm_id"])
+        assert isinstance(entry["params"], dict)
+        # v11 entries lay out `{hsv, shape_gate}` inside params; this is
+        # the only registered runnable algorithm whose seed surfaces here.
+        if entry["algorithm_id"] == algorithms.V11_HSV_CC:
+            assert "hsv" in entry["params"]
+            assert "shape_gate" in entry["params"]
+
+
 def test_load_preset_backfills_algorithm_id_into_legacy_file(
     tmp_path, monkeypatch,
 ):
@@ -146,6 +174,34 @@ def test_create_preset_persists_to_disk(tmp_path, monkeypatch):
     r = client.get("/presets")
     names = sorted(p["name"] for p in r.json()["presets"])
     assert "indoor_overcast" in names
+
+
+def test_create_preset_round_trip_canonical_shape(tmp_path, monkeypatch):
+    """`POST /presets` accepts the dashboard's v11-flat body, but the
+    storage + read-back surface is canonical. Round-tripping through
+    `GET /presets/{new_name}` must return `{algorithm_id, name, label,
+    params}` with values matching the POST body — no flat keys leaking
+    through. Pairs with `test_list_presets_wire_shape_is_canonical` to
+    pin every public read path of preset records."""
+    import algorithms
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    r = client.post("/presets", json=_BODY_VALID)
+    assert r.status_code == 200, r.text
+    r = client.get(f"/presets/{_BODY_VALID['name']}")
+    assert r.status_code == 200, r.text
+    p = r.json()
+    assert set(p.keys()) == {"algorithm_id", "name", "label", "params"}
+    assert p["algorithm_id"] == algorithms.DEFAULT_ALGORITHM_ID
+    assert p["name"] == _BODY_VALID["name"]
+    assert p["label"] == _BODY_VALID["label"]
+    assert p["params"]["hsv"]["h_min"] == _BODY_VALID["hsv"]["h_min"]
+    assert p["params"]["hsv"]["h_max"] == _BODY_VALID["hsv"]["h_max"]
+    assert p["params"]["shape_gate"]["aspect_min"] == pytest.approx(
+        _BODY_VALID["shape_gate"]["aspect_min"]
+    )
+    assert "hsv" not in p
+    assert "shape_gate" not in p
 
 
 def test_create_preset_rejects_duplicate_name(tmp_path, monkeypatch):
