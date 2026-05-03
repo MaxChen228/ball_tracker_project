@@ -148,6 +148,17 @@ def _check_legacy_bucket_in_registry() -> None:
 _check_legacy_bucket_in_registry()
 
 
+def is_valid_id_format(s: str) -> bool:
+    """Pure regex check on the slug shape — no registry lookup. Lets
+    HTTP handlers split "this string is structurally not an
+    algorithm_id" (400 — malformed input, like a typo with capitals or
+    a dash) from "this string is shaped like an id but I don't know
+    what it names" (422 — semantically invalid). Both cases otherwise
+    funnel through `validate_id`'s ValueError and the route layer
+    can't tell them apart."""
+    return bool(_ID_RE.match(s))
+
+
 def is_known(algorithm_id: str) -> bool:
     return algorithm_id in _REGISTRY
 

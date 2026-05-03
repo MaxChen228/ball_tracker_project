@@ -291,10 +291,9 @@ def test_create_preset_rejects_non_runnable_algorithm_id(tmp_path, monkeypatch):
 
 def test_create_preset_rejects_schema_mismatched_params(tmp_path, monkeypatch):
     """`params` must round-trip through the algorithm's
-    `params_schema`. A v11 preset missing `shape_gate` from `params`,
-    or carrying an extra field, surfaces Pydantic's structured error
-    list at 422 — dashboard form generator can highlight the offending
-    dotted path."""
+    `params_schema`. A preset missing a required nested field surfaces
+    Pydantic's structured error list at 422 — dashboard form generator
+    can highlight the offending dotted path."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
     # Missing shape_gate inside params — V11Params requires it.
@@ -305,16 +304,54 @@ def test_create_preset_rejects_schema_mismatched_params(tmp_path, monkeypatch):
     }
     r = client.post("/presets", json=bad_missing)
     assert r.status_code == 422, r.text
-    # Extra unknown key inside params — V11Params allows extras by
-    # default; flip when V11Params gains extra='forbid'. For now,
-    # confirm hybrid_28d (which IS extra='forbid') rejects extras.
-    bad_extra = {
+
+
+def test_create_preset_v11_rejects_extra_param_field(tmp_path, monkeypatch):
+    """V11Params is `extra='forbid'`. A rogue top-level key inside
+    `params` (operator typo, stale frontend, future-version field
+    pasted backwards) must 422 — silent drop would let the operator
+    think a value was saved when it wasn't."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    bad = {
+        **_BODY_VALID,
+        "name": "v11_extra",
+        "params": {**_BODY_VALID["params"], "rogue_field": 42},
+    }
+    r = client.post("/presets", json=bad)
+    assert r.status_code == 422, r.text
+
+
+def test_create_preset_hybrid_rejects_extra_param_field(tmp_path, monkeypatch):
+    """Same `extra='forbid'` contract on Hybrid28dParams — pinned
+    independently because the two schemas are independent classes
+    and extra-handling could regress on one without the other."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    bad = {
         **_BODY_VALID_HYBRID,
         "name": "hybrid_extra",
         "params": {**_BODY_VALID_HYBRID["params"], "rogue_field": 42},
     }
-    r = client.post("/presets", json=bad_extra)
+    r = client.post("/presets", json=bad)
     assert r.status_code == 422, r.text
+
+
+def test_create_preset_malformed_algorithm_id_returns_400(tmp_path, monkeypatch):
+    """An algorithm_id that doesn't match the slug regex (capitals,
+    dashes, too long) is structurally invalid — 400, distinct from
+    the 422 reserved for "well-formed but unknown / non-runnable".
+    Without the split, a typo with capitals would 422 and the
+    dashboard couldn't distinguish "fix the case" from "this id was
+    retired"."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    for bad_id in ("V11_HSV_CC", "v11-hsv-cc", "x" * 33, ""):
+        body = {**_BODY_VALID, "name": "bad_fmt", "algorithm_id": bad_id}
+        r = client.post("/presets", json=body)
+        # Empty string falls through to "missing field" 400 first,
+        # which is also 400 — both branches are correct here.
+        assert r.status_code == 400, (bad_id, r.text)
 
 
 def test_create_hybrid_preset_persists_without_touching_live(tmp_path, monkeypatch):
@@ -478,13 +515,11 @@ def test_set_active_server_post_unknown_preset_returns_404(
 def test_active_server_post_preset_default_matches_live(tmp_path, monkeypatch):
     """Boot default: server_post slot points at the same preset as
     live, so first-run operators don't need an extra "pick one" step
-    before the Run server button works. Persistence is empty on first
-    boot — sidecar file shouldn't exist yet."""
+    before the Run server button works. Boot also writes the sidecar
+    explicitly (see `test_active_server_post_first_boot_writes_sidecar_explicitly`)."""
     main = _fresh_main(tmp_path, monkeypatch)
     live = main.state.detection_config().preset
     assert main.state.active_server_post_preset_name() == live
-    sidecar = tmp_path / "active_server_post_preset.json"
-    assert not sidecar.exists()
 
 
 def test_active_server_post_preset_persisted_across_restart(
@@ -502,6 +537,85 @@ def test_active_server_post_preset_persisted_across_restart(
     # Simulate restart.
     fresh = main.State(data_dir=tmp_path)
     assert fresh.active_server_post_preset_name() == "hybrid_28d_blue_ball"
+
+
+def test_active_server_post_first_boot_writes_sidecar_explicitly(
+    tmp_path, monkeypatch,
+):
+    """First boot has no sidecar — `_load_active_server_post_preset_or_default`
+    MUST explicitly write one pointing at the live preset, not just
+    silently default in memory. Otherwise the operator's first
+    perceived 'choice' is a fallback no one persisted, and a hand-edit
+    pre-restart is invisible."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    sidecar = tmp_path / "active_server_post_preset.json"
+    assert sidecar.exists(), "boot must seed the sidecar explicitly"
+    import json
+    body = json.loads(sidecar.read_text())
+    assert body == {"name": main.state.detection_config().preset}
+
+
+def test_corrupt_active_server_post_sidecar_raises_at_boot(
+    tmp_path, monkeypatch,
+):
+    """A hand-edited corrupt sidecar must surface at boot with a
+    typed message naming the path — no silent fallback to the live
+    preset that would mask the operator's broken edit."""
+    sidecar = tmp_path / "active_server_post_preset.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("{not json")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        _fresh_main(tmp_path, monkeypatch)
+
+
+def test_delete_preset_rejects_active_server_post_slot(
+    tmp_path, monkeypatch,
+):
+    """DELETE on the preset bound to the server_post active slot must
+    409 — otherwise the sidecar dangles. The 409 mentions the
+    server_post slot specifically so operator knows which slot to
+    re-bind."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    client.post(
+        "/presets/active",
+        json={"name": "hybrid_28d_blue_ball", "target": "server_post"},
+    )
+    r = client.delete("/presets/hybrid_28d_blue_ball")
+    assert r.status_code == 409, r.text
+    assert "server_post" in r.json()["detail"]
+
+
+def test_set_active_target_is_case_sensitive(tmp_path, monkeypatch):
+    """`target` accepts only lowercase exact matches. `"Live"` and
+    `"LIVE"` 422 — same enum strictness the rest of the wire layer
+    follows; silent normalisation would mask client typos."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    for variant in ("Live", "LIVE", "Server_post"):
+        r = client.post(
+            "/presets/active",
+            json={"name": "blue_ball", "target": variant},
+        )
+        assert r.status_code == 422, (variant, r.text)
+
+
+def test_active_server_post_sidecar_shape_pinned(tmp_path, monkeypatch):
+    """The sidecar wire shape MUST stay exactly `{"name": "..."}` —
+    no extra fields creeping in (e.g. `set_at`, `algorithm_id`, etc.)
+    that future readers might come to depend on. Pin independent of
+    the round-trip test so a writer-side regression fails here."""
+    main = _fresh_main(tmp_path, monkeypatch)
+    client = TestClient(main.app)
+    client.post(
+        "/presets/active",
+        json={"name": "hybrid_28d_blue_ball", "target": "server_post"},
+    )
+    import json
+    sidecar = tmp_path / "active_server_post_preset.json"
+    body = json.loads(sidecar.read_text())
+    assert set(body.keys()) == {"name"}
+    assert body["name"] == "hybrid_28d_blue_ball"
 
 
 # ----- delete --------------------------------------------------------
@@ -534,10 +648,17 @@ def test_delete_active_preset_returns_409(tmp_path, monkeypatch):
     client = TestClient(main.app)
     # Default active is `tennis`.
     assert main.state.detection_config().preset == "tennis"
+    # Boot also seeded server_post slot to "tennis" (defaults to live).
+    # Move it off so the test can isolate the live-slot 409 path.
+    r = client.post(
+        "/presets/active",
+        json={"name": "blue_ball", "target": "server_post"},
+    )
+    assert r.status_code == 200, r.text
     r = client.delete("/presets/tennis")
     assert r.status_code == 409, r.text
     assert "currently active" in r.json()["detail"]
-    # Switching active first releases the lock.
+    # Switching live active too releases both slot locks.
     r = client.post(
         "/presets/active", json={"name": "blue_ball", "target": "live"},
     )
@@ -557,15 +678,30 @@ def test_dashboard_shows_deleted_when_bound_preset_removed(tmp_path, monkeypatch
     main = _fresh_main(tmp_path, monkeypatch)
     from detection_config import DetectionConfig
 
-    # Bind to blue_ball cleanly.
+    # Bind live to blue_ball cleanly. Server_post slot would also pin
+    # the preset against deletion (boot init = "tennis"), so move it
+    # to a third preset before forcing live to blue_ball + delete.
+    main.state.set_active_server_post_preset("hybrid_28d_blue_ball")
     bb = main.state.load_preset("blue_ball")
     main.state.set_detection_config(DetectionConfig(
         hsv=bb.hsv, shape_gate=bb.shape_gate,
         preset="blue_ball", last_applied_at=None,
     ))
 
-    # Operator (or cli) deletes the preset file out from under us.
+    # Switch live off blue_ball so delete_preset's active-slot guard
+    # passes — this test exercises the dangling-reference RENDERER
+    # branch, not the delete-while-active reject.
+    main.state.set_detection_config(DetectionConfig(
+        hsv=bb.hsv, shape_gate=bb.shape_gate,
+        preset="tennis", last_applied_at=None,
+    ))
     main.state.delete_preset("blue_ball")
+    # Re-pin live to dangling "blue_ball" name to drive the renderer
+    # branch (the file is gone but the in-memory pointer survives).
+    main.state.set_detection_config(DetectionConfig(
+        hsv=bb.hsv, shape_gate=bb.shape_gate,
+        preset="blue_ball", last_applied_at=None,
+    ))
 
     client = TestClient(main.app)
     body = client.get("/").text

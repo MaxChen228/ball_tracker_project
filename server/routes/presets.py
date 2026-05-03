@@ -105,6 +105,19 @@ def _read_preset_body(body: object, *, name_from_url: str | None) -> Preset:
             status_code=400,
             detail="missing required field 'algorithm_id'",
         )
+    # Split structural (400) vs semantic (422) algorithm_id errors so
+    # the dashboard can distinguish "client typo / wrong case" from
+    # "id is well-formed but the server doesn't know it / it's a
+    # non-runnable data source". Without this split a malformed slug
+    # `"V11_HSV_CC"` and an unknown `"v999"` both fall through to 422.
+    if not algorithms.is_valid_id_format(algorithm_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"invalid 'algorithm_id' format: {algorithm_id!r} — "
+                "must match [a-z0-9_]{1,32}"
+            ),
+        )
     try:
         algorithms.validate_runnable_id(algorithm_id)
     except ValueError as e:
@@ -286,10 +299,11 @@ async def presets_set_active(request: Request) -> dict[str, Any]:
 @router.delete("/presets/{name}")
 def presets_delete(name: str) -> dict[str, Any]:
     """Unlink a preset file. Returns 404 if the preset doesn't exist;
-    409 if the preset is currently the active one (operator must switch
-    active to a different preset first via `POST /presets/active`).
-    Built-in seeds (tennis, blue_ball) are deletable — restart will
-    re-seed any built-in whose file is missing.
+    409 if the preset is currently bound to either active slot — live
+    or server_post (operator must switch the relevant slot first via
+    `POST /presets/active`). Built-in seeds (tennis, blue_ball,
+    hybrid_28d_blue_ball) are deletable — restart will re-seed any
+    built-in whose file is missing.
 
     Sessions whose `live_config_used.preset_name` /
     `server_post_config_used.preset_name` references the deleted preset
@@ -298,6 +312,15 @@ def presets_delete(name: str) -> dict[str, Any]:
     The underlying detection results on disk are untouched.
     """
     from main import state
+    if state.active_server_post_preset_name() == name:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"preset {name!r} is currently active in the server_post "
+                "slot — switch active to another preset first via "
+                "POST /presets/active with target=server_post"
+            ),
+        )
     if state.detection_config().preset == name:
         raise HTTPException(
             status_code=409,
@@ -310,4 +333,10 @@ def presets_delete(name: str) -> dict[str, Any]:
         state.delete_preset(name)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown preset: {name!r}")
+    except RuntimeError as e:
+        # state.delete_preset re-checks the active slots under its
+        # lock — the route's two checks above are best-effort and a
+        # concurrent activate could race. Surface the lock-side reject
+        # as 409 too so the operator sees a consistent error class.
+        raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "deleted": name}

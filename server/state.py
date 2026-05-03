@@ -594,16 +594,24 @@ class State:
         return self._data_dir / "active_server_post_preset.json"
 
     def _load_active_server_post_preset_or_default(self) -> str:
-        """Boot loader for the server_post active preset slot. Falls
-        through to the live preset name if the sidecar file is missing
-        — first-boot operators get `tennis` (or whichever v11 preset
-        was just seeded as live) without an extra "pick one" step.
-        Strict on a present-but-corrupt file: raises so a hand-edited
-        wrong slug surfaces at boot, not at first dashboard render."""
+        """Boot loader for the server_post active preset slot. On
+        first boot (no sidecar file), explicitly initialises the slot
+        to the live preset name AND writes the sidecar so the choice
+        becomes auditable on disk — no silent in-memory fallback that
+        an operator would have to re-pick after a restart. Strict on
+        a present-but-corrupt file: wraps `json.loads` so malformed
+        bytes surface as a typed message naming the path."""
         path = self._active_server_post_preset_path
         if not path.exists():
-            return self._detection_config.preset
-        obj = json.loads(path.read_text())
+            initial = self._detection_config.preset
+            self._atomic_write(path, json.dumps({"name": initial}))
+            return initial
+        try:
+            obj = json.loads(path.read_text())
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"{path} is not valid JSON: {e}"
+            ) from e
         if not isinstance(obj, dict):
             raise ValueError(
                 f"{path} must be a JSON object with 'name'"
@@ -1781,11 +1789,31 @@ class State:
         )
 
     def delete_preset(self, name: str) -> None:
-        """Unlink the preset file. Raises `KeyError(name)` if absent.
-        No cascade on the live `detection_config.preset` reference —
-        the dashboard renderer surfaces the dangling state explicitly
-        and the next `set_detection_config` clears it."""
-        _presets.delete_preset(self._data_dir, name)
+        """Unlink the preset file. Raises `KeyError(name)` if absent;
+        raises `RuntimeError` if `name` is currently bound to either
+        the live or the server_post active slot — operator must
+        re-bind the slot first.
+
+        The active-slot check + filesystem unlink run under
+        `self._lock` so a concurrent `set_active_server_post_preset`
+        can't race past `preset_exists` while we're mid-delete and
+        leave the sidecar pointing at a deleted file. Live
+        `detection_config.preset` is also checked here as a defensive
+        layer — `routes/presets.py` DELETE handler also rejects with
+        409 before reaching this method, but that route check is
+        outside the lock and the in-memory `_detection_config` could
+        change between the route's check and this method.
+        """
+        with self._lock:
+            if self._detection_config.preset == name:
+                raise RuntimeError(
+                    f"preset {name!r} is the active live preset"
+                )
+            if self._active_server_post_preset_name == name:
+                raise RuntimeError(
+                    f"preset {name!r} is the active server_post preset"
+                )
+            _presets.delete_preset(self._data_dir, name)
 
     def modified_fields_for(self, cfg: DetectionConfig) -> list[str]:
         return _detection_config_modified_fields(
