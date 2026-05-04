@@ -216,14 +216,34 @@ def _cfg_strip_html(e: dict[str, Any]) -> str:
         return ""
 
     def _tip(cfg: dict[str, Any]) -> str:
-        h = cfg["hsv"]
-        g = cfg["shape_gate"]
-        return (
-            f"H {h['h_min']}-{h['h_max']} · "
-            f"S {h['s_min']}-{h['s_max']} · "
-            f"V {h['v_min']}-{h['v_max']} · "
-            f"asp≥{g['aspect_min']:.2f} fill≥{g['fill_min']:.2f}"
-        )
+        # `cfg` is canonical `DetectionConfigSnapshotPayload` shape:
+        # `{algorithm_id, params, preset_name}`. Tip layout dispatches
+        # on algorithm_id — v11_hsv_cc gets the historic HSV+gate
+        # one-liner; non-v11 detectors get a generic algorithm tag +
+        # params snapshot until they grow their own tooltip layout.
+        algo = cfg.get("algorithm_id", "?")
+        params = cfg.get("params") or {}
+        if algo == "v11_hsv_cc":
+            h = params.get("hsv") or {}
+            g = params.get("shape_gate") or {}
+            return (
+                f"H {h.get('h_min', '?')}-{h.get('h_max', '?')} · "
+                f"S {h.get('s_min', '?')}-{h.get('s_max', '?')} · "
+                f"V {h.get('v_min', '?')}-{h.get('v_max', '?')} · "
+                f"asp≥{g.get('aspect_min', 0):.2f} "
+                f"fill≥{g.get('fill_min', 0):.2f}"
+            )
+        if algo == "hybrid_28d":
+            ph = params.get("prod_hsv") or {}
+            vh = params.get("v11_hsv") or {}
+            return (
+                f"PROD H {ph.get('h_min', '?')}-{ph.get('h_max', '?')} · "
+                f"V11 H {vh.get('h_min', '?')}-{vh.get('h_max', '?')} · "
+                f"neigh±{params.get('neigh_half', '?')}"
+            )
+        # Unknown algorithm — surface the id so the operator sees what
+        # ran rather than a misleading v11-shaped tip.
+        return f"{algo}"
 
     def _chip(label: str, cfg: dict[str, Any] | None) -> str:
         if cfg is None:
