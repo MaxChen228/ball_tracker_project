@@ -253,13 +253,18 @@ def _config_pill_html(
     # share the `{hsv, shape_gate}` params shape; unknown algorithms
     # render `alg:<id>` (stale snapshot or future detector with no
     # formatter yet).
-    tip = _format_snapshot_params(snapshot["algorithm_id"], snapshot["params"])
+    algorithm_id = snapshot["algorithm_id"]
+    tip = _format_snapshot_params(algorithm_id, snapshot["params"])
     preset_name = snapshot.get("preset_name")
+    # Phase A: chip body shows `<algorithm_id>/<preset_name>` so an
+    # operator can read off which detector ran without hovering. Preset
+    # is the variable axis under the algorithm — algorithm_id first is
+    # the natural reading order.
     if preset_name is None:
         return (
             f'<span class="cfg-pill ok" title="{html.escape(label)}: custom — {html.escape(tip)}">'
             f'<span class="cfg-label">{html.escape(label)}</span>'
-            f'<span class="cfg-tag">custom</span>'
+            f'<span class="cfg-tag">{html.escape(algorithm_id)}/custom</span>'
             f'</span>'
         )
 
@@ -275,14 +280,14 @@ def _config_pill_html(
             f'<span class="cfg-pill missing" '
             f'title="{html.escape(label)}: preset {html.escape(preset_name)} no longer on disk — {html.escape(tip)}">'
             f'<span class="cfg-label">{html.escape(label)}</span>'
-            f'<span class="cfg-tag">{html.escape(preset_name)} (deleted)</span>'
+            f'<span class="cfg-tag">{html.escape(algorithm_id)}/{html.escape(preset_name)} (deleted)</span>'
             f'</span>'
         )
 
     return (
         f'<span class="cfg-pill ok" title="{html.escape(p.label)} — {html.escape(tip)}">'
         f'<span class="cfg-label">{html.escape(label)}</span>'
-        f'<span class="cfg-tag">{html.escape(preset_name)}</span>'
+        f'<span class="cfg-tag">{html.escape(algorithm_id)}/{html.escape(preset_name)}</span>'
         f'</span>'
     )
 

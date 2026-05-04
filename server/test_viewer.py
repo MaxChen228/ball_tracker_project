@@ -901,6 +901,108 @@ def test_viewer_page_run_server_post_form_carries_preset_selector():
     assert 'value="preset:' not in html
 
 
+def test_viewer_page_run_server_post_form_renders_two_stage_picker():
+    """Phase A: the rerun form has algorithm + preset dropdowns. The
+    cascade marker `data-algorithm-picker` lets the JS file
+    `75_algorithm_picker.js` find the form; each preset option carries
+    `data-algo` so the cascade can hide options whose algorithm doesn't
+    match. Server route still only reads `preset_name` — the
+    `algorithm_id` field rides along for UI consistency, ignored on the
+    server (preset.algorithm_id is canonical).
+    """
+    from viewer_page import render_viewer_html
+
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(741)
+    scene = build_scene(
+        session_id,
+        {"A": _pitch("A", 741, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))},
+        triangulated=None,
+    )
+    health = {
+        "session_id": session_id,
+        "cameras": {
+            "A": {"received": True, "calibrated": True, "time_synced": True, "n_frames": 1, "n_detected": 1},
+            "B": {"received": False, "calibrated": False, "time_synced": False, "n_frames": 0, "n_detected": 0},
+        },
+        "triangulated_count": 0,
+        "error": None,
+        "duration_s": 0.0,
+        "received_at": None,
+        "mode": "camera_only",
+    }
+    videos = [
+        ("A", "/videos/session_x_A.mov", 0.0, 240.0, {"t_rel_s": [0.0], "detected": [True]}),
+    ]
+
+    html = render_viewer_html(scene, videos, health)
+
+    # Cascade marker — the JS handler keys off this attribute.
+    assert "data-algorithm-picker" in html
+    # Two-stage picker: algorithm + preset.
+    assert 'name="algorithm_id"' in html
+    assert 'name="preset_name"' in html
+    # Every preset option ships its algorithm in `data-algo` so the JS
+    # can filter without round-tripping through the server.
+    assert 'data-algo="v11_hsv_cc"' in html
+    # Default boot has v11_hsv_cc as the only preset algorithm — algo
+    # dropdown surfaces it as a selected option.
+    assert '<option value="v11_hsv_cc" selected>' in html
+
+
+def test_build_viewer_health_surfaces_algorithms_run_excluding_live_path():
+    """`algorithms_run` is the per-session inventory of which detection
+    algorithms have completed, used to seed the picker default and (in
+    Phase B) the history list. ios_capture_time is the LIVE path — never
+    surfaced as a server_post target. is_active flag identifies which
+    algorithm's frames the viewer is currently displaying.
+    """
+    from routes.viewer import _build_viewer_health
+
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(742)
+    pitch = _pitch("A", 742, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
+    _record_pitch(pitch)
+
+    health = _build_viewer_health(session_id)
+
+    assert "algorithms_run" in health
+    assert "active_server_post_algorithm_id" in health
+    # ios_capture_time is the LIVE bucket — must be filtered out even
+    # though it's in `algorithms_completed`.
+    algo_ids = [a["algorithm_id"] for a in health["algorithms_run"]]
+    assert "ios_capture_time" not in algo_ids
+    assert "v11_hsv_cc" in algo_ids
+    v11 = next(a for a in health["algorithms_run"] if a["algorithm_id"] == "v11_hsv_cc")
+    assert v11["is_active"] is True
+    assert v11["frame_count_a"] >= 1
+    assert v11["frame_count_b"] == 0  # B never recorded
+    assert health["active_server_post_algorithm_id"] == "v11_hsv_cc"
+
+
+def test_viewer_cfg_pill_body_shows_algorithm_id_prefix():
+    """CFG strip pill body now reads `<algorithm_id>/<preset_name>` so
+    operators can see which detector ran without hovering for the
+    tooltip. Phase A: critical for hybrid-vs-v11 disambiguation once
+    multiple algorithms become routine."""
+    from viewer_fragments import detection_config_strip_html
+
+    snapshot = {
+        "algorithm_id": "v11_hsv_cc",
+        "params": {
+            "hsv": {"h_min": 25, "h_max": 55, "s_min": 90, "s_max": 255, "v_min": 90, "v_max": 255},
+            "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+        },
+        "preset_name": "tennis",
+    }
+    html = detection_config_strip_html(snapshot, snapshot)
+
+    # Body shows full `<algo>/<preset>` for both LIVE and SVR pills.
+    assert ">v11_hsv_cc/tennis<" in html
+    # Old pure-preset body must NOT leak through.
+    assert ">tennis<" not in html
+
+
 def test_failure_strip_html_prefers_earliest_blocking_reason():
     health = {
         "cameras": {

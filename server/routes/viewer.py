@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 
-from schemas import SessionResult
+from schemas import IOS_CAPTURE_TIME_ALGORITHM_ID, SessionResult
 
 router = APIRouter()
 
@@ -148,6 +148,28 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         mode = "camera_only"
     else:
         mode = "live_only"
+    # Per-algorithm summary for the viewer's picker / (later) history list.
+    # `algorithms_completed` is a set so we sort lexicographically for a
+    # stable UI order — per-algorithm timestamps don't exist on the schema
+    # yet (`server_post_ran_at` is session-aggregate). LIVE bucket
+    # (`ios_capture_time`) is always excluded: it's a different path,
+    # never selectable as a server_post target.
+    algorithms_run: list[dict[str, Any]] = []
+    active_server_post_algorithm_id: str | None = None
+    if result is not None:
+        active_server_post_algorithm_id = result.active_server_post_algorithm_id
+        for algo_id in sorted(result.algorithms_completed):
+            if algo_id == IOS_CAPTURE_TIME_ALGORITHM_ID:
+                continue
+            snap = result.config_used_by_algorithm.get(algo_id)
+            counts = result.frame_counts_by_algorithm.get(algo_id, {})
+            algorithms_run.append({
+                "algorithm_id": algo_id,
+                "preset_name": snap.preset_name if snap is not None else None,
+                "frame_count_a": int(counts.get("A", 0)),
+                "frame_count_b": int(counts.get("B", 0)),
+                "is_active": algo_id == active_server_post_algorithm_id,
+            })
     return {
         "session_id": session_id,
         "cameras": cams,
@@ -172,6 +194,12 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
             if result is not None and result.server_post_config_used is not None
             else None
         ),
+        # Server-post algorithms that have completed for this session +
+        # which one is currently active (drives default picker selection).
+        # `ios_capture_time` is never in `algorithms_run` — it's the LIVE
+        # path, not a server_post target.
+        "algorithms_run": algorithms_run,
+        "active_server_post_algorithm_id": active_server_post_algorithm_id,
     }
 
 

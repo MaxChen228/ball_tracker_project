@@ -85,6 +85,15 @@ class ViewerPageContext:
     # an operator opening the viewer mid-decode sees the overlay
     # immediately instead of waiting for the next SSE progress tick.
     processing_state: str | None
+    # Phase A picker: which (algorithm_id, preset_name) the rerun form
+    # defaults to. Reflects this session's last server_post run if any,
+    # else falls back to the dashboard's active server_post preset.
+    default_algorithm_id: str
+    default_preset_name: str | None
+    # Algorithm dropdown options — one per distinct algorithm_id across
+    # `state.list_presets()`. Sorted; UI cascade filter narrows preset
+    # options to the selected algorithm via data-algo attributes.
+    available_algorithm_ids: list[str]
 
 
 def build_viewer_page_context(
@@ -164,6 +173,43 @@ def build_viewer_page_context(
         scene.session_id,
     )
 
+    # Picker defaults: this session's last server_post run wins (so the
+    # operator's last choice for THIS session is what the picker reflects
+    # on reopen). Fall back to the dashboard's active server_post preset
+    # for sessions that haven't had server_post run yet. `preset_name`
+    # may be None when the run used a custom config — the JS cascade
+    # filter handles "no preset selected" gracefully.
+    active_algo_for_session = health.get("active_server_post_algorithm_id")
+    default_algorithm_id: str
+    default_preset_name: str | None
+    if active_algo_for_session is not None:
+        default_algorithm_id = active_algo_for_session
+        snap = (health.get("server_post_config_used") or {})
+        default_preset_name = snap.get("preset_name")
+    else:
+        _fallback_preset_name = _global_state.active_server_post_preset_name()
+        try:
+            _fallback_preset = _global_state.load_preset(_fallback_preset_name)
+            default_algorithm_id = _fallback_preset.algorithm_id
+            default_preset_name = _fallback_preset_name
+        except KeyError:
+            # Sidecar points at a preset that's been deleted under the
+            # operator's feet. Surface the situation by leaving preset
+            # blank — picker still renders, operator must explicitly pick.
+            default_algorithm_id = "v11_hsv_cc"
+            default_preset_name = None
+    available_algorithm_ids = sorted(
+        {p.algorithm_id for p in _global_state.list_presets()}
+    )
+    if default_algorithm_id not in available_algorithm_ids:
+        # Defensive: session active points at an algorithm with no preset
+        # on disk. Add it so the dropdown still includes it (operator can
+        # see what their session ran on); cascade filter will gracefully
+        # show no preset matches and Manage… is the next step.
+        available_algorithm_ids = sorted(
+            available_algorithm_ids + [default_algorithm_id]
+        )
+
     # SegmentRecord-only contract: callers (route + reprocess) pass
     # SegmentRecord instances. Tests construct them too. No dict
     # affordance — keeps wire shape canonical.
@@ -222,6 +268,9 @@ def build_viewer_page_context(
         can_run_server=can_run_server,
         server_post_ran_at=server_post_ran_at,
         processing_state=processing_state,
+        default_algorithm_id=default_algorithm_id,
+        default_preset_name=default_preset_name,
+        available_algorithm_ids=available_algorithm_ids,
     )
 
 
@@ -306,25 +355,36 @@ def render_viewer_html(
                 f'<span class="action-ts" title="Server detection last completed at {iso}">'
                 f'{iso}</span>'
             )
-        # Operator picks which preset to detect under. Default selection
-        # is the dashboard's current active preset, but the operator can
-        # pick any named preset on disk. The server resolves the file at
-        # request time and stamps the full frozen snapshot onto
-        # `SessionResult.server_post_config_used`.
+        # Two-stage picker: algorithm + preset (params). The default
+        # `(algorithm_id, preset_name)` reflects this session's last
+        # server_post run; cascade filter is pure-frontend (data-algo
+        # attribute on each preset option, see static/viewer/
+        # 75_algorithm_picker.js). Server route only reads `preset_name`
+        # — `algorithm_id` field rides along for UI consistency but is
+        # ignored server-side (preset.algorithm_id is canonical truth).
         from main import state as _state
         from html import escape as _esc
-        active = _state.detection_config().preset
-        options = "".join(
-            f'<option value="{_esc(p.name)}"'
-            f'{" selected" if p.name == active else ""}>'
+        algo_options = "".join(
+            f'<option value="{_esc(a)}"'
+            f'{" selected" if a == ctx.default_algorithm_id else ""}>'
+            f'{_esc(a)}</option>'
+            for a in ctx.available_algorithm_ids
+        )
+        preset_options = "".join(
+            f'<option value="{_esc(p.name)}" data-algo="{_esc(p.algorithm_id)}"'
+            f'{" selected" if p.name == ctx.default_preset_name else ""}>'
             f'{_esc(p.label)} ({_esc(p.name)})</option>'
             for p in _state.list_presets()
         )
         action_html = (
-            f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post" class="action-form">'
+            f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post" '
+            f'class="action-form" data-algorithm-picker>'
+            f'<select class="action-select" name="algorithm_id" '
+            f'title="Detection algorithm">'
+            f'{algo_options}</select>'
             f'<select class="action-select" name="preset_name" '
-            f'title="Detection preset to run server-side">'
-            f'{options}</select>'
+            f'title="Detection preset (params)">'
+            f'{preset_options}</select>'
             f'<button class="action" type="submit">{label}</button>'
             f'{ts_html}'
             f'</form>'
