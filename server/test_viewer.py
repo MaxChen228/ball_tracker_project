@@ -1024,14 +1024,9 @@ def test_viewer_header_groups_cfg_with_identity_in_nav_row():
     )
 
 
-def test_viewer_cfg_pill_body_shows_algorithm_id_prefix():
-    """CFG strip pill body now reads `<algorithm_id>/<preset_name>` so
-    operators can see which detector ran without hovering for the
-    tooltip. Phase A: critical for hybrid-vs-v11 disambiguation once
-    multiple algorithms become routine."""
-    from viewer_fragments import detection_config_strip_html
-
-    snapshot = {
+def _v11_tennis_snapshot():
+    """Reusable wire shape for the LIVE/SVR CFG pill tests."""
+    return {
         "algorithm_id": "v11_hsv_cc",
         "params": {
             "hsv": {"h_min": 25, "h_max": 55, "s_min": 90, "s_max": 255, "v_min": 90, "v_max": 255},
@@ -1039,12 +1034,59 @@ def test_viewer_cfg_pill_body_shows_algorithm_id_prefix():
         },
         "preset_name": "tennis",
     }
-    html = detection_config_strip_html(snapshot, snapshot)
 
-    # Body shows full `<algo>/<preset>` for both LIVE and SVR pills.
-    assert ">v11_hsv_cc/tennis<" in html
-    # Old pure-preset body must NOT leak through.
-    assert ">tennis<" not in html
+
+def test_cfg_pill_live_omits_algorithm_prefix():
+    """Phase H-2: LIVE pill body shows just the preset name. iOS only
+    runs `v11_hsv_cc` (CLAUDE.md: experimental phase, lockstep) so
+    stamping the algorithm_id on every render is redundant noise. The
+    hover tooltip still carries the full algorithm + HSV/gate detail
+    — no forensic info lost."""
+    from viewer_fragments import _config_pill_html
+
+    pill = _config_pill_html(
+        "LIVE", _v11_tennis_snapshot(), None, show_algorithm_prefix=False,
+    )
+    assert ">tennis<" in pill
+    # Algorithm prefix must NOT appear in the chip body. The string
+    # `v11_hsv_cc` may still appear inside the title= attribute (the
+    # tooltip), so guard via the chip-body marker.
+    assert ">v11_hsv_cc/tennis<" not in pill
+
+
+def test_cfg_pill_svr_keeps_algorithm_prefix():
+    """Phase H-2: SVR pill keeps `<algorithm_id>/<preset_name>` since
+    server_post can run any registered algorithm — the algorithm
+    choice is the variable axis on the SVR side and must be visible
+    at a glance for hybrid-vs-v11 disambiguation."""
+    from viewer_fragments import _config_pill_html
+
+    pill = _config_pill_html(
+        "SVR", _v11_tennis_snapshot(), None, show_algorithm_prefix=True,
+    )
+    assert ">v11_hsv_cc/tennis<" in pill
+
+
+def test_detection_config_strip_dispatches_prefix_per_pill():
+    """The strip-level wrapper hard-codes the LIVE-no-prefix vs
+    SVR-with-prefix dispatch — operators don't have to remember which
+    pill suppresses the algorithm name."""
+    from viewer_fragments import detection_config_strip_html
+
+    snap = _v11_tennis_snapshot()
+    strip = detection_config_strip_html(snap, snap)
+
+    # SVR pill keeps the prefix — must appear at least once.
+    assert ">v11_hsv_cc/tennis<" in strip
+    # LIVE pill drops the prefix — `>tennis<` (without slash prefix)
+    # must appear at least once. Search for the LIVE pill's chip-body
+    # marker specifically by anchoring on the LIVE label that precedes
+    # it in the HTML.
+    live_idx = strip.index(">LIVE<")
+    svr_idx = strip.index(">SVR<")
+    live_pill = strip[live_idx:svr_idx]
+    assert ">tennis<" in live_pill
+    assert "v11_hsv_cc/tennis" not in live_pill
 
 
 def test_failure_strip_html_prefers_earliest_blocking_reason():

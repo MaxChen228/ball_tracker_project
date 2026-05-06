@@ -211,8 +211,15 @@ def detection_config_strip_html(
     return (
         '<div class="config-strip" role="status" aria-label="Detection config used">'
         '<span class="cfg-head">CFG</span>'
-        f'{_config_pill_html("LIVE", live_config_used, presets_by_name)}'
-        f'{_config_pill_html("SVR", server_post_config_used, presets_by_name)}'
+        # LIVE pill drops the algorithm prefix because iOS only ever
+        # runs `v11_hsv_cc` (CLAUDE.md: experimental phase, lockstep
+        # iOS↔server, no other live detector exists). Stamping the
+        # prefix is redundant noise on every render.
+        f'{_config_pill_html("LIVE", live_config_used, presets_by_name, show_algorithm_prefix=False)}'
+        # SVR pill keeps the prefix — server_post can run any registered
+        # algorithm (v11_hsv_cc / hybrid_28d / future detectors). The
+        # algorithm choice is the variable axis on the SVR side.
+        f'{_config_pill_html("SVR", server_post_config_used, presets_by_name, show_algorithm_prefix=True)}'
         '</div>'
     )
 
@@ -239,7 +246,18 @@ def _config_pill_html(
     label: str,
     snapshot: dict | None,
     presets_by_name: dict | None,
+    *,
+    show_algorithm_prefix: bool = True,
 ) -> str:
+    """Render one CFG pill (LIVE or SVR).
+
+    `show_algorithm_prefix` controls whether the chip body reads
+    `<algorithm_id>/<preset_name>` (True, default) or just `<preset_name>`
+    (False). Set False for the LIVE pill — iOS runs only `v11_hsv_cc`
+    so the prefix is constant and uninformative. The hover tooltip
+    always carries the full algorithm + HSV/gate detail regardless,
+    so dropping the body prefix loses no forensic info.
+    """
     if snapshot is None:
         return (
             f'<span class="cfg-pill missing" title="{html.escape(label)}: not set">'
@@ -256,15 +274,12 @@ def _config_pill_html(
     algorithm_id = snapshot["algorithm_id"]
     tip = _format_snapshot_params(algorithm_id, snapshot["params"])
     preset_name = snapshot.get("preset_name")
-    # Phase A: chip body shows `<algorithm_id>/<preset_name>` so an
-    # operator can read off which detector ran without hovering. Preset
-    # is the variable axis under the algorithm — algorithm_id first is
-    # the natural reading order.
+    prefix = f"{html.escape(algorithm_id)}/" if show_algorithm_prefix else ""
     if preset_name is None:
         return (
             f'<span class="cfg-pill ok" title="{html.escape(label)}: custom — {html.escape(tip)}">'
             f'<span class="cfg-label">{html.escape(label)}</span>'
-            f'<span class="cfg-tag">{html.escape(algorithm_id)}/custom</span>'
+            f'<span class="cfg-tag">{prefix}custom</span>'
             f'</span>'
         )
 
@@ -280,14 +295,14 @@ def _config_pill_html(
             f'<span class="cfg-pill missing" '
             f'title="{html.escape(label)}: preset {html.escape(preset_name)} no longer on disk — {html.escape(tip)}">'
             f'<span class="cfg-label">{html.escape(label)}</span>'
-            f'<span class="cfg-tag">{html.escape(algorithm_id)}/{html.escape(preset_name)} (deleted)</span>'
+            f'<span class="cfg-tag">{prefix}{html.escape(preset_name)} (deleted)</span>'
             f'</span>'
         )
 
     return (
         f'<span class="cfg-pill ok" title="{html.escape(p.label)} — {html.escape(tip)}">'
         f'<span class="cfg-label">{html.escape(label)}</span>'
-        f'<span class="cfg-tag">{html.escape(algorithm_id)}/{html.escape(preset_name)}</span>'
+        f'<span class="cfg-tag">{prefix}{html.escape(preset_name)}</span>'
         f'</span>'
     )
 
