@@ -980,6 +980,50 @@ def test_build_viewer_health_surfaces_algorithms_run_excluding_live_path():
     assert health["active_server_post_algorithm_id"] == "v11_hsv_cc"
 
 
+def test_viewer_header_groups_cfg_with_identity_in_nav_row():
+    """Phase H-1 layout regroup: CFG strip lives inside `.nav` (Row 1
+    — identity + cam status + state) ahead of the action form which
+    lives in its own `.nav-action` container (Row 2 — what to do
+    next). DOM order is the structural contract — visual rows follow
+    from `display:grid` track ordering."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(709)
+    pitch = _pitch("A", 709, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+    _record_pitch(pitch)
+    client = TestClient(app)
+    body = client.get(f"/viewer/{session_id}").text
+
+    # Both new rows must exist as containers.
+    assert 'class="nav-action"' in body
+    assert 'class="nav-tuning"' in body
+    assert 'class="config-strip"' in body
+    # CFG strip is unique — Phase H-1 moved it, didn't duplicate it.
+    assert body.count('class="config-strip"') == 1
+    # Phase H-1 row contract: position-ordered DOM markers prove which
+    # row each block lives in, without depending on naive `</div>`
+    # matching (containers have nested divs that confuse string slicing).
+    cfg_pos = body.index('class="config-strip"')
+    back_pos = body.index('class="back"')
+    nav_action_pos = body.index('class="nav-action"')
+    action_pos = body.index("data-algorithm-picker")
+    nav_tuning_pos = body.index('class="nav-tuning"')
+    session_tuning_pos = body.index('class="session-tuning"')
+    # Row 1 (.nav): CFG strip + back link must appear BEFORE Row 2.
+    assert cfg_pos < nav_action_pos, "CFG belongs in Row 1, not Row 2"
+    assert back_pos < nav_action_pos, "DASHBOARD link belongs in Row 1"
+    # Row 2 (.nav-action): action form must be inside, before Row 3.
+    assert nav_action_pos < action_pos < nav_tuning_pos, (
+        "Action form must live in `.nav-action` (Row 2)"
+    )
+    # Row 3 (.nav-tuning): GAP only. CFG had a single occurrence and it
+    # was already verified to be in Row 1 (cfg_pos < nav_tuning_pos
+    # follows from cfg_pos < nav_action_pos < nav_tuning_pos).
+    assert nav_tuning_pos < session_tuning_pos, (
+        "GAP slider must live in `.nav-tuning` (Row 3)"
+    )
+
+
 def test_viewer_cfg_pill_body_shows_algorithm_id_prefix():
     """CFG strip pill body now reads `<algorithm_id>/<preset_name>` so
     operators can see which detector ran without hovering for the
@@ -1338,8 +1382,11 @@ def test_viewer_locks_layout_to_viewport_without_page_scroll():
     client = TestClient(app)
     body = client.get(f"/viewer/{session_id}").text
     assert "overflow:hidden" in body
-    # Three auto rows: nav, nav-tuning, health-failure banner.
-    assert "grid-template-rows:auto auto auto minmax(0, 1fr)" in body
+    # Four auto rows: nav, nav-action, nav-tuning, health-failure banner.
+    # Phase H-1 split the rerun controls out of `.nav` into a dedicated
+    # `.nav-action` row (gives picker + RERUN its own line, frees `.nav`
+    # to host CFG strip alongside identity + cams).
+    assert "grid-template-rows:auto auto auto auto minmax(0, 1fr)" in body
     assert "height:100vh" in body
     # Sticky-bottom dock contract: timeline pinned to viewport bottom,
     # .viewer reserves matching padding via the --timeline-h CSS var.

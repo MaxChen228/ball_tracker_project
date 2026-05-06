@@ -14,17 +14,21 @@
   html, body { margin:0; padding:0; height:100%; overflow:hidden;
     background:var(--bg); color:var(--ink); font-family:var(--sans);
     font-weight:300; line-height:1.6; -webkit-font-smoothing:antialiased; }
-  /* Three-row grid (nav / failure-strip / work). The transport timeline
-     is NOT a grid row — it floats as a fixed-position dock at the
-     viewport bottom (see `.timeline` below). `.viewer` reserves equal
-     bottom padding via `--timeline-h` (set by JS once the dock measures
-     itself) so nothing under .work hides under the dock.
-     First grid track is `auto` (not fixed 52 px) so the nav can wrap
-     to a second line on dense sessions (cam pills + session-tuning +
-     RERUN SERVER + timestamps + back link easily exceed a single row
-     ~1500 px wide) without leaking content above the bar — the prior
-     fix forced single-line + ellipsis but that just hid information. */
-  .viewer { display:grid; grid-template-rows:auto auto auto minmax(0, 1fr);
+  /* Five-row grid (nav / nav-action / nav-tuning / failure-strip /
+     work). The transport timeline is NOT a grid row — it floats as a
+     fixed-position dock at the viewport bottom (see `.timeline`
+     below). `.viewer` reserves equal bottom padding via `--timeline-h`
+     (set by JS once the dock measures itself) so nothing under .work
+     hides under the dock.
+     First three tracks are `auto` so each header row can wrap on dense
+     sessions (cam pills + CFG strip + RERUN form + timestamps easily
+     exceed a single row ~1500 px wide) without leaking content above
+     the bar — the prior single-line + ellipsis fix just hid
+     information. The 4th track is the (optional) failure-strip; when
+     `health_failure_html` returns empty it stays unallocated. The
+     final `minmax(0, 1fr)` track is `.work` (3D scene + camera grid). */
+  .viewer { display:grid;
+    grid-template-rows:auto auto auto auto minmax(0, 1fr);
     height:100vh; min-height:0; overflow:hidden;
     padding-bottom:var(--timeline-h, 80px); }
   .nav { min-height:52px; background:var(--surface);
@@ -35,39 +39,54 @@
     letter-spacing:0.16em; color:var(--ink); }
   .nav .brand .dot { display:inline-block; width:7px; height:7px;
     background:var(--ink); margin-right:var(--s-2); vertical-align:middle; }
+  /* Back link pinned to row 1's right edge — `margin-left:auto` is
+     belt-and-suspenders alongside .health-strip's flex:1 1 auto growth.
+     Keeps DASHBOARD link far-right even when the strip doesn't fully
+     grow (e.g. wide viewports with sparse health content). */
   .nav .back { font-family:var(--mono); font-size:11px;
     letter-spacing:0.12em; text-transform:uppercase; color:var(--sub);
-    text-decoration:none; }
+    text-decoration:none; margin-left:auto; }
   .nav .back:hover { color:var(--ink); }
-  .nav .srv-progress { font-family:var(--mono); font-size:10px;
+  /* Action row: dedicated container for the rerun controls (picker +
+     RERUN button + last-ran timestamp) and the server-detection
+     progress badge. Lives between .nav (identity + state) and
+     .nav-tuning (view tuning) so the operator's "what to do next"
+     pane is visually isolated from "what's currently displayed".
+     Selectors below scope the action chrome to this container. */
+  .nav-action { display:flex; align-items:center; flex-wrap:wrap;
+    row-gap:var(--s-2); gap:var(--s-3);
+    padding:var(--s-2) var(--s-5);
+    background:var(--surface);
+    border-bottom:1px solid var(--border-base); }
+  .nav-action .srv-progress { font-family:var(--mono); font-size:10px;
     letter-spacing:0.06em; color:var(--accent);
     padding:3px 8px; border:1px solid var(--accent); border-radius:var(--r);
     background:var(--surface); font-variant-numeric:tabular-nums;
     white-space:nowrap; }
-  .nav form { margin:0; }
-  .nav .action { font-family:var(--mono); font-size:10px;
+  .nav-action form { margin:0; }
+  .nav-action .action { font-family:var(--mono); font-size:10px;
     letter-spacing:0.10em; text-transform:uppercase; color:var(--ink);
     background:var(--surface); border:1px solid var(--border-base);
     border-radius:var(--r); padding:5px 10px; cursor:pointer;
     transition:border-color 0.15s, color 0.15s, background 0.15s; }
-  .nav .action:hover { border-color:var(--passed); color:var(--passed);
+  .nav-action .action:hover { border-color:var(--passed); color:var(--passed);
     background:var(--surface); }
-  .nav .action:disabled { opacity:0.55; cursor:not-allowed;
+  .nav-action .action:disabled { opacity:0.55; cursor:not-allowed;
     color:var(--sub); }
-  .nav .action-chip { font-family:var(--mono); font-size:10px;
+  .nav-action .action-chip { font-family:var(--mono); font-size:10px;
     letter-spacing:0.10em; text-transform:uppercase; color:var(--passed);
     border:1px solid var(--passed); background:var(--passed-bg);
     padding:3px 8px; border-radius:var(--r); }
-  .nav .action-form { display:inline-flex; align-items:center;
+  .nav-action .action-form { display:inline-flex; align-items:center;
     gap:var(--s-2, 6px); }
-  .nav .action-select { font-family:var(--mono); font-size:10px;
+  .nav-action .action-select { font-family:var(--mono); font-size:10px;
     letter-spacing:0.06em; color:var(--ink); background:var(--surface);
     border:1px solid var(--border-base); border-radius:var(--r);
     padding:4px 8px; cursor:pointer;
     transition:border-color 0.15s, color 0.15s; }
-  .nav .action-select:hover, .nav .action-select:focus {
+  .nav-action .action-select:hover, .nav-action .action-select:focus {
     border-color:var(--passed); color:var(--passed); outline:none; }
-  .nav .action-ts { font-family:var(--mono); font-size:10px;
+  .nav-action .action-ts { font-family:var(--mono); font-size:10px;
     color:var(--sub); white-space:nowrap; font-variant-numeric:tabular-nums;
     letter-spacing:0.04em; }
   /* The strip can wrap internally (cam pills + meta + duration); the
@@ -77,10 +96,12 @@
     align-items:center; gap:var(--s-3); flex-wrap:wrap;
     font-family:var(--mono); font-size:11px; color:var(--sub);
     letter-spacing:0.04em; }
-  /* Tuning bar: dedicated row beneath .nav so cost+gap sliders get the
-     full row width to themselves and don't reflow when the action chips
-     change in width. The strip itself stays an inline-flex group; the
-     parent .nav-tuning is the row container. */
+  /* Tuning bar: dedicated row beneath .nav-action for view-only knobs
+     (currently the per-session GAP slider). Doesn't trigger a server
+     rerun — pure post-hoc filtering of the displayed triangulation.
+     The CFG strip used to live here too but moved to .nav (Phase H-1)
+     because operators read "what's currently displayed" together with
+     identity + cam status, not alongside view tuning. */
   .nav-tuning { display:flex; align-items:center; gap:var(--s-3);
     padding:var(--s-2) var(--s-5);
     background:var(--surface);
@@ -123,11 +144,13 @@
     50%     { opacity:0.55; }
   }
   /* Per-session config strip — visible "Live used X / Svr used Y"
-     pills alongside the recompute-tuning row. Each pill shows the
-     preset filename + a compact HSV+gate detail so operator can read
-     what each pipeline actually ran without round-tripping through
-     the dashboard. `.missing` greys out stale references (deleted
-     preset / unset). */
+     pills inline on the .nav identity row (since Phase H-1). Each pill
+     shows the preset filename + a compact HSV+gate detail so operator
+     can read what each pipeline actually ran without round-tripping
+     through the dashboard. `.missing` greys out stale references
+     (deleted preset / unset). The strip's `flex:0 1 auto; min-width:0;
+     overflow:hidden` keeps it from shoving .back off-row when the
+     viewport gets narrow — wraps to row 1's next line gracefully. */
   .config-strip { display:flex; align-items:center; gap:var(--s-2);
     padding:3px 10px; border:1px solid var(--border-base);
     border-radius:var(--r); background:var(--surface);
