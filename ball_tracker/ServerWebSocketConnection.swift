@@ -116,13 +116,22 @@ final class ServerWebSocketConnection {
         let url = resolvedURL()
         let newTask = URLSession.shared.webSocketTask(with: url)
         task = newTask
+        // Stay `.connecting` until the first inbound activity (message or
+        // ping pong) confirms the socket is actually open. The previous
+        // optimistic `state = .connected` immediately after `resume()`
+        // opened a race: LiveFrameDispatcher would start streaming frames
+        // before TCP/WS handshake completed, inflating counters with
+        // payloads that URLSession was still buffering pre-open.
         state = .connecting
         newTask.resume()
-        state = .connected
         reconnectAttempt = 0
         lastInboundAt = Date()
         schedulePing()
         scheduleLivenessWatchdog()
+        // _send accepts both `.connecting` and `.connected` so the initial
+        // hello and any heartbeat fired before the first inbound message
+        // still reach URLSession's internal queue. Live frames remain
+        // gated on `.connected` via LiveFrameDispatcher.
         if let hello = initialHello { _send(hello) }
         _receiveNext(task: newTask)
     }
@@ -173,6 +182,16 @@ final class ServerWebSocketConnection {
                     self._handleDropped(reason: error.localizedDescription)
                 case .success(let msg):
                     self.lastInboundAt = Date()
+                    // First inbound activity confirms the socket actually
+                    // reached the server — promote from `.connecting`
+                    // (set in `_connect`) to `.connected` so frame
+                    // dispatchers can begin streaming. Ping pongs also
+                    // bump `lastInboundAt`, but they go through a separate
+                    // completion path; this transition only fires on a
+                    // real inbound message frame.
+                    if self.state == .connecting {
+                        self.state = .connected
+                    }
                     let text: String?
                     switch msg {
                     case .string(let s): text = s
@@ -210,8 +229,12 @@ final class ServerWebSocketConnection {
     }
 
     private func _send(_ payload: [String: Any]) {
+        // Accept `.connecting` so the initial hello and heartbeats fired
+        // before the first inbound message still reach URLSession's
+        // internal queue (it buffers pre-open). Live frames separately
+        // gate on `.connected` via LiveFrameDispatcher.
         guard
-            state == .connected,
+            state == .connected || state == .connecting,
             let task,
             JSONSerialization.isValidJSONObject(payload),
             let data = try? JSONSerialization.data(withJSONObject: payload),
@@ -232,7 +255,11 @@ final class ServerWebSocketConnection {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.wsQueue.async {
-                guard self.state == .connected, let t = self.task else { return }
+                // Pings during `.connecting` are how we collect the first
+                // pong that promotes us to `.connected` (without that we'd
+                // deadlock waiting for an unsolicited server message).
+                guard self.state == .connected || self.state == .connecting,
+                      let t = self.task else { return }
                 // Capture task identity so a stale completion (after a
                 // reconnect) can't mark the WRONG connection as dropped.
                 t.sendPing { [weak self] error in
@@ -243,8 +270,15 @@ final class ServerWebSocketConnection {
                             self._handleDropped(reason: "ping failed: \(error.localizedDescription)")
                             return
                         }
-                        // Successful pong = liveness signal.
+                        // Successful pong = liveness signal AND proof the
+                        // socket is fully open (we got a server-side
+                        // round-trip), so promote `.connecting` →
+                        // `.connected` if we hadn't already from an
+                        // inbound message.
                         self.lastInboundAt = Date()
+                        if self.state == .connecting {
+                            self.state = .connected
+                        }
                     }
                 }
                 self.schedulePing()
@@ -266,7 +300,11 @@ final class ServerWebSocketConnection {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.wsQueue.async {
-                guard self.state == .connected else { return }
+                // Watch both `.connecting` and `.connected` — a server
+                // that accepted TCP but never completes the WS handshake
+                // would otherwise leave us pinned in `.connecting`
+                // forever, since `URLSession.receive` can hang silently.
+                guard self.state == .connected || self.state == .connecting else { return }
                 let elapsed = Date().timeIntervalSince(self.lastInboundAt)
                 if elapsed > Self.livenessTimeout {
                     self._handleDropped(

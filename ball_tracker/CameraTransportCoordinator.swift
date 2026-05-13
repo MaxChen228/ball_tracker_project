@@ -126,15 +126,22 @@ final class CameraTransportCoordinator: NSObject {
                 currentPaths: { [weak self] in self?.dependencies.getCurrentSessionPaths() ?? [] }
             )
         }
-        ws?.connect(initialHello: [
+        // Optional<X>.none as Any survives the array-literal but fails
+        // JSONSerialization.isValidJSONObject downstream, which makes
+        // ServerWebSocketConnection._send silently drop the entire hello.
+        // Build the dict explicitly and only insert keys whose values exist
+        // so the server reliably receives the device hello even when
+        // syncAnchorTs / syncId are nil at boot.
+        var hello: [String: Any] = [
             "type": "hello",
             "cam": cameraRole,
             "device_id": DeviceIdentity.id,
             "device_model": DeviceIdentity.model,
-            "session_id": dependencies.getCurrentSessionId() as Any,
-            "time_sync_id": dependencies.getSyncId() as Any,
-            "sync_anchor_timestamp_s": dependencies.getSyncAnchorTimestampS() as Any,
-        ])
+        ]
+        if let sid = dependencies.getCurrentSessionId()    { hello["session_id"] = sid }
+        if let tid = dependencies.getSyncId()              { hello["time_sync_id"] = tid }
+        if let ts  = dependencies.getSyncAnchorTimestampS() { hello["sync_anchor_timestamp_s"] = ts }
+        ws?.connect(initialHello: hello)
     }
 
     func disconnect() {
@@ -240,15 +247,19 @@ final class CameraTransportCoordinator: NSObject {
             // the anchor across state transitions. Kept on while
             // Quick-Chirp anchor persistence is still being tuned.
             transportLog.info("heartbeat cam=\(self.cameraRole, privacy: .public) time_sync_id=\(timeSyncId ?? "nil", privacy: .public) anchor_ts=\(anchorTs ?? .nan)")
+            // Same Optional<X>.none-as-Any pitfall as the hello payload —
+            // wrapping nil through `as Any` poisons isValidJSONObject and
+            // makes the entire heartbeat silently disappear. Only insert
+            // optional keys that actually carry a value.
             var payload: [String: Any] = [
                 "type": "heartbeat",
                 "cam": self.cameraRole,
                 "device_id": DeviceIdentity.id,
                 "device_model": DeviceIdentity.model,
                 "t_session_s": CACurrentMediaTime(),
-                "time_sync_id": timeSyncId as Any,
-                "sync_anchor_timestamp_s": anchorTs as Any,
             ]
+            if let tid = timeSyncId { payload["time_sync_id"] = tid }
+            if let ts  = anchorTs   { payload["sync_anchor_timestamp_s"] = ts }
             let device = UIDevice.current
             let level = device.batteryLevel
             if level >= 0 {

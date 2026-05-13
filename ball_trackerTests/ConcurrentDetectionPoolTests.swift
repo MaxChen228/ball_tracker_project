@@ -9,6 +9,12 @@ import CoreVideo
 /// P-core, so we drop on overflow rather than running multiple workers.
 final class ConcurrentDetectionPoolTests: XCTestCase {
 
+    /// Push minimal settings so `enqueue` doesn't refuse-until-settings.
+    private func armSettings(on pool: ConcurrentDetectionPool) {
+        pool.updateHSVRange(ServerUploader.HSVRangePayload.tennis)
+        pool.updateShapeGate(ServerUploader.ShapeGatePayload.default)
+    }
+
     private func createDummyPixelBuffer() -> CVPixelBuffer {
         var pixelBuffer: CVPixelBuffer?
         let attrs = [
@@ -21,6 +27,7 @@ final class ConcurrentDetectionPoolTests: XCTestCase {
 
     func testDispatchFiresAllAcceptedFrames() {
         let pool = ConcurrentDetectionPool(maxBacklog: 32)
+        armSettings(on: pool)
         let exp = expectation(description: "Fires all frames")
         exp.expectedFulfillmentCount = 5
 
@@ -41,6 +48,7 @@ final class ConcurrentDetectionPoolTests: XCTestCase {
         // can't keep up while the loop is running, so we should bottom
         // out at `maxBacklog` accepted before drops kick in.
         let pool = ConcurrentDetectionPool(maxBacklog: 1)
+        armSettings(on: pool)
 
         var acceptedCount = 0
         for _ in 0..<100 {
@@ -55,6 +63,7 @@ final class ConcurrentDetectionPoolTests: XCTestCase {
 
     func testInvalidateGenerationSilencesInFlightWorkers() {
         let pool = ConcurrentDetectionPool(maxBacklog: 32)
+        armSettings(on: pool)
         var receivedCallbackCount = 0
         pool.onFrame = { _ in receivedCallbackCount += 1 }
 
@@ -72,6 +81,7 @@ final class ConcurrentDetectionPoolTests: XCTestCase {
 
     func testFrameIndexIsMonotonic() {
         let pool = ConcurrentDetectionPool(maxBacklog: 64)
+        armSettings(on: pool)
         var indices: [Int] = []
         let lock = NSLock()
 
@@ -101,6 +111,7 @@ final class ConcurrentDetectionPoolTests: XCTestCase {
 
     func testWaitForDrainCompletesAfterAllQueuedFramesProcessed() {
         let pool = ConcurrentDetectionPool(maxBacklog: 64)
+        armSettings(on: pool)
         let firedCount = NSCountedSet()
         pool.onFrame = { _ in firedCount.add("frame") }
 
@@ -122,6 +133,7 @@ final class ConcurrentDetectionPoolTests: XCTestCase {
 
     func testReset() {
         let pool = ConcurrentDetectionPool(maxBacklog: 1)
+        armSettings(on: pool)
         while pool.enqueue(pixelBuffer: createDummyPixelBuffer(), timestampS: 0) {}
         XCTAssertGreaterThan(pool.droppedFrameCount, 0)
 
