@@ -40,7 +40,7 @@
   } | null
   ```
 
-  `SessionResult` mirrors the same `live_config_used` + `server_post_config_used` snapshots with the same A-wins-B-fallback aggregation. The events list / viewer CFG strip renders from these snapshots directly, so custom configs and deleted presets still show the exact frozen HSV + gate values that produced the session.
+  `SessionResult` carries the same `live_config_used` and `server_post_config_used` fields, but both are `@computed_field` projections over the canonical `config_used_by_algorithm` dict — there is no cross-cam aggregation or A-wins-B-fallback. `live_config_used` returns `config_used_by_algorithm.get(ios_capture_time)`; `server_post_config_used` returns `config_used_by_algorithm.get(active_server_post_algorithm_id)`. Neither field is written to disk: `_PITCH_PERSIST_EXCLUDE` and `_RESULT_PERSIST_EXCLUDE` strip both projections from `.model_dump(mode="json")` so the dict is the only on-disk truth. The events list / viewer CFG strip renders from these projections directly, so custom configs and deleted presets still show the exact frozen HSV + gate values that produced the session.
 
   **Phase 6b additive fields** (PitchPayload + SessionResult): `frames_by_algorithm: {<algorithm_id>: FramePayload[]}` + `config_used_by_algorithm: {<algorithm_id>: snapshot}` (PitchPayload), and `triangulated_by_algorithm` / `segments_by_algorithm` / `frame_counts_by_algorithm` / `algorithms_completed: string[]` / `config_used_by_algorithm` (SessionResult). These are auto-mirrored from the legacy per-path fields by an after-validator on every load + WS receive (`live` → `ios_capture_time`, `server_post` → the stamped algorithm id, or `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID = "v11_hsv_cc"` for pre-Phase-2 records). Wire-additive: extra keys, no removal. iOS atomic-drop guards only enforce required-field presence so the additional keys pass through without iOS changes. **Phase 7 (shipped)**: `POST /sessions/{sid}/runs/{algorithm_id}` writes directly into these dicts, including ad-hoc params runs whose snapshot has `preset_name=null`. See the endpoint contract below.
 
@@ -100,6 +100,31 @@ The captured `DetectionConfigSnapshotPayload(algorithm_id, params, preset_name)`
 
 Kept for the HTML form callers (events-row "Run srv" button and viewer "Rerun server" button) which submit `preset_name` only. Behaviour is identical to the primary endpoint's preset path: the snapshot's `algorithm_id` is derived from `preset.algorithm_id`, then the same `_dispatch_server_post` runs. 422 on missing `preset_name`, 404 on unknown preset. Response shape matches the primary endpoint.
 
+### `POST /sessions/{sid}/active_run` — flip active server_post pointer
+
+Pure pointer flip — **no detection runs**. Switches `active_server_post_algorithm_id` to a different algorithm that has already been run on this session (i.e. has frames in some cam's `frames_by_algorithm`). After the flip, `server_post_config_used` / `server_post_config_used.preset_name` projections and the viewer history dropdown reflect the newly-active bucket. Handler: `server/routes/sessions.py::sessions_active_run`.
+
+Body (JSON or form-urlencoded):
+
+- `algorithm_id` (required): must already have at least one frame in some cam's `frames_by_algorithm`. The live bucket id (`ios_capture_time`) is rejected.
+- `return_to` (optional, HTML form only): viewer redirect after the flip; whitelisted to `/` or `/viewer/{session_id}`.
+
+Response (200):
+```json
+{"ok": true, "active_algorithm_id": "<algorithm_id>"}
+```
+
+Error matrix:
+
+| Status | Trigger |
+|---|---|
+| 422 | `session_id` fails `^s_[0-9a-f]{4,32}$` slug regex (HTML callers 303 to `/`) |
+| 422 | `algorithm_id` missing or empty |
+| 422 | `algorithm_id` is the live bucket (`ios_capture_time`) or has no frames in this session |
+| 404 | Session not found |
+
+Broadcasts a `fit` SSE with `cause: "active_run_switch"` so every open dashboard / viewer subscriber repaints the scene with the newly-active triangulation bucket without a page reload.
+
 ## WebSocket messages — `/ws/device/{cam}`
 
 The phone holds one WS connection per camera for the lifetime of its app session. Inbound (server→iOS) carries control commands; outbound (iOS→server) carries liveness + the live frame stream. Handler: `server/routes/device_ws.py::ws_device`. Send helper: `server/ws.py::DeviceSocketManager.send` (logs cam id + message type on every drop so silent failures are auditable). Every message is a JSON object with a `type` discriminator.
@@ -117,11 +142,11 @@ paths: list[str]                     # default DetectionPath set for newly-armed
 hsv_range: {h_min,h_max,s_min,s_max,v_min,v_max}  # from data/detection_config.json (POST /detection/config)
 shape_gate: {aspect_min, fill_min}   # from data/detection_config.json (POST /detection/config)
 active_preset_name: str | null       # currently-bound LIVE preset filename (DetectionConfig.preset). Pushed alongside the HSV+shape values so iOS can log preset identity. Pure metadata — iOS does not act on it. Null only when the live config is custom (slider direct-POST path); never null after a /presets or /presets/active {target:"live"} call. NOTE: the **server_post** active preset is NOT in this WS push (it never affects iOS) and is NOT exposed via any REST JSON endpoint. `active_server_post_preset_name` is injected at SSR time by `viewer_page.py` (calls `state.active_server_post_preset_name()` → reads `data/active_server_post_preset.json`) — there is no `GET /status` field for it.
-chirp_detect_threshold: float        # matched-filter cutoff for legacy chirp-listener path; data/chirp_detect_threshold.json
-mutual_sync_threshold: float         # cutoff for the two-device mutual-sync coordinator; data/mutual_sync_threshold.json
+chirp_detect_threshold: float        # matched-filter cutoff for legacy chirp-listener path; data/runtime_settings.json key "chirp_detect_threshold"
+mutual_sync_threshold: float         # cutoff for the two-device mutual-sync coordinator; data/runtime_settings.json key "mutual_sync_threshold"
 heartbeat_interval_s: float          # cadence iOS uses for upstream {type:"heartbeat"} (state.heartbeat_interval_s)
-tracking_exposure_cap: str           # TrackingExposureCapMode enum value (e.g. "auto"/"capped_2ms"); data/tracking_exposure_cap.json
-capture_height_px: int               # 1080 / 720 etc. — iOS picks the matching 240 fps format; data/capture_height.json
+tracking_exposure_cap: str           # TrackingExposureCapMode enum value (e.g. "auto"/"capped_2ms"); data/runtime_settings.json key "tracking_exposure_cap"
+capture_height_px: int               # 1080 / 720 etc. — iOS picks the matching 240 fps format; data/runtime_settings.json key "capture_height_px"
 preview_requested: bool              # True while the dashboard's Preview-on toggle is held for this cam
 calibration_frame_requested: bool    # True while /calibration/auto is awaiting a single still from this cam
 device_time_synced: bool             # mirrors the gated time_synced bit /status reports for this cam
@@ -263,7 +288,11 @@ event: fit
 data: {
   "sid": str,
   "segments": [SegmentRecord, ...],  # may be empty (1-point sessions, pure noise)
-  "gap_threshold_m": float            # carried on all three emit paths: recompute (routes/sessions.py:493), server_post (routes/pitch.py:410), and cycle_end (routes/device_ws.py:305). Clients should always patch their per-session slider cache from this field.
+  "gap_threshold_m": float,           # carried on all four emit paths. Clients should always patch their per-session slider cache from this field.
+  "cause": str                        # "recompute" | "cycle_end" | "server_post" | "active_run_switch"
+                                      # viewer 85_sse_fit.js returns early on "recompute" (inline /recompute
+                                      # response already patched the scene); all other causes trigger the
+                                      # autorefresh / /results refetch path.
 }
 ```
 
