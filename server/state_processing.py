@@ -48,6 +48,12 @@ class SessionProcessingState:
         # routes/pitch.py::_run_server_detection when a stage fails so
         # /events can surface the reason without tailing the log.
         self.server_post_errors: dict[str, dict[str, str]] = {}
+        # Per-(cam, sid) latest in-flight progress snapshot for the
+        # viewer's SSR overlay seed. Populated by
+        # routes/pitch.py::on_progress on every throttled emit and
+        # cleared on start_job / finish_job so a stale tick from a
+        # prior run can't bleed into the next overlay paint.
+        self.server_post_progress: dict[JobKey, dict[str, int | None]] = {}
         # Owner references wired in by attach(). Separate init-vs-attach
         # so State can instantiate us before its own fields exist.
         self._owner: "State | None" = None
@@ -119,6 +125,10 @@ class SessionProcessingState:
             return False
         self.server_post_jobs[key] = "processing"
         self.server_post_active_tasks.add(key)
+        # Wipe stale progress from a prior run on the same (cam, sid) so
+        # the viewer's SSR seed doesn't show "847/1200" from yesterday
+        # for the first paint of a freshly armed rerun.
+        self.server_post_progress.pop(key, None)
         return True
 
     def should_cancel(self, key: JobKey) -> bool:
@@ -130,6 +140,10 @@ class SessionProcessingState:
             self.server_post_jobs[key] = "canceled"
         else:
             self.server_post_jobs.pop(key, None)
+        # Always drop the progress entry on finish — done events fire on
+        # ok/canceled/error and the viewer's SSR seed must not show a
+        # frozen "999/1200" after detection has actually finished.
+        self.server_post_progress.pop(key, None)
 
     def cancel_keys(self, keys: Iterable[JobKey]) -> bool:
         changed = False
@@ -240,6 +254,42 @@ class SessionProcessingState:
         _, lock = self._require_owner()
         with lock:
             return dict(self.server_post_errors.get(session_id, {}))
+
+    def set_server_post_progress(
+        self,
+        session_id: str,
+        camera_id: str,
+        *,
+        done: int,
+        total: int | None,
+        pct: int | None,
+    ) -> None:
+        """Persist the latest progress tick so a viewer page rendered
+        mid-decode can paint the bar with real numbers instead of
+        `waiting for first frame…`. Called from
+        `routes/pitch.py::on_progress` after the wall-clock throttle
+        admits an emit, so write frequency mirrors SSE frequency
+        (≤ 10 Hz per cam)."""
+        _, lock = self._require_owner()
+        with lock:
+            self.server_post_progress[(camera_id, session_id)] = {
+                "done": int(done),
+                "total": int(total) if total is not None else None,
+                "pct": int(pct) if pct is not None else None,
+            }
+
+    def session_progress(self, session_id: str) -> dict[str, dict[str, int | None]]:
+        """Per-cam progress snapshot for the viewer's SSR seed. Returns
+        `{cam: {done, total, pct}}` for every cam that has emitted at
+        least one progress event on this session's current run. Empty
+        dict when no in-flight job has reported yet."""
+        _, lock = self._require_owner()
+        with lock:
+            return {
+                cam: dict(snap)
+                for (cam, sid), snap in self.server_post_progress.items()
+                if sid == session_id
+            }
 
     def cancel_processing(self, session_id: str) -> bool:
         keys = [

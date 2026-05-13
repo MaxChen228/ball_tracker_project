@@ -89,6 +89,48 @@
   .nav-action .action-ts { font-family:var(--mono); font-size:10px;
     color:var(--sub); white-space:nowrap; font-variant-numeric:tabular-nums;
     letter-spacing:0.04em; }
+  /* History dropdown — viewer second-row leftmost element when the
+     session has >1 server_post run on disk. `<details>` carries the
+     click-to-open state natively; the per-row forms inside POST to
+     /sessions/{sid}/active_run so a click triggers a real page reload
+     after the server flips the pointer. No JS. */
+  .nav-action .history-menu { position:relative; }
+  .nav-action .history-summary { font-family:var(--mono); font-size:10px;
+    letter-spacing:0.10em; text-transform:uppercase; color:var(--ink);
+    background:var(--surface); border:1px solid var(--border-base);
+    border-radius:var(--r); padding:5px 10px; cursor:pointer;
+    list-style:none; user-select:none;
+    transition:border-color 0.15s, color 0.15s; }
+  .nav-action .history-summary::-webkit-details-marker { display:none; }
+  .nav-action .history-summary:hover,
+  .nav-action details[open] .history-summary {
+    border-color:var(--passed); color:var(--passed); }
+  .nav-action .history-list { position:absolute;
+    top:calc(100% + 4px); left:0; z-index:10;
+    list-style:none; margin:0; padding:4px;
+    min-width:300px;
+    background:var(--surface); border:1px solid var(--border-base);
+    border-radius:var(--r); box-shadow:0 4px 12px rgba(0,0,0,0.08); }
+  .nav-action .hm-row { display:flex; align-items:center; }
+  .nav-action .hm-row-active { padding:6px 8px; gap:var(--s-2);
+    color:var(--passed); background:var(--passed-bg);
+    border-radius:var(--r); }
+  .nav-action .hm-form { width:100%; margin:0; }
+  .nav-action .hm-button { display:flex; align-items:center;
+    gap:var(--s-2); width:100%; padding:6px 8px;
+    font-family:var(--mono); font-size:10px; letter-spacing:0.06em;
+    color:var(--ink); background:transparent; border:none;
+    border-radius:var(--r); cursor:pointer; text-align:left;
+    transition:background 0.12s, color 0.12s; }
+  .nav-action .hm-button:hover {
+    background:var(--passed-bg); color:var(--passed); }
+  .nav-action .hm-marker { font-size:12px; flex:0 0 auto; }
+  .nav-action .hm-label { flex:1 1 auto; white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis; }
+  .nav-action .hm-meta { flex:0 0 auto; font-size:9px;
+    color:var(--sub); font-variant-numeric:tabular-nums;
+    letter-spacing:0.04em; }
+  .nav-action .hm-row-active .hm-meta { color:var(--passed); }
   /* The strip can wrap internally (cam pills + meta + duration); the
      parent .nav now also wraps (flex-wrap:wrap above) so wrapped lines
      stay inside the bar instead of overflowing above it. */
@@ -552,6 +594,14 @@
   .scene-col .scene-pending-overlay .spo-counts {
     font-family:var(--mono); font-size:24px; color:var(--ink); font-weight:500;
     letter-spacing:0.06em; }
+  .scene-col .scene-pending-overlay .spo-bar {
+    width:50%; max-width:340px; height:4px; border-radius:var(--r);
+    background:var(--border-base); overflow:hidden; }
+  .scene-col .scene-pending-overlay .spo-bar-fill {
+    height:100%; background:var(--ink); width:0%;
+    /* transition matches the SSE emit cadence (0.1 s wall-clock) so
+       the fill animates continuously instead of "advance + pause". */
+    transition:width 0.1s linear; }
   .scene-col .scene-pending-overlay .spo-hint {
     font-family:var(--mono); font-size:10px; letter-spacing:0.1em;
     color:var(--sub); text-transform:uppercase; }

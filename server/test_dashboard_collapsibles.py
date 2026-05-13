@@ -122,3 +122,23 @@ def test_events_card_renders_hybrid_snapshot_without_keyerror():
     html = _render_events_body([e])
     assert "hybrid_28d_blue_ball" in html
     assert "tennis" in html  # live chip
+
+
+def test_run_srv_form_has_no_return_to_field():
+    """The dashboard events-row Run srv form intentionally omits the
+    `return_to` hidden field so `_resolve_return_to` falls back to `/`
+    (the page the operator is already on). A regression that copy-
+    pasted `<input name="return_to" value="/viewer/{sid}">` here
+    would silently dump the dashboard caller into the viewer mid-rerun,
+    breaking the per-caller redirect contract that phase 1 introduced."""
+    e = {
+        "session_id": "s_form", "created_day": "2026-05-04", "created_hm": "10:00",
+        "live_config_used": _snapshot_v11(),
+        "server_post_config_used": _snapshot_v11(),
+    }
+    html = _render_events_body([e])
+    form_anchor = 'action="/sessions/s_form/run_server_post"'
+    assert form_anchor in html
+    start = html.index(form_anchor)
+    form_chunk = html[start:html.index("</form>", start) + len("</form>")]
+    assert 'name="return_to"' not in form_chunk

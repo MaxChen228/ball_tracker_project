@@ -141,3 +141,88 @@ def test_find_video_skips_tmp(tmp_path):
     real.write_bytes(b"")
 
     assert s._processing.find_video_for(sid, "A") == real
+
+
+def test_session_progress_empty_when_no_run(tmp_path):
+    """Untouched sessions report an empty progress dict — the viewer
+    SSR seed falls through to "waiting for first frame…" placeholder."""
+    s = State(data_dir=tmp_path)
+    sid = _sid(7)
+    assert s._processing.session_progress(sid) == {}
+
+
+def test_set_progress_round_trips(tmp_path):
+    """`set_server_post_progress` writes one snapshot per (cam, sid).
+    `session_progress(sid)` projects every cam's latest snapshot back
+    to the viewer SSR layer as a `{cam: {done, total, pct}}` dict."""
+    s = State(data_dir=tmp_path)
+    sid = _sid(8)
+    s._processing.set_server_post_progress(sid, "A", done=120, total=974, pct=12)
+    s._processing.set_server_post_progress(sid, "B", done=80, total=907, pct=8)
+    snap = s._processing.session_progress(sid)
+    assert snap == {
+        "A": {"done": 120, "total": 974, "pct": 12},
+        "B": {"done": 80, "total": 907, "pct": 8},
+    }
+
+
+def test_set_progress_handles_unknown_total(tmp_path):
+    """`probe_frame_count` returning None propagates as `total=None` and
+    `pct=None`. The viewer JS renders "?/" and the bar fill stays at 0%
+    — explicit "we don't know" beats a fake number."""
+    s = State(data_dir=tmp_path)
+    sid = _sid(9)
+    s._processing.set_server_post_progress(sid, "A", done=15, total=None, pct=None)
+    snap = s._processing.session_progress(sid)
+    assert snap == {"A": {"done": 15, "total": None, "pct": None}}
+
+
+def test_start_job_clears_stale_progress(tmp_path):
+    """A fresh run on the same (cam, sid) must not surface yesterday's
+    counters — `start_server_post_job` drops any prior progress snapshot
+    so the SSR seed shows the empty state until the next emit lands."""
+    s = State(data_dir=tmp_path)
+    sid = _sid(10)
+    s.record(_pitch("A", sid))
+    (s.video_dir / f"session_{sid}_A.mov").write_bytes(b"x")
+    s._processing.set_server_post_progress(sid, "A", done=999, total=1000, pct=99)
+
+    assert s._processing.start_server_post_job(sid, "A") is True
+    assert s._processing.session_progress(sid) == {}
+
+
+def test_finish_job_clears_progress(tmp_path):
+    """Done events fire on ok/canceled/error; the SSR seed must not
+    show a frozen "999/1200" after detection has actually completed."""
+    s = State(data_dir=tmp_path)
+    sid = _sid(11)
+    s.record(_pitch("A", sid))
+    (s.video_dir / f"session_{sid}_A.mov").write_bytes(b"x")
+    s._processing.start_server_post_job(sid, "A")
+    s._processing.set_server_post_progress(sid, "A", done=500, total=974, pct=51)
+
+    s._processing.finish_server_post_job(sid, "A", canceled=False)
+    assert s._processing.session_progress(sid) == {}
+
+
+def test_priming_write_after_start_job_survives(tmp_path):
+    """Load-bearing ordering invariant: `routes/pitch.py::_run_server_detection`
+    calls `start_server_post_job` first (which clears any stale
+    progress), then issues the priming `set_server_post_progress`.
+    A reversed order would let start_job's clear blow away the
+    priming write and the SSR seed would never observe done=0 until
+    the next throttled tick (one throttle-window where the operator
+    sees "waiting for first frame…" needlessly)."""
+    s = State(data_dir=tmp_path)
+    sid = _sid(12)
+    s.record(_pitch("A", sid))
+    (s.video_dir / f"session_{sid}_A.mov").write_bytes(b"x")
+    # Stale entry from a prior run.
+    s._processing.set_server_post_progress(sid, "A", done=999, total=1000, pct=99)
+
+    # Mirror pitch.py's real sequence: start_job first, then priming.
+    assert s._processing.start_server_post_job(sid, "A") is True
+    s._processing.set_server_post_progress(sid, "A", done=0, total=974, pct=0)
+
+    snap = s._processing.session_progress(sid)
+    assert snap == {"A": {"done": 0, "total": 974, "pct": 0}}
