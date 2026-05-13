@@ -225,7 +225,8 @@ def _cfg_strip_html(e: dict[str, Any]) -> str:
         # per-algorithm dispatch.
         return format_snapshot_params(cfg["algorithm_id"], cfg["params"])
 
-    def _chip(label: str, cfg: dict[str, Any] | None) -> str:
+    def _chip(label: str, cfg: dict[str, Any] | None,
+              *, show_algorithm_prefix: bool) -> str:
         if cfg is None:
             return (
                 f'<span class="ev-cfg-chip none" title="{html.escape(label)}: not set">'
@@ -233,10 +234,17 @@ def _cfg_strip_html(e: dict[str, Any]) -> str:
             )
         name = cfg.get("preset_name")
         tip = _tip(cfg)
+        # SVR axis varies by algorithm (v11_hsv_cc / hybrid_28d / future) so
+        # the chip body shows `<alg>/<preset>` — matches viewer SVR pill.
+        # LIVE axis is fixed (iOS always v11_hsv_cc) so the prefix is constant
+        # and uninformative; the tooltip carries the full alg+param detail.
+        prefix = (
+            f"{html.escape(cfg['algorithm_id'])}/" if show_algorithm_prefix else ""
+        )
         if name is None:
             return (
                 f'<span class="ev-cfg-chip" title="{html.escape(label)}: custom — {html.escape(tip)}">'
-                f'{html.escape(label)} <b>custom</b></span>'
+                f'{html.escape(label)} <b>{prefix}custom</b></span>'
             )
         try:
             p = _state.load_preset(name)
@@ -244,17 +252,18 @@ def _cfg_strip_html(e: dict[str, Any]) -> str:
             return (
                 f'<span class="ev-cfg-chip deleted" title="{html.escape(label)}: '
                 f'preset {html.escape(name)} no longer on disk — {html.escape(tip)}">'
-                f'{html.escape(label)} <b>{html.escape(name)}</b> '
+                f'{html.escape(label)} <b>{prefix}{html.escape(name)}</b> '
                 f'<i>(deleted)</i></span>'
             )
         return (
             f'<span class="ev-cfg-chip" title="{html.escape(p.label)} — {html.escape(tip)}">'
-            f'{html.escape(label)} <b>{html.escape(name)}</b></span>'
+            f'{html.escape(label)} <b>{prefix}{html.escape(name)}</b></span>'
         )
 
     return (
-        f'<div class="ev-cfg-strip">{_chip("Live", live_cfg)}'
-        f'{_chip("Svr", srv_cfg)}</div>'
+        f'<div class="ev-cfg-strip">'
+        f'{_chip("Live", live_cfg, show_algorithm_prefix=False)}'
+        f'{_chip("Svr", srv_cfg, show_algorithm_prefix=True)}</div>'
     )
 
 
