@@ -460,3 +460,132 @@ def test_server_post_progress_uses_wall_clock_throttle():
     assert "idx % 30" not in src
     assert "time.monotonic()" in src
     assert "_PROGRESS_THROTTLE_S" in src
+
+
+def test_run_server_detection_abandons_when_pitch_disappears(
+    tmp_path, monkeypatch,
+):
+    """Regression for PR #122 A-2: `_run_server_detection` re-fetches
+    the latest pitch from in-memory state AFTER MOV decode (which can
+    take 30+ seconds) and BEFORE stamping. If the session was deleted
+    or the cam's pitch was evicted while detection ran, the function
+    must abandon: broadcast canceled, finish the job, return without
+    calling `state.record` or `stamp_server_post_config`. Pre-fix code
+    used the stale snapshot from `resume_processing()` time, which
+    silently resurrected a tombstoned pitch (calling `record()` re-
+    inserts it into `self.pitches`)."""
+    import asyncio
+    import os
+    from pathlib import Path
+
+    import main
+    from detection_paths import stamp_server_post_run
+    from routes import pitch as _pitch
+    from schemas import (
+        BlobCandidate,
+        DetectionConfigSnapshotPayload,
+        FramePayload,
+        PitchPayload,
+    )
+
+    # Isolate state to tmp_path so we can construct + record pitches
+    # cleanly without colliding with whatever main.state holds from
+    # other tests in the suite.
+    isolated = main.State(data_dir=tmp_path)
+    monkeypatch.setattr(main, "state", isolated)
+
+    # Capture SSE broadcasts so we can assert "canceled" was emitted.
+    broadcasts: list[tuple[str, dict]] = []
+
+    class _CaptureHub:
+        async def broadcast(self, event: str, data: dict) -> None:
+            broadcasts.append((event, data))
+
+    monkeypatch.setattr(main, "sse_hub", _CaptureHub())
+
+    sid_str = "s_aaaa1111"
+    cam = "A"
+    isolated.heartbeat(cam, time_synced=True, time_sync_id="sy_deadbeef",
+                       sync_anchor_timestamp_s=0.0)
+    snap = DetectionConfigSnapshotPayload(
+        algorithm_id="v11_hsv_cc",
+        params={
+            "hsv": {"h_min": 10, "h_max": 20, "s_min": 30,
+                    "s_max": 200, "v_min": 40, "v_max": 210},
+            "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+        },
+        preset_name=None,
+    )
+    frame = FramePayload(
+        frame_index=0, timestamp_s=0.0, ball_detected=True,
+        candidates=[BlobCandidate(
+            px=10.0, py=20.0, area=100, area_score=1.0,
+            aspect=1.0, fill=0.68,
+        )],
+    )
+    pitch_snapshot = PitchPayload(
+        camera_id=cam, session_id=sid_str,
+        sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+    )
+    stamp_server_post_run(pitch_snapshot, snap, [frame])
+    isolated.record(pitch_snapshot)
+
+    # A clip path needs to exist (probe_frame_count opens it) — but we
+    # short-circuit run_detection so contents don't matter.
+    clip_path = tmp_path / "clip.mov"
+    clip_path.write_bytes(b"\x00" * 16)
+
+    # Stub run_detection: returns immediately (no MOV decode). During
+    # the to_thread call we simulate the race by deleting the pitch.
+    import algorithms as _algorithms
+
+    def fake_run_detection(algorithm_id, clip, video_start_pts_s, params,
+                           should_cancel=None, progress=None):
+        # Simulate the race: pitch vanishes mid-decode (session deleted
+        # by operator, or cam-level pitch evicted).
+        isolated.delete_session(sid_str)
+        return [frame]
+
+    monkeypatch.setattr(_algorithms, "run_detection", fake_run_detection)
+    monkeypatch.setattr(_pitch, "probe_frame_count", lambda _p: 1)
+
+    # Track whether the post-abandon stamp call was reached. If the
+    # abandon path works, stamp_server_post_config must NOT run.
+    stamp_called: list[bool] = []
+    original_stamp = isolated.stamp_server_post_config
+
+    def tracking_stamp(*args, **kwargs):
+        stamp_called.append(True)
+        return original_stamp(*args, **kwargs)
+
+    monkeypatch.setattr(isolated, "stamp_server_post_config", tracking_stamp)
+
+    # Run the coroutine to completion.
+    asyncio.run(_pitch._run_server_detection(
+        clip_path, pitch_snapshot, config_snapshot=snap,
+    ))
+
+    # Verified abandon path: canceled SSE broadcast was emitted.
+    done_events = [
+        d for (e, d) in broadcasts if e == "server_post_done"
+    ]
+    assert done_events, (
+        f"expected server_post_done broadcast; got {broadcasts}"
+    )
+    assert done_events[-1]["reason"] == "canceled", (
+        f"abandon path must broadcast reason=canceled; got "
+        f"{done_events[-1]['reason']!r}"
+    )
+    # stamp_server_post_config must NOT run — the abandon `return`
+    # short-circuits before the stamp call.
+    assert not stamp_called, (
+        "stamp_server_post_config was called despite the pitch having "
+        "disappeared — abandon-when-pitch-disappears path regressed"
+    )
+    # The session must remain deleted; pre-fix code silently
+    # re-inserted the pitch via record().
+    assert (cam, sid_str) not in isolated.pitches, (
+        "pitch was silently resurrected by record() — abandon-mid-run "
+        "regression"
+    )
