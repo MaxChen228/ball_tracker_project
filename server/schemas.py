@@ -142,6 +142,22 @@ class HSVRangePayload(BaseModel):
     v_min: int = Field(ge=0, le=255)
     v_max: int = Field(ge=0, le=255)
 
+    @model_validator(mode="after")
+    def _validate_min_le_max(self) -> "HSVRangePayload":
+        # Inverted bounds (e.g. h_min=120, h_max=50 from a typo) would
+        # collapse cv2.inRange to an all-zero mask and yield 0 candidates
+        # silently. Reject at the boundary so an operator typo on
+        # POST /presets is visible immediately rather than masquerading
+        # as a "detection broke" runtime bug.
+        for axis, lo, hi in (
+            ("h", self.h_min, self.h_max),
+            ("s", self.s_min, self.s_max),
+            ("v", self.v_min, self.v_max),
+        ):
+            if lo > hi:
+                raise ValueError(f"{axis}_min ({lo}) > {axis}_max ({hi})")
+        return self
+
 
 class ShapeGatePayload(BaseModel):
     """Wire mirror of `detection.ShapeGate`. Frozen per pitch alongside

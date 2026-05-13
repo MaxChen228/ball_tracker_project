@@ -116,13 +116,22 @@ class ShapeGate:
         return cls(aspect_min=_MIN_ASPECT, fill_min=_MIN_FILL)
 
 
+@functools.lru_cache(maxsize=16)
+def _close_kernel(size: int) -> np.ndarray:
+    """Cached elliptical structuring element. The hybrid_28d pass-1
+    iterates over thousands of frames re-allocating an identical kernel
+    each call; cache by size keeps construction O(unique sizes)."""
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+
+
 def _run_hsv_emit_pipeline(
-    frame_bgr: np.ndarray,
+    frame: np.ndarray,
     hsv_range: HSVRange,
     shape_gate: ShapeGate,
     *,
     close_kernel: int | None,
     area_min: int,
+    is_hsv: bool = False,
 ) -> "list[BlobCandidate]":
     """Shared HSV → (optional morph CLOSE) → CC → shape gate → cost-stamp
     pipeline. Caller decides ranking / winner-select. `close_kernel=None`
@@ -131,19 +140,24 @@ def _run_hsv_emit_pipeline(
     fallback). `area_min` is per-pool: v11_hsv_cc and hybrid_28d's PROD
     pool use 20 (ball-sized only), hybrid_28d's V11 pool uses 3 (rescue
     micro-blobs whose persistence rerank can still distinguish them from
-    clutter — see `algorithms/hybrid_28d.py:Hybrid28dParams`)."""
+    clutter — see `algorithms/hybrid_28d.py:Hybrid28dParams`).
+
+    `is_hsv=True` skips the `cvtColor(BGR2HSV)` step — callers that already
+    converted (e.g. hybrid_28d pass-1, where the PROD + V11 detector arms
+    share one HSV conversion per frame) pass the HSV array directly."""
     from candidate_selector import Candidate, score_candidates
     from schemas import BlobCandidate
 
-    if frame_bgr is None or frame_bgr.size == 0:
-        return []
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    # Internal invariant: detect_* callers either decode the frame
+    # themselves or surface the decoder error. A silent empty return here
+    # used to mask upstream buffer-pool bugs as "0 candidates" — see
+    # CLAUDE.md "禁止 silent fallback".
+    assert frame is not None and frame.size > 0, \
+        "frame invariant violated (None or empty) — upstream decoder bug"
+    hsv = frame if is_hsv else cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, hsv_range.lo(), hsv_range.hi())
     if close_kernel is not None:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (close_kernel, close_kernel),
-        )
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _close_kernel(close_kernel))
 
     num_labels, _labels, stats, centroids = cv2.connectedComponentsWithStats(
         mask, connectivity=8,
@@ -179,11 +193,15 @@ def _run_hsv_emit_pipeline(
     if not survivors:
         return []
     max_area_batch = max(c.area for c in survivors)
+    # Survivors are guaranteed `area >= area_min >= 1` by the loop gate
+    # above, so max_area_batch > 0 is invariant — the previous
+    # `if max_area_batch > 0 else 0.0` branch was unreachable.
+    assert max_area_batch > 0, "survivor invariant: area_min >= 1 implies max_area_batch > 0"
     costs = score_candidates(survivors)
     return [
         BlobCandidate(
             px=c.cx, py=c.cy, area=c.area,
-            area_score=c.area / max_area_batch if max_area_batch > 0 else 0.0,
+            area_score=c.area / max_area_batch,
             aspect=float(asp), fill=float(fl),
             cost=float(cost),
         )
