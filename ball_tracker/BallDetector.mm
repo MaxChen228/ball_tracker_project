@@ -13,25 +13,9 @@
 // with the server.
 // ---------------------------------------------------------------------------
 
-// HSVRange.default() in server/detection.py.
-static const int kDefaultHMin = 25;
-static const int kDefaultHMax = 55;
-static const int kDefaultSMin = 90;
-static const int kDefaultSMax = 255;
-static const int kDefaultVMin = 90;
-static const int kDefaultVMax = 255;
-
 // _MIN_AREA_PX / _MAX_AREA_PX in server/detection.py.
 static const int kMinAreaPx = 20;
 static const int kMaxAreaPx = 150000;
-
-// _MIN_ASPECT / _MIN_FILL in server/detection.py. Calibrated from real
-// pitch sessions (see memory: project_ball_empirical_fill,
-// project_ball_shape_invariance). Loosened 2026-04 (0.75→0.70, 0.60→0.55)
-// after ROI-cropped HSV masks showed median fill 0.63–0.70 — the prior
-// 0.60 floor was clipping real hits on tennis-ball rotations.
-static const double kMinAspect = 0.70;
-static const double kMinFill = 0.55;
 
 // ---------------------------------------------------------------------------
 // Timing harness. Off in release; on in DEBUG. Reports median over the last
@@ -388,65 +372,6 @@ static bool mapPixelBufferToBGR(
 // MARK: - BTBallDetector (stateless)
 
 @implementation BTBallDetector
-
-+ (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer
-{
-    return [self detectInPixelBuffer:pixelBuffer
-                                hMin:kDefaultHMin hMax:kDefaultHMax
-                                sMin:kDefaultSMin sMax:kDefaultSMax
-                                vMin:kDefaultVMin vMax:kDefaultVMax
-                           aspectMin:kMinAspect fillMin:kMinFill];
-}
-
-+ (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer
-                                             hMin:(int)hMin hMax:(int)hMax
-                                             sMin:(int)sMin sMax:(int)sMax
-                                             vMin:(int)vMin vMax:(int)vMax
-{
-    return [self detectInPixelBuffer:pixelBuffer
-                                hMin:hMin hMax:hMax
-                                sMin:sMin sMax:sMax
-                                vMin:vMin vMax:vMax
-                           aspectMin:kMinAspect fillMin:kMinFill];
-}
-
-+ (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer
-                                             hMin:(int)hMin hMax:(int)hMax
-                                             sMin:(int)sMin sMax:(int)sMax
-                                             vMin:(int)vMin vMax:(int)vMax
-                                        aspectMin:(double)aspectMin
-                                          fillMin:(double)fillMin
-{
-    // thread_local scratch: live path now calls this stateless class
-    // method from `ConcurrentDetectionPool`'s single serial worker
-    // (post "drop ROI tracking" commit), and tests call it from
-    // arbitrary threads. Per-thread scratch keeps it allocator-cheap
-    // on whichever thread happens to call without sharing state.
-    thread_local CVScratch scratch;
-    if (!mapPixelBufferToBGR(pixelBuffer, scratch.bgr)) { return nil; }
-
-#if BT_DETECTOR_TIMING
-    double hsvMs = 0, ccMs = 0;
-#endif
-    BTBallDetection *detection = detectBallCoreScratch(
-        scratch.bgr, hMin, hMax, sMin, sMax, vMin, vMax,
-        aspectMin, fillMin,
-        scratch, /*offsetX=*/0, /*offsetY=*/0,
-        /*outBestW=*/nullptr, /*outBestH=*/nullptr
-#if BT_DETECTOR_TIMING
-        , &hsvMs, &ccMs
-#endif
-    );
-
-#if BT_DETECTOR_TIMING
-    // ConcurrentDetectionPool has its own lock; the ring buffer here is
-    // racy on concurrent updates but we only use it for rough field-log
-    // stats, not a timing contract. Worst case: a few dropped samples.
-    gStatelessTiming.add(hsvMs, ccMs);
-    reportIfDue(gStatelessTiming, "stateless");
-#endif
-    return detection;
-}
 
 + (NSArray<BTBallDetection *> *)detectAllCandidatesInPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                                             hMin:(int)hMin hMax:(int)hMax
