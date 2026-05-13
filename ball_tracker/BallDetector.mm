@@ -4,7 +4,6 @@
 #import <opencv2/imgproc.hpp>
 
 #import <algorithm>
-#import <mach/mach_time.h>
 
 // ---------------------------------------------------------------------------
 // Constants — MUST be kept in lock-step with server/detection.py +
@@ -16,66 +15,6 @@
 // _MIN_AREA_PX / _MAX_AREA_PX in server/detection.py.
 static const int kMinAreaPx = 20;
 static const int kMaxAreaPx = 150000;
-
-// ---------------------------------------------------------------------------
-// Timing harness. Off in release; on in DEBUG. Reports median over the last
-// 240 frames, so we can verify the "12–18 ms → 3–6 ms" goal in the field.
-// ---------------------------------------------------------------------------
-#if DEBUG
-#define BT_DETECTOR_TIMING 1
-#else
-#define BT_DETECTOR_TIMING 0
-#endif
-
-#if BT_DETECTOR_TIMING
-namespace {
-struct TimingRing {
-    static constexpr size_t kCapacity = 240;
-    double hsvMs[kCapacity] = {0};
-    double ccMs[kCapacity] = {0};
-    size_t count = 0;
-    size_t head = 0;
-
-    void add(double hsv, double cc) {
-        hsvMs[head] = hsv;
-        ccMs[head] = cc;
-        head = (head + 1) % kCapacity;
-        if (count < kCapacity) count++;
-    }
-
-    static double median(const double *src, size_t n) {
-        double tmp[kCapacity];
-        std::copy(src, src + n, tmp);
-        std::nth_element(tmp, tmp + n / 2, tmp + n);
-        return tmp[n / 2];
-    }
-};
-
-static double machToMs(uint64_t delta) {
-    static mach_timebase_info_data_t tb = {0, 0};
-    if (tb.denom == 0) mach_timebase_info(&tb);
-    return (double)delta * (double)tb.numer / (double)tb.denom / 1.0e6;
-}
-
-static TimingRing gStatelessTiming;
-static dispatch_once_t gTimingLogOnce;
-
-static void reportIfDue(TimingRing &ring, const char *tag) {
-    if (ring.count < TimingRing::kCapacity) return;
-    double medHSV = TimingRing::median(ring.hsvMs, ring.count);
-    double medCC = TimingRing::median(ring.ccMs, ring.count);
-    NSLog(@"BallDetector[%s]: median over %zu frames → HSV %.2f ms, CC+gate %.2f ms (total %.2f ms)",
-          tag, ring.count, medHSV, medCC, medHSV + medCC);
-    ring.count = 0; // roll next bucket
-    ring.head = 0;
-}
-} // namespace
-#define BT_TIMING_START(name) uint64_t name = mach_absolute_time()
-#define BT_TIMING_ELAPSED_MS(start) machToMs(mach_absolute_time() - (start))
-#else
-#define BT_TIMING_START(name) (void)0
-#define BT_TIMING_ELAPSED_MS(start) 0.0
-#endif
 
 // Private initialiser for BTBallDetection — the .h only exposes read-only
 // properties, but the detector needs to construct instances from C++.
@@ -114,88 +53,13 @@ struct CVScratch {
 };
 } // namespace
 
-/// Core HSV + CC + shape gate pass, operating on an already-mapped BGR
-/// cv::Mat (possibly a ROI slice). Writes intermediates into the provided
-/// scratch buffers — the caller owns their lifetime, which lets us reuse
-/// them across frames on the stateful path and across concurrent calls
-/// (thread-local) on the stateless path.
-///
-/// `offsetX` / `offsetY` are added to the returned centroid so callers can
-/// pass a ROI crop and still get image-coordinate output.
-static BTBallDetection *_Nullable detectBallCoreScratch(
-    const cv::Mat &bgr,
-    int hMin, int hMax, int sMin, int sMax, int vMin, int vMax,
-    double aspectMin, double fillMin,
-    CVScratch &scratch,
-    double offsetX, double offsetY,
-    int *_Nullable outBestW, int *_Nullable outBestH
-#if BT_DETECTOR_TIMING
-    , double *outHsvMs, double *outCcMs
-#endif
-) {
-    BT_TIMING_START(tHsv);
-    cv::cvtColor(bgr, scratch.hsv, cv::COLOR_BGR2HSV);
-
-    cv::inRange(scratch.hsv,
-                cv::Scalar(hMin, sMin, vMin),
-                cv::Scalar(hMax, sMax, vMax),
-                scratch.mask);
-#if BT_DETECTOR_TIMING
-    if (outHsvMs) *outHsvMs = BT_TIMING_ELAPSED_MS(tHsv);
-#endif
-
-    BT_TIMING_START(tCc);
-    int ncomp = cv::connectedComponentsWithStats(
-        scratch.mask, scratch.labels, scratch.stats, scratch.centroids, 8, CV_32S
-    );
-
-    int bestLabel = -1;
-    int bestArea = 0;
-    int bestW = 0, bestH = 0;
-    double bestAspect = 0.0, bestFill = 0.0;
-    for (int i = 1; i < ncomp; i++) {
-        int area = scratch.stats.at<int>(i, cv::CC_STAT_AREA);
-        if (area < kMinAreaPx || area > kMaxAreaPx) { continue; }
-        int w = scratch.stats.at<int>(i, cv::CC_STAT_WIDTH);
-        int h = scratch.stats.at<int>(i, cv::CC_STAT_HEIGHT);
-        if (w <= 0 || h <= 0) { continue; }
-        double aspect = (double)std::min(w, h) / (double)std::max(w, h);
-        if (aspect < aspectMin) { continue; }
-        double fill = (double)area / (double)(w * h);
-        if (fill < fillMin) { continue; }
-        if (area > bestArea) {
-            bestArea = area;
-            bestLabel = i;
-            bestW = w;
-            bestH = h;
-            bestAspect = aspect;
-            bestFill = fill;
-        }
-    }
-#if BT_DETECTOR_TIMING
-    if (outCcMs) *outCcMs = BT_TIMING_ELAPSED_MS(tCc);
-#endif
-
-    if (bestLabel < 0) { return nil; }
-
-    double cx = scratch.centroids.at<double>(bestLabel, 0) + offsetX;
-    double cy = scratch.centroids.at<double>(bestLabel, 1) + offsetY;
-    if (outBestW) *outBestW = bestW;
-    if (outBestH) *outBestH = bestH;
-    return [[BTBallDetection alloc] initWithPx:(CGFloat)cx
-                                            py:(CGFloat)cy
-                                        areaPx:(NSInteger)bestArea
-                                        aspect:(CGFloat)bestAspect
-                                          fill:(CGFloat)bestFill];
-}
-
-/// Multi-candidate variant of detectBallCoreScratch — collects every
-/// blob passing area+aspect+fill, sorted by area desc. No best-of pick
-/// (caller picks). `offsetX` / `offsetY` are added to each centroid so
-/// ROI-cropped Mats can be passed and still get image-coordinate
-/// centroids back. `outLargestW` / `outLargestH` (nullable) receive the
-/// width/height of the largest-area blob — used by the stateful path
-/// to update its ROI radius hint after a multi-candidate hit.
+/// HSV + CC + shape-gate pass operating on an already-mapped BGR
+/// `cv::Mat`. Collects every blob passing area+aspect+fill, sorted by
+/// area desc. No best-of pick (caller picks). `offsetX` / `offsetY`
+/// are added to each centroid so ROI-cropped Mats can be passed and
+/// still get image-coordinate centroids back. `outLargestW` /
+/// `outLargestH` (nullable) receive the width/height of the
+/// largest-area blob.
 static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
     const cv::Mat &bgr,
     int hMin, int hMax, int sMin, int sMax, int vMin, int vMax,

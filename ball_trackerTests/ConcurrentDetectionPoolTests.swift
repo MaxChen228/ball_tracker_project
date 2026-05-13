@@ -10,9 +10,19 @@ import CoreVideo
 final class ConcurrentDetectionPoolTests: XCTestCase {
 
     /// Push minimal settings so `enqueue` doesn't refuse-until-settings.
+    /// Values are arbitrary — the test exercises the dispatch path, not the
+    /// detector. Numbers mirror the now-retired `HSVRangePayload.tennis` /
+    /// `ShapeGatePayload.default` statics (yellow-green tennis preset,
+    /// aspect ≥ 0.70 / fill ≥ 0.55) so log diffs remain familiar.
     private func armSettings(on pool: ConcurrentDetectionPool) {
-        pool.updateHSVRange(ServerUploader.HSVRangePayload.tennis)
-        pool.updateShapeGate(ServerUploader.ShapeGatePayload.default)
+        pool.updateHSVRange(ServerUploader.HSVRangePayload(
+            h_min: 25, h_max: 55,
+            s_min: 90, s_max: 255,
+            v_min: 90, v_max: 255
+        ))
+        pool.updateShapeGate(ServerUploader.ShapeGatePayload(
+            aspect_min: 0.70, fill_min: 0.55
+        ))
     }
 
     private func createDummyPixelBuffer() -> CVPixelBuffer {

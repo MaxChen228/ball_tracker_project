@@ -3,6 +3,28 @@ import CoreVideo
 import CoreGraphics
 @testable import ball_tracker
 
+/// Test-side replacement for the retired `BTBallDetector.detect(in:)`
+/// single-best convenience (removed in the 2026-05-13 iOS dead-code
+/// purge — production code now drives only the multi-candidate path
+/// through `ConcurrentDetectionPool`, which uses caller-supplied HSV +
+/// shape gate values pushed over WS). These tests still want a
+/// "single best blob" assertion at the historic tennis-preset defaults
+/// (yellow-green hue, aspect ≥ 0.70 / fill ≥ 0.55), so we collapse
+/// `detectAllCandidatesInPixelBuffer` (sorted by area desc) to its
+/// first element here. Numbers match the now-deleted
+/// `kDefault*` / `kMinAspect` / `kMinFill` constants.
+enum BallDetectorTestShim {
+    static func detect(in pixelBuffer: CVPixelBuffer) -> BTBallDetection? {
+        BTBallDetector.detectAllCandidates(
+            in: pixelBuffer,
+            hMin: Int32(25), hMax: Int32(55),
+            sMin: Int32(90), sMax: Int32(255),
+            vMin: Int32(90), vMax: Int32(255),
+            aspectMin: 0.70, fillMin: 0.55
+        ).first
+    }
+}
+
 /// Unit tests for the Obj-C++ HSV ball detector.
 ///
 /// We synthesise BGRA CVPixelBuffers with a filled yellow-green circle at
@@ -118,7 +140,7 @@ final class BallDetectorTests: XCTestCase {
     func testStatelessDetectsYellowGreenCircleAtKnownCenter() {
         let center = CGPoint(x: 960, y: 540)
         let buf = makeBGRA(circleCenter: center, radius: 28)
-        let detection = BTBallDetector.detect(in: buf)
+        let detection = BallDetectorTestShim.detect(in: buf)
         XCTAssertNotNil(detection, "Detector should find the synthetic disc")
         guard let d = detection else { return }
         XCTAssertEqual(Double(d.px), Double(center.x), accuracy: 5.0)
@@ -127,7 +149,7 @@ final class BallDetectorTests: XCTestCase {
 
     func testStatelessReturnsNilOnBlankImage() {
         let buf = makeBGRA(circleCenter: nil)
-        let detection = BTBallDetector.detect(in: buf)
+        let detection = BallDetectorTestShim.detect(in: buf)
         XCTAssertNil(detection, "Blank image must not produce a detection")
     }
 
