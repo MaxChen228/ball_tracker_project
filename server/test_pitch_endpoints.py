@@ -410,3 +410,39 @@ def test_pitch_upload_rejects_oversize_body_after_read():
         assert r.status_code == 413, r.text
     finally:
         main._MAX_PITCH_UPLOAD_BYTES = original_cap
+
+
+def test_server_post_progress_emit_wire_contract():
+    """Phase 2 wire contract: every `server_post_progress` SSE broadcast
+    payload must include a `pct` field (int 0..99 or None). The viewer
+    overlay's bar fill + dashboard chip both depend on it. Source-string
+    assertion because the actual broadcast happens deep inside
+    `_run_server_detection`'s to_thread worker — full integration
+    requires real MOV decode. This locks down both call sites
+    (priming + on_progress) at the literal-dict level."""
+    import inspect
+    from routes import pitch as _pitch
+    src = inspect.getsource(_pitch._run_server_detection)
+    chunks = src.split('"server_post_progress"')
+    # 2 emit sites → split yields 3 chunks; each "after" chunk's
+    # leading payload dict must contain `"pct":` before its closing
+    # brace.
+    assert len(chunks) == 3, f"expected 2 emit sites, found {len(chunks) - 1}"
+    for chunk in chunks[1:]:
+        head = chunk[:300]
+        assert '"pct"' in head, "payload missing pct: " + head[:120]
+
+
+def test_server_post_progress_uses_wall_clock_throttle():
+    """Wall-clock monotonic throttle on every emit so the bar advances
+    at predictable cadence regardless of decode-fps fluctuations.
+    Regression to frame-mod-N would silently reintroduce the wait
+    anxiety this code path set out to fix. The exact throttle value is
+    intentionally not asserted — tuning the cadence (we've shipped
+    0.5 s and 0.1 s) must not break the regression test."""
+    import inspect
+    from routes import pitch as _pitch
+    src = inspect.getsource(_pitch._run_server_detection)
+    assert "idx % 30" not in src
+    assert "time.monotonic()" in src
+    assert "_PROGRESS_THROTTLE_S" in src

@@ -52,6 +52,19 @@ from viewer_fragments import (
 
 
 @dataclass(frozen=True)
+class HistoryRun:
+    """One entry in the viewer's history dropdown — an algorithm bucket
+    that has already been run on this session's MOVs. Sourced from the
+    union of `frames_by_algorithm.keys()` across all cams (sans the
+    live bucket). Drives the dropdown's per-row form that POSTs to
+    `/sessions/{sid}/active_run`."""
+    algorithm_id: str
+    preset_name: str | None  # `None` when the run used ad-hoc params
+    point_count: int  # from `result.triangulated_by_algorithm[id]`
+    is_active: bool  # matches `result.active_server_post_algorithm_id`
+
+
+@dataclass(frozen=True)
 class ViewerPageContext:
     scene_json: str
     camera_colors_json: str
@@ -85,12 +98,24 @@ class ViewerPageContext:
     # an operator opening the viewer mid-decode sees the overlay
     # immediately instead of waiting for the next SSE progress tick.
     processing_state: str | None
+    # Per-cam progress snapshot at render time, sourced from
+    # state.processing.session_progress. {cam: {done, total, pct}}. Lets
+    # the overlay SSR paint with real numbers when the operator opens
+    # /viewer mid-decode — without this seed the overlay shows
+    # "waiting for first frame…" until the next SSE tick (≤ 0.1 s,
+    # but jarring if the page-load happens to land in that window).
+    progress_seed: dict[str, dict[str, int | None]]
     # Rerun-form default preset. Reflects this session's last
     # server_post run if any, else falls back to the dashboard's active
     # server_post preset. Algorithm is no longer picker-selectable —
     # `preset.algorithm_id` is the canonical truth so the form only ships
     # `preset_name` and never lets the UI disagree with what runs.
     default_preset_name: str | None
+    # History dropdown rows: every algorithm that has frames on disk
+    # for this session, with the active one flagged. Empty when the
+    # session has 0 or 1 runs; the dropdown hides itself in that case
+    # (nothing to switch to).
+    history_runs: list[HistoryRun]
 
 
 def build_viewer_page_context(
@@ -169,6 +194,11 @@ def build_viewer_page_context(
     processing_state, _resumable = _global_state.processing.session_summary(
         scene.session_id,
     )
+    # And the actual progress numbers so the overlay paints with real
+    # counters / bar fill on first render — the SSE handler will
+    # continue to update them, but this kills the "waiting for first
+    # frame…" placeholder window between page load and the next tick.
+    progress_seed = _global_state.processing.session_progress(scene.session_id)
 
     # Default preset for the rerun form. Priority:
     #   1. This session's last server_post run (operator's last choice for
@@ -185,6 +215,47 @@ def build_viewer_page_context(
         default_preset_name = snap.get("preset_name")
     else:
         default_preset_name = _global_state.active_server_post_preset_name()
+
+    # History dropdown rows. One per distinct algorithm bucket that has
+    # frames on disk for this session, across all cams. The live bucket
+    # is excluded — live and server_post are separate pointers and live
+    # never appears in the history dropdown (it's always-on, not a
+    # picked variant). Active-first sort so the current pointer anchors
+    # the list.
+    from schemas import IOS_CAPTURE_TIME_ALGORITHM_ID as _LIVE_ALG_ID
+    _session_pitches = _global_state.pitches_for_session(scene.session_id)
+    _session_result = _global_state.get(scene.session_id)
+    _active_alg = (
+        _session_result.active_server_post_algorithm_id
+        if _session_result is not None
+        else None
+    )
+    _all_algos: set[str] = set()
+    for _p in _session_pitches.values():
+        _all_algos |= set(_p.frames_by_algorithm.keys())
+    _all_algos.discard(_LIVE_ALG_ID)
+    history_runs: list[HistoryRun] = []
+    for _alg_id in _all_algos:
+        _preset_name: str | None = None
+        for _p in _session_pitches.values():
+            _snap = _p.config_used_by_algorithm.get(_alg_id)
+            if _snap is not None and _snap.preset_name:
+                _preset_name = _snap.preset_name
+                break
+        _pts = (
+            _session_result.triangulated_by_algorithm.get(_alg_id, [])
+            if _session_result is not None
+            else []
+        )
+        history_runs.append(
+            HistoryRun(
+                algorithm_id=_alg_id,
+                preset_name=_preset_name,
+                point_count=len(_pts),
+                is_active=(_alg_id == _active_alg),
+            )
+        )
+    history_runs.sort(key=lambda r: (not r.is_active, r.algorithm_id))
 
     # SegmentRecord-only contract: callers (route + reprocess) pass
     # SegmentRecord instances. Tests construct them too. No dict
@@ -244,15 +315,96 @@ def build_viewer_page_context(
         can_run_server=can_run_server,
         server_post_ran_at=server_post_ran_at,
         processing_state=processing_state,
+        progress_seed=progress_seed,
         default_preset_name=default_preset_name,
+        history_runs=history_runs,
     )
 
 
-def _pending_overlay_html(processing_state: str | None) -> str:
+def _history_dropdown_html(ctx: "ViewerPageContext") -> str:
+    """Server-rendered `<details>` dropdown listing every algorithm
+    that has ever been run on this session. Each non-active row is its
+    own form that POSTs to `/sessions/{sid}/active_run`; on submit the
+    server flips the pointer and 303-redirects back to the viewer.
+    Pure HTML — no JS, degrades to a click-then-reload pattern.
+
+    Returns the empty string when fewer than two runs exist (nothing
+    to switch to). The operator still sees the RERUN form to the
+    right; the dropdown only shows up once an alternative bucket is
+    available."""
+    from html import escape as _esc
+    if len(ctx.history_runs) < 2:
+        return ""
+    active = next((r for r in ctx.history_runs if r.is_active), None)
+    if active is None:
+        # Pointer is unset but multiple buckets exist on disk. Surface
+        # the dropdown anyway with a neutral summary so the operator
+        # can pick — clicking any row flips the pointer.
+        summary_text = "History"
+    elif active.preset_name:
+        summary_text = f"History · {active.algorithm_id} / {active.preset_name}"
+    else:
+        summary_text = f"History · {active.algorithm_id}"
+
+    rows: list[str] = []
+    for r in ctx.history_runs:
+        marker = "●" if r.is_active else "○"
+        label = (
+            f"{r.algorithm_id} / {r.preset_name}"
+            if r.preset_name
+            else r.algorithm_id
+        )
+        meta = f"{r.point_count} pts"
+        if r.is_active:
+            rows.append(
+                f'<li class="hm-row hm-row-active">'
+                f'<span class="hm-marker">{marker}</span>'
+                f'<span class="hm-label">{_esc(label)}</span>'
+                f'<span class="hm-meta">{meta}</span>'
+                f'</li>'
+            )
+        else:
+            rows.append(
+                f'<li class="hm-row">'
+                f'<form method="POST" '
+                f'action="/sessions/{_esc(ctx.session_id)}/active_run" '
+                f'class="hm-form">'
+                f'<input type="hidden" name="algorithm_id" '
+                f'value="{_esc(r.algorithm_id)}">'
+                f'<input type="hidden" name="return_to" '
+                f'value="/viewer/{_esc(ctx.session_id)}">'
+                f'<button type="submit" class="hm-button">'
+                f'<span class="hm-marker">{marker}</span>'
+                f'<span class="hm-label">{_esc(label)}</span>'
+                f'<span class="hm-meta">{meta}</span>'
+                f'</button>'
+                f'</form>'
+                f'</li>'
+            )
+    return (
+        f'<details class="history-menu">'
+        f'<summary class="history-summary">{_esc(summary_text)}</summary>'
+        f'<ul class="history-list">{"".join(rows)}</ul>'
+        f'</details>'
+    )
+
+
+def _pending_overlay_html(
+    processing_state: str | None,
+    progress_seed: dict[str, dict[str, int | None]],
+) -> str:
     """Server-detection pending overlay. Pre-seeded visible when the
     operator opens the viewer mid-decode (state.processing.session_summary
     returned 'queued' / 'processing'); the SSE handler in the inline
-    `<script>` block keeps it in sync afterwards."""
+    `<script>` block keeps it in sync afterwards.
+
+    `progress_seed` is `{cam: {done, total, pct}}` from
+    state.processing.session_progress, populated by the
+    `routes/pitch.py::on_progress` writes. When non-empty the overlay's
+    counters + bar fill render with real numbers on first paint — the
+    "waiting for first frame…" placeholder only appears for the
+    sub-priming window where state.processing knows we're processing
+    but no progress tick has landed yet."""
     visible = processing_state in ("queued", "processing")
     hidden_attr = "" if visible else " hidden"
     title = (
@@ -260,16 +412,42 @@ def _pending_overlay_html(processing_state: str | None) -> str:
         if processing_state == "queued"
         else "Decoding MOV…"
     )
-    counts_seed = (
-        "waiting for first frame…"
-        if processing_state == "processing"
-        else ""
-    )
+    if processing_state == "processing" and progress_seed:
+        cams_sorted = sorted(progress_seed.keys())
+        parts = []
+        min_pct: int | None = None
+        for cam in cams_sorted:
+            snap = progress_seed[cam]
+            # session_progress's setter writes done/total/pct on every
+            # tick, so the keys are guaranteed present — use missing-key
+            # defaults rather than `snap.get("done") or 0`, which would
+            # silently mask a setter-contract drift (CLAUDE.md root
+            # "禁止 silent fallback"). `done=0` from the priming tick
+            # is a legitimate value, not a missing-data sentinel.
+            done = snap.get("done", 0)
+            total = snap.get("total")
+            tot_str = str(total) if total is not None else "?"
+            parts.append(f"{cam} {done}/{tot_str}")
+            p = snap.get("pct")
+            if isinstance(p, int):
+                min_pct = p if min_pct is None else min(min_pct, p)
+        counts_seed = "  ·  ".join(parts)
+        seed_width_pct = min_pct if min_pct is not None else 0
+    elif processing_state == "processing":
+        counts_seed = "waiting for first frame…"
+        seed_width_pct = 0
+    else:
+        counts_seed = ""
+        seed_width_pct = 0
     return (
         f'<div class="scene-pending-overlay" id="scene-pending-overlay"'
         f'{hidden_attr} role="status" aria-live="polite">'
         f'<div class="spo-title">{title}</div>'
         f'<div class="spo-counts" id="scene-pending-counts">{counts_seed}</div>'
+        f'<div class="spo-bar">'
+        f'<div class="spo-bar-fill" id="scene-pending-bar-fill" '
+        f'style="width:{seed_width_pct}%"></div>'
+        f'</div>'
         f'<div class="spo-hint">Server detection running. Page will refresh on completion.</div>'
         f'</div>'
     )
@@ -346,9 +524,14 @@ def render_viewer_html(
             f'{_esc(p.label)} ({_esc(p.name)} · {_esc(p.algorithm_id)})</option>'
             for p in _state.list_presets()
         )
+        # The hidden return_to input below tells `_dispatch_server_post`
+        # to redirect back to this viewer page after queuing detection —
+        # without it the dispatch defaults to "/" and dumps the operator
+        # on the dashboard mid-rerun.
         action_html = (
             f'<form method="POST" action="/sessions/{ctx.session_id}/run_server_post" '
             f'class="action-form">'
+            f'<input type="hidden" name="return_to" value="/viewer/{ctx.session_id}">'
             f'<select class="action-select" name="preset_name" '
             f'title="Detection preset (algorithm derived from preset)">'
             f'{preset_options}</select>'
@@ -362,6 +545,7 @@ def render_viewer_html(
         '<span class="srv-progress" id="srv-progress" hidden'
         ' aria-live="polite"></span>'
     )
+    history_html = _history_dropdown_html(ctx)
     # Three.js scene runtime injection — importmap + theme JSON +
     # boot module that mounts the scene onto `#scene` and sets up the
     # viewer-specific layers. Polled mount with bounded retry (matches
@@ -389,6 +573,7 @@ def render_viewer_html(
   </div>
   <div class="nav-action" role="region" aria-label="Server detection rerun">
     {progress_html}
+    {history_html}
     {action_html}
   </div>
   <div class="nav-tuning" role="region" aria-label="View tuning">
@@ -403,7 +588,7 @@ def render_viewer_html(
         <span class="lpb-meta" id="viewer-lpb-meta"></span>
       </div>
       <div id="scene"></div>
-      {_pending_overlay_html(ctx.processing_state)}
+      {_pending_overlay_html(ctx.processing_state, ctx.progress_seed)}
       {view_presets_toolbar_html()}
       <div class="scene-toolbar" role="toolbar" aria-label="Scene controls">
         <button id="mode-all" class="active" type="button" role="tab" title="Show full trajectory">All</button>
@@ -721,15 +906,17 @@ _hookup();
   const navChip = document.getElementById('srv-progress');
   const overlay = document.getElementById('scene-pending-overlay');
   const counts = document.getElementById('scene-pending-counts');
-  if (!navChip || !overlay || !counts) {{
+  const barFill = document.getElementById('scene-pending-bar-fill');
+  if (!navChip || !overlay || !counts || !barFill) {{
     throw new Error("viewer SSE init: progress DOM missing");
   }}
-  const slots = {{}};  // cam → {{ done, total }}
+  const slots = {{}};  // cam → {{ done, total, pct }}
   function render() {{
     const cams = Object.keys(slots).sort();
     if (cams.length === 0) {{
       navChip.hidden = true; navChip.textContent = '';
       overlay.hidden = true; counts.textContent = '';
+      barFill.style.width = '0%';
       return;
     }}
     const summary = cams.map(function(c) {{
@@ -737,6 +924,16 @@ _hookup();
       const tot = (s.total != null) ? s.total : '?';
       return c + ' ' + s.done + '/' + tot;
     }}).join('  ·  ');
+    // Fill tracks the *slowest* cam's progress — both cams must finish
+    // before reload fires, so promising "we're at least this far" beats
+    // averaging (which would lie about the laggard).
+    let minPct = 100;
+    let sawPct = false;
+    for (const c of cams) {{
+      const p = slots[c].pct;
+      if (p != null) {{ sawPct = true; if (p < minPct) minPct = p; }}
+    }}
+    barFill.style.width = (sawPct ? minPct : 0) + '%';
     navChip.hidden = false;
     navChip.textContent = 'svr ' + summary;
     overlay.hidden = false;
@@ -749,6 +946,7 @@ _hookup();
     slots[d.cam] = {{
       done: Number(d.frames_done),
       total: d.frames_total != null ? Number(d.frames_total) : null,
+      pct: d.pct != null ? Number(d.pct) : null,
     }};
     render();
   }});
@@ -762,9 +960,12 @@ _hookup();
     // reload. The fit SSE handler in 85_sse_fit.js patches segments
     // in place, but server_post finishing also rewrites frames_server_post
     // which the IIFE seeded at first paint — easier to reload than to
-    // surgically rebuild every per-cam frame index.
+    // surgically rebuild every per-cam frame index. No setTimeout
+    // breather: the SSE done event fires after pitch.py has already
+    // awaited state.record + state.stamp_server_post_config, so disk
+    // is consistent the moment we see the event.
     if (Object.keys(slots).length === 0) {{
-      setTimeout(function() {{ location.reload(); }}, 800);
+      location.reload();
     }}
   }});
 }})();

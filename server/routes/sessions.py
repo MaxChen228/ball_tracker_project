@@ -231,6 +231,21 @@ async def _parse_request_body(request: Request) -> dict:
     return {k: form.get(k) for k in form}
 
 
+def _resolve_return_to(body: dict, session_id: str) -> str:
+    """Where to 303-redirect an HTML form caller after dispatch.
+
+    Two HTML callers submit the run_server_post form: the dashboard
+    events row (omits the field → falls back to `/`) and the viewer's
+    RERUN button (sends `return_to=/viewer/{sid}` so the operator
+    stays on the page they pressed from). Whitelisted to `/` and
+    `/viewer/{session_id}` to block open-redirect via crafted bodies;
+    anything unrecognised maps to `/`."""
+    rt = body.get("return_to")
+    if isinstance(rt, str) and (rt == "/" or rt == f"/viewer/{session_id}"):
+        return rt
+    return "/"
+
+
 def _snapshot_from_preset_name(state, preset_name: object) -> DetectionConfigSnapshotPayload:
     """Build a snapshot by looking up a preset by slug. Used by the
     deprecation-alias endpoint where the algorithm id is implied by the
@@ -340,25 +355,27 @@ async def _dispatch_server_post(
     session_id: str,
     snapshot: DetectionConfigSnapshotPayload,
     background_tasks: BackgroundTasks,
+    return_to: str,
 ):
     """Shared tail used by both server-post endpoints: validate session
     id, gate on `processing.session_candidates`, queue
     `_run_server_detection` for every cam under the same snapshot.
-    Caller supplies the snapshot."""
+    Caller supplies the snapshot and the whitelisted `return_to` for
+    HTML form callers (see `_resolve_return_to`)."""
     from main import state, _wants_html, _run_server_detection
     if not _SESSION_ID_RE.match(session_id):
         if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
+            return RedirectResponse(return_to, status_code=303)
         raise HTTPException(status_code=422, detail="invalid session_id")
     candidates = state.processing.session_candidates(session_id)
     if not candidates:
         if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
+            return RedirectResponse(return_to, status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
     queued = state.processing.resume_processing(session_id)
     if not queued:
         if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
+            return RedirectResponse(return_to, status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
     for clip_path, pitch in queued:
         background_tasks.add_task(
@@ -368,7 +385,7 @@ async def _dispatch_server_post(
             config_snapshot=snapshot,
         )
     if _wants_html(request):
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse(return_to, status_code=303)
     return {
         "ok": True,
         "session_id": session_id,
@@ -402,7 +419,10 @@ async def sessions_run_algorithm(
     from main import state
     body = await _parse_request_body(request)
     snapshot = _snapshot_for_algorithm(state, algorithm_id, body)
-    return await _dispatch_server_post(request, session_id, snapshot, background_tasks)
+    return_to = _resolve_return_to(body, session_id)
+    return await _dispatch_server_post(
+        request, session_id, snapshot, background_tasks, return_to
+    )
 
 
 @router.post("/sessions/{session_id}/run_server_post")
@@ -438,7 +458,10 @@ async def sessions_run_server_post(
             ),
         )
     snapshot = _snapshot_from_preset_name(state, body.get("preset_name"))
-    return await _dispatch_server_post(request, session_id, snapshot, background_tasks)
+    return_to = _resolve_return_to(body, session_id)
+    return await _dispatch_server_post(
+        request, session_id, snapshot, background_tasks, return_to
+    )
 
 
 @router.post("/sessions/{session_id}/recompute")
@@ -512,3 +535,76 @@ async def sessions_recompute(request: Request, session_id: str):
         },
     )
     return {"ok": True, "result": new_result.model_dump()}
+
+
+@router.post("/sessions/{session_id}/active_run")
+async def sessions_active_run(request: Request, session_id: str):
+    """Flip the active server_post pointer to an algorithm that has
+    already been run on this session. No detection runs — pure pointer
+    flip for the viewer's history dropdown.
+
+    Body (JSON or form):
+      - `algorithm_id` (required): the algorithm to mark active. Must
+        already have at least one frame in some cam's
+        `frames_by_algorithm` (the algorithm has been run on this
+        session before). The live bucket id is rejected.
+      - `return_to` (optional, HTML form only): viewer redirect after
+        the flip, whitelisted to `/` or `/viewer/{session_id}`.
+
+    Errors:
+      - 422 invalid session_id slug / missing `algorithm_id`
+      - 404 session not found
+      - 422 `algorithm_id` has no frames in this session, or is the
+        live bucket
+    """
+    from main import state, _wants_html, sse_hub
+    if not _SESSION_ID_RE.match(session_id):
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=422, detail="invalid session_id")
+
+    body = await _parse_request_body(request)
+    algorithm_id = body.get("algorithm_id")
+    if not isinstance(algorithm_id, str) or not algorithm_id:
+        raise HTTPException(status_code=422, detail="missing 'algorithm_id'")
+    return_to = _resolve_return_to(body, session_id)
+
+    try:
+        new_result = state.set_active_server_post_algorithm(
+            session_id, algorithm_id,
+        )
+    except KeyError:
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(
+            status_code=404, detail=f"session {session_id} not found",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if new_result is None:
+        raise HTTPException(
+            status_code=404, detail=f"session {session_id} deleted mid-flip",
+        )
+
+    # `fit` ride-along so any dashboard / viewer SSE subscriber repaints
+    # the scene with the new triangulation bucket. Same event the
+    # `recompute` endpoint emits — viewer's `85_sse_fit.js` cause-switches
+    # on `recompute` (returns early because the inline /recompute
+    # response already patched the scene), so `active_run_switch` falls
+    # through to the autorefresh / /results refetch path. Adding a new
+    # `cause` here means checking that file before assuming listeners
+    # pick it up.
+    await sse_hub.broadcast(
+        "fit",
+        {
+            "sid": session_id,
+            "cause": "active_run_switch",
+            "segments": [s.model_dump() for s in new_result.segments],
+            "gap_threshold_m": new_result.gap_threshold_m,
+        },
+    )
+
+    if _wants_html(request):
+        return RedirectResponse(return_to, status_code=303)
+    return {"ok": True, "active_algorithm_id": algorithm_id}

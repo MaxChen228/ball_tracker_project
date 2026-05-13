@@ -117,9 +117,14 @@
           total: data.frames_total != null ? Number(data.frames_total) : null,
         };
         // Bust the row diff cache and re-render so the new progress
-        // snapshot lands in the chip. Backend throttles to 30 frames
-        // (≈1 Hz per cam) so dual-cam tops out at ~2 Hz here — well
-        // within DOM-render budget; no client-side throttle needed.
+        // snapshot lands in the chip. Backend throttles to 0.1 s
+        // wall-clock (~10 Hz per cam) so dual-cam tops out at ~20 Hz
+        // here. `_lastEvKey = null` forces renderEvents to walk the
+        // full event list + recompute per-row diff keys, but `sp` is
+        // already part of each row's diff key (60_events_render.js)
+        // so only the in-flight session's innerHTML actually swaps —
+        // the rest of the list re-keys cheaply. No client-side
+        // throttle needed.
         _lastEvKey = null;
         if (typeof currentEvents !== 'undefined' && currentEvents
             && typeof renderEvents === 'function') {

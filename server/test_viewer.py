@@ -950,6 +950,13 @@ def test_viewer_page_run_server_post_form_has_no_algorithm_select():
     # Preset labels surface the algorithm slug so the operator sees what
     # will run, even without a separate algorithm dropdown.
     assert "v11_hsv_cc" in html
+    # Hidden return_to keeps the operator on /viewer/{sid} after dispatch
+    # — without it the form would 303 back to "/" and dump the viewer
+    # mid-rerun. `_dispatch_server_post::_resolve_return_to` whitelists
+    # exactly this string.
+    assert (
+        f'<input type="hidden" name="return_to" value="/viewer/{session_id}">'
+    ) in html
 
 
 def test_build_viewer_health_surfaces_algorithms_run_excluding_live_path():
@@ -1446,6 +1453,114 @@ def test_viewer_pending_overlay_seeded_when_processing(monkeypatch):
     assert "waiting for first frame" in body
 
 
+def test_viewer_pending_overlay_seeds_real_progress_when_available(monkeypatch):
+    """When `state.processing.session_progress` returns a non-empty
+    snapshot at render time (operator opens /viewer while a decode tick
+    has already fired), the SSR overlay paints with real counters
+    + a non-zero bar fill — no "waiting for first frame…" window.
+    Min-pct semantics: the bar tracks the slowest cam."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(904)
+    _record_pitch(_pitch("A", 904, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+    monkeypatch.setattr(
+        main.state.processing,
+        "session_summary",
+        lambda sid: ("processing", True),
+    )
+    monkeypatch.setattr(
+        main.state.processing,
+        "session_progress",
+        lambda sid: {
+            "A": {"done": 487, "total": 974, "pct": 50},
+            "B": {"done": 442, "total": 907, "pct": 48},
+        },
+    )
+
+    body = TestClient(app).get(f"/viewer/{session_id}").text
+    # Counters render in cam-sorted order with the chosen separator.
+    assert "A 487/974  ·  B 442/907" in body
+    # Bar fill seeded to the SLOWEST cam (48) so the operator sees
+    # "we're at least this far on every cam".
+    assert 'style="width:48%"' in body
+    # Placeholder window text is gone.
+    assert "waiting for first frame" not in body
+
+
+def test_viewer_pending_overlay_falls_back_to_placeholder_without_progress(monkeypatch):
+    """If state.processing knows we're processing but no progress tick
+    has landed yet (sub-priming window), the overlay keeps the
+    "waiting for first frame…" placeholder + 0% bar. The placeholder
+    only exists for this narrow window now — the SSE handler hides it
+    on the first tick after subscribe."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(905)
+    _record_pitch(_pitch("A", 905, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+    monkeypatch.setattr(
+        main.state.processing,
+        "session_summary",
+        lambda sid: ("processing", True),
+    )
+    monkeypatch.setattr(
+        main.state.processing,
+        "session_progress",
+        lambda sid: {},
+    )
+
+    body = TestClient(app).get(f"/viewer/{session_id}").text
+    assert "waiting for first frame" in body
+    assert 'style="width:0%"' in body
+
+
+def test_viewer_done_handler_reloads_without_setTimeout_delay():
+    """server_post_done was wrapping reload in a 800 ms setTimeout —
+    needless when the SSE event only fires after pitch.py awaits
+    state.record + stamp_server_post_config (disk is consistent by
+    the time we see the event). Phase 3 drops the delay; assert the
+    JS no longer carries any setTimeout-wrapped reload regardless of
+    syntactic variation (arrow fn, single-quotes, different delay)."""
+    import re
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(906)
+    _record_pitch(_pitch("A", 906, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+    body = TestClient(app).get(f"/viewer/{session_id}").text
+    # Match any setTimeout that wraps location.reload — catches
+    # `setTimeout(()=>location.reload(),N)`, `setTimeout(function(){...}, N)`,
+    # etc. The naive exact-string assertion would silently pass on a
+    # rewrite that reintroduced the delay under different syntax.
+    assert not re.search(r"setTimeout[^)]*location\.reload", body)
+    assert "location.reload()" in body
+
+
+def test_viewer_pending_overlay_has_progress_bar():
+    """The pending overlay ships a `.spo-bar` element + a `.spo-bar-fill`
+    child seeded at width:0%. Width is updated by the inline SSE handler
+    on every `server_post_progress` event. Without the DOM element the
+    handler's `document.getElementById('scene-pending-bar-fill')` returns
+    null and the IIFE throws, killing all subsequent viewer JS."""
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    session_id = sid(903)
+    _record_pitch(_pitch("A", 903, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]])))
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    body = TestClient(app).get(f"/viewer/{session_id}").text
+    overlay_start = body.index('id="scene-pending-overlay"')
+    overlay_chunk = body[overlay_start:overlay_start + 600]
+    assert '<div class="spo-bar">' in overlay_chunk
+    assert 'id="scene-pending-bar-fill"' in overlay_chunk
+    assert 'style="width:0%"' in overlay_chunk
+    # SSE handler reads `pct` off the progress payload and rewrites the
+    # bar's width. Without the JS path the bar would stay at 0% forever.
+    assert "barFill.style.width" in body
+    # CSS rule that gives the bar its geometry — without it the seeded
+    # `<div class="spo-bar">` collapses to 0 height and the operator
+    # sees no bar at all.
+    assert ".scene-pending-overlay .spo-bar {" in body
+    assert ".scene-pending-overlay .spo-bar-fill {" in body
+
+
 def test_viewer_locks_layout_to_viewport_without_page_scroll():
     """The viewer should fit in a single viewport: body scrolling is
     disabled and the root container owns a fixed 100vh layout. The
@@ -1892,3 +2007,223 @@ def test_seg_palette_strip_iife_matches_points_layer_js():
         f"SEG_PALETTE drift: points_layer.js={pl_hex}, 80_strip.js={strip_hex}. "
         f"Update both files in lockstep."
     )
+
+
+# ---- History dropdown SSR (phase 3) --------------------------------------
+
+
+def _record_pitch_with_two_algorithms(session_id: str) -> None:
+    """Plant a pitch that has been run with two algorithms (v11_hsv_cc
+    + hybrid_28d), each with a preset_name stamped under
+    `config_used_by_algorithm`. Phase 3 history dropdown reads from
+    both maps to populate row labels."""
+    import numpy as _np
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    pitch = _pitch("A", int(session_id[2:], 16), K, R_a, t_a, H_a,
+                   _np.array([[0.1, 0.3, 1.0]]))
+    pitch.frames_by_algorithm["hybrid_28d"] = list(
+        pitch.frames_by_algorithm["v11_hsv_cc"]
+    )
+    _hsv = {"h_min": 105, "h_max": 112, "s_min": 140, "s_max": 255,
+            "v_min": 40, "v_max": 255}
+    _shape = {"aspect_min": 0.75, "fill_min": 0.55}
+    pitch.config_used_by_algorithm["v11_hsv_cc"] = schemas.DetectionConfigSnapshotPayload(
+        algorithm_id="v11_hsv_cc",
+        params={"hsv": _hsv, "shape_gate": _shape},
+        preset_name="blue_ball",
+    )
+    pitch.config_used_by_algorithm["hybrid_28d"] = schemas.DetectionConfigSnapshotPayload(
+        algorithm_id="hybrid_28d",
+        params={
+            "prod_hsv": _hsv, "prod_shape": _shape,
+            "v11_hsv": _hsv, "v11_shape": _shape,
+        },
+        preset_name="hybrid_blue",
+    )
+    pitch.active_server_post_algorithm_id = "v11_hsv_cc"
+    _record_pitch(pitch)
+
+
+def _camera_only_health(session_id: str) -> dict:
+    return {
+        "session_id": session_id,
+        "cameras": {
+            "A": {"received": True, "calibrated": True, "time_synced": True,
+                  "n_frames": 1, "n_detected": 1},
+            "B": {"received": False, "calibrated": False, "time_synced": False,
+                  "n_frames": 0, "n_detected": 0},
+        },
+        "triangulated_count": 0,
+        "error": None,
+        "duration_s": 0.0,
+        "received_at": None,
+        "mode": "camera_only",
+        "active_server_post_algorithm_id": "v11_hsv_cc",
+    }
+
+
+def test_history_dropdown_lists_runs_active_first():
+    """ViewerPageContext.history_runs lists every algorithm bucket that
+    exists on disk for this session, with the active pointer flagged
+    and pushed to the head of the list. preset_name is sourced from
+    `config_used_by_algorithm[id].preset_name`."""
+    session_id = sid(2000)
+    _record_pitch_with_two_algorithms(session_id)
+
+    scene = build_scene(session_id, {}, triangulated=None)
+    ctx = build_viewer_page_context(scene, [], _camera_only_health(session_id))
+
+    assert len(ctx.history_runs) == 2
+    # Active-first sort: v11_hsv_cc is the active pointer (set in the
+    # seed), so it must lead the list regardless of alphabetical order
+    # (hybrid_28d < v11_hsv_cc alphabetically).
+    assert ctx.history_runs[0].algorithm_id == "v11_hsv_cc"
+    assert ctx.history_runs[0].is_active is True
+    assert ctx.history_runs[0].preset_name == "blue_ball"
+    assert ctx.history_runs[1].algorithm_id == "hybrid_28d"
+    assert ctx.history_runs[1].is_active is False
+    assert ctx.history_runs[1].preset_name == "hybrid_blue"
+
+
+def test_history_dropdown_html_renders_two_runs_with_form():
+    """SSR markup contains `<details class="history-menu">` summary +
+    a `<form action="/sessions/{sid}/active_run">` row for each
+    non-active algorithm. Each form carries `return_to=/viewer/{sid}`
+    so the server redirects back to the viewer after the flip."""
+    from viewer_page import render_viewer_html, _history_dropdown_html
+
+    session_id = sid(2001)
+    _record_pitch_with_two_algorithms(session_id)
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    scene = build_scene(session_id, {}, triangulated=None)
+    ctx = build_viewer_page_context(scene, [], _camera_only_health(session_id))
+    markup = _history_dropdown_html(ctx)
+
+    assert '<details class="history-menu">' in markup
+    # Active row labelled with both algorithm + preset.
+    assert "v11_hsv_cc / blue_ball" in markup
+    # Non-active row is a real form pointing at the new endpoint, with
+    # return_to set so the operator stays on the viewer after the flip.
+    assert f'action="/sessions/{session_id}/active_run"' in markup
+    assert 'name="algorithm_id" value="hybrid_28d"' in markup
+    assert f'name="return_to" value="/viewer/{session_id}"' in markup
+    # Active row must NOT carry a form — clicking the active entry is
+    # a no-op (it's already active); avoiding a self-POST keeps the
+    # endpoint's "switch to a different algorithm" semantic clean.
+    # Same row tagged `hm-row-active` for styling; check the form
+    # appears exactly once (the non-active row).
+    assert markup.count("<form ") == 1
+
+
+def test_history_dropdown_hidden_when_single_run():
+    """When the session has only one algorithm bucket (the freshly-run
+    default), the dropdown emits empty HTML — nothing to switch to.
+    The RERUN form to the right is still visible for the operator to
+    add a second run."""
+    from viewer_page import _history_dropdown_html
+
+    session_id = sid(2002)
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    import numpy as _np
+    pitch = _pitch("A", int(session_id[2:], 16), K, R_a, t_a, H_a,
+                   _np.array([[0.1, 0.3, 1.0]]))
+    _record_pitch(pitch)
+
+    scene = build_scene(session_id, {}, triangulated=None)
+    ctx = build_viewer_page_context(scene, [], _camera_only_health(session_id))
+
+    assert len(ctx.history_runs) == 1
+    assert _history_dropdown_html(ctx) == ""
+
+
+def test_history_dropdown_embedded_in_viewer_nav_action():
+    """The history dropdown lands inside `.nav-action` between the
+    server-progress badge and the RERUN form, so it sits leftmost on
+    the second row as the operator chose. Regression guard against a
+    future refactor that drops it off the page."""
+    from viewer_page import render_viewer_html
+
+    session_id = sid(2003)
+    _record_pitch_with_two_algorithms(session_id)
+    main.state.save_clip("A", session_id, b"clip", "mov")
+
+    scene = build_scene(session_id, {}, triangulated=None)
+    body = render_viewer_html(scene, [], _camera_only_health(session_id))
+
+    assert '<details class="history-menu">' in body
+    # Order check: history-menu must appear before the run_server_post
+    # form (the RERUN action), placing it to the left in flex layout.
+    hm_idx = body.index('<details class="history-menu">')
+    form_idx = body.index('/run_server_post"')
+    assert hm_idx < form_idx, (
+        "history dropdown must render before the RERUN form so the "
+        "second row reads: progress · history · rerun"
+    )
+
+
+def test_history_dropdown_renders_ad_hoc_params_run_with_algorithm_id_only():
+    """When a run used ad-hoc params (preset_name=None), the row label
+    falls back to algorithm_id alone. Regression guard against Python
+    f-string formatting ever rendering '/ None' or 'algorithm_id /
+    None' when preset_name is missing."""
+    session_id = sid(2004)
+    K, (R_a, t_a, _, H_a), _ = _make_rig()
+    import numpy as _np
+    pitch = _pitch("A", int(session_id[2:], 16), K, R_a, t_a, H_a,
+                   _np.array([[0.1, 0.3, 1.0]]))
+    pitch.frames_by_algorithm["hybrid_28d"] = list(
+        pitch.frames_by_algorithm["v11_hsv_cc"]
+    )
+    _hsv = {"h_min": 105, "h_max": 112, "s_min": 140, "s_max": 255,
+            "v_min": 40, "v_max": 255}
+    _shape = {"aspect_min": 0.75, "fill_min": 0.55}
+    pitch.config_used_by_algorithm["v11_hsv_cc"] = schemas.DetectionConfigSnapshotPayload(
+        algorithm_id="v11_hsv_cc",
+        params={"hsv": _hsv, "shape_gate": _shape},
+        preset_name="blue_ball",
+    )
+    pitch.config_used_by_algorithm["hybrid_28d"] = schemas.DetectionConfigSnapshotPayload(
+        algorithm_id="hybrid_28d",
+        params={"prod_hsv": _hsv, "prod_shape": _shape,
+                "v11_hsv": _hsv, "v11_shape": _shape},
+        preset_name=None,
+    )
+    pitch.active_server_post_algorithm_id = "v11_hsv_cc"
+    _record_pitch(pitch)
+
+    from viewer_page import _history_dropdown_html
+    scene = build_scene(session_id, {}, triangulated=None)
+    ctx = build_viewer_page_context(scene, [], _camera_only_health(session_id))
+    markup = _history_dropdown_html(ctx)
+
+    assert "v11_hsv_cc / blue_ball" in markup
+    assert "hybrid_28d / None" not in markup
+    assert "/ None" not in markup
+    # The ad-hoc row's label is the bare algorithm_id between hm-label
+    # span tags, no slash appended.
+    assert '<span class="hm-label">hybrid_28d</span>' in markup
+
+
+def test_history_dropdown_summary_falls_back_when_active_unknown():
+    """When the cached SessionResult's active pointer points at an
+    algorithm that isn't in frames_by_algorithm (data inconsistency:
+    stale pointer that survived a frames-bucket cleanup), the summary
+    degrades to neutral 'History' with no active marker. Operator can
+    still pick any row to flip the pointer to a valid algorithm."""
+    session_id = sid(2005)
+    _record_pitch_with_two_algorithms(session_id)
+    main.state.results[session_id].active_server_post_algorithm_id = "ghost_algorithm"
+
+    from viewer_page import _history_dropdown_html
+    scene = build_scene(session_id, {}, triangulated=None)
+    ctx = build_viewer_page_context(scene, [], _camera_only_health(session_id))
+    markup = _history_dropdown_html(ctx)
+
+    assert len(ctx.history_runs) == 2
+    assert all(not r.is_active for r in ctx.history_runs)
+    assert '>History</summary>' in markup
+    # Defence in depth: a stale pointer must not leak into the visible
+    # summary text. The neutral fallback hides the inconsistency from
+    # the operator, who fixes it by clicking any visible row.
+    assert "ghost_algorithm" not in markup

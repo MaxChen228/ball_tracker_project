@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -267,19 +268,52 @@ async def _run_server_detection(
     # next visible tick.
     loop = asyncio.get_running_loop()
 
+    # Wall-clock throttle so the bar advances at a predictable cadence
+    # regardless of decode-fps fluctuations. 0.1 s ≈ 10 Hz per cam, 20 Hz
+    # combined — still within SSE pipe budget (queues maxsize=1000, JSON
+    # payload <100 B). At 240 fps decode, each emit covers ~20 frames so
+    # the counter text steps in small increments and reads as continuous
+    # rather than the old 0.5 s / ~100-frame jumps. The old frame-mod-30
+    # throttle silently slowed when the CPU did, which amplified wait
+    # anxiety.
+    _PROGRESS_THROTTLE_S = 0.1
+    last_emit_ts = [0.0]
+
     def on_progress(idx: int) -> None:
-        # Throttle to every 30 frames. Server-side decode runs at
-        # ~30 fps wall-clock, so this fires ≈ 1 Hz — fast enough for a
-        # visibly moving bar, slow enough to not pressure the SSE pipe.
         # Skip idx=0 because the priming broadcast below already shipped
         # frames_done=0 with the same payload before run_detection ran.
-        if idx == 0 or idx % 30 != 0:
+        if idx == 0:
             return
+        now = time.monotonic()
+        if now - last_emit_ts[0] < _PROGRESS_THROTTLE_S:
+            return
+        last_emit_ts[0] = now
+        # `pct` is None when the container metadata probe failed to
+        # report a frame count — the dashboard / viewer fall back to
+        # indeterminate "N decoded" then. Otherwise clamped to 0..99 so
+        # the bar fill width is renderable as `pct + '%'` without
+        # client-side rounding. The `min(99, ...)` cap matters because
+        # the decoder occasionally emits one more frame than
+        # probe_frame_count estimated (the probe rounds duration*rate);
+        # a raw division could land on 100+ and overflow the bar.
+        pct = (
+            min(99, int(idx / frames_total * 100))
+            if frames_total is not None and frames_total > 0
+            else None
+        )
+        # Persist the same numbers we're about to broadcast so a viewer
+        # page rendered mid-decode (e.g. an operator opening /viewer
+        # after pressing RERUN) can paint the bar with real progress
+        # immediately, not the "waiting for first frame…" placeholder.
+        proc.set_server_post_progress(
+            sid, cam, done=idx, total=frames_total, pct=pct,
+        )
         fut = asyncio.run_coroutine_threadsafe(
             sse_hub.broadcast(
                 "server_post_progress",
                 {"sid": sid, "cam": cam,
-                 "frames_done": idx, "frames_total": frames_total},
+                 "frames_done": idx, "frames_total": frames_total,
+                 "pct": pct},
             ),
             loop,
         )
@@ -312,9 +346,17 @@ async def _run_server_detection(
     # Priming event so the row flips into "in progress" mode within
     # ~1 frame of the BackgroundTask actually starting, instead of
     # waiting for the first 30-frame milestone (~1 s wall).
+    # Persist the priming snapshot too so a viewer arriving before the
+    # first throttled emit (≤ 0.1 s window) still gets a non-empty seed
+    # — without this the operator sees "waiting for first frame…" until
+    # the first wall-clock tick clears.
+    proc.set_server_post_progress(
+        sid, cam, done=0, total=frames_total, pct=0,
+    )
     await sse_hub.broadcast(
         "server_post_progress",
-        {"sid": sid, "cam": cam, "frames_done": 0, "frames_total": frames_total},
+        {"sid": sid, "cam": cam, "frames_done": 0,
+         "frames_total": frames_total, "pct": 0},
     )
 
     # Whatever the snapshot says is what runs — never re-read state here,

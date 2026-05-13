@@ -1349,6 +1349,92 @@ class State:
         self.store_result(updated)
         return updated
 
+    def set_active_server_post_algorithm(
+        self,
+        session_id: str,
+        algorithm_id: str,
+    ) -> SessionResult | None:
+        """Flip the active server_post pointer on every cam's pitch for
+        this session, persist the pitches, and rebuild + persist the
+        SessionResult. No detection runs — pure pointer flip behind the
+        viewer's history dropdown.
+
+        `algorithm_id` must already have at least one frame in some
+        cam's `frames_by_algorithm` (the algorithm has been run on this
+        session before). Single-cam presence is enough — flipping to an
+        algorithm that only cam A has frames for is intentional (mono
+        session, or only-A reprocess); the rebuilt result will just
+        carry an empty `triangulated_by_algorithm[id]` for the missing
+        cam side. Passing the live bucket id is rejected — server_post
+        and live are separate pointers.
+
+        Returns the rebuilt SessionResult, or `None` if the session was
+        deleted mid-operation (mirrors `record()`'s race guard).
+
+        Raises:
+            KeyError: session has no pitches recorded.
+            ValueError: `algorithm_id` is the live bucket, or has no
+                frames in this session.
+        """
+        if algorithm_id == IOS_CAPTURE_TIME_ALGORITHM_ID:
+            raise ValueError(
+                f"{algorithm_id!r} is the live bucket; not a server_post run"
+            )
+        with self._lock:
+            cam_pitches = [
+                p for (_cam, sid), p in self.pitches.items()
+                if sid == session_id
+            ]
+            if not cam_pitches:
+                raise KeyError(f"session {session_id!r} has no pitches")
+            if not any(
+                algorithm_id in p.frames_by_algorithm for p in cam_pitches
+            ):
+                raise ValueError(
+                    f"algorithm {algorithm_id!r} has no frames in session "
+                    f"{session_id!r}"
+                )
+            for p in cam_pitches:
+                p.active_server_post_algorithm_id = algorithm_id
+
+        for pitch in cam_pitches:
+            self._atomic_write(
+                self._pitch_path(pitch.camera_id, pitch.session_id),
+                persist_pitch_json(pitch),
+            )
+        result = session_results.rebuild_result_for_session(self, session_id)
+
+        with self._lock:
+            still_present = any(
+                (p.camera_id, p.session_id) in self.pitches
+                for p in cam_pitches
+            )
+        if not still_present:
+            logger.info(
+                "set_active_server_post_algorithm: session %s deleted "
+                "during write — discarding result publish",
+                session_id,
+            )
+            return None
+
+        self._atomic_write(
+            self._result_path(session_id),
+            persist_result_json(result),
+        )
+        with self._lock:
+            if not any(
+                (p.camera_id, p.session_id) in self.pitches
+                for p in cam_pitches
+            ):
+                logger.info(
+                    "set_active_server_post_algorithm: session %s deleted "
+                    "between disk write and republish — discarding",
+                    session_id,
+                )
+                return None
+            self.results[session_id] = result
+        return result
+
     def pitches_for_session(self, session_id: str) -> dict[str, PitchPayload]:
         """Snapshot of all pitches currently stored for `session_id`, keyed
         by camera_id. Returns an empty dict if the session has not been

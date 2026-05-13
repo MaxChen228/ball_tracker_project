@@ -17,7 +17,7 @@ import chirp
 import main
 from conftest import sid
 from main import app
-from schemas import SyncReport, TrackingExposureCapMode
+from schemas import DetectionConfigSnapshotPayload, SyncReport, TrackingExposureCapMode
 
 
 # --- Device heartbeat + staleness ------------------------------------------
@@ -1160,6 +1160,198 @@ def test_old_run_server_post_rejects_algorithm_id_in_body(tmp_path):
         json={"preset_name": "tennis", "algorithm_id": "hybrid_28d"},
     )
     assert r.status_code == 400, r.text
+
+
+def test_html_run_server_post_with_return_to_redirects_to_viewer(tmp_path):
+    """Viewer's RERUN form submits with `return_to=/viewer/{sid}` so the
+    operator stays on the page they pressed from. Without this whitelist
+    pass the dispatch defaulted to `/`, which is what dumped the viewer
+    onto the dashboard mid-rerun."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(80))
+    target = f"/viewer/{sid(80)}"
+    r = client.post(
+        f"/sessions/{sid(80)}/run_server_post",
+        headers={"Accept": "text/html"},
+        data={"preset_name": "tennis", "return_to": target},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == target
+
+
+def test_html_run_server_post_without_return_to_redirects_to_dashboard(tmp_path):
+    """Dashboard events-row form omits `return_to` (caller already on
+    `/`). With no field the resolver falls back to `/`, matching the
+    pre-Phase-7 behaviour for the dashboard caller."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(81))
+    r = client.post(
+        f"/sessions/{sid(81)}/run_server_post",
+        headers={"Accept": "text/html"},
+        data={"preset_name": "tennis"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+
+
+def test_html_run_server_post_rejects_open_redirect_return_to(tmp_path):
+    """`return_to` is whitelisted to `/` and `/viewer/{session_id}`. A
+    crafted external URL falls back to `/` rather than becoming an
+    open-redirect vector."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(82))
+    r = client.post(
+        f"/sessions/{sid(82)}/run_server_post",
+        headers={"Accept": "text/html"},
+        data={"preset_name": "tennis", "return_to": "https://evil.example.com/"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+
+
+def test_html_runs_endpoint_honours_return_to(tmp_path):
+    """The new `/runs/{algorithm_id}` endpoint shares the same dispatch
+    tail as the alias, so `return_to` must work identically through this
+    surface — viewer's RERUN form may eventually migrate here once the
+    UI exposes ad-hoc params."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(83))
+    target = f"/viewer/{sid(83)}"
+    r = client.post(
+        f"/sessions/{sid(83)}/runs/v11_hsv_cc",
+        headers={"Accept": "text/html"},
+        data={"preset_name": "tennis", "return_to": target},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == target
+
+
+def _seed_session_with_two_algorithms(session_id: str) -> None:
+    """Plant a pitch with two server_post buckets (`v11_hsv_cc` +
+    `hybrid_28d`), each with a config snapshot stamped so callers can
+    read preset_name from `config_used_by_algorithm`. `_minimal_pitch`
+    already seeds `v11_hsv_cc` as the active pointer; we drop a second
+    bucket on top so the dropdown lookup matches a real-world session
+    that has had two algorithms run on it."""
+    pitch = _minimal_pitch("A", session_id=session_id).model_copy(deep=True)
+    pitch.frames_by_algorithm["hybrid_28d"] = [
+        main.FramePayload(
+            frame_index=0, timestamp_s=0.0,
+            px=100.0, py=100.0, ball_detected=True,
+        ),
+    ]
+    pitch.config_used_by_algorithm["v11_hsv_cc"] = DetectionConfigSnapshotPayload(
+        algorithm_id="v11_hsv_cc",
+        params=_V11_VALID_PARAMS,
+        preset_name="blue_ball",
+    )
+    pitch.config_used_by_algorithm["hybrid_28d"] = DetectionConfigSnapshotPayload(
+        algorithm_id="hybrid_28d",
+        params={
+            "prod_hsv": _V11_VALID_PARAMS["hsv"],
+            "prod_shape": _V11_VALID_PARAMS["shape_gate"],
+            "v11_hsv": _V11_VALID_PARAMS["hsv"],
+            "v11_shape": _V11_VALID_PARAMS["shape_gate"],
+        },
+        preset_name="hybrid_blue",
+    )
+    main.state.record(pitch)
+
+
+def test_active_run_switches_pointer(tmp_path):
+    """Operator picks a different algorithm from the viewer history
+    dropdown; server flips active_server_post_algorithm_id on every
+    cam's pitch + rebuilds the SessionResult. No detection runs."""
+    client = TestClient(app)
+    _seed_session_with_two_algorithms(sid(80))
+    r = client.post(
+        f"/sessions/{sid(80)}/active_run",
+        headers={"Accept": "application/json"},
+        json={"algorithm_id": "hybrid_28d"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True, "active_algorithm_id": "hybrid_28d"}
+    assert (
+        main.state.pitches_for_session(sid(80))["A"].active_server_post_algorithm_id
+        == "hybrid_28d"
+    )
+
+
+def test_active_run_rejects_unknown_algorithm(tmp_path):
+    """422 when the named algorithm has never been run on this session.
+    Catches stale viewer dropdowns rendered before the bucket was cleared
+    (e.g., a different session was open in another tab)."""
+    client = TestClient(app)
+    _seed_session_with_two_algorithms(sid(81))
+    r = client.post(
+        f"/sessions/{sid(81)}/active_run",
+        headers={"Accept": "application/json"},
+        json={"algorithm_id": "no_such_algorithm"},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_active_run_rejects_live_bucket(tmp_path):
+    """422 when the operator tries to mark the live bucket as the
+    active server_post pointer. Live and server_post are separate
+    pointers; conflating them would make the viewer's main scene flip
+    to iOS live coordinates on a UI mis-click."""
+    client = TestClient(app)
+    _seed_session_with_two_algorithms(sid(82))
+    r = client.post(
+        f"/sessions/{sid(82)}/active_run",
+        headers={"Accept": "application/json"},
+        json={"algorithm_id": "ios_capture_time"},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_active_run_404_unknown_session(tmp_path):
+    """404 when the session_id slug is well-formed but no pitches have
+    been recorded under it. Distinguishes 'session never existed' (404)
+    from 'algorithm not registered for this session' (422)."""
+    client = TestClient(app)
+    r = client.post(
+        f"/sessions/{sid(83)}/active_run",
+        headers={"Accept": "application/json"},
+        json={"algorithm_id": "hybrid_28d"},
+    )
+    assert r.status_code == 404, r.text
+
+
+def test_active_run_rejects_missing_algorithm_id(tmp_path):
+    """422 when the request body omits `algorithm_id`. The viewer
+    dropdown always sends one, so this is hit-the-wire bug protection."""
+    client = TestClient(app)
+    _seed_session_with_two_algorithms(sid(84))
+    r = client.post(
+        f"/sessions/{sid(84)}/active_run",
+        headers={"Accept": "application/json"},
+        json={},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_active_run_html_form_redirects_to_return_to(tmp_path):
+    """HTML form caller (viewer history dropdown click) gets a 303
+    redirect back to `/viewer/{sid}` so the page reloads with the new
+    active pointer. Same return_to whitelist as `run_server_post` —
+    crafted bodies cannot redirect off-site."""
+    client = TestClient(app)
+    _seed_session_with_two_algorithms(sid(85))
+    target = f"/viewer/{sid(85)}"
+    r = client.post(
+        f"/sessions/{sid(85)}/active_run",
+        headers={"Accept": "text/html"},
+        data={"algorithm_id": "hybrid_28d", "return_to": target},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303, r.text
+    assert r.headers["location"] == target
 
 
 def test_sessions_delete_json_returns_404_for_unknown():
