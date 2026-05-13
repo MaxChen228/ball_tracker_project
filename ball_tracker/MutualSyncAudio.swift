@@ -272,14 +272,20 @@ final class MutualSyncAudio {
         }
 
         // Host ticks → host-clock seconds via the documented bridge.
-        let bufferStartS: Double
-        if audioTime.isHostTimeValid {
-            let hostCMTime = CMClockMakeHostTimeFromSystemUnits(audioTime.hostTime)
-            bufferStartS = CMTimeGetSeconds(hostCMTime)
-        } else {
-            let hostCMTime = CMClockGetTime(CMClockGetHostTimeClock())
-            bufferStartS = CMTimeGetSeconds(hostCMTime)
+        // recordingFirstPTS is the anchor for the entire chirp-pair alignment;
+        // a wall-clock fallback (CMClockGetHostTimeClock at tap-time, not
+        // buffer-capture-time) introduces ~5-20 ms of unbounded skew, which
+        // directly breaks mutual sync given the 8 ms pairing window. Fail
+        // loud: drop the buffer so recordingFirstPTS stays nil and the outer
+        // VC's recording watchdog (see CameraSyncCoordinator.syncWatchdog)
+        // will time the sync out instead of silently producing a bad anchor.
+        guard audioTime.isHostTimeValid else {
+            assertionFailure("mutual-sync audio: AVAudioTime.isHostTimeValid == false; dropping buffer (host-clock fallback would corrupt chirp anchor)")
+            log.error("mutual-sync audio buffer dropped: hostTime invalid — anchor would be unreliable, letting watchdog time out")
+            return
         }
+        let hostCMTime = CMClockMakeHostTimeFromSystemUnits(audioTime.hostTime)
+        let bufferStartS = CMTimeGetSeconds(hostCMTime)
 
         stateQueue.async { [weak self] in
             guard let self, self.running else { return }

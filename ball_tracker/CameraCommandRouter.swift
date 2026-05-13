@@ -85,6 +85,21 @@ final class CameraCommandRouter {
                 commandLog.error("ws sync_run sid=\(sid, privacy: .public) missing required fields: \(missing.joined(separator: ","), privacy: .public)")
                 return
             }
+            // Atomic-drop on out-of-contract values. server is the single
+            // source of truth for sync params; an empty emit_at_s or a
+            // record_duration_s < 1.0 is a server bug, not a thing we
+            // silently clamp on the device side (which would mask the bug
+            // and quietly run with different timing than the server logs
+            // claim). Fail loud at the route layer, same pattern as the
+            // other missing-key drops above.
+            guard !emitAtS.isEmpty else {
+                commandLog.error("ws sync_run sid=\(sid, privacy: .public) atomic-drop: emit_at_s is empty (server bug)")
+                return
+            }
+            guard recordDurationS >= 1.0 else {
+                commandLog.error("ws sync_run sid=\(sid, privacy: .public) atomic-drop: record_duration_s=\(recordDurationS) below 1.0 floor")
+                return
+            }
             DispatchQueue.main.async {
                 self.deps.applyMutualSync(sid, emitAtS, recordDurationS)
             }
