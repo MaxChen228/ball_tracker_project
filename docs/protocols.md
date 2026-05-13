@@ -42,11 +42,11 @@
 
   `SessionResult` mirrors the same `live_config_used` + `server_post_config_used` snapshots with the same A-wins-B-fallback aggregation. The events list / viewer CFG strip renders from these snapshots directly, so custom configs and deleted presets still show the exact frozen HSV + gate values that produced the session.
 
-  **Phase 6b additive fields** (PitchPayload + SessionResult): `frames_by_algorithm: {<algorithm_id>: FramePayload[]}` + `config_used_by_algorithm: {<algorithm_id>: snapshot}` (PitchPayload), and `triangulated_by_algorithm` / `segments_by_algorithm` / `frame_counts_by_algorithm` / `algorithms_completed: string[]` / `config_used_by_algorithm` (SessionResult). These are auto-mirrored from the legacy per-path fields by an after-validator on every load + WS receive (`live` → `ios_capture_time`, `server_post` → the stamped algorithm id, or `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID = "v11_hsv_cc"` for pre-Phase-2 records). Wire-additive: extra keys, no removal. iOS atomic-drop guards only enforce required-field presence so the additional keys pass through without iOS changes. Phase 7's `POST /sessions/{sid}/runs/{algorithm_id}` will start writing non-mirrored algorithm ids directly into these dicts.
+  **Phase 6b additive fields** (PitchPayload + SessionResult): `frames_by_algorithm: {<algorithm_id>: FramePayload[]}` + `config_used_by_algorithm: {<algorithm_id>: snapshot}` (PitchPayload), and `triangulated_by_algorithm` / `segments_by_algorithm` / `frame_counts_by_algorithm` / `algorithms_completed: string[]` / `config_used_by_algorithm` (SessionResult). These are auto-mirrored from the legacy per-path fields by an after-validator on every load + WS receive (`live` → `ios_capture_time`, `server_post` → the stamped algorithm id, or `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID = "v11_hsv_cc"` for pre-Phase-2 records). Wire-additive: extra keys, no removal. iOS atomic-drop guards only enforce required-field presence so the additional keys pass through without iOS changes. **Phase 7 (shipped)**: `POST /sessions/{sid}/runs/{algorithm_id}` writes directly into these dicts, including ad-hoc params runs whose snapshot has `preset_name=null`. See the endpoint contract below.
 
   Server-side, `/pitch` looks up the matching `CalibrationSnapshot` from `state.calibrations()` and fills in `intrinsics` / `homography` / `image_width_px` / `image_height_px` BEFORE triangulation and on-disk persistence. **No calibration on file → 422**.
 
-- **`video`** (`video/quicktime`) — H.264 MOV. iOS uploads on every recording (PR61); `/pitch` stores it under `data/videos/session_{session_id}_{camera_id}.<ext>` without decoding. Decode + HSV detection (→ `frames_server_post`) happens only when the operator hits `POST /sessions/{sid}/run_server_post`.
+- **`video`** (`video/quicktime`) — H.264 MOV. iOS uploads on every recording (PR61); `/pitch` stores it under `data/videos/session_{session_id}_{camera_id}.<ext>` without decoding. Decode + HSV detection (→ `frames_server_post` / `frames_by_algorithm[<algorithm_id>]`) happens only when the operator hits `POST /sessions/{sid}/runs/{algorithm_id}` (or its preset-name alias `POST /sessions/{sid}/run_server_post`).
 
 - **Live path has no HTTP payload** — the always-on `live` pipeline produces WS `frame` messages on `/ws/device/{cam}` throughout the recording. `state.persist_live_frames(camera_id, session_id)` flushes the in-memory buffer onto the pitch JSON at `path_completed` (or session end) so reloads see the same two-bucket shape as an offline upload.
 
@@ -55,6 +55,50 @@ Pairing is by **`session_id` alone** (server-minted via `POST /sessions/arm`). i
 `POST /sessions/arm` may omit `paths`, in which case the operator's runtime default is used. If a JSON body includes `paths`, it must be a non-empty array of known `DetectionPath` values; unknown values and empty arrays return 422 instead of falling back to defaults.
 
 Triangulation requires **both** cameras to have `intrinsics` and `homography` present AND `sync_anchor_timestamp_s` non-null — if any is missing, `SessionResult.error` is set and triangulation is skipped (raw payload + MOV are still persisted for forensics).
+
+## Server-post detection — `POST /sessions/{sid}/runs/{algorithm_id}` + alias
+
+Operator triggers a server-side detection run against the archived MOVs of every camera in the session. Handler: `server/routes/sessions.py::sessions_run_algorithm`; both endpoints share `_dispatch_server_post`, which validates the session id, gates on `state.processing.session_candidates`, and queues `_run_server_detection` (`server/routes/pitch.py`) as a FastAPI BackgroundTask per camera.
+
+### `POST /sessions/{sid}/runs/{algorithm_id}` (primary)
+
+URL pins the algorithm id (`^[a-z0-9_]{1,32}$`). Body (JSON or form-urlencoded) must carry **exactly one** of:
+
+- `preset_name: str` — load the named preset from disk. Preset's `algorithm_id` must match the URL.
+- `params: dict` — ad-hoc one-off run. Validated against the registered detector's `params_schema` (`server/algorithms/<id>.py`); the resulting snapshot's `preset_name` is `null`.
+
+Response (200 on accept):
+
+```json
+{
+  "ok": true,
+  "session_id": "s_xxxxxxxx",
+  "queued": 2,
+  "algorithm_id": "<URL algorithm_id>",
+  "preset_name": "<name>" | null
+}
+```
+
+Error matrix:
+
+| Status | Trigger |
+|---|---|
+| 400 | URL `algorithm_id` fails the `[a-z0-9_]{1,32}` slug regex |
+| 404 | URL `algorithm_id` is unknown to `algorithms.is_known` |
+| 422 | URL `algorithm_id` is a non-runnable data source (`ios_capture_time`) |
+| 422 | Body has both `preset_name` and `params` |
+| 422 | Body has neither field |
+| 404 | `preset_name` does not exist on disk |
+| 422 | `preset.algorithm_id` mismatches URL `algorithm_id` |
+| 422 | `params` fail the detector's `params_schema.model_validate` |
+| 422 | `session_id` fails `^s_[0-9a-f]{4,32}$` (HTML callers 303 to `/`) |
+| 409 | Session has no resumable processing candidates (HTML callers 303 to `/`) |
+
+The captured `DetectionConfigSnapshotPayload(algorithm_id, params, preset_name)` is threaded into the BackgroundTask, so a concurrent dashboard slider edit cannot contaminate an in-flight run. Re-running the same `algorithm_id` overwrites that bucket; running a different one leaves prior buckets in place — `PitchPayload.frames_by_algorithm` and `SessionResult.triangulated_by_algorithm` / `segments_by_algorithm` retain the full multi-algorithm history at the dict layer.
+
+### `POST /sessions/{sid}/run_server_post` (deprecation alias)
+
+Kept for the HTML form callers (events-row "Run srv" button and viewer "Rerun server" button) which submit `preset_name` only. Behaviour is identical to the primary endpoint's preset path: the snapshot's `algorithm_id` is derived from `preset.algorithm_id`, then the same `_dispatch_server_post` runs. 422 on missing `preset_name`, 404 on unknown preset. Response shape matches the primary endpoint.
 
 ## WebSocket messages — `/ws/device/{cam}`
 

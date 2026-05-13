@@ -969,6 +969,170 @@ def test_run_server_post_rejects_unknown_preset_name(tmp_path):
     assert r.status_code == 404, r.text
 
 
+_V11_VALID_PARAMS = {
+    "hsv": {
+        "h_min": 105, "h_max": 112,
+        "s_min": 140, "s_max": 255,
+        "v_min": 40, "v_max": 255,
+    },
+    "shape_gate": {"aspect_min": 0.75, "fill_min": 0.55},
+}
+
+
+def test_runs_endpoint_with_preset_name_dispatches(tmp_path):
+    """preset path: URL algorithm matches preset.algorithm_id, snapshot
+    carries the preset name + algorithm id back in the response."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(70))
+    r = client.post(
+        f"/sessions/{sid(70)}/runs/v11_hsv_cc",
+        headers={"Accept": "application/json"},
+        json={"preset_name": "tennis"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["queued"] == 1
+    assert body["algorithm_id"] == "v11_hsv_cc"
+    assert body["preset_name"] == "tennis"
+
+
+def test_runs_endpoint_with_params_dispatches(tmp_path):
+    """ad-hoc params path: URL pins the algorithm, body carries a
+    schema-valid params dict, snapshot's preset_name is null."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(71))
+    r = client.post(
+        f"/sessions/{sid(71)}/runs/v11_hsv_cc",
+        headers={"Accept": "application/json"},
+        json={"params": _V11_VALID_PARAMS},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["queued"] == 1
+    assert body["algorithm_id"] == "v11_hsv_cc"
+    assert body["preset_name"] is None
+
+
+def test_runs_endpoint_rejects_both_body_fields(tmp_path):
+    """422 when both preset_name and params are supplied (XOR)."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(72))
+    r = client.post(
+        f"/sessions/{sid(72)}/runs/v11_hsv_cc",
+        headers={"Accept": "application/json"},
+        json={"preset_name": "tennis", "params": _V11_VALID_PARAMS},
+    )
+    assert r.status_code == 422, r.text
+    assert "mutually exclusive" in r.json()["detail"]
+
+
+def test_runs_endpoint_rejects_neither_body_field(tmp_path):
+    """422 when neither preset_name nor params is supplied."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(73))
+    r = client.post(
+        f"/sessions/{sid(73)}/runs/v11_hsv_cc",
+        headers={"Accept": "application/json"},
+        json={},
+    )
+    assert r.status_code == 422, r.text
+    assert "must supply" in r.json()["detail"]
+
+
+def test_runs_endpoint_rejects_algorithm_mismatch(tmp_path):
+    """422 when the preset's algorithm_id does not match the URL.
+    Caller is asking the server to run hybrid_28d but pointed at a v11
+    preset — refuse loudly rather than silently switching."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(74))
+    r = client.post(
+        f"/sessions/{sid(74)}/runs/hybrid_28d",
+        headers={"Accept": "application/json"},
+        json={"preset_name": "tennis"},
+    )
+    assert r.status_code == 422, r.text
+    detail = r.json()["detail"]
+    assert "v11_hsv_cc" in detail and "hybrid_28d" in detail
+
+
+def test_runs_endpoint_rejects_invalid_params_shape(tmp_path):
+    """422 when params fail the detector's params_schema. Here we send
+    a dict missing the required `shape_gate` block."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(75))
+    r = client.post(
+        f"/sessions/{sid(75)}/runs/v11_hsv_cc",
+        headers={"Accept": "application/json"},
+        json={"params": {"hsv": _V11_VALID_PARAMS["hsv"]}},
+    )
+    assert r.status_code == 422, r.text
+    assert "params failed schema" in r.json()["detail"]
+
+
+def test_runs_endpoint_rejects_unknown_algorithm(tmp_path):
+    """404 when the URL names an algorithm slug the registry doesn't know."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(76))
+    r = client.post(
+        f"/sessions/{sid(76)}/runs/no_such_alg",
+        headers={"Accept": "application/json"},
+        json={"params": _V11_VALID_PARAMS},
+    )
+    assert r.status_code == 404, r.text
+    assert "no_such_alg" in r.json()["detail"]
+
+
+def test_runs_endpoint_rejects_malformed_algorithm(tmp_path):
+    """400 when the URL slug fails the [a-z0-9_]{1,32} format
+    (uppercase or hyphens are rejected before registry lookup)."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(77))
+    r = client.post(
+        f"/sessions/{sid(77)}/runs/Invalid-ID",
+        headers={"Accept": "application/json"},
+        json={"params": _V11_VALID_PARAMS},
+    )
+    assert r.status_code == 400, r.text
+    assert "Invalid-ID" in r.json()["detail"]
+
+
+def test_runs_endpoint_rejects_non_runnable_algorithm(tmp_path):
+    """422 when the URL names a non-runnable data-source id like
+    `ios_capture_time` — it is a real algorithm identity but has no
+    server-side detector to invoke."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(78))
+    r = client.post(
+        f"/sessions/{sid(78)}/runs/ios_capture_time",
+        headers={"Accept": "application/json"},
+        json={"params": _V11_VALID_PARAMS},
+    )
+    assert r.status_code == 422, r.text
+    assert "non-runnable" in r.json()["detail"]
+
+
+def test_old_run_server_post_still_dispatches_through_alias(tmp_path):
+    """Regression: the deprecation-alias endpoint still resolves a
+    preset by name and dispatches the BackgroundTask. Phase 7's refactor
+    routed both endpoints through `_dispatch_server_post`; this test
+    locks down the old surface against accidental churn."""
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(79))
+    r = client.post(
+        f"/sessions/{sid(79)}/run_server_post",
+        headers={"Accept": "application/json"},
+        json={"preset_name": "tennis"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["queued"] == 1
+    assert body["preset_name"] == "tennis"
+    assert body["algorithm_id"] == "v11_hsv_cc"
+
+
 def test_sessions_delete_json_returns_404_for_unknown():
     client = TestClient(app)
     r = client.post(

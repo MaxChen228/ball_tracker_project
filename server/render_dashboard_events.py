@@ -315,9 +315,11 @@ def _run_srv_form(sid: str) -> str:
     """`Run srv` button with inline preset selector. Default option is
     the dashboard's current active preset; operator can pick any
     on-disk preset to detect under. Submits as
-    application/x-www-form-urlencoded with `preset_name` field, which
-    `routes/sessions._enqueue_server_post` resolves to a Preset object
-    or 404s on unknown name."""
+    application/x-www-form-urlencoded with `preset_name` field to the
+    deprecation-alias endpoint `/sessions/{sid}/run_server_post`, which
+    routes through `_snapshot_from_preset_name` + `_dispatch_server_post`
+    in `routes/sessions.py` (same tail as the primary
+    `/sessions/{sid}/runs/{algorithm_id}` endpoint)."""
     from main import state as _state
 
     active = _state.detection_config().preset
