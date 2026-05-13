@@ -264,8 +264,10 @@ def _load_legacy_triple(data_dir: Path) -> DetectionConfig | None:
         try:
             return parser(json.loads(path.read_text()))
         except Exception as e:
-            logger.warning("legacy %s corrupt during migration: %s", path.name, e)
-            return default
+            raise RuntimeError(
+                f"Legacy config file {path.name} is corrupt and cannot be "
+                f"migrated: {e}. Delete or fix the file and restart."
+            ) from e
 
     hsv = _load_or_default(hsv_path, _hsv_from_dict, HSVRange.default())
     sg = _load_or_default(sg_path, _shape_gate_from_dict, ShapeGate.default())
