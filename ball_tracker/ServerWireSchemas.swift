@@ -8,8 +8,6 @@ extension ServerUploader {
         let s_max: Int
         let v_min: Int
         let v_max: Int
-
-        static let tennis = HSVRangePayload(h_min: 25, h_max: 55, s_min: 90, s_max: 255, v_min: 90, v_max: 255)
     }
 
     /// Server-owned shape gate (aspect/fill thresholds applied after HSV +
@@ -19,8 +17,6 @@ extension ServerUploader {
     struct ShapeGatePayload: Codable, Equatable {
         let aspect_min: Double
         let fill_min: Double
-
-        static let `default` = ShapeGatePayload(aspect_min: 0.70, fill_min: 0.55)
     }
 
     enum DetectionPath: String, Codable, CaseIterable {
@@ -141,20 +137,6 @@ extension ServerUploader {
         let max_residual_m: Double?
         let peak_z_m: Double?
         let duration_s: Double?
-    }
-
-    struct DeviceSocketEvent: Codable {
-        let type: String
-        let sid: String?
-        let paths: [String]?
-        let max_duration_s: Double?
-        let hsv_range: HSVRangePayload?
-        let tracking_exposure_cap: String?
-        let chirp_detect_threshold: Double?
-        let heartbeat_interval_s: Double?
-        let capture_height_px: Int?
-        let preview_requested: Bool?
-        let calibration_frame_requested: Bool?
     }
 
     enum TrackingExposureCapMode: String, Codable {

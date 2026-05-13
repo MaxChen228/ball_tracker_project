@@ -222,7 +222,7 @@ final class BallDetectorParityTests: XCTestCase {
         fillSolid(buf, rgb: (r: 30, g: 30, b: 30))
         drawCircle(buf, cx: 640, cy: 360, radius: 22, rgb: Self.yellowGreenRGB)
 
-        let d = BTBallDetector.detect(in: buf)
+        let d = BallDetectorTestShim.detect(in: buf)
         XCTAssertNotNil(d, "Clean scene should yield a detection (parity with Python)")
         guard let d else { return }
         XCTAssertEqual(Double(d.px), 640, accuracy: 2.0)
@@ -238,7 +238,7 @@ final class BallDetectorParityTests: XCTestCase {
         // Core Image's radius ≈ sigma; match Python's sigmaX=3.0.
         let blurred = gaussianBlur(raw, radius: 3.0)
 
-        let d = BTBallDetector.detect(in: blurred)
+        let d = BallDetectorTestShim.detect(in: blurred)
         XCTAssertNotNil(d, "Blurred scene should still yield a detection")
         guard let d else { return }
         XCTAssertEqual(Double(d.px), 800, accuracy: 4.0)
@@ -255,7 +255,7 @@ final class BallDetectorParityTests: XCTestCase {
         drawCircle(buf, cx: 500, cy: 300, radius: 20, rgb: Self.yellowGreenRGB)
         drawRect(buf, x0: 900, y0: 500, x1: 1100, y1: 700, rgb: Self.distracterRGB)
 
-        let d = BTBallDetector.detect(in: buf)
+        let d = BallDetectorTestShim.detect(in: buf)
         XCTAssertNotNil(d, "Cluttered scene should still find the yellow-green ball")
         guard let d else { return }
         XCTAssertEqual(Double(d.px), 500, accuracy: 3.0)

@@ -215,7 +215,17 @@ final class CameraCommandRouterTests: XCTestCase {
         ]))
         drainMain()
         XCTAssertEqual(fixture.hsvPushes.count, 1)
-        XCTAssertEqual(fixture.hsvPushes.first, ServerUploader.HSVRangePayload.tennis)
+        // Mirrors the dict pushed two statements above (yellow-green tennis
+        // preset values, previously available as the retired
+        // `HSVRangePayload.tennis` static).
+        XCTAssertEqual(
+            fixture.hsvPushes.first,
+            ServerUploader.HSVRangePayload(
+                h_min: 25, h_max: 55,
+                s_min: 90, s_max: 255,
+                v_min: 90, v_max: 255
+            )
+        )
     }
 
     // MARK: settings · capture_height_px (only applied in .standby + only if changed)
