@@ -159,8 +159,19 @@ final class PayloadUploadQueue {
         do {
             payload = try store.load(fileURL)
         } catch {
+            // Poisoned cache: the JSON exists but can't be decoded
+            // (truncated write, schema drift, FS corruption). Retrying the
+            // same bytes will never succeed and `reloadPending()` would
+            // pull it back to the head on next entry → infinite retry
+            // bypassing `clientErrorRetryCount`. Drop the file, clear
+            // bookkeeping, and surface it via the same `onPayloadDropped`
+            // path operators see for 4xx-exhausted drops.
+            log.warning("queue drop-on-decode url=\(fileURL.lastPathComponent, privacy: .public) reason=\(error.localizedDescription, privacy: .public)")
+            store.delete(fileURL)
+            clientErrorRetryCount.removeValue(forKey: fileURL)
+            onStatusTextChanged?("Dropped (cache decode): \(error.localizedDescription)")
+            onPayloadDropped?(fileURL, .decoding(error))
             setUploading(false)
-            onStatusTextChanged?("Cache read failed: \(error.localizedDescription)")
             processNextIfNeeded()
             return
         }
