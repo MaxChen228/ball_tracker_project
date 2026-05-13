@@ -141,9 +141,7 @@ camera_id: str                       # echo of the {cam} in the URL (server-side
 paths: list[str]                     # default DetectionPath set for newly-armed sessions (always {"live"} post-Phase-1)
 hsv_range: {h_min,h_max,s_min,s_max,v_min,v_max}  # from data/detection_config.json (POST /detection/config)
 shape_gate: {aspect_min, fill_min}   # from data/detection_config.json (POST /detection/config)
-active_preset_name: str | null       # currently-bound LIVE preset filename (DetectionConfig.preset). Pushed alongside the HSV+shape values so iOS can log preset identity. Pure metadata — iOS does not act on it. Null only when the live config is custom (slider direct-POST path); never null after a /presets or /presets/active {target:"live"} call. NOTE: the **server_post** active preset is NOT in this WS push (it never affects iOS) and is NOT exposed via any REST JSON endpoint. `active_server_post_preset_name` is injected at SSR time by `viewer_page.py` (calls `state.active_server_post_preset_name()` → reads `data/active_server_post_preset.json`) — there is no `GET /status` field for it.
 chirp_detect_threshold: float        # matched-filter cutoff for legacy chirp-listener path; data/runtime_settings.json key "chirp_detect_threshold"
-mutual_sync_threshold: float         # cutoff for the two-device mutual-sync coordinator; data/runtime_settings.json key "mutual_sync_threshold"
 heartbeat_interval_s: float          # cadence iOS uses for upstream {type:"heartbeat"} (state.heartbeat_interval_s)
 tracking_exposure_cap: str           # TrackingExposureCapMode enum value (e.g. "auto"/"capped_2ms"); data/runtime_settings.json key "tracking_exposure_cap"
 capture_height_px: int               # 1080 / 720 etc. — iOS picks the matching 240 fps format; data/runtime_settings.json key "capture_height_px"

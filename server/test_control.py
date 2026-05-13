@@ -1839,15 +1839,22 @@ def test_settings_message_includes_server_authoritative_sync_status():
     assert msg["device_time_sync_id"] == "sy_deadbeef"
 
 
-def test_settings_message_excludes_algorithm_id():
-    """`algorithm_id` is intentionally absent from the WS settings push:
-    iOS live is v11_hsv_cc-only (CLAUDE.md) and CameraCommandRouter has
-    no consumer for it. The dashboard reads it from /status JSON
-    instead. Pin so a future "let's just push it too" addition trips
-    here. Key list also lives in docs/protocols.md (WS settings) — keep
+def test_settings_message_excludes_dead_wire_fields():
+    """Three fields are intentionally absent from the WS settings push
+    because iOS CameraCommandRouter has no consumer for any of them:
+      • `algorithm_id`: iOS live is v11_hsv_cc-only; dashboard reads it
+        from /status JSON.
+      • `active_preset_name`: pure server-side metadata; iOS does not
+        act on it; readable from /status JSON.
+      • `mutual_sync_threshold`: server-side two-device coordinator
+        cutoff; iOS has no mutual-sync logic client-side.
+    Pin all three so a future "let's just push it too" addition trips
+    here. Key list is also in docs/protocols.md (WS settings) — keep
     both in lockstep."""
     msg = main._settings_message_for("A")
     assert "algorithm_id" not in msg
+    assert "active_preset_name" not in msg
+    assert "mutual_sync_threshold" not in msg
 
 
 def test_setup_page_no_longer_renders_preview_marker_count_chip():

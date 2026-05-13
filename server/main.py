@@ -484,21 +484,23 @@ def _settings_message_for(camera_id: str) -> dict[str, Any]:
         (d for d in status.get("devices", []) if d.get("camera_id") == camera_id),
         {},
     )
-    # 12-key WS settings push. `algorithm_id` is intentionally NOT in
-    # this payload — iOS live is v11_hsv_cc-only (CLAUDE.md) and the iOS
-    # CameraCommandRouter has no consumer for it. The dashboard reads
-    # algorithm_id from the `/status` JSON instead. Key list is pinned in
-    # docs/protocols.md (WS settings) — keep this dict and that doc in
-    # lockstep.
+    # 10-key WS settings push. Three fields are intentionally NOT in
+    # this payload — iOS CameraCommandRouter has no consumer for them:
+    #   • `algorithm_id`: iOS live is v11_hsv_cc-only (CLAUDE.md); the
+    #     dashboard reads it from `/status` JSON instead.
+    #   • `active_preset_name`: pure server-side metadata; iOS does not
+    #     act on it; readable from `/status` JSON.
+    #   • `mutual_sync_threshold`: server-side two-device coordinator
+    #     cutoff; iOS has no mutual-sync logic client-side.
+    # Key list is pinned in docs/protocols.md (WS settings) — keep this
+    # dict and that doc in lockstep.
     return {
         "type": "settings",
         "camera_id": camera_id,
         "paths": status.get("default_paths", []),
         "hsv_range": status.get("hsv_range"),
         "shape_gate": status.get("shape_gate"),
-        "active_preset_name": status.get("active_preset_name"),
         "chirp_detect_threshold": status.get("chirp_detect_threshold"),
-        "mutual_sync_threshold": status.get("mutual_sync_threshold"),
         "heartbeat_interval_s": status.get("heartbeat_interval_s"),
         "tracking_exposure_cap": status.get("tracking_exposure_cap"),
         "capture_height_px": status.get("capture_height_px"),
