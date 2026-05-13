@@ -165,7 +165,7 @@ def test_hybrid_28d_field_bounds_and_defaults_match_pydantic(
     assert fields["neigh_half"]["minimum"] == 1
     assert fields["neigh_half"]["maximum"] == 30
     assert fields["neigh_half"]["default"] == 6
-    assert fields["match_px"]["minimum"] == 0.5
+    assert fields["match_px"]["minimum"] == 2.0
     assert fields["match_px"]["maximum"] == 50.0
     assert fields["match_px"]["default"] == 5.0
     assert fields["match_px"]["type"] == "float"

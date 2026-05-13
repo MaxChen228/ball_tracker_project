@@ -29,6 +29,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import cv2
 from pydantic import BaseModel, ConfigDict, Field
 
 from algorithms.base import (
@@ -78,23 +79,31 @@ class Hybrid28dParams(BaseModel):
     v11_area_min: int = Field(default=3, ge=1, le=10_000)
     v11_close_kernel: int = Field(default=3, ge=1, le=9)
     neigh_half: int = Field(default=6, ge=1, le=30)
-    match_px: float = Field(default=5.0, ge=0.5, le=50.0)
+    # match_px lower bound is 2.0: anything <2 makes the persistence
+    # rerank effectively a no-op (sub-pixel tolerance never matches
+    # neighbouring frames once subpixel jitter is considered), so we
+    # reject the parameter region rather than accept a silently-degraded
+    # detector.
+    match_px: float = Field(default=5.0, ge=2.0, le=50.0)
 
 
 def _emit(
-    bgr: "np.ndarray",
+    frame: "np.ndarray",
     hsv: HSVRangePayload,
     shape: ShapeGatePayload,
     *,
     close_kernel: int | None,
     area_min: int,
+    is_hsv: bool = False,
 ) -> list[BlobCandidate]:
     """Adapter: convert wire schemas to detection-module dataclasses,
     delegate to `detection._run_hsv_emit_pipeline`. Hybrid28dDetector
     runs this twice per frame (PROD pool + V11 pool) with different
-    HSV / shape / morphology / area_min settings."""
+    HSV / shape / morphology / area_min settings — pass-1 converts
+    BGR→HSV once and threads `is_hsv=True` so the conversion isn't
+    repeated for the second arm."""
     return _run_hsv_emit_pipeline(
-        bgr,
+        frame,
         HSVRange(
             h_min=hsv.h_min, h_max=hsv.h_max,
             s_min=hsv.s_min, s_max=hsv.s_max,
@@ -103,6 +112,7 @@ def _emit(
         ShapeGate(aspect_min=shape.aspect_min, fill_min=shape.fill_min),
         close_kernel=close_kernel,
         area_min=area_min,
+        is_hsv=is_hsv,
     )
 
 
@@ -173,15 +183,22 @@ class Hybrid28dDetector(Detector):
             if progress is not None:
                 progress(idx)
             timestamps.append(absolute_pts_s)
+            # Share BGR→HSV conversion between PROD + V11 arms. Previously
+            # each `_emit` re-converted the same frame inside
+            # `_run_hsv_emit_pipeline`, doubling cvtColor cost per frame
+            # for a multi-thousand-frame pass.
+            hsv_frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
             prod_per_frame.append(_emit(
-                bgr, params.prod_hsv, params.prod_shape,
+                hsv_frame, params.prod_hsv, params.prod_shape,
                 close_kernel=None,
                 area_min=params.prod_area_min,
+                is_hsv=True,
             ))
             v11_per_frame.append(_emit(
-                bgr, params.v11_hsv, params.v11_shape,
+                hsv_frame, params.v11_hsv, params.v11_shape,
                 close_kernel=params.v11_close_kernel,
                 area_min=params.v11_area_min,
+                is_hsv=True,
             ))
 
         n_frames = len(timestamps)
