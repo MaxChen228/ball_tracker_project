@@ -7,8 +7,9 @@ helpers map between the legacy `(pitch, DetectionPath)` interface
 that callers still want to read and the canonical dict storage:
 
 - `algorithm_id_for_path` resolves a path → algorithm id (live →
-  `ios_capture_time`, server_post → `pitch.active_server_post_algorithm_id`,
-  legacy fallback for pre-snapshot pitches).
+  `ios_capture_time`, server_post → `pitch.active_server_post_algorithm_id`).
+  Raises ValueError when server_post is requested without a pointer —
+  no legacy fallback per CLAUDE.md silent-fallback rule.
 - `get_algorithm_frames` / `set_algorithm_frames` are the low-level
   dict accessors.
 - `stamp_server_post_run` is the atomic writer for a server-side
@@ -34,7 +35,6 @@ from schemas import (
     FramePayload,
     IOS_CAPTURE_TIME_ALGORITHM_ID,
     PitchPayload,
-    _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID,
 )
 
 if TYPE_CHECKING:
@@ -111,14 +111,34 @@ def algorithm_id_for_path(pitch: PitchPayload, path: DetectionPath) -> str:
     """Resolve the algorithm id a path's frames live under in
     `frames_by_algorithm`. `live` always maps to `ios_capture_time`
     (the iOS-side capture-time data source). `server_post` reads
-    `pitch.active_server_post_algorithm_id`, falling back to the
-    legacy pre-snapshot bucket for pitches that predate snapshot
-    persistence."""
+    `pitch.active_server_post_algorithm_id`.
+
+    Per CLAUDE.md 'Experimental phase — 禁止 silent fallback', missing
+    `active_server_post_algorithm_id` for a `server_post` path is an
+    invariant violation, not a recoverable fallback: every pitch that
+    has server_post frames MUST have the pointer stamped (either via
+    `stamp_server_post_run` at run-time or via
+    `migrate_disk_pitches.py` for any pre-snapshot disk records — that
+    migration is a one-shot tool, not a permanent shim). Callers that
+    might receive a pitch without the pointer (e.g. a fresh pitch that
+    has only live frames) MUST guard with
+    `pitch.active_server_post_algorithm_id is not None` before asking
+    for the server_post algorithm id.
+
+    Raises:
+        ValueError: `path == server_post` and the pointer is None.
+    """
     if path == DetectionPath.live:
         return IOS_CAPTURE_TIME_ALGORITHM_ID
-    if pitch.active_server_post_algorithm_id is not None:
-        return pitch.active_server_post_algorithm_id
-    return _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID
+    if pitch.active_server_post_algorithm_id is None:
+        raise ValueError(
+            f"pitch sid={pitch.session_id} cam={pitch.camera_id} has no "
+            "active_server_post_algorithm_id; cannot resolve server_post "
+            "algorithm id without an explicit pointer. Either stamp the "
+            "pointer via stamp_server_post_run, or guard the call site "
+            "with `pitch.active_server_post_algorithm_id is not None`."
+        )
+    return pitch.active_server_post_algorithm_id
 
 
 def get_algorithm_frames(

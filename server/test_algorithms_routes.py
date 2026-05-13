@@ -192,20 +192,24 @@ def test_hybrid_28d_field_bounds_and_defaults_match_pydantic(
     assert fields["match_px"]["type"] == "float"
 
 
-def test_v11_fields_have_no_bounds_when_pydantic_didnt_set_any(
-    tmp_path, monkeypatch,
-):
-    """V11Params doesn't put `Field(ge=, le=)` on its HSV/shape leaves
-    (they're plain `int` / `float` inside the nested payload models),
-    so `minimum` / `maximum` must come back as `None` — the dashboard
-    falls back to free number input rather than rendering a bogus
-    [0, ?] slider."""
+def test_v11_hsv_shape_fields_expose_pydantic_bounds(tmp_path, monkeypatch):
+    """`HSVRangePayload` / `ShapeGatePayload` now carry `Field(ge=, le=)`
+    bounds (OpenCV 8-bit HSV space + [0,1] gate ranges). The exporter
+    must surface those bounds so the dashboard slider lands on the
+    correct range instead of free-form number input — and the
+    preset POST / `runs/{algorithm_id} {params}` path can no longer
+    sneak out-of-range values past the schema validator."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
     fields = {f["path"]: f for f in client.get("/algorithms/v11_hsv_cc").json()["fields"]}
-    assert fields["hsv.h_min"]["minimum"] is None
-    assert fields["hsv.h_min"]["maximum"] is None
-    assert fields["shape_gate.aspect_min"]["minimum"] is None
+    assert fields["hsv.h_min"]["minimum"] == 0
+    assert fields["hsv.h_min"]["maximum"] == 179
+    assert fields["hsv.h_max"]["maximum"] == 179
+    assert fields["hsv.s_min"]["maximum"] == 255
+    assert fields["hsv.v_max"]["maximum"] == 255
+    assert fields["shape_gate.aspect_min"]["minimum"] == 0.0
+    assert fields["shape_gate.aspect_min"]["maximum"] == 1.0
+    assert fields["shape_gate.fill_min"]["maximum"] == 1.0
 
 
 # ----- exporter unit tests -------------------------------------------

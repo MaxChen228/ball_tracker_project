@@ -63,6 +63,9 @@ def _project_pixels(K, R, t, P_world):
 
 
 def _pitch(cam_id, cycle, K, R, t, H, P_trajectory):
+    # Pairing reads `frame.candidates` exclusively (CLAUDE.md silent-
+    # fallback rule: no synth from px/py). Fixture supplies a single
+    # round-ball candidate per frame.
     frames = []
     for i, P in enumerate(P_trajectory):
         u, v = _project_pixels(K, R, t, P)
@@ -72,6 +75,10 @@ def _pitch(cam_id, cycle, K, R, t, H, P_trajectory):
                 timestamp_s=float(i) / 240.0,
                 px=u, py=v,
                 ball_detected=True,
+                candidates=[schemas.BlobCandidate(
+                    px=u, py=v, area=100, area_score=1.0,
+                    aspect=1.0, fill=0.68,
+                )],
             )
         )
     return schemas.PitchPayload(
@@ -161,6 +168,10 @@ def test_build_scene_includes_persisted_live_rays():
             px=u,
             py=v,
             ball_detected=True,
+            candidates=[schemas.BlobCandidate(
+                px=u, py=v, area=100, area_score=1.0,
+                aspect=1.0, fill=0.68,
+            )],
         )
     ]
 
@@ -1864,9 +1875,9 @@ def test_stream_includes_cost_for_live_candidates():
         ball_detected=True,
         candidates=[
             schemas.BlobCandidate(px=120.0, py=100.0, area=80,
-                                  area_score=0.4, cost=0.18),
+                                  area_score=0.4, cost=0.18, aspect=1.0, fill=0.68),
             schemas.BlobCandidate(px=500.0, py=500.0, area=200,
-                                  area_score=1.0, cost=0.91),
+                                  area_score=1.0, cost=0.91, aspect=1.0, fill=0.68),
         ],
     )
     out = _stream([frame], 0.0, include_candidates=True)
@@ -1894,9 +1905,9 @@ def test_stream_includes_cost_for_server_post_candidates():
         ball_detected=True,
         candidates=[
             schemas.BlobCandidate(px=10.0, py=20.0, area=120,
-                                  area_score=1.0, cost=0.05),
+                                  area_score=1.0, cost=0.05, aspect=1.0, fill=0.68),
             schemas.BlobCandidate(px=300.0, py=400.0, area=80,
-                                  area_score=0.66, cost=0.42),
+                                  area_score=0.66, cost=0.42, aspect=1.0, fill=0.68),
         ],
     )
     out = _stream([frame], 0.0, include_candidates=True)
@@ -1936,7 +1947,7 @@ def test_stream_legacy_candidates_without_cost_become_null():
         ball_detected=True,
         candidates=[
             schemas.BlobCandidate(px=10.0, py=10.0, area=80,
-                                  area_score=0.4),  # no cost
+                                  area_score=0.4, aspect=1.0, fill=0.68),  # no cost
         ],
     )
     out = _stream([frame], 0.0, include_candidates=True)

@@ -200,16 +200,33 @@ def _triangulate_non_current_algorithms(
     if sync_error is not None or a is None or b is None:
         return
 
-    current_alg_a = algorithm_id_for_path(a, DetectionPath.server_post)
-    current_alg_b = algorithm_id_for_path(b, DetectionPath.server_post)
-    if current_alg_a != current_alg_b:
+    # Pointer may be None on a session that only ever ran live (no
+    # server_post run). `algorithm_id_for_path` now raises rather than
+    # silently fall back to a legacy bucket (CLAUDE.md), so we resolve
+    # explicitly with a `None`-sentinel that the skip-set logic below
+    # handles cleanly.
+    current_alg_a = (
+        algorithm_id_for_path(a, DetectionPath.server_post)
+        if a.active_server_post_algorithm_id is not None
+        else None
+    )
+    current_alg_b = (
+        algorithm_id_for_path(b, DetectionPath.server_post)
+        if b.active_server_post_algorithm_id is not None
+        else None
+    )
+    if (
+        current_alg_a is not None
+        and current_alg_b is not None
+        and current_alg_a != current_alg_b
+    ):
         logger.warning(
             "session %s server_post algorithm mismatch A=%s B=%s — path-loop "
             "will pair frames across algorithms; rerun /run_server_post on "
             "both cams to recover",
             result.session_id, current_alg_a, current_alg_b,
         )
-    current_algs = {current_alg_a, current_alg_b}
+    current_algs: set[str] = {x for x in (current_alg_a, current_alg_b) if x is not None}
     candidate_algs: set[str] = (
         set(a.frames_by_algorithm) | set(b.frames_by_algorithm)
     )

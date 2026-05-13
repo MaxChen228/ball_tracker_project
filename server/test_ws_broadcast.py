@@ -428,6 +428,199 @@ def test_heartbeat_emits_device_heartbeat_sse(monkeypatch):
     assert "last_seen_at" in hb[0]
 
 
+def test_device_ws_normal_disconnect_emits_offline_broadcast(monkeypatch):
+    """Route-level test: when a phone closes its WS normally (no
+    reconnect race), the `finally` block in `routes.device_ws.ws_device`
+    MUST broadcast `device_status online=False` and call
+    `state.mark_device_offline`. R1 found the previous patch ordered the
+    snapshot BEFORE `disconnect()` — our own still-occupying socket made
+    `snap.connected=True` unconditionally, so the guard short-circuited
+    every disconnect and the dashboard kept painting the cam online for
+    up to 3 s after the phone dropped. This test pins the corrected
+    ordering (disconnect → snapshot → check)."""
+    events: list[tuple[str, dict]] = []
+    mark_offline_calls: list[str] = []
+
+    class _CaptureHub:
+        async def broadcast(self, event: str, data: dict) -> None:
+            events.append((event, data))
+
+        async def subscribe(self):
+            if False:
+                yield ""
+
+    monkeypatch.setattr(main, "sse_hub", _CaptureHub())
+    monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
+
+    real_mark_offline = main.state.mark_device_offline
+
+    def _spy_mark_offline(cam: str):
+        mark_offline_calls.append(cam)
+        return real_mark_offline(cam)
+
+    monkeypatch.setattr(main.state, "mark_device_offline", _spy_mark_offline)
+
+    client = TestClient(app)
+    with client.websocket_connect("/ws/device/A") as ws_a:
+        assert ws_a.receive_json()["type"] == "settings"
+        # Online event fires on connect.
+        assert any(
+            n == "device_status" and d.get("cam") == "A" and d.get("online") is True
+            for n, d in events
+        )
+    # Exiting the `with` closes ws_a → handler's finally runs.
+    # Settle event loop so async broadcast lands.
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if any(
+            n == "device_status" and d.get("cam") == "A" and d.get("online") is False
+            for n, d in events
+        ):
+            break
+        time.sleep(0.02)
+
+    assert any(
+        n == "device_status" and d.get("cam") == "A" and d.get("online") is False
+        for n, d in events
+    ), f"normal disconnect must broadcast offline, got {events}"
+    assert "A" in mark_offline_calls, (
+        "normal disconnect must call mark_device_offline; reconnect-race "
+        "guard regressed and is now swallowing real disconnects"
+    )
+
+
+def test_device_ws_reconnect_race_skips_offline_broadcast(monkeypatch):
+    """Route-level test: when a NEWER ws task replaces the slot before
+    the OLDER task's `finally` fires, the older task MUST NOT broadcast
+    `online=False` (the newer connect() already broadcast online=True;
+    a stale offline would paint a freshly-online cam offline for one
+    tick).
+
+    Mechanism: `DeviceSocketManager.connect` blindly overwrites
+    `_sockets[cam]`; the newer connect makes `disconnect(cam, ws_old)`
+    a no-op (identity-guarded). The route's `finally` snapshots AFTER
+    that no-op disconnect → sees the newer socket still present →
+    `snap.connected=True` → bail before painting offline."""
+    events: list[tuple[str, dict]] = []
+    mark_offline_calls: list[str] = []
+
+    class _CaptureHub:
+        async def broadcast(self, event: str, data: dict) -> None:
+            events.append((event, data))
+
+        async def subscribe(self):
+            if False:
+                yield ""
+
+    monkeypatch.setattr(main, "sse_hub", _CaptureHub())
+    monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
+
+    real_mark_offline = main.state.mark_device_offline
+
+    def _spy_mark_offline(cam: str):
+        mark_offline_calls.append(cam)
+        return real_mark_offline(cam)
+
+    monkeypatch.setattr(main.state, "mark_device_offline", _spy_mark_offline)
+
+    client = TestClient(app)
+    # Open ws_a, then ws_b for the SAME cam id. `connect()` overwrites
+    # `_sockets["A"]` with ws_b's socket — that's the reconnect race in
+    # miniature. Close ws_a INSIDE the ws_b block so ws_a's finally
+    # fires while ws_b still holds the slot.
+    with client.websocket_connect("/ws/device/A") as ws_a:
+        assert ws_a.receive_json()["type"] == "settings"
+        events_at_a_connect = len(events)
+        with client.websocket_connect("/ws/device/A") as ws_b:
+            assert ws_b.receive_json()["type"] == "settings"
+            # ws_b's connect broadcast online=True a second time —
+            # confirm before we close ws_a.
+            assert sum(
+                1
+                for n, d in events
+                if n == "device_status"
+                and d.get("cam") == "A"
+                and d.get("online") is True
+            ) >= 2
+
+            # Close ws_a (the OLDER socket) while ws_b still occupies
+            # the slot. We do this by exiting ws_a's context manager —
+            # but TestClient holds the handle until our `with` block
+            # ends. Instead, we send a close frame manually.
+            ws_a.close()
+
+            # Drain a beat for ws_a's finally to run.
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                # If the bug were back, we'd see a spurious offline.
+                if any(
+                    n == "device_status"
+                    and d.get("cam") == "A"
+                    and d.get("online") is False
+                    for n, d in events[events_at_a_connect:]
+                ):
+                    break
+                time.sleep(0.02)
+
+            # The reconnect-race guard must have suppressed the offline
+            # broadcast — the newer ws_b still owns the cam.
+            offline_events_during_race = [
+                (n, d)
+                for n, d in events[events_at_a_connect:]
+                if n == "device_status"
+                and d.get("cam") == "A"
+                and d.get("online") is False
+            ]
+            assert not offline_events_during_race, (
+                "reconnect race must NOT emit offline while newer ws is "
+                f"still connected; got {offline_events_during_race}"
+            )
+            assert "A" not in mark_offline_calls, (
+                "reconnect race must NOT call mark_device_offline while "
+                "newer ws holds the slot — would race the freshly-online "
+                "cam back to offline"
+            )
+
+            # Sanity: the manager still reports cam A as connected
+            # (newer ws_b owns it).
+            snap = main.device_ws.snapshot().get("A")
+            assert snap is not None and snap.connected is True
+
+
+def test_device_ws_disconnect_identity_guard():
+    """`DeviceSocketManager.disconnect(cam, websocket)` must be a no-op
+    when the current socket for `cam` is a different object than
+    `websocket` (reconnect race: a newer task already replaced the
+    socket; the old task's `finally` then calls disconnect — we must
+    not pop the newer socket). Together with the finally-side
+    snapshot guard in `routes.device_ws`, this prevents the old ws
+    task from painting an actively-connected cam offline."""
+    mgr = main.DeviceSocketManager()
+    # Simulate two sockets: the "old" one and a "new" one that replaced
+    # it in the slot. Plain object() is fine — disconnect only does
+    # identity comparison.
+    sock_old = object()
+    sock_new = object()
+    mgr._sockets["A"] = sock_old
+    mgr.disconnect("A", sock_old)
+    assert "A" not in mgr._sockets, "matching disconnect must pop"
+
+    # Re-insert as the "new" socket, then call disconnect with the old
+    # one — must be a no-op.
+    mgr._sockets["A"] = sock_new
+    mgr.disconnect("A", sock_old)
+    assert mgr._sockets["A"] is sock_new, (
+        "disconnect(cam, old_ws) must NOT pop a newer socket — identity "
+        "guard reintroduced silently?"
+    )
+
+    # And snapshot reflects the cam as connected throughout — that's
+    # the signal the finally block in routes.device_ws uses to decide
+    # whether to skip the offline broadcasts.
+    snap = mgr.snapshot().get("A")
+    assert snap is not None and snap.connected is True
+
+
 def test_calibration_state_returns_camera_list_for_threejs_dashboard():
     """/calibration/state ships the raw scene + per-camera image dims +
     last-touched timestamps. The Plotly-era `plot` + `plot_etag` fields

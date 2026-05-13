@@ -29,7 +29,8 @@ def _frame(idx: int) -> FramePayload:
         frame_index=idx,
         timestamp_s=0.1 * idx,
         ball_detected=True,
-        candidates=[BlobCandidate(px=10.0, py=20.0, area=100, area_score=1.0)],
+        candidates=[BlobCandidate(px=10.0, py=20.0, area=100, area_score=1.0,
+                                  aspect=1.0, fill=0.68)],
     )
 
 
@@ -93,10 +94,18 @@ def test_algorithm_id_for_server_post_reads_snapshot_stamp():
     assert algorithm_id_for_path(p, DetectionPath.server_post) == "v11_hsv_cc"
 
 
-def test_algorithm_id_for_server_post_falls_back_to_legacy_when_no_snapshot():
+def test_algorithm_id_for_server_post_raises_when_no_pointer():
+    """Per CLAUDE.md 'Experimental phase — 禁止 silent fallback', a
+    pitch without `active_server_post_algorithm_id` must raise rather
+    than silently fall back to the legacy v11 bucket. The migration
+    one-shot (`migrate_disk_pitches.py`) stamps the pointer on any
+    pre-snapshot disk record, so the absent-pointer case is unreachable
+    on persisted data; reaching it at runtime is an invariant
+    violation, not a recoverable condition."""
+    import pytest
     p = _pitch()
-    # Legacy bucket — pre-Phase-2 pitches lack the snapshot.
-    assert algorithm_id_for_path(p, DetectionPath.server_post) == "v11_hsv_cc"
+    with pytest.raises(ValueError, match="active_server_post_algorithm_id"):
+        algorithm_id_for_path(p, DetectionPath.server_post)
 
 
 def test_get_algorithm_frames_returns_empty_for_unrun_algorithm():

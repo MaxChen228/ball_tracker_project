@@ -29,7 +29,8 @@ def _frame(idx: int) -> FramePayload:
         frame_index=idx,
         timestamp_s=0.1 * idx,
         ball_detected=True,
-        candidates=[BlobCandidate(px=10.0, py=20.0, area=100, area_score=1.0)],
+        candidates=[BlobCandidate(px=10.0, py=20.0, area=100, area_score=1.0,
+                                  aspect=1.0, fill=0.68)],
     )
 
 

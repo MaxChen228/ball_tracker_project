@@ -1314,14 +1314,18 @@ class State:
         self,
         session_id: str,
         snapshot: "DetectionConfigSnapshotPayload",
-    ) -> SessionResult:
+    ) -> SessionResult | None:
         """Set `result.server_post_config_used = snapshot` on the
         in-memory SessionResult and persist. Both cams of a session
         run with the same preset / params (the request body locks
         it), so last-writer-wins is a no-op.
 
-        Returns an empty SessionResult shell if the session was deleted
-        between record() and this call — matches `record`'s race guard.
+        Returns `None` if the session was deleted between record() and
+        this call, or if `store_result`'s internal race guard tripped
+        (post-write delete) — matches `record`'s race semantics and
+        avoids silently returning a SessionResult that never landed in
+        `self.results`. Callers must check for None before using the
+        returned object to fan out SSE / persist downstream state.
         """
         with self._lock:
             existing = self.results.get(session_id)
@@ -1335,11 +1339,7 @@ class State:
                 "during server_post run; snapshot will not be persisted",
                 session_id,
             )
-            return SessionResult(
-                session_id=session_id,
-                camera_a_received=False,
-                camera_b_received=False,
-            )
+            return None
         # Dict-canonical: stamp the new snapshot into
         # `config_used_by_algorithm` and update the active pointer.
         # `model_copy` is shallow; we mutate the cloned dict directly.
@@ -1347,6 +1347,22 @@ class State:
         updated.config_used_by_algorithm[snapshot.algorithm_id] = snapshot
         updated.active_server_post_algorithm_id = snapshot.algorithm_id
         self.store_result(updated)
+        # `store_result` has its own race guard: if the session was
+        # deleted between our `existing` snapshot and the disk write /
+        # in-memory republish, it silently returns without writing
+        # `self.results`. Without the check below we'd hand the caller a
+        # `updated` SessionResult that never landed → SSE fan-out fires
+        # `fit` events for a result that doesn't exist in state. Re-read
+        # under the lock and verify the stamp landed.
+        with self._lock:
+            stored = self.results.get(session_id)
+        if stored is not updated:
+            logger.warning(
+                "stamp_server_post_config: session %s store_result race "
+                "guard tripped — snapshot for algorithm %s NOT persisted",
+                session_id, snapshot.algorithm_id,
+            )
+            return None
         return updated
 
     def set_active_server_post_algorithm(

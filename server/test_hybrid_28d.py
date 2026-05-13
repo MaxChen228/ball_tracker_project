@@ -161,9 +161,12 @@ def test_emit_rejects_out_of_band_blob_under_prod():
 def test_persistence_counts_neighbor_window_matches():
     """A candidate at (50, 50) appearing in 3 of 4 neighbor frames
     (within MATCH_PX) → persistence = 3."""
-    target = BlobCandidate(px=50, py=50, area=100, area_score=1.0)
-    other_close = BlobCandidate(px=52, py=51, area=100, area_score=1.0)
-    other_far = BlobCandidate(px=200, py=200, area=100, area_score=1.0)
+    target = BlobCandidate(px=50, py=50, area=100, area_score=1.0,
+                           aspect=1.0, fill=0.68)
+    other_close = BlobCandidate(px=52, py=51, area=100, area_score=1.0,
+                                aspect=1.0, fill=0.68)
+    other_far = BlobCandidate(px=200, py=200, area=100, area_score=1.0,
+                              aspect=1.0, fill=0.68)
     neighbors = [
         [other_close],          # match
         [other_far],            # no match
