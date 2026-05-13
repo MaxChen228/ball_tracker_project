@@ -16,6 +16,8 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from viewer_fragments import format_snapshot_params
+
 
 def _render_events_body(events: list[dict[str, Any]]) -> str:
     """Group sessions by `created_day` into collapsible folds. Each day
@@ -217,35 +219,14 @@ def _cfg_strip_html(e: dict[str, Any]) -> str:
 
     def _tip(cfg: dict[str, Any]) -> str:
         # `cfg` is canonical `DetectionConfigSnapshotPayload` shape:
-        # `{algorithm_id, params, preset_name}`. Tip layout dispatches
-        # on algorithm_id — v11_hsv_cc gets the historic HSV+gate
-        # one-liner; non-v11 detectors get a generic algorithm tag +
-        # params snapshot until they grow their own tooltip layout.
-        algo = cfg.get("algorithm_id", "?")
-        params = cfg.get("params") or {}
-        if algo == "v11_hsv_cc":
-            h = params.get("hsv") or {}
-            g = params.get("shape_gate") or {}
-            return (
-                f"H {h.get('h_min', '?')}-{h.get('h_max', '?')} · "
-                f"S {h.get('s_min', '?')}-{h.get('s_max', '?')} · "
-                f"V {h.get('v_min', '?')}-{h.get('v_max', '?')} · "
-                f"asp≥{g.get('aspect_min', 0):.2f} "
-                f"fill≥{g.get('fill_min', 0):.2f}"
-            )
-        if algo == "hybrid_28d":
-            ph = params.get("prod_hsv") or {}
-            vh = params.get("v11_hsv") or {}
-            return (
-                f"PROD H {ph.get('h_min', '?')}-{ph.get('h_max', '?')} · "
-                f"V11 H {vh.get('h_min', '?')}-{vh.get('h_max', '?')} · "
-                f"neigh±{params.get('neigh_half', '?')}"
-            )
-        # Unknown algorithm — surface the id so the operator sees what
-        # ran rather than a misleading v11-shaped tip.
-        return f"{algo}"
+        # `{algorithm_id, params, preset_name}`. Delegate to viewer's
+        # shared formatter so dashboard chip tooltip and viewer SVR/LIVE
+        # pill tooltip stay identical — single source of truth for
+        # per-algorithm dispatch.
+        return format_snapshot_params(cfg["algorithm_id"], cfg["params"])
 
-    def _chip(label: str, cfg: dict[str, Any] | None) -> str:
+    def _chip(label: str, cfg: dict[str, Any] | None,
+              *, show_algorithm_prefix: bool) -> str:
         if cfg is None:
             return (
                 f'<span class="ev-cfg-chip none" title="{html.escape(label)}: not set">'
@@ -253,10 +234,17 @@ def _cfg_strip_html(e: dict[str, Any]) -> str:
             )
         name = cfg.get("preset_name")
         tip = _tip(cfg)
+        # SVR axis varies by algorithm (v11_hsv_cc / hybrid_28d / future) so
+        # the chip body shows `<alg>/<preset>` — matches viewer SVR pill.
+        # LIVE axis is fixed (iOS always v11_hsv_cc) so the prefix is constant
+        # and uninformative; the tooltip carries the full alg+param detail.
+        prefix = (
+            f"{html.escape(cfg['algorithm_id'])}/" if show_algorithm_prefix else ""
+        )
         if name is None:
             return (
                 f'<span class="ev-cfg-chip" title="{html.escape(label)}: custom — {html.escape(tip)}">'
-                f'{html.escape(label)} <b>custom</b></span>'
+                f'{html.escape(label)} <b>{prefix}custom</b></span>'
             )
         try:
             p = _state.load_preset(name)
@@ -264,17 +252,41 @@ def _cfg_strip_html(e: dict[str, Any]) -> str:
             return (
                 f'<span class="ev-cfg-chip deleted" title="{html.escape(label)}: '
                 f'preset {html.escape(name)} no longer on disk — {html.escape(tip)}">'
-                f'{html.escape(label)} <b>{html.escape(name)}</b> '
+                f'{html.escape(label)} <b>{prefix}{html.escape(name)}</b> '
                 f'<i>(deleted)</i></span>'
             )
         return (
             f'<span class="ev-cfg-chip" title="{html.escape(p.label)} — {html.escape(tip)}">'
-            f'{html.escape(label)} <b>{html.escape(name)}</b></span>'
+            f'{html.escape(label)} <b>{prefix}{html.escape(name)}</b></span>'
         )
 
+    # +N badge surfaces multi-algorithm history existence — same union
+    # the viewer history dropdown shows (frame buckets minus the live
+    # bucket). Operator switches active server_post algorithm in viewer;
+    # dashboard's job is just to hint that alternates exist.
+    # `.get(..., 0)` matches the renderer's defensive convention used
+    # by every other event-dict access in this file (path_status,
+    # n_ball_frames_by_path, n_triangulated). Tests construct minimal
+    # event dicts; strict access would break them without buying real
+    # safety because the field is set by `build_events` on every code
+    # path that exercises the renderer in production.
+    n_alg = e.get("n_server_post_algorithms", 0)
+    if n_alg >= 2:
+        n_others = n_alg - 1
+        multi = (
+            f'<span class="ev-cfg-multi" title="'
+            f'{n_others} other algorithm run'
+            f'{"s" if n_others != 1 else ""} on this session '
+            f'— open viewer to switch active">+{n_others}</span>'
+        )
+    else:
+        multi = ""
+
     return (
-        f'<div class="ev-cfg-strip">{_chip("Live", live_cfg)}'
-        f'{_chip("Svr", srv_cfg)}</div>'
+        f'<div class="ev-cfg-strip">'
+        f'{_chip("Live", live_cfg, show_algorithm_prefix=False)}'
+        f'{_chip("Svr", srv_cfg, show_algorithm_prefix=True)}'
+        f'{multi}</div>'
     )
 
 
