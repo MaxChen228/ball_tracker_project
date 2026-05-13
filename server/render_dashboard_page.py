@@ -32,21 +32,12 @@ def render_events_index_html(
     detection_config: dict[str, Any] | None = None,
     sync: dict[str, Any] | None = None,
     sync_cooldown_remaining_s: float = 0.0,
-    chirp_detect_threshold: float = 0.18,
     heartbeat_interval_s: float = 1.0,
     tracking_exposure_cap: str = "frame_duration",
     capture_height_px: int = 1080,
     strike_zone: dict[str, Any] | None = None,
-    calibration_last_ts: dict[str, float] | None = None,
-    extended_markers: list[dict[str, Any]] | None = None,
-    preview_requested: dict[str, bool] | None = None,
 ) -> str:
     """Render the dashboard page shell and initial SSR partials."""
-    del chirp_detect_threshold
-    del calibration_last_ts
-    del extended_markers
-    del preview_requested
-
     devices = devices or []
     calibrations = calibrations or []
 
