@@ -1133,6 +1133,35 @@ def test_old_run_server_post_still_dispatches_through_alias(tmp_path):
     assert body["algorithm_id"] == "v11_hsv_cc"
 
 
+def test_old_run_server_post_rejects_algorithm_id_in_body(tmp_path):
+    """BLOCK A2 regression (2026-05 audit): the alias must 400 if the
+    caller ships an `algorithm_id` body field. Historically the HTML
+    form had a two-stage picker that submitted both `algorithm_id` and
+    `preset_name`; the alias only read `preset_name`, silently ignoring
+    the algorithm — so the UI could show algorithm X while the rerun
+    executed preset Y's algorithm. The new contract: pin the algorithm
+    via the URL endpoint, or send preset_name only.
+    """
+    client = TestClient(app)
+    _arm_minimal_session_for_run_server_post(sid(80))
+    r = client.post(
+        f"/sessions/{sid(80)}/run_server_post",
+        headers={"Accept": "application/json"},
+        json={"preset_name": "tennis", "algorithm_id": "v11_hsv_cc"},
+    )
+    assert r.status_code == 400, r.text
+    assert "algorithm_id" in r.json()["detail"]
+    # Also reject when the algorithm_id would have matched: silent-ignore
+    # is the bug, not the mismatch — handle the surface uniformly.
+    _arm_minimal_session_for_run_server_post(sid(81))
+    r = client.post(
+        f"/sessions/{sid(81)}/run_server_post",
+        headers={"Accept": "application/json"},
+        json={"preset_name": "tennis", "algorithm_id": "hybrid_28d"},
+    )
+    assert r.status_code == 400, r.text
+
+
 def test_sessions_delete_json_returns_404_for_unknown():
     client = TestClient(app)
     r = client.post(
