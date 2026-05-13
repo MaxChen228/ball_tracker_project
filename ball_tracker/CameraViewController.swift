@@ -503,8 +503,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 standbyFps: standbyFps,
                 uploader: { [weak self] in
                     // Sync coordinator should never call uploader() after VC release.
-                    // If you hit this trap: caller forgot to invalidate the coordinator
-                    // in viewWillDisappear before backgrounding the retry chain.
+                    // If you hit this trap: the sync coordinator's upload completion
+                    // callback is firing after VC release — fix by holding a strong
+                    // reference or breaking the callback chain in viewWillDisappear/dismiss
+                    // (e.g. cancel any pending upload retry before the VC is deallocated).
                     precondition(self != nil, "uploader() called after CameraViewController release")
                     return self!.uploader
                 },

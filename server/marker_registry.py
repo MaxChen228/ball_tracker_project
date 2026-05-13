@@ -46,7 +46,12 @@ class MarkerRegistryDB:
         if not isinstance(rows, list):
             raise ValueError(f"{self._path} 'markers' must be an array")
         for row in rows:
-            rec = MarkerRecord.model_validate(row)
+            try:
+                rec = MarkerRecord.model_validate(row)
+            except Exception as e:
+                raise ValueError(
+                    f"{self._path} malformed marker row {row!r}: {e}"
+                ) from e
             self._markers[rec.marker_id] = rec
 
     def _atomic_write_locked(self) -> None:

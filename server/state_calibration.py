@@ -79,7 +79,8 @@ class CalibrationStore:
                 raise ValueError(f"{path} is not valid JSON: {e}") from e
             except Exception as e:
                 raise ValueError(
-                    f"{path} failed CalibrationSnapshot validation: {e}"
+                    f"{path} failed CalibrationSnapshot validation: {e}\n"
+                    f"→ delete the file and re-run Auto Calibrate to rebuild"
                 ) from e
             validate_calibration_snapshot(snap)
             self._items[snap.camera_id] = snap
@@ -222,7 +223,8 @@ class DeviceIntrinsicsStore:
                 raise ValueError(f"{path} is not valid JSON: {e}") from e
             except Exception as e:
                 raise ValueError(
-                    f"{path} failed DeviceIntrinsics validation: {e}"
+                    f"{path} failed DeviceIntrinsics validation: {e}\n"
+                    f"→ delete the file and re-run Auto Calibrate to rebuild"
                 ) from e
             self._items[rec.device_id] = rec
         if self._items:

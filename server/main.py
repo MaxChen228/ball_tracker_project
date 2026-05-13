@@ -484,8 +484,9 @@ def _settings_message_for(camera_id: str) -> dict[str, Any]:
         (d for d in status.get("devices", []) if d.get("camera_id") == camera_id),
         {},
     )
-    # 10-key WS settings push. Three fields are intentionally NOT in
-    # this payload — iOS CameraCommandRouter has no consumer for them:
+    # 13-key WS settings push (type + camera_id + 11 content keys).
+    # Three fields are intentionally NOT in this payload — iOS
+    # CameraCommandRouter has no consumer for them:
     #   • `algorithm_id`: iOS live is v11_hsv_cc-only (CLAUDE.md); the
     #     dashboard reads it from `/status` JSON instead.
     #   • `active_preset_name`: pure server-side metadata; iOS does not

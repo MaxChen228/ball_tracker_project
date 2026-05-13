@@ -142,7 +142,7 @@ paths: list[str]                     # default DetectionPath set for newly-armed
 hsv_range: {h_min,h_max,s_min,s_max,v_min,v_max}  # from data/detection_config.json (POST /detection/config)
 shape_gate: {aspect_min, fill_min}   # from data/detection_config.json (POST /detection/config)
 chirp_detect_threshold: float        # matched-filter cutoff for legacy chirp-listener path; data/runtime_settings.json key "chirp_detect_threshold"
-heartbeat_interval_s: float          # cadence iOS uses for upstream {type:"heartbeat"} (state.heartbeat_interval_s)
+heartbeat_interval_s: float          # cadence iOS uses for upstream {type:"heartbeat"}; data/runtime_settings.json key "heartbeat_interval_s"
 tracking_exposure_cap: str           # TrackingExposureCapMode enum value (e.g. "auto"/"capped_2ms"); data/runtime_settings.json key "tracking_exposure_cap"
 capture_height_px: int               # 1080 / 720 etc. — iOS picks the matching 240 fps format; data/runtime_settings.json key "capture_height_px"
 preview_requested: bool              # True while the dashboard's Preview-on toggle is held for this cam
@@ -150,6 +150,8 @@ calibration_frame_requested: bool    # True while /calibration/auto is awaiting 
 device_time_synced: bool             # mirrors the gated time_synced bit /status reports for this cam
 device_time_sync_id: str | null      # last time_sync_id the server expects from this cam (chirp run id)
 ```
+
+> **Note — fields not in WS settings:** `active_preset_name`, `algorithm_id`, and `mutual_sync_threshold` are intentionally absent from this payload (iOS has no consumer for them). Active preset identity is available via `GET /status` JSON; not pushed over WS to keep the wire minimal.
 
 #### `type: "arm"` — start an armed session
 

@@ -233,6 +233,12 @@ class State:
         # across restart: server restart already invalidates iOS retry
         # queues by the heartbeat reconnect handshake, so the in-memory
         # bound is sufficient.
+        #
+        # deque(maxlen=256) — covers ~one week of sessions for personal LAN
+        # tool; older deletions age out and could in principle resurrect on
+        # retry-after-delete-after-256-other-deletions; non-persisted across
+        # server restart (relies on iOS WS reconnect to invalidate stale
+        # retry attempts).
         self._deleted_session_tombstones: deque[str] = deque(maxlen=256)
         # Per-camera calibration snapshots. Written by POST /calibration,
         # read by the dashboard canvas so the 3D preview shows where each
@@ -1118,9 +1124,10 @@ class State:
         except BaseException:
             try:
                 tmp.unlink(missing_ok=True)
-            except OSError:
-                # Best-effort cleanup; surface the original failure.
-                pass
+            except OSError as e:
+                # Best-effort cleanup; surface the original failure, but
+                # log the cleanup failure so inode accumulation is auditable.
+                logger.warning("failed to unlink leftover tmp %s: %s", tmp, e)
             raise
 
     def record(self, pitch: PitchPayload) -> SessionResult:
@@ -1139,6 +1146,16 @@ class State:
         the same (a, b) snapshot and deterministically yield the same
         points; last-writer-wins on `self.results[sid]` and on the
         result JSON file (both atomic).
+
+        Race note 1b — concurrent same-(cam, sid) record(): two
+        simultaneous uploads for the same (cam, sid) pair (e.g. iOS
+        PayloadUploadQueue retry racing the original) both read
+        existing=None in CS0, build identical merged pitches in
+        parallel, and the later CS1 publish overwrites the earlier
+        without union. For a personal LAN tool with bounded iOS retry
+        this collapses to last-writer-wins (deterministic on disk via
+        atomic_write). If frame-set union semantics matter in future,
+        re-read existing in CS1 and merge.
 
         Race note 2 — record vs delete_session: CS1 and CS2 are
         deliberately separated so disk I/O + triangulation don't block

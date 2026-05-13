@@ -206,6 +206,7 @@ final class ServerWebSocketConnection {
                     // real inbound message frame.
                     if self.state == .connecting {
                         self.state = .connected
+                        transportLog.info("ws state .connecting → .connected (first inbound message)")
                     }
                     let text: String?
                     switch msg {
@@ -234,7 +235,7 @@ final class ServerWebSocketConnection {
     private func _deliver(text: String) {
         dispatchPrecondition(condition: .onQueue(wsQueue))
         guard let data = text.data(using: .utf8) else {
-            transportLog.error("ws inbound text not UTF-8 len=\(text.count)")
+            transportLog.error("ws inbound text not UTF-8 len=\(text.count, privacy: .public)")
             return
         }
         let raw: Any
@@ -255,6 +256,7 @@ final class ServerWebSocketConnection {
     }
 
     private func _send(_ payload: [String: Any]) {
+        dispatchPrecondition(condition: .onQueue(wsQueue))
         // Accept `.connecting` so the initial hello and heartbeats fired
         // before the first inbound message still reach URLSession's
         // internal queue (it buffers pre-open). Live frames separately
@@ -273,7 +275,7 @@ final class ServerWebSocketConnection {
             return
         }
         guard let text = String(data: data, encoding: .utf8) else {
-            transportLog.error("ws outbound JSON not UTF-8 representable bytes=\(data.count)")
+            transportLog.error("ws outbound JSON not UTF-8 representable bytes=\(data.count, privacy: .public)")
             return
         }
         task.send(.string(text)) { [weak self] error in
@@ -314,6 +316,7 @@ final class ServerWebSocketConnection {
                         self.lastInboundAt = Date()
                         if self.state == .connecting {
                             self.state = .connected
+                            transportLog.info("ws state .connecting → .connected (pong received)")
                         }
                     }
                 }
