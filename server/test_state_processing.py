@@ -226,3 +226,59 @@ def test_priming_write_after_start_job_survives(tmp_path):
 
     snap = s._processing.session_progress(sid)
     assert snap == {"A": {"done": 0, "total": 974, "pct": 0}}
+
+
+# ---------------------------------------------------------------------------
+# PR #122 R3-NIT-3: progress purge on session removal
+# ---------------------------------------------------------------------------
+
+
+def test_remove_session_purges_server_post_progress(tmp_path):
+    """Regression for PR #122 R3-NIT-3: `remove_session` must strip every
+    `server_post_progress` entry whose key matches the deleted session_id
+    on either cam. Without the purge the dashboard SSR seed surfaces a
+    stale progress row pointing at a session that no longer exists —
+    operator sees "75% done" for a session they just deleted.
+
+    Verified via direct manipulation of `_processing.server_post_progress`
+    then `_processing.remove_session(sid)`."""
+    s = State(data_dir=tmp_path)
+    sid = _sid(101)
+    other_sid = _sid(102)
+    proc = s._processing
+    proc.set_server_post_progress(sid, "A", done=100, total=200, pct=50)
+    proc.set_server_post_progress(sid, "B", done=80, total=200, pct=40)
+    # Different session — must NOT be touched by remove_session(sid).
+    proc.set_server_post_progress(other_sid, "A", done=10, total=200, pct=5)
+
+    proc.remove_session(sid)
+
+    assert proc.session_progress(sid) == {}, (
+        f"remove_session must purge ALL progress entries for {sid}; "
+        f"leftover: {proc.session_progress(sid)}"
+    )
+    # Unrelated session's progress must be intact (key-level purge, not
+    # blanket clear).
+    assert proc.session_progress(other_sid) == {
+        "A": {"done": 10, "total": 200, "pct": 5},
+    }
+
+
+def test_clear_purges_server_post_progress(tmp_path):
+    """Regression for PR #122 A-NIT: `SessionProcessingState.clear()` —
+    invoked on `/reset` and server boot reset paths — must wipe
+    `server_post_progress` along with the other server_post state. Pre-fix
+    code left progress dangling so a /reset cleared everything else but
+    the dashboard kept showing the pre-reset progress bars."""
+    s = State(data_dir=tmp_path)
+    proc = s._processing
+    proc.set_server_post_progress(_sid(201), "A", done=10, total=20, pct=50)
+    proc.set_server_post_progress(_sid(202), "B", done=5, total=20, pct=25)
+    assert proc.server_post_progress  # sanity: populated
+
+    proc.clear()
+
+    assert proc.server_post_progress == {}, (
+        f"clear() must wipe server_post_progress; leftover: "
+        f"{proc.server_post_progress}"
+    )
