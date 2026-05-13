@@ -1,0 +1,19 @@
+{
+  "algorithm_id": "v11_hsv_cc",
+  "name": "tennis",
+  "label": "Tennis",
+  "params": {
+    "hsv": {
+      "h_min": 25,
+      "h_max": 55,
+      "s_min": 90,
+      "s_max": 255,
+      "v_min": 90,
+      "v_max": 255
+    },
+    "shape_gate": {
+      "aspect_min": 0.7,
+      "fill_min": 0.55
+    }
+  }
+}

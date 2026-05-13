@@ -89,11 +89,9 @@ from ws import DeviceSocketManager
 # Re-export everything tests reference via `main.*` so the test suite
 # needs zero changes.
 from state import (
-    _CALIBRATION_FRAME_TTL_S,  # noqa: F401  (test access via main.*)
     _DEVICE_GC_AFTER_S,  # noqa: F401
     _DEVICE_REGISTRY_CAP,  # noqa: F401
     _DISARM_ECHO_S,  # noqa: F401
-    TimeSyncIntent,  # noqa: F401
     _MAX_PITCH_UPLOAD_BYTES,  # noqa: F401
     _SYNC_COMMAND_TTL_S,  # noqa: F401
     _SYNC_COOLDOWN_S,  # noqa: F401
@@ -101,7 +99,6 @@ from state import (
     _SYNC_TIMEOUT_S,  # noqa: F401
     _TIME_SYNC_INTENT_WINDOW_S,  # noqa: F401
     _TIME_SYNC_MAX_AGE_S,
-    _validate_calibration_snapshot,  # noqa: F401
     State,
 )
 
@@ -647,18 +644,10 @@ def events_index() -> HTMLResponse:
             detection_config=_detection_config_view(state),
             sync=sync_run.to_dict() if sync_run is not None else None,
             sync_cooldown_remaining_s=state.sync.sync_cooldown_remaining_s(),
-            chirp_detect_threshold=state.chirp_detect_threshold(),
             heartbeat_interval_s=state.heartbeat_interval_s(),
             tracking_exposure_cap=state.tracking_exposure_cap().value,
             capture_height_px=state.capture_height_px(),
             strike_zone=state.strike_zone().to_dict(),
-            calibration_last_ts={
-                cam: p.stat().st_mtime
-                for cam in state.calibrations().keys()
-                for p in [state.calibration_path(cam)]
-                if p.exists()
-            },
-            preview_requested=state.preview.requested_map(),
         )
     )
 

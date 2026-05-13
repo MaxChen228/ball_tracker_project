@@ -1,0 +1,19 @@
+{
+  "algorithm_id": "v11_hsv_cc",
+  "name": "blue_ball",
+  "label": "Blue ball",
+  "params": {
+    "hsv": {
+      "h_min": 105,
+      "h_max": 112,
+      "s_min": 140,
+      "s_max": 255,
+      "v_min": 40,
+      "v_max": 255
+    },
+    "shape_gate": {
+      "aspect_min": 0.75,
+      "fill_min": 0.55
+    }
+  }
+}

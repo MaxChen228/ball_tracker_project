@@ -251,15 +251,43 @@ def test_capture_height_rejects_540_and_other_invalid_values(tmp_path, monkeypat
         main.state.set_capture_height_px(540)
 
 
+def _complete_runtime_settings(**overrides) -> dict:
+    """Full runtime_settings.json payload — strict loader rejects any
+    missing field, so tests that exercise the restored-from-disk path
+    must write every field (operator-edited files on the live server
+    are also expected to be complete, the dashboard's persist() writes
+    them all together).
+    """
+    base = {
+        "chirp_detect_threshold": 0.18,
+        "mutual_sync_threshold": 0.10,
+        "heartbeat_interval_s": 1.0,
+        "sync_params": {
+            "emit_a_at_s": [0.3, 0.5, 0.7],
+            "emit_b_at_s": [1.8, 2.0, 2.2],
+            "record_duration_s": 4.0,
+            "search_window_s": 0.3,
+        },
+        "capture_height_px": 1080,
+        "tracking_exposure_cap": "frame_duration",
+        "strike_zone": {"batter_height_cm": 175},
+        "default_paths": ["live"],
+    }
+    base.update(overrides)
+    return base
+
+
 def test_runtime_settings_restored_from_disk_on_state_init(tmp_path):
     import main
-    # Seed a file and confirm a fresh State picks it up.
+    # Seed a file and confirm a fresh State picks it up. Strict loader
+    # requires every field — partial files raise at boot rather than
+    # silently merging seed defaults (CLAUDE.md no-silent-fallback).
     (tmp_path / "runtime_settings.json").write_text(
-        _json.dumps({
-            "chirp_detect_threshold": 0.42,
-            "heartbeat_interval_s": 7.5,
-            "tracking_exposure_cap": "shutter_1000",
-        })
+        _json.dumps(_complete_runtime_settings(
+            chirp_detect_threshold=0.42,
+            heartbeat_interval_s=7.5,
+            tracking_exposure_cap="shutter_1000",
+        ))
     )
     s = main.State(data_dir=tmp_path)
     assert s.chirp_detect_threshold() == pytest.approx(0.42)
@@ -268,20 +296,25 @@ def test_runtime_settings_restored_from_disk_on_state_init(tmp_path):
     assert s.batter_height_cm() == 175
 
     (tmp_path / "runtime_settings.json").write_text(
-        _json.dumps({
-            "strike_zone": {"batter_height_cm": 190},
-        })
+        _json.dumps(_complete_runtime_settings(
+            strike_zone={"batter_height_cm": 190},
+        ))
     )
     s_zone = main.State(data_dir=tmp_path)
     assert s_zone.batter_height_cm() == 190
 
-    # Out-of-range values on disk are ignored, defaults retained.
+    # Out-of-range values on disk raise — no silent clamp / revert.
     (tmp_path / "runtime_settings.json").write_text(
-        _json.dumps({"chirp_detect_threshold": 99.0, "heartbeat_interval_s": 0.001})
+        _json.dumps(_complete_runtime_settings(chirp_detect_threshold=99.0))
     )
-    s2 = main.State(data_dir=tmp_path)
-    assert s2.chirp_detect_threshold() == pytest.approx(0.18)
-    assert s2.heartbeat_interval_s() == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="chirp_detect_threshold"):
+        main.State(data_dir=tmp_path)
+
+    (tmp_path / "runtime_settings.json").write_text(
+        _json.dumps(_complete_runtime_settings(heartbeat_interval_s=0.001))
+    )
+    with pytest.raises(ValueError, match="heartbeat_interval_s"):
+        main.State(data_dir=tmp_path)
 
 
 def test_strike_zone_post_persists_and_surfaces_on_status(tmp_path, monkeypatch):

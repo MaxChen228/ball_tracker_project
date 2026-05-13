@@ -5,21 +5,19 @@ threshold → connected-components → largest-blob pipeline on each decoded
 frame to recover `(px, py)` in image space. The result feeds `pipeline.py`
 which synthesises `FramePayload`s for the existing `triangulate_cycle` path.
 
-HSV defaults target a yellow tennis ball (the fluorescent yellow-green
-ball currently used on the rig). Override via the `BALL_TRACKER_HSV_RANGE`
-env var (comma-separated `hMin,hMax,sMin,sMax,vMin,vMax`) if you change
-the ball — e.g. the deep-blue ball on the rig uses
-`105,112,140,255,40,255` (dashboard's "blue ball" preset, narrowed
-through 2026-04 from the original h 100-130 after measuring the
-actual ball's hue band; v_min stays at 40 to retain the ball's
-shadowed underside, otherwise the mask collapses to a thin highlight
-arc when the ball is close to the camera).
+HSV ranges are operator-controlled via the dashboard preset library —
+`data/presets/<name>.json` is the source of truth. `HSVRange.default()`
+exists only for headless tests / first-boot; production code paths thread
+explicit operator-chosen HSV through. The env-var fallback
+(`BALL_TRACKER_HSV_RANGE`) was removed 2026-05 — it silently masked
+preset misconfig (operator thinks they're testing blue-ball range but
+detection actually ran the env-var range), violating CLAUDE.md
+no-silent-fallback.
 """
 from __future__ import annotations
 
 import functools
 import logging
-import os
 from dataclasses import dataclass
 
 import cv2
@@ -59,23 +57,6 @@ class HSVRange:
         # tennis-ball hue sits ~25-55 (lime-yellow to yellow-green). High
         # S/V filters out pale wood floor and warm wall tones.
         return cls(h_min=25, h_max=55, s_min=90, s_max=255, v_min=90, v_max=255)
-
-    @classmethod
-    def from_env(cls) -> "HSVRange":
-        raw = os.environ.get("BALL_TRACKER_HSV_RANGE", "").strip()
-        if not raw:
-            return cls.default()
-        try:
-            parts = [int(x) for x in raw.split(",")]
-            if len(parts) != 6:
-                raise ValueError(f"expected 6 ints, got {len(parts)}")
-            return cls(*parts)
-        except Exception as e:
-            logger.warning(
-                "BALL_TRACKER_HSV_RANGE=%r parse failed (%s) — using default yellow-green",
-                raw, e,
-            )
-            return cls.default()
 
     def lo(self) -> np.ndarray:
         return _hsv_bounds(self.h_min, self.h_max, self.s_min, self.s_max, self.v_min, self.v_max)[0]

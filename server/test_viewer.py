@@ -901,14 +901,19 @@ def test_viewer_page_run_server_post_form_carries_preset_selector():
     assert 'value="preset:' not in html
 
 
-def test_viewer_page_run_server_post_form_renders_two_stage_picker():
-    """Phase A: the rerun form has algorithm + preset dropdowns. The
-    cascade marker `data-algorithm-picker` lets the JS file
-    `75_algorithm_picker.js` find the form; each preset option carries
-    `data-algo` so the cascade can hide options whose algorithm doesn't
-    match. Server route still only reads `preset_name` — the
-    `algorithm_id` field rides along for UI consistency, ignored on the
-    server (preset.algorithm_id is canonical).
+def test_viewer_page_run_server_post_form_has_no_algorithm_select():
+    """BLOCK A2 fix (2026-05 audit): the rerun form must NOT carry an
+    algorithm_id <select>. Previously the form had a two-stage picker
+    where the algorithm field was sent in the body and silently ignored
+    by the deprecation-alias handler, so the UI could show algorithm X
+    while the rerun executed preset Y's algorithm.
+
+    Now: preset-only picker. The server derives `algorithm_id` from the
+    preset (canonical truth) and the form labels each option with the
+    algorithm slug so the operator sees what they're picking. The
+    `algorithm_id` body field, the `data-algorithm-picker` marker, and
+    the per-option `data-algo` attribute used to drive the JS cascade
+    are all dropped — `static/viewer/75_algorithm_picker.js` is deleted.
     """
     from viewer_page import render_viewer_html
 
@@ -937,17 +942,14 @@ def test_viewer_page_run_server_post_form_renders_two_stage_picker():
 
     html = render_viewer_html(scene, videos, health)
 
-    # Cascade marker — the JS handler keys off this attribute.
-    assert "data-algorithm-picker" in html
-    # Two-stage picker: algorithm + preset.
-    assert 'name="algorithm_id"' in html
+    # Preset picker present; algorithm picker gone.
     assert 'name="preset_name"' in html
-    # Every preset option ships its algorithm in `data-algo` so the JS
-    # can filter without round-tripping through the server.
-    assert 'data-algo="v11_hsv_cc"' in html
-    # Default boot has v11_hsv_cc as the only preset algorithm — algo
-    # dropdown surfaces it as a selected option.
-    assert '<option value="v11_hsv_cc" selected>' in html
+    assert 'name="algorithm_id"' not in html
+    assert "data-algorithm-picker" not in html
+    assert "data-algo=" not in html
+    # Preset labels surface the algorithm slug so the operator sees what
+    # will run, even without a separate algorithm dropdown.
+    assert "v11_hsv_cc" in html
 
 
 def test_build_viewer_health_surfaces_algorithms_run_excluding_live_path():
@@ -1006,7 +1008,7 @@ def test_viewer_header_groups_cfg_with_identity_in_nav_row():
     cfg_pos = body.index('class="config-strip"')
     back_pos = body.index('class="back"')
     nav_action_pos = body.index('class="nav-action"')
-    action_pos = body.index("data-algorithm-picker")
+    action_pos = body.index('class="action-form"')
     nav_tuning_pos = body.index('class="nav-tuning"')
     session_tuning_pos = body.index('class="session-tuning"')
     # Row 1 (.nav): CFG strip + back link must appear BEFORE Row 2.
@@ -1087,6 +1089,39 @@ def test_detection_config_strip_dispatches_prefix_per_pill():
     live_pill = strip[live_idx:svr_idx]
     assert ">tennis<" in live_pill
     assert "v11_hsv_cc/tennis" not in live_pill
+
+
+def test_cfg_pill_hybrid_28d_tooltip_shows_both_cubes():
+    """hybrid_28d tooltip must summarise PROD + V11 HSV cubes and
+    neighbourhood params — not fall through to the generic `alg:` stub."""
+    from viewer_fragments import _config_pill_html
+
+    snap = {
+        "algorithm_id": "hybrid_28d",
+        "params": {
+            "prod_hsv": {"h_min": 105, "h_max": 112, "s_min": 140, "s_max": 255, "v_min": 40, "v_max": 255},
+            "prod_shape": {"aspect_min": 0.75, "fill_min": 0.55},
+            "prod_area_min": 20,
+            "v11_hsv": {"h_min": 103, "h_max": 118, "s_min": 120, "s_max": 255, "v_min": 30, "v_max": 255},
+            "v11_shape": {"aspect_min": 0.40, "fill_min": 0.35},
+            "v11_area_min": 3,
+            "v11_close_kernel": 3,
+            "neigh_half": 6,
+            "match_px": 5.0,
+        },
+        "preset_name": "hybrid_28d_blue_ball",
+    }
+    pill = _config_pill_html("SVR", snap, None, show_algorithm_prefix=True)
+
+    # Must NOT fall back to the generic stub.
+    assert "alg:hybrid_28d" not in pill
+    # PROD cube key values present in tooltip.
+    assert "105-112" in pill
+    # V11 cube hue range present.
+    assert "103-118" in pill
+    # Neighbourhood params present.
+    assert "neigh±6" in pill
+    assert "match5.0px" in pill
 
 
 def test_failure_strip_html_prefers_earliest_blocking_reason():

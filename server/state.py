@@ -546,27 +546,55 @@ class State:
             )
 
     def _load_session_meta_from_disk(self) -> None:
+        """Strict loader: a present-but-corrupt session_meta file raises
+        rather than silently dropping trashed/starred state. Research-mode
+        invariant — silently restoring "no trash, no stars" on a parse
+        failure would un-hide sessions the operator deliberately trashed
+        and contaminate the events list."""
         path = self._session_meta_path
         if not path.exists():
             return
         try:
             obj = json.loads(path.read_text())
-        except Exception as e:
-            logger.warning("skip corrupt session_meta %s: %s", path, e)
-            return
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path} is not valid JSON: {e}") from e
+        if not isinstance(obj, dict):
+            raise ValueError(f"{path} must be a JSON object")
         trashed = obj.get("trashed_sessions")
-        if isinstance(trashed, dict):
+        if trashed is not None:
+            if not isinstance(trashed, dict):
+                raise ValueError(
+                    f"{path} 'trashed_sessions' must be an object, got {type(trashed).__name__}"
+                )
             parsed: dict[str, float] = {}
             for sid, ts in trashed.items():
-                if isinstance(sid, str) and isinstance(ts, (int, float)):
-                    parsed[sid] = float(ts)
+                if not isinstance(sid, str):
+                    raise ValueError(
+                        f"{path} 'trashed_sessions' key must be a string, got {type(sid).__name__}"
+                    )
+                if not isinstance(ts, (int, float)):
+                    raise ValueError(
+                        f"{path} 'trashed_sessions[{sid}]' must be numeric, got {type(ts).__name__}"
+                    )
+                parsed[sid] = float(ts)
             self._processing.load_trashed(parsed)
         starred = obj.get("starred_sessions")
-        if isinstance(starred, dict):
+        if starred is not None:
+            if not isinstance(starred, dict):
+                raise ValueError(
+                    f"{path} 'starred_sessions' must be an object, got {type(starred).__name__}"
+                )
             parsed_s: dict[str, float] = {}
             for sid, ts in starred.items():
-                if isinstance(sid, str) and isinstance(ts, (int, float)):
-                    parsed_s[sid] = float(ts)
+                if not isinstance(sid, str):
+                    raise ValueError(
+                        f"{path} 'starred_sessions' key must be a string, got {type(sid).__name__}"
+                    )
+                if not isinstance(ts, (int, float)):
+                    raise ValueError(
+                        f"{path} 'starred_sessions[{sid}]' must be numeric, got {type(ts).__name__}"
+                    )
+                parsed_s[sid] = float(ts)
             self._processing.load_starred(parsed_s)
 
     def _persist_session_meta_locked(self) -> None:
@@ -600,10 +628,28 @@ class State:
         becomes auditable on disk — no silent in-memory fallback that
         an operator would have to re-pick after a restart. Strict on
         a present-but-corrupt file: wraps `json.loads` so malformed
-        bytes surface as a typed message naming the path."""
+        bytes surface as a typed message naming the path.
+
+        If the live `_detection_config.preset` is None (e.g. an operator
+        nudged HSV from the dashboard which clears the preset binding),
+        first-boot must NOT write `{"name": null}` to the sidecar —
+        that would make the *next* boot raise ValueError on the
+        non-empty-string check and the server would never come up.
+        Fall back to the `tennis` builtin (seed_builtins guarantees it
+        on disk by the time this method runs) so the slot always has
+        a real preset on first write."""
         path = self._active_server_post_preset_path
         if not path.exists():
             initial = self._detection_config.preset
+            if not isinstance(initial, str) or not initial:
+                # Live config has no preset binding right now; pick a
+                # builtin so the sidecar is always non-null.
+                initial = "tennis"
+                if not _presets.preset_exists(self._data_dir, initial):
+                    raise RuntimeError(
+                        f"builtin preset {initial!r} missing on disk — "
+                        f"seed_builtins must run before _load_active_server_post_preset_or_default"
+                    )
             self._atomic_write(path, json.dumps({"name": initial}))
             return initial
         try:
@@ -644,7 +690,11 @@ class State:
 
     def set_active_server_post_preset(self, name: str) -> str:
         """Switch the server_post active preset. Validates the preset
-        exists on disk before binding; raises `KeyError` otherwise.
+        exists AND parses cleanly (algorithm_id registered, params
+        schema-valid) before binding; raises `KeyError` if missing,
+        `ValueError` if corrupt. Full round-trip via `load_preset` not
+        bare `preset_exists` so a corrupt preset can't be activated and
+        then crash detection on the next /run_server_post.
         Persists immediately so a restart doesn't drop the choice.
         Does NOT touch live `_detection_config` and does NOT broadcast
         WS settings — operators of the live (iOS) path see no change.
@@ -653,25 +703,37 @@ class State:
         # consistent with the in-memory pointer even if a concurrent
         # set_active_server_post_preset / delete_preset arrives mid-call.
         with self._lock:
-            if not _presets.preset_exists(self._data_dir, name):
-                raise KeyError(name)
+            # load_preset raises KeyError if missing; the migration
+            # path + algorithm_id registration check happens inside it.
+            _presets.load_preset(
+                self._data_dir, name, atomic_write=self._atomic_write
+            )
             self._active_server_post_preset_name = name
             self._persist_active_server_post_preset_locked()
             return self._active_server_post_preset_name
 
     def _load_pairing_tuning_from_disk(self) -> PairingTuning:
+        """Strict loader: a present-but-corrupt pairing_tuning file raises
+        rather than silently reverting to `PairingTuning.default()`.
+        Research-mode invariant — silently restoring defaults would
+        contaminate comparisons across pairing parameter sweeps."""
         path = self._pairing_tuning_path
         if not path.exists():
             return PairingTuning.default()
         try:
             obj = json.loads(path.read_text())
-            d = PairingTuning.default()
-            return PairingTuning(
-                gap_threshold_m=float(obj.get("gap_threshold_m", d.gap_threshold_m)),
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path} is not valid JSON: {e}") from e
+        if not isinstance(obj, dict):
+            raise ValueError(f"{path} must be a JSON object")
+        raw = obj.get("gap_threshold_m")
+        if raw is None:
+            raise ValueError(f"{path} missing required 'gap_threshold_m'")
+        if not isinstance(raw, (int, float)):
+            raise ValueError(
+                f"{path} 'gap_threshold_m' must be numeric, got {type(raw).__name__}"
             )
-        except Exception as e:
-            logger.warning("skip corrupt pairing_tuning %s: %s", path, e)
-            return PairingTuning.default()
+        return PairingTuning(gap_threshold_m=float(raw))
 
     def _persist_pairing_tuning_locked(self) -> None:
         t = self._pairing_tuning
@@ -718,10 +780,6 @@ class State:
     def device_intrinsics(self) -> dict[str, DeviceIntrinsics]:
         with self._lock:
             return self._device_intrinsics.snapshot()
-
-    def get_device_intrinsics(self, device_id: str) -> DeviceIntrinsics | None:
-        with self._lock:
-            return self._device_intrinsics.get(device_id)
 
     def set_device_intrinsics(self, rec: DeviceIntrinsics) -> None:
         with self._lock:
@@ -1390,9 +1448,9 @@ class State:
             for live in self._live_pairings.values():
                 for cam in ("A", "B"):
                     live.update_camera_pose(cam, None)
+            del marker_count  # marker registry cleared; not surfaced
             return {
                 "calibrations_removed": cal_count,
-                "extended_markers_removed": marker_count,
                 "last_solves_cleared": ls_count,
             }
 
@@ -1713,10 +1771,22 @@ class State:
         held write epoch. This keeps cross-module callers (`routes/`)
         out of `state._time_fn`, and means a "now()" stamp can never
         drift from when the disk row was actually written.
+
+        If `cfg.preset` is non-None, validates the preset still exists
+        on disk WITHIN the lock. The `routes/presets.py` Apply path
+        does its own `load_preset` outside the lock before calling this
+        — a concurrent `DELETE /presets/{name}` between that load and
+        the bind here would have wired the live config to a deleted
+        preset name. Raising KeyError here (route translates to 409)
+        keeps the in-memory `_detection_config.preset` pointing only at
+        presets that still exist on disk.
         """
         import algorithms
         algorithms.validate_runnable_id(cfg.algorithm_id)
         with self._lock:
+            if cfg.preset is not None:
+                if not _presets.preset_exists(self._data_dir, cfg.preset):
+                    raise KeyError(cfg.preset)
             self._detection_config = cfg.with_(last_applied_at=self._time_fn())
             self._persist_detection_config_locked()
             return self._detection_config
@@ -1851,15 +1921,6 @@ class State:
             if live is None or live.live_config_used is None:
                 return None
             return live.live_config_used
-
-    def live_session_preset_name(self, session_id: str) -> str | None:
-        """Active preset name frozen onto the LivePairingSession at
-        arm time. None when no session / no snapshot yet."""
-        with self._lock:
-            live = self._live_pairings.get(session_id)
-            if live is None or live.live_config_used is None:
-                return None
-            return live.live_config_used.preset_name
 
     def set_shape_gate(self, shape_gate: ShapeGate) -> ShapeGate:
         with self._lock:
@@ -2046,10 +2107,6 @@ class State:
                 return False
             self._persist_session_meta_locked()
             return True
-
-    def is_session_starred(self, session_id: str) -> bool:
-        with self._lock:
-            return self._processing.is_starred(session_id)
 
     def trash_count(self) -> int:
         with self._lock:

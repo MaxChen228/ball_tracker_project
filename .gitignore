@@ -51,7 +51,15 @@ env/
 .env.local
 
 # Server runtime state (pitch/results cache, written per-request).
-server/data/
+# Exclude all runtime data subdirs except presets/ (seed files committed).
+server/data/pitches/
+server/data/videos/
+server/data/results/
+server/data/calibrations/
+server/data/intrinsics/
+server/data/gt/
+server/data/sync_audio/
+server/data/*.json
 /data/
 
 # Tools venv (SAM 3 + transformers main, ~5 GB; managed by uv from tools/pyproject.toml)

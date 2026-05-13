@@ -40,7 +40,7 @@ Detection presets live as JSON files under `server/data/presets/<slug>.json` (th
 Operator workflow lives entirely on the dashboard's **DETECTION CONFIG** card:
 
 - **Switch presets** — click `Manage…` to open the library list, then click `Use` on the target preset (POSTs to `POST /presets/active`). The identity tag updates to the chosen preset.
-- **Edit & save** — drag sliders to taste, click `Apply`. Apply always opens a single slug+label prompt and POSTs to `POST /presets`, creating a new preset file and atomically switching the live config to it. The slug doubles as the filename; saving under an existing slug returns 409.
+- **Edit & save** — drag sliders to taste, click `Apply`. Apply opens an **algorithm + preset picker** (d963e4a): pick the target algorithm (form pulls schema from `GET /algorithms`, params editor regenerates on switch), name the slug + label, then POSTs `{name, label, algorithm_id, params}` to `POST /presets`. For a `v11_hsv_cc` preset that becomes the new live target, the server writes the preset file and atomically switches the live config + WS broadcast; non-v11 presets save to disk only (no live change, no WS push — they're server_post-only). The slug doubles as the filename; saving under an existing slug returns 409.
 - **Manage** — click `Manage…` to open the library list; per row you get `Use` (snap live config to that preset via `POST /presets/active`), `Duplicate` (prompt for a new slug+label, copy the values), `Delete` (unlink the file — 409 if the slug is currently active). The currently-bound preset is marked `★ current`.
 
 If the live config's `preset` field references a preset that has been deleted, the identity tag turns red and reads `<slug> (preset deleted)`. The dashboard does not silently re-bind; the next Apply records `preset=null` (custom).
@@ -49,15 +49,16 @@ For sharing or backup, `cp -r server/data/presets ~/somewhere` is sufficient —
 
 ## Per-session tuning sliders (viewer)
 
-Each session's viewer header has a dedicated tuning row beneath the main nav with two sliders + an Apply button:
+Each session's viewer header has a dedicated tuning row beneath the main nav with a single slider + an Apply button:
 
-- **Cost ≤** (0–1): hides triangulated points whose `max(cost_a, cost_b)` exceeds the cap. The slider operates on the **persisted full set** of points pairing emitted; dragging is a pure client-side mask, no server round-trip.
-- **Gap ≤** (0–200 cm): hides points whose skew-line residual `residual_m` exceeds the cap. Same client-side mask.
-- **Apply**: persists both stamped values to `SessionResult.cost_threshold` / `gap_threshold_m` and re-runs the segmenter against the stamped subset (`POST /sessions/{sid}/recompute`). Pairing does NOT re-run; the persisted point set is invariant. Sub-second on typical sessions.
+- **Gap ≤** (0–200 cm): hides points whose skew-line residual `residual_m` exceeds the cap. Pure client-side mask on the persisted full set.
+- **Apply**: persists the stamped value to `SessionResult.gap_threshold_m` and re-runs the segmenter against the stamped subset (`POST /sessions/{sid}/recompute` body `{gap_threshold_m}` only). Pairing does NOT re-run; the persisted point set is invariant. Sub-second on typical sessions.
 
-Architecture: pairing emits the full geometrically-plausible set under absolute ceilings (`gap < 5 m`, `cost < 5`) at arm/disarm time. The viewer renders the full set; the slider masks. Apply changes which points the **fit** sees, not which points exist on disk. So you can drag Cost ≤ from 0.2 → 1.0 and see masked points reappear instantly without losing them; the only thing Apply persists is the segmenter's filter input.
+The legacy **Cost ≤** slider has been retired (b15a611). Cost gating is now **owned by the algorithm** — each runnable entry in `server/algorithms/__init__.py` declares its own `cost_threshold` (via `algorithms.cost_threshold_for_algorithm`), applied server-side in pairing before segmentation. The operator no longer tunes this. `static/viewer/50_canvas.js::_passCostFilterPoint` is a no-op stub kept only so call sites compile; `SessionResult.cost_threshold` has been removed from the schema.
 
-The sliders never change pairing emit, so a stamped (cost=0.05, gap=0.01) cannot lose data — re-drag to loose values + Apply restores everything. For cases where you actually want fewer emitted points (disk pressure), the absolute ceilings live in `server/pairing.py::_EMIT_*_CEILING` and require a server restart.
+Architecture: pairing emits the full geometrically-plausible set under absolute ceilings (`gap < 5 m`, `cost < 5`) at arm/disarm time. The viewer renders the full set; the Gap slider masks. Apply changes which points the **fit** sees, not which points exist on disk. So you can drag Gap ≤ from 0.05 → 2.0 and see masked points reappear instantly without losing them; the only thing Apply persists is the segmenter's gap input.
+
+The slider never changes pairing emit, so a stamped `gap=0.01` cannot lose data — re-drag to loose values + Apply restores everything. For cases where you actually want fewer emitted points (disk pressure), the absolute ceilings live in `server/pairing.py::_EMIT_*_CEILING` and require a server restart.
 
 ## Degraded / fallback modes
 

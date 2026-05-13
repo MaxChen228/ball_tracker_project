@@ -416,9 +416,27 @@ async def sessions_run_server_post(
     Kept for HTML form callers (events-row "Run srv" button + viewer
     "Rerun server" button), which submit `preset_name` only. The
     snapshot's `algorithm_id` is derived from the preset, then routed
-    through the same `_dispatch_server_post` as the new endpoint."""
+    through the same `_dispatch_server_post` as the new endpoint.
+
+    Rejects body fields other than `preset_name` (400) — historically
+    the HTML forms also shipped an `algorithm_id` field that this
+    handler silently ignored, letting the UI display algorithm X while
+    the rerun executed preset Y's algorithm. No silent fallback: any
+    `algorithm_id` in the body is a caller bug, route through the
+    explicit `/sessions/{sid}/runs/{algorithm_id}` endpoint instead.
+    """
     from main import state
     body = await _parse_request_body(request)
+    if "algorithm_id" in body:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "this alias does not accept 'algorithm_id'; the algorithm "
+                "is derived from the preset. Use "
+                "POST /sessions/{sid}/runs/{algorithm_id} if you need to "
+                "pin an algorithm explicitly"
+            ),
+        )
     snapshot = _snapshot_from_preset_name(state, body.get("preset_name"))
     return await _dispatch_server_post(request, session_id, snapshot, background_tasks)
 

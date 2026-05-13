@@ -253,6 +253,74 @@ final class PayloadUploadQueueTests: XCTestCase {
         XCTAssertFalse(queue.isUploading)
     }
 
+    // MARK: 8. Poisoned cache JSON → drop + delete + onPayloadDropped(.decoding).
+
+    /// `store.load(fileURL)` throws on truncated / non-JSON / schema-drift
+    /// bytes. Before the B1.7 fix the catch branch only flipped
+    /// `isUploading` back to false — the file stayed on disk so the next
+    /// `reloadPending()` pulled it right back to the head, looping
+    /// forever and bypassing the 4xx retry budget entirely. Now the
+    /// queue must delete the file, fire `onPayloadDropped` with
+    /// `.decoding(_)`, and proceed to the next item.
+    func testPoisonedCacheJSONDropsViaDecodingPath() throws {
+        // Use a known dir name so we can write a poisoned JSON directly
+        // into the store's directory before the queue scans it.
+        let dirName = "store_\(UUID().uuidString)"
+        let store = PitchPayloadStore(directoryName: dirName)
+        try store.ensureDirectory()
+        addTeardownBlock {
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            try? FileManager.default.removeItem(at: docs.appendingPathComponent(dirName))
+        }
+
+        // Write an invalid JSON blob under the store's payload directory
+        // with a `.json` extension so `listPayloadFiles()` picks it up
+        // but `store.load(_:)` throws on decode.
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let dir = docs.appendingPathComponent(dirName, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let poisonedURL = dir.appendingPathComponent("poisoned_\(UUID().uuidString).json")
+        try Data("{not valid json".utf8).write(to: poisonedURL)
+        // Companion video so we can verify cascade delete.
+        let videoURL = dir.appendingPathComponent(poisonedURL.deletingPathExtension().lastPathComponent + ".mov")
+        try Data([0xDE, 0xAD]).write(to: videoURL)
+
+        // Any HTTP traffic here would be a bug — the queue should never
+        // reach the uploader for an undecodable payload.
+        QueueStubURLProtocol.handler = .httpStatus(500, body: nil)
+
+        let queue = PayloadUploadQueue(store: store, uploader: makeUploader(), policy: .fast)
+        try queue.reloadPending()
+
+        let dropExp = expectation(description: "decode failure surfaces as drop")
+        var dropped: (URL, ServerUploader.UploadError)?
+        var dropCallCount = 0
+        queue.onPayloadDropped = { url, err in
+            dropped = (url, err)
+            dropCallCount += 1
+            dropExp.fulfill()
+        }
+
+        queue.processNextIfNeeded()
+        wait(for: [dropExp], timeout: 5.0)
+
+        XCTAssertEqual(dropCallCount, 1, "onPayloadDropped must fire exactly once for decode failure")
+        XCTAssertEqual(dropped?.0.lastPathComponent, poisonedURL.lastPathComponent,
+                       "Drop callback must carry the poisoned file URL")
+        if case .decoding = dropped?.1 {
+            // ok
+        } else {
+            XCTFail("Expected .decoding(_); got \(String(describing: dropped?.1))")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: poisonedURL.path),
+                       "Poisoned JSON must be deleted, not left for infinite retry")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: videoURL.path),
+                       "Companion video must be deleted alongside the JSON")
+        XCTAssertEqual(QueueStubURLProtocol.requestCount, 0,
+                       "Queue must NOT hit the network for an undecodable payload")
+        XCTAssertFalse(queue.isUploading, "Queue should drain back to idle after the drop")
+    }
+
     // MARK: - Helpers
 
     private func makeStore() -> PitchPayloadStore {

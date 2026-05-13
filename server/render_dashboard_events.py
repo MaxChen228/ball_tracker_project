@@ -313,27 +313,29 @@ def _actions_html(e: dict[str, Any], sid: str,
 
 def _run_srv_form(sid: str) -> str:
     """`Run srv` button with inline preset selector. Default option is
-    the dashboard's current active preset; operator can pick any
-    on-disk preset to detect under. Submits as
-    application/x-www-form-urlencoded with `preset_name` field to the
-    deprecation-alias endpoint `/sessions/{sid}/run_server_post`, which
-    routes through `_snapshot_from_preset_name` + `_dispatch_server_post`
-    in `routes/sessions.py` (same tail as the primary
-    `/sessions/{sid}/runs/{algorithm_id}` endpoint)."""
+    the sticky server_post preset (`state.active_server_post_preset_name`)
+    — distinct from the live-detection active preset
+    (`detection_config().preset`) because server_post is the operator's
+    rerun choice for offline detection, not the iOS live config.
+    Operator can pick any on-disk preset to detect under. Submits as
+    application/x-www-form-urlencoded with `preset_name` field only to
+    the deprecation-alias endpoint `/sessions/{sid}/run_server_post`;
+    the server derives `algorithm_id` from the preset (canonical), so
+    the form never disagrees with what runs."""
     from main import state as _state
 
-    active = _state.detection_config().preset
+    active = _state.active_server_post_preset_name()
     options = "".join(
         f'<option value="{html.escape(p.name)}"'
         f'{" selected" if p.name == active else ""}>'
-        f'{html.escape(p.label)} ({html.escape(p.name)})</option>'
+        f'{html.escape(p.label)} ({html.escape(p.name)} · {html.escape(p.algorithm_id)})</option>'
         for p in _state.list_presets()
     )
     return (
         f'<form class="ev-action-form" method="POST" '
         f'action="/sessions/{sid}/run_server_post">'
         f'<select class="ev-cfg-select" name="preset_name" '
-        f'title="Detection preset to run server-side">{options}</select>'
+        f'title="Detection preset to run server-side (algorithm derived from preset)">{options}</select>'
         f'<button class="ev-btn ok" type="submit">Run srv</button>'
         f'</form>'
     )

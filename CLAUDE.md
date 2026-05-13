@@ -149,7 +149,7 @@ PR `a66d5db` 退役 HTTP `/heartbeat`，改純 WS 後曾漏掉 `/sync/start` 的
 任何 retirement / transport 切換**必須跑這 4 步**：
 
 1. `git grep '"type":\s*"' server/` 列所有現有 WS message types
-2. `git grep "case \"" ball_tracker/CameraViewController.swift` 看 iOS 接受哪些
+2. `git grep "case \"" ball_tracker/CameraCommandRouter.swift` 看 iOS 接受哪些
 3. 對照 server 還在 dispatch 但沒 WS push 的 command（找
    `state.commands_for_devices()` 的 caller）
 4. 凡是「server 改變狀態 → device 應該動作」的端點，確認後面有
@@ -205,9 +205,12 @@ iOS 端只剩 capture / detect / WS transport 三件事。
 
 - `live`：iOS 端 HSV+CC+shape gate，WS 串流 frame，**永遠開**，每場
   armed session 必跑
-- `server_post`：MOV 全錄上傳 + server HSV 偵測，每次都錄 MOV 但偵測**只在
-  operator 從 events 列點 Run server** 才跑（`POST
-  /sessions/{sid}/run_server_post`）
+- `server_post`：MOV 全錄上傳 + server 偵測（algorithm-pluggable），每次
+  都錄 MOV 但偵測**只在 operator 從 events 列點 Run server** 才跑。
+  主入口 `POST /sessions/{sid}/runs/{algorithm_id}` body `{preset_name}`
+  XOR `{params}`（Phase 7 ship），alias `POST /sessions/{sid}/run_server_post`
+  保留給舊 HTML form caller。runnable algorithms 由 `server/algorithms/`
+  registry 列出（`GET /algorithms`）
 
 **已棄用術語**：「模式一 / 模式二」— 後者（`ios_post`）已刪，`live`
 完全取代。使用者提「模式一/二」要主動釐清 — 多半是 live vs server_post。
@@ -287,16 +290,20 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
 - aspect/fill ship 進 WS frame payload（commit abfa422）
 - `frames_live` candidate `{px,py,area,area_score,aspect,fill}`；server
   `_resolve_candidates` 蓋 cost
-- legacy `hsv_range_used` / `shape_gate_used` 欄位仍 stamp 在 PitchPayload +
-  SessionResult — `reprocess_sessions.py --use-frozen-snapshot` 用這兩個欄位
-  重現原始 detection。PR #93 加進去的 `live_config_used` /
-  `server_post_config_used` + 對應 `DetectionConfigSnapshotPayload` 已在
-  detection-config 簡化時砍掉（從未被任何路徑寫過，dead schema 欄位）
-- 新增 `live_preset_name`（PitchPayload + SessionResult）/
-  `server_post_preset_name`（SessionResult only）— preset 檔名身份，
-  events 列 CFG strip + viewer popover 從這兩個欄位讀。Live 在 arm 時凍結，
-  server_post 在 rerun 時覆蓋。WS settings push 也帶 `active_preset_name`
-  metadata（iOS 只用來 log）
+- frozen detection config 走 **algorithm-keyed dict**：
+  `PitchPayload.config_used_by_algorithm` + `SessionResult.config_used_by_algorithm`
+  （`server/schemas.py:351, 501`），key 是 `algorithm_id`
+  （`ios_capture_time` for live，runnable detector id 例如 `v11_hsv_cc`
+  / `hybrid_28d` for server_post）。`DetectionConfigSnapshotPayload`
+  （schemas.py:132）是 dict value 的 model
+- `computed_field` `live_config_used` / `server_post_config_used` 是
+  dict 的 projection；後者由 `active_server_post_algorithm_id`
+  pointer 選 bucket（無 pointer → None）
+- preset name 在 `*_config_used.preset_name`（snapshot 內欄位），
+  **沒有** top-level `live_preset_name` / `server_post_preset_name`
+- legacy flat 欄位 `hsv_range_used` / `shape_gate_used` 已退役
+- `reprocess_sessions.py --use-frozen-snapshot` 讀
+  `config_used_by_algorithm` projection 重建偵測
 - iOS 對 server-required WS 欄位拒 schema 漂（atomic-drop guard at handler
   head）
 - WS settings push 12 欄位文件化（[docs/protocols.md](docs/protocols.md)，
@@ -308,13 +315,27 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
   `server/dry_run_live_vs_server.py --session <sid>` 看 centroid Δ 量化
 - 要 reproduce 舊 session detection → reprocess 預設行為已是用 disk 當下
   config（commit `0b300a4`，2026-04-29）。要凍結快照重現舊 detection 加
-  `--use-frozen-snapshot`（讀 `pitch.*_used`）
-- `/sessions/{sid}/run_server_post` 吃 `{preset_name: str}` body（required，
-  422 on missing，404 on unknown）。endpoint 載指定 preset 跑 detection，
-  把 preset 名字 stamp 進 `SessionResult.server_post_preset_name`；events 列
-  / viewer 顯示 `Live: <name> | Svr: <name>` chip。re-run 不同 preset 直接
-  覆蓋上次結果（沒有歷史）。dashboard active preset 跟這支無關 —
-  server_post 跟 live 用獨立 preset 選擇
+  `--use-frozen-snapshot`（讀 `config_used_by_algorithm` projection）
+- 主入口 `POST /sessions/{sid}/runs/{algorithm_id}` body `{preset_name: str}`
+  XOR `{params: object}`（exactly-one；422 on both/neither）。alias
+  `POST /sessions/{sid}/run_server_post` 仍接 `{preset_name}` for HTML
+  form caller。endpoint 載對應 algorithm + config 跑 detection，把
+  snapshot stamp 進 `config_used_by_algorithm[algorithm_id]` 並更新
+  `active_server_post_algorithm_id` pointer；events 列 / viewer 從
+  `*_config_used.preset_name` 讀身份。re-run 不同 algorithm/preset 直接
+  覆蓋上次結果（沒有歷史）
+- **dual active preset**：
+  - live：`data/detection_config.json` 內 `preset` 欄位驅動，
+    `POST /presets/active {name, target: "live"}` 更新並 WS broadcast
+    到 iOS（**v11_hsv_cc-only**，非 v11 preset 走 live → 422）
+  - server_post：`data/active_server_post_preset.json` 驅動，
+    `POST /presets/active {name, target: "server_post"}` 更新；任意
+    runnable algorithm 都可活；**不入 WS**，亦無 REST JSON endpoint
+    曝露，`active_server_post_preset_name` 由 `viewer_page.py` 在
+    SSR 時呼叫 `state.active_server_post_preset_name()` 注入頁面
+- `POST /presets/active` body 必帶 `{name, target}`（target ∈
+  `{"live", "server_post"}`），缺任一欄位 → 400；target 值不合法
+  或 preset 不可套用 → 422
 - 改 wire schema → 同 commit 改 `docs/protocols.md` + iOS 端
   `CameraCommandRouter` guard
 - 動 `state.py` 內共用 state → 用 public accessor（如
@@ -346,11 +367,20 @@ seed 寫入並可被操作員從 dashboard `Manage…` 改寫。
 - **v_min 必須 ≥ 40**：球下半進陰影 V 會掉到 80 以下；v_min 抬高會讓近相機
   的球只剩高光環、mask 變扁、aspect gate 砍掉（s_cc0dcaa5 reprocess 對比為證）
 - preset library 是磁碟驅動：`data/presets/<slug>.json` 每個檔一個 preset。
-  `presets.py` 只持有 `_BUILTIN_SEEDS` 種子值（tennis / blue_ball），boot
-  時若檔案不存在才寫入；既有檔案永遠不被覆蓋。要還原內建 → `rm` + 重啟
-- 操作員建立的自訂 preset 走 dashboard Apply（開 slug+label prompt → `POST
-  /presets`）或 `[Manage…]` Duplicate，不要改 source code；CRUD endpoints
-  `GET /presets`, `POST /presets`, `POST /presets/active`, `DELETE /presets/{name}` 已曝露完整 surface
+  `presets.py` 只持有 `_BUILTIN_SEEDS` 種子值（`tennis` / `blue_ball` /
+  `hybrid_28d_blue_ball`），boot 時若檔案不存在才寫入；既有檔案永遠不被
+  覆蓋。要還原內建 → `rm` + 重啟。每個 preset 綁一個 `algorithm_id`
+  （v11_hsv_cc / hybrid_28d / …），不可跨 algorithm 套用
+- 操作員建立的自訂 preset 走 dashboard Apply（algorithm + preset picker
+  → `POST /presets`），form 從 `GET /algorithms` 拉 schema 動態生成
+  params editor，不要改 source code。CRUD endpoints：
+  - `GET /presets`（list）
+  - `GET /presets/{name}`（single）
+  - `POST /presets` body `{name, label, algorithm_id, params}`（generic，
+    algorithm-aware；params 由對應 algorithm schema 驗）
+  - `POST /presets/active` body `{name, target}`（target ∈
+    `{"live", "server_post"}`）
+  - `DELETE /presets/{name}`
 - `detection.py` docstring 寫「default 是黃綠網球」是歷史 fallback，不要
   改
 

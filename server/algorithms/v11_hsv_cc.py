@@ -76,8 +76,8 @@ class V11Detector(Detector):
             video_path,
             video_start_pts_s,
             hsv_range=hsv_range,
+            shape_gate=shape_gate,
             frame_iter=iter_frames if frame_iter is None else frame_iter,
             should_cancel=should_cancel,
-            shape_gate=shape_gate,
             progress=progress,
         )

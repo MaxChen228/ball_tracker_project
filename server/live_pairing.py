@@ -7,8 +7,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from candidate_selector import Candidate, score_candidates
-from detection import HSVRange, ShapeGate  # noqa: F401  (re-export for callers)
-from schemas import DetectionConfigSnapshotPayload  # noqa: F401
 from pairing_tuning import PairingTuning
 from schemas import FramePayload, TriangulatedPoint
 
