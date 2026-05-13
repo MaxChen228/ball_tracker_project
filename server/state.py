@@ -1482,7 +1482,7 @@ class State:
         algorithm_id: str,
     ) -> SessionResult | None:
         """Flip the active server_post pointer on every cam's pitch for
-        this session, persist the pitches, and rebuild + persist the
+        this session, persist the pitches, and re-publish the
         SessionResult. No detection runs — pure pointer flip behind the
         viewer's history dropdown.
 
@@ -1490,12 +1490,23 @@ class State:
         cam's `frames_by_algorithm` (the algorithm has been run on this
         session before). Single-cam presence is enough — flipping to an
         algorithm that only cam A has frames for is intentional (mono
-        session, or only-A reprocess); the rebuilt result will just
-        carry an empty `triangulated_by_algorithm[id]` for the missing
-        cam side. Passing the live bucket id is rejected — server_post
-        and live are separate pointers.
+        session, or only-A reprocess); the result will just carry an
+        empty `triangulated_by_algorithm[id]` for the missing cam side.
+        Passing the live bucket id is rejected — server_post and live
+        are separate pointers.
 
-        Returns the rebuilt SessionResult, or `None` if the session was
+        Dispatch: dual-cam sessions with no `sync_error` and a cached
+        `triangulated_by_algorithm` bucket for the target alg use the
+        fast path (`stamp_active_pointer_projection`) — copy the cached
+        result, re-stamp the four pointer-derived projections, no
+        re-triangulation. Mono / sync_error / cache miss fall through
+        to `rebuild_result_for_session`, which is canonical and cheap
+        for those cases (no `triangulate_pair` runs under mono / sync
+        anyway). Avoids the multi-second `triangulate_pair` × N-algo
+        cost that was making `s_f9ddcbb6` (148K-pt hybrid_28d bucket)
+        block for ~10s on every history switch.
+
+        Returns the published SessionResult, or `None` if the session was
         deleted mid-operation (mirrors `record()`'s race guard).
 
         Raises:
@@ -1552,7 +1563,34 @@ class State:
             for pitch in new_pitches:
                 self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
 
-        result = session_results.rebuild_result_for_session(self, session_id)
+        # Fast-path eligibility: dual-cam, no sync error, cached result
+        # has the target alg's triangulated bucket. Everything else
+        # falls through to the canonical rebuild. `validate_pair_sync`
+        # grabs `self._lock` itself, so this block must stay outside the
+        # publish lock above (Lock() is not re-entrant).
+        a_pitch = next((p for p in new_pitches if p.camera_id == "A"), None)
+        b_pitch = next((p for p in new_pitches if p.camera_id == "B"), None)
+        with self._lock:
+            cached = self.results.get(session_id)
+        fast_path = (
+            cached is not None
+            and a_pitch is not None
+            and b_pitch is not None
+            and algorithm_id in cached.triangulated_by_algorithm
+            and session_results.validate_pair_sync(self, a_pitch, b_pitch) is None
+        )
+        if fast_path:
+            # Copy-mutate-swap: avoid in-place mutation on the
+            # `self.results[sid]` reference that concurrent SSE
+            # serializers / `/results/{sid}` GETs may be iterating.
+            # `stamp_segments_on_result` mutates dicts in place, so
+            # the deep copy isolates the work.
+            result = cached.model_copy(deep=True)
+            session_results.stamp_active_pointer_projection(
+                result, a_pitch, b_pitch,
+            )
+        else:
+            result = session_results.rebuild_result_for_session(self, session_id)
 
         self._atomic_write(
             self._result_path(session_id),
