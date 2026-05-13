@@ -51,15 +51,12 @@ from state_calibration import (
     CalibrationStore,
     CALIBRATION_FRAME_TTL_S as _CALIBRATION_FRAME_TTL_S,
     DeviceIntrinsicsStore,
-    validate_calibration_snapshot as _validate_calibration_snapshot,
 )
 from state_devices import DeviceRegistry
 from state_events import build_events
 from state_processing import SessionProcessingState
 from state_sync import (
     SyncCoordinator,
-    TimeSyncIntent,
-    _new_sync_id,
     _SYNC_COMMAND_TTL_S,
     _SYNC_COOLDOWN_S,
     _SYNC_LATE_REPORT_GRACE_S,
@@ -1498,17 +1495,25 @@ class State:
         # `self.results`. Without the check below we'd hand the caller a
         # `updated` SessionResult that never landed → SSE fan-out fires
         # `fit` events for a result that doesn't exist in state. Re-read
-        # under the lock and verify the stamp landed.
+        # under the lock and verify the stamp is present.
+        #
+        # Content check, not identity: a benign concurrent `record()`
+        # between `store_result` and the re-read publishes a fresher
+        # SessionResult object that carries our stamp (record() reads
+        # from disk, where store_result just wrote). Identity comparison
+        # (`is not updated`) treated those republishes as "race tripped"
+        # and silently skipped the SSE broadcast even though the stamp
+        # had landed. Verify by membership in `config_used_by_algorithm`.
         with self._lock:
             stored = self.results.get(session_id)
-        if stored is not updated:
+        if stored is None or snapshot.algorithm_id not in stored.config_used_by_algorithm:
             logger.warning(
                 "stamp_server_post_config: session %s store_result race "
                 "guard tripped — snapshot for algorithm %s NOT persisted",
                 session_id, snapshot.algorithm_id,
             )
             return None
-        return updated
+        return stored
 
     def set_active_server_post_algorithm(
         self,
@@ -1594,8 +1599,39 @@ class State:
                     session_id,
                 )
                 return None
-            for pitch in new_pitches:
-                self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
+            # Re-read under the lock and apply ONLY the pointer field to
+            # the latest in-memory pitch. Between our deep-copy above and
+            # this republish a concurrent `record()` (live retry / parallel
+            # server_post completion) may have published fresher
+            # `frames_*` / `config_used_by_algorithm` data — clobbering
+            # with our stale deep-copy would silently drop those writes
+            # from both memory and (via the now-published-then-replaced
+            # state) downstream reads. The pointer flip is the only field
+            # this method owns; everything else must come from the latest.
+            republished: list[PitchPayload] = []
+            for stale in new_pitches:
+                key = (stale.camera_id, stale.session_id)
+                latest = self.pitches.get(key)
+                if latest is None:
+                    # Cam-level race: this cam's pitch was deleted while
+                    # other cams remain. Skip the republish for this key
+                    # — the disk write above wrote the pointer-flipped
+                    # copy, which is fine to leave as the on-disk state
+                    # for this cam; the in-memory map has no entry to
+                    # update.
+                    continue
+                merged = latest.model_copy(
+                    update={"active_server_post_algorithm_id": algorithm_id},
+                )
+                self.pitches[key] = merged
+                # Refresh mtime cache so build_events sees the pointer
+                # flip in its ordering without an extra stat() syscall.
+                self._pitch_mtime_cache[key] = self._time_fn()
+                republished.append(merged)
+            # Downstream fast-path / rebuild reads the latest pitches via
+            # `self.pitches` (and re-reads under lock), so the references
+            # below must be refreshed to the merged objects.
+            new_pitches = republished
 
         # Fast-path eligibility: dual-cam, no sync error, cached result
         # has the target alg's triangulated bucket. Everything else
