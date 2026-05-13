@@ -95,6 +95,43 @@ def _stamp_frozen_config_on_result(
         result.active_server_post_algorithm_id = server_snap.algorithm_id
 
 
+def stamp_active_pointer_projection(
+    result: SessionResult,
+    a: PitchPayload | None,
+    b: PitchPayload | None,
+) -> None:
+    """Fast-path companion to `rebuild_result_for_session` — re-stamps
+    the four derived projections that change when the active
+    server_post pointer flips, **without** rerunning `triangulate_pair`.
+
+    Updates: `active_server_post_algorithm_id`, frozen-config snapshot
+    pointer (`config_used_by_algorithm` entry for the new alg), legacy
+    `triangulated` / `points` / `segments`, and `segments_by_algorithm`.
+    Cached `triangulated_by_algorithm` buckets are invariant under
+    pointer flips (frames + calibration + emit ceilings unchanged), so
+    no per-bucket triangulation is needed.
+
+    Pre-condition: `a` / `b` pitches' `active_server_post_algorithm_id`
+    are already flipped to the target alg, and `result` is a private
+    copy (use `model_copy(deep=True)` on the cached result before
+    calling — `stamp_segments_on_result` mutates dicts in-place).
+
+    Called from `state.set_active_server_post_algorithm`. The slow path
+    (`rebuild_result_for_session`) still applies on cache miss, mono
+    session, or `sync_error` — see that caller for the dispatch.
+    """
+    # Match rebuild's `empty_result_for_session` semantics for the
+    # frozen-config dict: clear before stamping so the prior active
+    # alg's config snapshot doesn't accumulate across switches.
+    # `_stamp_frozen_config_on_result` re-populates `live_config` from
+    # `pitch.live_config_used` and the new active alg's snap.
+    result.config_used_by_algorithm.clear()
+    _stamp_frozen_config_on_result(result, a, b)
+    stamp_segments_on_result(
+        result, legacy_points_path=DetectionPath.server_post,
+    )
+
+
 def _resolve_server_post_alg_for_result(
     a: PitchPayload | None, b: PitchPayload | None,
 ) -> str | None:
@@ -249,6 +286,12 @@ def _triangulate_non_current_algorithms(
                 f"{type(exc).__name__}: {exc}"
             )
             continue
+        # `triangulate_cycle` already emits t_rel-sorted (iterates
+        # `_frame_items` in t_rel order). Explicit sort here makes the
+        # invariant visible so `set_active_server_post_algorithm`'s
+        # fast path can safely re-stamp segments from cached buckets
+        # without re-running triangulation.
+        pts = sorted(pts, key=lambda p: p.t_rel_s)
         result.triangulated_by_algorithm[alg_id] = pts
         result.algorithms_completed.add(alg_id)
         result.frame_counts_by_algorithm[alg_id] = {

@@ -177,7 +177,11 @@ PR `a66d5db` 退役 HTTP `/heartbeat`，改純 WS 後曾漏掉 `/sync/start` 的
   已刪
 - Live preview pipeline：iOS → server JPEG push → dashboard MJPEG 串流
 - Auto-cal 重跑時若已有 calibration **保留既有 intrinsics 只更新
-  homography**
+  homography**。**Recalibrate 後切歷史 session 的 history dropdown 仍會
+  看到舊 calibration 下的三角化**（fast-path 用 `state.results[sid]`
+  cache，不重跑 `triangulate_pair`）— 要更新該 session 的點，必須
+  從 viewer 按 `RERUN SERVER` 重跑 `/run_server_post`。filmed-under-old-cal
+  的 MOV 用舊三角化點本來就比較合理；新校正只應用在後續錄影
 - `parkCameraInStandby` 已移除；standby 永遠保持 capture session 60fps
   running
 
