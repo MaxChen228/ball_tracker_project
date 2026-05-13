@@ -2557,6 +2557,22 @@ class State:
         with self._lock:
             return self._most_recent_ended_session_locked()
 
+    def session_known(self, session_id: str) -> bool:
+        """True iff this session id appears in any of the three persistence
+        surfaces that count as "alive": persisted pitch entries, computed
+        results, or an open live pairing buffer. Matches `store_result`'s
+        own guard and `/sessions/{sid}/recompute`'s existence check.
+
+        Public accessor so callers don't have to grab `state._lock` and
+        poke `_live_pairings` directly to learn whether a session exists.
+        """
+        with self._lock:
+            return (
+                any(s == session_id for _, s in self.pitches)
+                or session_id in self.results
+                or session_id in self._live_pairings
+            )
+
     def commands_for_devices(self) -> dict[str, str]:
         """Derive per-device commands from the current session state. The
         iPhone receives its slot via WS push (`/ws/device/{cam}` on hello

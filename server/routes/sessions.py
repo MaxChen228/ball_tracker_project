@@ -502,13 +502,7 @@ async def sessions_recompute(request: Request, session_id: str):
     # a live pairing buffer. Live-only WS sessions before persist_live_frames
     # flush only live in `_live_pairings` — so checking `pitches` alone
     # would 404 a still-active live session.
-    with state._lock:
-        known = (
-            any(s == session_id for _, s in state.pitches)
-            or session_id in state.results
-            or session_id in state._live_pairings
-        )
-    if not known:
+    if not state.session_known(session_id):
         raise HTTPException(status_code=404, detail=f"session {session_id} not found")
 
     from main import sse_hub
