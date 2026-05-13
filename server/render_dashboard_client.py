@@ -1,3 +1,10 @@
+"""JS snippet library for the dashboard runtime + template resolver.
+
+Hosts inline JS constants (PLATE_WORLD_JS / PROJECTION_JS / DRAW_VIRTUAL_BASE_JS /
+DRAW_PLATE_OVERLAY_JS) shared by dashboard, cam-view, and viewer SSR paths, plus
+the `_resolve_js_template()` helper that substitutes them into static/dashboard JS.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path

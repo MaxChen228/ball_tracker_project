@@ -81,6 +81,12 @@ final class MutualSyncAudio {
     private var recordingFirstPTS: Double?
     private var emissionPTSList: [Double] = []
     private var completionFired = false
+    // Latched from `beginSync(emittedRole:)` so D-5 fail-loud paths in the
+    // tap callback (`ingestTapBuffer`) can include cam role context — a
+    // log line like "buffer dropped: hostTime invalid" without role makes
+    // it impossible to tell which iPhone tripped the watchdog when both
+    // are mid-sync.
+    private var currentEmittedRole: String?
 
     /// - Parameters:
     ///   - emitAtS: Emission offsets (seconds from engine-start) for each burst.
@@ -131,6 +137,7 @@ final class MutualSyncAudio {
             recordingFirstPTS = nil
             emissionPTSList.removeAll()
             completionFired = false
+            currentEmittedRole = emittedRole
         }
 
         let engine = AVAudioEngine()
@@ -280,8 +287,9 @@ final class MutualSyncAudio {
         // VC's recording watchdog (see CameraSyncCoordinator.syncWatchdog)
         // will time the sync out instead of silently producing a bad anchor.
         guard audioTime.isHostTimeValid else {
-            assertionFailure("mutual-sync audio: AVAudioTime.isHostTimeValid == false; dropping buffer (host-clock fallback would corrupt chirp anchor)")
-            log.error("mutual-sync audio buffer dropped: hostTime invalid — anchor would be unreliable, letting watchdog time out")
+            let role = stateQueue.sync { currentEmittedRole ?? "<unset>" }
+            assertionFailure("mutual-sync audio role=\(role): AVAudioTime.isHostTimeValid == false; dropping buffer (host-clock fallback would corrupt chirp anchor)")
+            log.error("mutual-sync audio buffer dropped role=\(role, privacy: .public): hostTime invalid — anchor would be unreliable, letting watchdog time out")
             return
         }
         let hostCMTime = CMClockMakeHostTimeFromSystemUnits(audioTime.hostTime)
@@ -372,6 +380,7 @@ final class MutualSyncAudio {
         }
         self.player = nil
         self.engine = nil
+        stateQueue.sync { currentEmittedRole = nil }
 
         do {
             try AVAudioSession.sharedInstance().setActive(

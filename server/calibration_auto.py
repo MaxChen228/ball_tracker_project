@@ -24,7 +24,6 @@ on any FastAPI router / Request machinery.
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any
 
 import numpy as np
@@ -39,8 +38,6 @@ from calibration_solver import (
 from schemas import CalibrationSnapshot, IntrinsicsPayload
 from state_calibration import REPROJ_FAIL_PX
 from triangulate import build_K, camera_center_world, recover_extrinsics, triangulate_rays, undistorted_ray_cam
-
-logger = logging.getLogger("ball_tracker")
 
 # iPhone main (1x wide) rear camera horizontal FOV — empirically measured
 # from the device's `activeFormat.videoFieldOfView` at 240 fps (73.828°).

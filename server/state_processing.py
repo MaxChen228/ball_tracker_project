@@ -390,3 +390,9 @@ class SessionProcessingState:
             if key[1] == session_id:
                 self.server_post_jobs.pop(key, None)
                 self.server_post_active_tasks.discard(key)
+        # server_post_progress is keyed by JobKey = (cam, sid); strip every
+        # entry whose sid matches. Without this the dashboard would leak a
+        # stale progress row pointing at a session that no longer exists.
+        for key in list(self.server_post_progress.keys()):
+            if key[1] == session_id:
+                self.server_post_progress.pop(key, None)

@@ -1609,16 +1609,21 @@ class State:
             # state) downstream reads. The pointer flip is the only field
             # this method owns; everything else must come from the latest.
             republished: list[PitchPayload] = []
+            disk_writes_after_republish: list[PitchPayload] = []
+            orphan_disk_files: list[Path] = []
             for stale in new_pitches:
                 key = (stale.camera_id, stale.session_id)
                 latest = self.pitches.get(key)
                 if latest is None:
-                    # Cam-level race: this cam's pitch was deleted while
-                    # other cams remain. Skip the republish for this key
-                    # — the disk write above wrote the pointer-flipped
-                    # copy, which is fine to leave as the on-disk state
-                    # for this cam; the in-memory map has no entry to
-                    # update.
+                    # Cam-level race: this cam's pitch was deleted (via
+                    # `delete_session` / `remove_pitch`) while other cams
+                    # remain. The disk write above wrote our pointer-flipped
+                    # copy AFTER the delete unlinked the file — so it is
+                    # an orphan rather than a valid "this cam's latest
+                    # state". Drop it to keep disk in sync with the
+                    # in-memory absence; leaving it behind would resurrect
+                    # a tombstoned pitch on next boot.
+                    orphan_disk_files.append(self._pitch_path(*key))
                     continue
                 merged = latest.model_copy(
                     update={"active_server_post_algorithm_id": algorithm_id},
@@ -1628,10 +1633,34 @@ class State:
                 # flip in its ordering without an extra stat() syscall.
                 self._pitch_mtime_cache[key] = self._time_fn()
                 republished.append(merged)
+                # Disk-write-under-lock discipline (mirror of `record()`):
+                # our line-1584 write went out BEFORE this lock, so a
+                # concurrent `record()` may have clobbered disk with fresh
+                # `frames_*` / `config_used_by_algorithm` data. The
+                # `merged` object is the authoritative latest state
+                # (fresh-record fields + our pointer flip) — without
+                # rewriting disk, memory diverges from disk and a restart
+                # would silently revert the pointer (or worse, lose the
+                # fresh frames if our write landed last). Defer the actual
+                # write until outside this lock block to keep lock hold
+                # short, but capture the references now.
+                disk_writes_after_republish.append(merged)
             # Downstream fast-path / rebuild reads the latest pitches via
             # `self.pitches` (and re-reads under lock), so the references
             # below must be refreshed to the merged objects.
             new_pitches = republished
+
+        # Re-persist the merged pitches AND unlink orphan disk files left
+        # by the first-round write when a cam-level delete raced us. Both
+        # ops are outside the lock — _atomic_write / unlink are blocking
+        # I/O and the in-memory state is already coherent above.
+        for orphan in orphan_disk_files:
+            orphan.unlink(missing_ok=True)
+        for pitch in disk_writes_after_republish:
+            self._atomic_write(
+                self._pitch_path(pitch.camera_id, pitch.session_id),
+                persist_pitch_json(pitch),
+            )
 
         # Fast-path eligibility: dual-cam, no sync error, cached result
         # has the target alg's triangulated bucket. Everything else
