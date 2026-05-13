@@ -239,7 +239,12 @@ def load_pairing_tuning() -> PairingTuning:
         logger.info("no pairing_tuning.json — using default gap=%.2fm",
                     d.gap_threshold_m)
         return d
-    obj = json.loads(PAIRING_TUNING_PATH.read_text())
+    try:
+        obj = json.loads(PAIRING_TUNING_PATH.read_text())
+    except json.JSONDecodeError as e:
+        raise SystemExit(
+            f"{PAIRING_TUNING_PATH}: invalid JSON: {e}"
+        ) from e
     if not isinstance(obj, dict) or "gap_threshold_m" not in obj:
         raise SystemExit(
             f"{PAIRING_TUNING_PATH}: missing 'gap_threshold_m' "

@@ -240,8 +240,8 @@ IOS_CAPTURE_TIME_ALGORITHM_ID = "ios_capture_time"
 # that had shipped, so the historical `frames_server_post` content
 # always came from v11.
 #
-# This const survives only for (a) one-shot disk-migration anchors
-# (when `migrate_disk_pitches.py`-style scripts existed) and (b) the
+# This const survives only for (a) one-shot pre-Phase-2 migration
+# scripts no longer in-tree and (b) the
 # `algorithms.__init__._check_legacy_bucket_in_registry` drift guard
 # (pins this id equal to a real registered algorithm at boot).
 #
