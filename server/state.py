@@ -1390,9 +1390,9 @@ class State:
             for live in self._live_pairings.values():
                 for cam in ("A", "B"):
                     live.update_camera_pose(cam, None)
+            del marker_count  # marker registry cleared; not surfaced
             return {
                 "calibrations_removed": cal_count,
-                "extended_markers_removed": marker_count,
                 "last_solves_cleared": ls_count,
             }
 

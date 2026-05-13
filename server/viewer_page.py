@@ -202,12 +202,16 @@ def build_viewer_page_context(
         {p.algorithm_id for p in _global_state.list_presets()}
     )
     if default_algorithm_id not in available_algorithm_ids:
-        # Defensive: session active points at an algorithm with no preset
-        # on disk. Add it so the dropdown still includes it (operator can
-        # see what their session ran on); cascade filter will gracefully
-        # show no preset matches and Manage… is the next step.
-        available_algorithm_ids = sorted(
-            available_algorithm_ids + [default_algorithm_id]
+        # algorithm IDs are a server-controlled invariant — every preset
+        # carries a valid algorithm_id, and `default_algorithm_id` is
+        # either picked from a preset on disk or falls back to a
+        # hard-coded baseline. Reaching here means the registry / preset
+        # store have drifted out of sync; surface loudly instead of
+        # silently widening the dropdown.
+        raise RuntimeError(
+            f"viewer_page: default_algorithm_id={default_algorithm_id!r} not in "
+            f"available_algorithm_ids={available_algorithm_ids!r} — preset/algorithm "
+            "registry invariant violated"
         )
 
     # SegmentRecord-only contract: callers (route + reprocess) pass
