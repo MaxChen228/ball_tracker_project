@@ -43,7 +43,7 @@ from __future__ import annotations
 import html
 import json
 
-from render_compare import (
+from render_dashboard_client import (
     DRAW_VIRTUAL_BASE_JS,
     PLATE_WORLD_JS,
     PROJECTION_JS,

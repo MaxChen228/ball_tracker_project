@@ -661,7 +661,7 @@ def events_index() -> HTMLResponse:
 def sync_page() -> HTMLResponse:
     """Dedicated time-sync surface. Keeps chirp workflows and runtime
     tuning separate from geometric camera calibration."""
-    from render_sync import render_sync_html
+    from render_sync_page import render_sync_html
 
     session = state.session_snapshot()
     sync_run = state.sync.current_sync()
@@ -687,7 +687,7 @@ def sync_page() -> HTMLResponse:
 @app.get("/setup", response_class=HTMLResponse)
 def setup_page() -> HTMLResponse:
     """Calibration surface for device positioning and reprojection checks."""
-    from render_sync import render_setup_html
+    from render_sync_page import render_setup_html
 
     session = state.session_snapshot()
     return HTMLResponse(

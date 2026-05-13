@@ -18,7 +18,7 @@ from scene_runtime import (
     view_presets_toolbar_html,
 )
 from reconstruct import Scene
-from render_compare import (
+from render_dashboard_client import (
     DRAW_VIRTUAL_BASE_JS,
     PLATE_WORLD_JS,
     PROJECTION_JS,

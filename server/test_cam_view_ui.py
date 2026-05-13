@@ -154,8 +154,8 @@ def test_start_calibration_polling_setmeta_diff_drops_absent_cams():
 
 
 def test_runtime_reuses_existing_projection_helpers():
-    """Don't re-implement projection — must reuse render_compare's strings."""
-    from render_compare import PLATE_WORLD_JS, PROJECTION_JS, DRAW_VIRTUAL_BASE_JS
+    """Don't re-implement projection — must reuse render_dashboard_client's strings."""
+    from render_dashboard_client import PLATE_WORLD_JS, PROJECTION_JS, DRAW_VIRTUAL_BASE_JS
     assert PLATE_WORLD_JS.strip() in CAM_VIEW_RUNTIME_JS
     assert PROJECTION_JS.strip() in CAM_VIEW_RUNTIME_JS
     assert DRAW_VIRTUAL_BASE_JS.strip() in CAM_VIEW_RUNTIME_JS
@@ -248,7 +248,7 @@ def test_drawvirtualbase_does_not_paint_builtin_plate():
     principal-point are owned by the cam-view runtime's toggleable
     layers. The legacy built-in painting branch was removed; verify it
     stays gone so we don't double-paint."""
-    from render_compare import DRAW_VIRTUAL_BASE_JS
+    from render_dashboard_client import DRAW_VIRTUAL_BASE_JS
     assert "PLATE_WORLD.map" not in DRAW_VIRTUAL_BASE_JS
     assert "skipBuiltins" not in DRAW_VIRTUAL_BASE_JS
 
