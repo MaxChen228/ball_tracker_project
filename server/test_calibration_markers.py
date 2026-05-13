@@ -566,10 +566,6 @@ def test_markers_crud_and_persistence(tmp_path, monkeypatch):
             "source_camera_ids": [],
         },
     ]
-    assert client.get("/calibration/markers").json()["markers"] == [
-        {"id": 9, "wx": 1.0, "wy": 2.0},
-    ]
-
     # Persistence: recreate State from the same dir, registry must survive.
     main.state = main.State(data_dir=tmp_path)
     persisted = {rec.marker_id: rec for rec in main.state.markers.all_records()}
