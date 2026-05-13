@@ -324,15 +324,6 @@ def _videos_for_session(
     return out
 
 
-@router.get("/results/latest")
-def results_latest() -> SessionResult:
-    from main import state
-    r = state.latest()
-    if r is None:
-        raise HTTPException(404, "no results yet")
-    return r
-
-
 @router.get("/results/{session_id}")
 def results_for_session(session_id: str) -> SessionResult:
     from main import state
@@ -340,12 +331,6 @@ def results_for_session(session_id: str) -> SessionResult:
     if r is None:
         raise HTTPException(404, f"session {session_id} not found")
     return r
-
-
-@router.get("/reconstruction/{session_id}")
-def reconstruction(session_id: str) -> dict[str, Any]:
-    scene = _scene_for_session(session_id)
-    return scene.to_dict()
 
 
 @router.get("/viewer/{session_id}", response_class=HTMLResponse)

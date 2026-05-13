@@ -70,37 +70,16 @@ def test_list_algorithms_entry_carries_label_description_threshold(
     assert isinstance(v11["fields"], list) and v11["fields"]
 
 
-# ----- single endpoint -----------------------------------------------
+# ----- helpers --------------------------------------------------------
 
 
-def test_get_single_algorithm_matches_list_entry(tmp_path, monkeypatch):
-    """`GET /algorithms/{id}` returns the same shape as one entry of
-    the list endpoint — single source of truth for the dashboard."""
-    main = _fresh_main(tmp_path, monkeypatch)
-    client = TestClient(main.app)
-    list_v11 = next(
-        a for a in client.get("/algorithms").json()["algorithms"]
-        if a["algorithm_id"] == "v11_hsv_cc"
-    )
-    single = client.get("/algorithms/v11_hsv_cc").json()
-    assert single == list_v11
-
-
-def test_get_unknown_algorithm_returns_404(tmp_path, monkeypatch):
-    main = _fresh_main(tmp_path, monkeypatch)
-    client = TestClient(main.app)
-    r = client.get("/algorithms/v999_not_real")
-    assert r.status_code == 404
-    assert "v999_not_real" in r.json()["detail"]
-
-
-def test_get_ios_capture_time_returns_404(tmp_path, monkeypatch):
-    """Non-runnable data source has no Detector → no schema → 404
-    (consistent with `algorithms.get` which raises KeyError)."""
-    main = _fresh_main(tmp_path, monkeypatch)
-    client = TestClient(main.app)
-    r = client.get("/algorithms/ios_capture_time")
-    assert r.status_code == 404
+def _list_entry(client: TestClient, algorithm_id: str) -> dict:
+    """Fetch one entry from the list endpoint by id (single endpoint
+    `/algorithms/{id}` retired; list is the only schema surface)."""
+    for a in client.get("/algorithms").json()["algorithms"]:
+        if a["algorithm_id"] == algorithm_id:
+            return a
+    raise AssertionError(f"{algorithm_id!r} missing from /algorithms list")
 
 
 # ----- field flattening (v11_hsv_cc) ---------------------------------
@@ -114,7 +93,7 @@ def test_v11_fields_flattens_nested_hsv_and_shape_gate(
     into 8 leaf fields (6 HSV axes + 2 shape thresholds)."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    v11 = client.get("/algorithms/v11_hsv_cc").json()
+    v11 = _list_entry(client, "v11_hsv_cc")
     paths = sorted(f["path"] for f in v11["fields"])
     assert paths == sorted([
         "hsv.h_min", "hsv.h_max",
@@ -128,7 +107,7 @@ def test_v11_fields_flattens_nested_hsv_and_shape_gate(
 def test_v11_fields_typed_int_and_float(tmp_path, monkeypatch):
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    fields = {f["path"]: f for f in client.get("/algorithms/v11_hsv_cc").json()["fields"]}
+    fields = {f["path"]: f for f in _list_entry(client, "v11_hsv_cc")["fields"]}
     for hsv_path in ("hsv.h_min", "hsv.h_max", "hsv.s_min", "hsv.s_max", "hsv.v_min", "hsv.v_max"):
         assert fields[hsv_path]["type"] == "int", hsv_path
     assert fields["shape_gate.aspect_min"]["type"] == "float"
@@ -144,7 +123,7 @@ def test_hybrid_28d_fields_includes_all_leaves(tmp_path, monkeypatch):
     (6+6+2+2 from nested models, +6 scalar params)."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    fields = client.get("/algorithms/hybrid_28d").json()["fields"]
+    fields = _list_entry(client, "hybrid_28d")["fields"]
     paths = sorted(f["path"] for f in fields)
     assert paths == sorted([
         # PROD pool — tight HSV + shape + ball-sized area floor
@@ -174,7 +153,7 @@ def test_hybrid_28d_field_bounds_and_defaults_match_pydantic(
     wrong range / wrong starting value."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    fields = {f["path"]: f for f in client.get("/algorithms/hybrid_28d").json()["fields"]}
+    fields = {f["path"]: f for f in _list_entry(client, "hybrid_28d")["fields"]}
     # Spot-check the explicitly-bounded scalar params.
     assert fields["prod_area_min"]["minimum"] == 1
     assert fields["prod_area_min"]["maximum"] == 10_000
@@ -201,7 +180,7 @@ def test_v11_hsv_shape_fields_expose_pydantic_bounds(tmp_path, monkeypatch):
     sneak out-of-range values past the schema validator."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
-    fields = {f["path"]: f for f in client.get("/algorithms/v11_hsv_cc").json()["fields"]}
+    fields = {f["path"]: f for f in _list_entry(client, "v11_hsv_cc")["fields"]}
     assert fields["hsv.h_min"]["minimum"] == 0
     assert fields["hsv.h_min"]["maximum"] == 179
     assert fields["hsv.h_max"]["maximum"] == 179

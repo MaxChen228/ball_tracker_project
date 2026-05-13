@@ -513,17 +513,19 @@ def _record_pitch(pitch: main.PitchPayload) -> None:
     main.state.record(pitch)
 
 
-def test_reconstruction_endpoint_returns_scene_shape():
+def test_scene_builder_returns_scene_shape():
+    """`_scene_for_session` is the in-process scene builder shared by
+    `/viewer/{id}` SSR. The removed `/reconstruction/{id}` JSON
+    endpoint was a thin `.to_dict()` wrapper around it; this test
+    pins the underlying scene shape directly."""
+    from routes.viewer import _scene_for_session
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(701)
     pitch = _pitch("A", 701, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
-    client = TestClient(app)
 
     _record_pitch(pitch)
 
-    r = client.get(f"/reconstruction/{session_id}")
-    assert r.status_code == 200
-    body = r.json()
+    body = _scene_for_session(session_id).to_dict()
     assert body["session_id"] == session_id
     assert len(body["cameras"]) == 1
     assert body["cameras"][0]["camera_id"] == "A"
@@ -531,10 +533,12 @@ def test_reconstruction_endpoint_returns_scene_shape():
     assert body["triangulated"] == []
 
 
-def test_reconstruction_endpoint_unknown_session_returns_404():
-    client = TestClient(app)
-    r = client.get(f"/reconstruction/{sid('deadbeef')}")
-    assert r.status_code == 404
+def test_scene_builder_unknown_session_raises_404():
+    from fastapi import HTTPException
+    from routes.viewer import _scene_for_session
+    with pytest.raises(HTTPException) as ei:
+        _scene_for_session(sid("deadbeef"))
+    assert ei.value.status_code == 404
 
 
 def test_viewer_endpoint_returns_threejs_html():
@@ -1958,13 +1962,11 @@ def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
     """`video_cell_html` (the SSR builder for each cam pane) declares the
     layer set (PLATE + AXES + LIVE BLOBS + SVR BLOBS) but no longer
     embeds a per-cam toolbar — v4 collapsed both cams' toolbars into a
-    single shared bar above the videos column. The cell ships only the
-    cam-view runtime hooks (data-layers / data-layers-on) so the
-    runtime can mount per-cam state from the shared bar's clicks."""
-    from viewer_fragments import (
-        cam_view_shared_toolbar_html,
-        video_cell_html,
-    )
+    single shared bar above the videos column (now client-side in
+    50_renderers.js). The cell ships only the cam-view runtime hooks
+    (data-layers / data-layers-on) so the runtime can mount per-cam
+    state from the shared bar's clicks."""
+    from viewer_fragments import video_cell_html
     body = video_cell_html(
         "A",
         ("/videos/example.mov", 0.0),
@@ -1980,13 +1982,6 @@ def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
     assert 'class="cv-path-group"' not in body
     assert 'class="cv-opacity"' not in body
     assert 'data-layer="detection_blobs"' not in body
-    # Shared toolbar carries the single BLOBS pill + OVL slider.
-    bar = cam_view_shared_toolbar_html()
-    assert 'data-layer="detection_blobs"' in bar
-    # v5 split-path BLOBS markup is gone.
-    assert 'data-layer="detection_blobs_live"' not in bar
-    assert 'data-layer="detection_blobs_svr"' not in bar
-    assert 'data-blobs-group' not in bar
     # Winner-dot / K slider relics from the pre-v4 era.
     assert 'data-layer="detection_live"' not in body
     assert 'data-layer="detection_svr"' not in body

@@ -294,7 +294,8 @@ def test_post_pitch_anchorless_single_camera_keeps_rays(tmp_path):
     assert r.json()["triangulated_points"] == 0
 
     # Reconstruction always emits every ray now that chain_filter is gone.
-    scene = client.get(f"/reconstruction/{sid(502)}").json()
+    from routes.viewer import _scene_for_session
+    scene = _scene_for_session(sid(502)).to_dict()
     assert len(scene["cameras"]) == 1
     assert len(scene["rays"]) == 1
     assert scene["triangulated"] == []

@@ -36,11 +36,8 @@ Endpoints:
   GET  /events                      — one row per session: cameras, status,
                                        counts, received_at, triangulation
                                        stats
-  GET  /results/latest              — most recently recorded session
   GET  /results/{session_id}        — specific session's SessionResult
-  GET  /reconstruction/{session_id} — 3D scene (cameras + rays + optional
-                                       triangulated trajectory) as JSON
-  GET  /viewer/{session_id}         — same scene as a self-contained
+  GET  /viewer/{session_id}         — 3D scene as a self-contained
                                        Three.js HTML page
   POST /reset                       — clear all cached state
 
@@ -487,6 +484,12 @@ def _settings_message_for(camera_id: str) -> dict[str, Any]:
         (d for d in status.get("devices", []) if d.get("camera_id") == camera_id),
         {},
     )
+    # 12-key WS settings push. `algorithm_id` is intentionally NOT in
+    # this payload — iOS live is v11_hsv_cc-only (CLAUDE.md) and the iOS
+    # CameraCommandRouter has no consumer for it. The dashboard reads
+    # algorithm_id from the `/status` JSON instead. Key list is pinned in
+    # docs/protocols.md (WS settings) — keep this dict and that doc in
+    # lockstep.
     return {
         "type": "settings",
         "camera_id": camera_id,
@@ -494,7 +497,6 @@ def _settings_message_for(camera_id: str) -> dict[str, Any]:
         "hsv_range": status.get("hsv_range"),
         "shape_gate": status.get("shape_gate"),
         "active_preset_name": status.get("active_preset_name"),
-        "algorithm_id": status.get("algorithm_id"),
         "chirp_detect_threshold": status.get("chirp_detect_threshold"),
         "mutual_sync_threshold": status.get("mutual_sync_threshold"),
         "heartbeat_interval_s": status.get("heartbeat_interval_s"),

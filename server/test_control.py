@@ -1839,6 +1839,17 @@ def test_settings_message_includes_server_authoritative_sync_status():
     assert msg["device_time_sync_id"] == "sy_deadbeef"
 
 
+def test_settings_message_excludes_algorithm_id():
+    """`algorithm_id` is intentionally absent from the WS settings push:
+    iOS live is v11_hsv_cc-only (CLAUDE.md) and CameraCommandRouter has
+    no consumer for it. The dashboard reads it from /status JSON
+    instead. Pin so a future "let's just push it too" addition trips
+    here. Key list also lives in docs/protocols.md (WS settings) — keep
+    both in lockstep."""
+    msg = main._settings_message_for("A")
+    assert "algorithm_id" not in msg
+
+
 def test_setup_page_no_longer_renders_preview_marker_count_chip():
     client = TestClient(app)
     r = client.get("/setup")
