@@ -90,20 +90,22 @@ final class MutualSyncAudio {
 
     /// - Parameters:
     ///   - emitAtS: Emission offsets (seconds from engine-start) for each burst.
-    ///             Defaults to a single emission at 0.3 s (legacy behaviour).
-    ///             Server pushes this per-camera in the WS sync_run message.
+    ///             Server pushes this per-camera in the WS sync_run message;
+    ///             must be non-empty (router atomic-drops empty arrays at
+    ///             the wire boundary).
     ///   - recordingDurationS: Total mic recording window. Must exceed the last
     ///             emission offset + chirp duration + max propagation time.
     init(
-        emitAtS: [Double] = [0.3],
-        recordingDurationS: TimeInterval = 3.0,
+        emitAtS: [Double],
+        recordingDurationS: TimeInterval,
         chirpDurationS: Double = 0.1,
         bandAF0: Double = 2000.0,
         bandAF1: Double = 4000.0,
         bandBF0: Double = 5000.0,
         bandBF1: Double = 7000.0
     ) {
-        self.emitAtS = emitAtS.isEmpty ? [0.3] : emitAtS
+        precondition(!emitAtS.isEmpty, "MutualSyncAudio.init: emitAtS must not be empty (server pushes ≥1 offset; check router atomic-drop)")
+        self.emitAtS = emitAtS
         self.recordingDurationS = recordingDurationS
         self.chirpDurationS = chirpDurationS
         self.bandAF0 = bandAF0
