@@ -144,3 +144,154 @@ def test_framepayload_accepts_empty_candidates_list():
     )
     assert fp.candidates == []
     assert fp.candidates is not None
+
+
+# ---------------------------------------------------------------------------
+# 3. state.py — corrupt pairing_tuning.json must raise, not silent-default
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_pairing_tuning_raises_not_silent_default(tmp_path):
+    """A present-but-corrupt `pairing_tuning.json` historically reverted
+    to `PairingTuning.default()` via a bare `except Exception`. That
+    silently hid hand-edit typos and contaminated comparisons across
+    pairing parameter sweeps. The loader must raise so the operator
+    sees the parse error immediately."""
+    import pytest
+    from state import State
+
+    # Pre-create a corrupt pairing_tuning.json before constructing State.
+    pairing_path = tmp_path / "pairing_tuning.json"
+    pairing_path.write_text("{this is not json")
+
+    with pytest.raises(ValueError, match=r"pairing_tuning\.json"):
+        State(data_dir=tmp_path)
+
+
+def test_corrupt_pairing_tuning_missing_field_raises(tmp_path):
+    """Even if the JSON parses, missing the required `gap_threshold_m`
+    field must raise — silent fall-through to default would mask a
+    schema-drift bug after a manual hand-edit."""
+    import pytest
+    from state import State
+
+    pairing_path = tmp_path / "pairing_tuning.json"
+    pairing_path.write_text('{"some_other_field": 0.5}')
+
+    with pytest.raises(ValueError, match="gap_threshold_m"):
+        State(data_dir=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# 4. state.py — corrupt session_meta.json must raise, not silently drop trash
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_session_meta_raises_not_silent_drop(tmp_path):
+    """A present-but-corrupt `session_meta.json` historically returned
+    early on parse failure, silently un-trashing every session the
+    operator had hidden. Silent revert of operator-controlled state is
+    research-contaminating. The loader must raise so the failure is
+    visible at boot."""
+    import pytest
+    from state import State
+
+    meta_path = tmp_path / "session_meta.json"
+    meta_path.write_text("{broken json")
+
+    with pytest.raises(ValueError, match=r"session_meta\.json"):
+        State(data_dir=tmp_path)
+
+
+def test_corrupt_session_meta_wrong_type_raises(tmp_path):
+    """`session_meta.json` whose root is an array (not an object), or
+    whose `trashed_sessions` value is malformed, must raise — not
+    silently skip the malformed slot."""
+    import pytest
+    from state import State
+
+    meta_path = tmp_path / "session_meta.json"
+    meta_path.write_text('["wrong", "type"]')
+
+    with pytest.raises(ValueError, match=r"session_meta\.json.*JSON object"):
+        State(data_dir=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# 5. state_runtime.py — corrupt runtime_settings.json must raise
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_runtime_settings_raises_not_silent_revert(tmp_path):
+    """A present-but-corrupt `runtime_settings.json` historically
+    swallowed the parse error and silently reverted to ctor seed
+    defaults (chirp=0.18, heartbeat=1.0, capture=1080, etc). Operator
+    hand-edits a value to a typo'd string → thinks they're testing
+    chirp=0.18 but actually at the default. The loader must raise so
+    boot dies visibly."""
+    import pytest
+    from state_runtime import RuntimeSettingsStore
+
+    settings_path = tmp_path / "runtime_settings.json"
+    settings_path.write_text("not valid json {")
+
+    def _atomic_write(path, payload):
+        path.write_text(payload)
+
+    with pytest.raises(ValueError, match=r"runtime_settings\.json"):
+        RuntimeSettingsStore(settings_path, atomic_write=_atomic_write)
+
+
+def test_runtime_settings_missing_required_field_raises(tmp_path):
+    """A parseable but incomplete `runtime_settings.json` (e.g. missing
+    `chirp_detect_threshold`) must raise — silent fallback to the
+    seed default for that one field would create a half-applied state
+    that's hard to debug."""
+    import json
+    import pytest
+    from state_runtime import RuntimeSettingsStore
+
+    settings_path = tmp_path / "runtime_settings.json"
+    # Valid JSON but missing required fields.
+    settings_path.write_text(json.dumps({"capture_height_px": 1080}))
+
+    def _atomic_write(path, payload):
+        path.write_text(payload)
+
+    with pytest.raises(ValueError, match="chirp_detect_threshold"):
+        RuntimeSettingsStore(settings_path, atomic_write=_atomic_write)
+
+
+def test_runtime_settings_out_of_range_value_raises(tmp_path):
+    """A field present but out of the validated range must raise —
+    silent clamp or revert would hide operator misconfig."""
+    import json
+    import pytest
+    from state_runtime import RuntimeSettingsStore
+
+    settings_path = tmp_path / "runtime_settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "chirp_detect_threshold": 5.0,  # out of [0.01, 1.0]
+                "mutual_sync_threshold": 0.10,
+                "heartbeat_interval_s": 1.0,
+                "sync_params": {
+                    "emit_a_at_s": [0.3],
+                    "emit_b_at_s": [1.8],
+                    "record_duration_s": 4.0,
+                    "search_window_s": 0.3,
+                },
+                "capture_height_px": 1080,
+                "tracking_exposure_cap": "frame_duration",
+                "strike_zone": {"batter_height_cm": 175},
+                "default_paths": ["live"],
+            }
+        )
+    )
+
+    def _atomic_write(path, payload):
+        path.write_text(payload)
+
+    with pytest.raises(ValueError, match="chirp_detect_threshold"):
+        RuntimeSettingsStore(settings_path, atomic_write=_atomic_write)

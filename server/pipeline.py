@@ -39,11 +39,11 @@ class ProcessingCanceled(RuntimeError):
 def detect_pitch(
     video_path: Path,
     video_start_pts_s: float,
-    hsv_range: HSVRange | None = None,
+    hsv_range: HSVRange,
+    shape_gate: ShapeGate,
     frame_iter: FrameIteratorFactory = iter_frames,
     *,
     should_cancel: CancelCheck | None = None,
-    shape_gate: ShapeGate | None = None,
     progress: Callable[[int], None] | None = None,
 ) -> list[FramePayload]:
     """Decode `video_path`, run HSV ball detection on every frame, and
@@ -52,11 +52,13 @@ def detect_pitch(
     `px` / `py` are filled when the post-filter blob matches HSV + area +
     shape.
 
-    Algorithm is byte-for-byte aligned with the iOS `live` path so a
-    diff between the two reflects the H.264 vs BGRA input asymmetry
-    (chroma 4:2:0 + DCT quantization), not the algorithm itself.
+    `hsv_range` and `shape_gate` are REQUIRED — no env-var fallback, no
+    None-default. Research-mode invariant (CLAUDE.md): silent fallback
+    to a yellow-green tennis-ball HSV when the operator is actually
+    running the blue-ball preset would corrupt every comparison. Every
+    caller threads its explicit config through.
     """
-    hsv = hsv_range if hsv_range is not None else HSVRange.from_env()
+    hsv = hsv_range
     logger.info("detect_pitch video=%s", video_path.name)
     out: list[FramePayload] = []
     for idx, (absolute_pts_s, bgr) in enumerate(frame_iter(video_path, video_start_pts_s)):

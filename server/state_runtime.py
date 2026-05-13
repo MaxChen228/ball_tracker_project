@@ -70,57 +70,144 @@ class RuntimeSettingsStore:
         self.load()
 
     def load(self) -> None:
+        """Strict loader: any malformed or out-of-range field raises and
+        kills boot. Silent-fallback to ctor defaults would let an
+        operator's hand-edited `runtime_settings.json` partially apply
+        (good fields kept, bad fields reverted) which is the exact
+        research-contaminating behaviour CLAUDE.md forbids — they'd
+        think they're testing chirp=0.18 but actually be at the seed
+        default 0.10 because the value was typo'd to a string.
+
+        Crashing boot is the correct response: operator sees the error
+        immediately, fixes the file (or deletes it to start fresh),
+        restarts."""
         if not self._path.exists():
             return
+        path = self._path
         try:
-            obj = json.loads(self._path.read_text())
-        except Exception as e:
-            logger.warning("skip corrupt runtime_settings %s: %s", self._path, e)
-            return
-        thr = obj.get("chirp_detect_threshold")
-        if isinstance(thr, (int, float)) and self.CHIRP_THRESHOLD_MIN <= thr <= self.CHIRP_THRESHOLD_MAX:
-            self.chirp_detect_threshold = float(thr)
-        mthr = obj.get("mutual_sync_threshold")
-        if isinstance(mthr, (int, float)) and self.CHIRP_THRESHOLD_MIN <= mthr <= self.CHIRP_THRESHOLD_MAX:
-            self.mutual_sync_threshold = float(mthr)
-        ivl = obj.get("heartbeat_interval_s")
-        if isinstance(ivl, (int, float)) and self.HEARTBEAT_INTERVAL_MIN <= ivl <= self.HEARTBEAT_INTERVAL_MAX:
-            self.heartbeat_interval_s = float(ivl)
-        raw_sync = obj.get("sync_params")
-        if raw_sync is not None:
+            obj = json.loads(path.read_text())
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path} is not valid JSON: {e}") from e
+        if not isinstance(obj, dict):
+            raise ValueError(f"{path} must be a JSON object")
+
+        if "chirp_detect_threshold" not in obj:
+            raise ValueError(f"{path} missing required 'chirp_detect_threshold'")
+        thr = obj["chirp_detect_threshold"]
+        if not isinstance(thr, (int, float)):
+            raise ValueError(
+                f"{path} 'chirp_detect_threshold' must be numeric, got {type(thr).__name__}"
+            )
+        if not (self.CHIRP_THRESHOLD_MIN <= thr <= self.CHIRP_THRESHOLD_MAX):
+            raise ValueError(
+                f"{path} 'chirp_detect_threshold' {thr} out of range "
+                f"[{self.CHIRP_THRESHOLD_MIN}, {self.CHIRP_THRESHOLD_MAX}]"
+            )
+        self.chirp_detect_threshold = float(thr)
+
+        if "mutual_sync_threshold" not in obj:
+            raise ValueError(f"{path} missing required 'mutual_sync_threshold'")
+        mthr = obj["mutual_sync_threshold"]
+        if not isinstance(mthr, (int, float)):
+            raise ValueError(
+                f"{path} 'mutual_sync_threshold' must be numeric, got {type(mthr).__name__}"
+            )
+        if not (self.CHIRP_THRESHOLD_MIN <= mthr <= self.CHIRP_THRESHOLD_MAX):
+            raise ValueError(
+                f"{path} 'mutual_sync_threshold' {mthr} out of range "
+                f"[{self.CHIRP_THRESHOLD_MIN}, {self.CHIRP_THRESHOLD_MAX}]"
+            )
+        self.mutual_sync_threshold = float(mthr)
+
+        if "heartbeat_interval_s" not in obj:
+            raise ValueError(f"{path} missing required 'heartbeat_interval_s'")
+        ivl = obj["heartbeat_interval_s"]
+        if not isinstance(ivl, (int, float)):
+            raise ValueError(
+                f"{path} 'heartbeat_interval_s' must be numeric, got {type(ivl).__name__}"
+            )
+        if not (self.HEARTBEAT_INTERVAL_MIN <= ivl <= self.HEARTBEAT_INTERVAL_MAX):
+            raise ValueError(
+                f"{path} 'heartbeat_interval_s' {ivl} out of range "
+                f"[{self.HEARTBEAT_INTERVAL_MIN}, {self.HEARTBEAT_INTERVAL_MAX}]"
+            )
+        self.heartbeat_interval_s = float(ivl)
+
+        if "sync_params" not in obj:
+            raise ValueError(f"{path} missing required 'sync_params'")
+        # _validated_sync_params raises ValueError on any inner field; let it
+        # propagate so the operator sees the exact field that failed.
+        self.sync_params = self._validated_sync_params(obj["sync_params"])
+
+        if "capture_height_px" not in obj:
+            raise ValueError(f"{path} missing required 'capture_height_px'")
+        ch = obj["capture_height_px"]
+        if not isinstance(ch, int) or isinstance(ch, bool):
+            raise ValueError(
+                f"{path} 'capture_height_px' must be int, got {type(ch).__name__}"
+            )
+        if ch not in self.ALLOWED_CAPTURE_HEIGHTS:
+            raise ValueError(
+                f"{path} 'capture_height_px' {ch} not in {self.ALLOWED_CAPTURE_HEIGHTS}"
+            )
+        self.capture_height_px = ch
+
+        if "tracking_exposure_cap" not in obj:
+            raise ValueError(f"{path} missing required 'tracking_exposure_cap'")
+        tec = obj["tracking_exposure_cap"]
+        if not isinstance(tec, str):
+            raise ValueError(
+                f"{path} 'tracking_exposure_cap' must be a string, got {type(tec).__name__}"
+            )
+        try:
+            self.tracking_exposure_cap = TrackingExposureCapMode(tec)
+        except ValueError as e:
+            raise ValueError(
+                f"{path} 'tracking_exposure_cap' {tec!r} is not a valid mode: {e}"
+            ) from e
+
+        if "strike_zone" not in obj:
+            raise ValueError(f"{path} missing required 'strike_zone'")
+        sz = obj["strike_zone"]
+        if not isinstance(sz, dict):
+            raise ValueError(
+                f"{path} 'strike_zone' must be an object, got {type(sz).__name__}"
+            )
+        if "batter_height_cm" not in sz:
+            raise ValueError(f"{path} 'strike_zone' missing required 'batter_height_cm'")
+        raw_height = sz["batter_height_cm"]
+        if not isinstance(raw_height, int) or isinstance(raw_height, bool):
+            raise ValueError(
+                f"{path} 'strike_zone.batter_height_cm' must be int, "
+                f"got {type(raw_height).__name__}"
+            )
+        # validate_batter_height_cm raises ValueError on out-of-range; let it propagate.
+        self.batter_height_cm = validate_batter_height_cm(raw_height)
+
+        if "default_paths" not in obj:
+            raise ValueError(f"{path} missing required 'default_paths'")
+        paths = obj["default_paths"]
+        if not isinstance(paths, list):
+            raise ValueError(
+                f"{path} 'default_paths' must be an array, got {type(paths).__name__}"
+            )
+        if not paths:
+            raise ValueError(f"{path} 'default_paths' must be non-empty")
+        parsed: set[DetectionPath] = set()
+        for item in paths:
+            if not isinstance(item, str):
+                raise ValueError(
+                    f"{path} 'default_paths' entries must be strings, "
+                    f"got {type(item).__name__}"
+                )
             try:
-                self.sync_params = self._validated_sync_params(raw_sync)
+                parsed.add(DetectionPath(item))
             except ValueError as e:
-                logger.warning("skip invalid sync_params in runtime_settings %s: %s", self._path, e)
-        ch = obj.get("capture_height_px")
-        if isinstance(ch, int) and ch in self.ALLOWED_CAPTURE_HEIGHTS:
-            self.capture_height_px = ch
-        tec = obj.get("tracking_exposure_cap")
-        if isinstance(tec, str):
-            try:
-                self.tracking_exposure_cap = TrackingExposureCapMode(tec)
-            except ValueError:
-                pass
-        sz = obj.get("strike_zone")
-        if isinstance(sz, dict):
-            raw_height = sz.get("batter_height_cm")
-            if isinstance(raw_height, int):
-                try:
-                    self.batter_height_cm = validate_batter_height_cm(raw_height)
-                except ValueError:
-                    pass
-        paths = obj.get("default_paths")
-        if isinstance(paths, list):
-            parsed: set[DetectionPath] = set()
-            for item in paths:
-                if not isinstance(item, str):
-                    continue
-                try:
-                    parsed.add(DetectionPath(item))
-                except ValueError:
-                    continue
-            if parsed:
-                self.default_paths = parsed
+                raise ValueError(
+                    f"{path} 'default_paths' entry {item!r} is not a valid path: {e}"
+                ) from e
+        self.default_paths = parsed
+
         logger.info(
             "restored runtime_settings: chirp=%.3f interval_s=%.2f capture_h=%d tracking_exposure=%s paths=%s",
             self.chirp_detect_threshold,
