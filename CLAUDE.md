@@ -330,10 +330,12 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
     到 iOS（**v11_hsv_cc-only**，非 v11 preset 走 live → 422）
   - server_post：`data/active_server_post_preset.json` 驅動，
     `POST /presets/active {name, target: "server_post"}` 更新；任意
-    runnable algorithm 都可活；**不入 WS**，dashboard 透過 `/status`
-    讀 `active_server_post_preset_name`
+    runnable algorithm 都可活；**不入 WS**，亦無 REST JSON endpoint
+    曝露，`active_server_post_preset_name` 由 `viewer_page.py` 在
+    SSR 時呼叫 `state.active_server_post_preset_name()` 注入頁面
 - `POST /presets/active` body 必帶 `{name, target}`（target ∈
-  `{"live", "server_post"}`），單欄位 422
+  `{"live", "server_post"}`），缺任一欄位 → 400；target 值不合法
+  或 preset 不可套用 → 422
 - 改 wire schema → 同 commit 改 `docs/protocols.md` + iOS 端
   `CameraCommandRouter` guard
 - 動 `state.py` 內共用 state → 用 public accessor（如
