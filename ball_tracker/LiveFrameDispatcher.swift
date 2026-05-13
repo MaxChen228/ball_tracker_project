@@ -10,9 +10,8 @@ import Foundation
 /// - `dispatchCycleEnd` sends the `cycle_end` message if the live path is
 ///   active; the call is a no-op otherwise.
 ///
-/// The class is thread-safe: `dropCounters` is atomically incremented via
-/// `OSAtomicIncrement32` guarantees from `Dispatch.sync`; `dispatch*` may be
-/// called from any queue.
+/// The class is thread-safe: `dropCounters` mutation is serialized through
+/// an `NSLock` (`lock`); `dispatch*` may be called from any queue.
 final class LiveFrameDispatcher {
 
     // MARK: Drop counter breakdown

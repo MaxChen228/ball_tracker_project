@@ -134,10 +134,11 @@ final class CameraSyncCoordinator {
 
     func abortMutualSync(reason: String) {
         syncLog.warning("sync aborted reason=\(reason, privacy: .public) sync_id=\(self.pendingSyncId ?? "nil", privacy: .public)")
-        deps.uploader().postSyncLog(event: "abort", detail: [
-            "reason": .string(reason),
-            "sync_id": .string(pendingSyncId ?? ""),
-        ])
+        var detail: [String: ServerUploader.AnyJSONValue] = ["reason": .string(reason)]
+        if let syncId = pendingSyncId {
+            detail["sync_id"] = .string(syncId)
+        }
+        deps.uploader().postSyncLog(event: "abort", detail: detail)
         syncWatchdog?.cancel()
         syncWatchdog = nil
         teardownMutualSync(status: "Mutual sync · \(reason)")
