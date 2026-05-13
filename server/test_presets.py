@@ -786,3 +786,21 @@ def test_dashboard_renders_after_creating_custom_preset(tmp_path, monkeypatch):
     # button text. (HTML attributes elsewhere may carry escaped forms.)
     assert "Rainy &lt;day&gt;" in page
     assert "Rainy <day>" not in page
+
+
+# ----- boot drift guard -----------------------------------------------
+
+
+def test_builtin_seeds_validate_against_registry():
+    """Importing `presets` runs `_validate_builtin_seeds_against_registry`
+    at module level. If any seed's params drift from its algorithm's
+    `params_schema` (e.g. a new required field is added to the detector
+    without updating the seed literal), the import raises `RuntimeError`.
+    This test confirms the guard function is present and that the current
+    seeds all pass validation against their registered algorithm schemas."""
+    import presets
+    # Module-level call already ran on import — if seeds were invalid we
+    # would have raised before reaching here.
+    assert callable(presets._validate_builtin_seeds_against_registry)
+    # Re-invoke explicitly to confirm it passes with the current seeds.
+    presets._validate_builtin_seeds_against_registry()

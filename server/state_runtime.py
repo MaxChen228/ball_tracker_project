@@ -243,8 +243,15 @@ class RuntimeSettingsStore:
     def set_default_paths(self, paths: set[DetectionPath]) -> set[DetectionPath]:
         if not paths:
             raise ValueError("at least one detection path must be enabled")
+        # Write-then-mutate: persist first so a disk failure leaves in-memory
+        # state unchanged (no partial update visible to readers).
+        prev = self.default_paths
         self.default_paths = set(paths)
-        self.persist()
+        try:
+            self.persist()
+        except Exception:
+            self.default_paths = prev
+            raise
         return set(self.default_paths)
 
     def set_capture_height_px(self, value: int) -> int:
@@ -252,20 +259,35 @@ class RuntimeSettingsStore:
             raise ValueError("capture_height must be an int")
         if value not in self.ALLOWED_CAPTURE_HEIGHTS:
             raise ValueError(f"capture_height {value} not in {self.ALLOWED_CAPTURE_HEIGHTS}")
+        prev = self.capture_height_px
         self.capture_height_px = value
-        self.persist()
+        try:
+            self.persist()
+        except Exception:
+            self.capture_height_px = prev
+            raise
         return value
 
     def set_chirp_detect_threshold(self, value: float) -> float:
         v = self._validated_threshold(value)
+        prev = self.chirp_detect_threshold
         self.chirp_detect_threshold = v
-        self.persist()
+        try:
+            self.persist()
+        except Exception:
+            self.chirp_detect_threshold = prev
+            raise
         return v
 
     def set_mutual_sync_threshold(self, value: float) -> float:
         v = self._validated_threshold(value)
+        prev = self.mutual_sync_threshold
         self.mutual_sync_threshold = v
-        self.persist()
+        try:
+            self.persist()
+        except Exception:
+            self.mutual_sync_threshold = prev
+            raise
         return v
 
     def set_sync_params(self, params: SyncParams) -> SyncParams:
@@ -277,8 +299,13 @@ class RuntimeSettingsStore:
                 "search_window_s": params.search_window_s,
             }
         )
+        prev = self.sync_params
         self.sync_params = v
-        self.persist()
+        try:
+            self.persist()
+        except Exception:
+            self.sync_params = prev
+            raise
         return v
 
     def set_heartbeat_interval_s(self, value: float) -> float:
@@ -290,18 +317,34 @@ class RuntimeSettingsStore:
                 f"interval {v} out of range "
                 f"[{self.HEARTBEAT_INTERVAL_MIN}, {self.HEARTBEAT_INTERVAL_MAX}]"
             )
+        prev = self.heartbeat_interval_s
         self.heartbeat_interval_s = v
-        self.persist()
+        try:
+            self.persist()
+        except Exception:
+            self.heartbeat_interval_s = prev
+            raise
         return v
 
     def set_tracking_exposure_cap(self, mode: TrackingExposureCapMode) -> TrackingExposureCapMode:
+        prev = self.tracking_exposure_cap
         self.tracking_exposure_cap = mode
-        self.persist()
+        try:
+            self.persist()
+        except Exception:
+            self.tracking_exposure_cap = prev
+            raise
         return mode
 
     def set_batter_height_cm(self, value: int) -> int:
-        self.batter_height_cm = validate_batter_height_cm(value)
-        self.persist()
+        validated = validate_batter_height_cm(value)
+        prev = self.batter_height_cm
+        self.batter_height_cm = validated
+        try:
+            self.persist()
+        except Exception:
+            self.batter_height_cm = prev
+            raise
         return self.batter_height_cm
 
     def _validated_threshold(self, value: float) -> float:

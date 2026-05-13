@@ -187,6 +187,32 @@ _BUILTIN_SEEDS: dict[str, Preset] = {
 }
 
 
+def _validate_builtin_seeds_against_registry() -> None:
+    """Boot drift guard: every `_BUILTIN_SEEDS` entry must round-trip
+    through its algorithm's `params_schema`. Catches the case where a
+    detector schema gains a new required field but the seed literal
+    here wasn't updated — fails at module import (before seed_builtins
+    persists invalid JSON to disk)."""
+    for name, preset in _BUILTIN_SEEDS.items():
+        try:
+            entry = algorithms.get(preset.algorithm_id)
+        except KeyError:
+            raise RuntimeError(
+                f"_BUILTIN_SEEDS[{name!r}].algorithm_id="
+                f"{preset.algorithm_id!r} not in algorithms._REGISTRY"
+            )
+        try:
+            entry.detector.params_schema.model_validate(preset.params)
+        except Exception as exc:
+            raise RuntimeError(
+                f"_BUILTIN_SEEDS[{name!r}] params drift vs "
+                f"{preset.algorithm_id} schema: {exc}"
+            ) from exc
+
+
+_validate_builtin_seeds_against_registry()
+
+
 def presets_dir(data_dir: Path) -> Path:
     return data_dir / _PRESETS_DIRNAME
 

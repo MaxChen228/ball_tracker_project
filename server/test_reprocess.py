@@ -914,3 +914,38 @@ def test_failed_cam_also_blocks_session_triangulation(tmp_path, monkeypatch):
     assert json.loads(sentinel_result.read_text()) == {
         "_sentinel": "do-not-overwrite"
     }
+
+
+# ---------------------------------------------------------------------------
+# load_pairing_tuning — corrupt JSON must raise SystemExit (not bare
+# json.JSONDecodeError traceback), parity with state._load_pairing_tuning_from_disk
+# ---------------------------------------------------------------------------
+
+
+def test_reprocess_load_pairing_tuning_corrupt_json_raises_systemexit(
+    tmp_path, monkeypatch
+):
+    """A present-but-corrupt `pairing_tuning.json` must produce a clean
+    SystemExit with an "invalid JSON" message rather than an unhandled
+    json.JSONDecodeError traceback."""
+    import reprocess_sessions as R
+
+    monkeypatch.setattr(R, "PAIRING_TUNING_PATH", tmp_path / "pairing_tuning.json")
+    (tmp_path / "pairing_tuning.json").write_text("{this is not json")
+
+    with pytest.raises(SystemExit, match="invalid JSON"):
+        R.load_pairing_tuning()
+
+
+def test_reprocess_load_pairing_tuning_missing_key_raises_systemexit(
+    tmp_path, monkeypatch
+):
+    """A `pairing_tuning.json` that parses but lacks `gap_threshold_m`
+    must raise SystemExit with a message referencing the missing field."""
+    import reprocess_sessions as R
+
+    monkeypatch.setattr(R, "PAIRING_TUNING_PATH", tmp_path / "pairing_tuning.json")
+    (tmp_path / "pairing_tuning.json").write_text("{}")
+
+    with pytest.raises(SystemExit, match="missing 'gap_threshold_m'"):
+        R.load_pairing_tuning()

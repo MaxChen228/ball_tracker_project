@@ -116,10 +116,9 @@ def algorithm_id_for_path(pitch: PitchPayload, path: DetectionPath) -> str:
     Per CLAUDE.md 'Experimental phase — 禁止 silent fallback', missing
     `active_server_post_algorithm_id` for a `server_post` path is an
     invariant violation, not a recoverable fallback: every pitch that
-    has server_post frames MUST have the pointer stamped (either via
-    `stamp_server_post_run` at run-time or via
-    `migrate_disk_pitches.py` for any pre-snapshot disk records — that
-    migration is a one-shot tool, not a permanent shim). Callers that
+    has server_post frames MUST have the pointer stamped via
+    `stamp_server_post_run` at run-time. Pre-Phase-2 disk records were
+    migrated once by a one-shot script no longer in-tree. Callers that
     might receive a pitch without the pointer (e.g. a fresh pitch that
     has only live frames) MUST guard with
     `pitch.active_server_post_algorithm_id is not None` before asking

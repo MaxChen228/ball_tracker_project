@@ -232,18 +232,30 @@ def rerun_detection(
 
 def load_pairing_tuning() -> PairingTuning:
     """Mirror of `state._load_pairing_tuning_from_disk` for the offline
-    script. Falls back to `PairingTuning.default()` when the dashboard
-    has never written the file."""
+    script. Strict parity with `state._load_pairing_tuning_from_disk`:
+    missing file → PairingTuning.default(); corrupt / missing key → abort."""
     if not PAIRING_TUNING_PATH.exists():
         d = PairingTuning.default()
         logger.info("no pairing_tuning.json — using default gap=%.2fm",
                     d.gap_threshold_m)
         return d
-    obj = json.loads(PAIRING_TUNING_PATH.read_text())
-    d = PairingTuning.default()
-    t = PairingTuning(
-        gap_threshold_m=float(obj.get("gap_threshold_m", d.gap_threshold_m)),
-    )
+    try:
+        obj = json.loads(PAIRING_TUNING_PATH.read_text())
+    except json.JSONDecodeError as e:
+        raise SystemExit(
+            f"{PAIRING_TUNING_PATH}: invalid JSON: {e}"
+        ) from e
+    if not isinstance(obj, dict) or "gap_threshold_m" not in obj:
+        raise SystemExit(
+            f"{PAIRING_TUNING_PATH}: missing 'gap_threshold_m' "
+            "(strict parity with state._load_pairing_tuning_from_disk)"
+        )
+    raw = obj["gap_threshold_m"]
+    if not isinstance(raw, (int, float)):
+        raise SystemExit(
+            f"{PAIRING_TUNING_PATH}: 'gap_threshold_m' must be numeric"
+        )
+    t = PairingTuning(gap_threshold_m=float(raw))
     logger.info("pairing_tuning gap=%.2fm", t.gap_threshold_m)
     return t
 

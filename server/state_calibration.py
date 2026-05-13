@@ -66,22 +66,23 @@ class CalibrationStore:
         return self._directory / f"{camera_id}.json"
 
     def load(self) -> None:
+        """Strict loader. A corrupt calibration file is a hard error
+        (parity with _load_session_meta_from_disk): cal is a 422-grade
+        dependency and silently dropping one camera leaves the rig
+        running with mixed-version geometry. Operator must delete the
+        bad file + re-run Auto Calibrate."""
         for path in sorted(self._directory.glob("*.json")):
             try:
                 obj = json.loads(path.read_text())
                 snap = CalibrationSnapshot.model_validate(obj)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{path} is not valid JSON: {e}") from e
             except Exception as e:
-                logger.warning("skip corrupt calibration file %s: %s", path.name, e)
-                continue
-            try:
-                validate_calibration_snapshot(snap)
-            except ValueError as e:
-                logger.warning(
-                    "skip inconsistent calibration %s: %s — "
-                    "delete the file and re-run Auto Calibrate",
-                    path.name, e,
-                )
-                continue
+                raise ValueError(
+                    f"{path} failed CalibrationSnapshot validation: {e}\n"
+                    f"→ delete the file and re-run Auto Calibrate to rebuild"
+                ) from e
+            validate_calibration_snapshot(snap)
             self._items[snap.camera_id] = snap
         if self._items:
             logger.info(
@@ -92,8 +93,12 @@ class CalibrationStore:
 
     def set(self, snapshot: CalibrationSnapshot) -> None:
         validate_calibration_snapshot(snapshot)
+        # Persist first; on disk failure raises without dirtying cache.
+        self._atomic_write(
+            self.path(snapshot.camera_id),
+            snapshot.model_dump_json(indent=2),
+        )
         self._items[snapshot.camera_id] = snapshot
-        self._atomic_write(self.path(snapshot.camera_id), snapshot.model_dump_json(indent=2))
 
     def snapshot(self) -> dict[str, CalibrationSnapshot]:
         return dict(self._items)
@@ -104,13 +109,12 @@ class CalibrationStore:
     def clear(self) -> int:
         """Wipe in-memory + on-disk calibration JSONs. Returns count
         removed. Used by the dashboard 'Reset rig' affordance for full
-        re-setup; routine recalibration goes through `set()` per cam."""
+        re-setup; routine recalibration goes through `set()` per cam.
+        OSError on any unlink propagates — caller sees the disk failure
+        rather than a partially-cleared rig that diverges on restart."""
         n = len(self._items)
         for cam in list(self._items.keys()):
-            try:
-                self.path(cam).unlink(missing_ok=True)
-            except OSError:
-                logger.exception("failed to remove calibration JSON for %s", cam)
+            self.path(cam).unlink(missing_ok=True)
         self._items.clear()
         return n
 
@@ -215,9 +219,13 @@ class DeviceIntrinsicsStore:
             try:
                 obj = json.loads(path.read_text())
                 rec = DeviceIntrinsics.model_validate(obj)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{path} is not valid JSON: {e}") from e
             except Exception as e:
-                logger.warning("skip corrupt device-intrinsics file %s: %s", path.name, e)
-                continue
+                raise ValueError(
+                    f"{path} failed DeviceIntrinsics validation: {e}\n"
+                    f"→ delete the file and re-run Auto Calibrate to rebuild"
+                ) from e
             self._items[rec.device_id] = rec
         if self._items:
             logger.info(
@@ -226,22 +234,27 @@ class DeviceIntrinsicsStore:
             )
 
     def set(self, rec: DeviceIntrinsics) -> None:
-        self._items[rec.device_id] = rec
+        # Persist first; on disk failure raises without dirtying cache.
         self._atomic_write(self.path(rec.device_id), rec.model_dump_json(indent=2))
+        self._items[rec.device_id] = rec
 
     def get(self, device_id: str) -> DeviceIntrinsics | None:
         return self._items.get(device_id)
 
     def delete(self, device_id: str) -> bool:
-        existed = self._items.pop(device_id, None) is not None
+        if device_id not in self._items:
+            return False
         p = self.path(device_id)
         try:
             p.unlink()
         except FileNotFoundError:
             pass
-        except OSError as e:
-            logger.warning("delete %s failed: %s", p, e)
-        return existed
+        # OSError other than FileNotFoundError propagates — caller must
+        # see the disk failure rather than think the delete succeeded
+        # while the JSON file is still present (would be resurrected on
+        # next restart).
+        self._items.pop(device_id, None)
+        return True
 
     def snapshot(self) -> dict[str, DeviceIntrinsics]:
         return dict(self._items)

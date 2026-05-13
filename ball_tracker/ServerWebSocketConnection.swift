@@ -1,4 +1,7 @@
 import Foundation
+import OSLog
+
+private let transportLog = Logger(subsystem: "com.Max0228.ball-tracker", category: "camera.ws")
 
 // MARK: - Delegate
 
@@ -25,7 +28,19 @@ final class ServerWebSocketConnection {
 
     weak var delegate: ServerWebSocketDelegate?
 
-    private(set) var state: State = .disconnected
+    /// Backing storage + lock for `state`. Writes happen on `wsQueue`
+    /// (`_connect`, `_handleDropped`, `_receiveNext`, `schedulePing`); reads
+    /// happen on `wsQueue` AND from outside (e.g. `LiveFrameDispatcher` on
+    /// the detection queue). Plain stored prop is not safe across queues
+    /// even for enum reads — there's no memory barrier guarantee on ARM64
+    /// for arbitrary `var` access. Lock-guarded computed property keeps the
+    /// `private(set)`-equivalent external contract.
+    private let stateLock = NSLock()
+    private var _state: State = .disconnected
+    private(set) var state: State {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _state }
+        set { stateLock.lock(); _state = newValue; stateLock.unlock() }
+    }
     private(set) var reconnectAttempt: Int = 0
 
     // MARK: Configuration
@@ -191,6 +206,7 @@ final class ServerWebSocketConnection {
                     // real inbound message frame.
                     if self.state == .connecting {
                         self.state = .connected
+                        transportLog.info("ws state .connecting → .connected (first inbound message)")
                     }
                     let text: String?
                     switch msg {
@@ -218,10 +234,21 @@ final class ServerWebSocketConnection {
 
     private func _deliver(text: String) {
         dispatchPrecondition(condition: .onQueue(wsQueue))
-        guard
-            let data = text.data(using: .utf8),
-            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return }
+        guard let data = text.data(using: .utf8) else {
+            transportLog.error("ws inbound text not UTF-8 len=\(text.count, privacy: .public)")
+            return
+        }
+        let raw: Any
+        do {
+            raw = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            transportLog.error("ws inbound JSON parse failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        guard let obj = raw as? [String: Any] else {
+            transportLog.error("ws inbound JSON not dict (got \(String(describing: type(of: raw)), privacy: .public))")
+            return
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.delegate?.webSocket(self, didReceive: obj)
@@ -229,17 +256,28 @@ final class ServerWebSocketConnection {
     }
 
     private func _send(_ payload: [String: Any]) {
+        dispatchPrecondition(condition: .onQueue(wsQueue))
         // Accept `.connecting` so the initial hello and heartbeats fired
         // before the first inbound message still reach URLSession's
         // internal queue (it buffers pre-open). Live frames separately
         // gate on `.connected` via LiveFrameDispatcher.
-        guard
-            state == .connected || state == .connecting,
-            let task,
-            JSONSerialization.isValidJSONObject(payload),
-            let data = try? JSONSerialization.data(withJSONObject: payload),
-            let text = String(data: data, encoding: .utf8)
-        else { return }
+        guard state == .connected || state == .connecting else { return }
+        guard let task else { return }
+        guard JSONSerialization.isValidJSONObject(payload) else {
+            transportLog.error("ws outbound payload not valid JSON object — dropped")
+            return
+        }
+        let data: Data
+        do {
+            data = try JSONSerialization.data(withJSONObject: payload)
+        } catch {
+            transportLog.error("ws outbound JSON serialization failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            transportLog.error("ws outbound JSON not UTF-8 representable bytes=\(data.count, privacy: .public)")
+            return
+        }
         task.send(.string(text)) { [weak self] error in
             guard let error, let self else { return }
             self.wsQueue.async {
@@ -278,6 +316,7 @@ final class ServerWebSocketConnection {
                         self.lastInboundAt = Date()
                         if self.state == .connecting {
                             self.state = .connected
+                            transportLog.info("ws state .connecting → .connected (pong received)")
                         }
                     }
                 }
