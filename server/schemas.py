@@ -114,6 +114,7 @@ class HSVRangePayload(BaseModel):
     at detection time (server_post run + /pitch ingest of live frames)
     so reprocess / viewer always see the exact HSV bounds the cost basis
     was computed under, regardless of later disk edits."""
+    model_config = ConfigDict(extra="forbid")
     h_min: int
     h_max: int
     s_min: int
@@ -125,6 +126,7 @@ class HSVRangePayload(BaseModel):
 class ShapeGatePayload(BaseModel):
     """Wire mirror of `detection.ShapeGate`. Frozen per pitch alongside
     `HSVRangePayload`."""
+    model_config = ConfigDict(extra="forbid")
     aspect_min: float
     fill_min: float
 

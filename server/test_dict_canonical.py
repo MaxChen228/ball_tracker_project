@@ -467,3 +467,29 @@ def test_set_algorithm_frames_round_trip_through_persist_and_reload():
     # Projections agree post-reload:
     assert len(p2.frames_server_post) == 2
     assert len(p2.frames_live) == 1
+
+
+def test_hsv_range_payload_rejects_extra_fields():
+    """HSVRangePayload now has `extra="forbid"` — dirty hand-edited
+    presets carrying an unknown field (e.g. a typo'd `h_center`) must
+    raise at load time, not silently discard the key."""
+    import pytest as _pytest
+    from pydantic import ValidationError
+    from schemas import HSVRangePayload
+
+    with _pytest.raises(ValidationError):
+        HSVRangePayload(
+            h_min=25, h_max=55, s_min=90, s_max=255, v_min=90, v_max=255,
+            h_center=40,  # spurious field
+        )
+
+
+def test_shape_gate_payload_rejects_extra_fields():
+    """ShapeGatePayload now has `extra="forbid"` — spurious keys in a
+    hand-edited preset must surface as a validation error at load time."""
+    import pytest as _pytest
+    from pydantic import ValidationError
+    from schemas import ShapeGatePayload
+
+    with _pytest.raises(ValidationError):
+        ShapeGatePayload(aspect_min=0.7, fill_min=0.55, circularity_min=0.8)
