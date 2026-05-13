@@ -114,6 +114,18 @@ class SyncCoordinator:
             self._check_sync_timeout_locked(now)
             return self._current_sync
 
+    def check_sync_timeout_locked(self, now: float) -> None:
+        """Public accessor for `_check_sync_timeout_locked` so external
+        modules (ws_messages.py) can prune an expired run without poking
+        the private method directly. Caller must already hold `self._lock`."""
+        self._check_sync_timeout_locked(now)
+
+    def current_sync_locked(self) -> SyncRun | None:
+        """Public accessor for `_current_sync` so external modules
+        (ws_messages.py) can read the active run without poking the
+        private attribute. Caller must already hold `self._lock`."""
+        return self._current_sync
+
     def last_sync_result(self) -> SyncResult | None:
         with self._lock:
             return self._last_sync_result
