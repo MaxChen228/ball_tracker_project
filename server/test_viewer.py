@@ -1091,6 +1091,39 @@ def test_detection_config_strip_dispatches_prefix_per_pill():
     assert "v11_hsv_cc/tennis" not in live_pill
 
 
+def test_cfg_pill_hybrid_28d_tooltip_shows_both_cubes():
+    """hybrid_28d tooltip must summarise PROD + V11 HSV cubes and
+    neighbourhood params — not fall through to the generic `alg:` stub."""
+    from viewer_fragments import _config_pill_html
+
+    snap = {
+        "algorithm_id": "hybrid_28d",
+        "params": {
+            "prod_hsv": {"h_min": 105, "h_max": 112, "s_min": 140, "s_max": 255, "v_min": 40, "v_max": 255},
+            "prod_shape": {"aspect_min": 0.75, "fill_min": 0.55},
+            "prod_area_min": 20,
+            "v11_hsv": {"h_min": 103, "h_max": 118, "s_min": 120, "s_max": 255, "v_min": 30, "v_max": 255},
+            "v11_shape": {"aspect_min": 0.40, "fill_min": 0.35},
+            "v11_area_min": 3,
+            "v11_close_kernel": 3,
+            "neigh_half": 6,
+            "match_px": 5.0,
+        },
+        "preset_name": "hybrid_28d_blue_ball",
+    }
+    pill = _config_pill_html("SVR", snap, None, show_algorithm_prefix=True)
+
+    # Must NOT fall back to the generic stub.
+    assert "alg:hybrid_28d" not in pill
+    # PROD cube key values present in tooltip.
+    assert "105-112" in pill
+    # V11 cube hue range present.
+    assert "103-118" in pill
+    # Neighbourhood params present.
+    assert "neigh±6" in pill
+    assert "match5.0px" in pill
+
+
 def test_failure_strip_html_prefers_earliest_blocking_reason():
     health = {
         "cameras": {

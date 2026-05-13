@@ -239,6 +239,18 @@ def _format_snapshot_params(algorithm_id: str, params: dict) -> str:
             f"V {h['v_min']}-{h['v_max']} · "
             f"asp≥{g['aspect_min']:.2f} fill≥{g['fill_min']:.2f}"
         )
+    if algorithm_id == "hybrid_28d":
+        ph = params["prod_hsv"]
+        pg = params["prod_shape"]
+        vh = params["v11_hsv"]
+        vg = params["v11_shape"]
+        neigh = params["neigh_half"]
+        match_px = params["match_px"]
+        return (
+            f"PROD H {ph['h_min']}-{ph['h_max']} asp≥{pg['aspect_min']:.2f} · "
+            f"V11 H {vh['h_min']}-{vh['h_max']} asp≥{vg['aspect_min']:.2f} · "
+            f"neigh±{neigh} match{match_px:.1f}px"
+        )
     return f"alg:{algorithm_id}"
 
 
