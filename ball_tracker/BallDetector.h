@@ -37,29 +37,6 @@ NS_ASSUME_NONNULL_BEGIN
 /// (`ConcurrentDetectionPool`).
 @interface BTBallDetector : NSObject
 
-/// Run detection with the default HSV range.
-/// Returns nil when no blob passes area + shape gating.
-+ (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer;
-
-/// Run detection with a caller-supplied HSV range. Hue in 0–179, sat/val
-/// in 0–255 — OpenCV's 8-bit HSV convention, same as the server.
-/// Uses default shape gate (aspect ≥ 0.70, fill ≥ 0.55).
-+ (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer
-                                             hMin:(int)hMin hMax:(int)hMax
-                                             sMin:(int)sMin sMax:(int)sMax
-                                             vMin:(int)vMin vMax:(int)vMax;
-
-/// Run detection with caller-supplied HSV + shape gate thresholds.
-/// `aspectMin` = min(w,h)/max(w,h) lower bound; `fillMin` = area/(w*h)
-/// lower bound. Both ∈ [0, 1]. Match `ShapeGate` on the server so the
-/// live path rejects the same blobs server_post would.
-+ (nullable BTBallDetection *)detectInPixelBuffer:(CVPixelBufferRef)pixelBuffer
-                                             hMin:(int)hMin hMax:(int)hMax
-                                             sMin:(int)sMin sMax:(int)sMax
-                                             vMin:(int)vMin vMax:(int)vMax
-                                        aspectMin:(double)aspectMin
-                                          fillMin:(double)fillMin;
-
 /// Multi-candidate variant: return ALL blobs passing area+aspect+fill,
 /// sorted by area desc. Empty array → no candidates. Used by the live
 /// path to ship every survivor to the server (`schemas.BlobCandidate`),

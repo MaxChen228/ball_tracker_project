@@ -24,7 +24,6 @@ on any FastAPI router / Request machinery.
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any
 
 import numpy as np
@@ -39,8 +38,6 @@ from calibration_solver import (
 from schemas import CalibrationSnapshot, IntrinsicsPayload
 from state_calibration import REPROJ_FAIL_PX
 from triangulate import build_K, camera_center_world, recover_extrinsics, triangulate_rays, undistorted_ray_cam
-
-logger = logging.getLogger("ball_tracker")
 
 # iPhone main (1x wide) rear camera horizontal FOV — empirically measured
 # from the device's `activeFormat.videoFieldOfView` at 240 fps (73.828°).
@@ -261,10 +258,7 @@ def _solve_pnp_homography(
     )
     if not ok:
         return None
-    try:
-        rvec, tvec = cv2.solvePnPRefineLM(object_pts, image_pts, K, dist, rvec, tvec)
-    except Exception:
-        pass
+    rvec, tvec = cv2.solvePnPRefineLM(object_pts, image_pts, K, dist, rvec, tvec)
     R_wc, _ = cv2.Rodrigues(rvec)
     H = K @ np.column_stack([R_wc[:, 0], R_wc[:, 1], tvec.reshape(3)])
     if abs(H[2, 2]) < 1e-12:

@@ -401,30 +401,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .calib-sub h3 {{ font-family: var(--mono); font-size: 10px; font-weight: 500;
                   letter-spacing: 0.14em; text-transform: uppercase;
                   color: var(--sub); margin: 0 0 var(--s-2) 0; }}
-.calib-register-row {{ display: flex; gap: var(--s-2); align-items: center;
-                         flex-wrap: wrap; margin-bottom: var(--s-2); }}
-.calib-register-row select {{ font-family: var(--mono); font-size: 11px;
-                                padding: 6px 8px; border-radius: var(--r);
-                                border: 1px solid var(--border-base);
-                                background: var(--surface); color: var(--ink); }}
-.marker-list {{ display: flex; flex-direction: column; gap: 0;
-                 border: 1px solid var(--border-l); border-radius: var(--r);
-                 background: var(--surface-hover); }}
-.marker-list:empty {{ display: none; }}
-.marker-row {{ display: flex; align-items: center; justify-content: space-between;
-                padding: 6px var(--s-2); border-top: 1px solid var(--border-l);
-                font-family: var(--mono); font-size: 11px; color: var(--ink); }}
-.marker-row:first-child {{ border-top: 0; }}
-.marker-row .mid {{ font-weight: 700; min-width: 28px; }}
-.marker-row .mxy {{ color: var(--sub); flex: 1; padding-left: var(--s-2); }}
-.marker-row button {{ background: transparent; border: 0; color: var(--sub);
-                       font-family: var(--mono); font-size: 14px; line-height: 1;
-                       cursor: pointer; padding: 2px 6px; border-radius: var(--r); }}
-.marker-row button:hover {{ color: var(--dev); background: var(--surface); }}
-.marker-list-empty {{ color: var(--sub); font-style: italic; font-size: 11px;
-                        padding: var(--s-2) 0; font-family: var(--mono); }}
-.calib-last {{ font-family: var(--mono); font-size: 10px; color: var(--sub);
-                 letter-spacing: 0.06em; }}
 
 /* Runtime tunables card — two slider + number-input rows. Server owns
    the persisted value; sliders POST on `change` (keystroke commits on

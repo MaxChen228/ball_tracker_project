@@ -117,8 +117,15 @@ final class CameraSyncCoordinator {
             "n_bursts": .int(emitAtS.count),
         ])
         pendingSyncId = syncId
-        pendingSyncEmitAtS = emitAtS.isEmpty ? [0.3] : emitAtS
-        pendingSyncRecordDurationS = max(recordDurationS, 1.0)
+        // Out-of-contract values (empty emit_at_s / record_duration_s < 1.0)
+        // are atomic-dropped at the route layer in CameraCommandRouter so
+        // we never see them here. Internal-invariant assert; no silent
+        // clamp — quietly substituting [0.3] / 1.0s would mask server bugs
+        // and quietly run with different timing than the server logs claim.
+        assert(!emitAtS.isEmpty, "sync_run: empty emit_at_s leaked past route guard")
+        assert(recordDurationS >= 1.0, "sync_run: record_duration_s=\(recordDurationS) below 1.0 floor leaked past route guard")
+        pendingSyncEmitAtS = emitAtS
+        pendingSyncRecordDurationS = recordDurationS
         startMutualSync()
     }
 

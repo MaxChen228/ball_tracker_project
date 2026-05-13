@@ -98,38 +98,6 @@ def markers_clear() -> dict[str, Any]:
     return {"ok": True, "cleared_count": cleared}
 
 
-@router.post("/calibration/markers/register/{camera_id}")
-async def calibration_markers_register_legacy(camera_id: str) -> dict[str, Any]:
-    # Note: server/static/dashboard/82_markers.js:11 still POSTs here — keep
-    # this 409 sentinel so the dashboard surfaces a clear error. Do not remove.
-    raise HTTPException(
-        status_code=409,
-        detail="single-camera marker registration was removed; use /markers and scan with both cameras",
-    )
-
-
-@router.get("/calibration/markers")
-def calibration_markers_list_legacy() -> dict[str, Any]:
-    from main import state
-    return {
-        "markers": [
-            {"id": rec.marker_id, "wx": rec.x_m, "wy": rec.y_m}
-            for rec in state.markers.all_records()
-            if rec.on_plate_plane
-        ],
-    }
-
-
-@router.delete("/calibration/markers/{marker_id}")
-def calibration_markers_delete_legacy(marker_id: int) -> dict[str, Any]:
-    return marker_delete(marker_id)
-
-
-@router.post("/calibration/markers/clear")
-def calibration_markers_clear_legacy() -> dict[str, Any]:
-    return markers_clear()
-
-
 @router.post("/markers/scan")
 async def markers_scan(
     camera_a_id: str = "A",

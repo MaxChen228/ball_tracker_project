@@ -661,12 +661,25 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
         let ringStartGlobal = totalWritten - ringLen
         let chirpStartGlobal = Double(ringStartGlobal) + fracLag
         let chirpCenterGlobal = chirpStartGlobal + Double(refLen) / 2.0
-        let firstPTSS = firstPTS.map { CMTimeGetSeconds($0) } ?? 0
+        // firstPTS is latched on the first sample buffer ingested by
+        // `processAudio` (line ~362) before any scan can fire — by the time
+        // a CorrResult exists, firstPTS must be non-nil. Silent `?? 0`
+        // here would anchor chirpCenter to absolute time 0 + offset and
+        // poison every downstream sync calculation, so fail loud instead.
+        guard let firstPTS else {
+            preconditionFailure("timestampForChirpCenter called before firstPTS latched")
+        }
+        let firstPTSS = CMTimeGetSeconds(firstPTS)
         return firstPTSS + chirpCenterGlobal / sampleRate
     }
 
     private func currentPTSApprox() -> Double {
-        guard let first = firstPTS else { return 0 }
+        // Invariant: callers (scan loop in processAudio) only run after
+        // firstPTS has been latched on the same buffer. A nil here would
+        // mean we're scanning before any sample arrived — programmer error.
+        guard let first = firstPTS else {
+            preconditionFailure("currentPTSApprox called before firstPTS latched")
+        }
         return CMTimeGetSeconds(first) + Double(totalWritten) / sampleRate
     }
 

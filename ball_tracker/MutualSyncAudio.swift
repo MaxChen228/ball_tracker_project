@@ -81,6 +81,12 @@ final class MutualSyncAudio {
     private var recordingFirstPTS: Double?
     private var emissionPTSList: [Double] = []
     private var completionFired = false
+    // Latched from `beginSync(emittedRole:)` so D-5 fail-loud paths in the
+    // tap callback (`ingestTapBuffer`) can include cam role context — a
+    // log line like "buffer dropped: hostTime invalid" without role makes
+    // it impossible to tell which iPhone tripped the watchdog when both
+    // are mid-sync.
+    private var currentEmittedRole: String?
 
     /// - Parameters:
     ///   - emitAtS: Emission offsets (seconds from engine-start) for each burst.
@@ -131,6 +137,7 @@ final class MutualSyncAudio {
             recordingFirstPTS = nil
             emissionPTSList.removeAll()
             completionFired = false
+            currentEmittedRole = emittedRole
         }
 
         let engine = AVAudioEngine()
@@ -272,14 +279,21 @@ final class MutualSyncAudio {
         }
 
         // Host ticks → host-clock seconds via the documented bridge.
-        let bufferStartS: Double
-        if audioTime.isHostTimeValid {
-            let hostCMTime = CMClockMakeHostTimeFromSystemUnits(audioTime.hostTime)
-            bufferStartS = CMTimeGetSeconds(hostCMTime)
-        } else {
-            let hostCMTime = CMClockGetTime(CMClockGetHostTimeClock())
-            bufferStartS = CMTimeGetSeconds(hostCMTime)
+        // recordingFirstPTS is the anchor for the entire chirp-pair alignment;
+        // a wall-clock fallback (CMClockGetHostTimeClock at tap-time, not
+        // buffer-capture-time) introduces ~5-20 ms of unbounded skew, which
+        // directly breaks mutual sync given the 8 ms pairing window. Fail
+        // loud: drop the buffer so recordingFirstPTS stays nil and the outer
+        // VC's recording watchdog (see CameraSyncCoordinator.syncWatchdog)
+        // will time the sync out instead of silently producing a bad anchor.
+        guard audioTime.isHostTimeValid else {
+            let role = stateQueue.sync { currentEmittedRole ?? "<unset>" }
+            assertionFailure("mutual-sync audio role=\(role): AVAudioTime.isHostTimeValid == false; dropping buffer (host-clock fallback would corrupt chirp anchor)")
+            log.error("mutual-sync audio buffer dropped role=\(role, privacy: .public): hostTime invalid — anchor would be unreliable, letting watchdog time out")
+            return
         }
+        let hostCMTime = CMClockMakeHostTimeFromSystemUnits(audioTime.hostTime)
+        let bufferStartS = CMTimeGetSeconds(hostCMTime)
 
         stateQueue.async { [weak self] in
             guard let self, self.running else { return }
@@ -366,6 +380,7 @@ final class MutualSyncAudio {
         }
         self.player = nil
         self.engine = nil
+        stateQueue.sync { currentEmittedRole = nil }
 
         do {
             try AVAudioSession.sharedInstance().setActive(

@@ -341,7 +341,6 @@ class SessionProcessingState:
             return self._summary_chip(
                 pending_keys=pending_keys,
                 completed=completed,
-                has_candidates=bool(candidates),
             )
 
     def _summary_chip(
@@ -349,7 +348,6 @@ class SessionProcessingState:
         *,
         pending_keys: set[JobKey],
         completed: bool,
-        has_candidates: bool,
     ) -> tuple[str | None, bool]:
         """Processing chip state for a single session.
 
@@ -382,6 +380,7 @@ class SessionProcessingState:
         self.server_post_jobs.clear()
         self.server_post_active_tasks.clear()
         self.server_post_errors.clear()
+        self.server_post_progress.clear()
 
     def remove_session(self, session_id: str) -> None:
         self.trashed_sessions.pop(session_id, None)
@@ -391,3 +390,9 @@ class SessionProcessingState:
             if key[1] == session_id:
                 self.server_post_jobs.pop(key, None)
                 self.server_post_active_tasks.discard(key)
+        # server_post_progress is keyed by JobKey = (cam, sid); strip every
+        # entry whose sid matches. Without this the dashboard would leak a
+        # stale progress row pointing at a session that no longer exists.
+        for key in list(self.server_post_progress.keys()):
+            if key[1] == session_id:
+                self.server_post_progress.pop(key, None)

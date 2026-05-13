@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from render_sync import _render_burst_params_body
+from render_sync_page import _render_burst_params_body
 
 
 def test_burst_params_body_none_uses_boot_defaults() -> None:
