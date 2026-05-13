@@ -309,7 +309,22 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        # Reconnect-race guard: if a newer ws task already replaced our
+        # socket in `device_ws._sockets` (cam reconnected before our
+        # finally fires), the snapshot will show `connected=True` for a
+        # different ws object. Skip the offline broadcasts so we don't
+        # paint the freshly-online cam as offline for one tick — the
+        # newer `connect()` already broadcast `online=True`.
+        # The disconnect() call below is identity-guarded internally
+        # (no-op when current socket is not ours), so it's safe to keep
+        # unconditional.
+        snap = device_ws.snapshot().get(camera_id)
+        replaced_by_newer = snap is not None and snap.connected
         device_ws.disconnect(camera_id, websocket)
+        if replaced_by_newer:
+            # Newer ws task owns the cam now; its connect() already
+            # broadcast online=True. Bail before painting offline.
+            return
         # Dashboard `/status` derives online-ness from `Device.last_seen_at`
         # with a 3 s stale window, so without this the UI keeps painting the
         # cam as online for up to 3 s after the phone sleeps / drops WS.

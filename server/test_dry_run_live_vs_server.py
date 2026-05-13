@@ -34,7 +34,10 @@ def _frame(idx: int, ts: float, *, px=None, py=None, detected=False, n_cands=0):
         "px": px,
         "py": py,
         "ball_detected": detected,
-        "candidates": [{"px": 0, "py": 0, "area": 1, "area_score": 1.0}] * n_cands,
+        "candidates": [
+            {"px": 0, "py": 0, "area": 1, "area_score": 1.0,
+             "aspect": 1.0, "fill": 0.68}
+        ] * n_cands,
     }
 
 

@@ -143,17 +143,30 @@ def test_post_pitch_mode_two_accepts_frames_without_video(tmp_path):
     px_a, py_a = _project_to_px(R_a, t_a)
     px_b, py_b = _project_to_px(R_b, t_b)
 
+    # Pairing reads `frame.candidates` exclusively now (no silent
+    # synth from px/py — CLAUDE.md silent-fallback rule). The wire
+    # shape requires aspect+fill on every BlobCandidate.
     frames_a = [{
         "frame_index": 0,
         "timestamp_s": 0.0,
         "px": px_a, "py": py_a,
         "ball_detected": True,
+        "candidates": [{
+            "px": px_a, "py": py_a,
+            "area": 100, "area_score": 1.0,
+            "aspect": 1.0, "fill": 0.68,
+        }],
     }]
     frames_b = [{
         "frame_index": 0,
         "timestamp_s": 0.0,
         "px": px_b, "py": py_b,
         "ball_detected": True,
+        "candidates": [{
+            "px": px_b, "py": py_b,
+            "area": 100, "area_score": 1.0,
+            "aspect": 1.0, "fill": 0.68,
+        }],
     }]
 
     body_a = _base_payload("A", session_id, K, H_a)

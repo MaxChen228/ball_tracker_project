@@ -39,13 +39,22 @@ def _direct_payload_with_frames(
     H: np.ndarray,
     K: np.ndarray,
 ) -> "main.PitchPayload":
+    from schemas import BlobCandidate
     frames = []
     for i, (Pi, ti) in enumerate(zip(path, ts)):
         u, v = _project_pixels(K, R, t, Pi)
+        # Pairing reads `frame.candidates` only — no more synthetic
+        # candidate stand-in from `frame.px / py` (silent-fallback fix).
+        # Test fixtures must populate `candidates` explicitly with
+        # plausible shape stats; round + typical fill matches production.
         frames.append(
             main.FramePayload(
                 frame_index=i, timestamp_s=float(ti),
                 px=u, py=v, ball_detected=True,
+                candidates=[BlobCandidate(
+                    px=u, py=v, area=100, area_score=1.0,
+                    aspect=1.0, fill=0.68,
+                )],
             )
         )
     return main.PitchPayload(
@@ -213,11 +222,18 @@ def _build_pairing_payloads(
     P_true = np.array([0.1, 0.3, 1.0])
 
     def frames(ts_list: list[float], R, t):
+        from schemas import BlobCandidate
         u, v = _project_pixels(K, R, t, P_true)
+        # Pairing reads `frame.candidates` exclusively now (no silent
+        # synth from px/py). Fixture must populate candidates.
         return [
             main.FramePayload(
                 frame_index=i, timestamp_s=float(ti),
                 px=u, py=v, ball_detected=True,
+                candidates=[BlobCandidate(
+                    px=u, py=v, area=100, area_score=1.0,
+                    aspect=1.0, fill=0.68,
+                )],
             )
             for i, ti in enumerate(ts_list)
         ]
@@ -401,13 +417,23 @@ def test_triangulate_live_pair_matches_triangulate_cycle():
     bx_pix, by_pix = _project_pixels(K, R_b, t_b, P_world)
 
     anchor = 100.0
+    # Pairing reads `frame.candidates` only (no silent px/py synth).
+    from schemas import BlobCandidate
     fa = FramePayload(
         frame_index=1, timestamp_s=anchor + 0.001,
         px=ax_pix, py=ay_pix, ball_detected=True,
+        candidates=[BlobCandidate(
+            px=ax_pix, py=ay_pix, area=100, area_score=1.0,
+            aspect=1.0, fill=0.68,
+        )],
     )
     fb = FramePayload(
         frame_index=1, timestamp_s=anchor + 0.001,
         px=bx_pix, py=by_pix, ball_detected=True,
+        candidates=[BlobCandidate(
+            px=bx_pix, py=by_pix, area=100, area_score=1.0,
+            aspect=1.0, fill=0.68,
+        )],
     )
 
     intr = IntrinsicsPayload(fx=fx, fy=fy, cx=cx, cy=cy)

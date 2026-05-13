@@ -428,6 +428,40 @@ def test_heartbeat_emits_device_heartbeat_sse(monkeypatch):
     assert "last_seen_at" in hb[0]
 
 
+def test_device_ws_disconnect_identity_guard():
+    """`DeviceSocketManager.disconnect(cam, websocket)` must be a no-op
+    when the current socket for `cam` is a different object than
+    `websocket` (reconnect race: a newer task already replaced the
+    socket; the old task's `finally` then calls disconnect — we must
+    not pop the newer socket). Together with the finally-side
+    snapshot guard in `routes.device_ws`, this prevents the old ws
+    task from painting an actively-connected cam offline."""
+    mgr = main.DeviceSocketManager()
+    # Simulate two sockets: the "old" one and a "new" one that replaced
+    # it in the slot. Plain object() is fine — disconnect only does
+    # identity comparison.
+    sock_old = object()
+    sock_new = object()
+    mgr._sockets["A"] = sock_old
+    mgr.disconnect("A", sock_old)
+    assert "A" not in mgr._sockets, "matching disconnect must pop"
+
+    # Re-insert as the "new" socket, then call disconnect with the old
+    # one — must be a no-op.
+    mgr._sockets["A"] = sock_new
+    mgr.disconnect("A", sock_old)
+    assert mgr._sockets["A"] is sock_new, (
+        "disconnect(cam, old_ws) must NOT pop a newer socket — identity "
+        "guard reintroduced silently?"
+    )
+
+    # And snapshot reflects the cam as connected throughout — that's
+    # the signal the finally block in routes.device_ws uses to decide
+    # whether to skip the offline broadcasts.
+    snap = mgr.snapshot().get("A")
+    assert snap is not None and snap.connected is True
+
+
 def test_calibration_state_returns_camera_list_for_threejs_dashboard():
     """/calibration/state ships the raw scene + per-camera image dims +
     last-touched timestamps. The Plotly-era `plot` + `plot_etag` fields

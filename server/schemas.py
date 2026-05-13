@@ -70,22 +70,32 @@ class BlobCandidate(BaseModel):
     (`algorithms.cost_threshold_for_algorithm`) can filter cheap
     distractors before the segmenter consumes them. `area_score` is
     area / max_area_in_batch on the producing side; kept for the
-    viewer's BLOBS overlay sort fallback."""
+    viewer's BLOBS overlay sort fallback.
+
+    `aspect` / `fill` are **required**: both production sources (iOS
+    live WS + server detection) compute them at CC time, and treating
+    None as zero penalty in the selector was a silent fallback that
+    let legacy JSONs sneak through scoring with implausibly low cost
+    (CLAUDE.md 'Experimental phase — 禁止 silent fallback'). `cost`
+    stays `Optional` because the wire payload from iOS arrives before
+    the server-side selector runs — it's stamped during ingest, not at
+    the source."""
     model_config = ConfigDict(extra="forbid")
     px: float
     py: float
     area: int
     area_score: float
-    # Width/height ratio min(w,h)/max(w,h) of the CC bounding box. 1.0 =
-    # perfectly square (round ball ≈ 1); used by the shape-weighted
-    # selector cost. None on legacy JSONs predating shape persistence.
-    aspect: float | None = None
-    # area / (w*h) of the CC bounding box. Empirical median for the blue
-    # ball is ~0.68 (memory: project_ball_empirical_fill). None on legacy.
-    fill: float | None = None
-    # Selector cost stamped at decision time. None = legacy JSON written
-    # before cost persistence, or wire payload from iOS before server-side
-    # resolution. Viewer falls back to area-asc sort on None entries.
+    # Width/height ratio min(w,h)/max(w,h) of the CC bounding box.
+    # 1.0 = perfectly square (round ball ≈ 1). Required (CC stage
+    # always computes this).
+    aspect: float
+    # area / (w*h) of the CC bounding box. Empirical median for the
+    # blue ball is ~0.68. Required.
+    fill: float
+    # Selector cost stamped at decision time. None = wire payload from
+    # iOS before server-side resolution (live_pairing._resolve_candidates
+    # stamps it during ingest); the post-resolution surface always has
+    # a real cost.
     cost: float | None = None
 
 
@@ -113,22 +123,36 @@ class HSVRangePayload(BaseModel):
     """Wire mirror of `detection.HSVRange`. Stamped onto `PitchPayload`
     at detection time (server_post run + /pitch ingest of live frames)
     so reprocess / viewer always see the exact HSV bounds the cost basis
-    was computed under, regardless of later disk edits."""
+    was computed under, regardless of later disk edits.
+
+    Bounds are pinned to OpenCV's 8-bit HSV space: Hue 0-179 (each step
+    = 2°, see CLAUDE.md), Saturation/Value 0-255. The disk-form preset
+    POST path + `POST /sessions/{sid}/runs/{algorithm_id}` body `params`
+    funnel through this model; without the bounds, an operator typo
+    (e.g. 210 from a 0-360 hue picker) used to land on disk and
+    `cv2.inRange` interpreted it as 210 % 180 = 30 → silent wraparound
+    into the green band. `routes/settings.py::_validated_hsv_range`
+    duplicates these checks for the form-encoded `POST /detection/config`
+    endpoint; both surfaces now enforce the same range."""
     model_config = ConfigDict(extra="forbid")
-    h_min: int
-    h_max: int
-    s_min: int
-    s_max: int
-    v_min: int
-    v_max: int
+    h_min: int = Field(ge=0, le=179)
+    h_max: int = Field(ge=0, le=179)
+    s_min: int = Field(ge=0, le=255)
+    s_max: int = Field(ge=0, le=255)
+    v_min: int = Field(ge=0, le=255)
+    v_max: int = Field(ge=0, le=255)
 
 
 class ShapeGatePayload(BaseModel):
     """Wire mirror of `detection.ShapeGate`. Frozen per pitch alongside
-    `HSVRangePayload`."""
+    `HSVRangePayload`. Both gate values live in `[0.0, 1.0]`:
+    `aspect_min` is `min(w,h)/max(w,h)` of the CC bbox (1.0 = perfect
+    square); `fill_min` is `area / (w*h)` (theoretical perfect circle
+    ≈ 0.785, empirical median for the project blue ball ~0.68, gate
+    operating at 0.55)."""
     model_config = ConfigDict(extra="forbid")
-    aspect_min: float
-    fill_min: float
+    aspect_min: float = Field(ge=0.0, le=1.0)
+    fill_min: float = Field(ge=0.0, le=1.0)
 
 
 class DetectionConfigSnapshotPayload(BaseModel):

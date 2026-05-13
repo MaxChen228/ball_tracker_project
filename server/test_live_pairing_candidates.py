@@ -54,24 +54,16 @@ def test_size_does_not_decide_winner():
     assert stored.px == 100.0
 
 
-def test_legacy_no_shape_data_zero_cost():
-    """Legacy persisted frames (aspect=fill=None) score zero on both
-    axes → all candidates tie at cost=0. Argmin tie-break picks the
-    first. Not a useful selection in practice; this just locks the
-    neutral-default contract."""
-    sess = LivePairingSession("s_test")
-    cands = [
-        BlobCandidate(px=10.0, py=10.0, area=80, area_score=0.4),
-        BlobCandidate(px=300.0, py=400.0, area=400, area_score=1.0),
-        BlobCandidate(px=999.0, py=999.0, area=4000, area_score=0.5),
-    ]
-    sess.ingest("A", _frame(0, 1.0, candidates=cands), _no_triangulate)
-    stored = sess.frames_by_cam["A"][0]
-    # First candidate wins by argmin tie-break (all costs equal 0).
-    assert stored.px == 10.0 and stored.py == 10.0
-    assert stored.ball_detected is True
-    for c in stored.candidates:
-        assert c.cost == 0.0
+def test_blob_candidate_rejects_missing_shape_stats():
+    """Per CLAUDE.md 'Experimental phase — 禁止 silent fallback',
+    `BlobCandidate.aspect` / `fill` are required. Previous revisions
+    accepted None and the selector returned cost=0 for all axes →
+    distractors with no shape data scored equally well as the real
+    ball. Pydantic must now refuse the construction outright."""
+    import pytest
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        BlobCandidate(px=10.0, py=10.0, area=80, area_score=0.4)
 
 
 def test_empty_candidates_marks_no_detection():
