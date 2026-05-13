@@ -1398,6 +1398,24 @@ class State:
                 return None
             return self.results[max(self.results.keys())]
 
+    def session_known(self, session_id: str) -> bool:
+        """Existence check matching `store_result`'s own guard: a session
+        is 'alive' iff it has a pitch entry, a result entry, or a live
+        pairing buffer. Live-only WS sessions before `persist_live_frames`
+        flush live only in `_live_pairings`, so checking `pitches` alone
+        would 404 a still-active live session.
+
+        Public accessor so route handlers don't have to poke `state._lock`
+        + `state._live_pairings` directly (PR #93 / state.py refactor
+        keeps internal locks internal).
+        """
+        with self._lock:
+            return (
+                any(s == session_id for _, s in self.pitches)
+                or session_id in self.results
+                or session_id in self._live_pairings
+            )
+
     def get(self, session_id: str) -> SessionResult | None:
         with self._lock:
             cached = self.results.get(session_id)
@@ -1927,6 +1945,21 @@ class State:
                 device_id=device_id,
                 device_model=device_model,
             )
+
+    def touch_device_last_seen(self, camera_id: str) -> None:
+        """Freshen `Device.last_seen_at` WITHOUT touching time-sync state.
+
+        Called from the WS connect handler. Using `heartbeat()` here used
+        to clear `time_synced` / `time_sync_id` / `sync_anchor_timestamp_s`
+        because the connect handler doesn't yet know what the phone will
+        report on its first `hello` — every reconnect blip therefore wiped
+        a freshly-established time-sync until the next hello arrived. The
+        no-arg heartbeat() default `time_synced=False` is intentional for
+        the explicit-clear sites; this method is the surgical alternative
+        when liveness is the only thing we want to refresh.
+        """
+        with self._lock:
+            self._device_registry.touch_last_seen(camera_id)
 
     def mark_device_offline(self, camera_id: str) -> None:
         """Age out `last_seen_at` so the device shows offline on the very

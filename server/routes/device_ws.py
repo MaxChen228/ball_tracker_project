@@ -22,7 +22,11 @@ router = APIRouter()
 # cams the raw rate is ~480 events/sec which floods the dashboard event
 # loop with no operator-visible benefit (the panel only renders integer
 # counts). One emit per second per cam keeps the UI live without the cost.
-# Single-task asyncio context → plain dict mutation is race-free.
+# Each `/ws/device/{cam}` handler runs as its own asyncio task, so two
+# cams can read/mutate this dict concurrently. The keys are disjoint per
+# cam — a race could at worst cause one extra emit on the very first
+# frame after the 1 s window crosses, which is acceptable (the dashboard
+# overwrites the count either way).
 _FRAME_COUNT_EMIT_INTERVAL_S = 1.0
 _last_frame_count_emit_ts: dict[tuple[str, str], float] = {}
 
@@ -35,6 +39,18 @@ def _should_emit_frame_count(session_id: str, camera_id: str) -> bool:
         _last_frame_count_emit_ts[key] = now
         return True
     return False
+
+
+def _forget_frame_count_emits(session_id: str, camera_id: str) -> None:
+    """Drop the throttle entry for (sid, cam) once the cam's path ends.
+
+    Without this the dict grows monotonically: every armed session leaves
+    one (sid, cam) entry behind even after the session is done. On a
+    long-lived server (LAN box ran continuously by the operator) that's
+    unbounded growth — call site is the cycle_end handler where the cam
+    has just told us it's done streaming for this sid.
+    """
+    _last_frame_count_emit_ts.pop((session_id, camera_id), None)
 
 
 @router.websocket("/ws/device/{camera_id}")
@@ -60,7 +76,39 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
     # tickStatus — but state.online_devices() still excludes the cam
     # because its last_seen_at is old, so the panel races back to
     # offline for up to one hello cadence.
-    state.heartbeat(camera_id)
+    #
+    # IMPORTANT: use `touch_device_last_seen` (not `heartbeat`) on
+    # reconnect. `heartbeat(camera_id)` with no kwargs would rebuild
+    # the Device record with `time_synced=False` / `time_sync_id=None`,
+    # wiping a prior session's chirp anchor on every reconnect blip
+    # until the next `hello` arrived. The touch helper updates only
+    # `last_seen_at` so time-sync state survives the reconnect.
+    state.touch_device_last_seen(camera_id)
+
+    def _record_liveness(msg: dict) -> None:
+        """Shared `hello` / `heartbeat` handler.
+
+        Both messages carry the same liveness + identity payload (chirp
+        sync id, battery, hardware identity). The only difference is the
+        dashboard event the receive loop emits afterwards. Pulling the
+        14-line duplicate into one place keeps the two branches in
+        lockstep when fields are added.
+        """
+        device_ws.note_seen(camera_id)
+        reported_sync_id = msg.get("time_sync_id")
+        reported_anchor = msg.get("sync_anchor_timestamp_s")
+        battery_level, battery_state = _parse_battery(msg)
+        device_id, device_model = _parse_device_identity(msg)
+        state.heartbeat(
+            camera_id,
+            time_synced=(reported_sync_id is not None and reported_anchor is not None),
+            time_sync_id=reported_sync_id,
+            sync_anchor_timestamp_s=reported_anchor,
+            battery_level=battery_level,
+            battery_state=battery_state,
+            device_id=device_id,
+            device_model=device_model,
+        )
     try:
         await device_ws.send(camera_id, _settings_message_for(camera_id))
         session = state.current_session()
@@ -86,39 +134,16 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
             msg = await websocket.receive_json()
             mtype = msg.get("type")
             if mtype == "hello":
-                device_ws.note_seen(camera_id)
-                reported_sync_id = msg.get("time_sync_id")
-                reported_anchor = msg.get("sync_anchor_timestamp_s")
-                battery_level, battery_state = _parse_battery(msg)
-                device_id, device_model = _parse_device_identity(msg)
-                state.heartbeat(
-                    camera_id,
-                    time_synced=(reported_sync_id is not None and reported_anchor is not None),
-                    time_sync_id=reported_sync_id,
-                    sync_anchor_timestamp_s=reported_anchor,
-                    battery_level=battery_level,
-                    battery_state=battery_state,
-                    device_id=device_id,
-                    device_model=device_model,
-                )
+                _record_liveness(msg)
                 await device_ws.send(camera_id, _settings_message_for(camera_id))
                 continue
             if mtype == "heartbeat":
-                device_ws.note_seen(camera_id)
+                _record_liveness(msg)
+                # SSE re-derives a few fields directly (battery + sync id)
+                # so the dashboard payload matches the snapshot the
+                # registry just wrote in `_record_liveness`.
                 reported_sync_id = msg.get("time_sync_id")
-                reported_anchor = msg.get("sync_anchor_timestamp_s")
                 battery_level, battery_state = _parse_battery(msg)
-                device_id, device_model = _parse_device_identity(msg)
-                state.heartbeat(
-                    camera_id,
-                    time_synced=(reported_sync_id is not None and reported_anchor is not None),
-                    time_sync_id=reported_sync_id,
-                    sync_anchor_timestamp_s=reported_anchor,
-                    battery_level=battery_level,
-                    battery_state=battery_state,
-                    device_id=device_id,
-                    device_model=device_model,
-                )
                 telem = msg.get("sync_telemetry")
                 if isinstance(telem, dict):
                     state.sync.record_sync_telemetry(camera_id, telem)
@@ -305,7 +330,21 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
                         "gap_threshold_m": result.gap_threshold_m,
                     },
                 )
+                # Per-cam path is done streaming for this sid — drop the
+                # throttle entry so the dict doesn't accumulate one (sid,
+                # cam) leak per armed session over the server's lifetime.
+                _forget_frame_count_emits(session_id, camera_id)
                 continue
+            # Fail loud on unknown WS mtype — silently dropping masks
+            # iOS↔server schema drift (CLAUDE.md WS-only checklist § 4).
+            # If iOS adds a new outbound message type without server being
+            # updated, we want the WS to close noisily, not for subsequent
+            # frames/cycle_ends to keep flowing while the new mtype's
+            # payload disappears into the void.
+            raise ValueError(
+                f"unknown WS message type {mtype!r} from cam={camera_id} "
+                f"— iOS↔server schema drift; update both ends in lockstep"
+            )
     except WebSocketDisconnect:
         pass
     finally:

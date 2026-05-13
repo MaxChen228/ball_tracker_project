@@ -144,6 +144,8 @@ async def calibration_auto(
     """
     import main as _main
     state = _main.state
+    sse_hub = _main.sse_hub
+    device_ws = _main.device_ws
     _wants_html = _main._wants_html
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_id):
@@ -159,6 +161,26 @@ async def calibration_auto(
         image_height_px=result.image_height_px,
     )
     state.set_calibration(snapshot)
+    # Mirror `POST /calibration` shape: SSE to dashboard so the 3D scene
+    # rebuilds without waiting for a 5 s /calibration/state poll, and WS
+    # fan-out to peer cams (not self — the cam that just (re)calibrated
+    # already has the new K + H on the phone side via the auto-cal
+    # frame request flow).
+    await sse_hub.broadcast(
+        "calibration_changed",
+        {
+            "cam": snapshot.camera_id,
+            "image_width_px": snapshot.image_width_px,
+            "image_height_px": snapshot.image_height_px,
+        },
+    )
+    await device_ws.broadcast(
+        {
+            cam: {"type": "calibration_updated", "cam": snapshot.camera_id}
+            for cam in state.known_camera_ids()
+            if cam != snapshot.camera_id
+        }
+    )
     n_extended_used = sum(
         1 for mid in result.detected_ids if mid not in PLATE_MARKER_WORLD
     )
@@ -194,6 +216,8 @@ async def calibration_auto_start(
 ) -> dict[str, Any]:
     import main as _main
     state = _main.state
+    sse_hub = _main.sse_hub
+    device_ws = _main.device_ws
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,16}", camera_id):
         raise HTTPException(status_code=400, detail="invalid camera_id")
@@ -214,6 +238,24 @@ async def calibration_auto_start(
                 image_height_px=result.image_height_px,
             )
             state.set_calibration(snapshot)
+            # Mirror `POST /calibration` fan-out (see sync auto-cal path
+            # above). Without this the dashboard 3D scene + peer-cam
+            # `healthMonitor` stayed stale until the next /status poll.
+            await sse_hub.broadcast(
+                "calibration_changed",
+                {
+                    "cam": snapshot.camera_id,
+                    "image_width_px": snapshot.image_width_px,
+                    "image_height_px": snapshot.image_height_px,
+                },
+            )
+            await device_ws.broadcast(
+                {
+                    cam: {"type": "calibration_updated", "cam": snapshot.camera_id}
+                    for cam in state.known_camera_ids()
+                    if cam != snapshot.camera_id
+                }
+            )
             state.finish_auto_cal_run(
                 camera_id,
                 status="completed",
@@ -277,5 +319,20 @@ async def calibration_reset_rig() -> dict[str, Any]:
     are sensor-physical and don't change with rig geometry."""
     import main as _main
     state = _main.state
+    sse_hub = _main.sse_hub
+    device_ws = _main.device_ws
+    # Snapshot the cam list BEFORE reset_rig() runs — `known_camera_ids()`
+    # derives from the heartbeat registry rather than the calibration map
+    # so this is robust to reset semantics, but we still want a stable
+    # broadcast target set for the WS fan-out.
+    cams = state.known_camera_ids()
     counts = state.reset_rig()
+    # `cam: None` is the dashboard / iOS contract for "calibration cleared"
+    # — clients drop their cached K + H and refuse to triangulate until a
+    # new snapshot lands. Matches the existing `POST /calibration` shape
+    # apart from the null cam id signalling a wipe rather than an update.
+    await sse_hub.broadcast("calibration_changed", {"cam": None})
+    await device_ws.broadcast(
+        {cam: {"type": "calibration_updated", "cam": None} for cam in cams}
+    )
     return {"ok": True, **counts}
