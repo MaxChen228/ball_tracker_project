@@ -93,7 +93,15 @@ final class CameraRecordingWorkflow {
     }
 
     func reloadPendingQueues() {
-        try? payloadUploadQueue.reloadPending()
+        // Disk IO failure here means cached pitch payloads from a prior
+        // app run can't be re-enqueued and will be silently lost. Log
+        // loudly so the operator notices instead of letting `try?` eat
+        // sandbox corruption / disk-full conditions.
+        do {
+            try payloadUploadQueue.reloadPending()
+        } catch {
+            recordingLog.error("payload queue reload failed cam=\(self.dependencies.getCameraRole(), privacy: .public) reason=\(error.localizedDescription, privacy: .public)")
+        }
         payloadUploadQueue.processNextIfNeeded()
     }
 
