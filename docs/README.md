@@ -28,6 +28,8 @@ Specifically:
 - Detection algorithm change → `server.md` (and check `ball_tracker/BallDetector.mm` header)
 - Dashboard UI restructure → `architecture.md` (control plane section)
 - Calibration / sync flow change → `operations.md`
+- New algorithm entry in `server/algorithms/` registry → `server.md` (algorithm entry + `cost_threshold_for_algorithm` row) + `protocols.md` (preset wire shape, `GET /algorithms` schema)
+- Preset / dual-active preset schema change (`POST /presets`, `POST /presets/active`, `data/active_server_post_preset.json`) → `server.md` + `operations.md`
 
 ## Archive
 
