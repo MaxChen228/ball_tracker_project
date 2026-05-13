@@ -310,7 +310,7 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
   `config_used_by_algorithm` projection 重建偵測
 - iOS 對 server-required WS 欄位拒 schema 漂（atomic-drop guard at handler
   head）
-- WS settings push 12 欄位文件化（[docs/protocols.md](docs/protocols.md)，
+- WS settings push 13 欄位文件化（含 `type` discriminator；[docs/protocols.md](docs/protocols.md)，
   PR #93）
 
 ### How to apply

@@ -135,7 +135,6 @@ extension ServerUploader {
         let error: String?
         let mean_residual_m: Double?
         let max_residual_m: Double?
-        let peak_z_m: Double?
         let duration_s: Double?
     }
 
