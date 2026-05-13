@@ -295,28 +295,23 @@ def _frame_candidates(f: FramePayload) -> list[BlobCandidate]:
     """Return the candidates the fan-out loop should iterate.
 
     Production wire (post the iOS aspect/fill landing) always populates
-    `frame.candidates`. Legacy persisted JSONs and minimal test
-    fixtures sometimes ship `frame.px / frame.py` only with no
-    candidates list — synthesize a single-candidate stand-in from the
-    resolved winner so the same code path triangulates them too. The
-    synthetic candidate carries area=0 / cost=None, fine because the
-    selector cost is no longer read by the cost gate when cost is None.
-    Returns empty list when neither candidates nor px/py is usable."""
-    if f.candidates:
-        return list(f.candidates)
-    if f.px is None or f.py is None:
-        return []
-    return [BlobCandidate(
-        px=float(f.px), py=float(f.py),
-        area=0, area_score=0.0,
-        aspect=None, fill=None, cost=None,
-    )]
+    `frame.candidates`. Frames with `candidates=None` / `[]` are NOT
+    paired — pairing operates strictly on the candidate list. Previous
+    revisions synthesized a single-candidate stand-in from `frame.px /
+    frame.py` with `cost=None`; that silent fallback bypassed the
+    `cost > _EMIT_COST_CEILING` gate (None comparison short-circuits to
+    False) and contaminated the emitted point set with frames that
+    never went through the scoring pass. Per CLAUDE.md
+    'Experimental phase — 禁止 silent fallback', a frame without
+    explicit candidates produces zero triangulated points, full
+    stop."""
+    return list(f.candidates) if f.candidates else []
 
 
 def _valid_frame(f: FramePayload) -> bool:
-    """A frame is pair-able iff it has at least one usable candidate
-    (real or synthesized from a resolved winner — see
-    `_frame_candidates`)."""
+    """A frame is pair-able iff it has at least one explicit candidate
+    on `frame.candidates`. No synthesis from `frame.px / py` —
+    see `_frame_candidates`."""
     return bool(_frame_candidates(f))
 
 

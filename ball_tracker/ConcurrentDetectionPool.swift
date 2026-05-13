@@ -41,8 +41,16 @@ final class ConcurrentDetectionPool {
     private let maxBacklog: Int
     private let detectionQueue: DispatchQueue
     private let stateLock = NSLock()
-    private var hsvRange: ServerUploader.HSVRangePayload = .tennis
-    private var shapeGate: ServerUploader.ShapeGatePayload = .default
+    /// Nil until the dashboard pushes the active HSV preset over the WS
+    /// settings channel. Boot-defaulting to `.tennis` was a silent
+    /// fallback — a blue-ball session that armed before the first settings
+    /// push would run with tennis thresholds and produce zero candidates
+    /// for the entire race window. We now drop frames explicitly (bumping
+    /// `droppedFrameCount`) until both snapshots are populated, so the
+    /// HUD surfaces the mismatch instead of polluting the live bucket
+    /// with wrong-preset detections.
+    private var hsvRange: ServerUploader.HSVRangePayload?
+    private var shapeGate: ServerUploader.ShapeGatePayload?
 
     private var currentGeneration: Int = 0
     private var callIndex: Int = 0
@@ -64,6 +72,16 @@ final class ConcurrentDetectionPool {
     /// already at `maxBacklog` (the frame is dropped + counter bumped).
     func enqueue(pixelBuffer: CVPixelBuffer, timestampS: TimeInterval) -> Bool {
         stateLock.lock()
+        // Refuse to run detection until both HSV preset + shape gate have
+        // been pushed from the dashboard. Boot-defaulting to a hardcoded
+        // preset would silently mis-detect under a different active preset
+        // (e.g. blue_ball session running with tennis thresholds during
+        // the WS-push race window).
+        guard let hsvSnapshot = hsvRange, let shapeSnapshot = shapeGate else {
+            droppedFrameCount += 1
+            stateLock.unlock()
+            return false
+        }
         if inFlightCount >= maxBacklog {
             droppedFrameCount += 1
             stateLock.unlock()
@@ -72,8 +90,6 @@ final class ConcurrentDetectionPool {
         inFlightCount += 1
         let gen = currentGeneration
         let index = callIndex
-        let hsvSnapshot = hsvRange
-        let shapeSnapshot = shapeGate
         callIndex += 1
         stateLock.unlock()
 

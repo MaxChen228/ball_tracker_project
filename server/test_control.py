@@ -1548,7 +1548,7 @@ def test_record_merges_live_frames_into_single_camera_pitch(tmp_path):
         frame_index=3,
         timestamp_s=0.125,
         ball_detected=True,
-        candidates=[BlobCandidate(px=123.0, py=456.0, area=100, area_score=1.0)],
+        candidates=[BlobCandidate(px=123.0, py=456.0, area=100, area_score=1.0, aspect=1.0, fill=0.68)],
     )
     s.ingest_live_frame("A", sid(92), live_frame)
     s.mark_live_path_ended("A", sid(92), "disarmed")
@@ -1577,11 +1577,11 @@ def test_session_stop_flushes_live_frames_without_pitch_upload(tmp_path):
 
     s.ingest_live_frame("A", session_id, main.FramePayload(
         frame_index=1, timestamp_s=0.1, ball_detected=True,
-        candidates=[BlobCandidate(px=10.0, py=20.0, area=100, area_score=1.0)],
+        candidates=[BlobCandidate(px=10.0, py=20.0, area=100, area_score=1.0, aspect=1.0, fill=0.68)],
     ))
     s.ingest_live_frame("A", session_id, main.FramePayload(
         frame_index=2, timestamp_s=0.2, ball_detected=True,
-        candidates=[BlobCandidate(px=11.0, py=21.0, area=100, area_score=1.0)],
+        candidates=[BlobCandidate(px=11.0, py=21.0, area=100, area_score=1.0, aspect=1.0, fill=0.68)],
     ))
 
     # No /pitch upload arrives. Operator presses Stop.
@@ -1610,7 +1610,7 @@ def test_session_stop_drops_live_frames_without_anchor(tmp_path):
 
     s.ingest_live_frame("A", session_id, main.FramePayload(
         frame_index=1, timestamp_s=0.1, ball_detected=True,
-        candidates=[BlobCandidate(px=10.0, py=20.0, area=100, area_score=1.0)],
+        candidates=[BlobCandidate(px=10.0, py=20.0, area=100, area_score=1.0, aspect=1.0, fill=0.68)],
     ))
     s.stop_session()
 
@@ -1630,7 +1630,7 @@ def test_session_timeout_flushes_live_frames(tmp_path):
 
     s.ingest_live_frame("B", session_id, main.FramePayload(
         frame_index=7, timestamp_s=0.7, ball_detected=True,
-        candidates=[BlobCandidate(px=99.0, py=88.0, area=100, area_score=1.0)],
+        candidates=[BlobCandidate(px=99.0, py=88.0, area=100, area_score=1.0, aspect=1.0, fill=0.68)],
     ))
 
     # Push past timeout, then poll — first poll triggers timeout + flush.
@@ -1668,7 +1668,7 @@ def test_set_calibration_invalidates_cached_live_camera_pose(tmp_path):
     # First ingest populates the per-cam cached pose with the initial K.
     s.ingest_live_frame("A", session_id, main.FramePayload(
         frame_index=1, timestamp_s=0.0, ball_detected=True,
-        candidates=[BlobCandidate(px=100.0, py=100.0, area=50, area_score=1.0)],
+        candidates=[BlobCandidate(px=100.0, py=100.0, area=50, area_score=1.0, aspect=1.0, fill=0.68)],
     ))
     pairing_a = s._live_pairings[session_id]
     pose_initial = pairing_a.camera_pose("A")
@@ -1688,7 +1688,7 @@ def test_set_calibration_invalidates_cached_live_camera_pose(tmp_path):
     # silently kept the stale K because cached.image_wh == live_dims.
     s.ingest_live_frame("A", session_id, main.FramePayload(
         frame_index=2, timestamp_s=0.005, ball_detected=True,
-        candidates=[BlobCandidate(px=100.0, py=100.0, area=50, area_score=1.0)],
+        candidates=[BlobCandidate(px=100.0, py=100.0, area=50, area_score=1.0, aspect=1.0, fill=0.68)],
     ))
     pose_after = pairing_a.camera_pose("A")
     assert pose_after is not None
@@ -1722,7 +1722,7 @@ def test_ingest_live_frame_scales_K_to_720p_when_runtime_capture_height_is_720(t
 
     s.ingest_live_frame("A", session_id, main.FramePayload(
         frame_index=1, timestamp_s=0.0, ball_detected=True,
-        candidates=[BlobCandidate(px=100.0, py=100.0, area=50, area_score=1.0)],
+        candidates=[BlobCandidate(px=100.0, py=100.0, area=50, area_score=1.0, aspect=1.0, fill=0.68)],
     ))
     pose = s._live_pairings[session_id].camera_pose("A")
     assert pose is not None
@@ -1837,6 +1837,17 @@ def test_settings_message_includes_server_authoritative_sync_status():
     msg = main._settings_message_for("A")
     assert msg["device_time_synced"] is True
     assert msg["device_time_sync_id"] == "sy_deadbeef"
+
+
+def test_settings_message_excludes_algorithm_id():
+    """`algorithm_id` is intentionally absent from the WS settings push:
+    iOS live is v11_hsv_cc-only (CLAUDE.md) and CameraCommandRouter has
+    no consumer for it. The dashboard reads it from /status JSON
+    instead. Pin so a future "let's just push it too" addition trips
+    here. Key list also lives in docs/protocols.md (WS settings) — keep
+    both in lockstep."""
+    msg = main._settings_message_for("A")
+    assert "algorithm_id" not in msg
 
 
 def test_setup_page_no_longer_renders_preview_marker_count_chip():
@@ -2106,6 +2117,7 @@ def _minimal_pitch(camera_id: str, session_id: str) -> main.PitchPayload:
     for `State.record` to run, not enough for triangulation. Frames are
     populated to keep `events()` counts meaningful without going through
     the /pitch detection path."""
+    from schemas import BlobCandidate
     return main.PitchPayload(
         camera_id=camera_id,
         session_id=session_id,
@@ -2119,6 +2131,10 @@ def _minimal_pitch(camera_id: str, session_id: str) -> main.PitchPayload:
                 timestamp_s=0.0,
                 px=100.0, py=100.0,
                 ball_detected=True,
+                candidates=[BlobCandidate(
+                    px=100.0, py=100.0, area=100, area_score=1.0,
+                    aspect=1.0, fill=0.68,
+                )],
             ),
         ]},
         active_server_post_algorithm_id="v11_hsv_cc",

@@ -262,6 +262,195 @@ def test_runtime_settings_missing_required_field_raises(tmp_path):
         RuntimeSettingsStore(settings_path, atomic_write=_atomic_write)
 
 
+# ---------------------------------------------------------------------------
+# 6. pairing.py — frame.candidates is the sole source for fan-out
+# ---------------------------------------------------------------------------
+
+
+def test_pairing_no_synthetic_candidate_from_px_py():
+    """`_frame_candidates` must NOT synthesize a stand-in BlobCandidate
+    from `frame.px / frame.py` when `frame.candidates` is empty. The
+    previous synthesis carried cost=None which bypassed the cost
+    ceiling gate (None > x → False), letting frames that never went
+    through the selector contaminate triangulation. Per CLAUDE.md
+    silent-fallback rule, frames without explicit candidates produce
+    zero triangulated points."""
+    from schemas import FramePayload
+    from pairing import _frame_candidates, _valid_frame
+
+    # Frame with px/py but no candidates list — used to synth a stand-in.
+    f = FramePayload(
+        frame_index=0, timestamp_s=0.0,
+        px=100.0, py=200.0,
+        ball_detected=True,
+    )
+    assert _frame_candidates(f) == [], (
+        "frame with px/py but no candidates must produce empty list — "
+        "synthetic stand-in reintroduced?"
+    )
+    assert _valid_frame(f) is False
+
+
+# ---------------------------------------------------------------------------
+# 7. detection_paths.algorithm_id_for_path — no legacy fallback
+# ---------------------------------------------------------------------------
+
+
+def test_algorithm_id_for_path_raises_when_server_post_pointer_missing():
+    """`algorithm_id_for_path(pitch, server_post)` MUST raise when
+    `pitch.active_server_post_algorithm_id is None`. The legacy
+    fallback (`return _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID`) was a silent
+    drop into the v11_hsv_cc bucket — that contradicted the
+    `frames_server_post` computed_field docstring which already states
+    'no silent fallback to a legacy bucket'."""
+    import pytest
+    from detection_paths import algorithm_id_for_path
+    from schemas import BlobCandidate, DetectionPath, FramePayload, PitchPayload
+
+    p = PitchPayload(
+        camera_id="A",
+        session_id="s_deadbeef",
+        sync_id="sy_deadbeef",
+        sync_anchor_timestamp_s=0.0,
+        video_start_pts_s=0.0,
+        video_fps=240.0,
+        frames_by_algorithm={"ios_capture_time": [
+            FramePayload(
+                frame_index=0, timestamp_s=0.0, ball_detected=True,
+                candidates=[BlobCandidate(
+                    px=10.0, py=20.0, area=100, area_score=1.0,
+                    aspect=1.0, fill=0.68,
+                )],
+            )
+        ]},
+        # No active_server_post_algorithm_id set.
+    )
+    # live path resolves cleanly.
+    assert algorithm_id_for_path(p, DetectionPath.live) == "ios_capture_time"
+    # server_post raises.
+    with pytest.raises(ValueError, match="active_server_post_algorithm_id"):
+        algorithm_id_for_path(p, DetectionPath.server_post)
+
+
+# ---------------------------------------------------------------------------
+# 8. BlobCandidate.aspect / fill — required
+# ---------------------------------------------------------------------------
+
+
+def test_blob_candidate_aspect_required():
+    """`BlobCandidate.aspect` is required. Treating None as zero
+    penalty in the selector let unscored candidates win on tie-break."""
+    import pytest
+    from pydantic import ValidationError
+    from schemas import BlobCandidate
+
+    with pytest.raises(ValidationError):
+        BlobCandidate(px=1.0, py=2.0, area=100, area_score=1.0, fill=0.68)
+
+
+def test_blob_candidate_fill_required():
+    import pytest
+    from pydantic import ValidationError
+    from schemas import BlobCandidate
+
+    with pytest.raises(ValidationError):
+        BlobCandidate(px=1.0, py=2.0, area=100, area_score=1.0, aspect=1.0)
+
+
+# ---------------------------------------------------------------------------
+# 9. HSVRangePayload / ShapeGatePayload — Field bounds enforced
+# ---------------------------------------------------------------------------
+
+
+def test_hsv_range_payload_rejects_hue_above_179():
+    """OpenCV's `cv2.inRange` interprets hue in 0-179 (each step = 2°).
+    A 0-360 input from a UI picker MUST be rejected at the boundary —
+    silently wrapping 210 to 30 (the green band) used to be a real
+    silent-drift failure mode."""
+    import pytest
+    from pydantic import ValidationError
+    from schemas import HSVRangePayload
+
+    with pytest.raises(ValidationError):
+        HSVRangePayload(h_min=0, h_max=210, s_min=0, s_max=255,
+                        v_min=0, v_max=255)
+
+
+def test_hsv_range_payload_rejects_negative_hue():
+    import pytest
+    from pydantic import ValidationError
+    from schemas import HSVRangePayload
+
+    with pytest.raises(ValidationError):
+        HSVRangePayload(h_min=-1, h_max=100, s_min=0, s_max=255,
+                        v_min=0, v_max=255)
+
+
+def test_hsv_range_payload_rejects_saturation_above_255():
+    import pytest
+    from pydantic import ValidationError
+    from schemas import HSVRangePayload
+
+    with pytest.raises(ValidationError):
+        HSVRangePayload(h_min=0, h_max=100, s_min=0, s_max=300,
+                        v_min=0, v_max=255)
+
+
+def test_shape_gate_payload_rejects_aspect_above_one():
+    import pytest
+    from pydantic import ValidationError
+    from schemas import ShapeGatePayload
+
+    with pytest.raises(ValidationError):
+        ShapeGatePayload(aspect_min=2.0, fill_min=0.5)
+
+
+def test_shape_gate_payload_rejects_negative_fill():
+    import pytest
+    from pydantic import ValidationError
+    from schemas import ShapeGatePayload
+
+    with pytest.raises(ValidationError):
+        ShapeGatePayload(aspect_min=0.7, fill_min=-0.1)
+
+
+# ---------------------------------------------------------------------------
+# 10. state.stamp_server_post_config — returns None on store_result race
+# ---------------------------------------------------------------------------
+
+
+def test_stamp_server_post_config_returns_none_when_session_deleted(tmp_path):
+    """`stamp_server_post_config` previously returned an empty
+    SessionResult shell when the session was deleted between record()
+    and the stamp call. The caller in routes/pitch.py used that shell
+    to broadcast a `fit` SSE — segments from a result that never
+    landed in `state.results`. Now it must return None and the caller
+    must skip the broadcast."""
+    from state import State
+    s = State(data_dir=tmp_path)
+    # No record() ever called for this sid → results dict empty.
+    from schemas import DetectionConfigSnapshotPayload
+    snap = DetectionConfigSnapshotPayload(
+        algorithm_id="v11_hsv_cc",
+        params={
+            "hsv": {"h_min": 10, "h_max": 20, "s_min": 30, "s_max": 200, "v_min": 40, "v_max": 210},
+            "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+        },
+        preset_name=None,
+    )
+    result = s.stamp_server_post_config("s_neverexisted", snap)
+    assert result is None, (
+        "stamp_server_post_config must return None when the session is "
+        "missing — silent SessionResult shell would mislead callers into "
+        "broadcasting `fit` SSE for a non-existent result."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Originally-positioned: state_runtime range guard (kept below).
+# ---------------------------------------------------------------------------
+
+
 def test_runtime_settings_out_of_range_value_raises(tmp_path):
     """A field present but out of the validated range must raise —
     silent clamp or revert would hide operator misconfig."""

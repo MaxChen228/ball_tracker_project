@@ -35,9 +35,10 @@ Each component is normalized into [0, 1]:
 - `fill_pen` — `|fill - 0.68|` normalized; 0.68 is the empirical
   median for the project ball.
 
-Unknown shape (`aspect=None` or `fill=None`) maps to **zero penalty**
-on that axis. Production captures populate both fields — None only
-appears on historical pitch JSONs that predate aspect/fill persistence.
+`aspect` and `fill` are required on every candidate. Treating `None`
+as zero penalty was a silent fallback that let legacy / synthetic
+candidates score implausibly well; per CLAUDE.md 'Experimental phase
+— 禁止 silent fallback' the selector now refuses unknown shape data.
 
 Weights `_W_ASPECT` / `_W_FILL` were a runtime tunable
 (`CandidateSelectorTuning`) until the selector retirement. Locked as
@@ -70,12 +71,13 @@ class Candidate:
     cx: float
     cy: float
     area: int
-    # Shape stats from the CC bounding box. Production paths (live +
-    # server_post) always populate them; None only appears on historical
-    # pitch JSONs that predate aspect/fill persistence. Cost function
-    # treats None as neutral on that axis.
-    aspect: float | None = None
-    fill: float | None = None
+    # Shape stats from the CC bounding box. Required: production paths
+    # (live + server_post) always populate them, and treating None as
+    # zero penalty was a silent fallback the selector no longer
+    # tolerates. `BlobCandidate.aspect / fill` are also required on the
+    # wire, so the live ingest can never produce a None-shape Candidate.
+    aspect: float
+    fill: float
 
 
 def score_candidates(candidates: list[Candidate]) -> list[float]:
@@ -91,15 +93,7 @@ def score_candidates(candidates: list[Candidate]) -> list[float]:
     aspect_denom = max(1.0 - _ASPECT_PEN_FLOOR, 1e-6)
     out: list[float] = []
     for c in candidates:
-        if c.aspect is None:
-            aspect_pen = 0.0
-        else:
-            aspect_pen = max(0.0, min((1.0 - c.aspect) / aspect_denom, 1.0))
-
-        if c.fill is None:
-            fill_pen = 0.0
-        else:
-            fill_pen = min(abs(c.fill - _FILL_TYPICAL) / _FILL_TYPICAL, 1.0)
-
+        aspect_pen = max(0.0, min((1.0 - c.aspect) / aspect_denom, 1.0))
+        fill_pen = min(abs(c.fill - _FILL_TYPICAL) / _FILL_TYPICAL, 1.0)
         out.append(_W_ASPECT * aspect_pen + _W_FILL * fill_pen)
     return out

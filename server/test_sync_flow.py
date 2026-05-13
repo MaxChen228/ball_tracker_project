@@ -118,7 +118,8 @@ def test_flush_live_frames_synthesises_pitch_with_calibration(tmp_path, monkeypa
         FramePayload(
             frame_index=0, timestamp_s=42.1, ball_detected=True,
             candidates=[{"px": 100.0, "py": 200.0, "area": 50,
-                         "area_score": 1.0}],
+                         "area_score": 1.0,
+                         "aspect": 1.0, "fill": 0.68}],
         ),
     )
     main.state.flush_live_frames_for_session(sid)

@@ -89,12 +89,11 @@ def video_cell_html(
     cam_view_attrs = ""
     if entry is not None:
         # Layers: PLATE + AXES (calibration overlays) + one BLOBS layer
-        # per detection path. Toolbar lives outside the cell as a single
-        # shared bar above the videos column (see
-        # `cam_view_shared_toolbar_html`); the per-cam toolbar was
-        # retired in v4 because the operator never wanted to set A and B
-        # to different overlay states — left/right physical placement
-        # already encodes the cam axis.
+        # per detection path. The per-cam toolbar was retired in v4
+        # because the operator never wanted to set A and B to different
+        # overlay states — left/right physical placement already encodes
+        # the cam axis. The shared toolbar is now rendered client-side
+        # by 50_renderers.js (no SSR helper).
         cam_view_attrs = (
             f' data-cam-view="{cam}"'
             ' data-no-badges'
@@ -111,25 +110,6 @@ def video_cell_html(
         f"</div>"
         f"{body}"
         f"</div>"
-    )
-
-
-def cam_view_shared_toolbar_html() -> str:
-    """Shared 2D-overlay control bar for both cam panels. Click handlers
-    in 70_handlers.js fan setLayer / setOpacity calls out to every cam
-    that has cam-view mounted, keeping A and B in sync. PLATE / AXES /
-    BLOBS are independent on/off pills; the BLOBS data path comes from
-    the global PATH selector on the 3D toolbar."""
-    return (
-        '<div class="cam-view-shared-toolbar" data-cam-view-shared>'
-        '<button type="button" class="cv-layer on" data-layer="plate">PLATE</button>'
-        '<button type="button" class="cv-layer" data-layer="axes">AXES</button>'
-        '<button type="button" class="cv-layer on" data-layer="detection_blobs"'
-        ' aria-checked="true">BLOBS</button>'
-        '<span class="cv-opacity">OVL'
-        '<input type="range" min="0" max="100" step="1" value="65" aria-label="Overlay opacity">'
-        '</span>'
-        '</div>'
     )
 
 

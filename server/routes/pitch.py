@@ -442,20 +442,35 @@ async def _run_server_detection(
     # Wrapped like `broadcast_done` so a broadcast failure can't strand
     # the proc job state — leaking a stuck job is worse than dropping
     # one repaint event.
-    try:
-        await sse_hub.broadcast(
-            "fit",
-            {
-                "sid": sid,
-                "cause": "server_post",
-                "segments": [s.model_dump() for s in result.segments],
-                "gap_threshold_m": result.gap_threshold_m,
-            },
-        )
-    except Exception as exc:
+    #
+    # `result` is None when stamp_server_post_config hit a race-guard
+    # (session deleted between record() and stamp). Skip the `fit`
+    # broadcast — there's no in-memory result to fan segments out from,
+    # and emitting empty segments would mislead the dashboard into
+    # thinking detection completed for a session that no longer exists.
+    # We still run the cancel/finish paths so the job state doesn't
+    # leak.
+    if result is not None:
+        try:
+            await sse_hub.broadcast(
+                "fit",
+                {
+                    "sid": sid,
+                    "cause": "server_post",
+                    "segments": [s.model_dump() for s in result.segments],
+                    "gap_threshold_m": result.gap_threshold_m,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "fit broadcast failed sid=%s cam=%s err=%s",
+                sid, cam, exc,
+            )
+    else:
         logger.warning(
-            "fit broadcast failed sid=%s cam=%s err=%s",
-            sid, cam, exc,
+            "fit broadcast skipped sid=%s cam=%s — session deleted "
+            "during server_post stamp",
+            sid, cam,
         )
     await broadcast_done("ok", len(frames))
     proc.finish_server_post_job(sid, cam, canceled=False)

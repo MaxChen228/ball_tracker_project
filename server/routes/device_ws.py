@@ -309,7 +309,30 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        # Reconnect-race guard. Order matters: call `disconnect()` FIRST,
+        # then snapshot. `DeviceSocketManager.disconnect(cam, ws)` is
+        # identity-guarded — it pops `_sockets[cam]` only when the current
+        # entry IS our `ws`; if a newer connect() already replaced us, the
+        # call is a no-op and `_sockets[cam]` keeps the newer socket.
+        #
+        # Reading snapshot AFTER disconnect therefore tells us cleanly:
+        #   - normal disconnect: our entry popped → connected=False →
+        #     broadcast offline + clear preview ✓
+        #   - reconnect race:    no-op disconnect → newer entry still
+        #     present → connected=True → bail (newer connect() already
+        #     broadcast online=True) ✓
+        #
+        # If we snapshot BEFORE disconnect, our own still-occupying socket
+        # makes `connected=True` unconditionally, so the guard would skip
+        # offline broadcast on every normal disconnect — exactly the bug
+        # this guard was added to prevent.
         device_ws.disconnect(camera_id, websocket)
+        snap = device_ws.snapshot().get(camera_id)
+        if snap is not None and snap.connected:
+            # Reconnect race: newer ws already replaced ours, disconnect()
+            # was a no-op. Bail before painting offline — the newer
+            # connect() path already broadcast online=True.
+            return
         # Dashboard `/status` derives online-ness from `Device.last_seen_at`
         # with a 3 s stale window, so without this the UI keeps painting the
         # cam as online for up to 3 s after the phone sleeps / drops WS.

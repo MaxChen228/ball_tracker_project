@@ -54,17 +54,15 @@ def test_fill_prior_prefers_typical():
     assert costs[0] < costs[1]
 
 
-def test_unknown_aspect_fill_is_neutral():
-    """`aspect=None` / `fill=None` (legacy persisted JSONs predating
-    aspect/fill capture) contribute 0 to both penalties — explicit
-    neutral-default per module docstring."""
-    a = Candidate(cx=0, cy=0, area=452, aspect=None, fill=None)
-    b = Candidate(cx=0, cy=0, area=452, aspect=1.0, fill=0.68)
-    costs = score_candidates([a, b])
-    # `a` reduces to 0 + 0 (both axes neutral). `b` is also at the
-    # ideal aspect=1 / fill=0.68, so its cost is also 0. Equal.
-    assert abs(costs[0] - costs[1]) < 1e-9
-    assert costs[0] < 1e-9
+def test_candidate_rejects_missing_shape_stats():
+    """Per CLAUDE.md silent-fallback rule, `Candidate.aspect / fill` are
+    required dataclass fields. Constructing a Candidate without them
+    must raise TypeError — previously they defaulted to None and the
+    selector scored them as zero penalty, which let distractors with
+    no shape data tie the real ball at cost=0."""
+    import pytest
+    with pytest.raises(TypeError):
+        Candidate(cx=0, cy=0, area=452)
 
 
 def test_costs_in_unit_interval():

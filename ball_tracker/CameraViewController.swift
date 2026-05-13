@@ -110,8 +110,11 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     // UI containers. Preview stays full-screen; a small overlay panel exposes
     // role, link, and preview status.
     private var currentSessionPaths: Set<ServerUploader.DetectionPath> = [.serverPost]
-    private var currentHSVRange: ServerUploader.HSVRangePayload = .tennis
-    private var currentShapeGate: ServerUploader.ShapeGatePayload = .default
+    // Nil until the dashboard pushes the active preset; see
+    // ConcurrentDetectionPool for the matching refuse-until-pushed gate
+    // that prevents detection from running with a hardcoded boot preset.
+    private var currentHSVRange: ServerUploader.HSVRangePayload?
+    private var currentShapeGate: ServerUploader.ShapeGatePayload?
 
     // Haptic feedback generators. Kept as properties so prepare() is
     // honored (trigger latency drops from ~100 ms to <20 ms).

@@ -35,19 +35,16 @@ DEFAULT_ALGORITHM_ID = V11_HSV_CC
 # `config_used_by_algorithm` for the `live` data source. NOT runnable
 # server-side (source pixels live only in the iOS capture buffer; no
 # MOV-equivalent to feed back), so it bypasses `_REGISTRY` and lives in
-# `_NON_RUNNABLE_IDS` instead. `validate_id` accepts it (it's a real id
+# `NON_RUNNABLE_IDS` instead. `validate_id` accepts it (it's a real id
 # seen on disk + wire); `run_detection` rejects it via the registry
 # lookup.
 IOS_CAPTURE_TIME = "ios_capture_time"
 
-_NON_RUNNABLE_IDS: frozenset[str] = frozenset({IOS_CAPTURE_TIME})
-
-# Public alias for callers that need to dispatch on "is this id a non-
-# runnable data source" — e.g. the wire-schema validator skips
-# `Detector.params_schema` round-trip for these ids because they have
-# no Detector. Naming convention matches the rest of the module's
-# public surface (no leading underscore).
-NON_RUNNABLE_IDS = _NON_RUNNABLE_IDS
+# Public set of non-runnable data-source ids — callers that need to
+# dispatch on "is this id a non-runnable data source" (e.g. the wire-
+# schema validator skipping `Detector.params_schema` round-trip because
+# there's no Detector) read this directly.
+NON_RUNNABLE_IDS: frozenset[str] = frozenset({IOS_CAPTURE_TIME})
 
 # Cost threshold for the iOS capture-time data source. The live pipeline
 # uses the same `score_candidates` cost function as v11_hsv_cc (both
@@ -182,7 +179,7 @@ def cost_threshold_for_algorithm(algorithm_id: str) -> float:
         return entry.cost_threshold
     if algorithm_id == IOS_CAPTURE_TIME:
         return IOS_CAPTURE_TIME_COST_THRESHOLD
-    known = sorted(set(_REGISTRY) | _NON_RUNNABLE_IDS)
+    known = sorted(set(_REGISTRY) | NON_RUNNABLE_IDS)
     raise ValueError(
         f"unknown algorithm_id {algorithm_id!r} (known: {known})"
     )
@@ -196,7 +193,7 @@ def list_all() -> list[AlgorithmEntry]:
 def validate_id(algorithm_id: str) -> None:
     """Raise `ValueError` if `algorithm_id` is not a known wire / disk
     identity. Accepts both server-runnable algorithms (`_REGISTRY`) and
-    non-runnable data-source ids (`_NON_RUNNABLE_IDS`, e.g.
+    non-runnable data-source ids (`NON_RUNNABLE_IDS`, e.g.
     `ios_capture_time`).
 
     Use this when you only need to validate that a string is a real
@@ -210,9 +207,9 @@ def validate_id(algorithm_id: str) -> None:
         raise ValueError(
             f"invalid algorithm_id {algorithm_id!r}: must match [a-z0-9_]{{1,32}}"
         )
-    if algorithm_id in _REGISTRY or algorithm_id in _NON_RUNNABLE_IDS:
+    if algorithm_id in _REGISTRY or algorithm_id in NON_RUNNABLE_IDS:
         return
-    known = sorted(set(_REGISTRY) | _NON_RUNNABLE_IDS)
+    known = sorted(set(_REGISTRY) | NON_RUNNABLE_IDS)
     raise ValueError(
         f"unknown algorithm_id {algorithm_id!r} (known: {known})"
     )

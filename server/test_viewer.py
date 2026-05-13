@@ -63,6 +63,9 @@ def _project_pixels(K, R, t, P_world):
 
 
 def _pitch(cam_id, cycle, K, R, t, H, P_trajectory):
+    # Pairing reads `frame.candidates` exclusively (CLAUDE.md silent-
+    # fallback rule: no synth from px/py). Fixture supplies a single
+    # round-ball candidate per frame.
     frames = []
     for i, P in enumerate(P_trajectory):
         u, v = _project_pixels(K, R, t, P)
@@ -72,6 +75,10 @@ def _pitch(cam_id, cycle, K, R, t, H, P_trajectory):
                 timestamp_s=float(i) / 240.0,
                 px=u, py=v,
                 ball_detected=True,
+                candidates=[schemas.BlobCandidate(
+                    px=u, py=v, area=100, area_score=1.0,
+                    aspect=1.0, fill=0.68,
+                )],
             )
         )
     return schemas.PitchPayload(
@@ -161,6 +168,10 @@ def test_build_scene_includes_persisted_live_rays():
             px=u,
             py=v,
             ball_detected=True,
+            candidates=[schemas.BlobCandidate(
+                px=u, py=v, area=100, area_score=1.0,
+                aspect=1.0, fill=0.68,
+            )],
         )
     ]
 
@@ -502,17 +513,19 @@ def _record_pitch(pitch: main.PitchPayload) -> None:
     main.state.record(pitch)
 
 
-def test_reconstruction_endpoint_returns_scene_shape():
+def test_scene_builder_returns_scene_shape():
+    """`_scene_for_session` is the in-process scene builder shared by
+    `/viewer/{id}` SSR. The removed `/reconstruction/{id}` JSON
+    endpoint was a thin `.to_dict()` wrapper around it; this test
+    pins the underlying scene shape directly."""
+    from routes.viewer import _scene_for_session
     K, (R_a, t_a, _, H_a), _ = _make_rig()
     session_id = sid(701)
     pitch = _pitch("A", 701, K, R_a, t_a, H_a, np.array([[0.1, 0.3, 1.0]]))
-    client = TestClient(app)
 
     _record_pitch(pitch)
 
-    r = client.get(f"/reconstruction/{session_id}")
-    assert r.status_code == 200
-    body = r.json()
+    body = _scene_for_session(session_id).to_dict()
     assert body["session_id"] == session_id
     assert len(body["cameras"]) == 1
     assert body["cameras"][0]["camera_id"] == "A"
@@ -520,10 +533,12 @@ def test_reconstruction_endpoint_returns_scene_shape():
     assert body["triangulated"] == []
 
 
-def test_reconstruction_endpoint_unknown_session_returns_404():
-    client = TestClient(app)
-    r = client.get(f"/reconstruction/{sid('deadbeef')}")
-    assert r.status_code == 404
+def test_scene_builder_unknown_session_raises_404():
+    from fastapi import HTTPException
+    from routes.viewer import _scene_for_session
+    with pytest.raises(HTTPException) as ei:
+        _scene_for_session(sid("deadbeef"))
+    assert ei.value.status_code == 404
 
 
 def test_viewer_endpoint_returns_threejs_html():
@@ -1864,9 +1879,9 @@ def test_stream_includes_cost_for_live_candidates():
         ball_detected=True,
         candidates=[
             schemas.BlobCandidate(px=120.0, py=100.0, area=80,
-                                  area_score=0.4, cost=0.18),
+                                  area_score=0.4, cost=0.18, aspect=1.0, fill=0.68),
             schemas.BlobCandidate(px=500.0, py=500.0, area=200,
-                                  area_score=1.0, cost=0.91),
+                                  area_score=1.0, cost=0.91, aspect=1.0, fill=0.68),
         ],
     )
     out = _stream([frame], 0.0, include_candidates=True)
@@ -1894,9 +1909,9 @@ def test_stream_includes_cost_for_server_post_candidates():
         ball_detected=True,
         candidates=[
             schemas.BlobCandidate(px=10.0, py=20.0, area=120,
-                                  area_score=1.0, cost=0.05),
+                                  area_score=1.0, cost=0.05, aspect=1.0, fill=0.68),
             schemas.BlobCandidate(px=300.0, py=400.0, area=80,
-                                  area_score=0.66, cost=0.42),
+                                  area_score=0.66, cost=0.42, aspect=1.0, fill=0.68),
         ],
     )
     out = _stream([frame], 0.0, include_candidates=True)
@@ -1936,7 +1951,7 @@ def test_stream_legacy_candidates_without_cost_become_null():
         ball_detected=True,
         candidates=[
             schemas.BlobCandidate(px=10.0, py=10.0, area=80,
-                                  area_score=0.4),  # no cost
+                                  area_score=0.4, aspect=1.0, fill=0.68),  # no cost
         ],
     )
     out = _stream([frame], 0.0, include_candidates=True)
@@ -1947,13 +1962,11 @@ def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
     """`video_cell_html` (the SSR builder for each cam pane) declares the
     layer set (PLATE + AXES + LIVE BLOBS + SVR BLOBS) but no longer
     embeds a per-cam toolbar — v4 collapsed both cams' toolbars into a
-    single shared bar above the videos column. The cell ships only the
-    cam-view runtime hooks (data-layers / data-layers-on) so the
-    runtime can mount per-cam state from the shared bar's clicks."""
-    from viewer_fragments import (
-        cam_view_shared_toolbar_html,
-        video_cell_html,
-    )
+    single shared bar above the videos column (now client-side in
+    50_renderers.js). The cell ships only the cam-view runtime hooks
+    (data-layers / data-layers-on) so the runtime can mount per-cam
+    state from the shared bar's clicks."""
+    from viewer_fragments import video_cell_html
     body = video_cell_html(
         "A",
         ("/videos/example.mov", 0.0),
@@ -1969,13 +1982,6 @@ def test_video_cell_renders_path_grouped_toolbar_no_k_slider():
     assert 'class="cv-path-group"' not in body
     assert 'class="cv-opacity"' not in body
     assert 'data-layer="detection_blobs"' not in body
-    # Shared toolbar carries the single BLOBS pill + OVL slider.
-    bar = cam_view_shared_toolbar_html()
-    assert 'data-layer="detection_blobs"' in bar
-    # v5 split-path BLOBS markup is gone.
-    assert 'data-layer="detection_blobs_live"' not in bar
-    assert 'data-layer="detection_blobs_svr"' not in bar
-    assert 'data-blobs-group' not in bar
     # Winner-dot / K slider relics from the pre-v4 era.
     assert 'data-layer="detection_live"' not in body
     assert 'data-layer="detection_svr"' not in body
