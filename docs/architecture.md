@@ -45,7 +45,7 @@ Hydration: initial SSR paints every panel + canvas, then three JS ticks keep eve
 
 ## Dashboard control plane
 
-**Single-lock model**: `state._lock` is a non-reentrant `Lock` that serialises all store access (100+ `with self._lock` call sites across `state.py` — 2600+ lines after split-outs to `state_events.py` / `session_results.py` / `detection_paths.py` in PR #117 / #119, still the largest single module). Per-store facades on `State` (settings / calibration / runtime) are synchronisation boundaries, not vestigial pass-through — the underlying stores are deliberately not thread-safe in isolation, so deleting a facade and pointing callers at the inner store would silently lose synchronisation. `_marker_registry` / `_preview` carry their own internal locks separate from `_lock`. See the `class State` docstring in `state.py`.
+**Single-lock model**: `state._lock` is a non-reentrant `Lock` that serialises all store access (100+ `with self._lock` call sites across `state.py` and its split-out modules (`state_events.py` / `state_calibration.py` / `state_devices.py` / `state_processing.py` / `state_runtime.py` / `state_sync.py`) — `state.py` itself is 2600+ lines after the split-outs in PR #117 / #119 and is still the largest single module). Per-store facades on `State` (settings / calibration / runtime) are synchronisation boundaries, not vestigial pass-through — the underlying stores are deliberately not thread-safe in isolation, so deleting a facade and pointing callers at the inner store would silently lose synchronisation. `_marker_registry` / `_preview` carry their own internal locks separate from `_lock`. See the `class State` docstring in `state.py`.
 
 `State` owns three pieces of in-memory state (all reset on server restart):
 

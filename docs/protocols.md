@@ -143,7 +143,7 @@ hsv_range: {h_min,h_max,s_min,s_max,v_min,v_max}  # from data/detection_config.j
 shape_gate: {aspect_min, fill_min}   # from data/detection_config.json (POST /detection/config)
 chirp_detect_threshold: float        # matched-filter cutoff for legacy chirp-listener path; data/runtime_settings.json key "chirp_detect_threshold"
 heartbeat_interval_s: float          # cadence iOS uses for upstream {type:"heartbeat"}; data/runtime_settings.json key "heartbeat_interval_s"
-tracking_exposure_cap: str           # TrackingExposureCapMode enum: "auto" (sensor-controlled) | "capped_2ms" (240 fps motion-freeze) | other registered values; data/runtime_settings.json key "tracking_exposure_cap"
+tracking_exposure_cap: str           # TrackingExposureCapMode enum: "frame_duration" (sensor-managed, up to full frame time ≤ 1/fps) | "shutter_500" (1/500 s cap) | "shutter_1000" (1/1000 s cap, 240 fps motion-freeze use case); data/runtime_settings.json key "tracking_exposure_cap"
 capture_height_px: int               # 1080 / 720 etc. — iOS picks the matching 240 fps format; data/runtime_settings.json key "capture_height_px"
 preview_requested: bool              # True while the dashboard's Preview-on toggle is held for this cam
 calibration_frame_requested: bool    # True while /calibration/auto is awaiting a single still from this cam
