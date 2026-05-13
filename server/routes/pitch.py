@@ -401,6 +401,32 @@ async def _run_server_detection(
             sid, cam,
         )
         return
+    # Re-fetch the latest pitch from in-memory state before stamping.
+    # The `pitch` arg is a snapshot taken at `resume_processing()` time,
+    # which can be 30+ seconds old by now (MOV decode is the long pole).
+    # During decode, the live-frames merge path (cycle_end →
+    # persist_live_frames) may have updated
+    # `frames_by_algorithm[ios_capture_time]` on the canonical pitch.
+    # `state.record(merged)` lower down does dict-union with
+    # "incoming wins on key collision" — if we stamp onto the stale
+    # snapshot, the stale `ios_capture_time` bucket overwrites the
+    # fresh live frames. Re-fetch + deep-copy means we carry forward
+    # whatever live merge happened mid-decode.
+    fresh_map = await asyncio.to_thread(state.pitches_for_session, sid)
+    fresh = fresh_map.get(cam)
+    if fresh is None:
+        # Session was deleted (or this cam's pitch evicted) while
+        # detection was running. Abandon the run; nothing to write
+        # back. Treat as a cancel for SSE/UI purposes so the
+        # progress row clears.
+        await broadcast_done("canceled", len(frames))
+        proc.finish_server_post_job(sid, cam, canceled=True)
+        logger.info(
+            "background detection abandoned — pitch disappeared mid-run session=%s cam=%s",
+            sid, cam,
+        )
+        return
+    pitch = fresh.model_copy(deep=True)
     # Stamp the wall-clock for this cam's just-completed run so the
     # SessionResult rebuild picks it up via max(A, B). Only set on
     # success — cancellation / errors above return before this line.
