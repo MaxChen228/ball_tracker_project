@@ -204,12 +204,15 @@ def detection_config_strip_html(
     )
 
 
-def _format_snapshot_params(algorithm_id: str, params: dict) -> str:
+def format_snapshot_params(algorithm_id: str, params: dict) -> str:
     """Per-algorithm tooltip formatter. Mirrors the JS dispatch in
     `60_events_render.js`. Both v11_hsv_cc and ios_capture_time use
     the same `{hsv, shape_gate}` params shape. Unknown algorithms
     return `alg:<id>` rather than crashing — stale snapshots from a
-    deprecated algorithm should still render legibly."""
+    deprecated algorithm should still render legibly.
+
+    Public — also called by dashboard `_cfg_strip_html` so Live/Svr
+    chip tooltips dispatch identically to viewer SVR/LIVE pills."""
     if algorithm_id in ("v11_hsv_cc", "ios_capture_time"):
         h = params["hsv"]
         g = params["shape_gate"]
@@ -264,7 +267,7 @@ def _config_pill_html(
     # render `alg:<id>` (stale snapshot or future detector with no
     # formatter yet).
     algorithm_id = snapshot["algorithm_id"]
-    tip = _format_snapshot_params(algorithm_id, snapshot["params"])
+    tip = format_snapshot_params(algorithm_id, snapshot["params"])
     preset_name = snapshot.get("preset_name")
     prefix = f"{html.escape(algorithm_id)}/" if show_algorithm_prefix else ""
     if preset_name is None:
