@@ -214,7 +214,16 @@ async def presets_create(request: Request) -> dict[str, Any]:
             last_applied_at=None,
             algorithm_id=preset.algorithm_id,
         )
-        state.set_detection_config(cfg)
+        try:
+            state.set_detection_config(cfg)
+        except KeyError:
+            # set_detection_config validates preset existence within
+            # its lock; a concurrent DELETE between save_preset above
+            # and this set call would land us here.
+            raise HTTPException(
+                status_code=409,
+                detail=f"preset {preset.name!r} was deleted concurrently",
+            )
         await device_ws.broadcast(
             {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
         )
@@ -286,13 +295,28 @@ async def presets_set_active(request: Request) -> dict[str, Any]:
             last_applied_at=None,
             algorithm_id=p.algorithm_id,
         )
-        state.set_detection_config(cfg)
+        try:
+            state.set_detection_config(cfg)
+        except KeyError:
+            # set_detection_config re-validates preset existence within
+            # its lock; a concurrent DELETE between the load_preset
+            # above and this set call would land us here.
+            raise HTTPException(
+                status_code=409,
+                detail=f"preset {name!r} was deleted concurrently",
+            )
         await device_ws.broadcast(
             {cam.camera_id: _settings_message_for(cam.camera_id) for cam in state.online_devices()}
         )
     else:
         # target == "server_post"
-        state.set_active_server_post_preset(name)
+        try:
+            state.set_active_server_post_preset(name)
+        except KeyError:
+            raise HTTPException(
+                status_code=409,
+                detail=f"preset {name!r} was deleted concurrently",
+            )
     return {"ok": True, "active": name, "target": target}
 
 

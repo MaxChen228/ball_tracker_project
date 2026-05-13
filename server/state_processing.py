@@ -100,9 +100,6 @@ class SessionProcessingState:
         self.starred_sessions.pop(session_id, None)
         return True
 
-    def star_count(self) -> int:
-        return len(self.starred_sessions)
-
     # ---- Low-level job lifecycle -------------------------------------
 
     def mark_queued(self, key: JobKey) -> None:

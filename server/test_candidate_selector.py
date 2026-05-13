@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 from candidate_selector import Candidate, score_candidates
-from detection import HSVRange, detect_ball, detect_ball_with_candidates
+from detection import HSVRange, ShapeGate, detect_ball, detect_ball_with_candidates
 
 
 def _yg() -> tuple[int, int, int]:
@@ -136,6 +136,8 @@ def test_pipeline_detect_pitch_stamps_candidates_with_cost():
     out = detect_pitch(
         Path("/tmp/fake.mov"),
         video_start_pts_s=0.0,
+        hsv_range=HSVRange.default(),
+        shape_gate=ShapeGate.default(),
         frame_iter=_frame_iter,
     )
     assert len(out) == 1

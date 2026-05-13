@@ -697,11 +697,17 @@ def test_dashboard_shows_deleted_when_bound_preset_removed(tmp_path, monkeypatch
     ))
     main.state.delete_preset("blue_ball")
     # Re-pin live to dangling "blue_ball" name to drive the renderer
-    # branch (the file is gone but the in-memory pointer survives).
-    main.state.set_detection_config(DetectionConfig(
+    # branch. This SIMULATES an external `rm data/presets/blue_ball.json`
+    # while a session was live-bound — the in-memory pointer survives
+    # but the file is gone. `set_detection_config` (correctly) rejects
+    # binding to a missing preset under its lock-held existence check,
+    # so this test reaches into the private field to reproduce the
+    # post-external-rm inconsistent state. The renderer's
+    # `identity-deleted` branch is the safety net for exactly this case.
+    main.state._detection_config = DetectionConfig(
         hsv=bb.hsv, shape_gate=bb.shape_gate,
         preset="blue_ball", last_applied_at=None,
-    ))
+    )
 
     client = TestClient(main.app)
     body = client.get("/").text

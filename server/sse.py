@@ -34,7 +34,3 @@ class SSEHub:
             for queue in stale:
                 self._clients.discard(queue)
 
-    async def client_count(self) -> int:
-        async with self._lock:
-            return len(self._clients)
-

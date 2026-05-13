@@ -42,15 +42,18 @@ def test_pairing_tuning_disk_round_trip(tmp_path, monkeypatch):
     assert t.gap_threshold_m == pytest.approx(0.10)
 
 
-def test_corrupt_tuning_json_falls_back_to_default(tmp_path, monkeypatch):
-    """Per CLAUDE.md no-silent-fallback: corrupt JSON is logged but does
-    NOT propagate to runtime — defaults take over so live ingest stays
-    operational."""
+def test_corrupt_tuning_json_raises_not_silent_default(tmp_path, monkeypatch):
+    """Per CLAUDE.md no-silent-fallback: corrupt `pairing_tuning.json`
+    must raise at boot rather than silently reverting to defaults.
+    Silently restoring `PairingTuning.default()` would contaminate
+    research comparisons across pairing parameter sweeps (operator
+    hand-edits a value, typos, server boots cleanly under defaults but
+    operator believes their edit is active)."""
+    import pytest
     (tmp_path / "pairing_tuning.json").write_text("not json {}")
     import main
-    s = main.State(data_dir=tmp_path)
-    from pairing_tuning import PairingTuning
-    assert s.pairing_tuning() == PairingTuning.default()
+    with pytest.raises(ValueError, match=r"pairing_tuning\.json"):
+        main.State(data_dir=tmp_path)
 
 
 def test_pairing_tuning_json_with_legacy_cost_field_still_loads(tmp_path):
