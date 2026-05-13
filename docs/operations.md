@@ -24,6 +24,7 @@ uv run uvicorn main:app --host 0.0.0.0 --port 8765   # run (prints LAN IP → pa
 uv run pytest                                        # all tests (server + viewer)
 uv run pytest test_triangulation_math.py::test_triangulate_sweeps_ball_path   # single test
 uv run python reprocess_sessions.py --since today                 # re-run detection + triangulation with current data/detection_config.json over today's MOVs (also --session s_xxxx / --all / --dry-run; --use-frozen-snapshot replays each pitch's *_used config)
+uv run python migrations/strip_prepr93_quarantine.py              # one-shot data migration (2026-05-13): rehydrate `data/_quarantine_2026-05-13/` pitches (PR #93 schema tighten); dry-run by default, `--apply` to write, `--apply --purge-quarantine` to also rm the quarantine folder. After: rerun `reprocess_sessions.py --session <ids> --force-preset blue_ball` (or whichever preset was live for those sessions).
 ```
 
 ### iOS
