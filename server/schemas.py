@@ -280,8 +280,7 @@ def persist_pitch_json(pitch: "PitchPayload") -> str:
     flat surfaces — clients (viewer JS / dashboard) still see
     `frames_live` / `frames_server_post` / `*_config_used` projected
     from the dicts. On-disk shape drops them so the disk truly has a
-    single source of truth and `migrate_disk_pitches.py` can stay a
-    one-shot tool rather than a permanent shim."""
+    single source of truth with no migration shim needed at read time."""
     return pitch.model_dump_json(exclude=_PITCH_PERSIST_EXCLUDE)
 
 
@@ -389,10 +388,9 @@ class PitchPayload(BaseModel):
     # server-side detection run completes; the `frames_server_post` and
     # `server_post_config_used` computed fields read this to pick the
     # right dict bucket. None on pitches that never had server_post run
-    # (live-only flows, fresh pitches before run_server_post). Pre-snapshot
-    # legacy disk records that lacked an explicit snapshot fall back to
-    # `_LEGACY_PRE_SNAPSHOT_ALGORITHM_ID` at read time without needing
-    # this pointer set.
+    # (live-only flows, fresh pitches before run_server_post).
+    # `stamp_server_post_run` is the sole writer; pre-Phase-2 disk records
+    # were migrated once by a one-shot script no longer in-tree.
     active_server_post_algorithm_id: str | None = None
 
     @computed_field
@@ -413,9 +411,9 @@ class PitchPayload(BaseModel):
         `frames_by_algorithm[active_server_post_algorithm_id]`. Returns
         `[]` when no pointer is set (server_post never ran for this
         pitch) — no silent fallback to a legacy bucket per CLAUDE.md.
-        `migrate_disk_pitches.py` eagerly stamps the pointer whenever
-        legacy input declared server_post frames, so the absent-pointer
-        + non-empty-bucket case is unreachable for on-disk records.
+        `stamp_server_post_run` is the sole writer; pre-Phase-2 disk records
+        were migrated once by a one-shot script no longer in-tree, so the
+        absent-pointer + non-empty-bucket case is unreachable for on-disk records.
 
         Read-only — write via `detection_paths.stamp_server_post_run`."""
         bucket = self.active_server_post_algorithm_id

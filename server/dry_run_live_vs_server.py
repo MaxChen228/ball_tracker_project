@@ -46,7 +46,10 @@ EXIT_NOT_FOUND = 4
 # `schemas` / `algorithms` rather than imported so this dry-run tool
 # stays free of the schema dependency it consciously avoids.
 _IOS_CAPTURE_TIME = "ios_capture_time"
-_LEGACY_PRE_SNAPSHOT = "v11_hsv_cc"
+# (removed) _LEGACY_PRE_SNAPSHOT: silent fallback eliminated per
+# CLAUDE.md. A pitch lacking `active_server_post_algorithm_id` never
+# ran server_post — surface `None` instead of pretending v11 frames
+# exist.
 
 
 def _disk_frame_lists(
@@ -58,15 +61,15 @@ def _disk_frame_lists(
     Either side may be None when the corresponding bucket is missing
     entirely — `[]` is returned for explicit-empty buckets.
 
-    server_post resolution: prefer the active pointer, fall back to the
-    pre-snapshot legacy bucket so old pitches lacking
-    `active_server_post_algorithm_id` still surface their frames."""
+    server_post resolution: require the active pointer; no fallback.
+    A pitch without `active_server_post_algorithm_id` never ran
+    server_post — `None` is returned for the server side."""
     if "frames_live" in obj or "frames_server_post" in obj:
         return obj.get("frames_live"), obj.get("frames_server_post")
     fba = obj.get("frames_by_algorithm") or {}
     live = fba.get(_IOS_CAPTURE_TIME)
-    srv_alg = obj.get("active_server_post_algorithm_id") or _LEGACY_PRE_SNAPSHOT
-    server = fba.get(srv_alg)
+    srv_alg = obj.get("active_server_post_algorithm_id")
+    server = fba.get(srv_alg) if isinstance(srv_alg, str) and srv_alg else None
     return live, server
 
 
